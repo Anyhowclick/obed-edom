@@ -86,6 +86,19 @@ DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank Black",)
 _OBED_PROP_RE = re.compile(r"^OBED\t(\d+)\t([^\t]+)\t(.*)$")
 _HIDDEN_RE = re.compile(r"^HIDDEN\t(\d+)\t([^\t]+)\t(title|body)$")
 _MISS_RE = re.compile(r"^MISS\t(\d+)\t([^\t]+)\t(.*)$")
+_ADDR_RE = re.compile(r"^(.+) (\d+) of slide \d+$")
+_AS_KIND_NAMES_REV = {v: k for k, v in _AS_KIND_NAMES.items()}
+
+
+def _item_id_from_addr(addr: str) -> ItemId | None:
+    """Reverses `f"{name} {kindIndex + 1} of slide {ordinal}"` back to `(kind, kindIndex)`."""
+    m = _ADDR_RE.match(addr)
+    if not m:
+        return None
+    kind = _AS_KIND_NAMES_REV.get(m.group(1))
+    if kind is None:
+        return None
+    return (kind, int(m.group(2)) - 1)
 
 
 class AssemblyRefusal(ValueError):
@@ -141,6 +154,7 @@ class AssemblyPlan:
     run_sizes: dict[int, dict[ItemId, tuple[tuple[int, int, float], ...]]] = field(default_factory=dict)
     stacked_ids: dict[int, frozenset[ItemId]] = field(default_factory=dict)
     stack_bands: dict[int, Band] = field(default_factory=dict)
+    stack_t: dict[int, float] = field(default_factory=dict)
     short_fit: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
     short_row_h: dict[int, float] = field(default_factory=dict)
     crops: dict[int, dict[ItemId, CropSpec]] = field(default_factory=dict)
@@ -400,6 +414,7 @@ def plan_assembly(
     run_sizes: dict[int, dict[ItemId, tuple[tuple[int, int, float], ...]]] = {}
     stacked_id_map: dict[int, frozenset[ItemId]] = {}
     stack_band_map: dict[int, Band] = {}
+    stack_t_map: dict[int, float] = {}
     short_fit_map: dict[int, dict[ItemId, Rect]] = {}
     short_row_h_map: dict[int, float] = {}
     crops_out: dict[int, dict[ItemId, CropSpec]] = {}
@@ -570,6 +585,7 @@ def plan_assembly(
                     result = None if forced_parts is not None else fit_text_stack(boxes, stack_band, min_text_pt)
                     if result is not None:
                         t, sizes, heights = result
+                        stack_t_map[number] = t
                         long_rects = _stacked_text_rects(boxes, heights, stack_band)
                         fit.update(long_rects)
                         if short_fit:
@@ -801,6 +817,7 @@ def plan_assembly(
         run_sizes=run_sizes,
         stacked_ids=stacked_id_map,
         stack_bands=stack_band_map,
+        stack_t=stack_t_map,
         short_fit=short_fit_map,
         short_row_h=short_row_h_map,
         crops=crops_out,
@@ -1259,13 +1276,9 @@ _MEASURE_MAX_POLLS = 5
 def _text_measure_lines(
     number: int, kind_index: int, addr: str, target_h: float, *, ordinal: int | None = None
 ) -> list[str]:
-    """Poll a text item's live height after its geometry write until two consecutive
-    reads agree (`delay 0.2`, at most 5 polls -- Keynote has not always finished
-    re-laying the box on the first read, F3), always log
-    `OBED\\t<n>\\tMEASURE\\ttext:<idx>\\t<h>`, then log the existing
-    `OBED\\t<n>\\tOVERFLOW\\ttext:<idx>\\t<h>` gate when the settled height still
-    exceeds `target_h` by more than 2pt (`<idx>` suffixed `:ordinal` on a split part,
-    so a short item repeated across parts logs a distinguishable key)."""
+    """Poll a text item's live height until two consecutive reads agree (`delay 0.2`, at
+    most 5 polls), log `OBED\\t<n>\\tMEASURE\\ttext:<idx>\\t<h>`, then `OBED\\t<n>\\tOVERFLOW\\t...`
+    when it still exceeds `target_h` by more than 2pt."""
     item_key = f"text:{kind_index}" if ordinal is None else f"text:{kind_index}:{ordinal}"
     return [
         "        try",
@@ -1302,18 +1315,6 @@ def _second_measure_lines(number: int, kind_index: int, addr: str, *, ordinal: i
 
 
 _MEASURE_RE = re.compile(r"^OBED\t(\d+)\tMEASURE\t([^\t]+)\t([-\d.]+)$")
-_MEASURE2_RE = re.compile(r"^OBED\t(\d+)\tMEASURE2\t([^\t]+)\t([-\d.]+)$")
-
-
-def _parse_measure2_lines(stderr: str) -> dict[tuple[int, str], float]:
-    """`{(slide number, item key): end-of-slide-loop height}` from a batch's `MEASURE2`
-    lines -- diagnostic only, not consumed by the refit correction."""
-    out: dict[tuple[int, str], float] = {}
-    for line in stderr.splitlines():
-        m = _MEASURE2_RE.match(line)
-        if m:
-            out[(int(m.group(1)), m.group(2))] = float(m.group(3))
-    return out
 
 
 def _parse_measure_lines(stderr: str) -> dict[tuple[int, str], float]:
@@ -1489,7 +1490,6 @@ def build_assembly_script(
     black_layout_names: Sequence[str] = DEFAULT_TRANSPARENT_LAYOUT_NAMES,
     layout_template: Path = DEFAULT_LAYOUT_TEMPLATE,
     text_fit: Literal["warn", "shrink"] = "warn",
-    finalize: bool = True,
 ) -> str:
     """One AppleScript for the whole assembly batch: deletes first, then layout policy, canvas
     resize, then per-slide geometry/text-size/deletes/clip-insert -- same idioms as
@@ -1497,11 +1497,6 @@ def build_assembly_script(
     does document a `save ... in` verb, per `maps_keynote.py`) inside the batch's own work
     dir rather than in place, so the caller can post-process and verify before publishing
     to the final `out_path`.
-
-    `finalize=False` omits the trailing `save`/`close`, leaving `theDoc` open for a later
-    pass against the same scratch document. Unused in the shipped refit loop (which
-    reopens/re-saves the staging deck per round instead, avoiding the -1712 re-copy
-    hazard); kept for a future held-open variant.
 
     `text_fit`: "warn" (default) leaves a mixed-run autosize text box at its own wrapped
     size and only logs an overflow past the fitted band; "shrink" additionally sets its
@@ -1591,13 +1586,10 @@ def build_assembly_script(
             ordinal = plan.ordinals[number] + part
             lines += _slide_lines(plan, number, ordinal, part=part, text_fit=text_fit)
 
-    lines.append("    end tell")
-    if finalize:
-        lines += [
-            f'    save theDoc in POSIX file "{_as_escape(str(staging_path))}"',
-            "    close theDoc saving no",
-        ]
     lines += [
+        "    end tell",
+        f'    save theDoc in POSIX file "{_as_escape(str(staging_path))}"',
+        "    close theDoc saving no",
         "  end timeout",
         "end tell",
         "end using terms from",
@@ -1622,13 +1614,14 @@ def build_refit_script(
     ordinals: Mapping[int, int],
     scratch_path: Path,
     staging_path: Path,
-    finalize: bool = True,
+    hidden: Mapping[int, frozenset[ItemId]] | None = None,
 ) -> str:
     """A refit round: re-open `scratch_path` by POSIX path -- bring-to-front if it is
     still the live document, or a plain reopen of a prior round's save (`keynote.py:532`'s
     precedent covers either) -- re-write only the boxes named in `refits` for each
-    affected slide (size/run-ranges + position, addressed by staged post-delete index),
-    re-measure them, then `save`/`close` when `finalize`."""
+    affected slide (size/run-ranges + position, addressed by staged post-delete index,
+    with that slide's ``hidden`` delete targets treated as retained), re-measure them,
+    then `save`/`close`."""
     stem_name = _as_escape(scratch_path.stem)
     doc_name = _as_escape(scratch_path.name)
     lines = [
@@ -1649,7 +1642,7 @@ def build_refit_script(
         autosize_ids = plan.autosize.get(number, frozenset())
         for item_id, refit in items.items():
             kind, kind_index = item_id
-            staged_id = _staged_id_for(number, plan, item_id)
+            staged_id = _staged_id_for(number, plan, item_id, hidden=(hidden or {}).get(number, frozenset()))
             if staged_id is None:
                 continue
             name = _AS_KIND_NAMES.get(kind)
@@ -1674,11 +1667,10 @@ def build_refit_script(
             lines += _locked_write_block(number, addr, body)
             lines += _text_measure_lines(number, kind_index, addr, rect.h)
     lines.append("    end tell")
-    if finalize:
-        lines += [
-            f'    save theDoc in POSIX file "{_as_escape(str(staging_path))}"',
-            "    close theDoc saving no",
-        ]
+    lines += [
+        f'    save theDoc in POSIX file "{_as_escape(str(staging_path))}"',
+        "    close theDoc saving no",
+    ]
     lines += [
         "  end timeout",
         "end tell",
@@ -2200,9 +2192,12 @@ def _restore_crop_zorder(
     return result
 
 
-def _staged_kind_ranks(number: int, plan: AssemblyPlan, *, part: int = 0) -> dict[str, list[int]]:
+def _staged_kind_ranks(
+    number: int, plan: AssemblyPlan, *, part: int = 0, hidden: frozenset[ItemId] = frozenset()
+) -> dict[str, list[int]]:
     """Per-kind source ``kindIndex`` lists, sorted by post-delete staged index, for this
-    slide/part's kept items (own fits/deletes for a split part)."""
+    slide/part's kept items (own fits/deletes for a split part); ``hidden`` delete targets
+    (a default title/body item Keynote refused to delete) stay retained."""
     split_parts = plan.splits.get(number)
     if split_parts is not None:
         split_part = split_parts[part]
@@ -2211,10 +2206,9 @@ def _staged_kind_ranks(number: int, plan: AssemblyPlan, *, part: int = 0) -> dic
     else:
         fits_here = plan.fits.get(number, {})
         deleted = set(plan.deletes.get(number, ()))
+    retained_ids = (set(fits_here) - deleted) | (deleted & hidden)
     by_kind: dict[str, list[int]] = {}
-    for kind, idx in fits_here:
-        if (kind, idx) in deleted:
-            continue
+    for kind, idx in retained_ids:
         by_kind.setdefault(kind, []).append(idx)
     for kind, idxs in by_kind.items():
         by_kind[kind] = sorted(idxs)
@@ -2235,13 +2229,18 @@ def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> s
 
 
 def _staged_id_for(
-    number: int, plan: AssemblyPlan, source_id: tuple[str, int] | None, *, part: int = 0
+    number: int,
+    plan: AssemblyPlan,
+    source_id: tuple[str, int] | None,
+    *,
+    part: int = 0,
+    hidden: frozenset[ItemId] = frozenset(),
 ) -> tuple[str, int] | None:
     """Staged id for a source `(kind, kindIndex)`, or ``None`` if deleted or absent."""
     if source_id is None:
         return None
     kind, idx = source_id
-    idxs = _staged_kind_ranks(number, plan, part=part).get(kind, [])
+    idxs = _staged_kind_ranks(number, plan, part=part, hidden=hidden).get(kind, [])
     if idx not in idxs:
         return None
     return (kind, idxs.index(idx))
@@ -2462,12 +2461,11 @@ def _build_refit_round(
     *,
     text_fit: Literal["warn", "shrink"] = "warn",
     warned_gaps: set[tuple[int, ItemId]] | None = None,
+    last_t: dict[int, float] | None = None,
 ) -> dict[int, dict[ItemId, TextRefit]]:
     """One refit round's writes: per box still over budget, ``r = measured_h /
     last_written_h`` multiplied into ``correction`` (persisted across rounds, clamped to
-    ``[1.0, 3.0]`` on the running product -- a fresh, unaccumulated ratio would discard an
-    earlier round's fix), re-run through ``fit_text_stack`` for the whole stack on that
-    slide, and the badge/short row re-stacked one gap above the new stack top."""
+    ``[1.0, 3.0]``), re-run through ``fit_text_stack`` for the whole stack."""
     warned_gaps = warned_gaps if warned_gaps is not None else set()
     refits: dict[int, dict[ItemId, TextRefit]] = {}
     for slide_no in sorted({s for s, _k in todo}):
@@ -2489,6 +2487,11 @@ def _build_refit_round(
                     ratio = measured_h / predicted_h
                     correction[corr_key] = max(1.0, min(3.0, correction.get(corr_key, 1.0) * ratio))
                     any_new = True
+                elif measured_h is None:
+                    warnings.append(
+                        f"slide {slide_no}: text {key[1]} measure missing this round, "
+                        "no correction change"
+                    )
             if corr_key in correction:
                 slide_correction[box.item_id] = correction[corr_key]
         if not any_new:
@@ -2498,6 +2501,8 @@ def _build_refit_round(
         if fit is None:
             continue
         t, sizes, heights = fit
+        if last_t is not None:
+            last_t[slide_no] = t
         rects = _stacked_text_rects(boxes, heights, stack_band)
         slide_refits: dict[ItemId, TextRefit] = {}
         for box in boxes:
@@ -2547,6 +2552,7 @@ def _run_refit_and_finalize(
     overflows: list[dict],
     warnings: list[str],
     log: Callable[[str], None],
+    hidden: Mapping[int, frozenset[ItemId]] = {},
 ) -> None:
     """Refit loop, run after pass 1 has already saved and closed to ``staging_path``: at
     most ``_MAX_REFITS`` rounds, each reopening ``staging_path`` by POSIX path
@@ -2567,22 +2573,25 @@ def _run_refit_and_finalize(
     reopen_path = staging_path
     correction: dict[tuple[int, ItemId], float] = {}
     warned_gaps: set[tuple[int, ItemId]] = set()
+    last_t: dict[int, float] = dict(plan.stack_t)
 
     for round_no in range(1, _MAX_REFITS + 1):
         if not todo:
             break
         refits = _build_refit_round(
             plan, slides_by_number, todo, measured, band, min_text_pt, warnings,
-            correction, text_fit=text_fit, warned_gaps=warned_gaps,
+            correction, text_fit=text_fit, warned_gaps=warned_gaps, last_t=last_t,
         )
         if not refits:
             break
         log(f"refit round {round_no}: slides {sorted(refits)}")
         script = build_refit_script(
             plan, refits, ordinals=plan.ordinals, scratch_path=reopen_path,
-            staging_path=staging_path, finalize=True,
+            staging_path=staging_path, hidden=hidden,
         )
         proc = batch.run(_osascript_path(script, batch.work), retry_on_1712=False)
+        for key in todo:
+            measured.pop(key, None)
         measured.update(_parse_measure_lines(proc.stderr or ""))
         reopen_path = staging_path
         todo = _refit_still_over_budget(plan, measured, eligible_keys)
@@ -2602,19 +2611,41 @@ def _run_refit_and_finalize(
             rect = plan.fits[slide_no][item_id]
             item = next(it for it in slides_by_number[slide_no]["items"]
                         if (it["kind"], it["kindIndex"]) == item_id)
-            source_size = float(item.get("size") or min_text_pt)
-            t = min(1.0, min_text_pt / source_size) if source_size > 0 else 1.0
-            ranges, _unresolved = _run_size_ranges(
-                item, t, item_id=item_id, slide_number=slide_no, warnings=warnings,
+            run_sizes_src = [float(r["size"]) for r in (item.get("runs") or []) if r.get("size") is not None]
+            min_source_size = min(run_sizes_src) if run_sizes_src else float(item.get("size") or min_text_pt)
+            lead_source_size = float(item.get("size") or min_source_size)
+            t_floor = min(1.0, min_text_pt / min_source_size) if min_source_size > 0 else 1.0
+            t_prev = last_t.get(slide_no, 1.0)
+            measured_h = measured.get((slide_no, item_key))
+            t_fit = t_prev * (rect.h / measured_h) if measured_h and measured_h > 0 else t_prev
+            t = max(min(t_fit, t_prev), t_floor)
+            clamped = t == t_floor and t_floor > t_fit
+            ranges, unresolved = _run_size_ranges(
+                item, t, item_id=item_id, slide_number=slide_no, warnings=None,
             )
-            run_sizes = ranges if isinstance(ranges, (tuple, float)) else min_text_pt
+            if unresolved:
+                gap_key = (slide_no, item_id)
+                if gap_key not in warned_gaps:
+                    warned_gaps.add(gap_key)
+                    warnings.append(
+                        f"slide {slide_no} box {item_id[1]}: run ranges leave a gap, "
+                        "flattening run sizes to the lead size under --text-fit shrink"
+                    )
+            run_sizes = ranges if isinstance(ranges, (tuple, float)) else t * lead_source_size
+            if isinstance(ranges, tuple):
+                lo = round(min(sz for _s, _e, sz in ranges), 1)
+                hi = round(max(sz for _s, _e, sz in ranges), 1)
+                size_desc = f"{lo}pt" if lo == hi else f"{lo}-{hi}pt"
+            else:
+                size_desc = f"{round(t * lead_source_size, 1)}pt"
             shrink_refits.setdefault(slide_no, {})[item_id] = TextRefit(rect, run_sizes)
+            floor_note = f" (floor {min_text_pt}pt)" if clamped else ""
             warnings.append(
-                f"slide {slide_no}: text {item_key} shrunk to --min-text-pt {min_text_pt} after refit"
+                f"slide {slide_no}: text {item_key} shrunk to {size_desc} after refit{floor_note}"
             )
         script = build_refit_script(
             plan, shrink_refits, ordinals=plan.ordinals, scratch_path=reopen_path,
-            staging_path=staging_path, finalize=True,
+            staging_path=staging_path, hidden=hidden,
         )
         proc = batch.run(_osascript_path(script, batch.work), retry_on_1712=False)
         measured.update(_parse_measure_lines(proc.stderr or ""))
@@ -2725,6 +2756,8 @@ def assemble_dsk_deck(
 
         last_error: tuple[int, int, str] | None = None
         hidden: list[dict] = []
+        hidden_ids: dict[int, set[ItemId]] = {}
+        measure2: dict[tuple[int, str], float] = {}
         for line in (proc.stderr or "").splitlines():
             error_m = _ERROR_RE.match(line)
             if error_m:
@@ -2735,6 +2768,9 @@ def assemble_dsk_deck(
                 slide_no, addr, slot = int(hidden_m.group(1)), hidden_m.group(2), hidden_m.group(3)
                 hidden.append({"slide": slide_no, "addr": addr, "slot": slot})
                 warnings.append(f"slide {slide_no}: {addr} hidden ({slot} placeholder, delete refused)")
+                item_id = _item_id_from_addr(addr)
+                if item_id is not None:
+                    hidden_ids.setdefault(slide_no, set()).add(item_id)
                 continue
             prop_m = _OBED_PROP_RE.match(line)
             if prop_m:
@@ -2748,7 +2784,17 @@ def assemble_dsk_deck(
                     item_key, _sep, height_s = prop_m.group(3).partition("\t")
                     measured[(slide_no, item_key)] = float(height_s)
                 elif key == "MEASURE2":
-                    continue
+                    item_key, _sep, height_s = prop_m.group(3).partition("\t")
+                    height2 = float(height_s)
+                    measure2[(slide_no, item_key)] = height2
+                    measured_h = measured.get((slide_no, item_key))
+                    if measured_h is not None and abs(height2 - measured_h) > 2.0:
+                        msg = (
+                            f"slide {slide_no}: text {item_key} measure settled at "
+                            f"{measured_h} but re-read {height2} at end of slide"
+                        )
+                        warnings.append(msg)
+                        log(msg)
                 else:
                     movie_props.setdefault(slide_no, {})[key] = prop_m.group(3)
                 continue
@@ -2769,6 +2815,7 @@ def assemble_dsk_deck(
             plan, batch, slides_by_number,
             band=resolved_band, min_text_pt=min_text_pt, allow_split=allow_split, text_fit=text_fit,
             staging_path=staging_path, measured=measured, overflows=overflows, warnings=warnings, log=log,
+            hidden={n: frozenset(ids) for n, ids in hidden_ids.items()},
         )
 
         if layout_policy == "import":

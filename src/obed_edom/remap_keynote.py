@@ -67,16 +67,9 @@ def _as_escape(text: str) -> str:
 def _delete_or_hide_placeholder_lines(
     number: int, ordinal: int, addr: str, *, indent: str = "        "
 ) -> list[str]:
-    """``delete theObj``, except Keynote refuses to delete the shape bound as the slide's
-    default title/body item (errNum -10003, read-only per Keynote.sdef) -- for that one,
-    hide it instead via the read-write ``title showing``/``body showing`` slide properties.
-    Identity is compared by ``is`` (``iWork item``/``shape``/``text item`` have no ``id``
-    property per Keynote.sdef, so ``id of theObj`` raises and the branch fell through to a
-    plain delete), inside a ``try`` (a raising ``default ... item`` -- e.g. no title item
-    on the slide -- falls through to plain delete, as before). Each hide branch logs
-    ``HIDDEN\\t<number>\\t<addr>\\ttitle``/``body`` so the saved deck's log states which
-    object tripped it. Shared by `dsk_assemble` and `dsk_movie_export`; `indent` lets each
-    call site nest it at its own depth."""
+    """``delete theObj``, except Keynote refuses to delete the slide's default title/body
+    item (errNum -10003, read-only per Keynote.sdef) -- hide it instead and log
+    ``HIDDEN\\t<number>\\t<addr>\\ttitle``/``body``."""
     escaped_addr = _as_escape(addr)
     body = [
         "set isTitle to false",

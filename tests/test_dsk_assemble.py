@@ -324,20 +324,6 @@ def test_script_overflow_readback_omitted_for_uniform_run_text():
     assert 'OVERFLOW" & tab & "text:0"' not in script
 
 
-def test_assembly_script_finalize_false_has_no_save():
-    item = _text_item(0, x=1920, y=0, w=200, h=80, runs=[{"size": 20.0}, {"size": 30.0}])
-    slide = _slide(1, [item])
-    payload = _payload([slide])
-    cls = _classify(slide)
-    decisions = {1: SlideDecision(1, "in_deck")}
-    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
-    script = build_assembly_script(
-        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"), finalize=False
-    )
-    assert "save theDoc in POSIX file" not in script
-    assert "close theDoc saving no" not in script
-
-
 def test_refit_script_reopens_and_saves():
     item = _text_item(0, x=1920, y=0, w=200, h=80, runs=[{"size": 20.0}, {"size": 30.0}])
     slide = _slide(1, [item])
@@ -1056,7 +1042,7 @@ def test_delete_or_hide_placeholder_lines_branches_on_title_and_body():
     assert "theObj is (default body item of slide 17)" in script
     assert 'HIDDEN" & tab & "17" & tab & "shape 2 of slide 17" & tab & "title"' in script
     assert 'HIDDEN" & tab & "17" & tab & "shape 2 of slide 17" & tab & "body"' in script
-    assert script.count("try") >= 2  # each `is` probe is wrapped
+    assert sum(1 for ln in lines if ln.strip() == "try") >= 2
 
 
 def test_delete_or_hide_placeholder_lines_missing_title_item_falls_through_to_delete():
@@ -1295,6 +1281,144 @@ def test_gw13_stacked_text_does_not_overlap_badge():
             assert dsa._intersect(text_rect, other_rect) is None, (
                 f"stacked text overlaps {other_iid}: {text_rect} vs {other_rect}"
             )
+
+
+def _badge_and_stack_plan():
+    _require_font("AzoSans-Regular")
+    _require_font("AzoSans-Bold")
+    text_item = _long_text_item(1, (_VERSE_1 + " ") * 3)
+    badge = _badge_item(0)
+    slide = _slide(13, [text_item, badge])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+    return plan, slides_by_number
+
+
+def test_refit_second_round_accumulates_correction():
+    plan, slides_by_number = _badge_and_stack_plan()
+    todo = {(13, "text:1")}
+    warnings: list[str] = []
+    correction: dict = {}
+    last_t: dict = {}
+    corr_key = (13, ("text", 1))
+
+    measured1 = {(13, "text:1"): 400.0}
+    refits1 = dsa._build_refit_round(
+        plan, slides_by_number, todo, measured1, BAND, 24.0, warnings, correction, last_t=last_t,
+    )
+    size1 = refits1[13][("text", 1)].run_sizes
+    corr1 = correction[corr_key]
+
+    rect_h = refits1[13][("text", 1)].rect.h
+    measured2 = {(13, "text:1"): rect_h + 5.0}
+    refits2 = dsa._build_refit_round(
+        plan, slides_by_number, todo, measured2, BAND, 24.0, warnings, correction, last_t=last_t,
+    )
+    size2 = refits2[13][("text", 1)].run_sizes
+    corr2 = correction[corr_key]
+
+    assert size2 <= size1
+    assert corr2 > corr1, "round 2 must multiply into round 1's correction, not discard it"
+
+
+def test_refit_second_round_measured_equals_rect_h_leaves_correction_unchanged():
+    plan, slides_by_number = _badge_and_stack_plan()
+    todo = {(13, "text:1")}
+    warnings: list[str] = []
+    correction: dict = {}
+    last_t: dict = {}
+    corr_key = (13, ("text", 1))
+
+    measured1 = {(13, "text:1"): 400.0}
+    refits1 = dsa._build_refit_round(
+        plan, slides_by_number, todo, measured1, BAND, 24.0, warnings, correction, last_t=last_t,
+    )
+    corr1 = correction[corr_key]
+
+    rect_h = refits1[13][("text", 1)].rect.h
+    measured2 = {(13, "text:1"): rect_h}
+    refits2 = dsa._build_refit_round(
+        plan, slides_by_number, todo, measured2, BAND, 24.0, warnings, correction, last_t=last_t,
+    )
+    corr2 = correction[corr_key]
+
+    assert corr2 == corr1, "measured == last written height must leave the correction unchanged"
+
+
+def test_refit_round_re_stacks_badge_position_only():
+    plan, slides_by_number = _badge_and_stack_plan()
+    todo = {(13, "text:1")}
+    warnings: list[str] = []
+    original_badge_rect = plan.fits[13][("text", 0)]
+
+    refits = dsa._build_refit_round(
+        plan, slides_by_number, todo, {(13, "text:1"): 320.0}, BAND, 24.0, warnings, {}, last_t={},
+    )
+    badge_refit = refits[13][("text", 0)]
+    stack_top = refits[13][("text", 1)].rect.y
+    assert badge_refit.run_sizes is None
+    assert badge_refit.rect.y + badge_refit.rect.h == pytest.approx(stack_top - dsa._TEXT_STACK_GAP, abs=0.5)
+    assert badge_refit.rect.x == original_badge_rect.x
+    assert badge_refit.rect.w == original_badge_rect.w
+    assert badge_refit.rect.h == original_badge_rect.h
+
+
+def test_refit_script_addresses_staged_index_after_a_delete_below_the_stack():
+    plan, slides_by_number = _badge_and_stack_plan()
+    plan.deletes[13] = (("text", 2),)
+    refits = {13: {("text", 1): TextRefit(Rect(43.0, 700.0, 1849.0, 250.0), run_sizes=50.0)}}
+    script = dsa.build_refit_script(
+        plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
+        staging_path=Path("/tmp/staged.key"),
+    )
+    assert "text item 2 of slide 1" in script
+
+
+def test_refit_shrink_path_writes_measured_fit_size_above_floor(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "\n".join([
+        "OBED\t13\tMEASURE\ttext:0\t500.0",
+        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
+        "OBED\t13\tdone",
+    ])
+    still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t500.0", "OBED\t13\tdone"])
+    shrunk_fits_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t20.0", "OBED\t13\tdone"])
+    live_batch_cls, calls = _make_seq_live_batch(
+        [pass1_stderr, still_over_stderr, still_over_stderr, shrunk_fits_stderr]
+    )
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+    )
+    shrink_script = calls[-1].read_text()
+    written = float(shrink_script.split("set size of object text of theObj to ")[1].split("\n")[0])
+    assert written > dsa.DEFAULT_MIN_TEXT_PT
+    assert any("shrunk to" in w and "floor" not in w for w in result.warnings)
+
+
+def test_refit_shrink_path_clamps_to_floor_when_measured_fit_is_below_it(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "\n".join([
+        "OBED\t13\tMEASURE\ttext:0\t500.0",
+        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
+        "OBED\t13\tdone",
+    ])
+    still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t5000.0", "OBED\t13\tdone"])
+    huge_measured_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t50000.0", "OBED\t13\tdone"])
+    live_batch_cls, calls = _make_seq_live_batch(
+        [pass1_stderr, still_over_stderr, still_over_stderr, huge_measured_stderr]
+    )
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+    )
+    shrink_script = calls[-1].read_text()
+    written = float(shrink_script.split("set size of object text of theObj to ")[1].split("\n")[0])
+    assert written == pytest.approx(dsa.DEFAULT_MIN_TEXT_PT, abs=0.5)
+    assert any("shrunk to" in w and "floor" in w for w in result.warnings)
 
 
 # --------------------------------------------------------------------------
@@ -1580,8 +1704,113 @@ def test_refit_loop_shrinks(tmp_path, monkeypatch):
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
     )
     assert result.overflows == ()
-    assert any("shrunk to --min-text-pt" in w for w in result.warnings)
+    assert any("shrunk to" in w and "pt after refit" in w for w in result.warnings)
     assert len(calls) == 1 + dsa._MAX_REFITS + 1
+
+
+def test_shrink_fallback_never_writes_above_pass1_size(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck = tmp_path / "source.key"
+    fw_deck.mkdir()
+    (fw_deck / "stub").write_bytes(b"x" * 32)
+    out_path = tmp_path / "out" / "assembled.key"
+    text_item = {
+        "kind": "text", "kindIndex": 0, "x": 1920, "y": 0, "w": 3698.0, "h": 300.0,
+        "text": " ".join(["word"] * 120), "font": "Helvetica", "size": 40.0,
+    }
+    slide = _slide(13, [text_item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    pass1_size = plan.stack_t[13] * 40.0
+    assert plan.stack_t[13] < 1.0, "fixture must exercise pass 1 shrinking for this test to mean anything"
+
+    pass1_stderr = "\n".join([
+        "OBED\t13\tOVERFLOW\ttext:0\t900.0",
+        "OBED\t13\tdone",
+    ])
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+    )
+    assert len(calls) == 2
+    shrink_warnings = [w for w in result.warnings if "shrunk to" in w]
+    assert shrink_warnings
+    written = float(shrink_warnings[0].split("shrunk to ")[1].split("pt")[0].split("-")[0])
+    assert written <= pass1_size + 0.05, "shrink fallback must never write larger than pass 1's own size"
+
+
+def test_refit_round_dropped_measure_warns_and_keeps_prior_size(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "\n".join([
+        "OBED\t13\tMEASURE\ttext:0\t500.0",
+        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
+        "OBED\t13\tdone",
+    ])
+    dropped_measure_stderr = "OBED\t13\tdone"
+    shrunk_fits_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t20.0", "OBED\t13\tdone"])
+    live_batch_cls, calls = _make_seq_live_batch(
+        [pass1_stderr, dropped_measure_stderr, shrunk_fits_stderr]
+    )
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+    )
+    assert any("measure missing this round, no correction change" in w for w in result.warnings)
+    assert result.overflows == ()
+    assert len(calls) == 3
+
+
+def test_measure2_mismatch_warns_end_to_end(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "\n".join([
+        "OBED\t13\tMEASURE\ttext:0\t250.0",
+        "OBED\t13\tMEASURE2\ttext:0\t260.0",
+        "OBED\t13\tdone",
+    ])
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+    assert len(calls) == 1
+    assert any(
+        "text:0 measure settled at 250.0 but re-read 260.0 at end of slide" in w
+        for w in result.warnings
+    )
+
+
+def test_refit_script_staged_index_retains_hidden_item_below_stack():
+    plan, slides_by_number = _badge_and_stack_plan()
+    plan.fits[13][("text", 2)] = plan.fits[13][("text", 0)]
+    plan.deletes[13] = (("text", 0),)
+    refits = {13: {("text", 2): TextRefit(Rect(43.0, 700.0, 1849.0, 250.0), run_sizes=50.0)}}
+
+    script_without_hidden = dsa.build_refit_script(
+        plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
+        staging_path=Path("/tmp/staged.key"),
+    )
+    assert "text item 2 of slide 1" in script_without_hidden
+
+    script_with_hidden = dsa.build_refit_script(
+        plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
+        staging_path=Path("/tmp/staged.key"), hidden={13: frozenset({("text", 0)})},
+    )
+    assert "text item 3 of slide 1" in script_with_hidden
+
+
+def test_hidden_marker_appears_in_warnings(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "\n".join([
+        "HIDDEN\t13\tshape 2 of slide 13\ttitle",
+        "OBED\t13\tdone",
+    ])
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+    assert len(calls) == 1
+    assert any("shape 2 of slide 13" in w and "title" in w and "hidden" in w for w in result.warnings)
 
 
 def test_assemble_dsk_deck_calls_restore_crop_zorder(tmp_path, monkeypatch):
