@@ -43,6 +43,7 @@ from obed_edom.dsk_plan import (
     _delete_order,
     _item_object_ids,
     _TEXT_GAP_PT,
+    _word_count,
     classify_deck,
     fit_slide,
     fit_text_stack,
@@ -202,6 +203,33 @@ def _stacked_text_rects(boxes: Sequence[TextBox], heights: dict[ItemId, float], 
     return rects
 
 
+def _item_label(item_id: ItemId) -> str:
+    """Log/refusal-message identifier: ``groupchild {g}:{k}`` for a ``GroupChildId``,
+    else the bare ``kindIndex`` -- ``item_id[1]`` alone is the group's index for a
+    groupchild id, not the child's (F8)."""
+    if item_id[0] == "groupchild":
+        return f"groupchild {item_id[1]}:{item_id[2]}"
+    return str(item_id[1])
+
+
+def _refuse_on_short_row_overlap(number: int, short_fit: dict[ItemId, Rect]) -> None:
+    """Refuses when a group's short-row child (badge or short label) overlaps another
+    short-row item (F1) -- a pre-existing pair of ordinary short-row items may
+    legitimately share one rect (e.g. a shape stacked behind its caption), so only pairs
+    touching a ``GroupChildId`` -- the newly-placed entries this rule protects -- are
+    checked."""
+    items = list(short_fit.items())
+    for i, (iid_a, rect_a) in enumerate(items):
+        for iid_b, rect_b in items[i + 1:]:
+            if iid_a[0] != "groupchild" and iid_b[0] != "groupchild":
+                continue
+            if rect_a.x < rect_b.x + rect_b.w and rect_b.x < rect_a.x + rect_a.w:
+                raise AssemblyRefusal(
+                    f"slide {number}: short-row items {_item_label(iid_a)} and "
+                    f"{_item_label(iid_b)} overlap"
+                )
+
+
 def _short_row_rects(short_fit: dict[ItemId, Rect], row_h: float, stack_top: float) -> dict[ItemId, Rect]:
     """Bottom-align ``short_fit``'s own rects (unchanged x/w/h) into a row whose bottom
     sits one gap above ``stack_top`` -- the badge moves with the verse, per the golden deck."""
@@ -237,7 +265,7 @@ def _run_size_ranges(
     if not ranges:
         if gap and warnings is not None and item_id is not None:
             warnings.append(
-                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap"
+                f"slide {slide_number} text {_item_label(item_id)}: run ranges leave a gap"
             )
         return None, gap
     covered = not gap and ranges[0][0] == 1 and ranges[-1][1] == full_len
@@ -246,7 +274,7 @@ def _run_size_ranges(
     if not covered:
         if warnings is not None and item_id is not None:
             warnings.append(
-                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap"
+                f"slide {slide_number} text {_item_label(item_id)}: run ranges leave a gap"
             )
         return None, True
     if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
@@ -627,7 +655,15 @@ def plan_assembly(
             stacked_shrink_only_sizes: dict[ItemId, float] = {}
             stacked_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
             if cls.is_text and cls.long_text_ids:
-                long_ids = [iid for iid in cls.long_text_ids if iid[0] == "groupchild" or iid in fit]
+                long_ids = []
+                for iid in cls.long_text_ids:
+                    if iid[0] == "groupchild":
+                        _tag, g_ki, c_ki = iid
+                        c_info = (group_child_runs_map.get(g_ki) or {}).get(c_ki) or {}
+                        if _word_count(c_info.get("text")) > text_slide_words:
+                            long_ids.append(iid)
+                    elif iid in fit:
+                        long_ids.append(iid)
                 boxes, box_warnings = _text_boxes(
                     long_ids, items_by_id,
                     group_children=group_children_geo, group_child_runs=group_child_runs_map,
@@ -636,6 +672,11 @@ def plan_assembly(
                 if boxes and len(boxes) == len(long_ids):
                     long_id_set = set(long_ids)
                     group_top_ids = {("group", ki) for ki in text_group_kis}
+                    # The group's own affine-fitted rect is captured before it is popped
+                    # below -- a short (non-stacked) child of the same group is placed
+                    # relative to it rather than centred, so it does not collide with
+                    # other short-row content (F1).
+                    group_top_rects = {ki: fit.get(("group", ki)) for ki in text_group_kis}
                     short_fit = {
                         iid: rect for iid, rect in fit.items()
                         if iid not in long_id_set and iid not in group_top_ids
@@ -648,16 +689,30 @@ def plan_assembly(
                     slide_group_child_kind: dict[ItemId, str] = {
                         box.item_id: "text" for box in boxes if box.item_id[0] == "groupchild"
                     }
+                    short_children: list[tuple[int, dict, Rect | None, float]] = []
                     for group_ki in text_group_kis:
+                        group_rect = group_top_rects.get(group_ki)
+                        group_item = items_by_id.get(("group", group_ki))
+                        origin_x = group_item.get("x", 0.0) if group_item is not None else 0.0
                         for child in group_children_geo.get(group_ki, ()):
-                            if child.get("kind") == "text":
+                            child_id: ItemId = ("groupchild", group_ki, child["kindIndex"])
+                            if child_id in long_id_set:
                                 continue
-                            badge_id: ItemId = ("groupchild", group_ki, child["kindIndex"])
-                            badge_w = float(child.get("w", 0.0))
-                            badge_h = float(child.get("h", 0.0))
+                            if not _AS_KIND_NAMES.get(child["kind"]):
+                                continue
+                            short_children.append((group_ki, child, group_rect, origin_x))
+                    sole_occupant = not short_fit and len(short_children) == 1
+                    for group_ki, child, group_rect, origin_x in short_children:
+                        badge_id = ("groupchild", group_ki, child["kindIndex"])
+                        badge_w = float(child.get("w", 0.0))
+                        badge_h = float(child.get("h", 0.0))
+                        if sole_occupant or group_rect is None:
                             badge_x = band.x_min + (band.width - badge_w) / 2.0
-                            short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
-                            slide_group_child_kind[badge_id] = child["kind"]
+                        else:
+                            badge_x = group_rect.x + (float(child.get("x", 0.0)) - origin_x)
+                        short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
+                        slide_group_child_kind[badge_id] = child["kind"]
+                    _refuse_on_short_row_overlap(number, short_fit)
                     if slide_group_child_kind:
                         group_child_kind_map[number] = slide_group_child_kind
                     stack_band = band
@@ -704,22 +759,22 @@ def plan_assembly(
                                 if t < 1.0:
                                     if text_fit == "warn":
                                         raise AssemblyRefusal(
-                                            f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                            f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap and "
                                             f"fit t={t:.2f} < 1.0, would overflow with un-shrunken text"
                                         )
                                     warnings.append(
-                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                        f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap and "
                                         f"fit t={t:.2f} < 1.0, flattening run sizes to the lead size under "
                                         "--text-fit shrink"
                                     )
                                 elif text_fit == "shrink":
                                     warnings.append(
-                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                        f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap, "
                                         "flattening run sizes to the lead size under --text-fit shrink"
                                     )
                                 else:
                                     warnings.append(
-                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                        f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap, "
                                         "preserving source sizing"
                                     )
                                 stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
@@ -749,7 +804,7 @@ def plan_assembly(
                             single = fit_text_stack([box], stack_band, min_text_pt)
                             if single is None:
                                 raise AssemblyRefusal(
-                                    f"slide {number} box {box.item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
+                                    f"slide {number} box {_item_label(box.item_id)} does not fit the band even alone at --min-text-pt {min_text_pt}"
                                 )
                             t1, sizes1, heights1 = single
                             rect = _stacked_text_rects([box], heights1, stack_band)[box.item_id]
@@ -778,22 +833,22 @@ def plan_assembly(
                                 if t1 < 1.0:
                                     if text_fit == "warn":
                                         raise AssemblyRefusal(
-                                            f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                            f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap and "
                                             f"fit t={t1:.2f} < 1.0, would overflow with un-shrunken text"
                                         )
                                     warnings.append(
-                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                        f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap and "
                                         f"fit t={t1:.2f} < 1.0, flattening run sizes to the lead size under "
                                         "--text-fit shrink"
                                     )
                                 elif text_fit == "shrink":
                                     warnings.append(
-                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                        f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap, "
                                         "flattening run sizes to the lead size under --text-fit shrink"
                                     )
                                 else:
                                     warnings.append(
-                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                        f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap, "
                                         "preserving source sizing"
                                     )
                                 stacked_shrink_only_sizes[box.item_id] = sizes1[box.item_id]
@@ -812,6 +867,11 @@ def plan_assembly(
                             fit.pop(iid, None)
                         if short_fit:
                             fit.update({iid: r for iid, r in part_list[0].fits.items() if iid in short_fit})
+                elif text_group_kis:
+                    raise AssemblyRefusal(
+                        f"slide {number}: group {sorted(text_group_kis)} child text/font could "
+                        "not be resolved -- refusing to write blind"
+                    )
 
             if cls.category in ("movie", "mixed"):
                 clip_path = clips.get(number)
@@ -1384,15 +1444,20 @@ def _group_stacked_child_lines(
     """Per-child writes for a text-triggering group's stacked children (Design A step 4):
     each child is unlocked/written/relocked individually, the whole set wrapped in one
     guaranteed lock/relock on the group itself (mirrors `_group_known_child_lines`). A
-    ``text`` child (the verse) gets width+position and its run/lead size, NEVER height
-    (always autosize); a ``shape`` child (the badge) gets position only -- left at
-    source size, per the owner decision. The group itself takes no affine path here."""
+    stacked ``text`` child (the verse, carrying a resolved ``text_size``/``run_ranges``)
+    gets width+position and its run/lead size, NEVER height (always autosize); every
+    other child -- a short-row ``shape`` (the badge) or a short-row ``text`` label that
+    did not pass the stack-vs-short-row word threshold -- gets position only, left at
+    source size, per the owner decision. An unmapped kind is skipped, matching
+    `_group_known_child_lines`. The group itself takes no affine path here."""
     child_lines: list[str] = []
     for child, rect, text_size, run_ranges in entries:
-        name = "text item" if child["kind"] == "text" else _AS_KIND_NAMES.get(child["kind"], child["kind"])
+        name = _AS_KIND_NAMES.get(child["kind"])
+        if not name:
+            continue
         addr = f"{name} {child['kindIndex'] + 1} of group {group_ki + 1} of slide {ordinal}"
         body: list[str] = []
-        if child["kind"] == "text":
+        if child["kind"] == "text" and (text_size is not None or run_ranges):
             body.append(f"            set width of theObj to {_as_num(rect.w)}")
             body.append(f"            set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
             if run_ranges:
@@ -1501,8 +1566,8 @@ def _slide_lines(
         )
     for group_ki, entries in groupchild_by_group.items():
         lines += _group_stacked_child_lines(number, ordinal, group_ki, entries)
-        for child_rec, child_rect, _text_size, _run_ranges in entries:
-            if child_rec["kind"] != "text":
+        for child_rec, child_rect, child_text_size, child_run_ranges in entries:
+            if child_rec["kind"] != "text" or (child_text_size is None and not child_run_ranges):
                 continue
             child_ki = child_rec["kindIndex"]
             addr = f"text item {child_ki + 1} of group {group_ki + 1} of slide {ordinal}"
@@ -1780,6 +1845,8 @@ def build_refit_script(
         ordinal = ordinals[number]
         autosize_ids = plan.autosize.get(number, frozenset())
         for item_id, refit in items.items():
+            if item_id[0] == "groupchild":
+                continue
             kind, kind_index = item_id
             staged_id = _staged_id_for(number, plan, item_id, hidden=(hidden or {}).get(number, frozenset()))
             if staged_id is None:
@@ -2677,6 +2744,11 @@ def _build_refit_round(
     refits: dict[int, dict[ItemId, TextRefit]] = {}
     for slide_no in sorted({s for s, _k in todo}):
         stacked = plan.stacked_ids.get(slide_no, frozenset())
+        if any(iid[0] == "groupchild" for iid in stacked):
+            # A group's text is fit once offline and never refit live (D1 step 6,
+            # `_eligible_refit_items`) -- skip explicitly rather than relying on the
+            # box-count mismatch below, which only skips this slide by accident.
+            continue
         items_by_id = {(it["kind"], it["kindIndex"]): it for it in slides_by_number[slide_no]["items"]}
         boxes, box_warnings = _text_boxes(list(stacked), items_by_id)
         warnings.extend(f"slide {slide_no}: {w}" for w in box_warnings)
@@ -2715,19 +2787,22 @@ def _build_refit_round(
             if unresolved:
                 if t < 1.0 and text_fit == "warn":
                     raise AssemblyRefusal(
-                        f"slide {slide_no} box {box.item_id[1]}: run ranges leave a gap and "
+                        f"slide {slide_no} box {_item_label(box.item_id)}: run ranges leave a gap and "
                         f"fit t={t:.2f} < 1.0, would overflow with un-shrunken text"
                     )
                 gap_key = (slide_no, box.item_id)
                 if gap_key not in warned_gaps:
                     warned_gaps.add(gap_key)
                     warnings.append(
-                        f"slide {slide_no} box {box.item_id[1]}: run ranges leave a gap, "
+                        f"slide {slide_no} box {_item_label(box.item_id)}: run ranges leave a gap, "
                         "preserving source sizing"
                     )
             run_sizes = ranges if isinstance(ranges, (tuple, float)) else sizes[box.item_id]
             slide_refits[box.item_id] = TextRefit(rects[box.item_id], run_sizes)
-        short_fit = plan.short_fit.get(slide_no)
+        short_fit = {
+            iid: rect for iid, rect in (plan.short_fit.get(slide_no) or {}).items()
+            if iid[0] != "groupchild"
+        }
         if short_fit:
             stack_top = min(rect.y for rect in rects.values())
             short_row_h = plan.short_row_h.get(slide_no, 0.0)
@@ -2833,6 +2908,16 @@ def _run_refit_and_finalize(
     when they diverge from the offline read by more than 2pt). Split is not re-run after
     a refit (C5, deferred): a still-overflowing split slide is left to the ``text_fit``
     fallback below, same as any other unresolved box."""
+    # A group's text is fit once offline and never refit live (D1 step 6): a
+    # ``groupchild:`` OVERFLOW line means the offline estimator got it wrong and there
+    # is no live fallback for it (F5) -- escalate to a refusal under ``--text-fit warn``,
+    # else leave the OVERFLOW warning already appended by the caller in place.
+    for o in overflows:
+        if str(o["item"]).startswith("groupchild:") and text_fit == "warn":
+            raise AssemblyRefusal(
+                f"slide {o['slide']}: text {o['item']} overflow, height {o['height']} "
+                "-- grouped verse text cannot be refit live"
+            )
     eligible_keys = {
         (n, f"text:{iid[1]}")
         for n in plan.ordinals

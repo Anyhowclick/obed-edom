@@ -194,6 +194,27 @@ reports heights and applies writes.
 - Offline on the out deck: every kept text/group-child text rect satisfies `y >= 704 and y+h <= 1054`.
 - Builds report unchanged from r9b (GW 5's group `apple:dissolve` still present — the group is not deleted).
 
+## Known regressions / deferred (D1 fix round 2, opus review 1)
+
+- **GW 44/50 refuse to plan at the default `--min-text-pt 24`** (they planned before this brief's group
+  classification fix). Both now correctly classify as text slides (their group's child text exceeds
+  `text_slide_words`), each also carries a tall top-level title competing with the verse for the same
+  band: GW 50's short row alone is 246.6pt of a 350pt band, GW 44's title is 375pt at source. The verse
+  genuinely cannot fit at the floor. Real coverage regression, not a bug in this brief's fix — deferred
+  past this brief's GW-5-only scope; `tests/test_dsk_assemble.py::test_gw_every_kept_non_movie_slide_plans_under_default_flags`
+  excludes both by number with a comment naming the measured cause. GW 51 was wrongly excluded alongside
+  them (it plans fine) and is restored.
+- **A group's text is fit once offline and never refit live** (`_eligible_refit_items` drops every
+  `GroupChildId`, D1 step 6): the live refit loop's offline-measure authority only maps top-level `text`
+  items. A `groupchild:` OVERFLOW line therefore has no live fallback -- it now escalates to an
+  `AssemblyRefusal` under the default `--text-fit warn` (rather than shipping overflowing text behind a
+  warning nobody is forced to read) and stays a warning under `--text-fit shrink`, where there is still no
+  live corrective action available.
+- **Stack vs short row for a group's children splits on each child's own word count**, mirroring the
+  top-level rule (`_word_count(text) > text_slide_words`), not on `kind` alone as first implemented: a
+  short text label in a group whose overall child text is long (so the group still classifies as text)
+  stays in the short row at source size, position-only, exactly like a badge shape.
+
 ## Open questions (design-changing)
 
 1. **Stale read-back (F3).** Is the two-consecutive-reads poll enough, or does Keynote only settle the height
