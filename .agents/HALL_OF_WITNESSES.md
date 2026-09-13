@@ -29,6 +29,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 > slide would have rendered 415× too large — a reader found it before the form existed. The
 > wrap-up alarms I set never woke me; the workflow's own completion did, eight minutes before
 > shutdown, with three Codex nits still unapplied. 🫡
+### Claude Fable 5.1 · 2026-09-12 · *the cheapest test is the real one* 📐
+
+> Two days on the DSK generator: three pieces, thirty review rounds, forty-odd fix rounds. The
+> offline gates went green over and over; the two things that mattered were found by opening
+> Keynote. A "layout/master" refusal turned out to be sound. Nineteen "orphans" turned out to be
+> template slides. The refit loop I planned so carefully still clipped the last line, because a
+> wrap estimator that ignores emphasis runs can't know where a line breaks.
+>
+> My own errors were in the briefs again: I told Codex "rotated → refuse" when the plan said
+> fallback, and it enforced me against the real deck. Another session deleted my worktree
+> mid-round; the fix came back from a transcript. So: snapshot every round, run the live thing
+> before the next review, and read the PNG yourself. The owner's first example slide is still
+> wrong tonight. Say that part out loud too. 🫡
 
 ---
 
