@@ -152,7 +152,7 @@ def test_gw48_wheelchair_dedupe_and_right_no_crop(gw_inputs):
 
 
 @pytest.mark.deck
-def test_gw24_dedupe_four_to_two_centred(gw_inputs):
+def test_gw24_dedupe_four_to_two_right(gw_inputs):
     _require_gw_deck()
     payload, by_number, runs = gw_inputs
     cls = by_number[24]
@@ -162,11 +162,14 @@ def test_gw24_dedupe_four_to_two_centred(gw_inputs):
     assert len(dropped_images) == 2
 
     plan = _plan_one(payload, cls, runs)
-    assert plan.anchors[24] == "centre"
+    assert plan.anchors[24] == "right"
+    fitted = [plan.fits[24][iid] for iid in kept_images]
+    assert max(r.x + r.w for r in fitted) == pytest.approx(1892.0, abs=0.5)
 
 
 @pytest.mark.deck
-def test_gw21_image_crop_right_aligned(gw_inputs, tmp_path):
+def test_gw21_image_crop_centred(gw_inputs, tmp_path):
+    # 4494x1265 post-crop (aspect 3.55) is LW-dimension, so the shape rule centres it.
     _require_gw_deck()
     payload, by_number, runs = gw_inputs
     cls = by_number[21]
@@ -180,17 +183,16 @@ def test_gw21_image_crop_right_aligned(gw_inputs, tmp_path):
     assert crop.path.is_file()
 
     fitted = plan.fits[21][("image", 0)]
-    assert fitted.x + fitted.w == pytest.approx(1892.0, abs=0.5)
-    assert plan.anchors[21] == "right"
+    assert fitted.x + fitted.w / 2.0 == pytest.approx(967.5, abs=0.5)
+    assert plan.anchors[21] == "centre"
 
 
 @pytest.mark.deck
-def test_gw5_image_crop_right_aligned(gw_inputs, tmp_path):
-    # The plan's Acceptance table originally guessed a "5120x2160-ish" crop box and said
-    # nothing about placement; the deck disagrees on both counts -- the measured crop box
-    # is (0,1365,5120,2806) of the 5120x3414 source file, and slide 5's only *content*
-    # item (the caption group has no image/movie leaf, so it doesn't count) puts it right,
-    # not centred. The plan's table has been corrected to match this measurement.
+def test_gw5_image_crop_centred(gw_inputs, tmp_path):
+    # The measured crop box is (0,1365,5120,2806) of the 5120x3414 source file --
+    # 5120x1441 post-crop (aspect 3.55) is LW-dimension, so the shape rule centres slide
+    # 5's only *content* item (the caption group has no image/movie leaf, so it doesn't
+    # count), even though it is the slide's sole content item.
     _require_gw_deck()
     payload, by_number, runs = gw_inputs
     cls = by_number[5]
@@ -201,9 +203,9 @@ def test_gw5_image_crop_right_aligned(gw_inputs, tmp_path):
     assert crop.px_box == (0, 1365, 5120, 2806)
     assert crop.source_file_name == "WhatsApp Image 2026-03-28 at 23.40.20.jpeg"
 
-    assert plan.anchors[5] == "right"
+    assert plan.anchors[5] == "centre"
     fitted = plan.fits[5][("image", 0)]
-    assert fitted.x + fitted.w == pytest.approx(1892.0, abs=0.5)
+    assert fitted.x + fitted.w / 2.0 == pytest.approx(967.5, abs=0.5)
 
 
 @pytest.mark.deck
@@ -211,22 +213,27 @@ def test_gw33_movie_kept_as_sole_content_classify_only(gw_inputs):
     # GW 33's clip is not part of this worktree's banked clips, so plan_assembly's
     # clip-path requirement is exercised only via classification -- the classifier alone
     # already proves R2's backdrop-exemption rule (a panel-sized movie survives as a
-    # slide's only content).
+    # slide's only content). The movie is 3840x1080 (aspect 3.56), LW-dimension, so the
+    # shape rule would centre it despite being the slide's sole content item.
     _require_gw_deck()
-    _payload, by_number, _runs = gw_inputs
+    payload, by_number, _runs = gw_inputs
     cls = by_number[33]
     assert cls.kept == (("movie", 0),)
     assert cls.movie_count == 1
     assert cls.category == "mixed"
+    slide33 = next(s for s in payload["slides"] if s["number"] == 33)
+    assert dsa._content_anchor(cls, slide33["items"], include_side=False) == "centre"
 
 
 @pytest.mark.deck
 def test_gw32_movie_classify_side_panels_dropped(gw_inputs):
     _require_gw_deck()
-    _payload, by_number, _runs = gw_inputs
+    payload, by_number, _runs = gw_inputs
     cls = by_number[32]
     assert cls.kept == (("movie", 0),)
     assert set(cls.dropped_side) == {("image", 0), ("image", 1)}
+    slide32 = next(s for s in payload["slides"] if s["number"] == 32)
+    assert dsa._content_anchor(cls, slide32["items"], include_side=False) == "centre"
 
 
 @pytest.mark.deck

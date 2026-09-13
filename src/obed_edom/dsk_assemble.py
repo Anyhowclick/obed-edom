@@ -43,6 +43,7 @@ from obed_edom.dsk_plan import (
     _delete_order,
     _item_object_ids,
     _TEXT_GAP_PT,
+    _visibles_by_kept,
     classify_deck,
     fit_slide,
     fit_text_stack,
@@ -358,17 +359,39 @@ def _group_has_media(signature: str | None) -> bool:
     return any(part.startswith(("image:", "movie:")) for part in signature.split("\n") if part)
 
 
-def _content_item_count(cls: SlideClass, group_signature: Mapping[int, str | None] | None = None) -> int:
-    """Count of kept image/movie/group items; text-only content never counts towards it."""
+_LW_ASPECT_MIN = 2.5
+
+
+def _content_ids(cls: SlideClass, group_signature: Mapping[int, str | None] | None = None) -> list[ItemId]:
+    """Kept image/movie/group item ids; text-only content never counts towards them."""
     group_signature = group_signature or {}
-    count = 0
+    ids: list[ItemId] = []
     for kind, kind_index in cls.kept:
         if kind not in ("image", "movie", "group"):
             continue
         if kind == "group" and not _group_has_media(group_signature.get(kind_index)):
             continue
-        count += 1
-    return count
+        ids.append((kind, kind_index))
+    return ids
+
+
+def _content_anchor(
+    cls: SlideClass,
+    items: Sequence[dict],
+    *,
+    include_side: bool,
+    group_signature: Mapping[int, str | None] | None = None,
+) -> str:
+    """"centre"|"right" for a content slide with no explicit anchor: any kept item
+    whose LW-clipped rect is LW-dimension (w/h >= 2.5) forces centre; otherwise
+    squarish items go right at 1-2 and centre at 3+."""
+    content_ids = _content_ids(cls, group_signature)
+    if not content_ids:
+        return "centre"
+    visibles = _visibles_by_kept(items, content_ids, include_side=include_side)
+    if any(r.w > 0 and r.h > 0 and r.w / r.h >= _LW_ASPECT_MIN for r in visibles.values()):
+        return "centre"
+    return "right" if len(content_ids) <= 2 else "centre"
 
 
 def plan_assembly(
@@ -445,8 +468,8 @@ def plan_assembly(
             warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
             if decision.anchor in (None, "auto"):
-                anchor = "centre" if no_auto_anchor else (
-                    "right" if _content_item_count(cls, slide.get("groupChildSignature")) == 1 else "centre"
+                anchor = "centre" if no_auto_anchor else _content_anchor(
+                    cls, items, include_side=decision.keep_side, group_signature=slide.get("groupChildSignature"),
                 )
             else:
                 anchor = decision.anchor

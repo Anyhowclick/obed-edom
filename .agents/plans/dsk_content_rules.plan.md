@@ -312,19 +312,32 @@ its style, builds and z-order.
   tuple (or raw `objects`) to reuse it, or leave it `None` to have `plan_assembly` load `fw_deck`
   itself, gated on `not no_image_crop` (no need to load the IWA graph when cropping is off).
 
-### D3. Placement by COUNT (R3, Q3)
+### D3. Placement by SHAPE (owner correction 2026-09-12, supersedes "placement by count")
 
-In `plan_assembly` (`dsk_assemble.py:145`), let `n` = the number of kept **content** items after
-D1 (images/movies/groups; text and text-bearing badge shapes excluded). When the operator gave no
-explicit `--anchor` for the slide:
+In `plan_assembly` (`dsk_assemble.py`), let the kept **content** items be those from D1
+(images/movies/groups; text and text-bearing badge shapes excluded). When the operator gave no
+explicit `--anchor` for the slide, `_content_anchor` (`dsk_assemble.py`) decides from the SHAPE
+of those items' rects after the LW crop (or, when the crop isn't known yet at anchor time, the
+source rect clipped to the LW frame — the same clip `_visibles_by_kept`/`fit_slide` already
+compute), not from their count:
 
-- `n == 1` → `anchor = "right"` (flush to `band.x_max`; `_place`, `dsk_plan.py:492`, already
-  implements it);
-- `n > 1` → `anchor = "centre"` (today's behaviour, unchanged).
+- any kept item is "LW-dimension" (its clipped rect's `w/h >= 2.5`) → `anchor = "centre"`. Measured
+  examples: the GW 21 crowd photo crops to 4494x1265 = 3.55, the GW 5 photo crops to 5120x1441 =
+  3.55, the GW 32/33 movies are 3840x1080 = 3.56.
+- else (all squarish/small, e.g. the GW 48 wheelchair photo at 1381x921 = 1.5, the GW 24 phone
+  screenshots at 504x1080 = 0.47): 1 or 2 items → `anchor = "right"` (flush to `band.x_max`;
+  `_place`, `dsk_plan.py`, already implements it); 3 or more → `anchor = "centre"` (the three
+  conference-poster slide).
 
-No span threshold anywhere — this supersedes the previous revision's 0.98-of-panel test and its
-open question. `--anchor N=…` always wins; the derived anchor is recorded in the plan and printed
-in the run log.
+No span threshold anywhere — this supersedes both the previous revision's 0.98-of-panel test and
+the "count only" revision that followed it. `--anchor N=…` always wins; the derived anchor is
+recorded in the plan and printed in the run log.
+
+**Text + picture slides.** A slide that is both text (`cls.is_text`/`long_text_ids`) and keeps a
+non-full-wall picture (a media *group* survives the text-slide media drop that a bare image/movie
+does not) still stacks its long text boxes across the FULL band width (`x = band.x_min,
+w = band.width`), the same as a pure text slide — `_stacked_text_rects` already takes its rect
+from `band`, not from the picture's remaining space, so this is a pinned behaviour, not a new one.
 
 ### D4. Text: downscale, band stretch, and SPLIT (R1, Q2)
 
@@ -485,9 +498,13 @@ when present and refuse outright if it is not a reordering of the exact same id 
    `tests/test_dsk_assemble.py::test_crop_insert_lines_match_clip_idiom` (a `make new image` +
    position/width/height block and the source id in `deletes`),
    `::test_cropped_image_keeps_source_file_name_for_stroke`.
-9. **Placement by count.** *Tests* `::test_single_content_item_right_aligned` (GW 48 after dedupe →
-   right edge 1892.0, the golden-32 corroboration), `::test_two_items_centred` (GW 24 after dedupe),
-   `::test_explicit_anchor_overrides_auto`, `::test_text_items_do_not_count_towards_placement`.
+9. **Placement by shape** (owner correction 2026-09-12). *Tests*
+   `::test_single_content_item_right_aligned` (GW 48 after dedupe → right edge 1892.0, the
+   golden-32 corroboration), `::test_two_squarish_items_right_aligned` (GW 24 after dedupe, now
+   right — renamed from `test_two_items_centred`), `::test_lw_dimension_item_centred`,
+   `::test_three_squarish_items_centred`, `::test_lw_item_among_squarish_centres`,
+   `::test_explicit_anchor_overrides_auto`, `::test_text_items_do_not_count_towards_placement`,
+   `::test_text_and_picture_slide_stacks_full_band_width`.
 10. **Deletes + CLI + refusals.** *Tests* `::test_deletes_include_backdrop_duplicate_and_cropped`,
     `tests/test_cli.py::test_dsk_assemble_new_flags_parse`, `::test_min_text_pt_forces_split`,
     `tests/test_dsk_assemble.py::test_refusals_*`.

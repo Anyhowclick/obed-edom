@@ -4908,9 +4908,11 @@ def test_verify_builds_refuses_badge_build_surviving_only_one_part(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# placement by count (D3/step 9) -- SlideDecision(anchor="auto") is the CLI's
-# "operator gave no explicit --anchor" sentinel; plan_assembly derives right for
-# exactly one kept content item, centre otherwise, and text never counts.
+# placement by shape (D3/step 9, owner correction 2026-09-12) -- SlideDecision
+# (anchor="auto") is the CLI's "operator gave no explicit --anchor" sentinel;
+# plan_assembly derives the anchor from the kept content items' post-LW-crop
+# shape, not their count: any LW-dimension item (w/h >= 2.5) centres the slide;
+# otherwise 1-2 squarish items go right, 3+ centre. Text never counts.
 # --------------------------------------------------------------------------
 def test_single_content_item_right_aligned():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
@@ -4923,13 +4925,70 @@ def test_single_content_item_right_aligned():
     assert plan.anchors[48] == "right"
 
 
-def test_two_items_centred():
+def test_two_squarish_items_right_aligned():
     slide = _slide(24, [_image_item(0, x=1943, y=-14, w=504, h=1080), _image_item(1, x=3200, y=-14, w=504, h=1080)])
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {24: SlideDecision(24, "in_deck", anchor="auto")}
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[24] == "centre"
+    assert plan.anchors[24] == "right"
+
+
+def test_lw_dimension_item_centred():
+    slide = _slide(32, [_movie_item(0, x=1920, y=0, w=3840, h=1080)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {32: SlideDecision(32, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={32: Path("/tmp/clip.mov")})
+    assert plan.anchors[32] == "centre"
+    rect = plan.fits[32][("movie", 0)]
+    assert rect.x + rect.w / 2.0 == pytest.approx((BAND.x_min + BAND.x_max) / 2.0)
+
+
+def test_three_squarish_items_centred():
+    slide = _slide(3, [
+        _image_item(0, x=1500, y=0, w=500, h=500),
+        _image_item(1, x=2000, y=0, w=500, h=500),
+        _image_item(2, x=2500, y=0, w=500, h=500),
+    ])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {3: SlideDecision(3, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[3] == "centre"
+
+
+def test_lw_item_among_squarish_centres():
+    slide = _slide(4, [
+        _image_item(0, x=1500, y=0, w=500, h=500),
+        _movie_item(1, x=1920, y=0, w=3840, h=1080),
+    ])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {4: SlideDecision(4, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={4: Path("/tmp/clip.mov")})
+    assert plan.anchors[4] == "centre"
+
+
+def test_text_and_picture_slide_stacks_full_band_width():
+    """A text slide that also keeps a non-full-wall picture (a media group survives the
+    text-slide media drop, unlike a bare image/movie) still stacks its long text boxes
+    across the full band width, not narrowed to make room for the picture."""
+    _require_helvetica()
+    text_item = {
+        "kind": "text", "kindIndex": 0, "x": 1920, "y": 0, "w": 3698.0, "h": 300.0,
+        "text": " ".join(["word"] * 16), "font": "Helvetica", "size": 40.0,
+    }
+    picture = _group_item(0, x=5000, y=100, w=800, h=200)
+    slide = _slide(13, [text_item, picture])
+    slide["groupChildSignature"] = {0: "image:photo.jpg"}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    long_rect = plan.fits[13][("text", 0)]
+    assert long_rect.x == pytest.approx(BAND.x_min)
+    assert long_rect.w == pytest.approx(BAND.width)
 
 
 def test_explicit_anchor_overrides_auto():
