@@ -1696,15 +1696,21 @@ def test_refit_loop_triggers_without_any_live_overflow_line(tmp_path, monkeypatc
 
 
 def test_refit_loop_converges_in_two_rounds(tmp_path, monkeypatch):
+    # Genuinely two rounds: pass 1 over budget, round 1 still over budget, round 2
+    # fits -- distinct from the single-round trigger test above.
     _require_helvetica()
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
     pass1_stderr = "OBED\t13\tdone"
-    refit_stderr = "OBED\t13\tdone"
-    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, refit_stderr])
+    round1_stderr = "OBED\t13\tdone"
+    round2_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, round1_stderr, round2_stderr])
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
-    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_text_rects(269.0), _text_rects(270.0)]))
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq([_text_rects(500.0), _text_rects(400.0), _text_rects(270.0)]),
+    )
     result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert result.overflows == ()
 
 
@@ -1722,6 +1728,28 @@ def test_refit_loop_treats_band_breach_as_over_budget(tmp_path, monkeypatch):
     result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
     assert len(calls) == 2
     assert result.overflows == ()
+
+
+def test_refit_still_over_budget_eligible_keys_catches_shrink_displaced_sibling():
+    # Opus D2b review 1 finding 3: the post-shrink recheck must use the full eligible
+    # set, not just the keys that were already failing -- a sibling the shrink pass
+    # pushed out of its stack band would otherwise be published unchecked.
+    plan = AssemblyPlan(
+        kept=(13,), ordinals={13: 1}, deletes={}, clips={}, text_sizes={}, autosize={},
+        warnings=(),
+        fits={13: {("text", 1): Rect(43.0, 704.0, 1849.0, 260.0), ("text", 2): Rect(43.0, 964.0, 1849.0, 80.0)}},
+        stack_bands={13: BAND},
+    )
+    measured = {(13, "text:1"): 260.0, (13, "text:2"): 78.0}
+    bands = {(13, "text:1"): (704.0, 964.0), (13, "text:2"): (1100.0, 1178.0)}
+    todo = {(13, "text:1")}
+    eligible_keys = {(13, "text:1"), (13, "text:2")}
+
+    over_via_todo = dsa._refit_still_over_budget(plan, measured, todo, bands=bands)
+    assert over_via_todo == set(), "text:1 alone looks resolved -- the stale check would miss the sibling"
+
+    over_via_eligible = dsa._refit_still_over_budget(plan, measured, eligible_keys, bands=bands)
+    assert (13, "text:2") in over_via_eligible, "text:2 was pushed out of band and must still be caught"
 
 
 def test_refit_loop_refuses_when_still_overflowing(tmp_path, monkeypatch):
@@ -1801,14 +1829,22 @@ def test_shrink_fallback_never_writes_above_pass1_size(tmp_path, monkeypatch):
     assert plan.stack_t[13] < 1.0, "fixture must exercise pass 1 shrinking for this test to mean anything"
 
     pass1_stderr = "OBED\t13\tdone"
+    still_over_stderr = "OBED\t13\tdone"
     shrink_stderr = "OBED\t13\tdone"
-    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, shrink_stderr])
+    live_batch_cls, calls = _make_seq_live_batch(
+        [pass1_stderr, still_over_stderr, still_over_stderr, shrink_stderr]
+    )
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
-    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_MISSING_RECTS, _text_rects(20.0)]))
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq(
+            [_text_rects(500.0), _text_rects(500.0), _text_rects(500.0), _text_rects(20.0)]
+        ),
+    )
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
     )
-    assert len(calls) == 2
+    assert len(calls) == 1 + dsa._MAX_REFITS + 1
     shrink_warnings = [w for w in result.warnings if "shrunk to" in w]
     assert shrink_warnings
     written = float(shrink_warnings[0].split("shrunk to ")[1].split("pt")[0].split("-")[0])
@@ -1844,12 +1880,14 @@ def test_shrink_fallback_never_writes_above_pass1_size_mixed_run(tmp_path, monke
     shrink_stderr = "OBED\t13\tdone"
     live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, shrink_stderr])
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
-    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_MISSING_RECTS, _text_rects(20.0)]))
+    monkeypatch.setattr(
+        dsa, "offline_text_rects", _offline_reader_seq([_text_rects(500.0), _text_rects(20.0)]),
+    )
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
         min_text_pt=24.0,
     )
-    assert len(calls) == 2
+    assert len(calls) == 2, "the per-run floor must refuse the refit round outright, going straight to shrink"
     shrink_warnings = [w for w in result.warnings if "shrunk to" in w or "already at the floor" in w]
     assert shrink_warnings
     size_desc = shrink_warnings[0].split("to ")[1].split(" ")[0].split("pt")[0]
@@ -1860,26 +1898,88 @@ def test_shrink_fallback_never_writes_above_pass1_size_mixed_run(tmp_path, monke
     assert hi <= pass1_hi + 0.05, "shrink fallback must never write a run larger than pass 1's own size"
 
 
-def test_refit_round_dropped_measure_warns_and_keeps_prior_size(tmp_path, monkeypatch):
+def test_shrink_fallback_all_runs_below_floor_leaves_size_unchanged(tmp_path, monkeypatch):
+    # Opus D2b review 1 finding 1: a box whose source size is already below min_text_pt
+    # must not be shrunk further by the fallback -- t_floor = 1.0 clamps t to t_prev
+    # (pass 1's own size), and the warning must say "already at the floor".
+    _require_helvetica()
+    fw_deck = tmp_path / "source.key"
+    fw_deck.mkdir()
+    (fw_deck / "stub").write_bytes(b"x" * 32)
+    out_path = tmp_path / "out" / "assembled.key"
+    text_item = {
+        "kind": "text", "kindIndex": 0, "x": 1920, "y": 0, "w": 3698.0, "h": 300.0,
+        "text": " ".join(["word"] * 30), "font": "Helvetica", "size": 20.0,
+    }
+    slide = _slide(13, [text_item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    small_band = Band(1054.0, 60.0, 43.0, 1892.0, 4)
+    plan = plan_assembly(payload, classes, decisions=decisions, band=small_band, clips={})
+    t_prev = plan.stack_t[13]
+    assert t_prev == 1.0, "a box already below min_text_pt must fit at t=1.0 (never shrunk by the plan)"
+    pass1_size = t_prev * 20.0
+
+    pass1_stderr = "OBED\t13\tdone"
+    shrink_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, shrink_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    fitted_y = plan.fits[13][("text", 0)].y
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq([_text_rects(500.0, y=fitted_y), _text_rects(20.0, y=fitted_y)]),
+    )
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+        min_text_pt=24.0, band=small_band,
+    )
+    assert len(calls) == 2, "the floor must refuse the refit round outright, going straight to shrink"
+    floor_warnings = [w for w in result.warnings if "already at the floor" in w]
+    assert floor_warnings, result.warnings
+    assert not any("shrunk to" in w for w in result.warnings)
+    written = float(floor_warnings[0].split("left at ")[1].split("pt")[0])
+    assert written == pytest.approx(pass1_size, abs=0.05)
+
+
+def test_refit_round_dropped_measure_refuses_immediately(tmp_path, monkeypatch):
+    # Opus D2b review 1 finding 2: an offline read that stops covering an eligible key
+    # mid-loop (here: a fully missing read after round 1) must refuse immediately, not
+    # cascade into a wasted extra live round.
     _require_helvetica()
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
     pass1_stderr = "OBED\t13\tdone"
     dropped_measure_stderr = "OBED\t13\tdone"
-    shrunk_fits_stderr = "OBED\t13\tdone"
-    live_batch_cls, calls = _make_seq_live_batch(
-        [pass1_stderr, dropped_measure_stderr, shrunk_fits_stderr]
-    )
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, dropped_measure_stderr])
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
     monkeypatch.setattr(
         dsa, "offline_text_rects",
         _offline_reader_seq([_text_rects(500.0), _MISSING_RECTS, _text_rects(20.0)]),
     )
-    result = assemble_dsk_deck(
-        fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+    with pytest.raises(AssemblyRefusal, match="offline measure missing"):
+        assemble_dsk_deck(
+            fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+        )
+    assert len(calls) == 2, "no live pass beyond the one whose offline read went missing"
+
+
+def test_refit_loop_refuses_immediately_on_unlogged_hide(tmp_path, monkeypatch):
+    # Opus D2b review 1 finding 2: an offline read whose per-ordinal text count doesn't
+    # match the staged plan (here: an extra staged text item Keynote never logged as
+    # HIDDEN) must refuse right away, naming the count mismatch, burning no live passes.
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    unlogged_hide_rects = (
+        {1: {("text", 0): (43.0, 704.0, 1849.0, 260.0), ("text", 1): (43.0, 900.0, 1849.0, 20.0)}},
+        set(),
     )
-    assert any("measure missing this round, no correction change" in w for w in result.warnings)
-    assert result.overflows == ()
-    assert len(calls) == 3
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([unlogged_hide_rects]))
+    with pytest.raises(AssemblyRefusal, match=r"staged text count 1 != offline text count 2"):
+        assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+    assert len(calls) == 1
 
 
 def test_assembly_script_emits_no_measure2_lines():
@@ -1891,7 +1991,7 @@ def test_assembly_script_emits_no_measure2_lines():
         layout_policy="preserve",
     )
     assert "MEASURE2" not in script
-    assert "repeat with i from 1 to" not in script
+    assert "set prevH to -1" not in script
 
 
 def test_refit_script_staged_index_retains_hidden_item_below_stack():
@@ -3504,6 +3604,60 @@ def test_staged_retained_ids_remaps_after_a_deletion_shift():
         deletes={8: (("image", 0),)}, clips={}, text_sizes={}, autosize={}, warnings=(),
     )
     assert dsa._staged_retained_ids(8, plan) == {("image", 0), ("image", 1)}
+
+
+def test_staged_retained_ids_retains_same_kind_item_after_hidden_placeholder():
+    # Opus D2b review 1 finding 8 (C6 wiring): a delete-refused placeholder (Keynote's
+    # HIDDEN marker) keeps ("text", 0) staged; a same-kind sibling scheduled to survive
+    # ("text", 1)) must still rank one slot after it, not collide with it.
+    plan = AssemblyPlan(
+        kept=(13,), ordinals={13: 1},
+        fits={13: {("text", 0): Rect(0, 0, 1, 1), ("text", 1): Rect(0, 0, 1, 1)}},
+        deletes={13: (("text", 0),)}, clips={}, text_sizes={}, autosize={}, warnings=(),
+    )
+    assert dsa._staged_retained_ids(13, plan) == {("text", 0)}
+    assert dsa._staged_retained_ids(13, plan, hidden=frozenset({("text", 0)})) == {("text", 0), ("text", 1)}
+
+
+def test_merge_split_part_builds_dedupes_repeated_item_after_hidden_placeholder():
+    # Opus D2b review 1 finding 8 (C6 wiring): a hidden placeholder (("text", 0)) shifts
+    # every later staged text index by one. A short item genuinely repeated across both
+    # split parts (("text", 2), staged as index 2 once the placeholder is accounted for)
+    # must be recognised as the same item and deduped to a single build -- without
+    # ``hidden`` its staged index falls outside the (mis-)computed rank list, so it is
+    # never matched back to a source id and the surplus build is counted twice instead.
+    r1 = Rect(0, 0, 1, 1)
+    split_parts = (
+        SplitPart(
+            fits={("text", 1): r1, ("text", 2): r1}, deletes=(("text", 0),), text_sizes={},
+            stacked_ids=frozenset({("text", 1)}),
+        ),
+        SplitPart(
+            fits={("text", 1): r1, ("text", 2): r1}, deletes=(("text", 0),), text_sizes={},
+            stacked_ids=frozenset({("text", 1)}),
+        ),
+    )
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 1}, fits={17: {}}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(), splits={17: split_parts},
+    )
+    badge_build = {
+        "buildId": "b", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "text", "kindIndex": 2, "effect": "apple:fade-in", "animationType": "In",
+        "identity": ("text", "badge"),
+    }
+    ordinal_recs = [(1, {"builds": [dict(badge_build)]}), (2, {"builds": [dict(badge_build)]})]
+
+    merged_with_hidden = dsa._merge_split_part_builds(
+        ordinal_recs, plan, 17, hidden=frozenset({("text", 0)})
+    )
+    assert merged_with_hidden == [badge_build], "the repeated badge must be deduped to one build"
+
+    merged_without_hidden = dsa._merge_split_part_builds(ordinal_recs, plan, 17)
+    assert merged_without_hidden == [badge_build, badge_build], (
+        "without the hidden placeholder the staged index is miscomputed and the "
+        "repeat is not recognised, doubling the build"
+    )
 
 
 def test_staged_retained_ids_places_inserted_clip_after_kept_movies():
@@ -5737,11 +5891,12 @@ def test_offline_measure_maps_staged_index_back_to_source_index(monkeypatch):
             set(),
         ),
     )
-    measured, bands = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
+    measured, bands, measure_warnings = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
     assert measured[(13, "text:1")] == 300.0
     assert measured[(13, "text:2")] == 60.0
     assert bands[(13, "text:1")] == (800.0, 1100.0)
     assert not warnings
+    assert not measure_warnings
 
 
 def test_offline_measure_warns_and_skips_on_staged_count_mismatch(monkeypatch):
@@ -5751,9 +5906,46 @@ def test_offline_measure_warns_and_skips_on_staged_count_mismatch(monkeypatch):
         dsa, "offline_text_rects",
         lambda key_path, *, deck=None: ({1: {("text", 0): (0.0, 0.0, 0.0, 0.0)}}, set()),
     )
-    measured, _bands = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
+    measured, _bands, measure_warnings = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
     assert measured == {}
     assert any("staged text count" in w and "offline text count" in w for w in warnings)
+    assert any("staged text count" in w and "offline text count" in w for w in measure_warnings)
+
+
+def test_offline_measure_hidden_placeholder_retains_staged_id(monkeypatch):
+    # Opus D2b review 1 finding 9: the reviewer's probe_hidden.py scenario -- Keynote
+    # refuses to delete ("text", 0), so the staging deck retains 3 text items; the
+    # ``hidden`` map keeps the offline read from treating this as a count mismatch and
+    # correctly identity-maps the retained placeholder back to its source index.
+    plan, _slides_by_number = _badge_and_stack_plan()
+    plan.fits[13][("text", 2)] = plan.fits[13][("text", 0)]
+    plan.deletes[13] = (("text", 0),)
+    rects = {
+        1: {
+            ("text", 0): (43.0, 800.0, 1849.0, 300.0),
+            ("text", 1): (100.0, 50.0, 200.0, 60.0),
+            ("text", 2): (0.0, 0.0, 0.0, 10.0),
+        },
+    }
+    monkeypatch.setattr(dsa, "offline_text_rects", lambda key_path, *, deck=None: (rects, set()))
+
+    warnings: list[str] = []
+    measured, _bands, measure_warnings = dsa._offline_measure(
+        Path("/tmp/staged.key"), plan, {13: frozenset({("text", 0)})}, warnings,
+    )
+    assert measured[(13, "text:0")] == 300.0
+    assert measured[(13, "text:1")] == 60.0
+    assert measured[(13, "text:2")] == 10.0
+    assert not warnings
+    assert not measure_warnings
+
+    unlogged_warnings: list[str] = []
+    unlogged_measured, _bands2, unlogged_measure_warnings = dsa._offline_measure(
+        Path("/tmp/staged.key"), plan, {}, unlogged_warnings,
+    )
+    assert unlogged_measured == {}
+    assert any("staged text count 2 != offline text count 3" in w for w in unlogged_warnings)
+    assert any("staged text count 2 != offline text count 3" in w for w in unlogged_measure_warnings)
 
 
 # --------------------------------------------------------------------------

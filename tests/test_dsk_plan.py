@@ -1250,6 +1250,93 @@ def test_wrapped_height_runs_charges_emphasis_run_font():
     assert predicted > single
 
 
+def test_box_min_t_all_runs_below_floor_does_not_shrink():
+    # Opus D2b review 1 finding 1: a box whose every run is already below min_text_pt
+    # must impose t=1.0 (never shrunk further), not an empty-candidates 0.0.
+    box_all_below = TextBox(
+        ("text", 0), "x", "Helvetica", 20.0,
+        (Run("a", "Helvetica", 20.0), Run("b", "Helvetica", 18.0)),
+    )
+    assert dsk_plan._box_min_t(box_all_below, 24.0) == 1.0
+    box_no_runs_below = TextBox(("text", 0), "x", "Helvetica", 20.0, None)
+    assert dsk_plan._box_min_t(box_no_runs_below, 24.0) == 1.0
+    box_mixed = TextBox(
+        ("text", 0), "x", "Helvetica", 40.0,
+        (Run("a", "Helvetica", 40.0), Run("b", "Helvetica", 30.0)),
+    )
+    assert dsk_plan._box_min_t(box_mixed, 24.0) == pytest.approx(0.8)
+
+
+def test_fit_text_stack_all_runs_below_floor_refuses_to_shrink_further():
+    _require_font("Helvetica")
+    box = TextBox(("text", 0), "word " * 200, "Helvetica", 20.0)
+    result = fit_text_stack([box], Band(1054.0, 60.0, 43.0, 1892.0, 4), 24.0)
+    assert result is None
+
+
+def test_wrapped_height_runs_charges_every_consecutive_separator():
+    # Opus D2b review 1 finding 5: pending_sep must not be overwritten by a later
+    # separator in a run of consecutive break chars -- each one is charged, matching
+    # wrapped_height's per-separator join.
+    _require_font("AzoSans-Regular")
+    text = "alpha  beta   gamma delta"
+    single = wrapped_height(text, "AzoSans-Regular", 40.0, 200.0)
+    runs = (Run(text, "AzoSans-Regular", 40.0),)
+    via_runs = wrapped_height_runs(runs, 200.0)
+    assert single is not None and via_runs is not None
+    assert via_runs == pytest.approx(single)
+
+
+def test_wrapped_height_thin_space_separator_matches_runs():
+    # Opus D2b review 1 finding 6: _wrap_lines must charge the actual break character
+    # (a thin space is far wider than ASCII) so both estimators agree.
+    _require_font("AzoSans-Regular")
+    text = "alpha beta gamma delta"
+    single = wrapped_height(text, "AzoSans-Regular", 40.0, 200.0)
+    runs = (Run(text, "AzoSans-Regular", 40.0),)
+    via_runs = wrapped_height_runs(runs, 200.0)
+    assert single is not None and via_runs is not None
+    assert via_runs == pytest.approx(single)
+
+
+def test_wrapped_height_runs_equivalence_named_cases():
+    # Opus D2b review 1 finding 7: C2's three named equivalence cases, lifted from the
+    # reviewer's scratchpad probe (probe_c2.py).
+    _require_font("AzoSans-Regular")
+    font, size, width = "AzoSans-Regular", 40.0, 400.0
+
+    def _cmp(text, split_at):
+        single = wrapped_height(text, font, size, width)
+        runs = (Run(text[:split_at], font, size), Run(text[split_at:], font, size))
+        via_runs = wrapped_height_runs(runs, width)
+        assert single is not None and via_runs is not None
+        assert via_runs == pytest.approx(single)
+
+    _cmp("alphabeta gamma delta", 5)  # no whitespace at the split boundary
+    _cmp("alpha, beta gamma", 5)  # split before punctuation
+    _cmp("alpha beta gamma", 6)  # split across one trailing space
+
+
+def test_wrapped_height_runs_equivalence_fuzz():
+    # Opus D2b review 1 finding 7: small fuzz over random texts and every split
+    # position, lifted from probe_c2.py / probe_c2b.py.
+    import random
+
+    _require_font("AzoSans-Regular")
+    font, size = "AzoSans-Regular", 40.0
+    words = ["alpha", "beta", "gamma", "delta", "epsilon,", "zeta.", "eta", "theta"]
+    rng = random.Random(7)
+    for _ in range(50):
+        text = " ".join(rng.choice(words) for _ in range(rng.randint(1, 10)))
+        for width in (80.0, 200.0):
+            for split_at in range(0, len(text) + 1, max(1, len(text) // 5) or 1):
+                single = wrapped_height(text, font, size, width)
+                runs = (Run(text[:split_at], font, size), Run(text[split_at:], font, size))
+                via_runs = wrapped_height_runs(runs, width)
+                assert single is not None and via_runs is not None
+                assert via_runs == pytest.approx(single, abs=1e-6)
+
+
 def test_delete_order_dedupes_dual_shape_text_address():
     # GW 17's shape:1 (`shape 2`) and text:3 (`text item 4`) are the same underlying
     # object addressed under two kinds; id_by_item marks the dual so _delete_order keeps

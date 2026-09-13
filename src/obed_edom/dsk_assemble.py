@@ -1689,6 +1689,8 @@ def _restore_stroke(
     stroke_min_refs: int,
     warnings: list[str],
     log: Callable[[str], None],
+    *,
+    hidden: Mapping[int, frozenset[ItemId]] = {},
 ) -> dict:
     """Card-border stroke-width restore (paired styles) plus a default stroke grant for
     kept media whose style has none, restricted to styles every one of whose references
@@ -1763,7 +1765,10 @@ def _restore_stroke(
             number = inverse_ordinals.get(ordinal)
             slide_archive = out_objects.get(slide_id) or {}
             part = ordinal - plan.ordinals[number] if number is not None else 0
-            retained_staged_ids = _staged_retained_ids(number, plan, part=part) if number is not None else set()
+            retained_staged_ids = (
+                _staged_retained_ids(number, plan, part=part, hidden=hidden.get(number, frozenset()))
+                if number is not None else set()
+            )
             addressed = {rec["id"]: rec for rec in derive_kind_index(slide_archive, out_objects)}
             for ref in slide_archive.get("drawablesZOrder") or []:
                 rid = ref.get("identifier")
@@ -2273,7 +2278,14 @@ def _merge_split_part_builds(
     return long_builds + [short_reps[key] for key, n in merged_counts.items() for _ in range(n)]
 
 
-def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: list[str]) -> dict:
+def _verify_builds(
+    fw_deck: Path,
+    out_path: Path,
+    plan: AssemblyPlan,
+    warnings: list[str],
+    *,
+    hidden: Mapping[int, frozenset[ItemId]] = {},
+) -> dict:
     """Re-keys the output builds by inverse ordinal and multiset-compares against the
     kept source slides. Raises `AssemblyRefusal` on a surplus, on a missing build not
     attributable to a deletion, on a transition change unexplained by a clip insert, or
@@ -2318,7 +2330,9 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
         if len(recs) == 1:
             merged_builds = list(recs[0]["builds"])
         else:
-            merged_builds = _merge_split_part_builds(ordinal_recs, plan, number)
+            merged_builds = _merge_split_part_builds(
+                ordinal_recs, plan, number, hidden=hidden.get(number, frozenset())
+            )
         out_by_number[number] = {"slideId": recs[0]["slideId"], "builds": merged_builds, "transition": transition}
     src_by_number = {number: rec for number, rec in src.items() if number in plan.kept}
     builds["out_rekeyed"] = out_by_number
@@ -2439,6 +2453,7 @@ def _refit_still_over_budget(
     measured: Mapping[tuple[int, str], float],
     keys: Iterable[tuple[int, str]],
     bands: Mapping[tuple[int, str], tuple[float, float]] | None = None,
+    band: Band | None = None,
 ) -> set[tuple[int, str]]:
     """A key is over budget when its measured height exceeds its rect (+2pt), or --
     when ``bands`` carries its offline ``(y, bottom)`` -- it was placed outside its
@@ -2453,7 +2468,7 @@ def _refit_still_over_budget(
             over.add((slide_no, item_key))
             continue
         y_bottom = bands.get((slide_no, item_key))
-        stack_band = plan.stack_bands.get(slide_no)
+        stack_band = plan.stack_bands.get(slide_no, band)
         if y_bottom is not None and stack_band is not None:
             y, bottom = y_bottom
             top = stack_band.bottom - stack_band.height
@@ -2556,19 +2571,25 @@ def _offline_measure(
     plan: AssemblyPlan,
     hidden: Mapping[int, frozenset[ItemId]],
     warnings: list[str],
-) -> tuple[dict[tuple[int, str], float], dict[tuple[int, str], tuple[float, float]]]:
+) -> tuple[dict[tuple[int, str], float], dict[tuple[int, str], tuple[float, float]], list[str]]:
     """``{(source slide number, 'text:<srcIdx>'): measured h}`` plus ``{key: (y, bottom)}``,
     read from the SAVED staging deck -- the archive's stored naturalSize, the Gate-outcome
     authority (soft_geometry membership is expected and is not a reason to skip). Heights
     are whole-point rounded by the offline reader (+/-0.5pt against the +2.0pt tolerance).
-    Split slides are skipped -- ``_eligible_refit_items`` already excludes them."""
+    Split slides are skipped -- ``_eligible_refit_items`` already excludes them. The third
+    element carries this call's own measure-failure warnings (a full read failure, or an
+    ordinal skipped by the staged/offline text-count cross-check) so a caller can refuse
+    immediately on missing measures instead of treating them as merely over budget."""
     measured: dict[tuple[int, str], float] = {}
     bands: dict[tuple[int, str], tuple[float, float]] = {}
+    measure_warnings: list[str] = []
     try:
         rects_by_ordinal, _soft = offline_text_rects(staging_path)
     except Exception as exc:  # noqa: BLE001 -- any offline-read failure just skips this round's measure
-        warnings.append(f"offline measure failed: {exc}")
-        return measured, bands
+        msg = f"offline measure failed: {exc}"
+        warnings.append(msg)
+        measure_warnings.append(msg)
+        return measured, bands, measure_warnings
     for number, ordinal in plan.ordinals.items():
         if number in plan.splits:
             continue
@@ -2576,10 +2597,12 @@ def _offline_measure(
         offline_text_count = sum(1 for kind, _idx in rects if kind == "text")
         ranks = _staged_kind_ranks(number, plan, hidden=hidden.get(number, frozenset())).get("text", [])
         if offline_text_count != len(ranks):
-            warnings.append(
+            msg = (
                 f"slide {number}: staged text count {len(ranks)} != offline text count "
                 f"{offline_text_count} on ordinal {ordinal}, refit measurement skipped"
             )
+            warnings.append(msg)
+            measure_warnings.append(msg)
             continue
         for (kind, staged_idx), (_x, y, _w, h) in rects.items():
             if kind != "text" or staged_idx >= len(ranks):
@@ -2587,7 +2610,26 @@ def _offline_measure(
             key = (number, f"text:{ranks[staged_idx]}")
             measured[key] = h
             bands[key] = (y, y + h)
-    return measured, bands
+    return measured, bands, measure_warnings
+
+
+def _refuse_on_missing_measures(
+    eligible_keys: set[tuple[int, str]],
+    measured: Mapping[tuple[int, str], float],
+    measure_warnings: list[str],
+) -> None:
+    """Refuses immediately when an eligible key has no offline measurement -- an offline
+    read failure or an E cross-check skip must never cascade into live refit/shrink
+    passes that cannot change the outcome."""
+    missing = {k for k in eligible_keys if k not in measured}
+    if not missing:
+        return
+    slide_no, item_key = sorted(missing)[0]
+    detail = "; ".join(measure_warnings)
+    msg = f"slide {slide_no}: text {item_key} offline measure missing"
+    if detail:
+        msg = f"{msg}: {detail}"
+    raise AssemblyRefusal(msg)
 
 
 def _run_refit_and_finalize(
@@ -2625,12 +2667,13 @@ def _run_refit_and_finalize(
     if not eligible_keys:
         return
     live_measured = dict(measured)
-    measured, bands = _offline_measure(staging_path, plan, hidden, warnings)
+    measured, bands, measure_warnings = _offline_measure(staging_path, plan, hidden, warnings)
+    _refuse_on_missing_measures(eligible_keys, measured, measure_warnings)
     for key, live_h in live_measured.items():
         offline_h = measured.get(key)
         if offline_h is not None and abs(live_h - offline_h) > 2.0:
             log(f"slide {key[0]}: {key[1]} live={live_h} offline={offline_h} diverge")
-    todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands)
+    todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands, band=band)
     reopen_path = staging_path
     correction: dict[tuple[int, ItemId], float] = {}
     warned_gaps: set[tuple[int, ItemId]] = set()
@@ -2652,9 +2695,10 @@ def _run_refit_and_finalize(
         )
         proc = batch.run(_osascript_path(script, batch.work), retry_on_1712=False)
         _check_refit_batch_result(proc, f"refit round {round_no}")
-        measured, bands = _offline_measure(staging_path, plan, hidden, warnings)
+        measured, bands, measure_warnings = _offline_measure(staging_path, plan, hidden, warnings)
+        _refuse_on_missing_measures(eligible_keys, measured, measure_warnings)
         reopen_path = staging_path
-        todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands)
+        todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands, band=band)
 
     if todo:
         if allow_split:
@@ -2681,7 +2725,7 @@ def _run_refit_and_finalize(
             t_fit = t_prev * (rect.h / measured_h) if measured_h and measured_h > 0 else t_prev
             t = min(max(min(t_fit, t_prev), t_floor), t_prev)
             clamped = t == t_floor and t_floor > t_fit
-            at_floor = t_floor > t_prev
+            at_floor = t_floor >= t_prev
             ranges, unresolved = _run_size_ranges(
                 item, t, item_id=item_id, slide_number=slide_no, warnings=None,
             )
@@ -2717,8 +2761,9 @@ def _run_refit_and_finalize(
         )
         proc = batch.run(_osascript_path(script, batch.work), retry_on_1712=False)
         _check_refit_batch_result(proc, "shrink fallback")
-        measured, bands = _offline_measure(staging_path, plan, hidden, warnings)
-        todo = _refit_still_over_budget(plan, measured, todo, bands=bands)
+        measured, bands, measure_warnings = _offline_measure(staging_path, plan, hidden, warnings)
+        _refuse_on_missing_measures(eligible_keys, measured, measure_warnings)
+        todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands, band=band)
 
     if todo:
         slide_no, item_key = sorted(todo)[0]
@@ -2872,20 +2917,23 @@ def assemble_dsk_deck(
 
         log(f"movie_props: {movie_props}")
 
+        hidden_map = {n: frozenset(ids) for n, ids in hidden_ids.items()}
         slides_by_number = {s["number"]: s for s in payload.get("slides") or []}
         _run_refit_and_finalize(
             plan, batch, slides_by_number,
             band=resolved_band, min_text_pt=min_text_pt, allow_split=allow_split, text_fit=text_fit,
             staging_path=staging_path, measured=measured, overflows=overflows, warnings=warnings, log=log,
-            hidden={n: frozenset(ids) for n, ids in hidden_ids.items()},
+            hidden=hidden_map,
         )
 
         if layout_policy == "import":
             verify_staged_layouts_alpha_safe(staging_path, plan)
 
-        stroke = _restore_stroke(fw_deck, staging_path, plan, payload, stroke_min_refs, warnings, log)
+        stroke = _restore_stroke(
+            fw_deck, staging_path, plan, payload, stroke_min_refs, warnings, log, hidden=hidden_map,
+        )
         zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings)
-        builds = _verify_builds(fw_deck, staging_path, plan, warnings)
+        builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
 
         copy_keynote(staging_path, out_path)
 
