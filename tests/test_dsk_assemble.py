@@ -5010,6 +5010,9 @@ def test_mixed_group_bbox_with_caption_centres():
     group = _group_item(0, x=1920, y=0, w=2600, h=1000)
     slide = _slide(43, [group])
     slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:a wide caption strip"}
+    slide["groupChildren"] = {
+        0: [{"kind": "image", "kindIndex": 0, "x": 1920.0, "y": 0.0, "w": 1000.0, "h": 1000.0}]
+    }
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {43: SlideDecision(43, "in_deck", anchor="auto")}
@@ -5058,6 +5061,9 @@ def test_text_and_picture_slide_stacks_full_band_width():
     picture = _group_item(0, x=5000, y=100, w=800, h=200)
     slide = _slide(13, [text_item, picture])
     slide["groupChildSignature"] = {0: "image:photo.jpg"}
+    slide["groupChildren"] = {
+        0: [{"kind": "image", "kindIndex": 0, "x": 5000.0, "y": 100.0, "w": 800.0, "h": 200.0}]
+    }
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {13: SlideDecision(13, "in_deck")}
@@ -5104,6 +5110,9 @@ def test_group_with_media_child_counts_towards_placement():
     group = _group_item(0, x=4702, y=15, w=645, h=92)
     slide = _slide(6, [image, group])
     slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:caption"}
+    slide["groupChildren"] = {
+        0: [{"kind": "image", "kindIndex": 0, "x": 4702.0, "y": 15.0, "w": 645.0, "h": 92.0}]
+    }
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {6: SlideDecision(6, "in_deck", anchor="auto")}
@@ -5154,20 +5163,17 @@ def test_rotated_image_anchor_uses_transformed_aabb():
     assert plan.anchors[50] == "centre"
 
 
-def test_rotated_group_anchor_uses_transformed_aabb():
-    # Same production semantics, off-centre within the panel -- the content item is a
-    # top-level media group, so the fix must cover groups as well as images. AABB top-left
-    # (2200,300) with unrotated 400x1000 stays put; only the 1000x400 extent is derived.
+def test_content_item_aabb_rotated_group_extent_is_still_correct():
+    # Codex placement review 7, finding 1: a rotated top-level media group with
+    # unresolved children never reaches `_content_anchor` in production (see
+    # `test_rotated_media_only_group_refused_before_placement`) -- but
+    # `_content_item_aabb`/`_content_visibles_by_kept` themselves must still compute the
+    # right transformed extent for the cases that DO legitimately reach them (rotated
+    # top-level images/movies). AABB top-left (2200,300) with unrotated 400x1000 stays
+    # put; only the 1000x400 extent is derived.
     group = _group_item(0, x=2200, y=300, w=400, h=1000)
     group["rotation"] = 90
-    slide = _slide(51, [group])
-    slide["groupChildSignature"] = {0: "image:photo.jpg"}
-    payload = _payload([slide])
-    classes = [_classify(slide)]
-    decisions = {51: SlideDecision(51, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[51] == "centre"
-    visibles = dsa._content_visibles_by_kept(slide["items"], [("group", 0)])
+    visibles = dsa._content_visibles_by_kept([group], [("group", 0)])
     rect = visibles[("group", 0)]
     assert rect.x == pytest.approx(2200.0)
     assert rect.y == pytest.approx(300.0)
@@ -5321,6 +5327,25 @@ def test_rotated_top_level_group_refused_before_placement():
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {54: SlideDecision(54, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="nested/rotated/masked group"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+
+def test_rotated_media_only_group_refused_before_placement():
+    # Codex placement review 7, finding 1: the "nested/rotated/masked group" refusal
+    # only fired on `has_text`, so a rotated group with an image/movie leaf and no text
+    # child sailed past it into `_content_anchor`, which then used the group's blind
+    # group-union geometry (not the AABB-position/unrotated-size contract
+    # `_content_item_aabb` assumes) as if it were a valid content rect. Same rotated
+    # group shape as `test_rotated_top_level_group_refused_before_placement` above but
+    # with only an image child -- must refuse the same way.
+    group = _group_item(0, x=2200.0, y=300.0, w=400.0, h=1000.0)
+    group["rotation"] = 90
+    slide = _slide(55, [group])
+    slide["groupChildSignature"] = {0: "image:photo.jpg"}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {55: SlideDecision(55, "in_deck", anchor="auto")}
     with pytest.raises(AssemblyRefusal, match="nested/rotated/masked group"):
         plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
 

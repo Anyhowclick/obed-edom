@@ -587,12 +587,13 @@ def plan_assembly(
                 for iid in group_ids:
                     kind_index = iid[1]
                     has_text = bool((child_text_payload.get(kind_index) or "").strip())
+                    has_media = _group_has_media(group_child_text.get(kind_index) if group_child_text else None)
                     children = children_payload.get(kind_index)
-                    if has_text and children is None:
+                    if (has_text or has_media) and children is None:
                         raise AssemblyRefusal(
-                            f"slide {number}: group {kind_index} has text but no offline child "
-                            "metadata (nested/rotated/masked group, or an autosize child whose "
-                            "naturalSize disagrees with its frame) -- refusing to write blind"
+                            f"slide {number}: group {kind_index} has text or media but no offline "
+                            "child metadata (nested/rotated/masked group, or an autosize child "
+                            "whose naturalSize disagrees with its frame) -- refusing to write blind"
                         )
                     if children is not None:
                         slide_group_children[kind_index] = children

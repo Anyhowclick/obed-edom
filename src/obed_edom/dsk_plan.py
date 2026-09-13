@@ -85,11 +85,28 @@ def _content_item_aabb(item: dict) -> Rect:
     return Rect(x, y, w, h)
 
 
+def _is_content_visible(item: dict, wall_w: float, wall_h: float) -> bool:
+    """Like ``map_remap.is_visible`` but for image/movie items measures the transformed
+    AABB (``_content_item_aabb``) rather than the unrotated frame, so a rotated frame
+    that is wholly off-canvas but whose true extent crosses onto the wall is not dropped
+    before the AABB-aware side-panel classification ever sees it."""
+    if item.get("kind") not in ("image", "movie"):
+        return is_visible(item, wall_w, wall_h)
+    if wall_w <= 0 or wall_h <= 0:
+        return True
+    rect = _content_item_aabb(item)
+    if rect.w <= 0 and rect.h <= 0:
+        return False
+    w = rect.w if rect.w > 0 else 1.0
+    h = rect.h if rect.h > 0 else 1.0
+    return rect.x < wall_w and rect.y < wall_h and rect.x + w > 0 and rect.y + h > 0
+
+
 def _is_side_panel_item(item: dict, wall_w: float, wall_h: float) -> bool:
     """Like ``map_remap.is_side_panel_item`` but measured against the item's transformed
     AABB (``_content_item_aabb``) rather than its unrotated frame, so a rotated item that
     visually crosses into the centre panel is not dropped as side-only."""
-    if not is_lw_wall(wall_w, wall_h) or not is_visible(item, wall_w, wall_h):
+    if not is_lw_wall(wall_w, wall_h) or not _is_content_visible(item, wall_w, wall_h):
         return False
     r = _content_item_aabb(item)
     c = CENTRE_PANEL_RECT
@@ -148,7 +165,7 @@ def _filter_kept_items(
         item_id: ItemId = (item["kind"], item["kindIndex"])
         if is_backdrop(item, wall_w, wall_h):
             continue
-        if not is_visible(item, wall_w, wall_h):
+        if not _is_content_visible(item, wall_w, wall_h):
             continue
         if not include_side and _is_side_panel_item(item, wall_w, wall_h):
             dropped_side.append(item_id)

@@ -216,6 +216,27 @@ def test_is_side_panel_item_uses_transformed_aabb():
     assert dsk_plan._is_side_panel_item(unrotated_side, *CENTRE_WALL)
 
 
+def test_rotated_item_off_canvas_unrotated_kept_by_transformed_aabb():
+    # Codex placement review 7, finding 2: the whole-wall visibility filter
+    # (`_filter_kept_items`, formerly a plain `is_visible` call) ran before the
+    # AABB-aware side-panel classifier and used the item's unrotated frame -- x=1920,
+    # y=-50, w=3000, h=10 sits wholly above the wall (y+h=-40 <= 0), so `is_visible`
+    # dropped it and the slide classified empty even though its 90-degree-rotated
+    # transformed AABB (x=1920, y=-50, w=10, h=3000, per `_content_item_aabb`) is on
+    # canvas and overlaps the centre panel with positive area. The fix measures
+    # image/movie visibility against the transformed AABB before side-panel
+    # classification, so the item survives and anchors instead of being dropped blind.
+    item = {"kind": "image", "kindIndex": 0, "x": 1920, "y": -50, "w": 3000, "h": 10, "rotation": 90}
+    assert dsk_plan._content_item_aabb(item) == Rect(1920.0, -50.0, 10.0, 3000.0)
+    assert not dsk_plan.is_visible(item, *CENTRE_WALL)
+    assert dsk_plan._is_content_visible(item, *CENTRE_WALL)
+    slide = _slide(4, [item])
+    out = classify_slide(slide, None, CENTRE_WALL, include_side=False)
+    assert out.kept == (("image", 0),)
+    assert out.dropped_side == ()
+    assert out.category != "empty"
+
+
 # --------------------------------------------------------------------------
 # panel-backdrop drop (D1/F3) — the verse-slide scrim that fills the centre
 # panel but not the whole wall, so `is_backdrop` alone never catches it.

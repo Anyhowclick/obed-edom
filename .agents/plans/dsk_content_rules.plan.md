@@ -348,10 +348,10 @@ No span threshold anywhere — this supersedes both the previous revision's 0.98
 the "count only" revision that followed it. `--anchor N=…` always wins; the derived anchor is
 recorded in the plan and printed in the run log.
 
-A rotated top-level image/movie or rotated group is NOT refused before reaching `_content_anchor`
-(codex placement review 3, finding 1) — its content rect must therefore be the item's exact
-transformed AABB, not its unrotated frame, or a rotated wide item can wrongly read squarish (or
-vice versa).
+A rotated top-level image/movie is NOT refused before reaching `_content_anchor` (codex placement
+review 3, finding 1) — its content rect must therefore be the item's exact transformed AABB, not
+its unrotated frame, or a rotated wide item can wrongly read squarish (or vice versa). A rotated
+group with unresolved child metadata is refused instead (see codex placement review 5 and 7 below).
 
 **Measured payload semantics (codex placement review 4).** `iwa_geometry`'s own contract
 ("rotated=AABB position + unrotated size") holds uniformly: `_frame_rect` (plain frames, used for
@@ -383,12 +383,14 @@ whose float residue (`400×1000` rotated 90° → `1000×400.00000000000006`) ca
 tolerance. Rotated groups never reach this code at all: `plan_assembly` composes a rotated
 top-level group's `x`/`y`/`w`/`h` from `iwa_geometry`'s group-union branch (a translation-only
 child union, flagged `needs_keynote="rotated-group"`) — not the AABB-position/unrotated-size
-contract `_content_item_aabb` assumes for frames — but any such group with a text descendant
-(`groupChildText`, computed independent of rotation) always fails `plan_assembly`'s own
-"nested/rotated/masked group" refusal first, because `_group_child_records` refuses (returns
-`None`) for every rotated group regardless of content. So the group branch of `_content_anchor`/
-`_content_item_aabb` is only ever exercised by axis-aligned groups; no code change was needed or
-made there.
+contract `_content_item_aabb` assumes for frames — but any such group with a text or media
+descendant (`groupChildText`/`groupChildSignature`, both computed independent of rotation) always
+fails `plan_assembly`'s own "nested/rotated/masked group" refusal first, because
+`_group_child_records` refuses (returns `None`) for every rotated group regardless of content
+(codex placement review 7, finding 1: the refusal originally checked text only, letting a
+media-only rotated group reach `_content_anchor` with invalid group-union geometry). So the group
+branch of `_content_anchor`/`_content_item_aabb` is only ever exercised by axis-aligned groups; no
+code change was needed or made there.
 
 **Union vs. per-item, and the deck-wide flip list (opus review 1 finding 1, union reading, owner
 confirmation pending).** A per-*item* aspect test (the first cut of this rule) measures each kept
