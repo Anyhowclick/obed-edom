@@ -210,3 +210,13 @@ Steps 1→2→3 are strictly sequential; step 4 is independent and can land firs
 - Conclusion: the saved archive's naturalSize is the truthful authority; `soft_geometry` membership is expected and must NOT gate the
   read (drop §3's "stop and re-plan" branch; drop §9(a) — moot). The band check in §6.5 uses the offline y (stored top for
   top-aligned boxes) — keep. Open question A is resolved; E stands.
+
+## Piece record (round 2, post Opus review 2)
+
+- `_wrap_lines` (`dsk_plan.py`) now tokenizes consecutive-separator runs and joins with the *actual* break char instead of
+  collapsing every run to a single space. This is a deliberate, plan-wide behaviour change: `wrapped_height` is the estimator the
+  *planner* uses for every deck, not only ones exercising the D2b refit loop, so any source text containing thin spaces (U+2009)
+  or runs of spaces now gets a taller (correct) prediction on ordinary planning runs, not just refits. The old code under-charged
+  U+2009 by ~2.7x; the new prediction is the direction that prevents an overflow, not causes one. No existing test's numbers moved.
+- C5 (re-running split after a refit) remains deferred: a still-overflowing split slide is left to the `text_fit` fallback, same
+  as any other unresolved box; `_run_refit_and_finalize`'s docstring documents this.

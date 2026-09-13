@@ -1898,6 +1898,60 @@ def test_shrink_fallback_never_writes_above_pass1_size_mixed_run(tmp_path, monke
     assert hi <= pass1_hi + 0.05, "shrink fallback must never write a run larger than pass 1's own size"
 
 
+def test_shrink_fallback_recheck_catches_sibling_slide_out_of_band(tmp_path, monkeypatch):
+    # Opus D2b review 2 nit 2: the post-shrink recheck must use eligible_keys, not just
+    # todo -- a sibling slide the shrink pass left displaced out of band must still be
+    # caught even though only the over-budget slide was rewritten.
+    _require_helvetica()
+    fw_deck = tmp_path / "source.key"
+    fw_deck.mkdir()
+    (fw_deck / "stub").write_bytes(b"x" * 32)
+    out_path = tmp_path / "out" / "assembled.key"
+    long_text = " ".join(["word"] * 120)
+    item13 = {
+        "kind": "text", "kindIndex": 0, "x": 1920, "y": 0, "w": 3698.0, "h": 300.0,
+        "text": long_text, "font": "Helvetica", "size": 40.0,
+    }
+    item14 = {
+        "kind": "text", "kindIndex": 0, "x": 1920, "y": 0, "w": 3698.0, "h": 300.0,
+        "text": long_text, "font": "Helvetica", "size": 40.0,
+    }
+    slide13 = _slide(13, [item13])
+    slide14 = _slide(14, [item14])
+    payload = _payload([slide13, slide14])
+    classes = [_classify(slide13), _classify(slide14)]
+    decisions = {13: SlideDecision(13, "in_deck"), 14: SlideDecision(14, "in_deck")}
+
+    pass1_stderr = "OBED\t13\tdone"
+    round_stderr = "OBED\t13\tdone"
+    shrink_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch(
+        [pass1_stderr, round_stderr, round_stderr, shrink_stderr]
+    )
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+
+    def entry(h13, y13, h14, y14):
+        return (
+            {1: {("text", 0): (43.0, y13, 1849.0, h13)}, 2: {("text", 0): (43.0, y14, 1849.0, h14)}},
+            set(),
+        )
+
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq([
+            entry(500.0, 704.0, 20.0, 704.0),  # initial: slide 13 over budget, slide 14 fine
+            entry(500.0, 704.0, 20.0, 704.0),  # round 1: still over
+            entry(500.0, 704.0, 20.0, 704.0),  # round 2: still over -> refit exhausted
+            entry(20.0, 704.0, 20.0, 1200.0),  # post-shrink: slide 13 fixed, slide 14 out of band
+        ]),
+    )
+    with pytest.raises(AssemblyRefusal, match="slide 14: text text:0 still overflows after refit and shrink"):
+        assemble_dsk_deck(
+            fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+        )
+    assert len(calls) == 1 + dsa._MAX_REFITS + 1
+
+
 def test_shrink_fallback_all_runs_below_floor_leaves_size_unchanged(tmp_path, monkeypatch):
     # Opus D2b review 1 finding 1: a box whose source size is already below min_text_pt
     # must not be shrunk further by the fallback -- t_floor = 1.0 clamps t to t_prev
@@ -2033,7 +2087,7 @@ def test_assemble_dsk_deck_calls_restore_crop_zorder(tmp_path, monkeypatch):
 
     captured: dict = {}
 
-    def fake_restore_crop_zorder(fw_deck_arg, staging_path, plan, warnings):
+    def fake_restore_crop_zorder(fw_deck_arg, staging_path, plan, warnings, *, hidden={}):
         captured["fw_deck"] = fw_deck_arg
         captured["staging_path"] = staging_path
         captured["plan"] = plan
@@ -5664,6 +5718,71 @@ def test_restore_crop_zorder_moves_cropped_image_to_source_index(tmp_path, monke
     result = dsa._restore_crop_zorder("src.key", out_path, plan, warnings)
     assert captured["slide_id"] == "slideO"
     assert captured["moves"] == {"imgO": 0}
+    assert result[1] == {"refused": False}
+    assert warnings == []
+
+
+def test_restore_crop_zorder_hidden_delete_still_counts_as_present(tmp_path, monkeypatch):
+    # Opus D2b review 2 nit 3: a planned delete Keynote refused (a HIDDEN placeholder)
+    # is still present in the output z-order, so it must not be counted as deleted when
+    # computing the crop's target index -- same class of bug as C6, different function.
+    from obed_edom.dsk_plan import CropSpec
+    import zipfile as _zipfile
+
+    src_slide = {
+        "_pbtype": "KN.SlideArchive",
+        "drawablesZOrder": [{"identifier": "shapeS"}, {"identifier": "imgS"}, {"identifier": "grpS"}],
+    }
+    out_slide = {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "grpO"}, {"identifier": "imgO"}]}
+    out_image = {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "d1"}}
+    src_objects = {"slideS": src_slide}
+    out_objects = {"slideO": out_slide, "imgO": out_image, "grpO": {"_pbtype": "TSD.GroupArchive"}}
+
+    def fake_load_deck(path):
+        return (src_objects, {}, {}) if str(path) == "src.key" else (out_objects, {}, {})
+
+    def fake_slide_order(objects):
+        return [("slideS", False)] if objects is src_objects else [("slideO", False)]
+
+    def fake_derive_kind_index(slide_archive, objects):
+        if slide_archive is src_slide:
+            return [
+                {"id": "shapeS", "kind": "shape", "kindIndex": 0},
+                {"id": "imgS", "kind": "image", "kindIndex": 0},
+                {"id": "grpS", "kind": "group", "kindIndex": 0},
+            ]
+        return []
+
+    out_path = tmp_path / "out.key"
+    with _zipfile.ZipFile(out_path, "w"):
+        pass
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "slide_order", fake_slide_order)
+    monkeypatch.setattr(dsa, "derive_kind_index", fake_derive_kind_index)
+    monkeypatch.setattr(dsa, "_build_data_index", lambda names: {"d1": "photo.jpg"})
+    monkeypatch.setattr(dsa, "_data_identifier", lambda obj: (obj.get("data") or {}).get("identifier"))
+
+    spec = CropSpec(path=Path("/tmp/photo.jpg"), source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={1: {}},
+        deletes={1: (("shape", 0), ("image", 0))}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        crops={1: {("image", 0): spec}},
+    )
+
+    captured: dict = {}
+
+    def fake_reorder(out_path_arg, slide_id, moves):
+        captured["moves"] = moves
+        return {"refused": False}
+
+    monkeypatch.setattr(dsa, "reorder_drawables", fake_reorder)
+
+    warnings: list = []
+    result = dsa._restore_crop_zorder(
+        "src.key", out_path, plan, warnings, hidden={1: frozenset({("shape", 0)})}
+    )
+    assert captured["moves"] == {"imgO": 1}, "the hidden shape is still present, so the image belongs after it"
     assert result[1] == {"refused": False}
     assert warnings == []
 

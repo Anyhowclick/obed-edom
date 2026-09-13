@@ -2073,10 +2073,17 @@ def _restore_stroke(
 
 
 def _restore_crop_zorder(
-    fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: list[str]
+    fw_deck: Path,
+    out_path: Path,
+    plan: AssemblyPlan,
+    warnings: list[str],
+    *,
+    hidden: Mapping[int, frozenset[ItemId]] = {},
 ) -> dict[int, dict]:
     """Move each re-inserted cropped image back to its deleted source item's z-order
-    index, per slide; a slide with nothing to move is absent from the result."""
+    index, per slide; a slide with nothing to move is absent from the result. ``hidden``
+    (keyed by source slide number, same map as the refit loop's) keeps a delete-refused
+    placeholder counted as present, not deleted, in the target-index computation."""
     result: dict[int, dict] = {}
     if not plan.crops:
         return result
@@ -2111,7 +2118,7 @@ def _restore_crop_zorder(
             str(ref["identifier"]) for ref in (out_slide.get("drawablesZOrder") or []) if ref.get("identifier") is not None
         ]
         deleted = set(plan.deletes.get(number, ()))
-        deleted_not_cropped = deleted - set(crop_specs)
+        deleted_not_cropped = deleted - set(crop_specs) - hidden.get(number, frozenset())
 
         targets: dict[str, int] = {}
         used_out_ids: set[str] = set()
@@ -2515,11 +2522,6 @@ def _build_refit_round(
                     ratio = measured_h / predicted_h
                     correction[corr_key] = max(1.0, min(3.0, correction.get(corr_key, 1.0) * ratio))
                     any_new = True
-                elif measured_h is None:
-                    warnings.append(
-                        f"slide {slide_no}: text {key[1]} measure missing this round, "
-                        "no correction change"
-                    )
             if corr_key in correction:
                 slide_correction[box.item_id] = correction[corr_key]
         if not any_new:
@@ -2932,7 +2934,7 @@ def assemble_dsk_deck(
         stroke = _restore_stroke(
             fw_deck, staging_path, plan, payload, stroke_min_refs, warnings, log, hidden=hidden_map,
         )
-        zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings)
+        zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
         builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
 
         copy_keynote(staging_path, out_path)
