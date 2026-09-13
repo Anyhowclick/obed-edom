@@ -157,3 +157,13 @@ The badge-x **245.0** assertion is the load-bearing one: it is an exact, indepen
 
 ---
 
+
+## Owner decisions (2026-09-14 00:55)
+
+- **Q1 — repeated headings: DROP.** A heading cluster whose heading text equals the previous in-deck slide's heading is suppressed
+  (heading + number + circle deleted); the verse then takes the full band as a single-column text slide (reproduces gold 35/36/37 for
+  GW 51/52/53). Add it as step 5b (~20 lines) with a test (`test_gw51_52_53_repeat_heading_dropped_full_width`) and update the §6 rows
+  for 51/52/53 accordingly.
+- **Q3 — verse badge: keep current (unscaled) size.** The next milestone after D1b applies the proper template slide layout instead of
+  hand-placed rects; badge scaling belongs there.
+- Q2 (heading-only slides) — unanswered; leave today's affine path.
