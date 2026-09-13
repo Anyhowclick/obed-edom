@@ -406,11 +406,12 @@ def _content_anchor(
         return "centre"
     visibles = _visibles_by_kept(items, content_ids, include_side=False)
     rects = [r for r in visibles.values() if r.w > 0 and r.h > 0]
-    if rects:
-        union = _union_rect(rects)
-        if union.w / union.h >= _LW_ASPECT_MIN:
-            return "centre"
-    return "right" if len(content_ids) <= 2 else "centre"
+    if not rects:
+        return "centre"
+    union = _union_rect(rects)
+    if union.w / union.h >= _LW_ASPECT_MIN:
+        return "centre"
+    return "right" if len(rects) <= 2 else "centre"
 
 
 def plan_assembly(

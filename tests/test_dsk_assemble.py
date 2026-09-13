@@ -5165,6 +5165,32 @@ def test_no_auto_anchor_flag_forces_centre():
     assert plan.anchors[48] == "centre"
 
 
+def test_lone_zero_area_item_defaults_to_centre():
+    # codex review 2, finding 1: a single zero-width item is proven content_ids-wise
+    # but has no positive-area rect, so the zero-content default of "centre" applies.
+    item = _image_item(0, x=1954, y=27, w=0, h=921)
+    slide = _slide(51, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {51: SlideDecision(51, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[51] == "centre"
+
+
+def test_valid_item_plus_degenerate_media_counts_by_positive_area_only():
+    # codex review 2, finding 1: two zero-area media items must not push the count
+    # to 3+; only the one squarish positive-area rect counts, so anchor is "right".
+    valid = _image_item(0, x=1954, y=27, w=1381, h=921)
+    degenerate_a = _image_item(1, x=4702, y=15, w=0, h=92)
+    degenerate_b = _image_item(2, x=4702, y=200, w=645, h=0)
+    slide = _slide(52, [valid, degenerate_a, degenerate_b])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {52: SlideDecision(52, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[52] == "right"
+
+
 # --------------------------------------------------------------------------
 # deletes/refusals (step 10)
 # --------------------------------------------------------------------------
