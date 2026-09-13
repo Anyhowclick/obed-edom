@@ -746,6 +746,53 @@ def test_groupchild_overflow_stays_a_warning_under_text_fit_shrink():
     assert any("groupchild:0:1 overflow" in w for w in warnings)
 
 
+def test_refit_stopped_logs_reason_and_per_box_offline_measures(monkeypatch):
+    # r11 GW 17 root cause repro: two boxes sharing one stack `t`, a floor so tight that
+    # `fit_text_stack` finds no valid `t` even at max correction -- round 1 must log the
+    # offline measure for every eligible box and the reason the round produced no write,
+    # not vanish silently before the "still overflows" refusal.
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+    ordinal = plan.ordinals[17]
+
+    def fake_offline_text_rects(key_path, *, deck=None):
+        rects = {
+            ("text", idx): (43.0, 800.0 + idx * 200, 1849.0, 5000.0)
+            for idx, _iid in enumerate(sorted(plan.stacked_ids[17]))
+        }
+        return ({ordinal: rects}, set())
+
+    monkeypatch.setattr(dsa, "offline_text_rects", fake_offline_text_rects)
+
+    logs: list[str] = []
+    with pytest.raises(AssemblyRefusal, match="slide 17: text text:1 still overflows after refit"):
+        dsa._run_refit_and_finalize(
+            plan, batch=None, slides_by_number=slides_by_number,
+            band=BAND, min_text_pt=66.0, allow_split=False, text_fit="warn",
+            staging_path=Path("/tmp/staged.key"), measured={}, overflows=[],
+            warnings=[], log=logs.append,
+        )
+    assert any(
+        l.startswith("slide 17: text text:1 offline=5000 rect=") and "over=+" in l for l in logs
+    )
+    assert any(
+        l.startswith("slide 17: text text:2 offline=5000 rect=") and "over=+" in l for l in logs
+    )
+    assert any(
+        l == "refit stopped after round 1: slide 17: fit_text_stack found no t >= floor "
+        "(66.0pt) fitting the stack band at correction "
+        "{('text', 1): 3.0, ('text', 2): 3.0}"
+        for l in logs
+    )
+
+
 def test_group_child_of_unmapped_kind_skipped_not_placed():
     # F7: an unmapped child kind must be skipped, like `_group_known_child_lines`
     # already does -- not given a bogus AppleScript address / a short-row rect.
@@ -814,6 +861,31 @@ def test_image_child_in_text_triggering_group_refuses():
     cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
     decisions = {5: SlideDecision(5, "in_deck")}
     with pytest.raises(AssemblyRefusal, match="image nested in text-triggering group"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+
+def test_group_badge_wider_than_band_refuses():
+    # Opus D1 review 3 finding 3: the `badge_w > band.width` refusal (dsk_assemble.py,
+    # the only new refusal in this round without a discriminating test) -- a synthetic
+    # group badge wider than the band must refuse before any clamp is attempted.
+    _require_font("AzoSans-Regular")
+    photo = _image_item(0, x=1920, y=-1024, w=3840, h=2561)
+    group = _group_item(0, x=4702, y=15, w=2000, h=92)
+    slide = _slide(5, [photo, group])
+    slide["groupChildText"] = {0: _GW5_VERSE}
+    slide["groupChildSignature"] = {0: f"shape:badge\ntext:{_GW5_VERSE}"}
+    slide["groupChildren"] = {0: [
+        {"kind": "shape", "kindIndex": 0, "autosize": False, "x": 4702.0, "y": 15.0, "w": 2000.0, "h": 92.0},
+        {"kind": "text", "kindIndex": 1, "autosize": True, "x": 4303.0, "cy": 89.0, "y": -88.0, "w": 1442.0, "h": 355.0},
+    ]}
+    slide["groupChildRuns"] = {0: {1: {
+        "text": _GW5_VERSE, "font": "AzoSans-Regular", "size": 70.0,
+        "runs": [{"text": _GW5_VERSE, "fontName": "AzoSans-Regular", "size": 70.0}],
+    }}}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    decisions = {5: SlideDecision(5, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="is wider than the band"):
         plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
 
 
@@ -1577,15 +1649,19 @@ def test_gw_group_text_slides_short_row_stays_within_band_x():
 def test_gw53_badge_x_clamped_to_band_right_edge():
     # New finding 1: reproduces the real-deck defect -- GW 53's badge, placed at the
     # group's fitted x plus its source offset, used to overhang the canvas by 213 pt.
+    # Opus D1 review 3 finding 1: `plan.fits[53]`'s insertion order puts the verse
+    # groupchild first -- it always spans the band exactly, so selecting "the first
+    # groupchild rect" asserted on the verse and passed even on the pre-fix code. Index
+    # the badge by its own id and pin the clamped value.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, classes, runs = load_assembly_inputs(GW_DECK)
     by_number = {c.number: c for c in classes}
     decisions = {53: SlideDecision(53, "in_deck")}
     plan = plan_assembly(payload, [by_number[53]], decisions=decisions, band=BAND, clips={}, runs=runs)
-    badge = next(rect for iid, rect in plan.fits[53].items() if iid[0] == "groupchild")
-    assert badge.x + badge.w <= BAND.x_max + 1e-6
-    assert badge.x >= BAND.x_min - 1e-6
+    badge = plan.fits[53][("groupchild", 0, 0)]
+    assert badge.x == pytest.approx(1246.97, abs=0.5)
+    assert badge.x + badge.w == pytest.approx(BAND.x_max, abs=1e-6)
 
 
 def test_short_row_rects_regression_moves_badge_out_of_band():
@@ -1721,6 +1797,39 @@ def test_refit_second_round_measured_equals_rect_h_leaves_correction_unchanged()
     corr2 = correction[corr_key]
 
     assert corr2 == corr1, "measured == last written height must leave the correction unchanged"
+
+
+def test_build_refit_round_records_stop_reason_when_fit_returns_none_at_floor():
+    # r11 GW 17 root cause: a corrected height that only clears at t below the
+    # `--min-text-pt` floor must not vanish from `refits` without a trace -- the round
+    # skip is now recorded in `stop_reasons` so a caller can log why.
+    plan, slides_by_number = _badge_and_stack_plan()
+    todo = {(13, "text:1")}
+    warnings: list[str] = []
+    correction: dict = {}
+    stop_reasons: dict[int, str] = {}
+    measured = {(13, "text:1"): 5000.0}
+    refits = dsa._build_refit_round(
+        plan, slides_by_number, todo, measured, BAND, 60.0, warnings, correction,
+        last_t={}, stop_reasons=stop_reasons,
+    )
+    assert refits == {}
+    assert 13 in stop_reasons
+    assert "fit_text_stack found no t" in stop_reasons[13]
+
+
+def test_build_refit_round_clears_stop_reason_once_a_slide_fits():
+    # A slide that failed a prior round but fits this one must not leave a stale reason
+    # behind for the caller to misreport.
+    plan, slides_by_number = _badge_and_stack_plan()
+    todo = {(13, "text:1")}
+    stop_reasons: dict[int, str] = {13: "stale reason from an earlier round"}
+    refits = dsa._build_refit_round(
+        plan, slides_by_number, todo, {(13, "text:1"): 400.0}, BAND, 24.0, [], {},
+        last_t={}, stop_reasons=stop_reasons,
+    )
+    assert 13 in refits
+    assert 13 not in stop_reasons
 
 
 def test_refit_round_re_stacks_badge_position_only():
@@ -6942,3 +7051,44 @@ def test_shrink_fallback_refuses_when_still_over_budget_after_shrink(tmp_path, m
         assemble_dsk_deck(
             fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
         )
+
+
+# --------------------------------------------------------------------------
+# r11 refit brief item 4 -- keep the staging deck on refusal after pass 1 saved.
+# --------------------------------------------------------------------------
+def test_refusal_after_pass1_saves_copies_staging_deck_next_to_out(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+
+    class _SavingRefusingBatch:
+        def __init__(self, deck, out_dir, *, rss_limit_bytes=0, log=print):
+            self.deck = Path(deck)
+            self.out_dir = Path(out_dir)
+            self.work = self.out_dir / "fake-work"
+            self.scratch = self.work / self.deck.name
+
+        def __enter__(self):
+            self.work.mkdir(parents=True, exist_ok=True)
+            self.scratch.mkdir(parents=True, exist_ok=True)
+            (self.scratch / "marker").write_bytes(b"scratch")
+            return self
+
+        def run(self, script_path, *, on_progress=None, retry_on_1712=True):
+            staging_path = self.work / f"staged-{out_path.name}"
+            staging_path.write_bytes(b"staged-deck-bytes")
+            return subprocess.CompletedProcess([], 0, "", "OBED\t13\tdone")
+
+        def __exit__(self, exc_type, exc, _tb):
+            return False
+
+    _patch_common_with_batch(monkeypatch, payload, classes, _SavingRefusingBatch)
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_text_rects(5000.0)]))
+    logs: list[str] = []
+    with pytest.raises(AssemblyRefusal, match="still overflows after refit"):
+        assemble_dsk_deck(
+            fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", log=logs.append,
+        )
+    refused_path = out_path.parent / f"{out_path.stem}.refused.key"
+    assert refused_path.exists()
+    assert not out_path.exists()
+    assert any(str(refused_path) in l for l in logs)

@@ -805,7 +805,13 @@ def plan_assembly(
                             badge_x = band.x_min + (band.width - badge_w) / 2.0
                         else:
                             badge_x = group_rect.x + (float(child.get("x", 0.0)) - origin_x)
-                        badge_x = min(max(badge_x, band.x_min), band.x_max - badge_w)
+                        clamped_x = min(max(badge_x, band.x_min), band.x_max - badge_w)
+                        if clamped_x != badge_x:
+                            warnings.append(
+                                f"slide {number}: group {group_ki} child {child['kindIndex']} badge x "
+                                f"clamped {badge_x:.1f} -> {clamped_x:.1f} to stay in the band"
+                            )
+                        badge_x = clamped_x
                         short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
                         slide_group_child_kind[badge_id] = child["kind"]
                     _refuse_on_short_row_overlap(number, short_fit)
@@ -2832,11 +2838,16 @@ def _build_refit_round(
     text_fit: Literal["warn", "shrink"] = "warn",
     warned_gaps: set[tuple[int, ItemId]] | None = None,
     last_t: dict[int, float] | None = None,
+    stop_reasons: dict[int, str] | None = None,
 ) -> dict[int, dict[ItemId, TextRefit]]:
     """One refit round's writes: per box still over budget, ``r = measured_h /
     last_written_h`` multiplied into ``correction`` (persisted across rounds, clamped to
-    ``[1.0, 3.0]``), re-run through ``fit_text_stack`` for the whole stack."""
+    ``[1.0, 3.0]``), re-run through ``fit_text_stack`` for the whole stack. A slide in
+    ``todo`` that this round cannot produce a write for (group-stacked text, a box-count
+    mismatch, missing measurements, or ``fit_text_stack`` finding no valid ``t``) is
+    recorded in ``stop_reasons`` rather than dropped silently."""
     warned_gaps = warned_gaps if warned_gaps is not None else set()
+    stop_reasons = stop_reasons if stop_reasons is not None else {}
     refits: dict[int, dict[ItemId, TextRefit]] = {}
     for slide_no in sorted({s for s, _k in todo}):
         stacked = plan.stacked_ids.get(slide_no, frozenset())
@@ -2844,11 +2855,13 @@ def _build_refit_round(
             # A group's text is fit once offline and never refit live (D1 step 6,
             # `_eligible_refit_items`) -- skip explicitly rather than relying on the
             # box-count mismatch below, which only skips this slide by accident.
+            stop_reasons[slide_no] = "slide has group-stacked text, not eligible for live refit"
             continue
         items_by_id = {(it["kind"], it["kindIndex"]): it for it in slides_by_number[slide_no]["items"]}
         boxes, box_warnings = _text_boxes(list(stacked), items_by_id)
         warnings.extend(f"slide {slide_no}: {w}" for w in box_warnings)
         if len(boxes) != len(stacked):
+            stop_reasons[slide_no] = f"text box read {len(boxes)} boxes for {len(stacked)} stacked ids"
             continue
         slide_correction: dict[ItemId, float] = {}
         any_new = False
@@ -2865,11 +2878,17 @@ def _build_refit_round(
             if corr_key in correction:
                 slide_correction[box.item_id] = correction[corr_key]
         if not any_new:
+            stop_reasons[slide_no] = "no predicted height/measurement available for the over-budget box"
             continue
         stack_band = plan.stack_bands.get(slide_no, band)
         fit = fit_text_stack(boxes, stack_band, min_text_pt, height_correction=slide_correction)
         if fit is None:
+            stop_reasons[slide_no] = (
+                f"fit_text_stack found no t >= floor ({min_text_pt}pt) fitting the stack "
+                f"band at correction {slide_correction}"
+            )
             continue
+        stop_reasons.pop(slide_no, None)
         t, sizes, heights = fit
         if last_t is not None:
             last_t[slide_no] = t
@@ -2977,6 +2996,24 @@ def _refuse_on_missing_measures(
     raise AssemblyRefusal(msg)
 
 
+def _log_offline_measures(
+    plan: AssemblyPlan,
+    measured: Mapping[tuple[int, str], float],
+    eligible_keys: set[tuple[int, str]],
+    log: Callable[[str], None],
+) -> None:
+    """One line per eligible box after every offline measure: ``slide N: text K
+    offline=H rect=R over=+D`` -- the numbers the refit/refusal decision is made from."""
+    for slide_no, item_key in sorted(eligible_keys):
+        item_id: ItemId = ("text", int(item_key.split(":")[1]))
+        rect = plan.fits.get(slide_no, {}).get(item_id)
+        h = measured.get((slide_no, item_key))
+        if rect is None or h is None:
+            continue
+        over = h - rect.h
+        log(f"slide {slide_no}: text {item_key} offline={h:.0f} rect={rect.h:.0f} over={over:+.0f}")
+
+
 def _run_refit_and_finalize(
     plan: AssemblyPlan,
     batch: LiveBatch,
@@ -3028,6 +3065,7 @@ def _run_refit_and_finalize(
         offline_h = measured.get(key)
         if offline_h is not None and abs(live_h - offline_h) > 2.0:
             log(f"slide {key[0]}: {key[1]} live={live_h} offline={offline_h} diverge")
+    _log_offline_measures(plan, measured, eligible_keys, log)
     todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands, band=band)
     reopen_path = staging_path
     correction: dict[tuple[int, ItemId], float] = {}
@@ -3037,11 +3075,16 @@ def _run_refit_and_finalize(
     for round_no in range(1, _MAX_REFITS + 1):
         if not todo:
             break
+        stop_reasons: dict[int, str] = {}
         refits = _build_refit_round(
             plan, slides_by_number, todo, measured, band, min_text_pt, warnings,
             correction, text_fit=text_fit, warned_gaps=warned_gaps, last_t=last_t,
+            stop_reasons=stop_reasons,
         )
         if not refits:
+            for slide_no in sorted({s for s, _k in todo}):
+                reason = stop_reasons.get(slide_no, "no write produced for this slide's boxes")
+                log(f"refit stopped after round {round_no}: slide {slide_no}: {reason}")
             break
         log(f"refit round {round_no}: slides {sorted(refits)}")
         script = build_refit_script(
@@ -3052,8 +3095,13 @@ def _run_refit_and_finalize(
         _check_refit_batch_result(proc, f"refit round {round_no}")
         measured, bands, measure_warnings = _offline_measure(staging_path, plan, hidden, warnings)
         _refuse_on_missing_measures(eligible_keys, measured, measure_warnings)
+        _log_offline_measures(plan, measured, eligible_keys, log)
         reopen_path = staging_path
+        remaining = {s for s, _k in todo}
         todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands, band=band)
+        for slide_no in remaining - refits.keys():
+            reason = stop_reasons.get(slide_no, "no write produced for this slide's boxes")
+            log(f"refit stopped after round {round_no}: slide {slide_no}: {reason}")
 
     if todo:
         if allow_split:
@@ -3118,6 +3166,7 @@ def _run_refit_and_finalize(
         _check_refit_batch_result(proc, "shrink fallback")
         measured, bands, measure_warnings = _offline_measure(staging_path, plan, hidden, warnings)
         _refuse_on_missing_measures(eligible_keys, measured, measure_warnings)
+        _log_offline_measures(plan, measured, eligible_keys, log)
         todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands, band=band)
 
     if todo:
@@ -3274,21 +3323,31 @@ def assemble_dsk_deck(
 
         hidden_map = {n: frozenset(ids) for n, ids in hidden_ids.items()}
         slides_by_number = {s["number"]: s for s in payload.get("slides") or []}
-        _run_refit_and_finalize(
-            plan, batch, slides_by_number,
-            band=resolved_band, min_text_pt=min_text_pt, allow_split=allow_split, text_fit=text_fit,
-            staging_path=staging_path, measured=measured, overflows=overflows, warnings=warnings, log=log,
-            hidden=hidden_map,
-        )
+        try:
+            _run_refit_and_finalize(
+                plan, batch, slides_by_number,
+                band=resolved_band, min_text_pt=min_text_pt, allow_split=allow_split, text_fit=text_fit,
+                staging_path=staging_path, measured=measured, overflows=overflows, warnings=warnings, log=log,
+                hidden=hidden_map,
+            )
 
-        if layout_policy == "import":
-            verify_staged_layouts_alpha_safe(staging_path, plan)
+            if layout_policy == "import":
+                verify_staged_layouts_alpha_safe(staging_path, plan)
 
-        stroke = _restore_stroke(
-            fw_deck, staging_path, plan, payload, stroke_min_refs, warnings, log, hidden=hidden_map,
-        )
-        zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
-        builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
+            stroke = _restore_stroke(
+                fw_deck, staging_path, plan, payload, stroke_min_refs, warnings, log, hidden=hidden_map,
+            )
+            zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
+            builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
+        except AssemblyRefusal:
+            # Pass 1 has already saved to `staging_path` -- keep it next to `out_path`
+            # rather than letting the batch's disposable work dir discard it, so a
+            # refusal after pass 1 still leaves the operator something to inspect.
+            if staging_path.exists():
+                refused_path = out_path.parent / f"{out_path.stem}.refused.key"
+                copy_keynote(staging_path, refused_path)
+                log(f"staged deck kept at {refused_path}")
+            raise
 
         copy_keynote(staging_path, out_path)
 

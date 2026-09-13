@@ -203,7 +203,9 @@ reports heights and applies writes.
   genuinely cannot fit at the floor. Real coverage regression, not a bug in this brief's fix — deferred
   past this brief's GW-5-only scope; `tests/test_dsk_assemble.py::test_gw_every_kept_non_movie_slide_plans_under_default_flags`
   excludes both by number with a comment naming the measured cause. GW 51 was wrongly excluded alongside
-  them (it plans fine) and is restored.
+  them (it plans fine) and is restored. Not a marginal miss: measured, the refusal persists all the way
+  down to `--min-text-pt 12` (GW 44's heading alone consumes ~271pt of the 350pt band) and would only
+  clear near 9pt, so nobody should later "fix" it by lowering the floor.
 - **A group's text is fit once offline and never refit live** (`_eligible_refit_items` drops every
   `GroupChildId`, D1 step 6): the live refit loop's offline-measure authority only maps top-level `text`
   items. A `groupchild:` OVERFLOW line therefore has no live fallback -- it now escalates to an
