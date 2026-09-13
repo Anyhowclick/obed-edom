@@ -186,6 +186,15 @@ export function IconClose({ className }: IconProps) {
   );
 }
 
+export function IconInfo({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls(className)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5M12 8h.01" />
+    </svg>
+  );
+}
+
 export function IconChevronLeft({ className }: IconProps) {
   return (
     <svg {...base} className={cls(className)}>

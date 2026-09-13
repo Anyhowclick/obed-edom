@@ -25,6 +25,9 @@ describe("MapsTab export row sits in the Export button's row", () => {
     expect(exportTo).toHaveClass("collab");
     expect(exportTo.closest(".actions")).not.toBeNull();
     expect(exportTo.closest(".actions")).toBe(exportBtn.closest(".actions"));
+
+    const path = screen.getByText(/output\/ \(default\)|\(default\)/);
+    expect(exportTo.compareDocumentPosition(path) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 
@@ -35,13 +38,3 @@ describe("ExportDestinationRow default (non-inline) rendering", () => {
   });
 });
 
-describe("ExportDestinationRow inline + disabled", () => {
-  it("renders locked destination copy and no Export to… button", () => {
-    render(
-      <ExportDestinationRow value="/tmp/out" onChange={() => undefined} disabled inline />,
-    );
-    expect(screen.getByText(/\/tmp\/out/)).toBeInTheDocument();
-    expect(screen.getByText(/Locked to this destination until applied\./)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Export to…" })).not.toBeInTheDocument();
-  });
-});

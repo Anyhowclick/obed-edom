@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IconClose, IconPlus } from "../components/icons";
+import { IconClose, IconInfo, IconPlus } from "../components/icons";
 import {
   blankRow,
   rowIsEmpty,
@@ -21,18 +21,42 @@ type Props = {
 
 const LINK_NOTE =
   "A Google Maps link is only read when it contains @lat,lng (the full desktop URL) — shortened maps.app.goo.gl links are not.";
-const SKIP_NOTE = "Blank rows are skipped.";
-const NOTES: Record<ManualMode, string> = {
-  slides: `One entry per slide. A name alone is geocoded and zoomed to fit what it is — a country lands at z4.3, a town at z13. New slides are added at the end of the deck. ${LINK_NOTE} ${SKIP_NOTE}`,
-  pins: `One entry per pin on the current view. Pins keep this slide's zoom. ${LINK_NOTE} A pin still needs a name, a place or coordinates of its own. ${SKIP_NOTE}`,
+const NOTES: Record<ManualMode, string[]> = {
+  slides: [
+    "One entry per slide; new slides are added at the end of the deck.",
+    "A name alone is geocoded and zoomed to fit what it is — a country lands at z4.3, a town at z13.",
+    LINK_NOTE,
+  ],
+  pins: [
+    "Pins keep this slide's zoom.",
+    "A pin still needs a name, a place or coordinates of its own.",
+    LINK_NOTE,
+  ],
 };
 
+const SEEN_KEY = "obed-edom.maps.manualInfoSeen";
+
 export function ManualEntriesForm({ mode, busy, onDone, onCancel }: Props) {
+  const seenKey = `${SEEN_KEY}.${mode}`;
   const [rows, setRows] = useState<ManualRow[]>([blankRow(0)]);
   const [errors, setErrors] = useState<ManualRowError[]>([]);
+  const [infoOpen, setInfoOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem(seenKey) !== "1";
+    } catch {
+      return true;
+    }
+  });
   const seq = useRef(1);
   const nameInputs = useRef<Record<string, HTMLInputElement | null>>({});
   const pendingFocus = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!infoOpen) return;
+    try {
+      window.localStorage.setItem(seenKey, "1");
+    } catch {}
+  }, [infoOpen, seenKey]);
 
   useEffect(() => {
     const key = pendingFocus.current;
@@ -74,8 +98,38 @@ export function ManualEntriesForm({ mode, busy, onDone, onCancel }: Props) {
       role="group"
       aria-label={mode === "slides" ? "Add slides manually" : "Add pins manually"}
     >
-      <div className="cap">{mode === "slides" ? "Add slides manually" : "Add pins to this view manually"}</div>
-      <p className="note">{NOTES[mode]}</p>
+      <div className="maps-manual-top">
+        <button
+          type="button"
+          className="btn secondary icon-btn maps-manual-info"
+          aria-expanded={infoOpen}
+          aria-controls="maps-manual-note"
+          aria-label="About this form"
+          title="About this form"
+          onClick={() => setInfoOpen((open) => !open)}
+        >
+          <IconInfo />
+        </button>
+        <button
+          type="button"
+          className="btn secondary icon-btn danger-text maps-manual-close"
+          disabled={busy}
+          aria-label="Cancel"
+          title="Cancel"
+          onClick={onCancel}
+        >
+          <IconClose />
+        </button>
+      </div>
+      {infoOpen && (
+        <div id="maps-manual-note" className="callout maps-manual-note">
+          <ul>
+            {NOTES[mode].map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="maps-manual-head">
         <span>Name</span>
         <span>Place</span>
@@ -183,10 +237,7 @@ export function ManualEntriesForm({ mode, busy, onDone, onCancel }: Props) {
           Add row
         </button>
         <span className="spacer" />
-        <button className="btn secondary" type="button" disabled={busy} onClick={onCancel}>
-          Cancel
-        </button>
-        <button className="btn" type="button" disabled={busy} onClick={done}>
+        <button className="btn maps-manual-done" type="button" disabled={busy} onClick={done}>
           Done
         </button>
       </div>

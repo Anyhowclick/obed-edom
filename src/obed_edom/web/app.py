@@ -130,6 +130,7 @@ class FramingsBody(BaseModel):
     """`{wallIndex, state, templateSlide}` per answered page. A group confirm is several entries."""
 
     decisions: list[dict[str, Any]] | None = None
+    exportDir: str | None = None
 
 
 class SettingsBody(BaseModel):
@@ -152,6 +153,16 @@ def _require_local_origin(request: Request) -> None:
     host = urlsplit(origin).hostname
     if host not in _LOCAL_HOSTS:
         raise HTTPException(403, "Forbidden origin")
+
+
+class SpaStaticFiles(StaticFiles):
+    """HTML must revalidate, or a browser keeps serving an index that names deleted hashed assets."""
+
+    def file_response(self, full_path, stat_result, scope, status_code: int = 200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if str(full_path).endswith(".html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def create_app() -> FastAPI:
@@ -710,16 +721,44 @@ def create_app() -> FastAPI:
         job = RUNNER.get(job_id)
         if not job or not job.result:
             raise HTTPException(404, "Unknown job")
-        if payload and payload.decisions is not None:
-            save_resize_framings(job_id, payload)
-        job = RUNNER.get(job_id)
-        result = dict((job.result if job else None) or {})
-        overrides = _overrides_from_result(result)
-        side_content = _side_content_slides_from_result(result)
+        result = dict(job.result)
         key = Path(str(result.get("path") or "")).expanduser()
         template = Path(str(result.get("templatePath") or "")).expanduser()
         if not key.exists() or not template.exists():
             raise HTTPException(400, "The wall deck or template has moved since proposing.")
+        export_dir: str | None = None
+        resolved_export_dir: str | None = None
+        if payload and payload.exportDir is not None:
+            if payload.exportDir:
+                try:
+                    resolved_export_dir = str(validate_export_dir(payload.exportDir))
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                export_dir = payload.exportDir
+            else:
+                proposal_export_dir = result.get("proposalExportDir")
+                if proposal_export_dir:
+                    resolved_export_dir = proposal_export_dir
+                else:
+                    try:
+                        resolved_export_dir = str(resolve_export_destination(None))
+                    except ValueError as exc:
+                        raise HTTPException(400, str(exc)) from exc
+        if payload and payload.decisions is not None:
+            save_resize_framings(job_id, payload)
+        if payload and payload.exportDir is not None:
+            job = RUNNER.get(job_id)
+            current = dict((job.result if job else None) or {})
+            if export_dir:
+                current["exportDir"] = export_dir
+            else:
+                current.pop("exportDir", None)
+            current["resolvedExportDir"] = resolved_export_dir
+            RUNNER.update_result(job_id, current)
+        job = RUNNER.get(job_id)
+        result = dict((job.result if job else None) or {})
+        overrides = _overrides_from_result(result)
+        side_content = _side_content_slides_from_result(result)
         raw_range = result.get("slideRange")
         sel = frozenset(int(n) for n in raw_range) if raw_range else None
         do_export = bool(result.get("export", True))
@@ -745,7 +784,7 @@ def create_app() -> FastAPI:
     app.include_router(watercolour_router)
 
     if DASHBOARD_DIST.is_dir():
-        app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")
+        app.mount("/", SpaStaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")
 
     return app
 
@@ -840,9 +879,10 @@ def _run_generate(
 
 
 def _carried_export_dir(job: Job) -> dict[str, Any]:
-    """`{"exportDir": ...}` carried from `job.result`.
+    """`{"exportDir": ..., "resolvedExportDir": ..., "proposalExportDir": ...}`
+    carried from `job.result`.
 
-    Key is present only when it has a truthy value — never a `None`
+    Keys are present only when they have a truthy value — never a `None`
     `exportDir`, matching maps' `_run_export`.
     """
     current = job.result or {}
@@ -850,6 +890,12 @@ def _carried_export_dir(job: Job) -> dict[str, Any]:
     export_dir = current.get("exportDir")
     if export_dir:
         out["exportDir"] = export_dir
+    resolved_export_dir = current.get("resolvedExportDir")
+    if resolved_export_dir:
+        out["resolvedExportDir"] = resolved_export_dir
+    proposal_export_dir = current.get("proposalExportDir")
+    if proposal_export_dir:
+        out["proposalExportDir"] = proposal_export_dir
     return out
 
 
@@ -1547,6 +1593,7 @@ def _run_resize_propose(
         "export": export,
         **({"exportDir": export_dir} if export_dir else {}),
         "resolvedExportDir": resolved_export_dir,
+        "proposalExportDir": resolved_export_dir,
         **proposal,
         "slideRange": sorted(slide_range) if slide_range else None,
         "slideRangeTyped": sorted(expand_slide_range(typed) or []) or None,

@@ -1953,7 +1953,7 @@ export function MapsTab() {
                   setManualMode("slides");
                 }}
               >
-                Add slides manually…
+                Add slides
               </button>
               <button
                 type="button"
@@ -1964,7 +1964,7 @@ export function MapsTab() {
                   setManualMode("pins");
                 }}
               >
-                Add pins to this view manually…
+                Add pins
               </button>
               <button
                 type="button"
@@ -1975,7 +1975,7 @@ export function MapsTab() {
                   csvInput.current?.click();
                 }}
               >
-                Add slides from CSV…
+                Add slides from CSV
               </button>
               <button
                 type="button"
@@ -1987,7 +1987,7 @@ export function MapsTab() {
                   csvInput.current?.click();
                 }}
               >
-                Add pins to this view from CSV…
+                Add pins from CSV
               </button>
               <button
                 type="button"
@@ -1998,7 +1998,7 @@ export function MapsTab() {
                   csvInput.current?.click();
                 }}
               >
-                Replace deck from CSV…
+                Replace deck from CSV
               </button>
             </div>
           )}
@@ -2729,7 +2729,7 @@ export function MapsTab() {
                   )}
                   {(activeView?.highlights.length || 0) > 0 && (
                     <div className="maps-hl">
-                      <div className="cap">Orange countries</div>
+                      <div className="cap">Selected regions</div>
                       <div className="maps-hl-list">
                         {(activeView?.highlights || []).map((code) => (
                           <button
@@ -3105,7 +3105,7 @@ export function MapsTab() {
               {inspTab === "export" && (
                 <div>
                   <div className="cap">Export to Keynote</div>
-                  <label className="maps-check aud-lw">
+                  <label className="maps-check">
                     <input
                       type="checkbox"
                       checked={doc?.exportLw !== false}
@@ -3119,7 +3119,7 @@ export function MapsTab() {
                     />
                     LED wall (7680×1080)
                   </label>
-                  <label className="maps-check aud-cg">
+                  <label className="maps-check">
                     <input
                       type="checkbox"
                       checked={doc?.exportCg !== false}
@@ -3133,7 +3133,7 @@ export function MapsTab() {
                     />
                     CG (1920×1080)
                   </label>
-                  <label className="maps-check aud-dsk">
+                  <label className="maps-check">
                     <input
                       type="checkbox"
                       checked={doc?.exportDsk === true}

@@ -45,3 +45,24 @@ test("every control that opens a menu renders exactly one caret", () => {
     assert.equal(carets, triggers, `${file}: ${triggers} menu triggers but ${carets} carets`);
   }
 });
+
+test("the ＋ menu labels are terse — no trailing ellipsis", () => {
+  const text = src("tabs/MapsTab.tsx");
+  for (const label of ["Add slides", "Add pins", "Add slides from CSV", "Add pins from CSV", "Replace deck from CSV"]) {
+    assert.match(text, new RegExp(`>\\s*${label}\\s*<`), `missing label ${JSON.stringify(label)}`);
+  }
+  for (const stale of ["Add slides manually…", "Add pins to this view manually…", "Add slides from CSV…", "Add pins to this view from CSV…", "Replace deck from CSV…"]) {
+    assert.doesNotMatch(text, new RegExp(`>\\s*${stale}\\s*<`), `stale label ${JSON.stringify(stale)} still present`);
+  }
+});
+
+test("the highlight list is captioned \"Selected regions\", not \"Orange countries\"", () => {
+  const text = src("tabs/MapsTab.tsx");
+  assert.match(text, /<div className="cap">\s*Selected regions\s*<\/div>/);
+  assert.doesNotMatch(text, /Orange countries/);
+});
+
+test("the export checkboxes no longer carry an audience-colour class", () => {
+  const text = src("tabs/MapsTab.tsx");
+  assert.doesNotMatch(text, /className="maps-check aud-(lw|cg|dsk)"/);
+});

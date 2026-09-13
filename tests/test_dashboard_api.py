@@ -220,6 +220,34 @@ def test_health_and_stubs():
     assert missing_file.status_code == 400
 
 
+def test_spa_index_is_served_no_cache_but_hashed_assets_are_not():
+    from obed_edom.web.app import DASHBOARD_DIST
+
+    if not DASHBOARD_DIST.is_dir():
+        pytest.skip("dashboard/dist not built")
+    client = TestClient(app)
+    for path in ("/", "/index.html"):
+        res = client.get(path)
+        assert res.status_code == 200
+        assert res.headers["cache-control"] == "no-cache"
+    asset = next(iter(sorted((DASHBOARD_DIST / "assets").glob("*.js"))), None)
+    assert asset is not None
+    assert "no-cache" not in client.get(f"/assets/{asset.name}").headers.get("cache-control", "")
+
+
+def test_spa_index_conditional_request_returns_304_with_no_cache():
+    from obed_edom.web.app import DASHBOARD_DIST
+
+    if not DASHBOARD_DIST.is_dir():
+        pytest.skip("dashboard/dist not built")
+    client = TestClient(app)
+    first = client.get("/")
+    etag = first.headers["etag"]
+    res = client.get("/", headers={"If-None-Match": etag})
+    assert res.status_code == 304
+    assert res.headers["cache-control"] == "no-cache"
+
+
 def test_open_path_missing_is_404():
     client = TestClient(app)
     res = client.post("/api/open", data={"path": "/no/such/deck.key"})
@@ -488,6 +516,107 @@ def test_outline_export_dir_removed_between_submit_and_run_fails_the_job(tmp_pat
 
     with pytest.raises(ValueError, match="no longer exists"):
         _run_outline(job, path)
+
+
+def test_resize_apply_unknown_job_is_404():
+    client = TestClient(app)
+    res = client.post("/api/resize/no-such-job/apply", json={})
+    assert res.status_code == 404
+
+
+def test_resize_apply_rejects_private_root_export_dir(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+    from obed_edom.paths import output_root
+    from obed_edom.web.jobs import Job
+
+    job = Job(id="job-1", kind="resize", feature="resize", name="job-1", result={"phase": "framing"})
+    monkeypatch.setattr(app_mod.RUNNER, "get", lambda job_id: job if job_id == "job-1" else None)
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/resize/job-1/apply", json={"exportDir": str(output_root() / ".resize")}
+    )
+    assert res.status_code == 400
+
+
+def test_resize_apply_writes_valid_export_dir_to_result(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+    from obed_edom.web.jobs import Job
+
+    job = Job(id="job-1", kind="resize", feature="resize", name="job-1", result={"phase": "framing"})
+    app_mod.RUNNER._jobs[job.id] = job
+    monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
+
+    export_dir = tmp_path / "exports"
+    client = TestClient(app)
+    res = client.post("/api/resize/job-1/apply", json={"exportDir": str(export_dir)})
+
+    assert res.status_code == 200
+    assert app_mod.RUNNER.get("job-1").result["resolvedExportDir"] == str(export_dir.resolve())
+
+
+def test_resize_apply_completion_preserves_resolved_export_dir(tmp_path, monkeypatch):
+    """A real propose -> apply -> completion round trip: the completed job's result
+    must still carry the `resolvedExportDir` chosen at apply time, not just `exportDir`.
+    Only the Keynote-driving `remap_and_inspect` is stubbed — `rerun` runs for real."""
+    app_mod, wall, template = _propose_stubs(monkeypatch, tmp_path)
+
+    def fake_remap_and_inspect(path, dest, *, export_dir=None, **_kwargs):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return {
+            "inspect": {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 0, "exported": False},
+            "payload": {"path": str(dest), "slideWidth": 1920, "slideHeight": 1080, "slides": []},
+            "counts": {},
+            "applied": 0,
+            "missed": 0,
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap_and_inspect)
+
+    client = TestClient(app)
+    started = client.post(
+        "/api/resize",
+        data={"path": str(wall), "template_path": str(template), "export": "false"},
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    proposed = _wait(client, job_id)
+    assert proposed["status"] == "done", proposed.get("error")
+
+    export_dir = tmp_path / "chosen-exports"
+    res = client.post(f"/api/resize/{job_id}/apply", json={"exportDir": str(export_dir)})
+    assert res.status_code == 200
+
+    completed = _wait(client, job_id)
+    assert completed["status"] == "done", completed.get("error")
+    assert completed["result"]["resolvedExportDir"] == str(export_dir.resolve())
+    assert completed["result"]["exportDir"] == str(export_dir)
+
+
+def test_resize_apply_explicit_empty_export_dir_resets_to_default(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+    from obed_edom.paths import output_root
+    from obed_edom.web.jobs import Job
+
+    export_dir = tmp_path / "exports"
+    job = Job(
+        id="job-1",
+        kind="resize",
+        feature="resize",
+        name="job-1",
+        result={"phase": "framing", "exportDir": str(export_dir), "resolvedExportDir": str(export_dir)},
+    )
+    app_mod.RUNNER._jobs[job.id] = job
+    monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
+
+    client = TestClient(app)
+    res = client.post("/api/resize/job-1/apply", json={"exportDir": ""})
+
+    assert res.status_code == 200
+    result = app_mod.RUNNER.get("job-1").result
+    assert "exportDir" not in result
+    assert result["resolvedExportDir"] == str(output_root())
 
 
 def test_outline_endpoint_rejects_private_root_export_dir(tmp_path):
@@ -1187,6 +1316,7 @@ def test_resize_propose_stores_resolved_export_dir_with_no_override(tmp_path, mo
     )
     assert "exportDir" not in result
     assert result["resolvedExportDir"] == str(output_root())
+    assert result["proposalExportDir"] == str(output_root())
 
 
 def test_resize_propose_stores_resolved_export_dir_with_override(tmp_path, monkeypatch):
@@ -1200,6 +1330,116 @@ def test_resize_propose_stores_resolved_export_dir_with_override(tmp_path, monke
     )
     assert result["exportDir"] == str(override)
     assert result["resolvedExportDir"] == str(override)
+    assert result["proposalExportDir"] == str(override)
+
+
+def test_resize_apply_empty_export_dir_uses_proposal_default_despite_settings_change(
+    tmp_path, monkeypatch
+):
+    """The default captured at propose time (`proposalExportDir`) must win over a
+    Settings default changed after propose, and must survive completion."""
+    app_mod, wall, template = _propose_stubs(monkeypatch, tmp_path)
+
+    def fake_remap_and_inspect(path, dest, *, export_dir=None, **_kwargs):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return {
+            "inspect": {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 0, "exported": False},
+            "payload": {"path": str(dest), "slideWidth": 1920, "slideHeight": 1080, "slides": []},
+            "counts": {},
+            "applied": 0,
+            "missed": 0,
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap_and_inspect)
+
+    client = TestClient(app)
+    started = client.post(
+        "/api/resize",
+        data={"path": str(wall), "template_path": str(template), "export": "false"},
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    proposed = _wait(client, job_id)
+    assert proposed["status"] == "done", proposed.get("error")
+    proposal_default = proposed["result"]["proposalExportDir"]
+
+    later_default = tmp_path / "later-default"
+    later_default.mkdir()
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(later_default)}
+    )
+
+    res = client.post(f"/api/resize/{job_id}/apply", json={"exportDir": ""})
+    assert res.status_code == 200
+    assert res.json()["result"]["resolvedExportDir"] == proposal_default
+
+    completed = _wait(client, job_id)
+    assert completed["status"] == "done", completed.get("error")
+    assert completed["result"]["resolvedExportDir"] == proposal_default
+    assert completed["result"]["resolvedExportDir"] != str(later_default)
+
+
+def test_resize_apply_failed_custom_export_dir_leaves_resolved_export_dir_untouched(
+    tmp_path, monkeypatch
+):
+    import obed_edom.web.app as app_mod
+    from obed_edom.paths import output_root
+    from obed_edom.web.jobs import Job
+
+    job = Job(
+        id="job-1",
+        kind="resize",
+        feature="resize",
+        name="job-1",
+        result={"phase": "framing", "resolvedExportDir": str(output_root())},
+    )
+    app_mod.RUNNER._jobs[job.id] = job
+    monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/resize/job-1/apply", json={"exportDir": str(output_root() / ".resize")}
+    )
+    assert res.status_code == 400
+    assert app_mod.RUNNER.get("job-1").result["resolvedExportDir"] == str(output_root())
+
+
+def test_resize_apply_valid_export_dir_with_missing_wall_deck_leaves_result_untouched(
+    tmp_path, monkeypatch
+):
+    import obed_edom.web.app as app_mod
+    from obed_edom.web.jobs import Job
+
+    template = tmp_path / "template.key"
+    template.mkdir()
+    job = Job(
+        id="job-1",
+        kind="resize",
+        feature="resize",
+        name="job-1",
+        result={
+            "phase": "framing",
+            "path": str(tmp_path / "missing-wall.key"),
+            "templatePath": str(template),
+            "resolvedExportDir": str(tmp_path / "old-exports"),
+            "framings": {"1": {"state": "pinned"}},
+        },
+    )
+    app_mod.RUNNER._jobs[job.id] = job
+    monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
+
+    export_dir = tmp_path / "new-exports"
+    client = TestClient(app)
+    res = client.post("/api/resize/job-1/apply", json={"exportDir": str(export_dir)})
+
+    assert res.status_code == 400
+    result = app_mod.RUNNER.get("job-1").result
+    assert result["resolvedExportDir"] == str(tmp_path / "old-exports")
+    assert "exportDir" not in result
+    assert result["framings"] == {"1": {"state": "pinned"}}
 
 
 def test_resize_apply_uses_the_resolved_export_dir_frozen_at_propose_time(

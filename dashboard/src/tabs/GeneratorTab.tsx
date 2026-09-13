@@ -2,25 +2,15 @@ import { useState } from "react";
 import { chooseKeynote, generateDocx, pollJob, type ChosenFile } from "../api";
 import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
-import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
-import {
-  DSK_TEMPLATE_KEY,
-  LW_TEMPLATE_KEY,
-  loadStoredFile,
-  saveStoredFile,
-  useDefaultExportDir,
-  useSessionPath,
-} from "../prefs";
+import { DSK_TEMPLATE_KEY, LW_TEMPLATE_KEY, loadStoredFile, saveStoredFile } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 export function GeneratorTab() {
   const { job, upsert, rename, error: openError } = useCurrentJob("generate");
   const [lwTemplate, setLwTemplate] = useState<ChosenFile | null>(() => loadStoredFile(LW_TEMPLATE_KEY));
   const [dskTemplate, setDskTemplate] = useState<ChosenFile | null>(() => loadStoredFile(DSK_TEMPLATE_KEY));
-  const [exportDir, setExportDir] = useSessionPath("obed-edom.generate.exportDir");
-  const defaultExportDir = useDefaultExportDir();
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [open, setOpen] = useState<string | null>(null);
@@ -60,14 +50,10 @@ export function GeneratorTab() {
     setError(null);
     setBusy(true);
     try {
-      const created = await generateDocx(
-        docx,
-        {
-          lwTemplate: lwTemplate?.path,
-          dskTemplate: dskTemplate?.path,
-        },
-        exportDir
-      );
+      const created = await generateDocx(docx, {
+        lwTemplate: lwTemplate?.path,
+        dskTemplate: dskTemplate?.path,
+      });
       for (const createdJob of created) {
         upsert(createdJob);
         const done = await pollJob(createdJob.id, (tick) => {
@@ -126,12 +112,6 @@ export function GeneratorTab() {
             setDskTemplate(null);
             saveStoredFile(DSK_TEMPLATE_KEY, null);
           }}
-          onError={setError}
-        />
-        <ExportDestinationRow
-          value={exportDir}
-          onChange={setExportDir}
-          defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
           onError={setError}
         />
       </div>

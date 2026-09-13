@@ -48,6 +48,8 @@ export const STYLE_SWATCHES: { id: MapsStyleId; label: string; color: string }[]
   { id: "watercolour", label: "Watercolour", color: "#f1e5cb" },
 ];
 
+export const STYLE_THUMB_CAMERA = { lat: 1.2864, lon: 103.8604, zoom: 16.5, pitch: 0, bearing: 75, cgShiftX: 0 } as const;
+
 const TONER_LINES_WIDTH_FACTOR = 0.55;
 
 const styleCache = new Map<string, Promise<StyleSpecification>>();

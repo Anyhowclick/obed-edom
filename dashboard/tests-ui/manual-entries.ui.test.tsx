@@ -8,6 +8,7 @@ import { ManualEntriesForm } from "../src/maps/ManualEntriesForm";
 
 beforeEach(() => {
   vi.useFakeTimers();
+  window.localStorage.clear();
 });
 
 afterEach(() => {
@@ -57,7 +58,7 @@ describe("manual entry forms", () => {
     });
     mapsApiScript.pollJob.resolve(done);
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await type("Name row 1", "Singapore");
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Add row" }));
@@ -78,7 +79,7 @@ describe("manual entry forms", () => {
     const { mapFake } = await renderMapsTab();
     mapsApiScript.pollJob.resolve(makeJob({ result: { ...makeDoc(), stateRevision: 3 } }));
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await type("Name row 1", "Singapore");
     await clickDone();
 
@@ -95,7 +96,7 @@ describe("manual entry forms", () => {
     await renderMapsTab();
     mapsApiScript.pollJob.resolve(makeJob({ result: { ...makeDoc(), stateRevision: 3 } }));
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Add row" }));
       fireEvent.click(screen.getByRole("button", { name: "Add row" }));
@@ -114,7 +115,7 @@ describe("manual entry forms", () => {
   it("shows a validation error and posts nothing when a slides row has no name", async () => {
     await renderMapsTab();
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await type("Latitude row 1", "1.3521");
     await clickDone();
 
@@ -126,7 +127,7 @@ describe("manual entry forms", () => {
   it("clears the all-rows-blank error as soon as the operator types", async () => {
     await renderMapsTab();
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await clickDone();
     expect(screen.getByRole("alert")).toHaveTextContent("Add at least one entry.");
 
@@ -139,7 +140,7 @@ describe("manual entry forms", () => {
     await renderMapsTab();
     mapsApiScript.bootstrapMapsRows.failOnce(new Error("Row 1: no name"));
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await type("Name row 1", "Singapore");
     await clickDone();
 
@@ -152,7 +153,7 @@ describe("manual entry forms", () => {
     await renderMapsTab();
     mapsApiScript.pollJob.resolve(makeJob({ result: { ...makeDoc(), stateRevision: 3 } }));
 
-    await openForm("Add pins to this view manually…");
+    await openForm("Add pins");
     await type("Name row 1", "Bedok");
     await clickDone();
 
@@ -166,13 +167,13 @@ describe("manual entry forms", () => {
   it("starts a fresh row when the operator switches forms", async () => {
     await renderMapsTab();
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await type("Name row 1", "Singapore");
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Add row" }));
     });
     await type("Name row 2", "London");
-    await openForm("Add pins to this view manually…");
+    await openForm("Add pins");
 
     expect(screen.getByRole("group", { name: "Add pins manually" })).toBeInTheDocument();
     expect(screen.getByLabelText("Name row 1")).toHaveValue("");
@@ -182,7 +183,7 @@ describe("manual entry forms", () => {
   it("takes focus on open and follows the row it adds", async () => {
     await renderMapsTab();
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     expect(screen.getByLabelText("Name row 1")).toHaveFocus();
 
     await act(async () => {
@@ -194,7 +195,7 @@ describe("manual entry forms", () => {
   it("stops adding rows at the batch cap the server enforces", async () => {
     await renderMapsTab();
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     const addRow = screen.getByRole("button", { name: "Add row" });
     await act(async () => {
       for (let i = 0; i < 99; i += 1) fireEvent.click(addRow);
@@ -229,7 +230,7 @@ describe("manual entry forms", () => {
     await renderMapsTab();
     mapsApiScript.bootstrapMapsRows.deferOnce(new Promise<Job>(() => {}));
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await type("Name row 1", "Singapore");
     await clickDone();
 
@@ -240,12 +241,61 @@ describe("manual entry forms", () => {
   it("returns focus to the ＋ trigger when the form closes", async () => {
     await renderMapsTab();
 
-    await openForm("Add slides manually…");
+    await openForm("Add slides");
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     });
 
     expect(screen.queryByRole("group", { name: "Add slides manually" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add" })).toHaveFocus();
+  });
+
+  it("shows the info list on first mount, hides it after being seen, and toggles it back on click", () => {
+    const { unmount } = render(
+      <ManualEntriesForm mode="pins" busy={false} onDone={() => {}} onCancel={() => {}} />
+    );
+
+    expect(screen.getByText(/Pins keep this slide's zoom/)).toBeInTheDocument();
+    unmount();
+
+    render(<ManualEntriesForm mode="pins" busy={false} onDone={() => {}} onCancel={() => {}} />);
+    expect(screen.queryByText(/Pins keep this slide's zoom/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "About this form" }));
+    expect(screen.getByText(/Pins keep this slide's zoom/)).toBeInTheDocument();
+  });
+
+  it("keys the seen flag per mode: seeing slides first does not suppress pins", () => {
+    const { unmount } = render(
+      <ManualEntriesForm mode="slides" busy={false} onDone={() => {}} onCancel={() => {}} />
+    );
+    unmount();
+
+    render(<ManualEntriesForm mode="pins" busy={false} onDone={() => {}} onCancel={() => {}} />);
+    expect(screen.getByText(/Pins keep this slide's zoom/)).toBeInTheDocument();
+  });
+
+  it("no longer mentions blank rows being skipped or one entry per pin on the view", () => {
+    render(<ManualEntriesForm mode="slides" busy={false} onDone={() => {}} onCancel={() => {}} />);
+    expect(screen.queryByText(/Blank rows are skipped/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/One entry per pin on the current view/)).not.toBeInTheDocument();
+
+    render(<ManualEntriesForm mode="pins" busy={false} onDone={() => {}} onCancel={() => {}} />);
+    expect(screen.queryByText(/Blank rows are skipped/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/One entry per pin on the current view/)).not.toBeInTheDocument();
+  });
+
+  it("gives Done a distinct scheme and drops the old plain header", () => {
+    render(<ManualEntriesForm mode="pins" busy={false} onDone={() => {}} onCancel={() => {}} />);
+
+    expect(screen.getByRole("button", { name: "Done" })).toHaveClass("maps-manual-done");
+    expect(screen.queryByText("Add pins to this view manually")).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Add pins manually" })).toBeInTheDocument();
+  });
+
+  it("gives Cancel the danger scheme", () => {
+    render(<ManualEntriesForm mode="pins" busy={false} onDone={() => {}} onCancel={() => {}} />);
+
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveClass("danger-text");
   });
 });
