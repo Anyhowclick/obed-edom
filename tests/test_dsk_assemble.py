@@ -5123,6 +5123,39 @@ def test_group_shape_plus_text_badge_does_not_count_towards_placement():
     assert plan.anchors[7] == "centre"
 
 
+def test_keep_side_content_anchor_clips_to_centre_panel():
+    # A 3000x1000 item at x=1000 straddles the LW centre-panel boundary (panel is
+    # [1920, 5760]). Even with keep_side=True, the anchor must clip against the
+    # centre panel (2080x1000, aspect < 2.5), not the full wall (aspect 3.0) --
+    # codex review 1, finding 1.
+    item = _image_item(0, x=1000, y=0, w=3000, h=1000)
+    slide = _slide(49, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide, include_side=True)]
+    decisions = {49: SlideDecision(49, "in_deck", anchor="auto", keep_side=True)}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[49] == "right"
+
+
+def test_group_has_media_missing_none_empty_signature():
+    # codex review 1, finding 2: missing mapping entry, None, and "" are not content.
+    assert dsa._group_has_media(None) is False
+    assert dsa._group_has_media("") is False
+
+
+def test_lone_unresolved_group_defaults_to_centre():
+    # A single group with no signature entry at all (mapping miss) has zero proven
+    # content, so the zero-content default of "centre" applies, not "right".
+    group = _group_item(0, x=4702, y=15, w=645, h=92)
+    slide = _slide(50, [group])
+    slide["groupChildSignature"] = {}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[50] == "centre"
+
+
 def test_no_auto_anchor_flag_forces_centre():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
     payload = _payload([slide])

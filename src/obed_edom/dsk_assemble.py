@@ -353,9 +353,9 @@ def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | N
 
 
 def _group_has_media(signature: str | None) -> bool:
-    """True when `signature` has an ``image:``/``movie:`` leaf; unresolved/empty counts as content."""
+    """True when `signature` has an ``image:``/``movie:`` leaf; missing/empty is not content."""
     if not signature:
-        return True
+        return False
     return any(part.startswith(("image:", "movie:")) for part in signature.split("\n") if part)
 
 
@@ -391,20 +391,20 @@ def _content_anchor(
     cls: SlideClass,
     items: Sequence[dict],
     *,
-    include_side: bool,
     wall: tuple[float, float],
     group_signature: Mapping[int, str | None] | None = None,
+    include_side: bool = False,
 ) -> str:
     """Auto anchor ("centre" or "right") for a content slide with no explicit anchor:
-    the union of the kept content rects — the same clip `fit_slide` uses, restricted
-    to content — being LW-dimension (w/h >= 2.5) forces centre; otherwise squarish
-    items go right at 1-2 and centre at 3+. Side panels never count as content for
-    anchoring."""
+    the union of the kept content rects — always clipped to the centre panel,
+    regardless of `keep_side`/`include_side` — being LW-dimension (w/h >= 2.5) forces
+    centre; otherwise squarish items go right at 1-2 and centre at 3+. Side panels
+    never count as content for anchoring. `include_side` is accepted but unused."""
     items_by_id = {(item["kind"], item["kindIndex"]): item for item in items}
     content_ids = _content_ids(cls, items_by_id, wall=wall, group_signature=group_signature)
     if not content_ids:
         return "centre"
-    visibles = _visibles_by_kept(items, content_ids, include_side=include_side)
+    visibles = _visibles_by_kept(items, content_ids, include_side=False)
     rects = [r for r in visibles.values() if r.w > 0 and r.h > 0]
     if rects:
         union = _union_rect(rects)
@@ -488,7 +488,7 @@ def plan_assembly(
 
             if decision.anchor in (None, "auto"):
                 anchor = "centre" if no_auto_anchor else _content_anchor(
-                    cls, items, include_side=decision.keep_side, wall=wall,
+                    cls, items, wall=wall,
                     group_signature=slide.get("groupChildSignature"),
                 )
             else:

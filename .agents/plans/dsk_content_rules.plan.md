@@ -327,9 +327,9 @@ unconditionally).
 
 When the operator gave no explicit `--anchor` for the slide, `_content_anchor` (`dsk_assemble.py`)
 decides from the SHAPE of the **union** of those items' rects — the masked rect clipped to the
-panel (the same clip `_visibles_by_kept`/`fit_slide` already compute) — the union of the kept
-content rects, the same clip `fit_slide` uses, restricted to content (`_union_rect`), not from
-their count and not per item:
+centre panel always (`_visibles_by_kept(..., include_side=False)`, regardless of `keep_side`) —
+the union of the kept content rects, restricted to content (`_union_rect`), not from their count
+and not per item:
 
 - the union is "LW-dimension" (`w/h >= 2.5`) → `anchor = "centre"`. Measured examples: the GW 21
   crowd photo crops to 4494x1265 = 3.55, the GW 5 photo crops to 5120x1441 = 3.55, the GW 32/33
