@@ -94,9 +94,9 @@ def test_gw17_dedupe_and_stretch_no_overlap(gw_inputs):
 
     ranges17 = plan.run_sizes[17][("text", 1)]
     assert [(start, end) for start, end, _ in ranges17] == [(1, 3), (4, 20), (21, 30), (31, 79)]
-    assert [size for _, _, size in ranges17] == pytest.approx([44.8, 44.8, 54.4, 44.8], abs=0.01)
+    assert [size for _, _, size in ranges17] == pytest.approx([44.1, 44.1, 53.55, 44.1], abs=0.01)
     t17 = ranges17[0][2] / 70.0
-    assert t17 == pytest.approx(0.64, abs=0.01)
+    assert t17 == pytest.approx(0.63, abs=0.01)
 
 
 @pytest.mark.deck

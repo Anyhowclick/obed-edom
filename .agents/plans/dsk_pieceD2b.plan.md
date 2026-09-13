@@ -220,3 +220,69 @@ Steps 1→2→3 are strictly sequential; step 4 is independent and can land firs
   U+2009 by ~2.7x; the new prediction is the direction that prevents an overflow, not causes one. No existing test's numbers moved.
 - C5 (re-running split after a refit) remains deferred: a still-overflowing split slide is left to the `text_fit` fallback, same
   as any other unresolved box; `_run_refit_and_finalize`'s docstring documents this.
+
+## Piece record (round 3, post Opus refit-log review 1)
+
+### A. Horizontal wrap margin
+
+Opus review finding 1: `wrapped_height`/`wrapped_height_runs` charge the wrap width with no horizontal safety margin, so a box at
+97-100% fill packs onto one line the live Keynote wrap flips to two. Added `_WRAP_MARGIN` (`dsk_plan.py`), a named constant both
+functions wrap at `width * (1 - _WRAP_MARGIN)`.
+
+Deck-wide validation against the four r11-measured GW boxes (pass-1 `t`, `plan.stack_bands[n].width`, real item `runs`, no
+`height_correction`):
+
+| slide | box | t | measured | m=0.00 | m=0.02 | m=0.03 | m=0.05 |
+|---|---|---|---|---|---|---|---|
+| 13 | text:1 | 0.80 | 269.0 | 243.1 (0.40 under) | 243.1 (0.40 under) | 243.1 (0.40 under) | 243.1 (0.40 under) |
+| 17 | text:1 | 0.64 | 186.0 | 135.8 (0.97 under) | 135.8 (0.97 under) | 135.8 (0.97 under) | 135.8 (0.97 under) |
+| 17 | text:2 | 0.64 | 189.0 | 83.9 (**2.03 under**) | 146.9 (0.81 under) | 146.9 (0.81 under) | 146.9 (0.81 under) |
+| 28 | text:1 | 0.91 | 349.0 | 273.7 (**1.02 under**) | 363.2 (over-predicts) | 363.2 (over-predicts) | 363.2 (over-predicts) |
+
+"under" is under-prediction in whole lines (`(measured - predicted) / (1.157 * size * t)`); bold = under by a whole line or more.
+Margin 0.00 under-predicts GW 17 text:2 and GW 28 text:1 by a full line each (the r11 failure mode); margin 0.02 already clears
+both and is stable through 0.05 (the wrap boundary these two boxes sit on doesn't move again in that range). GW 13 text:1 and
+GW 17 text:1 stay under by <1 line at every margin tested — expected, since under-prediction below a whole line is not necessarily
+estimator error (the live height includes Keynote's own line-height/padding slop the estimator doesn't model exactly).
+
+Chosen: **`_WRAP_MARGIN = 0.02`** — the smallest of the tested set clearing every measured box.
+
+Cross-check against `test_wrapped_height_matches_golden_boxes` (DSK deck, all long-text boxes, over-prediction bound
+`predicted_lines - observed_lines <= 1.0 line`): margins 0.00/0.02/0.03 produce identical worst-case over-prediction (golden
+slide 14 text:2 at 1.0012 lines, already at the bound pre-margin); margin 0.05 adds one more box at the bound (golden slide 30
+text:0, 1.0025 lines) but still inside it. No golden-box number moved past the bound at 0.02, so the golden-box test's pinned
+expectations are unchanged. Two other pinned real-deck values did move and were re-blessed: `test_gw13_gw17_stack_budget_and_fit_t_under_default_band`'s
+GW 17 `t` (0.64 -> 0.63) and `test_unresolved_gap_below_t1_flattens_lead_size_under_shrink_text_fit`'s GW-49-shaped shrink size
+(124.5pt -> 123.0pt) — both are the estimator now correctly predicting a taller wrap for the same source text, shrinking further
+to fit.
+
+### B. Nits (opus-refit-log-review1)
+
+- `copy_keynote` of the refused-deck copy is now wrapped in `try/except Exception`, logging `could not keep the staged deck: …`
+  and letting the original `AssemblyRefusal` propagate either way (never replaced by a `ditto` failure).
+- The pass-1 AppleScript-refusal raises now sit inside the same `try` as the refit/verify steps, so a post-save pass-1 script
+  failure also keeps the staged deck at `*.refused.key`, not just a refusal from `_run_refit_and_finalize` onward.
+- `_build_refit_round` logs one line when the `[1.0, 3.0]` correction clamp bites: `slide N: text K correction clipped U -> C`.
+- The continue-path per-round log (other slides still refitting) now reads `no refit written in round N: slide X: …`; only the
+  `break` path (the loop actually stopping) still says `refit stopped after round N: …`.
+- The `fit_text_stack found no t >= floor` stop reason rounds every correction float to 2dp before formatting.
+- `_log_offline_measures` now prints a box only when it is over budget or its measure changed by more than 0.5pt since the
+  previous measure (an optional `previous` mapping, threaded through all three call sites), plus one `N box(es) within budget and
+  unchanged, not shown` line; a box missing its rect or measure now logs `offline measure missing a rect or height` instead of
+  disappearing silently.
+- `test_gw53_badge_x_clamped_to_band_right_edge` now also asserts the badge-clamp warning text is in `plan.warnings`.
+- `test_refit_stopped_logs_reason_and_per_box_offline_measures` now scales its two offline measures to the real r11 corrections
+  (1.37/2.25, derived from the fixture's own predicted rects) instead of driving both to the 3.0 cap; comment corrected to say
+  GW 17 never hit the cap and the `--min-text-pt 66` floor is what refused it.
+
+### Operator-visible artifacts and log lines (undocumented until now)
+
+- `*.refused.key`, saved next to `out_path` (`{out_path.stem}.refused.key`), is the staged deck kept whenever assembly raises
+  `AssemblyRefusal` after pass 1 has already saved — inspect it to see the state Keynote was in when the refusal fired.
+- `slide N: text K offline=H rect=R over=+D` — one line per over-budget or newly-changed box after every offline measure round.
+- `N box(es) within budget and unchanged, not shown` — the quiet-box count for the same round.
+- `refit round N: slides [...]` — a round's live refit write went out.
+- `no refit written in round N: slide X: <reason>` — a slide in this round produced no write (other slides may still be
+  refitting).
+- `refit stopped after round N: slide X: <reason>` — the refit loop has stopped entirely; slide X is one of the slides left over.
+- `slide N: text K correction clipped U -> C` — the `[1.0, 3.0]` height-correction clamp bit for that box.

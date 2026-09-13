@@ -939,6 +939,7 @@ _WRAP_OVERSAMPLE = 8
 _LINE_HEIGHT_FACTOR = 1.157
 _BOX_PADDING_PT = 21.0
 _TEXT_SAFETY_PT = 15.0
+_WRAP_MARGIN = 0.02
 
 
 def _norm_font_key(name: str) -> str:
@@ -1029,7 +1030,7 @@ def wrapped_height(text: str, font_name: str, size: float, width: float) -> floa
     from PIL import ImageFont  # noqa: PLC0415
 
     font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
-    lines = _wrap_lines(text, font, width * _WRAP_OVERSAMPLE)
+    lines = _wrap_lines(text, font, width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE)
     return len(lines) * _LINE_HEIGHT_FACTOR * size + _BOX_PADDING_PT
 
 
@@ -1092,7 +1093,7 @@ def wrapped_height_runs(runs: Sequence[Run], width: float) -> float | None:
                 else:
                     para.append(("word", [(part, font, run.size)]))
 
-    scaled_width = width * _WRAP_OVERSAMPLE
+    scaled_width = width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE
     lines: list[list[list[tuple[str, Any, float]]]] = []
     for paragraph in paragraphs:
         if not paragraph:

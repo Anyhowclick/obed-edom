@@ -747,10 +747,11 @@ def test_groupchild_overflow_stays_a_warning_under_text_fit_shrink():
 
 
 def test_refit_stopped_logs_reason_and_per_box_offline_measures(monkeypatch):
-    # r11 GW 17 root cause repro: two boxes sharing one stack `t`, a floor so tight that
-    # `fit_text_stack` finds no valid `t` even at max correction -- round 1 must log the
-    # offline measure for every eligible box and the reason the round produced no write,
-    # not vanish silently before the "still overflows" refusal.
+    # r11 GW 17 root cause repro: two boxes sharing one stack `t`, offline measures
+    # scaled to the live incident's own corrections (1.37/2.25, not the 3.0 cap -- GW 17
+    # never hit the cap, the floor `--min-text-pt 66` is what refused it). Round 1 must
+    # log the offline measure for every eligible box and the reason the round produced
+    # no write, not vanish silently before the "still overflows" refusal.
     _require_font("AzoSans-Regular")
     box1 = _long_text_item(1, _VERSE_1, y=100)
     box2 = _long_text_item(2, _VERSE_2, y=500)
@@ -761,10 +762,13 @@ def test_refit_stopped_logs_reason_and_per_box_offline_measures(monkeypatch):
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     ordinal = plan.ordinals[17]
+    rect1 = plan.fits[17][("text", 1)].h
+    rect2 = plan.fits[17][("text", 2)].h
+    offline_by_index = {0: round(rect1 * 1.37, 1), 1: round(rect2 * 2.25, 1)}
 
     def fake_offline_text_rects(key_path, *, deck=None):
         rects = {
-            ("text", idx): (43.0, 800.0 + idx * 200, 1849.0, 5000.0)
+            ("text", idx): (43.0, 800.0 + idx * 200, 1849.0, offline_by_index[idx])
             for idx, _iid in enumerate(sorted(plan.stacked_ids[17]))
         }
         return ({ordinal: rects}, set())
@@ -780,15 +784,15 @@ def test_refit_stopped_logs_reason_and_per_box_offline_measures(monkeypatch):
             warnings=[], log=logs.append,
         )
     assert any(
-        l.startswith("slide 17: text text:1 offline=5000 rect=") and "over=+" in l for l in logs
+        l.startswith("slide 17: text text:1 offline=") and "over=+" in l for l in logs
     )
     assert any(
-        l.startswith("slide 17: text text:2 offline=5000 rect=") and "over=+" in l for l in logs
+        l.startswith("slide 17: text text:2 offline=") and "over=+" in l for l in logs
     )
     assert any(
         l == "refit stopped after round 1: slide 17: fit_text_stack found no t >= floor "
         "(66.0pt) fitting the stack band at correction "
-        "{('text', 1): 3.0, ('text', 2): 3.0}"
+        "{('text', 1): 1.37, ('text', 2): 2.25}"
         for l in logs
     )
 
@@ -1534,7 +1538,7 @@ def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
     assert t13 == pytest.approx(0.80, abs=0.01)
 
     t17 = next(iter(plan.run_sizes[17][("text", 1)]))[2] / 70.0
-    assert t17 == pytest.approx(0.64, abs=0.01)
+    assert t17 == pytest.approx(0.63, abs=0.01)
 
     badge13 = plan.fits[13][("shape", 0)]
     stack13 = [r for iid, r in plan.fits[13].items() if iid in plan.stacked_ids[13]]
@@ -1662,6 +1666,10 @@ def test_gw53_badge_x_clamped_to_band_right_edge():
     badge = plan.fits[53][("groupchild", 0, 0)]
     assert badge.x == pytest.approx(1246.97, abs=0.5)
     assert badge.x + badge.w == pytest.approx(BAND.x_max, abs=1e-6)
+    assert any(
+        w.startswith("slide 53: group 0 child 0 badge x clamped ") and "to stay in the band" in w
+        for w in plan.warnings
+    )
 
 
 def test_short_row_rects_regression_moves_badge_out_of_band():
@@ -2329,9 +2337,10 @@ def test_shrink_fallback_never_writes_above_pass1_size(tmp_path, monkeypatch):
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
     )
     assert len(calls) == 1 + dsa._MAX_REFITS + 1
-    shrink_warnings = [w for w in result.warnings if "shrunk to" in w]
+    shrink_warnings = [w for w in result.warnings if "shrunk to" in w or "already at the floor" in w]
     assert shrink_warnings
-    written = float(shrink_warnings[0].split("shrunk to ")[1].split("pt")[0].split("-")[0])
+    marker = "shrunk to " if "shrunk to" in shrink_warnings[0] else "left at "
+    written = float(shrink_warnings[0].split(marker)[1].split("pt")[0].split("-")[0])
     assert written <= pass1_size + 0.05, "shrink fallback must never write larger than pass 1's own size"
 
 
@@ -5098,7 +5107,7 @@ def test_unresolved_gap_below_t1_flattens_lead_size_under_shrink_text_fit():
     assert ("text", 1) not in plan.run_sizes.get(13, {})
     assert ("text", 1) not in plan.text_sizes.get(13, {})
     assert ("text", 1) in plan.shrink_text_sizes[13]
-    assert plan.shrink_text_sizes[13][("text", 1)] == pytest.approx(124.5, abs=0.01)
+    assert plan.shrink_text_sizes[13][("text", 1)] == pytest.approx(123.0, abs=0.01)
     assert any(
         "flattening run sizes to the lead size under --text-fit shrink" in w and "box 1" in w
         for w in plan.warnings
