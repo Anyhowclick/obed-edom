@@ -134,8 +134,12 @@ def _line_rect(geom: dict) -> tuple[float, float, float, float]:
 
 
 def _natural_size(obj: dict) -> tuple[float, float]:
-    pathsource = (obj.get("super") or {}).get("pathsource") or {}
-    natural = (pathsource.get("bezierPathSource") or {}).get("naturalSize") or {}
+    """naturalSize off whichever of the six ``_PATH_SOURCE_KEYS`` the ``super`` walk finds."""
+    found = _path_source(obj)
+    if found is None:
+        return (0.0, 0.0)
+    _key, sub = found
+    natural = sub.get("naturalSize") or {}
     return (natural.get("width") or 0.0, natural.get("height") or 0.0)
 
 
@@ -367,8 +371,8 @@ def _compose_record(rec: dict, objects: dict[str, dict]) -> None:
                 needs = "masked-unresolved"
 
     elif kind == "text":
-        _tx, _ty, _tw, th, _ta = _xywha(geom)
-        if th == 0.0:  # autosize box: zero-height frame
+        _tx, _ty, tw, th, _ta = _xywha(geom)
+        if tw == 0.0 or th == 0.0:  # matches the write refuse at iwa_write.py:600
             x, y, w, h = _autosize_rect(obj, geom, objects)
             source = "autosize"
             needs = "autosize-soft"  # x is good (left-aligned); y/h/w are stale-soft

@@ -374,12 +374,16 @@ def _patch_offline_slides(
     return results
 
 
-def _composed_frames(dest: Path, slides: set[int]) -> dict[int, list[dict[str, Any]]]:
-    """Fresh offline read of each slide's composed (JXA-equivalent) frame, post-patch."""
+def _composed_frames(
+    dest: Path, slides: set[int], deck: tuple | None = None,
+) -> dict[int, list[dict[str, Any]]]:
+    """Fresh offline read of each slide's composed (JXA-equivalent) frame, post-patch.
+    ``deck``, when given, is an already-loaded ``_load_deck`` result — pure read of
+    ``objects``, never mutated."""
     from obed_edom.iwa_geometry import compose_geometry  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415 (optional iwa extra)
 
-    objects, _id_to_file, _file_ids = _load_deck(dest)
+    objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(dest)
     order = slide_order(objects)
     out: dict[int, list[dict[str, Any]]] = {}
     for n in slides:
@@ -393,14 +397,16 @@ def _composed_frames(dest: Path, slides: set[int]) -> dict[int, list[dict[str, A
     return out
 
 
-def _natural_audit(dest: Path, slides: set[int]) -> dict[int, list[dict[str, Any]]]:
-    """Per-slide render-derived-field consistency, post-patch. One extra decode (measured
-    1.9 s on the 2.5 GB Gold deck); verify mode only, same diagnostic stance as
-    ``_composed_frames``."""
+def _natural_audit(
+    dest: Path, slides: set[int], deck: tuple | None = None,
+) -> dict[int, list[dict[str, Any]]]:
+    """Per-slide render-derived-field consistency, post-patch. ``deck``, when given, is an
+    already-loaded ``_load_deck`` result shared with ``_composed_frames`` — pure read of
+    ``objects``, never mutated. Verify mode only, same diagnostic stance either way."""
     from obed_edom.iwa_geometry import audit_natural_consistency  # noqa: PLC0415
     from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415
 
-    objects, _id_to_file, _file_ids = _load_deck(dest)
+    objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(dest)
     order = slide_order(objects)
     out = {}
     for n in slides:
@@ -685,7 +691,14 @@ def run_offline_write(
     natural_informational = 0
     group_verify: dict[str, Any] | None = None
     if mode == "verify":
-        composed = _composed_frames(dest, offline_slides)
+        from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415 (optional iwa extra)
+
+        skipped: list[tuple[str, str]] = []
+        deck = _load_deck(dest, skipped=skipped)
+        if skipped:
+            say(f"WARN: offline-write verify: {len(skipped)} undecodable .iwa member(s) "
+                f"dropped from the read — {skipped[:10]}")
+        composed = _composed_frames(dest, offline_slides, deck=deck)
         written_specs = _written_specs_by_slide(specs_by_slide, fallback_by_slide)
         offline_report = verify_offline_frames(written_specs, composed)
         _, group_approx_rows = group_frame_rows(written_specs, composed)
@@ -701,7 +714,7 @@ def run_offline_write(
             say(f"Offline-write verify: group-missed n={len(group_missed_rows)} "
                 f"worst={missed_max:.2f}px NOT GATED (written by the AppleScript "
                 "fallback, not by the offline patcher).")
-        issues = _natural_audit(dest, offline_slides)
+        issues = _natural_audit(dest, offline_slides, deck=deck)
         gating = {n: [i for i in v if i.get("gating", True)] for n, v in issues.items()}
         gating = {n: v for n, v in gating.items() if v}
         natural_gating = sum(len(v) for v in gating.values())
