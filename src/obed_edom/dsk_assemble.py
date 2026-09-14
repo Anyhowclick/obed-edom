@@ -57,6 +57,7 @@ from obed_edom.dsk_plan import (
     fit_heading_pt,
     fit_slide,
     fit_text_stack,
+    line_count as _line_count,
     plan_crops,
     read_band,
     visible_union,
@@ -108,6 +109,198 @@ DEFAULT_DSK_LAYOUT_NAMES: tuple[str, ...] = (
     "Point (2 Lines)",
     "Blank Black",
 )
+
+
+@dataclass(frozen=True)
+class LayoutSlot:
+    """One layout's measured slots (plan §1.2), re-measured via
+    ``plan-layout/p6_template_table.py`` against the template deck. ``verse``/``text``
+    are the autosize body slot (``verse`` for the two verse layouts, ``text`` for the
+    two point layouts); ``badge`` is the verse reference/badge text slot; ``panel`` is
+    the inherited panel artwork rect, informational only -- it is never slide-owned."""
+
+    verse: Rect | None = None
+    verse_pt: float = 45.0
+    verse_align: str = "left"
+    text: Rect | None = None
+    text_pt: float = 45.0
+    text_align: str = "centre"
+    badge: Rect | None = None
+    badge_pt: float = 40.0
+    panel: Rect | None = None
+
+
+LAYOUT_SLOTS: dict[str, LayoutSlot] = {
+    "Verse Standard (Variation 2)": LayoutSlot(
+        verse=Rect(53.6, 866.4, 1799.0, 177.0), verse_pt=45.0, verse_align="left",
+        badge=Rect(63.1, 785.8, 933.1, 82.1), badge_pt=40.0,
+        panel=Rect(25.5, 840.4, 1869.0, 213.0),
+    ),
+    "Verse 1 Line (Variation 2)": LayoutSlot(
+        verse=Rect(53.6, 967.0, 1812.9, 73.0), verse_pt=45.0, verse_align="left",
+        badge=Rect(63.1, 878.4, 945.9, 77.0), badge_pt=40.0,
+        panel=Rect(26.0, 929.8, 1868.0, 120.0),
+    ),
+    "Point 3 Lines": LayoutSlot(
+        text=Rect(53.6, 860.9, 1812.9, 177.0), text_pt=45.0, text_align="centre",
+        panel=Rect(26.0, 842.9, 1868.0, 213.0),
+    ),
+    "Point (2 Lines)": LayoutSlot(
+        text=Rect(53.6, 886.9, 1812.9, 177.0), text_pt=45.0, text_align="centre",
+        panel=Rect(26.0, 893.9, 1868.0, 163.0),
+    ),
+    "Blank Black": LayoutSlot(),
+}
+
+
+LayoutSlideCategory = Literal["verse", "point", "content"]
+
+
+def layout_for_slide(*, category: LayoutSlideCategory, two_column: bool, line_count: int | None) -> str | None:
+    """Class -> layout mapping (plan §2.2). ``category="content"`` (image/movie/
+    full-bleed) always resolves to ``Blank Black`` regardless of ``line_count``.
+    ``two_column`` (D1b's hand heading+verse geometry) always resolves to
+    ``Point 3 Lines`` unchanged, taking precedence over ``category``. For
+    ``category="verse"``, 1 rendered line resolves to ``Verse 1 Line (Variation 2)``,
+    2-3 lines to ``Verse Standard (Variation 2)``; a verse needing more than 3 lines at
+    45pt in the Standard slot returns ``None`` -- the caller must route it into the
+    split path (owner Q2), never a 4-line panel. For ``category="point"``, <=2 lines
+    resolves to ``Point (2 Lines)``, 3 lines to ``Point 3 Lines``; more than 3 lines
+    also returns ``None``."""
+    if two_column:
+        return "Point 3 Lines"
+    if category == "content":
+        return "Blank Black"
+    if line_count is None:
+        return None
+    if category == "verse":
+        if line_count <= 1:
+            return "Verse 1 Line (Variation 2)"
+        if line_count <= 3:
+            return "Verse Standard (Variation 2)"
+        return None
+    if category == "point":
+        if line_count <= 2:
+            return "Point (2 Lines)"
+        if line_count <= 3:
+            return "Point 3 Lines"
+        return None
+    return None
+
+
+def _find_verse_badge_id(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) -> ItemId | None:
+    """The single kept top-level ``text`` item, other than a long (verse) text, carrying
+    non-empty text -- the verse reference/badge tag (GW13-shaped). ``None`` when there is
+    none or more than one (ambiguous, so the slide is treated as ``point`` rather than
+    guessed at)."""
+    long_ids = set(cls.long_text_ids)
+    candidates = [
+        item_id for item_id in cls.kept
+        if item_id[0] == "text" and item_id not in long_ids
+        and (items_by_id.get(item_id) or {}).get("text", "").strip()
+    ]
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def apply_layout_slot_rects(
+    plan: AssemblyPlan,
+    classes: Sequence[SlideClass],
+    payload: Mapping[str, Any],
+    slide_layout_names: Mapping[int, str],
+) -> AssemblyPlan:
+    """Snaps a verse/point slide's long text (and verse badge, when found) rect and
+    45pt/40pt size to its resolved layout's slot (plan §1.2/§3 L3), instead of the
+    band-fitted rect ``plan_assembly`` already computed -- covers the common
+    single-long-text-box, non-two-column, non-split case; two-column slides
+    (``plan.two_column``, D1b's hand geometry) and split slides (``plan.splits``, owner
+    Q2) are left untouched, since both already carry their own measured placement."""
+    classes_by_number = {c.number: c for c in classes}
+    slides_by_number = {s["number"]: s for s in payload.get("slides") or []}
+    fits = {number: dict(rects) for number, rects in plan.fits.items()}
+    text_sizes = {number: dict(sizes) for number, sizes in plan.text_sizes.items()}
+    changed = False
+    for number, layout_name in slide_layout_names.items():
+        if number in plan.two_column or number in plan.splits:
+            continue
+        slot = LAYOUT_SLOTS.get(layout_name)
+        if slot is None or (slot.verse is None and slot.text is None):
+            continue
+        cls = classes_by_number.get(number)
+        if cls is None:
+            continue
+        long_ids = [iid for iid in cls.long_text_ids if iid[0] == "text"]
+        if len(long_ids) != 1:
+            continue
+        long_id = long_ids[0]
+        if long_id not in fits.get(number, {}):
+            continue
+        slide = slides_by_number.get(number) or {}
+        items_by_id = {(item["kind"], item["kindIndex"]): item for item in (slide.get("items") or [])}
+        if slot.verse is not None:
+            fits[number][long_id] = slot.verse
+            text_sizes.setdefault(number, {})[long_id] = slot.verse_pt
+            badge_id = _find_verse_badge_id(cls, items_by_id)
+            if badge_id is not None and slot.badge is not None and badge_id in fits.get(number, {}):
+                fits[number][badge_id] = slot.badge
+                text_sizes.setdefault(number, {})[badge_id] = slot.badge_pt
+        elif slot.text is not None:
+            fits[number][long_id] = slot.text
+            text_sizes.setdefault(number, {})[long_id] = slot.text_pt
+        changed = True
+    if not changed:
+        return plan
+    return _dc_replace(plan, fits=fits, text_sizes=text_sizes)
+
+
+def resolve_slide_layouts(
+    payload: Mapping[str, Any],
+    classes: Sequence[SlideClass],
+    plan: AssemblyPlan,
+) -> dict[int, str]:
+    """Per kept slide (keyed by slide ``number``, plan §2.2/§3 L3): resolves the base
+    layout name from the slide's own category (verse/point/content), whether it is a
+    D1b two-column slide (``plan.two_column``, always ``Point 3 Lines``, hand geometry
+    unchanged), and its rendered line count at 45pt in the candidate slot's width. A
+    split slide (``plan.splits``, owner Q2 -- a verse needing more than 3 lines at 45pt)
+    always resolves to ``Verse Standard (Variation 2)`` for a verse, ``Point 3 Lines``
+    for a point -- every part shares the slide's one base layout (Keynote's
+    ``duplicate slide`` copies it). A slide whose category/line-count cannot be
+    determined offline (font unresolved, no single long text box) falls back to
+    ``Blank Black`` rather than guessing."""
+    classes_by_number = {c.number: c for c in classes}
+    slides_by_number = {s["number"]: s for s in payload.get("slides") or []}
+    out: dict[int, str] = {}
+    for number in plan.kept:
+        cls = classes_by_number.get(number)
+        if cls is None:
+            out[number] = "Blank Black"
+            continue
+        if number in plan.two_column:
+            out[number] = "Point 3 Lines"
+            continue
+        slide = slides_by_number.get(number) or {}
+        items_by_id = {(item["kind"], item["kindIndex"]): item for item in (slide.get("items") or [])}
+        long_ids = [iid for iid in cls.long_text_ids if iid[0] == "text"]
+        if not cls.is_text or len(long_ids) != 1:
+            out[number] = "Blank Black"
+            continue
+        long_id = long_ids[0]
+        category: LayoutSlideCategory = "verse" if _find_verse_badge_id(cls, items_by_id) else "point"
+        if number in plan.splits:
+            out[number] = "Verse Standard (Variation 2)" if category == "verse" else "Point 3 Lines"
+            continue
+        item = items_by_id.get(long_id)
+        rect = plan.fits.get(number, {}).get(long_id)
+        lines = None
+        if item is not None and rect is not None and rect.w > 0:
+            lines = _line_count(item.get("text") or "", item.get("font") or "", 45.0, rect.w)
+        name = layout_for_slide(category=category, two_column=False, line_count=lines)
+        if name is None:
+            name = "Verse Standard (Variation 2)" if category == "verse" else "Point 3 Lines"
+        out[number] = name
+    return out
 
 _OBED_PROP_RE = re.compile(r"^OBED\t(\d+)\t([^\t]+)\t(.*)$")
 _HIDDEN_RE = re.compile(r"^HIDDEN\t(\d+)\t([^\t]+)\t(title|body)$")
@@ -2188,6 +2381,7 @@ def build_assembly_script(
     import_layout_names: Sequence[str] = DEFAULT_DSK_LAYOUT_NAMES,
     layout_template: Path = DEFAULT_LAYOUT_TEMPLATE,
     text_fit: Literal["warn", "shrink"] = "warn",
+    slide_layout_names: Mapping[int, str] | None = None,
 ) -> str:
     """One AppleScript for the whole assembly batch: deletes first, then layout policy, canvas
     resize, then per-slide geometry/text-size/deletes/clip-insert -- same idioms as
@@ -2204,10 +2398,11 @@ def build_assembly_script(
     `layout_policy`:
     - "import" (default): imports every layout in `import_layout_names` missing from the
       scratch doc from `layout_template` (see `check_layout_import_preconditions`, the
-      plan-time dedupe-trap refusal), then sets every kept slide's base layout to the
-      alpha-safe layout named in `black_layout_names` -- never an FW-owned layout
-      matched by name, since a same-named layout the FW deck happens to own is not
-      guaranteed to be alpha-safe.
+      plan-time dedupe-trap refusal), then sets every kept slide's base layout per
+      `slide_layout_names` (plan §2.2/§3 L3, see `resolve_slide_layouts`) when given,
+      else the single alpha-safe layout named in `black_layout_names` (the pre-L3
+      blanket assignment) -- never an FW-owned layout matched by name, since a
+      same-named layout the FW deck happens to own is not guaranteed to be alpha-safe.
     - "preserve": leaves every kept slide's base layout untouched -- no layout is
       searched for or imported.
     """
@@ -2242,22 +2437,45 @@ def build_assembly_script(
 
     if layout_policy == "import":
         lines += layout_import_lines("theDoc", import_layout_names, layout_template)
-        lines += [
-            f"      set blackNames to {approved_names}",
-            "      set targetLayout to missing value",
-            "      repeat with lay in slide layouts of theDoc",
-            "        ignoring case",
-            "          if (name of lay as text) is in blackNames then",
-            "            set targetLayout to lay",
-            "          end if",
-            "        end ignoring",
-            "        if targetLayout is not missing value then exit repeat",
-            "      end repeat",
-            '      if targetLayout is missing value then error "resolved black layout not found in theDoc"',
-        ]
-        for number in keep:
-            ordinal = base_ordinals[number]
-            lines.append(f"      set base layout of slide {ordinal} of theDoc to targetLayout")
+        if slide_layout_names:
+            needed_names = sorted({slide_layout_names.get(number, black_layout_names[-1]) for number in keep})
+            layout_vars: dict[str, str] = {}
+            for i, name in enumerate(needed_names):
+                var = f"resolvedLayout{i}"
+                layout_vars[name] = var
+                lines += [
+                    f"      set {var} to missing value",
+                    "      repeat with lay in slide layouts of theDoc",
+                    "        ignoring case",
+                    f'          if (name of lay as text) is "{_as_escape(name)}" then',
+                    f"            set {var} to lay",
+                    "          end if",
+                    "        end ignoring",
+                    f"        if {var} is not missing value then exit repeat",
+                    "      end repeat",
+                    f'      if {var} is missing value then error "resolved layout {_as_escape(name)} not found in theDoc"',
+                ]
+            for number in keep:
+                ordinal = base_ordinals[number]
+                name = slide_layout_names.get(number, black_layout_names[-1])
+                lines.append(f"      set base layout of slide {ordinal} of theDoc to {layout_vars[name]}")
+        else:
+            lines += [
+                f"      set blackNames to {approved_names}",
+                "      set targetLayout to missing value",
+                "      repeat with lay in slide layouts of theDoc",
+                "        ignoring case",
+                "          if (name of lay as text) is in blackNames then",
+                "            set targetLayout to lay",
+                "          end if",
+                "        end ignoring",
+                "        if targetLayout is not missing value then exit repeat",
+                "      end repeat",
+                '      if targetLayout is missing value then error "resolved black layout not found in theDoc"',
+            ]
+            for number in keep:
+                ordinal = base_ordinals[number]
+                lines.append(f"      set base layout of slide {ordinal} of theDoc to targetLayout")
 
     lines += [
         f"      set width of theDoc to {plan.canvas[0]}",
@@ -3698,6 +3916,10 @@ def assemble_dsk_deck(
     elapsed_by_slide: dict[int, float] = {}
     t0 = time.monotonic()
 
+    slide_layout_names = resolve_slide_layouts(payload, classes, plan) if layout_policy == "import" else None
+    if slide_layout_names:
+        plan = apply_layout_slot_rects(plan, classes, payload, slide_layout_names)
+
     with LiveBatch(fw_deck, out_path.parent, rss_limit_bytes=rss_limit_bytes, log=log) as batch:
         staging_path = batch.work / f"staged-{out_path.name}"
         script = build_assembly_script(
@@ -3709,6 +3931,7 @@ def assemble_dsk_deck(
             import_layout_names=import_layout_names,
             layout_template=layout_template,
             text_fit=text_fit,
+            slide_layout_names=slide_layout_names,
         )
         script_path = _osascript_path(script, batch.work)
 

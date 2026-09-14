@@ -8822,3 +8822,205 @@ def test_gw17_stacked_long_boxes_are_raw_autosize_position_last():
         size_indices = [i for i, l in enumerate(block) if "set size" in l]
         assert size_indices, (kind_index, block)
         assert width_i < min(size_indices) and max(size_indices) < position_i, (kind_index, block)
+
+
+# --------------------------------------------------------------------------
+# L3 -- layout slot table + per-class base layout
+# --------------------------------------------------------------------------
+
+def test_layout_slots_pinned_to_plan_section_1_2():
+    """Values re-measured via plan-layout/p6_template_table.py against the template
+    deck (2026_Lower-Thirds (ENG).key); pinned here so a future change to the table
+    is a deliberate, reviewed edit."""
+    verse = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    assert verse.verse == Rect(53.6, 866.4, 1799.0, 177.0)
+    assert verse.verse_pt == 45.0
+    assert verse.verse_align == "left"
+    assert verse.badge == Rect(63.1, 785.8, 933.1, 82.1)
+    assert verse.badge_pt == 40.0
+
+    verse1 = dsa.LAYOUT_SLOTS["Verse 1 Line (Variation 2)"]
+    assert verse1.verse == Rect(53.6, 967.0, 1812.9, 73.0)
+    assert verse1.badge == Rect(63.1, 878.4, 945.9, 77.0)
+
+    point3 = dsa.LAYOUT_SLOTS["Point 3 Lines"]
+    assert point3.text == Rect(53.6, 860.9, 1812.9, 177.0)
+    assert point3.text_pt == 45.0
+    assert point3.text_align == "centre"
+
+    point2 = dsa.LAYOUT_SLOTS["Point (2 Lines)"]
+    assert point2.text == Rect(53.6, 886.9, 1812.9, 177.0)
+
+    blank = dsa.LAYOUT_SLOTS["Blank Black"]
+    assert blank.verse is None and blank.text is None and blank.badge is None
+
+
+def test_layout_for_slide_two_column_always_point_3_lines():
+    assert dsa.layout_for_slide(category="verse", two_column=True, line_count=1) == "Point 3 Lines"
+    assert dsa.layout_for_slide(category="content", two_column=True, line_count=None) == "Point 3 Lines"
+
+
+def test_layout_for_slide_content_always_blank_black():
+    assert dsa.layout_for_slide(category="content", two_column=False, line_count=None) == "Blank Black"
+    assert dsa.layout_for_slide(category="content", two_column=False, line_count=3) == "Blank Black"
+
+
+@pytest.mark.parametrize(
+    "category,lines,expected",
+    [
+        ("verse", 1, "Verse 1 Line (Variation 2)"),
+        ("verse", 2, "Verse Standard (Variation 2)"),
+        ("verse", 3, "Verse Standard (Variation 2)"),
+        ("verse", 4, None),
+        ("point", 1, "Point (2 Lines)"),
+        ("point", 2, "Point (2 Lines)"),
+        ("point", 3, "Point 3 Lines"),
+        ("point", 4, None),
+    ],
+)
+def test_layout_for_slide_line_count_table(category, lines, expected):
+    assert dsa.layout_for_slide(category=category, two_column=False, line_count=lines) == expected
+
+
+def test_layout_for_slide_none_line_count_unresolved():
+    assert dsa.layout_for_slide(category="verse", two_column=False, line_count=None) is None
+    assert dsa.layout_for_slide(category="point", two_column=False, line_count=None) is None
+
+
+def _verse_slide(number, verse_text="For God so loved the world", badge_text="John 3:16"):
+    verse = _text_item(1, x=43.0, y=810.0, w=1849.0, h=200.0, runs=[{"text": verse_text, "size": 45.0}])
+    verse["text"] = verse_text
+    verse["font"] = "AzoSans-Regular"
+    badge = _text_item(0, x=44.0, y=719.0, w=651.0, h=81.0, runs=[{"text": badge_text, "size": 40.0}])
+    badge["text"] = badge_text
+    badge["font"] = "AzoSans-Bold"
+    return _slide(number, [verse, badge])
+
+
+def _point_slide(number, text="Whatever we put into the hands of God"):
+    item = _text_item(1, x=43.0, y=838.0, w=1849.0, h=215.0, runs=[{"text": text, "size": 45.0}])
+    item["text"] = text
+    item["font"] = "AzoSans-Regular"
+    return _slide(number, [item])
+
+
+def _content_slide(number):
+    return _slide(number, [_image_item(0, x=0, y=0, w=1920, h=1080)])
+
+
+def test_resolve_slide_layouts_and_apply_slot_rects_verse_and_point_and_content():
+    from obed_edom.dsk_plan import SlideClass
+
+    _require_font("AzoSans-Regular")
+    verse = _verse_slide(1)
+    point = _point_slide(2)
+    content = _content_slide(3)
+    payload = _payload([verse, point, content], wall=(1920.0, 1080.0))
+    classes = [
+        SlideClass(
+            number=1, category="built", build_count=0, movie_count=0,
+            kept=(("text", 1), ("text", 0)), dropped_side=(), dropped_backdrop=(),
+            transition=None, is_text=True, long_text_ids=(("text", 1),),
+        ),
+        SlideClass(
+            number=2, category="built", build_count=0, movie_count=0,
+            kept=(("text", 1),), dropped_side=(), dropped_backdrop=(),
+            transition=None, is_text=True, long_text_ids=(("text", 1),),
+        ),
+        SlideClass(
+            number=3, category="static", build_count=0, movie_count=0,
+            kept=(("image", 0),), dropped_side=(), dropped_backdrop=(),
+            transition=None, is_text=False, long_text_ids=(),
+        ),
+    ]
+    plan = AssemblyPlan(
+        kept=(1, 2, 3), ordinals={1: 1, 2: 2, 3: 3}, fits={
+            1: {("text", 1): Rect(43.0, 810.0, 1849.0, 200.0), ("text", 0): Rect(44.0, 719.0, 651.0, 81.0)},
+            2: {("text", 1): Rect(43.0, 838.0, 1849.0, 215.0)},
+            3: {("image", 0): Rect(0.0, 0.0, 1920.0, 1080.0)},
+        }, deletes={}, clips={}, text_sizes={1: {("text", 1): 45.0}, 2: {("text", 1): 45.0}},
+        autosize={}, warnings=(),
+    )
+
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[1] in ("Verse Standard (Variation 2)", "Verse 1 Line (Variation 2)")
+    assert names[2] in ("Point 3 Lines", "Point (2 Lines)")
+    assert names[3] == "Blank Black"
+
+    plan2 = dsa.apply_layout_slot_rects(plan, classes, payload, names)
+    verse_id = classes[0].long_text_ids[0]
+    slot = dsa.LAYOUT_SLOTS[names[1]]
+    assert plan2.fits[1][verse_id] == slot.verse
+    assert plan2.text_sizes[1][verse_id] == 45.0
+    badge_iid = next(iid for iid in classes[0].kept if iid != verse_id and iid[0] == "text")
+    assert plan2.fits[1][badge_iid] == slot.badge
+    assert plan2.fits[1][badge_iid].x == 63.1
+
+    assert plan2.fits[3] == plan.fits[3]
+
+
+def test_build_assembly_script_per_slide_layout_names():
+    plan = _clip_plan()
+    names = {8: "Point 3 Lines", 32: "Blank Black"}
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        slide_layout_names=names,
+    )
+    assert 'set wantLayoutName to "Point 3 Lines"' in script or "Point 3 Lines" in script
+    assert "resolvedLayout" in script
+    assert "set base layout of slide" in script
+    assert "blackNames" not in script
+
+
+def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[13]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK,
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[13] == "Verse Standard (Variation 2)"
+    plan2 = dsa.apply_layout_slot_rects(plan, classes, payload, names)
+    verse_id = by_number[13].long_text_ids[0]
+    assert plan2.fits[13][verse_id] == dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"].verse
+    badge_id = dsa._find_verse_badge_id(by_number[13], {
+        (item["kind"], item["kindIndex"]): item for item in payload["slides"][12]["items"]
+    })
+    assert badge_id is not None
+    assert plan2.fits[13][badge_id].x == 63.1
+
+
+def test_gw21_image_slide_resolves_blank_black():
+    _require_gw_deck()
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {21: SlideDecision(21, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[21]], decisions=decisions, band=BAND, clips={}, runs=runs, all_classes=classes,
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[21] == "Blank Black"
+
+
+def test_gw44_50_two_column_resolves_point_3_lines_geometry_unchanged():
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {44: SlideDecision(44, "in_deck"), 50: SlideDecision(50, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[44], by_number[50]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK,
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[44] == "Point 3 Lines"
+    assert names[50] == "Point 3 Lines"
+    plan2 = dsa.apply_layout_slot_rects(plan, classes, payload, names)
+    assert plan2.fits[44] == plan.fits[44]
+    assert plan2.fits[50] == plan.fits[50]

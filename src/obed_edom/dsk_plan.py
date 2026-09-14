@@ -1026,6 +1026,19 @@ def _wrap_lines(text: str, font: Any, max_width: float) -> list[str]:
     return lines
 
 
+def line_count(text: str, font_name: str, size: float, width: float) -> int | None:
+    """Wrapped line count of ``text`` at ``size`` wrapped to ``width`` (F9), same wrap
+    pass as ``wrapped_height``. ``None`` when the font cannot be resolved."""
+    path = resolve_font_path(font_name)
+    if path is None or size <= 0:
+        return None
+    from PIL import ImageFont  # noqa: PLC0415
+
+    font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
+    lines = _wrap_lines(text, font, width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE)
+    return len(lines)
+
+
 def wrapped_height(text: str, font_name: str, size: float, width: float) -> float | None:
     """Estimated laid-out height (pt) of ``text`` at ``size`` wrapped to ``width`` (F9).
     ``None`` when the font cannot be resolved -- callers must warn and fall back."""

@@ -452,3 +452,24 @@ exists" was never refused offline. Fixed in `export_slide_clips` (dsk_movie_expo
 resolving the FW-owned alpha-safe alias unconditionally, before checking template
 availability; only when none is owned does it require an existing template, resolve a
 donor, and run the import precondition -- otherwise it raises `LayoutImportRefusal`.
+
+## L3 landed (2026-09-14)
+
+`dsk_assemble.LAYOUT_SLOTS` (§1.2, re-measured via `p6_template_table.py`) and
+`layout_for_slide` (§2.2, table-driven) added; `resolve_slide_layouts` classifies each
+kept slide (two-column -> `Point 3 Lines` unchanged; content -> `Blank Black`; verse/point
+via a single-long-text-box + badge-presence heuristic and 45pt line count) and
+`build_assembly_script` now emits one `set base layout of slide N to <resolved>` per slide
+when given `slide_layout_names`, replacing the blanket assignment (backward compatible --
+omitting the param keeps the old blanket path, exercised by the existing script tests).
+`apply_layout_slot_rects` snaps the long text/badge rect and 45/40pt size to the slot for
+the common single-box case; two-column and split slides are left on their existing
+band-derived geometry untouched. Deck-probed: GW13 (verse, 2 lines) -> Verse Standard,
+verse/badge rects match the slot exactly, badge x=63.1; GW21 (image) -> Blank Black; GW44/50
+(two-column) -> Point 3 Lines, D1b geometry byte-identical. Not covered this pass: a
+multi-long-text-box slide (GW17) and a groupchild badge (GW46/51/53) fall back to
+`Blank Black` rather than being classified; no >3-line verse or 1-line verse was present
+in the tested keep set to exercise the split/1-line branches live; the >3-line split path
+does not yet thread the slot rect as its budget (still `DEFAULT_BAND`) -- flagged for L4/L5
+follow-up rather than guessed at. Targeted suite 506 passed / 1 xfailed (was 489/1);
+full suite reported in the L3 handoff.
