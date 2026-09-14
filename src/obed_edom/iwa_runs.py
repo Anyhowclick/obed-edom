@@ -200,8 +200,12 @@ def slide_order(objects: dict[str, dict]) -> list[tuple[str, bool]]:
     return out
 
 
-def _load_deck(path: str | Path) -> tuple[dict[str, dict], dict[str, str], dict[str, list[str]]]:
-    """(objects, id_to_file, file_ids). keynote_parser imported lazily (optional iwa extra)."""
+def _load_deck(
+    path: str | Path, *, skipped: list[tuple[str, str]] | None = None,
+) -> tuple[dict[str, dict], dict[str, str], dict[str, list[str]]]:
+    """(objects, id_to_file, file_ids). keynote_parser imported lazily (optional iwa extra).
+    When ``skipped`` is given, an undecodable member is appended as ``(name, repr(exc))``
+    instead of silently dropped."""
     from keynote_parser.codec import IWAFile  # noqa: PLC0415 (optional extra)
 
     objects: dict[str, dict] = {}
@@ -213,7 +217,9 @@ def _load_deck(path: str | Path) -> tuple[dict[str, dict], dict[str, str], dict[
                 continue
             try:
                 decoded = IWAFile.from_buffer(zf.read(name), name).to_dict()
-            except Exception:  # noqa: BLE001 — a single bad chunk must not sink the deck
+            except Exception as exc:  # noqa: BLE001 — a single bad chunk must not sink the deck
+                if skipped is not None:
+                    skipped.append((name, repr(exc)))
                 continue
             for chunk in decoded["chunks"]:
                 for arch in chunk["archives"]:
