@@ -2,6 +2,8 @@ export type MercatorPoint = { x: number; y: number; z: number };
 
 export const INK_COLOR = "#4C4B50";
 export const INK_COLOR_RGB: [number, number, number] = [76 / 255, 75 / 255, 80 / 255];
+/** Clip-space depth bias. Stay at 0; roof lift / wall outset provide the physical offset. */
+export const INK_DEPTH_BIAS = 0;
 
 export function authoredZoomFromMap(mapZoom: number, authoredZoomDelta: number): number {
   return mapZoom - authoredZoomDelta;

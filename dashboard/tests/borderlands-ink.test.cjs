@@ -359,6 +359,66 @@ test("shared coincident edges drop only the interior seam", () => {
   assert.ok(roofs(planned.segs).length >= 6);
 });
 
+test("T-junction vertices still register the overlapping span as shared", () => {
+  const long = feature(rect(SG.lng, SG.lat, 0, 0, 60, 10), { render_height: 16, render_min_height: 0 }, { id: "LONG" });
+  const stub = feature(rect(SG.lng, SG.lat, 20, 10, 30, 20), { render_height: 16, render_min_height: 0 }, { id: "STUB" });
+  const { components } = geo.normalizeBuildings([long, stub]);
+  const shared = geo.suppressSharedEdges(components);
+  assert.ok(shared.size >= 1);
+  const blob = [...shared].join("\n");
+  const p = toLngLat(SG.lng, SG.lat, 20, 10);
+  const q = toLngLat(SG.lng, SG.lat, 30, 10);
+  assert.match(blob, new RegExp(p[0].toFixed(7).replace(".", "\\.")));
+  assert.match(blob, new RegExp(q[0].toFixed(7).replace(".", "\\.")));
+});
+
+test("shared-edge suppression stays near-linear on a touching grid", () => {
+  const features = [];
+  for (let i = 0; i < 400; i++) {
+    const x = (i % 20) * 8;
+    const y = Math.floor(i / 20) * 8;
+    features.push(feature(rect(SG.lng, SG.lat, x, y, x + 8, y + 8), { render_height: 12, render_min_height: 0 }, { id: `g${i}` }));
+  }
+  const started = Date.now();
+  const planned = planBuildingsInk(features);
+  const ms = Date.now() - started;
+  assert.ok(planned.diagnostics.sharedEdgesRemoved > 100, planned.diagnostics.sharedEdgesRemoved);
+  assert.ok(ms < 250, `shared-edge suppression took ${ms}ms`);
+});
+
+test("bounds, not a centre radius, decide which buildings stay eligible", () => {
+  const edge = feature(rect(SG.lng, SG.lat, 2000, 0, 2020, 20), { render_height: 20, render_min_height: 0 }, { id: "edge" });
+  const cos = Math.cos(SG.lat * Math.PI / 180);
+  const bounds = {
+    west: SG.lng - 0.002,
+    south: SG.lat - 0.002,
+    east: SG.lng + 2020 / (M * cos),
+    north: SG.lat + 0.002,
+  };
+  const planned = planBuildingsInk([edge], { bounds, padDeg: 0.002 });
+  assert.ok(planned.segs.length > 0);
+  assert.equal(planned.diagnostics.normalizedCount, 1);
+});
+
+test("raw-vertex budget is applied after volume sort, not query order", () => {
+  const dense = feature(circle(SG.lng, SG.lat, 3, 80), { render_height: 8, render_min_height: 0 }, { id: "dense" });
+  const keep = feature(rect(SG.lng, SG.lat, 80, 0, 140, 60), { render_height: 40, render_min_height: 0 }, { id: "keep" });
+  const a = geo.normalizeBuildings([dense, keep], { maxRawVertices: 10 });
+  const b = geo.normalizeBuildings([keep, dense], { maxRawVertices: 10 });
+  assert.equal(a.components.length, 1);
+  assert.equal(b.components.length, 1);
+  assert.equal(a.components[0].identity, b.components[0].identity);
+  assert.ok(a.components[0].areaM2 > 1000);
+  assert.equal(a.diagnostics.budgetDropped, 1);
+});
+
+test("ink uses zero clip-space depth bias", () => {
+  assert.equal(proj.INK_DEPTH_BIAS, 0);
+  const ink = fs.readFileSync(path.join(root, "src/maps/borderlandsInk.ts"), "utf8");
+  assert.match(ink, /INK_DEPTH_BIAS/);
+  assert.doesNotMatch(ink, /uniform1f\(depthBiasLoc,\s*0\.00[1-9]/);
+});
+
 test("query order does not change the selected signature", () => {
   const a = feature(rect(SG.lng, SG.lat, 0, 0, 30, 30), { render_height: 40, render_min_height: 0 }, { id: "A" });
   const b = feature(rect(SG.lng, SG.lat, 80, 0, 92, 12), { render_height: 12, render_min_height: 0 }, { id: "B" });

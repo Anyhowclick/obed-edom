@@ -13,6 +13,7 @@ import {
   inkFullWidthCssPx,
   authoredZoomFromMap,
   INK_COLOR_RGB,
+  INK_DEPTH_BIAS,
   matrixAsFloat64,
   type MercatorPoint,
 } from "./borderlandsProjection";
@@ -350,6 +351,9 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
     requestedGen += 1;
     lastDiag.requestedGeneration = requestedGen;
     if (!enabled) {
+      cacheKey = rebuildKey();
+      cameraDirty = false;
+      sourceDirty = false;
       committedGen = requestedGen;
       lastDiag.committedGeneration = committedGen;
       rebuilding = false;
@@ -357,6 +361,8 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
     }
     if (!buildingsEligible(map)) {
       cacheKey = rebuildKey();
+      cameraDirty = false;
+      sourceDirty = false;
       commit([], origin, "");
       rebuilding = false;
       return;
@@ -393,8 +399,6 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
       const planned = planBuildingsInk(collected.features, {
         bounds: viewBounds,
         padDeg: 0.002,
-        center: { lng: map.getCenter().lng, lat: map.getCenter().lat },
-        radiusM: Math.max(650, 420 * 2 ** (17 - map.getZoom())),
       });
       const center = map.getCenter();
       const nextOrigin = mercator(center.lng, center.lat, 0);
@@ -670,7 +674,7 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
       const fullCss = inkFullWidthCssPx(authoredZoomFromMap(map.getZoom(), context.authoredZoomDelta));
       if (widthLoc) gl.uniform1f(widthLoc, halfWidthBufferPx(fullCss, ratio));
       if (aaLoc) gl.uniform1f(aaLoc, 0.5);
-      if (depthBiasLoc) gl.uniform1f(depthBiasLoc, 0.008);
+      if (depthBiasLoc) gl.uniform1f(depthBiasLoc, INK_DEPTH_BIAS);
       if (colorLoc) gl.uniform3f(colorLoc, INK_COLOR_RGB[0], INK_COLOR_RGB[1], INK_COLOR_RGB[2]);
       lastDiag.effectivePixelRatio = ratio;
       gl.enable(gl.DEPTH_TEST);

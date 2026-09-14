@@ -158,6 +158,26 @@ describe("borderlands ink lifecycle", () => {
     await expect(pending).rejects.toThrow(/cancelled/);
   });
 
+  it("below building minzoom does not idle-loop rebuilds", () => {
+    vi.useFakeTimers();
+    const map = createFakeMap([square]);
+    map.zoom = 12;
+    const layer = createBorderlandsInkLayer(map as never);
+    map._layer = layer;
+    layer.onAdd?.(map as never, fakeGl());
+    layer.flush();
+    const requested = layer.requestedGeneration();
+    const committed = layer.committedGeneration();
+    expect(layer.vertexCount).toBe(0);
+    map.emit("idle");
+    vi.advanceTimersByTime(200);
+    map.emit("idle");
+    vi.advanceTimersByTime(200);
+    expect(layer.requestedGeneration()).toBe(requested);
+    expect(layer.committedGeneration()).toBe(committed);
+    expect(map.triggerRepaint).toHaveBeenCalled();
+  });
+
   it("waitForBorderlandsInk returns immediately when the layer is absent", async () => {
     const map = createFakeMap();
     await expect(waitForBorderlandsInk(map as never)).resolves.toBeUndefined();

@@ -357,24 +357,6 @@ export function featureMayBeVisible(feature: WireFeature, bounds: { west: number
   return false;
 }
 
-export function featureNearCenter(feature: WireFeature, center: { lng: number; lat: number }, radiusM: number): boolean {
-  const origin = metricOrigin(center.lng, center.lat);
-  for (const member of polygonMembers(feature.geometry)) {
-    if (!Array.isArray(member) || !Array.isArray(member[0])) continue;
-    const ring = (member[0] as number[][]).filter((point) => Number.isFinite(point?.[0]) && Number.isFinite(point?.[1])) as LngLat[];
-    if (!ring.length) continue;
-    let e = 0;
-    let n = 0;
-    for (const point of ring) {
-      const en = toEn(point, origin);
-      e += en.e;
-      n += en.n;
-    }
-    if (Math.hypot(e / ring.length, n / ring.length) <= radiusM) return true;
-  }
-  return false;
-}
-
 export function normalizeFeature(feature: WireFeature, originLng?: number): NormalizedComponent[] {
   const extents = buildingExtents(feature);
   if (!extents) return [];
@@ -416,7 +398,10 @@ export function normalizeFeature(feature: WireFeature, originLng?: number): Norm
   return out;
 }
 
-export function normalizeBuildings(features: WireFeature[]): { components: NormalizedComponent[]; diagnostics: GeometryDiagnostics } {
+export function normalizeBuildings(
+  features: WireFeature[],
+  opts?: { maxRawVertices?: number },
+): { components: NormalizedComponent[]; diagnostics: GeometryDiagnostics } {
   const diagnostics: GeometryDiagnostics = {
     sourceFeatureCount: features.length,
     normalizedCount: 0,
@@ -432,30 +417,20 @@ export function normalizeBuildings(features: WireFeature[]): { components: Norma
   };
   const seen = new Set<string>();
   const components: NormalizedComponent[] = [];
-  let rawVerts = 0;
   for (const feature of features) {
     const props = feature.properties || {};
     const top = renderedNumber(props.render_height);
     const rawBase = Math.max(0, renderedNumber(props.render_min_height) ?? 0);
     if (top != null && isShallowElevatedSlab(rawBase, top)) diagnostics.slabsOmitted += 1;
-    const before = components.length;
     const next = normalizeFeature(feature);
     if (!next.length && polygonMembers(feature.geometry).length) diagnostics.invalidRings += 1;
     for (const component of next) {
-      rawVerts += component.outer.length;
-      if (rawVerts > MAX_RAW_VERTICES) {
-        diagnostics.budgetDropped += 1;
-        continue;
-      }
       if (seen.has(component.identity)) {
         diagnostics.duplicatesRemoved += 1;
         continue;
       }
       seen.add(component.identity);
       components.push(component);
-    }
-    if (next.length === 0 && before === components.length && top != null && top >= MIN_HEIGHT_M && !isShallowElevatedSlab(rawBase, top)) {
-      diagnostics.invalidRings += 0;
     }
   }
   components.sort((a, b) => {
@@ -464,8 +439,19 @@ export function normalizeBuildings(features: WireFeature[]): { components: Norma
     if (vb !== va) return vb - va;
     return a.identity < b.identity ? -1 : a.identity > b.identity ? 1 : 0;
   });
-  diagnostics.normalizedCount = components.length;
-  return { components, diagnostics };
+  const maxRaw = opts?.maxRawVertices ?? MAX_RAW_VERTICES;
+  const kept: NormalizedComponent[] = [];
+  let rawVerts = 0;
+  for (const component of components) {
+    if (rawVerts + component.outer.length > maxRaw) {
+      diagnostics.budgetDropped += 1;
+      continue;
+    }
+    rawVerts += component.outer.length;
+    kept.push(component);
+  }
+  diagnostics.normalizedCount = kept.length;
+  return { components: kept, diagnostics };
 }
 
 type Corner = { index: number; e: number; n: number; turn: number; support: number; along: number };
@@ -600,14 +586,50 @@ function splitAtPoints(a: LngLat, b: LngLat, cuts: LngLat[], origin: { lng: numb
   return out.length ? out : [[a, b]];
 }
 
+const EDGE_CELL_M = 8;
+
+function heightKey(base: number, top: number): string {
+  return `${base.toFixed(2)}|${top.toFixed(2)}`;
+}
+
+function cellCoord(value: number): number {
+  return Math.floor(value / EDGE_CELL_M);
+}
+
+function endpointBucketKey(ce: number, cn: number, base: number, top: number): string {
+  return `${ce},${cn}|${heightKey(base, top)}`;
+}
+
+function cellsForSegment(ae: En, be: En): Array<[number, number]> {
+  const e0 = cellCoord(Math.min(ae.e, be.e));
+  const e1 = cellCoord(Math.max(ae.e, be.e));
+  const n0 = cellCoord(Math.min(ae.n, be.n));
+  const n1 = cellCoord(Math.max(ae.n, be.n));
+  const cells: Array<[number, number]> = [];
+  for (let ce = e0; ce <= e1; ce++) {
+    for (let cn = n0; cn <= n1; cn++) cells.push([ce, cn]);
+  }
+  return cells;
+}
+
+type IndexedEndpoint = { point: LngLat; en: En; component: number };
+
 export function suppressSharedEdges(components: NormalizedComponent[]): Set<string> {
   const origin = components[0] ? metricOrigin(components[0].outer[0][0], components[0].outer[0][1]) : metricOrigin(0, 0);
   const edges: SourceEdge[] = [];
+  const buckets = new Map<string, IndexedEndpoint[]>();
   components.forEach((component, componentIndex) => {
     const ring = component.outer;
     for (let i = 0; i < ring.length; i++) {
+      const point = ring[i];
+      const en = toEn(point, origin);
+      const bucket = endpointBucketKey(cellCoord(en.e), cellCoord(en.n), component.base, component.top);
+      const list = buckets.get(bucket);
+      const indexed = { point, en, component: componentIndex };
+      if (list) list.push(indexed);
+      else buckets.set(bucket, [indexed]);
       edges.push({
-        a: ring[i],
+        a: point,
         b: ring[(i + 1) % ring.length],
         base: component.base,
         top: component.top,
@@ -620,12 +642,17 @@ export function suppressSharedEdges(components: NormalizedComponent[]): Set<stri
     const cuts: LngLat[] = [];
     const ae = toEn(edge.a, origin);
     const be = toEn(edge.b, origin);
-    for (const other of edges) {
-      if (other.component === edge.component || other.base !== edge.base || other.top !== edge.top) continue;
-      const p = toEn(other.a, origin);
-      const q = toEn(other.b, origin);
-      if (pointOnSegment(p, ae, be)) cuts.push(other.a);
-      if (pointOnSegment(q, ae, be)) cuts.push(other.b);
+    const seen = new Set<string>();
+    for (const [ce, cn] of cellsForSegment(ae, be)) {
+      const hits = buckets.get(endpointBucketKey(ce, cn, edge.base, edge.top));
+      if (!hits) continue;
+      for (const other of hits) {
+        if (other.component === edge.component) continue;
+        const id = `${other.point[0].toFixed(7)},${other.point[1].toFixed(7)}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (pointOnSegment(other.en, ae, be)) cuts.push(other.point);
+      }
     }
     for (const [a, b] of splitAtPoints(edge.a, edge.b, cuts, origin)) {
       split.push({ ...edge, a, b });

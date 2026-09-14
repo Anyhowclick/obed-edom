@@ -1,14 +1,11 @@
 import {
   buildingExtents as extentsFromFeature,
   featureMayBeVisible,
-  featureNearCenter,
   geometrySignature,
-  metricOrigin,
   normalizeBuildings,
   normalizeFeature,
   planNormalizedInk,
   ringIntersectsBounds,
-  toEn,
   type FacadeSeg,
   type GeometryDiagnostics,
   type NormalizedComponent,
@@ -33,39 +30,20 @@ export function planBuildingFacade(feature: WireFeature, _zoom = 16): FacadeSeg[
   return segs;
 }
 
-function componentNearCenter(component: NormalizedComponent, center: { lng: number; lat: number }, radiusM: number): boolean {
-  const origin = metricOrigin(center.lng, center.lat);
-  let e = 0;
-  let n = 0;
-  for (const point of component.outer) {
-    const en = toEn(point, origin);
-    e += en.e;
-    n += en.n;
-  }
-  const count = Math.max(component.outer.length, 1);
-  return Math.hypot(e / count, n / count) <= radiusM;
-}
-
 export function planBuildingsInk(
   features: WireFeature[],
   opts?: {
     bounds?: { west: number; south: number; east: number; north: number };
     padDeg?: number;
-    center?: { lng: number; lat: number };
-    radiusM?: number;
   }
 ): { segs: FacadeSeg[]; components: NormalizedComponent[]; diagnostics: GeometryDiagnostics; signature: string } {
-  const gated = features.filter((feature) => {
-    if (opts?.center && opts.radiusM != null && !featureNearCenter(feature, opts.center, opts.radiusM)) return false;
-    if (opts?.bounds && !featureMayBeVisible(feature, opts.bounds, opts.padDeg)) return false;
-    return true;
-  });
+  const gated = opts?.bounds
+    ? features.filter((feature) => featureMayBeVisible(feature, opts.bounds!, opts.padDeg))
+    : features;
   const { components, diagnostics } = normalizeBuildings(gated);
-  const visible = components.filter((component) => {
-    if (opts?.bounds && !ringIntersectsBounds(component.outer, opts.bounds, opts.padDeg)) return false;
-    if (opts?.center && opts.radiusM != null && !componentNearCenter(component, opts.center, opts.radiusM)) return false;
-    return true;
-  });
+  const visible = opts?.bounds
+    ? components.filter((component) => ringIntersectsBounds(component.outer, opts.bounds!, opts.padDeg))
+    : components;
   diagnostics.normalizedCount = visible.length;
   diagnostics.budgetDropped += Math.max(0, components.length - visible.length);
   const planned = planNormalizedInk(visible);
