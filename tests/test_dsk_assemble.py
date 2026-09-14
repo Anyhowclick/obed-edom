@@ -1651,7 +1651,7 @@ def test_gw_every_kept_non_movie_slide_plans_under_default_flags(tmp_path):
         decisions = {number: SlideDecision(number, "in_deck")}
         plan = plan_assembly(
             payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs,
-            deck=deck, fw_deck=GW_DECK, crop_dir=tmp_path / "crops",
+            deck=deck, fw_deck=GW_DECK, crop_dir=tmp_path / "crops", all_classes=classes,
         )
         assert plan is not None
         checked += 1
@@ -1676,7 +1676,9 @@ def test_gw_text_slides_stay_within_band_top():
             continue
         decisions = {number: SlideDecision(number, "in_deck")}
         try:
-            plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs)
+            plan = plan_assembly(
+                payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs, all_classes=classes,
+            )
         except AssemblyRefusal:
             # GW 49 has a real run-size coverage gap with t < 1.0 -- refused rather
             # than assembled overflowing; not a band-containment case.
@@ -1707,7 +1709,9 @@ def test_gw44_badge_x_clears_title_right_edge():
     payload, classes, runs = load_assembly_inputs(GW_DECK)
     by_number = {c.number: c for c in classes}
     decisions = {44: SlideDecision(44, "in_deck")}
-    plan = plan_assembly(payload, [by_number[44]], decisions=decisions, band=BAND, clips={}, runs=runs)
+    plan = plan_assembly(
+        payload, [by_number[44]], decisions=decisions, band=BAND, clips={}, runs=runs, all_classes=classes,
+    )
 
     title_rect = plan.fits[44][("text", 1)]
     badge_rect = plan.fits[44][("groupchild", 0, "shape", 0)]
@@ -1729,7 +1733,10 @@ def test_gw_group_text_slides_short_fit_stays_within_band_x():
     for number in (5, 44, 50, 51, 53, 54):
         decisions = {number: SlideDecision(number, "in_deck")}
         try:
-            plan = plan_assembly(payload, [by_number[number]], decisions=decisions, band=BAND, clips={}, runs=runs)
+            plan = plan_assembly(
+                payload, [by_number[number]], decisions=decisions, band=BAND, clips={}, runs=runs,
+                all_classes=classes,
+            )
         except AssemblyRefusal:
             continue
         for iid, rect in plan.short_fit.get(number, {}).items():
@@ -1755,7 +1762,9 @@ def test_gw50_badge_x_clamped_to_band_right_edge():
     payload, classes, runs = load_assembly_inputs(GW_DECK)
     by_number = {c.number: c for c in classes}
     decisions = {50: SlideDecision(50, "in_deck")}
-    plan = plan_assembly(payload, [by_number[50]], decisions=decisions, band=BAND, clips={}, runs=runs)
+    plan = plan_assembly(
+        payload, [by_number[50]], decisions=decisions, band=BAND, clips={}, runs=runs, all_classes=classes,
+    )
     badge = plan.fits[50][("groupchild", 0, "shape", 0)]
     assert badge.x == pytest.approx(501.0, abs=0.5)
 
@@ -1792,7 +1801,7 @@ def test_gw17_28_forced_split_at_floor_66_refuses_gw28_single_box():
     with pytest.raises(AssemblyRefusal, match="does not fit the band even alone"):
         plan_assembly(
             payload, [by_number[17], by_number[28]], decisions=decisions,
-            band=BAND, clips={}, runs=runs, min_text_pt=66.0,
+            band=BAND, clips={}, runs=runs, min_text_pt=66.0, all_classes=classes,
         )
 
 
@@ -1807,7 +1816,10 @@ def test_gw13_forced_floor_66_refuses_its_badge_gapped_single_box():
     by_number = {c.number: c for c in classes}
     decisions = {13: SlideDecision(13, "in_deck")}
     with pytest.raises(AssemblyRefusal, match="does not fit the band even alone"):
-        plan_assembly(payload, [by_number[13]], decisions=decisions, band=BAND, clips={}, runs=runs, min_text_pt=66.0)
+        plan_assembly(
+            payload, [by_number[13]], decisions=decisions, band=BAND, clips={}, runs=runs,
+            min_text_pt=66.0, all_classes=classes,
+        )
 
 
 def test_gw13_stacked_text_does_not_overlap_badge():
@@ -5588,9 +5600,11 @@ def test_gw49_plans_under_shrink_and_refuses_under_warn():
     with pytest.raises(AssemblyRefusal):
         plan_assembly(
             payload, [by_number[49]], decisions=decisions, band=BAND, clips={}, runs=runs, text_fit="warn",
+            all_classes=classes,
         )
     plan = plan_assembly(
         payload, [by_number[49]], decisions=decisions, band=BAND, clips={}, runs=runs, text_fit="shrink",
+        all_classes=classes,
     )
     assert plan.shrink_text_sizes.get(49) or plan.splits.get(49)
 
@@ -7466,8 +7480,9 @@ def test_two_column_repeat_heading_dropped_when_planned_alone():
     slide_21 = _two_column_slide(21, _VERSE_2)
     payload = _payload([slide_20, slide_21])
     classes = [_classify(slide_21)]
+    all_classes = [_classify(slide_20), _classify(slide_21)]
     decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, all_classes=all_classes)
 
     assert 21 not in plan.two_column
     verse = plan.fits[21][("text", 3)]
@@ -7487,8 +7502,9 @@ def test_two_column_repeat_heading_survives_heading_only_predecessor():
     slide_22 = _two_column_slide(22, _VERSE_1)
     payload = _payload([slide_21, slide_22])
     classes = [_classify(slide_22)]
+    all_classes = [_classify(slide_21), _classify(slide_22)]
     decisions = {22: SlideDecision(22, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, all_classes=all_classes)
 
     assert 22 in plan.two_column
     assert plan.fits[22][("text", 2)].x == pytest.approx(43.0, abs=0.01)
@@ -7506,8 +7522,9 @@ def test_two_column_repeat_heading_survives_headingless_predecessor():
     slide_22 = _two_column_slide(22, _VERSE_2)
     payload = _payload([slide_20, slide_21, slide_22])
     classes = [_classify(slide_22)]
+    all_classes = [_classify(slide_20), _classify(slide_21), _classify(slide_22)]
     decisions = {22: SlideDecision(22, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, all_classes=all_classes)
 
     assert 22 in plan.two_column
     assert plan.fits[22][("text", 2)].x == pytest.approx(43.0, abs=0.01)
@@ -7537,25 +7554,25 @@ def _two_column_slide_group_child_verse(number, verse_text, *, verse_w=1800, ver
 
 
 def test_repeat_heading_predecessor_uses_group_child_verse():
-    # Codex D1b-p2 review 2 MAJOR: the removed `_heading_cluster_present_from_payload_slide`
-    # approximation ignored group-child verses entirely (GW 44/50/51/53's real shape),
-    # so it always said "no cluster" for such a predecessor and never suppressed the
-    # successor's repeated heading. `_full_classes_by_number` now reclassifies the
-    # whole payload the same way `load_assembly_inputs` would, so slide 20's
-    # group-child-verse heading cluster is recognised and slide 21 (planned alone,
-    # sharing its "Faith" heading) drops its own.
+    # Codex D1b-p2 review 2/3 MAJOR: a predecessor outside the planning batch must be
+    # classified through the exact same inputs (here, group-child text/children) as
+    # `_heading_cluster` requires -- there is no fallback reclassification any more
+    # (D1b-p2 fix round 4), so the caller supplies `all_classes` with the predecessor
+    # classified with its group-child kwargs, and slide 20's group-child-verse heading
+    # cluster is recognised, dropping slide 21's (planned alone) repeated heading.
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
     slide_20 = _two_column_slide_group_child_verse(20, _VERSE_1)
     slide_21 = _two_column_slide(21, _VERSE_2)
     payload = _payload([slide_20, slide_21])
     classes = [_classify(slide_21)]
-    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-
     predecessor_cls = _classify(
         slide_20, group_child_words=slide_20["groupChildText"], group_children=slide_20["groupChildren"],
     )
+    all_classes = [predecessor_cls, _classify(slide_21)]
+    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, all_classes=all_classes)
+
     predecessor_items = {(it["kind"], it["kindIndex"]): it for it in slide_20["items"]}
     assert dsa._heading_cluster(predecessor_cls, predecessor_items) is not None
 
@@ -7581,10 +7598,11 @@ def test_repeat_heading_predecessor_unmatched_badge_does_not_suppress():
     slide_21 = _two_column_slide(21, _VERSE_2)
     payload = _payload([slide_20, slide_21])
     classes = [_classify(slide_21)]
-    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-
     predecessor_cls = _classify(slide_20)
+    all_classes = [predecessor_cls, _classify(slide_21)]
+    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, all_classes=all_classes)
+
     predecessor_items = {(it["kind"], it["kindIndex"]): it for it in slide_20["items"]}
     assert dsa._heading_cluster(predecessor_cls, predecessor_items) is None
 
@@ -7609,16 +7627,103 @@ def test_repeat_heading_predecessor_multiple_long_text_ids_does_not_suppress():
     slide_21 = _two_column_slide(21, _VERSE_2)
     payload = _payload([slide_20, slide_21])
     classes = [_classify(slide_21)]
-    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
-    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-
     predecessor_cls = _classify(slide_20)
+    all_classes = [predecessor_cls, _classify(slide_21)]
+    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, all_classes=all_classes)
+
     assert len(predecessor_cls.long_text_ids) == 2
     predecessor_items = {(it["kind"], it["kindIndex"]): it for it in slide_20["items"]}
     assert dsa._heading_cluster(predecessor_cls, predecessor_items) is None
 
     assert 21 in plan.two_column
     assert plan.fits[21][("text", 2)].x == pytest.approx(43.0, abs=0.01)
+
+
+def test_repeat_heading_predecessor_include_side_matches_batch_classification():
+    # D1b-p2 fix round 4: `_full_classes_by_number` no longer reclassifies -- it uses
+    # the caller's `all_classes` verbatim, so a predecessor's `include_side` setting
+    # (which can keep a side-panel long-text box that would otherwise be dropped,
+    # adding a second `long_text_ids` entry and breaking the heading cluster) is
+    # respected exactly as whole-deck batch classification computed it.
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide_20 = _two_column_slide(20, _VERSE_1)
+    side_text = {
+        "kind": "text", "kindIndex": 4, "x": 100, "y": 200, "w": 800, "h": 300,
+        "text": "A side panel caption that runs on for quite a lot of words indeed.",
+        "font": "AzoSans-Regular", "size": 40.0,
+    }
+    slide_20["items"].append(side_text)
+    slide_21 = _two_column_slide(21, _VERSE_2)
+    payload = _payload([slide_20, slide_21])
+    classes = [_classify(slide_21)]
+    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
+
+    predecessor_no_side = _classify(slide_20, include_side=False)
+    assert len(predecessor_no_side.long_text_ids) == 1
+    plan_no_side = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        all_classes=[predecessor_no_side, _classify(slide_21)],
+    )
+    assert 21 not in plan_no_side.two_column
+
+    predecessor_with_side = _classify(slide_20, include_side=True)
+    assert len(predecessor_with_side.long_text_ids) == 2
+    predecessor_items = {(it["kind"], it["kindIndex"]): it for it in slide_20["items"]}
+    assert dsa._heading_cluster(predecessor_with_side, predecessor_items) is None
+    plan_with_side = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        all_classes=[predecessor_with_side, _classify(slide_21)],
+    )
+    assert 21 in plan_with_side.two_column
+
+
+def test_repeat_heading_connection_line_only_slide_breaks_run_consistently_with_batch():
+    # D1b-p2 fix round 4: a connection-line-only intervening slide (no kept items) is
+    # `category == "empty"` with zero connection-line builds and transparent to the
+    # repeat-heading run, but `category == "built"` with a connection-line build --
+    # `_full_classes_by_number` must see whichever the caller's `all_classes` (batch
+    # classification) actually computed, not an approximation that always leaves
+    # connection-line counts at zero.
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide_20 = _two_column_slide(20, _VERSE_1)
+    slide_21 = _slide(21, [])
+    slide_22 = _two_column_slide(22, _VERSE_1)
+    payload = _payload([slide_20, slide_21, slide_22])
+    classes = [_classify(slide_22)]
+    decisions = {22: SlideDecision(22, "in_deck", anchor="auto")}
+
+    transparent = _classify(slide_21, connection_line_builds=0)
+    assert transparent.category == "empty"
+    plan_transparent = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        all_classes=[_classify(slide_20), transparent, _classify(slide_22)],
+    )
+    assert 22 not in plan_transparent.two_column
+
+    breaks_run = _classify(slide_21, connection_line_builds=1)
+    assert breaks_run.category == "built"
+    plan_breaks = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        all_classes=[_classify(slide_20), breaks_run, _classify(slide_22)],
+    )
+    assert 22 in plan_breaks.two_column
+
+
+def test_plan_assembly_subset_of_deck_without_all_classes_raises():
+    # D1b-p2 fix round 4 ORCHESTRATOR DECISION: the reclassification fallback is
+    # deleted -- planning a subset of a deck-backed payload (`classes` narrower than
+    # `payload`'s slides) without `all_classes` must refuse rather than silently
+    # reclassify through inputs that can disagree with batch classification.
+    slide_20 = _two_column_slide(20, _VERSE_1)
+    slide_21 = _two_column_slide(21, _VERSE_2)
+    payload = _payload([slide_20, slide_21])
+    classes = [_classify(slide_21)]
+    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
+    with pytest.raises(ValueError, match="all_classes"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
 
 
 def test_repeat_heading_gw51_planned_alone_matches_batch():
@@ -7634,6 +7739,7 @@ def test_repeat_heading_gw51_planned_alone_matches_batch():
     decisions = {n: SlideDecision(n, "in_deck") for n in numbers}
     batch = plan_assembly(
         payload, [by_number[n] for n in numbers], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes,
     )
     assert set(batch.two_column) == {44, 46, 50}
     for n, verse_id in ((51, ("groupchild", 0, "text", 1)), (52, ("text", 1)), (53, ("groupchild", 0, "text", 1))):
@@ -7641,7 +7747,9 @@ def test_repeat_heading_gw51_planned_alone_matches_batch():
         assert verse.x == pytest.approx(43.0, abs=0.01)
 
     alone_decisions = {51: SlideDecision(51, "in_deck")}
-    alone = plan_assembly(payload, [by_number[51]], decisions=alone_decisions, band=BAND, clips={}, runs=runs)
+    alone = plan_assembly(
+        payload, [by_number[51]], decisions=alone_decisions, band=BAND, clips={}, runs=runs, all_classes=classes,
+    )
     assert 51 not in alone.two_column
     alone_verse = alone.fits[51][("groupchild", 0, "text", 1)]
     batch_verse = batch.fits[51][("groupchild", 0, "text", 1)]

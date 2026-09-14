@@ -48,7 +48,6 @@ from obed_edom.dsk_plan import (
     _TEXT_GAP_PT,
     _word_count,
     classify_deck,
-    classify_slide,
     fit_heading_pt,
     fit_slide,
     fit_text_stack,
@@ -593,63 +592,33 @@ def _heading_text_for_repeat_check(cls: SlideClass, items_by_id: Mapping[ItemId,
     return candidates[0]
 
 
-def _classify_all_slides_from_payload(
-    payload: Mapping[str, Any],
-    builds: Mapping[int, dict] | None,
-    text_slide_words: int,
-    no_dedupe: bool,
-    no_drop_panel_backdrop: bool,
-) -> dict[int, SlideClass]:
-    """`classify_slide` over every slide in `payload`, group-movie/-build/connection
-    -line counts left at their defaults (no deck graph to read them from) -- the
-    last-resort source of `_repeat_heading_state`'s full-deck classification when
-    `plan_assembly` gets neither `all_classes` nor a deck graph (`deck`/`fw_deck`),
-    e.g. fully in-memory tests. The real CLI path always has one of those, since
-    `load_assembly_inputs` classifies the whole deck up front."""
-    wall = (payload["slideWidth"], payload["slideHeight"])
-    builds = builds or {}
-    out: dict[int, SlideClass] = {}
-    for slide in payload.get("slides") or []:
-        number = slide["number"]
-        out[number] = classify_slide(
-            slide,
-            builds.get(number),
-            wall,
-            group_child_text=slide.get("groupChildSignature"),
-            group_child_words=slide.get("groupChildText"),
-            group_children=slide.get("groupChildren"),
-            text_slide_words=text_slide_words,
-            no_dedupe=no_dedupe,
-            no_drop_panel_backdrop=no_drop_panel_backdrop,
-        )
-    return out
-
-
 def _full_classes_by_number(
     payload: Mapping[str, Any],
-    builds: Mapping[int, dict] | None,
-    text_slide_words: int,
-    no_dedupe: bool,
-    no_drop_panel_backdrop: bool,
+    classes: Sequence[SlideClass],
     all_classes: Sequence[SlideClass] | None,
 ) -> dict[int, SlideClass]:
     """The whole deck's `SlideClass`es for `_repeat_heading_state`, so a predecessor
     outside the planning batch is classified through the exact same inputs
-    (`cls.kept`, `long_text_ids`, group-child text/children, dedupe, backdrop
-    settings) as `_heading_cluster` requires -- never the batch's own (possibly
-    partial) `classes`. Prefers caller-supplied `all_classes` (the real CLI path:
-    `load_assembly_inputs` already classifies the whole deck via `classify_deck`);
-    else falls back to `_classify_all_slides_from_payload`, which never touches the
-    deck graph or `fw_deck` (a plan that defers deck loading, e.g. for crop/anchor
-    work, must stay lazy) -- safe because `_heading_cluster` and
-    `_heading_text_for_repeat_check` only read `cls.kept`/`cls.long_text_ids`/
-    `cls.is_text`, none of which `classify_slide` derives from the group-movie/
-    -build/connection-line counts that fallback leaves at their defaults; only
-    `cls.category`/`build_count`/`movie_count` would differ, and this pass never
-    reads those."""
+    (`cls.kept`, `long_text_ids`, group-child text/children, dedupe, backdrop,
+    `include_side`, connection-line settings) as `_heading_cluster` requires --
+    never an approximation. Prefers caller-supplied `all_classes` (the real CLI
+    path: `load_assembly_inputs` already classifies the whole deck via
+    `classify_deck`); else, when `classes` itself already covers every slide in
+    `payload` (a synthetic single-/few-slide payload built to match `classes`),
+    uses `classes` directly. There is no other fallback: reclassifying a subset
+    payload without the whole deck's `include_side`/connection-line-build inputs
+    previously could disagree with batch classification's `category`, which
+    `_repeat_heading_state` reads -- planning a subset of a deck-backed payload
+    now requires `all_classes`."""
     if all_classes is not None:
         return {c.number: c for c in all_classes}
-    return _classify_all_slides_from_payload(payload, builds, text_slide_words, no_dedupe, no_drop_panel_backdrop)
+    payload_numbers = {slide["number"] for slide in payload.get("slides") or []}
+    classes_by_number = {c.number: c for c in classes}
+    if payload_numbers <= classes_by_number.keys():
+        return classes_by_number
+    raise ValueError(
+        "plan_assembly: planning a subset of the deck needs all_classes (the whole-deck classification)"
+    )
 
 
 def _repeat_heading_state(
@@ -871,8 +840,9 @@ def plan_assembly(
     `crop_dir` (unless `no_image_crop`), committed only once every slide validates.
     `all_classes`, when given, is the whole deck's classification (see
     `_full_classes_by_number`) -- used only for the repeat-heading predecessor check,
-    so a `--slides` batch drops a repeated heading exactly like a full-deck run;
-    `classes` itself may be just the batch's."""
+    so a `--slides` batch drops a repeated heading exactly like a full-deck run.
+    Planning a subset of a deck-backed payload (`classes` narrower than `payload`'s
+    slides) requires `all_classes`; omitting it then raises `ValueError`."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -883,9 +853,7 @@ def plan_assembly(
         if decision.action in ("in_deck", "both")
         and classes_by_number[number].category != "empty"
     )
-    full_classes_by_number = _full_classes_by_number(
-        payload, builds, text_slide_words, no_dedupe, no_drop_panel_backdrop, all_classes,
-    )
+    full_classes_by_number = _full_classes_by_number(payload, classes, all_classes)
     repeat_heading_by_number = _repeat_heading_state(slides_by_number, full_classes_by_number)
 
     fits: dict[int, dict[ItemId, Rect]] = {}

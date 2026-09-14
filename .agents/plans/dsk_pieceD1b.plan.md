@@ -284,3 +284,57 @@ New tests (`tests/test_dsk_assemble.py`):
   the batch's own two-column set stays `{44, 46, 50}`.
 
 A/B vs 9604e2e (every GW slide planned alone, and the same deck-order batch as `test_gw_every_kept_non_movie_slide_plans_under_default_flags`): the deck-order batch is byte-identical (it always had the whole deck's real classes -- `load_assembly_inputs` classifies every slide regardless of `--slides`). Planned alone, GW51 and GW52 both change from two-column (heading kept, wrong) to full-width (heading dropped, correct) -- both slides' immediate predecessors (GW50, GW51) are group-child-verse clusters the round-2 approximation could not see. GW53 (predecessor GW52, a top-level-text cluster the approximation *could* see) was already correct and is unchanged. No other slide, in either scenario, changed.
+
+## Fix round 4 (Codex D1b-p2 review 3 of 0adc25a -- no reclassification fallback; all_classes contract)
+
+Review 3's MAJOR: round 3's `_classify_all_slides_from_payload` fallback forwarded `text_slide_words`, dedupe,
+backdrop, and group-child text/geometry, but its `classify_slide` call omitted `include_side` (batch
+classification passes the per-slide setting) and left `connection_line_builds` at zero (`classify_deck`
+supplies the real count). Both can change `category`/`kept`/`long_text_ids` from batch classification, and
+`_repeat_heading_state` reads `cls.category` (a connection-line-only intervening slide is `built` in batch
+classification but `empty` in the fallback, so the fallback could wrongly treat it as transparent to the run).
+
+**Fix (ORCHESTRATOR DECISION): the fallback is deleted, not patched.** `_classify_all_slides_from_payload` is
+removed entirely. `_full_classes_by_number(payload, classes, all_classes)`: caller-supplied `all_classes` wins
+as before; else, when `classes` already covers every slide number in `payload` (a synthetic single-/few-slide
+payload built to match `classes` -- unaffected, since `classes` already equals the payload's full
+classification), uses `classes` directly; else raises `ValueError("plan_assembly: planning a subset of the
+deck needs all_classes (the whole-deck classification)")`. `plan_assembly`'s docstring states the new
+requirement. `classify_slide` is no longer imported by `dsk_assemble.py`.
+
+Every direct `plan_assembly` caller that plans a subset of a deck-backed payload now passes
+`all_classes=classes` (or the fixture's full `by_number.values()`): `tests/test_dsk_assemble.py`'s
+`test_gw_every_kept_non_movie_slide_plans_under_default_flags`, `test_gw_text_slides_stay_within_band_top`,
+`test_gw44_badge_x_clears_title_right_edge`, `test_gw_group_text_slides_short_fit_stays_within_band_x`,
+`test_gw50_badge_x_clamped_to_band_right_edge`, `test_gw17_28_forced_split_at_floor_66_refuses_gw28_single_box`,
+`test_gw13_forced_floor_66_refuses_its_badge_gapped_single_box`, `test_gw49_plans_under_shrink_and_refuses_under_warn`,
+`test_repeat_heading_gw51_planned_alone_matches_batch`, and the three round-3 synthetic predecessor tests
+(`test_two_column_repeat_heading_dropped_when_planned_alone`, `..._survives_heading_only_predecessor`,
+`..._survives_headingless_predecessor`, `test_repeat_heading_predecessor_uses_group_child_verse`,
+`..._unmatched_badge_does_not_suppress`, `..._multiple_long_text_ids_does_not_suppress`), whose synthetic
+payloads include a predecessor slide outside `classes` and so now need an explicit `all_classes` covering both
+slides. `tests/test_dsk_content_rules_acceptance.py`'s `_plan_one` fixture helper now takes `by_number` and
+always passes `all_classes=list(by_number.values())`; `test_gw51_52_53_repeat_heading_dropped_full_width`
+passes `all_classes=list(by_number.values())` directly. The CLI path (`assemble_offline_deck`) already passed
+`all_classes=classes`; no `src/` caller needed a change (grepped every `plan_assembly(` call in `src/` and
+`tests/`; `_build_refit_round` does not reclassify or replan, per the review).
+
+New tests (`tests/test_dsk_assemble.py`):
+- `test_repeat_heading_predecessor_include_side_matches_batch_classification`: a predecessor classified with
+  `include_side=True` (an extra side-panel long-text box, kept only under `include_side`) breaks its own
+  heading cluster (two `long_text_ids`) and must not suppress; the same predecessor classified with
+  `include_side=False` drops that side text, keeps one `long_text_ids`, and does suppress -- both via
+  `all_classes`, proving `_full_classes_by_number` uses exactly what the caller classified, not its own guess.
+- `test_repeat_heading_connection_line_only_slide_breaks_run_consistently_with_batch`: an intervening
+  no-items slide classified with `connection_line_builds=0` is `category == "empty"` (transparent, run
+  continues, heading suppressed) versus `connection_line_builds=1` is `category == "built"` (breaks the run,
+  heading kept) -- both via `all_classes`.
+- `test_plan_assembly_subset_of_deck_without_all_classes_raises`: a subset `classes` (payload has a slide
+  `classes` doesn't cover) without `all_classes` raises `ValueError` naming `all_classes`.
+
+A/B vs 0adc25a: with `all_classes=classes` passed (as `assemble_offline_deck` already does, and as every
+updated test now does), `_full_classes_by_number` returns exactly `{c.number: c for c in all_classes}` --
+byte-identical to round 3's `all_classes is not None` branch, which was untouched. Every GW slide planned
+alone and the GW `{44, 46, 50, 51, 52, 53}` batch are therefore identical to 0adc25a's. No behavioural change
+on the `all_classes`-supplied path; the change is confined to what happens when it is omitted for a deck
+subset (refuse instead of silently reclassifying).

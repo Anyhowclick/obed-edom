@@ -51,9 +51,9 @@ def gw_inputs():
     return payload, {c.number: c for c in classes}, runs
 
 
-def _plan_one(payload, cls, runs, *, min_text_pt=dsa.DEFAULT_MIN_TEXT_PT, crop_dir=None, deck=None):
+def _plan_one(payload, cls, runs, by_number, *, min_text_pt=dsa.DEFAULT_MIN_TEXT_PT, crop_dir=None, deck=None):
     decisions = {cls.number: SlideDecision(cls.number, "in_deck", anchor="auto")}
-    kwargs = dict(band=DEFAULT_BAND, clips={}, runs=runs, min_text_pt=min_text_pt)
+    kwargs = dict(band=DEFAULT_BAND, clips={}, runs=runs, min_text_pt=min_text_pt, all_classes=list(by_number.values()))
     if crop_dir is not None:
         kwargs.update(deck=deck, fw_deck=GW_DECK, crop_dir=crop_dir)
     return plan_assembly(payload, [cls], decisions=decisions, **kwargs)
@@ -65,7 +65,7 @@ def test_gw13_single_text_verse_box_no_split(gw_inputs):
     _require_font("AzoSans-Regular")
     payload, by_number, runs = gw_inputs
     cls = by_number[13]
-    plan = _plan_one(payload, cls, runs)
+    plan = _plan_one(payload, cls, runs, by_number)
 
     verse = plan.fits[13][("text", 1)]
     assert verse.x == pytest.approx(43.0, abs=0.5)
@@ -85,7 +85,7 @@ def test_gw17_dedupe_and_stretch_no_overlap(gw_inputs):
     cls = by_number[17]
     assert {("text", 3), ("text", 4), ("text", 5)} <= set(cls.dropped_duplicate)
 
-    plan = _plan_one(payload, cls, runs)
+    plan = _plan_one(payload, cls, runs, by_number)
     stacked = plan.stacked_ids[17]
     assert stacked == frozenset({("text", 1), ("text", 2)})
     rects = [plan.fits[17][iid] for iid in stacked]
@@ -105,7 +105,7 @@ def test_gw17_forced_split_at_min_text_pt_66(gw_inputs):
     _require_font("AzoSans-Regular")
     payload, by_number, runs = gw_inputs
     cls = by_number[17]
-    plan = _plan_one(payload, cls, runs, min_text_pt=66)
+    plan = _plan_one(payload, cls, runs, by_number, min_text_pt=66)
 
     assert plan.parts[17] == 2
     assert plan.ordinal_to_number == {1: 17, 2: 17}
@@ -129,7 +129,7 @@ def test_gw28_panel_backdrop_dropped(gw_inputs):
     shape0 = next(i for i in slide28["items"] if (i["kind"], i["kindIndex"]) == ("shape", 0))
     assert item_rect(shape0) == Rect(951.0, 0.0, 3840.0, 1080.0)
 
-    plan = _plan_one(payload, cls, runs)
+    plan = _plan_one(payload, cls, runs, by_number)
     verse = next(i for i in slide28["items"] if (i["kind"], i["kindIndex"]) == ("text", 1))
     fitted = plan.fits[28][("text", 1)]
     scale = fitted.w / item_rect(verse).w
@@ -144,7 +144,7 @@ def test_gw48_wheelchair_dedupe_and_right_no_crop(gw_inputs):
     assert cls.kept == (("image", 2),)
     assert ("image", 3) in cls.dropped_duplicate
 
-    plan = _plan_one(payload, cls, runs)
+    plan = _plan_one(payload, cls, runs, by_number)
     assert plan.anchors[48] == "right"
     fitted = plan.fits[48][("image", 2)]
     assert fitted.x + fitted.w == pytest.approx(1892.0, abs=0.5)
@@ -161,7 +161,7 @@ def test_gw24_dedupe_four_to_two_right(gw_inputs):
     assert len(kept_images) == 2
     assert len(dropped_images) == 2
 
-    plan = _plan_one(payload, cls, runs)
+    plan = _plan_one(payload, cls, runs, by_number)
     assert plan.anchors[24] == "right"
     fitted = [plan.fits[24][iid] for iid in kept_images]
     assert max(r.x + r.w for r in fitted) == pytest.approx(1892.0, abs=0.5)
@@ -175,7 +175,7 @@ def test_gw16_diptych_union_centred(gw_inputs):
     _require_gw_deck()
     payload, by_number, runs = gw_inputs
     cls = by_number[16]
-    plan = _plan_one(payload, cls, runs)
+    plan = _plan_one(payload, cls, runs, by_number)
     assert plan.anchors[16] == "centre"
 
 
@@ -185,7 +185,7 @@ def test_gw22_diptych_union_centred(gw_inputs):
     _require_gw_deck()
     payload, by_number, runs = gw_inputs
     cls = by_number[22]
-    plan = _plan_one(payload, cls, runs)
+    plan = _plan_one(payload, cls, runs, by_number)
     assert plan.anchors[22] == "centre"
 
 
@@ -196,7 +196,7 @@ def test_gw21_image_crop_centred(gw_inputs, tmp_path):
     payload, by_number, runs = gw_inputs
     cls = by_number[21]
     deck = dsa._load_deck(GW_DECK)
-    plan = _plan_one(payload, cls, runs, crop_dir=tmp_path / "crops21", deck=deck)
+    plan = _plan_one(payload, cls, runs, by_number, crop_dir=tmp_path / "crops21", deck=deck)
 
     crop = plan.crops[21][("image", 0)]
     assert crop.px_box == (57, 1100, 4551, 2365)
@@ -226,7 +226,7 @@ def test_gw5_group_verse_text_slide_no_image(gw_inputs, tmp_path):
     assert cls.long_text_ids == (("groupchild", 0, "text", 1),)
     assert ("image", 0) in cls.dropped_media_text
 
-    plan = _plan_one(payload, cls, runs, crop_dir=tmp_path / "crops5", deck=deck)
+    plan = _plan_one(payload, cls, runs, by_number, crop_dir=tmp_path / "crops5", deck=deck)
 
     assert not plan.crops.get(5)
     assert ("image", 0) not in plan.fits[5]
@@ -323,7 +323,7 @@ def test_gw44_two_column_heading_and_verse(gw_inputs):
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
     payload, by_number, runs = gw_inputs
-    plan = _plan_one(payload, by_number[44], runs)
+    plan = _plan_one(payload, by_number[44], runs, by_number)
 
     heading = plan.fits[44][("text", 1)]
     badge = plan.fits[44][("shape", 0)]
@@ -365,7 +365,7 @@ def test_gw50_two_column_heading_and_verse(gw_inputs):
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
     payload, by_number, runs = gw_inputs
-    plan = _plan_one(payload, by_number[50], runs)
+    plan = _plan_one(payload, by_number[50], runs, by_number)
 
     heading = plan.fits[50][("text", 1)]
     badge = plan.fits[50][("shape", 0)]
@@ -412,7 +412,7 @@ def test_gw46_two_column_top_level_verse(gw_inputs):
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
     payload, by_number, runs = gw_inputs
-    plan = _plan_one(payload, by_number[46], runs)
+    plan = _plan_one(payload, by_number[46], runs, by_number)
 
     assert 46 in plan.two_column
     heading = plan.fits[46][("text", 3)]
@@ -448,6 +448,7 @@ def test_gw51_52_53_repeat_heading_dropped_full_width(gw_inputs):
     plan = plan_assembly(
         payload, [by_number[n] for n in (50, 51, 52, 53)],
         decisions=decisions, band=DEFAULT_BAND, clips={}, runs=runs,
+        all_classes=list(by_number.values()),
     )
 
     assert plan.two_column.get(50) is not None
@@ -474,7 +475,7 @@ def test_gw54_unchanged_single_column(gw_inputs):
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, by_number, runs = gw_inputs
-    plan = _plan_one(payload, by_number[54], runs)
+    plan = _plan_one(payload, by_number[54], runs, by_number)
 
     verse = plan.fits[54][("groupchild", 0, "text", 1)]
     assert verse.x == pytest.approx(43.0, abs=0.5)
@@ -487,7 +488,7 @@ def test_gw57_heading_only_unchanged(gw_inputs):
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, by_number, runs = gw_inputs
-    plan = _plan_one(payload, by_number[57], runs)
+    plan = _plan_one(payload, by_number[57], runs, by_number)
 
     assert 57 not in plan.two_column
     assert 57 not in plan.stack_bands
