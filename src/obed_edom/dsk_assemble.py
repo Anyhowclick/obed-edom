@@ -440,6 +440,56 @@ def _group_has_media(signature: str | None) -> bool:
 _LW_ASPECT_MIN = 2.5
 _LW_ASPECT_TOL = 1e-9
 
+HEADING_COL_W = 450.0
+COL_GUTTER = 8.0
+NUMBER_BADGE_PT = 46.0
+MAX_HEADING_PT = 80.0
+MAX_HEADING_BLOCK_PT = 140.0
+
+_HEADING_FONT_PREFIX = "ArgentCF"
+_HEADING_MAX_WORDS = 5
+_HEADING_NUMBER_MAX_CHARS = 2
+_HEADING_CIRCLE_PT = 81.0
+
+
+@dataclass(frozen=True)
+class HeadingCluster:
+    """A point heading's three paired items: its ``ArgentCF*`` text, its point-number
+    text, and the unfilled circle behind the number."""
+
+    heading_id: ItemId
+    number_id: ItemId
+    circle_id: ItemId
+
+
+def _heading_cluster(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) -> HeadingCluster | None:
+    """One ``ArgentCF*`` heading (<= 5 words) paired with one all-digit point number
+    (<= 2 chars) and its unfilled 81x81 circle, on a slide that also carries a long
+    text -- else ``None`` (never raises)."""
+    if not cls.long_text_ids:
+        return None
+    heading_ids: list[ItemId] = []
+    number_ids: list[ItemId] = []
+    circle_ids: list[ItemId] = []
+    for item_id in cls.kept:
+        kind, _kind_index = item_id
+        item = items_by_id.get(item_id)
+        if item is None:
+            continue
+        text = (item.get("text") or "").strip()
+        if kind == "text":
+            font = item.get("font") or ""
+            if font.startswith(_HEADING_FONT_PREFIX) and text and _word_count(text) <= _HEADING_MAX_WORDS:
+                heading_ids.append(item_id)
+            elif text.isdigit() and len(text) <= _HEADING_NUMBER_MAX_CHARS:
+                number_ids.append(item_id)
+        elif kind == "shape" and not text:
+            if item.get("w") == _HEADING_CIRCLE_PT and item.get("h") == _HEADING_CIRCLE_PT:
+                circle_ids.append(item_id)
+    if len(heading_ids) != 1 or len(number_ids) != 1 or len(circle_ids) != 1:
+        return None
+    return HeadingCluster(heading_ids[0], number_ids[0], circle_ids[0])
+
 
 def _content_ids(
     cls: SlideClass,

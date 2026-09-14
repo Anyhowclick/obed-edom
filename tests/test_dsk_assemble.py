@@ -1825,6 +1825,105 @@ def test_gw13_stacked_text_does_not_overlap_badge():
             )
 
 
+def _heading_item(kind_index, text, font="ArgentCF-Bold", w=450, h=150):
+    return {"kind": "text", "kindIndex": kind_index, "x": 0, "y": 0, "w": w, "h": h, "text": text, "font": font}
+
+
+def _number_item(kind_index, text="3", w=35, h=80):
+    return {
+        "kind": "text", "kindIndex": kind_index, "x": 0, "y": 0, "w": w, "h": h,
+        "text": text, "font": "AzoSans-Bold",
+    }
+
+
+def _circle_item(kind_index, w=81, h=81):
+    return {"kind": "shape", "kindIndex": kind_index, "x": 0, "y": 0, "w": w, "h": h, "text": ""}
+
+
+def _verse_item(kind_index, w=1492, h=358):
+    return {
+        "kind": "text", "kindIndex": kind_index, "x": 0, "y": 0, "w": w, "h": h,
+        "text": "A long verse text that keeps going on and on.", "font": "AzoSans-Regular",
+    }
+
+
+def test_heading_cluster_detected():
+    from obed_edom.dsk_plan import SlideClass
+
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse,
+    }
+    cls = SlideClass(
+        number=5, category="static", build_count=0, movie_count=0,
+        kept=(("text", 0), ("text", 1), ("shape", 0), ("text", 2)),
+        dropped_side=(), dropped_backdrop=(), transition=None,
+        is_text=True, long_text_ids=(("text", 2),),
+    )
+    cluster = dsa._heading_cluster(cls, items_by_id)
+    assert cluster == dsa.HeadingCluster(("text", 0), ("text", 1), ("shape", 0))
+
+
+def test_heading_cluster_rejects_two_headings():
+    from obed_edom.dsk_plan import SlideClass
+
+    heading0 = _heading_item(0, "Faith")
+    heading1 = _heading_item(3, "Hope")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    items_by_id = {
+        ("text", 0): heading0, ("text", 3): heading1, ("text", 1): number,
+        ("shape", 0): circle, ("text", 2): verse,
+    }
+    cls = SlideClass(
+        number=5, category="static", build_count=0, movie_count=0,
+        kept=(("text", 0), ("text", 3), ("text", 1), ("shape", 0), ("text", 2)),
+        dropped_side=(), dropped_backdrop=(), transition=None,
+        is_text=True, long_text_ids=(("text", 2),),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_none_without_long_text():
+    from obed_edom.dsk_plan import SlideClass
+
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle}
+    cls = SlideClass(
+        number=5, category="static", build_count=0, movie_count=0,
+        kept=(("text", 0), ("text", 1), ("shape", 0)),
+        dropped_side=(), dropped_backdrop=(), transition=None,
+        is_text=False, long_text_ids=(),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_gw_deck_measured_slides():
+    # Probe (§6): the plan doc's measured D1b set is GW {44, 46, 50, 51, 52, 53}; this
+    # fixes that measurement independently of the plan doc's own table.
+    _require_gw_deck()
+    payload, classes, _runs = load_assembly_inputs(GW_DECK)
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+    fires = set()
+    for cls in classes:
+        items_by_id = {
+            (i["kind"], i["kindIndex"]): i for i in slides_by_number[cls.number]["items"]
+        }
+        if dsa._heading_cluster(cls, items_by_id) is not None:
+            fires.add(cls.number)
+    for expect_yes in (44, 46, 50, 51, 52, 53):
+        assert expect_yes in fires, f"slide {expect_yes} should fire a heading cluster"
+    for expect_no in (5, 54, 57):
+        assert expect_no not in fires, f"slide {expect_no} should not fire a heading cluster"
+    assert fires == {44, 46, 50, 51, 52, 53}
+
+
 def _badge_and_stack_plan():
     _require_font("AzoSans-Regular")
     _require_font("AzoSans-Bold")
