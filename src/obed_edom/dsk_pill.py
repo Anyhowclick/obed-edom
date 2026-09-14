@@ -83,6 +83,7 @@ class _Expected:
     pill_id: str
     fingerprint: dict | None = None
     minted_ids: list[str] | None = None  # [image, mask, title, caption] iff the mint path ran
+    minted_types: list[str] | None = None  # _pbtype per minted_ids entry
     target_component_id: str | None = None
     expected_data_ids: list[str] | None = None
     style_ref: tuple[str, str] | None = None  # (style_id, style_component_id) iff cross-component
@@ -318,6 +319,33 @@ class _Minter:
         return {"lower": str(lower), "upper": str(upper)}
 
 
+def _resolve_layout_mask(
+    objects: dict[str, dict], id_to_file: dict[str, str], layout_member: str,
+    layout_pill_id: str, layout_pill: dict,
+) -> dict:
+    """The resolved layout's own Media mask, required before any candidate is
+    considered: must resolve, live in the layout member, have `super.parent` equal to
+    `layout_pill_id`, and use `_MASK_PATH_TYPE`. Any violation refuses -- mutation is
+    never authorized off an invalid layout source."""
+    mask_id = str((layout_pill.get("mask") or {}).get("identifier") or "")
+    mask_obj = objects.get(mask_id)
+    if not mask_id or mask_obj is None:
+        raise OfflineWriteRefused(f"layout pill {layout_pill_id}: mask {mask_id!r} unresolved")
+    if id_to_file.get(mask_id) != layout_member:
+        raise OfflineWriteRefused(f"layout pill {layout_pill_id}: mask {mask_id} not in layout member")
+    parent_id = str(((mask_obj.get("super") or {}).get("parent") or {}).get("identifier") or "")
+    if parent_id != layout_pill_id:
+        raise OfflineWriteRefused(
+            f"layout pill {layout_pill_id}: mask {mask_id} parent {parent_id!r} != {layout_pill_id!r}"
+        )
+    sps = (mask_obj.get("pathsource") or {}).get("scalarPathSource") or {}
+    if str(sps.get("type") or "") != _MASK_PATH_TYPE:
+        raise OfflineWriteRefused(
+            f"layout pill {layout_pill_id}: mask {mask_id} pathsource type is not {_MASK_PATH_TYPE!r}"
+        )
+    return mask_obj
+
+
 def _mask_exclusively_owned(
     objects: dict[str, dict], id_to_file: dict[str, str], slide_member: str,
     image_id: str, mask_id: str, mask_member: str,
@@ -449,8 +477,7 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
         if not data_id or not _data_id_present(namelist, data_id):
             raise OfflineWriteRefused(f"slide {ordinal}: data id {data_id!r} absent from the deck")
 
-        layout_mask_id = str((layout_pill.get("mask") or {}).get("identifier") or "")
-        layout_mask = objects.get(layout_mask_id)
+        layout_mask = _resolve_layout_mask(objects, id_to_file, layout_member, layout_pill_id, layout_pill)
 
         candidates = _resolve_slide_media_candidates(objects, slide, data_id, layout_pill, layout_mask)
         if len(candidates) > 1:
@@ -567,6 +594,10 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
             width, spec.layout, new_image_id,
             fingerprint=_image_fingerprint(new_image_obj),
             minted_ids=[new_image_id, new_mask_id, new_title_id, new_caption_id],
+            minted_types=[
+                new_image_obj.get("_pbtype"), new_mask_obj.get("_pbtype"),
+                new_title_obj.get("_pbtype"), new_caption_obj.get("_pbtype"),
+            ],
             target_component_id=str(slide_component["identifier"]),
             expected_data_ids=data_ids,
             style_ref=style_ref,
@@ -654,12 +685,13 @@ def _verify(out_path: Path, expected: Mapping[int, "_Expected"]) -> None:
             raise OfflineWriteRefused(
                 f"slide {ordinal}: re-read mask {mask_id} pathsource type is not {_MASK_PATH_TYPE!r}"
             )
-        if layout_mask is not None:
-            layout_mask_sps = (layout_mask.get("pathsource") or {}).get("scalarPathSource") or {}
-            if str(layout_mask_sps.get("type") or "") != _MASK_PATH_TYPE:
-                raise OfflineWriteRefused(
-                    f"slide {ordinal}: layout mask {layout_mask_id} pathsource type is not {_MASK_PATH_TYPE!r}"
-                )
+        if layout_mask is None:
+            raise OfflineWriteRefused(f"slide {ordinal}: layout mask {layout_mask_id} unresolved")
+        layout_mask_sps = (layout_mask.get("pathsource") or {}).get("scalarPathSource") or {}
+        if str(layout_mask_sps.get("type") or "") != _MASK_PATH_TYPE:
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: layout mask {layout_mask_id} pathsource type is not {_MASK_PATH_TYPE!r}"
+            )
 
         if exp.minted_ids is None:
             continue
@@ -676,6 +708,42 @@ def _verify(out_path: Path, expected: Mapping[int, "_Expected"]) -> None:
                 f"slide {ordinal}: minted pill {new_image_id} not registered identically in "
                 f"ownedDrawables ({owned.count(new_image_id)}) and drawablesZOrder ({z_order.count(new_image_id)})"
             )
+        # Mint object graph: all four archives live in the slide member with the
+        # expected types, image->mask/title/caption and mask->image are exactly the
+        # minted ids, and the mask is (still) exclusively owned by the minted image.
+        minted_mask_id, minted_title_id, minted_caption_id = exp.minted_ids[1:4]
+        minted_types = exp.minted_types or [None, None, None, None]
+        minted_labels = ("image", "mask", "title", "caption")
+        slide_member = id_to_file.get(slide_id)
+        for label, nid, ntype in zip(minted_labels, exp.minted_ids, minted_types):
+            nobj = objects.get(nid)
+            if nobj is None:
+                raise OfflineWriteRefused(f"slide {ordinal}: minted {label} archive {nid} unresolved on re-read")
+            if id_to_file.get(nid) != slide_member:
+                raise OfflineWriteRefused(f"slide {ordinal}: minted {label} archive {nid} not in the slide member")
+            if ntype is not None and nobj.get("_pbtype") != ntype:
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: minted {label} archive {nid} is {nobj.get('_pbtype')!r}, expected {ntype!r}"
+                )
+        image_title_id = str((image_obj.get("super") or {}).get("title", {}).get("identifier") or "")
+        image_caption_id = str((image_obj.get("super") or {}).get("caption", {}).get("identifier") or "")
+        if mask_id != minted_mask_id or image_title_id != minted_title_id or image_caption_id != minted_caption_id:
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: minted pill {new_image_id} references mask={mask_id!r} "
+                f"title={image_title_id!r} caption={image_caption_id!r}, expected "
+                f"mask={minted_mask_id!r} title={minted_title_id!r} caption={minted_caption_id!r}"
+            )
+        mask_parent_id = str(((mask_obj.get("super") or {}).get("parent") or {}).get("identifier") or "")
+        if mask_parent_id != new_image_id:
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: minted mask {mask_id} parent {mask_parent_id!r} != {new_image_id!r}"
+            )
+        mask_member = id_to_file.get(mask_id)
+        if not _mask_exclusively_owned(objects, id_to_file, slide_member, new_image_id, mask_id, mask_member):
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: minted mask {mask_id} is not exclusively owned by pill {new_image_id}"
+            )
+
         if package_meta is None:
             raise OfflineWriteRefused(f"slide {ordinal}: no package metadata to verify mint registration")
 
@@ -689,26 +757,30 @@ def _verify(out_path: Path, expected: Mapping[int, "_Expected"]) -> None:
                 f"slide {ordinal}: target metadata component {exp.target_component_id} not found"
             )
 
-        registered_uuid_ids = {
+        registered_uuid_ids_raw = [
             str(u.get("identifier")) for u in target_component.get("objectUuidMapEntries") or []
-        }
-        missing = [nid for nid in exp.minted_ids if nid not in registered_uuid_ids]
-        if missing:
-            raise OfflineWriteRefused(
-                f"slide {ordinal}: minted ids {missing} missing objectUuidMapEntries in "
-                f"component {exp.target_component_id}"
-            )
-
-        by_data = {str(d.get("dataIdentifier")): d for d in target_component.get("dataReferences") or []}
-        for did in exp.expected_data_ids or []:
-            entry = by_data.get(did)
-            refs = [
-                r for r in ((entry or {}).get("objectReferenceList") or [])
-                if str(r.get("objectIdentifier")) == new_image_id
-            ]
-            if len(refs) != 1 or int(refs[0].get("count", -1)) != 1:
+        ]
+        for nid in exp.minted_ids:
+            count = registered_uuid_ids_raw.count(nid)
+            if count != 1:
                 raise OfflineWriteRefused(
-                    f"slide {ordinal}: data id {did} missing an exact "
+                    f"slide {ordinal}: minted id {nid} has {count} objectUuidMapEntries in "
+                    f"component {exp.target_component_id}, expected exactly 1"
+                )
+
+        data_entries_raw = target_component.get("dataReferences") or []
+        for did in exp.expected_data_ids or []:
+            matching_entries = [d for d in data_entries_raw if str(d.get("dataIdentifier")) == did]
+            if len(matching_entries) != 1:
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: data id {did} has {len(matching_entries)} dataReferences entries "
+                    f"in component {exp.target_component_id}, expected exactly 1"
+                )
+            refs_raw = matching_entries[0].get("objectReferenceList") or []
+            matching_refs = [r for r in refs_raw if str(r.get("objectIdentifier")) == new_image_id]
+            if len(matching_refs) != 1 or int(matching_refs[0].get("count", -1)) != 1:
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: data id {did} does not have an exact "
                     f"{{objectIdentifier: {new_image_id}, count: 1}} registration in "
                     f"component {exp.target_component_id}"
                 )
@@ -716,14 +788,15 @@ def _verify(out_path: Path, expected: Mapping[int, "_Expected"]) -> None:
         if exp.style_ref is not None:
             style_id, style_component_id = exp.style_ref
             ext_refs = target_component.get("externalReferences") or []
-            if not any(
-                str(r.get("objectIdentifier")) == style_id
-                and str(r.get("componentIdentifier")) == style_component_id
-                for r in ext_refs
+            matching_ext_refs = [r for r in ext_refs if str(r.get("objectIdentifier")) == style_id]
+            if (
+                len(matching_ext_refs) != 1
+                or str(matching_ext_refs[0].get("componentIdentifier")) != style_component_id
             ):
                 raise OfflineWriteRefused(
-                    f"slide {ordinal}: style {style_id} external reference to component "
-                    f"{style_component_id} missing in component {exp.target_component_id}"
+                    f"slide {ordinal}: style {style_id} external reference is not exactly one "
+                    f"non-conflicting reference to component {style_component_id} in "
+                    f"component {exp.target_component_id}"
                 )
 
         if str(package_meta.get("lastObjectIdentifier")) != exp.final_counter:

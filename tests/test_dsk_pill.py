@@ -821,3 +821,224 @@ def test_verify_catches_a_persisted_counter_that_does_not_match_the_final_mint(
     _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
     with pytest.raises(P.OfflineWriteRefused, match="lastObjectIdentifier"):
         P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+# ------------------------------------------------------------- Codex review 3, finding 1
+# The resolved layout's own Media mask must fully resolve BEFORE any candidate is
+# considered -- gold slide 3, layout member Index/TemplateSlide-3654281.iwa, layout pill
+# 3654467, layout mask 3654469.
+
+_GOLD_LAYOUT_MEMBER = "Index/TemplateSlide-3654281.iwa"
+_GOLD_LAYOUT_PILL = "3654467"
+_GOLD_LAYOUT_MASK = "3654469"
+
+
+def _corrupt_gold_layout_mask(deck: Path, mutate) -> None:
+    with zipfile.ZipFile(deck) as zf:
+        buf = zf.read(_GOLD_LAYOUT_MEMBER)
+    decoded = IWAFile.from_buffer(buf, _GOLD_LAYOUT_MEMBER).to_dict()
+    mutate(decoded)
+    new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
+    _rewrite_members(deck, {_GOLD_LAYOUT_MEMBER: new_bytes})
+
+
+@needs_gold
+def test_layout_mask_unresolved_refuses_before_any_candidate(tmp_path: Path) -> None:
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+
+    def mutate(decoded: dict) -> None:
+        arch = _find_archive(decoded, _GOLD_LAYOUT_PILL)
+        arch["objects"][0]["mask"] = {"identifier": "999999999"}
+
+    _corrupt_gold_layout_mask(deck, mutate)
+    with pytest.raises(P.OfflineWriteRefused, match="unresolved"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_layout_mask_wrong_parent_refuses_before_any_candidate(tmp_path: Path) -> None:
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+
+    def mutate(decoded: dict) -> None:
+        arch = _find_archive(decoded, _GOLD_LAYOUT_MASK)
+        arch["objects"][0]["super"]["parent"] = {"identifier": "999999999"}
+
+    _corrupt_gold_layout_mask(deck, mutate)
+    with pytest.raises(P.OfflineWriteRefused, match="parent"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_layout_mask_wrong_path_type_refuses_before_any_candidate(tmp_path: Path) -> None:
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+
+    def mutate(decoded: dict) -> None:
+        arch = _find_archive(decoded, _GOLD_LAYOUT_MASK)
+        arch["objects"][0]["pathsource"]["scalarPathSource"]["type"] = ""
+
+    _corrupt_gold_layout_mask(deck, mutate)
+    with pytest.raises(P.OfflineWriteRefused, match="pathsource type"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+# ------------------------------------------------------------- Codex review 3, finding 2
+# Mint object-graph verification: all four archives, exact image<->mask/title/caption
+# wiring, and re-run exclusive mask ownership on the re-read output. Each test lets the
+# real write happen, then corrupts the already-rewritten out_path (monkeypatching
+# `_rewrite_members` to run the real rewrite first) so `_verify`'s re-read is what fails.
+
+
+def _minted_graph_ids(path: Path, member: str, slide_id: str) -> tuple[str, str, str, str]:
+    with zipfile.ZipFile(path) as zf:
+        buf = zf.read(member)
+    decoded = IWAFile.from_buffer(buf, member).to_dict()
+    slide_obj = _find_archive(decoded, slide_id)["objects"][0]
+    image_id = str(slide_obj["ownedDrawables"][-1]["identifier"])
+    image_obj = _find_archive(decoded, image_id)["objects"][0]
+    mask_id = str(image_obj["mask"]["identifier"])
+    title_id = str(image_obj["super"]["title"]["identifier"])
+    caption_id = str(image_obj["super"]["caption"]["identifier"])
+    return image_id, mask_id, title_id, caption_id
+
+
+@needs_gold
+def test_verify_catches_a_missing_minted_caption_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_rewrite = P._rewrite_members
+    member = "Index/Slide-15156371.iwa"
+
+    def corrupt_rewrite(path: Path, edits: dict) -> None:
+        real_rewrite(path, edits)
+        _image_id, _mask_id, _title_id, caption_id = _minted_graph_ids(path, member, "15156371")
+        with zipfile.ZipFile(path) as zf:
+            buf = zf.read(member)
+        decoded = IWAFile.from_buffer(buf, member).to_dict()
+        decoded["chunks"][0]["archives"] = [
+            a for a in decoded["chunks"][0]["archives"]
+            if str(a["header"]["identifier"]) != caption_id
+        ]
+        new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
+        real_rewrite(path, {member: new_bytes})
+
+    monkeypatch.setattr(P, "_rewrite_members", corrupt_rewrite)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, member, "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="caption archive"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_a_minted_mask_whose_parent_is_not_the_minted_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_rewrite = P._rewrite_members
+    member = "Index/Slide-15156371.iwa"
+
+    def corrupt_rewrite(path: Path, edits: dict) -> None:
+        real_rewrite(path, edits)
+        _image_id, mask_id, _title_id, _caption_id = _minted_graph_ids(path, member, "15156371")
+        with zipfile.ZipFile(path) as zf:
+            buf = zf.read(member)
+        decoded = IWAFile.from_buffer(buf, member).to_dict()
+        mask_arch = _find_archive(decoded, mask_id)
+        mask_arch["objects"][0]["super"]["parent"] = {"identifier": "999999999"}
+        new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
+        real_rewrite(path, {member: new_bytes})
+
+    monkeypatch.setattr(P, "_rewrite_members", corrupt_rewrite)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, member, "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="parent"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_a_substituted_minted_mask_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The minted image's own `mask` reference is retargeted to a byte-for-byte DUPLICATE
+    of the correctly-written minted mask (same fields, satisfies the mask law for this
+    width identically) under a different id -- `_verify` must still refuse because it is
+    not the exact id it minted, not merely because the geometry looks right."""
+    real_rewrite = P._rewrite_members
+    member = "Index/Slide-15156371.iwa"
+
+    def corrupt_rewrite(path: Path, edits: dict) -> None:
+        real_rewrite(path, edits)
+        image_id, mask_id, _title_id, _caption_id = _minted_graph_ids(path, member, "15156371")
+        with zipfile.ZipFile(path) as zf:
+            buf = zf.read(member)
+        decoded = IWAFile.from_buffer(buf, member).to_dict()
+        mask_arch = _find_archive(decoded, mask_id)
+        dup_mask = copy.deepcopy(mask_arch)
+        dup_mask["header"] = copy.deepcopy(dup_mask["header"])
+        dup_mask["header"]["identifier"] = "888888888"
+        decoded["chunks"][0]["archives"].append(dup_mask)
+        image_arch = _find_archive(decoded, image_id)
+        image_arch["objects"][0]["mask"] = {"identifier": "888888888"}
+        new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
+        real_rewrite(path, {member: new_bytes})
+
+    monkeypatch.setattr(P, "_rewrite_members", corrupt_rewrite)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, member, "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="references"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+# ------------------------------------------------------------- Codex review 3, finding 3
+# Metadata verification must count over the raw lists: exactly one entry per minted id /
+# expected data id / non-conflicting style reference, not mere containment.
+
+
+@needs_gold
+def test_verify_catches_a_duplicate_uuid_entry_for_a_minted_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_register = P._register_new_ids
+
+    def dup_register(component: dict, minter: P._Minter, new_ids: list[str]) -> None:
+        real_register(component, minter, new_ids)
+        component["objectUuidMapEntries"].append({"identifier": new_ids[0], "uuid": minter.mint_uuid()})
+
+    monkeypatch.setattr(P, "_register_new_ids", dup_register)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="objectUuidMapEntries"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_a_duplicate_data_reference_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_register = P._register_data_refs
+
+    def dup_register(component: dict, image_id: str, data_ids: list[str]) -> None:
+        real_register(component, image_id, data_ids)
+        for did in data_ids:
+            component["dataReferences"].append(
+                {"dataIdentifier": did, "objectReferenceList": [{"objectIdentifier": image_id, "count": 1}]}
+            )
+
+    monkeypatch.setattr(P, "_register_data_refs", dup_register)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="dataReferences entries"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_a_correct_plus_conflicting_style_reference_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_register = P._register_style_ext_ref
+
+    def conflicting_register(component: dict, style_id: str, style_component_id: str) -> None:
+        real_register(component, style_id, style_component_id)
+        component["externalReferences"].append(
+            {"componentIdentifier": "999999999", "objectIdentifier": style_id}
+        )
+
+    monkeypatch.setattr(P, "_register_style_ext_ref", conflicting_register)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="non-conflicting"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")

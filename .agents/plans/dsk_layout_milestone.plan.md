@@ -435,6 +435,33 @@ matching same-component reference idempotently, refusing a conflicting one, and 
 new cross-member one. `tests/test_dsk_pill.py`: 28 -> 39, all passing; full suite unchanged
 at 2515 passed / 84 skipped / 1 xfailed, no regressions.
 
+**L4 fix round 3 (2026-09-14, Codex review `codex-L4-review3.md`, REVISE).** The resolved
+layout's own Media mask must now fully resolve BEFORE any candidate is considered
+(`_resolve_layout_mask`): must resolve, live in the layout member, have
+`mask.super.parent.identifier == layout_pill_id`, and use `_MASK_PATH_TYPE` -- any
+violation refuses before candidate selection runs; `_verify`'s matching layout-mask type
+check is now unconditional (it always resolves, so it always checks). Mint verification
+now validates the full minted object graph on the re-read output, not just that the four
+ids appear in metadata: each of image/mask/title/caption resolves in the target slide
+member with its own minted `_pbtype`, the minted image's `mask`/`title`/`caption`
+references are exactly the minted ids (a byte-identical duplicate mask under a different
+id is refused, not merely a geometrically-plausible one), the minted mask's own
+`super.parent` is exactly the minted image, and `_mask_exclusively_owned` is re-run on
+the reread ids. "Exact" metadata verification is now a count over the RAW lists rather
+than containment: exactly one `objectUuidMapEntries` entry per minted id, exactly one
+`dataReferences` entry per expected data id each carrying exactly one
+`{objectIdentifier: image_id, count: 1}`, and exactly one non-conflicting
+(style id, component id) external reference -- a duplicate UUID entry, a duplicate
+`dataReferences` entry, or a correct-plus-conflicting style pair now all fail. 9 tests
+added: 3 for the layout-mask precondition (unresolved / wrong parent / wrong path type,
+gold slide 3's own layout pill+mask); 3 for the mint object graph (missing caption
+archive, mask parent not the minted image, mask id substituted for a duplicate) via a
+`_rewrite_members` monkeypatch that lets the real write land then corrupts the already-
+written `out_path` before `_verify` re-reads it; 3 for exact-count metadata (duplicate
+UUID entry, duplicate `dataReferences` entry, correct+conflicting style reference) by
+monkeypatching the `_register_*` helpers to append an extra entry after the real one.
+`tests/test_dsk_pill.py`: 49 -> 58, all passing.
+
 **L5 — heading-only and point classes (Q2, Q3).** Heading-only: 60 pt flat, badge 46 pt,
 pair centred on x=960, badge above for 2 lines / inline-left for 1 line, on
 `Point 3 Lines` / `Point (2 Lines)` per line count. Drop the Q3 0.75 badge scale — the verse
