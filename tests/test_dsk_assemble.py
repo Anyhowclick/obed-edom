@@ -6817,6 +6817,165 @@ def test_verify_builds_refuses_badge_build_surviving_only_one_part(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# S4 -- build policy on split boxes: planning refusal for a character/word-level
+# build, and cloned-build multiplicity/identity-narrowing at verify time.
+# --------------------------------------------------------------------------
+def test_refuse_split_box_char_word_builds_names_box_and_effect():
+    with pytest.raises(AssemblyRefusal, match=r"box 3.*apple:dissolve character"):
+        dsa._refuse_split_box_char_word_builds(
+            17, ("text", 3),
+            {17: {"builds": [
+                {"kind": "text", "kindIndex": 3, "effect": "apple:dissolve character", "animationType": "In"},
+            ]}},
+        )
+
+
+def test_refuse_split_box_char_word_builds_matches_word_and_klnsparkle_suffixes():
+    for effect in ("apple:dissolve word", "com.apple.iWork.Keynote.KLNSparkle"):
+        with pytest.raises(AssemblyRefusal):
+            dsa._refuse_split_box_char_word_builds(
+                17, ("text", 3),
+                {17: {"builds": [{"kind": "text", "kindIndex": 3, "effect": effect, "animationType": "In"}]}},
+            )
+
+
+def test_refuse_split_box_char_word_builds_ignores_other_boxes_and_whole_object_builds():
+    dsa._refuse_split_box_char_word_builds(
+        17, ("text", 3),
+        {17: {"builds": [
+            {"kind": "text", "kindIndex": 9, "effect": "apple:dissolve character", "animationType": "In"},
+            {"kind": "text", "kindIndex": 3, "effect": "apple:dissolve", "animationType": "In"},
+        ]}},
+    )
+
+
+def _char_window_split_part(part_no: int, kind_index: int, deletes: tuple, char_window: tuple) -> SplitPart:
+    item_id = ("text", kind_index)
+    return SplitPart(
+        fits={item_id: Rect(0.0, 0.0, 100.0, 100.0)}, deletes=deletes, text_sizes={},
+        stacked_ids=frozenset({item_id}), char_window=char_window, char_total=30,
+    )
+
+
+def test_verify_builds_char_window_split_clean_with_exactly_len_parts_copies(monkeypatch):
+    from obed_edom import iwa_builds
+
+    src_dissolve = {
+        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
+        "identity": ("text", "whole box text here"),
+    }
+    src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
+    part_texts = ["whole box", "box text", "text here"]
+    out_builds = {
+        2 + i: {
+            "slideId": f"o{i}",
+            "builds": [dict(src_dissolve, kindIndex=0, identity=("text", t))],
+            "transition": None,
+        }
+        for i, t in enumerate(part_texts)
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 3}, ordinal_to_number={2: 17, 3: 17, 4: 17},
+        splits={17: tuple(_char_window_split_part(i, 1, (), (1, 10)) for i in range(3))},
+    )
+    warnings: list[str] = []
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert len(builds["out_rekeyed"][17]["builds"]) == 3
+    assert any("cloned build on split part" in w for w in warnings)
+
+
+def _run_char_window_verify(out_builds_per_ordinal: list[list[dict]], monkeypatch, src_dissolve: dict):
+    from obed_edom import iwa_builds
+
+    src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
+    out_builds = {
+        2 + i: {"slideId": f"o{i}", "builds": builds_here, "transition": None}
+        for i, builds_here in enumerate(out_builds_per_ordinal)
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 3}, ordinal_to_number={2: 17, 3: 17, 4: 17},
+        splits={17: tuple(_char_window_split_part(i, 1, (), (1, 10)) for i in range(3))},
+    )
+    warnings: list[str] = []
+    return dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+def test_verify_builds_char_window_split_mismatches_with_two_copies(monkeypatch):
+    src_dissolve = {
+        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
+        "identity": ("text", "whole box text here"),
+    }
+    part_texts = ["whole box", "box text"]
+    per_ordinal = [[dict(src_dissolve, kindIndex=0, identity=("text", t))] for t in part_texts] + [[]]
+    with pytest.raises(AssemblyRefusal, match="surplus"):
+        _run_char_window_verify(per_ordinal, monkeypatch, src_dissolve)
+
+
+def test_verify_builds_char_window_split_mismatches_with_four_copies(monkeypatch):
+    src_dissolve = {
+        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
+        "identity": ("text", "whole box text here"),
+    }
+    part_texts = ["whole box", "box text", "text here"]
+    per_ordinal = [[dict(src_dissolve, kindIndex=0, identity=("text", t))] for t in part_texts]
+    per_ordinal[0] = per_ordinal[0] * 2
+    with pytest.raises(AssemblyRefusal, match="surplus"):
+        _run_char_window_verify(per_ordinal, monkeypatch, src_dissolve)
+
+
+def test_verify_builds_char_window_split_unrelated_identity_is_genuine_mismatch(monkeypatch):
+    from obed_edom import iwa_builds
+
+    src_dissolve = {
+        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "text", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
+        "identity": ("text", "whole box text here"),
+    }
+    src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
+    part_texts = ["whole box", "box text", "completely unrelated"]
+    out_builds = {
+        2 + i: {
+            "slideId": f"o{i}",
+            "builds": [dict(src_dissolve, kindIndex=0, identity=("text", t))],
+            "transition": None,
+        }
+        for i, t in enumerate(part_texts)
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 3}, ordinal_to_number={2: 17, 3: 17, 4: 17},
+        splits={17: tuple(_char_window_split_part(i, 1, (), (1, 10)) for i in range(3))},
+    )
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+def test_identity_is_narrowed_slice_accepts_contiguous_slice_rejects_unrelated():
+    assert dsa._identity_is_narrowed_slice(("text", "box text"), ("text", "whole box text here"))
+    assert dsa._identity_is_narrowed_slice(("group", "abc"), ("group", "abc"))
+    assert not dsa._identity_is_narrowed_slice(("text", "unrelated"), ("text", "whole box text here"))
+    assert not dsa._identity_is_narrowed_slice(("text", "x"), ("group", "x"))
+
+
+# --------------------------------------------------------------------------
 # placement by shape (D3/step 9, owner correction 2026-09-12) -- SlideDecision
 # (anchor="auto") is the CLI's "operator gave no explicit --anchor" sentinel;
 # plan_assembly derives the anchor from the union of the kept content rects --
@@ -9402,6 +9561,29 @@ def test_gw38_split_part_run_sizes_capped_at_50pt():
     sizes = {round(sz, 2) for _lo, _hi, sz in part0.run_sizes[verse_id]}
     assert 50.0 in sizes
     assert round(85.0 * 45.0 / 70.0, 2) not in sizes  # 54.64pt, the uncapped ratio
+
+
+def test_gw38_split_refuses_a_character_level_build_on_the_split_box():
+    # S4 §3: a real char-window split candidate (GW 38) whose box carries a
+    # character-level build must be refused during planning, naming the box and effect,
+    # before any split geometry/deletes are emitted.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    cls38 = by_number[38]
+    verse_id = cls38.long_text_ids[0]
+    decisions = {38: SlideDecision(38, "in_deck")}
+    builds = {38: {"builds": [
+        {"kind": verse_id[0], "kindIndex": verse_id[1], "effect": "apple:dissolve character", "animationType": "In"},
+    ]}}
+    with pytest.raises(AssemblyRefusal, match=rf"box {verse_id[1]}.*apple:dissolve character"):
+        plan_assembly(
+            payload, [cls38], decisions=decisions, band=BAND, clips={}, runs=runs,
+            all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+            builds=builds,
+        )
 
 
 # --------------------------------------------------------------------------- S3: split

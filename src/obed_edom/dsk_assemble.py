@@ -407,6 +407,40 @@ def _item_label(item_id: ItemId) -> str:
     return str(item_id[1])
 
 
+_CHAR_WORD_BUILD_SUFFIXES = (" character", " word")
+
+
+def _refuse_split_box_char_word_builds(
+    number: int, box_id: ItemId, builds: Mapping[int, dict] | None
+) -> None:
+    """S4 §3: refuses splitting a box (or its group) that carries a character/word-level
+    build -- Keynote animates such a build over the box's own character/word indices,
+    which a text split invalidates."""
+    for b in ((builds or {}).get(number) or {}).get("builds") or []:
+        if (b["kind"], b["kindIndex"]) != box_id:
+            continue
+        effect = b.get("effect") or ""
+        if effect.endswith(_CHAR_WORD_BUILD_SUFFIXES) or "KLNSparkle" in effect:
+            raise AssemblyRefusal(
+                f"slide {number} box {_item_label(box_id)}: build {effect!r} is "
+                "character/word-level -- cannot split"
+            )
+
+
+def _identity_is_narrowed_slice(part_identity: tuple, src_identity: tuple) -> bool:
+    """True if a split part's build identity is the source's identity narrowed to a
+    contiguous slice of its text (probe H3) -- the only legitimate way a cloned build's
+    identity may differ from its source."""
+    if part_identity == src_identity:
+        return True
+    if len(part_identity) != 2 or len(src_identity) != 2 or part_identity[0] != src_identity[0]:
+        return False
+    part_text, src_text = part_identity[1], src_identity[1]
+    if not part_text or not src_text:
+        return False
+    return part_text in src_text
+
+
 def _refuse_on_short_row_overlap(number: int, short_fit: dict[ItemId, Rect]) -> None:
     """Refuses when a group's short-row child (badge or short label) overlaps another
     short-row item (F1) -- a pre-existing pair of ordinary short-row items may
@@ -1813,6 +1847,7 @@ def plan_assembly(
                                 f"slide {number} box {_item_label(split_box.item_id)}: the slot's "
                                 f"{split_pt:.0f}pt size is below --min-text-pt {min_text_pt}"
                             )
+                        _refuse_split_box_char_word_builds(number, split_box.item_id, builds)
                         long_item = items_by_id[split_box.item_id]
                         run_table = _emitted_run_sizes(long_item, split_t, split_pt)
                         if run_table == "unresolved":
@@ -1911,6 +1946,7 @@ def plan_assembly(
                         stacked_ids = set(long_ids)
                         part_list: list[SplitPart] = []
                         for box in boxes:
+                            _refuse_split_box_char_word_builds(number, box.item_id, builds)
                             single = fit_text_stack([box], stack_band, min_text_pt)
                             if single is None:
                                 raise AssemblyRefusal(
@@ -3768,14 +3804,31 @@ def _merge_split_part_builds(
     plan: AssemblyPlan,
     number: int,
     *,
+    src_builds: Sequence[dict] = (),
     hidden: frozenset[ItemId] = frozenset(),
+    warnings: list[str] | None = None,
 ) -> list[dict]:
     """Sums each part's own long-box builds; merges short-item builds, treating a key as
     "repeated" only when genuinely shared across every part (see plan D5). ``hidden`` is
     the source slide's placeholder-hide set (keyed by slide number, not by ordinal/part --
     a delete-refused placeholder is the same source item regardless of which split part
-    produced the ``HIDDEN`` marker, so one set per source slide is sufficient here)."""
+    produced the ``HIDDEN`` marker, so one set per source slide is sufficient here).
+
+    S4 §2/§3: a char-window split's long box is the SAME source box cloned across every
+    part, so each part's own copy of a non-character/word build is legitimate (planning
+    already refused a character/word-level build on the box -- see
+    ``_refuse_split_box_char_word_builds``). When a part's build identity narrows to a
+    contiguous slice of the matching source build's identity (probe H3), its identity is
+    collapsed to the source's own -- so `_verify_builds`' multiset compare sees ``len(parts)``
+    copies of ONE key instead of ``len(parts)`` distinct narrowed keys, and tolerates the
+    surplus exactly (``_verify_builds``). Any part whose identity is not such a slice is left
+    alone -- a genuine mismatch, not silently absorbed."""
     split_parts = plan.splits.get(number, ())
+    is_char_window = any(p.char_window is not None for p in split_parts)
+    src_by_effect_type: dict[tuple, dict] = {}
+    if is_char_window:
+        for sb in src_builds:
+            src_by_effect_type.setdefault((sb["kind"], sb["effect"], sb["animationType"]), sb)
     part_fits = [p.fits for p in split_parts]
     long_builds: list[dict] = []
     short_counts: list[Counter] = []
@@ -3789,7 +3842,14 @@ def _merge_split_part_builds(
         counts: Counter = Counter()
         for b in rec["builds"]:
             if (b["kind"], b["kindIndex"]) == long_id:
-                long_builds.append(b)
+                src_b = src_by_effect_type.get((b["kind"], b["effect"], b["animationType"]))
+                if src_b is not None and _identity_is_narrowed_slice(b["identity"], src_b["identity"]):
+                    clone = dict(b, identity=src_b["identity"])
+                    long_builds.append(clone)
+                    if warnings is not None and b["identity"] != src_b["identity"]:
+                        warnings.append(f"slide {number}: cloned build on split part {part}, identity narrowed")
+                else:
+                    long_builds.append(b)
                 continue
             key = (b["effect"], b["animationType"], b["identity"])
             counts[key] += 1
@@ -3865,7 +3925,9 @@ def _verify_builds(
             merged_builds = list(recs[0]["builds"])
         else:
             merged_builds = _merge_split_part_builds(
-                ordinal_recs, plan, number, hidden=hidden.get(number, frozenset())
+                ordinal_recs, plan, number,
+                src_builds=src.get(number, {}).get("builds", []),
+                hidden=hidden.get(number, frozenset()), warnings=warnings,
             )
         out_by_number[number] = {"slideId": recs[0]["slideId"], "builds": merged_builds, "transition": transition}
     src_by_number = {number: rec for number, rec in src.items() if number in plan.kept}
@@ -3904,7 +3966,17 @@ def _verify_builds(
             if s["count"] <= avail:
                 paired = True
                 avail_movie_start[s["slide"]] = avail - s["count"]
-        (tolerated_surplus if paired else real_surplus).append(s)
+        is_cloned_repr = False
+        if not paired:
+            split_parts = plan.splits.get(s["slide"], ())
+            if split_parts and any(p.char_window is not None for p in split_parts):
+                expected_surplus = len(split_parts) - 1
+                has_source_build = any(
+                    (b["effect"], b["animationType"], b["identity"]) == (s["effect"], s["animationType"], s["identity"])
+                    for b in src_by_number.get(s["slide"], {}).get("builds", [])
+                )
+                is_cloned_repr = has_source_build and s["count"] == expected_surplus
+        (tolerated_surplus if paired or is_cloned_repr else real_surplus).append(s)
     builds["tolerated_surplus"] = tolerated_surplus
     if real_surplus:
         raise AssemblyRefusal(f"builds verify surplus on assembled deck: {real_surplus}")

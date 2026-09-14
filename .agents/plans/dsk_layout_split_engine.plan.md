@@ -439,6 +439,43 @@ group build whose part identity is a slice of the source's verifies, and one who
 unrelated refuses. Offline A/B: GW 20's `KLNSparkle` builds stay untouched (not on the split
 box); no other candidate's build report changes.
 
+> **S4 landed.** New `_refuse_split_box_char_word_builds` (checks `builds[number]` for a
+> `(kind, kindIndex)` match on the split box, refusing when its `effect` ends in
+> ` character`/` word` or contains `KLNSparkle`) is called from both split branches in
+> `plan_assembly` -- the char-window path (single long box, right before `_emitted_run_sizes`)
+> and the per-box stack-split path (each `box` in the loop) -- before any split geometry is
+> computed; group-child boxes never reach either call site (already refused earlier, generic
+> "grouped verse text ... refusing to split text inside a group"), so this is the S4 scope's
+> only reachable case today -- GW 5/54's group dissolve is S5's. `_merge_split_part_builds`
+> gained `src_builds`/`warnings` params: for a char-window split's own long-box build, when a
+> part's raw identity narrows to a contiguous slice of the matching `(kind, effect,
+> animationType)` source build's identity (`_identity_is_narrowed_slice`, probe H3), the part's
+> copy is emitted with the SOURCE's identity substituted (and a "cloned build on split part k,
+> identity narrowed" warning) -- collapsing what would otherwise be `len(parts)` distinct
+> narrowed keys into ONE key with multiplicity `len(parts)`; an identity that isn't a slice is
+> left alone as a genuine mismatch. `_verify_builds`' surplus loop now tolerates a clone
+> representative's surplus only when it EXACTLY equals `len(plan.splits[slide]) - 1` (not "at
+> most", unlike the movie-start budget it sits beside) and a same-key source build exists --
+> 2 or 4 copies on a 3-part split both miss that exact-match test and raise. Tests added
+> (`tests/test_dsk_assemble.py`, new S4 block before "placement by shape"): the refusal helper
+> named/suffix/KLNSparkle/other-box cases; a real GW 38 planning run with a synthetic
+> character-level build on its verse box, refusing and naming the box+effect; a synthetic
+> 3-part char-window `_verify_builds` run clean at exactly 3 copies (with the narrowing
+> warning asserted), and mismatching at 2 and 4; an unrelated-identity part refusing;
+> `_identity_is_narrowed_slice` unit cases. `tests/test_dsk_assemble.py` +
+> `tests/test_iwa_builds.py` + `tests/test_dsk_content_rules_acceptance.py`: 460 passed (9
+> new). Full suite: 2622 passed, 84 skipped, 1 xfailed, no failures (worktree `dsk-gen`,
+> HEAD 3bb8bdb + this piece, uncommitted). Measured first (`deck_builds` over the GW deck,
+> read-only): of the 13 char-window candidates (GW 5/12/18/19/20/28/29/30/35/36/38/52/54),
+> none carries a build on its own split box -- confirming §0 finding 4 -- so this piece's
+> logic is untested by any live candidate; only GW 5/54 (`group`, `apple:dissolve`, S5's
+> group-child scope, currently refused generically) and GW 20 (`KLNSparkle` In on
+> `text:4`/`text:5`, both dropped side-panel boxes, off any split box) carry builds at all.
+> Deck-wide A/B vs base worktree at 3bb8bdb (`git worktree add <scratchpad>/wt-S4-base
+> 3bb8bdb`, removed by exact path after): planned every one of the 63 non-empty classified
+> slides through `plan_assembly` on both trees and diffed `plan.splits` (char windows +
+> stacked ids) per slide -- 0 diffs; refusals unchanged (no slide refuses on either tree).
+
 **S5 — group-child split, GW 5/54 (~280 lines).**
 §2.5: drop the two group refusals for the single-box case, window from `groupChildRuns`, emit
 the deletes inside `_group_stacked_child_lines` between the size and position lines, per-part
