@@ -83,11 +83,11 @@ def offline_read_mode(explicit: str | None = None) -> str:
 
 
 def offline_write_mode(explicit: str | None = None, *, say: Callable[[str], None] | None = None) -> str:
-    """`off` (default), `on` (surgical offline IWA patch), or `verify` (patch + live
-    verify). Env `OBED_OFFLINE_WRITE`. Forced `off` when `as_geometry_enabled()` is False:
+    """`on` (default, surgical offline IWA patch), `off` (scripted AppleScript geometry),
+    or `verify` (patch + live verify). Env `OBED_OFFLINE_WRITE`; unknown tokens fall back to `on`. Forced `off` when `as_geometry_enabled()` is False:
     the offline write's AppleScript fallback is the same batched-geometry body that flag disables."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_WRITE", "")).strip().lower()
-    mode = raw if raw in {"on", "verify"} else "off"
+    mode = raw if raw in {"off", "verify"} else "on"
     if mode != "off" and not as_geometry_enabled():
         if say:
             say(

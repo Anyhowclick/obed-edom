@@ -359,8 +359,9 @@ The 2026-09-07 Full bank under
 both A/B decks and run records are present, so diagnose and re-run comparisons
 Keynote-free before paying for another live gate. The surgical writer's own
 consistency and live geometry verify passed at 0.00px, but pass-2 parity and 12
-slides' identity geometry failed. Offline write therefore remains opt-in with
-the default OFF.
+slides' identity geometry failed. Those defects were fixed (PRs #57/#59/#73/#78/#80/#94/
+#104/#115) and the strict full gate went GREEN 2026-09-12; the W1 default flipped to
+`OBED_OFFLINE_WRITE=on` on 2026-09-14 (`off` restores the scripted AppleScript path).
 
 A 2026-09-07 gate-integrity follow-up added a gating `group` bar (composed
 child-union vs the planned rect, 2.5px) to the offline verify — it is expected
