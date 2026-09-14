@@ -25,6 +25,8 @@ def _set(monkeypatch, name, value):
 
 
 _REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS = dme.dsk_live.check_layout_import_preconditions
+_REAL_RESOLVE_BLACK_LAYOUT_NAME = dme._resolve_black_layout_name
+_REAL_RESOLVE_BLACK_LAYOUT_DONOR = dme._resolve_black_layout_donor
 
 
 @pytest.fixture(autouse=True)
@@ -39,12 +41,17 @@ def no_keynote(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_layout_precondition(monkeypatch):
-    """`export_slide_clips` runs `check_layout_import_preconditions` offline against the
-    real, on-disk `DEFAULT_LAYOUT_TEMPLATE` whenever a test omits `layout_template` -- a
-    no-op here so tests that don't care about layout import aren't coupled to that file's
-    contents. Tests that DO exercise the precondition restore the real function via
-    `_REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS`."""
+    """`export_slide_clips` resolves and validates the black layout offline (against the
+    real, on-disk `DEFAULT_LAYOUT_TEMPLATE`, and the fake FW deck bytes tests write)
+    whenever a test omits `layout_template` -- no-ops here so tests that don't care about
+    layout import aren't coupled to that file's contents or made to parse fake deck bytes:
+    `_resolve_black_layout_name` reports nothing FW-owned (forcing the donor path), and the
+    donor/precondition seams pick/accept the first candidate name unconditionally. Tests
+    that DO exercise this restore the real functions via `_REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS`
+    and `dme._resolve_black_layout_name`/`dme._resolve_black_layout_donor`."""
     monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", lambda *_a, **_k: None)
+    monkeypatch.setattr(dme, "_resolve_black_layout_name", lambda _fw, _candidates: None)
+    monkeypatch.setattr(dme, "_resolve_black_layout_donor", lambda _tpl, candidates: candidates[0])
 
 
 # --- ordinal_map -------------------------------------------------------------
@@ -648,29 +655,34 @@ def _patch_build_export_script_capture(monkeypatch):
     monkeypatch.setattr(dme, "_build_export_script", wrapper)
 
 
-def _layout_objects_for_precondition(*, donor_rects, fw_rects):
-    """Minimal `KN.ThemeArchive` graph with one layout named "Black" -- `donor_rects`
+def _layout_objects_for_precondition(*, donor_rects, fw_rects, name="Black"):
+    """Minimal `KN.ThemeArchive` graph with one layout named `name` -- `donor_rects`
     (in the template) and `fw_rects` (already owned by the FW deck), each a list of
     (x, y, w, h) drawable frames on a 1920x1080 canvas."""
-    def _objects(rects):
-        drawables = []
-        for i, (x, y, w, h) in enumerate(rects):
-            did = f"d{i}"
-            drawables.append({"identifier": did})
-        objects = {
-            "theme": {"_pbtype": "KN.ThemeArchive", "templates": [{"identifier": "node"}]},
-            "node": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "slide"}},
-            "slide": {"_pbtype": "KN.SlideArchive", "name": "Black", "drawablesZOrder": drawables},
-            "show": {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}},
-        }
-        for i, (x, y, w, h) in enumerate(rects):
-            objects[f"d{i}"] = {
+    return _layout_objects_multi(entries=[(name, donor_rects)]), _layout_objects_multi(entries=[(name, fw_rects)])
+
+
+def _layout_objects_multi(*, entries):
+    """`KN.ThemeArchive` graph with one layout per `(name, rects)` in `entries`, each
+    `rects` a list of (x, y, w, h) drawable frames on a 1920x1080 canvas. An empty
+    `entries` list yields a deck that owns no layouts at all."""
+    objects = {
+        "theme": {
+            "_pbtype": "KN.ThemeArchive",
+            "templates": [{"identifier": f"node{i}"} for i in range(len(entries))],
+        },
+        "show": {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}},
+    }
+    for i, (name, rects) in enumerate(entries):
+        drawables = [{"identifier": f"d{i}_{j}"} for j in range(len(rects))]
+        objects[f"node{i}"] = {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": f"slide{i}"}}
+        objects[f"slide{i}"] = {"_pbtype": "KN.SlideArchive", "name": name, "drawablesZOrder": drawables}
+        for j, (x, y, w, h) in enumerate(rects):
+            objects[f"d{i}_{j}"] = {
                 "_pbtype": "TSD.ImageArchive",
                 "geometry": {"position": {"x": x, "y": y}, "size": {"width": w, "height": h}},
             }
-        return objects
-
-    return _objects(donor_rects), _objects(fw_rects)
+    return objects
 
 
 def test_export_slide_clips_refuses_unsafe_same_named_fw_layout_with_safe_donor(monkeypatch, tmp_path):
@@ -708,6 +720,132 @@ def test_export_slide_clips_refuses_unsafe_same_named_fw_layout_with_safe_donor(
     with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="not alpha-safe"):
         dme.export_slide_clips(
             fw, [17], out_dir, layout_template=template, black_layout_names=("Black",),
+        )
+
+
+def test_export_slide_clips_uses_fw_owned_alias_absent_from_template(monkeypatch, tmp_path):
+    """`black_layout_names` is a list of ALTERNATIVE aliases (any one acceptable), not
+    all required: an alpha-safe FW-owned "BLACK BLANK" must proceed even though the
+    layout template owns none of the aliases at all -- no import needed or attempted."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    template = tmp_path / "Donor.key"
+    template.write_bytes(b"template")
+
+    fw_objects = _layout_objects_multi(entries=[("BLACK BLANK", [])])
+    template_objects = _layout_objects_multi(entries=[])
+
+    def _dispatched_load_deck(path):
+        return (template_objects, {}, {}) if Path(path) == template else (fw_objects, {}, {})
+
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
+    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
+    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
+
+    def _precondition_forbidden(*a, **k):
+        raise AssertionError("no import precondition is needed when the FW deck already owns a safe alias")
+
+    monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", _precondition_forbidden)
+
+    imported: list[list[str]] = []
+    _real_layout_import_lines = dme.dsk_live.layout_import_lines
+
+    def _capture_layout_import_lines(doc_var, layout_names, template_path):
+        imported.append(list(layout_names) if not isinstance(layout_names, str) else [layout_names])
+        return _real_layout_import_lines(doc_var, layout_names, template_path)
+
+    monkeypatch.setattr(dme.dsk_live, "layout_import_lines", _capture_layout_import_lines)
+
+    calls = _stub_live(monkeypatch, tmp_path)
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(
+        fw, [17], out_dir, layout_template=template, black_layout_names=dme.DEFAULT_BLACK_LAYOUT_NAMES,
+    )
+
+    assert {r.slide for r in results} == {17}
+    assert calls["osascript"] == 2
+    # the script still embeds a fallback import of the FW-owned name (the runtime "if
+    # blackLayoutName is empty" guard skips it since the FW deck already owns it), but
+    # the offline precondition -- which would wrongly require the template to also own
+    # it -- must not run for an alias that needs no import.
+    assert imported == [["BLACK BLANK"]]
+
+
+def test_export_slide_clips_imports_single_template_donor_when_no_fw_alias(monkeypatch, tmp_path):
+    """Neither FW-owned alias is alpha-safe (or present); the template owns a safe
+    "Black" -- exactly that one name must be validated and imported, not the whole
+    alias list as required imports."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    template = tmp_path / "Donor.key"
+    template.write_bytes(b"template")
+
+    fw_objects = _layout_objects_multi(entries=[])
+    template_objects = _layout_objects_multi(entries=[("Black", [])])
+
+    def _dispatched_load_deck(path):
+        return (template_objects, {}, {}) if Path(path) == template else (fw_objects, {}, {})
+
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
+    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
+    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
+    monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", _REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS)
+
+    imported: list[list[str]] = []
+    _real_layout_import_lines = dme.dsk_live.layout_import_lines
+
+    def _capture_layout_import_lines(doc_var, layout_names, template_path):
+        imported.append(list(layout_names) if not isinstance(layout_names, str) else [layout_names])
+        return _real_layout_import_lines(doc_var, layout_names, template_path)
+
+    monkeypatch.setattr(dme.dsk_live, "layout_import_lines", _capture_layout_import_lines)
+
+    calls = _stub_live(monkeypatch, tmp_path)
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(
+        fw, [17], out_dir, layout_template=template, black_layout_names=dme.DEFAULT_BLACK_LAYOUT_NAMES,
+    )
+
+    assert {r.slide for r in results} == {17}
+    assert imported == [["Black"]]
+
+
+def test_export_slide_clips_refuses_when_neither_fw_nor_template_owns_an_alias(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    template = tmp_path / "Donor.key"
+    template.write_bytes(b"template")
+
+    fw_objects = _layout_objects_multi(entries=[])
+    template_objects = _layout_objects_multi(entries=[])
+
+    def _dispatched_load_deck(path):
+        return (template_objects, {}, {}) if Path(path) == template else (fw_objects, {}, {})
+
+    _stub_offline_payload(monkeypatch)
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
+    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
+    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
+
+    def _copy_keynote_forbidden(src, dest):
+        raise AssertionError("Keynote must not launch once the precondition refuses")
+
+    monkeypatch.setattr(dme, "copy_keynote", _copy_keynote_forbidden)
+    _set(monkeypatch, "_keynote_running", lambda: False)
+    _set(monkeypatch, "_acquire_lock", lambda: None)
+    _set(monkeypatch, "_release_lock", lambda fd: None)
+
+    with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="no alpha-safe layout"):
+        dme.export_slide_clips(
+            fw, [17], out_dir, layout_template=template, black_layout_names=dme.DEFAULT_BLACK_LAYOUT_NAMES,
         )
 
 

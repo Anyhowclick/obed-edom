@@ -385,3 +385,18 @@ not import `dsk_assemble`, which already has its own equal-valued constant) and 
 `dsk_stage_export` import it from there. Also: `layout_import_lines`'s per-name donor
 tracking (`pendingDonor`) now starts right after `make`, before `move`, so a failed `move`
 or a failed post-move re-resolve still leaves a deletable reference for the error handler.
+
+**L2 fix round 5 (Codex review 4 of 4560d93):** `DEFAULT_BLACK_LAYOUT_NAMES` (dsk_live.py)
+is a list of ALTERNATIVE aliases (any one acceptable), but `dsk_movie_export.export_slide_clips`
+was passing the whole list straight to `check_layout_import_preconditions`, whose semantics
+treat every name as required -- so a valid alpha-safe FW-owned `BLACK BLANK` was refused
+whenever the template lacked a layout literally named `BLACK BLANK`. Fixed by resolving the
+single relevant name in Python before validating: `_resolve_black_layout_name` (dsk_movie_export.py)
+returns the first alias `fw_deck` already owns alpha-safely, skipping any check entirely (no
+import needed); when none is owned, `_resolve_black_layout_donor` picks the first alpha-safe
+template donor among the aliases and only that one name is passed to
+`check_layout_import_preconditions`/`layout_import_lines`; `export_slide_clips` raises
+`LayoutImportRefusal` when neither exists. `dsk_stage_export`'s `transparent_layout_names`
+path uses a single-name tuple (`DEFAULT_TRANSPARENT_LAYOUT_NAMES`), so the required-import
+semantics were already correct there and needed no change. The assembly path's
+`DEFAULT_DSK_LAYOUT_NAMES` stays all-required by design (unchanged).

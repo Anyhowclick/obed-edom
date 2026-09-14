@@ -221,6 +221,31 @@ def _normalize_even_crop(x: int, y: int, w: int, h: int, wall_w: int, wall_h: in
     return ex, ey, ew, eh
 
 
+def _resolve_black_layout_name(fw_deck: Path, candidates: Sequence[str]) -> str | None:
+    """`candidates` are alternative aliases (any one acceptable), not all required.
+    Returns the first one `fw_deck` already owns alpha-safely -- no import needed --
+    or `None` when it owns none of them safely."""
+    fw_objects, _fw_file, _fw_file_ids = dsk_live._load_deck(fw_deck)
+    fw_canvas = dsk_live._canvas_size(fw_objects)
+    for name in candidates:
+        owned = dsk_live._find_layout_by_name(fw_objects, name)
+        if owned is not None and dsk_live.layout_alpha_safe(owned, fw_objects, fw_canvas):
+            return name
+    return None
+
+
+def _resolve_black_layout_donor(layout_template: Path, candidates: Sequence[str]) -> str | None:
+    """The first alpha-safe `layout_template` donor among `candidates`; `None` when
+    none exist (caller refuses)."""
+    template_objects, _t_file, _t_file_ids = dsk_live._load_deck(layout_template)
+    template_canvas = dsk_live._canvas_size(template_objects)
+    for name in candidates:
+        donor = dsk_live._find_layout_by_name(template_objects, name)
+        if donor is not None and dsk_live.layout_alpha_safe(donor, template_objects, template_canvas):
+            return name
+    return None
+
+
 def _build_export_script(
     *,
     scratch_path: Path,
@@ -712,10 +737,22 @@ def export_slide_clips(
 
         resolved_template = layout_template or DEFAULT_LAYOUT_TEMPLATE
         resolved_template = resolved_template if resolved_template.exists() else None
+        resolved_black_names = black_layout_names
         if resolved_template is not None:
-            dsk_live.check_layout_import_preconditions(
-                fw_deck, layout_template=resolved_template, layout_names=black_layout_names
-            )
+            owned_name = _resolve_black_layout_name(fw_deck, black_layout_names)
+            if owned_name is not None:
+                resolved_black_names = (owned_name,)
+            else:
+                donor_name = _resolve_black_layout_donor(resolved_template, black_layout_names)
+                if donor_name is None:
+                    raise dsk_live.LayoutImportRefusal(
+                        f"no alpha-safe layout matching {list(black_layout_names)!r} found in "
+                        f"{fw_deck} or layout template {resolved_template}"
+                    )
+                resolved_black_names = (donor_name,)
+                dsk_live.check_layout_import_preconditions(
+                    fw_deck, layout_template=resolved_template, layout_names=resolved_black_names
+                )
         script = _build_export_script(
             scratch_path=scratch,
             stem=fw_deck.stem,
@@ -723,7 +760,7 @@ def export_slide_clips(
             per_slide=per_slide,
             codec=codec,
             fps=fps,
-            black_layout_names=black_layout_names,
+            black_layout_names=resolved_black_names,
         )
         script_path = _osascript_path(script, work)
 
