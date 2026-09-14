@@ -1163,38 +1163,79 @@ label.check input[type="checkbox"]:disabled,
 }
 .seg button.on { background: var(--bg-surface-solid); color: var(--ink-inverse); border-color: transparent; }
 .seg.seg-slide {
+  --tabs-dur: 250ms;
+  --tabs-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --tabs-pad: 3px;
   position: relative;
-  gap: 0;
+  display: inline-flex;
+  align-items: center;
+  align-self: start;
+  width: max-content;
+  max-width: 100%;
+  gap: 3px;
+  padding: var(--tabs-pad);
+  height: var(--ctl-h);
+  box-sizing: border-box;
   border: var(--border-glass);
   border-radius: var(--radius-pill);
+  background: var(--bg-surface-glass);
 }
 .seg.seg-slide button {
   position: relative;
+  appearance: none;
   z-index: 1;
-  flex: 1 1 0;
+  flex: 0 0 auto;
+  height: 100%;
+  min-height: 0;
   min-width: 0;
+  padding: 0 12px;
   background: transparent;
-  border-color: transparent;
-  transition: color 200ms ease-out;
+  border: 0;
+  color: var(--ink-secondary);
+  transition: color var(--tabs-dur) var(--tabs-ease);
 }
-.seg.seg-slide button.on { background: transparent; color: var(--ink-inverse); }
+.seg.seg-slide button:not([aria-selected="true"]):hover {
+  color: var(--ink-primary);
+}
+.seg.seg-slide button.on,
+.seg.seg-slide button[aria-selected="true"] {
+  background: transparent;
+  color: var(--ink-inverse);
+}
 @media (prefers-reduced-motion: reduce) {
   .seg.seg-slide button { transition: none; }
 }
 .seg-slide-ind {
   position: absolute;
-  inset: 0 auto 0 0;
-  width: calc(100% / var(--seg-n, 2));
+  top: var(--tabs-pad);
+  bottom: var(--tabs-pad);
+  left: 0;
+  width: 0;
   border-radius: var(--radius-pill);
   background: var(--bg-surface-solid);
-  transform: translateX(calc(var(--seg-i) * 100%));
-  transition: transform 200ms ease-out;
+  transform: translateX(0);
+  visibility: hidden;
+  transition:
+    transform var(--tabs-dur) var(--tabs-ease),
+    width     var(--tabs-dur) var(--tabs-ease);
+  will-change: transform, width;
   pointer-events: none;
   z-index: 0;
 }
 @media (prefers-reduced-motion: reduce) {
-  .seg-slide-ind { transition: none; }
+  .seg-slide-ind { transition: none !important; }
 }
+.maps-pick-hint {
+  min-height: 1.35em;
+  margin-top: 6px;
+}
+.maps-aud-row {
+  display: flex;
+  gap: var(--gap-ctl);
+  align-items: center;
+  margin: 12px 0;
+}
+.maps-aud-row > .seg { margin: 0; }
 /* Audience spine, drawn inside the pill so it survives the solid-white on-state. */
 .seg button.aud-lw, .seg button.aud-cg, .seg button.aud-dsk {
   position: relative;
@@ -2468,17 +2509,49 @@ input.maps-thumb-title-input:focus {
   bottom: 0;
   box-sizing: border-box;
   border: 2px solid var(--plum);
-  pointer-events: auto;
-  cursor: grab;
+  pointer-events: none;
+  cursor: default;
 }
+.maps-crop-cg.select { pointer-events: none; cursor: default; }
+.maps-crop-cg.move { pointer-events: auto; cursor: grab; }
 .maps-crop-cg-label {
   top: 8px;
   left: 8px;
   pointer-events: none;
   color: var(--plum);
 }
-.maps-crop-cg:active { cursor: grabbing; }
+.maps-crop-cg.move:active { cursor: grabbing; }
 .maps-crop-cg.snapped { border-color: var(--accent-primary); }
+.maps-cg-mode {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 5;
+  display: flex;
+  border: var(--border-glass);
+  border-radius: var(--radius-pill);
+  background: rgba(7, 7, 10, 0.72);
+  overflow: hidden;
+  pointer-events: auto;
+}
+.maps-cg-mode button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.maps-cg-mode button.on {
+  background: var(--bg-surface-solid);
+  color: var(--ink-inverse);
+}
+.maps-cg-mode button:active {
+  transform: scale(0.97);
+}
 .maps-snap-guide {
   position: absolute;
   left: 50%;
@@ -3077,9 +3150,27 @@ input.maps-thumb-title-input:focus {
   color: var(--maps-highlight);
   font-size: 12px;
   font-weight: 600;
+}
+.maps-hl-chip > button {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
 }
-.maps-hl-chip:disabled { opacity: 0.45; cursor: not-allowed; }
+.maps-hl-chip > button:last-child {
+  display: inline-flex;
+  opacity: 0.7;
+}
+.maps-hl-chip > button:last-child:hover { opacity: 1; }
+.maps-hl-chip.on {
+  outline: 1px solid var(--maps-highlight);
+  outline-offset: 1px;
+}
+.maps-hl-chip:disabled,
+.maps-hl-chip button:disabled { opacity: 0.45; cursor: not-allowed; }
 .maps-inspector > label:not(.ae-scrub):not(.maps-check),
 .maps-inspector label:not(.maps-check):not(.ae-scrub) {
   display: flex;

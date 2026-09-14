@@ -24,6 +24,7 @@ import {
   addWatercolourToMap,
   watercolourImageUrl,
   renameJob,
+  putSettings,
   type Job,
 } from "../api";
 import { ArtifactActions } from "../components/ArtifactActions";
@@ -59,12 +60,20 @@ import {
   MAPS_PICK_MODE_KEY,
   MAPS_SIDE_PANELS_KEY,
   highlightColourReady,
+  refreshHighlightColour,
   useDefaultExportDir,
   useHighlightColour,
   useSessionPath,
   useSessionToggle,
 } from "../prefs";
-import { highlightCssVars, setHighlightColour } from "../maps/highlight";
+import {
+  DEFAULT_HIGHLIGHT_COLOUR,
+  highlightCssVars,
+  isHighlightHex,
+  normaliseHighlightColour,
+  pruneHighlightColours,
+  setHighlightColour,
+} from "../maps/highlight";
 import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
@@ -82,6 +91,7 @@ import { OBJECT_SIZE_MAX, defaultObjectSize, pasteRebase, zoomSizeFactor } from 
 import type { ObjectClipboard } from "../maps/objects";
 import { admin0Name, admin1Name, highlightedCountries, isAdmin1Loaded, loadAdmin0, loadAdmin1 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
+import { SlidingSeg } from "../maps/SlidingSeg";
 import { StylePicker } from "../maps/StylePicker";
 import { MapsSaveConflictError, MapsSaveQueue, type MapsSaveStatus } from "../maps/saveQueue";
 import {
@@ -190,6 +200,56 @@ function HighlightIcon({ code }: { code: string }) {
   return code.startsWith("A1:") ? <IconRegion /> : <IconCountry />;
 }
 
+function highlightName(code: string): string {
+  return code.startsWith("A1:") ? admin1Name(code) : admin0Name(code);
+}
+
+const COLOUR_DEBOUNCE_MS = 250;
+
+function HighlightColourFields({
+  colour,
+  text,
+  disabled,
+  onColour,
+  onText,
+  onCommit,
+}: {
+  colour: string;
+  text: string;
+  disabled?: boolean;
+  onColour: (value: string) => void;
+  onText: (value: string) => void;
+  onCommit: () => void;
+}) {
+  return (
+    <label>
+      Colour
+      <input
+        type="text"
+        value={text}
+        disabled={disabled}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        aria-label="Highlight colour hex"
+        onChange={(event) => onText(event.target.value)}
+        onBlur={onCommit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") onCommit();
+        }}
+      />
+      <input
+        type="color"
+        value={normaliseHighlightColour(colour || text)}
+        disabled={disabled}
+        aria-label="Highlight colour"
+        onChange={(event) => onColour(event.target.value)}
+        onBlur={onCommit}
+      />
+    </label>
+  );
+}
+
 function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
   return {
     ...slide,
@@ -244,6 +304,14 @@ export function MapsTab() {
   const [dropIndicator, setDropIndicator] = useState<{ id: string; position: "before" | "after" } | null>(null);
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [selectedPins, setSelectedPins] = useState<string[]>([]);
+  const [selectedHighlight, setSelectedHighlight] = useState<string | null>(null);
+  const [colourText, setColourText] = useState("");
+  const [overrideText, setOverrideText] = useState("");
+  const colourDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingColourRef = useRef<string | null>(null);
+  const commitGlobalColourRef = useRef<(value: string) => void>(() => undefined);
+  const overrideDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingOverrideRef = useRef<string | null>(null);
   const [objectClipboard, setObjectClipboard] = useState<ObjectClipboard<MapsChurch>>({ churches: [], sourceZoom: 0 });
   const [pasteTargets, setPasteTargets] = useState<string[]>([]);
   const [renamingSlide, setRenamingSlide] = useState<{ id: string; title: string } | null>(null);
@@ -314,6 +382,7 @@ export function MapsTab() {
 
   useEffect(() => {
     setHighlightColour(highlightColour);
+    setColourText(highlightColour);
     const vars = highlightCssVars(highlightColour);
     for (const [key, value] of Object.entries(vars)) document.documentElement.style.setProperty(key, value);
   }, [highlightColour]);
@@ -408,6 +477,22 @@ export function MapsTab() {
   const slides = doc?.slides || [];
   const active = slides.find((s) => s.id === activeId) || slides[0] || null;
   const activeView = active ? slideForAudience(active, activeAudience) : null;
+
+  useEffect(() => {
+    if (!selectedHighlight) return;
+    setOverrideText(activeView?.highlightColours?.[selectedHighlight] ?? highlightColour);
+  }, [selectedHighlight, activeView?.highlightColours, highlightColour]);
+
+  useEffect(() => {
+    return () => {
+      if (colourDebounceRef.current) {
+        clearTimeout(colourDebounceRef.current);
+        colourDebounceRef.current = null;
+        if (pendingColourRef.current !== null) commitGlobalColourRef.current(pendingColourRef.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const activeHiddenLayers = slideHiddenLayers(activeView);
   const activeHillshade = activeView?.hillshade === true;
   const renderedView = previewView || activeView;
@@ -488,6 +573,7 @@ export function MapsTab() {
 
   useEffect(() => {
     setSelectedPins([]);
+    setSelectedHighlight(null);
   }, [activeId, activeAudience]);
 
   useEffect(() => {
@@ -807,8 +893,18 @@ export function MapsTab() {
     const current = docRef.current;
     const id = activeRef.current;
     if (!current || !id) return;
-    if (partial.highlights !== undefined && partial.highlights.length === 0) {
-      partial = { ...partial, isolate: undefined };
+    if (partial.highlights !== undefined) {
+      const highlights = partial.highlights;
+      const slide = current.slides.find((item) => item.id === id);
+      const view = activeAudienceRef.current === "cg" && slide?.cg ? slide.cg : slide;
+      const colours = partial.highlightColours !== undefined ? partial.highlightColours : view?.highlightColours;
+      partial = {
+        ...partial,
+        highlights,
+        highlightColours: pruneHighlightColours(highlights, colours),
+        ...(highlights.length === 0 ? { isolate: undefined } : {}),
+      };
+      if (selectedHighlight && !highlights.includes(selectedHighlight)) setSelectedHighlight(null);
     }
     patchDoc({
       ...current,
@@ -832,6 +928,7 @@ export function MapsTab() {
         camera,
         style: source.style,
         highlights: [...source.highlights],
+        highlightColours: source.highlightColours ? { ...source.highlightColours } : undefined,
         churches: source.churches.map((church) => ({ ...church })),
         isolate: source.isolate,
       },
@@ -1019,8 +1116,80 @@ export function MapsTab() {
   }
 
   function openPin(id: string) {
+    setSelectedHighlight(null);
     setSelectedPin(id);
     setInspTab("properties");
+  }
+
+  function openHighlight(code: string) {
+    setSelectedPin(null);
+    setSelectedPins([]);
+    setSelectedHighlight(code);
+    setInspTab("properties");
+  }
+
+  function commitGlobalColourValue(value: string) {
+    if (colourDebounceRef.current) {
+      clearTimeout(colourDebounceRef.current);
+      colourDebounceRef.current = null;
+    }
+    pendingColourRef.current = null;
+    const colour = isHighlightHex(value) ? normaliseHighlightColour(value) : DEFAULT_HIGHLIGHT_COLOUR;
+    setColourText(colour);
+    if (colour === highlightColour) return;
+    void putSettings({ highlightColour: colour })
+      .then(() => refreshHighlightColour())
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }
+  commitGlobalColourRef.current = commitGlobalColourValue;
+
+  function scheduleGlobalColour(value: string) {
+    setColourText(value);
+    if (colourDebounceRef.current) clearTimeout(colourDebounceRef.current);
+    pendingColourRef.current = value;
+    colourDebounceRef.current = setTimeout(() => {
+      colourDebounceRef.current = null;
+      commitGlobalColourValue(value);
+    }, COLOUR_DEBOUNCE_MS);
+  }
+
+  function writeHighlightOverride(code: string, value: string) {
+    if (!activeView || !isHighlightHex(value)) return;
+    const colour = normaliseHighlightColour(value);
+    setOverrideText(colour);
+    if (activeView.highlightColours?.[code] === colour) return;
+    updateActive({
+      highlightColours: pruneHighlightColours(activeView.highlights, { ...(activeView.highlightColours || {}), [code]: colour }),
+    });
+  }
+
+  function scheduleOverrideColour(value: string) {
+    setOverrideText(value);
+    if (overrideDebounceRef.current) clearTimeout(overrideDebounceRef.current);
+    pendingOverrideRef.current = value;
+    overrideDebounceRef.current = setTimeout(() => {
+      overrideDebounceRef.current = null;
+      pendingOverrideRef.current = null;
+      if (selectedHighlight) writeHighlightOverride(selectedHighlight, value);
+    }, COLOUR_DEBOUNCE_MS);
+  }
+
+  function commitOverrideColour() {
+    if (overrideDebounceRef.current) {
+      clearTimeout(overrideDebounceRef.current);
+      overrideDebounceRef.current = null;
+    }
+    const pending = pendingOverrideRef.current ?? overrideText;
+    pendingOverrideRef.current = null;
+    if (selectedHighlight) writeHighlightOverride(selectedHighlight, pending);
+  }
+
+  function clearHighlightOverride(code: string) {
+    if (!activeView) return;
+    const next = { ...(activeView.highlightColours || {}) };
+    delete next[code];
+    updateActive({ highlightColours: pruneHighlightColours(activeView.highlights, next) });
+    setOverrideText(highlightColour);
   }
 
   function beginSlideRename(slide: MapsSlide) {
@@ -1214,7 +1383,14 @@ export function MapsTab() {
     setPreviewView({
       ...view,
       camera,
-      cg: { camera, style: view.style, highlights: view.highlights, churches: view.churches },
+      cg: {
+        camera,
+        style: view.style,
+        highlights: view.highlights,
+        highlightColours: view.highlightColours,
+        churches: view.churches,
+        isolate: view.isolate,
+      },
     });
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     if (previewAbort.current || previewRun.current !== run) return;
@@ -1538,6 +1714,10 @@ export function MapsTab() {
       throwIfCancelled();
 
       const slidesById = new Map((docRef.current?.slides || []).map((slide) => [slide.id, slide]));
+      const coloursOf = (slideId: string, audience: MapsAudience = "lw") => {
+        const slide = slidesById.get(slideId.replace(/__landing$/, ""));
+        return slide ? slideForAudience(slide, audience).highlightColours : undefined;
+      };
       const stamp = docRef.current?.attribution !== "credits";
       const linkHasSlides = (link: MapsLink) => slidesById.has(link.from) && slidesById.has(link.to);
       const lwMovieLinks = (docRef.current?.links || []).filter(
@@ -1667,6 +1847,7 @@ export function MapsTab() {
           isCancelled: () => exportAbort.current,
           stamp,
           highlightColour: readyColour,
+          highlightColours: coloursOf(still.slideId),
         };
         if (still.highlights.length) {
           const pair = await captureIsolatePair(exportOpts);
@@ -1698,6 +1879,7 @@ export function MapsTab() {
           isCancelled: () => exportAbort.current,
           stamp,
           highlightColour: readyColour,
+          highlightColours: coloursOf(plate.slideIds[0] || ""),
         };
         if (plate.highlights.length) {
           const pair = await captureIsolatePair(plateOpts);
@@ -1729,6 +1911,7 @@ export function MapsTab() {
             isCancelled: () => exportAbort.current,
             stamp,
             highlightColour: readyColour,
+            highlightColours: coloursOf(still.slideId, "cg"),
           };
           if (still.highlights.length) {
             const pair = await captureIsolatePair(exportOpts);
@@ -1765,6 +1948,7 @@ export function MapsTab() {
             isCancelled: () => exportAbort.current,
             stamp,
             highlightColour: readyColour,
+            highlightColours: coloursOf(plate.slideIds[0] || "", "cg"),
           };
           if (plate.highlights.length) {
             const pair = await captureIsolatePair(plateOpts);
@@ -1855,6 +2039,7 @@ export function MapsTab() {
           isCancelled: () => exportAbort.current,
           stamp,
           highlightColour: readyColour,
+          highlightColours: from.highlightColours,
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
             await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 });
@@ -1940,6 +2125,7 @@ export function MapsTab() {
             isCancelled: () => exportAbort.current,
             stamp,
             highlightColour: readyColour,
+            highlightColours: from.highlightColours,
             onFrame: async (blob, i, n) => {
               if (exportAbort.current) throw new Error("Export cancelled.");
               await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps, audience: "cg" });
@@ -2480,6 +2666,7 @@ export function MapsTab() {
                 hiddenLayers={slideHiddenLayers(renderedView)}
                 hillshade={renderedView?.hillshade === true}
                 highlightColour={highlightColour}
+                highlightColours={renderedView?.highlightColours}
                 cgShiftX={activeAudience === "cg" ? 0 : active.cgShiftX}
                 authoredWidth={renderedAuthoredWidth}
                 previewing={previewing}
@@ -2516,7 +2703,10 @@ export function MapsTab() {
                 }}
                 onSelectPin={(id) => {
                   if (id) openPin(id);
-                  else setSelectedPin(null);
+                  else {
+                    setSelectedPin(null);
+                    setSelectedHighlight(null);
+                  }
                 }}
                 onEditPin={(id) => {
                   if (!activeView) return;
@@ -2765,28 +2955,61 @@ export function MapsTab() {
               )}
               {inspTab === "properties" && !pin && (
                 <>
+                  {selectedHighlight ? (
+                    <>
+                      <button className="maps-insp-back" type="button" onClick={() => setSelectedHighlight(null)}>
+                        <IconArrowLeft /> Camera
+                      </button>
+                      <div className="cap">Highlight</div>
+                      <label>
+                        Name
+                        <span>{highlightName(selectedHighlight)}</span>
+                      </label>
+                      <HighlightColourFields
+                        colour={overrideText || highlightColour}
+                        text={overrideText}
+                        disabled={locked}
+                        onColour={scheduleOverrideColour}
+                        onText={setOverrideText}
+                        onCommit={commitOverrideColour}
+                      />
+                      {activeView?.highlightColours?.[selectedHighlight] && (
+                        <button className="btn secondary" type="button" disabled={locked} onClick={() => clearHighlightOverride(selectedHighlight)}>
+                          Use global colour
+                        </button>
+                      )}
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        disabled={locked}
+                        onClick={() => {
+                          updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== selectedHighlight) });
+                          setSelectedHighlight(null);
+                        }}
+                      >
+                        Remove highlight
+                      </button>
+                    </>
+                  ) : (
+                    <>
                   <InspSection id="viewport" title="Viewport">
                     {active.cg ? (
-                      <div className="seg">
-                        <button
-                          type="button"
-                          className={`aud-lw${activeAudience === "lw" ? " on" : ""}`}
+                      <div className="maps-aud-row">
+                        <SlidingSeg
+                          value={activeAudience}
                           disabled={locked}
-                          onClick={() => void selectSlide(active.id, { audience: "lw" })}
-                        >
-                          {sidePanels || active.includeSidePanels ? "FW" : "LW"}
-                        </button>
-                        <button
-                          type="button"
-                          className={`aud-cg${activeAudience === "cg" ? " on" : ""}`}
-                          disabled={locked}
-                          onClick={() => void selectSlide(active.id, { audience: "cg" })}
-                        >
-                          CG
-                        </button>
-                        <button type="button" disabled={locked} onClick={mergeCg}>
-                          Merge CG
-                        </button>
+                          ariaLabel="Viewport"
+                          options={[
+                            { id: "lw", label: sidePanels || active.includeSidePanels ? "FW" : "LW", className: "aud-lw" },
+                            { id: "cg", label: "CG", className: "aud-cg" },
+                          ]}
+                          onChange={(id) => void selectSlide(active.id, { audience: id as MapsAudience })}
+                        />
+                        <div className="seg">
+                          <button type="button" disabled={locked} onClick={mergeCg}>
+                            Merge CG
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <button className="btn secondary" type="button" disabled={locked} onClick={splitCg}>
@@ -2905,51 +3128,55 @@ export function MapsTab() {
                       </>
                     )}
                   </InspSection>
+                    </>
+                  )}
                   <div className="maps-hl">
                     <InspSection id="regions" title="Selected regions">
-                      <div className="seg seg-slide">
-                        <span
-                          className="seg-slide-ind"
-                          aria-hidden="true"
-                          style={{ "--seg-i": pickRegions ? 1 : 0, "--seg-n": 2 } as CSSProperties}
-                        />
-                        <button
-                          type="button"
-                          className={pickRegions ? "" : "on"}
-                          disabled={locked}
-                          onClick={() => setPickRegions(false)}
-                        >
-                          Countries
-                        </button>
-                        <button
-                          type="button"
-                          className={pickRegions ? "on" : ""}
-                          disabled={locked}
-                          onClick={() => setPickRegions(true)}
-                        >
-                          Regions
-                        </button>
+                      <SlidingSeg
+                        value={pickRegions ? "regions" : "countries"}
+                        disabled={locked}
+                        ariaLabel="Pick mode"
+                        options={[
+                          { id: "countries", label: "Countries" },
+                          { id: "regions", label: "Regions" },
+                        ]}
+                        onChange={(id) => setPickRegions(id === "regions")}
+                      />
+                      <div className="maps-pick-hint note">
+                        {pickRegions && regionsLoading
+                          ? "Loading regions…"
+                          : pickRegions && regionCameraCountries.length === 0
+                            ? "Pan a country into view to pick its regions."
+                            : null}
                       </div>
-                      {pickRegions && regionsLoading && <div className="note">Loading regions…</div>}
-                      {pickRegions && !regionsLoading && regionCameraCountries.length === 0 && (
-                        <div className="note">Pan a country under the centre to pick its regions.</div>
+                      {!selectedHighlight && (
+                        <HighlightColourFields
+                          colour={colourText || highlightColour}
+                          text={colourText}
+                          disabled={locked}
+                          onColour={scheduleGlobalColour}
+                          onText={setColourText}
+                          onCommit={() => commitGlobalColourValue(colourText)}
+                        />
                       )}
                       {(activeView?.highlights.length || 0) > 0 && (
                         <div className="maps-hl-list">
                           {(activeView?.highlights || []).map((code) => (
-                            <button
-                              key={`${code}-${namesTick}`}
-                              className="maps-hl-chip"
-                              type="button"
-                              disabled={locked}
-                              title="Remove highlight"
-                              onClick={() =>
-                                updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
-                              }
-                            >
-                              {code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}
-                              <IconClose />
-                            </button>
+                            <div key={`${code}-${namesTick}`} className={`maps-hl-chip${selectedHighlight === code ? " on" : ""}`}>
+                              <button type="button" disabled={locked} onClick={() => openHighlight(code)}>
+                                {highlightName(code)}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={locked}
+                                title="Remove highlight"
+                                onClick={() =>
+                                  updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
+                                }
+                              >
+                                <IconClose />
+                              </button>
+                            </div>
                           ))}
                         </div>
                       )}
@@ -3126,17 +3353,19 @@ export function MapsTab() {
                       <div className="cap">Highlights</div>
                       <div className="maps-pin-list">
                         {(activeView?.highlights || []).map((code) => (
-                          <div key={`${code}-${namesTick}`} className={`maps-pin-row kind-${highlightClass(code)}`}>
-                            <span className={`maps-pin-kind kind-${highlightClass(code)}`} aria-hidden="true">
-                              <HighlightIcon code={code} />
-                            </span>
-                            <span className="maps-pin-name">{code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}</span>
+                          <div key={`${code}-${namesTick}`} className={`maps-pin-row kind-${highlightClass(code)}${selectedHighlight === code ? " active" : ""}`}>
+                            <button type="button" className="maps-pin-open" disabled={locked} onClick={() => openHighlight(code)}>
+                              <span className={`maps-pin-kind kind-${highlightClass(code)}`} aria-hidden="true">
+                                <HighlightIcon code={code} />
+                              </span>
+                              <span className="maps-pin-name">{highlightName(code)}</span>
+                            </button>
                             <button
                               className="btn maps-delete icon-btn"
                               type="button"
                               disabled={locked}
                               title="Remove highlight"
-                              aria-label={`Remove ${code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}`}
+                              aria-label={`Remove ${highlightName(code)}`}
                               onClick={() =>
                                 updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
                               }

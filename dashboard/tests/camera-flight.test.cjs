@@ -273,9 +273,10 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
   assert.equal(next.length, vendor.layers.length + 1);
 
   const low = byId(next, "boundary_state_z1-4");
-  assert.equal(low.minzoom, 4);
+  assert.equal(low.minzoom, 3);
   assert.equal(low.maxzoom, 5);
   assert.equal(low.paint["line-width"], 1.2);
+  assert.equal(low.paint["line-color"], "rgba(80, 80, 80, 1)");
   assert.equal(low.paint["line-dasharray"], undefined);
   assert.deepEqual(low.filter, vendorState.filter);
 
@@ -308,7 +309,7 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
   const statePreview = byId(preview, "boundary_state");
   const countryLowPreview = byId(preview, "boundary_country_z0-4");
   const countryHighPreview = byId(preview, "boundary_country_z5-");
-  assert.ok(Math.abs(lowPreview.minzoom - 1.06) < 1e-9);
+  assert.ok(Math.abs(lowPreview.minzoom - 0.06) < 1e-9);
   assert.ok(Math.abs(lowPreview.maxzoom - 2.06) < 1e-9);
   assert.ok(Math.abs(statePreview.minzoom - 2.06) < 1e-9);
   assert.equal(countryLowPreview.minzoom, 0);
@@ -322,9 +323,20 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
   assert.equal(byId(clamped, "boundary_country_z0-4").maxzoom, 0);
   assert.equal(byId(clamped, "boundary_country_z5-").minzoom, 0);
 
-  // FW export renders at exportZoomDelta(7680) === -2 (types.ts) — the authored 4/5 gates land at 2/3.
+  // Honest-preview offsets (types.ts exportZoomDelta): CG 1920 → 0, LW 3840 → -1, FW 7680 → -2.
+  // Authored province min 3 must stay on at authored z3 on every surface.
+  const { exportZoomDelta } = require(path.join(out, "types.js"));
+  assert.equal(exportZoomDelta(1920), 0);
+  assert.equal(exportZoomDelta(3840), -1);
+  assert.equal(exportZoomDelta(7680), -2);
+  const cgExport = withLowZoomBoundaries(vendor.layers, 0);
+  const lwExport = withLowZoomBoundaries(vendor.layers, -1);
   const fwExport = withLowZoomBoundaries(vendor.layers, -2);
-  assert.equal(byId(fwExport, "boundary_state_z1-4").minzoom, 2);
+  assert.equal(byId(cgExport, "boundary_state_z1-4").minzoom, 3);
+  assert.equal(byId(cgExport, "boundary_state_z1-4").maxzoom, 5);
+  assert.equal(byId(lwExport, "boundary_state_z1-4").minzoom, 2);
+  assert.equal(byId(lwExport, "boundary_state_z1-4").maxzoom, 4);
+  assert.equal(byId(fwExport, "boundary_state_z1-4").minzoom, 1);
   assert.equal(byId(fwExport, "boundary_state_z1-4").maxzoom, 3);
   assert.equal(byId(fwExport, "boundary_state").minzoom, 3);
   assert.equal(byId(fwExport, "boundary_country_z0-4").maxzoom, 3);
@@ -361,7 +373,12 @@ test("applyAuthoredZoomGates re-gates the toner province upper bound and the rel
     },
   };
 
+  applyAuthoredZoomGates(map, 0);
+  assert.deepEqual(ranges["boundary_state_z1-4"], [3, 5]);
+  applyAuthoredZoomGates(map, -1);
+  assert.deepEqual(ranges["boundary_state_z1-4"], [2, 4]);
   applyAuthoredZoomGates(map, -2);
+  assert.deepEqual(ranges["boundary_state_z1-4"], [1, 3]);
   assert.deepEqual(ranges["boundary_state"], [3, 12]);
   assert.deepEqual(ranges["hillshade"], [4, 24]);
   assert.deepEqual(ranges["terrarium-ne2"], [0, 4]);

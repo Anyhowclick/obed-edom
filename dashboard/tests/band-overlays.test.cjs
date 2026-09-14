@@ -115,6 +115,11 @@ test("BandOverlays: snap guide is absent when splitCg is true even if cgSnapped"
   assert.ok(!render({ cgSnapped: true, splitCg: true }).includes("maps-snap-guide"));
 });
 
+test("BandOverlays: CG frame defaults to select and can switch to move", () => {
+  assert.match(render(), /class="maps-crop-cg select"/);
+  assert.match(render({ cgInteract: "move" }), /class="maps-crop-cg move"/);
+});
+
 test("styles.css: .maps-object-layer sits above the crop overlay and stays click-through except its handles", () => {
   const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
   const block = (selector) => {
@@ -172,6 +177,20 @@ test("styles.css: FW crop frame/label are neutral white, LW stays --aud-lw, CG s
   assert.match(cgLabelOverride[0], /color:\s*var\(--plum\)/);
 });
 
+test("styles.css: select mode lets map clicks through the CG frame; move mode captures them", () => {
+  const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
+  const block = (selector) => {
+    const m = css.match(new RegExp(selector.replace(/[.]/g, "\\.") + "\\s*\\{([^}]*)\\}"));
+    assert.ok(m, `missing ${selector} block`);
+    return m[1];
+  };
+  assert.match(block(".maps-crop-cg.select"), /pointer-events:\s*none/);
+  assert.match(block(".maps-crop-cg.move"), /pointer-events:\s*auto/);
+  const mode = block(".maps-cg-mode");
+  assert.match(mode, /z-index:\s*5/);
+  assert.match(mode, /bottom:\s*10px/);
+});
+
 test("styles.css: .maps-manual-pins tints gold, .maps-manual stays teal", () => {
   const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
   const block = (selector) => {
@@ -201,4 +220,11 @@ test("MapView.tsx: inner transform translates by -bandTop*k then scales by k", (
     src.includes("`translateY(${-L.bandTop * L.k}px) scale(${L.k})`"),
     "expected the inner element's transform template literal to translate by -bandTop*k then scale by k"
   );
+});
+
+test("MapView.tsx: wheel over the CG overlay is forwarded to MapLibre scrollZoom", () => {
+  const src = fs.readFileSync(path.join(root, "src/maps/MapView.tsx"), "utf8");
+  assert.match(src, /addEventListener\("wheel", onFrameWheel/);
+  assert.match(src, /scrollZoom\.wheel\(event\)/);
+  assert.match(src, /getCanvasContainer\(\)\.contains\(target\)/);
 });

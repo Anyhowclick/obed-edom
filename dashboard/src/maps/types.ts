@@ -1,3 +1,5 @@
+import { parseHighlightColours } from "./highlight";
+
 export const HILLSHADE_LAYER_ID = "hillshade";
 export const HILLSHADE_SOURCE_ID = "terrarium";
 export const HILLSHADE_NE2_LAYER_ID = "terrarium-ne2";
@@ -58,6 +60,7 @@ export type MapsCgOverride = {
   camera: MapsCamera;
   style: MapsStyleId;
   highlights: string[];
+  highlightColours?: Record<string, string>;
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
   hillshade?: boolean;
@@ -74,6 +77,7 @@ export type MapsSlide = {
   style: MapsStyleId;
   camera: MapsCamera;
   highlights: string[];
+  highlightColours?: Record<string, string>;
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
   hillshade?: boolean;
@@ -738,6 +742,7 @@ function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefine
   return {
     ...rest,
     highlights: cg.highlights || [],
+    highlightColours: parseHighlightColours(cg.highlightColours),
     churches: churchesFromResult(cg.churches),
     ...(hiddenLayers ? { hiddenLayers: parseHiddenLayers(hiddenLayers) } : {}),
     ...(typeof hillshade === "boolean" ? { hillshade } : {}),
@@ -755,6 +760,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     cgShiftY: slide.cgShiftY ?? 0,
     includeSidePanels: slide.includeSidePanels === true,
     highlights: slide.highlights || [],
+    highlightColours: parseHighlightColours(slide.highlightColours),
     churches: churchesFromResult(slide.churches),
     hiddenLayers: parseHiddenLayers(slide.hiddenLayers ?? deckHidden),
     hillshade: slide.hillshade === true,

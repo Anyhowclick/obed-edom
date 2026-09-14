@@ -150,13 +150,6 @@ export function SettingsTab() {
             <span>Highlight colour for selected countries and regions</span>
             <div className="settings-row">
               <input
-                type="color"
-                value={normaliseHighlightColour(colourText || settings.highlightColour)}
-                onChange={(event) => scheduleColourCommit(event.target.value)}
-                onBlur={commitColourText}
-                aria-label="Highlight colour"
-              />
-              <input
                 type="text"
                 value={colourText}
                 onChange={(event) => setColourText(event.target.value)}
@@ -164,7 +157,17 @@ export function SettingsTab() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") commitColourText();
                 }}
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
                 aria-label="Highlight colour hex"
+              />
+              <input
+                type="color"
+                value={normaliseHighlightColour(colourText || settings.highlightColour)}
+                onChange={(event) => scheduleColourCommit(event.target.value)}
+                onBlur={commitColourText}
+                aria-label="Highlight colour"
               />
             </div>
           </label>

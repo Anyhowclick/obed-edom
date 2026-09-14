@@ -1,5 +1,8 @@
 export const DEFAULT_HIGHLIGHT_COLOUR = "#e8772a";
 
+const HIGHLIGHT_CODE = /^(?:[A-Z]{3}|A1:[A-Z0-9+?_-]{1,16})$/;
+const HEX_COLOUR = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
 export function normaliseHighlightColour(value: unknown): string {
   if (typeof value !== "string") return DEFAULT_HIGHLIGHT_COLOUR;
   const trimmed = value.trim();
@@ -35,4 +38,59 @@ export function highlightColour(): string {
 
 export function setHighlightColour(next: string): void {
   current = normaliseHighlightColour(next);
+}
+
+export function isHighlightHex(value: unknown): boolean {
+  return typeof value === "string" && HEX_COLOUR.test(value.trim());
+}
+
+export function parseHighlightCode(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  const code = text.includes(":") ? text : text.toUpperCase();
+  return HIGHLIGHT_CODE.test(code) ? code : null;
+}
+
+export function parseHighlightColours(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const code = parseHighlightCode(key);
+    if (!code || !isHighlightHex(value)) continue;
+    out[code] = normaliseHighlightColour(value);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+export function pruneHighlightColours(
+  highlights: string[],
+  colours: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  if (!colours) return undefined;
+  const keep = new Set(highlights);
+  const next: Record<string, string> = {};
+  for (const [code, colour] of Object.entries(colours)) {
+    if (keep.has(code)) next[code] = colour;
+  }
+  return Object.keys(next).length ? next : undefined;
+}
+
+/** MapLibre `match` on ADM0_A3 / adm1_code, falling back to the global colour. */
+export function highlightColourExpression(
+  idProperty: "ADM0_A3" | "adm1_code",
+  fallback: string,
+  overrides?: Record<string, string>
+): string | unknown[] {
+  const base = normaliseHighlightColour(fallback);
+  const pairs: string[] = [];
+  for (const [code, colour] of Object.entries(overrides || {})) {
+    if (idProperty === "ADM0_A3") {
+      if (code.startsWith("A1:")) continue;
+      pairs.push(code, normaliseHighlightColour(colour));
+    } else if (code.startsWith("A1:")) {
+      pairs.push(code.slice(3), normaliseHighlightColour(colour));
+    }
+  }
+  if (!pairs.length) return base;
+  return ["match", ["get", idProperty], ...pairs, base];
 }

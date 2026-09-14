@@ -67,14 +67,37 @@ test("the export checkboxes no longer carry an audience-colour class", () => {
   assert.doesNotMatch(text, /className="maps-check aud-(lw|cg|dsk)"/);
 });
 
-test("the Countries/Regions segmented indicator carries --seg-n so its width isn't hard-coded", () => {
-  const text = src("tabs/MapsTab.tsx");
-  assert.match(text, /"--seg-i":\s*pickRegions\s*\?\s*1\s*:\s*0,\s*"--seg-n":\s*2/);
+test("the sliding pill is measured (offsetLeft/width), not equal-width CSS vars", () => {
+  const maps = src("tabs/MapsTab.tsx");
+  assert.match(maps, /<SlidingSeg/);
+  assert.doesNotMatch(maps, /"--seg-i":\s*pickRegions/);
+
+  const sliding = src("maps/SlidingSeg.tsx");
+  assert.match(sliding, /offsetLeft/);
+  assert.match(sliding, /offsetWidth/);
+  assert.match(sliding, /style\.transition = "none"/);
+  assert.match(sliding, /role="tablist"/);
+  assert.match(sliding, /role="tab"/);
+  assert.match(sliding, /animUntilRef/);
+  assert.match(sliding, /TABS_MS = 250/);
+
+  const bar = blocks().find((b) => b.selector === ".seg.seg-slide");
+  assert.ok(bar, ".seg.seg-slide rule not found");
+  assert.match(bar.body, /padding:\s*var\(--tabs-pad\)/);
+  assert.match(bar.body, /gap:\s*3px/);
+  assert.match(bar.body, /width:\s*max-content/);
+  assert.doesNotMatch(bar.body, /flex:\s*1/);
+
+  const tab = blocks().find((b) => b.selector === ".seg.seg-slide button");
+  assert.ok(tab, ".seg.seg-slide button rule not found");
+  assert.doesNotMatch(tab.body, /flex:\s*1 1 0/);
 
   const ind = blocks().find((b) => b.selector === ".seg-slide-ind");
   assert.ok(ind, ".seg-slide-ind rule not found");
-  assert.match(ind.body, /width:\s*calc\(100%\s*\/\s*var\(--seg-n/);
-  assert.doesNotMatch(ind.body, /width:\s*50%/);
+  assert.match(ind.body, /width:\s*0/);
+  assert.match(ind.body, /visibility:\s*hidden/);
+  assert.doesNotMatch(ind.body, /--seg-n|--seg-i/);
+  assert.match(ind.body, /transition:[^}]*transform[^}]*width/);
 
   const reducedMotion = css.match(/@media \(prefers-reduced-motion: reduce\) \{[^}]*\.seg-slide-ind[^}]*\}[^}]*\}/);
   assert.ok(reducedMotion, "missing reduced-motion rule for .seg-slide-ind");

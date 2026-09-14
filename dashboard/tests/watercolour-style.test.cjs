@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/watercolourStyle.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { buildWatercolourStyle, WATERCOLOUR_PATTERN_IDS, scribbleStrokes, paperGrainPixels, paperGrainCss } = require(path.join(out, "watercolourStyle.js"));
+const { buildWatercolourStyle, WATERCOLOUR_PATTERN_IDS, SCRIBBLE_ORIENTS, scribbleStrokes, paperGrainPixels, paperGrainCss } = require(path.join(out, "watercolourStyle.js"));
 
 const base = {
   version: 8,
@@ -76,25 +76,46 @@ test("land fills are lifted above the hillshade anchor; water and roads stay bel
   // Mirrors withHillshade's anchor in styles.ts: hillshade splices immediately before the first source-layer "water" layer.
   const anchor = style.layers.findIndex((layer) => layer["source-layer"] === "water");
   assert.ok(anchor >= 0);
-  for (const id of ["park", "park-scribble", "landcover_wood", "landcover_wood-scribble", "ice"]) {
+  for (const id of [
+    "park", "park-scribble", "park-scribble-2", "park-scribble-3",
+    "landcover_wood", "landcover_wood-scribble", "landcover_wood-scribble-2", "landcover_wood-scribble-3",
+    "ice",
+  ]) {
     assert.ok(indexOf(id) < anchor, `${id} should sit before the hillshade anchor`);
   }
   assert.equal(indexOf("water"), anchor);
-  for (const id of ["water-scribble", "waterway", "building", "highway_major", "railway"]) {
+  for (const id of ["water-scribble", "water-scribble-2", "water-scribble-3", "waterway", "building", "highway_major", "railway"]) {
     assert.ok(indexOf(id) > anchor, `${id} should sit after the hillshade anchor`);
   }
   assert.equal(indexOf("park-scribble"), indexOf("park") + 1);
+  assert.equal(indexOf("park-scribble-2"), indexOf("park-scribble") + 1);
+  assert.equal(indexOf("park-scribble-3"), indexOf("park-scribble-2") + 1);
   assert.equal(indexOf("landcover_wood-scribble"), indexOf("landcover_wood") + 1);
+  assert.equal(indexOf("landcover_wood-scribble-2"), indexOf("landcover_wood-scribble") + 1);
+  assert.equal(indexOf("landcover_wood-scribble-3"), indexOf("landcover_wood-scribble-2") + 1);
   assert.equal(indexOf("water-scribble"), indexOf("water") + 1);
+  assert.equal(indexOf("water-scribble-2"), indexOf("water-scribble") + 1);
+  assert.equal(indexOf("water-scribble-3"), indexOf("water-scribble-2") + 1);
 });
 
 test("scribble twins mirror their parent fill", () => {
   const { style } = buildWatercolourStyle(base);
   const byId = Object.fromEntries(style.layers.map((layer) => [layer.id, layer]));
-  for (const [parentId, patternId] of [["water", "scribble-water"], ["park", "scribble-park"], ["landcover_wood", "scribble-wood"]]) {
+  const twins = [
+    ["water", "scribble", "scribble-water"],
+    ["water", "scribble-2", "scribble-water-2"],
+    ["water", "scribble-3", "scribble-water-3"],
+    ["park", "scribble", "scribble-park"],
+    ["park", "scribble-2", "scribble-park-2"],
+    ["park", "scribble-3", "scribble-park-3"],
+    ["landcover_wood", "scribble", "scribble-wood"],
+    ["landcover_wood", "scribble-2", "scribble-wood-2"],
+    ["landcover_wood", "scribble-3", "scribble-wood-3"],
+  ];
+  for (const [parentId, suffix, patternId] of twins) {
     const parent = byId[parentId];
-    const twin = byId[`${parentId}-scribble`];
-    assert.ok(twin, `${parentId}-scribble should exist`);
+    const twin = byId[`${parentId}-${suffix}`];
+    assert.ok(twin, `${parentId}-${suffix} should exist`);
     assert.equal(twin.source, parent.source);
     assert.equal(twin["source-layer"], parent["source-layer"]);
     assert.deepEqual(twin.filter, parent.filter);
@@ -129,9 +150,49 @@ test("cached Positron transforms without undefined style values", () => {
   const ids = style.layers.map((layer) => String(layer.id));
   const anchor = style.layers.findIndex((layer) => layer["source-layer"] === "water");
   assert.ok(anchor >= 0);
-  for (const id of ["park", "park-scribble", "landcover_ice_shelf", "landcover_glacier", "landuse_residential", "landcover_wood", "landcover_wood-scribble"]) {
+  for (const id of ["park", "park-scribble", "park-scribble-2", "park-scribble-3", "landcover_ice_shelf", "landcover_glacier", "landuse_residential", "landcover_wood", "landcover_wood-scribble", "landcover_wood-scribble-2", "landcover_wood-scribble-3"]) {
     assert.ok(ids.indexOf(id) < anchor, `${id} should sit before the hillshade anchor`);
   }
+});
+
+test("scribble orients rotate and flip the spec angles", () => {
+  const spec = { angles: [0.3], count: 500, length: 40, width: 2, alpha: 0.4, seed: 5, jitter: 0.08, orients: ["id", "rot90"] };
+  const strokes = scribbleStrokes(spec);
+  const wrap = (angle) => ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  const near = (target) => strokes.filter((stroke) => Math.abs(wrap(stroke.angle) - wrap(target)) < 0.12).length;
+  assert.ok(near(0.3) > 20, "identity family missing");
+  assert.ok(near(0.3 + Math.PI / 2) > 20, "rotated family missing");
+});
+
+test("water scribble stacks three pattern periods", () => {
+  const src = fs.readFileSync(path.join(root, "src/maps/watercolourStyle.ts"), "utf8");
+  assert.match(src, /id: "scribble-water"[\s\S]*orients: \[\.\.\.SCRIBBLE_ORIENTS\][\s\S]*size: 1024[\s\S]*patchContrast: 0/);
+  assert.match(src, /id: "scribble-water-2"[\s\S]*size: 512[\s\S]*patchContrast: 0/);
+  assert.match(src, /id: "scribble-water-3"[\s\S]*size: 256[\s\S]*patchContrast: 0/);
+  assert.match(src, /id: "scribble-park"[\s\S]*patchContrast: 0/);
+  assert.match(src, /id: "scribble-park-2"[\s\S]*size: 1024[\s\S]*patchContrast: 0/);
+  assert.match(src, /id: "scribble-park-3"[\s\S]*size: 256[\s\S]*patchContrast: 0/);
+  assert.match(src, /id: "scribble-wood"[\s\S]*patchContrast: 0/);
+  assert.match(src, /id: "scribble-wood-2"[\s\S]*size: 1024[\s\S]*patchContrast: 0/);
+  assert.match(src, /id: "scribble-wood-3"[\s\S]*size: 256[\s\S]*patchContrast: 0/);
+  assert.deepEqual(WATERCOLOUR_PATTERN_IDS, [
+    "scribble-water",
+    "scribble-water-2",
+    "scribble-water-3",
+    "scribble-park",
+    "scribble-park-2",
+    "scribble-park-3",
+    "scribble-wood",
+    "scribble-wood-2",
+    "scribble-wood-3",
+  ]);
+  assert.deepEqual(SCRIBBLE_ORIENTS, ["id", "flipX", "flipY", "rot90", "rot180", "rot270"]);
+});
+
+test("patchContrast 0 keeps an even hatch", () => {
+  const spec = { angles: [0], count: 80, length: 20, width: 1, alpha: 0.4, seed: 5, patchContrast: 0 };
+  const strokes = scribbleStrokes(spec);
+  assert.equal(strokes.length, spec.count);
 });
 
 test("scribbleStrokes is deterministic, seed-sensitive, and stays near the spec angles", () => {

@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MapsExportPlan } from "../src/api";
 import { DEFAULT_HIGHLIGHT_COLOUR, highlightColour as currentHighlightColour } from "../src/maps/highlight";
 import { flushMicrotasks, renderMapsTab, tick } from "./renderMapsTab";
-import { mapsApiScript, saveMapsState, fetchMapsExportPlan } from "./fakes/mapsApi";
-import { makeCamera, makeJob, makeSlide } from "./fakes/doc";
+import { mapsApiScript, putSettings, saveMapsState, fetchMapsExportPlan } from "./fakes/mapsApi";
+import { makeCamera, makeDoc, makeJob, makeSlide } from "./fakes/doc";
 import { refreshHighlightColour } from "../src/prefs";
 
 const captureExportRaster = vi.fn(async (..._args: unknown[]) => new Blob(["still"]));
@@ -294,6 +294,48 @@ describe("highlight colour readiness gates export", () => {
     expect(captureExportRaster).not.toHaveBeenCalled();
     expect(captureIsolatePair).not.toHaveBeenCalled();
     expect(captureFlyFrames).not.toHaveBeenCalled();
+  });
+});
+
+describe("Selected regions colour wheel", () => {
+  it("writes the global highlight colour from Selected regions", async () => {
+    await renderMapsTab();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Properties" }));
+    });
+
+    const picker = screen.getByLabelText("Highlight colour") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(picker, { target: { value: "#123abc" } });
+    });
+    await tick(300);
+
+    expect(putSettings).toHaveBeenCalledWith({ highlightColour: "#123abc" });
+  });
+
+  it("stores a per-region colour override on the slide", async () => {
+    const job = makeJob({
+      result: { ...makeDoc({ slides: [makeSlide({ highlights: ["SGP"] })] }), stateRevision: 1 },
+    });
+    await renderMapsTab({ job });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Properties" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "SGP" }));
+    });
+
+    const picker = screen.getByLabelText("Highlight colour") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(picker, { target: { value: "#00aaff" } });
+    });
+    await tick(800);
+
+    const calls = mapsApiScript.saveMapsState.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const slides = calls[calls.length - 1].document.slides as Array<{ highlightColours?: Record<string, string> }>;
+    expect(slides[0]?.highlightColours).toEqual({ SGP: "#00aaff" });
+    expect(screen.getByRole("button", { name: "Use global colour" })).toBeInTheDocument();
   });
 });
 
