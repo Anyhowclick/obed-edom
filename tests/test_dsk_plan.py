@@ -334,7 +334,7 @@ def test_group_child_text_makes_slide_text():
         group_child_words={0: verse}, group_children=group_children,
     )
     assert out.is_text
-    assert out.long_text_ids == (("groupchild", 0, 1),)
+    assert out.long_text_ids == (("groupchild", 0, "text", 1),)
     assert set(out.dropped_media_text) == {("image", 0)}
     assert ("group", 0) in out.kept
 

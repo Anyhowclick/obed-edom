@@ -223,7 +223,7 @@ def test_gw5_group_verse_text_slide_no_image(gw_inputs, tmp_path):
     cls = by_number[5]
     deck = dsa._load_deck(GW_DECK)
     assert cls.is_text
-    assert cls.long_text_ids == (("groupchild", 0, 1),)
+    assert cls.long_text_ids == (("groupchild", 0, "text", 1),)
     assert ("image", 0) in cls.dropped_media_text
 
     plan = _plan_one(payload, cls, runs, crop_dir=tmp_path / "crops5", deck=deck)
@@ -234,14 +234,13 @@ def test_gw5_group_verse_text_slide_no_image(gw_inputs, tmp_path):
     for iid in (("image", 0), ("image", 1), ("image", 2), ("shape", 0)):
         assert iid in plan.deletes[5]
 
-    verse = plan.fits[5][("groupchild", 0, 1)]
-    badge = plan.fits[5][("groupchild", 0, 0)]
+    verse = plan.fits[5][("groupchild", 0, "text", 1)]
+    badge = plan.fits[5][("groupchild", 0, "shape", 0)]
     band_top = DEFAULT_BAND.bottom - DEFAULT_BAND.height
     for rect in (verse, badge):
         assert rect.y >= band_top - 0.5
         assert rect.y + rect.h <= DEFAULT_BAND.bottom + 0.5
     assert badge.y + badge.h <= verse.y + 0.5  # badge above verse
-    assert plan.group_child_kind[5] == {("groupchild", 0, 1): "text", ("groupchild", 0, 0): "shape"}
 
 
 @pytest.mark.deck
@@ -256,7 +255,7 @@ def test_gw50_51_mirror_pair_dedupe_ahead_of_group_classifier(gw_inputs):
         cls = by_number[number]
         assert cls.dropped_duplicate == (("group", 1),)
         assert cls.is_text
-        assert cls.long_text_ids == (("groupchild", 0, 1),)
+        assert cls.long_text_ids == (("groupchild", 0, "text", 1),)
         assert ("group", 1) not in cls.kept
 
 

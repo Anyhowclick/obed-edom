@@ -586,7 +586,7 @@ def test_group_verse_slide_stacks_children_not_affine():
     _require_font("AzoSans-Regular")
     slide, payload, cls = _gw5_shaped_slide_and_plan_inputs()
     assert cls.is_text
-    assert cls.long_text_ids == (("groupchild", 0, 1),)
+    assert cls.long_text_ids == (("groupchild", 0, "text", 1),)
     assert ("image", 0) in cls.dropped_media_text
 
     decisions = {5: SlideDecision(5, "in_deck")}
@@ -597,8 +597,8 @@ def test_group_verse_slide_stacks_children_not_affine():
     assert ("image", 0) in plan.deletes[5]
 
     band_top = BAND.bottom - BAND.height
-    verse_rect = plan.fits[5][("groupchild", 0, 1)]
-    badge_rect = plan.fits[5][("groupchild", 0, 0)]
+    verse_rect = plan.fits[5][("groupchild", 0, "text", 1)]
+    badge_rect = plan.fits[5][("groupchild", 0, "shape", 0)]
     assert verse_rect.y >= band_top - 0.01
     assert verse_rect.y + verse_rect.h <= BAND.bottom + 0.01
     assert badge_rect.y + badge_rect.h <= verse_rect.y + 0.01  # badge above verse
@@ -614,7 +614,7 @@ def test_group_verse_slide_stacks_children_not_affine():
     assert f"iWork items of group 1 of slide {ordinal}" not in script
     assert "(width of theObj)" not in script
 
-    assert 'log ("OBED" & tab & "5" & tab & "MEASURE" & tab & "groupchild:0:1"' in script
+    assert 'log ("OBED" & tab & "5" & tab & "MEASURE" & tab & "groupchild:0:text:1"' in script
 
 
 def test_eligible_refit_items_excludes_groupchild():
@@ -623,7 +623,7 @@ def test_eligible_refit_items_excludes_groupchild():
     slide, payload, cls = _gw5_shaped_slide_and_plan_inputs()
     decisions = {5: SlideDecision(5, "in_deck")}
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
-    assert ("groupchild", 0, 1) in plan.stacked_ids[5]
+    assert ("groupchild", 0, "text", 1) in plan.stacked_ids[5]
     assert dsa._eligible_refit_items(plan, 5) == frozenset()
 
 
@@ -666,14 +666,14 @@ def test_group_short_label_stays_in_short_row_at_source_size():
     }}
     payload = _payload([slide])
     cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
-    assert cls.long_text_ids == (("groupchild", 0, 0), ("groupchild", 0, 1))
+    assert cls.long_text_ids == (("groupchild", 0, "text", 0), ("groupchild", 0, "text", 1))
 
     decisions = {5: SlideDecision(5, "in_deck")}
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
 
-    assert ("groupchild", 0, 1) in plan.stacked_ids[5]
-    assert ("groupchild", 0, 0) not in plan.stacked_ids[5]
-    label_rect = plan.fits[5][("groupchild", 0, 0)]
+    assert ("groupchild", 0, "text", 1) in plan.stacked_ids[5]
+    assert ("groupchild", 0, "text", 0) not in plan.stacked_ids[5]
+    label_rect = plan.fits[5][("groupchild", 0, "text", 0)]
     assert label_rect.w == pytest.approx(200.0)
     assert label_rect.h == pytest.approx(60.0)
 
@@ -717,8 +717,8 @@ def test_groupchild_overflow_refuses_under_text_fit_warn():
     decisions = {5: SlideDecision(5, "in_deck")}
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
     slides_by_number = {s["number"]: s for s in payload["slides"]}
-    overflows = [{"slide": 5, "item": "groupchild:0:1", "height": 400.0}]
-    with pytest.raises(AssemblyRefusal, match="groupchild:0:1 overflow"):
+    overflows = [{"slide": 5, "item": "groupchild:0:text:1", "height": 400.0}]
+    with pytest.raises(AssemblyRefusal, match="groupchild:0:text:1 overflow"):
         dsa._run_refit_and_finalize(
             plan, batch=None, slides_by_number=slides_by_number,
             band=BAND, min_text_pt=24.0, allow_split=False, text_fit="warn",
@@ -735,15 +735,15 @@ def test_groupchild_overflow_stays_a_warning_under_text_fit_shrink():
     decisions = {5: SlideDecision(5, "in_deck")}
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
     slides_by_number = {s["number"]: s for s in payload["slides"]}
-    overflows = [{"slide": 5, "item": "groupchild:0:1", "height": 400.0}]
-    warnings = ["slide 5: text groupchild:0:1 overflow, height 400.0"]
+    overflows = [{"slide": 5, "item": "groupchild:0:text:1", "height": 400.0}]
+    warnings = ["slide 5: text groupchild:0:text:1 overflow, height 400.0"]
     dsa._run_refit_and_finalize(
         plan, batch=None, slides_by_number=slides_by_number,
         band=BAND, min_text_pt=24.0, allow_split=False, text_fit="shrink",
         staging_path=Path("/tmp/staged.key"), measured={}, overflows=overflows,
         warnings=warnings, log=lambda _msg: None,
     )
-    assert any("groupchild:0:1 overflow" in w for w in warnings)
+    assert any("groupchild:0:text:1 overflow" in w for w in warnings)
 
 
 def test_refit_stopped_logs_reason_and_per_box_offline_measures(monkeypatch):
@@ -817,8 +817,91 @@ def test_group_child_of_unmapped_kind_skipped_not_placed():
     cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
     decisions = {5: SlideDecision(5, "in_deck")}
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
-    assert ("groupchild", 0, 0) not in plan.fits[5]
-    assert ("groupchild", 0, 0) not in plan.group_child_kind.get(5, {})
+    assert ("groupchild", 0, "table", 0) not in plan.fits[5]
+
+
+def test_groupchild_id_carries_kind_no_shape_text_kindindex_collision():
+    # D1 Codex fix round, Finding 1: kindIndex is assigned PER KIND, so a `shape`
+    # kindIndex 1 badge and a `text` kindIndex 1 verse in the same group used to collapse
+    # to the same 3-tuple ("groupchild", 0, 1) -- the badge was mistaken for the long
+    # child and got no short-row placement. The 4-tuple id (kind-bearing) must keep them
+    # apart: the verse is the long/stacked id, the badge gets its own short-row rect.
+    _require_font("AzoSans-Regular")
+    group = _group_item(0, x=4702, y=-88, w=1442, h=443)
+    slide = _slide(5, [group])
+    slide["groupChildText"] = {0: _GW5_VERSE}
+    slide["groupChildSignature"] = {0: f"shape:badge\ntext:{_GW5_VERSE}"}
+    slide["groupChildren"] = {0: [
+        {"kind": "shape", "kindIndex": 1, "autosize": False, "x": 4750.0, "y": 20.0, "w": 200.0, "h": 60.0},
+        {"kind": "text", "kindIndex": 1, "autosize": True, "x": 4303.0, "cy": 89.0, "y": -88.0, "w": 1442.0, "h": 355.0},
+    ]}
+    slide["groupChildRuns"] = {0: {1: {
+        "text": _GW5_VERSE, "font": "AzoSans-Regular", "size": 70.0,
+        "runs": [{"text": _GW5_VERSE, "fontName": "AzoSans-Regular", "size": 70.0}],
+    }}}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    assert cls.long_text_ids == (("groupchild", 0, "text", 1),)
+
+    decisions = {5: SlideDecision(5, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+    assert ("groupchild", 0, "text", 1) in plan.stacked_ids[5]
+    assert ("groupchild", 0, "shape", 1) not in plan.stacked_ids[5]
+    badge_rect = plan.fits[5][("groupchild", 0, "shape", 1)]
+    verse_rect = plan.fits[5][("groupchild", 0, "text", 1)]
+    assert badge_rect.w == pytest.approx(200.0)
+    assert badge_rect.h == pytest.approx(60.0)
+    assert badge_rect.y + badge_rect.h <= verse_rect.y + 0.01
+
+
+def test_fixed_frame_group_text_over_threshold_refuses():
+    # D1 Codex fix round, Finding 2: a group's DFS word join exceeds `text_slide_words`
+    # but its only long-text-bearing child is a FIXED FRAME (autosize False) one whose
+    # `kind` collapsed to `shape` (dual text+shape membership) -- `_is_text_slide_kept`
+    # then emits no groupchild long id for this group at all, so unguarded it would
+    # silently fall through to the normal affine path. Must refuse instead.
+    group = _group_item(0, x=4702, y=15, w=645, h=443)
+    slide = _slide(5, [group])
+    slide["groupChildText"] = {0: _GW5_VERSE}
+    slide["groupChildSignature"] = {0: f"shape:{_GW5_VERSE}"}
+    slide["groupChildren"] = {0: [
+        {
+            "kind": "shape", "kindIndex": 0, "autosize": False, "has_text": True,
+            "x": 4702.0, "y": 15.0, "w": 645.0, "h": 443.0,
+        },
+    ]}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    assert not cls.long_text_ids  # no `kind == "text"` child -> no groupchild long id at all
+    decisions = {5: SlideDecision(5, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="fixed-frame text inside group 0 unsupported"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+
+def test_fixed_frame_group_text_under_threshold_unaffected():
+    # Companion to the refusal above: a NON-text-triggering group (a short caption, under
+    # `text_slide_words`) with a fixed-frame text child on an otherwise ordinary content
+    # slide must be unaffected -- the new check only fires for a group whose DFS word
+    # join is actually over threshold.
+    photo = _image_item(0, x=1920, y=0, w=3840, h=1080)
+    group = _group_item(0, x=2000, y=100, w=300, h=80)
+    slide = _slide(5, [photo, group])
+    caption = "Short caption"
+    slide["groupChildText"] = {0: caption}
+    slide["groupChildSignature"] = {0: f"shape:{caption}"}
+    slide["groupChildren"] = {0: [
+        {
+            "kind": "shape", "kindIndex": 0, "autosize": False, "has_text": True,
+            "x": 2000.0, "y": 100.0, "w": 300.0, "h": 80.0,
+        },
+    ]}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    assert not cls.is_text
+    decisions = {5: SlideDecision(5, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    assert 5 in plan.fits
 
 
 def test_content_ids_excludes_text_triggering_group():
@@ -831,7 +914,7 @@ def test_content_ids_excludes_text_triggering_group():
     cls = SlideClass(
         number=5, category="mixed", build_count=0, movie_count=0,
         kept=(("image", 0), ("group", 1)), dropped_side=(), dropped_backdrop=(),
-        transition=None, is_text=True, long_text_ids=(("groupchild", 1, 0),),
+        transition=None, is_text=True, long_text_ids=(("groupchild", 1, "text", 0),),
     )
     group_signature = {1: "image:photo\ntext:verse"}
     without_exclusion = dsa._content_ids(cls, group_signature=group_signature)
@@ -922,7 +1005,7 @@ def test_group_nested_child_refuses_even_with_top_level_long_text():
     cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
     assert cls.is_text
     assert ("text", 0) in cls.long_text_ids
-    assert ("groupchild", 0, 1) in cls.long_text_ids
+    assert ("groupchild", 0, "text", 1) in cls.long_text_ids
 
     decisions = {5: SlideDecision(5, "in_deck")}
     with pytest.raises(AssemblyRefusal, match="nested"):
@@ -1621,7 +1704,7 @@ def test_gw51_badge_x_clears_title_right_edge():
     plan = plan_assembly(payload, [by_number[51]], decisions=decisions, band=BAND, clips={}, runs=runs)
 
     title_rect = plan.fits[51][("text", 1)]
-    badge_rect = plan.fits[51][("groupchild", 0, 0)]
+    badge_rect = plan.fits[51][("groupchild", 0, "shape", 0)]
     assert badge_rect.x >= title_rect.x + title_rect.w
     assert badge_rect.x == pytest.approx(1069.99, abs=0.5)
 
@@ -1663,7 +1746,7 @@ def test_gw53_badge_x_clamped_to_band_right_edge():
     by_number = {c.number: c for c in classes}
     decisions = {53: SlideDecision(53, "in_deck")}
     plan = plan_assembly(payload, [by_number[53]], decisions=decisions, band=BAND, clips={}, runs=runs)
-    badge = plan.fits[53][("groupchild", 0, 0)]
+    badge = plan.fits[53][("groupchild", 0, "shape", 0)]
     assert badge.x == pytest.approx(1246.97, abs=0.5)
     assert badge.x + badge.w == pytest.approx(BAND.x_max, abs=1e-6)
     assert any(

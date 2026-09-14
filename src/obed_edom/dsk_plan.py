@@ -130,10 +130,13 @@ def is_panel_backdrop(item: dict, wall: tuple[float, float], *, include_side: bo
 
 DEFAULT_TEXT_SLIDE_WORDS = 10
 
-# ("groupchild", group kindIndex, child kindIndex) -- a group's TEXT child, carried
-# alongside plain ItemId everywhere a long/stacked/text-size/run-size id is keyed
+# ("groupchild", group kindIndex, child kind, child kindIndex) -- a group's TEXT child,
+# carried alongside plain ItemId everywhere a long/stacked/text-size/run-size id is keyed
 # (Design A step 2); every ``iid[0] in ("text", "image", ...)`` filter must ignore it.
-GroupChildId = tuple[str, int, int]
+# The child kind is carried in the id (not just its per-kind kindIndex) because
+# kindIndex is assigned PER KIND -- a badge ``shape`` and a verse ``text`` in the same
+# group can share one kindIndex, and a 3-tuple id collided the two (D1 Codex fix round).
+GroupChildId = tuple[str, int, str, int]
 
 
 def _word_count(text: str | None) -> int:
@@ -168,7 +171,7 @@ def _is_text_slide_kept(
             continue
         for child in group_children.get(group_ki, ()):
             if child.get("kind") == "text":
-                long_ids.append(("groupchild", group_ki, child["kindIndex"]))
+                long_ids.append(("groupchild", group_ki, "text", child["kindIndex"]))
     return (bool(long_ids), tuple(long_ids))
 
 

@@ -171,7 +171,6 @@ class AssemblyPlan:
     short_row_h: dict[int, float] = field(default_factory=dict)
     crops: dict[int, dict[ItemId, CropSpec]] = field(default_factory=dict)
     anchors: dict[int, str] = field(default_factory=dict)
-    group_child_kind: dict[int, dict[ItemId, str]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -207,11 +206,11 @@ def _stacked_text_rects(boxes: Sequence[TextBox], heights: dict[ItemId, float], 
 
 
 def _item_label(item_id: ItemId) -> str:
-    """Log/refusal-message identifier: ``groupchild {g}:{k}`` for a ``GroupChildId``,
-    else the bare ``kindIndex`` -- ``item_id[1]`` alone is the group's index for a
-    groupchild id, not the child's (F8)."""
+    """Log/refusal-message identifier: ``groupchild {g}:{kind}:{idx}`` for a
+    ``GroupChildId``, else the bare ``kindIndex`` -- ``item_id[1]`` alone is the group's
+    index for a groupchild id, not the child's (F8)."""
     if item_id[0] == "groupchild":
-        return f"groupchild {item_id[1]}:{item_id[2]}"
+        return f"groupchild {item_id[1]}:{item_id[2]}:{item_id[3]}"
     return str(item_id[1])
 
 
@@ -288,10 +287,10 @@ def _run_size_ranges(
 
 
 def _group_child_geometry(
-    group_children: Mapping[int, Sequence[dict]], group_ki: int, child_ki: int
+    group_children: Mapping[int, Sequence[dict]], group_ki: int, child_kind: str, child_ki: int
 ) -> dict | None:
     for child in group_children.get(group_ki, ()):
-        if child.get("kindIndex") == child_ki and child.get("kind") == "text":
+        if child.get("kindIndex") == child_ki and child.get("kind") == child_kind:
             return child
     return None
 
@@ -312,8 +311,8 @@ def _text_boxes(
 
     def sort_key(iid: ItemId) -> tuple[float, float]:
         if iid[0] == "groupchild":
-            _tag, group_ki, child_ki = iid
-            child = _group_child_geometry(group_children, group_ki, child_ki)
+            _tag, group_ki, child_kind, child_ki = iid
+            child = _group_child_geometry(group_children, group_ki, child_kind, child_ki)
             if child is None:
                 return (0.0, 0.0)
             return (child.get("y", child.get("cy", 0.0)), child.get("x", 0.0))
@@ -325,7 +324,7 @@ def _text_boxes(
     warnings: list[str] = []
     for iid in ordered:
         if iid[0] == "groupchild":
-            _tag, group_ki, child_ki = iid
+            _tag, group_ki, _child_kind, child_ki = iid
             info = (group_child_runs.get(group_ki) or {}).get(child_ki)
             font_name = (info or {}).get("font") or None
             size = (info or {}).get("size") or None
@@ -570,7 +569,6 @@ def plan_assembly(
     short_row_h_map: dict[int, float] = {}
     crops_out: dict[int, dict[ItemId, CropSpec]] = {}
     anchors_out: dict[int, str] = {}
-    group_child_kind_map: dict[int, dict[ItemId, str]] = {}
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
     if objects_graph is None and fw_deck is not None:
@@ -599,6 +597,29 @@ def plan_assembly(
                         raise AssemblyRefusal(
                             f"slide {number}: group {group_ki} child {child['kindIndex']} is nested "
                             "inside a text-triggering group -- unsupported"
+                        )
+
+            # Finding 2 (D1 Codex fix round): a group's DFS word join can exceed
+            # ``text_slide_words`` (making the group text-triggering) even when NONE of
+            # its children resolved to ``kind == "text"`` -- ``_all_group_child_records``
+            # labels a text-bearing FIXED-FRAME child ``shape`` when it also carries shape
+            # membership, so `_is_text_slide_kept` never emits a long groupchild id for
+            # it and the group is silently left off `text_group_kis`, taking the normal
+            # affine path (keeping a full-wall photo) instead. Piece D1 handles autosize
+            # group text only -- refuse explicitly rather than write that blind.
+            for iid in cls.kept:
+                if iid[0] != "group":
+                    continue
+                group_ki = iid[1]
+                if group_ki in text_group_kis:
+                    continue
+                if _word_count(group_child_words.get(group_ki) if group_child_words else None) <= text_slide_words:
+                    continue
+                for child in group_children_geo.get(group_ki, ()):
+                    if child.get("has_text") and child.get("kind") != "text" and child.get("autosize") is False:
+                        raise AssemblyRefusal(
+                            f"slide {number}: fixed-frame text inside group {group_ki} unsupported "
+                            "(piece D1 handles autosize group text only)"
                         )
 
             if decision.anchor in (None, "auto"):
@@ -738,7 +759,7 @@ def plan_assembly(
                 long_ids = []
                 for iid in cls.long_text_ids:
                     if iid[0] == "groupchild":
-                        _tag, g_ki, c_ki = iid
+                        _tag, g_ki, _c_kind, c_ki = iid
                         c_info = (group_child_runs_map.get(g_ki) or {}).get(c_ki) or {}
                         if not (c_info.get("text") and c_info.get("font") and c_info.get("size")):
                             raise AssemblyRefusal(
@@ -771,16 +792,13 @@ def plan_assembly(
                     # falls into `_group_blind_child_lines` for it.
                     for group_top_id in group_top_ids:
                         fit.pop(group_top_id, None)
-                    slide_group_child_kind: dict[ItemId, str] = {
-                        box.item_id: "text" for box in boxes if box.item_id[0] == "groupchild"
-                    }
                     short_children: list[tuple[int, dict, Rect | None, float]] = []
                     for group_ki in text_group_kis:
                         group_rect = group_top_rects.get(group_ki)
                         group_item = items_by_id.get(("group", group_ki))
                         origin_x = group_item.get("x", 0.0) if group_item is not None else 0.0
                         for child in group_children_geo.get(group_ki, ()):
-                            child_id: ItemId = ("groupchild", group_ki, child["kindIndex"])
+                            child_id: ItemId = ("groupchild", group_ki, child["kind"], child["kindIndex"])
                             if child_id in long_id_set:
                                 continue
                             if child["kind"] == "image":
@@ -793,7 +811,7 @@ def plan_assembly(
                             short_children.append((group_ki, child, group_rect, origin_x))
                     sole_occupant = not short_fit and len(short_children) == 1
                     for group_ki, child, group_rect, origin_x in short_children:
-                        badge_id = ("groupchild", group_ki, child["kindIndex"])
+                        badge_id = ("groupchild", group_ki, child["kind"], child["kindIndex"])
                         badge_w = float(child.get("w", 0.0))
                         badge_h = float(child.get("h", 0.0))
                         if badge_w > band.width:
@@ -813,10 +831,7 @@ def plan_assembly(
                             )
                         badge_x = clamped_x
                         short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
-                        slide_group_child_kind[badge_id] = child["kind"]
                     _refuse_on_short_row_overlap(number, short_fit)
-                    if slide_group_child_kind:
-                        group_child_kind_map[number] = slide_group_child_kind
                     stack_band = band
                     short_row_h = 0.0
                     if short_fit:
@@ -844,7 +859,7 @@ def plan_assembly(
                         stacked_ids = {box.item_id for box in boxes}
                         for box in boxes:
                             if box.item_id[0] == "groupchild":
-                                _tag, g_ki, c_ki = box.item_id
+                                _tag, g_ki, _c_kind, c_ki = box.item_id
                                 c_info = (group_child_runs_map.get(g_ki) or {}).get(c_ki) or {}
                                 run_item = {"runs": c_info.get("runs") or [], "text": c_info.get("text") or ""}
                             else:
@@ -1088,7 +1103,6 @@ def plan_assembly(
         short_row_h=short_row_h_map,
         crops=crops_out,
         anchors=anchors_out,
-        group_child_kind=group_child_kind_map,
     )
 
 
@@ -1161,15 +1175,23 @@ def _all_group_child_records(
                 return None
             out.append({
                 "kind": "text", "kindIndex": assigned["text"], "autosize": True,
+                "has_text": True,
                 "x": abs_gx + cx, "cy": abs_gy + cy, "y": abs_gy + cy - nh / 2.0, "w": nw, "h": nh,
                 "group_path": group_path,
             })
             continue
         kind = "shape" if "shape" in assigned else kinds[0]
+        # A fixed-frame (non-autosize) text-bearing child keeps its own text membership
+        # here (``has_text``) even though ``kind`` collapses to ``shape`` when it ALSO
+        # carries shape membership -- Finding 2 (D1 Codex fix round) needs this to detect
+        # a group whose long text lives in such a child, without touching the AppleScript
+        # write path's kind label.
+        has_text = "text" in assigned
         if rotated and not masked:
             fx, fy, fw, fh = _frame_rect(geom)
             out.append({
                 "kind": kind, "kindIndex": assigned[kind], "autosize": False,
+                "has_text": has_text,
                 "x": abs_gx + fx, "y": abs_gy + fy, "w": fw, "h": fh, "angle": ca,
                 "group_path": group_path,
             })
@@ -1177,6 +1199,7 @@ def _all_group_child_records(
         x0, y0, x1, y1 = _leaf_bbox(child, abs_gx, abs_gy, objects)
         out.append({
             "kind": kind, "kindIndex": assigned[kind], "autosize": False,
+            "has_text": has_text,
             "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0,
             "group_path": group_path,
         })
@@ -1588,8 +1611,8 @@ def _text_measure_lines(
     naturalSize read of the saved deck is the refit authority, see D2b), logging
     `OBED\\t<n>\\tMEASURE\\ttext:<idx>\\t<h>`, then `OBED\\t<n>\\tOVERFLOW\\t...` when it still
     exceeds `target_h` by more than 2pt. ``item_key`` overrides the default ``text:<idx>``
-    key -- a group child (D1 step 6) uses ``groupchild:<g>:<k>`` so it never collides with
-    a top-level text item sharing the same ``kindIndex``."""
+    key -- a group child (D1 step 6) uses ``groupchild:<g>:<kind>:<idx>`` so it never
+    collides with a top-level text item sharing the same ``kindIndex``."""
     if item_key is None:
         item_key = f"text:{kind_index}" if ordinal is None else f"text:{kind_index}:{ordinal}"
     return [
@@ -1654,14 +1677,12 @@ def _slide_lines(
     group_origin = plan.group_origin.get(number, {})
     scale = plan.group_scale.get(number)
     slide_crops = plan.crops.get(number, {}) if split_parts is None else {}
-    group_child_kind = plan.group_child_kind.get(number, {}) if split_parts is None else {}
 
     groupchild_by_group: dict[int, list[tuple[dict, Rect, float | None, tuple | None]]] = {}
     for item_id, rect in fit.items():
         if item_id[0] != "groupchild":
             continue
-        _tag, group_ki, child_ki = item_id
-        child_kind = group_child_kind.get(item_id, "text")
+        _tag, group_ki, child_kind, child_ki = item_id
         child_rec = {"kind": child_kind, "kindIndex": child_ki}
         groupchild_by_group.setdefault(group_ki, []).append(
             (child_rec, rect, text_sizes.get(item_id), run_sizes_here.get(item_id))
@@ -1674,7 +1695,7 @@ def _slide_lines(
             child_ki = child_rec["kindIndex"]
             addr = f"text item {child_ki + 1} of group {group_ki + 1} of slide {ordinal}"
             lines += _text_measure_lines(
-                number, child_ki, addr, child_rect.h, item_key=f"groupchild:{group_ki}:{child_ki}"
+                number, child_ki, addr, child_rect.h, item_key=f"groupchild:{group_ki}:text:{child_ki}"
             )
 
     for item_id, rect in fit.items():

@@ -248,6 +248,58 @@ reports heights and applies writes.
   notes it is an x-interval proxy; the two placeholder-less f-strings in
   `tests/test_dsk_assemble.py` fixed.
 
+## D1 Codex fix round (codex-D1-refit-review1)
+
+- **Finding 1 (MAJOR): `GroupChildId` collided a badge and a verse sharing one per-kind
+  `kindIndex`.** `("groupchild", group_ki, child_kindIndex)` is a 3-tuple keyed by the
+  child's PER-KIND index, so a `shape 1` badge and a `text 1` verse in the same group both
+  became `("groupchild", g, 1)` -- GW 5 only worked because its badge is `shape:0` and its
+  verse is `text:1` (no collision). Fixed by making the id kind-bearing:
+  `GroupChildId = ("groupchild", group_ki, child_kind, child_kindIndex)` (4-tuple).
+  Threaded through every consumer: `_is_text_slide_kept` (dsk_plan.py), `_item_label`,
+  `_group_child_geometry`/`_text_boxes` (geometry+run lookups), the badge/verse id builders
+  in `plan_assembly`'s group-text branch, `_group_stacked_child_lines`/`_slide_lines`'s
+  AppleScript emission, the offline MEASURE/OVERFLOW key (now
+  `groupchild:<g>:<kind>:<idx>`, e.g. `groupchild:0:text:1`). `AssemblyPlan.group_child_kind`
+  (a side-map from id -> child kind, needed only because the old id couldn't carry it) is
+  removed entirely -- `_slide_lines` now reads the kind straight off `item_id[2]`. All
+  existing tests constructing a 3-tuple groupchild id were updated to the 4-tuple; the
+  D1-marked rows (GW 5/44/50/51/53/54) keep the same numbers.
+- **Finding 2 (MAJOR): fixed-frame (non-autosize) grouped text could be silently excluded.**
+  `_all_group_child_records` labels a text-bearing FIXED-FRAME child `shape` (not `text`)
+  when it also carries shape membership (`kind = "shape" if "shape" in assigned else
+  kinds[0]`); `_is_text_slide_kept` only picks up `kind == "text"` children as long ids. A
+  group whose DFS word join crosses `text_slide_words` but whose only long text lives in
+  such a fixed-frame child would end up contributing no long groupchild id at all --
+  silently left off `text_group_kis` and taking the normal affine path (keeping a full-wall
+  photo) instead of being stacked into the band.
+  - **Measurement over the whole GW deck**: 10 top-level groups (slides 3, 4, 5, 44, 50 x2,
+    51 x2, 53, 54) DO have a fixed-frame (`autosize == False`) text-bearing child -- every
+    one of them is the numbered badge (dual `text`+`shape` membership, frame height 92pt,
+    short digit text e.g. "19"/"15"). In every one of those groups the group's own
+    over-threshold word count is driven by a SEPARATE autosize verse child that already
+    resolves to `kind == "text"` and is already captured as a long id. No GW slide has its
+    *long* text living in a fixed-frame child, so the live path this fix guards against is
+    never exercised today.
+  - **Fix (decision: refuse explicitly, do not support yet)**: `_all_group_child_records`
+    now also carries `has_text` (`"text" in assigned`, independent of the `kind` label) on
+    every non-nested child record, without touching the `kind` the AppleScript path reads.
+    `plan_assembly` (dsk_assemble.py), right after the existing nested-child-in-text-group
+    refusal, walks every KEPT top-level group (`cls.kept`, so a mirror-duplicate-dropped
+    group is correctly skipped) that is NOT already in `text_group_kis`: if its DFS word
+    join exceeds `text_slide_words` and any of its children has `has_text` and
+    `autosize is False` and a `kind` other than `text` (i.e. its long-text potential is
+    hidden under a collapsed `shape` label), it raises
+    `AssemblyRefusal("slide N: fixed-frame text inside group G unsupported (piece D1
+    handles autosize group text only)")`. Per-slide, not batch-fatal, same mechanism as the
+    other D1 refusals. `iwa_runs.attach_group_child_runs`'s semantics are untouched -- the
+    refusal never needs a fixed-frame child's runs attached, since it fires before any text
+    box is built for that group.
+  - **Follow-up (not done here)**: real support for fixed-frame grouped text needs `set
+    height` emission for the non-autosize child (today's stacked-child write path always
+    treats a stacked text child as autosize and never sets its height) and a live check
+    against an actual fixed-frame-verse deck, since none exists in GW today.
+
 ## Open questions (design-changing)
 
 1. **Stale read-back (F3).** Is the two-consecutive-reads poll enough, or does Keynote only settle the height
