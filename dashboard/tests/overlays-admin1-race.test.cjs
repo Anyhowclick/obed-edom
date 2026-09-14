@@ -252,6 +252,9 @@ function fakeMapView() {
     return settled;
   };
 
+  /** The construct-once effect's cleanup: releases a pre-acquired style token on unmount. */
+  state.unmount = () => gate.dispose();
+
   /** `syncRegionCamera` in miniature: its admin0/codes guards sit above `beginSync`, so a pan
    * that has nothing to sync must not consume a generation. */
   state.cameraSync = () => {
@@ -423,4 +426,49 @@ test("waitUntilIdle stays pending through an ordinary admin-1 sync with no style
   await effect;
   await idle.promise;
   assert.equal(idle.done, true);
+});
+
+test("unmount before style.load: dispose releases the pre-acquired style token and settles the gate", async () => {
+  const view = fakeMapView();
+  await view.paintOverlays();
+
+  view.setStyle();
+  let settledDone = false;
+  const settled = view.gate.settled().then(() => (settledDone = true));
+  view.unmount();
+
+  await settled;
+  assert.equal(settledDone, true, "settled() must resolve once the unmounted map's style token is released");
+
+  const freshGate = new AdminSyncGate();
+  assert.notEqual(freshGate.beginSync(), null, "a fresh gate must be unaffected by another instance's dispose");
+});
+
+test("dispose then reuse: a tracked promise outstanding at dispose must not settle the next lifecycle early", async () => {
+  const view = fakeMapView();
+  await view.paintOverlays();
+
+  view.highlights = ["A1:RUU-1"];
+  const stalePromise = view.highlightEffect();
+  view.unmount();
+
+  // The gate is reused for a fresh lifecycle, as it is when React remounts the map in place.
+  view.highlights = ["A1:RVV-1"];
+  const fresh = view.highlightEffect();
+
+  let settledDone = false;
+  const settled = view.gate.settled().then(() => (settledDone = true));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(settledDone, false, "settled() must wait for the new lifecycle's sync, not just the stale one");
+  assert.notEqual(view.gate.inFlight, -1, "inFlight must never go negative");
+
+  gateFor("RUU").resolve();
+  await stalePromise;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(settledDone, false, "the stale request's finalizer must not decrement the new lifecycle's inFlight");
+
+  gateFor("RVV").resolve();
+  await fresh;
+  await settled;
+  assert.equal(settledDone, true, "settled() must resolve once the new lifecycle's own sync finishes");
 });

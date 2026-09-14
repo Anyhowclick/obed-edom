@@ -948,6 +948,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       map?.getCanvas().removeEventListener("pointermove", onObjPointerMove);
       map?.getCanvas().removeEventListener("pointerup", onObjPointerUp);
       map?.getCanvas().removeEventListener("pointercancel", onObjPointerUp);
+      adminSync.current.dispose();
       map?.remove();
       mapRef.current = null;
     };

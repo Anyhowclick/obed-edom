@@ -11,7 +11,9 @@
  * camera sync's. */
 export class AdminSyncGate {
   private generation = 0;
+  private epoch = 0;
   private styleToken: number | null = null;
+  private styleTokenEpoch: number | null = null;
   private pending = false;
   private replayOwed = false;
   private inFlight = 0;
@@ -19,13 +21,15 @@ export class AdminSyncGate {
 
   beginStyleLoad(): number {
     this.styleToken = ++this.generation;
+    this.styleTokenEpoch = this.epoch;
     return this.styleToken;
   }
 
-  /** Clears the in-flight marker when `token` is the newest style load, and reports whether
-   * deferred sync work should now be replayed. An older, slower load clears nothing. */
+  /** Clears the in-flight marker when `token` is the newest style load from the current
+   * lifecycle epoch, and reports whether deferred sync work should now be replayed. An older,
+   * slower load, or one from a lifecycle a `dispose()` has since ended, clears nothing. */
   endStyleLoad(token: number): boolean {
-    if (this.styleToken !== token) return false;
+    if (this.styleToken !== token || this.styleTokenEpoch !== this.epoch) return false;
     this.styleToken = null;
     const replay = this.pending;
     this.pending = false;
@@ -56,10 +60,13 @@ export class AdminSyncGate {
     return this.generation === token;
   }
 
-  /** Counts `work` as an in-flight sync, so `settled()` cannot resolve while it runs. */
+  /** Counts `work` as an in-flight sync, so `settled()` cannot resolve while it runs. The
+   * finalizer decrements only if `dispose()` has not ended this lifecycle epoch since. */
   track<T>(work: Promise<T>): Promise<T> {
+    const epoch = this.epoch;
     this.inFlight += 1;
     return work.finally(() => {
+      if (this.epoch !== epoch) return;
       this.inFlight -= 1;
       this.flush();
     });
@@ -72,6 +79,18 @@ export class AdminSyncGate {
     return new Promise((resolve) => {
       this.waiters.push(resolve);
     });
+  }
+
+  /** Releases any pre-acquired style token and owed replay, and resolves outstanding
+   * `settled()` waiters. For use when the map is torn down mid-style-load. */
+  dispose(): void {
+    this.epoch += 1;
+    this.styleToken = null;
+    this.styleTokenEpoch = null;
+    this.pending = false;
+    this.replayOwed = false;
+    this.inFlight = 0;
+    this.flush();
   }
 
   private isIdle(): boolean {
