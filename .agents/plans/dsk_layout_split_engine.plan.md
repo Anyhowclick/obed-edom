@@ -339,6 +339,41 @@ from the function under test); GW 28/30/36/52 no longer produce a 1-part split; 
 over-budget single line refuses. Offline A/B: part counts on GW 12/18/19/28/30/36/38/52 change;
 GW 20/29/35/49 unchanged.
 
+> **S2 landed.** `dsk_assemble._pack_split_lines` (greedy height pack over `wrap_line_spans_runs`'
+> line spans, `_line_max_size` restricting `_emitted_run_sizes`'s table per line via the
+> existing `_windowed_run_ranges`) replaces the flat `chunks = [spans[i:i+3] ...]` chunker at
+> the single-box char-window split call site; `_SPLIT_TOL = 2.0` added next to
+> `_EMPHASIS_CAP_PT`. When the pack yields one part the split branch is skipped entirely --
+> `fit[item_id]`/`stacked_run_sizes`/`stacked_text_sizes` are populated directly from the
+> slot rect and the un-windowed `_emitted_run_sizes` table (the same shape `_windowed_run_ranges`
+> already produces for a full-range window), so `plan.stacked_ids`/downstream autosize/badge
+> logic see an ordinary non-split slide. Owner's 50pt emphasis cap (task 3) is applied on the
+> NON-split slot-fit path too: `_run_size_ranges` gained a `cap: float | None = None` param
+> (`min(size * scale, cap)`), passed as `_EMPHASIS_CAP_PT` at exactly one call site -- the
+> `if result is not None:` block's per-box run-size write, gated `cap=_EMPHASIS_CAP_PT if
+> is_slot_fit else None` where `is_slot_fit = (slot_result is not None)` (i.e. only the 45pt-
+> lead slot fit, never a generic `fit_text_stack` shrink `t` -- an early attempt that capped
+> unconditionally broke GW 17's own `t≈0.63` emphasis ratio, caught by the existing
+> `test_gw17_dedupe_and_stretch_no_overlap`/`test_stacked_*_run_size_*` tests). GW 13's pinned
+> `run_sizes` test updated 54.642857pt → 50.0pt.
+>
+> **New candidate set (real re-measurement, GW deck, this worktree):** every one of
+> 12/18/19/20/28/29/30/35/36/38/52 still splits (none fell back to fit-only) -- GW
+> 18 (2→3 parts), 28/30/36/52 (1 no-op→2 real parts), 38 (3→4 parts) changed part count;
+> 12/19/20/29/35 kept the same part count (boundaries may shift a few chars). GW 49 stays
+> refused (S1's unresolved-run policy, untouched) and GW 5/54 stay refused (group-child,
+> S5's scope). Pinned per-slide flat-45pt line counts per part (`GW_S2_SPLIT_CANDIDATES` in
+> `tests/test_dsk_assemble.py`): 12 `[2,2]`, 18 `[2,2,1]`, 19 `[2,3]`, 20 `[3,2]`, 28 `[2,1]`,
+> 29 `[3,1]`, 30 `[2,1]`, 35 `[3,2]`, 36 `[2,1]`, 38 `[2,2,2,1]`, 52 `[2,1]`.
+>
+> **Deviation / bonus finding:** GW 8 and GW 10 (not in the §1.1 table -- outside the
+> originally catalogued candidate scan) were also old-chunker no-op 1-part "splits" (window
+> covering the full 58/… chars, deleting nothing) that the height pack now correctly splits
+> into 2 real parts each; deck-wide A/B confirmed no other slide's part count or geometry
+> changed. The cap (task 3) also changes emphasis 54.64→50.0 on GW 7/11/13/14/37/53 (every
+> non-split slot-fit slide carrying an emphasis run), not only GW 13 -- expected, since the
+> cap is a property of the slot-fit path as a whole, not a per-slide carve-out.
+
 **S3 — part geometry + per-ordinal offline measurement and refusal (~300 lines).**
 Part rect = slot x/w at the slot's top y, no height (§2.3). `_offline_measure`,
 `_eligible_refit_items`, `_refit_still_over_budget` and `_refuse_on_missing_measures` all keyed

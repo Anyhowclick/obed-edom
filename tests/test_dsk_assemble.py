@@ -325,6 +325,62 @@ def test_emitted_run_sizes_caps_at_50pt_gw13_emphasis_run():
     assert table[2] == (14, 18, pytest.approx(45.0))
 
 
+def test_run_size_ranges_cap_caps_the_emphasis_run_gw13_non_split_path():
+    # S2 task 3: the same flat 50pt cap applies on the NON-split slot-fit path
+    # (`_run_size_ranges`, GW 13-shaped) -- one rule (`min(size * scale, cap)`), applied
+    # at the single `is_slot_fit` call site in `plan_assembly`, never a generic
+    # `fit_text_stack` t (that would wrongly cap a shrink-fit's own emphasis ratio).
+    item = {
+        "text": "lead EMPHASIS lead",
+        "runs": [
+            {"text": "lead ", "size": 70.0},
+            {"text": "EMPHASIS", "size": 85.0},
+            {"text": " lead", "size": 70.0},
+        ],
+    }
+    t = 45.0 / 70.0
+    ranges, unresolved = dsa._run_size_ranges(item, t, cap=dsa._EMPHASIS_CAP_PT)
+    assert unresolved is False
+    assert ranges[0] == (1, 5, pytest.approx(45.0))
+    assert ranges[1] == (6, 13, 50.0)
+    assert ranges[2] == (14, 18, pytest.approx(45.0))
+    uncapped, _ = dsa._run_size_ranges(item, t)
+    assert uncapped[1] == (6, 13, pytest.approx(54.642857142857146))
+
+
+def test_pack_split_lines_greedy_height_budget_over_flat_three_lines():
+    # S2/§2.2: pack by height, not line count -- a budget one line-height short of
+    # three 45pt lines' worth must split at 2 lines/part, never wait for the 3-line
+    # guard to kick in.
+    run_table = ((1, 100, 45.0),)
+    spans = [(0, 10), (10, 20), (20, 30), (30, 40)]
+    slot_h = 3 * dsa._LINE_HEIGHT_FACTOR * 45.0 + dsa._BOX_PADDING_PT - dsa._SPLIT_TOL - 1.0
+    chunks = dsa._pack_split_lines(spans, run_table, 45.0, slot_h, 1, ("text", 0))
+    assert [len(c) for c in chunks] == [2, 2]
+
+
+def test_pack_split_lines_respects_the_three_line_guard_even_under_budget():
+    run_table = ((1, 100, 10.0),)
+    spans = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
+    slot_h = 1000.0
+    chunks = dsa._pack_split_lines(spans, run_table, 45.0, slot_h, 1, ("text", 0))
+    assert [len(c) for c in chunks] == [3, 2]
+
+
+def test_pack_split_lines_single_over_budget_line_refuses_naming_slide_and_box():
+    run_table = ((1, 100, 90.0),)
+    spans = [(0, 10)]
+    with pytest.raises(dsa.AssemblyRefusal, match=r"slide 7 box 2:.*exceeds the slot budget"):
+        dsa._pack_split_lines(spans, run_table, 45.0, 50.0, 7, ("text", 2))
+
+
+def test_pack_split_lines_one_part_result_signals_no_split_needed():
+    run_table = ((1, 100, 45.0),)
+    spans = [(0, 10), (10, 20)]
+    chunks = dsa._pack_split_lines(spans, run_table, 45.0, 1000.0, 1, ("text", 0))
+    assert len(chunks) == 1
+
+
 def test_emitted_run_sizes_uncapped_below_50pt_is_unaffected():
     item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 10.0}]}
     table = dsa._emitted_run_sizes(item, 0.5, 45.0)
@@ -9196,11 +9252,14 @@ def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):
     # post-plan override left behind -- GW 13's verse keeps a mixed-emphasis run (its
     # 85pt highlight against the 70pt body), so `_slide_lines` must see the 45pt-scaled
     # ranges in `run_sizes` (it prefers `run_sizes` over `text_sizes`), pinned exactly:
-    # t = 45 / 70 (the body/lead size), so the 85pt run becomes 85 * 45/70 = 54.642857pt.
+    # t = 45 / 70 (the body/lead size), so the 85pt run becomes 85 * 45/70 = 54.642857pt,
+    # capped at gold's 50pt (S2/owner decision) -- the non-split-slot sibling of the
+    # split path's own cap, applied by `_run_size_ranges(..., cap=_EMPHASIS_CAP_PT)` at
+    # the slot-fit call site only (`is_slot_fit`), never a generic `fit_text_stack` t.
     assert plan.stack_bands[13] == dsa._slot_band(slot.verse)
     expected_ranges = [
         (1, 1, 45.0), (2, 6, 45.0), (7, 10, 45.0), (11, 90, 45.0),
-        (91, 146, 54.642857142857146), (147, 149, 45.0),
+        (91, 146, 50.0), (147, 149, 45.0),
     ]
     actual_ranges = plan.run_sizes[13][verse_id]
     assert len(actual_ranges) == len(expected_ranges)
@@ -9342,6 +9401,76 @@ def test_gw38_split_part_run_sizes_capped_at_50pt():
     sizes = {round(sz, 2) for _lo, _hi, sz in part0.run_sizes[verse_id]}
     assert 50.0 in sizes
     assert round(85.0 * 45.0 / 70.0, 2) not in sizes  # 54.64pt, the uncapped ratio
+
+
+# S2/§1.1 re-measurement (height-budget pack, post-cap): expected part count and, per
+# part, the flat-45pt line count of that part's own text (pinned literals, not derived
+# from the function under test). GW 28/30/36/52 moved off the old flat 3-line chunker's
+# no-op 1-part "split" to a real 2-part split; GW 18/38 gained a part (the old chunker's
+# fixed 3-line boundary under-filled a part relative to the height budget); GW 12/19/20/
+# 29/35 keep the same part count as before S2 (their boundaries may still shift a few
+# characters against the old chunker, untested here). GW 49 stays refused (S1's
+# unresolved-run policy, out of S2's scope) and GW 5/54 stay refused (group-child,
+# S5's scope).
+GW_S2_SPLIT_CANDIDATES: dict[int, list[int]] = {
+    12: [2, 2],
+    18: [2, 2, 1],
+    19: [2, 3],
+    20: [3, 2],
+    28: [2, 1],
+    29: [3, 1],
+    30: [2, 1],
+    35: [3, 2],
+    36: [2, 1],
+    38: [2, 2, 2, 1],
+    52: [2, 1],
+}
+
+
+@pytest.mark.deck
+def test_gw_s2_split_candidates_part_counts_and_line_counts_pinned():
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    for number, expected_lines in GW_S2_SPLIT_CANDIDATES.items():
+        cls = by_number[number]
+        decisions = {number: SlideDecision(number, "in_deck")}
+        plan = plan_assembly(
+            payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs,
+            all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+        )
+        assert number in plan.splits, f"slide {number}: expected a split"
+        parts = plan.splits[number]
+        assert len(parts) == len(expected_lines), f"slide {number}: part count"
+        items = {(it["kind"], it["kindIndex"]): it for it in payload["slides"][number - 1]["items"]}
+        verse_id = cls.long_text_ids[0]
+        full_text = items[verse_id]["text"]
+        for i, part in enumerate(parts):
+            start, end = part.char_window
+            part_text = full_text[start - 1:end]
+            lc = line_count(part_text, items[verse_id]["font"], 45.0, slot.verse.w)
+            assert lc == expected_lines[i], f"slide {number} part {i}: line count"
+            assert lc <= 3
+
+
+@pytest.mark.deck
+def test_gw28_30_36_52_never_produce_a_one_part_split():
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    for number in (28, 30, 36, 52):
+        decisions = {number: SlideDecision(number, "in_deck")}
+        plan = plan_assembly(
+            payload, [by_number[number]], decisions=decisions, band=BAND, clips={}, runs=runs,
+            all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+        )
+        assert number in plan.splits
+        assert len(plan.splits[number]) >= 2, f"slide {number}: no-op 1-part split"
 
 
 def test_gw21_image_slide_resolves_blank_black():

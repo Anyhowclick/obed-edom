@@ -65,6 +65,8 @@ from obed_edom.dsk_plan import (
     wrap_line_spans_runs,
     wrapped_height,
     wrapped_height_runs,
+    _BOX_PADDING_PT,
+    _LINE_HEIGHT_FACTOR,
 )
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import (
@@ -444,11 +446,13 @@ def _short_row_rects(
 
 def _run_size_ranges(
     item: dict, scale: float, *, item_id: ItemId | None = None, slide_number: int | None = None,
-    warnings: list[str] | None = None,
+    warnings: list[str] | None = None, cap: float | None = None,
 ) -> tuple[tuple[tuple[int, int, float], ...] | float | None, bool]:
-    """Per-run 1-indexed character ranges ``(start, end, size * scale)``; a single ``float``
-    (the covered run size ``* scale``) when every run shares one size; or ``(None, unresolved)``
-    -- ``unresolved`` marks a size gap where the caller must preserve source sizing."""
+    """Per-run 1-indexed character ranges ``(start, end, size * scale)``, capped at ``cap``
+    when given (S2: gold's flat 50pt emphasis cap, the non-split-slot sibling of
+    ``_emitted_run_sizes``'s cap); a single ``float`` (the covered run size ``* scale``,
+    capped) when every run shares one size; or ``(None, unresolved)`` -- ``unresolved``
+    marks a size gap where the caller must preserve source sizing."""
     runs = item.get("runs") or []
     full_len = len(item.get("text") or "")
     ranges: list[tuple[int, int, float]] = []
@@ -464,7 +468,10 @@ def _run_size_ranges(
             gap = True
             pos += length
             continue
-        ranges.append((pos, pos + length - 1, float(size) * scale))
+        sz = float(size) * scale
+        if cap is not None:
+            sz = min(sz, cap)
+        ranges.append((pos, pos + length - 1, sz))
         pos += length
     if not ranges:
         if gap and warnings is not None and item_id is not None:
@@ -541,6 +548,59 @@ def _windowed_run_ranges(
     if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
         return ranges[0][2]
     return tuple(ranges)
+
+
+_SPLIT_TOL = 2.0
+
+
+def _line_max_size(
+    run_table: tuple[tuple[int, int, float], ...], start0: int, end0: int, lead_pt: float
+) -> float:
+    """Tallest emitted run size intersecting the ``[start0, end0)`` (0-indexed) line span
+    (S2/§2.2), via ``_windowed_run_ranges``'s own restriction of ``run_table`` so the pack's
+    height estimate and the part's emitted run sizes never disagree."""
+    ranges = _windowed_run_ranges(run_table, start0, end0, lead_pt)
+    if isinstance(ranges, tuple):
+        return max(sz for _lo, _hi, sz in ranges)
+    return ranges
+
+
+def _pack_split_lines(
+    spans: Sequence[tuple[int, int]],
+    run_table: tuple[tuple[int, int, float], ...],
+    lead_pt: float,
+    slot_h: float,
+    slide_number: int,
+    item_id: ItemId,
+) -> list[list[tuple[int, int]]]:
+    """Greedy height-budget pack (S2/§2.2) over run-aware line ``spans``: add lines to the
+    current part while ``Σ _LINE_HEIGHT_FACTOR * line.max_size + _BOX_PADDING_PT <= slot_h +
+    _SPLIT_TOL`` AND the part has at most 3 lines; start a new part otherwise. A single line
+    that alone exceeds the budget refuses, naming the slide/box -- it cannot be fixed by
+    splitting further. Replaces the old flat 3-line chunker; the degenerate one-part outcome
+    is left to the caller, which must not take the split branch when only one part results."""
+    budget = slot_h + _SPLIT_TOL
+    chunks: list[list[tuple[int, int]]] = []
+    current: list[tuple[int, int]] = []
+    current_h = _BOX_PADDING_PT
+    for start0, end0 in spans:
+        size = _line_max_size(run_table, start0, end0, lead_pt)
+        line_h = _LINE_HEIGHT_FACTOR * size
+        if not current and _BOX_PADDING_PT + line_h > budget:
+            raise AssemblyRefusal(
+                f"slide {slide_number} box {_item_label(item_id)}: a single wrapped line "
+                f"({_BOX_PADDING_PT + line_h:.1f}pt) exceeds the slot budget ({budget:.1f}pt), "
+                "cannot split"
+            )
+        if current and (current_h + line_h > budget or len(current) >= 3):
+            chunks.append(current)
+            current = []
+            current_h = _BOX_PADDING_PT
+        current.append((start0, end0))
+        current_h += line_h
+    if current:
+        chunks.append(current)
+    return chunks or [[(0, 0)]]
 
 
 def _group_child_geometry(
@@ -1621,6 +1681,7 @@ def plan_assembly(
                     # back to `fit_text_stack`'s own (wider, `DEFAULT_BAND`-derived) search,
                     # which could otherwise shrink the whole verse to fit unsplit.
                     slot_needs_split = slot_eligible and slot_category is not None and slot_layout_name is None
+                    is_slot_fit = slot_result is not None
                     result = (
                         slot_result if slot_result is not None
                         else (None if forced_parts is not None or slot_needs_split
@@ -1657,6 +1718,7 @@ def plan_assembly(
                             ranges, unresolved = _run_size_ranges(
                                 run_item, t, item_id=box.item_id,
                                 slide_number=number, warnings=warnings,
+                                cap=_EMPHASIS_CAP_PT if is_slot_fit else None,
                             )
                             if isinstance(ranges, tuple):
                                 stacked_run_sizes[box.item_id] = ranges
@@ -1788,39 +1850,55 @@ def plan_assembly(
                                 f"slide {number} box {_item_label(split_box.item_id)}: font/size unresolved, "
                                 "cannot split verse text at the slot budget"
                             )
-                        chunks = [spans[i:i + 3] for i in range(0, len(spans), 3)] or [[(0, 0)]]
                         full_len = len(split_box.text)
                         stacked_ids = {split_box.item_id}
-                        part_list = []
-                        for chunk in chunks:
-                            start0, end0 = chunk[0][0], chunk[-1][1]
-                            part_fit = dict(short_fit)
-                            if short_fit:
-                                part_fit.update(_short_row_rects(short_fit, short_row_h, split_rect.y))
-                            part_fit[split_box.item_id] = split_rect
-                            ranges = _windowed_run_ranges(run_table, start0, end0, split_pt)
-                            part_text_sizes: dict[ItemId, float] = {}
-                            part_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
-                            if isinstance(ranges, tuple):
-                                part_run_sizes[split_box.item_id] = ranges
-                            else:
-                                part_text_sizes[split_box.item_id] = ranges
-                            part_autosize = _autosize_text_ids((split_box.item_id,), id_by_item, objects_graph)
-                            part_list.append(
-                                SplitPart(
-                                    fits=part_fit, deletes=base_deletes, text_sizes=part_text_sizes,
-                                    run_sizes=part_run_sizes, stacked_ids=frozenset({split_box.item_id}),
-                                    autosize=part_autosize, char_window=(start0 + 1, end0), char_total=full_len,
-                                )
-                            )
-                        parts[number] = len(part_list)
-                        splits[number] = tuple(part_list)
-                        fit.pop(split_box.item_id, None)
-                        if short_fit:
-                            fit.update({iid: r for iid, r in part_list[0].fits.items() if iid in short_fit})
                         layout_names[number] = (
                             "Verse Standard (Variation 2)" if slot_category == "verse" else "Point 3 Lines"
                         )
+                        chunks = _pack_split_lines(
+                            spans, run_table, split_pt, split_rect.h, number, split_box.item_id,
+                        )
+                        if len(chunks) <= 1:
+                            # S2/§2.2: the height-budget pack fits in one part -- the box
+                            # fits the slot after all (often thanks to the 50pt emphasis
+                            # cap); fall back to the normal slot-fit path rather than
+                            # emitting a no-op split that deletes nothing.
+                            fit[split_box.item_id] = split_rect
+                            if short_fit:
+                                fit.update(_short_row_rects(short_fit, short_row_h, split_rect.y))
+                            ranges = _windowed_run_ranges(run_table, 0, full_len, split_pt)
+                            if isinstance(ranges, tuple):
+                                stacked_run_sizes[split_box.item_id] = ranges
+                            else:
+                                stacked_text_sizes[split_box.item_id] = ranges
+                        else:
+                            part_list = []
+                            for chunk in chunks:
+                                start0, end0 = chunk[0][0], chunk[-1][1]
+                                part_fit = dict(short_fit)
+                                if short_fit:
+                                    part_fit.update(_short_row_rects(short_fit, short_row_h, split_rect.y))
+                                part_fit[split_box.item_id] = split_rect
+                                ranges = _windowed_run_ranges(run_table, start0, end0, split_pt)
+                                part_text_sizes: dict[ItemId, float] = {}
+                                part_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
+                                if isinstance(ranges, tuple):
+                                    part_run_sizes[split_box.item_id] = ranges
+                                else:
+                                    part_text_sizes[split_box.item_id] = ranges
+                                part_autosize = _autosize_text_ids((split_box.item_id,), id_by_item, objects_graph)
+                                part_list.append(
+                                    SplitPart(
+                                        fits=part_fit, deletes=base_deletes, text_sizes=part_text_sizes,
+                                        run_sizes=part_run_sizes, stacked_ids=frozenset({split_box.item_id}),
+                                        autosize=part_autosize, char_window=(start0 + 1, end0), char_total=full_len,
+                                    )
+                                )
+                            parts[number] = len(part_list)
+                            splits[number] = tuple(part_list)
+                            fit.pop(split_box.item_id, None)
+                            if short_fit:
+                                fit.update({iid: r for iid, r in part_list[0].fits.items() if iid in short_fit})
                     elif len(boxes) < 2:
                         raise AssemblyRefusal(
                             f"slide {number} box {_item_label(boxes[0].item_id)} does not fit the band even alone at --min-text-pt {min_text_pt}"
