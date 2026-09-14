@@ -504,6 +504,44 @@ def test_top_aligned_packed_column_composes_back_to_the_packed_rect():
     assert rec["y"] >= 0.0 and rec["y"] + rec["h"] <= 1080.0
 
 
+def test_width_only_zero_frame_is_also_flagged_autosize():
+    """Synthetic only: MEASURED zero production instances of w==0 & h!=0 on the Gold wall
+    deck (112 h-only-zero, 1301 both-zero, 0 w-only-zero). Widened so the read sentinel
+    matches the write refuse at iwa_write.py:600."""
+    objects = {}
+    tid = _shape(objects, "t", x=15.0, y=200.0, w=0.0, h=240.0, is_textbox=True,
+                 text="CHC Kuching", natural=(120.0, 30.0))
+    rec = _one(_slide(tid), objects)
+    assert rec["geom_source"] == "autosize"
+    assert rec["needs_keynote"] == "autosize-soft"
+
+
+def test_natural_size_reads_editable_bezier_when_bezier_is_absent():
+    """A custom-path text box is a dual (textItems AND shape, `_has_custom_shape_path`);
+    only the text record goes through `_autosize_rect`."""
+    objects = {}
+    tid = _shape(objects, "t", x=0.0, y=100.0, w=0.0, h=0.0, is_textbox=True, text="Hi")
+    objects[tid]["super"]["pathsource"] = {
+        "editableBezierPathSource": {"naturalSize": {"width": 88.0, "height": 22.0}},
+    }
+    recs = compose_geometry(_slide(tid), objects)
+    rec = next(r for r in recs if r["kind"] == "text")
+    assert (rec["w"], rec["h"]) == (88.0, 22.0)
+
+
+def test_natural_size_walks_a_second_super_hop_below_the_pathsource_level():
+    """The old one-hop reader (obj.super.pathsource) would miss a pathsource one hop
+    further down; the six-hop walk in `_path_source` must not."""
+    objects = {}
+    tid = _shape(objects, "t", x=0.0, y=100.0, w=0.0, h=0.0, is_textbox=True, text="Hi")
+    del objects[tid]["super"]["pathsource"]
+    objects[tid]["super"]["super"]["pathsource"] = {
+        "scalarPathSource": {"naturalSize": {"width": 55.0, "height": 12.0}},
+    }
+    rec = _one(_slide(tid), objects)
+    assert (rec["w"], rec["h"]) == (55.0, 12.0)
+
+
 # --------------------------------------------------------------------------
 # Shape and movie.
 # --------------------------------------------------------------------------
