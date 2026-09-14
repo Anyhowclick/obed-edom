@@ -1039,6 +1039,49 @@ def wrapped_height(text: str, font_name: str, size: float, width: float) -> floa
     return len(lines) * _LINE_HEIGHT_FACTOR * size + _BOX_PADDING_PT
 
 
+def longest_line_width(text: str, font_name: str, size: float, width: float) -> float | None:
+    """Rendered width (pt) of the longest line of ``text`` at ``size`` after wrapping to ``width``
+    (F9), mirroring ``wrapped_height``'s wrap pass. ``None`` when the font cannot be resolved."""
+    path = resolve_font_path(font_name)
+    if path is None or size <= 0:
+        return None
+    from PIL import ImageFont  # noqa: PLC0415
+
+    font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
+    lines = _wrap_lines(text, font, width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE)
+    if not lines:
+        return 0.0
+    return max(font.getlength(line) for line in lines) / _WRAP_OVERSAMPLE
+
+
+def fit_heading_pt(
+    text: str,
+    font_name: str,
+    col_width: float,
+    budget: float,
+    *,
+    max_pt: float,
+    max_block_pt: float,
+    min_pt: float,
+) -> float | None:
+    """Largest integer point size in ``[min_pt, max_pt]`` fitting ``text`` inside ``col_width`` with
+    its per-block line-height sum within ``max_block_pt`` and its wrapped height within ``budget``.
+    ``None`` when no size fits or the font is unresolved."""
+    for s in range(math.floor(max_pt), math.ceil(min_pt) - 1, -1):
+        width = longest_line_width(text, font_name, s, col_width)
+        height = wrapped_height(text, font_name, s, col_width)
+        if width is None or height is None:
+            return None
+        if width > col_width:
+            continue
+        if height - _BOX_PADDING_PT > max_block_pt:
+            continue
+        if height > budget:
+            continue
+        return float(s)
+    return None
+
+
 @dataclass(frozen=True)
 class Run:
     text: str

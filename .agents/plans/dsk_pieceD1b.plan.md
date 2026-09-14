@@ -167,3 +167,174 @@ The badge-x **245.0** assertion is the load-bearing one: it is an exact, indepen
 - **Q3 — verse badge: keep current (unscaled) size.** The next milestone after D1b applies the proper template slide layout instead of
   hand-placed rects; badge scaling belongs there.
 - Q2 (heading-only slides) — unanswered; leave today's affine path.
+
+---
+
+## Fix round 1 (Codex D1b-p2 review 1 of 56879cf)
+
+- **`_two_column_rects` now takes `min_text_pt`** and forwards it to `fit_heading_pt` (was hardcoded to
+  `DEFAULT_MIN_TEXT_PT`, ignoring `--min-text-pt`). Also requires the heading's own source `size` resolved
+  (refuses otherwise, alongside the existing font/numeral-size refusal).
+- **Repeat-heading predecessor is deck-order, not batch-order.** `_repeat_heading_state` (new) walks
+  `payload["slides"]` in full ascending order once, independent of `kept_numbers`, skipping only
+  `cls.category == "empty"` slides; a slide with no heading text resets the run (a headingless intervening
+  slide now breaks it, which the old per-batch `prev_heading_text` accumulator did not). A slide outside the
+  current call's `classes` (no `SlideClass`) falls back to `_heading_text_from_payload_slide`, which applies
+  the same single-ArgentCF-candidate rule straight off the payload item without a `cls.kept` filter -- the best
+  available signal for a slide `plan_assembly` never classified (**superseded by Fix round 3 below**: this
+  payload-only approximation missed group-child verses and the badge/long-text-count rules, so it disagreed
+  with `_heading_cluster` on the real deck; it has been removed in favour of reclassifying the whole payload).
+  This is a real, not merely theoretical,
+  correction: GW46's own true predecessor is GW45 ("Prayer", heading-only), which shares GW46's heading text.
+  **This turned out to be wrong** (see Fix round 2 below): the gold deck keeps GW46 two-column despite GW45
+  sharing its heading, so round 1's blanket "any matching predecessor heading text drops the run" rule was too
+  broad. The three GW44/50/51/53 badge/short-row tests that relied on GW51/53's old (batch-dependent) "heading
+  kept when planned alone" behaviour were moved to GW44/50, whose real predecessors are not heading matches.
+- **Refit re-centring.** `plan.two_column_cluster: dict[int, HeadingCluster]` (new `AssemblyPlan` field) records
+  the cluster ids alongside `plan.two_column`'s left `Band`, so `_build_refit_round` can, after computing the
+  round's verse/short-row rects, rederive the left block's `circle_y`/`heading_y` off the new right-block centre
+  and emit position-only (`TextRefit(rect, None)`) refits for the heading/circle/numeral. Previously `plan.two_column`
+  was dead metadata and the left block silently stayed pinned to the pre-refit centring.
+- **Heading/numeral sizing goes through `_run_size_ranges`.** `_two_column_rects` now computes
+  `t = heading_pt / heading_source_size` for the heading and the constant `NUMBER_BADGE_PT / _HEADING_CIRCLE_PT`
+  (46/81) for the numeral, calling `_run_size_ranges` for each: a tuple result goes to `run_sizes`, a uniform
+  float (or a run-gap, flattened with a warning) to `text_sizes`. Previously both were always a single flat
+  point size, which would have silently discarded a mixed-size heading or numeral run.
+
+## Fix round 2 (GW46 keeps its heading -- owner-pinned rule)
+
+Round 1's deck-order repeat rule dropped GW46's heading because its immediate predecessor GW45 ("Prayer",
+heading cluster, no verse -- `_heading_cluster` returns `None` since `cls.long_text_ids` is empty, `category`
+"static") carries the same heading text. But the gold deck (gold 30 = GW 46, §2 above) **keeps** "Prayer" on
+GW46 as a two-column slide -- round 1's rule was derived from gold 34->35/36/37 (GW50->51/52/53), where the
+predecessor is itself a heading+verse (two-column-eligible) slide.
+
+**Owner-pinned rule (orchestrator decision, owner confirmation pending):** a heading cluster is suppressed only
+when the immediate non-empty predecessor in deck order is itself heading+verse (two-column-eligible) with an
+identical heading text. A heading-only predecessor (heading cluster, no verse) does not suppress; a headingless
+predecessor still breaks the run (unchanged from round 1).
+
+`_repeat_heading_state` now tracks `prev_has_cluster` alongside `prev_heading_text`; `repeats[number]` is set
+only when the current slide has a cluster, its heading text is non-`None`, and **both** the predecessor's
+heading text is non-`None` and the predecessor itself had a cluster. For a predecessor outside the current
+batch's `classes` (no `SlideClass`), `_heading_cluster_present_from_payload_slide` (new) approximates has-cluster
+straight off the payload: the same digit-in-circle geometry test as `_heading_cluster`, plus a long-text proxy
+(any raw text item over `DEFAULT_TEXT_SLIDE_WORDS` words, since there is no `cls.long_text_ids` to consult).
+**Superseded by Fix round 3 below** -- this approximation is removed; every predecessor is now reclassified
+through the real `classify_slide` pipeline before `_heading_cluster` is asked about it.
+
+Measured (deck-order batch `[44, 45, 46, 50, 51, 52, 53]`, full `plan_assembly` call together):
+- 44, 46, 50 -> two-column; 51, 52, 53 -> full-width (heading dropped, unchanged from round 1).
+- GW45 itself: `category == "static"`, `long_text_ids == ()`, `_heading_cluster` returns `None` (heading-only,
+  confirmed no verse), `_heading_text_for_repeat_check` returns `"Prayer"`.
+- Gold deck: the plan's own mapping (§2) lists gold 39-42 as the heading-only, single-centred-column pattern
+  (those map to GW56/57/...); GW45's own gold counterpart is not individually enumerated in this plan's gold
+  survey, so we report the heading-only pattern by analogy rather than a direct gold-slide measurement for
+  GW45 specifically.
+- `test_gw46_two_column_top_level_verse` restored (deleted `test_gw46_repeat_heading_dropped_top_level`) with
+  round 1's original pin re-measured against round 2's code: unchanged at `t = 0.65`, lead `45.5 pt` (heading
+  `Rect(43.0, ~882.2, 450.0, 113.56)` @ 80.0 pt, badge `Rect(245.0, ~826.2, 46.0, 46.0)`, verse
+  `Rect(501.0, ~852.5, 1391.0, ~201.5)`) -- the geometry never depended on the repeat-heading decision, so
+  re-measuring after the rule fix reproduces the pre-round-1 numbers exactly.
+- New synthetic unit test `test_two_column_repeat_heading_survives_heading_only_predecessor`: a heading-only
+  predecessor sharing the next slide's heading text does not suppress it (companion to the existing
+  `test_two_column_repeat_heading_survives_headingless_predecessor` and
+  `test_two_column_repeat_heading_dropped_when_planned_alone`, both unchanged -- their predecessors are
+  themselves heading+verse).
+
+## Fix round 3 (Codex D1b-p2 review 2 of 9604e2e -- predecessor classification must be real)
+
+Review 2's MAJOR: `_heading_cluster_present_from_payload_slide` (round 2's approximation) scanned only
+top-level text/shape items and required merely *any* text over `DEFAULT_TEXT_SLIDE_WORDS` words -- it ignored
+`cls.kept`, group-child verses (`groupChildren`/`groupChildText`), dedupe, and backdrop-drop settings, and
+skipped `_heading_cluster`'s badge-match and single-long-text-id rules entirely. On the real deck this
+disagreed with `_heading_cluster`: GW44/50/51/53's verse is a group child, which the approximation could never
+see, so it always reported "no cluster" for those predecessors and never suppressed a same-heading successor
+planned right after one of them.
+
+**Fix:** both payload-approximation functions (`_heading_text_from_payload_slide`,
+`_heading_cluster_present_from_payload_slide`) are deleted. `_repeat_heading_state` now takes
+`full_classes_by_number: Mapping[int, SlideClass]` -- the *whole deck's* classification, not the planning
+batch's -- and calls `_heading_cluster`/`_heading_text_for_repeat_check` on every predecessor exactly as it
+would on a batch slide; there is no more a "slide outside `classes`" branch. `plan_assembly` gained an optional
+`all_classes: Sequence[SlideClass] | None` parameter and a new `_full_classes_by_number` helper that resolves
+it: caller-supplied `all_classes` wins (the real CLI path -- `assemble_offline_deck` now passes
+`all_classes=classes`, and `load_assembly_inputs` already classifies the whole deck via `classify_deck`, so
+this is free); absent that, `_classify_all_slides_from_payload` (new) reclassifies every slide in `payload` via
+`classify_slide` directly, with group-movie/-build/connection-line counts left at their defaults. That
+degradation is safe for this purpose: `_heading_cluster`/`_heading_text_for_repeat_check` read only
+`cls.kept`/`cls.long_text_ids`/`cls.is_text`, none of which those counts affect (only `cls.category`,
+`build_count`, `movie_count` would differ, and this pass never reads those). This fallback deliberately never
+loads the deck graph or `fw_deck` from disk, so a caller that defers deck loading stays lazy (an earlier
+attempt that called `classify_deck` from a lazily-loaded `fw_deck`/deck-graph broke that laziness --
+`iwa_builds.deck_builds` unconditionally opens the `.key` zip for its data index even when a `deck` graph is
+supplied -- so it was dropped in favour of the payload-only path).
+
+New tests (`tests/test_dsk_assemble.py`):
+- `test_repeat_heading_predecessor_uses_group_child_verse`: a group-child-verse predecessor (mirroring GW
+  44/50/51/53) now correctly suppresses a same-heading successor planned alone -- proven both via the plan
+  (heading dropped, verse `x=43`) and directly via `_heading_cluster` on the reclassified predecessor.
+- `test_repeat_heading_predecessor_unmatched_badge_does_not_suppress`: a predecessor with an extra top-level
+  text that fails the badge-match rule is not a cluster (`_heading_cluster` returns `None`) and must not
+  suppress.
+- `test_repeat_heading_predecessor_multiple_long_text_ids_does_not_suppress`: a predecessor with two
+  `long_text_ids` is not a cluster and must not suppress.
+- `test_repeat_heading_gw51_planned_alone_matches_batch` (real deck): GW51 planned alone now matches its plan
+  in the GW `{44, 46, 50, 51, 52, 53}` batch exactly -- heading dropped, verse `x=43.0`/`w=1849.0` both ways;
+  the batch's own two-column set stays `{44, 46, 50}`.
+
+A/B vs 9604e2e (every GW slide planned alone, and the same deck-order batch as `test_gw_every_kept_non_movie_slide_plans_under_default_flags`): the deck-order batch is byte-identical (it always had the whole deck's real classes -- `load_assembly_inputs` classifies every slide regardless of `--slides`). Planned alone, GW51 and GW52 both change from two-column (heading kept, wrong) to full-width (heading dropped, correct) -- both slides' immediate predecessors (GW50, GW51) are group-child-verse clusters the round-2 approximation could not see. GW53 (predecessor GW52, a top-level-text cluster the approximation *could* see) was already correct and is unchanged. No other slide, in either scenario, changed.
+
+## Fix round 4 (Codex D1b-p2 review 3 of 0adc25a -- no reclassification fallback; all_classes contract)
+
+Review 3's MAJOR: round 3's `_classify_all_slides_from_payload` fallback forwarded `text_slide_words`, dedupe,
+backdrop, and group-child text/geometry, but its `classify_slide` call omitted `include_side` (batch
+classification passes the per-slide setting) and left `connection_line_builds` at zero (`classify_deck`
+supplies the real count). Both can change `category`/`kept`/`long_text_ids` from batch classification, and
+`_repeat_heading_state` reads `cls.category` (a connection-line-only intervening slide is `built` in batch
+classification but `empty` in the fallback, so the fallback could wrongly treat it as transparent to the run).
+
+**Fix (ORCHESTRATOR DECISION): the fallback is deleted, not patched.** `_classify_all_slides_from_payload` is
+removed entirely. `_full_classes_by_number(payload, classes, all_classes)`: caller-supplied `all_classes` wins
+as before; else, when `classes` already covers every slide number in `payload` (a synthetic single-/few-slide
+payload built to match `classes` -- unaffected, since `classes` already equals the payload's full
+classification), uses `classes` directly; else raises `ValueError("plan_assembly: planning a subset of the
+deck needs all_classes (the whole-deck classification)")`. `plan_assembly`'s docstring states the new
+requirement. `classify_slide` is no longer imported by `dsk_assemble.py`.
+
+Every direct `plan_assembly` caller that plans a subset of a deck-backed payload now passes
+`all_classes=classes` (or the fixture's full `by_number.values()`): `tests/test_dsk_assemble.py`'s
+`test_gw_every_kept_non_movie_slide_plans_under_default_flags`, `test_gw_text_slides_stay_within_band_top`,
+`test_gw44_badge_x_clears_title_right_edge`, `test_gw_group_text_slides_short_fit_stays_within_band_x`,
+`test_gw50_badge_x_clamped_to_band_right_edge`, `test_gw17_28_forced_split_at_floor_66_refuses_gw28_single_box`,
+`test_gw13_forced_floor_66_refuses_its_badge_gapped_single_box`, `test_gw49_plans_under_shrink_and_refuses_under_warn`,
+`test_repeat_heading_gw51_planned_alone_matches_batch`, and the three round-3 synthetic predecessor tests
+(`test_two_column_repeat_heading_dropped_when_planned_alone`, `..._survives_heading_only_predecessor`,
+`..._survives_headingless_predecessor`, `test_repeat_heading_predecessor_uses_group_child_verse`,
+`..._unmatched_badge_does_not_suppress`, `..._multiple_long_text_ids_does_not_suppress`), whose synthetic
+payloads include a predecessor slide outside `classes` and so now need an explicit `all_classes` covering both
+slides. `tests/test_dsk_content_rules_acceptance.py`'s `_plan_one` fixture helper now takes `by_number` and
+always passes `all_classes=list(by_number.values())`; `test_gw51_52_53_repeat_heading_dropped_full_width`
+passes `all_classes=list(by_number.values())` directly. The CLI path (`assemble_offline_deck`) already passed
+`all_classes=classes`; no `src/` caller needed a change (grepped every `plan_assembly(` call in `src/` and
+`tests/`; `_build_refit_round` does not reclassify or replan, per the review).
+
+New tests (`tests/test_dsk_assemble.py`):
+- `test_repeat_heading_predecessor_include_side_matches_batch_classification`: a predecessor classified with
+  `include_side=True` (an extra side-panel long-text box, kept only under `include_side`) breaks its own
+  heading cluster (two `long_text_ids`) and must not suppress; the same predecessor classified with
+  `include_side=False` drops that side text, keeps one `long_text_ids`, and does suppress -- both via
+  `all_classes`, proving `_full_classes_by_number` uses exactly what the caller classified, not its own guess.
+- `test_repeat_heading_connection_line_only_slide_breaks_run_consistently_with_batch`: an intervening
+  no-items slide classified with `connection_line_builds=0` is `category == "empty"` (transparent, run
+  continues, heading suppressed) versus `connection_line_builds=1` is `category == "built"` (breaks the run,
+  heading kept) -- both via `all_classes`.
+- `test_plan_assembly_subset_of_deck_without_all_classes_raises`: a subset `classes` (payload has a slide
+  `classes` doesn't cover) without `all_classes` raises `ValueError` naming `all_classes`.
+
+A/B vs 0adc25a: with `all_classes=classes` passed (as `assemble_offline_deck` already does, and as every
+updated test now does), `_full_classes_by_number` returns exactly `{c.number: c for c in all_classes}` --
+byte-identical to round 3's `all_classes is not None` branch, which was untouched. Every GW slide planned
+alone and the GW `{44, 46, 50, 51, 52, 53}` batch are therefore identical to 0adc25a's. No behavioural change
+on the `all_classes`-supplied path; the change is confined to what happens when it is omitted for a deck
+subset (refuse instead of silently reclassifying).

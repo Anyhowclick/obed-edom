@@ -22,6 +22,7 @@ from obed_edom.dsk_plan import (
     classify_deck,
     classify_slide,
     crop_geometry,
+    fit_heading_pt,
     fit_item,
     fit_slide,
     fit_text_stack,
@@ -1290,6 +1291,56 @@ def test_wrap_lines_mixed_separators_all_break():
 def test_wrapped_height_missing_font_warns():
     assert resolve_font_path("NotARealFontXYZ") is None
     assert wrapped_height("hello world", "NotARealFontXYZ", 40.0, 1849.0) is None
+
+
+def test_fit_heading_pt_two_lines_caps_at_block():
+    # Gold 29/39/41 (D1b): 61pt would push the two-line block to 141.2 > 140.
+    _require_font("ArgentCF-Bold")
+    size = fit_heading_pt(
+        "Praise and Worship", "ArgentCF-Bold", 450.0, 300.0,
+        max_pt=80.0, max_block_pt=140.0, min_pt=24.0,
+    )
+    assert size == pytest.approx(60.0)
+
+
+def test_fit_heading_pt_one_line_caps_at_max_pt():
+    # Gold 30/34 (D1b): the block cap would allow 121pt; MAX_HEADING_PT binds first.
+    _require_font("ArgentCF-Bold")
+    size = fit_heading_pt(
+        "Faith", "ArgentCF-Bold", 450.0, 300.0,
+        max_pt=80.0, max_block_pt=140.0, min_pt=24.0,
+    )
+    assert size == pytest.approx(80.0)
+
+
+def test_fit_heading_pt_width_bound():
+    _require_font("ArgentCF-Bold")
+    size = fit_heading_pt(
+        "x" * 20, "ArgentCF-Bold", 450.0, 300.0,
+        max_pt=80.0, max_block_pt=140.0, min_pt=24.0,
+    )
+    assert size is not None
+    width = dsk_plan.longest_line_width("x" * 20, "ArgentCF-Bold", size, 450.0)
+    assert width <= 450.0
+
+
+def test_fit_heading_pt_returns_none_below_min():
+    _require_font("ArgentCF-Bold")
+    size = fit_heading_pt(
+        "Faith", "ArgentCF-Bold", 450.0, 30.0,
+        max_pt=80.0, max_block_pt=140.0, min_pt=24.0,
+    )
+    assert size is None
+
+
+def test_fit_heading_pt_fractional_min_never_rounds_down():
+    _require_font("ArgentCF-Bold")
+    size = fit_heading_pt(
+        "Faith", "ArgentCF-Bold", 450.0, 30.0,
+        max_pt=80.0, max_block_pt=140.0, min_pt=24.5,
+    )
+    assert size != 24.0
+    assert size is None or size >= 24.5
 
 
 def test_fit_text_stack_bare_band_ordering():

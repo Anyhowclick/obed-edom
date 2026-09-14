@@ -48,6 +48,7 @@ from obed_edom.dsk_plan import (
     _TEXT_GAP_PT,
     _word_count,
     classify_deck,
+    fit_heading_pt,
     fit_slide,
     fit_text_stack,
     plan_crops,
@@ -172,6 +173,8 @@ class AssemblyPlan:
     short_row_h: dict[int, float] = field(default_factory=dict)
     crops: dict[int, dict[ItemId, CropSpec]] = field(default_factory=dict)
     anchors: dict[int, str] = field(default_factory=dict)
+    two_column: dict[int, Band] = field(default_factory=dict)
+    two_column_cluster: dict[int, HeadingCluster] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -441,6 +444,302 @@ def _group_has_media(signature: str | None) -> bool:
 _LW_ASPECT_MIN = 2.5
 _LW_ASPECT_TOL = 1e-9
 
+HEADING_COL_W = 450.0
+COL_GUTTER = 8.0
+NUMBER_BADGE_PT = 46.0
+MAX_HEADING_PT = 80.0
+MAX_HEADING_BLOCK_PT = 140.0
+
+_HEADING_FONT_PREFIX = "ArgentCF"
+_HEADING_MAX_WORDS = 5
+_HEADING_NUMBER_MAX_CHARS = 2
+_HEADING_CIRCLE_PT = 81.0
+_HEADING_GEOM_TOL_PT = 1.0
+
+
+@dataclass(frozen=True)
+class HeadingCluster:
+    """A point heading's three paired items: its ``ArgentCF*`` text, its point-number
+    text, and the 81x81 circle behind the number (the offline payload exposes no fill
+    property, so the circle is identified by geometry alone, not by fill state)."""
+
+    heading_id: ItemId
+    number_id: ItemId
+    circle_id: ItemId
+
+
+def _rect_of(item: dict) -> tuple[float, float, float, float]:
+    return (float(item.get("x", 0.0)), float(item.get("y", 0.0)), float(item.get("w", 0.0)), float(item.get("h", 0.0)))
+
+
+def _normalise_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _rects_match(a: tuple[float, float, float, float], b: tuple[float, float, float, float], tol: float) -> bool:
+    return all(abs(av - bv) <= tol for av, bv in zip(a, b))
+
+
+def _heading_cluster(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) -> HeadingCluster | None:
+    """One kept top-level ``ArgentCF*`` heading (<= 5 words) paired with the single kept
+    top-level all-digit point number (<= 2 chars) found anywhere -- a second such digit
+    text elsewhere always refuses -- whose rect centre lies within 1pt of the radius of
+    exactly one kept textless 81x81 top-level ``shape`` (the number circle). At most one
+    other kept top-level text is allowed -- besides the top-level long text itself, when
+    ``cls.long_text_ids`` names one -- and it must be the verse badge: its normalised
+    (whitespace-collapsed, stripped) non-empty text must match exactly one kept top-level
+    shape's rect (tolerance 1pt) and normalised text, other than the circle -- measured on
+    GW 46/52, where the badge is a top-level text+shape pair sharing one rect and text; on
+    GW 44/50/51/53 the badge is a group child and leaves no top-level text behind. Two or
+    more extra top-level texts, or an unmatched one, refuses the cluster. Requires exactly
+    one long text (``cls.long_text_ids``). Never raises."""
+    if len(cls.long_text_ids) != 1:
+        return None
+    texts: list[tuple[ItemId, dict]] = []
+    shapes: list[tuple[ItemId, dict]] = []
+    for item_id in cls.kept:
+        kind, _kind_index = item_id
+        item = items_by_id.get(item_id)
+        if item is None:
+            continue
+        if kind == "text":
+            texts.append((item_id, item))
+        elif kind == "shape":
+            shapes.append((item_id, item))
+
+    circle_candidates = [
+        (item_id, item)
+        for item_id, item in shapes
+        if not (item.get("text") or "").strip()
+        and item.get("w") == _HEADING_CIRCLE_PT
+        and item.get("h") == _HEADING_CIRCLE_PT
+    ]
+    if len(circle_candidates) != 1:
+        return None
+    circle_id, circle_item = circle_candidates[0]
+    circle_rect = _rect_of(circle_item)
+
+    heading_ids = [
+        item_id
+        for item_id, item in texts
+        if (item.get("font") or "").startswith(_HEADING_FONT_PREFIX)
+        and (item.get("text") or "").strip()
+        and _word_count((item.get("text") or "").strip()) <= _HEADING_MAX_WORDS
+    ]
+    if len(heading_ids) != 1:
+        return None
+    heading_id = heading_ids[0]
+
+    digit_ids = [
+        item_id
+        for item_id, item in texts
+        if (item.get("text") or "").strip().isdigit()
+        and len((item.get("text") or "").strip()) <= _HEADING_NUMBER_MAX_CHARS
+    ]
+    if len(digit_ids) != 1:
+        return None
+    number_id = digit_ids[0]
+    nx, ny, nw, nh = _rect_of(items_by_id[number_id])
+    centre = (nx + nw / 2.0, ny + nh / 2.0)
+    cx, cy, cw, ch = circle_rect
+    circle_centre = (cx + cw / 2.0, cy + ch / 2.0)
+    radius = math.hypot(centre[0] - circle_centre[0], centre[1] - circle_centre[1])
+    if radius > (_HEADING_CIRCLE_PT / 2.0) + _HEADING_GEOM_TOL_PT:
+        return None
+
+    long_text_ids = set(cls.long_text_ids)
+    extra_texts = [
+        (item_id, item)
+        for item_id, item in texts
+        if item_id not in (heading_id, number_id) and item_id not in long_text_ids
+    ]
+    if len(extra_texts) > 1:
+        return None
+    if extra_texts:
+        badge_id, badge_item = extra_texts[0]
+        badge_text = _normalise_ws(badge_item.get("text") or "")
+        if not badge_text:
+            return None
+        rect = _rect_of(badge_item)
+        matching_shapes = [
+            (shape_id, shape_item)
+            for shape_id, shape_item in shapes
+            if shape_id != circle_id
+            and _rects_match(rect, _rect_of(shape_item), _HEADING_GEOM_TOL_PT)
+            and _normalise_ws(shape_item.get("text") or "") == badge_text
+        ]
+        if len(matching_shapes) != 1:
+            return None
+
+    return HeadingCluster(heading_id, number_id, circle_id)
+
+
+def _heading_text_for_repeat_check(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) -> str | None:
+    """The slide's single kept top-level ``ArgentCF*`` heading text (stripped), or
+    ``None`` when there is none or more than one -- used for the D1b Q1 repeat-heading
+    drop, which must also see heading-only slides (no verse, so `_heading_cluster`
+    itself never fires for them)."""
+    candidates = [
+        item.get("text", "").strip()
+        for item_id, item in items_by_id.items()
+        if item_id[0] == "text"
+        and item_id in cls.kept
+        and (item.get("font") or "").startswith(_HEADING_FONT_PREFIX)
+        and (item.get("text") or "").strip()
+        and _word_count((item.get("text") or "").strip()) <= _HEADING_MAX_WORDS
+    ]
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def _full_classes_by_number(
+    payload: Mapping[str, Any],
+    classes: Sequence[SlideClass],
+    all_classes: Sequence[SlideClass] | None,
+) -> dict[int, SlideClass]:
+    """The whole deck's `SlideClass`es for `_repeat_heading_state`, so a predecessor
+    outside the planning batch is classified through the exact same inputs
+    (`cls.kept`, `long_text_ids`, group-child text/children, dedupe, backdrop,
+    `include_side`, connection-line settings) as `_heading_cluster` requires --
+    never an approximation. Prefers caller-supplied `all_classes` (the real CLI
+    path: `load_assembly_inputs` already classifies the whole deck via
+    `classify_deck`); else, when `classes` itself already covers every slide in
+    `payload` (a synthetic single-/few-slide payload built to match `classes`),
+    uses `classes` directly. There is no other fallback: reclassifying a subset
+    payload without the whole deck's `include_side`/connection-line-build inputs
+    previously could disagree with batch classification's `category`, which
+    `_repeat_heading_state` reads -- planning a subset of a deck-backed payload
+    now requires `all_classes`."""
+    if all_classes is not None:
+        return {c.number: c for c in all_classes}
+    payload_numbers = {slide["number"] for slide in payload.get("slides") or []}
+    classes_by_number = {c.number: c for c in classes}
+    if payload_numbers <= classes_by_number.keys():
+        return classes_by_number
+    raise ValueError(
+        "plan_assembly: planning a subset of the deck needs all_classes (the whole-deck classification)"
+    )
+
+
+def _repeat_heading_state(
+    slides_by_number: Mapping[int, dict],
+    full_classes_by_number: Mapping[int, SlideClass],
+) -> dict[int, bool]:
+    """Per slide number, whether its heading cluster repeats the immediately preceding
+    non-empty slide's heading text -- walking `slides_by_number` in full deck order,
+    independent of the planning batch (`kept_numbers`), so `--slides 51` alone drops
+    the heading exactly like a full-deck run. Suppression additionally requires that
+    predecessor to itself be heading+verse (two-column-eligible): a heading-only
+    predecessor (heading cluster with no verse, e.g. GW45 "Prayer") does not suppress
+    (owner-pinned rule, D1b-p2 fix round 2). A slide with no heading text breaks the
+    run. `full_classes_by_number` (see `_full_classes_by_number`) must be the whole
+    deck's classification, not just the planning batch's -- every predecessor is read
+    through the same `_heading_cluster`/`_heading_text_for_repeat_check` as the batch
+    slides, off its real `SlideClass` (`cls.kept`, group-child verses, dedupe,
+    backdrop settings all included), never an approximation. A number missing from
+    `full_classes_by_number` (should not happen) breaks the run, same as an empty
+    slide."""
+    repeats: dict[int, bool] = {}
+    prev_heading_text: str | None = None
+    prev_has_cluster = False
+    for number in sorted(slides_by_number):
+        cls = full_classes_by_number.get(number)
+        if cls is None:
+            prev_heading_text = None
+            prev_has_cluster = False
+            continue
+        if cls.category == "empty":
+            continue
+        items_by_id = {(it["kind"], it["kindIndex"]): it for it in slides_by_number[number].get("items") or []}
+        heading_text = _heading_text_for_repeat_check(cls, items_by_id)
+        has_cluster = _heading_cluster(cls, items_by_id) is not None
+        if (
+            has_cluster
+            and heading_text is not None
+            and prev_heading_text is not None
+            and prev_has_cluster
+        ):
+            repeats[number] = heading_text == prev_heading_text
+        prev_heading_text = heading_text
+        prev_has_cluster = has_cluster
+    return repeats
+
+
+def _two_column_rects(
+    number: int,
+    cluster: HeadingCluster,
+    items_by_id: Mapping[ItemId, dict],
+    band: Band,
+    verse_block_top: float,
+    min_text_pt: float,
+    warnings: list[str],
+) -> tuple[dict[ItemId, Rect], dict[ItemId, float], dict[ItemId, tuple[tuple[int, int, float], ...]], Band]:
+    """Left-column rects (heading text, number circle, numeral) for a two-column
+    heading+verse band (D1b Section 4); ``verse_block_top`` is the top y of the already
+    -placed right column (the verse badge when present, else the verse text itself),
+    used to vertically centre the left block on it. Returns
+    ``(rects, text_sizes, run_sizes, left_band)``, both size maps disjoint per item id.
+    Raises `AssemblyRefusal` per the Section 4 refusals (heading does not fit, or its
+    font/numeral size is unresolved)."""
+    left = Band(band.bottom, band.height, band.x_min, band.x_min + HEADING_COL_W, band.sample_count)
+    heading_item = items_by_id[cluster.heading_id]
+    heading_text = heading_item.get("text") or ""
+    heading_font = heading_item.get("font") or ""
+    heading_source_size = heading_item.get("size")
+    number_item = items_by_id[cluster.number_id]
+    numeral_source_size = number_item.get("size")
+    if not heading_font or not heading_source_size or not numeral_source_size:
+        raise AssemblyRefusal(
+            f"slide {number}: two-column heading font or number size unresolved -- refusing to "
+            "write blind"
+        )
+    avail_h = band.height - NUMBER_BADGE_PT - _TEXT_STACK_GAP
+    heading_pt = fit_heading_pt(
+        heading_text, heading_font, HEADING_COL_W, avail_h,
+        max_pt=MAX_HEADING_PT, max_block_pt=MAX_HEADING_BLOCK_PT, min_pt=min_text_pt,
+    )
+    if heading_pt is None:
+        raise AssemblyRefusal(
+            f"slide {number}: two-column heading does not fit the heading column -- refusing to split"
+        )
+    heading_h = wrapped_height(heading_text, heading_font, heading_pt, HEADING_COL_W)
+    if heading_h is None:
+        raise AssemblyRefusal(f"slide {number}: two-column heading height unresolved -- refusing to write blind")
+
+    block_h = NUMBER_BADGE_PT + _TEXT_STACK_GAP + heading_h
+    right_block_centre = (verse_block_top + band.bottom) / 2.0
+    circle_y = right_block_centre - block_h / 2.0
+    heading_y = circle_y + NUMBER_BADGE_PT + _TEXT_STACK_GAP
+    circle_x = left.x_min + HEADING_COL_W / 2.0 - NUMBER_BADGE_PT / 2.0
+
+    rects = {
+        cluster.heading_id: Rect(left.x_min, heading_y, HEADING_COL_W, heading_h),
+        cluster.circle_id: Rect(circle_x, circle_y, NUMBER_BADGE_PT, NUMBER_BADGE_PT),
+        cluster.number_id: Rect(circle_x, circle_y, NUMBER_BADGE_PT, NUMBER_BADGE_PT),
+    }
+    heading_t = heading_pt / float(heading_source_size)
+    numeral_t = NUMBER_BADGE_PT / _HEADING_CIRCLE_PT
+    text_sizes: dict[ItemId, float] = {}
+    run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
+    for item_id, item, scale, flat_pt in (
+        (cluster.heading_id, heading_item, heading_t, heading_pt),
+        (cluster.number_id, number_item, numeral_t, float(numeral_source_size) * numeral_t),
+    ):
+        ranges, unresolved = _run_size_ranges(item, scale, item_id=item_id, slide_number=number, warnings=warnings)
+        if isinstance(ranges, tuple):
+            run_sizes[item_id] = ranges
+        elif ranges is not None:
+            text_sizes[item_id] = ranges
+        else:
+            if unresolved:
+                warnings.append(
+                    f"slide {number} text {_item_label(item_id)}: run ranges leave a gap, "
+                    "preserving the flat two-column size"
+                )
+            text_sizes[item_id] = flat_pt
+    return rects, text_sizes, run_sizes, left
+
 
 def _content_ids(
     cls: SlideClass,
@@ -536,9 +835,15 @@ def plan_assembly(
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
     split_overrides: Mapping[int, int] | None = None,
+    all_classes: Sequence[SlideClass] | None = None,
 ) -> AssemblyPlan:
     """Pure planning over `payload`/`classes`, EXCEPT the cropped image files under
-    `crop_dir` (unless `no_image_crop`), committed only once every slide validates."""
+    `crop_dir` (unless `no_image_crop`), committed only once every slide validates.
+    `all_classes`, when given, is the whole deck's classification (see
+    `_full_classes_by_number`) -- used only for the repeat-heading predecessor check,
+    so a `--slides` batch drops a repeated heading exactly like a full-deck run.
+    Planning a subset of a deck-backed payload (`classes` narrower than `payload`'s
+    slides) requires `all_classes`; omitting it then raises `ValueError`."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -549,6 +854,8 @@ def plan_assembly(
         if decision.action in ("in_deck", "both")
         and classes_by_number[number].category != "empty"
     )
+    full_classes_by_number = _full_classes_by_number(payload, classes, all_classes)
+    repeat_heading_by_number = _repeat_heading_state(slides_by_number, full_classes_by_number)
 
     fits: dict[int, dict[ItemId, Rect]] = {}
     deletes: dict[int, tuple[ItemId, ...]] = {}
@@ -570,6 +877,8 @@ def plan_assembly(
     short_row_h_map: dict[int, float] = {}
     crops_out: dict[int, dict[ItemId, CropSpec]] = {}
     anchors_out: dict[int, str] = {}
+    two_column_map: dict[int, Band] = {}
+    two_column_cluster_map: dict[int, HeadingCluster] = {}
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
     if objects_graph is None and fw_deck is not None:
@@ -756,6 +1065,22 @@ def plan_assembly(
             )
             deletes[number] = base_deletes
 
+            cluster = _heading_cluster(cls, items_by_id)
+            is_repeat_heading = cluster is not None and repeat_heading_by_number.get(number, False)
+            cluster_ids: set[ItemId] = set()
+            if cluster is not None:
+                cluster_ids = {cluster.heading_id, cluster.number_id, cluster.circle_id}
+            if is_repeat_heading:
+                for cid in cluster_ids:
+                    fit.pop(cid, None)
+                deletes[number] = _delete_order(list(base_deletes) + list(cluster_ids), id_by_item)
+                cluster = None
+                cluster_ids = set()
+            elif cluster is not None and slide_crops:
+                raise AssemblyRefusal(
+                    f"slide {number}: two-column verse and image crop both apply -- unsupported"
+                )
+
             stacked_ids: set[ItemId] = set()
             stacked_text_sizes: dict[ItemId, float] = {}
             stacked_shrink_only_sizes: dict[ItemId, float] = {}
@@ -790,8 +1115,14 @@ def plan_assembly(
                     group_top_rects = {ki: fit.get(("group", ki)) for ki in text_group_kis}
                     short_fit = {
                         iid: rect for iid, rect in fit.items()
-                        if iid not in long_id_set and iid not in group_top_ids
+                        if iid not in long_id_set and iid not in group_top_ids and iid not in cluster_ids
                     }
+                    col_band = band
+                    if cluster is not None:
+                        col_band = Band(
+                            band.bottom, band.height, band.x_min + HEADING_COL_W + COL_GUTTER,
+                            band.x_max, band.sample_count,
+                        )
                     # The group itself takes no affine path on a text slide (Design A
                     # step 4): drop its own top-level fit entry so `_slide_lines` never
                     # falls into `_group_blind_child_lines` for it.
@@ -831,16 +1162,16 @@ def plan_assembly(
                         badge_id = ("groupchild", group_ki, child["kind"], child["kindIndex"])
                         badge_w = float(child.get("w", 0.0))
                         badge_h = float(child.get("h", 0.0))
-                        if badge_w > band.width:
+                        if badge_w > col_band.width:
                             raise AssemblyRefusal(
                                 f"slide {number}: group {group_ki} child {child['kindIndex']} is "
                                 "wider than the band -- refusing to place"
                             )
                         if sole_occupant or group_rect is None:
-                            badge_x = band.x_min + (band.width - badge_w) / 2.0
+                            badge_x = col_band.x_min + (col_band.width - badge_w) / 2.0
                         else:
                             badge_x = group_rect.x + (float(child.get("x", 0.0)) - origin_x)
-                        clamped_x = min(max(badge_x, band.x_min), band.x_max - badge_w)
+                        clamped_x = min(max(badge_x, col_band.x_min), col_band.x_max - badge_w)
                         if clamped_x != badge_x:
                             warnings.append(
                                 f"slide {number}: group {group_ki} child {child['kindIndex']} badge x "
@@ -848,13 +1179,21 @@ def plan_assembly(
                             )
                         badge_x = clamped_x
                         short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
+                    if cluster is not None:
+                        for badge_id, rect in short_fit.items():
+                            if rect.w > col_band.width:
+                                raise AssemblyRefusal(
+                                    f"slide {number}: verse badge {_item_label(badge_id)} is wider "
+                                    "than the two-column verse column -- refusing to place"
+                                )
+                        short_fit = {iid: _dc_replace(rect, x=col_band.x_min) for iid, rect in short_fit.items()}
                     _refuse_on_short_row_overlap(number, short_fit)
-                    stack_band = band
+                    stack_band = col_band
                     short_row_h = 0.0
                     if short_fit:
                         short_row_h = max(rect.h for rect in short_fit.values())
-                        budget = max(0.0, band.height - short_row_h - _TEXT_STACK_GAP)
-                        stack_band = _dc_replace(band, height=budget)
+                        budget = max(0.0, col_band.height - short_row_h - _TEXT_STACK_GAP)
+                        stack_band = _dc_replace(col_band, height=budget)
 
                     forced_parts = (split_overrides or {}).get(number)
                     if forced_parts is not None:
@@ -870,9 +1209,11 @@ def plan_assembly(
                         stack_t_map[number] = t
                         long_rects = _stacked_text_rects(boxes, heights, stack_band)
                         fit.update(long_rects)
+                        short_rects: dict[ItemId, Rect] = {}
                         if short_fit:
                             stack_top = min(rect.y for rect in long_rects.values())
-                            fit.update(_short_row_rects(short_fit, short_row_h, stack_top))
+                            short_rects = _short_row_rects(short_fit, short_row_h, stack_top)
+                            fit.update(short_rects)
                         stacked_ids = {box.item_id for box in boxes}
                         for box in boxes:
                             if box.item_id[0] == "groupchild":
@@ -914,6 +1255,21 @@ def plan_assembly(
                                 stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
                             else:
                                 stacked_text_sizes[box.item_id] = sizes[box.item_id]
+                        if cluster is not None:
+                            verse_block_top = min((short_rects or long_rects).values(), key=lambda r: r.y).y
+                            two_col_rects, two_col_sizes, two_col_run_sizes, left_band = _two_column_rects(
+                                number, cluster, items_by_id, band, verse_block_top, min_text_pt, warnings,
+                            )
+                            fit.update(two_col_rects)
+                            stacked_text_sizes.update(two_col_sizes)
+                            stacked_run_sizes.update(two_col_run_sizes)
+                            two_column_map[number] = left_band
+                            two_column_cluster_map[number] = cluster
+                    elif cluster is not None:
+                        raise AssemblyRefusal(
+                            f"slide {number}: two-column verse does not fit the verse column at "
+                            f"--min-text-pt {min_text_pt}"
+                        )
                     elif not allow_split:
                         raise AssemblyRefusal(
                             f"slide {number}: text does not fit the band at --min-text-pt {min_text_pt}"
@@ -1021,7 +1377,7 @@ def plan_assembly(
             slide_shrink_sizes: dict[ItemId, float] = {}
             slide_autosize: set[ItemId] = set()
             for iid in cls.kept:
-                if iid[0] != "text" or iid in stacked_ids:
+                if iid[0] != "text" or iid in stacked_ids or iid in cluster_ids:
                     continue
                 item = items_by_id.get(iid)
                 if item is None:
@@ -1120,6 +1476,8 @@ def plan_assembly(
         short_row_h=short_row_h_map,
         crops=crops_out,
         anchors=anchors_out,
+        two_column=two_column_map,
+        two_column_cluster=two_column_cluster_map,
     )
 
 
@@ -2985,6 +3343,24 @@ def _build_refit_round(
             for iid, short_rect in short_rects.items():
                 slide_refits[iid] = TextRefit(short_rect, None)
             rects = {**rects, **short_rects}
+        cluster = plan.two_column_cluster.get(slide_no)
+        left_band = plan.two_column.get(slide_no)
+        if cluster is not None and left_band is not None:
+            heading_rect = plan.fits[slide_no][cluster.heading_id]
+            block_h = NUMBER_BADGE_PT + _TEXT_STACK_GAP + heading_rect.h
+            verse_block_top = min(rect.y for rect in rects.values())
+            right_block_centre = (verse_block_top + left_band.bottom) / 2.0
+            circle_y = right_block_centre - block_h / 2.0
+            heading_y = circle_y + NUMBER_BADGE_PT + _TEXT_STACK_GAP
+            circle_x = left_band.x_min + HEADING_COL_W / 2.0 - NUMBER_BADGE_PT / 2.0
+            cluster_rects = {
+                cluster.heading_id: _dc_replace(heading_rect, y=heading_y),
+                cluster.circle_id: Rect(circle_x, circle_y, NUMBER_BADGE_PT, NUMBER_BADGE_PT),
+                cluster.number_id: Rect(circle_x, circle_y, NUMBER_BADGE_PT, NUMBER_BADGE_PT),
+            }
+            for cid, cluster_rect in cluster_rects.items():
+                slide_refits[cid] = TextRefit(cluster_rect, None)
+            plan.fits[slide_no].update(cluster_rects)
         refits[slide_no] = slide_refits
         plan.fits[slide_no].update(rects)
     return refits
@@ -3329,6 +3705,7 @@ def assemble_dsk_deck(
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
         no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop, split_overrides=split_overrides,
+        all_classes=classes,
     )
     for number in sorted(plan.anchors):
         log(f"slide {number}: anchor {plan.anchors[number]}")

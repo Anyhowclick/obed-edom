@@ -349,6 +349,68 @@ reports heights and applies writes.
 
 - **MINOR: `_child_word_count` now normalizes storage text with `iwa_runs._normalize_text` before `_word_count`,** matching the aggregate `groupChildText` threshold so a standalone object-replacement character no longer inflates a per-child count past the aggregate's; deck-wide A/B (`ab-D1fix4/`) zero differences against `ab-D1fix3/`.
 
+## D1b -- two-column heading+verse band
+
+Full design in `.agents/plans/dsk_pieceD1b.plan.md`. Summary of the landed piece (both parts):
+Section 4 (layout) and Section 5/5b (wiring + repeat-heading drop) below reproduce that plan's
+Section 2 gold table; deviations from the plan's own pre-implementation estimates are called out
+where `plan_assembly`'s measured output differs by more than 0.5pt.
+
+### Gold-deck measurements (verbatim from `dsk_pieceD1b.plan.md` Section 2)
+
+| gold | GW | heading | verse |
+|---|---|---|---|
+| 29 | 44 | "Praise and Worship" | 2 Kings 3:15 |
+| 30 | 46 | "Prayer" | James 5:16 |
+| 34 | 50 | "Your Faith" (GW: "Faith") | Luke 5:17 |
+| 35 / 36 / 37 | 51 / 52 / 53 | heading dropped by the owner | Luke 5:18 / 19 / 20 |
+| 39-42 | 56/57/... | heading-only, single centred column | -- |
+
+Heading-box centre x 267.5/267.5/268.0 -> left column centre 268.0; number badge x 245.0, w=46 on
+all three; `43.0 + 450.0/2 = 268.0` and `43 + 450 + 8 = 501` = the measured verse-column left edge.
+`HEADING_COL_W = 450.0`, `COL_GUTTER = 8.0`, `NUMBER_BADGE_PT = 46.0`, `MAX_HEADING_PT = 80.0`,
+`MAX_HEADING_BLOCK_PT = 140.0` (all constants in `dsk_assemble.py`, each landed in part 1).
+
+### Owner decisions
+
+- **Q1 -- repeated headings: DROP.** A heading cluster whose heading text equals the previous
+  *deck-order* non-empty slide's heading text is suppressed: heading + number + circle move into
+  `deletes` and the verse takes the full band as a single-column text slide (`plan.two_column` gets
+  no entry). Reproduces gold 35/36/37 for GW 51/52/53 exactly (verse `x=43.0 w=1849.0` in both
+  cases). Fix round 1 (Codex D1b-p2 review 1, finding 2) corrected this from the original
+  `kept_numbers`-tracked version: the predecessor is now derived from `payload["slides"]`'s full
+  order (`_repeat_heading_state` in `dsk_assemble.py`), independent of the planning batch, and a
+  headingless intervening slide resets the run instead of being skipped over -- see
+  `dsk_pieceD1b.plan.md`'s "Fix round 1" section.
+- **Q3 -- verse badge: unscaled.** The verse badge keeps its source size (645x92) in the column,
+  forced to `x = right_column.x_min` (left-aligned) -- no scaling. Proper template-slide badge
+  sizing is deferred to the next milestone.
+- Q2 (heading-only slides use a 140pt affine fit rather than the 80pt heading cap) is still open;
+  heading-only slides are unchanged by this piece (`test_gw57_heading_only_unchanged`).
+
+### Measured acceptance numbers (`tests/test_dsk_content_rules_acceptance.py`)
+
+GW44 and GW50 reproduce the plan's pre-implementation estimates within 0.5pt: heading
+`Rect(43.0, 834.8, 450.0, 159.8)` @ 60.0pt / `Rect(43.0, 858.2, 450.0, 113.6)` @ 80.0pt; number
+badge `Rect(245.0, ..., 46.0, 46.0)` on both; verse `t=0.59` (lead 41.3pt) / `t=0.48` (lead 33.6pt).
+
+**GW46 keeps its heading (owner-pinned rule, D1b-p2 fix round 2)**: round 1's deck-order repeat
+rule read GW46's true predecessor GW45 ("Prayer", heading-only) and, since it shares GW46's heading
+text, dropped GW46's heading -- but the gold deck (gold 30 = GW46) keeps "Prayer" on GW46 as
+two-column, so that was wrong. The pinned rule (orchestrator decision, owner confirmation pending):
+suppression requires the immediate predecessor to itself be heading+verse (two-column-eligible)
+with identical heading text; a heading-only predecessor like GW45 does not suppress. GW46 (planned
+alone or in the full deck-order batch `[44, 45, 46, 50, 51, 52, 53]`) is therefore two-column again,
+reproducing the original geometry (heading top ~882.2/height 113.56 @ 80.0pt, badge a top-level
+522.57x74.54 shape+text pair, verse lead 45.5pt at t=0.65) -- see
+`test_gw46_two_column_top_level_verse`. GW51/52/53's predecessors are themselves heading+verse
+slides, so their drop is unchanged.
+
+GW51/52/53 (repeat-drop): verse `x=43.0 w=1849.0` in all three; heading/number/circle land in
+`plan.deletes` (`{("shape", 0), ("text", 0), ("text", 1)}` for 51/53, `{("shape", 1), ("text", 2),
+("text", 3)}` for 52 -- GW52's items are indexed differently since its badge is top-level, not a
+group child). GW54 (no heading cluster) and GW57 (heading-only) are unchanged.
+
 ## Open questions (design-changing)
 
 1. **Stale read-back (F3).** Is the two-consecutive-reads poll enough, or does Keynote only settle the height
