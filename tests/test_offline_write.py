@@ -997,16 +997,25 @@ def test_run_offline_write_decodes_once_for_the_frames_and_audit_pair(monkeypatc
     import obed_edom.offline_write as ow_mod
 
     load_calls = []
-    monkeypatch.setattr(
-        "obed_edom.iwa_runs._load_deck",
-        lambda *a, **k: (load_calls.append(1), ({}, {}, {}))[1],
-        raising=False,
-    )
+
+    def _fake_load_deck(*a, **k):
+        load_calls.append(1)
+        skipped = k.get("skipped")
+        if skipped is not None:
+            skipped.append(("Slide123.iwa", "bad zip member"))
+        return ({}, {}, {})
+
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", _fake_load_deck, raising=False)
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    messages = []
     run_offline_write(
-        Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+        Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], messages.append
     )
     assert load_calls == [1]
+    output = "\n".join(messages)
+    assert "WARN" in output
+    assert "Slide123.iwa" in output
+    assert "1 undecodable" in output
 
 
 def test_run_offline_write_skips_natural_audit_in_on_mode(monkeypatch):

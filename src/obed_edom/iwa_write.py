@@ -638,17 +638,23 @@ def _slide_edits(
 
 
 def _decode_apply_reencode_diff(
-    zf: zipfile.ZipFile, member: str, apply_fn: Callable[[dict], int],
-) -> tuple[bytes, int, int, int, dict, dict]:
+    zf: zipfile.ZipFile, member: str, apply_fn: Callable[[dict], int], expect: int | None = None,
+) -> tuple[bytes | None, int, int, int, dict | None, dict | None]:
     """Decode -> apply -> re-encode -> reparse -> diff ONE member, off an already-open
     ``ZipFile`` (the caller hoists one handle across every member). ``apply_fn`` mutates
     the decoded dict in place and returns the applied count. (new_bytes, applied,
     obj_diffs, header_diffs, decoded, reparsed) -- the last two for callers that also
-    need ``_archive_diff``'s coarser archive-id-set check."""
+    need ``_archive_diff``'s coarser archive-id-set check.
+
+    ``expect``, when given, refuses BEFORE re-encoding: if ``applied`` doesn't match,
+    ``new_bytes``/``decoded``/``reparsed`` come back ``None`` and the diffs ``0`` --
+    the caller's mismatch check must run on ``applied`` alone."""
     buf = zf.read(member)
     decoded = IWAFile.from_buffer(buf, member).to_dict()
     patched = copy.deepcopy(decoded)
     applied = apply_fn(patched)
+    if expect is not None and applied != expect:
+        return None, applied, 0, 0, None, None
 
     new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
     reparsed = IWAFile.from_buffer(new_member, member).to_dict()
@@ -1145,7 +1151,7 @@ def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
         if target_member not in zf.namelist():
             return {"refused": True, "reason": f"member {target_member} missing from deck"}
         new_member, applied, obj_diffs, header_diffs, _decoded, _reparsed = _decode_apply_reencode_diff(
-            zf, target_member, apply_fn)
+            zf, target_member, apply_fn, expect=len(widths))
 
     if applied != len(widths):
         return {"refused": True,
@@ -1265,7 +1271,7 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
                 return touched
 
             new_member, touched, _obj_diffs, _header_diffs, decoded, reparsed = _decode_apply_reencode_diff(
-                zf, member, apply_fn)
+                zf, member, apply_fn, expect=len(wanted))
 
             if touched != len(wanted):
                 return {

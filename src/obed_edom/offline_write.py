@@ -696,7 +696,7 @@ def run_offline_write(
         skipped: list[tuple[str, str]] = []
         deck = _load_deck(dest, skipped=skipped)
         if skipped:
-            say(f"Offline-write verify: {len(skipped)} undecodable .iwa member(s) "
+            say(f"WARN: offline-write verify: {len(skipped)} undecodable .iwa member(s) "
                 f"dropped from the read — {skipped[:10]}")
         composed = _composed_frames(dest, offline_slides, deck=deck)
         written_specs = _written_specs_by_slide(specs_by_slide, fallback_by_slide)
