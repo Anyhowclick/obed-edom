@@ -531,6 +531,7 @@ export function churchesGeo(
           assetHeight: church.assetHeight || 1,
           size,
           opacity: church.opacity ?? 1,
+          labelOpacity: church.labelOpacity ?? church.opacity ?? 1,
           sel: church.id === selectedPinId,
           objectScale,
           scaleWithMap: church.scaleWithMap === true,
@@ -558,6 +559,16 @@ export function withoutRevealed(list: MapsChurch[]): MapsChurch[] {
   return list.filter((c) => !painted(c));
 }
 
+export const MOVIE_LABEL_FADE = 0.15;
+
+function sourceLabelAlpha(t: number): number {
+  return t >= MOVIE_LABEL_FADE ? 0 : 1 - t / MOVIE_LABEL_FADE;
+}
+
+function destLabelAlpha(t: number): number {
+  return t <= 1 - MOVIE_LABEL_FADE ? 0 : (t - (1 - MOVIE_LABEL_FADE)) / MOVIE_LABEL_FADE;
+}
+
 /**
  * `destinationPaintsReveal` mirrors maps_keynote.build_slide_items's `bg_movie is None` gate: the
  * destination slide only places (paints on) its revealed landmarks when it has no outgoing movie
@@ -567,12 +578,20 @@ export function withoutRevealed(list: MapsChurch[]): MapsChurch[] {
 export function movieObjectsAt(from: MapsChurch[], to: MapsChurch[], t: number, transition: "fade" | "hold" | undefined, destinationPaintsReveal = true): MapsChurch[] {
   const clamped = Math.max(0, Math.min(1, t));
   const destination = destinationPaintsReveal ? withoutRevealed(to) : to;
-  if ((transition || "hold") === "hold") return clamped < 1 ? from.map((item) => ({ ...item, opacity: item.opacity ?? 1 })) : destination.map((item) => ({ ...item, opacity: item.opacity ?? 1 }));
+  const sourceLabel = sourceLabelAlpha(clamped);
+  const destLabel = destLabelAlpha(clamped);
+  if ((transition || "hold") === "hold") {
+    if (clamped >= 1) return destination.map((item) => ({ ...item, opacity: item.opacity ?? 1, labelOpacity: item.opacity ?? 1 }));
+    const sourceItems = from.map((item) => ({ ...item, opacity: item.opacity ?? 1, labelOpacity: (item.opacity ?? 1) * sourceLabel }));
+    if (destLabel <= 0) return sourceItems;
+    const destLabelItems = destination.map((item) => ({ ...item, id: `to-${item.id}`, opacity: 0, labelOpacity: (item.opacity ?? 1) * destLabel }));
+    return [...sourceItems, ...destLabelItems];
+  }
   const sourceAlpha = Math.max(0, 1 - 2 * clamped);
   const destAlpha = Math.max(0, 2 * clamped - 1);
   return [
-    ...from.map((item) => ({ ...item, opacity: (item.opacity ?? 1) * sourceAlpha })),
-    ...destination.map((item) => ({ ...item, id: `to-${item.id}`, opacity: (item.opacity ?? 1) * destAlpha })),
+    ...from.map((item) => ({ ...item, opacity: (item.opacity ?? 1) * sourceAlpha, labelOpacity: (item.opacity ?? 1) * sourceLabel })),
+    ...destination.map((item) => ({ ...item, id: `to-${item.id}`, opacity: (item.opacity ?? 1) * destAlpha, labelOpacity: (item.opacity ?? 1) * destLabel })),
   ];
 }
 
@@ -634,12 +653,6 @@ function dropPinImage(color: string): ImageData {
   ctx.closePath();
   ctx.moveTo(size, half);
   ctx.arc(half, half, half, 0, Math.PI * 2);
-  // Stroke under the fill: the outer silhouette keeps a thin white rim while the fill hides
-  // the head/tail seam. The rim's overshoot is clipped by the canvas, so the head stays `size` wide.
-  ctx.lineWidth = size * 0.03;
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineJoin = "round";
-  ctx.stroke();
   ctx.fillStyle = color;
   ctx.fill();
   ctx.beginPath();
@@ -795,7 +808,7 @@ export function churchesLayers(): LayerSpecification[] {
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
       },
-      paint: { "text-color": "#FFFFFF", "text-opacity": ["coalesce", ["get", "opacity"], 1], "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
+      paint: { "text-color": "#FFFFFF", "text-opacity": ["coalesce", ["get", "labelOpacity"], 1], "icon-opacity": ["coalesce", ["get", "labelOpacity"], 1] },
     },
   ] as LayerSpecification[];
 }

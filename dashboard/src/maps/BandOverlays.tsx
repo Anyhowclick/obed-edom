@@ -55,7 +55,9 @@ export function BandOverlays({
             <span className="maps-crop-fw-label">FW</span>
           </div>
         ) : (
-          <div className="maps-crop-frame center" style={{ inset: 0 }} />
+          <div className="maps-crop-frame center" style={{ inset: 0 }}>
+            <span className="maps-crop-lw-label">LW</span>
+          </div>
         )}
         {exportCg && !splitCg && (
           <div

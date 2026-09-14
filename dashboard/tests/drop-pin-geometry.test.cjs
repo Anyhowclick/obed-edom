@@ -66,6 +66,16 @@ test("a drag that returns the se handle to its start leaves a selected drop pin'
   assert.equal(back, startSize);
 });
 
+test("dropPinImage no longer strokes a rim around the pin", () => {
+  const source = fs.readFileSync(path.join(root, "src/maps/overlays.ts"), "utf8");
+  const start = source.indexOf("function dropPinImage(");
+  assert.notEqual(start, -1);
+  const nextExport = source.indexOf("export function", start);
+  const body = source.slice(start, nextExport === -1 ? source.length : nextExport);
+  assert.ok(!/stroke\(/.test(body));
+  assert.ok(!/strokeStyle/.test(body));
+});
+
 test("a dot's handle drag needs no selection scale", () => {
   const layoutScale = 1.5;
   const handleX = (size) => (size * layoutScale) / 2;

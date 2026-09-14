@@ -204,6 +204,16 @@ test("churchesGeo emits labelScale and one labelOffset per integer zoom", () => 
   }
 });
 
+test("churchesGeo defaults labelOpacity to opacity, and the labels layer reads labelOpacity", () => {
+  const withOpacity = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dot", color: "#fff", opacity: 0.4 }], null, false, 1);
+  assert.equal(withOpacity.features[0].properties.labelOpacity, 0.4);
+  const withBoth = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dot", color: "#fff", opacity: 0.4, labelOpacity: 0.7 }], null, false, 1);
+  assert.equal(withBoth.features[0].properties.labelOpacity, 0.7);
+  const layer = churchesLayers().find((item) => item.id === "churches-labels");
+  assert.deepEqual(layer.paint["text-opacity"], ["coalesce", ["get", "labelOpacity"], 1]);
+  assert.deepEqual(layer.paint["icon-opacity"], ["coalesce", ["get", "labelOpacity"], 1]);
+});
+
 test("a church with no showLabel is showLabel: false in churchesGeo", () => {
   const church = { id: "a", name: "a", lat: 0, lon: 0, kind: "dot", color: "#fff" };
   const geo = churchesGeo([church], null, false, 1);

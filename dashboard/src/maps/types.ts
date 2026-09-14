@@ -47,6 +47,8 @@ export type MapsChurch = {
   assetHeight?: number;
   size?: number;
   opacity?: number;
+  /** Runtime-only, never persisted. */
+  labelOpacity?: number;
   reveal?: { kind: "brush"; duration: number; strokes?: number };
   scaleWithMap?: boolean;
   sizeZoom?: number;
