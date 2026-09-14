@@ -167,3 +167,34 @@ The badge-x **245.0** assertion is the load-bearing one: it is an exact, indepen
 - **Q3 — verse badge: keep current (unscaled) size.** The next milestone after D1b applies the proper template slide layout instead of
   hand-placed rects; badge scaling belongs there.
 - Q2 (heading-only slides) — unanswered; leave today's affine path.
+
+---
+
+## Fix round 1 (Codex D1b-p2 review 1 of 56879cf)
+
+- **`_two_column_rects` now takes `min_text_pt`** and forwards it to `fit_heading_pt` (was hardcoded to
+  `DEFAULT_MIN_TEXT_PT`, ignoring `--min-text-pt`). Also requires the heading's own source `size` resolved
+  (refuses otherwise, alongside the existing font/numeral-size refusal).
+- **Repeat-heading predecessor is deck-order, not batch-order.** `_repeat_heading_state` (new) walks
+  `payload["slides"]` in full ascending order once, independent of `kept_numbers`, skipping only
+  `cls.category == "empty"` slides; a slide with no heading text resets the run (a headingless intervening
+  slide now breaks it, which the old per-batch `prev_heading_text` accumulator did not). A slide outside the
+  current call's `classes` (no `SlideClass`) falls back to `_heading_text_from_payload_slide`, which applies
+  the same single-ArgentCF-candidate rule straight off the payload item without a `cls.kept` filter -- the best
+  available signal for a slide `plan_assembly` never classified. This is a real, not merely theoretical,
+  correction: GW46's own true predecessor is GW45 ("Prayer", heading-only), which shares GW46's heading text,
+  so GW46 planned alone now also drops its heading (`test_gw46_repeat_heading_dropped_top_level`,
+  `dsk_assemble.py`), matching what even the *unfixed* code already produced when GW45 was included in the same
+  batch -- this is the batch-dependence bug being fixed, not a new regression. The three GW44/50/51/53 badge/short
+  -row tests that relied on GW51/53's old (batch-dependent) "heading kept when planned alone" behaviour were
+  moved to GW44/50, whose real predecessors are not heading matches.
+- **Refit re-centring.** `plan.two_column_cluster: dict[int, HeadingCluster]` (new `AssemblyPlan` field) records
+  the cluster ids alongside `plan.two_column`'s left `Band`, so `_build_refit_round` can, after computing the
+  round's verse/short-row rects, rederive the left block's `circle_y`/`heading_y` off the new right-block centre
+  and emit position-only (`TextRefit(rect, None)`) refits for the heading/circle/numeral. Previously `plan.two_column`
+  was dead metadata and the left block silently stayed pinned to the pre-refit centring.
+- **Heading/numeral sizing goes through `_run_size_ranges`.** `_two_column_rects` now computes
+  `t = heading_pt / heading_source_size` for the heading and the constant `NUMBER_BADGE_PT / _HEADING_CIRCLE_PT`
+  (46/81) for the numeral, calling `_run_size_ranges` for each: a tuple result goes to `run_sizes`, a uniform
+  float (or a run-gap, flattened with a warning) to `text_sizes`. Previously both were always a single flat
+  point size, which would have silently discarded a mixed-size heading or numeral run.

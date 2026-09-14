@@ -325,10 +325,14 @@ all three; `43.0 + 450.0/2 = 268.0` and `43 + 450 + 8 = 501` = the measured vers
 ### Owner decisions
 
 - **Q1 -- repeated headings: DROP.** A heading cluster whose heading text equals the previous
-  in-deck slide's heading text (tracked across `kept_numbers` in ascending/in-deck order) is
-  suppressed: heading + number + circle move into `deletes` and the verse takes the full band as
-  a single-column text slide (`plan.two_column` gets no entry). Reproduces gold 35/36/37 for GW
-  51/52/53 exactly (verse `x=43.0 w=1849.0` in both cases).
+  *deck-order* non-empty slide's heading text is suppressed: heading + number + circle move into
+  `deletes` and the verse takes the full band as a single-column text slide (`plan.two_column` gets
+  no entry). Reproduces gold 35/36/37 for GW 51/52/53 exactly (verse `x=43.0 w=1849.0` in both
+  cases). Fix round 1 (Codex D1b-p2 review 1, finding 2) corrected this from the original
+  `kept_numbers`-tracked version: the predecessor is now derived from `payload["slides"]`'s full
+  order (`_repeat_heading_state` in `dsk_assemble.py`), independent of the planning batch, and a
+  headingless intervening slide resets the run instead of being skipped over -- see
+  `dsk_pieceD1b.plan.md`'s "Fix round 1" section.
 - **Q3 -- verse badge: unscaled.** The verse badge keeps its source size (645x92) in the column,
   forced to `x = right_column.x_min` (left-aligned) -- no scaling. Proper template-slide badge
   sizing is deferred to the next milestone.
@@ -341,12 +345,14 @@ GW44 and GW50 reproduce the plan's pre-implementation estimates within 0.5pt: he
 `Rect(43.0, 834.8, 450.0, 159.8)` @ 60.0pt / `Rect(43.0, 858.2, 450.0, 113.6)` @ 80.0pt; number
 badge `Rect(245.0, ..., 46.0, 46.0)` on both; verse `t=0.59` (lead 41.3pt) / `t=0.48` (lead 33.6pt).
 
-**GW46 deviates from the plan doc's estimate** (heading top 870.7/height 113.6, verse lead 46.9pt
-at t=0.67): GW46's badge is a top-level 522.57x74.54 shape+text pair (not the 645x92 group-child
-badge the other five slides share), so its real `verse_block_top` differs from the doc's hand
-estimate. The measured, reproducible numbers are heading `h=113.56` (unchanged), verse `t=0.65`,
-lead `45.5pt` -- pinned in `test_gw46_two_column_top_level_verse` with the measured values and this
-note, per the brief's ">0.5pt: report and pin" rule.
+**GW46 is itself a repeat-heading slide once fix round 1 (finding 2) reads the true deck order**:
+GW46's own predecessor GW45 ("Prayer", heading-only) shares GW46's heading text, so GW46 (planned
+alone or in any batch that includes GW45) now drops its heading and takes the verse full-width
+(`x=43.0 w=1849.0`, `t=0.82`), same as GW51/52/53 -- see `test_gw46_repeat_heading_dropped_top_level`.
+The original "GW46 deviates from the plan doc's estimate" two-column geometry (heading top
+870.7/height 113.6, badge a top-level 522.57x74.54 shape+text pair, verse lead 45.5pt at t=0.65) was
+only ever observed because the pre-fix `kept_numbers`-tracked repeat check couldn't see GW45 when
+GW46 was planned alone -- a batch-dependence artifact, not GW46's true behaviour.
 
 GW51/52/53 (repeat-drop): verse `x=43.0 w=1849.0` in all three; heading/number/circle land in
 `plan.deletes` (`{("shape", 0), ("text", 0), ("text", 1)}` for 51/53, `{("shape", 1), ("text", 2),

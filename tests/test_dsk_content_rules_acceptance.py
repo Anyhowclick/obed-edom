@@ -398,38 +398,26 @@ def test_gw50_two_column_heading_and_verse(gw_inputs):
 
 
 @pytest.mark.deck
-def test_gw46_two_column_top_level_verse(gw_inputs):
-    # Measured, not the plan doc's pre-implementation estimate: the doc predicted a
-    # heading top of 870.7/height 113.6 and verse lead 46.9pt at t=0.67; the real
-    # `wrapped_height`/`fit_text_stack` numbers for GW46's actual badge geometry
-    # (a top-level 522.57x74.54 shape+text pair, not the 645x92 group-child badge the
-    # other five slides share) come out at t=0.65 and lead 45.5 -- pinning the measured
-    # values rather than the doc's hand estimate.
+def test_gw46_repeat_heading_dropped_top_level(gw_inputs):
+    # GW46 is the deck's other top-level (non-groupchild) heading+verse slide, but its
+    # real predecessor GW45 ("Prayer", heading-only) shares GW46's heading text. Codex
+    # D1b-p2 review 1 finding 2: planned alone (GW45 outside this call's `classes`),
+    # the deck-order fallback still reads GW45's heading off the payload and drops
+    # GW46's heading, taking the verse full-width -- matching a true full-deck run
+    # (confirmed by planning GW44/45/46/50-53 together against the same-fixed code).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
-    _require_font("ArgentCF-Bold")
     payload, by_number, runs = gw_inputs
     plan = _plan_one(payload, by_number[46], runs)
 
-    heading = plan.fits[46][("text", 3)]
-    badge = plan.fits[46][("shape", 0)]
+    assert 46 not in plan.two_column
     verse = plan.fits[46][("text", 2)]
+    assert verse.x == pytest.approx(43.0, abs=0.5)
+    assert verse.w == pytest.approx(1849.0, abs=0.5)
+    assert plan.stack_t[46] == pytest.approx(0.82, abs=0.01)
 
-    assert heading.x == pytest.approx(43.0, abs=0.5)
-    assert heading.w == pytest.approx(450.0, abs=0.5)
-    assert heading.h == pytest.approx(113.56, abs=0.5)
-    assert plan.text_sizes[46][("text", 3)] == pytest.approx(80.0, abs=0.01)
-
-    assert badge.x == pytest.approx(245.0, abs=0.5)
-    assert badge.w == pytest.approx(46.0, abs=0.01)
-    assert badge.h == pytest.approx(46.0, abs=0.01)
-
-    assert verse.x == pytest.approx(501.0, abs=0.5)
-    assert verse.w == pytest.approx(1391.0, abs=0.5)
-    assert plan.stack_t[46] == pytest.approx(0.65, abs=0.01)
-
-    lead = min(size for _s, _e, size in plan.run_sizes[46][("text", 2)])
-    assert lead == pytest.approx(45.5, abs=0.5)
+    cluster_ids = {("shape", 0), ("text", 3), ("text", 0)}
+    assert cluster_ids <= set(plan.deletes[46])
     assert 46 not in plan.splits
 
 
