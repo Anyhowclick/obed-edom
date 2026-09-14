@@ -62,6 +62,7 @@ from obed_edom.dsk_plan import (
     read_band,
     visible_union,
     wrap_line_spans,
+    wrap_line_spans_runs,
     wrapped_height,
     wrapped_height_runs,
 )
@@ -475,36 +476,58 @@ def _run_size_ranges(
     return tuple(ranges), False
 
 
-def _windowed_run_ranges(
-    item: dict, scale: float, start0: int, end0: int
-) -> tuple[tuple[int, int, float], ...] | float:
-    """Per-run 1-indexed character ranges (owner Q2/finding 3), restricted to the
-    ``[start0, end0)`` (0-indexed) window of ``item``'s ORIGINAL text -- indices stay
-    against that original text (the live object still holds it in full when these are
-    applied; the caller deletes the rest afterward, see ``SplitPart.char_window``). A
-    run with no resolved ``size`` is skipped -- callers of a single-run-size verse/point
-    box never hit that gap in practice. A single ``float`` when every kept run shares
-    one size."""
+_EMPHASIS_CAP_PT = 50.0
+
+
+def _emitted_run_sizes(
+    item: dict, t: float, lead_pt: float
+) -> tuple[tuple[int, int, float], ...] | Literal["unresolved"]:
+    """Single source of truth for what a split part emits per run of ``item``'s ORIGINAL
+    text (S1/owner Q2): 1-indexed ``(start, end, size)`` ranges at ``size * t``, capped
+    ``min(size * t, _EMPHASIS_CAP_PT)`` -- gold's flat 50pt emphasis cap, never the
+    source 85/70 ratio (a lead-sized run is always well under the cap, so this applies
+    uniformly rather than needing to detect "emphasis" separately). ``"unresolved"`` when
+    ANY run has no resolvable ``size`` -- the caller applies the unresolved-run policy
+    (refuse under ``warn``, flatten to ``lead_pt`` under ``shrink``); this table never
+    picks a fallback from a run the caller's window doesn't intersect, see
+    ``_windowed_run_ranges``. A box with no runs at all falls back to a single range at
+    ``lead_pt`` covering ``item``'s full text."""
     runs = item.get("runs") or []
     ranges: list[tuple[int, int, float]] = []
     pos = 1
-    fallback = scale * 45.0
     for r in runs:
         text = r.get("text") or ""
         length = len(text)
         if length == 0:
             continue
-        r_lo, r_hi = pos, pos + length - 1
-        pos += length
         size = r.get("size")
         if size is None:
-            continue
-        fallback = float(size) * scale
-        lo, hi = max(r_lo, start0 + 1), min(r_hi, end0)
-        if lo <= hi:
-            ranges.append((lo, hi, float(size) * scale))
+            return "unresolved"
+        ranges.append((pos, pos + length - 1, min(float(size) * t, _EMPHASIS_CAP_PT)))
+        pos += length
+    if ranges:
+        return tuple(ranges)
+    full_len = len(item.get("text") or "")
+    if full_len == 0:
+        return ()
+    return ((1, full_len, lead_pt),)
+
+
+def _windowed_run_ranges(
+    table: tuple[tuple[int, int, float], ...], start0: int, end0: int, lead_pt: float
+) -> tuple[tuple[int, int, float], ...] | float:
+    """Pure restriction (S1/finding 1) of ``_emitted_run_sizes``'s full-item ``table`` to
+    the ``[start0, end0)`` (0-indexed) window -- it can no longer pick a fallback from a
+    run outside the window, because it no longer picks fallbacks at all: an empty
+    restriction (no range in ``table`` intersects the window) returns ``lead_pt``, the
+    slot's own lead size. A single ``float`` when every kept range shares one size."""
+    ranges: list[tuple[int, int, float]] = []
+    for lo, hi, size in table:
+        a, b = max(lo, start0 + 1), min(hi, end0)
+        if a <= b:
+            ranges.append((a, b, size))
     if not ranges:
-        return fallback
+        return lead_pt
     if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
         return ranges[0][2]
     return tuple(ranges)
@@ -1703,21 +1726,51 @@ def plan_assembly(
                                 and slot_badge_id in short_fit:
                             short_fit[slot_badge_id] = split_slot.badge
                             slot_badge_pt = split_slot.badge_pt
-                        spans = wrap_line_spans(split_box.text, split_box.font_name, split_pt, split_rect.w)
-                        if spans is None:
-                            raise AssemblyRefusal(
-                                f"slide {number} box {_item_label(split_box.item_id)}: font/size unresolved, "
-                                "cannot split verse text at the slot budget"
-                            )
                         split_t = split_pt / split_box.size if split_box.size else 1.0
                         if split_t < _box_min_t(split_box, min_text_pt):
                             raise AssemblyRefusal(
                                 f"slide {number} box {_item_label(split_box.item_id)}: the slot's "
                                 f"{split_pt:.0f}pt size is below --min-text-pt {min_text_pt}"
                             )
+                        long_item = items_by_id[split_box.item_id]
+                        run_table = _emitted_run_sizes(long_item, split_t, split_pt)
+                        if run_table == "unresolved":
+                            bad = next(
+                                (i for i, r in enumerate(long_item.get("runs") or [])
+                                 if (r.get("text") or "") and r.get("size") is None),
+                                None,
+                            )
+                            if text_fit == "warn":
+                                raise AssemblyRefusal(
+                                    f"slide {number} box {_item_label(split_box.item_id)} run {bad}: "
+                                    "run sizes unresolved, cannot split"
+                                )
+                            warnings.append(
+                                f"slide {number} box {_item_label(split_box.item_id)} run {bad}: "
+                                f"run sizes unresolved, flattening to the {split_pt:.0f}pt lead under "
+                                "--text-fit shrink"
+                            )
+                            run_table = ()
+                            spans = wrap_line_spans(split_box.text, split_box.font_name, split_pt, split_rect.w)
+                        elif long_item.get("runs"):
+                            run_objs = tuple(
+                                Run(r.get("text") or "", r.get("fontName"), size)
+                                for r, (_lo, _hi, size) in zip(
+                                    (r for r in long_item["runs"] if r.get("text")), run_table,
+                                )
+                            )
+                            spans = wrap_line_spans_runs(
+                                split_box.text, run_objs, split_box.font_name, split_pt, split_rect.w,
+                            )
+                        else:
+                            spans = wrap_line_spans(split_box.text, split_box.font_name, split_pt, split_rect.w)
+                        if spans is None:
+                            raise AssemblyRefusal(
+                                f"slide {number} box {_item_label(split_box.item_id)}: font/size unresolved, "
+                                "cannot split verse text at the slot budget"
+                            )
                         chunks = [spans[i:i + 3] for i in range(0, len(spans), 3)] or [[(0, 0)]]
                         full_len = len(split_box.text)
-                        long_item = items_by_id[split_box.item_id]
                         stacked_ids = {split_box.item_id}
                         part_list = []
                         for chunk in chunks:
@@ -1726,7 +1779,7 @@ def plan_assembly(
                             if short_fit:
                                 part_fit.update(_short_row_rects(short_fit, short_row_h, split_rect.y))
                             part_fit[split_box.item_id] = split_rect
-                            ranges = _windowed_run_ranges(long_item, split_t, start0, end0)
+                            ranges = _windowed_run_ranges(run_table, start0, end0, split_pt)
                             part_text_sizes: dict[ItemId, float] = {}
                             part_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
                             if isinstance(ranges, tuple):

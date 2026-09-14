@@ -1216,6 +1216,117 @@ def wrapped_height_runs(runs: Sequence[Run], width: float) -> float | None:
     return total + _BOX_PADDING_PT
 
 
+def wrap_line_spans_runs(
+    text: str, runs: Sequence[Run], lead_font: str, lead_pt: float, width: float
+) -> list[tuple[int, int]] | None:
+    """Run-aware sibling of ``wrap_line_spans``: ``[start, end)`` character spans over
+    ``text`` (== the concatenation of ``runs``' own text), wrapped at each run's own
+    resolved font/size -- the EXACT sizes the emitter writes (S1/owner Q2), sharing
+    ``wrapped_height_runs``'s tokeniser and run-boundary word handling verbatim (a run
+    boundary with no break char between it and its neighbour is one word, never a
+    synthetic space). A run with no ``font_name`` inherits ``lead_font``. ``None`` when a
+    run's font cannot be resolved. Empty ``runs`` wraps ``text`` at ``lead_font``/
+    ``lead_pt`` via ``wrap_line_spans``."""
+    if not runs:
+        return wrap_line_spans(text, lead_font, lead_pt, width)
+    import re as _re  # noqa: PLC0415
+    from PIL import ImageFont  # noqa: PLC0415
+
+    fonts: dict[tuple[str, float], Any] = {}
+
+    def _font_for(name: str, size: float) -> Any | None:
+        key = (name, size)
+        font = fonts.get(key)
+        if font is None:
+            path = resolve_font_path(name)
+            if path is None:
+                return None
+            font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
+            fonts[key] = font
+        return font
+
+    break_pattern = "[" + "".join(_WRAP_BREAK_CHARS) + "]"
+    para_pattern = "\r\n|[" + "".join(_PARA_BREAK_CHARS) + "]"
+    tok_re = _re.compile(f"({break_pattern})")
+
+    # Each paragraph is a list of ("word", [(text, offset, font, size), ...]) or
+    # ("sep", text, font, size, offset) tokens in source order, offsets against ``text``.
+    paragraphs: list[list[tuple]] = [[]]
+    pos = 0
+    for run in runs:
+        name = run.font_name or lead_font
+        font = _font_for(name, run.size)
+        if font is None:
+            return None
+        run_text = run.text or ""
+        last = 0
+        for m in _re.finditer(para_pattern, run_text):
+            _wrap_span_emit(paragraphs[-1], run_text[last:m.start()], pos + last, font, run.size, tok_re)
+            paragraphs.append([])
+            last = m.end()
+        _wrap_span_emit(paragraphs[-1], run_text[last:], pos + last, font, run.size, tok_re)
+        pos += len(run_text)
+
+    scaled_width = width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE
+    out: list[tuple[int, int]] = []
+    for paragraph in paragraphs:
+        current: list[list[tuple[str, int, Any, float]]] = []
+        current_width = 0.0
+        pending_seps: list[tuple[str, int, Any, float]] = []
+        for tok in paragraph:
+            if tok[0] == "sep":
+                pending_seps.append((tok[1], tok[2], tok[3], tok[4]))
+                continue
+            subparts = tok[1]
+            word_width = sum(f.getlength(t) for t, _o, f, _s in subparts)
+            space_width = 0.0
+            if current and pending_seps:
+                space_width = sum(f.getlength(t) for t, _o, f, _s in pending_seps)
+            trial_width = current_width + space_width + word_width
+            if not current or trial_width <= scaled_width:
+                current.append(subparts)
+                current_width = trial_width
+            else:
+                out.append(_wrap_span_of(current))
+                current = [subparts]
+                current_width = word_width
+            pending_seps = []
+        # A trailing separator at the very end of the paragraph (no following word --
+        # end of text, or immediately before a hard paragraph break) has nowhere to
+        # attach as a mid-line space, so it stays glued to this last line rather than
+        # being silently dropped (parity with `wrap_line_spans`, whose `_wrap_lines`
+        # keeps it via the paragraph split's trailing empty token).
+        if pending_seps and current:
+            current.append(list(pending_seps))
+        out.append(_wrap_span_of(current))
+    return out
+
+
+def _wrap_span_emit(para: list, piece: str, base: int, font: Any, size: float, tok_re: Any) -> None:
+    if piece == "":
+        return
+    off = base
+    for part in tok_re.split(piece):
+        if part == "":
+            continue
+        if tok_re.fullmatch(part):
+            para.append(("sep", part, off, font, size))
+        elif para and para[-1][0] == "word":
+            para[-1][1].append((part, off, font, size))
+        else:
+            para.append(("word", [(part, off, font, size)]))
+        off += len(part)
+
+
+def _wrap_span_of(current: list[list[tuple[str, int, Any, float]]]) -> tuple[int, int]:
+    subs = [s for subparts in current for s in subparts]
+    if not subs:
+        return (0, 0)
+    start = subs[0][1]
+    end = subs[-1][1] + len(subs[-1][0])
+    return (start, end)
+
+
 @dataclass(frozen=True)
 class TextBox:
     item_id: ItemId
