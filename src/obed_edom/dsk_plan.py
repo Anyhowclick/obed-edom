@@ -1065,7 +1065,7 @@ def fit_heading_pt(
     """Largest integer point size in ``[min_pt, max_pt]`` fitting ``text`` inside ``col_width`` with
     its per-block line-height sum within ``max_block_pt`` and its wrapped height within ``budget``.
     ``None`` when no size fits or the font is unresolved."""
-    for s in range(int(max_pt), int(min_pt) - 1, -1):
+    for s in range(math.floor(max_pt), math.ceil(min_pt) - 1, -1):
         width = longest_line_width(text, font_name, s, col_width)
         height = wrapped_height(text, font_name, s, col_width)
         if width is None or height is None:

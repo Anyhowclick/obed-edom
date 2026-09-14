@@ -1332,6 +1332,16 @@ def test_fit_heading_pt_returns_none_below_min():
     assert size is None
 
 
+def test_fit_heading_pt_fractional_min_never_rounds_down():
+    _require_font("ArgentCF-Bold")
+    size = fit_heading_pt(
+        "Faith", "ArgentCF-Bold", 450.0, 30.0,
+        max_pt=80.0, max_block_pt=140.0, min_pt=24.5,
+    )
+    assert size != 24.0
+    assert size is None or size >= 24.5
+
+
 def test_fit_text_stack_bare_band_ordering():
     # Unit test of fit_text_stack alone against a bare band with no badge subtracted --
     # not the shipped product t (see test_gw13_gw17_stack_budget_and_fit_t_under_default_band

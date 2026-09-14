@@ -1924,6 +1924,125 @@ def test_heading_cluster_gw_deck_measured_slides():
     assert fires == {44, 46, 50, 51, 52, 53}
 
 
+def _cls_for(kept, long_text_ids):
+    from obed_edom.dsk_plan import SlideClass
+
+    return SlideClass(
+        number=5, category="static", build_count=0, movie_count=0,
+        kept=kept, dropped_side=(), dropped_backdrop=(), transition=None,
+        is_text=True, long_text_ids=long_text_ids,
+    )
+
+
+def test_heading_cluster_rejects_two_long_boxes():
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    verse0 = _verse_item(2)
+    verse1 = _verse_item(3)
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
+        ("text", 2): verse0, ("text", 3): verse1,
+    }
+    cls = _cls_for(
+        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3)),
+        (("text", 2), ("text", 3)),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_unrelated_short_text():
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    stray = _number_item(3, text="Amen")
+    stray["font"] = "AzoSans-Bold"
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
+        ("text", 2): verse, ("text", 3): stray,
+    }
+    cls = _cls_for(
+        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3)),
+        (("text", 2),),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_accepts_verse_badge_pair():
+    heading = _heading_item(0, "Prayer")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    badge_text = {
+        "kind": "text", "kindIndex": 3, "x": 100, "y": 44, "w": 645, "h": 92,
+        "text": "James 5 (AMP)", "font": "AzoSans-Bold",
+    }
+    badge_shape = {
+        "kind": "shape", "kindIndex": 1, "x": 100, "y": 44, "w": 645, "h": 92,
+        "text": "James 5 (AMP)",
+    }
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
+        ("text", 2): verse, ("text", 3): badge_text, ("shape", 1): badge_shape,
+    }
+    cls = _cls_for(
+        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3), ("shape", 1)),
+        (("text", 2),),
+    )
+    cluster = dsa._heading_cluster(cls, items_by_id)
+    assert cluster == dsa.HeadingCluster(("text", 0), ("text", 1), ("shape", 0))
+
+
+def test_heading_cluster_rejects_text_bearing_circle():
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    circle["text"] = "3"
+    verse = _verse_item(2)
+    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse}
+    cls = _cls_for((("text", 0), ("text", 1), ("shape", 0), ("text", 2)), (("text", 2),))
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_digit_without_circle():
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    verse = _verse_item(2)
+    items_by_id = {("text", 0): heading, ("text", 1): number, ("text", 2): verse}
+    cls = _cls_for((("text", 0), ("text", 1), ("text", 2)), (("text", 2),))
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_numeral_not_overlapping_circle():
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    number["x"] = 500
+    number["y"] = 500
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse}
+    cls = _cls_for((("text", 0), ("text", 1), ("shape", 0), ("text", 2)), (("text", 2),))
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_two_point_numbers():
+    heading = _heading_item(0, "Faith")
+    number0 = _number_item(1)
+    number1 = _number_item(3, text="4")
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number0, ("text", 3): number1,
+        ("shape", 0): circle, ("text", 2): verse,
+    }
+    cls = _cls_for(
+        (("text", 0), ("text", 1), ("text", 3), ("shape", 0), ("text", 2)),
+        (("text", 2),),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
 def _badge_and_stack_plan():
     _require_font("AzoSans-Regular")
     _require_font("AzoSans-Bold")

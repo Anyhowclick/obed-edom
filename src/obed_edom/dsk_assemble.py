@@ -450,45 +450,105 @@ _HEADING_FONT_PREFIX = "ArgentCF"
 _HEADING_MAX_WORDS = 5
 _HEADING_NUMBER_MAX_CHARS = 2
 _HEADING_CIRCLE_PT = 81.0
+_HEADING_GEOM_TOL_PT = 1.0
 
 
 @dataclass(frozen=True)
 class HeadingCluster:
     """A point heading's three paired items: its ``ArgentCF*`` text, its point-number
-    text, and the unfilled circle behind the number."""
+    text, and the 81x81 circle behind the number (the offline payload exposes no fill
+    property, so the circle is identified by geometry alone, not by fill state)."""
 
     heading_id: ItemId
     number_id: ItemId
     circle_id: ItemId
 
 
+def _rect_of(item: dict) -> tuple[float, float, float, float]:
+    return (float(item.get("x", 0.0)), float(item.get("y", 0.0)), float(item.get("w", 0.0)), float(item.get("h", 0.0)))
+
+
+def _point_in_rect(px: float, py: float, rect: tuple[float, float, float, float], tol: float) -> bool:
+    x, y, w, h = rect
+    return (x - tol) <= px <= (x + w + tol) and (y - tol) <= py <= (y + h + tol)
+
+
+def _rects_match(a: tuple[float, float, float, float], b: tuple[float, float, float, float], tol: float) -> bool:
+    return all(abs(av - bv) <= tol for av, bv in zip(a, b))
+
+
 def _heading_cluster(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) -> HeadingCluster | None:
-    """One ``ArgentCF*`` heading (<= 5 words) paired with one all-digit point number
-    (<= 2 chars) and its unfilled 81x81 circle, on a slide that also carries a long
-    text -- else ``None`` (never raises)."""
-    if not cls.long_text_ids:
+    """One kept top-level ``ArgentCF*`` heading (<= 5 words) paired with one kept
+    top-level all-digit point number (<= 2 chars) whose rect centre lies inside
+    (tolerance 1pt) exactly one kept textless 81x81 top-level ``shape`` (the number
+    circle). Every other kept top-level text -- besides the top-level long text itself,
+    when ``cls.long_text_ids`` names one -- must be the verse badge: a text whose rect
+    matches (tolerance 1pt) a kept top-level shape's rect other than the circle --
+    measured on GW 46/52, where the badge is a top-level text+shape pair sharing one
+    rect; on GW 44/50/51/53 the badge is a group child and leaves no top-level text
+    behind. Anything else kept and top-level (a second heading/number/circle, or an
+    unrelated short text) refuses the cluster. Requires exactly one long text
+    (``cls.long_text_ids``). Never raises."""
+    if len(cls.long_text_ids) != 1:
         return None
-    heading_ids: list[ItemId] = []
-    number_ids: list[ItemId] = []
-    circle_ids: list[ItemId] = []
+    texts: list[tuple[ItemId, dict]] = []
+    shapes: list[tuple[ItemId, dict]] = []
     for item_id in cls.kept:
         kind, _kind_index = item_id
         item = items_by_id.get(item_id)
         if item is None:
             continue
-        text = (item.get("text") or "").strip()
         if kind == "text":
-            font = item.get("font") or ""
-            if font.startswith(_HEADING_FONT_PREFIX) and text and _word_count(text) <= _HEADING_MAX_WORDS:
-                heading_ids.append(item_id)
-            elif text.isdigit() and len(text) <= _HEADING_NUMBER_MAX_CHARS:
-                number_ids.append(item_id)
-        elif kind == "shape" and not text:
-            if item.get("w") == _HEADING_CIRCLE_PT and item.get("h") == _HEADING_CIRCLE_PT:
-                circle_ids.append(item_id)
-    if len(heading_ids) != 1 or len(number_ids) != 1 or len(circle_ids) != 1:
+            texts.append((item_id, item))
+        elif kind == "shape":
+            shapes.append((item_id, item))
+
+    circle_candidates = [
+        (item_id, item)
+        for item_id, item in shapes
+        if not (item.get("text") or "").strip()
+        and item.get("w") == _HEADING_CIRCLE_PT
+        and item.get("h") == _HEADING_CIRCLE_PT
+    ]
+    if len(circle_candidates) != 1:
         return None
-    return HeadingCluster(heading_ids[0], number_ids[0], circle_ids[0])
+    circle_id, circle_item = circle_candidates[0]
+    circle_rect = _rect_of(circle_item)
+
+    heading_ids = [
+        item_id
+        for item_id, item in texts
+        if (item.get("font") or "").startswith(_HEADING_FONT_PREFIX)
+        and (item.get("text") or "").strip()
+        and _word_count((item.get("text") or "").strip()) <= _HEADING_MAX_WORDS
+    ]
+    if len(heading_ids) != 1:
+        return None
+    heading_id = heading_ids[0]
+
+    number_ids = []
+    for item_id, item in texts:
+        text = (item.get("text") or "").strip()
+        if not (text.isdigit() and len(text) <= _HEADING_NUMBER_MAX_CHARS):
+            continue
+        x, y, w, h = _rect_of(item)
+        centre = (x + w / 2.0, y + h / 2.0)
+        if _point_in_rect(centre[0], centre[1], circle_rect, _HEADING_GEOM_TOL_PT):
+            number_ids.append(item_id)
+    if len(number_ids) != 1:
+        return None
+    number_id = number_ids[0]
+
+    long_text_ids = set(cls.long_text_ids)
+    badge_shape_rects = [_rect_of(item) for item_id, item in shapes if item_id != circle_id]
+    for item_id, item in texts:
+        if item_id in (heading_id, number_id) or item_id in long_text_ids:
+            continue
+        rect = _rect_of(item)
+        if not any(_rects_match(rect, shape_rect, _HEADING_GEOM_TOL_PT) for shape_rect in badge_shape_rects):
+            return None
+
+    return HeadingCluster(heading_id, number_id, circle_id)
 
 
 def _content_ids(
