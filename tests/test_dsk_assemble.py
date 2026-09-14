@@ -8243,3 +8243,109 @@ def test_refusal_after_pass1_saves_copies_staging_deck_next_to_out(tmp_path, mon
     assert refused_path.exists()
     assert not out_path.exists()
     assert any(str(refused_path) in l for l in logs)
+
+
+# --------------------------------------------------------------------------
+# Live r12 finding -- two-column heading/numeral floating off-canvas: the boxes are
+# genuine Keynote-autosize text frames (raw geometry height 0), so an emitted
+# `set height` is silently overridden by Keynote on save. `plan.autosize` must carry
+# them so `_slide_lines` skips the height write, matching the group-child convention.
+# --------------------------------------------------------------------------
+def _cluster_deck_objects(*, heading_autosize, number_autosize):
+    heading_obj = {
+        "geometry": {
+            "position": {"x": 2000, "y": 500}, "size": {"width": 1600, "height": 0.0 if heading_autosize else 150},
+            "angle": 0.0,
+        },
+    }
+    number_obj = {
+        "geometry": {
+            "position": {"x": 2220, "y": 320}, "size": {"width": 41, "height": 0.0 if number_autosize else 41},
+            "angle": 0.0,
+        },
+    }
+    return {"headingObj": heading_obj, "numberObj": number_obj}
+
+
+def _patch_cluster_object_ids(monkeypatch, heading_kindindex, number_kindindex):
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {"slide": number})
+    monkeypatch.setattr(
+        dsa, "_item_object_ids",
+        lambda slide_archive, objects: {
+            ("text", heading_kindindex): "headingObj", ("text", number_kindindex): "numberObj",
+        },
+    )
+
+
+def test_two_column_autosize_heading_and_numeral_skip_set_height(monkeypatch):
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide = _two_column_slide(17, _VERSE_1)
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    objects = _cluster_deck_objects(heading_autosize=True, number_autosize=True)
+    _patch_cluster_object_ids(monkeypatch, heading_kindindex=2, number_kindindex=1)
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, deck=(objects, {}, {}),
+    )
+    heading_id = ("text", 2)
+    number_id = ("text", 1)
+    assert heading_id in plan.autosize[17]
+    assert number_id in plan.autosize[17]
+
+    lines = dsa._slide_lines(plan, 17, 1)
+    for kind_index, label in ((2, "heading"), (1, "numeral")):
+        addr = f"text item {kind_index + 1} of slide 1"
+        start = lines.index(f"          set theObj to {addr}")
+        block = lines[start:start + 12]
+        assert not any("set height" in l for l in block), (label, block)
+        assert any("set width" in l for l in block), (label, block)
+        assert any("set position" in l for l in block), (label, block)
+
+
+def test_two_column_fixed_frame_heading_still_gets_set_height(monkeypatch):
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide = _two_column_slide(17, _VERSE_1)
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    objects = _cluster_deck_objects(heading_autosize=False, number_autosize=False)
+    _patch_cluster_object_ids(monkeypatch, heading_kindindex=2, number_kindindex=1)
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, deck=(objects, {}, {}),
+    )
+    heading_id = ("text", 2)
+    number_id = ("text", 1)
+    assert heading_id not in plan.autosize.get(17, frozenset())
+    assert number_id not in plan.autosize.get(17, frozenset())
+
+    lines = dsa._slide_lines(plan, 17, 1)
+    for kind_index, label in ((2, "heading"), (1, "numeral")):
+        addr = f"text item {kind_index + 1} of slide 1"
+        start = lines.index(f"          set theObj to {addr}")
+        block = lines[start:start + 12]
+        assert any("set height" in l for l in block), (label, block)
+
+
+def test_gw44_cluster_heading_and_numeral_are_autosize():
+    # Live r12 finding, measured on the real deck: GW 44's heading (text 1) and
+    # numeral (text 0) are genuine Keynote-autosize text frames (raw geometry height
+    # 0), which is why the r12 live run's `set height` was silently overridden and
+    # the heading rendered off-canvas.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {44: SlideDecision(44, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[44]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK,
+    )
+    cluster = plan.two_column_cluster[44]
+    assert cluster.heading_id in plan.autosize[44]
+    assert cluster.number_id in plan.autosize[44]

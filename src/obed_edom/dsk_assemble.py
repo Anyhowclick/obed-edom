@@ -58,12 +58,15 @@ from obed_edom.dsk_plan import (
 )
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import (
+    _ALIGN_BOTTOM,
+    _ALIGN_TOP,
     _frame_rect,
     _geom_dict,
     _leaf_bbox,
     _mask_geom,
     _masked_rect,
     _natural_size,
+    _vertical_alignment,
     _xywha,
     compose_geometry,
 )
@@ -175,6 +178,7 @@ class AssemblyPlan:
     anchors: dict[int, str] = field(default_factory=dict)
     two_column: dict[int, Band] = field(default_factory=dict)
     two_column_cluster: dict[int, HeadingCluster] = field(default_factory=dict)
+    cluster_align: dict[int, dict[ItemId, str]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -666,6 +670,31 @@ def _repeat_heading_state(
     return repeats
 
 
+def _cluster_autosize_align(
+    cluster: HeadingCluster,
+    id_by_item: Mapping[ItemId, str] | None,
+    objects_graph: Mapping[str, dict] | None,
+) -> dict[ItemId, str]:
+    """Live r12 finding: the two-column heading/numeral text boxes can be genuine
+    Keynote-autosize frames (raw geometry height 0, same test `iwa_geometry._compose_record`
+    uses), in which case an emitted `set height` is silently overridden on save. Returns
+    the alignment code (`_ALIGN_TOP`/`_ALIGN_BOTTOM`/other-treated-as-middle) for each of
+    `heading_id`/`number_id` that is genuinely autosize; a non-autosize id is omitted."""
+    align_by_id: dict[ItemId, str] = {}
+    if id_by_item is None or objects_graph is None:
+        return align_by_id
+    for item_id in (cluster.heading_id, cluster.number_id):
+        obj_id = id_by_item.get(item_id)
+        obj = objects_graph.get(obj_id) if obj_id is not None else None
+        if obj is None:
+            continue
+        geom = _geom_dict(obj)
+        if _xywha(geom)[3] != 0.0:
+            continue
+        align_by_id[item_id] = _vertical_alignment(obj, objects_graph) or "kFrameAlignMiddle"
+    return align_by_id
+
+
 def _two_column_rects(
     number: int,
     cluster: HeadingCluster,
@@ -879,6 +908,7 @@ def plan_assembly(
     anchors_out: dict[int, str] = {}
     two_column_map: dict[int, Band] = {}
     two_column_cluster_map: dict[int, HeadingCluster] = {}
+    cluster_align_map: dict[int, dict[ItemId, str]] = {}
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
     if objects_graph is None and fw_deck is not None:
@@ -1265,6 +1295,9 @@ def plan_assembly(
                             stacked_run_sizes.update(two_col_run_sizes)
                             two_column_map[number] = left_band
                             two_column_cluster_map[number] = cluster
+                            cluster_align = _cluster_autosize_align(cluster, id_by_item, objects_graph)
+                            if cluster_align:
+                                cluster_align_map[number] = cluster_align
                     elif cluster is not None:
                         raise AssemblyRefusal(
                             f"slide {number}: two-column verse does not fit the verse column at "
@@ -1375,7 +1408,7 @@ def plan_assembly(
             wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if decision.keep_side else CENTRE_PANEL_RECT
             slide_text_sizes: dict[ItemId, float] = {}
             slide_shrink_sizes: dict[ItemId, float] = {}
-            slide_autosize: set[ItemId] = set()
+            slide_autosize: set[ItemId] = set(cluster_align_map.get(number, {}))
             for iid in cls.kept:
                 if iid[0] != "text" or iid in stacked_ids or iid in cluster_ids:
                     continue
@@ -1478,6 +1511,7 @@ def plan_assembly(
         anchors=anchors_out,
         two_column=two_column_map,
         two_column_cluster=two_column_cluster_map,
+        cluster_align=cluster_align_map,
     )
 
 
@@ -2060,6 +2094,7 @@ def _slide_lines(
         stacked_ids_here = plan.stacked_ids.get(number, frozenset())
         autosize_ids = plan.autosize.get(number, frozenset())
         shrink_text_sizes = plan.shrink_text_sizes.get(number, {})
+    cluster_align = plan.cluster_align.get(number, {})
     known_children = plan.group_children.get(number, {})
     group_text_sizes = plan.group_text_sizes.get(number, {})
     group_origin = plan.group_origin.get(number, {})
@@ -2114,7 +2149,13 @@ def _slide_lines(
         body = [f"          set width of theObj to {_as_num(rect.w)}"]
         if item_id not in autosize_ids:
             body.append(f"          set height of theObj to {_as_num(rect.h)}")
-        body.append(f"          set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
+        write_y = rect.y
+        align = cluster_align.get(item_id)
+        if align == _ALIGN_BOTTOM:
+            write_y = rect.y + rect.h
+        elif align is not None and align != _ALIGN_TOP:
+            write_y = rect.y + rect.h / 2.0
+        body.append(f"          set position of theObj to {{{_as_num(rect.x)}, {_as_num(write_y)}}}")
         if kind == "text" and item_id in run_sizes_here:
             for start, end, size in run_sizes_here[item_id]:
                 body.append(

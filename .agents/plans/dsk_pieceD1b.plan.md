@@ -338,3 +338,58 @@ byte-identical to round 3's `all_classes is not None` branch, which was untouche
 alone and the GW `{44, 46, 50, 51, 52, 53}` batch are therefore identical to 0adc25a's. No behavioural change
 on the `all_classes`-supplied path; the change is confined to what happens when it is omitted for a deck
 subset (refuse instead of silently reclassifying).
+
+## Live r12 finding -- two-column heading/numeral floating off-canvas
+
+Measured on the live r12 output deck (`~/Desktop/dsk-d4-work/out-r12/Sermon_PK_DSK.key`, read via
+`offline_wall_payload`): GW 44's heading text `x=43 y=835 w=450 h=868` (PNG shows no heading, it sits below
+the canvas) and GW 50's heading `h=451` (PNG clips it at the bottom edge); the numeral boxes came back at
+`h=74`/`h=43` against a planned 46.0.
+
+The brief's premise -- that the AppleScript emission never writes `set height` for these two boxes -- is
+**wrong**: rebuilding the emitted script offline for GW 44/46/50 (`_slide_lines`) shows `set height of theObj`
+IS written for both the heading (planned h e.g. 159.84) and the numeral (46.0) on every one of the three
+slides, before this round's fix.
+
+Root cause: `offline_wall_payload(GW_DECK)["_offline"]["soft_geometry"]` flags GW 44/46/50's heading
+(`text` kindIndex 1, 1, 3) and numeral (`text` kindIndex 0) as `geom_source == "autosize"` --
+`iwa_geometry._compose_record` sets this whenever the raw IWA frame height is exactly `0.0` (a genuine
+Keynote "auto size" text box, not a fixed frame). Keynote silently re-autosizes such a box on save, so an
+explicit `set height` write is a no-op that keeps the box at its old (pre-shrink) autosize height -- exactly
+the r12 symptom. `dsk_assemble`'s own `plan.autosize` detection only flags an item when the POST-COMPOSITION
+payload item has `w == 0.0 or h == 0.0`, which is never true here (composition backfills real w/h from
+`naturalSize` via `_autosize_rect`), and the cluster-building loop explicitly skips `cluster_ids`, so nothing
+ever marked these boxes autosize.
+
+Fix (`src/obed_edom/dsk_assemble.py`): new `_cluster_autosize_align(cluster, id_by_item, objects_graph)`
+reads the raw object geometry for `cluster.heading_id`/`cluster.number_id` (the same `objects_graph`/
+`id_by_item` `plan_assembly` already builds for crops) and flags an id autosize when its raw frame height is
+`0.0`, recording its vertical-alignment code (`_vertical_alignment`, default `kFrameAlignMiddle` when unset --
+matching `_autosize_rect`'s own middle/justify/unknown fallback). Flagged ids are folded into `slide_autosize`
+so the existing `plan.autosize` mechanism in `_slide_lines` (the same check that already skips `set height`
+for a fixed-size-0 top-level text box) drops the write -- no parallel mechanism. New `AssemblyPlan.cluster_align`
+field carries the alignment code through to `_slide_lines`, which adjusts the WRITTEN position (not the
+planned rect, which stays a plain visual-top rect exactly as `_build_refit_round`'s cluster reposition already
+produces): `kFrameAlignTop` writes `rect.y` unchanged, `kFrameAlignBottom` writes `rect.y + rect.h`, anything
+else (middle/justify/unset) writes `rect.y + rect.h / 2`. Because the transform is applied at emission time
+from whatever `rect` is current in `plan.fits`, a refit round's position-only cluster rewrite
+(`_build_refit_round`'s `cluster_rects` block, which only ever changes `y` and never `h`) needs no changes --
+it stays consistent automatically.
+
+Tests added (`tests/test_dsk_assemble.py`): `test_two_column_autosize_heading_and_numeral_skip_set_height` and
+`test_two_column_fixed_frame_heading_still_gets_set_height` (synthetic two-column payload with a mocked
+`objects_graph`, autosize vs fixed-frame raw geometry); `test_gw44_cluster_heading_and_numeral_are_autosize`
+(real GW 44, asserts both cluster ids land in `plan.autosize[44]`).
+
+A/B vs the prior commit (`git show HEAD:.../dsk_assemble.py`, offline, whole GW deck, every slide planned
+alone): only GW 44/46/50 differ. Per slide, the diff is exactly: `set height` dropped for both the heading and
+numeral text boxes, and the written `y` shifted by `+h/2` for each (all six resolve to `kFrameAlignMiddle`,
+no `verticalAlignment` set on any of the six source objects) -- e.g. GW 44 numeral `{245, 778.77}` ->
+`{245, 801.77}` (46/2 = 23), heading `{43, 834.77}` -> `{43, 914.69}` (159.84/2 = 79.9); GW 46/50 shift by
+their own `h/2` the same way. No other slide's emitted script changes.
+
+**Out of scope, not changed:** the same `geom_source == "autosize"` signal also fires for GW 13's main
+stacked long text box (`text` kindIndex 1) and GW 17's (kindIndex 1, 2, 4, 5) -- i.e. the general top-level
+stacked-text path likely has the same "Keynote overrides `set height`" exposure, not just the two-column
+cluster. This brief scoped the fix to `_two_column_rects`/the heading cluster only; the stacked-text path is
+untouched and is a separate, larger-surface finding for a future round.
