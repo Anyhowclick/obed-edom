@@ -31,6 +31,8 @@ from obed_edom.dsk_plan import (
     plan_crops,
     read_band,
     resolve_font_path,
+    wrap_line_spans,
+    wrap_line_spans_runs,
     wrapped_height,
     wrapped_height_runs,
 )
@@ -1484,6 +1486,90 @@ def test_wrapped_height_runs_equivalence_fuzz():
                 via_runs = wrapped_height_runs(runs, width)
                 assert single is not None and via_runs is not None
                 assert via_runs == pytest.approx(single, abs=1e-6)
+
+
+def test_wrap_line_spans_runs_uniform_size_matches_flat_wrap():
+    _require_font("Helvetica")
+    text = "The quick brown fox jumps over the lazy dog and then keeps running far away"
+    flat = wrap_line_spans(text, "Helvetica", 20.0, 300.0)
+    runs = (Run(text, "Helvetica", 20.0),)
+    assert wrap_line_spans_runs(text, runs, "Helvetica", 20.0, 300.0) == flat
+
+
+def test_wrap_line_spans_runs_font_name_none_inherits_lead_font():
+    _require_font("Helvetica")
+    text = "The quick brown fox jumps over the lazy dog and then keeps running far away"
+    flat = wrap_line_spans(text, "Helvetica", 20.0, 300.0)
+    runs = (Run(text, None, 20.0),)
+    assert wrap_line_spans_runs(text, runs, "Helvetica", 20.0, 300.0) == flat
+
+
+def test_wrap_line_spans_runs_empty_runs_falls_back_to_wrap_line_spans():
+    _require_font("Helvetica")
+    text = "alpha beta gamma delta"
+    assert wrap_line_spans_runs(text, (), "Helvetica", 20.0, 300.0) == wrap_line_spans(
+        text, "Helvetica", 20.0, 300.0
+    )
+
+
+def test_wrap_line_spans_runs_unresolved_font_returns_none():
+    runs = (Run("alpha beta", "NoSuchFontAnywhere", 20.0),)
+    assert wrap_line_spans_runs("alpha beta", runs, "NoSuchFontAnywhere", 20.0, 300.0) is None
+
+
+def test_wrap_line_spans_runs_trailing_separator_stays_with_its_line():
+    # A trailing wrap-break character at the very end of the text (no following word)
+    # must not be silently dropped -- parity with `wrap_line_spans`'s own paragraph-end
+    # artifact, so `char_window`s built from spans always cover the whole source text.
+    _require_font("Helvetica")
+    text = "alpha beta "
+    runs = (Run(text, "Helvetica", 20.0),)
+    spans = wrap_line_spans_runs(text, runs, "Helvetica", 20.0, 300.0)
+    assert spans is not None
+    assert spans[-1][1] == len(text)
+
+
+def test_wrap_line_spans_runs_gw12_flat_vs_runaware_line_counts_pinned():
+    # Plan §1.1: GW 12's own verse text, at the OLD flat-45 chunker's first 3-line
+    # window -- re-wrapping that SAME window text at the run-aware emitted sizes (a
+    # 54.64pt-before-cap emphasis run pushes past the flat 45pt estimate) needs 4 lines,
+    # not 3. This is finding 1's core motivation for S1: the old flat-wrap chunk
+    # boundary does not guarantee the run-aware emitted text actually fits.
+    _require_deck(GW_DECK)
+    _require_font("AzoSans-Regular")
+    from obed_edom.dsk_assemble import LAYOUT_SLOTS, _emitted_run_sizes, load_assembly_inputs
+
+    payload, classes, _runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    verse_id = by_number[12].long_text_ids[0]
+    items = {(it["kind"], it["kindIndex"]): it for it in payload["slides"][11]["items"]}
+    verse = items[verse_id]
+    text = verse["text"]
+    slot = LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+
+    flat_spans = wrap_line_spans(text, verse["font"], 45.0, slot.verse.w)
+    assert flat_spans is not None
+    start0, end0 = flat_spans[0][0], flat_spans[2][1]
+    window_text = text[start0:end0]
+    assert len(wrap_line_spans(window_text, verse["font"], 45.0, slot.verse.w)) == 3
+
+    t = 45.0 / verse["size"]
+    table = _emitted_run_sizes(verse, t, 45.0)
+    assert table != "unresolved"
+    run_objs = []
+    pos = 0
+    for r in verse["runs"]:
+        run_text = r.get("text") or ""
+        r_lo, r_hi = pos, pos + len(run_text)
+        pos = r_hi
+        a, b = max(r_lo, start0), min(r_hi, end0)
+        if a >= b:
+            continue
+        size = next(sz for lo, hi, sz in table if lo - 1 <= a < hi)
+        run_objs.append(Run(text[a:b], r.get("fontName"), size))
+    run_aware_spans = wrap_line_spans_runs(window_text, tuple(run_objs), verse["font"], 45.0, slot.verse.w)
+    assert run_aware_spans is not None
+    assert len(run_aware_spans) == 4
 
 
 def test_delete_order_dedupes_dual_shape_text_address():

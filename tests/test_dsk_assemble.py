@@ -299,6 +299,74 @@ def test_run_size_ranges_known_size_then_unresolved_run_is_unresolved():
     assert warnings == ["slide 1 text 0: run ranges leave a gap"]
 
 
+def test_emitted_run_sizes_full_coverage_multi_size():
+    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 20.0}]}
+    table = dsa._emitted_run_sizes(item, 1.0, 45.0)
+    assert table == ((1, 1, 10.0), (2, 2, 20.0))
+
+
+def test_emitted_run_sizes_caps_at_50pt_gw13_emphasis_run():
+    # Plan §0/owner decision: gold uses a flat 50pt emphasis cap, never the source
+    # 85/70 ratio -- GW 13's own 85pt run scaled to the 45pt lead (t = 45/70) would be
+    # 54.642857pt uncapped; `_emitted_run_sizes` must emit 50.0 instead.
+    item = {
+        "text": "lead EMPHASIS lead",
+        "runs": [
+            {"text": "lead ", "size": 70.0},
+            {"text": "EMPHASIS", "size": 85.0},
+            {"text": " lead", "size": 70.0},
+        ],
+    }
+    t = 45.0 / 70.0
+    assert 85.0 * t == pytest.approx(54.642857142857146)  # uncapped source ratio
+    table = dsa._emitted_run_sizes(item, t, 45.0)
+    assert table[0] == (1, 5, pytest.approx(45.0))
+    assert table[1] == (6, 13, 50.0)
+    assert table[2] == (14, 18, pytest.approx(45.0))
+
+
+def test_emitted_run_sizes_uncapped_below_50pt_is_unaffected():
+    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 10.0}]}
+    table = dsa._emitted_run_sizes(item, 0.5, 45.0)
+    assert table == ((1, 1, 5.0), (2, 2, 5.0))
+
+
+def test_emitted_run_sizes_any_unresolved_run_makes_the_whole_table_unresolved():
+    # Owner-adopted policy (S1/§2.1 step 2): unlike `_run_size_ranges`'s partial-gap
+    # tuple, ANY run with no size makes the table wholly "unresolved" -- GW 49 has one
+    # resolved run among five; the caller must not silently keep that one range.
+    item = {
+        "text": "abc",
+        "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": None}, {"text": "c", "size": 10.0}],
+    }
+    assert dsa._emitted_run_sizes(item, 1.0, 45.0) == "unresolved"
+
+
+def test_emitted_run_sizes_no_runs_falls_back_to_lead_pt_over_full_text():
+    item = {"text": "abcd", "runs": []}
+    assert dsa._emitted_run_sizes(item, 1.0, 45.0) == ((1, 4, 45.0),)
+
+
+def test_emitted_run_sizes_no_runs_no_text_is_empty():
+    item = {"text": "", "runs": []}
+    assert dsa._emitted_run_sizes(item, 1.0, 45.0) == ()
+
+
+def test_windowed_run_ranges_restricts_and_collapses_uniform_size():
+    table = ((1, 1, 45.0), (2, 6, 50.0), (7, 10, 45.0))
+    assert dsa._windowed_run_ranges(table, 0, 1, 45.0) == 45.0
+    restricted = dsa._windowed_run_ranges(table, 0, 6, 45.0)
+    assert restricted == ((1, 1, 45.0), (2, 6, 50.0))
+
+
+def test_windowed_run_ranges_window_with_only_resolved_run_outside_it_falls_back_to_lead():
+    # Owner decision (finding 1): the window can no longer borrow a neighbouring run's
+    # size as its fallback -- a window that intersects no range in the table gets the
+    # slot's own lead size, never the out-of-window run's size (here 50.0).
+    table = ((200, 210, 50.0),)
+    assert dsa._windowed_run_ranges(table, 0, 10, 45.0) == 45.0
+
+
 def test_text_mixed_run_sizes_warns_and_omits():
     item = _text_item(0, x=1920, y=0, w=200, h=80, runs=[{"size": 20.0}, {"size": 30.0}])
     slide = _slide(1, [item])
@@ -6208,6 +6276,53 @@ def test_gw49_plans_under_shrink_and_refuses_under_warn():
     assert plan.shrink_text_sizes.get(49) or plan.splits.get(49)
 
 
+def test_gw49_single_box_split_refuses_under_warn_naming_box_and_run():
+    # S1/§2.1 step 2 (Codex's prescription): GW 49 has 4 of 5 runs with no resolved
+    # size (83 chars) -- `_emitted_run_sizes` marks the whole box "unresolved" rather
+    # than emitting the old 25.0pt (100 * 45/180) that skipped the unresolved runs and
+    # picked a fallback from the one resolved run. Under warn this must refuse, naming
+    # the box (and the first unresolved run) rather than write blind.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    if 49 not in by_number:
+        pytest.skip("GW deck has no slide 49")
+    decisions = {49: SlideDecision(49, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match=r"box.*run.*unresolved"):
+        plan_assembly(
+            payload, [by_number[49]], decisions=decisions, band=BAND, clips={}, runs=runs, text_fit="warn",
+            all_classes=classes, fw_deck=GW_DECK, layout_policy="import",
+        )
+
+
+def test_gw49_single_box_split_flattens_to_45pt_lead_under_shrink():
+    # Under shrink, every part of GW 49's split flattens to the slot's own 45pt lead --
+    # never the old 25.0pt (100 * 45/180) that only ever saw the one resolved run.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    if 49 not in by_number:
+        pytest.skip("GW deck has no slide 49")
+    decisions = {49: SlideDecision(49, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[49]], decisions=decisions, band=BAND, clips={}, runs=runs, text_fit="shrink",
+        all_classes=classes, fw_deck=GW_DECK, layout_policy="import",
+    )
+    parts = plan.splits.get(49)
+    assert parts
+    for part in parts:
+        for sizes in list(part.text_sizes.values()) + list(part.run_sizes.values()):
+            flat = (sizes,) if isinstance(sizes, float) else sizes
+            for entry in flat:
+                size = entry if isinstance(entry, float) else entry[2]
+                assert size == pytest.approx(45.0)
+    assert any(
+        "run sizes unresolved" in w and "flattening" in w for w in plan.warnings
+    )
+
+
 def test_stacked_mixed_run_box_keeps_run_ranges_under_text_fit_shrink():
     # Shrink no longer flattens a stacked mixed-run box -- it writes the same
     # per-run ranges (scaled by the fit factor) as warn mode, since flattening it was
@@ -9169,9 +9284,13 @@ def test_gw38_verse_over_three_lines_splits_at_the_standard_slot():
         assert part.fits[verse_id] == slot.verse
         start, end = part.char_window
         assert part.char_total == len(full_text)
-        # Contiguous in source order, modulo the single wrap-point separator dropped
-        # between two consecutive wrapped lines (`wrap_line_spans` excludes it).
-        assert seen_end + 1 <= start <= seen_end + 2
+        # Contiguous in source order, modulo the wrap-point separator(s) dropped between
+        # two consecutive wrapped lines (`wrap_line_spans_runs` excludes them, S1): at
+        # most a space/thin-space plus a hard paragraph break (U+2028/U+2029), never a
+        # real character of verse text.
+        gap = full_text[seen_end:start - 1]
+        assert 0 <= len(gap) <= 2
+        assert all(ch in " \xa0   " for ch in gap)
         seen_end = end
         part_text = full_text[start - 1:end]
         assert line_count(part_text, items[verse_id]["font"], 45.0, slot.verse.w) <= 3
@@ -9203,6 +9322,26 @@ def test_gw38_split_part_emits_character_deletes_outside_its_window():
     assert f"delete characters {end + 1} thru {total} of object text of theObj" in part0
     assert start == 1  # part 0 starts at the top of the box -- no head delete expected
     assert "delete characters 1 thru" not in part0
+
+
+def test_gw38_split_part_run_sizes_capped_at_50pt():
+    # GW 38 part 0 carries an emphasis run that would scale to 85 * 45/70 =
+    # 54.642857...pt uncapped -- owner decision: gold's flat 50pt cap applies, never
+    # the source ratio (pin GW 38's own runs, real deck).
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {38: SlideDecision(38, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[38]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, fw_deck=GW_DECK, layout_policy="import",
+    )
+    part0 = plan.splits[38][0]
+    verse_id = next(iter(part0.stacked_ids))
+    sizes = {round(sz, 2) for _lo, _hi, sz in part0.run_sizes[verse_id]}
+    assert 50.0 in sizes
+    assert round(85.0 * 45.0 / 70.0, 2) not in sizes  # 54.64pt, the uncapped ratio
 
 
 def test_gw21_image_slide_resolves_blank_black():

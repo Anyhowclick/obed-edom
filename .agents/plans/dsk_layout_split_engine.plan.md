@@ -308,6 +308,29 @@ that run); GW 49 refuses under `warn` and flattens to 45 pt with a named warning
 `shrink`; run `fontName=None` inherits the box font. Offline A/B: `run_sizes` lines change on
 GW 49 only (25 → refusal/45); every other candidate's emitted sizes are byte-identical.
 
+> **S1 landed** (branch `feat/dsk-split-S1`, off `baa1dab`). `dsk_plan.wrap_line_spans_runs`
+> and `dsk_assemble._emitted_run_sizes`/`_windowed_run_ranges` (pure restriction) are in;
+> `_windowed_run_ranges`'s call site (the single-box `char_window` split) now builds spans
+> from `wrap_line_spans_runs` instead of the flat `wrap_line_spans`, and the emphasis cap
+> (`min(size * t, 50.0)`) lives in `_emitted_run_sizes`. **Deviation from this paragraph's
+> last line**: the 50pt cap applies inside every emitted range (a lead-sized run is always
+> under 50, so no separate "is this emphasis" test was needed) -- so `run_sizes` change on
+> every split candidate carrying an emphasis run (GW 12/18/19/20/28/29/30/35/36/38/52:
+> 54.64 → 50.0), not only GW 49. GW 13's own (non-split, `_run_size_ranges`) 54.64pt run is
+> UNCHANGED -- that path is out of S1's file scope (owner note: "another worktree is
+> editing the badge/verifier code"); `_emitted_run_sizes` is exercised directly against
+> GW 13's real runs in a unit test instead. `wrap_line_spans_runs` also fixes a trailing-
+> separator-drop bug the port from `s0_runaware_spans.py` would have carried over (a
+> separator at the very end of a paragraph, or just before a ` ` hard break, was being
+> dropped instead of staying glued to its line the way `wrap_line_spans`'s own paragraph-
+> split artifact keeps it) -- without that fix, split parts would not cover 100% of the
+> source text. Old part boundaries shift by a few chars wherever a hard paragraph break
+> sits near a chunk boundary (GW 19/38, both real GW slides) -- widened the one existing
+> gap-tolerance assertion (`test_gw38_verse_over_three_lines_splits_at_the_standard_slot`)
+> to check the dropped characters are only wrap/para-break whitespace, not a fixed count.
+> S2 (height-budget packing) still owns the "no-op 1-part split" degenerate case (GW
+> 28/30/36/52) -- untouched here.
+
 **S2 — height-budget packing, and no more no-op splits (~200 lines).**
 Replace the 3-line chunker with the greedy height pack (§2.2); refuse a single over-budget
 line; when the pack yields one part, fall back to the non-split slot-fit path. Tests: the §1.1
