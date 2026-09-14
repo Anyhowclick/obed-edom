@@ -1028,6 +1028,78 @@ def test_fixed_frame_child_unresolvable_text_refuses_conservatively():
         plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
 
 
+_TEN_WORD_TEXT = "Matthew eighteen verse fifteen through seventeen tells us how reconcile"
+
+
+def _fixed_word_boundary_group_records(fixed_text):
+    """Variant of `_fixed_long_plus_autosize_short_group_records` with the autosize
+    sibling placed clear of the fixed child's x-range, so a NOT-refuse boundary case
+    can run `plan_assembly` to completion without tripping the unrelated short-row
+    overlap check (F1)."""
+    objects = {
+        "900": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 4702.0, "y": 15.0}, "size": {"width": 2100.0, "height": 100.0}},
+            "children": [{"identifier": "901"}, {"identifier": "911"}],
+        },
+        "901": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "912"},
+            "super": {"geometry": {
+                "position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 80.0}, "angle": 0.0,
+            }},
+        },
+        "911": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "913"},
+            "super": {
+                "geometry": {"position": {"x": 2000.0, "y": 0.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 100.0}}},
+            },
+        },
+        "912": {"_pbtype": "TSWP.StorageArchive", "text": [fixed_text]},
+        "913": {"_pbtype": "TSWP.StorageArchive", "text": ["Amen"]},
+    }
+    return dsa._all_group_child_records(objects["900"], objects)
+
+
+def test_fixed_frame_child_word_count_normalizes_placeholder_at_boundary():
+    # D1 Codex fix round 4 MINOR: `_child_word_count` must normalize the child's raw
+    # storage text the same way `groupChildText` does (`iwa_runs._normalize_text`)
+    # before counting words, so a standalone object-replacement character ("￼")
+    # in the storage text doesn't inflate the per-child count past the aggregate's.
+    # A fixed-frame child at exactly `text_slide_words` (10) words plus a standalone
+    # placeholder token must NOT refuse (10 == threshold after normalisation); the
+    # same child with one more real word must refuse.
+    at_threshold = _fixed_word_boundary_group_records(f"{_TEN_WORD_TEXT} ￼")
+    assert [(r["kind"], r["autosize"], r["words"]) for r in at_threshold] == [
+        ("text", False, 10), ("text", True, 1),
+    ]
+    top_box = _long_text_item(0, _VERSE_1, x=200, y=200, w=1800, h=300)
+    group = _group_item(0, x=4702, y=15, w=2100, h=100)
+    slide = _slide(5, [top_box, group])
+    slide["groupChildText"] = {0: f"{_TEN_WORD_TEXT} Amen"}
+    slide["groupChildSignature"] = {0: f"text:{_TEN_WORD_TEXT}\ntext:Amen"}
+    slide["groupChildren"] = {0: at_threshold}
+    slide["groupChildRuns"] = {0: {1: {
+        "text": "Amen", "font": "AzoSans-Regular", "size": 70.0,
+        "runs": [{"text": "Amen", "fontName": "AzoSans-Regular", "size": 70.0}],
+    }}}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    decisions = {5: SlideDecision(5, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    assert 5 in plan.fits
+
+    over_threshold = _fixed_long_plus_autosize_short_group_records(fixed_text=f"{_TEN_WORD_TEXT} today")
+    assert over_threshold[0]["words"] == 11
+    slide["groupChildText"] = {0: f"{_TEN_WORD_TEXT} today Amen"}
+    slide["groupChildSignature"] = {0: f"text:{_TEN_WORD_TEXT} today\ntext:Amen"}
+    slide["groupChildren"] = {0: over_threshold}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    with pytest.raises(AssemblyRefusal, match="fixed-frame text inside group 0 unsupported"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+
 def test_fixed_frame_group_text_under_threshold_unaffected():
     # Companion to the refusal above: a NON-text-triggering group (a short caption, under
     # `text_slide_words`) with a fixed-frame text child on an otherwise ordinary content

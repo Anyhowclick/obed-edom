@@ -69,6 +69,7 @@ from obed_edom.iwa_geometry import (
 from obed_edom.iwa_kindindex import _memberships, derive_kind_index
 from obed_edom.iwa_runs import (
     _load_deck,
+    _normalize_text,
     attach_group_captions,
     attach_group_child_runs,
     attach_group_child_text,
@@ -1232,7 +1233,7 @@ def _child_word_count(child: dict, objects: dict[str, dict]) -> int | None:
     if not storage or storage.get("_pbtype") != "TSWP.StorageArchive":
         return None
     text = "".join(storage.get("text") or [])
-    return _word_count(text)
+    return _word_count(_normalize_text(text))
 
 
 def _attach_full_group_children(fw_deck: Path, payload: dict, *, deck: Any = None) -> None:

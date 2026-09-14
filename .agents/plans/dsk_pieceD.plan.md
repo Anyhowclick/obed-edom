@@ -345,6 +345,10 @@ reports heights and applies writes.
 - Deck-wide A/B (`ab-D1fix3/`): zero differences against `ab-D1fix2/` output -- no GW
   slide exercises the newly-refused path.
 
+## D1 Codex fix round 4 (codex-D1-codexfix-review3)
+
+- **MINOR: `_child_word_count` now normalizes storage text with `iwa_runs._normalize_text` before `_word_count`,** matching the aggregate `groupChildText` threshold so a standalone object-replacement character no longer inflates a per-child count past the aggregate's; deck-wide A/B (`ab-D1fix4/`) zero differences against `ab-D1fix3/`.
+
 ## Open questions (design-changing)
 
 1. **Stale read-back (F3).** Is the two-consecutive-reads poll enough, or does Keynote only settle the height
