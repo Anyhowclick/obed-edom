@@ -328,6 +328,140 @@ the resolved layout has no `Media` slot. Tests: mask law round-trip over the eig
 widths; refusal path. Offline A/B: every verse slide gains one image whose
 `x+mask.width == 1832.5315`. ~250 lines.
 
+**L4 landed (2026-09-14, branch `feat/dsk-layout-L4`).** `dsk_pill.write_pills(key_path,
+*, slides: Mapping[int, PillSpec], out_path)` (new module, standalone -- not wired into
+`dsk_assemble`/`cli` yet, per L3's concurrent edit). Re-measured the mask law directly
+(`p8`-style dump of gold slides 3/5/9/20/23/35/38 plus both verse layouts' own default
+pill, 8 widths total) and found it simpler than the plan text implied: the pill image
+drawable's own `geometry` (position/size/angle) **never varies with width** -- it is
+byte-identical across all 8 samples, keyed only by which verse layout resolves (789.1 vs
+879.1 composed y falls out of a constant raw y, +6.9359 either way). Only the mask moves:
+`position.y` 50.9344 and `size.height` 75.52111 constant; `position.x` = `1832.5315 −
+width`; `pathsource.scalarPathSource.naturalSize` tracks the mask's own size (width with
+it, height constant) with a constant `scalar` (corner radius) 15.0 -- a fourth measured
+field the plan note didn't list. Per slide: reuse an existing owned pill (matched by
+`Media` sage-tag OR by `data.identifier` -- gold slides 9/20/23/38 carry an untagged
+override, so tag-only matching would have missed real duplicates) by rewriting just its
+mask (`_apply_mask_fields`) and confirming its image geometry against the layout's; else
+mint one by copying the resolved layout's own `Media`-tagged image/mask/title/caption
+archives verbatim (new ids off `Index/Metadata.iwa`'s `lastObjectIdentifier`, matching
+`iwa_write.mint_media_style`'s collision checks), remapping only the internal id
+references, and registering the four new ids in the **slide's own** metadata component
+(`objectUuidMapEntries`, `dataReferences` per data id, and an `externalReferences` entry
+for the style id when the style lives in a different member) -- discovered by diffing a
+real gold slide's metadata component, not previously documented anywhere in this repo.
+Refuses (`OfflineWriteRefused`, source and `out_path` untouched) on: width outside (0,
+958.4864]; an unrecognised `layout` tag; the resolved layout missing a `Media` slot; the
+pill's data id absent from the deck's `Data/` members; more than one candidate pill on
+the slide; and a declared `layout` that disagrees with the resolved layout's composed y
+after the write (a re-derive, not a name lookup -- template slides showed no usable
+`super.name` on this deck). Writes to `out_path` only (`shutil.copy2` then
+`iwa_write._rewrite_members`); verifies by fully re-reading `out_path` and asserting the
+law via `compose_geometry`, never the pre-rewrite in-memory dict.
+
+Tests (`tests/test_dsk_pill.py`, 28): mask-law unit round-trip over the 8 measured widths
+plus the layout default (958.4864); 6 refusal paths; write-to-copy-only; a gold-deck
+idempotency test writing all 7 gold verse slides' own measured widths back and asserting
+every untouched IWA member is byte-identical to the original gold deck; a per-slide
+parametrisation of the same; a mint-path test that strips slide 3's own pill from a gold
+copy and shows the re-derived pill reproduces gold's original frame/mask exactly (fresh
+id, not a reuse); and the brief's r12b case -- since r12b carries no pill or Media-slotted
+layout at all (§1.6), the test first builds a fixture (`_build_r12b_media_slot_fixture`)
+that grafts a synthetic `Media` pill (gold's donor archives, remapped ids, an r12b-native
+existing media style, gold's `Data/` files copied in) onto r12b's own `Blank Black`
+layout -- approximating what a live L2/L3 import would leave -- then asserts `write_pills`
+mints exactly one pill on ordinal 1 satisfying the law with every other member
+byte-identical. Full suite: 2515 passed / 84 skipped / 1 xfailed, no failures, no
+regressions.
+
+Deviations from the piece brief: (1) the mask law needed a 4th field
+(`pathsource.scalarPathSource.naturalSize`/`scalar`) beyond the 3 listed constants, found
+by comparing the 8 samples' full archives, not just their `geometry`; (2) "reuse a
+`Media`-tagged pill" is generalised to tag-OR-data-id matching, since real gold slides
+carry untagged overrides; (3) the r12b acceptance test could not use r12b as-is (no pill,
+no Media-slotted layout in that deck) and instead uses a purpose-built fixture rather
+than r12b verbatim -- the underlying `write_pills` code path is identical either way, but
+this is a materially different test double than "a copy of the r12b output," flagged
+here for the reviewer.
+
+**L4 fix round 1 (2026-09-14, Codex review `codex-L4-review1.md`, REVISE).** Reuse now
+requires the candidate to actually be the layout's own pill, not merely share its data
+id: a `Media`-tagged candidate must also carry the expected data id, and an untagged
+same-data-id candidate must carry the COMPLETE layout-pill fingerprint (image geometry
+incl. the 180 deg angle, `originalSize`, media `naturalSize`, mask type/scalar 15.0,
+style) matching the resolved layout's Media drawable exactly (`_pill_fingerprint_matches`)
+-- an unrelated content image sharing a data id is refused, never rewritten, and the reuse
+path now mutates ONLY the mask fields (the image geometry overwrite at the old ~:282 is
+gone, since a matched fingerprint already guarantees equality). `_verify` now re-reads and
+validates the entire law -- mask position/size/angle, `scalarPathSource.naturalSize`/
+`scalar`, `originalSize`, media `naturalSize` -- and identifies the pill by id (threaded
+through as `_Expected.pill_id`), never by data id alone (two objects can legitimately
+share a data id); for the mint path it additionally confirms both drawable lists carry the
+new id identically and the slide component's metadata registration
+(`objectUuidMapEntries`, `dataReferences`) is present. The minter's collision set now
+includes every identifier registered anywhere in metadata (`objectUuidMapEntries`,
+`externalReferences`, `dataReferences` incl. `objectReferenceList`), mirroring
+`iwa_write.mint_media_style`; `_register_style_ext_ref` refuses a pre-existing style
+external reference whose `componentIdentifier` conflicts rather than accepting it silently.
+The r12b copy-path test is renamed
+`test_synthetic_r12b_media_slot_copy_path_mints_exactly_one_pill_and_touches_nothing_else`
+and documented as a SYNTHETIC mint case (manually grafted fixture, not a real L2/L3-imported
+layout) -- **replace it with a fixture produced by the real importer once L2/L3 land.**
+
+**L4 fix round 2 (2026-09-14, Codex review `codex-L4-review2.md`, REVISE).** Reuse now proves
+exclusive mask ownership (`_mask_exclusively_owned`) before mutating: the image must live in
+the target slide member, the mask must live in that same member, `mask.super.parent.identifier`
+must equal the image id, and no other image anywhere in the deck may reference that mask id --
+a candidate whose mask is the layout's own (shared) mask, or a mask shared with a second image,
+is refused untouched. Mint metadata verification is now exact-component rather than a global
+scan: `_Expected` carries the target component id, the expected data ids, the (style id,
+component id) pair when cross-component, and the final `lastObjectIdentifier`; `_verify` locates
+that one component and requires every expected data id to carry `{objectIdentifier: image_id,
+count: 1}` there, the minted uuid entries and (when applicable) the style external reference to
+be registered there specifically, and the persisted counter to match. `_verify` now also
+captures each pill's complete immutable fingerprint (`_image_fingerprint`: raw geometry incl.
+angle, `originalSize`, media `naturalSize`, style reference) before the write and compares it
+after reread (`_fingerprints_match`), not only the composed frame -- and both source validation
+(`_pill_fingerprint_matches`) and output verification require the concrete mask path type
+`kTSDRoundedRectangle` (`_MASK_PATH_TYPE`), so two missing/blank types no longer pass as equal.
+10 tests added (49 total in `test_dsk_pill.py`); full suite 2536 passed, 84 skipped, 1 xfailed.
+Added 11 focused tests: an unrelated same-data content image (data id 27859) refused for
+reuse both untagged and Media-tagged-with-a-foreign-data-id; two `_verify` regression tests
+that monkeypatch `_apply_mask_fields` to drop the scalar / angle after the real write and
+confirm verification catches it; unit tests for the minter skipping ids registered only in
+`objectUuidMapEntries`/`externalReferences`/`dataReferences`; `_register_data_refs`
+appending to a pre-existing slide data reference; `_register_style_ext_ref` accepting a
+matching same-component reference idempotently, refusing a conflicting one, and appending a
+new cross-member one. `tests/test_dsk_pill.py`: 28 -> 39, all passing; full suite unchanged
+at 2515 passed / 84 skipped / 1 xfailed, no regressions.
+
+**L4 fix round 3 (2026-09-14, Codex review `codex-L4-review3.md`, REVISE).** The resolved
+layout's own Media mask must now fully resolve BEFORE any candidate is considered
+(`_resolve_layout_mask`): must resolve, live in the layout member, have
+`mask.super.parent.identifier == layout_pill_id`, and use `_MASK_PATH_TYPE` -- any
+violation refuses before candidate selection runs; `_verify`'s matching layout-mask type
+check is now unconditional (it always resolves, so it always checks). Mint verification
+now validates the full minted object graph on the re-read output, not just that the four
+ids appear in metadata: each of image/mask/title/caption resolves in the target slide
+member with its own minted `_pbtype`, the minted image's `mask`/`title`/`caption`
+references are exactly the minted ids (a byte-identical duplicate mask under a different
+id is refused, not merely a geometrically-plausible one), the minted mask's own
+`super.parent` is exactly the minted image, and `_mask_exclusively_owned` is re-run on
+the reread ids. "Exact" metadata verification is now a count over the RAW lists rather
+than containment: exactly one `objectUuidMapEntries` entry per minted id, exactly one
+`dataReferences` entry per expected data id each carrying exactly one
+`{objectIdentifier: image_id, count: 1}`, and exactly one non-conflicting
+(style id, component id) external reference -- a duplicate UUID entry, a duplicate
+`dataReferences` entry, or a correct-plus-conflicting style pair now all fail. 9 tests
+added: 3 for the layout-mask precondition (unresolved / wrong parent / wrong path type,
+gold slide 3's own layout pill+mask); 3 for the mint object graph (missing caption
+archive, mask parent not the minted image, mask id substituted for a duplicate) via a
+`_rewrite_members` monkeypatch that lets the real write land then corrupts the already-
+written `out_path` before `_verify` re-reads it; 3 for exact-count metadata (duplicate
+UUID entry, duplicate `dataReferences` entry, correct+conflicting style reference) by
+monkeypatching the `_register_*` helpers to append an extra entry after the real one.
+`tests/test_dsk_pill.py`: 49 -> 58, all passing.
+
 **L5 — heading-only and point classes (Q2, Q3).** Heading-only: 60 pt flat, badge 46 pt,
 pair centred on x=960, badge above for 2 lines / inline-left for 1 line, on
 `Point 3 Lines` / `Point (2 Lines)` per line count. Drop the Q3 0.75 badge scale — the verse
