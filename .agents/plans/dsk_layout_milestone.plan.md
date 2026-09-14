@@ -384,6 +384,39 @@ than r12b verbatim -- the underlying `write_pills` code path is identical either
 this is a materially different test double than "a copy of the r12b output," flagged
 here for the reviewer.
 
+**L4 fix round 1 (2026-09-14, Codex review `codex-L4-review1.md`, REVISE).** Reuse now
+requires the candidate to actually be the layout's own pill, not merely share its data
+id: a `Media`-tagged candidate must also carry the expected data id, and an untagged
+same-data-id candidate must carry the COMPLETE layout-pill fingerprint (image geometry
+incl. the 180 deg angle, `originalSize`, media `naturalSize`, mask type/scalar 15.0,
+style) matching the resolved layout's Media drawable exactly (`_pill_fingerprint_matches`)
+-- an unrelated content image sharing a data id is refused, never rewritten, and the reuse
+path now mutates ONLY the mask fields (the image geometry overwrite at the old ~:282 is
+gone, since a matched fingerprint already guarantees equality). `_verify` now re-reads and
+validates the entire law -- mask position/size/angle, `scalarPathSource.naturalSize`/
+`scalar`, `originalSize`, media `naturalSize` -- and identifies the pill by id (threaded
+through as `_Expected.pill_id`), never by data id alone (two objects can legitimately
+share a data id); for the mint path it additionally confirms both drawable lists carry the
+new id identically and the slide component's metadata registration
+(`objectUuidMapEntries`, `dataReferences`) is present. The minter's collision set now
+includes every identifier registered anywhere in metadata (`objectUuidMapEntries`,
+`externalReferences`, `dataReferences` incl. `objectReferenceList`), mirroring
+`iwa_write.mint_media_style`; `_register_style_ext_ref` refuses a pre-existing style
+external reference whose `componentIdentifier` conflicts rather than accepting it silently.
+The r12b copy-path test is renamed
+`test_synthetic_r12b_media_slot_copy_path_mints_exactly_one_pill_and_touches_nothing_else`
+and documented as a SYNTHETIC mint case (manually grafted fixture, not a real L2/L3-imported
+layout) -- **replace it with a fixture produced by the real importer once L2/L3 land.**
+Added 11 focused tests: an unrelated same-data content image (data id 27859) refused for
+reuse both untagged and Media-tagged-with-a-foreign-data-id; two `_verify` regression tests
+that monkeypatch `_apply_mask_fields` to drop the scalar / angle after the real write and
+confirm verification catches it; unit tests for the minter skipping ids registered only in
+`objectUuidMapEntries`/`externalReferences`/`dataReferences`; `_register_data_refs`
+appending to a pre-existing slide data reference; `_register_style_ext_ref` accepting a
+matching same-component reference idempotently, refusing a conflicting one, and appending a
+new cross-member one. `tests/test_dsk_pill.py`: 28 -> 39, all passing; full suite unchanged
+at 2515 passed / 84 skipped / 1 xfailed, no regressions.
+
 **L5 — heading-only and point classes (Q2, Q3).** Heading-only: 60 pt flat, badge 46 pt,
 pair centred on x=960, badge above for 2 lines / inline-left for 1 line, on
 `Point 3 Lines` / `Point (2 Lines)` per line count. Drop the Q3 0.75 badge scale — the verse

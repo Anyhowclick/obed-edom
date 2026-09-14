@@ -66,6 +66,18 @@ class PillResult:
     edited_ids: dict[int, str] = field(default_factory=dict)
 
 
+@dataclass
+class _Expected:
+    """What `_verify` must find for one ordinal, threaded through from the write so it
+    does not have to re-derive which path was taken -- or which drawable is the pill --
+    from the re-read deck alone. `pill_id` identifies the pill by id, never by data id
+    alone: an unrelated content image can legitimately share the pill's data id."""
+    width: float
+    layout: str
+    pill_id: str
+    minted_ids: list[str] | None = None  # [image, mask, title, caption] iff the mint path ran
+
+
 def _sage_tags(slide: dict) -> dict[str, str]:
     return {str(e["info"]["identifier"]): e["tag"] for e in (slide.get("sageTagToInfoMap") or [])}
 
@@ -107,7 +119,85 @@ def _mask_law_ok(mask_geom: dict, width: float) -> bool:
     )
 
 
-def _resolve_slide_media_candidates(objects: dict[str, dict], slide: dict, data_id: str) -> list[str]:
+def _mask_full_law_ok(mask_obj: dict, width: float) -> bool:
+    """Full mask law: geometry (incl. the 180 deg angle) AND the pathsource's tracked
+    naturalSize/scalar -- the render-derived fields `_mask_law_ok` alone does not see."""
+    geom = (mask_obj.get("super") or {}).get("geometry") or {}
+    if not _mask_law_ok(geom, width):
+        return False
+    if abs(float(geom.get("angle", -1)) - 180.0) > 0.01:
+        return False
+    sps = ((mask_obj.get("pathsource") or {}).get("scalarPathSource") or {})
+    ns = sps.get("naturalSize") or {}
+    return (
+        abs(float(ns.get("width", -1)) - width) <= 0.01
+        and abs(float(ns.get("height", -1)) - _MASK_H) <= 0.01
+        and abs(float(sps.get("scalar", -1)) - _MASK_SCALAR) <= 0.01
+    )
+
+
+def _points_match(a: dict | None, b: dict | None, *, keys: tuple[str, str]) -> bool:
+    a, b = a or {}, b or {}
+    ka, kb = keys
+    try:
+        return (
+            abs(float(a.get(ka, -1)) - float(b.get(ka, -2))) <= 0.01
+            and abs(float(a.get(kb, -1)) - float(b.get(kb, -2))) <= 0.01
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _sizes_match(a: dict | None, b: dict | None) -> bool:
+    return _points_match(a, b, keys=("width", "height"))
+
+
+def _positions_match(a: dict | None, b: dict | None) -> bool:
+    return _points_match(a, b, keys=("x", "y"))
+
+
+def _pill_fingerprint_matches(image_obj: dict, mask_obj: dict, layout_pill: dict, layout_mask: dict) -> bool:
+    """The complete layout-pill fingerprint an untagged same-data-id candidate must carry
+    to be eligible for reuse: image geometry (incl. the 180 deg angle), `originalSize`,
+    the media's own `naturalSize`, mask type/scalar 15.0, and style -- all equal to the
+    resolved layout's own Media drawable. A candidate failing this is refused, never
+    rewritten (an unrelated content image sharing a data id must not be touched)."""
+    img_geom = (image_obj.get("super") or {}).get("geometry") or {}
+    layout_geom = (layout_pill.get("super") or {}).get("geometry") or {}
+    if not (
+        _positions_match(img_geom.get("position"), layout_geom.get("position"))
+        and _sizes_match(img_geom.get("size"), layout_geom.get("size"))
+        and abs(float(img_geom.get("angle", -1)) - float(layout_geom.get("angle", -2))) <= 0.01
+        and abs(float(img_geom.get("angle", -1)) - 180.0) <= 0.01
+    ):
+        return False
+    if not _sizes_match(image_obj.get("originalSize"), layout_pill.get("originalSize")):
+        return False
+    if not _sizes_match(image_obj.get("naturalSize"), layout_pill.get("naturalSize")):
+        return False
+    if str((image_obj.get("style") or {}).get("identifier") or "") != str(
+        (layout_pill.get("style") or {}).get("identifier") or ""
+    ):
+        return False
+    mask_sps = ((mask_obj.get("pathsource") or {}).get("scalarPathSource") or {})
+    layout_mask_sps = ((layout_mask.get("pathsource") or {}).get("scalarPathSource") or {})
+    if str(mask_sps.get("type") or "") != str(layout_mask_sps.get("type") or ""):
+        return False
+    try:
+        if abs(float(mask_sps.get("scalar", -1)) - _MASK_SCALAR) > 0.01:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _resolve_slide_media_candidates(
+    objects: dict[str, dict], slide: dict, data_id: str, layout_pill: dict, layout_mask: dict | None
+) -> list[str]:
+    """Reuse-eligible pills on `slide`: a `Media`-tagged image using `data_id`, or an
+    untagged same-`data_id` image whose fingerprint matches the resolved layout's own
+    Media drawable exactly (see `_pill_fingerprint_matches`). An unrelated content image
+    that merely shares the data id -- tagged or not -- is never a candidate."""
     tags = _sage_tags(slide)
     owned = [str(r["identifier"]) for r in (slide.get("ownedDrawables") or [])]
     found: list[str] = []
@@ -115,7 +205,16 @@ def _resolve_slide_media_candidates(objects: dict[str, dict], slide: dict, data_
         obj = objects.get(oid) or {}
         if obj.get("_pbtype") != _IMAGE_PBTYPE:
             continue
-        if tags.get(oid) == _MEDIA_TAG or str((obj.get("data") or {}).get("identifier")) == data_id:
+        if str((obj.get("data") or {}).get("identifier") or "") != data_id:
+            continue
+        if tags.get(oid) == _MEDIA_TAG:
+            found.append(oid)
+            continue
+        if layout_mask is None:
+            continue
+        mask_id = str((obj.get("mask") or {}).get("identifier") or "")
+        mask_obj = objects.get(mask_id)
+        if mask_obj is not None and _pill_fingerprint_matches(obj, mask_obj, layout_pill, layout_mask):
             found.append(oid)
     seen: list[str] = []
     for oid in found:
@@ -141,16 +240,27 @@ class _Minter:
                 f"lastObjectIdentifier {package_meta.get('lastObjectIdentifier')!r} is not numeric"
             ) from exc
         self._existing_uuids: set[tuple[str, str]] = set()
+        self._registered_ids: set[str] = set()
         for comp in package_meta.get("components") or []:
             for u in comp.get("objectUuidMapEntries") or []:
                 uu = u.get("uuid") or {}
                 self._existing_uuids.add((str(uu.get("lower")), str(uu.get("upper"))))
+                self._registered_ids.add(str(u.get("identifier")))
+            for ref in comp.get("externalReferences") or []:
+                self._registered_ids.add(str(ref.get("objectIdentifier")))
+            for dref in comp.get("dataReferences") or []:
+                self._registered_ids.add(str(dref.get("dataIdentifier")))
+                for orl in dref.get("objectReferenceList") or []:
+                    self._registered_ids.add(str(orl.get("objectIdentifier")))
 
     def mint_id(self) -> str:
         while True:
             self._last_id += 1
             cand = str(self._last_id)
-            if cand in self._id_to_file or cand in self._objects or cand in self._hor:
+            if (
+                cand in self._id_to_file or cand in self._objects or cand in self._hor
+                or cand in self._registered_ids
+            ):
                 continue
             self._package_meta["lastObjectIdentifier"] = cand
             return cand
@@ -184,6 +294,11 @@ def _register_style_ext_ref(component: dict, style_id: str, style_component_id: 
     ext_refs = component.setdefault("externalReferences", [])
     for ref in ext_refs:
         if str(ref.get("objectIdentifier")) == style_id:
+            if str(ref.get("componentIdentifier")) != str(style_component_id):
+                raise OfflineWriteRefused(
+                    f"style {style_id} already registered against component "
+                    f"{ref.get('componentIdentifier')!r}, not {style_component_id!r}"
+                )
             return
     ext_refs.append({"componentIdentifier": style_component_id, "objectIdentifier": style_id})
 
@@ -227,6 +342,7 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
 
     result = PillResult()
     touched: set[str] = set()
+    expected: dict[int, _Expected] = {}
 
     for ordinal in sorted(slides):
         spec = slides[ordinal]
@@ -263,32 +379,32 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
         if not data_id or not _data_id_present(namelist, data_id):
             raise OfflineWriteRefused(f"slide {ordinal}: data id {data_id!r} absent from the deck")
 
-        candidates = _resolve_slide_media_candidates(objects, slide, data_id)
+        layout_mask_id = str((layout_pill.get("mask") or {}).get("identifier") or "")
+        layout_mask = objects.get(layout_mask_id)
+
+        candidates = _resolve_slide_media_candidates(objects, slide, data_id, layout_pill, layout_mask)
         if len(candidates) > 1:
             raise OfflineWriteRefused(f"slide {ordinal}: {len(candidates)} candidate pills, expected at most 1")
 
         if candidates:
+            # Reuse mutates ONLY the mask fields -- the fingerprint check above already
+            # guarantees the image's own geometry equals the resolved layout's.
             image_id = candidates[0]
             image = objects[image_id]
-            image_member = id_to_file[image_id]
             mask_ref = image.get("mask") or {}
             mask_id = str(mask_ref.get("identifier") or "")
             mask_member = id_to_file.get(mask_id)
             if not mask_id or mask_member is None:
                 raise OfflineWriteRefused(f"slide {ordinal}: pill {image_id} has no resolvable mask")
 
-            image_arch = _find_archive(get_decoded(image_member), image_id)
-            image_obj = image_arch["objects"][0]
-            image_obj["super"]["geometry"] = copy.deepcopy(layout_pill["super"]["geometry"])
-
             mask_arch = _find_archive(get_decoded(mask_member), mask_id)
             mask_obj = mask_arch["objects"][0]
             _apply_mask_fields(mask_obj, width)
-            touched.add(image_member)
             touched.add(mask_member)
 
             result.reused += 1
             result.edited_ids[ordinal] = image_id
+            expected[ordinal] = _Expected(width, spec.layout, image_id)
             continue
 
         # Copy path: mint image/mask/title/caption archives from the layout's own pill.
@@ -369,6 +485,10 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
         touched.add(_METADATA_MEMBER)
         result.minted += 1
         result.edited_ids[ordinal] = new_image_id
+        expected[ordinal] = _Expected(
+            width, spec.layout, new_image_id,
+            minted_ids=[new_image_id, new_mask_id, new_title_id, new_caption_id],
+        )
 
     edits: dict[str, bytes] = {}
     for member in touched:
@@ -389,38 +509,92 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
         raise OfflineWriteRefused(f"rewrite failed: {exc}") from exc
 
     result.members = sorted(edits)
-    _verify(out_path, slides)
+    _verify(out_path, expected)
     result.applied = result.reused + result.minted
     return result
 
 
-def _verify(out_path: Path, slides: Mapping[int, PillSpec]) -> None:
+def _verify(out_path: Path, expected: Mapping[int, "_Expected"]) -> None:
     objects, id_to_file, _file_ids = _load_deck_full(out_path)[:3]
     order = slide_order(objects)
-    for ordinal, spec in slides.items():
+    meta_decoded = None
+    package_meta = None
+    with zipfile.ZipFile(out_path) as zf:
+        if _METADATA_MEMBER in set(zf.namelist()):
+            meta_decoded = IWAFile.from_buffer(zf.read(_METADATA_MEMBER), _METADATA_MEMBER).to_dict()
+    if meta_decoded is not None:
+        meta_arch = _find_package_metadata_archive(meta_decoded)
+        package_meta = meta_arch["objects"][0] if meta_arch is not None else None
+
+    for ordinal, exp in expected.items():
         slide_id, _skipped = order[ordinal - 1]
         slide = objects[slide_id]
         records = compose_geometry(slide, objects)
-        data_id = None
         layout_id = str(slide["templateSlide"]["identifier"])
         _lp_id, layout_pill = _find_media_pill(objects, objects[layout_id])
-        if layout_pill is not None:
-            data_id = str((layout_pill.get("data") or {}).get("identifier") or "")
-        pills = [
-            r for r in records
-            if r["kind"] == "image" and str((objects.get(r["id"]) or {}).get("data", {}).get("identifier")) == data_id
-        ]
+        data_id = str((layout_pill.get("data") or {}).get("identifier") or "") if layout_pill else None
+        layout_mask_id = str((layout_pill.get("mask") or {}).get("identifier") or "") if layout_pill else None
+        layout_mask = objects.get(layout_mask_id) if layout_pill else None
+        pills = [r for r in records if r["kind"] == "image" and str(r["id"]) == exp.pill_id]
         if len(pills) != 1:
-            raise OfflineWriteRefused(f"slide {ordinal}: re-read shows {len(pills)} pills, expected 1")
+            raise OfflineWriteRefused(f"slide {ordinal}: re-read shows {len(pills)} pill(s) for {exp.pill_id}, expected 1")
         rec = pills[0]
-        width = float(spec.width)
+        if str((objects.get(rec["id"]) or {}).get("data", {}).get("identifier")) != data_id:
+            raise OfflineWriteRefused(f"slide {ordinal}: pill {exp.pill_id} data id no longer matches the layout")
+        width = exp.width
         if abs(rec["x"] - _FRAME_X) > 0.02 or abs(rec["w"] - width) > 0.02:
             raise OfflineWriteRefused(f"slide {ordinal}: re-read frame {rec} fails the mask law for width {width}")
-        expected_y = _LAYOUT_FRAME_Y[spec.layout]
+        expected_y = _LAYOUT_FRAME_Y[exp.layout]
         if abs(rec["y"] - expected_y) > 0.02:
             raise OfflineWriteRefused(f"slide {ordinal}: re-read frame y {rec['y']} != {expected_y}")
+
         pill_id = rec["id"]
-        mask_id = str((objects[pill_id].get("mask") or {}).get("identifier"))
-        mask_geom = (objects[mask_id]["super"] or {}).get("geometry") or {}
-        if not _mask_law_ok(mask_geom, width):
-            raise OfflineWriteRefused(f"slide {ordinal}: re-read mask geometry {mask_geom} fails the mask law")
+        image_obj = objects[pill_id]
+        mask_id = str((image_obj.get("mask") or {}).get("identifier"))
+        mask_obj = objects.get(mask_id)
+        if mask_obj is None:
+            raise OfflineWriteRefused(f"slide {ordinal}: re-read mask {mask_id} unresolved")
+        if not _mask_full_law_ok(mask_obj, width):
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: re-read mask {mask_id} fails the full mask law for width {width}"
+            )
+        if layout_pill is not None and not _sizes_match(image_obj.get("originalSize"), layout_pill.get("originalSize")):
+            raise OfflineWriteRefused(f"slide {ordinal}: re-read pill {pill_id} originalSize changed")
+        if layout_pill is not None and not _sizes_match(image_obj.get("naturalSize"), layout_pill.get("naturalSize")):
+            raise OfflineWriteRefused(f"slide {ordinal}: re-read pill {pill_id} media naturalSize changed")
+        if layout_mask is not None:
+            mask_sps = (mask_obj.get("pathsource") or {}).get("scalarPathSource") or {}
+            layout_mask_sps = (layout_mask.get("pathsource") or {}).get("scalarPathSource") or {}
+            if str(mask_sps.get("type") or "") != str(layout_mask_sps.get("type") or ""):
+                raise OfflineWriteRefused(f"slide {ordinal}: re-read mask {mask_id} pathsource type changed")
+
+        if exp.minted_ids is None:
+            continue
+
+        # Mint path: both drawable lists carry the new image id identically, and the
+        # slide's metadata component registered every minted id.
+        new_image_id = exp.minted_ids[0]
+        if new_image_id != pill_id:
+            raise OfflineWriteRefused(f"slide {ordinal}: minted id {new_image_id} != resolved pill {pill_id}")
+        owned = [str(r["identifier"]) for r in (slide.get("ownedDrawables") or [])]
+        z_order = [str(r["identifier"]) for r in (slide.get("drawablesZOrder") or [])]
+        if owned.count(new_image_id) != 1 or z_order.count(new_image_id) != 1:
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: minted pill {new_image_id} not registered identically in "
+                f"ownedDrawables ({owned.count(new_image_id)}) and drawablesZOrder ({z_order.count(new_image_id)})"
+            )
+        if package_meta is None:
+            raise OfflineWriteRefused(f"slide {ordinal}: no package metadata to verify mint registration")
+        registered_uuid_ids: set[str] = set()
+        registered_data_object_ids: set[str] = set()
+        for comp in package_meta.get("components") or []:
+            for u in comp.get("objectUuidMapEntries") or []:
+                registered_uuid_ids.add(str(u.get("identifier")))
+            for dref in comp.get("dataReferences") or []:
+                for orl in dref.get("objectReferenceList") or []:
+                    registered_data_object_ids.add(str(orl.get("objectIdentifier")))
+        missing = [nid for nid in exp.minted_ids if nid not in registered_uuid_ids]
+        if missing:
+            raise OfflineWriteRefused(f"slide {ordinal}: minted ids {missing} missing objectUuidMapEntries")
+        if new_image_id not in registered_data_object_ids:
+            raise OfflineWriteRefused(f"slide {ordinal}: minted pill {new_image_id} missing dataReferences entry")

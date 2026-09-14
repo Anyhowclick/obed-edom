@@ -241,6 +241,110 @@ def _strip_own_pill(deck: Path, slide_member: str, slide_id: str, pill_id: str) 
 
 
 @needs_gold
+def test_reuse_refuses_an_unrelated_content_image_sharing_the_data_id(tmp_path: Path) -> None:
+    """With slide 3's own pill (15156374) stripped, an untagged content image that merely
+    reuses its data id (27859) but does not carry the layout pill's fingerprint (a
+    different geometry/angle here) must never be selected for reuse: the mint path runs
+    instead, and the unrelated image is left untouched."""
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    member = "Index/Slide-15156371.iwa"
+    with zipfile.ZipFile(deck) as zf:
+        buf = zf.read(member)
+    decoded = IWAFile.from_buffer(buf, member).to_dict()
+    arch = _find_archive(decoded, "15156371")
+    obj = arch["objects"][0]
+    donor = copy.deepcopy(_find_archive(decoded, "15156374"))
+    donor["header"] = copy.deepcopy(donor["header"])
+    donor["header"]["identifier"] = "27859999"
+    donor["objects"][0] = copy.deepcopy(donor["objects"][0])
+    # Same data id (27859) but a different, non-fingerprint-matching geometry/angle: an
+    # ordinary content image, not a pill.
+    donor["objects"][0]["super"]["geometry"] = {
+        "position": {"x": 10.0, "y": 20.0}, "size": {"width": 400.0, "height": 300.0},
+        "flags": 3, "angle": 0.0,
+    }
+    decoded["chunks"][0]["archives"].append(donor)
+    obj["ownedDrawables"].append({"identifier": "27859999"})
+    obj["drawablesZOrder"].append({"identifier": "27859999"})
+    new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
+    _rewrite_members(deck, {member: new_bytes})
+
+    out_path = tmp_path / "out.key"
+    result = P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=out_path)
+    assert result.minted == 1
+    assert result.reused == 0
+
+    objects, _i2f, _fi = _load_deck_full(out_path)[:3]
+    unrelated = objects["27859999"]
+    assert unrelated["super"]["geometry"]["angle"] == 0.0
+    assert unrelated["super"]["geometry"]["size"] == {"width": 400.0, "height": 300.0}
+
+
+@needs_gold
+def test_reuse_accepts_a_tagged_candidate_only_when_its_data_id_matches(tmp_path: Path) -> None:
+    """With slide 3's own pill stripped, a `Media`-tagged image on the slide whose OWN
+    data id differs from the resolved layout's pill data id is not eligible for reuse
+    (mint runs instead)."""
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    member = "Index/Slide-15156371.iwa"
+    with zipfile.ZipFile(deck) as zf:
+        buf = zf.read(member)
+    decoded = IWAFile.from_buffer(buf, member).to_dict()
+    arch = _find_archive(decoded, "15156371")
+    obj = arch["objects"][0]
+    donor = copy.deepcopy(_find_archive(decoded, "15156374"))
+    donor["header"] = copy.deepcopy(donor["header"])
+    donor["header"]["identifier"] = "27859998"
+    donor["objects"][0] = copy.deepcopy(donor["objects"][0])
+    donor["objects"][0]["data"] = {"identifier": "999999999"}  # foreign data id
+    decoded["chunks"][0]["archives"].append(donor)
+    obj["ownedDrawables"].append({"identifier": "27859998"})
+    obj["drawablesZOrder"].append({"identifier": "27859998"})
+    obj.setdefault("sageTagToInfoMap", []).append({"tag": "Media", "info": {"identifier": "27859998"}})
+    new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
+    _rewrite_members(deck, {member: new_bytes})
+
+    out_path = tmp_path / "out.key"
+    result = P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=out_path)
+    assert result.minted == 1
+    assert result.reused == 0
+
+
+@needs_gold
+def test_verify_catches_a_dropped_mask_scalar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_verify` re-reads and validates the FULL mask law, not just position/size: a
+    corrupted `_apply_mask_fields` that stops writing the rounded-rect `scalar` is caught
+    (not just the composed geometry, which is unaffected by a dropped scalar)."""
+    real_apply = P._apply_mask_fields
+
+    def broken_apply(mask_obj: dict, width: float) -> None:
+        real_apply(mask_obj, width)
+        mask_obj["pathsource"]["scalarPathSource"]["scalar"] = 1.0  # drop the 15.0 law
+
+    monkeypatch.setattr(P, "_apply_mask_fields", broken_apply)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    with pytest.raises(P.OfflineWriteRefused, match="mask"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_a_dropped_mask_angle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same as above for the mask's 180 deg angle, dropped after the real write."""
+    real_apply = P._apply_mask_fields
+
+    def broken_apply(mask_obj: dict, width: float) -> None:
+        real_apply(mask_obj, width)
+        mask_obj["super"]["geometry"]["angle"] = 0.0
+
+    monkeypatch.setattr(P, "_apply_mask_fields", broken_apply)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    with pytest.raises(P.OfflineWriteRefused, match="mask"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
 def test_mint_path_reproduces_gold_after_stripping_the_own_pill(tmp_path: Path) -> None:
     """Slide 3's own pill (15156374) stripped, then re-derived by copying the layout's
     Media drawable: the minted pill reproduces gold's original frame/mask exactly."""
@@ -264,6 +368,66 @@ def test_mint_path_reproduces_gold_after_stripping_the_own_pill(tmp_path: Path) 
     assert rec["w"] == pytest.approx(301.8292, abs=0.02)
     mask_id = str(objects[rec["id"]]["mask"]["identifier"])
     assert P._mask_law_ok(objects[mask_id]["super"]["geometry"], 301.8292)
+
+
+# ------------------------------------------------------------- minter / metadata registration
+
+
+def test_minter_skips_a_candidate_id_registered_only_in_object_uuid_map_entries() -> None:
+    package_meta = {
+        "lastObjectIdentifier": "100",
+        "components": [{"objectUuidMapEntries": [{"identifier": "101", "uuid": {"lower": "1", "upper": "2"}}]}],
+    }
+    minter = P._Minter(package_meta, objects={}, id_to_file={}, header_object_references=set())
+    assert minter.mint_id() == "102"
+
+
+def test_minter_skips_a_candidate_id_registered_only_in_external_references() -> None:
+    package_meta = {
+        "lastObjectIdentifier": "100",
+        "components": [{"externalReferences": [{"componentIdentifier": "5", "objectIdentifier": "101"}]}],
+    }
+    minter = P._Minter(package_meta, objects={}, id_to_file={}, header_object_references=set())
+    assert minter.mint_id() == "102"
+
+
+def test_minter_skips_a_candidate_id_registered_only_in_data_references() -> None:
+    package_meta = {
+        "lastObjectIdentifier": "100",
+        "components": [{"dataReferences": [
+            {"dataIdentifier": "101", "objectReferenceList": [{"objectIdentifier": "102", "count": 1}]},
+        ]}],
+    }
+    minter = P._Minter(package_meta, objects={}, id_to_file={}, header_object_references=set())
+    assert minter.mint_id() == "103"
+
+
+def test_register_data_refs_appends_to_a_pre_existing_slide_data_reference() -> None:
+    component = {"dataReferences": [
+        {"dataIdentifier": "27859", "objectReferenceList": [{"objectIdentifier": "999", "count": 1}]},
+    ]}
+    P._register_data_refs(component, "1000", ["27859", "27867"])
+    by_data = {e["dataIdentifier"]: e for e in component["dataReferences"]}
+    assert [r["objectIdentifier"] for r in by_data["27859"]["objectReferenceList"]] == ["999", "1000"]
+    assert [r["objectIdentifier"] for r in by_data["27867"]["objectReferenceList"]] == ["1000"]
+
+
+def test_register_style_ext_ref_accepts_a_same_component_match_idempotently() -> None:
+    component = {"externalReferences": [{"componentIdentifier": "7", "objectIdentifier": "8527"}]}
+    P._register_style_ext_ref(component, "8527", "7")
+    assert component["externalReferences"] == [{"componentIdentifier": "7", "objectIdentifier": "8527"}]
+
+
+def test_register_style_ext_ref_refuses_a_conflicting_component_id() -> None:
+    component = {"externalReferences": [{"componentIdentifier": "7", "objectIdentifier": "8527"}]}
+    with pytest.raises(P.OfflineWriteRefused, match="already registered"):
+        P._register_style_ext_ref(component, "8527", "9")
+
+
+def test_register_style_ext_ref_appends_a_new_cross_member_reference() -> None:
+    component = {}
+    P._register_style_ext_ref(component, "8527", "7")
+    assert component["externalReferences"] == [{"componentIdentifier": "7", "objectIdentifier": "8527"}]
 
 
 # ------------------------------------------------------------------- copy path, r12b fixture
@@ -404,12 +568,17 @@ def _build_r12b_media_slot_fixture(tmp_path: Path) -> Path:
 
 @needs_gold
 @needs_r12b
-def test_r12b_copy_path_mints_exactly_one_pill_and_touches_nothing_else(tmp_path: Path) -> None:
-    """r12b has no pills anywhere (§1.6). Onto a fixture where ordinal 1's resolved
-    layout has been given a Media slot (see `_build_r12b_media_slot_fixture`), writing a
-    301.829-wide pill mints exactly one pill drawable satisfying the mask law, and every
-    other object in the deck -- including every other member byte-for-byte -- is
-    untouched."""
+def test_synthetic_r12b_media_slot_copy_path_mints_exactly_one_pill_and_touches_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """SYNTHETIC mint case, not a real L2/L3-imported layout: r12b has no pills anywhere
+    (§1.6), so `_build_r12b_media_slot_fixture` manually grafts a `Media`-tagged pill and
+    hand-builds the metadata shape (objectUuidMapEntries/dataReferences/externalReferences)
+    the writer relies on, onto r12b's own real `Blank Black` layout and real Data/ files.
+    Replace with a fixture produced by the real importer once L2/L3 land (plan note, L4).
+    Onto that fixture, writing a 301.829-wide pill mints exactly one pill drawable
+    satisfying the mask law, and every other object in the deck -- including every other
+    member byte-for-byte -- is untouched."""
     fixture = _build_r12b_media_slot_fixture(tmp_path)
     out_path = tmp_path / "out.key"
     result = P.write_pills(fixture, slides={1: P.PillSpec(301.829, "standard")}, out_path=out_path)
