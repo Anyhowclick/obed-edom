@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET); the pass-2 half is now ALSO MET as of the 2026-09-12 full W1 strict gate (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate bar. `kindindex-guard-test-vacuous` is on PR #77; `badge-width-collapse-gold-slide-2` is DONE (PR #94 @ 1ad51ed, owner merges; live acceptance PASSED 2026-09-12 18:07, `output/bank/2026-09-12/badge-width-live/results.md`); main is `9ef859b` and the shared osascript runner (PR #104) is merged and live-verified (ranged live gate 47/113/82 GREEN, `output/bank/2026-09-12/runner-ranged/results.md`); IWA natural-size/sentinel unification is now IMPLEMENTED on `refactor/iwa-unification` (PR pending, owner merges; live gate owed) — next = the W1 default flip, then W2; new bug-backlog item `badge-probe-on-blind` (2026-09-12 W1 gate run 1: a global-`badgeMoved`-guard blind spot let 232 badge raises silently not land on a GREEN-looking report; arm-A re-run clean, gate itself unaffected). Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
+overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET); the pass-2 half is now ALSO MET as of the 2026-09-12 full W1 strict gate (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate bar. `kindindex-guard-test-vacuous` is on PR #77; `badge-width-collapse-gold-slide-2` is DONE (PR #94 @ 1ad51ed, owner merges; live acceptance PASSED 2026-09-12 18:07, `output/bank/2026-09-12/badge-width-live/results.md`); main is `9ef859b` and the shared osascript runner (PR #104) is merged and live-verified (ranged live gate 47/113/82 GREEN, `output/bank/2026-09-12/runner-ranged/results.md`); IWA natural-size/sentinel unification is now IMPLEMENTED on `refactor/iwa-unification` (PR #115 open, owner merges; live gate GREEN 09-14) — next = the W1 default flip, then W2; new bug-backlog item `badge-probe-on-blind` (2026-09-12 W1 gate run 1: a global-`badgeMoved`-guard blind spot let 232 badge raises silently not land on a GREEN-looking report; arm-A re-run clean, gate itself unaffected). Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
@@ -571,12 +571,15 @@ todos:
       survey-iwa sec 2 (style chain x5, mask x6, group DFS x7), iwa_text_shape.py, the
       dead _text_fields:257,260 guards, the 12 osascript runners (preceding item), the
       planner split, and everything owned by w-offline-write-stabilise (masked-media
-      natural size, group-descendant refuse, the default flip). STILL OWED: owner-run
-      `scripts/offline_write_ab.py --slides 47,82,113 --mode verify --pass2-bar
-      strict` GREEN with no new autosize-soft/consistency-audit entries vs
-      `output/bank/2026-09-12/w1-gate/results.md` and an EMPTY skipped-member WARN
-      line -- that closes the item and unblocks the W1 flip on this axis."
-    status: pending
+      natural size, group-descendant refuse, the default flip). LIVE GATE PASSED
+      2026-09-14 09:23-09:31: one owner-run `offline_write_ab.py --slides 47,82,113
+      --mode verify --no-validate --pass2-bar strict` on RAISE10 -> OFFLINE-WRITE GATE
+      GREEN, 0 autosize-soft entries, consistency audit PASS, skipped-member WARN
+      empty, counters identical to the 09-12 runner-ranged record (missedSpecs=3 all
+      fallback-covered, badgeFallback=1 both arms, applied=41, damage check 83/83,
+      identity 100%). Record: `output/bank/2026-09-14/iwa-gate/results.md`. Item
+      CLOSED; W1 default flip unblocked on this axis."
+    status: done
 isProject: false
 ---
 
@@ -661,7 +664,7 @@ Mac is preferred, not mandatory policy. Historical reviews retain their original
   strict gate 2026-09-12 GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict
   is now the W1 gate bar. `badge-width-collapse-gold-slide-2` and the shared osascript runner are
   both DONE and live-verified. IWA natural-size/sentinel unification is now IMPLEMENTED on
-  `refactor/iwa-unification` (PR pending, owner merges; live gate owed). Next: the W1 default
+  `refactor/iwa-unification` (PR #115 open, owner merges; live gate GREEN 09-14). Next: the W1 default
   flip, then W2.
   **W2 `w-zorder-patch` stays gated on W1** and is
   purely speed/Accessibility removal, since `8a7b4bb` fixed the raise-order correctness bug W2's
@@ -788,11 +791,11 @@ cleanup and golden-plan gate; the refactor assessment.
    live-verified: PR #104 merged, ranged live gate 47/113/82 GREEN on all three
    (`output/bank/2026-09-12/runner-ranged/results.md`), see `shared-osascript-runner`. The
    follow-up bind is `stat-bind-name-verified`.
-4. **IWA natural-size/sentinel unification** + one decode→re-encode→diff — IMPLEMENTED and
-   Codex-approved on `refactor/iwa-unification` (5 commits rebased on main `f1b7a72`; PR pending,
-   owner merges), pending only the owner-run live gate
-   (`scripts/offline_write_ab.py --slides 47,82,113 --mode verify --pass2-bar strict`); see
-   `iwa-natural-sentinel-unify`. Before W2.
+4. **IWA natural-size/sentinel unification** + one decode→re-encode→diff — DONE and
+   live-verified: Codex-approved on `refactor/iwa-unification` (5 commits rebased on main
+   `f1b7a72`; PR #115 open, owner merges), live gate GREEN 09-14
+   (`scripts/offline_write_ab.py --slides 47,82,113 --mode verify --pass2-bar strict`,
+   `output/bank/2026-09-14/iwa-gate/results.md`); see `iwa-natural-sentinel-unify`. Before W2.
 5. **W1 default flip** (`w-offline-write-stabilise`) — bar is the universal naturalSize writer plus
    a healthy whole-deck gate (green on both gold decks, with the consistency audit). The geometry
    half of the flip bar is now MET (`as-geometry-rounding` LIVE-CONFIRMED 2026-09-11, full W1 gate
@@ -801,7 +804,7 @@ cleanup and golden-plan gate; the refactor assessment.
    GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate
    bar. `badge-width-collapse-gold-slide-2` and the shared osascript runner are both DONE and
    live-verified. IWA natural-size/sentinel unification is now IMPLEMENTED on
-   `refactor/iwa-unification` (PR pending, owner merges; live gate owed). Next: the W1 default
+   `refactor/iwa-unification` (PR #115 open, owner merges; live gate GREEN 09-14). Next: the W1 default
    flip, then W2.
 6. **W2 `w-zorder-patch`** — gated on W1 stable; purely speed + Accessibility removal now.
    `restore_source_builds` must still run LAST, after any future z-order write.
