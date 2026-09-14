@@ -21,16 +21,22 @@ from obed_edom import dsk_live
 from obed_edom.dsk_live import (
     DEFAULT_LAYOUT_TEMPLATE,
     DEFAULT_RSS_LIMIT_BYTES,
+    DEFAULT_TRANSPARENT_LAYOUT_NAMES,
     LiveBatch,
+    LayoutImportRefusal,
     _applescript_string_list,
     _as_escape,
     _ERROR_RE,
+    _find_layout_by_name,
     _keynote_tell,
     _keynote_terms,
     _osascript_path,
+    _theme_layout_slides,
+    layout_alpha_safe,
     layout_import_lines,
     ordinal_map,
 )
+from obed_edom.dsk_live import check_layout_import_preconditions as _live_check_layout_import_preconditions
 from obed_edom.dsk_plan import (
     Band,
     CropRefusal,
@@ -95,7 +101,13 @@ _TEXT_STACK_GAP = _TEXT_GAP_PT
 
 LayoutPolicy = Literal["preserve", "import"]
 
-DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank Black",)
+DEFAULT_DSK_LAYOUT_NAMES: tuple[str, ...] = (
+    "Verse Standard (Variation 2)",
+    "Verse 1 Line (Variation 2)",
+    "Point 3 Lines",
+    "Point (2 Lines)",
+    "Blank Black",
+)
 
 _OBED_PROP_RE = re.compile(r"^OBED\t(\d+)\t([^\t]+)\t(.*)$")
 _HIDDEN_RE = re.compile(r"^HIDDEN\t(\d+)\t([^\t]+)\t(title|body)$")
@@ -1691,60 +1703,6 @@ def load_assembly_inputs(
     return payload, classes, runs
 
 
-def _theme_layout_slides(objects: dict[str, dict]) -> list[tuple[str, dict, dict]]:
-    """``[(name, layoutNode, layoutSlide)]`` for every ``KN.ThemeArchive.templates``
-    entry -- Keynote's IWA graph has no separate layout type; a layout IS a
-    ``KN.SlideArchive`` referenced from the theme's ``templates`` list (each a
-    ``KN.SlideNodeArchive`` wrapping the slide, same shape as an ordinary slide)."""
-    theme = next((o for o in objects.values() if o.get("_pbtype") == "KN.ThemeArchive"), None)
-    if theme is None:
-        return []
-    out: list[tuple[str, dict, dict]] = []
-    for ref in theme.get("templates") or []:
-        node = objects.get(str(ref.get("identifier")))
-        if not node:
-            continue
-        slide_id = (node.get("slide") or {}).get("identifier")
-        slide = objects.get(str(slide_id)) if slide_id is not None else None
-        if slide is None:
-            continue
-        out.append((slide.get("name") or "", node, slide))
-    return out
-
-
-def _find_layout_by_name(objects: dict[str, dict], name: str) -> dict | None:
-    target = name.strip().lower()
-    for layout_name, _node, slide in _theme_layout_slides(objects):
-        if layout_name.strip().lower() == target:
-            return slide
-    return None
-
-
-def _first_matching_layout(objects: dict[str, dict], names: Sequence[str]) -> tuple[str | None, dict | None]:
-    """First theme layout (in ``templates`` order) whose name case-insensitively matches
-    any of ``names`` -- mirrors the live search ``layout_import_lines`` runs against the
-    layout template."""
-    approved = {n.strip().lower() for n in names}
-    for layout_name, _node, slide in _theme_layout_slides(objects):
-        if layout_name.strip().lower() in approved:
-            return layout_name, slide
-    return None, None
-
-
-def layout_alpha_safe(slide_archive: dict, objects: dict[str, dict], canvas: tuple[float, float]) -> bool:
-    """A slide/layout PNG-exports opaque whenever it owns a drawable spanning the full
-    ``canvas`` (``x<=0``, ``y<=0``, ``x+w>=W``, ``y+h>=H``); one with no such drawable
-    -- including zero drawables -- exports transparent. Frames come from
-    ``compose_geometry`` (masks, rotation and group unions composed, not raw
-    ``geometry``)."""
-    width, height = canvas
-    for rec in compose_geometry(slide_archive, objects):
-        x, y, w, h = rec["x"], rec["y"], rec["w"], rec["h"]
-        if x <= 0 and y <= 0 and x + w >= width and y + h >= height:
-            return False
-    return True
-
-
 def template_layout_alpha_safe(template_path: Path, layout_name: str) -> bool:
     """Offline pre-check, never touches Keynote: resolves ``layout_name`` in
     ``template_path`` by walking ``KN.ThemeArchive.templates`` (Keynote's only offline
@@ -1784,56 +1742,34 @@ def _slide_archive_for_ordinal(objects: dict[str, dict], ordinal: int) -> dict |
 
 def _base_layout_slide_for_ordinal(objects: dict[str, dict], ordinal: int) -> dict | None:
     """The 1-based ``ordinal``-th slide's base layout, resolved offline via
-    ``templateSlideId`` -- a 128-bit uuid every slide's ``KN.SlideNodeArchive`` carries,
-    equal to the same field on exactly one ``KN.ThemeArchive.templates`` node. This is
-    Keynote's only offline link from a slide to its layout; there is no direct object
-    reference. ``None`` if the ordinal is out of range or the uuid doesn't resolve."""
-    nodes = _slide_nodes(objects)
-    if not (1 <= ordinal <= len(nodes)):
+    ``KN.SlideArchive.templateSlide`` -- a direct object reference from the slide's own
+    archive to its layout's ``KN.SlideArchive``, one hop. ``None`` if the ordinal is out
+    of range or the reference doesn't resolve."""
+    slide = _slide_archive_for_ordinal(objects, ordinal)
+    if slide is None:
         return None
-    target = nodes[ordinal - 1].get("templateSlideId")
+    target = (slide.get("templateSlide") or {}).get("identifier")
     if target is None:
         return None
-    for _name, node, slide in _theme_layout_slides(objects):
-        if node.get("templateSlideId") == target:
-            return slide
-    return None
+    return objects.get(str(target))
 
 
 def check_layout_import_preconditions(
     fw_deck: Path,
     *,
     layout_template: Path,
-    black_layout_names: Sequence[str],
+    layout_names: Sequence[str],
 ) -> None:
     """Offline plan-time precondition for ``layout_policy="import"``, run before Keynote
-    ever launches. Refuses (``AssemblyRefusal``) when:
-
-    - `layout_template` has no layout matching `black_layout_names`, or its first match
-      (in `templates` order -- the same one the live search finds) is not alpha-safe --
-      importing a donor that isn't alpha-safe defeats the point.
-    - `fw_deck` already owns a layout with that same name and it is NOT alpha-safe: the
-      live import (`layout_import_lines`) makes a new slide with `base layout: donorLayout`
-      then moves it into the FW-deck copy -- Keynote dedupes slide layouts by name
-      (case-insensitive) on import, so it would silently keep the FW deck's own
-      (unsafe) layout instead of the template's donor.
-    """
-    template_objects, _tf, _tfi = _load_deck(layout_template)
-    donor_name, donor_slide = _first_matching_layout(template_objects, black_layout_names)
-    if donor_slide is None:
-        raise AssemblyRefusal(
-            f"no layout named any of {list(black_layout_names)} found in layout template {layout_template}"
+    ever launches, for every name in `layout_names`. Thin ``AssemblyRefusal`` wrapper
+    over the shared ``dsk_live.check_layout_import_preconditions`` (also used by the
+    movie/stage exporters) -- see that docstring for the refusal conditions."""
+    try:
+        _live_check_layout_import_preconditions(
+            fw_deck, layout_template=layout_template, layout_names=layout_names
         )
-    if not layout_alpha_safe(donor_slide, template_objects, _canvas_size(template_objects)):
-        raise AssemblyRefusal(f"layout template donor {donor_name!r} in {layout_template} is not alpha-safe")
-
-    fw_objects, _ff, _ffi = _load_deck(fw_deck)
-    fw_owned = _find_layout_by_name(fw_objects, donor_name)
-    if fw_owned is not None and not layout_alpha_safe(fw_owned, fw_objects, _canvas_size(fw_objects)):
-        raise AssemblyRefusal(
-            f"FW deck already owns a layout named {donor_name!r} that is not alpha-safe; "
-            "Keynote's name-based import dedupe would reuse it instead of the template donor"
-        )
+    except LayoutImportRefusal as exc:
+        raise AssemblyRefusal(str(exc)) from exc
 
 
 def verify_staged_layouts_alpha_safe(staging_path: Path, plan: AssemblyPlan) -> None:
@@ -2249,6 +2185,7 @@ def build_assembly_script(
     staging_path: Path,
     layout_policy: LayoutPolicy = "import",
     black_layout_names: Sequence[str] = DEFAULT_TRANSPARENT_LAYOUT_NAMES,
+    import_layout_names: Sequence[str] = DEFAULT_DSK_LAYOUT_NAMES,
     layout_template: Path = DEFAULT_LAYOUT_TEMPLATE,
     text_fit: Literal["warn", "shrink"] = "warn",
 ) -> str:
@@ -2265,11 +2202,12 @@ def build_assembly_script(
     character-styling loss the operator should expect, not the default.
 
     `layout_policy`:
-    - "import" (default): always imports the alpha-safe layout from `layout_template`
-      (a full-canvas drawable exports opaque even from a Blank layout), never an
-      FW-owned layout matched by name -- a same-named layout the FW deck happens to
-      own is not guaranteed to be alpha-safe (see `check_layout_import_preconditions`,
-      the plan-time dedupe-trap refusal).
+    - "import" (default): imports every layout in `import_layout_names` missing from the
+      scratch doc from `layout_template` (see `check_layout_import_preconditions`, the
+      plan-time dedupe-trap refusal), then sets every kept slide's base layout to the
+      alpha-safe layout named in `black_layout_names` -- never an FW-owned layout
+      matched by name, since a same-named layout the FW deck happens to own is not
+      guaranteed to be alpha-safe.
     - "preserve": leaves every kept slide's base layout untouched -- no layout is
       searched for or imported.
     """
@@ -2303,31 +2241,23 @@ def build_assembly_script(
     ]
 
     if layout_policy == "import":
+        lines += layout_import_lines("theDoc", import_layout_names, layout_template)
         lines += [
-            '      set blackLayoutName to ""',
-            f"      set approvedBlackNames to {approved_names}",
-            "      set donorSlide to missing value",
-        ]
-        lines += layout_import_lines("theDoc", "approvedBlackNames", layout_template)
-        lines += [
-            '      if blackLayoutName is "" then',
-            '        error "layout import failed to resolve a black layout"',
-            "      end if",
+            f"      set blackNames to {approved_names}",
             "      set targetLayout to missing value",
             "      repeat with lay in slide layouts of theDoc",
             "        ignoring case",
-            "          if (name of lay as text) is blackLayoutName then",
+            "          if (name of lay as text) is in blackNames then",
             "            set targetLayout to lay",
             "          end if",
             "        end ignoring",
             "        if targetLayout is not missing value then exit repeat",
             "      end repeat",
-            '      if targetLayout is missing value then error "resolved layout name not found in theDoc"',
+            '      if targetLayout is missing value then error "resolved black layout not found in theDoc"',
         ]
         for number in keep:
             ordinal = base_ordinals[number]
             lines.append(f"      set base layout of slide {ordinal} of theDoc to targetLayout")
-        lines.append("      if donorSlide is not missing value then delete donorSlide")
 
     lines += [
         f"      set width of theDoc to {plan.canvas[0]}",
@@ -3700,6 +3630,7 @@ def assemble_dsk_deck(
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     layout_policy: LayoutPolicy = "import",
     black_layout_names: Sequence[str] = DEFAULT_TRANSPARENT_LAYOUT_NAMES,
+    import_layout_names: Sequence[str] = DEFAULT_DSK_LAYOUT_NAMES,
     layout_template: Path = DEFAULT_LAYOUT_TEMPLATE,
     stroke_min_refs: int = 1,
     text_fit: Literal["warn", "shrink"] = "warn",
@@ -3732,7 +3663,7 @@ def assemble_dsk_deck(
 
     if layout_policy == "import":
         check_layout_import_preconditions(
-            fw_deck, layout_template=layout_template, black_layout_names=black_layout_names
+            fw_deck, layout_template=layout_template, layout_names=import_layout_names
         )
 
     if reference_deck is not None:
@@ -3775,6 +3706,7 @@ def assemble_dsk_deck(
             staging_path=staging_path,
             layout_policy=layout_policy,
             black_layout_names=black_layout_names,
+            import_layout_names=import_layout_names,
             layout_template=layout_template,
             text_fit=text_fit,
         )

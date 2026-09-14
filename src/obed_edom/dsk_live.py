@@ -22,6 +22,9 @@ from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 
 from obed_edom import keynote_app
+from obed_edom.iwa_geometry import compose_geometry
+from obed_edom.iwa_runs import _load_deck
+from obed_edom.offline_inspect import _canvas_size
 from obed_edom.remap_keynote import copy_keynote
 
 LOCK_PATH = Path.home() / "Library" / "Application Support" / "obed-edom" / "keynote.lock"
@@ -36,6 +39,7 @@ _PROGRESS_RE = re.compile(r"^OBED\t(\d+)\t")
 _ERROR_RE = re.compile(r"^ERR\t(\d+)\t(-?\d+)\t(.*)$")
 
 DEFAULT_BLACK_LAYOUT_NAMES: tuple[str, ...] = ("BLACK BLANK", "Black", "BLACK", "black")
+DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank Black",)
 
 
 def guard_out_dir(out_dir: Path, deck: Path) -> None:
@@ -294,42 +298,169 @@ def _applescript_string_list(values: Sequence[str]) -> str:
     return "{" + ", ".join(f'"{_as_escape(v)}"' for v in values) + "}"
 
 
-def layout_import_lines(doc_var: str, approved_names: str, template_path: Path) -> list[str]:
-    """AppleScript lines that import a black-approved slide layout from `template_path`
-    into `doc_var` when it doesn't already own one matching `approved_names` -- an
-    AppleScript expression (typically a variable already in scope, e.g. the
-    `approvedBlackNames` list set by the caller), not a Python value. Caller must have
-    already resolved `blackLayoutName`/`donorSlide` in `doc_var`'s scope."""
-    return [
-        f'      if blackLayoutName is "" then',
-        "        try",
-        f'          set tmplDoc to open POSIX file "{_as_escape(str(template_path))}"',
-        "          delay 2",
-        '          set donorLayoutName to ""',
-        "          set donorLayout to missing value",
-        "          repeat with lay in slide layouts of tmplDoc",
-        "            set tname to (name of lay as text)",
-        "            ignoring case",
-        f'              if donorLayoutName is "" and tname is in {approved_names} then',
-        "                set donorLayoutName to tname",
-        "                set donorLayout to lay",
-        "              end if",
-        "            end ignoring",
-        "          end repeat",
-        '          if donorLayoutName is "" then error "no black layout found in layout_template"',
-        "          set madeSlide to (make new slide at end of slides of tmplDoc with properties {base layout:donorLayout})",
-        f"          move madeSlide to end of slides of {doc_var}",
-        f"          set donorSlide to slide (count of slides of {doc_var}) of {doc_var}",
-        "          set blackLayoutName to donorLayoutName",
-        "          close tmplDoc saving no",
-        "        on error errMsg number errNum",
-        "          try",
-        "            close tmplDoc saving no",
-        "          end try",
-        '          error "layout import failed: " & errMsg number errNum',
-        "        end try",
-        "      end if",
+class LayoutImportRefusal(ValueError):
+    """A `check_layout_import_preconditions` precondition failed -- refuse rather
+    than let a live import silently keep an unsafe layout."""
+
+
+def _theme_layout_slides(objects: dict[str, dict]) -> list[tuple[str, dict, dict]]:
+    """``[(name, layoutNode, layoutSlide)]`` for every ``KN.ThemeArchive.templates``
+    entry -- Keynote's IWA graph has no separate layout type; a layout IS a
+    ``KN.SlideArchive`` referenced from the theme's ``templates`` list (each a
+    ``KN.SlideNodeArchive`` wrapping the slide, same shape as an ordinary slide)."""
+    theme = next((o for o in objects.values() if o.get("_pbtype") == "KN.ThemeArchive"), None)
+    if theme is None:
+        return []
+    out: list[tuple[str, dict, dict]] = []
+    for ref in theme.get("templates") or []:
+        node = objects.get(str(ref.get("identifier")))
+        if not node:
+            continue
+        slide_id = (node.get("slide") or {}).get("identifier")
+        slide = objects.get(str(slide_id)) if slide_id is not None else None
+        if slide is None:
+            continue
+        out.append((slide.get("name") or "", node, slide))
+    return out
+
+
+def _find_layout_by_name(objects: dict[str, dict], name: str) -> dict | None:
+    target = name.strip().lower()
+    for layout_name, _node, slide in _theme_layout_slides(objects):
+        if layout_name.strip().lower() == target:
+            return slide
+    return None
+
+
+def layout_alpha_safe(slide_archive: dict, objects: dict[str, dict], canvas: tuple[float, float]) -> bool:
+    """A slide/layout PNG-exports opaque whenever it owns a drawable spanning the full
+    ``canvas`` (``x<=0``, ``y<=0``, ``x+w>=W``, ``y+h>=H``); one with no such drawable
+    -- including zero drawables -- exports transparent. Frames come from
+    ``compose_geometry`` (masks, rotation and group unions composed, not raw
+    ``geometry``)."""
+    width, height = canvas
+    for rec in compose_geometry(slide_archive, objects):
+        x, y, w, h = rec["x"], rec["y"], rec["w"], rec["h"]
+        if x <= 0 and y <= 0 and x + w >= width and y + h >= height:
+            return False
+    return True
+
+
+def check_layout_import_preconditions(
+    fw_deck: Path,
+    *,
+    layout_template: Path,
+    layout_names: Sequence[str],
+) -> None:
+    """Offline plan-time precondition for a live layout import, run before Keynote ever
+    launches, for every name in `layout_names`. Shared by DSK assembly and the movie/stage
+    exporters so none of them can bake in an unsafe same-named FW-owned layout. Refuses
+    (``LayoutImportRefusal``) when:
+
+    - a name is ``Blank`` -- never alpha-safe, never an import candidate.
+    - `layout_template` has more than one layout named `name` -- a duplicate-name donor
+      would be picked arbitrarily by `layout_import_lines`' own exact-name search.
+    - `layout_template` has no layout named `name`, or that layout is not alpha-safe --
+      importing a donor that isn't alpha-safe defeats the point.
+    - `fw_deck` already owns a layout named `name` and it is NOT alpha-safe: the live
+      import (`layout_import_lines`) skips a name `fw_deck` already owns, so it would
+      silently keep the FW deck's own (unsafe) layout instead of the template's donor.
+    """
+    for name in layout_names:
+        if name.strip().lower() == "blank":
+            raise LayoutImportRefusal(f"refusing to import layout {name!r}: Blank is never alpha-safe")
+
+    template_objects, _tf, _tfi = _load_deck(layout_template)
+    fw_objects, _ff, _ffi = _load_deck(fw_deck)
+    template_canvas = _canvas_size(template_objects)
+    fw_canvas = _canvas_size(fw_objects)
+
+    template_name_counts: dict[str, int] = {}
+    for layout_name, _node, _slide in _theme_layout_slides(template_objects):
+        key = layout_name.strip().lower()
+        template_name_counts[key] = template_name_counts.get(key, 0) + 1
+
+    for name in layout_names:
+        key = name.strip().lower()
+        if template_name_counts.get(key, 0) > 1:
+            raise LayoutImportRefusal(
+                f"layout template {layout_template} has "
+                f"{template_name_counts[key]} layouts named {name!r}; a duplicate-name "
+                "donor would be picked arbitrarily"
+            )
+
+        donor_slide = _find_layout_by_name(template_objects, name)
+        if donor_slide is None:
+            raise LayoutImportRefusal(f"no layout named {name!r} found in layout template {layout_template}")
+        if not layout_alpha_safe(donor_slide, template_objects, template_canvas):
+            raise LayoutImportRefusal(f"layout template donor {name!r} in {layout_template} is not alpha-safe")
+
+        fw_owned = _find_layout_by_name(fw_objects, name)
+        if fw_owned is not None and not layout_alpha_safe(fw_owned, fw_objects, fw_canvas):
+            raise LayoutImportRefusal(
+                f"FW deck already owns a layout named {name!r} that is not alpha-safe; "
+                "layout_import_lines' own dedupe (skip a name fw_deck already owns) "
+                "would keep it instead of importing the template's donor"
+            )
+
+
+def layout_import_lines(doc_var: str, layout_names: str | Sequence[str], template_path: Path) -> list[str]:
+    """AppleScript lines that import every layout in `layout_names` (a single name is a
+    special case of one) missing from `doc_var` -- one donor slide per missing layout,
+    made in `template_path` with `base layout` set to the exact-named template layout,
+    moved into `doc_var`, then deleted. A name `doc_var` already owns (case-insensitive)
+    is left untouched -- Keynote's own name-based import dedupe never runs, so it can't
+    silently keep an unsafe FW-owned layout instead."""
+    if isinstance(layout_names, str):
+        layout_names = [layout_names]
+    lines = [
+        "      try",
+        f'        set tmplDoc to open POSIX file "{_as_escape(str(template_path))}"',
+        "        delay 2",
+        "        set pendingDonor to missing value",
     ]
+    for name in layout_names:
+        escaped_name = _as_escape(name)
+        lines += [
+            f'        set wantLayoutName to "{escaped_name}"',
+            "        set haveLayout to false",
+            f"        repeat with lay in slide layouts of {doc_var}",
+            "          ignoring case",
+            "            if (name of lay as text) is wantLayoutName then set haveLayout to true",
+            "          end ignoring",
+            "          if haveLayout then exit repeat",
+            "        end repeat",
+            "        if not haveLayout then",
+            "          set donorLayout to missing value",
+            "          repeat with lay in slide layouts of tmplDoc",
+            "            ignoring case",
+            "              if (name of lay as text) is wantLayoutName then set donorLayout to lay",
+            "            end ignoring",
+            "            if donorLayout is not missing value then exit repeat",
+            "          end repeat",
+            f'          if donorLayout is missing value then error "no layout named \\"{escaped_name}\\" found in layout_template"',
+            "          set madeSlide to (make new slide at end of slides of tmplDoc with properties {base layout:donorLayout})",
+            "          set pendingDonor to madeSlide",
+            f"          move madeSlide to end of slides of {doc_var}",
+            f"          set donorSlide to slide (count of slides of {doc_var}) of {doc_var}",
+            "          set pendingDonor to donorSlide",
+            "          delete donorSlide",
+            "          set pendingDonor to missing value",
+            "        end if",
+        ]
+    lines += [
+        "        close tmplDoc saving no",
+        "      on error errMsg number errNum",
+        "        try",
+        "          if pendingDonor is not missing value then delete pendingDonor",
+        "        end try",
+        "        try",
+        "          close tmplDoc saving no",
+        "        end try",
+        '        error "layout import failed: " & errMsg number errNum',
+        "      end try",
+    ]
+    return lines
 
 
 def _quit_script(stem: str, doc_name: str) -> str:

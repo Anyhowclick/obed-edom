@@ -282,3 +282,65 @@ def test_live_batch_run_no_retry_flag(monkeypatch, tmp_path):
     assert calls.count("run_osascript") == 1
     assert calls.count("copy_keynote") == 1
     assert "quit_and_wait" not in calls
+
+
+def test_layout_import_lines_single_name_is_special_case_of_list():
+    single = dl.layout_import_lines("theDoc", "Blank Black", Path("/tmp/tmpl.key"))
+    listed = dl.layout_import_lines("theDoc", ["Blank Black"], Path("/tmp/tmpl.key"))
+    assert single == listed
+
+
+def test_layout_import_lines_three_names_has_three_donor_pairs():
+    lines = dl.layout_import_lines(
+        "theDoc", ["Point 3 Lines", "Point (2 Lines)", "Blank Black"], Path("/tmp/tmpl.key")
+    )
+    script = "\n".join(lines)
+    assert script.count("set madeSlide to (make new slide") == 3
+    assert script.count("delete donorSlide") == 3
+    for name in ("Point 3 Lines", "Point (2 Lines)", "Blank Black"):
+        assert f'set wantLayoutName to "{name}"' in script
+    assert 'set wantLayoutName to "Blank"' not in script
+    assert script.count("open POSIX file") == 1
+
+
+def test_layout_import_lines_skips_already_owned_name_at_runtime():
+    lines = dl.layout_import_lines("theDoc", ["Blank Black"], Path("/tmp/tmpl.key"))
+    script = "\n".join(lines)
+    assert "if not haveLayout then" in script
+    assert "set haveLayout to false" in script
+
+
+def test_layout_import_lines_error_handler_deletes_pending_donor_before_closing_tmpldoc():
+    """A per-name destination donor reference is initialised before any `make`, tracked
+    only while it might exist undeleted in the destination doc, and the `on error`
+    handler must attempt to delete it -- guarded by its own `try` so a donor that was
+    never made (or already deleted) doesn't itself raise -- strictly before `close
+    tmplDoc`, so an error mid-import never leaves a donor slide behind in `theDoc`."""
+    lines = dl.layout_import_lines("theDoc", ["Point 3 Lines", "Blank Black"], Path("/tmp/tmpl.key"))
+    script = "\n".join(lines)
+
+    init_idx = next(i for i, l in enumerate(lines) if "set pendingDonor to missing value" in l)
+    on_error_idx = next(i for i, l in enumerate(lines) if l.strip().startswith("on error errMsg number errNum"))
+    assert init_idx < on_error_idx, "pendingDonor must be initialised before the try body, not in the handler"
+
+    handler_lines = lines[on_error_idx:]
+    delete_idx = next(
+        i for i, l in enumerate(handler_lines) if "if pendingDonor is not missing value then delete pendingDonor" in l
+    )
+    close_idx = next(i for i, l in enumerate(handler_lines) if "close tmplDoc saving no" in l)
+    assert delete_idx < close_idx, "the handler must delete a pending donor before closing tmplDoc"
+    assert handler_lines[delete_idx - 1].strip() == "try", "the donor delete must be its own guarded try"
+
+    # `pendingDonor` is set to `madeSlide` immediately after `make` and BEFORE `move` --
+    # so a failed `move`, or a failed re-resolve of `donorSlide` after a successful
+    # `move`, still leaves a deletable reference behind -- then reassigned to the
+    # re-resolved `donorSlide` and finally cleared after each successful `delete`.
+    for made_idx, l in enumerate(lines):
+        if "set madeSlide to (make new slide" in l:
+            track_idx = next(i for i in range(made_idx, len(lines)) if "set pendingDonor to madeSlide" in lines[i])
+            move_idx = next(i for i in range(made_idx, len(lines)) if lines[i].strip().startswith("move madeSlide"))
+            assert track_idx < move_idx, "pendingDonor must track madeSlide before move, not after"
+
+    assert script.count("set pendingDonor to madeSlide") == 2
+    assert script.count("set pendingDonor to donorSlide") == 2
+    assert script.count("set pendingDonor to missing value") == 3  # 1 init + 2 clears

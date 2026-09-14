@@ -22,6 +22,7 @@ from PIL import Image
 from obed_edom import dsk_live
 from obed_edom.dsk_live import (
     DEFAULT_RSS_LIMIT_BYTES,
+    DEFAULT_TRANSPARENT_LAYOUT_NAMES,
     LiveBatch,
     _applescript_string_list,
     _as_escape,
@@ -34,8 +35,6 @@ from obed_edom.dsk_live import (
 from obed_edom.iwa_builds import _build_effect_animtype, _ref_id, deck_builds
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.offline_inspect import offline_wall_payload
-
-DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank", "BLANK", "blank")
 EXPECTED_GEOMETRY: tuple[int, int] = (1920, 1080)
 _STAGE_NAME_RE = re.compile(r"\.(\d+)\.[^.]+$")
 
@@ -237,10 +236,19 @@ def build_stage_script(
             '          if blackLayoutName is "" and lname is in approvedBlackNames then set blackLayoutName to lname',
             "        end ignoring",
             "      end repeat",
-            "      set donorSlide to missing value",
         ]
         if layout_template is not None:
-            lines += dsk_live.layout_import_lines("theDoc", "approvedBlackNames", layout_template)
+            lines += ['      if blackLayoutName is "" then']
+            lines += dsk_live.layout_import_lines("theDoc", list(transparent_layout_names), layout_template)
+            lines += [
+                "        repeat with lay in slide layouts of theDoc",
+                "          set lname to (name of lay as text)",
+                "          ignoring case",
+                '            if blackLayoutName is "" and lname is in approvedBlackNames then set blackLayoutName to lname',
+                "          end ignoring",
+                "        end repeat",
+                "      end if",
+            ]
         lines += [
             '      if blackLayoutName is "" then',
             '        error "no transparent layout resolvable in the deck or layout_template"',
@@ -254,9 +262,8 @@ def build_stage_script(
             "      end repeat",
             '      if targetLayout is missing value then error "resolved layout name not found in theDoc"',
             "      repeat with s in slides of theDoc",
-            "        if s is not donorSlide then set base layout of s to targetLayout",
+            "        set base layout of s to targetLayout",
             "      end repeat",
-            "      if donorSlide is not missing value then delete donorSlide",
         ]
     lines += [
         "      set slideRefs to {}",
@@ -455,6 +462,11 @@ def export_stage_pngs(
         )
 
     total_slides = len(deck_builds(deck))
+
+    if transparent_layout_names is not None and layout_template is not None:
+        dsk_live.check_layout_import_preconditions(
+            deck, layout_template=layout_template, layout_names=transparent_layout_names
+        )
 
     with LiveBatch(deck, out_dir, rss_limit_bytes=rss_limit_bytes, log=log) as batch:
         assert batch.scratch is not None and batch.work is not None

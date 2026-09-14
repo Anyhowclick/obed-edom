@@ -401,3 +401,54 @@ GW 7, or accept the slide with the arrows dropped and the highlight box's LineDr
 - **Q2 — 4-line verses:** SPLIT into two or more slides (reuse the existing split path with the layout's slot as the budget); never hand-place a 267 panel.
 - **Q3 — GW payload 7:** KEEP THE ARROWS TOO. Connection lines survive copy-and-transform; since they have no AppleScript handle, piece L6 moves them OFFLINE after the live pass with the same affine as their sibling group (geometry-only write, builds preserved) instead of refusing. The slide's text must not be resized (character/line builds die on a size write) — refuse with a named reason only if its text does not fit unscaled.
 - Live verification is deferred until Keynote is free (no Keynote 2026-09-14 ~11:50–12:50).
+
+## L2 landed (2026-09-14, branch `feat/dsk-layout-L2`)
+
+`layout_import_lines` (dsk_live.py) now takes a list of names, one donor slide per name
+missing from the doc (single name still works, unified as a one-item list).
+`check_layout_import_preconditions` (dsk_assemble.py) loops the whole `import_layout_names`
+list, refuses `Blank` explicitly and a duplicate-named template donor.
+`_base_layout_slide_for_ordinal` now resolves via `KN.SlideArchive.templateSlide` (one hop)
+instead of the `templateSlideId` uuid walk; verified against all 43 gold-deck slides.
+`DEFAULT_DSK_LAYOUT_NAMES` added and threaded through `cli.py`; every kept slide still gets
+`Blank Black` as base layout in this piece (per-class base layout is L3).
+**Known gap for the next piece to reconcile:** `dsk_movie_export.py` (out of L2's edit
+scope) calls the old `layout_import_lines("theDoc", "approvedBlackNames", ...)` form,
+passing an AppleScript variable-name string rather than a literal layout name — this now
+breaks (`test_script_black_layout_uses_explicit_approved_name_list` fails); it needs its own
+update to the list form before the next merge.
+
+**L2 fix round 3 (Codex review 2 of f8ded83):** `dsk_stage_export.DEFAULT_TRANSPARENT_LAYOUT_NAMES`
+was still `("Blank", "BLANK", "blank")` (its original d5 value, when it only verified an
+existing layout offline and never imported), but `check_layout_import_preconditions`
+(moved to `dsk_live.py` in this piece) now unconditionally refuses any `Blank` variant, so
+the stage exporter's import path could never proceed. Fixed by adding the shared
+`DEFAULT_TRANSPARENT_LAYOUT_NAMES = ("Blank Black",)` to `dsk_live.py` (stage export must
+not import `dsk_assemble`, which already has its own equal-valued constant) and having
+`dsk_stage_export` import it from there. Also: `layout_import_lines`'s per-name donor
+tracking (`pendingDonor`) now starts right after `make`, before `move`, so a failed `move`
+or a failed post-move re-resolve still leaves a deletable reference for the error handler.
+
+**L2 fix round 5 (Codex review 4 of 4560d93):** `DEFAULT_BLACK_LAYOUT_NAMES` (dsk_live.py)
+is a list of ALTERNATIVE aliases (any one acceptable), but `dsk_movie_export.export_slide_clips`
+was passing the whole list straight to `check_layout_import_preconditions`, whose semantics
+treat every name as required -- so a valid alpha-safe FW-owned `BLACK BLANK` was refused
+whenever the template lacked a layout literally named `BLACK BLANK`. Fixed by resolving the
+single relevant name in Python before validating: `_resolve_black_layout_name` (dsk_movie_export.py)
+returns the first alias `fw_deck` already owns alpha-safely, skipping any check entirely (no
+import needed); when none is owned, `_resolve_black_layout_donor` picks the first alpha-safe
+template donor among the aliases and only that one name is passed to
+`check_layout_import_preconditions`/`layout_import_lines`; `export_slide_clips` raises
+`LayoutImportRefusal` when neither exists. `dsk_stage_export`'s `transparent_layout_names`
+path uses a single-name tuple (`DEFAULT_TRANSPARENT_LAYOUT_NAMES`), so the required-import
+semantics were already correct there and needed no change. The assembly path's
+`DEFAULT_DSK_LAYOUT_NAMES` stays all-required by design (unchanged).
+
+**L2 fix round 6 (Codex review 5 of 3559a57):** round 5's `_resolve_black_layout_name` call
+was nested inside `if resolved_template is not None`, so a missing/unavailable template
+skipped FW-alias resolution entirely and passed the raw `black_layout_names` list straight
+to the live script -- an unsafe FW-owned alias could be baked into clips, and "neither
+exists" was never refused offline. Fixed in `export_slide_clips` (dsk_movie_export.py) by
+resolving the FW-owned alpha-safe alias unconditionally, before checking template
+availability; only when none is owned does it require an existing template, resolve a
+donor, and run the import precondition -- otherwise it raises `LayoutImportRefusal`.
