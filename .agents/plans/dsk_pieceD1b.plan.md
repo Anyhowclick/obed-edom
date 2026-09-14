@@ -361,32 +361,75 @@ payload item has `w == 0.0 or h == 0.0`, which is never true here (composition b
 `naturalSize` via `_autosize_rect`), and the cluster-building loop explicitly skips `cluster_ids`, so nothing
 ever marked these boxes autosize.
 
-Fix (`src/obed_edom/dsk_assemble.py`): new `_cluster_autosize_align(cluster, id_by_item, objects_graph)`
-reads the raw object geometry for `cluster.heading_id`/`cluster.number_id` (the same `objects_graph`/
-`id_by_item` `plan_assembly` already builds for crops) and flags an id autosize when its raw frame height is
-`0.0`, recording its vertical-alignment code (`_vertical_alignment`, default `kFrameAlignMiddle` when unset --
-matching `_autosize_rect`'s own middle/justify/unknown fallback). Flagged ids are folded into `slide_autosize`
-so the existing `plan.autosize` mechanism in `_slide_lines` (the same check that already skips `set height`
-for a fixed-size-0 top-level text box) drops the write -- no parallel mechanism. New `AssemblyPlan.cluster_align`
-field carries the alignment code through to `_slide_lines`, which adjusts the WRITTEN position (not the
-planned rect, which stays a plain visual-top rect exactly as `_build_refit_round`'s cluster reposition already
-produces): `kFrameAlignTop` writes `rect.y` unchanged, `kFrameAlignBottom` writes `rect.y + rect.h`, anything
-else (middle/justify/unset) writes `rect.y + rect.h / 2`. Because the transform is applied at emission time
-from whatever `rect` is current in `plan.fits`, a refit round's position-only cluster rewrite
-(`_build_refit_round`'s `cluster_rects` block, which only ever changes `y` and never `h`) needs no changes --
-it stays consistent automatically.
+**Round 1 fix (WRONG, reverted this round):** wrote `rect.y + rect.h/2` (or `+rect.h`/unchanged by
+alignment code) instead of `rect.y`, on the mistaken premise that Keynote's live `position` for an
+autosize box is anchored somewhere other than its visual top-left, and that the compensation needed to
+counteract it depended on vertical alignment. Codex D1b-live review 1 flagged this as unsound (findings 1-3:
+`.agents/reviews/dsk-d4b/codex-D1b-live-review1.md`) and a live AppleScript probe on the real GW 44 heading/
+numeral (autosize, `kFrameAlignMiddle`) proved it wrong outright.
 
-Tests added (`tests/test_dsk_assemble.py`): `test_two_column_autosize_heading_and_numeral_skip_set_height` and
-`test_two_column_fixed_frame_heading_still_gets_set_height` (synthetic two-column payload with a mocked
-`objects_graph`, autosize vs fixed-frame raw geometry); `test_gw44_cluster_heading_and_numeral_are_autosize`
-(real GW 44, asserts both cluster ids land in `plan.autosize[44]`).
+**Live probe result (round 2), `<scratchpad>/probe-autosize/log.txt` (`probe.applescript`, GW 44 heading and
+numeral, both raw-height-zero autosize):**
 
-A/B vs the prior commit (`git show HEAD:.../dsk_assemble.py`, offline, whole GW deck, every slide planned
-alone): only GW 44/46/50 differ. Per slide, the diff is exactly: `set height` dropped for both the heading and
-numeral text boxes, and the written `y` shifted by `+h/2` for each (all six resolve to `kFrameAlignMiddle`,
-no `verticalAlignment` set on any of the six source objects) -- e.g. GW 44 numeral `{245, 778.77}` ->
-`{245, 801.77}` (46/2 = 23), heading `{43, 834.77}` -> `{43, 914.69}` (159.84/2 = 79.9); GW 46/50 shift by
-their own `h/2` the same way. No other slide's emitted script changes.
+```
+OBEDPROBE  heading  A_initial       position  {2217, 100}   width 975  height 396  size 190.0
+OBEDPROBE  heading  B_after_width   position  {2217, -140}  width 450  height 874  size 190.0
+OBEDPROBE  heading  C_after_size    position  {2217, 232}   width 450  height 130  size 60.0
+OBEDPROBE  heading  D_after_height  position  {2217, 247}   width 450  height 130  size 60.0
+OBEDPROBE  heading  E_after_position position {43, 835}     width 450  height 130  size 60.0
+OBEDPROBE  heading  F_after_delay1  position  {43, 835}     width 450  height 130  size 60.0
+OBEDPROBE  heading  G_after_reopen  position  {43, 835}     width 450  height 130  size 60.0
+OBEDPROBE  numeral  A_initial       position  {2687, 51}    width 35   height 80   size 50.0
+OBEDPROBE  numeral  B_after_width   position  {2687, 51}    width 46   height 80   size 50.0
+OBEDPROBE  numeral  C_after_size    position  {2687, 66}    width 46   height 49   size 28.4
+OBEDPROBE  numeral  D_after_height  position  {2687, 65}    width 46   height 49   size 28.4
+OBEDPROBE  numeral  E_after_position position {245, 779}    width 46   height 49   size 28.4
+```
+
+Conclusions: (1) `position` IS already the live visual top-left of an autosize box -- no compensation is
+ever needed. (2) Every `width`/text-size write re-autosizes the box around its centre and moves `y` off
+whatever `position` was last set to, so **the position write must be the LAST geometry write** for an
+autosize box, or a later width/size write silently drags it back off the planned spot. (3) `set height` on
+an autosize box is a no-op (Keynote overrides it on save) -- the existing height-skip stands. (4) Keynote's
+own laid-out height for this heading (60pt, two lines) is 130, not the composed-payload estimate of 159.84 --
+noted, not acted on (out of scope).
+
+This explains the r12 write order bug directly: `_slide_lines` (pre-fix) wrote width -> position -> size for
+every text item, cluster items included. For an autosize box, writing `position` before `size` bakes in a
+`y` computed for the *old*, oversized box, then the subsequent size write re-autosizes around centre and
+drags the box away from that `y` by roughly half the height delta -- e.g. the r12 saved deck's heading frame
+(`h=868`) matches probe step B (`h=874`, right after the width write, before size ever applied), i.e. the
+final on-disk geometry reflects a state from before size took effect, with position already stale.
+
+Fix (`src/obed_edom/dsk_assemble.py`): `_cluster_autosize_ids(cluster, id_by_item, objects_graph)` (renamed
+from `_cluster_autosize_align`) still reads the raw object geometry for `cluster.heading_id`/
+`cluster.number_id` and flags an id autosize when its raw frame height is `0.0`, but no longer resolves or
+returns a vertical-alignment code -- per the probe, none is needed. Flagged ids are still folded into
+`slide_autosize` so the existing `plan.autosize` mechanism in `_slide_lines` skips `set height` for them, and
+`AssemblyPlan.cluster_align` is replaced by `AssemblyPlan.cluster_autosize_ids` (dict[int, frozenset[ItemId]]
+of the flagged ids only, no alignment payload). `_slide_lines` always writes the plain `{rect.x, rect.y}` (no
+transform), and for items in `cluster_autosize_ids` reorders the body to emit width -> text size -> position
+LAST -- every other item (fixed-frame, or autosize outside the two-column cluster) keeps the original
+width -> [height] -> position -> size order, since Codex/the probe only cover the two genuinely-autosize
+cluster boxes and changing the general path would widen the diff beyond GW 44/46/50. `build_refit_script`
+already wrote `rect.y` untouched with no transform (Codex finding 2 was that round 1's transform lived only
+in `_slide_lines`, never in the refit emitter) -- with the transform removed from `_slide_lines` too, both
+emitters now agree.
+
+Tests added/updated (`tests/test_dsk_assemble.py`): `test_two_column_autosize_heading_and_numeral_skip_set_height`
+now asserts the exact emitted position value (`rect.x`, `rect.y`, no offset) and that it comes after both the
+width and every `set size` line in the block; `test_two_column_fixed_frame_heading_still_gets_set_height`
+unchanged (non-autosize, no reorder); `test_gw44_cluster_heading_and_numeral_are_autosize` extended to assert
+the same exact-position/after-size-and-width ordering on the real GW 44 script; new
+`test_build_refit_script_writes_visual_top_y_for_recentred_cluster` builds a refit round that recentres the
+heading and asserts `build_refit_script` writes that refit's `rect.y` untouched, matching `_slide_lines`.
+
+A/B vs `3851343` (offline, whole GW deck, every slide planned alone): only GW 44/46/50 differ, and only in
+the heading/numeral `position` line and its ordering relative to `size` -- e.g. GW 44 numeral position
+`{245, 801.77}` -> `{245, 778.77}` (drops the `+23` = `46/2`), heading `{43, 914.69}` -> `{43, 834.77}` (drops
+the `+79.92` = `159.84/2`), and in both cases the `set size` line now precedes `set position` instead of
+following it; GW 46/50 shift by their own `h/2` and reorder the same way. No `set height` writes reappear (the
+skip is untouched) and no other slide's emitted script changes.
 
 **Out of scope, not changed:** the same `geom_source == "autosize"` signal also fires for GW 13's main
 stacked long text box (`text` kindIndex 1) and GW 17's (kindIndex 1, 2, 4, 5) -- i.e. the general top-level

@@ -8020,6 +8020,46 @@ def test_build_refit_round_recentres_two_column_heading():
     assert refits[17][circle_id].rect.y == pytest.approx(expected_circle_y, abs=0.5)
 
 
+def test_build_refit_script_writes_visual_top_y_for_recentred_cluster():
+    # Probe result round 2 (`<scratchpad>/probe-autosize/log.txt`): `position` is
+    # already the live visual top-left of an autosize box, so `build_refit_script`
+    # must write the refit's `rect.y` untouched -- no vertical-alignment transform --
+    # matching `_slide_lines`'s own (now transform-free) position write for the
+    # same recentred heading.
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide = _two_column_slide(17, _VERSE_1)
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+    verse_id = ("text", 3)
+    heading_id = ("text", 2)
+    predicted_h = plan.fits[17][verse_id].h
+    measured_h = predicted_h * 1.3
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+    refits = dsa._build_refit_round(
+        plan, slides_by_number, {(17, "text:3")}, {(17, "text:3"): measured_h}, BAND, 24.0, [], {},
+    )
+    new_heading_y = refits[17][heading_id].rect.y
+
+    script = build_refit_script(
+        plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
+        staging_path=Path("/tmp/staged.key"),
+    )
+    staged_heading_id = dsa._staged_id_for(17, plan, heading_id, hidden=frozenset())
+    heading_addr = f"text item {staged_heading_id[1] + 1} of slide {plan.ordinals[17]}"
+    lines = script.splitlines()
+    start = next(i for i, l in enumerate(lines) if f"set theObj to {heading_addr}" in l)
+    block = lines[start:start + 14]
+    position_line = next(l for l in block if "set position" in l)
+    assert position_line == (
+        f"          set position of theObj to {{{dsa._as_num(plan.fits[17][heading_id].x)}, "
+        f"{dsa._as_num(new_heading_y)}}}"
+    )
+
+
 def test_two_column_refuses_instead_of_splitting():
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
@@ -8296,13 +8336,23 @@ def test_two_column_autosize_heading_and_numeral_skip_set_height(monkeypatch):
     assert number_id in plan.autosize[17]
 
     lines = dsa._slide_lines(plan, 17, 1)
-    for kind_index, label in ((2, "heading"), (1, "numeral")):
+    for item_id, kind_index, label in ((heading_id, 2, "heading"), (number_id, 1, "numeral")):
+        rect = plan.fits[17][item_id]
         addr = f"text item {kind_index + 1} of slide 1"
         start = lines.index(f"          set theObj to {addr}")
         block = lines[start:start + 12]
         assert not any("set height" in l for l in block), (label, block)
-        assert any("set width" in l for l in block), (label, block)
-        assert any("set position" in l for l in block), (label, block)
+        width_i = next(i for i, l in enumerate(block) if "set width" in l)
+        position_i = next(i for i, l in enumerate(block) if "set position" in l)
+        assert block[position_i] == (
+            f"          set position of theObj to {{{dsa._as_num(rect.x)}, {dsa._as_num(rect.y)}}}"
+        ), (label, block)
+        assert width_i < position_i, (label, block)
+        size_indices = [i for i, l in enumerate(block) if "set size" in l]
+        assert size_indices, (label, block)
+        assert all(i < position_i for i in size_indices), (
+            "position must be written after width and size for cluster autosize items", label, block,
+        )
 
 
 def test_two_column_fixed_frame_heading_still_gets_set_height(monkeypatch):
@@ -8349,3 +8399,19 @@ def test_gw44_cluster_heading_and_numeral_are_autosize():
     cluster = plan.two_column_cluster[44]
     assert cluster.heading_id in plan.autosize[44]
     assert cluster.number_id in plan.autosize[44]
+
+    ordinal = plan.ordinals[44]
+    lines = dsa._slide_lines(plan, 44, ordinal)
+    for item_id, label in ((cluster.heading_id, "heading"), (cluster.number_id, "numeral")):
+        rect = plan.fits[44][item_id]
+        kind_index = item_id[1]
+        addr = f"text item {kind_index + 1} of slide {ordinal}"
+        start = lines.index(f"          set theObj to {addr}")
+        block = lines[start:start + 12]
+        position_i = next(i for i, l in enumerate(block) if "set position" in l)
+        size_indices = [i for i, l in enumerate(block) if "set size" in l]
+        assert size_indices, (label, block)
+        assert all(i < position_i for i in size_indices), (label, block)
+        assert block[position_i] == (
+            f"          set position of theObj to {{{dsa._as_num(rect.x)}, {dsa._as_num(rect.y)}}}"
+        ), (label, block)

@@ -58,15 +58,12 @@ from obed_edom.dsk_plan import (
 )
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import (
-    _ALIGN_BOTTOM,
-    _ALIGN_TOP,
     _frame_rect,
     _geom_dict,
     _leaf_bbox,
     _mask_geom,
     _masked_rect,
     _natural_size,
-    _vertical_alignment,
     _xywha,
     compose_geometry,
 )
@@ -178,7 +175,7 @@ class AssemblyPlan:
     anchors: dict[int, str] = field(default_factory=dict)
     two_column: dict[int, Band] = field(default_factory=dict)
     two_column_cluster: dict[int, HeadingCluster] = field(default_factory=dict)
-    cluster_align: dict[int, dict[ItemId, str]] = field(default_factory=dict)
+    cluster_autosize_ids: dict[int, frozenset[ItemId]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -670,19 +667,21 @@ def _repeat_heading_state(
     return repeats
 
 
-def _cluster_autosize_align(
+def _cluster_autosize_ids(
     cluster: HeadingCluster,
     id_by_item: Mapping[ItemId, str] | None,
     objects_graph: Mapping[str, dict] | None,
-) -> dict[ItemId, str]:
-    """Live r12 finding: the two-column heading/numeral text boxes can be genuine
-    Keynote-autosize frames (raw geometry height 0, same test `iwa_geometry._compose_record`
-    uses), in which case an emitted `set height` is silently overridden on save. Returns
-    the alignment code (`_ALIGN_TOP`/`_ALIGN_BOTTOM`/other-treated-as-middle) for each of
-    `heading_id`/`number_id` that is genuinely autosize; a non-autosize id is omitted."""
-    align_by_id: dict[ItemId, str] = {}
+) -> frozenset[ItemId]:
+    """Live r12 finding, live-probed round 2: the two-column heading/numeral text boxes
+    can be genuine Keynote-autosize frames (raw geometry height 0, same test
+    `iwa_geometry._compose_record` uses), in which case an emitted `set height` is
+    silently overridden on save. Returns the subset of `heading_id`/`number_id` that is
+    genuinely autosize; a non-autosize id is omitted. `position` is the live visual
+    top-left for an autosize box (no vertical-alignment offset applies -- probe log:
+    `<scratchpad>/probe-autosize/log.txt`), so no alignment is resolved or returned."""
+    ids: set[ItemId] = set()
     if id_by_item is None or objects_graph is None:
-        return align_by_id
+        return frozenset(ids)
     for item_id in (cluster.heading_id, cluster.number_id):
         obj_id = id_by_item.get(item_id)
         obj = objects_graph.get(obj_id) if obj_id is not None else None
@@ -691,8 +690,8 @@ def _cluster_autosize_align(
         geom = _geom_dict(obj)
         if _xywha(geom)[3] != 0.0:
             continue
-        align_by_id[item_id] = _vertical_alignment(obj, objects_graph) or "kFrameAlignMiddle"
-    return align_by_id
+        ids.add(item_id)
+    return frozenset(ids)
 
 
 def _two_column_rects(
@@ -908,7 +907,7 @@ def plan_assembly(
     anchors_out: dict[int, str] = {}
     two_column_map: dict[int, Band] = {}
     two_column_cluster_map: dict[int, HeadingCluster] = {}
-    cluster_align_map: dict[int, dict[ItemId, str]] = {}
+    cluster_autosize_map: dict[int, frozenset[ItemId]] = {}
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
     if objects_graph is None and fw_deck is not None:
@@ -1295,9 +1294,9 @@ def plan_assembly(
                             stacked_run_sizes.update(two_col_run_sizes)
                             two_column_map[number] = left_band
                             two_column_cluster_map[number] = cluster
-                            cluster_align = _cluster_autosize_align(cluster, id_by_item, objects_graph)
-                            if cluster_align:
-                                cluster_align_map[number] = cluster_align
+                            cluster_autosize = _cluster_autosize_ids(cluster, id_by_item, objects_graph)
+                            if cluster_autosize:
+                                cluster_autosize_map[number] = cluster_autosize
                     elif cluster is not None:
                         raise AssemblyRefusal(
                             f"slide {number}: two-column verse does not fit the verse column at "
@@ -1408,7 +1407,7 @@ def plan_assembly(
             wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if decision.keep_side else CENTRE_PANEL_RECT
             slide_text_sizes: dict[ItemId, float] = {}
             slide_shrink_sizes: dict[ItemId, float] = {}
-            slide_autosize: set[ItemId] = set(cluster_align_map.get(number, {}))
+            slide_autosize: set[ItemId] = set(cluster_autosize_map.get(number, frozenset()))
             for iid in cls.kept:
                 if iid[0] != "text" or iid in stacked_ids or iid in cluster_ids:
                     continue
@@ -1511,7 +1510,7 @@ def plan_assembly(
         anchors=anchors_out,
         two_column=two_column_map,
         two_column_cluster=two_column_cluster_map,
-        cluster_align=cluster_align_map,
+        cluster_autosize_ids=cluster_autosize_map,
     )
 
 
@@ -2094,7 +2093,7 @@ def _slide_lines(
         stacked_ids_here = plan.stacked_ids.get(number, frozenset())
         autosize_ids = plan.autosize.get(number, frozenset())
         shrink_text_sizes = plan.shrink_text_sizes.get(number, {})
-    cluster_align = plan.cluster_align.get(number, {})
+    cluster_ids = plan.cluster_autosize_ids.get(number, frozenset())
     known_children = plan.group_children.get(number, {})
     group_text_sizes = plan.group_text_sizes.get(number, {})
     group_origin = plan.group_origin.get(number, {})
@@ -2149,25 +2148,26 @@ def _slide_lines(
         body = [f"          set width of theObj to {_as_num(rect.w)}"]
         if item_id not in autosize_ids:
             body.append(f"          set height of theObj to {_as_num(rect.h)}")
-        write_y = rect.y
-        align = cluster_align.get(item_id)
-        if align == _ALIGN_BOTTOM:
-            write_y = rect.y + rect.h
-        elif align is not None and align != _ALIGN_TOP:
-            write_y = rect.y + rect.h / 2.0
-        body.append(f"          set position of theObj to {{{_as_num(rect.x)}, {_as_num(write_y)}}}")
+        position_line = f"          set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}"
+        size_lines: list[str] = []
         if kind == "text" and item_id in run_sizes_here:
             for start, end, size in run_sizes_here[item_id]:
-                body.append(
+                size_lines.append(
                     f"          set size of characters {start} thru {end} "
                     f"of object text of theObj to {_as_num(size)}"
                 )
         elif kind == "text" and item_id in text_sizes:
-            body.append(f"          set size of object text of theObj to {_as_num(text_sizes[item_id])}")
+            size_lines.append(f"          set size of object text of theObj to {_as_num(text_sizes[item_id])}")
         elif kind == "text" and text_fit == "shrink" and item_id in shrink_text_sizes:
-            body.append(
+            size_lines.append(
                 f"          set size of object text of theObj to {_as_num(shrink_text_sizes[item_id])}"
             )
+        if item_id in cluster_ids:
+            body += size_lines
+            body.append(position_line)
+        else:
+            body.append(position_line)
+            body += size_lines
         lines += _locked_write_block(number, addr, body)
         if kind == "text" and (item_id not in text_sizes or item_id in stacked_ids_here):
             overflow_ordinal = ordinal if split_parts is not None else None
