@@ -94,8 +94,11 @@ def _result(**over):
 # --- offline_write_mode ------------------------------------------------------
 
 
-def test_offline_write_mode_defaults_off(monkeypatch):
+def test_offline_write_mode_defaults_on(monkeypatch):
+    monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
     monkeypatch.delenv("OBED_OFFLINE_WRITE", raising=False)
+    assert offline_write_mode() == "on"
+    monkeypatch.setenv("OBED_OFFLINE_WRITE", "off")
     assert offline_write_mode() == "off"
 
 
@@ -109,10 +112,10 @@ def test_offline_write_mode_parses_on_and_verify(monkeypatch):
     assert offline_write_mode() == "on"
 
 
-def test_offline_write_mode_unknown_token_is_off(monkeypatch):
+def test_offline_write_mode_unknown_token_is_on(monkeypatch):
     monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
     monkeypatch.setenv("OBED_OFFLINE_WRITE", "bogus")
-    assert offline_write_mode() == "off"
+    assert offline_write_mode() == "on"
 
 
 def test_offline_write_mode_forced_off_without_as_geometry(monkeypatch):
@@ -1348,9 +1351,8 @@ def test_flag_off_builds_the_same_plan_as_today_pure(monkeypatch):
     """Pure-function lock (kept alongside the full remap_keynote() lock below): the exact
     computation the plan-building hook performs when the flag is off.
 
-    SAFETY: OBED_OFFLINE_WRITE is set EXPLICITLY (not delenv'd) -- this repo's ambient
-    default is a piece-2-pending flip away from "off" (D14, uncommitted), and relying on
-    delenv here would make this test's `remap_keynote()` sibling below silently take the
+    SAFETY: OBED_OFFLINE_WRITE is set EXPLICITLY (not delenv'd) -- the ambient default
+    is "on" since the W1 flip (2026-09-14), and relying on delenv here would make this test's `remap_keynote()` sibling below silently take the
     REAL offline-write path (and its fallback launches REAL Keynote) whenever it runs
     against a flipped tree. Explicit off is correct under either default.
     """
@@ -3176,7 +3178,7 @@ def test_plan_out_collects_group_collapse_refused_from_a_non_other_transform(mon
     import obed_edom.remap_keynote as rk
     from obed_edom.map_remap import ItemTransform
 
-    monkeypatch.delenv("OBED_OFFLINE_WRITE", raising=False)
+    monkeypatch.setenv("OBED_OFFLINE_WRITE", "off")
     monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
     monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
 
