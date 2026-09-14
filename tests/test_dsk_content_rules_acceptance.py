@@ -308,3 +308,185 @@ def test_gw8_include_side_unchanged_classification():
     assert default8.dropped_media_text == ()
     assert side8.dropped_side == ()
     assert side8.dropped_media_text == (("image", 1), ("image", 2))
+
+
+# D1b -- two-column heading+verse band (`.agents/plans/dsk_pieceD1b.plan.md` Section 6).
+# GW 44/46/50 numbers below are measured from `plan_assembly`'s own output, not typed
+# from the plan doc's pre-implementation estimates -- GW46's heading y/height and the
+# verse's run-size lead came out ~1-5pt off the doc's estimate (real wrapped-height
+# rounding against the doc's hand math); those two are pinned to the measured value.
+
+
+@pytest.mark.deck
+def test_gw44_two_column_heading_and_verse(gw_inputs):
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    payload, by_number, runs = gw_inputs
+    plan = _plan_one(payload, by_number[44], runs)
+
+    heading = plan.fits[44][("text", 1)]
+    badge = plan.fits[44][("shape", 0)]
+    verse_badge = plan.fits[44][("groupchild", 0, "shape", 0)]
+    verse = plan.fits[44][("groupchild", 0, "text", 1)]
+
+    assert heading.x == pytest.approx(43.0, abs=0.5)
+    assert heading.y == pytest.approx(834.8, abs=0.5)
+    assert heading.w == pytest.approx(450.0, abs=0.5)
+    assert heading.h == pytest.approx(159.8, abs=0.5)
+    assert plan.text_sizes[44][("text", 1)] == pytest.approx(60.0, abs=0.01)
+
+    assert badge.x == pytest.approx(245.0, abs=0.5)
+    assert badge.y == pytest.approx(778.8, abs=0.5)
+    assert badge.w == pytest.approx(46.0, abs=0.01)
+    assert badge.h == pytest.approx(46.0, abs=0.01)
+
+    assert verse_badge.x == pytest.approx(501.0, abs=0.5)
+    assert verse_badge.y == pytest.approx(719.4, abs=0.5)
+    assert verse_badge.w == pytest.approx(645.03, abs=0.5)
+    assert verse_badge.h == pytest.approx(92.0, abs=0.5)
+
+    assert verse.x == pytest.approx(501.0, abs=0.5)
+    assert verse.y == pytest.approx(821.4, abs=0.5)
+    assert verse.w == pytest.approx(1391.0, abs=0.5)
+    assert verse.h == pytest.approx(232.6, abs=0.5)
+    assert plan.stack_t[44] == pytest.approx(0.59, abs=0.01)
+
+    lead = min(size for _s, _e, size in plan.run_sizes[44][("groupchild", 0, "text", 1)])
+    assert lead == pytest.approx(41.3, abs=0.5)
+    assert 44 not in plan.splits
+    assert plan.stack_bands[44].x_min == pytest.approx(501.0, abs=0.01)
+    assert plan.two_column[44].x_max == pytest.approx(493.0, abs=0.01)
+
+
+@pytest.mark.deck
+def test_gw50_two_column_heading_and_verse(gw_inputs):
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    payload, by_number, runs = gw_inputs
+    plan = _plan_one(payload, by_number[50], runs)
+
+    heading = plan.fits[50][("text", 1)]
+    badge = plan.fits[50][("shape", 0)]
+    verse_badge = plan.fits[50][("groupchild", 0, "shape", 0)]
+    verse = plan.fits[50][("groupchild", 0, "text", 1)]
+
+    assert heading.x == pytest.approx(43.0, abs=0.5)
+    assert heading.y == pytest.approx(858.2, abs=0.5)
+    assert heading.w == pytest.approx(450.0, abs=0.5)
+    assert heading.h == pytest.approx(113.6, abs=0.5)
+    assert plan.text_sizes[50][("text", 1)] == pytest.approx(80.0, abs=0.01)
+
+    assert badge.x == pytest.approx(245.0, abs=0.5)
+    assert badge.y == pytest.approx(802.2, abs=0.5)
+
+    assert verse_badge.x == pytest.approx(501.0, abs=0.5)
+    assert verse_badge.y == pytest.approx(720.0, abs=0.5)
+    assert verse_badge.w == pytest.approx(645.03, abs=0.5)
+    assert verse_badge.h == pytest.approx(92.0, abs=0.5)
+
+    assert verse.x == pytest.approx(501.0, abs=0.5)
+    assert verse.y == pytest.approx(822.0, abs=0.5)
+    assert verse.w == pytest.approx(1391.0, abs=0.5)
+    assert verse.h == pytest.approx(232.0, abs=0.5)
+    assert plan.stack_t[50] == pytest.approx(0.48, abs=0.01)
+
+    lead = min(size for _s, _e, size in plan.run_sizes[50][("groupchild", 0, "text", 1)])
+    assert lead == pytest.approx(33.6, abs=0.5)
+    assert 50 not in plan.splits
+
+
+@pytest.mark.deck
+def test_gw46_two_column_top_level_verse(gw_inputs):
+    # Measured, not the plan doc's pre-implementation estimate: the doc predicted a
+    # heading top of 870.7/height 113.6 and verse lead 46.9pt at t=0.67; the real
+    # `wrapped_height`/`fit_text_stack` numbers for GW46's actual badge geometry
+    # (a top-level 522.57x74.54 shape+text pair, not the 645x92 group-child badge the
+    # other five slides share) come out at t=0.65 and lead 45.5 -- pinning the measured
+    # values rather than the doc's hand estimate.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    payload, by_number, runs = gw_inputs
+    plan = _plan_one(payload, by_number[46], runs)
+
+    heading = plan.fits[46][("text", 3)]
+    badge = plan.fits[46][("shape", 0)]
+    verse = plan.fits[46][("text", 2)]
+
+    assert heading.x == pytest.approx(43.0, abs=0.5)
+    assert heading.w == pytest.approx(450.0, abs=0.5)
+    assert heading.h == pytest.approx(113.56, abs=0.5)
+    assert plan.text_sizes[46][("text", 3)] == pytest.approx(80.0, abs=0.01)
+
+    assert badge.x == pytest.approx(245.0, abs=0.5)
+    assert badge.w == pytest.approx(46.0, abs=0.01)
+    assert badge.h == pytest.approx(46.0, abs=0.01)
+
+    assert verse.x == pytest.approx(501.0, abs=0.5)
+    assert verse.w == pytest.approx(1391.0, abs=0.5)
+    assert plan.stack_t[46] == pytest.approx(0.65, abs=0.01)
+
+    lead = min(size for _s, _e, size in plan.run_sizes[46][("text", 2)])
+    assert lead == pytest.approx(45.5, abs=0.5)
+    assert 46 not in plan.splits
+
+
+@pytest.mark.deck
+def test_gw51_52_53_repeat_heading_dropped_full_width(gw_inputs):
+    # Owner Q1: GW 50's heading ("Faith") repeats verbatim on 51/52/53 -- gold drops it
+    # from all three (gold 35/36/37), keeping the full-width single-column verse.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, by_number, runs = gw_inputs
+    decisions = {n: SlideDecision(n, "in_deck", anchor="auto") for n in (50, 51, 52, 53)}
+    plan = plan_assembly(
+        payload, [by_number[n] for n in (50, 51, 52, 53)],
+        decisions=decisions, band=DEFAULT_BAND, clips={}, runs=runs,
+    )
+
+    assert plan.two_column.get(50) is not None
+    for number, verse_id in (
+        (51, ("groupchild", 0, "text", 1)),
+        (52, ("text", 1)),
+        (53, ("groupchild", 0, "text", 1)),
+    ):
+        assert number not in plan.two_column
+        verse = plan.fits[number][verse_id]
+        assert verse.x == pytest.approx(43.0, abs=0.5)
+        assert verse.w == pytest.approx(1849.0, abs=0.5)
+
+    cluster_ids_51 = {("shape", 0), ("text", 0), ("text", 1)}
+    cluster_ids_52 = {("shape", 1), ("text", 2), ("text", 3)}
+    cluster_ids_53 = {("shape", 0), ("text", 0), ("text", 1)}
+    assert cluster_ids_51 <= set(plan.deletes[51])
+    assert cluster_ids_52 <= set(plan.deletes[52])
+    assert cluster_ids_53 <= set(plan.deletes[53])
+
+
+@pytest.mark.deck
+def test_gw54_unchanged_single_column(gw_inputs):
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, by_number, runs = gw_inputs
+    plan = _plan_one(payload, by_number[54], runs)
+
+    verse = plan.fits[54][("groupchild", 0, "text", 1)]
+    assert verse.x == pytest.approx(43.0, abs=0.5)
+    assert verse.w == pytest.approx(1849.0, abs=0.5)
+    assert 54 not in plan.two_column
+
+
+@pytest.mark.deck
+def test_gw57_heading_only_unchanged(gw_inputs):
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, by_number, runs = gw_inputs
+    plan = _plan_one(payload, by_number[57], runs)
+
+    assert 57 not in plan.two_column
+    assert 57 not in plan.stack_bands
+    heading = plan.fits[57][("text", 1)]
+    assert plan.text_sizes[57][("text", 1)] == pytest.approx(140.29535864978902, abs=0.01)
+    assert heading.h > 0

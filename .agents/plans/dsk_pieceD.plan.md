@@ -300,6 +300,59 @@ reports heights and applies writes.
     treats a stacked text child as autosize and never sets its height) and a live check
     against an actual fixed-frame-verse deck, since none exists in GW today.
 
+## D1b -- two-column heading+verse band
+
+Full design in `.agents/plans/dsk_pieceD1b.plan.md`. Summary of the landed piece (both parts):
+Section 4 (layout) and Section 5/5b (wiring + repeat-heading drop) below reproduce that plan's
+Section 2 gold table; deviations from the plan's own pre-implementation estimates are called out
+where `plan_assembly`'s measured output differs by more than 0.5pt.
+
+### Gold-deck measurements (verbatim from `dsk_pieceD1b.plan.md` Section 2)
+
+| gold | GW | heading | verse |
+|---|---|---|---|
+| 29 | 44 | "Praise and Worship" | 2 Kings 3:15 |
+| 30 | 46 | "Prayer" | James 5:16 |
+| 34 | 50 | "Your Faith" (GW: "Faith") | Luke 5:17 |
+| 35 / 36 / 37 | 51 / 52 / 53 | heading dropped by the owner | Luke 5:18 / 19 / 20 |
+| 39-42 | 56/57/... | heading-only, single centred column | -- |
+
+Heading-box centre x 267.5/267.5/268.0 -> left column centre 268.0; number badge x 245.0, w=46 on
+all three; `43.0 + 450.0/2 = 268.0` and `43 + 450 + 8 = 501` = the measured verse-column left edge.
+`HEADING_COL_W = 450.0`, `COL_GUTTER = 8.0`, `NUMBER_BADGE_PT = 46.0`, `MAX_HEADING_PT = 80.0`,
+`MAX_HEADING_BLOCK_PT = 140.0` (all constants in `dsk_assemble.py`, each landed in part 1).
+
+### Owner decisions
+
+- **Q1 -- repeated headings: DROP.** A heading cluster whose heading text equals the previous
+  in-deck slide's heading text (tracked across `kept_numbers` in ascending/in-deck order) is
+  suppressed: heading + number + circle move into `deletes` and the verse takes the full band as
+  a single-column text slide (`plan.two_column` gets no entry). Reproduces gold 35/36/37 for GW
+  51/52/53 exactly (verse `x=43.0 w=1849.0` in both cases).
+- **Q3 -- verse badge: unscaled.** The verse badge keeps its source size (645x92) in the column,
+  forced to `x = right_column.x_min` (left-aligned) -- no scaling. Proper template-slide badge
+  sizing is deferred to the next milestone.
+- Q2 (heading-only slides use a 140pt affine fit rather than the 80pt heading cap) is still open;
+  heading-only slides are unchanged by this piece (`test_gw57_heading_only_unchanged`).
+
+### Measured acceptance numbers (`tests/test_dsk_content_rules_acceptance.py`)
+
+GW44 and GW50 reproduce the plan's pre-implementation estimates within 0.5pt: heading
+`Rect(43.0, 834.8, 450.0, 159.8)` @ 60.0pt / `Rect(43.0, 858.2, 450.0, 113.6)` @ 80.0pt; number
+badge `Rect(245.0, ..., 46.0, 46.0)` on both; verse `t=0.59` (lead 41.3pt) / `t=0.48` (lead 33.6pt).
+
+**GW46 deviates from the plan doc's estimate** (heading top 870.7/height 113.6, verse lead 46.9pt
+at t=0.67): GW46's badge is a top-level 522.57x74.54 shape+text pair (not the 645x92 group-child
+badge the other five slides share), so its real `verse_block_top` differs from the doc's hand
+estimate. The measured, reproducible numbers are heading `h=113.56` (unchanged), verse `t=0.65`,
+lead `45.5pt` -- pinned in `test_gw46_two_column_top_level_verse` with the measured values and this
+note, per the brief's ">0.5pt: report and pin" rule.
+
+GW51/52/53 (repeat-drop): verse `x=43.0 w=1849.0` in all three; heading/number/circle land in
+`plan.deletes` (`{("shape", 0), ("text", 0), ("text", 1)}` for 51/53, `{("shape", 1), ("text", 2),
+("text", 3)}` for 52 -- GW52's items are indexed differently since its badge is top-level, not a
+group child). GW54 (no heading cluster) and GW57 (heading-only) are unchanged.
+
 ## Open questions (design-changing)
 
 1. **Stale read-back (F3).** Is the two-consecutive-reads poll enough, or does Keynote only settle the height

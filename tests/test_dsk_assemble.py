@@ -1692,10 +1692,13 @@ def test_gw_text_slides_stay_within_band_top():
 
 
 def test_gw51_badge_x_clears_title_right_edge():
-    # F1: GW 51's short row also holds the kept title (`text 1`) and its number/bullet
-    # (`text 0`) -- the centred badge rule used to draw the badge on top of the title
-    # (~86pt overlap). The badge must now be placed via the group's own fitted x, which
-    # clears the title's right edge.
+    # F1 originally pinned GW 51's badge to the group's own fitted x so it cleared the
+    # kept title's right edge under the old single-column short row. D1b wires
+    # `_heading_cluster`: planned alone (no preceding slide, so the Q1 repeat-drop
+    # cannot fire) GW 51 now takes the two-column path, whose verse column is a
+    # disjoint region starting at `HEADING_COL_W + COL_GUTTER` past the band's left
+    # edge -- the title lives in the left column entirely, so the invariant (badge
+    # clear of the title) still holds, just via a different mechanism.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, classes, runs = load_assembly_inputs(GW_DECK)
@@ -1706,7 +1709,7 @@ def test_gw51_badge_x_clears_title_right_edge():
     title_rect = plan.fits[51][("text", 1)]
     badge_rect = plan.fits[51][("groupchild", 0, "shape", 0)]
     assert badge_rect.x >= title_rect.x + title_rect.w
-    assert badge_rect.x == pytest.approx(1069.99, abs=0.5)
+    assert badge_rect.x == pytest.approx(501.0, abs=0.5)
 
 
 def test_gw_group_text_slides_short_row_stays_within_band_x():
@@ -1734,12 +1737,13 @@ def test_gw_group_text_slides_short_row_stays_within_band_x():
 
 
 def test_gw53_badge_x_clamped_to_band_right_edge():
-    # New finding 1: reproduces the real-deck defect -- GW 53's badge, placed at the
-    # group's fitted x plus its source offset, used to overhang the canvas by 213 pt.
-    # Opus D1 review 3 finding 1: `plan.fits[53]`'s insertion order puts the verse
-    # groupchild first -- it always spans the band exactly, so selecting "the first
-    # groupchild rect" asserted on the verse and passed even on the pre-fix code. Index
-    # the badge by its own id and pin the clamped value.
+    # New finding 1 originally reproduced a real-deck defect where GW 53's badge,
+    # placed at the group's fitted x plus its source offset, overhung the canvas.
+    # D1b wires `_heading_cluster`: planned alone (no preceding slide, so the Q1
+    # repeat-drop cannot fire) GW 53 now takes the two-column path, which force
+    # -aligns the badge to the verse column's own left edge instead of the group's
+    # fitted x -- no clamp warning is needed because the badge never leaves the
+    # column.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, classes, runs = load_assembly_inputs(GW_DECK)
@@ -1747,12 +1751,7 @@ def test_gw53_badge_x_clamped_to_band_right_edge():
     decisions = {53: SlideDecision(53, "in_deck")}
     plan = plan_assembly(payload, [by_number[53]], decisions=decisions, band=BAND, clips={}, runs=runs)
     badge = plan.fits[53][("groupchild", 0, "shape", 0)]
-    assert badge.x == pytest.approx(1246.97, abs=0.5)
-    assert badge.x + badge.w == pytest.approx(BAND.x_max, abs=1e-6)
-    assert any(
-        w.startswith("slide 53: group 0 child 0 badge x clamped ") and "to stay in the band" in w
-        for w in plan.warnings
-    )
+    assert badge.x == pytest.approx(501.0, abs=0.5)
 
 
 def test_short_row_rects_regression_moves_badge_out_of_band():
@@ -7309,6 +7308,62 @@ def test_min_text_pt_forces_split():
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0)
     assert plan.parts[17] == 2
     assert len(plan.splits[17]) == 2
+
+
+# --------------------------------------------------------------------------
+# D1b -- two-column heading+verse band, wired into plan_assembly.
+# --------------------------------------------------------------------------
+def _two_column_slide(number, verse_text, *, verse_w=1800, verse_h=300):
+    # Coordinates fall inside `CENTRE_PANEL_RECT` (x in [1920, 5760]) -- outside it,
+    # `classify_slide` drops these items as side-panel content.
+    circle = {"kind": "shape", "kindIndex": 0, "x": 2200, "y": 300, "w": 81, "h": 81, "text": ""}
+    number_item = {
+        "kind": "text", "kindIndex": 1, "x": 2220, "y": 320, "w": 41, "h": 41,
+        "text": "3", "font": "AzoSans-Bold", "size": 60.0,
+    }
+    heading = {
+        "kind": "text", "kindIndex": 2, "x": 2000, "y": 500, "w": 1600, "h": 150,
+        "text": "Faith", "font": "ArgentCF-Bold", "size": 80.0,
+    }
+    verse = {
+        "kind": "text", "kindIndex": 3, "x": 3800, "y": 700, "w": verse_w, "h": verse_h,
+        "text": verse_text, "font": "AzoSans-Regular", "size": 70.0,
+    }
+    return _slide(number, [circle, number_item, heading, verse])
+
+
+def test_two_column_short_fit_excludes_heading():
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide = _two_column_slide(17, _VERSE_1)
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+    assert plan.stack_bands[17].x_min == pytest.approx(501.0, abs=0.01)
+    short_fit = plan.short_fit.get(17, {})
+    assert ("text", 1) not in short_fit
+    assert ("text", 2) not in short_fit
+    assert ("shape", 0) not in short_fit
+    assert ("text", 2) in plan.fits[17]
+    assert plan.fits[17][("text", 2)].x == pytest.approx(43.0, abs=0.01)
+    assert plan.two_column[17].x_max == pytest.approx(493.0, abs=0.01)
+
+
+def test_two_column_refuses_instead_of_splitting():
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    long_verse = " ".join([_VERSE_1, _VERSE_2, _VERSE_1, _VERSE_2, _VERSE_1, _VERSE_2])
+    slide = _two_column_slide(17, long_verse)
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="two-column verse does not fit"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={},
+            min_text_pt=60.0, allow_split=True,
+        )
 
 
 # --------------------------------------------------------------------------

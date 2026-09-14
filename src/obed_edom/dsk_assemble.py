@@ -48,6 +48,7 @@ from obed_edom.dsk_plan import (
     _TEXT_GAP_PT,
     _word_count,
     classify_deck,
+    fit_heading_pt,
     fit_slide,
     fit_text_stack,
     plan_crops,
@@ -171,6 +172,7 @@ class AssemblyPlan:
     short_row_h: dict[int, float] = field(default_factory=dict)
     crops: dict[int, dict[ItemId, CropSpec]] = field(default_factory=dict)
     anchors: dict[int, str] = field(default_factory=dict)
+    two_column: dict[int, Band] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -570,6 +572,79 @@ def _heading_cluster(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) -> Hea
     return HeadingCluster(heading_id, number_id, circle_id)
 
 
+def _heading_text_for_repeat_check(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) -> str | None:
+    """The slide's single kept top-level ``ArgentCF*`` heading text (stripped), or
+    ``None`` when there is none or more than one -- used for the D1b Q1 repeat-heading
+    drop, which must also see heading-only slides (no verse, so `_heading_cluster`
+    itself never fires for them)."""
+    candidates = [
+        item.get("text", "").strip()
+        for item_id, item in items_by_id.items()
+        if item_id[0] == "text"
+        and item_id in cls.kept
+        and (item.get("font") or "").startswith(_HEADING_FONT_PREFIX)
+        and (item.get("text") or "").strip()
+        and _word_count((item.get("text") or "").strip()) <= _HEADING_MAX_WORDS
+    ]
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def _two_column_rects(
+    number: int,
+    cluster: HeadingCluster,
+    items_by_id: Mapping[ItemId, dict],
+    band: Band,
+    verse_block_top: float,
+    warnings: list[str],
+) -> tuple[dict[ItemId, Rect], dict[ItemId, float], Band]:
+    """Left-column rects (heading text, number circle, numeral) for a two-column
+    heading+verse band (D1b Section 4); ``verse_block_top`` is the top y of the already
+    -placed right column (the verse badge when present, else the verse text itself),
+    used to vertically centre the left block on it. Raises `AssemblyRefusal` per the
+    Section 4 refusals (heading does not fit, or its font/numeral size is unresolved)."""
+    del warnings
+    left = Band(band.bottom, band.height, band.x_min, band.x_min + HEADING_COL_W, band.sample_count)
+    heading_item = items_by_id[cluster.heading_id]
+    heading_text = heading_item.get("text") or ""
+    heading_font = heading_item.get("font") or ""
+    number_item = items_by_id[cluster.number_id]
+    numeral_source_size = number_item.get("size")
+    if not heading_font or not numeral_source_size:
+        raise AssemblyRefusal(
+            f"slide {number}: two-column heading font or number size unresolved -- refusing to "
+            "write blind"
+        )
+    avail_h = band.height - NUMBER_BADGE_PT - _TEXT_STACK_GAP
+    heading_pt = fit_heading_pt(
+        heading_text, heading_font, HEADING_COL_W, avail_h,
+        max_pt=MAX_HEADING_PT, max_block_pt=MAX_HEADING_BLOCK_PT, min_pt=DEFAULT_MIN_TEXT_PT,
+    )
+    if heading_pt is None:
+        raise AssemblyRefusal(
+            f"slide {number}: two-column heading does not fit the heading column -- refusing to split"
+        )
+    heading_h = wrapped_height(heading_text, heading_font, heading_pt, HEADING_COL_W)
+    if heading_h is None:
+        raise AssemblyRefusal(f"slide {number}: two-column heading height unresolved -- refusing to write blind")
+
+    block_h = NUMBER_BADGE_PT + _TEXT_STACK_GAP + heading_h
+    right_block_centre = (verse_block_top + band.bottom) / 2.0
+    circle_y = right_block_centre - block_h / 2.0
+    heading_y = circle_y + NUMBER_BADGE_PT + _TEXT_STACK_GAP
+    circle_x = left.x_min + HEADING_COL_W / 2.0 - NUMBER_BADGE_PT / 2.0
+
+    rects = {
+        cluster.heading_id: Rect(left.x_min, heading_y, HEADING_COL_W, heading_h),
+        cluster.circle_id: Rect(circle_x, circle_y, NUMBER_BADGE_PT, NUMBER_BADGE_PT),
+        cluster.number_id: Rect(circle_x, circle_y, NUMBER_BADGE_PT, NUMBER_BADGE_PT),
+    }
+    numeral_pt = float(numeral_source_size) * (NUMBER_BADGE_PT / _HEADING_CIRCLE_PT)
+    sizes = {cluster.heading_id: heading_pt, cluster.number_id: numeral_pt}
+    return rects, sizes, left
+
+
 def _content_ids(
     cls: SlideClass,
     *,
@@ -698,6 +773,8 @@ def plan_assembly(
     short_row_h_map: dict[int, float] = {}
     crops_out: dict[int, dict[ItemId, CropSpec]] = {}
     anchors_out: dict[int, str] = {}
+    two_column_map: dict[int, Band] = {}
+    prev_heading_text: str | None = None
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
     if objects_graph is None and fw_deck is not None:
@@ -880,6 +957,33 @@ def plan_assembly(
             )
             deletes[number] = base_deletes
 
+            heading_text_this_slide = _heading_text_for_repeat_check(cls, items_by_id)
+            cluster = _heading_cluster(cls, items_by_id)
+            is_repeat_heading = (
+                cluster is not None
+                and heading_text_this_slide is not None
+                and prev_heading_text is not None
+                and heading_text_this_slide == prev_heading_text
+            )
+            if heading_text_this_slide is not None:
+                prev_heading_text = heading_text_this_slide
+            cluster_ids: set[ItemId] = set()
+            if cluster is not None:
+                cluster_ids = {cluster.heading_id, cluster.number_id, cluster.circle_id}
+            if is_repeat_heading:
+                # Owner Q1: the repeated heading is dropped entirely rather than
+                # two-columned -- the verse then takes the full band (measured GW
+                # 50 -> 51 -> 52 -> 53 against gold 34 -> 35 -> 36 -> 37).
+                for cid in cluster_ids:
+                    fit.pop(cid, None)
+                deletes[number] = _delete_order(list(base_deletes) + list(cluster_ids), id_by_item)
+                cluster = None
+                cluster_ids = set()
+            elif cluster is not None and slide_crops:
+                raise AssemblyRefusal(
+                    f"slide {number}: two-column verse and image crop both apply -- unsupported"
+                )
+
             stacked_ids: set[ItemId] = set()
             stacked_text_sizes: dict[ItemId, float] = {}
             stacked_shrink_only_sizes: dict[ItemId, float] = {}
@@ -914,8 +1018,14 @@ def plan_assembly(
                     group_top_rects = {ki: fit.get(("group", ki)) for ki in text_group_kis}
                     short_fit = {
                         iid: rect for iid, rect in fit.items()
-                        if iid not in long_id_set and iid not in group_top_ids
+                        if iid not in long_id_set and iid not in group_top_ids and iid not in cluster_ids
                     }
+                    col_band = band
+                    if cluster is not None:
+                        col_band = Band(
+                            band.bottom, band.height, band.x_min + HEADING_COL_W + COL_GUTTER,
+                            band.x_max, band.sample_count,
+                        )
                     # The group itself takes no affine path on a text slide (Design A
                     # step 4): drop its own top-level fit entry so `_slide_lines` never
                     # falls into `_group_blind_child_lines` for it.
@@ -943,16 +1053,16 @@ def plan_assembly(
                         badge_id = ("groupchild", group_ki, child["kind"], child["kindIndex"])
                         badge_w = float(child.get("w", 0.0))
                         badge_h = float(child.get("h", 0.0))
-                        if badge_w > band.width:
+                        if badge_w > col_band.width:
                             raise AssemblyRefusal(
                                 f"slide {number}: group {group_ki} child {child['kindIndex']} is "
                                 "wider than the band -- refusing to place"
                             )
                         if sole_occupant or group_rect is None:
-                            badge_x = band.x_min + (band.width - badge_w) / 2.0
+                            badge_x = col_band.x_min + (col_band.width - badge_w) / 2.0
                         else:
                             badge_x = group_rect.x + (float(child.get("x", 0.0)) - origin_x)
-                        clamped_x = min(max(badge_x, band.x_min), band.x_max - badge_w)
+                        clamped_x = min(max(badge_x, col_band.x_min), col_band.x_max - badge_w)
                         if clamped_x != badge_x:
                             warnings.append(
                                 f"slide {number}: group {group_ki} child {child['kindIndex']} badge x "
@@ -960,13 +1070,23 @@ def plan_assembly(
                             )
                         badge_x = clamped_x
                         short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
+                    if cluster is not None:
+                        # Owner Q3: the verse badge keeps its source size in the column,
+                        # left-aligned to the verse column's own left edge.
+                        for badge_id, rect in short_fit.items():
+                            if rect.w > col_band.width:
+                                raise AssemblyRefusal(
+                                    f"slide {number}: verse badge {_item_label(badge_id)} is wider "
+                                    "than the two-column verse column -- refusing to place"
+                                )
+                        short_fit = {iid: _dc_replace(rect, x=col_band.x_min) for iid, rect in short_fit.items()}
                     _refuse_on_short_row_overlap(number, short_fit)
-                    stack_band = band
+                    stack_band = col_band
                     short_row_h = 0.0
                     if short_fit:
                         short_row_h = max(rect.h for rect in short_fit.values())
-                        budget = max(0.0, band.height - short_row_h - _TEXT_STACK_GAP)
-                        stack_band = _dc_replace(band, height=budget)
+                        budget = max(0.0, col_band.height - short_row_h - _TEXT_STACK_GAP)
+                        stack_band = _dc_replace(col_band, height=budget)
 
                     forced_parts = (split_overrides or {}).get(number)
                     if forced_parts is not None:
@@ -982,9 +1102,11 @@ def plan_assembly(
                         stack_t_map[number] = t
                         long_rects = _stacked_text_rects(boxes, heights, stack_band)
                         fit.update(long_rects)
+                        short_rects: dict[ItemId, Rect] = {}
                         if short_fit:
                             stack_top = min(rect.y for rect in long_rects.values())
-                            fit.update(_short_row_rects(short_fit, short_row_h, stack_top))
+                            short_rects = _short_row_rects(short_fit, short_row_h, stack_top)
+                            fit.update(short_rects)
                         stacked_ids = {box.item_id for box in boxes}
                         for box in boxes:
                             if box.item_id[0] == "groupchild":
@@ -1026,6 +1148,19 @@ def plan_assembly(
                                 stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
                             else:
                                 stacked_text_sizes[box.item_id] = sizes[box.item_id]
+                        if cluster is not None:
+                            verse_block_top = min((short_rects or long_rects).values(), key=lambda r: r.y).y
+                            two_col_rects, two_col_sizes, left_band = _two_column_rects(
+                                number, cluster, items_by_id, band, verse_block_top, warnings,
+                            )
+                            fit.update(two_col_rects)
+                            stacked_text_sizes.update(two_col_sizes)
+                            two_column_map[number] = left_band
+                    elif cluster is not None:
+                        raise AssemblyRefusal(
+                            f"slide {number}: two-column verse does not fit the verse column at "
+                            f"--min-text-pt {min_text_pt}"
+                        )
                     elif not allow_split:
                         raise AssemblyRefusal(
                             f"slide {number}: text does not fit the band at --min-text-pt {min_text_pt}"
@@ -1133,7 +1268,7 @@ def plan_assembly(
             slide_shrink_sizes: dict[ItemId, float] = {}
             slide_autosize: set[ItemId] = set()
             for iid in cls.kept:
-                if iid[0] != "text" or iid in stacked_ids:
+                if iid[0] != "text" or iid in stacked_ids or iid in cluster_ids:
                     continue
                 item = items_by_id.get(iid)
                 if item is None:
@@ -1232,6 +1367,7 @@ def plan_assembly(
         short_row_h=short_row_h_map,
         crops=crops_out,
         anchors=anchors_out,
+        two_column=two_column_map,
     )
 
 
