@@ -9170,3 +9170,262 @@ def test_gw44_50_two_column_resolves_point_3_lines_geometry_unchanged():
     )
     assert plan.fits[44] == plan_preserve.fits[44]
     assert plan.fits[50] == plan_preserve.fits[50]
+
+
+def test_find_verse_badge_id_requires_matched_text_shape_not_any_lone_text():
+    # Finding 1: the badge predicate is the SAME one D1b's `_heading_cluster` uses for
+    # its own badge -- a top-level text matching exactly one top-level shape's rect and
+    # text -- never "any lone extra text". A lone extra text with no matching shape
+    # (e.g. a stray caption) must NOT be treated as a badge.
+    from obed_edom.dsk_plan import SlideClass
+
+    verse = _text_item(1, x=43.0, y=810.0, w=1849.0, h=200.0, runs=[{"text": "verse body", "size": 45.0}])
+    verse["text"] = "verse body"
+    verse["font"] = "AzoSans-Regular"
+    stray = _text_item(0, x=44.0, y=719.0, w=651.0, h=81.0, runs=[{"text": "unmatched caption", "size": 40.0}])
+    stray["text"] = "unmatched caption"
+    stray["font"] = "AzoSans-Bold"
+    items_by_id = {("text", 1): verse, ("text", 0): stray}
+    cls = SlideClass(
+        number=1, category="built", build_count=0, movie_count=0,
+        kept=(("text", 1), ("text", 0)), dropped_side=(), dropped_backdrop=(),
+        transition=None, is_text=True, long_text_ids=(("text", 1),),
+    )
+    assert dsa._find_verse_badge_id(cls, items_by_id) is None
+
+    badge_shape = {"kind": "shape", "kindIndex": 0, "x": 44.0, "y": 719.0, "w": 651.0, "h": 81.0}
+    badge_shape["text"] = "unmatched caption"
+    items_by_id_with_shape = dict(items_by_id)
+    items_by_id_with_shape[("shape", 0)] = badge_shape
+    cls_with_shape = dsk_plan.SlideClass(
+        **{**cls.__dict__, "kept": (("text", 1), ("text", 0), ("shape", 0))}
+    )
+    assert dsa._find_verse_badge_id(cls_with_shape, items_by_id_with_shape) == ("text", 0)
+
+
+def test_find_verse_badge_id_falls_back_to_retained_group_child_short_fit():
+    # Finding 1: a group-child verse (GW5/51/53/54-shaped) leaves no top-level text
+    # badge behind -- the badge is a retained group-child short item, already placed in
+    # `short_fit` by the time the badge predicate runs.
+    from obed_edom.dsk_plan import SlideClass
+
+    cls = SlideClass(
+        number=1, category="built", build_count=0, movie_count=0,
+        kept=(("group", 0),), dropped_side=(), dropped_backdrop=(),
+        transition=None, is_text=True, long_text_ids=(("groupchild", 0, "text", 1),),
+    )
+    short_fit = {("groupchild", 0, "shape", 0): Rect(63.1, 0.0, 645.0, 92.0)}
+    assert dsa._find_verse_badge_id(cls, {}, short_fit=short_fit) == ("groupchild", 0, "shape", 0)
+    # Ambiguous with two group-child short items: refuse to guess.
+    short_fit_ambiguous = dict(short_fit)
+    short_fit_ambiguous[("groupchild", 0, "shape", 1)] = Rect(63.1, 0.0, 200.0, 92.0)
+    assert dsa._find_verse_badge_id(cls, {}, short_fit=short_fit_ambiguous) is None
+
+
+def test_gw51_group_child_verse_resolves_verse_standard_and_slot_rects():
+    # Finding 1: GW 51 repeats GW 50's "Faith" heading -- the two-column cluster drops
+    # (D1b's repeat-heading rule), leaving a plain group-child verse whose badge is the
+    # retained group-child reference ("Luke 5") -- it must resolve to the verse layout,
+    # not silently fall back to Blank Black (the round-B bug).
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {51: SlideDecision(51, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[51]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[51] == "Verse Standard (Variation 2)"
+    verse_id = by_number[51].long_text_ids[0]
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    verse_rect = plan.fits[51][verse_id]
+    assert verse_rect.x == slot.verse.x
+    assert verse_rect.w == slot.verse.w
+    assert verse_rect.y + verse_rect.h == pytest.approx(slot.verse.y + slot.verse.h)
+    badge_rects = [
+        rect for iid, rect in plan.fits[51].items()
+        if iid[0] == "groupchild" and iid != verse_id
+    ]
+    assert len(badge_rects) == 1
+    assert badge_rects[0].x == slot.badge.x
+    assert badge_rects[0].w == slot.badge.w
+    assert badge_rects[0].h == slot.badge.h
+
+
+def test_gw17_two_top_level_boxes_stack_inside_the_verse_slot():
+    # Finding 1: GW 17's verse is split across two top-level text boxes (not a
+    # group) -- both must stack inside the SAME verse slot, not fall back to Blank
+    # Black for having more than one long text box.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[17]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[17] == "Verse Standard (Variation 2)"
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    long_ids = by_number[17].long_text_ids
+    assert len(long_ids) == 2
+    for iid in long_ids:
+        rect = plan.fits[17][iid]
+        assert rect.x == slot.verse.x
+        assert rect.w == slot.verse.w
+    tops = sorted(plan.fits[17][iid].y for iid in long_ids)
+    bottoms = sorted(plan.fits[17][iid].y + plan.fits[17][iid].h for iid in long_ids)
+    assert bottoms[-1] == pytest.approx(slot.verse.y + slot.verse.h)
+    assert tops[0] >= slot.verse.y - 0.01
+
+
+def test_gw52_repeat_heading_dropped_resolves_verse_standard():
+    # Finding 1: GW 52 repeats GW 51's "Faith" heading -- once D1b drops it, the
+    # remaining top-level text is the badge ("Luke 5") matched to its shape, so the
+    # slide must resolve to a verse layout, not `Point 3 Lines` (the round-B bug, where
+    # `_find_verse_badge_id` read the pre-plan `cls.kept`, still counting the
+    # about-to-be-deleted heading/number/circle as ambiguous extra texts).
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {52: SlideDecision(52, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[52]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[52] == "Verse Standard (Variation 2)"
+    assert 52 in plan.splits  # GW 52's verse needs more than 3 lines at 45pt
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    for part in plan.splits[52]:
+        verse_id = by_number[52].long_text_ids[0]
+        assert part.fits[verse_id] == slot.verse
+        # Exactly one retained short item (the badge `_find_verse_badge_id` matched to
+        # its shape) is snapped to the badge slot -- any sibling item sharing the same
+        # source text/rect (e.g. the shape half of a text/shape badge pair) keeps its
+        # own natural short-row position, unmoved.
+        snapped = [
+            iid for iid, rect in part.fits.items()
+            if iid != verse_id and rect.x == slot.badge.x and rect.w == slot.badge.w
+            and rect.h == slot.badge.h
+        ]
+        assert len(snapped) == 1
+
+
+def test_gw44_50_unchanged_by_finding_1_role_resolver():
+    # Finding 5 regression: the two-column path (GW 44/50, first occurrence of their
+    # heading) must still resolve `Point 3 Lines` with D1b's hand geometry byte-
+    # identical -- finding 1's broadened slot eligibility must never touch a two-column
+    # slide.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {44: SlideDecision(44, "in_deck"), 50: SlideDecision(50, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[44], by_number[50]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[44] == "Point 3 Lines"
+    assert names[50] == "Point 3 Lines"
+    plan_preserve = plan_assembly(
+        payload, [by_number[44], by_number[50]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="preserve",
+    )
+    assert plan.fits[44] == plan_preserve.fits[44]
+    assert plan.fits[50] == plan_preserve.fits[50]
+
+
+def test_verify_staged_layouts_refuses_wrong_layout_name(monkeypatch, tmp_path):
+    # Finding 4: an alpha-safe but WRONG base layout must refuse, not silently pass --
+    # the pre-existing check only asserted alpha-safety, which every layout in
+    # `LAYOUT_SLOTS` satisfies.
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={}, short_fit={},
+    )
+
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (1920.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(dsa, "_base_layout_slide_for_ordinal", lambda objects, ordinal: {"name": "Blank Black"})
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+
+    with pytest.raises(AssemblyRefusal, match="resolved to 'Blank Black'"):
+        dsa.verify_staged_layouts_alpha_safe(
+            tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
+        )
+
+
+def test_verify_staged_layouts_refuses_wrong_verse_rect(monkeypatch, tmp_path):
+    # Finding 4: the right layout name with a retained verse rect that does NOT match
+    # the slot must also refuse.
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={1: frozenset({("text", 1)})}, short_fit={},
+    )
+
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    wrong_rec = {"kind": "text", "kindIndex": 1, "x": 0.0, "y": 0.0, "w": 100.0, "h": 50.0}
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (1920.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        dsa, "_base_layout_slide_for_ordinal",
+        lambda objects, ordinal: {"name": "Verse Standard (Variation 2)"},
+    )
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+    monkeypatch.setattr(dsa, "compose_geometry", lambda slide, objects: [wrong_rec])
+
+    with pytest.raises(AssemblyRefusal, match="does not match"):
+        dsa.verify_staged_layouts_alpha_safe(
+            tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
+        )
+
+
+def test_verify_staged_layouts_accepts_matching_verse_rect(monkeypatch, tmp_path):
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={1: frozenset({("text", 1)})},
+        short_fit={1: {("text", 0): slot.badge}},
+    )
+
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    verse_rec = {
+        "kind": "text", "kindIndex": 1,
+        "x": slot.verse.x, "y": slot.verse.y + slot.verse.h - 100.0, "w": slot.verse.w, "h": 100.0,
+    }
+    badge_rec = {"kind": "text", "kindIndex": 0, "x": slot.badge.x, "y": 700.0, "w": slot.badge.w, "h": slot.badge.h}
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (1920.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        dsa, "_base_layout_slide_for_ordinal",
+        lambda objects, ordinal: {"name": "Verse Standard (Variation 2)"},
+    )
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+    monkeypatch.setattr(dsa, "compose_geometry", lambda slide, objects: [verse_rec, badge_rec])
+
+    dsa.verify_staged_layouts_alpha_safe(
+        tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
+    )

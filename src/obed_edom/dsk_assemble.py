@@ -190,20 +190,58 @@ def layout_for_slide(*, category: LayoutSlideCategory, two_column: bool, line_co
     return None
 
 
-def _find_verse_badge_id(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) -> ItemId | None:
-    """The single kept top-level ``text`` item, other than a long (verse) text, carrying
-    non-empty text -- the verse reference/badge tag (GW13-shaped). ``None`` when there is
-    none or more than one (ambiguous, so the slide is treated as ``point`` rather than
-    guessed at)."""
+def _find_verse_badge_id(
+    cls: SlideClass,
+    items_by_id: Mapping[ItemId, dict],
+    *,
+    exclude: frozenset[ItemId] = frozenset(),
+    short_fit: Mapping[ItemId, Rect] | None = None,
+) -> ItemId | None:
+    """The verse reference/badge id, resolved with the SAME predicate D1b's
+    ``_heading_cluster`` uses for its own badge (finding 1): a kept top-level ``text``
+    item, other than a long (verse) text or an ``exclude``d id (e.g. a repeat-heading
+    cluster's ids, already retained-plan-dropped), whose normalised text matches exactly
+    one kept top-level ``shape``'s rect and text (GW13/46/52-shaped) -- never any lone
+    extra text. When no top-level text matches, falls back to the single retained
+    ``groupchild`` short item already placed in ``short_fit`` (GW5/44/50/51/53/54-shaped,
+    where the badge is a group child and no top-level text is left behind). ``None`` when
+    there is no match or more than one (ambiguous, so the slide is treated as ``point``
+    rather than guessed at)."""
     long_ids = set(cls.long_text_ids)
-    candidates = [
-        item_id for item_id in cls.kept
-        if item_id[0] == "text" and item_id not in long_ids
-        and (items_by_id.get(item_id) or {}).get("text", "").strip()
+    texts = [
+        (item_id, items_by_id[item_id]) for item_id in cls.kept
+        if item_id[0] == "text" and item_id not in long_ids and item_id not in exclude
+        and item_id in items_by_id
     ]
-    if len(candidates) != 1:
+    shapes = [
+        (item_id, items_by_id[item_id]) for item_id in cls.kept
+        if item_id[0] == "shape" and item_id not in exclude and item_id in items_by_id
+    ]
+    candidates: list[ItemId] = []
+    for text_id, text_item in texts:
+        badge_text = _normalise_ws(text_item.get("text") or "")
+        if not badge_text:
+            continue
+        rect = _rect_of(text_item)
+        matches = [
+            shape_id for shape_id, shape_item in shapes
+            if _rects_match(rect, _rect_of(shape_item), _HEADING_GEOM_TOL_PT)
+            and _normalise_ws(shape_item.get("text") or "") == badge_text
+        ]
+        if len(matches) == 1:
+            candidates.append(text_id)
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
         return None
-    return candidates[0]
+    if short_fit:
+        group_badges = [
+            item_id for item_id in short_fit
+            if item_id[0] == "groupchild" and item_id not in long_ids
+        ]
+        if len(group_badges) == 1:
+            return group_badges[0]
+    return None
 
 
 def _slot_band(rect: Rect, *, sample_count: int = DEFAULT_BAND.sample_count) -> Band:
@@ -1289,10 +1327,12 @@ def plan_assembly(
             cluster_ids: set[ItemId] = set()
             if cluster is not None:
                 cluster_ids = {cluster.heading_id, cluster.number_id, cluster.circle_id}
+            dropped_heading_ids: frozenset[ItemId] = frozenset()
             if is_repeat_heading:
                 for cid in cluster_ids:
                     fit.pop(cid, None)
                 deletes[number] = _delete_order(list(base_deletes) + list(cluster_ids), id_by_item)
+                dropped_heading_ids = frozenset(cluster_ids)
                 cluster = None
                 cluster_ids = set()
             elif cluster is not None and slide_crops:
@@ -1410,33 +1450,51 @@ def plan_assembly(
                         short_fit = {iid: _dc_replace(rect, x=col_band.x_min) for iid, rect in short_fit.items()}
                     _refuse_on_short_row_overlap(number, short_fit)
 
-                    # L3 (finding 2): a single top-level long text box, not two-column,
-                    # threads the layout slot INTO planning -- the slot's own rect
-                    # becomes the stack band and its 45pt/40pt sizes are authoritative,
-                    # instead of a post-plan override that left the stack/refit/typography
-                    # deriving from DEFAULT_BAND behind its back. Finding 1's role
-                    # resolver (group-child verses, GW17-shaped multi-box verses) is out
-                    # of scope for this round -- only plugged in later.
+                    # L3 (finding 2) + finding 1: a slide whose long text is a single
+                    # top-level box, a single retained group-child box (GW5/51/53/54,
+                    # not two-column), or several top-level boxes stacked together
+                    # (GW17) threads the layout slot INTO planning -- the slot's own
+                    # rect becomes the stack band and its 45pt/40pt sizes are
+                    # authoritative, instead of a post-plan override that left the
+                    # stack/refit/typography deriving from DEFAULT_BAND behind its back.
+                    # The badge (verse vs. point) is resolved from the RETAINED plan --
+                    # ``exclude`` drops a repeat-heading cluster's ids and ``short_fit``
+                    # already carries a retained group-child badge -- via the same
+                    # matched-text/shape (or group-child) predicate D1b's two-column
+                    # path uses, never "any lone extra text".
                     slot_category: LayoutSlideCategory | None = None
                     slot_layout_name: str | None = None
                     slot_eligible = (
                         layout_policy == "import"
-                        and cluster is None and len(boxes) == len(long_ids) == 1
-                        and long_ids[0][0] == "text"
+                        and cluster is None and len(boxes) == len(long_ids) >= 1
+                        and all(iid[0] in ("text", "groupchild") for iid in long_ids)
                     )
                     if slot_eligible:
-                        slot_long_item = items_by_id[long_ids[0]]
-                        slot_badge_id = _find_verse_badge_id(cls, items_by_id)
+                        slot_badge_id = _find_verse_badge_id(
+                            cls, items_by_id, exclude=dropped_heading_ids, short_fit=short_fit,
+                        )
                         slot_category = "verse" if slot_badge_id is not None else "point"
                         slot_verse_slot = LAYOUT_SLOTS["Verse Standard (Variation 2)"]
                         slot_point_slot = LAYOUT_SLOTS["Point 3 Lines"]
                         slot_candidate_width = (
                             slot_verse_slot.verse.w if slot_category == "verse" else slot_point_slot.text.w
                         )
-                        slot_lines = _line_count(
-                            slot_long_item.get("text") or "", slot_long_item.get("font") or "",
-                            45.0, slot_candidate_width,
-                        )
+                        slot_lines_total = 0
+                        slot_lines_ok = True
+                        for long_id in long_ids:
+                            if long_id[0] == "groupchild":
+                                _tag, g_ki, _c_kind, c_ki = long_id
+                                c_info = (group_child_runs_map.get(g_ki) or {}).get(c_ki) or {}
+                                box_text, box_font = c_info.get("text") or "", c_info.get("font") or ""
+                            else:
+                                slot_long_item = items_by_id[long_id]
+                                box_text, box_font = slot_long_item.get("text") or "", slot_long_item.get("font") or ""
+                            box_lines = _line_count(box_text, box_font, 45.0, slot_candidate_width)
+                            if box_lines is None:
+                                slot_lines_ok = False
+                                break
+                            slot_lines_total += box_lines
+                        slot_lines = slot_lines_total if slot_lines_ok else None
                         slot_layout_name = (
                             layout_for_slide(category=slot_category, two_column=False, line_count=slot_lines)
                             if slot_lines is not None else None
@@ -1470,20 +1528,48 @@ def plan_assembly(
                         slot_rect = slot.verse if slot_category == "verse" else slot.text
                         slot_pt = slot.verse_pt if slot_category == "verse" else slot.text_pt
                         stack_band = _slot_band(slot_rect)
-                        slot_box = boxes[0]
-                        slot_t = slot_pt / slot_box.size if slot_box.size else 1.0
-                        if slot_box.runs:
-                            slot_h = wrapped_height_runs(
-                                tuple(Run(r.text, r.font_name, r.size * slot_t) for r in slot_box.runs),
-                                stack_band.width,
-                            )
-                        else:
-                            slot_h = wrapped_height(slot_box.text, slot_box.font_name, slot_box.size * slot_t, stack_band.width)
-                        if (
-                            slot_h is not None and slot_t >= _box_min_t(slot_box, min_text_pt)
-                            and slot_h + _TEXT_STACK_GAP <= stack_band.height
-                        ):
-                            slot_result = (slot_t, {slot_box.item_id: slot_box.size * slot_t}, {slot_box.item_id: slot_h})
+                        # A slot always carries one authoritative lead size (45pt);
+                        # ``t`` is derived from the first (lead) box and applied to every
+                        # box sharing the slot (GW17 -- both boxes are the same verse's
+                        # own font/size), each re-checked against its own floor/wrap.
+                        lead_box = boxes[0]
+                        slot_t = slot_pt / lead_box.size if lead_box.size else 1.0
+                        slot_sizes: dict[ItemId, float] = {}
+                        slot_heights: dict[ItemId, float] = {}
+                        slot_fits_all = True
+                        for slot_box in boxes:
+                            if slot_t < _box_min_t(slot_box, min_text_pt):
+                                slot_fits_all = False
+                                break
+                            if slot_box.runs:
+                                slot_h = wrapped_height_runs(
+                                    tuple(Run(r.text, r.font_name, r.size * slot_t) for r in slot_box.runs),
+                                    stack_band.width,
+                                )
+                            else:
+                                slot_h = wrapped_height(
+                                    slot_box.text, slot_box.font_name, slot_box.size * slot_t, stack_band.width
+                                )
+                            if slot_h is None:
+                                slot_fits_all = False
+                                break
+                            slot_sizes[slot_box.item_id] = slot_box.size * slot_t
+                            slot_heights[slot_box.item_id] = slot_h
+                        slot_total_h = (
+                            sum(slot_heights.values()) + _TEXT_STACK_GAP * (len(boxes) - 1)
+                            if slot_fits_all else None
+                        )
+                        if slot_fits_all and slot_total_h is not None and slot_total_h + _TEXT_STACK_GAP <= stack_band.height:
+                            slot_result = (slot_t, slot_sizes, slot_heights)
+                        elif len(boxes) > 1:
+                            # GW17-shaped: several boxes resolved to one slot/category but
+                            # cannot jointly stack inside it (per-box padding overhead) --
+                            # keep the slot as the budget/layout and fall through to the
+                            # generic per-box split below (finding 1), rather than the
+                            # single-box char-window split (which only ever touches
+                            # ``boxes[0]``) or DEFAULT_BAND. The badge stays snapped to
+                            # the slot for every resulting part.
+                            pass
                         else:
                             slot_layout_name = None
                             if slot_badge_id is not None and slot_badge_pt is not None:
@@ -1588,12 +1674,15 @@ def plan_assembly(
                             f"slide {number}: grouped verse text does not fit the band at "
                             f"--min-text-pt {min_text_pt} -- refusing to split text inside a group"
                         )
-                    elif slot_eligible and slot_category is not None and forced_parts is None:
+                    elif slot_eligible and slot_category is not None and forced_parts is None and len(boxes) == 1:
                         # Owner Q2/finding 3: a single verse/point box too long for its
                         # slot at 45pt (more than 3 lines) SPLITS by TEXT, every part
                         # fitted against the Standard slot -- never `DEFAULT_BAND`, and
                         # never more than 3 lines per part. ``allow_split`` was already
                         # checked above (``elif not allow_split``) before this branch.
+                        # A multi-box slide over the slot budget (GW17-shaped) falls
+                        # through to the generic per-box split below instead, on
+                        # DEFAULT_BAND -- no layout_names entry is recorded for it here.
                         if slide_crops:
                             raise AssemblyRefusal(
                                 f"slide {number}: text split and image crop both apply -- unsupported"
@@ -2109,13 +2198,34 @@ def check_layout_import_preconditions(
         raise AssemblyRefusal(str(exc)) from exc
 
 
-def verify_staged_layouts_alpha_safe(staging_path: Path, plan: AssemblyPlan) -> None:
+_SLOT_RECT_TOL_PT = 0.5
+
+
+def verify_staged_layouts_alpha_safe(
+    staging_path: Path,
+    plan: AssemblyPlan,
+    *,
+    expected_layout_names: Mapping[int, str] | None = None,
+) -> None:
     """Offline post-check for ``layout_policy="import"``, run against the assembled
     STAGING deck before it is published to ``out_path``: every kept slide's base layout
     (resolved via ``templateSlideId``) must be alpha-safe, AND the slide's own drawables
     (backdrops the plan failed to delete included) must leave no full-canvas coverage.
     Refuses (``AssemblyRefusal``) naming the first offending slide rather than publishing
-    a deck whose PNG stage export would come back opaque."""
+    a deck whose PNG stage export would come back opaque.
+
+    ``expected_layout_names`` (finding 4, plan §2.2/§3 L3 -- ``resolve_slide_layouts``'s
+    result, one entry per kept slide number) is the missing half of that check: an
+    alpha-safe layout can still be the WRONG one (``Blank Black``, a mismatched verse/
+    point layout, ...). When given, every output ordinal's ACTUAL resolved layout name
+    (read straight off the staged deck, not the plan) must equal the expected one for
+    its slide number, and -- for a verse/point layout, whose slot carries a ``verse``/
+    ``text`` rect -- the slide's own top-level long-text item(s) (``plan.stacked_ids``/
+    ``SplitPart.stacked_ids``, skipping any ``groupchild`` id, whose composed geometry a
+    nested group complicates) must sit at the slot's x/width, bottom-aligned to the
+    slot's own bottom, within `_SLOT_RECT_TOL_PT`; a slot carrying a ``badge`` rect is
+    checked the same way against whichever retained short item was itself snapped to
+    that exact x/w/h during planning (`plan.short_fit`)."""
     objects, _id_to_file, _file_ids = _load_deck(staging_path)
     canvas = _canvas_size(objects)
     ordinal_to_number = plan.ordinal_to_number or {
@@ -2125,9 +2235,10 @@ def verify_staged_layouts_alpha_safe(staging_path: Path, plan: AssemblyPlan) -> 
         layout = _base_layout_slide_for_ordinal(objects, ordinal)
         if layout is None:
             raise AssemblyRefusal(f"slide {number} (ordinal {ordinal}): base layout not resolvable offline")
+        actual_name = layout.get("name")
         if not layout_alpha_safe(layout, objects, canvas):
             raise AssemblyRefusal(
-                f"slide {number} (ordinal {ordinal}): base layout {layout.get('name')!r} is not alpha-safe"
+                f"slide {number} (ordinal {ordinal}): base layout {actual_name!r} is not alpha-safe"
             )
         slide = _slide_archive_for_ordinal(objects, ordinal)
         if slide is None:
@@ -2136,6 +2247,87 @@ def verify_staged_layouts_alpha_safe(staging_path: Path, plan: AssemblyPlan) -> 
             raise AssemblyRefusal(
                 f"slide {number} (ordinal {ordinal}): a full-canvas drawable remains on the slide itself"
             )
+
+        if expected_layout_names is None:
+            continue
+        expected_name = expected_layout_names.get(number)
+        if expected_name is None:
+            continue
+        if actual_name != expected_name:
+            raise AssemblyRefusal(
+                f"slide {number} (ordinal {ordinal}): base layout resolved to {actual_name!r}, "
+                f"expected {expected_name!r}"
+            )
+        slot = LAYOUT_SLOTS.get(expected_name)
+        if slot is None:
+            continue
+        slot_rect = slot.verse if slot.verse is not None else slot.text
+        records_by_addr: dict[ItemId, dict] | None = None
+
+        def _records() -> dict[ItemId, dict]:
+            nonlocal records_by_addr
+            if records_by_addr is None:
+                records_by_addr = {
+                    (rec["kind"], rec["kindIndex"]): rec for rec in compose_geometry(slide, objects)
+                }
+            return records_by_addr
+
+        def _refuse_rect(item_id: ItemId, rec: dict, target: Rect, label: str) -> None:
+            raise AssemblyRefusal(
+                f"slide {number} (ordinal {ordinal}): {label} {_item_label(item_id)} rect "
+                f"({rec['x']:.2f}, {rec['y']:.2f}, {rec['w']:.2f}, {rec['h']:.2f}) does not match "
+                f"the {expected_name!r} slot within {_SLOT_RECT_TOL_PT}pt"
+            )
+
+        if slot_rect is not None:
+            part = ordinal - plan.ordinals.get(number, ordinal)
+            stacked = (
+                plan.splits[number][part].stacked_ids if number in plan.splits
+                else plan.stacked_ids.get(number, frozenset())
+            )
+            for item_id in sorted(iid for iid in stacked if iid[0] != "groupchild"):
+                rec = _records().get(item_id)
+                if rec is None:
+                    raise AssemblyRefusal(
+                        f"slide {number} (ordinal {ordinal}): verse/point text {_item_label(item_id)} "
+                        "not found on the staged slide"
+                    )
+                if (
+                    abs(rec["x"] - slot_rect.x) > _SLOT_RECT_TOL_PT
+                    or abs(rec["w"] - slot_rect.w) > _SLOT_RECT_TOL_PT
+                    or abs((rec["y"] + rec["h"]) - (slot_rect.y + slot_rect.h)) > _SLOT_RECT_TOL_PT
+                ):
+                    _refuse_rect(item_id, rec, slot_rect, "verse/point text")
+
+        if slot.badge is not None:
+            part = ordinal - plan.ordinals.get(number, ordinal)
+            short_fit = (
+                plan.splits[number][part].fits if number in plan.splits
+                else plan.short_fit.get(number, {})
+            )
+            badge_id = next(
+                (
+                    iid for iid, rect in short_fit.items()
+                    if iid[0] != "groupchild"
+                    and abs(rect.x - slot.badge.x) <= _SLOT_RECT_TOL_PT
+                    and abs(rect.w - slot.badge.w) <= _SLOT_RECT_TOL_PT
+                    and abs(rect.h - slot.badge.h) <= _SLOT_RECT_TOL_PT
+                ),
+                None,
+            )
+            if badge_id is not None:
+                rec = _records().get(badge_id)
+                if rec is None:
+                    raise AssemblyRefusal(
+                        f"slide {number} (ordinal {ordinal}): verse badge {_item_label(badge_id)} "
+                        "not found on the staged slide"
+                    )
+                if (
+                    abs(rec["x"] - slot.badge.x) > _SLOT_RECT_TOL_PT
+                    or abs(rec["w"] - slot.badge.w) > _SLOT_RECT_TOL_PT
+                    or abs(rec["h"] - slot.badge.h) > _SLOT_RECT_TOL_PT
+                ):
+                    _refuse_rect(badge_id, rec, slot.badge, "verse badge")
 
 
 def _locked_write_block(
@@ -4146,7 +4338,9 @@ def assemble_dsk_deck(
             )
 
             if layout_policy == "import":
-                verify_staged_layouts_alpha_safe(staging_path, plan)
+                verify_staged_layouts_alpha_safe(
+                    staging_path, plan, expected_layout_names=slide_layout_names
+                )
 
             stroke = _restore_stroke(
                 fw_deck, staging_path, plan, payload, stroke_min_refs, warnings, log, hidden=hidden_map,

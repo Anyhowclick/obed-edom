@@ -498,3 +498,61 @@ rather than ever replacing text content, keeping the copy-and-transform contract
 1 (role resolver for group-child/multi-box verses) and finding 4 (verifier) are explicitly
 out of scope for this round per the review-of-record split. Targeted suite 509 passed / 1
 xfailed; full suite 2507 passed / 84 skipped / 1 xfailed, no regressions.
+
+### L3 fix round A (2026-09-14, Codex review1 findings 1+4+5)
+
+Finding 1: `_find_verse_badge_id` (dsk_assemble.py) now matches D1b's own badge
+predicate instead of accepting any lone extra text -- a candidate top-level text must
+match exactly one kept top-level shape's rect+text (same rule `_heading_cluster` uses
+for its own badge), and `plan_assembly` calls it with `exclude=dropped_heading_ids` (the
+repeat-heading cluster's ids, popped from `fit` before the badge check ever runs, so a
+dropped heading can no longer masquerade as an ambiguous extra text) and
+`short_fit=short_fit` (a retained group-child short item, already placed there by the
+existing group-child-badge loop, is the fallback when no top-level match exists).
+`slot_eligible` (plan_assembly) now admits a single retained group-child long box
+(`long_ids[0][0] == "groupchild"`) and several top-level long boxes together
+(`len(boxes) == len(long_ids) >= 1`, all `text`/`groupchild`), not only one top-level
+text box; the slot-fit block generalizes from one box to every box sharing the slot (one
+authoritative 45pt `t` derived from the lead box, applied to each box's own wrap/floor
+check, heights summed against the slot height) instead of hardcoding `boxes[0]`. A
+multi-box slide that resolves a category but cannot jointly fit its slot (GW17: two
+lines + one line summed to 3, but two boxes' own padding overhead exceeds the 177pt
+slot) keeps its slot layout/band and badge placement and falls through to the pre-
+existing per-box split path (now on the slot band, not `DEFAULT_BAND`) rather than the
+single-box char-window split (which only ever addresses `boxes[0]`); that single-box
+split path itself is now gated `len(boxes) == 1` for the same reason. Deck-probed
+(single-slide plans against GW_DECK, `all_classes=classes`): GW 51/53 (group-child verse,
+repeated "Faith" heading dropped) and GW 17 (two top-level boxes) -> `Verse Standard
+(Variation 2)`; GW 52 (repeated heading dropped, badge is a matched top-level text/shape
+pair) -> `Verse Standard (Variation 2)`, split into parts (its verse needs >3 lines at
+45pt); GW 44/50 (first occurrence of their heading, still two-column) -> `Point 3 Lines`
+unchanged, D1b geometry byte-identical (regression-tested). GW 5/54 (group-child verse,
+5 lines at 45pt in the 3-line slot) now REFUSE ("grouped verse text does not fit ... 
+refusing to split text inside a group") rather than silently landing on `Blank Black` --
+this is the pre-existing, intentional group-text-split guard (finding 3 only built
+character-window splitting for top-level text); given the hard "never write blind" rule,
+an explicit refusal for an unsupported case is correct and preferred over a silent
+misclassification, but group-text splitting remains a real gap for a follow-up piece.
+Slide 20 (not named in the review, found by the deck-wide A/B) also flips `Point 3 Lines`
+-> `Verse Standard (Variation 2)`: its old ambiguous 2-extra-text read (badge + an
+unrelated stray caption) now resolves cleanly since only the badge matches a shape.
+
+Finding 4: `verify_staged_layouts_alpha_safe` takes an optional `expected_layout_names`
+(the `resolve_slide_layouts` result); when given, every output ordinal's ACTUAL base
+layout name (read off the staged deck, not the plan) must equal the expected one, and --
+for a verse/point layout -- every retained top-level long-text item (`stacked_ids`/
+`SplitPart.stacked_ids`, group-child ids skipped: composing a nested group's geometry is
+out of scope here) must sit at the slot's x/width, bottom-aligned to the slot's bottom,
+within 0.5pt (`compose_geometry` against the staged objects graph); a slot with a badge
+rect is checked the same way against whichever retained short item was itself snapped to
+that exact x/w/h during planning. `assemble_dsk_deck` now passes `slide_layout_names`
+into the call.
+
+Finding 5: pinned tests replace the old either/or geometry check and add regressions for
+every case above (group-child verse, GW17's two boxes, GW52's dropped-heading verse,
+GW44/50 unchanged, the badge predicate's matched-shape requirement and its group-child
+fallback) plus three `verify_staged_layouts_alpha_safe` unit tests (monkeypatched offline
+deck) proving it refuses a wrong layout name, refuses a wrong verse rect, and accepts a
+matching one. Targeted suite (`test_dsk_assemble.py test_dsk_plan.py
+test_dsk_content_rules_acceptance.py`) 518 passed / 1 xfailed (was 509/1); full suite
+2516 passed / 84 skipped / 1 xfailed, no regressions.
