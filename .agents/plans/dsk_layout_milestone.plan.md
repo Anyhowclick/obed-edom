@@ -272,6 +272,36 @@ issue, not caused by this change). Deck-wide A/B against `0bfd8d1` on all 41 non
 non-movie GW slides: geometry/deletes byte-identical; 32 slides' scripts changed, every
 changed line either a dropped `set height` or a width/position/size reorder.
 
+**L1 fix round 1 (2026-09-14, Codex review 1 of `7ef00bd`, 2 MAJOR/1 MINOR, REVISE).**
+1. `_group_known_child_lines` now accumulates a `groupCaption` autosize child's size
+write before position (was width → position → size, same bug the non-group path had
+already fixed); fixed-frame child order unchanged.
+2. Centralised autosize detection in one `_autosize_text_ids` helper (thin wrapper over
+`_raw_autosize_ids`) used by both `plan.autosize` and `SplitPart.autosize`; deleted the
+`w == 0.0 or h == 0.0` payload heuristic everywhere. No payload-level `soft_geometry`/
+`geom_source == "autosize"` pre-write flag exists in this codebase (that field is a
+post-write verification concept in `offline_inspect.offline_wall_payload`, unrelated to
+planning) and the `plan-layout/p9_pp7.py`/`p11_text_metrics.py` files the review named do
+not exist here, so precedence collapsed to graph-backed (b) else no-autosize (c) — matching
+production, which always supplies `deck=`/`fw_deck=` (`dsk_assemble.py:3764`). A deck-wide
+parity probe on GW (70 kept top-level text ids, 41 non-empty/non-movie slides) found the old
+heuristic disagreed with the graph on 50/70 ids, always in the same direction (heuristic
+said fixed-frame, graph says autosize) — i.e. `set height` was being wrongly emitted for
+most of the deck's genuine autosize boxes pre-fix; zero false positives (heuristic-autosize
+but graph-fixed) were found.
+3. Fixed a genuinely vacuous test (`test_gw17_stacked_long_boxes_are_raw_autosize_position_last`
+asserted on `("text", 4)`, which is raw-autosize per the graph but not `kept`/planned on
+GW 17 at all, so the old `continue`-if-absent guard always skipped it; corrected to
+`("text", 2)`, the box actually present) and made the refit fixture raw-height-zero via a
+graph fixture instead of payload width-zero. Added graph-backed-vs-graphless parity tests
+and a groupCaption regression.
+Deck-wide A/B against `7ef00bd` (41 non-empty/non-movie slides): `fits`/`deletes`
+byte-identical; 4 scripts changed (slides 2, 7, 37, 61), every diff a single `set position`
+line moving one line later (the groupCaption reorder) — no slide's fixed-frame/autosize
+classification flipped on this deck. Targeted suite 475 passed/1 known-failed/1 xfailed;
+full suite 2461 passed / 84 skipped / 1 xfailed, same pre-existing `test_dsk_deck_builds`
+failure.
+
 **L2 — multi-layout import, dedupe-gated.** `dsk_live.layout_import_lines` takes a list of
 layout names and imports each missing one (donor slide per layout, deleted after);
 `dsk_assemble.check_layout_import_preconditions` loops the whole list (name absent from the

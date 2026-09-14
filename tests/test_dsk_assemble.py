@@ -43,6 +43,18 @@ def no_keynote(monkeypatch):
     yield
 
 
+def _raw_autosize_deck(monkeypatch, kind_index, x, y, w):
+    """Minimal objects graph + `_item_object_ids` patch proving `("text", kind_index)`
+    is raw-height-zero (genuine Keynote autosize) per `dsa._raw_autosize_ids`."""
+    objects = {"theObj": {"geometry": {"position": {"x": x, "y": y}, "size": {"width": w, "height": 0.0}, "angle": 0.0}}}
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {"slide": number})
+    monkeypatch.setattr(
+        dsa, "_item_object_ids",
+        lambda slide_archive, objects: {("text", kind_index): "theObj"},
+    )
+    return (objects, {}, {})
+
+
 def _text_item(kind_index, x=0, y=0, w=100, h=50, runs=None):
     item = {"kind": "text", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h}
     if runs is not None:
@@ -366,13 +378,64 @@ def test_stacked_unresolved_run_gap_below_full_size_refuses(monkeypatch):
         plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
 
 
-def test_text_autosize_zero_dimension_flagged():
+def test_autosize_detector_graph_backed_vs_graphless_raw_height_zero_parity(monkeypatch):
+    # Codex L1 review 1, finding 2: `_autosize_text_ids` centralizes both `plan.autosize`
+    # and `SplitPart.autosize` on the graph's raw-height-zero rule; production always
+    # supplies a graph (`dsk_assemble.py:3764`), so the graphless path never marks a box
+    # autosize on its own (no payload flag exists to do so safely -- `offline_wall_payload`
+    # fills a genuine autosize frame's zero height with its saved `naturalSize`). A
+    # graphless plan of a raw-height-zero box is therefore fixed-frame (emits `set
+    # height`); the graph-backed plan of the SAME box is autosize (no `set height`).
+    item = _text_item(0, x=2000, y=0, w=300.0, h=300, runs=[{"size": 20.0}])
+    slide = _slide(1, [item])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+
+    graphless_plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    assert ("text", 0) not in graphless_plan.autosize.get(1, frozenset())
+
+    deck = _raw_autosize_deck(monkeypatch, 0, x=2000, y=0, w=300.0)
+    graph_plan = plan_assembly(
+        payload, [cls], decisions=decisions, band=BAND, clips={}, deck=deck, fw_deck="/tmp/does-not-matter.key",
+    )
+    assert ("text", 0) in graph_plan.autosize[1]
+
+
+def test_autosize_detector_raw_width_zero_fixed_height_is_never_autosize(monkeypatch):
+    # Codex L1 review 1, finding 2: a raw-width-zero/fixed-height box must never be
+    # classified autosize, in either the graphless or the graph-backed path -- the old
+    # `w == 0.0 or h == 0.0` heuristic wrongly flagged this as autosize on the payload
+    # alone.
     item = _text_item(0, x=2000, y=0, w=0.0, h=300, runs=[{"size": 20.0}])
     slide = _slide(1, [item])
     payload = _payload([slide])
     cls = _classify(slide)
     decisions = {1: SlideDecision(1, "in_deck")}
-    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+    graphless_plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    assert ("text", 0) not in graphless_plan.autosize.get(1, frozenset())
+
+    objects = {"theObj": {"geometry": {"position": {"x": 2000, "y": 0}, "size": {"width": 0.0, "height": 300.0}, "angle": 0.0}}}
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {"slide": number})
+    monkeypatch.setattr(dsa, "_item_object_ids", lambda slide_archive, objects: {("text", 0): "theObj"})
+    graph_plan = plan_assembly(
+        payload, [cls], decisions=decisions, band=BAND, clips={},
+        deck=(objects, {}, {}), fw_deck="/tmp/does-not-matter.key",
+    )
+    assert ("text", 0) not in graph_plan.autosize.get(1, frozenset())
+
+
+def test_text_autosize_zero_dimension_flagged(monkeypatch):
+    item = _text_item(0, x=2000, y=0, w=0.0, h=300, runs=[{"size": 20.0}])
+    slide = _slide(1, [item])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    deck = _raw_autosize_deck(monkeypatch, 0, x=2000, y=0, w=0.0)
+    plan = plan_assembly(
+        payload, [cls], decisions=decisions, band=BAND, clips={}, deck=deck, fw_deck="/tmp/does-not-matter.key",
+    )
     assert ("text", 0) in plan.autosize[1]
 
 
@@ -479,6 +542,38 @@ def test_group_autosize_child_never_gets_height_write_and_relocks_on_error():
     assert "set height of theObj to" not in script  # the only write in this plan is the autosize child
     assert "on error errMsg number errNum" in script
     assert "if wasLocked then set locked of theObj to true" in script
+
+
+def test_group_autosize_caption_child_writes_size_before_position():
+    # Codex L1 review 1, finding 1: an autosize caption child (single text leaf +
+    # groupCaption text_size) must accumulate the size write BEFORE position, same
+    # order as the non-group autosize path -- not width -> position -> size.
+    group = _group_item(0, x=1920, y=0, w=400, h=200)
+    slide = _slide(1, [group])
+    slide["groupChildren"] = {
+        0: [{"kind": "text", "kindIndex": 0, "autosize": True, "x": 1920.0, "y": 0.0, "w": 400.0, "h": 200.0}]
+    }
+    slide["groupChildText"] = {0: "Caption"}
+    slide["groupCaption"] = {0: {"text": "Caption", "size": 24.0}}
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+    child = plan.group_children[1][0][0]
+    assert child["autosize"] is True
+
+    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
+    lines = script.splitlines()
+    ordinal = plan.ordinals[1]
+    addr = f"text item 1 of group 1 of slide {ordinal}"
+    start = lines.index(f"          set theObj to {addr}")
+    block = lines[start:start + 12]
+    assert not any("set height" in l for l in block)
+    width_i = next(i for i, l in enumerate(block) if "set width" in l)
+    size_i = next(i for i, l in enumerate(block) if "set size" in l)
+    position_i = next(i for i, l in enumerate(block) if "set position" in l)
+    assert width_i < size_i < position_i, block
 
 
 def test_group_uniform_single_leaf_caption_text_size_scaled():
@@ -5146,13 +5241,16 @@ def test_verify_builds_refuses_surplus_not_matching_the_clip_filename(monkeypatc
 # --------------------------------------------------------------------------
 # Mixed-run autosize text: overflow read-back and --text-fit shrink.
 # --------------------------------------------------------------------------
-def test_plan_assembly_records_shrink_size_for_mixed_run_autosize_text():
+def test_plan_assembly_records_shrink_size_for_mixed_run_autosize_text(monkeypatch):
     text = _text_item(0, x=3000, y=0, w=0.0, h=100.0, runs=[{"size": 30.0}, {"size": 60.0}])
     slide = _slide(1, [text])
     payload = _payload([slide])
     cls = _classify(slide)
     decisions = {1: SlideDecision(1, "in_deck")}
-    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    deck = _raw_autosize_deck(monkeypatch, 0, x=3000, y=0, w=0.0)
+    plan = plan_assembly(
+        payload, [cls], decisions=decisions, band=BAND, clips={}, deck=deck, fw_deck="/tmp/does-not-matter.key",
+    )
     assert ("text", 0) in plan.autosize.get(1, frozenset())
     assert 1 not in plan.text_sizes
     assert ("text", 0) in plan.shrink_text_sizes.get(1, {})
@@ -5220,13 +5318,16 @@ def test_slide_lines_non_cluster_autosize_text_writes_size_before_position():
     assert width_i < size_i < position_i
 
 
-def test_build_refit_script_non_cluster_autosize_text_writes_size_before_position():
+def test_build_refit_script_non_cluster_autosize_text_writes_size_before_position(monkeypatch):
     item = _text_item(0, x=2000, y=0, w=0.0, h=300, runs=[{"size": 20.0}])
     slide = _slide(1, [item])
     payload = _payload([slide])
     cls = _classify(slide)
     decisions = {1: SlideDecision(1, "in_deck")}
-    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    deck = _raw_autosize_deck(monkeypatch, 0, x=2000, y=0, w=0.0)
+    plan = plan_assembly(
+        payload, [cls], decisions=decisions, band=BAND, clips={}, deck=deck, fw_deck="/tmp/does-not-matter.key",
+    )
     assert ("text", 0) in plan.autosize[1]
     refits = {1: {("text", 0): TextRefit(Rect(43.0, 704.0, 1892.0, 200.0), run_sizes=44.0)}}
     script = build_refit_script(
@@ -8516,7 +8617,11 @@ def test_gw13_stacked_long_box_is_raw_autosize_position_last():
 
 
 def test_gw17_stacked_long_boxes_are_raw_autosize_position_last():
-    # Same L1 regression as GW 13, on GW 17's two stacked verse boxes (text 1, text 4).
+    # Same L1 regression as GW 13, on GW 17's two stacked verse boxes (text 1, text 2)
+    # -- L1 fix round 1 correction: text 4 is raw-autosize per the graph but is not
+    # kept/planned on slide 17 (deleted before planning), so asserting on it made this
+    # test vacuously pass under the old skip-if-absent guard; text 1 and 2 are the two
+    # stacked boxes actually present in plan.fits.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     deck = dsa._load_deck(GW_DECK)
@@ -8529,14 +8634,14 @@ def test_gw17_stacked_long_boxes_are_raw_autosize_position_last():
     )
     raw_autosize = _gw_raw_autosize_text_ids(17)
     assert ("text", 1) in raw_autosize
-    assert ("text", 4) in raw_autosize
+    assert ("text", 2) in raw_autosize
 
     ordinal = plan.ordinals[17]
     lines = dsa._slide_lines(plan, 17, ordinal)
-    for kind_index in (1, 4):
+    assert ("text", 1) in plan.fits.get(17, {})
+    assert ("text", 2) in plan.fits.get(17, {})
+    for kind_index in (1, 2):
         iid = ("text", kind_index)
-        if iid not in plan.fits.get(17, {}):
-            continue
         assert iid in plan.autosize[17]
         addr = f"text item {kind_index + 1} of slide {ordinal}"
         block = _write_block_at(lines, addr)

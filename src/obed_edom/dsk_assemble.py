@@ -694,6 +694,20 @@ def _raw_autosize_ids(
     return frozenset(ids)
 
 
+def _autosize_text_ids(
+    item_ids: Iterable[ItemId],
+    id_by_item: Mapping[ItemId, str] | None,
+    objects_graph: Mapping[str, dict] | None,
+) -> frozenset[ItemId]:
+    """Single detector for both `plan.autosize` and `SplitPart.autosize`: a text id is
+    autosize only when the source-deck objects graph proves its raw frame height is 0
+    (`_raw_autosize_ids`). Without a graph (no `id_by_item`/`objects_graph`), nothing is
+    autosize -- the former `w == 0.0 or h == 0.0` payload heuristic is gone, since
+    `offline_wall_payload` fills a genuine autosize frame's zero height with its saved
+    `naturalSize` and so cannot tell autosize from fixed-frame on its own."""
+    return _raw_autosize_ids(item_ids, id_by_item, objects_graph)
+
+
 def _two_column_rects(
     number: int,
     cluster: HeadingCluster,
@@ -1342,11 +1356,8 @@ def plan_assembly(
                                 items_by_id[box.item_id], t1, item_id=box.item_id,
                                 slide_number=number, warnings=warnings,
                             )
-                            part_item = items_by_id[box.item_id]
-                            part_autosize = (
-                                frozenset({box.item_id})
-                                if part_item.get("w") == 0.0 or part_item.get("h") == 0.0
-                                else frozenset()
+                            part_autosize = _autosize_text_ids(
+                                (box.item_id,), id_by_item, objects_graph
                             )
                             part_text_sizes: dict[ItemId, float] = {}
                             if isinstance(part_ranges, float):
@@ -1411,20 +1422,12 @@ def plan_assembly(
             slide_shrink_sizes: dict[ItemId, float] = {}
             slide_autosize: set[ItemId] = set(cluster_autosize_map.get(number, frozenset()))
             all_kept_text_ids = [iid for iid in cls.kept if iid[0] == "text" and iid not in cluster_ids]
-            slide_raw_autosize = (
-                _raw_autosize_ids(all_kept_text_ids, id_by_item, objects_graph)
-                if id_by_item is not None and objects_graph is not None
-                else None
-            )
-            if slide_raw_autosize is not None:
-                slide_autosize.update(slide_raw_autosize)
+            slide_autosize.update(_autosize_text_ids(all_kept_text_ids, id_by_item, objects_graph))
             candidate_text_ids = [iid for iid in all_kept_text_ids if iid not in stacked_ids]
             for iid in candidate_text_ids:
                 item = items_by_id.get(iid)
                 if item is None:
                     continue
-                if slide_raw_autosize is None and (item.get("w") == 0.0 or item.get("h") == 0.0):
-                    slide_autosize.add(iid)
                 if runs is not None:
                     item_sizes = list(runs.get(number, {}).get(iid) or [])
                 else:
@@ -1949,13 +1952,20 @@ def _group_known_child_lines(
         new_y = rect.y + (child["y"] - group_y) * scale
         new_w = child["w"] * scale
         body = [f"            set width of theObj to {_as_num(new_w)}"]
+        is_caption = caption_child is not None and child is caption_child
         if not child.get("autosize"):
             body.append(f"            set height of theObj to {_as_num(child['h'] * scale)}")
-        body.append(f"            set position of theObj to {{{_as_num(new_x)}, {_as_num(new_y)}}}")
-        if child.get("angle"):
-            body.append(f"            set rotation of theObj to {_as_num(child['angle'])}")
-        if caption_child is not None and child is caption_child:
-            body.append(f"            set size of object text of theObj to {_as_num(text_size)}")
+            body.append(f"            set position of theObj to {{{_as_num(new_x)}, {_as_num(new_y)}}}")
+            if child.get("angle"):
+                body.append(f"            set rotation of theObj to {_as_num(child['angle'])}")
+            if is_caption:
+                body.append(f"            set size of object text of theObj to {_as_num(text_size)}")
+        else:
+            if is_caption:
+                body.append(f"            set size of object text of theObj to {_as_num(text_size)}")
+            body.append(f"            set position of theObj to {{{_as_num(new_x)}, {_as_num(new_y)}}}")
+            if child.get("angle"):
+                body.append(f"            set rotation of theObj to {_as_num(child['angle'])}")
         write_block = _locked_write_block(number, addr, body)
         child_lines += _wrap_group_locks(number, ordinal, group_chain, write_block)
 
