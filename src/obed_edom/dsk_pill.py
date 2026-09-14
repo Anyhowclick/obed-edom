@@ -38,6 +38,7 @@ _MASK_Y = 50.9344
 _MASK_H = 75.52111
 _MASK_RIGHT = 1832.5315
 _MASK_SCALAR = 15.0
+_MASK_PATH_TYPE = "kTSDRoundedRectangle"
 _MAX_WIDTH = 958.4864
 _FRAME_X = 50.4
 _LAYOUT_FRAME_Y = {"standard": 789.1, "one_line": 879.1}
@@ -71,11 +72,21 @@ class _Expected:
     """What `_verify` must find for one ordinal, threaded through from the write so it
     does not have to re-derive which path was taken -- or which drawable is the pill --
     from the re-read deck alone. `pill_id` identifies the pill by id, never by data id
-    alone: an unrelated content image can legitimately share the pill's data id."""
+    alone: an unrelated content image can legitimately share the pill's data id.
+    `fingerprint` is the pill's own complete immutable fingerprint (raw geometry incl.
+    angle, originalSize, media naturalSize, style reference) captured pre-write, for
+    proving after reread that ONLY the mask changed. The mint-path fields below carry the
+    exact metadata registration `_verify` must find -- in that one target component, not
+    anywhere in the package."""
     width: float
     layout: str
     pill_id: str
+    fingerprint: dict | None = None
     minted_ids: list[str] | None = None  # [image, mask, title, caption] iff the mint path ran
+    target_component_id: str | None = None
+    expected_data_ids: list[str] | None = None
+    style_ref: tuple[str, str] | None = None  # (style_id, style_component_id) iff cross-component
+    final_counter: str | None = None
 
 
 def _sage_tags(slide: dict) -> dict[str, str]:
@@ -181,7 +192,10 @@ def _pill_fingerprint_matches(image_obj: dict, mask_obj: dict, layout_pill: dict
         return False
     mask_sps = ((mask_obj.get("pathsource") or {}).get("scalarPathSource") or {})
     layout_mask_sps = ((layout_mask.get("pathsource") or {}).get("scalarPathSource") or {})
-    if str(mask_sps.get("type") or "") != str(layout_mask_sps.get("type") or ""):
+    if (
+        str(mask_sps.get("type") or "") != _MASK_PATH_TYPE
+        or str(layout_mask_sps.get("type") or "") != _MASK_PATH_TYPE
+    ):
         return False
     try:
         if abs(float(mask_sps.get("scalar", -1)) - _MASK_SCALAR) > 0.01:
@@ -189,6 +203,37 @@ def _pill_fingerprint_matches(image_obj: dict, mask_obj: dict, layout_pill: dict
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _image_fingerprint(image_obj: dict) -> dict:
+    """The pill's complete immutable fingerprint: raw geometry (incl. angle), the two
+    size fields, and the style reference -- everything a reuse/mint write must leave
+    untouched. Captured pre-write and re-checked after reread (see `_fingerprints_match`)
+    so a changed raw geometry that still composes to the expected frame is caught."""
+    geom = (image_obj.get("super") or {}).get("geometry") or {}
+    return {
+        "position": dict(geom.get("position") or {}),
+        "size": dict(geom.get("size") or {}),
+        "angle": geom.get("angle"),
+        "originalSize": dict(image_obj.get("originalSize") or {}),
+        "naturalSize": dict(image_obj.get("naturalSize") or {}),
+        "style": str((image_obj.get("style") or {}).get("identifier") or ""),
+    }
+
+
+def _fingerprints_match(a: dict, b: dict) -> bool:
+    try:
+        angle_ok = abs(float(a.get("angle", -1)) - float(b.get("angle", -2))) <= 0.01
+    except (TypeError, ValueError):
+        angle_ok = False
+    return (
+        _positions_match(a.get("position"), b.get("position"))
+        and _sizes_match(a.get("size"), b.get("size"))
+        and angle_ok
+        and _sizes_match(a.get("originalSize"), b.get("originalSize"))
+        and _sizes_match(a.get("naturalSize"), b.get("naturalSize"))
+        and a.get("style") == b.get("style")
+    )
 
 
 def _resolve_slide_media_candidates(
@@ -271,6 +316,31 @@ class _Minter:
             lower, upper = secrets.randbits(64), secrets.randbits(64)
         self._existing_uuids.add((str(lower), str(upper)))
         return {"lower": str(lower), "upper": str(upper)}
+
+
+def _mask_exclusively_owned(
+    objects: dict[str, dict], id_to_file: dict[str, str], slide_member: str,
+    image_id: str, mask_id: str, mask_member: str,
+) -> bool:
+    """Before a reuse mutates a candidate's mask: the image must live in the target
+    slide member, the mask must live in that same member, the mask's own parent must be
+    that image (never the layout's mask, never some other drawable's), and no other image
+    anywhere in the deck may reference that mask id. Any violation refuses the mutation --
+    a mask shared with an unrelated drawable is never touched."""
+    if id_to_file.get(image_id) != slide_member:
+        return False
+    if mask_member != slide_member:
+        return False
+    mask_obj = objects.get(mask_id) or {}
+    parent_id = str(((mask_obj.get("super") or {}).get("parent") or {}).get("identifier") or "")
+    if parent_id != image_id:
+        return False
+    for oid, obj in objects.items():
+        if oid == image_id or obj.get("_pbtype") != _IMAGE_PBTYPE:
+            continue
+        if str((obj.get("mask") or {}).get("identifier") or "") == mask_id:
+            return False
+    return True
 
 
 def _register_new_ids(component: dict, minter: _Minter, new_ids: list[str]) -> None:
@@ -396,7 +466,12 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
             mask_member = id_to_file.get(mask_id)
             if not mask_id or mask_member is None:
                 raise OfflineWriteRefused(f"slide {ordinal}: pill {image_id} has no resolvable mask")
+            if not _mask_exclusively_owned(objects, id_to_file, slide_member, image_id, mask_id, mask_member):
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: pill {image_id} mask {mask_id} is not exclusively owned by it"
+                )
 
+            fingerprint = _image_fingerprint(image)
             mask_arch = _find_archive(get_decoded(mask_member), mask_id)
             mask_obj = mask_arch["objects"][0]
             _apply_mask_fields(mask_obj, width)
@@ -404,7 +479,7 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
 
             result.reused += 1
             result.edited_ids[ordinal] = image_id
-            expected[ordinal] = _Expected(width, spec.layout, image_id)
+            expected[ordinal] = _Expected(width, spec.layout, image_id, fingerprint=fingerprint)
             continue
 
         # Copy path: mint image/mask/title/caption archives from the layout's own pill.
@@ -473,13 +548,16 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
                     if layout_pill.get(k)]
         _register_data_refs(slide_component, new_image_id, data_ids)
         style_id = str((layout_pill.get("style") or {}).get("identifier") or "")
+        style_ref = None
         if style_id:
             style_member = id_to_file.get(style_id)
             if style_member is None:
                 raise OfflineWriteRefused(f"slide {ordinal}: style {style_id} unresolved")
             if style_member != slide_member:
                 style_component = component_for_member(style_member)
-                _register_style_ext_ref(slide_component, style_id, str(style_component["identifier"]))
+                style_component_id = str(style_component["identifier"])
+                _register_style_ext_ref(slide_component, style_id, style_component_id)
+                style_ref = (style_id, style_component_id)
 
         touched.add(slide_member)
         touched.add(_METADATA_MEMBER)
@@ -487,8 +565,17 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
         result.edited_ids[ordinal] = new_image_id
         expected[ordinal] = _Expected(
             width, spec.layout, new_image_id,
+            fingerprint=_image_fingerprint(new_image_obj),
             minted_ids=[new_image_id, new_mask_id, new_title_id, new_caption_id],
+            target_component_id=str(slide_component["identifier"]),
+            expected_data_ids=data_ids,
+            style_ref=style_ref,
         )
+
+    final_counter = str(minter._last_id)
+    for exp in expected.values():
+        if exp.minted_ids is not None:
+            exp.final_counter = final_counter
 
     edits: dict[str, bytes] = {}
     for member in touched:
@@ -558,15 +645,21 @@ def _verify(out_path: Path, expected: Mapping[int, "_Expected"]) -> None:
             raise OfflineWriteRefused(
                 f"slide {ordinal}: re-read mask {mask_id} fails the full mask law for width {width}"
             )
-        if layout_pill is not None and not _sizes_match(image_obj.get("originalSize"), layout_pill.get("originalSize")):
-            raise OfflineWriteRefused(f"slide {ordinal}: re-read pill {pill_id} originalSize changed")
-        if layout_pill is not None and not _sizes_match(image_obj.get("naturalSize"), layout_pill.get("naturalSize")):
-            raise OfflineWriteRefused(f"slide {ordinal}: re-read pill {pill_id} media naturalSize changed")
+        if exp.fingerprint is not None and not _fingerprints_match(exp.fingerprint, _image_fingerprint(image_obj)):
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: re-read pill {pill_id} image fingerprint changed -- only the mask may change"
+            )
+        mask_sps = (mask_obj.get("pathsource") or {}).get("scalarPathSource") or {}
+        if str(mask_sps.get("type") or "") != _MASK_PATH_TYPE:
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: re-read mask {mask_id} pathsource type is not {_MASK_PATH_TYPE!r}"
+            )
         if layout_mask is not None:
-            mask_sps = (mask_obj.get("pathsource") or {}).get("scalarPathSource") or {}
             layout_mask_sps = (layout_mask.get("pathsource") or {}).get("scalarPathSource") or {}
-            if str(mask_sps.get("type") or "") != str(layout_mask_sps.get("type") or ""):
-                raise OfflineWriteRefused(f"slide {ordinal}: re-read mask {mask_id} pathsource type changed")
+            if str(layout_mask_sps.get("type") or "") != _MASK_PATH_TYPE:
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: layout mask {layout_mask_id} pathsource type is not {_MASK_PATH_TYPE!r}"
+                )
 
         if exp.minted_ids is None:
             continue
@@ -585,16 +678,56 @@ def _verify(out_path: Path, expected: Mapping[int, "_Expected"]) -> None:
             )
         if package_meta is None:
             raise OfflineWriteRefused(f"slide {ordinal}: no package metadata to verify mint registration")
-        registered_uuid_ids: set[str] = set()
-        registered_data_object_ids: set[str] = set()
+
+        target_component = None
         for comp in package_meta.get("components") or []:
-            for u in comp.get("objectUuidMapEntries") or []:
-                registered_uuid_ids.add(str(u.get("identifier")))
-            for dref in comp.get("dataReferences") or []:
-                for orl in dref.get("objectReferenceList") or []:
-                    registered_data_object_ids.add(str(orl.get("objectIdentifier")))
+            if str(comp.get("identifier")) == exp.target_component_id:
+                target_component = comp
+                break
+        if target_component is None:
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: target metadata component {exp.target_component_id} not found"
+            )
+
+        registered_uuid_ids = {
+            str(u.get("identifier")) for u in target_component.get("objectUuidMapEntries") or []
+        }
         missing = [nid for nid in exp.minted_ids if nid not in registered_uuid_ids]
         if missing:
-            raise OfflineWriteRefused(f"slide {ordinal}: minted ids {missing} missing objectUuidMapEntries")
-        if new_image_id not in registered_data_object_ids:
-            raise OfflineWriteRefused(f"slide {ordinal}: minted pill {new_image_id} missing dataReferences entry")
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: minted ids {missing} missing objectUuidMapEntries in "
+                f"component {exp.target_component_id}"
+            )
+
+        by_data = {str(d.get("dataIdentifier")): d for d in target_component.get("dataReferences") or []}
+        for did in exp.expected_data_ids or []:
+            entry = by_data.get(did)
+            refs = [
+                r for r in ((entry or {}).get("objectReferenceList") or [])
+                if str(r.get("objectIdentifier")) == new_image_id
+            ]
+            if len(refs) != 1 or int(refs[0].get("count", -1)) != 1:
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: data id {did} missing an exact "
+                    f"{{objectIdentifier: {new_image_id}, count: 1}} registration in "
+                    f"component {exp.target_component_id}"
+                )
+
+        if exp.style_ref is not None:
+            style_id, style_component_id = exp.style_ref
+            ext_refs = target_component.get("externalReferences") or []
+            if not any(
+                str(r.get("objectIdentifier")) == style_id
+                and str(r.get("componentIdentifier")) == style_component_id
+                for r in ext_refs
+            ):
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: style {style_id} external reference to component "
+                    f"{style_component_id} missing in component {exp.target_component_id}"
+                )
+
+        if str(package_meta.get("lastObjectIdentifier")) != exp.final_counter:
+            raise OfflineWriteRefused(
+                f"slide {ordinal}: persisted lastObjectIdentifier "
+                f"{package_meta.get('lastObjectIdentifier')!r} != expected {exp.final_counter!r}"
+            )

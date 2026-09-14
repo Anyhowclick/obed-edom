@@ -345,6 +345,127 @@ def test_verify_catches_a_dropped_mask_angle(tmp_path: Path, monkeypatch: pytest
 
 
 @needs_gold
+def test_verify_catches_a_missing_mask_path_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex review 2, finding 3: the concrete mask path type `kTSDRoundedRectangle` is
+    required on reread, not merely equality with the (possibly also-missing) layout type."""
+    real_apply = P._apply_mask_fields
+
+    def broken_apply(mask_obj: dict, width: float) -> None:
+        real_apply(mask_obj, width)
+        mask_obj["pathsource"]["scalarPathSource"]["type"] = ""
+
+    monkeypatch.setattr(P, "_apply_mask_fields", broken_apply)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    with pytest.raises(P.OfflineWriteRefused, match="pathsource type"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+# ------------------------------------------------------------- Codex review 2, finding 1
+
+
+@needs_gold
+def test_reuse_refuses_a_candidate_whose_mask_is_the_layouts_own_shared_mask(tmp_path: Path) -> None:
+    """A reused pill whose `mask` reference is retargeted to the resolved layout's OWN
+    mask (a mask shared with the layout's Media drawable, in a different member) must be
+    refused before any mutation -- the layout's mask must never be touched."""
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    member = "Index/Slide-15156371.iwa"
+    with zipfile.ZipFile(deck) as zf:
+        buf = zf.read(member)
+    decoded = IWAFile.from_buffer(buf, member).to_dict()
+    arch = _find_archive(decoded, "15156374")
+    arch["objects"][0]["mask"] = {"identifier": "3654469"}  # the layout's own mask, cross-member
+    new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
+    _rewrite_members(deck, {member: new_bytes})
+
+    with zipfile.ZipFile(GOLD) as zf:
+        layout_member_buf = zf.read("Index/TemplateSlide-3654281.iwa")
+    layout_mask_before = _find_archive(
+        IWAFile.from_buffer(layout_member_buf, "Index/TemplateSlide-3654281.iwa").to_dict(), "3654469"
+    )["objects"][0]
+
+    with pytest.raises(P.OfflineWriteRefused, match="not exclusively owned"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+    # the layout's own mask member is untouched -- write_pills never reached the edit stage
+    with zipfile.ZipFile(deck) as zf:
+        layout_member_after = zf.read("Index/TemplateSlide-3654281.iwa")
+    layout_mask_after = _find_archive(
+        IWAFile.from_buffer(layout_member_after, "Index/TemplateSlide-3654281.iwa").to_dict(), "3654469"
+    )["objects"][0]
+    assert layout_mask_after == layout_mask_before
+
+
+@needs_gold
+def test_reuse_refuses_a_mask_shared_with_another_image(tmp_path: Path) -> None:
+    """A candidate's mask (15156378) also referenced by a second, unrelated image
+    anywhere in the deck must refuse the reuse mutation -- shared masks are never
+    eligible, regardless of that second image's own tag or data id."""
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    member = "Index/Slide-15156371.iwa"
+    with zipfile.ZipFile(deck) as zf:
+        buf = zf.read(member)
+    decoded = IWAFile.from_buffer(buf, member).to_dict()
+    arch = _find_archive(decoded, "15156371")
+    obj = arch["objects"][0]
+    dup_image = copy.deepcopy(_find_archive(decoded, "15156374"))
+    dup_image["header"] = copy.deepcopy(dup_image["header"])
+    dup_image["header"]["identifier"] = "15156998"
+    dup_image["objects"][0] = copy.deepcopy(dup_image["objects"][0])
+    dup_image["objects"][0]["data"] = {"identifier": "999999998"}  # unrelated data id
+    dup_image["objects"][0]["mask"] = {"identifier": "15156378"}  # shares the pill's own mask
+    decoded["chunks"][0]["archives"].append(dup_image)
+    obj["ownedDrawables"].append({"identifier": "15156998"})
+    obj["drawablesZOrder"].append({"identifier": "15156998"})
+    new_bytes = IWAFile.from_dict(copy.deepcopy(decoded)).to_buffer()
+    _rewrite_members(deck, {member: new_bytes})
+
+    with pytest.raises(P.OfflineWriteRefused, match="not exclusively owned"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+# ------------------------------------------------------------- Codex review 2, finding 3
+# (fingerprint / mask-type unit coverage; full-pipeline coverage is above and in mint tests)
+
+
+def test_fingerprints_match_rejects_a_changed_raw_height_with_the_same_composed_frame() -> None:
+    """`compose_geometry`'s frame does not carry height, and `_verify`'s own x/w/y checks
+    do not either -- only the full fingerprint catches a raw geometry change (here, mask
+    height, not width) that still composes to the same expected frame."""
+    before = P._image_fingerprint({
+        "super": {"geometry": {"position": {"x": 50.4, "y": 789.1},
+                                "size": {"width": 300.0, "height": 100.0}, "angle": 180.0}},
+        "originalSize": {"width": 500.0, "height": 500.0},
+        "naturalSize": {"width": 500.0, "height": 500.0},
+        "style": {"identifier": "8527"},
+    })
+    after = P._image_fingerprint({
+        "super": {"geometry": {"position": {"x": 50.4, "y": 789.1},
+                                "size": {"width": 300.0, "height": 250.0}, "angle": 180.0}},
+        "originalSize": {"width": 500.0, "height": 500.0},
+        "naturalSize": {"width": 500.0, "height": 500.0},
+        "style": {"identifier": "8527"},
+    })
+    assert not P._fingerprints_match(before, after)
+
+
+def test_pill_fingerprint_matches_refuses_when_mask_type_missing_on_both_sides() -> None:
+    """Both sides carrying an empty/absent mask path type must not be treated as a match
+    -- the concrete `kTSDRoundedRectangle` literal is required, not mere equality."""
+    image_obj = {
+        "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 1.0, "height": 1.0},
+                                "angle": 180.0}},
+        "originalSize": {"width": 1.0, "height": 1.0},
+        "naturalSize": {"width": 1.0, "height": 1.0},
+        "style": {"identifier": "1"},
+    }
+    layout_pill = copy.deepcopy(image_obj)
+    mask_obj = {"pathsource": {"scalarPathSource": {"scalar": 15.0}}}
+    layout_mask = {"pathsource": {"scalarPathSource": {"scalar": 15.0}}}
+    assert not P._pill_fingerprint_matches(image_obj, mask_obj, layout_pill, layout_mask)
+
+
+@needs_gold
 def test_mint_path_reproduces_gold_after_stripping_the_own_pill(tmp_path: Path) -> None:
     """Slide 3's own pill (15156374) stripped, then re-derived by copying the layout's
     Media drawable: the minted pill reproduces gold's original frame/mask exactly."""
@@ -609,3 +730,94 @@ def test_synthetic_r12b_media_slot_copy_path_mints_exactly_one_pill_and_touches_
             and str((objects[str(r["identifier"])].get("data") or {}).get("identifier")) == "27859"
             for r in (slide.get("ownedDrawables") or [])
         )
+
+
+# ------------------------------------------------------------- Codex review 2, finding 2
+# Mint metadata verification must be exact-component, not global. Each test below uses
+# gold's own mint path (slide 3's own pill stripped) with one registration step broken.
+
+
+@needs_gold
+def test_verify_catches_minted_ids_missing_uuid_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(P, "_register_new_ids", lambda component, minter, new_ids: None)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="objectUuidMapEntries"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_minted_ids_registered_in_the_wrong_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior global scan would have accepted registration anywhere in the package;
+    `_verify` must now require it in the target slide component specifically."""
+    real_register = P._register_new_ids
+
+    def broken_register(component: dict, minter: P._Minter, new_ids: list[str]) -> None:
+        wrong = next(
+            c for c in (minter._package_meta.get("components") or []) if c is not component
+        )
+        real_register(wrong, minter, new_ids)
+
+    monkeypatch.setattr(P, "_register_new_ids", broken_register)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="objectUuidMapEntries"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_a_dropped_data_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(P, "_register_data_refs", lambda component, image_id, data_ids: None)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="data id"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_a_dropped_style_external_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Slide 3's layout pill style (8527) lives in `Index/DocumentStylesheet.iwa`, a
+    different member from the slide -- the cross-component path `_register_style_ext_ref`
+    normally exercises. Gold's slide component already carries this ext ref from other
+    usage, so it is stripped first (else a no-op registration would be masked by the
+    pre-existing entry); dropping the registration must then fail verification."""
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with zipfile.ZipFile(deck) as zf:
+        meta_buf = zf.read("Index/Metadata.iwa")
+    meta_decoded = IWAFile.from_buffer(meta_buf, "Index/Metadata.iwa").to_dict()
+    package_meta = _find_package_metadata_archive(meta_decoded)["objects"][0]
+    slide_comp = _components_by_locator(package_meta.get("components") or [])[
+        _member_locator("Index/Slide-15156371.iwa")
+    ][0]
+    slide_comp["externalReferences"] = [
+        r for r in (slide_comp.get("externalReferences") or []) if str(r.get("objectIdentifier")) != "8527"
+    ]
+    new_meta_bytes = IWAFile.from_dict(copy.deepcopy(meta_decoded)).to_buffer()
+    _rewrite_members(deck, {"Index/Metadata.iwa": new_meta_bytes})
+
+    monkeypatch.setattr(
+        P, "_register_style_ext_ref", lambda component, style_id, style_component_id: None
+    )
+    with pytest.raises(P.OfflineWriteRefused, match="style"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")
+
+
+@needs_gold
+def test_verify_catches_a_persisted_counter_that_does_not_match_the_final_mint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_mint_id = P._Minter.mint_id
+
+    def broken_mint_id(self: P._Minter) -> str:
+        cand = real_mint_id(self)
+        self._package_meta["lastObjectIdentifier"] = str(int(cand) - 1)
+        return cand
+
+    monkeypatch.setattr(P._Minter, "mint_id", broken_mint_id)
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="lastObjectIdentifier"):
+        P.write_pills(deck, slides={3: P.PillSpec(301.8292, "standard")}, out_path=tmp_path / "out.key")

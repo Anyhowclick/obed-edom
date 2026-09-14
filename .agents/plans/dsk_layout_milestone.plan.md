@@ -407,6 +407,24 @@ The r12b copy-path test is renamed
 `test_synthetic_r12b_media_slot_copy_path_mints_exactly_one_pill_and_touches_nothing_else`
 and documented as a SYNTHETIC mint case (manually grafted fixture, not a real L2/L3-imported
 layout) -- **replace it with a fixture produced by the real importer once L2/L3 land.**
+
+**L4 fix round 2 (2026-09-14, Codex review `codex-L4-review2.md`, REVISE).** Reuse now proves
+exclusive mask ownership (`_mask_exclusively_owned`) before mutating: the image must live in
+the target slide member, the mask must live in that same member, `mask.super.parent.identifier`
+must equal the image id, and no other image anywhere in the deck may reference that mask id --
+a candidate whose mask is the layout's own (shared) mask, or a mask shared with a second image,
+is refused untouched. Mint metadata verification is now exact-component rather than a global
+scan: `_Expected` carries the target component id, the expected data ids, the (style id,
+component id) pair when cross-component, and the final `lastObjectIdentifier`; `_verify` locates
+that one component and requires every expected data id to carry `{objectIdentifier: image_id,
+count: 1}` there, the minted uuid entries and (when applicable) the style external reference to
+be registered there specifically, and the persisted counter to match. `_verify` now also
+captures each pill's complete immutable fingerprint (`_image_fingerprint`: raw geometry incl.
+angle, `originalSize`, media `naturalSize`, style reference) before the write and compares it
+after reread (`_fingerprints_match`), not only the composed frame -- and both source validation
+(`_pill_fingerprint_matches`) and output verification require the concrete mask path type
+`kTSDRoundedRectangle` (`_MASK_PATH_TYPE`), so two missing/blank types no longer pass as equal.
+10 tests added (49 total in `test_dsk_pill.py`); full suite 2536 passed, 84 skipped, 1 xfailed.
 Added 11 focused tests: an unrelated same-data content image (data id 27859) refused for
 reuse both untagged and Media-tagged-with-a-foreign-data-id; two `_verify` regression tests
 that monkeypatch `_apply_mask_fields` to drop the scalar / angle after the real write and
