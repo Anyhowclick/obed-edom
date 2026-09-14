@@ -666,19 +666,21 @@ def _repeat_heading_state(
     return repeats
 
 
-def _raw_autosize_ids(
+def _autosize_text_ids(
     item_ids: Iterable[ItemId],
     id_by_item: Mapping[ItemId, str] | None,
     objects_graph: Mapping[str, dict] | None,
 ) -> frozenset[ItemId]:
-    """Live r12 finding, live-probed round 2, generalised to any top-level text id (not
-    only a two-column cluster's heading/numeral): a text box can be a genuine
-    Keynote-autosize frame (raw geometry height 0, same test `iwa_geometry._compose_record`
-    uses), in which case an emitted `set height` is silently overridden on save. Returns
-    the subset of `item_ids` that is genuinely autosize; a non-autosize id is omitted.
-    `position` is the live visual top-left for an autosize box (no vertical-alignment
-    offset applies -- probe log: `<scratchpad>/probe-autosize/log.txt`), so no alignment
-    is resolved or returned."""
+    """Single detector for both `plan.autosize` and `SplitPart.autosize`: a text id is
+    autosize only when the source-deck objects graph proves its raw frame height is 0
+    (live r12 finding, live-probed round 2, generalised to any top-level text id, not only
+    a two-column cluster's heading/numeral -- same test `iwa_geometry._compose_record`
+    uses). Without a graph (no `id_by_item`/`objects_graph`), nothing is autosize -- the
+    former `w == 0.0 or h == 0.0` payload heuristic is gone, since `offline_wall_payload`
+    fills a genuine autosize frame's zero height with its saved `naturalSize` and so
+    cannot tell autosize from fixed-frame on its own. `position` is the live visual
+    top-left for an autosize box (no vertical-alignment offset applies -- probe log:
+    `<scratchpad>/probe-autosize/log.txt`), so no alignment is resolved or returned."""
     ids: set[ItemId] = set()
     if id_by_item is None or objects_graph is None:
         return frozenset(ids)
@@ -692,20 +694,6 @@ def _raw_autosize_ids(
             continue
         ids.add(item_id)
     return frozenset(ids)
-
-
-def _autosize_text_ids(
-    item_ids: Iterable[ItemId],
-    id_by_item: Mapping[ItemId, str] | None,
-    objects_graph: Mapping[str, dict] | None,
-) -> frozenset[ItemId]:
-    """Single detector for both `plan.autosize` and `SplitPart.autosize`: a text id is
-    autosize only when the source-deck objects graph proves its raw frame height is 0
-    (`_raw_autosize_ids`). Without a graph (no `id_by_item`/`objects_graph`), nothing is
-    autosize -- the former `w == 0.0 or h == 0.0` payload heuristic is gone, since
-    `offline_wall_payload` fills a genuine autosize frame's zero height with its saved
-    `naturalSize` and so cannot tell autosize from fixed-frame on its own."""
-    return _raw_autosize_ids(item_ids, id_by_item, objects_graph)
 
 
 def _two_column_rects(
@@ -1308,7 +1296,7 @@ def plan_assembly(
                             stacked_run_sizes.update(two_col_run_sizes)
                             two_column_map[number] = left_band
                             two_column_cluster_map[number] = cluster
-                            cluster_autosize = _raw_autosize_ids(
+                            cluster_autosize = _autosize_text_ids(
                                 (cluster.heading_id, cluster.number_id), id_by_item, objects_graph
                             )
                             if cluster_autosize:

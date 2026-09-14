@@ -45,7 +45,7 @@ def no_keynote(monkeypatch):
 
 def _raw_autosize_deck(monkeypatch, kind_index, x, y, w):
     """Minimal objects graph + `_item_object_ids` patch proving `("text", kind_index)`
-    is raw-height-zero (genuine Keynote autosize) per `dsa._raw_autosize_ids`."""
+    is raw-height-zero (genuine Keynote autosize) per `dsa._autosize_text_ids`."""
     objects = {"theObj": {"geometry": {"position": {"x": x, "y": y}, "size": {"width": w, "height": 0.0}, "angle": 0.0}}}
     monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {"slide": number})
     monkeypatch.setattr(
@@ -8570,7 +8570,7 @@ def _gw_raw_autosize_text_ids(number):
     text_ids = [
         ("text", item["kindIndex"]) for item in slides_by_number[number]["items"] if item["kind"] == "text"
     ]
-    return dsa._raw_autosize_ids(text_ids, id_by_item, objects_graph)
+    return dsa._autosize_text_ids(text_ids, id_by_item, objects_graph)
 
 
 def _write_block_at(lines, addr):
