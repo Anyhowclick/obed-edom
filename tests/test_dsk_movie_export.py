@@ -708,6 +708,8 @@ def test_export_slide_clips_refuses_unsafe_same_named_fw_layout_with_safe_donor(
     _stub_offline_payload(monkeypatch)
     monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", _REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS)
     monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
+    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
+    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
 
     def _copy_keynote_forbidden(src, dest):
         raise AssertionError("Keynote must not launch once the precondition refuses")
@@ -846,6 +848,116 @@ def test_export_slide_clips_refuses_when_neither_fw_nor_template_owns_an_alias(m
     with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="no alpha-safe layout"):
         dme.export_slide_clips(
             fw, [17], out_dir, layout_template=template, black_layout_names=dme.DEFAULT_BLACK_LAYOUT_NAMES,
+        )
+
+
+def test_export_slide_clips_uses_fw_owned_alias_with_nonexistent_template(monkeypatch, tmp_path):
+    """FW-owned alpha-safe alias resolution must run regardless of whether the template
+    exists: a safe FW-owned alias proceeds with that single name and no import, even
+    when `layout_template` points at a nonexistent path."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    missing_template = tmp_path / "NoSuchDonor.key"
+
+    fw_objects = _layout_objects_multi(entries=[("BLACK BLANK", [])])
+
+    def _dispatched_load_deck(path):
+        assert Path(path) != missing_template, "nonexistent template must never be loaded"
+        return fw_objects, {}, {}
+
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
+    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
+    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
+
+    def _precondition_forbidden(*a, **k):
+        raise AssertionError("no import precondition is needed when the FW deck already owns a safe alias")
+
+    monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", _precondition_forbidden)
+
+    imported: list[list[str]] = []
+    _real_layout_import_lines = dme.dsk_live.layout_import_lines
+
+    def _capture_layout_import_lines(doc_var, layout_names, template_path):
+        imported.append(list(layout_names) if not isinstance(layout_names, str) else [layout_names])
+        return _real_layout_import_lines(doc_var, layout_names, template_path)
+
+    monkeypatch.setattr(dme.dsk_live, "layout_import_lines", _capture_layout_import_lines)
+
+    calls = _stub_live(monkeypatch, tmp_path)
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(
+        fw, [17], out_dir, layout_template=missing_template, black_layout_names=dme.DEFAULT_BLACK_LAYOUT_NAMES,
+    )
+
+    assert {r.slide for r in results} == {17}
+    assert imported == []
+
+
+def test_export_slide_clips_refuses_unsafe_fw_alias_with_nonexistent_template(monkeypatch, tmp_path):
+    """An unsafe FW-owned alias with no usable template must refuse offline, not fall
+    through to passing the raw alias list to the live script."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    missing_template = tmp_path / "NoSuchDonor.key"
+
+    fw_objects = _layout_objects_multi(entries=[("Black", [(-10.0, 0.0, 8000.0, 1080.0)])])
+
+    def _dispatched_load_deck(path):
+        return fw_objects, {}, {}
+
+    _stub_offline_payload(monkeypatch)
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
+    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
+    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
+
+    def _copy_keynote_forbidden(src, dest):
+        raise AssertionError("Keynote must not launch once the precondition refuses")
+
+    monkeypatch.setattr(dme, "copy_keynote", _copy_keynote_forbidden)
+    _set(monkeypatch, "_keynote_running", lambda: False)
+    _set(monkeypatch, "_acquire_lock", lambda: None)
+    _set(monkeypatch, "_release_lock", lambda fd: None)
+
+    with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="no alpha-safe layout"):
+        dme.export_slide_clips(
+            fw, [17], out_dir, layout_template=missing_template, black_layout_names=("Black",),
+        )
+
+
+def test_export_slide_clips_refuses_no_fw_alias_with_nonexistent_template(monkeypatch, tmp_path):
+    """No FW-owned alias at all, and no usable template: must refuse offline."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    missing_template = tmp_path / "NoSuchDonor.key"
+
+    fw_objects = _layout_objects_multi(entries=[])
+
+    def _dispatched_load_deck(path):
+        return fw_objects, {}, {}
+
+    _stub_offline_payload(monkeypatch)
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
+    monkeypatch.setattr(dme, "_resolve_black_layout_name", _REAL_RESOLVE_BLACK_LAYOUT_NAME)
+    monkeypatch.setattr(dme, "_resolve_black_layout_donor", _REAL_RESOLVE_BLACK_LAYOUT_DONOR)
+
+    def _copy_keynote_forbidden(src, dest):
+        raise AssertionError("Keynote must not launch once the precondition refuses")
+
+    monkeypatch.setattr(dme, "copy_keynote", _copy_keynote_forbidden)
+    _set(monkeypatch, "_keynote_running", lambda: False)
+    _set(monkeypatch, "_acquire_lock", lambda: None)
+    _set(monkeypatch, "_release_lock", lambda fd: None)
+
+    with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="no alpha-safe layout"):
+        dme.export_slide_clips(
+            fw, [17], out_dir, layout_template=missing_template, black_layout_names=dme.DEFAULT_BLACK_LAYOUT_NAMES,
         )
 
 

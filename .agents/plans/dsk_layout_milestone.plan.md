@@ -400,3 +400,12 @@ template donor among the aliases and only that one name is passed to
 path uses a single-name tuple (`DEFAULT_TRANSPARENT_LAYOUT_NAMES`), so the required-import
 semantics were already correct there and needed no change. The assembly path's
 `DEFAULT_DSK_LAYOUT_NAMES` stays all-required by design (unchanged).
+
+**L2 fix round 6 (Codex review 5 of 3559a57):** round 5's `_resolve_black_layout_name` call
+was nested inside `if resolved_template is not None`, so a missing/unavailable template
+skipped FW-alias resolution entirely and passed the raw `black_layout_names` list straight
+to the live script -- an unsafe FW-owned alias could be baked into clips, and "neither
+exists" was never refused offline. Fixed in `export_slide_clips` (dsk_movie_export.py) by
+resolving the FW-owned alpha-safe alias unconditionally, before checking template
+availability; only when none is owned does it require an existing template, resolve a
+donor, and run the import precondition -- otherwise it raises `LayoutImportRefusal`.

@@ -737,22 +737,25 @@ def export_slide_clips(
 
         resolved_template = layout_template or DEFAULT_LAYOUT_TEMPLATE
         resolved_template = resolved_template if resolved_template.exists() else None
-        resolved_black_names = black_layout_names
-        if resolved_template is not None:
-            owned_name = _resolve_black_layout_name(fw_deck, black_layout_names)
-            if owned_name is not None:
-                resolved_black_names = (owned_name,)
-            else:
-                donor_name = _resolve_black_layout_donor(resolved_template, black_layout_names)
-                if donor_name is None:
-                    raise dsk_live.LayoutImportRefusal(
-                        f"no alpha-safe layout matching {list(black_layout_names)!r} found in "
-                        f"{fw_deck} or layout template {resolved_template}"
-                    )
-                resolved_black_names = (donor_name,)
-                dsk_live.check_layout_import_preconditions(
-                    fw_deck, layout_template=resolved_template, layout_names=resolved_black_names
+        owned_name = _resolve_black_layout_name(fw_deck, black_layout_names)
+        if owned_name is not None:
+            resolved_black_names = (owned_name,)
+        else:
+            if resolved_template is None:
+                raise dsk_live.LayoutImportRefusal(
+                    f"no alpha-safe layout matching {list(black_layout_names)!r} found in "
+                    f"{fw_deck} and no layout template available"
                 )
+            donor_name = _resolve_black_layout_donor(resolved_template, black_layout_names)
+            if donor_name is None:
+                raise dsk_live.LayoutImportRefusal(
+                    f"no alpha-safe layout matching {list(black_layout_names)!r} found in "
+                    f"{fw_deck} or layout template {resolved_template}"
+                )
+            resolved_black_names = (donor_name,)
+            dsk_live.check_layout_import_preconditions(
+                fw_deck, layout_template=resolved_template, layout_names=resolved_black_names
+            )
         script = _build_export_script(
             scratch_path=scratch,
             stem=fw_deck.stem,
