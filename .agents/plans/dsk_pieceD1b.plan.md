@@ -181,7 +181,10 @@ The badge-x **245.0** assertion is the load-bearing one: it is an exact, indepen
   slide now breaks it, which the old per-batch `prev_heading_text` accumulator did not). A slide outside the
   current call's `classes` (no `SlideClass`) falls back to `_heading_text_from_payload_slide`, which applies
   the same single-ArgentCF-candidate rule straight off the payload item without a `cls.kept` filter -- the best
-  available signal for a slide `plan_assembly` never classified. This is a real, not merely theoretical,
+  available signal for a slide `plan_assembly` never classified (**superseded by Fix round 3 below**: this
+  payload-only approximation missed group-child verses and the badge/long-text-count rules, so it disagreed
+  with `_heading_cluster` on the real deck; it has been removed in favour of reclassifying the whole payload).
+  This is a real, not merely theoretical,
   correction: GW46's own true predecessor is GW45 ("Prayer", heading-only), which shares GW46's heading text.
   **This turned out to be wrong** (see Fix round 2 below): the gold deck keeps GW46 two-column despite GW45
   sharing its heading, so round 1's blanket "any matching predecessor heading text drops the run" rule was too
@@ -217,6 +220,8 @@ heading text is non-`None` and the predecessor itself had a cluster. For a prede
 batch's `classes` (no `SlideClass`), `_heading_cluster_present_from_payload_slide` (new) approximates has-cluster
 straight off the payload: the same digit-in-circle geometry test as `_heading_cluster`, plus a long-text proxy
 (any raw text item over `DEFAULT_TEXT_SLIDE_WORDS` words, since there is no `cls.long_text_ids` to consult).
+**Superseded by Fix round 3 below** -- this approximation is removed; every predecessor is now reclassified
+through the real `classify_slide` pipeline before `_heading_cluster` is asked about it.
 
 Measured (deck-order batch `[44, 45, 46, 50, 51, 52, 53]`, full `plan_assembly` call together):
 - 44, 46, 50 -> two-column; 51, 52, 53 -> full-width (heading dropped, unchanged from round 1).
@@ -236,3 +241,46 @@ Measured (deck-order batch `[44, 45, 46, 50, 51, 52, 53]`, full `plan_assembly` 
   `test_two_column_repeat_heading_survives_headingless_predecessor` and
   `test_two_column_repeat_heading_dropped_when_planned_alone`, both unchanged -- their predecessors are
   themselves heading+verse).
+
+## Fix round 3 (Codex D1b-p2 review 2 of 9604e2e -- predecessor classification must be real)
+
+Review 2's MAJOR: `_heading_cluster_present_from_payload_slide` (round 2's approximation) scanned only
+top-level text/shape items and required merely *any* text over `DEFAULT_TEXT_SLIDE_WORDS` words -- it ignored
+`cls.kept`, group-child verses (`groupChildren`/`groupChildText`), dedupe, and backdrop-drop settings, and
+skipped `_heading_cluster`'s badge-match and single-long-text-id rules entirely. On the real deck this
+disagreed with `_heading_cluster`: GW44/50/51/53's verse is a group child, which the approximation could never
+see, so it always reported "no cluster" for those predecessors and never suppressed a same-heading successor
+planned right after one of them.
+
+**Fix:** both payload-approximation functions (`_heading_text_from_payload_slide`,
+`_heading_cluster_present_from_payload_slide`) are deleted. `_repeat_heading_state` now takes
+`full_classes_by_number: Mapping[int, SlideClass]` -- the *whole deck's* classification, not the planning
+batch's -- and calls `_heading_cluster`/`_heading_text_for_repeat_check` on every predecessor exactly as it
+would on a batch slide; there is no more a "slide outside `classes`" branch. `plan_assembly` gained an optional
+`all_classes: Sequence[SlideClass] | None` parameter and a new `_full_classes_by_number` helper that resolves
+it: caller-supplied `all_classes` wins (the real CLI path -- `assemble_offline_deck` now passes
+`all_classes=classes`, and `load_assembly_inputs` already classifies the whole deck via `classify_deck`, so
+this is free); absent that, `_classify_all_slides_from_payload` (new) reclassifies every slide in `payload` via
+`classify_slide` directly, with group-movie/-build/connection-line counts left at their defaults. That
+degradation is safe for this purpose: `_heading_cluster`/`_heading_text_for_repeat_check` read only
+`cls.kept`/`cls.long_text_ids`/`cls.is_text`, none of which those counts affect (only `cls.category`,
+`build_count`, `movie_count` would differ, and this pass never reads those). This fallback deliberately never
+loads the deck graph or `fw_deck` from disk, so a caller that defers deck loading stays lazy (an earlier
+attempt that called `classify_deck` from a lazily-loaded `fw_deck`/deck-graph broke that laziness --
+`iwa_builds.deck_builds` unconditionally opens the `.key` zip for its data index even when a `deck` graph is
+supplied -- so it was dropped in favour of the payload-only path).
+
+New tests (`tests/test_dsk_assemble.py`):
+- `test_repeat_heading_predecessor_uses_group_child_verse`: a group-child-verse predecessor (mirroring GW
+  44/50/51/53) now correctly suppresses a same-heading successor planned alone -- proven both via the plan
+  (heading dropped, verse `x=43`) and directly via `_heading_cluster` on the reclassified predecessor.
+- `test_repeat_heading_predecessor_unmatched_badge_does_not_suppress`: a predecessor with an extra top-level
+  text that fails the badge-match rule is not a cluster (`_heading_cluster` returns `None`) and must not
+  suppress.
+- `test_repeat_heading_predecessor_multiple_long_text_ids_does_not_suppress`: a predecessor with two
+  `long_text_ids` is not a cluster and must not suppress.
+- `test_repeat_heading_gw51_planned_alone_matches_batch` (real deck): GW51 planned alone now matches its plan
+  in the GW `{44, 46, 50, 51, 52, 53}` batch exactly -- heading dropped, verse `x=43.0`/`w=1849.0` both ways;
+  the batch's own two-column set stays `{44, 46, 50}`.
+
+A/B vs 9604e2e (every GW slide planned alone, and the same deck-order batch as `test_gw_every_kept_non_movie_slide_plans_under_default_flags`): the deck-order batch is byte-identical (it always had the whole deck's real classes -- `load_assembly_inputs` classifies every slide regardless of `--slides`). Planned alone, GW51 and GW52 both change from two-column (heading kept, wrong) to full-width (heading dropped, correct) -- both slides' immediate predecessors (GW50, GW51) are group-child-verse clusters the round-2 approximation could not see. GW53 (predecessor GW52, a top-level-text cluster the approximation *could* see) was already correct and is unchanged. No other slide, in either scenario, changed.

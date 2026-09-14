@@ -48,6 +48,7 @@ from obed_edom.dsk_plan import (
     _TEXT_GAP_PT,
     _word_count,
     classify_deck,
+    classify_slide,
     fit_heading_pt,
     fit_slide,
     fit_text_stack,
@@ -592,72 +593,68 @@ def _heading_text_for_repeat_check(cls: SlideClass, items_by_id: Mapping[ItemId,
     return candidates[0]
 
 
-def _heading_text_from_payload_slide(slide: Mapping[str, Any]) -> str | None:
-    """Fallback for `_repeat_heading_state`'s deck-order walk when a predecessor slide
-    falls outside the current planning batch's `classes` (no `SlideClass`, so no
-    `cls.kept` to consult): the same single-ArgentCF-heading-candidate rule as
-    `_heading_text_for_repeat_check`, read straight off the slide's payload items."""
-    candidates = [
-        (item.get("text") or "").strip()
-        for item in slide.get("items") or []
-        if item.get("kind") == "text"
-        and (item.get("font") or "").startswith(_HEADING_FONT_PREFIX)
-        and (item.get("text") or "").strip()
-        and _word_count((item.get("text") or "").strip()) <= _HEADING_MAX_WORDS
-    ]
-    if len(candidates) != 1:
-        return None
-    return candidates[0]
+def _classify_all_slides_from_payload(
+    payload: Mapping[str, Any],
+    builds: Mapping[int, dict] | None,
+    text_slide_words: int,
+    no_dedupe: bool,
+    no_drop_panel_backdrop: bool,
+) -> dict[int, SlideClass]:
+    """`classify_slide` over every slide in `payload`, group-movie/-build/connection
+    -line counts left at their defaults (no deck graph to read them from) -- the
+    last-resort source of `_repeat_heading_state`'s full-deck classification when
+    `plan_assembly` gets neither `all_classes` nor a deck graph (`deck`/`fw_deck`),
+    e.g. fully in-memory tests. The real CLI path always has one of those, since
+    `load_assembly_inputs` classifies the whole deck up front."""
+    wall = (payload["slideWidth"], payload["slideHeight"])
+    builds = builds or {}
+    out: dict[int, SlideClass] = {}
+    for slide in payload.get("slides") or []:
+        number = slide["number"]
+        out[number] = classify_slide(
+            slide,
+            builds.get(number),
+            wall,
+            group_child_text=slide.get("groupChildSignature"),
+            group_child_words=slide.get("groupChildText"),
+            group_children=slide.get("groupChildren"),
+            text_slide_words=text_slide_words,
+            no_dedupe=no_dedupe,
+            no_drop_panel_backdrop=no_drop_panel_backdrop,
+        )
+    return out
 
 
-def _heading_cluster_present_from_payload_slide(slide: Mapping[str, Any]) -> bool:
-    """Approximate has-cluster (heading+verse) check for `_repeat_heading_state`'s
-    deck-order walk when a predecessor slide falls outside the current batch's
-    `classes`: the same digit-in-circle geometry test as `_heading_cluster`, plus a
-    long-text proxy (any raw text item over `DEFAULT_TEXT_SLIDE_WORDS` words, since
-    there is no `cls.long_text_ids` to consult here) -- straight off the slide's
-    payload items, unfiltered by `kept`, matching `_heading_text_from_payload_slide`'s
-    fallback."""
-    items = slide.get("items") or []
-    texts = [item for item in items if item.get("kind") == "text"]
-    shapes = [item for item in items if item.get("kind") == "shape"]
-    if not any(_word_count((item.get("text") or "").strip()) > DEFAULT_TEXT_SLIDE_WORDS for item in texts):
-        return False
-    circle_candidates = [
-        item for item in shapes
-        if not (item.get("text") or "").strip()
-        and item.get("w") == _HEADING_CIRCLE_PT
-        and item.get("h") == _HEADING_CIRCLE_PT
-    ]
-    if len(circle_candidates) != 1:
-        return False
-    circle_rect = _rect_of(circle_candidates[0])
-    heading_ids = [
-        item for item in texts
-        if (item.get("font") or "").startswith(_HEADING_FONT_PREFIX)
-        and (item.get("text") or "").strip()
-        and _word_count((item.get("text") or "").strip()) <= _HEADING_MAX_WORDS
-    ]
-    if len(heading_ids) != 1:
-        return False
-    digit_candidates = [
-        item for item in texts
-        if (item.get("text") or "").strip().isdigit()
-        and len((item.get("text") or "").strip()) <= _HEADING_NUMBER_MAX_CHARS
-    ]
-    if len(digit_candidates) != 1:
-        return False
-    nx, ny, nw, nh = _rect_of(digit_candidates[0])
-    centre = (nx + nw / 2.0, ny + nh / 2.0)
-    cx, cy, cw, ch = circle_rect
-    circle_centre = (cx + cw / 2.0, cy + ch / 2.0)
-    radius = math.hypot(centre[0] - circle_centre[0], centre[1] - circle_centre[1])
-    return radius <= (_HEADING_CIRCLE_PT / 2.0) + _HEADING_GEOM_TOL_PT
+def _full_classes_by_number(
+    payload: Mapping[str, Any],
+    builds: Mapping[int, dict] | None,
+    text_slide_words: int,
+    no_dedupe: bool,
+    no_drop_panel_backdrop: bool,
+    all_classes: Sequence[SlideClass] | None,
+) -> dict[int, SlideClass]:
+    """The whole deck's `SlideClass`es for `_repeat_heading_state`, so a predecessor
+    outside the planning batch is classified through the exact same inputs
+    (`cls.kept`, `long_text_ids`, group-child text/children, dedupe, backdrop
+    settings) as `_heading_cluster` requires -- never the batch's own (possibly
+    partial) `classes`. Prefers caller-supplied `all_classes` (the real CLI path:
+    `load_assembly_inputs` already classifies the whole deck via `classify_deck`);
+    else falls back to `_classify_all_slides_from_payload`, which never touches the
+    deck graph or `fw_deck` (a plan that defers deck loading, e.g. for crop/anchor
+    work, must stay lazy) -- safe because `_heading_cluster` and
+    `_heading_text_for_repeat_check` only read `cls.kept`/`cls.long_text_ids`/
+    `cls.is_text`, none of which `classify_slide` derives from the group-movie/
+    -build/connection-line counts that fallback leaves at their defaults; only
+    `cls.category`/`build_count`/`movie_count` would differ, and this pass never
+    reads those."""
+    if all_classes is not None:
+        return {c.number: c for c in all_classes}
+    return _classify_all_slides_from_payload(payload, builds, text_slide_words, no_dedupe, no_drop_panel_backdrop)
 
 
 def _repeat_heading_state(
     slides_by_number: Mapping[int, dict],
-    classes_by_number: Mapping[int, SlideClass],
+    full_classes_by_number: Mapping[int, SlideClass],
 ) -> dict[int, bool]:
     """Per slide number, whether its heading cluster repeats the immediately preceding
     non-empty slide's heading text -- walking `slides_by_number` in full deck order,
@@ -666,22 +663,27 @@ def _repeat_heading_state(
     predecessor to itself be heading+verse (two-column-eligible): a heading-only
     predecessor (heading cluster with no verse, e.g. GW45 "Prayer") does not suppress
     (owner-pinned rule, D1b-p2 fix round 2). A slide with no heading text breaks the
-    run; a slide outside the batch's `classes` falls back to
-    `_heading_text_from_payload_slide`/`_heading_cluster_present_from_payload_slide`."""
+    run. `full_classes_by_number` (see `_full_classes_by_number`) must be the whole
+    deck's classification, not just the planning batch's -- every predecessor is read
+    through the same `_heading_cluster`/`_heading_text_for_repeat_check` as the batch
+    slides, off its real `SlideClass` (`cls.kept`, group-child verses, dedupe,
+    backdrop settings all included), never an approximation. A number missing from
+    `full_classes_by_number` (should not happen) breaks the run, same as an empty
+    slide."""
     repeats: dict[int, bool] = {}
     prev_heading_text: str | None = None
     prev_has_cluster = False
     for number in sorted(slides_by_number):
-        cls = classes_by_number.get(number)
-        if cls is not None and cls.category == "empty":
+        cls = full_classes_by_number.get(number)
+        if cls is None:
+            prev_heading_text = None
+            prev_has_cluster = False
             continue
-        if cls is not None:
-            items_by_id = {(it["kind"], it["kindIndex"]): it for it in slides_by_number[number].get("items") or []}
-            heading_text = _heading_text_for_repeat_check(cls, items_by_id)
-            has_cluster = _heading_cluster(cls, items_by_id) is not None
-        else:
-            heading_text = _heading_text_from_payload_slide(slides_by_number[number])
-            has_cluster = _heading_cluster_present_from_payload_slide(slides_by_number[number])
+        if cls.category == "empty":
+            continue
+        items_by_id = {(it["kind"], it["kindIndex"]): it for it in slides_by_number[number].get("items") or []}
+        heading_text = _heading_text_for_repeat_check(cls, items_by_id)
+        has_cluster = _heading_cluster(cls, items_by_id) is not None
         if (
             has_cluster
             and heading_text is not None
@@ -863,9 +865,14 @@ def plan_assembly(
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
     split_overrides: Mapping[int, int] | None = None,
+    all_classes: Sequence[SlideClass] | None = None,
 ) -> AssemblyPlan:
     """Pure planning over `payload`/`classes`, EXCEPT the cropped image files under
-    `crop_dir` (unless `no_image_crop`), committed only once every slide validates."""
+    `crop_dir` (unless `no_image_crop`), committed only once every slide validates.
+    `all_classes`, when given, is the whole deck's classification (see
+    `_full_classes_by_number`) -- used only for the repeat-heading predecessor check,
+    so a `--slides` batch drops a repeated heading exactly like a full-deck run;
+    `classes` itself may be just the batch's."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -876,7 +883,10 @@ def plan_assembly(
         if decision.action in ("in_deck", "both")
         and classes_by_number[number].category != "empty"
     )
-    repeat_heading_by_number = _repeat_heading_state(slides_by_number, classes_by_number)
+    full_classes_by_number = _full_classes_by_number(
+        payload, builds, text_slide_words, no_dedupe, no_drop_panel_backdrop, all_classes,
+    )
+    repeat_heading_by_number = _repeat_heading_state(slides_by_number, full_classes_by_number)
 
     fits: dict[int, dict[ItemId, Rect]] = {}
     deletes: dict[int, tuple[ItemId, ...]] = {}
@@ -3697,6 +3707,7 @@ def assemble_dsk_deck(
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
         no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop, split_overrides=split_overrides,
+        all_classes=classes,
     )
     for number in sorted(plan.anchors):
         log(f"slide {number}: anchor {plan.anchors[number]}")

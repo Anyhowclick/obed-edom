@@ -1693,11 +1693,12 @@ def test_gw_text_slides_stay_within_band_top():
 
 def test_gw44_badge_x_clears_title_right_edge():
     # F1 originally pinned this badge to the group's own fitted x so it cleared the
-    # kept title's right edge under the old single-column short row. Codex D1b-p2
-    # review 1 finding 2 fixed the repeat-heading check to see the true deck-order
-    # predecessor even when planned alone -- GW 51/53 now correctly drop their
-    # (repeated) heading in every batch (see the repeat-heading tests below), so this
-    # invariant is checked on GW 44 instead, whose heading is genuinely not a repeat:
+    # kept title's right edge under the old single-column short row. The
+    # repeat-heading check must see the true deck-order predecessor even when
+    # planned alone -- GW 51/53 correctly drop their (repeated) heading in every
+    # batch (see the repeat-heading tests below, including
+    # `test_repeat_heading_gw51_planned_alone_matches_batch`), so this invariant is
+    # checked on GW 44 instead, whose heading is genuinely not a repeat:
     # the verse column is a disjoint region starting at `HEADING_COL_W + COL_GUTTER`
     # past the band's left edge, and the heading/title lives in the left column
     # entirely, so the badge still clears it, just via the two-column mechanism.
@@ -7457,7 +7458,8 @@ def test_two_column_repeat_heading_dropped_when_planned_alone():
     # Codex D1b-p2 review 1 finding 2: the repeat-heading predecessor is the true
     # deck-order previous non-empty slide, independent of the planning batch --
     # slide 21 alone (its predecessor 20 outside `classes`) must still see 20's
-    # matching "Faith" heading via the payload fallback and drop its own.
+    # matching "Faith" heading, via `_full_classes_by_number`'s reclassification of
+    # the whole payload (review 2), and drop its own.
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
     slide_20 = _two_column_slide(20, _VERSE_1)
@@ -7509,6 +7511,144 @@ def test_two_column_repeat_heading_survives_headingless_predecessor():
 
     assert 22 in plan.two_column
     assert plan.fits[22][("text", 2)].x == pytest.approx(43.0, abs=0.01)
+
+
+def _two_column_slide_group_child_verse(number, verse_text, *, verse_w=1800, verse_h=300):
+    # Same left-column heading cluster as `_two_column_slide`, but the verse is a
+    # group child (GW 44/50/51/53's real shape) rather than a top-level text.
+    circle = {"kind": "shape", "kindIndex": 0, "x": 2200, "y": 300, "w": 81, "h": 81, "text": ""}
+    number_item = {
+        "kind": "text", "kindIndex": 1, "x": 2220, "y": 320, "w": 41, "h": 41,
+        "text": "3", "font": "AzoSans-Bold", "size": 60.0,
+    }
+    heading = {
+        "kind": "text", "kindIndex": 2, "x": 2000, "y": 500, "w": 1600, "h": 150,
+        "text": "Faith", "font": "ArgentCF-Bold", "size": 80.0,
+    }
+    group = _group_item(0, x=3800, y=700, w=verse_w, h=verse_h)
+    slide = _slide(number, [circle, number_item, heading, group])
+    slide["groupChildText"] = {0: verse_text}
+    slide["groupChildSignature"] = {0: f"shape:badge\ntext:{verse_text}"}
+    slide["groupChildren"] = {0: [
+        {"kind": "shape", "kindIndex": 0, "autosize": False, "x": 3800.0, "y": 700.0, "w": 300.0, "h": 60.0},
+        {"kind": "text", "kindIndex": 1, "autosize": True, "x": 3800.0, "y": 760.0, "w": float(verse_w), "h": float(verse_h) - 60.0},
+    ]}
+    return slide
+
+
+def test_repeat_heading_predecessor_uses_group_child_verse():
+    # Codex D1b-p2 review 2 MAJOR: the removed `_heading_cluster_present_from_payload_slide`
+    # approximation ignored group-child verses entirely (GW 44/50/51/53's real shape),
+    # so it always said "no cluster" for such a predecessor and never suppressed the
+    # successor's repeated heading. `_full_classes_by_number` now reclassifies the
+    # whole payload the same way `load_assembly_inputs` would, so slide 20's
+    # group-child-verse heading cluster is recognised and slide 21 (planned alone,
+    # sharing its "Faith" heading) drops its own.
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide_20 = _two_column_slide_group_child_verse(20, _VERSE_1)
+    slide_21 = _two_column_slide(21, _VERSE_2)
+    payload = _payload([slide_20, slide_21])
+    classes = [_classify(slide_21)]
+    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+    predecessor_cls = _classify(
+        slide_20, group_child_words=slide_20["groupChildText"], group_children=slide_20["groupChildren"],
+    )
+    predecessor_items = {(it["kind"], it["kindIndex"]): it for it in slide_20["items"]}
+    assert dsa._heading_cluster(predecessor_cls, predecessor_items) is not None
+
+    assert 21 not in plan.two_column
+    verse = plan.fits[21][("text", 3)]
+    assert verse.x == pytest.approx(43.0, abs=0.01)
+
+
+def test_repeat_heading_predecessor_unmatched_badge_does_not_suppress():
+    # Codex D1b-p2 review 2 MAJOR parity case: a predecessor whose extra top-level
+    # text does NOT match any shape's rect+text (the badge rule in `_heading_cluster`)
+    # is not itself a two-column-eligible cluster, so it must not suppress a
+    # same-heading successor -- the old approximation never checked the badge rule
+    # at all and would have wrongly suppressed.
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide_20 = _two_column_slide(20, _VERSE_1)
+    unmatched_badge = {
+        "kind": "text", "kindIndex": 4, "x": 3000, "y": 900, "w": 300, "h": 50,
+        "text": "John 3:16", "font": "AzoSans-Bold", "size": 30.0,
+    }
+    slide_20["items"].append(unmatched_badge)
+    slide_21 = _two_column_slide(21, _VERSE_2)
+    payload = _payload([slide_20, slide_21])
+    classes = [_classify(slide_21)]
+    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+    predecessor_cls = _classify(slide_20)
+    predecessor_items = {(it["kind"], it["kindIndex"]): it for it in slide_20["items"]}
+    assert dsa._heading_cluster(predecessor_cls, predecessor_items) is None
+
+    assert 21 in plan.two_column
+    assert plan.fits[21][("text", 2)].x == pytest.approx(43.0, abs=0.01)
+
+
+def test_repeat_heading_predecessor_multiple_long_text_ids_does_not_suppress():
+    # Codex D1b-p2 review 2 MAJOR parity case: `_heading_cluster` refuses whenever
+    # `cls.long_text_ids` has more than one entry -- a predecessor with two long-text
+    # boxes is not two-column-eligible and must not suppress a same-heading
+    # successor. The old approximation had no `cls.long_text_ids` to consult and
+    # would have wrongly suppressed (any text over the word threshold sufficed).
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide_20 = _two_column_slide(20, _VERSE_1)
+    second_long_text = {
+        "kind": "text", "kindIndex": 4, "x": 2000, "y": 900, "w": 1800, "h": 300,
+        "text": _VERSE_2, "font": "AzoSans-Regular", "size": 70.0,
+    }
+    slide_20["items"].append(second_long_text)
+    slide_21 = _two_column_slide(21, _VERSE_2)
+    payload = _payload([slide_20, slide_21])
+    classes = [_classify(slide_21)]
+    decisions = {21: SlideDecision(21, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+    predecessor_cls = _classify(slide_20)
+    assert len(predecessor_cls.long_text_ids) == 2
+    predecessor_items = {(it["kind"], it["kindIndex"]): it for it in slide_20["items"]}
+    assert dsa._heading_cluster(predecessor_cls, predecessor_items) is None
+
+    assert 21 in plan.two_column
+    assert plan.fits[21][("text", 2)].x == pytest.approx(43.0, abs=0.01)
+
+
+def test_repeat_heading_gw51_planned_alone_matches_batch():
+    # Codex D1b-p2 review 2 MAJOR real-deck assertion: GW 51 planned alone must
+    # match its plan in the GW 50-53 batch -- heading dropped, verse
+    # x=43/w=1849 -- and the other GW rows stay as measured (44/46/50 two-column,
+    # 51/52/53 full-width).
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    numbers = (44, 46, 50, 51, 52, 53)
+    decisions = {n: SlideDecision(n, "in_deck") for n in numbers}
+    batch = plan_assembly(
+        payload, [by_number[n] for n in numbers], decisions=decisions, band=BAND, clips={}, runs=runs,
+    )
+    assert set(batch.two_column) == {44, 46, 50}
+    for n, verse_id in ((51, ("groupchild", 0, "text", 1)), (52, ("text", 1)), (53, ("groupchild", 0, "text", 1))):
+        verse = batch.fits[n][verse_id]
+        assert verse.x == pytest.approx(43.0, abs=0.01)
+
+    alone_decisions = {51: SlideDecision(51, "in_deck")}
+    alone = plan_assembly(payload, [by_number[51]], decisions=alone_decisions, band=BAND, clips={}, runs=runs)
+    assert 51 not in alone.two_column
+    alone_verse = alone.fits[51][("groupchild", 0, "text", 1)]
+    batch_verse = batch.fits[51][("groupchild", 0, "text", 1)]
+    assert alone_verse.x == pytest.approx(batch_verse.x, abs=0.01)
+    assert alone_verse.w == pytest.approx(batch_verse.w, abs=0.01)
+    assert alone_verse.x == pytest.approx(43.0, abs=0.01)
+    assert alone_verse.w == pytest.approx(1849.0, abs=0.5)
 
 
 def test_build_refit_round_recentres_two_column_heading():
