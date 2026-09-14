@@ -7474,6 +7474,24 @@ def test_two_column_repeat_heading_dropped_when_planned_alone():
     assert cluster_ids <= set(plan.deletes[21])
 
 
+def test_two_column_repeat_heading_survives_heading_only_predecessor():
+    # Owner-pinned rule (D1b-p2 fix round 2, GW45->46): suppression requires the
+    # immediate predecessor to itself be heading+verse -- a heading-only predecessor
+    # (heading cluster, no verse) shares slide 22's "Faith" heading text but must not
+    # drop it.
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    slide_21 = _slide(21, [_heading_item(0, "Faith")])
+    slide_22 = _two_column_slide(22, _VERSE_1)
+    payload = _payload([slide_21, slide_22])
+    classes = [_classify(slide_22)]
+    decisions = {22: SlideDecision(22, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+    assert 22 in plan.two_column
+    assert plan.fits[22][("text", 2)].x == pytest.approx(43.0, abs=0.01)
+
+
 def test_two_column_repeat_heading_survives_headingless_predecessor():
     # Codex D1b-p2 review 1 finding 2: a headingless intervening slide breaks the
     # run -- slide 22's immediate predecessor (21, an image slide) has no heading,

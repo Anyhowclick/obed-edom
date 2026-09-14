@@ -610,18 +610,67 @@ def _heading_text_from_payload_slide(slide: Mapping[str, Any]) -> str | None:
     return candidates[0]
 
 
+def _heading_cluster_present_from_payload_slide(slide: Mapping[str, Any]) -> bool:
+    """Approximate has-cluster (heading+verse) check for `_repeat_heading_state`'s
+    deck-order walk when a predecessor slide falls outside the current batch's
+    `classes`: the same digit-in-circle geometry test as `_heading_cluster`, plus a
+    long-text proxy (any raw text item over `DEFAULT_TEXT_SLIDE_WORDS` words, since
+    there is no `cls.long_text_ids` to consult here) -- straight off the slide's
+    payload items, unfiltered by `kept`, matching `_heading_text_from_payload_slide`'s
+    fallback."""
+    items = slide.get("items") or []
+    texts = [item for item in items if item.get("kind") == "text"]
+    shapes = [item for item in items if item.get("kind") == "shape"]
+    if not any(_word_count((item.get("text") or "").strip()) > DEFAULT_TEXT_SLIDE_WORDS for item in texts):
+        return False
+    circle_candidates = [
+        item for item in shapes
+        if not (item.get("text") or "").strip()
+        and item.get("w") == _HEADING_CIRCLE_PT
+        and item.get("h") == _HEADING_CIRCLE_PT
+    ]
+    if len(circle_candidates) != 1:
+        return False
+    circle_rect = _rect_of(circle_candidates[0])
+    heading_ids = [
+        item for item in texts
+        if (item.get("font") or "").startswith(_HEADING_FONT_PREFIX)
+        and (item.get("text") or "").strip()
+        and _word_count((item.get("text") or "").strip()) <= _HEADING_MAX_WORDS
+    ]
+    if len(heading_ids) != 1:
+        return False
+    digit_candidates = [
+        item for item in texts
+        if (item.get("text") or "").strip().isdigit()
+        and len((item.get("text") or "").strip()) <= _HEADING_NUMBER_MAX_CHARS
+    ]
+    if len(digit_candidates) != 1:
+        return False
+    nx, ny, nw, nh = _rect_of(digit_candidates[0])
+    centre = (nx + nw / 2.0, ny + nh / 2.0)
+    cx, cy, cw, ch = circle_rect
+    circle_centre = (cx + cw / 2.0, cy + ch / 2.0)
+    radius = math.hypot(centre[0] - circle_centre[0], centre[1] - circle_centre[1])
+    return radius <= (_HEADING_CIRCLE_PT / 2.0) + _HEADING_GEOM_TOL_PT
+
+
 def _repeat_heading_state(
     slides_by_number: Mapping[int, dict],
     classes_by_number: Mapping[int, SlideClass],
 ) -> dict[int, bool]:
-    """Per slide number, whether its heading cluster (if any) repeats the immediately
-    preceding non-empty slide's heading text -- walking `slides_by_number` in full deck
-    order, independent of the planning batch (`kept_numbers`), so `--slides 51` alone
-    drops the heading exactly like a full-deck run. A slide with no heading text breaks
-    the run (its non-heading successor is never a repeat); a slide outside the batch's
-    `classes` falls back to `_heading_text_from_payload_slide`."""
+    """Per slide number, whether its heading cluster repeats the immediately preceding
+    non-empty slide's heading text -- walking `slides_by_number` in full deck order,
+    independent of the planning batch (`kept_numbers`), so `--slides 51` alone drops
+    the heading exactly like a full-deck run. Suppression additionally requires that
+    predecessor to itself be heading+verse (two-column-eligible): a heading-only
+    predecessor (heading cluster with no verse, e.g. GW45 "Prayer") does not suppress
+    (owner-pinned rule, D1b-p2 fix round 2). A slide with no heading text breaks the
+    run; a slide outside the batch's `classes` falls back to
+    `_heading_text_from_payload_slide`/`_heading_cluster_present_from_payload_slide`."""
     repeats: dict[int, bool] = {}
     prev_heading_text: str | None = None
+    prev_has_cluster = False
     for number in sorted(slides_by_number):
         cls = classes_by_number.get(number)
         if cls is not None and cls.category == "empty":
@@ -632,10 +681,16 @@ def _repeat_heading_state(
             has_cluster = _heading_cluster(cls, items_by_id) is not None
         else:
             heading_text = _heading_text_from_payload_slide(slides_by_number[number])
-            has_cluster = False
-        if has_cluster and heading_text is not None and prev_heading_text is not None:
+            has_cluster = _heading_cluster_present_from_payload_slide(slides_by_number[number])
+        if (
+            has_cluster
+            and heading_text is not None
+            and prev_heading_text is not None
+            and prev_has_cluster
+        ):
             repeats[number] = heading_text == prev_heading_text
         prev_heading_text = heading_text
+        prev_has_cluster = has_cluster
     return repeats
 
 

@@ -182,12 +182,11 @@ The badge-x **245.0** assertion is the load-bearing one: it is an exact, indepen
   current call's `classes` (no `SlideClass`) falls back to `_heading_text_from_payload_slide`, which applies
   the same single-ArgentCF-candidate rule straight off the payload item without a `cls.kept` filter -- the best
   available signal for a slide `plan_assembly` never classified. This is a real, not merely theoretical,
-  correction: GW46's own true predecessor is GW45 ("Prayer", heading-only), which shares GW46's heading text,
-  so GW46 planned alone now also drops its heading (`test_gw46_repeat_heading_dropped_top_level`,
-  `dsk_assemble.py`), matching what even the *unfixed* code already produced when GW45 was included in the same
-  batch -- this is the batch-dependence bug being fixed, not a new regression. The three GW44/50/51/53 badge/short
-  -row tests that relied on GW51/53's old (batch-dependent) "heading kept when planned alone" behaviour were
-  moved to GW44/50, whose real predecessors are not heading matches.
+  correction: GW46's own true predecessor is GW45 ("Prayer", heading-only), which shares GW46's heading text.
+  **This turned out to be wrong** (see Fix round 2 below): the gold deck keeps GW46 two-column despite GW45
+  sharing its heading, so round 1's blanket "any matching predecessor heading text drops the run" rule was too
+  broad. The three GW44/50/51/53 badge/short-row tests that relied on GW51/53's old (batch-dependent) "heading
+  kept when planned alone" behaviour were moved to GW44/50, whose real predecessors are not heading matches.
 - **Refit re-centring.** `plan.two_column_cluster: dict[int, HeadingCluster]` (new `AssemblyPlan` field) records
   the cluster ids alongside `plan.two_column`'s left `Band`, so `_build_refit_round` can, after computing the
   round's verse/short-row rects, rederive the left block's `circle_y`/`heading_y` off the new right-block centre
@@ -198,3 +197,42 @@ The badge-x **245.0** assertion is the load-bearing one: it is an exact, indepen
   (46/81) for the numeral, calling `_run_size_ranges` for each: a tuple result goes to `run_sizes`, a uniform
   float (or a run-gap, flattened with a warning) to `text_sizes`. Previously both were always a single flat
   point size, which would have silently discarded a mixed-size heading or numeral run.
+
+## Fix round 2 (GW46 keeps its heading -- owner-pinned rule)
+
+Round 1's deck-order repeat rule dropped GW46's heading because its immediate predecessor GW45 ("Prayer",
+heading cluster, no verse -- `_heading_cluster` returns `None` since `cls.long_text_ids` is empty, `category`
+"static") carries the same heading text. But the gold deck (gold 30 = GW 46, §2 above) **keeps** "Prayer" on
+GW46 as a two-column slide -- round 1's rule was derived from gold 34->35/36/37 (GW50->51/52/53), where the
+predecessor is itself a heading+verse (two-column-eligible) slide.
+
+**Owner-pinned rule (orchestrator decision, owner confirmation pending):** a heading cluster is suppressed only
+when the immediate non-empty predecessor in deck order is itself heading+verse (two-column-eligible) with an
+identical heading text. A heading-only predecessor (heading cluster, no verse) does not suppress; a headingless
+predecessor still breaks the run (unchanged from round 1).
+
+`_repeat_heading_state` now tracks `prev_has_cluster` alongside `prev_heading_text`; `repeats[number]` is set
+only when the current slide has a cluster, its heading text is non-`None`, and **both** the predecessor's
+heading text is non-`None` and the predecessor itself had a cluster. For a predecessor outside the current
+batch's `classes` (no `SlideClass`), `_heading_cluster_present_from_payload_slide` (new) approximates has-cluster
+straight off the payload: the same digit-in-circle geometry test as `_heading_cluster`, plus a long-text proxy
+(any raw text item over `DEFAULT_TEXT_SLIDE_WORDS` words, since there is no `cls.long_text_ids` to consult).
+
+Measured (deck-order batch `[44, 45, 46, 50, 51, 52, 53]`, full `plan_assembly` call together):
+- 44, 46, 50 -> two-column; 51, 52, 53 -> full-width (heading dropped, unchanged from round 1).
+- GW45 itself: `category == "static"`, `long_text_ids == ()`, `_heading_cluster` returns `None` (heading-only,
+  confirmed no verse), `_heading_text_for_repeat_check` returns `"Prayer"`.
+- Gold deck: the plan's own mapping (§2) lists gold 39-42 as the heading-only, single-centred-column pattern
+  (those map to GW56/57/...); GW45's own gold counterpart is not individually enumerated in this plan's gold
+  survey, so we report the heading-only pattern by analogy rather than a direct gold-slide measurement for
+  GW45 specifically.
+- `test_gw46_two_column_top_level_verse` restored (deleted `test_gw46_repeat_heading_dropped_top_level`) with
+  round 1's original pin re-measured against round 2's code: unchanged at `t = 0.65`, lead `45.5 pt` (heading
+  `Rect(43.0, ~882.2, 450.0, 113.56)` @ 80.0 pt, badge `Rect(245.0, ~826.2, 46.0, 46.0)`, verse
+  `Rect(501.0, ~852.5, 1391.0, ~201.5)`) -- the geometry never depended on the repeat-heading decision, so
+  re-measuring after the rule fix reproduces the pre-round-1 numbers exactly.
+- New synthetic unit test `test_two_column_repeat_heading_survives_heading_only_predecessor`: a heading-only
+  predecessor sharing the next slide's heading text does not suppress it (companion to the existing
+  `test_two_column_repeat_heading_survives_headingless_predecessor` and
+  `test_two_column_repeat_heading_dropped_when_planned_alone`, both unchanged -- their predecessors are
+  themselves heading+verse).

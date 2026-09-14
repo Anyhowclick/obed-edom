@@ -345,14 +345,17 @@ GW44 and GW50 reproduce the plan's pre-implementation estimates within 0.5pt: he
 `Rect(43.0, 834.8, 450.0, 159.8)` @ 60.0pt / `Rect(43.0, 858.2, 450.0, 113.6)` @ 80.0pt; number
 badge `Rect(245.0, ..., 46.0, 46.0)` on both; verse `t=0.59` (lead 41.3pt) / `t=0.48` (lead 33.6pt).
 
-**GW46 is itself a repeat-heading slide once fix round 1 (finding 2) reads the true deck order**:
-GW46's own predecessor GW45 ("Prayer", heading-only) shares GW46's heading text, so GW46 (planned
-alone or in any batch that includes GW45) now drops its heading and takes the verse full-width
-(`x=43.0 w=1849.0`, `t=0.82`), same as GW51/52/53 -- see `test_gw46_repeat_heading_dropped_top_level`.
-The original "GW46 deviates from the plan doc's estimate" two-column geometry (heading top
-870.7/height 113.6, badge a top-level 522.57x74.54 shape+text pair, verse lead 45.5pt at t=0.65) was
-only ever observed because the pre-fix `kept_numbers`-tracked repeat check couldn't see GW45 when
-GW46 was planned alone -- a batch-dependence artifact, not GW46's true behaviour.
+**GW46 keeps its heading (owner-pinned rule, D1b-p2 fix round 2)**: round 1's deck-order repeat
+rule read GW46's true predecessor GW45 ("Prayer", heading-only) and, since it shares GW46's heading
+text, dropped GW46's heading -- but the gold deck (gold 30 = GW46) keeps "Prayer" on GW46 as
+two-column, so that was wrong. The pinned rule (orchestrator decision, owner confirmation pending):
+suppression requires the immediate predecessor to itself be heading+verse (two-column-eligible)
+with identical heading text; a heading-only predecessor like GW45 does not suppress. GW46 (planned
+alone or in the full deck-order batch `[44, 45, 46, 50, 51, 52, 53]`) is therefore two-column again,
+reproducing the original geometry (heading top ~882.2/height 113.56 @ 80.0pt, badge a top-level
+522.57x74.54 shape+text pair, verse lead 45.5pt at t=0.65) -- see
+`test_gw46_two_column_top_level_verse`. GW51/52/53's predecessors are themselves heading+verse
+slides, so their drop is unchanged.
 
 GW51/52/53 (repeat-drop): verse `x=43.0 w=1849.0` in all three; heading/number/circle land in
 `plan.deletes` (`{("shape", 0), ("text", 0), ("text", 1)}` for 51/53, `{("shape", 1), ("text", 2),
