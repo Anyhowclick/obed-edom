@@ -4,6 +4,7 @@ subprocess.run/Popen is reached without an explicit monkeypatch.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 import subprocess
 from pathlib import Path
@@ -469,7 +470,7 @@ def test_refit_script_reopens_and_saves():
     cls = _classify(slide)
     decisions = {1: SlideDecision(1, "in_deck")}
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
-    refits = {1: {("text", 0): TextRefit(Rect(43.0, 704.0, 1892.0, 200.0), run_sizes=44.0)}}
+    refits = {(1, 0): {("text", 0): TextRefit(Rect(43.0, 704.0, 1892.0, 200.0), run_sizes=44.0)}}
     script = build_refit_script(
         plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
         staging_path=Path("/tmp/staged.key"),
@@ -2964,7 +2965,7 @@ def test_refit_round_re_stacks_badge_position_only():
 def test_refit_script_addresses_staged_index_after_a_delete_below_the_stack():
     plan, slides_by_number = _badge_and_stack_plan()
     plan.deletes[13] = (("text", 2),)
-    refits = {13: {("text", 1): TextRefit(Rect(43.0, 700.0, 1849.0, 250.0), run_sizes=50.0)}}
+    refits = {(13, 0): {("text", 1): TextRefit(Rect(43.0, 700.0, 1849.0, 250.0), run_sizes=50.0)}}
     script = dsa.build_refit_script(
         plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
         staging_path=Path("/tmp/staged.key"),
@@ -3648,7 +3649,7 @@ def test_refit_script_staged_index_retains_hidden_item_below_stack():
     plan, slides_by_number = _badge_and_stack_plan()
     plan.fits[13][("text", 2)] = plan.fits[13][("text", 0)]
     plan.deletes[13] = (("text", 0),)
-    refits = {13: {("text", 2): TextRefit(Rect(43.0, 700.0, 1849.0, 250.0), run_sizes=50.0)}}
+    refits = {(13, 0): {("text", 2): TextRefit(Rect(43.0, 700.0, 1849.0, 250.0), run_sizes=50.0)}}
 
     script_without_hidden = dsa.build_refit_script(
         plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
@@ -5681,7 +5682,7 @@ def test_build_refit_script_non_cluster_autosize_text_writes_size_before_positio
         payload, [cls], decisions=decisions, band=BAND, clips={}, deck=deck, fw_deck="/tmp/does-not-matter.key",
     )
     assert ("text", 0) in plan.autosize[1]
-    refits = {1: {("text", 0): TextRefit(Rect(43.0, 704.0, 1892.0, 200.0), run_sizes=44.0)}}
+    refits = {(1, 0): {("text", 0): TextRefit(Rect(43.0, 704.0, 1892.0, 200.0), run_sizes=44.0)}}
     script = build_refit_script(
         plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
         staging_path=Path("/tmp/staged.key"),
@@ -8594,8 +8595,8 @@ def test_build_refit_script_writes_visual_top_y_for_recentred_cluster():
     new_heading_y = refits[17][heading_id].rect.y
 
     script = build_refit_script(
-        plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
-        staging_path=Path("/tmp/staged.key"),
+        plan, {(n, 0): items for n, items in refits.items()}, ordinals=plan.ordinals,
+        scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
     )
     staged_heading_id = dsa._staged_id_for(17, plan, heading_id, hidden=frozenset())
     heading_addr = f"text item {staged_heading_id[1] + 1} of slide {plan.ordinals[17]}"
@@ -9401,6 +9402,196 @@ def test_gw38_split_part_run_sizes_capped_at_50pt():
     sizes = {round(sz, 2) for _lo, _hi, sz in part0.run_sizes[verse_id]}
     assert 50.0 in sizes
     assert round(85.0 * 45.0 / 70.0, 2) not in sizes  # 54.64pt, the uncapped ratio
+
+
+# --------------------------------------------------------------------------- S3: split
+# part geometry + per-ordinal offline measurement/refit/refusal (dsk_layout_split_engine
+# plan §1.3/§2.3/§3 S3, dsk_pieceD2b's offline naturalSize/refit machinery extended to
+# split parts).
+
+
+def _two_part_split_plan(number: int, base_ordinal: int) -> tuple[AssemblyPlan, dict]:
+    """A minimal char-window two-part split on one source box, both parts sharing the
+    slide's stack band/slot rect -- just enough to exercise ``_offline_measure``/
+    ``_eligible_refit_items``/``_refit_still_over_budget`` without a real deck."""
+    item_id = ("text", 1)
+    rect = Rect(43.0, 800.0, 1849.0, 200.0)
+    part0 = SplitPart(
+        fits={item_id: rect}, deletes=(), text_sizes={}, stacked_ids=frozenset({item_id}),
+        autosize=frozenset({item_id}), char_window=(1, 40), char_total=80,
+    )
+    part1 = SplitPart(
+        fits={item_id: rect}, deletes=(), text_sizes={},
+        run_sizes={item_id: ((1, 40, 45.0),)}, stacked_ids=frozenset({item_id}),
+        autosize=frozenset({item_id}), char_window=(41, 80), char_total=80,
+    )
+    plan = AssemblyPlan(
+        kept=(number,), ordinals={number: base_ordinal}, fits={}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(), splits={number: (part0, part1)},
+        stack_bands={number: BAND},
+    )
+    item = _text_item(1, x=43, y=800, w=1849, h=200, runs=[{"size": 45.0}])
+    slides_by_number = {number: _slide(number, [item])}
+    return plan, slides_by_number
+
+
+def test_offline_measure_keys_split_parts_by_output_ordinal():
+    plan, _slides = _two_part_split_plan(14, base_ordinal=5)
+
+    def fake_offline_text_rects(_key_path, *, deck=None):
+        rects_by_ordinal = {
+            5: {("text", 0): (43.0, 800.0, 1849.0, 120.0)},
+            6: {("text", 0): (43.0, 800.0, 1849.0, 150.0)},
+        }
+        return (rects_by_ordinal, set())
+
+    import obed_edom.dsk_assemble as _dsa
+    orig = _dsa.offline_text_rects
+    _dsa.offline_text_rects = fake_offline_text_rects
+    try:
+        warnings: list[str] = []
+        measured, bands, measure_warnings = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
+    finally:
+        _dsa.offline_text_rects = orig
+    assert measure_warnings == []
+    assert measured == {(14, "text:1:5"): 120.0, (14, "text:1:6"): 150.0}
+    assert bands[(14, "text:1:5")] == (800.0, 920.0)
+    assert bands[(14, "text:1:6")] == (800.0, 950.0)
+
+
+def test_eligible_refit_items_includes_split_parts_keyed_by_ordinal():
+    plan, _slides = _two_part_split_plan(14, base_ordinal=5)
+    eligible = dsa._eligible_refit_items(plan, 14)
+    assert eligible == frozenset({(5, ("text", 1)), (6, ("text", 1))})
+
+
+def test_refit_still_over_budget_reads_split_part_rect_and_slide_band():
+    plan, _slides = _two_part_split_plan(14, base_ordinal=5)
+    measured = {(14, "text:1:5"): 250.0, (14, "text:1:6"): 150.0}
+    over = dsa._refit_still_over_budget(plan, measured, {(14, "text:1:5"), (14, "text:1:6")})
+    assert over == {(14, "text:1:5")}
+
+
+def test_split_part_still_over_budget_after_max_refits_refuses_under_text_fit_warn():
+    # A part's rect/geometry is never re-windowed live (C5) -- an over-budget part must
+    # still exhaust `_MAX_REFITS` measurement rounds (each reading the same offline
+    # naturalSize, since nothing live ever corrects it) before it refuses.
+    plan, slides_by_number = _two_part_split_plan(14, base_ordinal=5)
+
+    def fake_offline_text_rects(_key_path, *, deck=None):
+        rects_by_ordinal = {
+            5: {("text", 0): (43.0, 800.0, 1849.0, 260.0)},  # over part 0's 200pt rect
+            6: {("text", 0): (43.0, 800.0, 1849.0, 150.0)},  # part 1 fits
+        }
+        return (rects_by_ordinal, set())
+
+    import obed_edom.dsk_assemble as _dsa
+    monkeypatch_orig = _dsa.offline_text_rects
+    _dsa.offline_text_rects = fake_offline_text_rects
+    try:
+        logs: list[str] = []
+        with pytest.raises(AssemblyRefusal, match="slide 14: text text:1:5 still overflows after refit"):
+            dsa._run_refit_and_finalize(
+                plan, batch=None, slides_by_number=slides_by_number,
+                band=BAND, min_text_pt=24.0, allow_split=True, text_fit="warn",
+                staging_path=Path("/tmp/staged.key"), measured={}, overflows=[],
+                warnings=[], log=logs.append,
+            )
+    finally:
+        _dsa.offline_text_rects = monkeypatch_orig
+    assert any("split slide, part geometry is not re-run" in l for l in logs)
+
+
+def test_offline_measure_missing_for_split_part_refuses_immediately():
+    plan, slides_by_number = _two_part_split_plan(14, base_ordinal=5)
+
+    def fake_offline_text_rects_missing_part1(_key_path, *, deck=None):
+        # Ordinal 6 (part 1) is entirely absent from the saved deck's read.
+        return ({5: {("text", 0): (43.0, 800.0, 1849.0, 120.0)}}, set())
+
+    import obed_edom.dsk_assemble as _dsa
+    orig = _dsa.offline_text_rects
+    _dsa.offline_text_rects = fake_offline_text_rects_missing_part1
+    try:
+        with pytest.raises(AssemblyRefusal, match="text:1:6 offline measure missing"):
+            dsa._run_refit_and_finalize(
+                plan, batch=None, slides_by_number=slides_by_number,
+                band=BAND, min_text_pt=24.0, allow_split=True, text_fit="warn",
+                staging_path=Path("/tmp/staged.key"), measured={}, overflows=[],
+                warnings=[], log=lambda _msg: None,
+            )
+    finally:
+        _dsa.offline_text_rects = orig
+
+
+def test_split_part_emitted_script_order_is_width_size_delete_position_no_height():
+    plan, _slides = _two_part_split_plan(14, base_ordinal=5)
+    ordinal = plan.ordinals[14] + 1  # part 1's own ordinal
+    part1_lines = dsa._slide_lines(plan, 14, ordinal, part=1)
+    script = "\n".join(part1_lines)
+    assert "set height" not in script
+    width_i = next(i for i, l in enumerate(part1_lines) if "set width of theObj" in l)
+    size_i = next(i for i, l in enumerate(part1_lines) if "set size of characters" in l)
+    delete_i = next(i for i, l in enumerate(part1_lines) if l.strip().startswith("delete characters 1 thru"))
+    position_i = next(i for i, l in enumerate(part1_lines) if "set position of theObj" in l)
+    assert width_i < size_i < delete_i < position_i
+
+
+@pytest.mark.deck
+def test_gw38_split_part_rects_pinned_to_the_standard_slot():
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {38: SlideDecision(38, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[38]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, fw_deck=GW_DECK, layout_policy="import",
+    )
+    for part in plan.splits[38]:
+        verse_id = next(iter(part.stacked_ids))
+        rect = part.fits[verse_id]
+        assert (round(rect.x, 1), round(rect.y, 1), round(rect.w, 1)) == (53.6, 866.4, 1799.0)
+
+
+R12B = Path.home() / "Desktop/dsk-d4-work/out-r12b/Sermon_PK_DSK.key"
+
+
+def _require_r12b_deck():
+    if not R12B.is_file():
+        pytest.skip(f"deck not present (local operator file): {R12B}")
+
+
+# `evidence-r12b/run.out`'s own post-refit offline reads for the deck's unsplit stacked
+# boxes -- pinned so this S3 change (widening `_offline_measure` to also cover split
+# parts) provably leaves an unsplit slide's own measurement untouched. r12b predates the
+# split engine (no `plan.splits` entries at all), so rather than re-deriving a plan that
+# now might legitimately split some of these slides (S1/S2 moved GW 28 onto a real
+# split), this reads the SAVED deck itself as the source of truth for which staged text
+# items exist per ordinal -- an identity `(kind, idx)` plan, matching `_offline_measure`'s
+# non-split branch, which S3 leaves untouched (it only added a new split branch above it).
+R12B_UNSPLIT_OFFLINE_H = {13: 219.0, 28: 241.0, 46: 179.0, 52: 193.0}
+R12B_UNSPLIT_STAGED_IDX = {13: 1, 28: 1, 46: 2, 52: 1}
+R12B_ORDINAL = {13: 2, 28: 7, 46: 11, 52: 15}
+
+
+@pytest.mark.deck
+def test_offline_measure_unsplit_keys_match_r12b_run_out_regression():
+    _require_r12b_deck()
+    warnings: list[str] = []
+    for number, expected_h in R12B_UNSPLIT_OFFLINE_H.items():
+        ordinal = R12B_ORDINAL[number]
+        rects_by_ordinal, _soft = dsa.offline_text_rects(R12B)
+        text_count = sum(1 for kind, _idx in rects_by_ordinal.get(ordinal, {}) if kind == "text")
+        plan = AssemblyPlan(
+            kept=(number,), ordinals={number: ordinal},
+            fits={number: {("text", i): Rect(0.0, 0.0, 0.0, 0.0) for i in range(text_count)}},
+            deletes={number: ()}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        )
+        measured, _bands, measure_warnings = dsa._offline_measure(R12B, plan, {}, warnings)
+        assert measure_warnings == [], f"slide {number}: {measure_warnings}"
+        key = (number, f"text:{R12B_UNSPLIT_STAGED_IDX[number]}")
+        assert measured.get(key) == pytest.approx(expected_h, abs=1.0), f"slide {number}: {measured}"
 
 
 # S2/§1.1 re-measurement (height-budget pack, post-cap): expected part count and, per

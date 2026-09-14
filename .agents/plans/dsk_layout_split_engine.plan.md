@@ -383,6 +383,52 @@ absent → refusal; emitted-script test pinning `width → size → delete → p
 part and asserting no `set height`; the part rects pinned to (53.6, 866.4, 1799.0). Offline
 A/B: split slides gain MEASURE/refit coverage; no geometry change on unsplit slides.
 
+> **S3 landed.** Part geometry (§2.3, `_slide_lines`'s `autosize_ids` = `plan.autosize |
+> split_part.autosize`, width → run sizes/char deletes → position, never `set height`) was
+> already correct from S1/S2 -- untouched here (confirmed by diff: no change inside
+> `_slide_lines` or the split-geometry block in `plan_assembly`). This piece is the
+> measurement/refit/refusal plumbing only: `_eligible_refit_items` now returns
+> `(output ordinal, item id)` pairs, unioning every part's `SplitPart.stacked_ids` (still
+> excluding `groupchild`) instead of returning empty for a split slide; `_offline_measure`
+> measures each part on its own output ordinal (`plan.ordinals[number] + part`), keyed
+> `text:<srcIdx>:<ordinal>`, instead of `continue`-skipping the whole slide; the caller in
+> `_run_refit_and_finalize` builds `eligible_keys` with the ordinal suffix for a split slide's
+> entries; `_refit_still_over_budget` reads a split key's rect from
+> `plan.splits[number][part].fits` and its band from `plan.stack_bands[number]` (the shared
+> slide band, C5: no per-part band). `_build_refit_round` now explicitly skips a split slide
+> (`stop_reasons[slide_no] = "split slide, part geometry is not re-run in a live refit
+> round"`) rather than relying on the old accidental exclusion via `_eligible_refit_items`
+> returning `frozenset()` -- C5 (never re-window a split live) stands, enforced explicitly
+> instead of implicitly. `build_refit_script`'s `refits` key changed from `int` (slide number)
+> to `tuple[int, int]` (`number, part`, `0` for non-split) so a char-window split reusing one
+> source item id across parts still addresses the correct part's own staged ordinal
+> (`_staged_id_for(..., part=part, ...)`); only the `--text-fit shrink` fallback path (after
+> `_MAX_REFITS` offline-only rounds) can reach a split part through this, and per C5 a live
+> refit round itself never does. A part still over budget after `_MAX_REFITS` (or missing a
+> measurement) refuses exactly like a non-split box, under `--text-fit warn`. Tests added
+> (`tests/test_dsk_assemble.py`, S3 block before `GW_S2_SPLIT_CANDIDATES`): a synthetic
+> two-part char-window fixture covering `_offline_measure`/`_eligible_refit_items`/
+> `_refit_still_over_budget` keying, a still-over-budget-after-`_MAX_REFITS` refusal under
+> warn, a missing-measurement refusal, an emitted-script width→size→delete→position/no-height
+> order test, GW 38's part rects pinned to `(53.6, 866.4, 1799.0)` (deck-marked, corroborating
+> the already-passing S1/S2 `test_gw38_verse_over_three_lines_splits_at_the_standard_slot`),
+> and an r12b (`~/Desktop/dsk-d4-work/out-r12b/Sermon_PK_DSK.key`, predates the split engine)
+> regression reading the SAVED deck's own per-ordinal text rects directly (rather than
+> re-deriving a plan, since S1/S2 now legitimately split some of these slides, e.g. GW 28)
+> and asserting `_offline_measure`'s untouched non-split branch reproduces
+> `evidence-r12b/run.out`'s own post-refit offline reads exactly for GW 13/28/46/52 (219.0 /
+> 241.0 / 179.0 / 193.0 pt). Full suite: 400 pre-existing tests unchanged (6 build_refit_script
+> call sites' `refits` literals updated to the new `(number, part)` keying, no assertion
+> changed) + 8 new S3 tests, all pass; `tests/test_dsk_content_rules_acceptance.py` (20)
+> unchanged and pass. Offline A/B vs 76fde7a: `git diff` confined to
+> `build_refit_script`/`_refit_still_over_budget`/`_build_refit_round`/`_offline_measure`/
+> `_run_refit_and_finalize` -- no line inside `_slide_lines` or the split-geometry block of
+> `plan_assembly` changed, so every split slide's emitted script (part rects, run sizes,
+> character deletes, position order, no `set height`) and every unsplit slide's script/plan
+> are byte-identical to S2; the only behavioural change is that `_offline_measure` now
+> produces `MEASURE`-equivalent offline readings (and the refusal/refit machinery reacts to
+> them) for split parts it previously skipped entirely.
+
 **S4 — build policy on split boxes (~220 lines).**
 The §2.4 refusal (character/word-level build on a split box) and cloned-build semantics in
 `_merge_split_part_builds` + `_verify_builds` (per-part multiplicity, narrowed identity,

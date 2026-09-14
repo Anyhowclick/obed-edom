@@ -3093,7 +3093,7 @@ class TextRefit:
 
 def build_refit_script(
     plan: AssemblyPlan,
-    refits: Mapping[int, Mapping[ItemId, TextRefit]],
+    refits: Mapping[tuple[int, int], Mapping[ItemId, TextRefit]],
     *,
     ordinals: Mapping[int, int],
     scratch_path: Path,
@@ -3103,9 +3103,11 @@ def build_refit_script(
     """A refit round: re-open `scratch_path` by POSIX path -- bring-to-front if it is
     still the live document, or a plain reopen of a prior round's save (`keynote.py:532`'s
     precedent covers either) -- re-write only the boxes named in `refits` for each
-    affected slide (size/run-ranges + position, addressed by staged post-delete index,
-    with that slide's ``hidden`` delete targets treated as retained), re-measure them,
-    then `save`/`close`."""
+    affected (slide number, part) -- ``part`` is ``0`` for a non-split slide -- (size/
+    run-ranges + position, addressed by staged post-delete index on that part's own
+    output ordinal, with that slide's ``hidden`` delete targets treated as retained),
+    re-measure them, then `save`/`close`. A split part never gets a ``set height`` (S3
+    part geometry is always autosize)."""
     stem_name = _as_escape(scratch_path.stem)
     doc_name = _as_escape(scratch_path.name)
     lines = [
@@ -3121,14 +3123,20 @@ def build_refit_script(
         "    end if",
         "    tell theDoc",
     ]
-    for number, items in refits.items():
-        ordinal = ordinals[number]
-        autosize_ids = plan.autosize.get(number, frozenset())
+    for (number, part), items in refits.items():
+        split_parts = plan.splits.get(number)
+        is_split = split_parts is not None
+        ordinal = ordinals[number] + part if is_split else ordinals[number]
+        autosize_ids = (
+            plan.autosize.get(number, frozenset()) | split_parts[part].autosize
+            if is_split else plan.autosize.get(number, frozenset())
+        )
+        slide_hidden = (hidden or {}).get(number, frozenset())
         for item_id, refit in items.items():
             if item_id[0] == "groupchild":
                 continue
             kind, kind_index = item_id
-            staged_id = _staged_id_for(number, plan, item_id, hidden=(hidden or {}).get(number, frozenset()))
+            staged_id = _staged_id_for(number, plan, item_id, part=part, hidden=slide_hidden)
             if staged_id is None:
                 continue
             name = _AS_KIND_NAMES.get(kind)
@@ -3155,7 +3163,8 @@ def build_refit_script(
                 body.append(position_line)
                 body += size_lines
             lines += _locked_write_block(number, addr, body)
-            lines += _text_measure_lines(number, kind_index, addr, rect.h)
+            measure_ordinal = ordinal if is_split else None
+            lines += _text_measure_lines(number, kind_index, addr, rect.h, ordinal=measure_ordinal)
     lines.append("    end tell")
     lines += [
         f'    save theDoc in POSIX file "{_as_escape(str(staging_path))}"',
@@ -3965,16 +3974,26 @@ def _box_with_runs(box: TextBox, item: Mapping) -> TextBox:
     return _dc_replace(box, runs=runs or None)
 
 
-def _eligible_refit_items(plan: AssemblyPlan, slide_no: int) -> frozenset[ItemId]:
-    """Text items a refit round may re-fit: the slide's stacked ids, excluding a split
-    slide (its per-part rects live in ``plan.splits``, not ``plan.fits``; out of scope)
-    and any ``GroupChildId`` -- the live refit's offline measure only maps top-level
-    ``text`` items (D2b); a group's text is fit once, offline, with the run-aware
-    estimator and its safety margin, never refit live (D1 step 6)."""
-    if slide_no in plan.splits:
-        return frozenset()
+def _eligible_refit_items(plan: AssemblyPlan, slide_no: int) -> frozenset[tuple[int, ItemId]]:
+    """``(output ordinal, item id)`` pairs a refit round may measure/re-fit: the slide's
+    stacked ids, excluding any ``GroupChildId`` -- the live refit's offline measure only
+    maps top-level ``text`` items (D2b); a group's text is fit once, offline, with the
+    run-aware estimator and its safety margin, never refit live (D1 step 6). A split
+    slide (S3) yields one pair per part, keyed by that part's own output ordinal --
+    ``SplitPart.stacked_ids`` -- since a char-window split can reuse the same source
+    item id across parts and only the ordinal tells them apart."""
+    split_parts = plan.splits.get(slide_no)
+    if split_parts is not None:
+        base = plan.ordinals.get(slide_no, 0)
+        return frozenset(
+            (base + part, iid)
+            for part, split_part in enumerate(split_parts)
+            for iid in split_part.stacked_ids
+            if iid[0] != "groupchild"
+        )
+    ordinal = plan.ordinals.get(slide_no, 0)
     return frozenset(
-        iid for iid in plan.stacked_ids.get(slide_no, frozenset()) if iid[0] != "groupchild"
+        (ordinal, iid) for iid in plan.stacked_ids.get(slide_no, frozenset()) if iid[0] != "groupchild"
     )
 
 
@@ -3987,12 +4006,20 @@ def _refit_still_over_budget(
 ) -> set[tuple[int, str]]:
     """A key is over budget when its measured height exceeds its rect (+2pt), or --
     when ``bands`` carries its offline ``(y, bottom)`` -- it was placed outside its
-    slide's stack band by more than 1pt even though its own rect fits."""
+    slide's stack band by more than 1pt even though its own rect fits. A split key
+    (``text:<srcIdx>:<ordinal>``, S3) reads its rect from that part's own
+    ``SplitPart.fits`` and its band from the slide's shared ``plan.stack_bands``."""
     bands = bands or {}
     over: set[tuple[int, str]] = set()
     for slide_no, item_key in keys:
-        item_id: ItemId = ("text", int(item_key.split(":")[1]))
-        rect = plan.fits.get(slide_no, {}).get(item_id)
+        parts = item_key.split(":")
+        item_id: ItemId = ("text", int(parts[1]))
+        split_parts = plan.splits.get(slide_no)
+        if split_parts is not None and len(parts) > 2:
+            part = int(parts[2]) - plan.ordinals.get(slide_no, 0)
+            rect = split_parts[part].fits.get(item_id) if 0 <= part < len(split_parts) else None
+        else:
+            rect = plan.fits.get(slide_no, {}).get(item_id)
         measured_h = measured.get((slide_no, item_key))
         if rect is None or measured_h is None or measured_h > rect.h + 2.0:
             over.add((slide_no, item_key))
@@ -4033,6 +4060,12 @@ def _build_refit_round(
     stop_reasons = stop_reasons if stop_reasons is not None else {}
     refits: dict[int, dict[ItemId, TextRefit]] = {}
     for slide_no in sorted({s for s, _k in todo}):
+        if slide_no in plan.splits:
+            # A split slide's parts are never re-windowed live (C5): the offline
+            # measure/budget check (S3) still triggers on them, but the only live
+            # response to an over-budget part is the shrink fallback below.
+            stop_reasons[slide_no] = "split slide, part geometry is not re-run in a live refit round"
+            continue
         stacked = plan.stacked_ids.get(slide_no, frozenset())
         if any(iid[0] == "groupchild" for iid in stacked):
             # A group's text is fit once offline and never refit live (D1 step 6,
@@ -4151,10 +4184,13 @@ def _offline_measure(
     read from the SAVED staging deck -- the archive's stored naturalSize, the Gate-outcome
     authority (soft_geometry membership is expected and is not a reason to skip). Heights
     are whole-point rounded by the offline reader (+/-0.5pt against the +2.0pt tolerance).
-    Split slides are skipped -- ``_eligible_refit_items`` already excludes them. The third
-    element carries this call's own measure-failure warnings (a full read failure, or an
-    ordinal skipped by the staged/offline text-count cross-check) so a caller can refuse
-    immediately on missing measures instead of treating them as merely over budget."""
+    A split slide (S3) is measured per part on that part's own output ordinal, keyed
+    ``text:<srcIdx>:<ordinal>`` (matching ``_eligible_refit_items``/``build_refit_script``)
+    so a char-window split reusing one source item id across parts still measures
+    distinctly. The third element carries this call's own measure-failure warnings (a
+    full read failure, or an ordinal skipped by the staged/offline text-count
+    cross-check) so a caller can refuse immediately on missing measures instead of
+    treating them as merely over budget."""
     measured: dict[tuple[int, str], float] = {}
     bands: dict[tuple[int, str], tuple[float, float]] = {}
     measure_warnings: list[str] = []
@@ -4166,7 +4202,30 @@ def _offline_measure(
         measure_warnings.append(msg)
         return measured, bands, measure_warnings
     for number, ordinal in plan.ordinals.items():
-        if number in plan.splits:
+        split_parts = plan.splits.get(number)
+        if split_parts is not None:
+            for part, split_part in enumerate(split_parts):
+                part_ordinal = ordinal + part
+                part_rects = rects_by_ordinal.get(part_ordinal, {})
+                offline_text_count = sum(1 for kind, _idx in part_rects if kind == "text")
+                ranks = _staged_kind_ranks(
+                    number, plan, part=part, hidden=hidden.get(number, frozenset())
+                ).get("text", [])
+                if offline_text_count != len(ranks):
+                    msg = (
+                        f"slide {number} part {part}: staged text count {len(ranks)} != offline "
+                        f"text count {offline_text_count} on ordinal {part_ordinal}, refit "
+                        "measurement skipped"
+                    )
+                    warnings.append(msg)
+                    measure_warnings.append(msg)
+                    continue
+                for (kind, staged_idx), (_x, y, _w, h) in part_rects.items():
+                    if kind != "text" or staged_idx >= len(ranks):
+                        continue
+                    key = (number, f"text:{ranks[staged_idx]}:{part_ordinal}")
+                    measured[key] = h
+                    bands[key] = (y, y + h)
             continue
         rects = rects_by_ordinal.get(ordinal, {})
         offline_text_count = sum(1 for kind, _idx in rects if kind == "text")
@@ -4281,9 +4340,9 @@ def _run_refit_and_finalize(
                 "-- grouped verse text cannot be refit live"
             )
     eligible_keys = {
-        (n, f"text:{iid[1]}")
+        (n, f"text:{iid[1]}:{ordinal}") if n in plan.splits else (n, f"text:{iid[1]}")
         for n in plan.ordinals
-        for iid in _eligible_refit_items(plan, n)
+        for ordinal, iid in _eligible_refit_items(plan, n)
     }
     if not eligible_keys:
         return
@@ -4317,8 +4376,8 @@ def _run_refit_and_finalize(
             break
         log(f"refit round {round_no}: slides {sorted(refits)}")
         script = build_refit_script(
-            plan, refits, ordinals=plan.ordinals, scratch_path=reopen_path,
-            staging_path=staging_path, hidden=hidden,
+            plan, {(n, 0): items for n, items in refits.items()}, ordinals=plan.ordinals,
+            scratch_path=reopen_path, staging_path=staging_path, hidden=hidden,
         )
         proc = batch.run(_osascript_path(script, batch.work), retry_on_1712=False)
         _check_refit_batch_result(proc, f"refit round {round_no}")
@@ -4342,10 +4401,13 @@ def _run_refit_and_finalize(
         if text_fit == "warn":
             slide_no, item_key = sorted(todo)[0]
             raise AssemblyRefusal(f"slide {slide_no}: text {item_key} still overflows after refit")
-        shrink_refits: dict[int, dict[ItemId, TextRefit]] = {}
+        shrink_refits: dict[tuple[int, int], dict[ItemId, TextRefit]] = {}
         for slide_no, item_key in todo:
-            item_id: ItemId = ("text", int(item_key.split(":")[1]))
-            rect = plan.fits[slide_no][item_id]
+            key_parts = item_key.split(":")
+            item_id: ItemId = ("text", int(key_parts[1]))
+            split_parts = plan.splits.get(slide_no)
+            part = int(key_parts[2]) - plan.ordinals.get(slide_no, 0) if split_parts is not None else 0
+            rect = split_parts[part].fits[item_id] if split_parts is not None else plan.fits[slide_no][item_id]
             item = next(it for it in slides_by_number[slide_no]["items"]
                         if (it["kind"], it["kindIndex"]) == item_id)
             run_sizes_src = [float(r["size"]) for r in (item.get("runs") or []) if r.get("size") is not None]
@@ -4377,7 +4439,7 @@ def _run_refit_and_finalize(
                 size_desc = f"{lo}pt" if lo == hi else f"{lo}-{hi}pt"
             else:
                 size_desc = f"{round(t * lead_source_size, 1)}pt"
-            shrink_refits.setdefault(slide_no, {})[item_id] = TextRefit(rect, run_sizes)
+            shrink_refits.setdefault((slide_no, part), {})[item_id] = TextRefit(rect, run_sizes)
             if at_floor:
                 warnings.append(
                     f"slide {slide_no}: text {item_key} already at the floor, "
