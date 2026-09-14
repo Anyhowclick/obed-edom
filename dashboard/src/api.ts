@@ -181,6 +181,7 @@ export type Settings = {
   reusePairings: boolean;
   reusePreviews: boolean;
   defaultExportDir: string;
+  highlightColour: string;
 };
 
 export async function getSettings(): Promise<Settings> {

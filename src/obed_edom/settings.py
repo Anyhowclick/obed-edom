@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from obed_edom.baseline import cache_root
@@ -12,7 +13,10 @@ DEFAULTS = {
     "reusePairings": True,
     "reusePreviews": True,
     "defaultExportDir": "",
+    "highlightColour": "#e8772a",
 }
+
+_HEX_COLOUR_RE = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
 def settings_path(root: Path | None = None) -> Path:
@@ -33,6 +37,16 @@ def _clamp(data: dict) -> dict:
         out["reusePreviews"] = bool(data["reusePreviews"])
     if "defaultExportDir" in data:
         out["defaultExportDir"] = str(data["defaultExportDir"] or "").strip()
+    if "highlightColour" in data:
+        value = str(data["highlightColour"] or "").strip()
+        match = _HEX_COLOUR_RE.fullmatch(value)
+        if match:
+            hex_digits = match.group(1).lower()
+            if len(hex_digits) == 3:
+                hex_digits = "".join(ch * 2 for ch in hex_digits)
+            out["highlightColour"] = f"#{hex_digits}"
+        else:
+            out["highlightColour"] = DEFAULTS["highlightColour"]
     return out
 
 

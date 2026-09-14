@@ -387,6 +387,9 @@ export async function captureFlyFrames(opts: {
   };
   isCancelled?: () => boolean;
   stamp?: boolean;
+  /** Overrides the module-level highlight colour for this map only, so an in-progress export
+   * keeps a single colour even if the operator's settings resolve mid-export. */
+  highlightColour?: string;
   onFrame: (blob: Blob, index: number, count: number) => Promise<void>;
 }): Promise<number> {
   const {
@@ -417,6 +420,7 @@ export async function captureFlyFrames(opts: {
     outputCrop,
     isCancelled,
     stamp = true,
+    highlightColour,
     onFrame,
   } = opts;
   const cancelled = () => Boolean(isCancelled?.());
@@ -435,6 +439,7 @@ export async function captureFlyFrames(opts: {
     numberPins,
     assetBaseUrl,
     isCancelled,
+    highlightColour,
   });
   const objectScale = 1 / surface.pixelRatio;
   try {

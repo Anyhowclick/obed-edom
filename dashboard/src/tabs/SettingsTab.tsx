@@ -1,17 +1,36 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { chooseFolder, getSettings, putSettings, type Settings } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
-import { refreshDefaultExportDir } from "../prefs";
+import { refreshDefaultExportDir, refreshHighlightColour } from "../prefs";
+import { DEFAULT_HIGHLIGHT_COLOUR, normaliseHighlightColour } from "../maps/highlight";
+
+const COLOUR_DEBOUNCE_MS = 250;
 
 export function SettingsTab() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [colourText, setColourText] = useState("");
+  const colourDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingColourRef = useRef<string | null>(null);
 
   useEffect(() => {
     getSettings()
-      .then(setSettings)
+      .then((next) => {
+        setSettings(next);
+        setColourText(next.highlightColour);
+      })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (colourDebounceRef.current) {
+        clearTimeout(colourDebounceRef.current);
+        colourDebounceRef.current = null;
+        if (pendingColourRef.current !== null) commitColourValue(pendingColourRef.current);
+      }
+    };
   }, []);
 
   async function update(next: Partial<Settings>) {
@@ -20,11 +39,42 @@ export function SettingsTab() {
     try {
       const written = await putSettings(next);
       setSettings(written);
+      setColourText(written.highlightColour);
       setSaved(true);
       if (next.defaultExportDir !== undefined) refreshDefaultExportDir();
+      if (next.highlightColour !== undefined) refreshHighlightColour();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  function commitColourValue(value: string) {
+    if (colourDebounceRef.current) {
+      clearTimeout(colourDebounceRef.current);
+      colourDebounceRef.current = null;
+    }
+    pendingColourRef.current = null;
+    const trimmed = value.trim();
+    const hex = trimmed.startsWith("#") ? trimmed.slice(1) : trimmed;
+    const valid = /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex);
+    const colour = valid ? normaliseHighlightColour(value) : DEFAULT_HIGHLIGHT_COLOUR;
+    setColourText(colour);
+    if (colour === settings?.highlightColour) return;
+    void update({ highlightColour: colour });
+  }
+
+  function commitColourText() {
+    commitColourValue(colourText);
+  }
+
+  function scheduleColourCommit(value: string) {
+    setColourText(value);
+    if (colourDebounceRef.current) clearTimeout(colourDebounceRef.current);
+    pendingColourRef.current = value;
+    colourDebounceRef.current = setTimeout(() => {
+      colourDebounceRef.current = null;
+      commitColourValue(value);
+    }, COLOUR_DEBOUNCE_MS);
   }
 
   const threshold = Math.round((settings?.reuseThreshold ?? 0.6) * 100);
@@ -94,6 +144,28 @@ export function SettingsTab() {
                   Use output/
                 </button>
               )}
+            </div>
+          </label>
+          <label className="settings-block">
+            <span>Highlight colour for selected countries and regions</span>
+            <div className="settings-row">
+              <input
+                type="color"
+                value={normaliseHighlightColour(colourText || settings.highlightColour)}
+                onChange={(event) => scheduleColourCommit(event.target.value)}
+                onBlur={commitColourText}
+                aria-label="Highlight colour"
+              />
+              <input
+                type="text"
+                value={colourText}
+                onChange={(event) => setColourText(event.target.value)}
+                onBlur={commitColourText}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") commitColourText();
+                }}
+                aria-label="Highlight colour hex"
+              />
             </div>
           </label>
           {saved && <p className="ok">Saved.</p>}

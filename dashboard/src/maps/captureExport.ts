@@ -156,6 +156,9 @@ export type ExportMapOpts = {
   assetBaseUrl?: string;
   isCancelled?: () => boolean;
   stamp?: boolean;
+  /** Overrides the module-level highlight colour for this map only, so an in-progress export
+   * keeps a single colour even if the operator's settings resolve mid-export. */
+  highlightColour?: string;
 };
 
 export async function createExportMap(
@@ -174,6 +177,7 @@ export async function createExportMap(
     numberPins = false,
     assetBaseUrl,
     isCancelled,
+    highlightColour: highlightColourOverride,
   } = opts;
   const surfaceWidth = opts.surfaceWidth ?? width;
   const surface = exportSurface(width, height, surfaceWidth);
@@ -217,9 +221,22 @@ export async function createExportMap(
     applyHillshade(map, hillshade);
     const objectScale = 1 / surface.pixelRatio;
     if (churches) {
-      await addOverlays(map, highlights, churches, null, styleId, numberPins, assetBaseUrl, objectScale, isolate);
+      await addOverlays(
+        map,
+        highlights,
+        churches,
+        null,
+        styleId,
+        numberPins,
+        assetBaseUrl,
+        objectScale,
+        isolate,
+        [],
+        undefined,
+        highlightColourOverride
+      );
     } else {
-      await ensureAdmin0Highlights(map, highlights, styleId, isolate, zoomDelta);
+      await ensureAdmin0Highlights(map, highlights, styleId, isolate, zoomDelta, [], undefined, highlightColourOverride);
     }
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);
@@ -256,8 +273,8 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
 /** Highlighted slides render a second still: the highlighted area cut out of the base, so Keynote
  * can stack it above the mask with pins on top. Null when there is nothing highlighted.
  *
- * The base always drops the orange, matching today's shipped look. The cutout keeps it only when
- * the slide is not isolated — an isolate slide's orange lives in neither raster, as it does today. */
+ * The base always drops the highlight, matching today's shipped look. The cutout keeps it only when
+ * the slide is not isolated — an isolate slide's highlight lives in neither raster, as it does today. */
 export async function captureIsolatePair(
   opts: ExportMapOpts
 ): Promise<{ base: Blob; pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] } | null> {

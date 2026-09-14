@@ -414,7 +414,7 @@ class MapsDocument(BaseModel):
     hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_LAYERS))
     cachedCountries: list[str] = Field(default_factory=list)
     assets: list[MapsAsset] = Field(default_factory=list)
-    attribution: MapsAttribution = "stamp"
+    attribution: MapsAttribution = "credits"
 
     @model_validator(mode="before")
     @classmethod
@@ -449,7 +449,7 @@ class MapsDocument(BaseModel):
     @classmethod
     def _attribution(cls, value: object) -> object:
         if value not in ("stamp", "credits"):
-            return "stamp"
+            return "credits"
         return value
 
     slides: list[MapsSlide]
@@ -952,7 +952,7 @@ def _seed_result(name: str) -> dict[str, Any]:
         "crop": "center+cg",
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
         "cachedCountries": [],
-        "attribution": "stamp",
+        "attribution": "credits",
         "assets": [],
         "slides": [
             {

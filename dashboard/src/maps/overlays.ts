@@ -8,6 +8,7 @@ import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
 import { defaultObjectSize, zoomScaledStops } from "./objects";
+import { highlightColour, setHighlightColour } from "./highlight";
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -287,7 +288,8 @@ export async function ensureAdmin0Highlights(
   isolate?: MapsIsolate,
   zoomOffset = 0,
   extraAdmin1: string[] = [],
-  isCurrent: IsCurrent = ALWAYS_CURRENT
+  isCurrent: IsCurrent = ALWAYS_CURRENT,
+  highlightColourOverride?: string
 ): Promise<void> {
   ensureLowZoomRaster(map, styleId, zoomOffset);
   const data = await loadAdmin0();
@@ -298,6 +300,7 @@ export async function ensureAdmin0Highlights(
   const admin1Codes = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(highlights) : []), ...extraAdmin1])];
   if (admin1Codes.length) await Promise.all(admin1Codes.map(loadAdmin1));
   if (!isCurrent()) return;
+  const colour = highlightColourOverride ?? highlightColour();
   if (!map.getSource("admin0")) {
     map.addSource("admin0", { type: "geojson", data: data as GeoJSON.GeoJSON, promoteId: "ADM0_A3" });
   }
@@ -309,7 +312,7 @@ export async function ensureAdmin0Highlights(
         type: "fill",
         source: "admin0",
         paint: {
-          "fill-color": "#e8772a",
+          "fill-color": colour,
           "fill-opacity": admin0PaintExpression(ADMIN0_FILL_OPACITY),
         },
       },
@@ -321,7 +324,7 @@ export async function ensureAdmin0Highlights(
         type: "line",
         source: "admin0",
         paint: {
-          "line-color": "#e8772a",
+          "line-color": colour,
           "line-width": 1.2,
           "line-opacity": admin0PaintExpression(ADMIN0_LINE_OPACITY),
         },
@@ -329,10 +332,20 @@ export async function ensureAdmin0Highlights(
       before
     );
   }
-  ensureAdmin1Layers(map, admin1Codes);
+  ensureAdmin1Layers(map, admin1Codes, colour);
   applyHighlights(map, highlights);
   applyAdmin1Highlights(map, highlights);
   applyIsolate(map, highlights, isolate);
+}
+
+/** Sets the module-level highlight colour and repaints the admin-0/admin-1 layers already on `map`. */
+export function applyHighlightColour(map: MapLibreMap, colour: string): void {
+  setHighlightColour(colour);
+  const next = highlightColour();
+  if (map.getLayer("admin0-fill")) map.setPaintProperty("admin0-fill", "fill-color", next);
+  if (map.getLayer("admin0-line")) map.setPaintProperty("admin0-line", "line-color", next);
+  if (map.getLayer("admin1-fill")) map.setPaintProperty("admin1-fill", "fill-color", next);
+  if (map.getLayer("admin1-line")) map.setPaintProperty("admin1-line", "line-color", next);
 }
 
 /** Loads `codes` and re-feeds the merged `admin1` source from the cache — the explicit
@@ -350,7 +363,7 @@ export async function syncAdmin1Source(
 }
 
 /** Adds (or re-feeds) the merged admin-1 source for `codes`. No-op while nothing is highlighted. */
-function ensureAdmin1Layers(map: MapLibreMap, codes: string[]): void {
+function ensureAdmin1Layers(map: MapLibreMap, codes: string[], highlightColourOverride?: string): void {
   if (!codes.length) {
     if (map.getLayer("admin1-line")) map.removeLayer("admin1-line");
     if (map.getLayer("admin1-fill")) map.removeLayer("admin1-fill");
@@ -369,12 +382,13 @@ function ensureAdmin1Layers(map: MapLibreMap, codes: string[]): void {
   // Pin admin1-fill below isolate-fill regardless of which layer is (re)created first, so the
   // isolate mask always stays on top of the region fill, matching today's look.
   const before = map.getLayer("isolate-fill") ? "isolate-fill" : firstSymbolId(map);
+  const colour = highlightColourOverride ?? highlightColour();
   map.addLayer(
     {
       id: "admin1-fill",
       type: "fill",
       source: "admin1",
-      paint: { "fill-color": "#e8772a", "fill-opacity": 0 },
+      paint: { "fill-color": colour, "fill-opacity": 0 },
     },
     before
   );
@@ -383,7 +397,7 @@ function ensureAdmin1Layers(map: MapLibreMap, codes: string[]): void {
       id: "admin1-line",
       type: "line",
       source: "admin1",
-      paint: { "line-color": "#e8772a", "line-width": 1.2, "line-opacity": 0 },
+      paint: { "line-color": colour, "line-width": 1.2, "line-opacity": 0 },
     },
     before
   );
@@ -620,9 +634,10 @@ export async function addOverlays(
   objectScale = 1,
   isolate?: MapsIsolate,
   extraAdmin1: string[] = [],
-  isCurrent: IsCurrent = ALWAYS_CURRENT
+  isCurrent: IsCurrent = ALWAYS_CURRENT,
+  highlightColourOverride?: string
 ) {
-  await ensureAdmin0Highlights(map, highlights, styleId, isolate, 0, extraAdmin1, isCurrent);
+  await ensureAdmin0Highlights(map, highlights, styleId, isolate, 0, extraAdmin1, isCurrent, highlightColourOverride);
   if (!isCurrent()) return;
   ensureDropPinImages(map, churches);
   await ensureLandmarkImages(map, churches, assetBaseUrl);

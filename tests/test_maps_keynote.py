@@ -329,9 +329,15 @@ def test_export_maps_job_appends_credits_slide_when_attribution_credits(monkeypa
 
 
 def test_export_maps_job_omits_credits_slide_when_attribution_stamp(monkeypatch, tmp_path: Path):
-    scripts = _export_scripts(monkeypatch, tmp_path, attribution=None, credits=["© OpenStreetMap contributors"])
+    scripts = _export_scripts(monkeypatch, tmp_path, attribution="stamp", credits=["© OpenStreetMap contributors"])
     for script in scripts:
         assert "© OpenStreetMap" not in script
+
+
+def test_export_maps_job_appends_credits_slide_when_attribution_missing(monkeypatch, tmp_path: Path):
+    scripts = _export_scripts(monkeypatch, tmp_path, attribution=None, credits=["© OpenStreetMap contributors"])
+    for script in scripts:
+        assert "© OpenStreetMap" in script
 
 
 def test_credits_slide_not_rescaled_in_dsk_script(monkeypatch, tmp_path: Path):

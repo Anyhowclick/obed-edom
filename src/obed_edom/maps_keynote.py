@@ -2188,7 +2188,7 @@ def export_maps_job(
     result["links"] = links
     credit_lines = (
         [cleaned for x in (credits or []) if (cleaned := normalise_credit_line(x))]
-        if str(result.get("attribution") or "stamp") == "credits"
+        if str(result.get("attribution") or "credits") != "stamp"
         else []
     )
     movie = find_pin_drop_wave()

@@ -6,7 +6,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
 import { AdminSyncGate } from "./adminSync";
-import { addOverlays, applyAdmin1Highlights, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureAdmin0Highlights, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, highlightedCountries, isAdmin1Loaded, loadAdmin0, movieObjectsAt, selectedDragScale, syncAdmin1Source, withoutRevealed } from "./overlays";
+import { addOverlays, applyAdmin1Highlights, applyHighlightColour, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureAdmin0Highlights, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, highlightedCountries, isAdmin1Loaded, loadAdmin0, movieObjectsAt, selectedDragScale, syncAdmin1Source, withoutRevealed } from "./overlays";
 import { exportGpuCap } from "./captureExport";
 import { defaultObjectSize, effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
@@ -244,6 +244,7 @@ type Props = {
   onCgShift: (dx: number) => void;
   onPreviewAbort?: () => void;
   assetBaseUrl?: string;
+  highlightColour?: string;
 };
 
 function pinIdFromEvent(event: MapMouseEvent, map: MapLibreMap): string {
@@ -283,6 +284,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     onCgShift,
     onPreviewAbort,
     assetBaseUrl,
+    highlightColour,
   },
   ref
 ) {
@@ -1037,6 +1039,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (!map) return;
     applyHillshade(map, hillshade);
   }, [hillshade]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !highlightColour) return;
+    applyHighlightColour(map, highlightColour);
+  }, [highlightColour]);
 
   useEffect(() => {
     const map = mapRef.current;

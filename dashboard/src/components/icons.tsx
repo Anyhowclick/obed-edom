@@ -203,6 +203,14 @@ export function IconChevronLeft({ className }: IconProps) {
   );
 }
 
+export function IconChevron({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls(className)}>
+      <path d="M6 9.5l6 6 6-6" />
+    </svg>
+  );
+}
+
 export function IconArrowLeft({ className }: IconProps) {
   return (
     <svg {...base} className={cls(className)}>

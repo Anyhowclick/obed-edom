@@ -643,7 +643,7 @@ export function worldCopyWarning(zoom: number): string | null {
   const tiled: string[] = ["FW"];
   if (zoom < CENTRE_MIN_ZOOM) tiled.push("LW");
   if (zoom < CG_MIN_ZOOM) tiled.push("CG");
-  return `World copies tile in ${tiled.join(" / ")}. Pins and orange countries will repeat.`;
+  return `World copies tile in ${tiled.join(" / ")}. Pins and highlighted countries will repeat.`;
 }
 
 /** Same wrap as `maps_geo.clamp_lon` — persist cameras in (−180, 180]. */
@@ -786,7 +786,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     cachedCountries: Array.isArray(result.cachedCountries)
       ? (result.cachedCountries as unknown[]).filter((item): item is string => typeof item === "string")
       : [],
-    attribution: result.attribution === "credits" ? "credits" : "stamp",
+    attribution: result.attribution === "stamp" ? "stamp" : "credits",
     assets: Array.isArray(result.assets)
       ? (result.assets as MapsAsset[]).filter((asset) => asset && typeof asset.id === "string" && typeof asset.version === "string")
       : [],

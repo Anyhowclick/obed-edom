@@ -3963,14 +3963,14 @@ def test_bootstrap_rows_bumps_state_revision(monkeypatch):
     assert int(done_pin["result"]["stateRevision"] or 0) == before + 2
 
 
-def test_document_attribution_defaults_to_stamp():
+def test_document_attribution_defaults_to_credits():
     job = _seed()
     doc = _doc(job)
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["attribution"] == "stamp"
+    assert saved.json()["result"]["attribution"] == "credits"
     latest = client.get(f"/api/jobs/{job['id']}")
-    assert latest.json()["result"]["attribution"] == "stamp"
+    assert latest.json()["result"]["attribution"] == "credits"
 
 
 def test_document_attribution_round_trips_credits():
@@ -3984,13 +3984,33 @@ def test_document_attribution_round_trips_credits():
     assert latest.json()["result"]["attribution"] == "credits"
 
 
-def test_document_attribution_rejects_unknown_value_as_stamp():
+def test_document_attribution_round_trips_stamp():
+    job = _seed()
+    doc = _doc(job)
+    doc["attribution"] = "stamp"
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["attribution"] == "stamp"
+    latest = client.get(f"/api/jobs/{job['id']}")
+    assert latest.json()["result"]["attribution"] == "stamp"
+
+
+def test_document_attribution_rejects_unknown_value_as_credits():
     job = _seed()
     doc = _doc(job)
     doc["attribution"] = "banner"
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["attribution"] == "stamp"
+    assert saved.json()["result"]["attribution"] == "credits"
+
+
+def test_document_attribution_missing_key_reads_as_credits():
+    job = _seed()
+    doc = _doc(job)
+    doc.pop("attribution", None)
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["attribution"] == "credits"
 
 
 def test_export_forwards_credits_to_job(monkeypatch):
