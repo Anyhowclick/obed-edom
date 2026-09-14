@@ -400,3 +400,8 @@ Same CSV shape as `~/Desktop/dsk-d4-work/accept12.py` (`check,expected,actual,re
 12. **PNG read-back** — export both parts of GW 38 and both of GW 5 and confirm by eye: the
     verse text starts at the panel's top edge exactly as gold's does, no clipped line, the badge
     and pill unchanged between parts.
+
+## Owner decisions (2026-09-14 17:30)
+
+- **Emphasis size: CAP at gold's 50 pt** on a 45 pt lead (do not carry the source 85/70 ratio). Fewer slides split; matches gold.
+- Live probe (§4) approved and run immediately; results appended below by the orchestrator.
