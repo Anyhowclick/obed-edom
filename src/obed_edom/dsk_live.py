@@ -39,6 +39,7 @@ _PROGRESS_RE = re.compile(r"^OBED\t(\d+)\t")
 _ERROR_RE = re.compile(r"^ERR\t(\d+)\t(-?\d+)\t(.*)$")
 
 DEFAULT_BLACK_LAYOUT_NAMES: tuple[str, ...] = ("BLACK BLANK", "Black", "BLACK", "black")
+DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank Black",)
 
 
 def guard_out_dir(out_dir: Path, deck: Path) -> None:
@@ -439,6 +440,7 @@ def layout_import_lines(doc_var: str, layout_names: str | Sequence[str], templat
             "          end repeat",
             f'          if donorLayout is missing value then error "no layout named \\"{escaped_name}\\" found in layout_template"',
             "          set madeSlide to (make new slide at end of slides of tmplDoc with properties {base layout:donorLayout})",
+            "          set pendingDonor to madeSlide",
             f"          move madeSlide to end of slides of {doc_var}",
             f"          set donorSlide to slide (count of slides of {doc_var}) of {doc_var}",
             "          set pendingDonor to donorSlide",

@@ -331,8 +331,16 @@ def test_layout_import_lines_error_handler_deletes_pending_donor_before_closing_
     assert delete_idx < close_idx, "the handler must delete a pending donor before closing tmplDoc"
     assert handler_lines[delete_idx - 1].strip() == "try", "the donor delete must be its own guarded try"
 
-    # `pendingDonor` is set immediately after each `move` (donor now lives in theDoc) and
-    # cleared immediately after each successful `delete` -- once per name, matching the
-    # number of make/move/delete triples.
+    # `pendingDonor` is set to `madeSlide` immediately after `make` and BEFORE `move` --
+    # so a failed `move`, or a failed re-resolve of `donorSlide` after a successful
+    # `move`, still leaves a deletable reference behind -- then reassigned to the
+    # re-resolved `donorSlide` and finally cleared after each successful `delete`.
+    for made_idx, l in enumerate(lines):
+        if "set madeSlide to (make new slide" in l:
+            track_idx = next(i for i in range(made_idx, len(lines)) if "set pendingDonor to madeSlide" in lines[i])
+            move_idx = next(i for i in range(made_idx, len(lines)) if lines[i].strip().startswith("move madeSlide"))
+            assert track_idx < move_idx, "pendingDonor must track madeSlide before move, not after"
+
+    assert script.count("set pendingDonor to madeSlide") == 2
     assert script.count("set pendingDonor to donorSlide") == 2
     assert script.count("set pendingDonor to missing value") == 3  # 1 init + 2 clears

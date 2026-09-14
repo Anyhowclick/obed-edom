@@ -22,6 +22,7 @@ from PIL import Image
 from obed_edom import dsk_live
 from obed_edom.dsk_live import (
     DEFAULT_RSS_LIMIT_BYTES,
+    DEFAULT_TRANSPARENT_LAYOUT_NAMES,
     LiveBatch,
     _applescript_string_list,
     _as_escape,
@@ -34,8 +35,6 @@ from obed_edom.dsk_live import (
 from obed_edom.iwa_builds import _build_effect_animtype, _ref_id, deck_builds
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.offline_inspect import offline_wall_payload
-
-DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank", "BLANK", "blank")
 EXPECTED_GEOMETRY: tuple[int, int] = (1920, 1080)
 _STAGE_NAME_RE = re.compile(r"\.(\d+)\.[^.]+$")
 

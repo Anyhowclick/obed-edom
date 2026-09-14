@@ -374,3 +374,14 @@ scope) calls the old `layout_import_lines("theDoc", "approvedBlackNames", ...)` 
 passing an AppleScript variable-name string rather than a literal layout name — this now
 breaks (`test_script_black_layout_uses_explicit_approved_name_list` fails); it needs its own
 update to the list form before the next merge.
+
+**L2 fix round 3 (Codex review 2 of f8ded83):** `dsk_stage_export.DEFAULT_TRANSPARENT_LAYOUT_NAMES`
+was still `("Blank", "BLANK", "blank")` (its original d5 value, when it only verified an
+existing layout offline and never imported), but `check_layout_import_preconditions`
+(moved to `dsk_live.py` in this piece) now unconditionally refuses any `Blank` variant, so
+the stage exporter's import path could never proceed. Fixed by adding the shared
+`DEFAULT_TRANSPARENT_LAYOUT_NAMES = ("Blank Black",)` to `dsk_live.py` (stage export must
+not import `dsk_assemble`, which already has its own equal-valued constant) and having
+`dsk_stage_export` import it from there. Also: `layout_import_lines`'s per-name donor
+tracking (`pendingDonor`) now starts right after `make`, before `move`, so a failed `move`
+or a failed post-move re-resolve still leaves a deletable reference for the error handler.
