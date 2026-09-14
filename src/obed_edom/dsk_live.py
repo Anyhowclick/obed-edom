@@ -294,42 +294,56 @@ def _applescript_string_list(values: Sequence[str]) -> str:
     return "{" + ", ".join(f'"{_as_escape(v)}"' for v in values) + "}"
 
 
-def layout_import_lines(doc_var: str, approved_names: str, template_path: Path) -> list[str]:
-    """AppleScript lines that import a black-approved slide layout from `template_path`
-    into `doc_var` when it doesn't already own one matching `approved_names` -- an
-    AppleScript expression (typically a variable already in scope, e.g. the
-    `approvedBlackNames` list set by the caller), not a Python value. Caller must have
-    already resolved `blackLayoutName`/`donorSlide` in `doc_var`'s scope."""
-    return [
-        f'      if blackLayoutName is "" then',
-        "        try",
-        f'          set tmplDoc to open POSIX file "{_as_escape(str(template_path))}"',
-        "          delay 2",
-        '          set donorLayoutName to ""',
-        "          set donorLayout to missing value",
-        "          repeat with lay in slide layouts of tmplDoc",
-        "            set tname to (name of lay as text)",
-        "            ignoring case",
-        f'              if donorLayoutName is "" and tname is in {approved_names} then',
-        "                set donorLayoutName to tname",
-        "                set donorLayout to lay",
-        "              end if",
-        "            end ignoring",
-        "          end repeat",
-        '          if donorLayoutName is "" then error "no black layout found in layout_template"',
-        "          set madeSlide to (make new slide at end of slides of tmplDoc with properties {base layout:donorLayout})",
-        f"          move madeSlide to end of slides of {doc_var}",
-        f"          set donorSlide to slide (count of slides of {doc_var}) of {doc_var}",
-        "          set blackLayoutName to donorLayoutName",
-        "          close tmplDoc saving no",
-        "        on error errMsg number errNum",
-        "          try",
-        "            close tmplDoc saving no",
-        "          end try",
-        '          error "layout import failed: " & errMsg number errNum',
-        "        end try",
-        "      end if",
+def layout_import_lines(doc_var: str, layout_names: str | Sequence[str], template_path: Path) -> list[str]:
+    """AppleScript lines that import every layout in `layout_names` (a single name is a
+    special case of one) missing from `doc_var` -- one donor slide per missing layout,
+    made in `template_path` with `base layout` set to the exact-named template layout,
+    moved into `doc_var`, then deleted. A name `doc_var` already owns (case-insensitive)
+    is left untouched -- Keynote's own name-based import dedupe never runs, so it can't
+    silently keep an unsafe FW-owned layout instead."""
+    if isinstance(layout_names, str):
+        layout_names = [layout_names]
+    lines = [
+        "      try",
+        f'        set tmplDoc to open POSIX file "{_as_escape(str(template_path))}"',
+        "        delay 2",
     ]
+    for name in layout_names:
+        escaped_name = _as_escape(name)
+        lines += [
+            f'        set wantLayoutName to "{escaped_name}"',
+            "        set haveLayout to false",
+            f"        repeat with lay in slide layouts of {doc_var}",
+            "          ignoring case",
+            "            if (name of lay as text) is wantLayoutName then set haveLayout to true",
+            "          end ignoring",
+            "          if haveLayout then exit repeat",
+            "        end repeat",
+            "        if not haveLayout then",
+            "          set donorLayout to missing value",
+            "          repeat with lay in slide layouts of tmplDoc",
+            "            ignoring case",
+            "              if (name of lay as text) is wantLayoutName then set donorLayout to lay",
+            "            end ignoring",
+            "            if donorLayout is not missing value then exit repeat",
+            "          end repeat",
+            f'          if donorLayout is missing value then error "no layout named \\"{escaped_name}\\" found in layout_template"',
+            "          set madeSlide to (make new slide at end of slides of tmplDoc with properties {base layout:donorLayout})",
+            f"          move madeSlide to end of slides of {doc_var}",
+            f"          set donorSlide to slide (count of slides of {doc_var}) of {doc_var}",
+            "          delete donorSlide",
+            "        end if",
+        ]
+    lines += [
+        "        close tmplDoc saving no",
+        "      on error errMsg number errNum",
+        "        try",
+        "          close tmplDoc saving no",
+        "        end try",
+        '        error "layout import failed: " & errMsg number errNum',
+        "      end try",
+    ]
+    return lines
 
 
 def _quit_script(stem: str, doc_name: str) -> str:

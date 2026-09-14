@@ -320,6 +320,7 @@ _DSK_ASSEMBLE_ANCHORS = frozenset({"centre", "left", "right"})
 
 def _run_dsk_assemble(args: argparse.Namespace) -> int:
     from obed_edom.dsk_assemble import (
+        DEFAULT_DSK_LAYOUT_NAMES,
         DEFAULT_LAYOUT_TEMPLATE,
         DEFAULT_MIN_TEXT_PT,
         DEFAULT_TEXT_SLIDE_WORDS,
@@ -458,6 +459,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
     out_path = Path(args.out).expanduser()
     reference_deck = Path(args.reference_deck).expanduser() if args.reference_deck else None
     black_layout_names = (args.layout_name,) if args.layout_name else DEFAULT_TRANSPARENT_LAYOUT_NAMES
+    import_layout_names = (args.layout_name,) if args.layout_name else DEFAULT_DSK_LAYOUT_NAMES
     try:
         result = assemble_dsk_deck(
             source,
@@ -468,6 +470,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             log=print,
             layout_policy=args.layout,
             black_layout_names=black_layout_names,
+            import_layout_names=import_layout_names,
             stroke_min_refs=args.stroke_min_refs,
             text_fit=args.text_fit,
             min_text_pt=args.min_text_pt if args.min_text_pt is not None else DEFAULT_MIN_TEXT_PT,

@@ -282,3 +282,29 @@ def test_live_batch_run_no_retry_flag(monkeypatch, tmp_path):
     assert calls.count("run_osascript") == 1
     assert calls.count("copy_keynote") == 1
     assert "quit_and_wait" not in calls
+
+
+def test_layout_import_lines_single_name_is_special_case_of_list():
+    single = dl.layout_import_lines("theDoc", "Blank Black", Path("/tmp/tmpl.key"))
+    listed = dl.layout_import_lines("theDoc", ["Blank Black"], Path("/tmp/tmpl.key"))
+    assert single == listed
+
+
+def test_layout_import_lines_three_names_has_three_donor_pairs():
+    lines = dl.layout_import_lines(
+        "theDoc", ["Point 3 Lines", "Point (2 Lines)", "Blank Black"], Path("/tmp/tmpl.key")
+    )
+    script = "\n".join(lines)
+    assert script.count("set madeSlide to (make new slide") == 3
+    assert script.count("delete donorSlide") == 3
+    for name in ("Point 3 Lines", "Point (2 Lines)", "Blank Black"):
+        assert f'set wantLayoutName to "{name}"' in script
+    assert 'set wantLayoutName to "Blank"' not in script
+    assert script.count("open POSIX file") == 1
+
+
+def test_layout_import_lines_skips_already_owned_name_at_runtime():
+    lines = dl.layout_import_lines("theDoc", ["Blank Black"], Path("/tmp/tmpl.key"))
+    script = "\n".join(lines)
+    assert "if not haveLayout then" in script
+    assert "set haveLayout to false" in script

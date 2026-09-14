@@ -1439,20 +1439,19 @@ def test_script_layout_preserve_touches_nothing():
     script = build_assembly_script(
         plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"), layout_policy="preserve"
     )
-    assert "blackLayoutName" not in script
+    assert "wantLayoutName" not in script
     assert "set base layout of slide" not in script
 
 
-def test_script_layout_import_is_default_and_uses_only_template_donor():
+def test_script_layout_import_is_default_and_imports_every_dsk_layout_name():
     plan = _clip_plan()
     script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    assert "blackLayoutName" in script
     assert "set base layout of slide" in script
     assert "set tmplDoc to open POSIX file" in script
-    assert '"Blank Black"' in script
-    # "import" never pre-searches theDoc's OWN layouts to find a black layout to reuse --
-    # blackLayoutName starts "" and only layout_import_lines (donor-only) can set it.
-    assert '  if blackLayoutName is "" and lname is in approvedBlackNames then set blackLayoutName to lname' not in script
+    for name in dsa.DEFAULT_DSK_LAYOUT_NAMES:
+        assert f'set wantLayoutName to "{name}"' in script
+    assert script.count("set madeSlide to (make new slide") == len(dsa.DEFAULT_DSK_LAYOUT_NAMES)
+    assert script.count("delete donorSlide") == len(dsa.DEFAULT_DSK_LAYOUT_NAMES)
 
 
 def test_script_target_layout_lookup_is_case_insensitive():
@@ -1460,8 +1459,21 @@ def test_script_target_layout_lookup_is_case_insensitive():
     script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
     assert "ignoring case" in script
     assert "end ignoring" in script
-    idx = script.index("ignoring case")
-    assert "(name of lay as text) is blackLayoutName" in script[idx:]
+    idx = script.index('set blackNames to')
+    assert "(name of lay as text) is in blackNames" in script[idx:]
+
+
+def test_script_three_name_import_has_three_donor_pairs_and_no_blank():
+    plan = _clip_plan()
+    script = build_assembly_script(
+        plan,
+        scratch_path=Path("/tmp/scratch.key"),
+        staging_path=Path("/tmp/staged.key"),
+        import_layout_names=("Point 3 Lines", "Point (2 Lines)", "Blank Black"),
+    )
+    assert script.count("set madeSlide to (make new slide") == 3
+    assert script.count("delete donorSlide") == 3
+    assert 'set wantLayoutName to "Blank"' not in script
 
 
 # --------------------------------------------------------------------------
@@ -1581,7 +1593,7 @@ def test_check_layout_import_preconditions_ok_when_fw_lacks_layout(monkeypatch):
     fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
     monkeypatch.setattr(dsa, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
     dsa.check_layout_import_preconditions(
-        Path("fw"), layout_template=Path("template"), black_layout_names=("Blank Black",)
+        Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
     )
 
 
@@ -1593,7 +1605,7 @@ def test_check_layout_import_preconditions_refuses_unsafe_donor(monkeypatch):
     monkeypatch.setattr(dsa, "_load_deck", lambda path: (template_objects, {}, {}))
     with pytest.raises(AssemblyRefusal, match="not alpha-safe"):
         dsa.check_layout_import_preconditions(
-            Path("fw"), layout_template=Path("template"), black_layout_names=("Blank Black",)
+            Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
         )
 
 
@@ -1607,7 +1619,7 @@ def test_check_layout_import_preconditions_dedupe_trap_refuses(monkeypatch):
     monkeypatch.setattr(dsa, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
     with pytest.raises(AssemblyRefusal, match="dedupe"):
         dsa.check_layout_import_preconditions(
-            Path("fw"), layout_template=Path("template"), black_layout_names=("Blank Black",)
+            Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
         )
 
 
@@ -1618,7 +1630,7 @@ def test_check_layout_import_preconditions_dedupe_ok_when_fw_layout_safe(monkeyp
     fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
     monkeypatch.setattr(dsa, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
     dsa.check_layout_import_preconditions(
-        Path("fw"), layout_template=Path("template"), black_layout_names=("Blank Black",)
+        Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
     )
 
 
@@ -1629,9 +1641,33 @@ def _staged_objects(rects):
         "size": {"width": 1920.0, "height": 1080.0},
         "slideTree": {"slides": [{"identifier": "slideNode1"}]},
     }
-    objects["slideNode1"] = {"slide": {"identifier": "realSlide1"}, "templateSlideId": {"lower": "1", "upper": "1"}}
-    objects["realSlide1"] = {"name": None, "drawablesZOrder": []}
+    objects["slideNode1"] = {"slide": {"identifier": "realSlide1"}}
+    objects["realSlide1"] = {
+        "name": None, "drawablesZOrder": [], "templateSlide": {"identifier": "layoutSlide"}
+    }
     return objects
+
+
+def test_check_layout_import_preconditions_refuses_blank():
+    with pytest.raises(AssemblyRefusal, match="Blank is never alpha-safe"):
+        dsa.check_layout_import_preconditions(
+            Path("fw"), layout_template=Path("template"), layout_names=("Blank",)
+        )
+
+
+def test_check_layout_import_preconditions_refuses_duplicate_named_donor(monkeypatch):
+    template_objects = _layout_objects(
+        ("n1", "s1", "Point 3 Lines", {"lower": "1", "upper": "1"}, []),
+        ("n2", "s2", "Point 3 Lines", {"lower": "2", "upper": "2"}, []),
+    )
+    template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
+    fw_objects = _layout_objects()
+    fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
+    monkeypatch.setattr(dsa, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
+    with pytest.raises(AssemblyRefusal, match="duplicate-name donor"):
+        dsa.check_layout_import_preconditions(
+            Path("fw"), layout_template=Path("template"), layout_names=("Point 3 Lines",)
+        )
 
 
 def test_verify_staged_layouts_alpha_safe_refuses_unsafe_layout(monkeypatch):
@@ -1801,6 +1837,37 @@ def _require_gw_deck():
         import keynote_parser  # noqa: F401
     except Exception:
         pytest.skip("keynote-parser (iwa extra) not installed")
+
+
+GOLD_DECK = Path("/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key")
+
+
+def _require_gold_deck():
+    if not GOLD_DECK.is_file():
+        pytest.skip(f"deck not present (local operator file): {GOLD_DECK}")
+    try:
+        import keynote_parser  # noqa: F401
+    except Exception:
+        pytest.skip("keynote-parser (iwa extra) not installed")
+
+
+@pytest.mark.deck
+def test_base_layout_slide_for_ordinal_matches_gold_deck_layout_map():
+    _require_gold_deck()
+    objects, _id_to_file, _file_ids = dsa._load_deck(GOLD_DECK)
+    by_slide_id = {}
+    for name, node, slide in dsa._theme_layout_slides(objects):
+        sid = str((node.get("slide") or {}).get("identifier"))
+        by_slide_id[sid] = name
+    nodes = dsa._slide_nodes(objects)
+    assert len(nodes) == 43
+    for ordinal in range(1, len(nodes) + 1):
+        slide = dsa._slide_archive_for_ordinal(objects, ordinal)
+        expected_target = str((slide.get("templateSlide") or {}).get("identifier"))
+        expected_name = by_slide_id[expected_target]
+        layout = dsa._base_layout_slide_for_ordinal(objects, ordinal)
+        assert layout is not None, f"ordinal {ordinal}: base layout not resolvable"
+        assert layout.get("name") == expected_name, f"ordinal {ordinal}: expected {expected_name!r}"
 
 
 def test_load_and_plan_against_gw_deck():
@@ -5239,7 +5306,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
     captured: dict = {}
 
     def fake_assemble_dsk_deck(
-        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, stroke_min_refs,
+        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
         split_overrides=None, rss_limit_bytes=None,
@@ -5319,7 +5386,7 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
     captured: dict = {}
 
     def fake_assemble_dsk_deck(
-        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, stroke_min_refs,
+        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
         split_overrides=None, rss_limit_bytes=None,

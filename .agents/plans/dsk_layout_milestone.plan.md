@@ -358,3 +358,19 @@ GW 7, or accept the slide with the arrows dropped and the highlight box's LineDr
 - **Q2 — 4-line verses:** SPLIT into two or more slides (reuse the existing split path with the layout's slot as the budget); never hand-place a 267 panel.
 - **Q3 — GW payload 7:** KEEP THE ARROWS TOO. Connection lines survive copy-and-transform; since they have no AppleScript handle, piece L6 moves them OFFLINE after the live pass with the same affine as their sibling group (geometry-only write, builds preserved) instead of refusing. The slide's text must not be resized (character/line builds die on a size write) — refuse with a named reason only if its text does not fit unscaled.
 - Live verification is deferred until Keynote is free (no Keynote 2026-09-14 ~11:50–12:50).
+
+## L2 landed (2026-09-14, branch `feat/dsk-layout-L2`)
+
+`layout_import_lines` (dsk_live.py) now takes a list of names, one donor slide per name
+missing from the doc (single name still works, unified as a one-item list).
+`check_layout_import_preconditions` (dsk_assemble.py) loops the whole `import_layout_names`
+list, refuses `Blank` explicitly and a duplicate-named template donor.
+`_base_layout_slide_for_ordinal` now resolves via `KN.SlideArchive.templateSlide` (one hop)
+instead of the `templateSlideId` uuid walk; verified against all 43 gold-deck slides.
+`DEFAULT_DSK_LAYOUT_NAMES` added and threaded through `cli.py`; every kept slide still gets
+`Blank Black` as base layout in this piece (per-class base layout is L3).
+**Known gap for the next piece to reconcile:** `dsk_movie_export.py` (out of L2's edit
+scope) calls the old `layout_import_lines("theDoc", "approvedBlackNames", ...)` form,
+passing an AppleScript variable-name string rather than a literal layout name — this now
+breaks (`test_script_black_layout_uses_explicit_approved_name_list` fails); it needs its own
+update to the list form before the next merge.
