@@ -359,31 +359,55 @@ test("shared coincident edges drop only the interior seam", () => {
   assert.ok(roofs(planned.segs).length >= 6);
 });
 
-test("T-junction vertices still register the overlapping span as shared", () => {
+test("T-junction shared spans are omitted from the planned roof mesh", () => {
   const long = feature(rect(SG.lng, SG.lat, 0, 0, 60, 10), { render_height: 16, render_min_height: 0 }, { id: "LONG" });
   const stub = feature(rect(SG.lng, SG.lat, 20, 10, 30, 20), { render_height: 16, render_min_height: 0 }, { id: "STUB" });
   const { components } = geo.normalizeBuildings([long, stub]);
   const shared = geo.suppressSharedEdges(components);
-  assert.ok(shared.size >= 1);
-  const blob = [...shared].join("\n");
+  assert.ok(shared.keys.size >= 1);
+  const blob = [...shared.keys].join("\n");
   const p = toLngLat(SG.lng, SG.lat, 20, 10);
   const q = toLngLat(SG.lng, SG.lat, 30, 10);
   assert.match(blob, new RegExp(p[0].toFixed(7).replace(".", "\\.")));
   assert.match(blob, new RegExp(q[0].toFixed(7).replace(".", "\\.")));
+  const planned = planBuildingsInk([long, stub]);
+  assert.ok(planned.diagnostics.sharedEdgesRemoved >= 1);
+  const cos = Math.cos(SG.lat * Math.PI / 180);
+  const seam = roofs(planned.segs).filter((seg) => {
+    const e0 = (seg.a[0] - SG.lng) * M * cos;
+    const e1 = (seg.b[0] - SG.lng) * M * cos;
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    if (Math.abs(n0 - 10) > 1 || Math.abs(n1 - 10) > 1) return false;
+    return Math.min(e0, e1) < 24 && Math.max(e0, e1) > 26;
+  });
+  assert.equal(seam.length, 0);
 });
 
-test("shared-edge suppression stays near-linear on a touching grid", () => {
+function touchingGrid(count, cols) {
   const features = [];
-  for (let i = 0; i < 400; i++) {
-    const x = (i % 20) * 8;
-    const y = Math.floor(i / 20) * 8;
+  for (let i = 0; i < count; i++) {
+    const x = (i % cols) * 8;
+    const y = Math.floor(i / cols) * 8;
     features.push(feature(rect(SG.lng, SG.lat, x, y, x + 8, y + 8), { render_height: 12, render_min_height: 0 }, { id: `g${i}` }));
   }
+  return features;
+}
+
+test("shared-edge suppression stays near-linear on a touching grid", () => {
   const started = Date.now();
-  const planned = planBuildingsInk(features);
+  const planned = planBuildingsInk(touchingGrid(400, 20));
   const ms = Date.now() - started;
   assert.ok(planned.diagnostics.sharedEdgesRemoved > 100, planned.diagnostics.sharedEdgesRemoved);
-  assert.ok(ms < 250, `shared-edge suppression took ${ms}ms`);
+  assert.ok(ms < 120, `shared-edge suppression took ${ms}ms`);
+});
+
+test("seam application stays near-linear on a 1600-building grid", () => {
+  const started = Date.now();
+  const planned = planBuildingsInk(touchingGrid(1600, 40));
+  const ms = Date.now() - started;
+  assert.ok(planned.diagnostics.sharedEdgesRemoved > 500, planned.diagnostics.sharedEdgesRemoved);
+  assert.ok(ms < 250, `seam application took ${ms}ms`);
 });
 
 test("bounds, not a centre radius, decide which buildings stay eligible", () => {

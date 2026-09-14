@@ -614,7 +614,55 @@ function cellsForSegment(ae: En, be: En): Array<[number, number]> {
 
 type IndexedEndpoint = { point: LngLat; en: En; component: number };
 
-export function suppressSharedEdges(components: NormalizedComponent[]): Set<string> {
+export type SharedSeam = { a: LngLat; b: LngLat; base: number; top: number };
+
+export type SharedSeams = {
+  keys: Set<string>;
+  spans: SharedSeam[];
+  origin: { lng: number; lat: number; cos: number };
+  index: Map<string, SharedSeam[]>;
+};
+
+function indexSharedSpans(spans: SharedSeam[], origin: { lng: number; lat: number; cos: number }): Map<string, SharedSeam[]> {
+  const index = new Map<string, SharedSeam[]>();
+  for (const span of spans) {
+    const seen = new Set<string>();
+    for (const [ce, cn] of cellsForSegment(toEn(span.a, origin), toEn(span.b, origin))) {
+      const key = endpointBucketKey(ce, cn, span.base, span.top);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const list = index.get(key);
+      if (list) list.push(span);
+      else index.set(key, [span]);
+    }
+  }
+  return index;
+}
+
+function nearbySpans(
+  a: LngLat,
+  b: LngLat,
+  base: number,
+  top: number,
+  shared: SharedSeams,
+): SharedSeam[] {
+  const ae = toEn(a, shared.origin);
+  const be = toEn(b, shared.origin);
+  const seen = new Set<SharedSeam>();
+  const out: SharedSeam[] = [];
+  for (const [ce, cn] of cellsForSegment(ae, be)) {
+    const hits = shared.index.get(endpointBucketKey(ce, cn, base, top));
+    if (!hits) continue;
+    for (const span of hits) {
+      if (seen.has(span)) continue;
+      seen.add(span);
+      out.push(span);
+    }
+  }
+  return out;
+}
+
+export function suppressSharedEdges(components: NormalizedComponent[]): SharedSeams {
   const origin = components[0] ? metricOrigin(components[0].outer[0][0], components[0].outer[0][1]) : metricOrigin(0, 0);
   const edges: SourceEdge[] = [];
   const buckets = new Map<string, IndexedEndpoint[]>();
@@ -659,22 +707,72 @@ export function suppressSharedEdges(components: NormalizedComponent[]): Set<stri
     }
   }
   const counts = new Map<string, number>();
+  const byKey = new Map<string, SharedSeam>();
   for (const edge of split) {
     const key = `${orderedKey(edge.a, edge.b)}|${edge.base.toFixed(2)}|${edge.top.toFixed(2)}`;
     counts.set(key, (counts.get(key) || 0) + 1);
+    if (!byKey.has(key)) byKey.set(key, { a: edge.a, b: edge.b, base: edge.base, top: edge.top });
   }
-  const shared = new Set<string>();
+  const keys = new Set<string>();
+  const spans: SharedSeam[] = [];
   for (const [key, count] of counts) {
-    if (count >= 2) shared.add(key);
+    if (count < 2) continue;
+    keys.add(key);
+    const span = byKey.get(key);
+    if (span) spans.push(span);
   }
-  return shared;
+  return { keys, spans, origin, index: indexSharedSpans(spans, origin) };
 }
 
 function edgeIdentity(a: LngLat, b: LngLat, base: number, top: number): string {
   return `${orderedKey(a, b)}|${base.toFixed(2)}|${top.toFixed(2)}`;
 }
 
-export function planComponent(component: NormalizedComponent, shared: Set<string>, diagnostics: GeometryDiagnostics): FacadeSeg[] {
+function paramOnEdge(point: LngLat, a: LngLat, b: LngLat, origin: { lng: number; lat: number; cos: number }): number {
+  const ae = toEn(a, origin);
+  const be = toEn(b, origin);
+  const pe = toEn(point, origin);
+  const abe = be.e - ae.e;
+  const abn = be.n - ae.n;
+  const len2 = abe * abe + abn * abn;
+  if (len2 < 1e-12) return 0;
+  return ((pe.e - ae.e) * abe + (pe.n - ae.n) * abn) / len2;
+}
+
+function lerpLngLat(a: LngLat, b: LngLat, t: number): LngLat {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+
+function cutsForDrawingEdge(a: LngLat, b: LngLat, shared: SharedSeams, base: number, top: number): LngLat[] {
+  const ae = toEn(a, shared.origin);
+  const be = toEn(b, shared.origin);
+  const cuts: LngLat[] = [];
+  for (const span of nearbySpans(a, b, base, top, shared)) {
+    if (pointOnSegment(toEn(span.a, shared.origin), ae, be, 0.12)) cuts.push(span.a);
+    if (pointOnSegment(toEn(span.b, shared.origin), ae, be, 0.12)) cuts.push(span.b);
+  }
+  return cuts;
+}
+
+function pieceCoveredBySeam(
+  a: LngLat,
+  b: LngLat,
+  shared: SharedSeams,
+  base: number,
+  top: number,
+): boolean {
+  if (shared.keys.has(edgeIdentity(a, b, base, top))) return true;
+  const mid = {
+    e: (toEn(a, shared.origin).e + toEn(b, shared.origin).e) / 2,
+    n: (toEn(a, shared.origin).n + toEn(b, shared.origin).n) / 2,
+  };
+  for (const span of nearbySpans(a, b, base, top, shared)) {
+    if (pointOnSegment(mid, toEn(span.a, shared.origin), toEn(span.b, shared.origin), 0.15)) return true;
+  }
+  return false;
+}
+
+export function planComponent(component: NormalizedComponent, shared: SharedSeams, diagnostics: GeometryDiagnostics): FacadeSeg[] {
   const roofZ = component.top + ROOF_LIFT_M;
   const origin = metricOrigin(component.outer[0][0], component.outer[0][1]);
   const drawing = simplifyClosed(component.outer, origin);
@@ -686,11 +784,18 @@ export function planComponent(component: NormalizedComponent, shared: Set<string
     for (let i = 0; i < drawing.length; i++) {
       const a = drawing[i];
       const b = drawing[(i + 1) % drawing.length];
-      if (shared.has(edgeIdentity(a, b, component.base, component.top))) continue;
       const oa = offset[i];
       const ob = offset[(i + 1) % offset.length];
-      segs.push({ a: [oa[0], oa[1], roofZ], b: [ob[0], ob[1], roofZ] });
-      diagnostics.roofSegments += 1;
+      const cuts = cutsForDrawingEdge(a, b, shared, component.base, component.top);
+      for (const [p0, p1] of splitAtPoints(a, b, cuts, origin)) {
+        if (pieceCoveredBySeam(p0, p1, shared, component.base, component.top)) continue;
+        const t0 = paramOnEdge(p0, a, b, origin);
+        const t1 = paramOnEdge(p1, a, b, origin);
+        const o0 = lerpLngLat(oa, ob, t0);
+        const o1 = lerpLngLat(oa, ob, t1);
+        segs.push({ a: [o0[0], o0[1], roofZ], b: [o1[0], o1[1], roofZ] });
+        diagnostics.roofSegments += 1;
+      }
     }
   }
   const posts = selectSignificantCorners(component.outer);
@@ -699,8 +804,8 @@ export function planComponent(component: NormalizedComponent, shared: Set<string
     const prev = component.outer[(index - 1 + component.outer.length) % component.outer.length];
     const curr = component.outer[index];
     const next = component.outer[(index + 1) % component.outer.length];
-    const leftShared = shared.has(edgeIdentity(prev, curr, component.base, component.top));
-    const rightShared = shared.has(edgeIdentity(curr, next, component.base, component.top));
+    const leftShared = shared.keys.has(edgeIdentity(prev, curr, component.base, component.top));
+    const rightShared = shared.keys.has(edgeIdentity(curr, next, component.base, component.top));
     if (leftShared && rightShared) continue;
     const p = originalOffset[index] || curr;
     segs.push({ a: [p[0], p[1], component.base], b: [p[0], p[1], roofZ] });
@@ -725,7 +830,7 @@ export function planNormalizedInk(components: NormalizedComponent[]): { segs: Fa
     budgetDropped: Math.max(0, components.length - selected.length),
   };
   const shared = suppressSharedEdges(selected);
-  diagnostics.sharedEdgesRemoved = shared.size;
+  diagnostics.sharedEdgesRemoved = shared.keys.size;
   const segs: FacadeSeg[] = [];
   for (const component of selected) {
     const next = planComponent(component, shared, diagnostics);
