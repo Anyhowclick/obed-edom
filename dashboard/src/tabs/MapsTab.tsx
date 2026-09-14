@@ -2851,7 +2851,6 @@ export function MapsTab() {
                     )}
                   </div>
                   <div className="maps-hl">
-                    <div className="cap">Isolate country</div>
                     <label className="maps-check">
                       <input
                         type="checkbox"
@@ -2866,7 +2865,7 @@ export function MapsTab() {
                           });
                         }}
                       />{" "}
-                      Isolate country
+                      Isolate <span className="muted">{activeView?.isolate ? "ON" : "OFF"}</span>
                     </label>
                     {activeView?.isolate && (
                       <AeScrub
