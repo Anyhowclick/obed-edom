@@ -27,7 +27,7 @@ from obed_edom.dsk_assemble import (
     plan_assembly,
 )
 import obed_edom.dsk_plan as dsk_plan
-from obed_edom.dsk_plan import Band, CropRefusal, classify_slide, resolve_font_path
+from obed_edom.dsk_plan import Band, CropRefusal, classify_slide, line_count, resolve_font_path
 from obed_edom.map_remap import Rect
 
 BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
@@ -8933,30 +8933,38 @@ def test_resolve_slide_layouts_and_apply_slot_rects_verse_and_point_and_content(
             transition=None, is_text=False, long_text_ids=(),
         ),
     ]
+    # Finding 2 (L3 fix round B): `resolve_slide_layouts` no longer recomputes a
+    # category/line-count independently -- it just reads back the layout
+    # `plan_assembly` already chose and threaded into `fits`/`text_sizes` while planning
+    # (`plan.layout_names`, single source of truth), so an ``AssemblyPlan`` whose
+    # `layout_names` says "verse" must have its verse rect already at that slot.
+    verse_slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    point_slot = dsa.LAYOUT_SLOTS["Point 3 Lines"]
     plan = AssemblyPlan(
         kept=(1, 2, 3), ordinals={1: 1, 2: 2, 3: 3}, fits={
-            1: {("text", 1): Rect(43.0, 810.0, 1849.0, 200.0), ("text", 0): Rect(44.0, 719.0, 651.0, 81.0)},
-            2: {("text", 1): Rect(43.0, 838.0, 1849.0, 215.0)},
+            1: {("text", 1): verse_slot.verse, ("text", 0): verse_slot.badge},
+            2: {("text", 1): point_slot.text},
             3: {("image", 0): Rect(0.0, 0.0, 1920.0, 1080.0)},
-        }, deletes={}, clips={}, text_sizes={1: {("text", 1): 45.0}, 2: {("text", 1): 45.0}},
+        }, deletes={}, clips={},
+        text_sizes={1: {("text", 1): 45.0, ("text", 0): 40.0}, 2: {("text", 1): 45.0}},
         autosize={}, warnings=(),
+        layout_names={1: "Verse Standard (Variation 2)", 2: "Point 3 Lines"},
     )
 
     names = dsa.resolve_slide_layouts(payload, classes, plan)
-    assert names[1] in ("Verse Standard (Variation 2)", "Verse 1 Line (Variation 2)")
-    assert names[2] in ("Point 3 Lines", "Point (2 Lines)")
+    assert names[1] == "Verse Standard (Variation 2)"
+    assert names[2] == "Point 3 Lines"
     assert names[3] == "Blank Black"
 
-    plan2 = dsa.apply_layout_slot_rects(plan, classes, payload, names)
     verse_id = classes[0].long_text_ids[0]
-    slot = dsa.LAYOUT_SLOTS[names[1]]
-    assert plan2.fits[1][verse_id] == slot.verse
-    assert plan2.text_sizes[1][verse_id] == 45.0
+    assert plan.fits[1][verse_id] == verse_slot.verse
+    assert plan.text_sizes[1][verse_id] == 45.0
     badge_iid = next(iid for iid in classes[0].kept if iid != verse_id and iid[0] == "text")
-    assert plan2.fits[1][badge_iid] == slot.badge
-    assert plan2.fits[1][badge_iid].x == 63.1
+    assert plan.fits[1][badge_iid] == verse_slot.badge
+    assert plan.fits[1][badge_iid].x == 63.1
+    assert plan.text_sizes[1][badge_iid] == 40.0
 
-    assert plan2.fits[3] == plan.fits[3]
+    assert plan.fits[3] == {("image", 0): Rect(0.0, 0.0, 1920.0, 1080.0)}
 
 
 def test_build_assembly_script_per_slide_layout_names():
@@ -8981,18 +8989,153 @@ def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):
     decisions = {13: SlideDecision(13, "in_deck")}
     plan = plan_assembly(
         payload, [by_number[13]], decisions=decisions, band=BAND, clips={}, runs=runs,
-        all_classes=classes, deck=deck, fw_deck=GW_DECK,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
     )
     names = dsa.resolve_slide_layouts(payload, classes, plan)
     assert names[13] == "Verse Standard (Variation 2)"
-    plan2 = dsa.apply_layout_slot_rects(plan, classes, payload, names)
     verse_id = by_number[13].long_text_ids[0]
-    assert plan2.fits[13][verse_id] == dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"].verse
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    verse_rect = plan.fits[13][verse_id]
+    # The verse stacks bottom-anchored inside the slot band (content-height rect, not a
+    # literal slot-rect override) -- x/w match the slot exactly, and the rect's bottom
+    # coincides with the slot's own bottom (`_stacked_text_rects` stacks upward from
+    # `stack_band.bottom`, and `stack_bands[13]` IS the slot band, see below).
+    assert verse_rect.x == slot.verse.x
+    assert verse_rect.w == slot.verse.w
+    assert verse_rect.y + verse_rect.h == pytest.approx(slot.verse.y + slot.verse.h)
+    assert verse_rect.h <= slot.verse.h
     badge_id = dsa._find_verse_badge_id(by_number[13], {
         (item["kind"], item["kindIndex"]): item for item in payload["slides"][12]["items"]
     })
     assert badge_id is not None
-    assert plan2.fits[13][badge_id].x == 63.1
+    assert plan.fits[13][badge_id].x == 63.1
+
+    # Finding 2: `stack_bands`/`run_sizes` derive from the SAME slot as `fits`, not a
+    # post-plan override left behind -- GW 13's verse keeps a mixed-emphasis run (its
+    # 85pt highlight against the 70pt body), so `_slide_lines` must see the 45pt-scaled
+    # ranges in `run_sizes` (it prefers `run_sizes` over `text_sizes`), pinned exactly:
+    # t = 45 / 70 (the body/lead size), so the 85pt run becomes 85 * 45/70 = 54.642857pt.
+    assert plan.stack_bands[13] == dsa._slot_band(slot.verse)
+    expected_ranges = [
+        (1, 1, 45.0), (2, 6, 45.0), (7, 10, 45.0), (11, 90, 45.0),
+        (91, 146, 54.642857142857146), (147, 149, 45.0),
+    ]
+    actual_ranges = plan.run_sizes[13][verse_id]
+    assert len(actual_ranges) == len(expected_ranges)
+    for (a_start, a_end, a_size), (e_start, e_end, e_size) in zip(actual_ranges, expected_ranges):
+        assert a_start == e_start and a_end == e_end
+        assert a_size == pytest.approx(e_size)
+
+    # The emitted script sets THIS slide's base layout by literal ordinal, matching
+    # `plan.layout_names[13]` -- the old blanket-assignment bug (finding 1 of the
+    # earlier review) would still have satisfied a looser "any base layout line" check.
+    slide_layout_names = dsa.resolve_slide_layouts(payload, classes, plan)
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        layout_policy="import", slide_layout_names=slide_layout_names,
+    )
+    ordinal = plan.ordinals[13]
+    assert f'set base layout of slide {ordinal} of theDoc to resolvedLayout' in script
+
+
+def test_build_refit_round_keeps_slot_rect_as_refit_authority(tmp_path):
+    # Finding 2's refit-authority requirement: a live refit round must re-fit INSIDE the
+    # slot, not `DEFAULT_BAND` -- `_build_refit_round` already reads `plan.stack_bands`,
+    # so once planning threads the slot band in there (rather than leaving it behind a
+    # post-plan override), a refit naturally stays inside the slot without any change to
+    # `_build_refit_round` itself.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[13]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    assert plan.stack_bands[13] == dsa._slot_band(slot.verse)
+    verse_id = by_number[13].long_text_ids[0]
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+    predicted_h = plan.fits[13][verse_id].h
+    refits = dsa._build_refit_round(
+        plan, slides_by_number, {(13, "text:1")}, {(13, "text:1"): predicted_h + 10.0},
+        BAND, 24.0, [], {},
+    )
+    refit_rect = refits[13][verse_id].rect
+    assert refit_rect.x == slot.verse.x
+    assert refit_rect.w == slot.verse.w
+    assert refit_rect.y + refit_rect.h == pytest.approx(slot.verse.y + slot.verse.h)
+    assert refit_rect.h <= slot.verse.h + 0.01
+
+
+def test_gw38_verse_over_three_lines_splits_at_the_standard_slot():
+    # Owner Q2/finding 3: GW 38's verse (a real deck slide, found by scanning the WHOLE
+    # deck rather than only the r12b keep list) needs 7 lines at 45pt in the Standard
+    # slot width (1799pt) -- it must split into parts of at most 3 lines each, every
+    # part fitted against the Standard verse/badge slots, never `DEFAULT_BAND`.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    cls38 = by_number[38]
+    verse_id = cls38.long_text_ids[0]
+    items = {(it["kind"], it["kindIndex"]): it for it in payload["slides"][37]["items"]}
+    full_text = items[verse_id]["text"]
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    assert dsa._find_verse_badge_id(cls38, items) is not None
+    assert line_count(full_text, items[verse_id]["font"], 45.0, slot.verse.w) > 3
+
+    decisions = {38: SlideDecision(38, "in_deck")}
+    plan = plan_assembly(
+        payload, [cls38], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    assert plan.layout_names[38] == "Verse Standard (Variation 2)"
+    parts = plan.splits[38]
+    assert len(parts) >= 3
+
+    seen_end = 0
+    for part in parts:
+        assert part.fits[verse_id] == slot.verse
+        start, end = part.char_window
+        assert part.char_total == len(full_text)
+        # Contiguous in source order, modulo the single wrap-point separator dropped
+        # between two consecutive wrapped lines (`wrap_line_spans` excludes it).
+        assert seen_end + 1 <= start <= seen_end + 2
+        seen_end = end
+        part_text = full_text[start - 1:end]
+        assert line_count(part_text, items[verse_id]["font"], 45.0, slot.verse.w) <= 3
+    assert seen_end == len(full_text)
+
+
+def test_gw38_split_part_emits_character_deletes_outside_its_window():
+    # The emitter must trim the live box down to just this part's text (copy-and-
+    # transform, never a literal text replacement) -- deleting the tail first, then the
+    # head, both indexed against the box's ORIGINAL (pre-delete) text so they land on
+    # the same characters whose sizes were just set.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    cls38 = by_number[38]
+    decisions = {38: SlideDecision(38, "in_deck")}
+    plan = plan_assembly(
+        payload, [cls38], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    ordinal = plan.ordinals[38]
+    part0_lines = dsa._slide_lines(plan, 38, ordinal, part=0)
+    part0 = "\n".join(part0_lines)
+    part = plan.splits[38][0]
+    start, end = part.char_window
+    total = part.char_total
+    assert f"delete characters {end + 1} thru {total} of object text of theObj" in part0
+    assert start == 1  # part 0 starts at the top of the box -- no head delete expected
+    assert "delete characters 1 thru" not in part0
 
 
 def test_gw21_image_slide_resolves_blank_black():
@@ -9016,11 +9159,14 @@ def test_gw44_50_two_column_resolves_point_3_lines_geometry_unchanged():
     decisions = {44: SlideDecision(44, "in_deck"), 50: SlideDecision(50, "in_deck")}
     plan = plan_assembly(
         payload, [by_number[44], by_number[50]], decisions=decisions, band=BAND, clips={}, runs=runs,
-        all_classes=classes, deck=deck, fw_deck=GW_DECK,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
     )
     names = dsa.resolve_slide_layouts(payload, classes, plan)
     assert names[44] == "Point 3 Lines"
     assert names[50] == "Point 3 Lines"
-    plan2 = dsa.apply_layout_slot_rects(plan, classes, payload, names)
-    assert plan2.fits[44] == plan.fits[44]
-    assert plan2.fits[50] == plan.fits[50]
+    plan_preserve = plan_assembly(
+        payload, [by_number[44], by_number[50]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="preserve",
+    )
+    assert plan.fits[44] == plan_preserve.fits[44]
+    assert plan.fits[50] == plan_preserve.fits[50]

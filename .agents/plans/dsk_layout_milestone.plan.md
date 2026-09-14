@@ -473,3 +473,28 @@ in the tested keep set to exercise the split/1-line branches live; the >3-line s
 does not yet thread the slot rect as its budget (still `DEFAULT_BAND`) -- flagged for L4/L5
 follow-up rather than guessed at. Targeted suite 506 passed / 1 xfailed (was 489/1);
 full suite reported in the L3 handoff.
+
+### L3 fix round B (2026-09-14, Codex review1 findings 2+3)
+
+`apply_layout_slot_rects` deleted -- `plan_assembly` (`layout_policy="import"` only,
+default `"preserve"` unaffected) now threads the resolved layout slot INTO planning for
+a single top-level long text box, not two-column: the slot's own rect becomes the
+`fit_text_stack` band (`AssemblyPlan.stack_bands`, so a live refit round -- already
+reading `plan.stack_bands` -- stays inside the slot with no `_build_refit_round` change
+needed) and the slot's 45pt/40pt sizes are authoritative, scaled through
+`_run_size_ranges`/a new `_windowed_run_ranges` at `t = 45 / lead_source_size` so
+emphasis runs keep their relative scale (GW13 confirmed: 56/68pt -> 45/54.64pt).
+`AssemblyPlan.layout_names` is the new single source of truth for the resolved name;
+`resolve_slide_layouts` just reads it back (plus the still-separate two-column case) --
+one path can no longer disagree with the other. Finding 3 (owner Q2): a verse/point box
+needing more than 3 lines at 45pt in the Standard/Point-3-Lines slot width now SPLITS by
+TEXT (`dsk_plan.wrap_line_spans`, new) into parts of at most 3 lines, every part fitted
+against that one slot, never `DEFAULT_BAND` -- searching the WHOLE deck (not just the
+r12b keep list) found real candidates the L3 landing note said were absent: GW 12/18-20/
+28-30/35/38/49/52 (GW 38's verse needs 7 lines -> 3 parts). Each `SplitPart` carries a new
+`char_window`/`char_total`; the emitter deletes the box's characters outside that window
+(tail then head, both indexed against the pre-delete text, after the per-run size lines)
+rather than ever replacing text content, keeping the copy-and-transform contract. Finding
+1 (role resolver for group-child/multi-box verses) and finding 4 (verifier) are explicitly
+out of scope for this round per the review-of-record split. Targeted suite 509 passed / 1
+xfailed; full suite 2507 passed / 84 skipped / 1 xfailed, no regressions.

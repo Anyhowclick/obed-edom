@@ -61,7 +61,9 @@ from obed_edom.dsk_plan import (
     plan_crops,
     read_band,
     visible_union,
+    wrap_line_spans,
     wrapped_height,
+    wrapped_height_runs,
 )
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import (
@@ -204,54 +206,10 @@ def _find_verse_badge_id(cls: SlideClass, items_by_id: Mapping[ItemId, dict]) ->
     return candidates[0]
 
 
-def apply_layout_slot_rects(
-    plan: AssemblyPlan,
-    classes: Sequence[SlideClass],
-    payload: Mapping[str, Any],
-    slide_layout_names: Mapping[int, str],
-) -> AssemblyPlan:
-    """Snaps a verse/point slide's long text (and verse badge, when found) rect and
-    45pt/40pt size to its resolved layout's slot (plan §1.2/§3 L3), instead of the
-    band-fitted rect ``plan_assembly`` already computed -- covers the common
-    single-long-text-box, non-two-column, non-split case; two-column slides
-    (``plan.two_column``, D1b's hand geometry) and split slides (``plan.splits``, owner
-    Q2) are left untouched, since both already carry their own measured placement."""
-    classes_by_number = {c.number: c for c in classes}
-    slides_by_number = {s["number"]: s for s in payload.get("slides") or []}
-    fits = {number: dict(rects) for number, rects in plan.fits.items()}
-    text_sizes = {number: dict(sizes) for number, sizes in plan.text_sizes.items()}
-    changed = False
-    for number, layout_name in slide_layout_names.items():
-        if number in plan.two_column or number in plan.splits:
-            continue
-        slot = LAYOUT_SLOTS.get(layout_name)
-        if slot is None or (slot.verse is None and slot.text is None):
-            continue
-        cls = classes_by_number.get(number)
-        if cls is None:
-            continue
-        long_ids = [iid for iid in cls.long_text_ids if iid[0] == "text"]
-        if len(long_ids) != 1:
-            continue
-        long_id = long_ids[0]
-        if long_id not in fits.get(number, {}):
-            continue
-        slide = slides_by_number.get(number) or {}
-        items_by_id = {(item["kind"], item["kindIndex"]): item for item in (slide.get("items") or [])}
-        if slot.verse is not None:
-            fits[number][long_id] = slot.verse
-            text_sizes.setdefault(number, {})[long_id] = slot.verse_pt
-            badge_id = _find_verse_badge_id(cls, items_by_id)
-            if badge_id is not None and slot.badge is not None and badge_id in fits.get(number, {}):
-                fits[number][badge_id] = slot.badge
-                text_sizes.setdefault(number, {})[badge_id] = slot.badge_pt
-        elif slot.text is not None:
-            fits[number][long_id] = slot.text
-            text_sizes.setdefault(number, {})[long_id] = slot.text_pt
-        changed = True
-    if not changed:
-        return plan
-    return _dc_replace(plan, fits=fits, text_sizes=text_sizes)
+def _slot_band(rect: Rect, *, sample_count: int = DEFAULT_BAND.sample_count) -> Band:
+    """A layout slot's rect (plan §1.2), read as the ``Band`` ``fit_text_stack``/the
+    refit round expect -- bottom-anchored, matching how a slot's y/h were measured."""
+    return Band(rect.y + rect.h, rect.h, rect.x, rect.x + rect.w, sample_count)
 
 
 def resolve_slide_layouts(
@@ -259,47 +217,20 @@ def resolve_slide_layouts(
     classes: Sequence[SlideClass],
     plan: AssemblyPlan,
 ) -> dict[int, str]:
-    """Per kept slide (keyed by slide ``number``, plan §2.2/§3 L3): resolves the base
-    layout name from the slide's own category (verse/point/content), whether it is a
-    D1b two-column slide (``plan.two_column``, always ``Point 3 Lines``, hand geometry
-    unchanged), and its rendered line count at 45pt in the candidate slot's width. A
-    split slide (``plan.splits``, owner Q2 -- a verse needing more than 3 lines at 45pt)
-    always resolves to ``Verse Standard (Variation 2)`` for a verse, ``Point 3 Lines``
-    for a point -- every part shares the slide's one base layout (Keynote's
-    ``duplicate slide`` copies it). A slide whose category/line-count cannot be
-    determined offline (font unresolved, no single long text box) falls back to
-    ``Blank Black`` rather than guessing."""
-    classes_by_number = {c.number: c for c in classes}
-    slides_by_number = {s["number"]: s for s in payload.get("slides") or []}
+    """Per kept slide (keyed by slide ``number``, plan §2.2/§3 L3): the base layout name
+    ``plan_assembly`` already resolved while threading the slot into planning (finding 2,
+    ``plan.layout_names`` -- single source of truth, so the emitted rects/sizes and the
+    emitted ``set base layout of slide N`` line always agree), for every slide category
+    that resolver covers -- verse/point single-long-text-box slides (split or not) and
+    D1b two-column slides (``plan.two_column``, always ``Point 3 Lines``, hand geometry
+    unchanged). A slide outside that scope (no single long text box, font unresolved)
+    falls back to ``Blank Black`` rather than guessing."""
     out: dict[int, str] = {}
     for number in plan.kept:
-        cls = classes_by_number.get(number)
-        if cls is None:
-            out[number] = "Blank Black"
-            continue
-        if number in plan.two_column:
-            out[number] = "Point 3 Lines"
-            continue
-        slide = slides_by_number.get(number) or {}
-        items_by_id = {(item["kind"], item["kindIndex"]): item for item in (slide.get("items") or [])}
-        long_ids = [iid for iid in cls.long_text_ids if iid[0] == "text"]
-        if not cls.is_text or len(long_ids) != 1:
-            out[number] = "Blank Black"
-            continue
-        long_id = long_ids[0]
-        category: LayoutSlideCategory = "verse" if _find_verse_badge_id(cls, items_by_id) else "point"
-        if number in plan.splits:
-            out[number] = "Verse Standard (Variation 2)" if category == "verse" else "Point 3 Lines"
-            continue
-        item = items_by_id.get(long_id)
-        rect = plan.fits.get(number, {}).get(long_id)
-        lines = None
-        if item is not None and rect is not None and rect.w > 0:
-            lines = _line_count(item.get("text") or "", item.get("font") or "", 45.0, rect.w)
-        name = layout_for_slide(category=category, two_column=False, line_count=lines)
-        if name is None:
-            name = "Verse Standard (Variation 2)" if category == "verse" else "Point 3 Lines"
-        out[number] = name
+        name = plan.layout_names.get(number)
+        if name is None and number in plan.two_column:
+            name = "Point 3 Lines"
+        out[number] = name if name is not None else "Blank Black"
     return out
 
 _OBED_PROP_RE = re.compile(r"^OBED\t(\d+)\t([^\t]+)\t(.*)$")
@@ -338,7 +269,11 @@ class SlideDecision:
 @dataclass(frozen=True)
 class SplitPart:
     """One part of a text slide split N ways (D4/D6): its own long box, the slide's short
-    items at their shared affine, and the deletes/text size that go with just this part."""
+    items at their shared affine, and the deletes/text size that go with just this part.
+    ``char_window`` (1-indexed, inclusive, owner Q2/finding 3), when set, is a single
+    long box split by TEXT rather than by box -- the emitter deletes every character of
+    that box outside the window, after applying ``run_sizes`` (still indexed against the
+    box's original, pre-delete text); ``char_total`` is that original text's length."""
 
     fits: dict[ItemId, Rect]
     deletes: tuple[ItemId, ...]
@@ -346,12 +281,18 @@ class SplitPart:
     run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = field(default_factory=dict)
     stacked_ids: frozenset[ItemId] = frozenset()
     autosize: frozenset[ItemId] = frozenset()
+    char_window: tuple[int, int] | None = None
+    char_total: int | None = None
 
 
 @dataclass(frozen=True)
 class AssemblyPlan:
     """For a slide in ``splits``, ``fits[number]`` holds only the short items' part-0
-    row rects -- each part's own long-box rect lives in ``splits[number][part].fits``."""
+    row rects -- each part's own long-box rect lives in ``splits[number][part].fits``.
+    ``layout_names`` (finding 2/§3 L3) is the base layout resolved DURING planning for
+    every verse/point single-long-text-box slide (split or not); when set, that slide's
+    ``fits``/``text_sizes``/``run_sizes``/``stack_bands``/``short_fit`` are all already
+    derived from that layout's slot -- ``resolve_slide_layouts`` just reads it back."""
 
     kept: tuple[int, ...]
     ordinals: dict[int, int]
@@ -380,6 +321,7 @@ class AssemblyPlan:
     anchors: dict[int, str] = field(default_factory=dict)
     two_column: dict[int, Band] = field(default_factory=dict)
     two_column_cluster: dict[int, HeadingCluster] = field(default_factory=dict)
+    layout_names: dict[int, str] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -493,6 +435,41 @@ def _run_size_ranges(
     if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
         return ranges[0][2], False
     return tuple(ranges), False
+
+
+def _windowed_run_ranges(
+    item: dict, scale: float, start0: int, end0: int
+) -> tuple[tuple[int, int, float], ...] | float:
+    """Per-run 1-indexed character ranges (owner Q2/finding 3), restricted to the
+    ``[start0, end0)`` (0-indexed) window of ``item``'s ORIGINAL text -- indices stay
+    against that original text (the live object still holds it in full when these are
+    applied; the caller deletes the rest afterward, see ``SplitPart.char_window``). A
+    run with no resolved ``size`` is skipped -- callers of a single-run-size verse/point
+    box never hit that gap in practice. A single ``float`` when every kept run shares
+    one size."""
+    runs = item.get("runs") or []
+    ranges: list[tuple[int, int, float]] = []
+    pos = 1
+    fallback = scale * 45.0
+    for r in runs:
+        text = r.get("text") or ""
+        length = len(text)
+        if length == 0:
+            continue
+        r_lo, r_hi = pos, pos + length - 1
+        pos += length
+        size = r.get("size")
+        if size is None:
+            continue
+        fallback = float(size) * scale
+        lo, hi = max(r_lo, start0 + 1), min(r_hi, end0)
+        if lo <= hi:
+            ranges.append((lo, hi, float(size) * scale))
+    if not ranges:
+        return fallback
+    if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
+        return ranges[0][2]
+    return tuple(ranges)
 
 
 def _group_child_geometry(
@@ -1071,9 +1048,14 @@ def plan_assembly(
     no_drop_panel_backdrop: bool = False,
     split_overrides: Mapping[int, int] | None = None,
     all_classes: Sequence[SlideClass] | None = None,
+    layout_policy: LayoutPolicy = "preserve",
 ) -> AssemblyPlan:
     """Pure planning over `payload`/`classes`, EXCEPT the cropped image files under
     `crop_dir` (unless `no_image_crop`), committed only once every slide validates.
+    `layout_policy="import"` (plan §2.2/§3 L3) threads a verse/point slide's resolved
+    layout slot INTO planning itself (finding 2) -- its rect becomes the stack band and
+    its 45pt/40pt sizes are authoritative, instead of `preserve`'s plain band fit; see
+    `resolve_slide_layouts`, which reads back the per-slide choice this makes.
     `all_classes`, when given, is the whole deck's classification (see
     `_full_classes_by_number`) -- used only for the repeat-heading predecessor check,
     so a `--slides` batch drops a repeated heading exactly like a full-deck run.
@@ -1114,6 +1096,7 @@ def plan_assembly(
     anchors_out: dict[int, str] = {}
     two_column_map: dict[int, Band] = {}
     two_column_cluster_map: dict[int, HeadingCluster] = {}
+    layout_names: dict[int, str] = {}
     cluster_autosize_map: dict[int, frozenset[ItemId]] = {}
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
@@ -1321,6 +1304,8 @@ def plan_assembly(
             stacked_text_sizes: dict[ItemId, float] = {}
             stacked_shrink_only_sizes: dict[ItemId, float] = {}
             stacked_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
+            slot_badge_id: ItemId | None = None
+            slot_badge_pt: float | None = None
             if cls.is_text and cls.long_text_ids:
                 long_ids = []
                 for iid in cls.long_text_ids:
@@ -1424,6 +1409,45 @@ def plan_assembly(
                                 )
                         short_fit = {iid: _dc_replace(rect, x=col_band.x_min) for iid, rect in short_fit.items()}
                     _refuse_on_short_row_overlap(number, short_fit)
+
+                    # L3 (finding 2): a single top-level long text box, not two-column,
+                    # threads the layout slot INTO planning -- the slot's own rect
+                    # becomes the stack band and its 45pt/40pt sizes are authoritative,
+                    # instead of a post-plan override that left the stack/refit/typography
+                    # deriving from DEFAULT_BAND behind its back. Finding 1's role
+                    # resolver (group-child verses, GW17-shaped multi-box verses) is out
+                    # of scope for this round -- only plugged in later.
+                    slot_category: LayoutSlideCategory | None = None
+                    slot_layout_name: str | None = None
+                    slot_eligible = (
+                        layout_policy == "import"
+                        and cluster is None and len(boxes) == len(long_ids) == 1
+                        and long_ids[0][0] == "text"
+                    )
+                    if slot_eligible:
+                        slot_long_item = items_by_id[long_ids[0]]
+                        slot_badge_id = _find_verse_badge_id(cls, items_by_id)
+                        slot_category = "verse" if slot_badge_id is not None else "point"
+                        slot_verse_slot = LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+                        slot_point_slot = LAYOUT_SLOTS["Point 3 Lines"]
+                        slot_candidate_width = (
+                            slot_verse_slot.verse.w if slot_category == "verse" else slot_point_slot.text.w
+                        )
+                        slot_lines = _line_count(
+                            slot_long_item.get("text") or "", slot_long_item.get("font") or "",
+                            45.0, slot_candidate_width,
+                        )
+                        slot_layout_name = (
+                            layout_for_slide(category=slot_category, two_column=False, line_count=slot_lines)
+                            if slot_lines is not None else None
+                        )
+                        if slot_layout_name is not None and slot_category == "verse" and slot_badge_id is not None:
+                            badge_slot = LAYOUT_SLOTS[slot_layout_name]
+                            if badge_slot.badge is not None and slot_badge_id in short_fit:
+                                slot_badge_orig_rect = short_fit[slot_badge_id]
+                                short_fit[slot_badge_id] = badge_slot.badge
+                                slot_badge_pt = badge_slot.badge_pt
+
                     stack_band = col_band
                     short_row_h = 0.0
                     if short_fit:
@@ -1439,7 +1463,51 @@ def plan_assembly(
                             f"slide {number}: --split requests {forced_parts} part(s) but the slide "
                             f"has {len(boxes)} long text box(es) to split"
                         )
-                    result = None if forced_parts is not None else fit_text_stack(boxes, stack_band, min_text_pt)
+
+                    slot_result = None
+                    if slot_layout_name is not None and forced_parts is None:
+                        slot = LAYOUT_SLOTS[slot_layout_name]
+                        slot_rect = slot.verse if slot_category == "verse" else slot.text
+                        slot_pt = slot.verse_pt if slot_category == "verse" else slot.text_pt
+                        stack_band = _slot_band(slot_rect)
+                        slot_box = boxes[0]
+                        slot_t = slot_pt / slot_box.size if slot_box.size else 1.0
+                        if slot_box.runs:
+                            slot_h = wrapped_height_runs(
+                                tuple(Run(r.text, r.font_name, r.size * slot_t) for r in slot_box.runs),
+                                stack_band.width,
+                            )
+                        else:
+                            slot_h = wrapped_height(slot_box.text, slot_box.font_name, slot_box.size * slot_t, stack_band.width)
+                        if (
+                            slot_h is not None and slot_t >= _box_min_t(slot_box, min_text_pt)
+                            and slot_h + _TEXT_STACK_GAP <= stack_band.height
+                        ):
+                            slot_result = (slot_t, {slot_box.item_id: slot_box.size * slot_t}, {slot_box.item_id: slot_h})
+                        else:
+                            slot_layout_name = None
+                            if slot_badge_id is not None and slot_badge_pt is not None:
+                                short_fit[slot_badge_id] = slot_badge_orig_rect
+                                slot_badge_pt = None
+                            stack_band = col_band
+                            short_row_h = 0.0
+                            if short_fit:
+                                short_row_h = max(rect.h for rect in short_fit.values())
+                                budget = max(0.0, col_band.height - short_row_h - _TEXT_STACK_GAP)
+                                stack_band = _dc_replace(col_band, height=budget)
+
+                    # Owner Q2/finding 3: once a slot-eligible slide fails the 45pt/3-line
+                    # slot budget, the SPLIT path is taken before any shrink -- never fall
+                    # back to `fit_text_stack`'s own (wider, `DEFAULT_BAND`-derived) search,
+                    # which could otherwise shrink the whole verse to fit unsplit.
+                    slot_needs_split = slot_eligible and slot_category is not None and slot_layout_name is None
+                    result = (
+                        slot_result if slot_result is not None
+                        else (None if forced_parts is not None or slot_needs_split
+                              else fit_text_stack(boxes, stack_band, min_text_pt))
+                    )
+                    if slot_layout_name is not None:
+                        layout_names[number] = slot_layout_name
                     if result is not None:
                         t, sizes, heights = result
                         stack_t_map[number] = t
@@ -1519,6 +1587,78 @@ def plan_assembly(
                         raise AssemblyRefusal(
                             f"slide {number}: grouped verse text does not fit the band at "
                             f"--min-text-pt {min_text_pt} -- refusing to split text inside a group"
+                        )
+                    elif slot_eligible and slot_category is not None and forced_parts is None:
+                        # Owner Q2/finding 3: a single verse/point box too long for its
+                        # slot at 45pt (more than 3 lines) SPLITS by TEXT, every part
+                        # fitted against the Standard slot -- never `DEFAULT_BAND`, and
+                        # never more than 3 lines per part. ``allow_split`` was already
+                        # checked above (``elif not allow_split``) before this branch.
+                        if slide_crops:
+                            raise AssemblyRefusal(
+                                f"slide {number}: text split and image crop both apply -- unsupported"
+                            )
+                        split_slot = (
+                            LAYOUT_SLOTS["Verse Standard (Variation 2)"] if slot_category == "verse"
+                            else LAYOUT_SLOTS["Point 3 Lines"]
+                        )
+                        split_rect = split_slot.verse if slot_category == "verse" else split_slot.text
+                        split_pt = split_slot.verse_pt if slot_category == "verse" else split_slot.text_pt
+                        split_box = boxes[0]
+                        if split_box.item_id[0] != "text":
+                            raise AssemblyRefusal(
+                                f"slide {number} box {_item_label(split_box.item_id)}: grouped verse text "
+                                "does not fit the slot -- refusing to split text inside a group"
+                            )
+                        if slot_category == "verse" and slot_badge_id is not None and split_slot.badge is not None \
+                                and slot_badge_id in short_fit:
+                            short_fit[slot_badge_id] = split_slot.badge
+                            slot_badge_pt = split_slot.badge_pt
+                        spans = wrap_line_spans(split_box.text, split_box.font_name, split_pt, split_rect.w)
+                        if spans is None:
+                            raise AssemblyRefusal(
+                                f"slide {number} box {_item_label(split_box.item_id)}: font/size unresolved, "
+                                "cannot split verse text at the slot budget"
+                            )
+                        split_t = split_pt / split_box.size if split_box.size else 1.0
+                        if split_t < _box_min_t(split_box, min_text_pt):
+                            raise AssemblyRefusal(
+                                f"slide {number} box {_item_label(split_box.item_id)}: the slot's "
+                                f"{split_pt:.0f}pt size is below --min-text-pt {min_text_pt}"
+                            )
+                        chunks = [spans[i:i + 3] for i in range(0, len(spans), 3)] or [[(0, 0)]]
+                        full_len = len(split_box.text)
+                        long_item = items_by_id[split_box.item_id]
+                        stacked_ids = {split_box.item_id}
+                        part_list = []
+                        for chunk in chunks:
+                            start0, end0 = chunk[0][0], chunk[-1][1]
+                            part_fit = dict(short_fit)
+                            if short_fit:
+                                part_fit.update(_short_row_rects(short_fit, short_row_h, split_rect.y))
+                            part_fit[split_box.item_id] = split_rect
+                            ranges = _windowed_run_ranges(long_item, split_t, start0, end0)
+                            part_text_sizes: dict[ItemId, float] = {}
+                            part_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
+                            if isinstance(ranges, tuple):
+                                part_run_sizes[split_box.item_id] = ranges
+                            else:
+                                part_text_sizes[split_box.item_id] = ranges
+                            part_autosize = _autosize_text_ids((split_box.item_id,), id_by_item, objects_graph)
+                            part_list.append(
+                                SplitPart(
+                                    fits=part_fit, deletes=base_deletes, text_sizes=part_text_sizes,
+                                    run_sizes=part_run_sizes, stacked_ids=frozenset({split_box.item_id}),
+                                    autosize=part_autosize, char_window=(start0 + 1, end0), char_total=full_len,
+                                )
+                            )
+                        parts[number] = len(part_list)
+                        splits[number] = tuple(part_list)
+                        fit.pop(split_box.item_id, None)
+                        if short_fit:
+                            fit.update({iid: r for iid, r in part_list[0].fits.items() if iid in short_fit})
+                        layout_names[number] = (
+                            "Verse Standard (Variation 2)" if slot_category == "verse" else "Point 3 Lines"
                         )
                     elif len(boxes) < 2:
                         raise AssemblyRefusal(
@@ -1654,6 +1794,9 @@ def plan_assembly(
             slide_shrink_sizes.update(stacked_shrink_only_sizes)
             for iid, ranges in stacked_run_sizes.items():
                 slide_shrink_sizes[iid] = max(size for _s, _e, size in ranges)
+            if slot_badge_id is not None and slot_badge_pt is not None:
+                slide_text_sizes[slot_badge_id] = slot_badge_pt
+                slide_shrink_sizes[slot_badge_id] = slot_badge_pt
             if slide_text_sizes:
                 text_sizes[number] = slide_text_sizes
             if slide_shrink_sizes:
@@ -1715,6 +1858,7 @@ def plan_assembly(
         anchors=anchors_out,
         two_column=two_column_map,
         two_column_cluster=two_column_cluster_map,
+        layout_names=layout_names,
     )
 
 
@@ -2296,6 +2440,16 @@ def _slide_lines(
             size_lines.append(
                 f"          set size of object text of theObj to {_as_num(shrink_text_sizes[item_id])}"
             )
+        if (
+            split_parts is not None and kind == "text"
+            and split_part.char_window is not None and item_id in split_part.stacked_ids
+        ):
+            start, end = split_part.char_window
+            total = split_part.char_total or end
+            if end < total:
+                size_lines.append(f"          delete characters {end + 1} thru {total} of object text of theObj")
+            if start > 1:
+                size_lines.append(f"          delete characters 1 thru {start - 1} of object text of theObj")
         if item_id in autosize_ids:
             body += size_lines
             body.append(position_line)
@@ -3904,7 +4058,7 @@ def assemble_dsk_deck(
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
         no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop, split_overrides=split_overrides,
-        all_classes=classes,
+        all_classes=classes, layout_policy=layout_policy,
     )
     for number in sorted(plan.anchors):
         log(f"slide {number}: anchor {plan.anchors[number]}")
@@ -3917,8 +4071,6 @@ def assemble_dsk_deck(
     t0 = time.monotonic()
 
     slide_layout_names = resolve_slide_layouts(payload, classes, plan) if layout_policy == "import" else None
-    if slide_layout_names:
-        plan = apply_layout_slot_rects(plan, classes, payload, slide_layout_names)
 
     with LiveBatch(fw_deck, out_path.parent, rss_limit_bytes=rss_limit_bytes, log=log) as batch:
         staging_path = batch.work / f"staged-{out_path.name}"

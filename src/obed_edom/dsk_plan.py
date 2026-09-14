@@ -1039,6 +1039,31 @@ def line_count(text: str, font_name: str, size: float, width: float) -> int | No
     return len(lines)
 
 
+def wrap_line_spans(text: str, font_name: str, size: float, width: float) -> list[tuple[int, int]] | None:
+    """``[start, end)`` character span of each wrapped line at ``size`` wrapped to
+    ``width`` (F9/owner Q2), same wrap pass as ``line_count``/``wrapped_height`` -- a
+    span excludes the wrap-point separator trailing its line, so a caller splitting
+    ``text`` at line boundaries can join consecutive spans back into one contiguous
+    slice. ``None`` when the font cannot be resolved."""
+    path = resolve_font_path(font_name)
+    if path is None or size <= 0:
+        return None
+    from PIL import ImageFont  # noqa: PLC0415
+
+    font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
+    lines = _wrap_lines(text, font, width * (1.0 - _WRAP_MARGIN) * _WRAP_OVERSAMPLE)
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for line in lines:
+        if line == "":
+            spans.append((cursor, cursor))
+            continue
+        idx = text.index(line, cursor)
+        spans.append((idx, idx + len(line)))
+        cursor = idx + len(line)
+    return spans
+
+
 def wrapped_height(text: str, font_name: str, size: float, width: float) -> float | None:
     """Estimated laid-out height (pt) of ``text`` at ``size`` wrapped to ``width`` (F9).
     ``None`` when the font cannot be resolved -- callers must warn and fall back."""
