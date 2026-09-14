@@ -355,6 +355,7 @@ class AssemblyPlan:
     stack_t: dict[int, float] = field(default_factory=dict)
     short_fit: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
     short_row_h: dict[int, float] = field(default_factory=dict)
+    slot_badge_ids: dict[int, ItemId] = field(default_factory=dict)
     crops: dict[int, dict[ItemId, CropSpec]] = field(default_factory=dict)
     anchors: dict[int, str] = field(default_factory=dict)
     two_column: dict[int, Band] = field(default_factory=dict)
@@ -423,12 +424,21 @@ def _refuse_on_short_row_overlap(number: int, short_fit: dict[ItemId, Rect]) -> 
                 )
 
 
-def _short_row_rects(short_fit: dict[ItemId, Rect], row_h: float, stack_top: float) -> dict[ItemId, Rect]:
+def _short_row_rects(
+    short_fit: dict[ItemId, Rect], row_h: float, stack_top: float,
+    *, pinned_ids: frozenset[ItemId] | None = None,
+) -> dict[ItemId, Rect]:
     """Bottom-align ``short_fit``'s own rects (unchanged x/w/h) into a row whose bottom
-    sits one gap above ``stack_top`` -- the badge moves with the verse, per the golden deck."""
+    sits one gap above ``stack_top`` -- the badge moves with the verse, per the golden deck.
+    ``pinned_ids`` (the selected verse slot badge) keep their exact incoming rect instead
+    of being reflowed (finding 4: slot geometry is authoritative for the badge)."""
     row_bottom = stack_top - _TEXT_STACK_GAP
     row_top = row_bottom - row_h
-    return {iid: _dc_replace(rect, y=row_top + (row_h - rect.h)) for iid, rect in short_fit.items()}
+    return {
+        iid: rect if pinned_ids and iid in pinned_ids
+        else _dc_replace(rect, y=row_top + (row_h - rect.h))
+        for iid, rect in short_fit.items()
+    }
 
 
 def _run_size_ranges(
@@ -1130,6 +1140,7 @@ def plan_assembly(
     stack_t_map: dict[int, float] = {}
     short_fit_map: dict[int, dict[ItemId, Rect]] = {}
     short_row_h_map: dict[int, float] = {}
+    slot_badge_ids_map: dict[int, ItemId] = {}
     crops_out: dict[int, dict[ItemId, CropSpec]] = {}
     anchors_out: dict[int, str] = {}
     two_column_map: dict[int, Band] = {}
@@ -1602,7 +1613,15 @@ def plan_assembly(
                         short_rects: dict[ItemId, Rect] = {}
                         if short_fit:
                             stack_top = min(rect.y for rect in long_rects.values())
-                            short_rects = _short_row_rects(short_fit, short_row_h, stack_top)
+                            slot_pinned = (
+                                frozenset({slot_badge_id})
+                                if slot_layout_name is not None and slot_badge_id is not None
+                                and slot_badge_id in short_fit
+                                else None
+                            )
+                            short_rects = _short_row_rects(
+                                short_fit, short_row_h, stack_top, pinned_ids=slot_pinned
+                            )
                             fit.update(short_rects)
                         stacked_ids = {box.item_id for box in boxes}
                         for box in boxes:
@@ -1899,6 +1918,8 @@ def plan_assembly(
                 stack_band_map[number] = stack_band
                 short_fit_map[number] = dict(short_fit)
                 short_row_h_map[number] = short_row_h
+                if slot_layout_name is not None and slot_badge_id is not None and slot_badge_id in short_fit:
+                    slot_badge_ids_map[number] = slot_badge_id
         except Exception:
             _discard_pending_crop_writes(pending_crop_writes)
             raise
@@ -1943,6 +1964,7 @@ def plan_assembly(
         stack_t=stack_t_map,
         short_fit=short_fit_map,
         short_row_h=short_row_h_map,
+        slot_badge_ids=slot_badge_ids_map,
         crops=crops_out,
         anchors=anchors_out,
         two_column=two_column_map,
@@ -2198,7 +2220,72 @@ def check_layout_import_preconditions(
         raise AssemblyRefusal(str(exc)) from exc
 
 
-_SLOT_RECT_TOL_PT = 0.5
+_SLOT_RECT_TOL_PT = 1.0  # plan's recorded acceptance tolerance (dsk_layout_milestone.plan.md:495)
+
+
+def _staged_group_rank(
+    number: int, plan: AssemblyPlan, group_ki: int, *, part: int = 0, hidden: frozenset[ItemId] = frozenset(),
+) -> int | None:
+    """Staged rank (0-indexed) for a RETAINED top-level group's source ``kindIndex`` --
+    unlike a text/shape/image item, the group itself is never a ``plan.fits`` entry (a
+    text-triggering group's own frame takes no affine path; see ``AssemblyPlan``), so its
+    rank is derived from every group kindIndex the plan is otherwise aware of: an explicit
+    delete, another retained groupchild host, or an affine-scaled group's own origin.
+    ``None`` when ``group_ki`` itself was deleted."""
+    split_parts = plan.splits.get(number)
+    if split_parts is not None:
+        fits_here = split_parts[part].fits
+        deleted = set(split_parts[part].deletes)
+    else:
+        fits_here = plan.fits.get(number, {})
+        deleted = set(plan.deletes.get(number, ()))
+    deleted_ranks = {idx for kind, idx in deleted if kind == "group"} - {
+        idx for kind, idx in hidden if kind == "group"
+    }
+    if group_ki in deleted_ranks:
+        return None
+    retained_ranks = {group_ki, *(iid[1] for iid in fits_here if iid[0] == "groupchild")}
+    retained_ranks |= set(plan.group_origin.get(number, {}))
+    retained_ranks -= deleted_ranks
+    return sorted(retained_ranks).index(group_ki)
+
+
+def _staged_group_child_rect(
+    objects: dict,
+    slide: dict,
+    number: int,
+    plan: AssemblyPlan,
+    item_id: ItemId,
+    *,
+    part: int = 0,
+    hidden: frozenset[ItemId] = frozenset(),
+) -> Rect | None:
+    """A group-child's absolute rect composed from the STAGED deck: the top-level
+    group's own kindIndex is translated through ``_staged_group_rank`` (deletions can
+    shift it), then ``_all_group_child_records`` -- the same source-geometry composer
+    planning uses -- reads the staged group object directly; a kept group's own children
+    are never individually deleted, so the child's kind/kindIndex stay source-stable."""
+    _tag, group_ki, child_kind, child_ki = item_id
+    staged_rank = _staged_group_rank(number, plan, group_ki, part=part, hidden=hidden)
+    if staged_rank is None:
+        return None
+    staged_group_id = ("group", staged_rank)
+    group_rec = next(
+        (rec for rec in compose_geometry(slide, objects) if (rec["kind"], rec["kindIndex"]) == staged_group_id),
+        None,
+    )
+    if group_rec is None:
+        return None
+    group_obj = objects.get(group_rec["id"])
+    if group_obj is None:
+        return None
+    children = _all_group_child_records(group_obj, objects)
+    if children is None:
+        return None
+    for child in children:
+        if child["kind"] == child_kind and child["kindIndex"] == child_ki:
+            return Rect(child["x"], child["y"], child["w"], child["h"])
+    return None
 
 
 def verify_staged_layouts_alpha_safe(
@@ -2206,6 +2293,7 @@ def verify_staged_layouts_alpha_safe(
     plan: AssemblyPlan,
     *,
     expected_layout_names: Mapping[int, str] | None = None,
+    hidden: Mapping[int, frozenset[ItemId]] | None = None,
 ) -> None:
     """Offline post-check for ``layout_policy="import"``, run against the assembled
     STAGING deck before it is published to ``out_path``: every kept slide's base layout
@@ -2221,11 +2309,13 @@ def verify_staged_layouts_alpha_safe(
     (read straight off the staged deck, not the plan) must equal the expected one for
     its slide number, and -- for a verse/point layout, whose slot carries a ``verse``/
     ``text`` rect -- the slide's own top-level long-text item(s) (``plan.stacked_ids``/
-    ``SplitPart.stacked_ids``, skipping any ``groupchild`` id, whose composed geometry a
-    nested group complicates) must sit at the slot's x/width, bottom-aligned to the
+    ``SplitPart.stacked_ids``) must sit at the slot's x/width, bottom-aligned to the
     slot's own bottom, within `_SLOT_RECT_TOL_PT`; a slot carrying a ``badge`` rect is
-    checked the same way against whichever retained short item was itself snapped to
-    that exact x/w/h during planning (`plan.short_fit`)."""
+    checked the same way (full x/y/w/h) against the plan's own recorded slot badge id
+    (`plan.slot_badge_ids`). A source id (finding 5) is translated through
+    ``_staged_id_for``/``hidden`` before lookup -- deletions shift the staged
+    ``kindIndex`` -- and a ``groupchild`` id's rect is composed from the staged group
+    object via ``_staged_group_child_rect`` rather than skipped."""
     objects, _id_to_file, _file_ids = _load_deck(staging_path)
     canvas = _canvas_size(objects)
     ordinal_to_number = plan.ordinal_to_number or {
@@ -2272,62 +2362,65 @@ def verify_staged_layouts_alpha_safe(
                 }
             return records_by_addr
 
-        def _refuse_rect(item_id: ItemId, rec: dict, target: Rect, label: str) -> None:
+        def _refuse_rect(item_id: ItemId, x: float, y: float, w: float, h: float, label: str) -> None:
             raise AssemblyRefusal(
                 f"slide {number} (ordinal {ordinal}): {label} {_item_label(item_id)} rect "
-                f"({rec['x']:.2f}, {rec['y']:.2f}, {rec['w']:.2f}, {rec['h']:.2f}) does not match "
+                f"({x:.2f}, {y:.2f}, {w:.2f}, {h:.2f}) does not match "
                 f"the {expected_name!r} slot within {_SLOT_RECT_TOL_PT}pt"
             )
 
+        part = ordinal - plan.ordinals.get(number, ordinal)
+        slide_hidden = (hidden or {}).get(number, frozenset())
+
+        def _rect_for(item_id: ItemId) -> tuple[float, float, float, float] | None:
+            if item_id[0] == "groupchild":
+                rect = _staged_group_child_rect(
+                    objects, slide, number, plan, item_id, part=part, hidden=slide_hidden
+                )
+                return (rect.x, rect.y, rect.w, rect.h) if rect is not None else None
+            staged_id = _staged_id_for(number, plan, item_id, part=part, hidden=slide_hidden)
+            if staged_id is None:
+                return None
+            rec = _records().get(staged_id)
+            return (rec["x"], rec["y"], rec["w"], rec["h"]) if rec is not None else None
+
         if slot_rect is not None:
-            part = ordinal - plan.ordinals.get(number, ordinal)
             stacked = (
                 plan.splits[number][part].stacked_ids if number in plan.splits
                 else plan.stacked_ids.get(number, frozenset())
             )
-            for item_id in sorted(iid for iid in stacked if iid[0] != "groupchild"):
-                rec = _records().get(item_id)
-                if rec is None:
+            for item_id in sorted(stacked):
+                got = _rect_for(item_id)
+                if got is None:
                     raise AssemblyRefusal(
                         f"slide {number} (ordinal {ordinal}): verse/point text {_item_label(item_id)} "
                         "not found on the staged slide"
                     )
+                x, y, w, h = got
                 if (
-                    abs(rec["x"] - slot_rect.x) > _SLOT_RECT_TOL_PT
-                    or abs(rec["w"] - slot_rect.w) > _SLOT_RECT_TOL_PT
-                    or abs((rec["y"] + rec["h"]) - (slot_rect.y + slot_rect.h)) > _SLOT_RECT_TOL_PT
+                    abs(x - slot_rect.x) > _SLOT_RECT_TOL_PT
+                    or abs(w - slot_rect.w) > _SLOT_RECT_TOL_PT
+                    or abs((y + h) - (slot_rect.y + slot_rect.h)) > _SLOT_RECT_TOL_PT
                 ):
-                    _refuse_rect(item_id, rec, slot_rect, "verse/point text")
+                    _refuse_rect(item_id, x, y, w, h, "verse/point text")
 
         if slot.badge is not None:
-            part = ordinal - plan.ordinals.get(number, ordinal)
-            short_fit = (
-                plan.splits[number][part].fits if number in plan.splits
-                else plan.short_fit.get(number, {})
-            )
-            badge_id = next(
-                (
-                    iid for iid, rect in short_fit.items()
-                    if iid[0] != "groupchild"
-                    and abs(rect.x - slot.badge.x) <= _SLOT_RECT_TOL_PT
-                    and abs(rect.w - slot.badge.w) <= _SLOT_RECT_TOL_PT
-                    and abs(rect.h - slot.badge.h) <= _SLOT_RECT_TOL_PT
-                ),
-                None,
-            )
+            badge_id = plan.slot_badge_ids.get(number)
             if badge_id is not None:
-                rec = _records().get(badge_id)
-                if rec is None:
+                got = _rect_for(badge_id)
+                if got is None:
                     raise AssemblyRefusal(
                         f"slide {number} (ordinal {ordinal}): verse badge {_item_label(badge_id)} "
                         "not found on the staged slide"
                     )
+                x, y, w, h = got
                 if (
-                    abs(rec["x"] - slot.badge.x) > _SLOT_RECT_TOL_PT
-                    or abs(rec["w"] - slot.badge.w) > _SLOT_RECT_TOL_PT
-                    or abs(rec["h"] - slot.badge.h) > _SLOT_RECT_TOL_PT
+                    abs(x - slot.badge.x) > _SLOT_RECT_TOL_PT
+                    or abs(y - slot.badge.y) > _SLOT_RECT_TOL_PT
+                    or abs(w - slot.badge.w) > _SLOT_RECT_TOL_PT
+                    or abs(h - slot.badge.h) > _SLOT_RECT_TOL_PT
                 ):
-                    _refuse_rect(badge_id, rec, slot.badge, "verse badge")
+                    _refuse_rect(badge_id, x, y, w, h, "verse badge")
 
 
 def _locked_write_block(
@@ -2462,10 +2555,13 @@ def _group_stacked_child_lines(
     each child is unlocked/written/relocked individually, the whole set wrapped in one
     guaranteed lock/relock on the group itself (mirrors `_group_known_child_lines`). A
     stacked ``text`` child (the verse, carrying a resolved ``text_size``/``run_ranges``)
-    gets width, its run/lead size, then position last, NEVER height (always autosize); every
-    other child -- a short-row ``shape`` (the badge) or a short-row ``text`` label that
-    did not pass the stack-vs-short-row word threshold -- gets position only, left at
-    source size, per the owner decision. An unmapped kind is skipped, matching
+    gets width, its run/lead size, then position last, NEVER height (always autosize). A
+    short-row child carrying a resolved ``text_size``/``run_ranges`` -- the selected verse
+    slot badge, ``text`` or a text-bearing ``shape`` alike (finding 4) -- gets its exact
+    slot width/height, size write, then position, so badge typography is authoritative.
+    Every other child -- an unselected short-row shape or a short-row text label that did
+    not pass the stack-vs-short-row word threshold -- gets position only, left at source
+    size, per the owner decision. An unmapped kind is skipped, matching
     `_group_known_child_lines`. The group itself takes no affine path here."""
     child_lines: list[str] = []
     for child, rect, text_size, run_ranges in entries:
@@ -2474,8 +2570,10 @@ def _group_stacked_child_lines(
             continue
         addr = f"{name} {child['kindIndex'] + 1} of group {group_ki + 1} of slide {ordinal}"
         body: list[str] = []
-        if child["kind"] == "text" and (text_size is not None or run_ranges):
+        if text_size is not None or run_ranges:
             body.append(f"            set width of theObj to {_as_num(rect.w)}")
+            if child["kind"] != "text":
+                body.append(f"            set height of theObj to {_as_num(rect.h)}")
             if run_ranges:
                 for start, end, size in run_ranges:
                     body.append(
@@ -3883,7 +3981,9 @@ def _build_refit_round(
         if short_fit:
             stack_top = min(rect.y for rect in rects.values())
             short_row_h = plan.short_row_h.get(slide_no, 0.0)
-            short_rects = _short_row_rects(short_fit, short_row_h, stack_top)
+            slot_badge_id = plan.slot_badge_ids.get(slide_no)
+            slot_pinned = frozenset({slot_badge_id}) if slot_badge_id in short_fit else None
+            short_rects = _short_row_rects(short_fit, short_row_h, stack_top, pinned_ids=slot_pinned)
             for iid, short_rect in short_rects.items():
                 slide_refits[iid] = TextRefit(short_rect, None)
             rects = {**rects, **short_rects}
@@ -4339,7 +4439,7 @@ def assemble_dsk_deck(
 
             if layout_policy == "import":
                 verify_staged_layouts_alpha_safe(
-                    staging_path, plan, expected_layout_names=slide_layout_names
+                    staging_path, plan, expected_layout_names=slide_layout_names, hidden=hidden_map,
                 )
 
             stroke = _restore_stroke(
