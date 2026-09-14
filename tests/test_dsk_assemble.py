@@ -2403,8 +2403,8 @@ def test_group_stacked_child_lines_writes_size_for_text_bearing_shape_badge():
     badge_child = {"kind": "shape", "kindIndex": 0}
     badge_rect = Rect(63.1, 785.8, 933.1, 82.1)
     entries = [
-        (verse_child, verse_rect, 45.0, None),
-        (badge_child, badge_rect, 40.0, None),
+        (verse_child, verse_rect, 45.0, None, None),
+        (badge_child, badge_rect, 40.0, None, None),
     ]
     lines = dsa._group_stacked_child_lines(1, 1, 0, entries)
     text = "\n".join(lines)
@@ -2412,7 +2412,7 @@ def test_group_stacked_child_lines_writes_size_for_text_bearing_shape_badge():
     assert "set width of theObj to 933.1" in text
     assert "set height of theObj to 82.1" in text
     # The verse (text kind) still never gets a height write (always autosize).
-    verse_lines = dsa._group_stacked_child_lines(1, 1, 0, [(verse_child, verse_rect, 45.0, None)])
+    verse_lines = dsa._group_stacked_child_lines(1, 1, 0, [(verse_child, verse_rect, 45.0, None, None)])
     verse_text = "\n".join(verse_lines)
     assert "set height of theObj" not in verse_text
 
@@ -2422,7 +2422,7 @@ def test_group_stacked_child_lines_unselected_short_child_position_only():
     # position only, left at source size, per the owner decision.
     other_child = {"kind": "shape", "kindIndex": 1}
     other_rect = Rect(0.0, 0.0, 50.0, 50.0)
-    lines = dsa._group_stacked_child_lines(1, 1, 0, [(other_child, other_rect, None, None)])
+    lines = dsa._group_stacked_child_lines(1, 1, 0, [(other_child, other_rect, None, None, None)])
     text = "\n".join(lines)
     assert "set position of theObj" in text
     assert "set size of object text of theObj" not in text
@@ -6966,6 +6966,155 @@ def test_verify_builds_char_window_split_unrelated_identity_is_genuine_mismatch(
     warnings: list[str] = []
     with pytest.raises(AssemblyRefusal):
         dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+# --------------------------------------------------------------------------
+# S5: single-box char-window split of a group-child verse -- the two group refusals
+# (band-fit and slot-fit) are dropped for a SINGLE retained group-child box, and its
+# cloned build is the GROUP's own build, not the child's.
+# --------------------------------------------------------------------------
+def _char_window_groupchild_split_part(kind_index: int, char_window: tuple) -> SplitPart:
+    item_id = ("groupchild", 0, "text", kind_index)
+    return SplitPart(
+        fits={item_id: Rect(0.0, 0.0, 100.0, 100.0)}, deletes=(), text_sizes={},
+        stacked_ids=frozenset({item_id}), char_window=char_window, char_total=30,
+    )
+
+
+def test_verify_builds_groupchild_char_window_split_clones_the_group_build(monkeypatch):
+    from obed_edom import iwa_builds
+
+    src_dissolve = {
+        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "group", "kindIndex": 0, "effect": "apple:dissolve", "animationType": "In",
+        "identity": ("group", "whole box text here"),
+    }
+    src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
+    part_texts = ["whole box", "box text", "text here"]
+    out_builds = {
+        2 + i: {
+            "slideId": f"o{i}",
+            "builds": [dict(src_dissolve, identity=("group", t))],
+            "transition": None,
+        }
+        for i, t in enumerate(part_texts)
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 3}, ordinal_to_number={2: 17, 3: 17, 4: 17},
+        splits={17: tuple(_char_window_groupchild_split_part(1, (1, 10)) for _ in range(3))},
+    )
+    warnings: list[str] = []
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert len(builds["out_rekeyed"][17]["builds"]) == 3
+    assert any("cloned build on split part" in w for w in warnings)
+
+
+def test_refuse_split_box_char_word_builds_group_child_checks_the_groups_own_build():
+    # S5: a groupchild box's cloneable build lives on the GROUP object -- a
+    # character-level build on the group refuses splitting its child.
+    builds = {1: {"builds": [{"kind": "group", "kindIndex": 0, "effect": "apple:sparkle character"}]}}
+    with pytest.raises(AssemblyRefusal, match="groupchild 0:text:1"):
+        dsa._refuse_split_box_char_word_builds(1, ("groupchild", 0, "text", 1), builds)
+
+
+def test_refuse_split_box_char_word_builds_group_child_ignores_unrelated_group_and_whole_object():
+    builds = {
+        1: {"builds": [
+            {"kind": "group", "kindIndex": 1, "effect": "apple:sparkle character"},
+            {"kind": "group", "kindIndex": 0, "effect": "apple:dissolve"},
+        ]}
+    }
+    dsa._refuse_split_box_char_word_builds(1, ("groupchild", 0, "text", 1), builds)
+
+
+@pytest.mark.deck
+def test_gw5_54_group_child_verse_splits_at_the_standard_slot():
+    # Owner Q2/finding 3 + S5: GW 5/54's group-child verse used to refuse (grouped
+    # verse text, band or slot). Piece S5 drops that refusal for the single-box case
+    # -- both now split into the Verse Standard (Variation 2) slot, windows pinned to
+    # the current pack (S2's height-budget pack over the run-aware spans).
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    expected = {5: [2, 2, 1], 54: [3, 2]}
+    for number, expected_lines in expected.items():
+        cls = by_number[number]
+        decisions = {number: SlideDecision(number, "in_deck")}
+        plan = plan_assembly(
+            payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs,
+            all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+        )
+        assert number in plan.splits, f"slide {number}: expected a split"
+        assert plan.layout_names[number] == "Verse Standard (Variation 2)"
+        parts = plan.splits[number]
+        assert len(parts) == len(expected_lines), f"slide {number}: part count"
+        verse_id = cls.long_text_ids[0]
+        assert verse_id[0] == "groupchild"
+        _tag, g_ki, _c_kind, c_ki = verse_id
+        c_info = payload["slides"][number - 1]["groupChildRuns"][g_ki][c_ki]
+        full_text, font = c_info["text"], c_info["font"]
+        for i, part in enumerate(parts):
+            assert part.stacked_ids == frozenset({verse_id})
+            start, end = part.char_window
+            part_text = full_text[start - 1:end]
+            lc = line_count(part_text, font, 45.0, slot.verse.w)
+            assert lc == expected_lines[i], f"slide {number} part {i}: line count"
+            assert lc <= 3
+            assert part.fits[verse_id].x == pytest.approx(slot.verse.x)
+            assert part.fits[verse_id].w == pytest.approx(slot.verse.w)
+            assert part.fits[verse_id].y == pytest.approx(slot.verse.y)
+
+        # Every part's emitted script addresses the same group-child object, orders
+        # width -> size -> delete -> position, never sets height, and keeps the
+        # child-then-group lock/unlock nesting.
+        for part_no, part in enumerate(parts):
+            ordinal = plan.ordinals[number] + part_no
+            lines = dsa._slide_lines(plan, number, ordinal, part=part_no)
+            text = "\n".join(lines)
+            addr = f"text item {c_ki + 1} of group {g_ki + 1} of slide {ordinal}"
+            assert f"set theObj to {addr}" in text
+            assert f"set theGroupObj to group {g_ki + 1} of slide {ordinal}" in text
+            w_idx = text.index("set width of theObj")
+            size_idx = text.index("of object text of theObj to", w_idx)
+            delete_idx = text.index("delete characters", size_idx)
+            pos_idx = text.index("set position of theObj", delete_idx)
+            assert w_idx < size_idx < delete_idx < pos_idx
+            child_block_start = text.index(addr)
+            child_block_end = text.index("if wasLocked then set locked of theObj to true", child_block_start)
+            assert "set height of theObj" not in text[child_block_start:child_block_end]
+            assert text.index("wasGroupLocked to true", 0, w_idx) is not None or "wasGroupLocked" in text
+
+
+@pytest.mark.deck
+def test_gw44_50_51_53_group_child_verse_unaffected_by_s5():
+    # A/B vs pre-S5 behaviour: GW 44/50 (two-column, don't reach the split path) and
+    # GW 51/53 (fit the slot without splitting) must be entirely unchanged by dropping
+    # the two group split refusals -- they never reach the branches S5 touched.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {n: SlideDecision(n, "in_deck") for n in (44, 50, 51, 53)}
+    plan = plan_assembly(
+        payload, [by_number[n] for n in (44, 50, 51, 53)], decisions=decisions, band=BAND, clips={},
+        runs=runs, all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert 44 not in plan.splits and 50 not in plan.splits
+    assert 51 not in plan.splits and 53 not in plan.splits
+    assert names[44] == "Point 3 Lines"
+    assert names[50] == "Point 3 Lines"
+    assert names[51] == "Verse Standard (Variation 2)"
+    assert names[53] == "Verse Standard (Variation 2)"
 
 
 def test_identity_is_narrowed_slice_accepts_contiguous_slice_rejects_unrelated():

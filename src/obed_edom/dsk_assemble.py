@@ -415,9 +415,13 @@ def _refuse_split_box_char_word_builds(
 ) -> None:
     """S4 §3: refuses splitting a box (or its group) that carries a character/word-level
     build -- Keynote animates such a build over the box's own character/word indices,
-    which a text split invalidates."""
+    which a text split invalidates. A ``groupchild`` box is checked against its GROUP's
+    builds (S5): the group's own build is what gets cloned per part, and a
+    character/word-level build on the group is unsplittable regardless of which child
+    triggered the split."""
+    build_owner = ("group", box_id[1]) if box_id[0] == "groupchild" else box_id
     for b in ((builds or {}).get(number) or {}).get("builds") or []:
-        if (b["kind"], b["kindIndex"]) != box_id:
+        if (b["kind"], b["kindIndex"]) != build_owner:
             continue
         effect = b.get("effect") or ""
         if effect.endswith(_CHAR_WORD_BUILD_SUFFIXES) or "KLNSparkle" in effect:
@@ -1807,7 +1811,7 @@ def plan_assembly(
                         raise AssemblyRefusal(
                             f"slide {number}: text does not fit the band at --min-text-pt {min_text_pt}"
                         )
-                    elif any(box.item_id[0] == "groupchild" for box in boxes):
+                    elif len(boxes) > 1 and any(box.item_id[0] == "groupchild" for box in boxes):
                         raise AssemblyRefusal(
                             f"slide {number}: grouped verse text does not fit the band at "
                             f"--min-text-pt {min_text_pt} -- refusing to split text inside a group"
@@ -1832,11 +1836,6 @@ def plan_assembly(
                         split_rect = split_slot.verse if slot_category == "verse" else split_slot.text
                         split_pt = split_slot.verse_pt if slot_category == "verse" else split_slot.text_pt
                         split_box = boxes[0]
-                        if split_box.item_id[0] != "text":
-                            raise AssemblyRefusal(
-                                f"slide {number} box {_item_label(split_box.item_id)}: grouped verse text "
-                                "does not fit the slot -- refusing to split text inside a group"
-                            )
                         if slot_category == "verse" and slot_badge_id is not None and split_slot.badge is not None \
                                 and slot_badge_id in short_fit:
                             short_fit[slot_badge_id] = split_slot.badge
@@ -1848,7 +1847,12 @@ def plan_assembly(
                                 f"{split_pt:.0f}pt size is below --min-text-pt {min_text_pt}"
                             )
                         _refuse_split_box_char_word_builds(number, split_box.item_id, builds)
-                        long_item = items_by_id[split_box.item_id]
+                        if split_box.item_id[0] == "groupchild":
+                            _tag, g_ki, _c_kind, c_ki = split_box.item_id
+                            c_info = (group_child_runs_map.get(g_ki) or {}).get(c_ki) or {}
+                            long_item = {"runs": c_info.get("runs") or [], "text": c_info.get("text") or ""}
+                        else:
+                            long_item = items_by_id[split_box.item_id]
                         run_table = _emitted_run_sizes(long_item, split_t, split_pt)
                         if run_table == "unresolved":
                             bad = next(
@@ -2716,7 +2720,9 @@ def _group_stacked_child_lines(
     number: int,
     ordinal: int,
     group_ki: int,
-    entries: Sequence[tuple[dict, Rect, float | None, tuple[tuple[int, int, float], ...] | None]],
+    entries: Sequence[
+        tuple[dict, Rect, float | None, tuple[tuple[int, int, float], ...] | None, tuple[int, int, int] | None]
+    ],
 ) -> list[str]:
     """Per-child writes for a text-triggering group's stacked children (Design A step 4):
     each child is unlocked/written/relocked individually, the whole set wrapped in one
@@ -2729,9 +2735,12 @@ def _group_stacked_child_lines(
     Every other child -- an unselected short-row shape or a short-row text label that did
     not pass the stack-vs-short-row word threshold -- gets position only, left at source
     size, per the owner decision. An unmapped kind is skipped, matching
-    `_group_known_child_lines`. The group itself takes no affine path here."""
+    `_group_known_child_lines`. The group itself takes no affine path here. S5: a
+    child carrying a ``char_window`` (start, end, total) is the single-box char-window
+    split's verse child -- its part's ``delete characters`` lines are appended between
+    the size write and the position write, addressed to the same ``theObj``."""
     child_lines: list[str] = []
-    for child, rect, text_size, run_ranges in entries:
+    for child, rect, text_size, run_ranges, char_window in entries:
         name = _AS_KIND_NAMES.get(child["kind"])
         if not name:
             continue
@@ -2749,6 +2758,14 @@ def _group_stacked_child_lines(
                     )
             elif text_size is not None:
                 body.append(f"            set size of object text of theObj to {_as_num(text_size)}")
+            if char_window is not None:
+                win_start, win_end, win_total = char_window
+                if win_end < win_total:
+                    body.append(
+                        f"            delete characters {win_end + 1} thru {win_total} of object text of theObj"
+                    )
+                if win_start > 1:
+                    body.append(f"            delete characters 1 thru {win_start - 1} of object text of theObj")
             body.append(f"            set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
         else:
             body.append(f"            set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
@@ -2835,25 +2852,33 @@ def _slide_lines(
     scale = plan.group_scale.get(number)
     slide_crops = plan.crops.get(number, {}) if split_parts is None else {}
 
-    groupchild_by_group: dict[int, list[tuple[dict, Rect, float | None, tuple | None]]] = {}
+    groupchild_by_group: dict[int, list[tuple[dict, Rect, float | None, tuple | None, tuple | None]]] = {}
     for item_id, rect in fit.items():
         if item_id[0] != "groupchild":
             continue
         _tag, group_ki, child_kind, child_ki = item_id
         child_rec = {"kind": child_kind, "kindIndex": child_ki}
+        char_window = None
+        if (
+            split_parts is not None and split_part.char_window is not None
+            and item_id in split_part.stacked_ids
+        ):
+            win_start, win_end = split_part.char_window
+            char_window = (win_start, win_end, split_part.char_total or win_end)
         groupchild_by_group.setdefault(group_ki, []).append(
-            (child_rec, rect, text_sizes.get(item_id), run_sizes_here.get(item_id))
+            (child_rec, rect, text_sizes.get(item_id), run_sizes_here.get(item_id), char_window)
         )
     for group_ki, entries in groupchild_by_group.items():
         lines += _group_stacked_child_lines(number, ordinal, group_ki, entries)
-        for child_rec, child_rect, child_text_size, child_run_ranges in entries:
+        for child_rec, child_rect, child_text_size, child_run_ranges, _char_window in entries:
             if child_rec["kind"] != "text" or (child_text_size is None and not child_run_ranges):
                 continue
             child_ki = child_rec["kindIndex"]
             addr = f"text item {child_ki + 1} of group {group_ki + 1} of slide {ordinal}"
-            lines += _text_measure_lines(
-                number, child_ki, addr, child_rect.h, item_key=f"groupchild:{group_ki}:text:{child_ki}"
-            )
+            item_key = f"groupchild:{group_ki}:text:{child_ki}"
+            if split_parts is not None:
+                item_key = f"{item_key}:{ordinal}"
+            lines += _text_measure_lines(number, child_ki, addr, child_rect.h, item_key=item_key)
 
     for item_id, rect in fit.items():
         if item_id[0] == "groupchild":
@@ -3837,7 +3862,14 @@ def _merge_split_part_builds(
     for ordinal, rec in ordinal_recs:
         part = ordinal - plan.ordinals[number]
         source_long_id = next(iter(split_parts[part].stacked_ids), None) if part < len(split_parts) else None
-        long_id = _staged_id_for(number, plan, source_long_id, part=part, hidden=hidden)
+        if source_long_id is not None and source_long_id[0] == "groupchild":
+            # S5: a group-child split's clonable build lives on the GROUP object
+            # itself (``apple:dissolve``), not the child -- ``_staged_id_for`` expects a
+            # plain ``(kind, kindIndex)`` source id and would misparse the 4-tuple.
+            staged_rank = _staged_group_rank(number, plan, source_long_id[1], part=part, hidden=hidden)
+            long_id = ("group", staged_rank) if staged_rank is not None else None
+        else:
+            long_id = _staged_id_for(number, plan, source_long_id, part=part, hidden=hidden)
         staged_idxs = _staged_kind_ranks(number, plan, part=part, hidden=hidden)
         counts: Counter = Counter()
         for b in rec["builds"]:

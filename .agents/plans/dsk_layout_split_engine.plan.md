@@ -476,6 +476,51 @@ box); no other candidate's build report changes.
 > slides through `plan_assembly` on both trees and diffed `plan.splits` (char windows +
 > stacked ids) per slide -- 0 diffs; refusals unchanged (no slide refuses on either tree).
 
+> **S5 landed.** Both group refusals in the char-window branch are narrowed to the
+> multi-box case only (`len(boxes) > 1 and any(box.item_id[0] == "groupchild" ...)` for the
+> band-fit refusal; the slot-fit branch's `split_box.item_id[0] != "text"` check is dropped
+> outright since `boxes[0]` already carries a resolved `groupchild` `TextBox` from
+> `_text_boxes`) -- a single retained group-child box now falls through to the same
+> char-window pack (`_pack_split_lines` against the slot) as a top-level box, with its
+> `long_item` read from `group_child_runs_map` instead of `items_by_id` when the split box is
+> a `groupchild`. `_refuse_split_box_char_word_builds` gained a `build_owner` indirection: a
+> `groupchild` box id is checked against its GROUP's builds (`("group", box_id[1])`), since the
+> clonable `apple:dissolve` lives on the group object, not the child -- a character/word build
+> on the group still refuses, naming the child. `_merge_split_part_builds` mirrors this: a
+> split part whose sole stacked id is a `groupchild` resolves its clonable "long build" id via
+> `_staged_group_rank` (`("group", staged_rank)`) instead of `_staged_id_for` (which expects a
+> plain 2-tuple source id and would misparse the 4-tuple). `_group_stacked_child_lines` gained a
+> 5th per-entry field, `char_window: (start, end, total) | None` -- when set, its part's
+> `delete characters` lines are appended between the size write and the position write,
+> addressed to the same `theObj`, mirroring the top-level per-box loop's ordering; the
+> `_slide_lines` call site computes this from `split_part.char_window`/`char_total` for
+> whichever group-child item id is in `split_part.stacked_ids`. The offline `MEASURE`/
+> `OVERFLOW` key for a group-child text child now carries the output ordinal suffix
+> (`groupchild:<g>:text:<idx>:<ordinal>`) when the slide is split, matching the top-level
+> `text:<idx>:<ordinal>` shape (S3) -- without it, two parts of the same source slide would log
+> under the same key and silently clobber each other's offline measurement in
+> `_parse_measure_lines`. Per-part geometry, build-owner verification (`compose_geometry` via
+> `_staged_group_child_rect`), and live-refit exclusion needed no changes -- `verify_staged_
+> layouts_alpha_safe`'s `_rect_for`/`_staged_group_child_rect` (C2) and `_eligible_refit_items`/
+> `_build_refit_round`'s group-child/split-slide skips already handled the split-part case
+> generically once the refusals were dropped. Tests added (`tests/test_dsk_assemble.py`, new S5
+> block before "placement by shape"): a synthetic `_verify_builds` run cloning a `group`-kind
+> build across 3 groupchild split parts; the refusal helper checking the group's own build for
+> a groupchild box id (character-level refuses, an unrelated group id or a whole-object build on
+> the right group does not); a real GW 5/54 planning run asserting the split part count/char
+> windows/line counts (5: 2+2+1 lines, 54: 3+2 lines), the part rect pinned to the slot, and the
+> emitted per-part script's address/lock-nesting/width-size-delete-position ordering/no-height
+> invariants; a real GW 44/50/51/53 planning run confirming none of them reaches a split (44/50
+> stay `Point 3 Lines` two-column, 51/53 stay unsplit `Verse Standard (Variation 2)`) -- byte-for-
+> byte the same outcome as before S5. `tests/test_dsk_assemble.py` +
+> `tests/test_dsk_content_rules_acceptance.py`: 442 passed (5 new). Full suite: 2627 passed, 84
+> skipped, 1 xfailed, no failures (worktree `dsk-gen`, HEAD 9ea0c59 + this piece, uncommitted).
+> Deck-wide A/B vs base worktree at 9ea0c59 (`git worktree add <scratchpad>/wt-S5-base 9ea0c59`,
+> removed by exact path after): GW 5/54 move from a generic "grouped verse text ... refusing to
+> split text inside a group" `AssemblyRefusal` to a clean 3-part/2-part split at the Verse
+> Standard (Variation 2) slot; GW 44/50 (two-column) and GW 51/53 (fits the slot unsplit) are
+> unaffected -- same `plan.splits`/`layout_names` outcome on both trees.
+
 **S5 — group-child split, GW 5/54 (~280 lines).**
 §2.5: drop the two group refusals for the single-box case, window from `groupChildRuns`, emit
 the deletes inside `_group_stacked_child_lines` between the size and position lines, per-part

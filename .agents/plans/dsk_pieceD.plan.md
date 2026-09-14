@@ -424,3 +424,5 @@ group child). GW54 (no heading cluster) and GW57 (heading-only) are unchanged.
 3. **Splitting a grouped verse.** If a group's verse still does not fit after two refits and `allow_split` is
    on, splitting means duplicating the slide and hiding text *inside a group* on each part. Acceptable, or
    should a grouped verse simply refuse instead of splitting?
+   (Superseded by split engine piece S5: a single retained group-child verse box now splits via the
+   char-window pack, same as a top-level box; "grouped verse never splits" no longer holds.)
