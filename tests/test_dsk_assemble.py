@@ -938,6 +938,96 @@ def test_fixed_frame_group_text_kind_text_over_threshold_refuses():
         plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
 
 
+_DUAL_TEXT_12_WORDS = (
+    "Matthew eighteen verse fifteen through seventeen tells us how to reconcile today"
+)
+
+
+def _fixed_long_plus_autosize_short_group_records(fixed_text=_DUAL_TEXT_12_WORDS, storage_id="912"):
+    """Raw archive for a group with a fixed-frame (autosize False) 12-word text child
+    (kindIndex 0) and an autosize 1-word text child (kindIndex 1) -- Codex D1 fix round 3's
+    case: the group-level exemption (`group_ki in text_group_kis`) used to hide the fixed
+    child once the autosize sibling qualified the group as text-triggering."""
+    objects = {
+        "900": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 4702.0, "y": 15.0}, "size": {"width": 1442.0, "height": 443.0}, "angle": 0.0},
+            "children": [{"identifier": "901"}, {"identifier": "911"}],
+        },
+        "901": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": storage_id},
+            "super": {"geometry": {
+                "position": {"x": 0.0, "y": 0.0}, "size": {"width": 645.0, "height": 92.0}, "angle": 0.0,
+            }},
+        },
+        "911": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "913"},
+            "super": {
+                "geometry": {"position": {"x": 0.0, "y": 100.0}, "size": {"width": 1442.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 1442.0, "height": 343.0}}},
+            },
+        },
+        "913": {"_pbtype": "TSWP.StorageArchive", "text": ["Amen"]},
+    }
+    if storage_id != "no-storage":
+        objects[storage_id] = {"_pbtype": "TSWP.StorageArchive", "text": [fixed_text]}
+    records = dsa._all_group_child_records(objects["900"], objects)
+    return records
+
+
+def test_fixed_frame_long_child_refuses_despite_autosize_short_sibling():
+    # D1 Codex fix round 3 MAJOR: a top-level long text box PLUS a group holding a
+    # 12-word fixed-frame text child and a 1-word autosize text child. The group's DFS
+    # word join (12 + 1 = 13) triggers text classification via the autosize child alone
+    # -- the group-level exemption used to let BOTH children fall into short_children,
+    # emitting the fixed-frame long child position-only with no `set height`. Per-child
+    # words must refuse regardless of the autosize sibling.
+    _require_font("AzoSans-Regular")
+    records = _fixed_long_plus_autosize_short_group_records()
+    assert [(r["kind"], r["autosize"], r["words"]) for r in records] == [
+        ("text", False, 12), ("text", True, 1),
+    ]
+    top_box = _long_text_item(0, _VERSE_1, x=200, y=200, w=1800, h=300)
+    group = _group_item(0, x=4702, y=15, w=1442, h=443)
+    slide = _slide(5, [top_box, group])
+    slide["groupChildText"] = {0: f"{_DUAL_TEXT_12_WORDS} Amen"}
+    slide["groupChildSignature"] = {0: f"text:{_DUAL_TEXT_12_WORDS}\ntext:Amen"}
+    slide["groupChildren"] = {0: records}
+    slide["groupChildRuns"] = {0: {1: {
+        "text": "Amen", "font": "AzoSans-Regular", "size": 70.0,
+        "runs": [{"text": "Amen", "fontName": "AzoSans-Regular", "size": 70.0}],
+    }}}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    assert cls.long_text_ids == (("text", 0), ("groupchild", 0, "text", 1))
+    decisions = {5: SlideDecision(5, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="fixed-frame text inside group 0 unsupported"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+
+def test_fixed_frame_child_unresolvable_text_refuses_conservatively():
+    # Round 3: a fixed-frame child whose text cannot be resolved (`words` is ``None``,
+    # e.g. its `ownedStorage` points nowhere) must refuse conservatively rather than be
+    # treated as short.
+    records = _fixed_long_plus_autosize_short_group_records(storage_id="no-storage")
+    assert records[0]["words"] is None
+    top_box = _long_text_item(0, _VERSE_1, x=200, y=200, w=1800, h=300)
+    group = _group_item(0, x=4702, y=15, w=1442, h=443)
+    slide = _slide(5, [top_box, group])
+    slide["groupChildText"] = {0: f"{_DUAL_TEXT_12_WORDS} Amen"}
+    slide["groupChildSignature"] = {0: f"text:{_DUAL_TEXT_12_WORDS}\ntext:Amen"}
+    slide["groupChildren"] = {0: records}
+    slide["groupChildRuns"] = {0: {1: {
+        "text": "Amen", "font": "AzoSans-Regular", "size": 70.0,
+        "runs": [{"text": "Amen", "fontName": "AzoSans-Regular", "size": 70.0}],
+    }}}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    decisions = {5: SlideDecision(5, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="fixed-frame text inside group 0 unsupported"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+
 def test_fixed_frame_group_text_under_threshold_unaffected():
     # Companion to the refusal above: a NON-text-triggering group (a short caption, under
     # `text_slide_words`) with a fixed-frame text child on an otherwise ordinary content

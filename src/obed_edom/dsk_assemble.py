@@ -810,6 +810,18 @@ def plan_assembly(
                                     f"slide {number}: image nested in text-triggering group "
                                     f"{group_ki} unsupported"
                                 )
+                            # The group-level exemption above (skipping the fixed-frame
+                            # refusal once a group has a supported autosize verse) only
+                            # holds for a child PROVEN short -- an autosize sibling never
+                            # excuses a fixed-frame LONG child (Codex D1 fix round 3).
+                            if child.get("has_text") and child.get("autosize") is False:
+                                words = child.get("words")
+                                if words is None or words > text_slide_words:
+                                    raise AssemblyRefusal(
+                                        f"slide {number}: fixed-frame text inside group "
+                                        f"{group_ki} unsupported (piece D1 handles autosize "
+                                        "group text only)"
+                                    )
                             if not _AS_KIND_NAMES.get(child["kind"]):
                                 continue
                             short_children.append((group_ki, child, group_rect, origin_x))
@@ -1179,7 +1191,7 @@ def _all_group_child_records(
                 return None
             out.append({
                 "kind": "text", "kindIndex": assigned["text"], "autosize": True,
-                "has_text": True,
+                "has_text": True, "words": _child_word_count(child, objects),
                 "x": abs_gx + cx, "cy": abs_gy + cy, "y": abs_gy + cy - nh / 2.0, "w": nw, "h": nh,
                 "group_path": group_path,
             })
@@ -1191,11 +1203,12 @@ def _all_group_child_records(
         # a group whose long text lives in such a child, without touching the AppleScript
         # write path's kind label.
         has_text = "text" in assigned
+        words = _child_word_count(child, objects) if has_text else None
         if rotated and not masked:
             fx, fy, fw, fh = _frame_rect(geom)
             out.append({
                 "kind": kind, "kindIndex": assigned[kind], "autosize": False,
-                "has_text": has_text,
+                "has_text": has_text, "words": words,
                 "x": abs_gx + fx, "y": abs_gy + fy, "w": fw, "h": fh, "angle": ca,
                 "group_path": group_path,
             })
@@ -1203,11 +1216,23 @@ def _all_group_child_records(
         x0, y0, x1, y1 = _leaf_bbox(child, abs_gx, abs_gy, objects)
         out.append({
             "kind": kind, "kindIndex": assigned[kind], "autosize": False,
-            "has_text": has_text,
+            "has_text": has_text, "words": words,
             "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0,
             "group_path": group_path,
         })
     return out
+
+
+def _child_word_count(child: dict, objects: dict[str, dict]) -> int | None:
+    """Word count of a fixed-frame text child's storage text, the same ``ownedStorage``
+    -> ``TSWP.StorageArchive`` resolution ``iwa_runs._group_child_runs`` uses. ``None``
+    when the text cannot be resolved."""
+    stor_id = (child.get("ownedStorage") or {}).get("identifier")
+    storage = objects.get(str(stor_id)) if stor_id is not None else None
+    if not storage or storage.get("_pbtype") != "TSWP.StorageArchive":
+        return None
+    text = "".join(storage.get("text") or [])
+    return _word_count(text)
 
 
 def _attach_full_group_children(fw_deck: Path, payload: dict, *, deck: Any = None) -> None:

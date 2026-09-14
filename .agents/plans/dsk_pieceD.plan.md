@@ -325,6 +325,26 @@ reports heights and applies writes.
 - Deck-wide A/B (`ab-D1fix2/`): zero differences against the pre-fix (61cb650) output --
   no GW slide exercises either changed path.
 
+## D1 Codex fix round 3 (codex-D1-codexfix-review2)
+
+- **MAJOR: the group-level exemption still hid a fixed-frame LONG child.** Round 2's
+  `group_ki in text_group_kis` exemption skips the fixed-frame refusal for the WHOLE
+  group once any child is a supported autosize verse -- a 12-word fixed-frame child
+  sitting next to a 1-word autosize child in the same group sailed through: both landed
+  in `short_children`, and the fixed-frame long child was emitted position-only with no
+  `set height`. Fixed by carrying each child's own word count on the records from
+  `_all_group_child_records` (`_child_word_count`: `ownedStorage` -> `TSWP.StorageArchive`
+  text, the same resolution `iwa_runs._group_child_runs` uses; `None` when unresolvable)
+  and refusing per child inside the `text_group_kis` short-children loop -- any
+  `has_text and autosize is False` child with `words is None or words > text_slide_words`
+  refuses regardless of an autosize sibling. Children proven short (`words <=
+  text_slide_words`) keep the short-row path, so GW 5/44/50/51/53/54 still plan. The
+  non-triggering-group refusal (round 1/2, still using the group's DFS-joined word
+  count) is unchanged: if that join is `<= text_slide_words` no single child's word
+  count can exceed it, so the aggregate check alone suffices there.
+- Deck-wide A/B (`ab-D1fix3/`): zero differences against `ab-D1fix2/` output -- no GW
+  slide exercises the newly-refused path.
+
 ## Open questions (design-changing)
 
 1. **Stale read-back (F3).** Is the two-consecutive-reads poll enough, or does Keynote only settle the height
