@@ -53,6 +53,7 @@ import { type Item as WcItem } from "../components/WatercolourResultView";
 import { useRunNav } from "../nav";
 import {
   MAPS_INSPECTOR_KEY,
+  MAPS_PICK_MODE_KEY,
   MAPS_SIDE_PANELS_KEY,
   useDefaultExportDir,
   useSessionPath,
@@ -65,6 +66,7 @@ import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
 import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
+import { creditLines } from "../maps/credits";
 import { HopTimeline } from "../maps/HopTimeline";
 import { ManualEntriesForm } from "../maps/ManualEntriesForm";
 import type { ManualMode, MapsBootstrapRow } from "../maps/manualRows";
@@ -72,7 +74,7 @@ import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
 import { OBJECT_SIZE_MAX, defaultObjectSize, pasteRebase, zoomSizeFactor } from "../maps/objects";
 import type { ObjectClipboard } from "../maps/objects";
-import { admin0Name, loadAdmin0 } from "../maps/overlays";
+import { admin0Name, admin1Name, highlightedCountries, isAdmin1Loaded, loadAdmin0, loadAdmin1 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
 import { MapsSaveConflictError, MapsSaveQueue, type MapsSaveStatus } from "../maps/saveQueue";
@@ -249,6 +251,9 @@ export function MapsTab() {
   const defaultExportDir = useDefaultExportDir();
   const [sidePanels, setSidePanels] = useSessionToggle(MAPS_SIDE_PANELS_KEY, true);
   const [inspectorOpen, setInspectorOpen] = useSessionToggle(MAPS_INSPECTOR_KEY, true);
+  const [pickRegions, setPickRegions] = useSessionToggle(MAPS_PICK_MODE_KEY, false);
+  const [regionsLoading, setRegionsLoading] = useState(false);
+  const [regionCameraCountries, setRegionCameraCountries] = useState<string[]>([]);
   const [layersOpen, setLayersOpen] = useState(false);
   const layersRef = useRef<HTMLDivElement | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -271,6 +276,49 @@ export function MapsTab() {
   }, []);
 
   const doc = documentFromResult(job?.result as Record<string, unknown> | undefined);
+  const activeSlideRaw = (doc?.slides || []).find((s) => s.id === activeId);
+  const activeAudienceView = activeSlideRaw ? slideForAudience(activeSlideRaw, activeAudience) : null;
+  const activeCamera = activeAudienceView?.camera;
+  const cameraKey = activeCamera ? `${activeCamera.lat},${activeCamera.lon},${activeCamera.zoom}` : "";
+  const activeHighlights = activeAudienceView ? activeAudienceView.highlights : [];
+  const activeViewKey = `${activeId}:${activeAudience}:${activeHighlights.join(",")}`;
+  const activeViewGeneration = useRef(0);
+  useEffect(() => {
+    const codes = highlightedCountries(activeHighlights.filter((h) => h.startsWith("A1:")));
+    const missing = codes.filter((code) => !isAdmin1Loaded(code));
+    if (!missing.length) return;
+    const generation = ++activeViewGeneration.current;
+    void Promise.all(missing.map((code) => loadAdmin1(code))).then(() => {
+      if (activeViewGeneration.current !== generation) return;
+      setNamesTick((n) => n + 1);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeViewKey]);
+  useEffect(() => {
+    if (!pickRegions) {
+      setRegionsLoading(false);
+      setRegionCameraCountries([]);
+      return;
+    }
+    const codes = mapRef.current?.getRegionCountries() ?? [];
+    setRegionCameraCountries(codes);
+    const missing = codes.filter((code) => !isAdmin1Loaded(code));
+    if (!missing.length) {
+      setRegionsLoading(false);
+      return;
+    }
+    let ignore = false;
+    setRegionsLoading(true);
+    void Promise.all(missing.map((code) => loadAdmin1(code))).then(() => {
+      if (ignore) return;
+      setRegionsLoading(false);
+      setNamesTick((n) => n + 1);
+    });
+    return () => {
+      ignore = true;
+      setRegionsLoading(false);
+    };
+  }, [pickRegions, activeId, activeAudience, cameraKey]);
   jobRef.current = job;
   docRef.current = doc;
   activeRef.current = activeId;
@@ -780,6 +828,11 @@ export function MapsTab() {
     patchDoc({ ...current, cachedCountries: nextSelected });
     const adding = nextSelected.some((item) => item.toUpperCase() === code.toUpperCase());
     if (!adding) return;
+    void loadAdmin1(code).then((data) => {
+      if (!data) return;
+      setNamesTick((n) => n + 1);
+      setLogs((prev) => [...prev, `Regions ready for ${code}.`]);
+    });
     const prefetch: Promise<void> = prefetchMapsTiles({ countries: [code], maxzoom: 8 })
       .then((stats) => {
         setLogs((prev) => [...prev, `Cached ${code}: ${stats.cached + stats.fetched} tiles.`]);
@@ -1432,6 +1485,7 @@ export function MapsTab() {
       throwIfCancelled();
 
       const slidesById = new Map((docRef.current?.slides || []).map((slide) => [slide.id, slide]));
+      const stamp = docRef.current?.attribution !== "credits";
       const linkHasSlides = (link: MapsLink) => slidesById.has(link.from) && slidesById.has(link.to);
       const lwMovieLinks = (docRef.current?.links || []).filter(
         (link) => link.kind === "movie" && linkHasSlides(link)
@@ -1541,8 +1595,9 @@ export function MapsTab() {
           hillshade: (still.hillshade as boolean | undefined) === true,
           isolate: still.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
+          stamp,
         };
-        if (still.isolate && still.highlights.length) {
+        if (still.highlights.length) {
           const pair = await captureIsolatePair(exportOpts);
           throwIfCancelled();
           if (pair) {
@@ -1560,7 +1615,7 @@ export function MapsTab() {
       for (let i = 0; i < plan.plates.length; i++) {
         const plate = plan.plates[i];
         throwIfCancelled();
-        const blob = await captureExportRaster({
+        const plateOpts = {
           width: plate.plateW,
           height: plate.plateH,
           surfaceWidth: plateSurfaceWidth(plate.slideIds, slidesById, plate.plateW),
@@ -1571,9 +1626,20 @@ export function MapsTab() {
           hillshade: (plate.hillshade as boolean | undefined) === true,
           isolate: plate.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
-        });
-        throwIfCancelled();
-        reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId }));
+          stamp,
+        };
+        if (plate.highlights.length) {
+          const pair = await captureIsolatePair(plateOpts);
+          throwIfCancelled();
+          if (pair) {
+            reconcileServerJob(await postMapsPng(id, pair.base, { kind: "plate", plateId: plate.plateId }));
+            reconcileServerJob(await postMapsPng(id, pair.country, { kind: "plate", plateId: plate.plateId, variant: "country" }));
+          }
+        } else {
+          const blob = await captureExportRaster(plateOpts);
+          throwIfCancelled();
+          reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId }));
+        }
         stepIndex += 1;
         setStepProgress("Rendering plates", i + 1, plan.plates.length);
       }
@@ -1591,8 +1657,9 @@ export function MapsTab() {
             hillshade: (still.hillshade as boolean | undefined) === true,
             isolate: still.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
+            stamp,
           };
-          if (still.isolate && still.highlights.length) {
+          if (still.highlights.length) {
             const pair = await captureIsolatePair(exportOpts);
             throwIfCancelled();
             if (pair) {
@@ -1610,7 +1677,7 @@ export function MapsTab() {
         for (let i = 0; i < plan.cg.plates.length; i++) {
           const plate = plan.cg.plates[i];
           throwIfCancelled();
-          const blob = await captureExportRaster({
+          const plateOpts = {
             width: plate.plateW,
             height: plate.plateH,
             surfaceWidth: CG_W,
@@ -1621,9 +1688,20 @@ export function MapsTab() {
             hillshade: (plate.hillshade as boolean | undefined) === true,
             isolate: plate.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
-          });
-          throwIfCancelled();
-          reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
+            stamp,
+          };
+          if (plate.highlights.length) {
+            const pair = await captureIsolatePair(plateOpts);
+            throwIfCancelled();
+            if (pair) {
+              reconcileServerJob(await postMapsPng(id, pair.base, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
+              reconcileServerJob(await postMapsPng(id, pair.country, { kind: "plate", plateId: plate.plateId, audience: "cg", variant: "country" }));
+            }
+          } else {
+            const blob = await captureExportRaster(plateOpts);
+            throwIfCancelled();
+            reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
+          }
           stepIndex += 1;
           setStepProgress("Rendering CG plates", i + 1, plan.cg.plates.length);
         }
@@ -1695,6 +1773,7 @@ export function MapsTab() {
           easeOut: link.easeOut,
           flight: link.flight,
           isCancelled: () => exportAbort.current,
+          stamp,
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
             await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 });
@@ -1778,6 +1857,7 @@ export function MapsTab() {
               toX: cropToX,
             },
             isCancelled: () => exportAbort.current,
+            stamp,
             onFrame: async (blob, i, n) => {
               if (exportAbort.current) throw new Error("Export cancelled.");
               await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps, audience: "cg" });
@@ -1789,11 +1869,18 @@ export function MapsTab() {
       throwIfCancelled();
       setProgress(null);
       const latest = docRef.current;
+      const audiences: Array<"lw" | "cg"> = [];
+      if (latest?.exportLw || latest?.exportDsk) audiences.push("lw");
+      if (latest?.exportCg) audiences.push("cg");
+      const credits = stamp
+        ? undefined
+        : creditLines((latest?.slides || []).flatMap((s) => audiences.map((a) => slideForAudience(s, a))));
       const started = await exportMaps(id, {
         exportLw: latest?.exportLw,
         exportCg: latest?.exportCg,
         exportDsk: latest?.exportDsk,
         exportDir,
+        credits,
       });
       setJob(started);
       const done = await pollJob(started.id, (tick) => {
@@ -1938,7 +2025,7 @@ export function MapsTab() {
                   setManualMode("slides");
                 }}
               >
-                Add slides manually…
+                Add slides
               </button>
               <button
                 type="button"
@@ -1949,7 +2036,7 @@ export function MapsTab() {
                   setManualMode("pins");
                 }}
               >
-                Add pins to this view manually…
+                Add pins
               </button>
               <button
                 type="button"
@@ -1960,7 +2047,7 @@ export function MapsTab() {
                   csvInput.current?.click();
                 }}
               >
-                Add slides from CSV…
+                Add slides from CSV
               </button>
               <button
                 type="button"
@@ -1972,7 +2059,7 @@ export function MapsTab() {
                   csvInput.current?.click();
                 }}
               >
-                Add pins to this view from CSV…
+                Add pins from CSV
               </button>
               <button
                 type="button"
@@ -1983,7 +2070,7 @@ export function MapsTab() {
                   csvInput.current?.click();
                 }}
               >
-                Replace deck from CSV…
+                Replace deck from CSV
               </button>
             </div>
           )}
@@ -2315,10 +2402,17 @@ export function MapsTab() {
                 previewing={previewing}
                 selectedPinId={selectedPin}
                 onCameraCommit={onCameraCommit}
+                pickRegions={pickRegions}
                 onToggleCountry={(adm0) => {
                   if (!activeView) return;
                   const has = activeView.highlights.includes(adm0);
                   updateActive({ highlights: has ? activeView.highlights.filter((h) => h !== adm0) : [...activeView.highlights, adm0] });
+                }}
+                onToggleRegion={(adm1) => {
+                  if (!activeView) return;
+                  const id = `A1:${adm1}`;
+                  const has = activeView.highlights.includes(id);
+                  updateActive({ highlights: has ? activeView.highlights.filter((h) => h !== id) : [...activeView.highlights, id] });
                 }}
                 onAddPin={(lat, lon) => {
                   if (!activeView) return;
@@ -2712,9 +2806,31 @@ export function MapsTab() {
                       </label>
                     </>
                   )}
-                  {(activeView?.highlights.length || 0) > 0 && (
-                    <div className="maps-hl">
-                      <div className="cap">Orange countries</div>
+                  <div className="maps-hl">
+                    <div className="cap">Selected regions</div>
+                    <div className="seg">
+                      <button
+                        type="button"
+                        className={pickRegions ? "" : "on"}
+                        disabled={locked}
+                        onClick={() => setPickRegions(false)}
+                      >
+                        Countries
+                      </button>
+                      <button
+                        type="button"
+                        className={pickRegions ? "on" : ""}
+                        disabled={locked}
+                        onClick={() => setPickRegions(true)}
+                      >
+                        Regions
+                      </button>
+                    </div>
+                    {pickRegions && regionsLoading && <div className="note">Loading regions…</div>}
+                    {pickRegions && !regionsLoading && regionCameraCountries.length === 0 && (
+                      <div className="note">Pan a country under the centre to pick its regions.</div>
+                    )}
+                    {(activeView?.highlights.length || 0) > 0 && (
                       <div className="maps-hl-list">
                         {(activeView?.highlights || []).map((code) => (
                           <button
@@ -2727,13 +2843,13 @@ export function MapsTab() {
                               updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
                             }
                           >
-                            {admin0Name(code)}
+                            {code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}
                             <IconClose />
                           </button>
                         ))}
                       </div>
-                    </div>
-                  )}
+                    )}
+                  </div>
                   <div className="maps-hl">
                     <div className="cap">Isolate country</div>
                     <label className="maps-check">
@@ -3090,7 +3206,7 @@ export function MapsTab() {
               {inspTab === "export" && (
                 <div>
                   <div className="cap">Export to Keynote</div>
-                  <label className="maps-check aud-lw">
+                  <label className="maps-check">
                     <input
                       type="checkbox"
                       checked={doc?.exportLw !== false}
@@ -3104,7 +3220,7 @@ export function MapsTab() {
                     />
                     LED wall (7680×1080)
                   </label>
-                  <label className="maps-check aud-cg">
+                  <label className="maps-check">
                     <input
                       type="checkbox"
                       checked={doc?.exportCg !== false}
@@ -3118,7 +3234,7 @@ export function MapsTab() {
                     />
                     CG (1920×1080)
                   </label>
-                  <label className="maps-check aud-dsk">
+                  <label className="maps-check">
                     <input
                       type="checkbox"
                       checked={doc?.exportDsk === true}
@@ -3131,6 +3247,18 @@ export function MapsTab() {
                       }}
                     />
                     DSK lower third (1920×1080)
+                  </label>
+                  <label className="maps-check" title="Removes the on-image attribution bar and appends one end slide with the map credits to every exported deck.">
+                    <input
+                      type="checkbox"
+                      checked={doc?.attribution === "credits"}
+                      disabled={locked}
+                      onChange={(event) => {
+                        if (!doc) return;
+                        patchDoc({ ...doc, attribution: event.target.checked ? "credits" : "stamp" });
+                      }}
+                    />
+                    Credits slide instead of stamped attribution
                   </label>
                   <div className="actions export-actions">
                     <ExportDestinationRow

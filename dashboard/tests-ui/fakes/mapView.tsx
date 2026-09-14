@@ -52,6 +52,11 @@ export function createMapViewFake() {
     if (idleDeferred) await idleDeferred.promise;
   });
   const resize = vi.fn();
+  let regionCountries: string[] = [];
+  const getRegionCountries = vi.fn(() => regionCountries);
+  function setRegionCountries(codes: string[]) {
+    regionCountries = codes;
+  }
 
   function emitCameraCommit(cam: MapsCamera) {
     camera = cam;
@@ -78,6 +83,10 @@ export function createMapViewFake() {
     act(() => latestProps.onToggleCountry(adm0));
   }
 
+  function emitToggleRegion(adm1: string) {
+    act(() => latestProps.onToggleRegion(adm1));
+  }
+
   const MapView = forwardRef<MapViewHandle, MapViewProps>(function MapViewFake(props, ref) {
     latestProps = props;
     viewLog.push({ type: "render", props: props as unknown as Record<string, unknown> });
@@ -93,6 +102,7 @@ export function createMapViewFake() {
       capturePreviewBlob,
       waitUntilIdle,
       resize,
+      getRegionCountries,
     };
     useImperativeHandle(ref, () => handle);
     return <div data-testid="mapview" />;
@@ -112,6 +122,8 @@ export function createMapViewFake() {
     capturePreviewBlob,
     waitUntilIdle,
     resize,
+    getRegionCountries,
+    setRegionCountries,
     holdIdle,
     releaseIdle,
     getLatestProps: (): MapViewProps => latestProps,
@@ -122,6 +134,7 @@ export function createMapViewFake() {
       cgShift: emitCgShift,
       previewAbort: emitPreviewAbort,
       toggleCountry: emitToggleCountry,
+      toggleRegion: emitToggleRegion,
     },
   };
 }

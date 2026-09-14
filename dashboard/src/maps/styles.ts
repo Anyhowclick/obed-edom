@@ -1,7 +1,7 @@
 import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
 import { proxyOpenFreeMapUrl } from "./tileProxy";
-import { TERRAIN_ATTRIBUTION } from "./stampOsm";
+import { TERRAIN_ATTRIBUTION } from "./credits";
 import { withBrighterDarkLines } from "./darkContrast";
 import { shift, withLowZoomBoundaries } from "./tonerBoundaries";
 import { withoutSolidBuildings } from "./tonerBuildings";
@@ -47,6 +47,8 @@ export const STYLE_SWATCHES: { id: MapsStyleId; label: string; color: string }[]
   { id: "toner-lines", label: "Toner lines", color: "#2f3130" },
   { id: "watercolour", label: "Watercolour", color: "#f1e5cb" },
 ];
+
+export const STYLE_THUMB_CAMERA = { lat: 1.2864, lon: 103.8604, zoom: 16.5, pitch: 0, bearing: 75, cgShiftX: 0 } as const;
 
 const TONER_LINES_WIDTH_FACTOR = 0.55;
 

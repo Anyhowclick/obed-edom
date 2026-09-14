@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import threading
@@ -12,8 +13,11 @@ import pytest
 
 from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, clamp_cg_shift, world_width
 from obed_edom.maps_keynote import (
+    CG_HEIGHT,
     CG_WIDTH,
+    CREDITS_FONT,
     DOT_SIZE,
+    DSK_HEIGHT,
     DSK_SCALE,
     DSK_WIDTH,
     LABEL_BOLD_FALLBACK,
@@ -35,6 +39,7 @@ from obed_edom.maps_keynote import (
     build_slide_items,
     cg_crop_origin,
     coerce_link_kinds,
+    credits_op,
     dsk_item,
     dsk_ops,
     export_maps_job,
@@ -226,6 +231,94 @@ def test_cg_shift_clamp_used(tmp_path: Path):
 
 def whole_wall_to_cg(wall_x: float, origin_x: float) -> int:
     return int(round(wall_x - origin_x))
+
+
+def test_credits_op_emits_one_text_item_per_line():
+    op = credits_op(["a", "b"], width=int(WALL_WIDTH), height=int(WALL_HEIGHT))
+    assert len(op["items"]) == 3
+    assert all(item["kind"] == "text" for item in op["items"])
+    assert all("\n" not in item["text"] for item in op["items"])
+    assert "alignment" not in op["items"][0]
+    centre_x = WALL_WIDTH / 2.0
+    for item in op["items"]:
+        assert abs((item["x"] + item["w"] / 2.0) - centre_x) <= 1
+
+
+def test_credits_op_script_has_no_alignment_verb(tmp_path: Path):
+    op = credits_op(["short", "a"], width=int(WALL_WIDTH), height=int(WALL_HEIGHT))
+    script = build_deck_script([op], tmp_path / "deck.key", width=int(WALL_WIDTH), height=int(WALL_HEIGHT))
+    assert "set alignment" not in script
+
+
+@pytest.mark.parametrize(
+    "width,height",
+    [(int(WALL_WIDTH), int(WALL_HEIGHT)), (int(DSK_WIDTH), int(DSK_HEIGHT)), (int(CG_WIDTH), int(CG_HEIGHT))],
+)
+def test_credits_op_layout_stays_in_bounds_and_centred(width: int, height: int):
+    short_line = "© OSM"
+    long_line = "© MapTiler, terrain data from a very long attribution string that needs to wrap across multiple lines"
+    op = credits_op([short_line, long_line], width=width, height=height)
+    centre_x = width / 2.0
+    items = op["items"]
+    for item in items:
+        assert item["x"] >= 0
+        assert item["x"] + item["w"] <= width
+        assert item["y"] >= 0
+        assert item["y"] + item["h"] <= height
+        assert abs((item["x"] + item["w"] / 2.0) - centre_x) <= 1
+    short_item, long_item = items[1], items[2]
+    assert short_item["w"] < long_item["w"]
+    top = items[0]["y"]
+    bottom = items[-1]["y"] + items[-1]["h"]
+    block_h = bottom - top
+    assert abs((height - block_h) / 2.0 - top) <= 2
+
+
+def _export_scripts(monkeypatch, tmp_path: Path, *, attribution: str | None, credits: list[str] | None) -> list[str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    scripts: list[str] = []
+
+    def capture(script: str, **_k):
+        scripts.append(script)
+        return _ok_osascript(script)
+
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", capture)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a)
+    b = _slide("s2", cam_b)
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": True}]
+    job = _job(tmp_path, [a, b], links)
+    if attribution is not None:
+        job.result["attribution"] = attribution
+    _write_plan_rasters(Path(job.result["outputDir"]), [a, b], links)
+    result = export_maps_job(job, export_lw=True, export_cg=True, export_dsk=True, credits=credits)
+    assert result.get("destPath") and result.get("destPathCg") and result.get("destPathDsk")
+    return scripts
+
+
+def test_export_maps_job_appends_credits_slide_when_attribution_credits(monkeypatch, tmp_path: Path):
+    credits = ["© OpenStreetMap contributors", "© MapTiler"]
+    with_credits = _export_scripts(monkeypatch, tmp_path / "with", attribution="credits", credits=credits)
+    without_credits = _export_scripts(monkeypatch, tmp_path / "without", attribution="stamp", credits=credits)
+    for script in with_credits:
+        assert "© MapTiler" in script
+    for script_with, script_without in zip(with_credits, without_credits):
+        assert script_with.count("make new slide") - script_without.count("make new slide") == 1
+
+
+def test_export_maps_job_omits_credits_slide_when_attribution_stamp(monkeypatch, tmp_path: Path):
+    scripts = _export_scripts(monkeypatch, tmp_path, attribution=None, credits=["© OpenStreetMap contributors"])
+    for script in scripts:
+        assert "© OpenStreetMap" not in script
+
+
+def test_credits_slide_not_rescaled_in_dsk_script(monkeypatch, tmp_path: Path):
+    scripts = _export_scripts(monkeypatch, tmp_path, attribution="credits", credits=["© OpenStreetMap contributors"])
+    lw_script, dsk_script, _cg_script = scripts
+    assert f"to {float(CREDITS_FONT)}" in dsk_script
+    assert f"to {float(CREDITS_FONT)}" in lw_script
+    assert f"to {float(CREDITS_FONT) * DSK_SCALE}" not in dsk_script
 
 
 def test_both_dest_keys_when_both_flags_on(monkeypatch, tmp_path: Path):
@@ -1610,30 +1703,61 @@ def test_plan_deck_emits_country_cutout_image_above_base(tmp_path: Path):
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     items = ops[0]["items"]
     map_items = [item for item in items if item.get("map")]
-    assert len(map_items) == 2
+    country_items = [item for item in items if item.get("country")]
+    assert len(map_items) == 1
+    assert len(country_items) == 1
     assert Path(map_items[0]["path"]).name == "s1.png"
-    assert Path(map_items[1]["path"]).name == "s1-country.png"
+    assert Path(country_items[0]["path"]).name == "s1-country.png"
     assert (map_items[0]["x"], map_items[0]["y"], map_items[0]["w"], map_items[0]["h"]) == (
-        map_items[1]["x"],
-        map_items[1]["y"],
-        map_items[1]["w"],
-        map_items[1]["h"],
+        country_items[0]["x"],
+        country_items[0]["y"],
+        country_items[0]["w"],
+        country_items[0]["h"],
     )
     assert len([item for item in ops[1]["items"] if item.get("map")]) == 1
 
 
-def test_plan_deck_magic_move_duplicate_skips_country_cutout(tmp_path: Path):
+def test_plan_deck_magic_move_duplicate_keeps_country_cutout(tmp_path: Path):
     cam_a, cam_b = _pan_camera(8, 400)
     a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
     b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
     links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
     plates, links = assign_morph_plates([a, b], links)
-    _write_plan_rasters(tmp_path, [a, b], links)
-    _dummy_png(tmp_path / "stills" / "s1-country.png")
-    _dummy_png(tmp_path / "stills" / "s2-country.png")
+    plan = _write_plan_rasters(tmp_path, [a, b], links)
+    for plate in plan["plates"]:
+        stem = Path(plate_filename(plate["plateId"])).stem
+        _dummy_png(tmp_path / "plates" / f"{stem}-country.png")
     ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     assert ops[1]["duplicate"] is True
-    assert len(ops[1]["items"]) == 1
+    country_items = [item for item in ops[1]["items"] if item.get("country")]
+    assert len(country_items) == 1
+    assert Path(country_items[0]["path"]).name.endswith("-country.png")
+
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    tell_start = script.index("tell slide 2")
+    tell_end = script.index("end tell", tell_start)
+    body = script[tell_start:tell_end]
+    assert "-country.png" not in body
+    assert "make new image" not in body
+    assert "set width of image 2 to" in body
+    assert "set height of image 2 to" in body
+    assert re.search(r"repeat with i from \(count of images\) to 3 by -1", body) is not None
+
+
+def test_plan_deck_morph_member_with_no_own_highlights_still_gets_plate_cutout(tmp_path: Path):
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=[])
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
+    plates, links = assign_morph_plates([a, b], links)
+    for plate_id in plates:
+        stem = Path(plate_filename(plate_id)).stem
+        _dummy_png(tmp_path / "plates" / plate_filename(plate_id))
+        _dummy_png(tmp_path / "plates" / f"{stem}-country.png")
+    ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    country_items = [item for item in ops[1]["items"] if item.get("country")]
+    assert len(country_items) == 1
+    assert Path(country_items[0]["path"]).name.endswith("-country.png")
 
 
 def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
@@ -1677,7 +1801,8 @@ def test_plan_deck_inserts_landing_slide_between_movie_and_isolated_destination(
     assert [op["id"] for op in ops] == ["s1", "s2__landing", "s2"]
     assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.0}
     assert ops[1]["transition"] == {"effect": "dissolve", "duration": 1.5, "automatic": False}
-    assert len([item for item in ops[2]["items"] if item.get("map")]) == 2
+    assert len([item for item in ops[2]["items"] if item.get("map")]) == 1
+    assert len([item for item in ops[2]["items"] if item.get("country")]) == 1
 
 
 def test_plan_deck_no_isolate_deck_ops_unchanged(tmp_path: Path):
@@ -2440,6 +2565,15 @@ def _kitchen_sink_ops(tmp_path: Path, *, wall: bool = True) -> list[dict]:
         {"id": "s4", "duplicate": False,
          "items": [mod._item("text", 10, 20, 200, 40, text='Quote "x" & tail')],
          "transition": None},
+        mod.credits_op(
+            [
+                "© OpenStreetMap contributors",
+                "Elevation: Mapzen Terrain Tiles · SRTM & GMTED2010 data courtesy of the U.S. Geological Survey",
+                'Data by "Acme\\Maps" Ltd.',
+            ],
+            width=deck_width,
+            height=WALL_HEIGHT,
+        ),
     ]
 
 
@@ -2480,6 +2614,34 @@ def test_deck_script_and_plate_probe_compile_under_osacompile(tmp_path: Path):
             check=False,
         )
         assert proc.returncode == 0, f"{label}: {proc.stderr}"
+
+
+def test_credits_op_normalises_control_characters():
+    op = credits_op(
+        ["Line one\r\nwith CRLF", "Line two\nwith LF", "Tabbed\tvalue", "   ", ""],
+        width=int(WALL_WIDTH), height=int(WALL_HEIGHT),
+    )
+    texts = [item["text"] for item in op["items"]]
+    assert texts[1:] == ["Line one with CRLF", "Line two with LF", "Tabbed value"]
+    for text in texts:
+        assert "\r" not in text and "\n" not in text and "\t" not in text
+
+
+def test_credits_op_with_crlf_compiles_under_osacompile(tmp_path: Path):
+    if shutil.which("osacompile") is None:
+        pytest.skip("osacompile unavailable (non-macOS)")
+    op = credits_op(
+        ["© OpenStreetMap contributors\r\nMulti-line credit", 'Quoted "value"\\with\\backslash'],
+        width=int(WALL_WIDTH), height=int(WALL_HEIGHT),
+    )
+    script = build_deck_script([op], tmp_path / "deck.key", width=int(WALL_WIDTH), height=int(WALL_HEIGHT))
+    source = tmp_path / "credits.applescript"
+    source.write_text(script, encoding="utf-8")
+    proc = subprocess.run(
+        ["osacompile", "-o", str(tmp_path / "credits.scpt"), str(source)],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_static_drop_pin_geometry_survives_the_dsk_scale(tmp_path: Path):
@@ -2702,3 +2864,103 @@ def test_label_pill_outer_bounds_clear_the_wall_seam(tmp_path: Path):
     assert pill["x"] <= text["x"]
     assert text["x"] + text["w"] <= pill["x"] + pill["w"]
     assert pill["x"] == text["x"] - PILL_PAD_X
+
+
+def test_still_plans_a_cutout_without_isolate():
+    """A highlighted slide gets its cutout raster whether or not it is isolated."""
+    plain = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    isolated = _slide("s2", _camera(3.0, 101.0), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
+    bare = _slide("s3", _camera(3.0, 101.0))
+
+    plan = maps_export_plan([plain, isolated, bare], [])
+    rows = {row["slideId"]: row for row in plan["stills"]}
+
+    assert rows["s1"]["stillPngCountry"] == "s1-country.png"
+    assert rows["s2"]["stillPngCountry"] == "s2-country.png"
+    assert "stillPngCountry" not in rows["s3"]
+
+
+def test_landing_slide_plans_no_cutout():
+    """`isolate_landing_slides` forces `highlights: []`, so the gate can never fire for one."""
+    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
+    b = _slide("s2", _camera(20.0, 130.0, 4), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 2.0, "playWithoutClick": True}]
+
+    plan = maps_export_plan([a, b], links)
+    landing = [row for row in plan["stills"] if row["slideId"].endswith("__landing")]
+
+    assert landing, "expected a synthetic landing still"
+    assert all("stillPngCountry" not in row for row in landing)
+
+
+def test_plate_plans_a_cutout_when_highlighted():
+    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+
+    plan = maps_export_plan([a, b], links)
+    plates = plan["plates"]
+
+    assert plates, "expected a morph plate"
+    assert plates[0]["platePngCountry"] == f"{plates[0]['plateId']}-country.png"
+
+
+def test_plate_plans_no_cutout_without_highlights():
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.05, 101.05))
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+
+    plan = maps_export_plan([a, b], links)
+
+    assert plan["plates"]
+    assert "platePngCountry" not in plan["plates"][0]
+
+
+def test_build_slide_items_stacks_the_cutout_without_isolate(tmp_path: Path):
+    slide = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"], isolate=None)
+    country = _dummy_png(tmp_path / "stills" / "s1-country.png")
+
+    items = build_slide_items(
+        slide,
+        plate=None,
+        plate_path=None,
+        still=_dummy_png(tmp_path / "stills" / "s1.png"),
+        movie=None,
+        wall=True,
+        pin_root=tmp_path / "pins",
+        country_still=country,
+    )
+    map_items = [item for item in items if item.get("map")]
+    country_items = [item for item in items if item.get("country")]
+
+    assert len(map_items) == 1
+    assert len(country_items) == 1
+    assert country_items[0]["path"] == str(country)
+    assert (country_items[0]["x"], country_items[0]["y"]) == (map_items[0]["x"], map_items[0]["y"])
+    assert (country_items[0]["w"], country_items[0]["h"]) == (map_items[0]["w"], map_items[0]["h"])
+
+
+def test_build_slide_items_gives_a_plate_cutout_the_plate_geometry(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
+    geom = morph_plate_geom([a, b])
+    plate_path = _dummy_png(tmp_path / "plates" / plate_filename("p-s1-s2"))
+    country = _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-country.png")
+
+    items = build_slide_items(
+        a,
+        plate=geom,
+        plate_path=plate_path,
+        still=None,
+        movie=None,
+        wall=True,
+        pin_root=tmp_path / "pins",
+        country_still=country,
+    )
+    map_items = [item for item in items if item.get("map")]
+    country_items = [item for item in items if item.get("country")]
+
+    assert len(map_items) == 1
+    assert len(country_items) == 1
+    assert country_items[0]["path"] == str(country)
+    assert [country_items[0][key] for key in ("x", "y", "w", "h")] == [map_items[0][key] for key in ("x", "y", "w", "h")]

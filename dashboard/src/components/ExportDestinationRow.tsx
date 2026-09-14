@@ -5,31 +5,18 @@ type Props = {
   onChange: (path: string) => void;
   defaultLabel?: string;
   onError?: (message: string) => void;
-  /** Freeze the row read-only, e.g. between a propose and its matching apply. */
-  disabled?: boolean;
-  /** Render without the "Export to" heading/col wrapper, for sharing a row with another button. */
+  /** Render as direct members of the caller's `.actions` row, for sharing it with another button. */
   inline?: boolean;
 };
 
-export function ExportDestinationRow({ value, onChange, defaultLabel, onError, disabled, inline }: Props) {
+export function ExportDestinationRow({ value, onChange, defaultLabel, onError, inline }: Props) {
   const destination = value || defaultLabel || "output/ (default)";
 
-  if (disabled) {
-    return inline ? (
-      <span className="muted">{destination} · Locked to this destination until applied.</span>
-    ) : (
-      <div className="col">
-        <strong>Export to</strong>
-        <p className="muted">{destination}</p>
-        <p className="muted">Locked to this destination until applied.</p>
-      </div>
-    );
-  }
-
-  const buttons = (
-    <>
+  return (
+    <div className={`export-dest${inline ? " inline" : ""}`}>
+      {!inline && <span className="export-dest-label">Export to</span>}
       <button
-        className={inline ? "btn collab" : "btn secondary"}
+        className="btn collab"
         type="button"
         onClick={async () => {
           try {
@@ -42,28 +29,14 @@ export function ExportDestinationRow({ value, onChange, defaultLabel, onError, d
       >
         Export to…
       </button>
+      <span className="export-dest-path" title={destination}>
+        {destination}
+      </span>
       {value && (
         <button className="btn secondary" type="button" onClick={() => onChange("")}>
           Use default
         </button>
       )}
-    </>
-  );
-
-  if (inline) {
-    return (
-      <>
-        <span className="muted" title={destination}>{destination}</span>
-        {buttons}
-      </>
-    );
-  }
-
-  return (
-    <div className="col">
-      <strong>Export to</strong>
-      <p className="muted">{destination}</p>
-      <div className="actions">{buttons}</div>
     </div>
   );
 }

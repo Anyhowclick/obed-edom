@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Callable
 
@@ -59,6 +60,9 @@ LABEL_BOLD_FALLBACK = "HelveticaNeue-Bold"
 LABEL_CHAR_W = 13
 PILL_PAD_X = 6
 PILL_PAD_Y = 2
+CREDITS_TITLE = "Map data"
+CREDITS_FONT = 28
+CREDITS_TITLE_FONT = 40
 MAP_BG_RE = re.compile(r"map\s*bg", re.I)
 PIN_WAVE_RE = re.compile(r"PIN\s*DROP\s*WAVE.*\.mov$", re.I)
 _SKIP_WALK = {
@@ -431,6 +435,13 @@ def assign_morph_plates(
     return plates, next_links
 
 
+def _first_plate_slide(slides: list[dict[str, Any]], slide_ids: list[str]) -> dict[str, Any] | None:
+    """The plate's own slide, in document order — the plate raster and its cutout gate must
+    agree on which slide's highlights/style/isolate represent the whole group."""
+    wanted = set(slide_ids)
+    return next((slide for slide in slides if str(slide.get("id") or "") in wanted), None)
+
+
 def maps_export_plan(
     slides: list[dict[str, Any]],
     links: list[dict[str, Any]],
@@ -474,7 +485,7 @@ def maps_export_plan(
             "height": cap_h,
             "revealMovie": bool(slide.get("revealMovie")),
         }
-        if slide.get("isolate") and highlights:
+        if highlights:
             row["stillPngCountry"] = f"{sid}{'_CG' if audience == 'cg' else ''}-country.png"
         stills.append(row)
         if sid in landing_targets:
@@ -495,7 +506,7 @@ def maps_export_plan(
             )
     plate_list: list[dict[str, Any]] = []
     for plate_id, geom in plates.items():
-        first = next((slide for slide in slides if str(slide.get("id") or "") in (geom.get("slideIds") or [])), None)
+        first = _first_plate_slide(slides, geom.get("slideIds") or [])
         output_id = f"{plate_id}-cg" if audience == "cg" else plate_id
         if audience == "cg":
             for link in links:
@@ -513,6 +524,11 @@ def maps_export_plan(
                 "hiddenLayers": slide_hidden_layers(first or {}),
                 "hillshade": bool((first or {}).get("hillshade")),
                 "isolate": (first or {}).get("isolate"),
+                **(
+                    {"platePngCountry": f"{output_id}-country.png"}
+                    if (first or {}).get("highlights")
+                    else {}
+                ),
             }
         )
     if audience == "cg":
@@ -673,6 +689,12 @@ def _country_still_path(slide: dict[str, Any], output_dir: Path, audience: str =
     return path if path.is_file() else None
 
 
+def _plate_country_path(plate_id: str, output_dir: Path) -> Path | None:
+    name = plate_filename(plate_id)
+    path = Path(output_dir) / "plates" / f"{Path(name).stem}-country{Path(name).suffix}"
+    return path if path.is_file() else None
+
+
 def _plate_path(plate_id: str, output_dir: Path) -> Path:
     name = plate_filename(plate_id)
     path = Path(output_dir) / "plates" / name
@@ -707,6 +729,60 @@ def dsk_item(item: dict[str, Any]) -> dict[str, Any]:
 
 def dsk_ops(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{**op, "items": [dsk_item(item) for item in op["items"]]} for op in ops]
+
+
+def normalise_credit_line(line: str) -> str:
+    return re.sub(r"[\r\n\t]+", " ", str(line)).strip()
+
+
+CREDITS_WIDTH_FRAC = 0.6
+CREDITS_CHAR_WIDTH_FRAC = 0.55
+CREDITS_LINE_HEIGHT_FRAC = 1.6
+
+
+def _wrapped_row_count(text: str, box_w: float, font_size: float) -> int:
+    char_w = font_size * CREDITS_CHAR_WIDTH_FRAC
+    chars_per_line = max(1, int(box_w / char_w))
+    return max(1, math.ceil(len(text) / chars_per_line))
+
+
+def _centred_box(text: str, max_w: float, font_size: float, centre_x: float) -> tuple[float, float]:
+    line_w = min(max_w, len(text) * font_size * CREDITS_CHAR_WIDTH_FRAC)
+    return centre_x - line_w / 2.0, line_w
+
+
+def credits_op(lines: list[str], *, width: int, height: int) -> dict[str, Any]:
+    """One text item per line (no `\\n`): `_as_escape` doesn't handle literal newlines,
+    which would otherwise break `osacompile`. Keynote's `rich text`/`text item` classes
+    have no `alignment` property, so each line's own box is centred by its estimated
+    width instead of relying on AppleScript alignment. Box width is deck-relative so it
+    fits LW, DSK, and CG canvases alike; each item's height is estimated from wrapped
+    row count so the block centres correctly even when a line wraps."""
+    clean_lines = [normalise_credit_line(line) for line in lines]
+    clean_lines = [line for line in clean_lines if line]
+    max_w = width * CREDITS_WIDTH_FRAC
+    centre_x = width / 2.0
+    line_height = CREDITS_FONT * CREDITS_LINE_HEIGHT_FRAC
+    title_line_height = CREDITS_TITLE_FONT * CREDITS_LINE_HEIGHT_FRAC
+    title_h = _wrapped_row_count(CREDITS_TITLE, max_w, CREDITS_TITLE_FONT) * title_line_height
+    row_heights = [title_h]
+    for line in clean_lines:
+        row_heights.append(_wrapped_row_count(line, max_w, CREDITS_FONT) * line_height)
+    block_h = sum(row_heights)
+    y0 = (height - block_h) / 2.0
+    title_x, title_w = _centred_box(CREDITS_TITLE, max_w, CREDITS_TITLE_FONT, centre_x)
+    items = [
+        _item(
+            "text", title_x, y0, title_w, row_heights[0],
+            text=CREDITS_TITLE, fontSize=CREDITS_TITLE_FONT, bold=True,
+        )
+    ]
+    y = y0 + row_heights[0]
+    for line, h in zip(clean_lines, row_heights[1:]):
+        line_x, line_w = _centred_box(line, max_w, CREDITS_FONT, centre_x)
+        items.append(_item("text", line_x, y, line_w, h, text=line, fontSize=CREDITS_FONT))
+        y += h
+    return {"id": "_credits", "duplicate": False, "transition": None, "items": items}
 
 
 def _pin_size(church: dict[str, Any], movie: Path | None) -> int:
@@ -928,14 +1004,22 @@ def build_slide_items(
     reveal_audience: str = "lw",
     sid: str = "",
     skip_landmarks: bool = False,
+    cutout_highlights: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """`pin_root` is required (see `_place_churches`); pass `output_dir / "pins"`."""
+    """`pin_root` is required (see `_place_churches`); pass `output_dir / "pins"`.
+
+    `cutout_highlights` gates the country-cutout item when set: for a morph plate
+    member it should be the plate's own highlights (the group's first slide), so
+    every member of the group shows what the plate raster was rendered with. Falls
+    back to `slide`'s own highlights when omitted.
+    """
     mapped, placement = _map_item(
         slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
     )
     items = [mapped]
-    if country_still is not None and still is not None and slide.get("isolate") and slide.get("highlights"):
-        items.append(_item("image", mapped["x"], mapped["y"], mapped["w"], mapped["h"], path=str(country_still), map=True))
+    cutout_gate = slide.get("highlights") if cutout_highlights is None else cutout_highlights
+    if country_still is not None and mapped.get("kind") == "image" and cutout_gate:
+        items.append(_item("image", mapped["x"], mapped["y"], mapped["w"], mapped["h"], path=str(country_still), country=True))
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
     if bg_movie is None or skip_landmarks:
@@ -1003,12 +1087,16 @@ def plan_deck(
     reveal_movies: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, Any]]:
     slides, links = isolate_landing_slides(slides, links)
-    slide_plate: dict[str, str] = {}
-    for plate_id, geom in plates.items():
-        for sid in geom.get("slideIds") or []:
-            slide_plate[str(sid)] = plate_id
-    ops: list[dict[str, Any]] = []
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
+    slide_plate: dict[str, str] = {}
+    plate_highlights: dict[str, list[str]] = {}
+    for plate_id, geom in plates.items():
+        ids = [str(sid) for sid in (geom.get("slideIds") or [])]
+        for sid in ids:
+            slide_plate[sid] = plate_id
+        first = _first_plate_slide(slides, ids)
+        plate_highlights[plate_id] = list((first or {}).get("highlights") or [])
+    ops: list[dict[str, Any]] = []
     for index, slide in enumerate(slides):
         sid = str(slide.get("id") or "")
         cg_key = str(slide.get("_landingFor") or sid)
@@ -1063,11 +1151,16 @@ def plan_deck(
             and prev_link.get("plateId")
             and prev_link.get("plateId") == plate_id
         )
-        country_still = (
-            _country_still_path(slide, output_dir, asset_audience)
-            if not duplicate and bg_movie is None and plate_id is None
-            else None
-        )
+        country_still = None
+        if bg_movie is None:
+            country_still = (
+                _country_still_path(slide, output_dir, asset_audience)
+                if plate_id is None
+                else _plate_country_path(plate_id, output_dir)
+            )
+            cutout_expected = plate_highlights.get(plate_id) if plate_id else slide.get("highlights")
+            if cutout_expected and country_still is None:
+                warnings.warn(f"missing country cutout for slide {sid} (expected -country.png)")
         items = build_slide_items(
             item_slide,
             plate=plate,
@@ -1085,6 +1178,7 @@ def plan_deck(
             reveal_audience="cg" if item_slide.get("_splitCg") else "lw",
             sid=cg_key,
             skip_landmarks=reveal_bg,
+            cutout_highlights=plate_highlights.get(plate_id) if plate_id else None,
         )
         ops.append(
             {
@@ -1114,18 +1208,36 @@ def _emit_clear() -> list[str]:
     ]
 
 
-def _emit_adjust_map(item: dict[str, Any]) -> list[str]:
-    return [
+def _emit_adjust_map(item: dict[str, Any], cutout: dict[str, Any] | None = None) -> list[str]:
+    lines = [
         "        try",
         f"          set position of image 1 to {{{item['x']}, {item['y']}}}",
         f"          set width of image 1 to {item['w']}",
         f"          set height of image 1 to {item['h']}",
         "        end try",
-        "        try",
-        "          repeat with i from (count of images) to 2 by -1",
-        "            delete image i",
-        "          end repeat",
-        "        end try",
+    ]
+    if cutout is not None:
+        lines += [
+            "        try",
+            f"          set position of image 2 to {{{cutout['x']}, {cutout['y']}}}",
+            f"          set width of image 2 to {cutout['w']}",
+            f"          set height of image 2 to {cutout['h']}",
+            "        end try",
+            "        try",
+            "          repeat with i from (count of images) to 3 by -1",
+            "            delete image i",
+            "          end repeat",
+            "        end try",
+        ]
+    else:
+        lines += [
+            "        try",
+            "          repeat with i from (count of images) to 2 by -1",
+            "            delete image i",
+            "          end repeat",
+            "        end try",
+        ]
+    lines += [
         "        try",
         "          delete every shape",
         "        end try",
@@ -1136,6 +1248,7 @@ def _emit_adjust_map(item: dict[str, Any]) -> list[str]:
         "          delete every text item",
         "        end try",
     ]
+    return lines
 
 
 def _emit_item(item: dict[str, Any]) -> list[str]:
@@ -1241,9 +1354,10 @@ def _emit_slide_body(op: dict[str, Any], slide_no: int) -> list[str]:
     lines = [f"      tell slide {slide_no}"]
     if op.get("duplicate"):
         mapped = next((item for item in items if item.get("map")), items[0] if items else None)
+        cutout = next((item for item in items if item.get("country")), None)
         if mapped:
-            lines += _emit_adjust_map(mapped)
-        overlays = [item for item in items if not item.get("map")]
+            lines += _emit_adjust_map(mapped, cutout)
+        overlays = [item for item in items if item is not mapped and item is not cutout]
         for item in overlays:
             lines += _emit_item(item)
     else:
@@ -1932,6 +2046,7 @@ def export_maps_job(
     export_cg: bool = True,
     export_dsk: bool = False,
     export_dir: Path | None = None,
+    credits: list[str] | None = None,
 ) -> dict[str, Any]:
     if not export_lw and not export_cg and not export_dsk:
         raise ValueError("At least one export target must be on")
@@ -1976,6 +2091,11 @@ def export_maps_job(
     plates = plan["plateGeoms"]
     links = plan["links"]
     result["links"] = links
+    credit_lines = (
+        [cleaned for x in (credits or []) if (cleaned := normalise_credit_line(x))]
+        if str(result.get("attribution") or "stamp") == "credits"
+        else []
+    )
     movie = find_pin_drop_wave()
     stem = str(result.get("stem") or getattr(job, "name", "") or f"maps-{getattr(job, 'id', 'maps')}")
     flags: list[Any] = []
@@ -1994,6 +2114,8 @@ def export_maps_job(
             slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True,
             reveals=reveals, reveal_movies=reveal_movies,
         )
+        if credit_lines:
+            ops.append(credits_op(credit_lines, width=WALL_WIDTH, height=WALL_HEIGHT))
         _run_one_deck(
             ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
         )
@@ -2023,6 +2145,8 @@ def export_maps_job(
                 reveals=reveals, reveal_movies=reveal_movies,
             )
         )
+        if credit_lines:
+            ops_dsk.append(credits_op(credit_lines, width=DSK_WIDTH, height=DSK_HEIGHT))
         _run_one_deck(
             ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
         )
@@ -2074,6 +2198,8 @@ def export_maps_job(
                 slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=False,
                 reveals=reveals, reveal_movies=reveal_movies,
             )
+        if credit_lines:
+            ops_cg.append(credits_op(credit_lines, width=CG_WIDTH, height=CG_HEIGHT))
         _run_one_deck(
             ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
         )

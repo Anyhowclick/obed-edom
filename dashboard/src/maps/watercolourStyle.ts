@@ -154,7 +154,7 @@ export function paperGrainCss(previewWidth: number, authoredWidth: number): { ba
   return { backgroundSize: `${tile}px ${tile}px`, backgroundPosition: "0px 0px" };
 }
 
-/** Restores globalCompositeOperation: stampOsm.ts reuses one scratch canvas and must paint the attribution bar normally afterwards. */
+/** Restores globalCompositeOperation: stampOsm.ts reuses one scratch canvas and must leave the context clean for whatever paints next. */
 export function compositePaperGrain(ctx: CanvasRenderingContext2D, width: number, height: number): void {
   const pattern = ctx.createPattern(paperGrainCanvas(), "repeat");
   if (!pattern) return;

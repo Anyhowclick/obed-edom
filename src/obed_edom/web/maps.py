@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
+from obed_edom.maps_admin1 import Admin1FetchError, ensure_admin1, load_admin1
 from obed_edom.maps_csv import COORD_DEFAULT_ZOOM, Place, parse_places, places_from_rows, resolve_zoom
 from obed_edom.maps_geo import (
     DEFAULT_HIDDEN_LAYERS,
@@ -43,7 +45,15 @@ from obed_edom.maps_geo import (
     parse_maps_query,
     sea_overview_camera,
 )
-from obed_edom.maps_keynote import DOT_SIZE, DROP_SIZE, coerce_link_kinds, maps_export_plan, plate_filename, split_cg_export_plan
+from obed_edom.maps_keynote import (
+    DOT_SIZE,
+    DROP_SIZE,
+    coerce_link_kinds,
+    maps_export_plan,
+    normalise_credit_line,
+    plate_filename,
+    split_cg_export_plan,
+)
 from obed_edom.maps_tiles import (
     DEFAULT_CAMERA_MAXZOOM,
     DEFAULT_COUNTRY_MAXZOOM,
@@ -216,6 +226,7 @@ MapsHopKind = Literal["morph", "movie", "dissolve", "cut"]
 MapsPinKind = Literal["dot", "dropPin", "landmark"]
 MapsIconId = Literal["none", "building", "cross"]
 MapsEasing = Literal["ease-in-out", "linear", "ease-in", "ease-out"]
+MapsAttribution = Literal["stamp", "credits"]
 
 
 def _runner():
@@ -276,6 +287,23 @@ class MapsAsset(BaseModel):
     height: int = Field(ge=1, le=10000)
 
 
+_HIGHLIGHT_RE = re.compile(r"^(?:[A-Z]{3}|A1:[A-Z0-9+?_-]{1,16})$")
+
+
+def _validate_highlights(value: object) -> object:
+    """Bare ADM0_A3 codes are upper-cased; `A1:<adm1_code>` payloads are kept verbatim."""
+    if not isinstance(value, list):
+        return value
+    out: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        candidate = text if ":" in text else text.upper()
+        if not _HIGHLIGHT_RE.match(candidate):
+            raise ValueError(f"Invalid highlight: {item!r}")
+        out.append(candidate)
+    return out
+
+
 class MapsCgOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
     camera: MapsCamera
@@ -289,6 +317,8 @@ class MapsCgOverride(BaseModel):
     movieMov: str | None = None
     movieDuration: float | None = None
     revealMovie: bool = False
+
+    _check_highlights = field_validator("highlights", mode="before")(_validate_highlights)
 
 
 class MapsSlide(BaseModel):
@@ -310,6 +340,8 @@ class MapsSlide(BaseModel):
     cgShiftY: float = 0
     includeSidePanels: bool = False
     cg: MapsCgOverride | None = None
+
+    _check_highlights = field_validator("highlights", mode="before")(_validate_highlights)
 
     @field_validator("includeSidePanels", mode="before")
     @classmethod
@@ -379,6 +411,7 @@ class MapsDocument(BaseModel):
     hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_LAYERS))
     cachedCountries: list[str] = Field(default_factory=list)
     assets: list[MapsAsset] = Field(default_factory=list)
+    attribution: MapsAttribution = "stamp"
 
     @model_validator(mode="before")
     @classmethod
@@ -408,6 +441,14 @@ class MapsDocument(BaseModel):
             seen.add(code)
             out.append(code)
         return out
+
+    @field_validator("attribution", mode="before")
+    @classmethod
+    def _attribution(cls, value: object) -> object:
+        if value not in ("stamp", "credits"):
+            return "stamp"
+        return value
+
     slides: list[MapsSlide]
     links: list[MapsLink]
     retiredLinks: list[MapsLink] = Field(default_factory=list)
@@ -472,6 +513,23 @@ class ExportBody(BaseModel):
     exportCg: bool | None = None
     exportDsk: bool | None = None
     exportDir: str | None = None
+    credits: list[str] | None = None
+
+    @field_validator("credits", mode="before")
+    @classmethod
+    def _credits(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            return None
+        out = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            cleaned = normalise_credit_line(item)
+            if cleaned:
+                out.append(cleaned)
+        return out[:8]
 
 
 class BootstrapRow(BaseModel):
@@ -775,6 +833,7 @@ def _dump_document(doc: MapsDocument) -> dict[str, Any]:
         "exportDsk": doc.exportDsk,
         "hiddenLayers": list(doc.hiddenLayers),
         "cachedCountries": list(doc.cachedCountries),
+        "attribution": doc.attribution,
         "assets": [asset.model_dump() for asset in doc.assets],
         "slides": [slide.model_dump() for slide in doc.slides],
         "links": [link.dumped() for link in doc.links],
@@ -792,6 +851,7 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         "exportDsk",
         "hiddenLayers",
         "cachedCountries",
+        "attribution",
         "assets",
         "slides",
         "links",
@@ -834,6 +894,7 @@ def _seed_result(name: str) -> dict[str, Any]:
         "crop": "center+cg",
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
         "cachedCountries": [],
+        "attribution": "stamp",
         "assets": [],
         "slides": [
             {
@@ -1264,10 +1325,11 @@ def _run_export(
     export_dsk: bool = False,
     export_dir: Path | None = None,
     persist_export_dir: bool = True,
+    credits: list[str] | None = None,
 ) -> dict[str, Any]:
     from obed_edom.maps_keynote import export_maps_job
 
-    result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk, export_dir=export_dir)
+    result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk, export_dir=export_dir, credits=credits)
     if persist_export_dir and export_dir is not None:
         result["exportDir"] = str(export_dir)
     else:
@@ -1483,6 +1545,7 @@ def save_state(job_id: str, payload: dict[str, Any]) -> dict:
         "exportDsk",
         "hiddenLayers",
         "cachedCountries",
+        "attribution",
         "assets",
         "slides",
         "links",
@@ -1527,10 +1590,15 @@ async def post_png(
     if kind == "plate":
         if not plateId:
             raise HTTPException(400, "plateId is required for kind=plate")
+        if variant is not None and variant != "country":
+            raise HTTPException(400, "variant must be country")
         safe_plate = _safe_name(plateId)
         folder = output_dir / "plates"
         plate_name = safe_plate if audience != "cg" or safe_plate.endswith("-cg") else f"{safe_plate}-cg"
-        path = folder / plate_filename(plate_name)
+        name = plate_filename(plate_name)
+        if variant == "country":
+            name = f"{Path(name).stem}-country{Path(name).suffix}"
+        path = folder / name
         with maps_commit(job_id, None, bump=False) as commit:
             commit.stage_bytes(path, body)
         return commit.payload
@@ -1726,6 +1794,24 @@ def ne_places() -> JSONResponse:
     return JSONResponse(load_places(), headers={"Cache-Control": "public, max-age=86400"})
 
 
+def _admin1_country(adm0_a3: str) -> dict:
+    if not re.fullmatch(r"[A-Z]{3}", adm0_a3):
+        raise HTTPException(400, "Invalid country code")
+    try:
+        ensure_admin1()
+    except Admin1FetchError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    data = load_admin1(adm0_a3)
+    if data is None:
+        raise HTTPException(404, f"No admin-1 data for {adm0_a3}")
+    return data
+
+
+@router.get("/ne/admin1/{adm0_a3}")
+def ne_admin1(adm0_a3: str) -> JSONResponse:
+    return JSONResponse(_admin1_country(adm0_a3), headers={"Cache-Control": "public, max-age=86400"})
+
+
 @router.post("/{job_id}/export")
 def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
     _job_or_404(job_id)
@@ -1762,10 +1848,11 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
                     export_dir = export_destination(default_source)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
+            credits = None if payload is None else payload.credits
             updated = _runner().rerun(
                 job_id,
-                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir, persist=is_override: _run_export(
-                    j, lw, cg, dsk, ed, persist_export_dir=persist
+                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir, persist=is_override, cr=credits: _run_export(
+                    j, lw, cg, dsk, ed, persist_export_dir=persist, credits=cr
                 ),
             )
     except RuntimeError as exc:

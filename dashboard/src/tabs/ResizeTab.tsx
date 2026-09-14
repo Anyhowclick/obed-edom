@@ -49,6 +49,7 @@ type ResizeResult = FramingProposal & {
   destPath?: string;
   exportDir?: string;
   resolvedExportDir?: string;
+  proposalExportDir?: string;
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -107,7 +108,6 @@ export function ResizeTab() {
         templatePath: template.path,
         slides: parsedSlides ?? undefined,
         validate,
-        exportDir: exportDir || undefined,
       });
       upsert(created);
       await track(created);
@@ -146,7 +146,7 @@ export function ResizeTab() {
     setBusy(true);
     setError(null);
     try {
-      await track(await applyResize(job.id, decisions));
+      await track(await applyResize(job.id, decisions, exportDir));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -157,15 +157,6 @@ export function ResizeTab() {
   const counts = result?.counts;
   const score = result?.templateScore || result?.goldScore;
   const awaitingFramings = result?.phase === "framing";
-  // A failed Apply leaves the proposal result (phase: "framing") in place so the review
-  // stays visible for a retry — but the export row must unlock, since "pick another
-  // folder" is a common fix for the error, and a locked row can't be changed.
-  const exportDirLocked = awaitingFramings && job?.status !== "error";
-  // Once a proposal is captured, Apply always uses the destination it was proposed
-  // against — freeze the row so it can't drift out from under the pending apply.
-  const frozenExportDir = exportDirLocked
-    ? result?.resolvedExportDir || result?.exportDir || ""
-    : undefined;
   const fitted = result?.fittedSlides || [];
   const offFrame = result?.offFrame || [];
   const overruled = (result?.framingReport || []).filter((r) => r.confirmed && r.fitted);
@@ -209,13 +200,6 @@ export function ResizeTab() {
           }}
           onPath={(path) => setTemplate({ path, name: path.split("/").pop() || path })}
           onError={setError}
-        />
-        <ExportDestinationRow
-          value={frozenExportDir ?? exportDir}
-          onChange={setExportDir}
-          defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
-          onError={setError}
-          disabled={exportDirLocked}
         />
       </div>
       <label className="field">
@@ -275,13 +259,26 @@ export function ResizeTab() {
         </button>
       </div>
       {awaitingFramings && result && job && (
-        <FramingReview
-          proposal={result}
-          jobId={job.id}
-          busy={busy}
-          onSave={saveFramings}
-          onApply={applyFramings}
-        />
+        <>
+          <div className="actions export-actions">
+            <ExportDestinationRow
+              value={exportDir}
+              onChange={setExportDir}
+              defaultLabel={
+                result.proposalExportDir ??
+                (defaultExportDir ? `${defaultExportDir}/ (default)` : result.resolvedExportDir)
+              }
+              onError={setError}
+            />
+          </div>
+          <FramingReview
+            proposal={result}
+            jobId={job.id}
+            busy={busy}
+            onSave={saveFramings}
+            onApply={applyFramings}
+          />
+        </>
       )}
       {result?.destPath && overruled.length > 0 && (
         <p className="note">

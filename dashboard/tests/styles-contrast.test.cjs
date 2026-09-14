@@ -52,3 +52,20 @@ test("component input overrides are prefixed with `input` and ordered after the 
   );
   assert.deepEqual(offenders, []);
 });
+
+test("nothing inside a solid-white on-state pill hard-codes a light ink", () => {
+  const blocks = css.match(/[^{}]+\{[^{}]*\}/g) || [];
+  const badge = blocks.find((b) => b.trim().startsWith(".maps-layers-count"));
+  assert.ok(badge, ".maps-layers-count rule not found");
+  assert.doesNotMatch(badge, /color:\s*var\(--(muted|ink-primary|ink-secondary|ink-tertiary)\)/);
+  assert.match(badge, /color:\s*inherit/);
+});
+
+test("nav buttons no longer carry an audience-colour dot", () => {
+  assert.doesNotMatch(css, /\.nav-btn::before/);
+  assert.doesNotMatch(css, /\.nav-btn\[data-tab="[a-z]+"\]::before/);
+});
+
+test("the deck-toggle checkmarks no longer carry an audience-colour dot", () => {
+  assert.doesNotMatch(css, /\.maps-check\.aud-(lw|cg|dsk)::before/);
+});

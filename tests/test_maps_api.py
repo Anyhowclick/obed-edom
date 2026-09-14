@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 import pytest
 
+from obed_edom import maps_admin1
 from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM, camera_dict
 from obed_edom.maps_keynote import export_maps_job, maps_export_plan
 from obed_edom.web.app import RUNNER, app
@@ -2394,6 +2395,7 @@ def test_delete_and_edit_conflict_leaves_exactly_one_winner():
         "exportDsk",
         "hiddenLayers",
         "cachedCountries",
+        "attribution",
         "assets",
         "slides",
         "links",
@@ -2766,7 +2768,7 @@ def test_export_bumps_state_revision(monkeypatch):
     job = _seed()
     before_revision = int(job["result"].get("stateRevision") or 0)
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
     monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
@@ -2781,7 +2783,7 @@ def test_export_resolves_export_dir_inside_mutation_lock(monkeypatch, tmp_path):
     job = _seed()
     captured = {}
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         captured["export_dir"] = export_dir
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
@@ -2798,7 +2800,7 @@ def test_export_resolves_export_dir_inside_mutation_lock(monkeypatch, tmp_path):
 def test_export_clears_export_dir_with_empty_string(monkeypatch, tmp_path):
     job = _seed()
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
     monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
@@ -2821,7 +2823,7 @@ def test_export_uses_configured_default_export_dir_with_no_override(monkeypatch,
     job = _seed()
     captured = {}
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         captured["export_dir"] = export_dir
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
@@ -2848,7 +2850,7 @@ def test_export_uses_output_root_default_flat_not_private_maps_dir(monkeypatch, 
     job = _seed()
     captured = {}
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         captured["export_dir"] = export_dir
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
@@ -3093,7 +3095,7 @@ def test_export_enqueue_waits_for_admitted_commit(monkeypatch):
 
     captured = {}
 
-    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None, persist_export_dir=True):
+    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None, persist_export_dir=True, credits=None):
         captured["export_lw"] = export_lw
         captured["export_cg"] = export_cg
         captured["export_dsk"] = export_dsk
@@ -3959,3 +3961,168 @@ def test_bootstrap_rows_bumps_state_revision(monkeypatch):
     done_pin = _wait(job["id"])
     assert done_pin["status"] == "done", done_pin.get("error")
     assert int(done_pin["result"]["stateRevision"] or 0) == before + 2
+
+
+def test_document_attribution_defaults_to_stamp():
+    job = _seed()
+    doc = _doc(job)
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["attribution"] == "stamp"
+    latest = client.get(f"/api/jobs/{job['id']}")
+    assert latest.json()["result"]["attribution"] == "stamp"
+
+
+def test_document_attribution_round_trips_credits():
+    job = _seed()
+    doc = _doc(job)
+    doc["attribution"] = "credits"
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["attribution"] == "credits"
+    latest = client.get(f"/api/jobs/{job['id']}")
+    assert latest.json()["result"]["attribution"] == "credits"
+
+
+def test_document_attribution_rejects_unknown_value_as_stamp():
+    job = _seed()
+    doc = _doc(job)
+    doc["attribution"] = "banner"
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["attribution"] == "stamp"
+
+
+def test_export_forwards_credits_to_job(monkeypatch):
+    job = _seed()
+    captured = {}
+
+    def spy(j, **kwargs):
+        captured.update(kwargs)
+        result = dict(getattr(j, "result", None) or {})
+        result["destPath"] = str(Path(result.get("outputDir", ".")) / "spy.key")
+        return result
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", spy)
+    started = client.post(
+        f"/api/maps/{job['id']}/export",
+        json={"credits": ["© OpenStreetMap contributors"]},
+    )
+    assert started.status_code == 200, started.text
+    _wait(job["id"])
+    assert captured.get("credits") == ["© OpenStreetMap contributors"]
+
+
+def test_export_normalises_crlf_in_credits(monkeypatch):
+    job = _seed()
+    captured = {}
+
+    def spy(j, **kwargs):
+        captured.update(kwargs)
+        result = dict(getattr(j, "result", None) or {})
+        result["destPath"] = str(Path(result.get("outputDir", ".")) / "spy.key")
+        return result
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", spy)
+    started = client.post(
+        f"/api/maps/{job['id']}/export",
+        json={"credits": ["Line one\r\nwith CRLF", "Line two\nwith LF", "  ", ""]},
+    )
+    assert started.status_code == 200, started.text
+    _wait(job["id"])
+    assert captured.get("credits") == ["Line one with CRLF", "Line two with LF"]
+
+
+@pytest.fixture
+def admin1_root(tmp_path, monkeypatch):
+    """Point the admin-1 store at a throwaway root already holding a two-country split."""
+    monkeypatch.setattr(maps_admin1, "output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    maps_admin1._admin1.clear()
+    raw = {
+        "features": [
+            {
+                "properties": {
+                    "adm0_a3": "MYS",
+                    "adm1_code": "MYS-1186",
+                    "iso_3166_2": "MY-12",
+                    "name": "Sabah",
+                    "type_en": "State",
+                },
+                "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+            },
+            {
+                "properties": {
+                    "adm0_a3": "MYS",
+                    "adm1_code": "MYS-1187",
+                    "iso_3166_2": "MY-13",
+                    "name": "Sarawak",
+                    "type_en": "State",
+                },
+                "geometry": {"type": "Polygon", "coordinates": [[[2, 2], [3, 2], [3, 3], [2, 2]]]},
+            },
+        ]
+    }
+    maps_admin1.split_admin1(raw, maps_admin1.admin1_dir())
+    yield tmp_path
+    maps_admin1._admin1.clear()
+
+
+def test_ne_admin1_returns_country(admin1_root):
+    response = client.get("/api/maps/ne/admin1/MYS")
+    assert response.status_code == 200
+    names = [f["properties"]["name"] for f in response.json()["features"]]
+    assert names == ["Sabah", "Sarawak"]
+    assert response.headers["cache-control"] == "public, max-age=86400"
+
+
+def test_ne_admin1_rejects_bad_code(admin1_root):
+    assert client.get("/api/maps/ne/admin1/xx").status_code == 400
+    assert client.get("/api/maps/ne/admin1/ZZZ").status_code == 404
+
+
+def test_maps_slide_rejects_bad_highlight():
+    """`/state` funnels every document validation failure through 400 (see `_parse_document`)."""
+    job = _seed()
+    for bad in ("a1:foo", "USAA", "A1:has space", "A1:"):
+        doc = _doc(job)
+        doc["slides"][0]["highlights"] = [bad]
+        assert _save(job, doc).status_code == 400, bad
+
+
+def test_maps_slide_accepts_admin1_highlight():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["highlights"] = ["mys", "A1:MYS-1186"]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["highlights"] == ["MYS", "A1:MYS-1186"]
+
+
+def test_post_png_plate_country_variant():
+    job = _seed()
+    body = _landmark_png()
+    response = client.post(
+        f"/api/maps/{job['id']}/png?plateId=p-s1-s2&kind=plate&variant=country", content=body
+    )
+    assert response.status_code == 200
+    out = Path(job["result"]["outputDir"])
+    assert (out / "plates" / "map BG_p-s1-s2-country.png").read_bytes() == body
+    bad = client.post(
+        f"/api/maps/{job['id']}/png?plateId=p-s1-s2&kind=plate&variant=nope", content=body
+    )
+    assert bad.status_code == 400
+
+
+def test_session_zip_excludes_admin1(admin1_root):
+    from obed_edom import maps_tiles
+
+    (maps_tiles.cache_root() / "planet.json").write_text("{}", encoding="utf-8")
+    job = _seed()
+    assert _save(job, _doc(job)).status_code == 200
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200
+    with zipfile.ZipFile(BytesIO(session.content)) as archive:
+        names = archive.namelist()
+    assert "tile-cache/planet.json" in names, names
+    assert not any("admin1" in name for name in names), names

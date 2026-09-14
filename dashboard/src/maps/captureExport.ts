@@ -1,7 +1,17 @@
 import "./maplibreWorker";
 import { Map as MapLibreMap } from "maplibre-gl";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHillshade, ensureAdmin0Highlights, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
+import {
+  addOverlays,
+  admin1FeaturesInPlay,
+  highlightedCountries,
+  applyHillshade,
+  ensureAdmin0Highlights,
+  ensureLowZoomRaster,
+  loadAdmin0,
+  loadAdmin1,
+} from "./overlays";
+import { isolatePairBaseVisibility, isolatePairCutoutVisibility } from "./captureIsolateVisibility";
 import { countryClipRings } from "./isolate";
 import { stampOsmCropOnCanvas } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
@@ -145,6 +155,7 @@ export type ExportMapOpts = {
   numberPins?: boolean;
   assetBaseUrl?: string;
   isCancelled?: () => boolean;
+  stamp?: boolean;
 };
 
 export async function createExportMap(
@@ -233,7 +244,8 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
       "image/png",
       1,
       opts.hillshade === true,
-      opts.styleId
+      opts.styleId,
+      opts.stamp !== false
     );
   } finally {
     map.remove();
@@ -241,14 +253,16 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
   }
 }
 
-/** Isolated slides render a second still: the highlighted country cut out of the darkened base,
- * so Keynote can stack it above the mask with pins on top. Null when there is nothing to isolate. */
+/** Highlighted slides render a second still: the highlighted area cut out of the base, so Keynote
+ * can stack it above the mask with pins on top. Null when there is nothing highlighted.
+ *
+ * The base always drops the orange, matching today's shipped look. The cutout keeps it only when
+ * the slide is not isolated — an isolate slide's orange lives in neither raster, as it does today. */
 export async function captureIsolatePair(opts: ExportMapOpts): Promise<{ base: Blob; country: Blob } | null> {
-  if (!opts.isolate || !opts.highlights.length) return null;
+  if (!opts.highlights.length) return null;
   const { map, host, surface } = await createExportMap(opts);
   try {
-    map.setPaintProperty("admin0-fill", "fill-opacity", 0);
-    map.setPaintProperty("admin0-line", "line-opacity", 0);
+    isolatePairBaseVisibility(map, opts.highlights);
     await waitIdleForFrame(map, undefined, opts.isCancelled);
     const base = await stampOsmCropOnCanvas(
       map.getCanvas(),
@@ -259,14 +273,18 @@ export async function captureIsolatePair(opts: ExportMapOpts): Promise<{ base: B
       "image/png",
       1,
       opts.hillshade === true,
-      opts.styleId
+      opts.styleId,
+      opts.stamp !== false
     );
 
-    map.setLayoutProperty("isolate-fill", "visibility", "none");
+    isolatePairCutoutVisibility(map, opts.highlights, !!opts.isolate);
     await waitIdleForFrame(map, undefined, opts.isCancelled);
 
     const admin0 = await loadAdmin0();
-    const rings = countryClipRings((admin0?.features || []) as never, opts.highlights);
+    if (opts.highlights.some((h) => h.startsWith("A1:"))) {
+      await Promise.all(highlightedCountries(opts.highlights).map(loadAdmin1));
+    }
+    const rings = countryClipRings((admin0?.features || []) as never, opts.highlights, admin1FeaturesInPlay(opts.highlights));
     const canvas = document.createElement("canvas");
     canvas.width = opts.width;
     canvas.height = opts.height;

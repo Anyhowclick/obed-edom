@@ -208,28 +208,6 @@ body::before {
   letter-spacing: -0.01em;
   transition: var(--transition);
 }
-/* One dot per tool, the same hue the tool's runs carry in History. History and
-   Settings get none — they are not jobs. */
-.nav-btn::before {
-  content: "";
-  flex: 0 0 6px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  margin-right: 10px;
-  background: var(--job-colour, transparent);
-  box-shadow: 0 0 0 1px rgba(7, 7, 10, 0.35);
-}
-/* No dot means no ring either — the fill is transparent but the ring is not. */
-.nav-btn[data-tab="history"]::before,
-.nav-btn[data-tab="settings"]::before { box-shadow: none; }
-.sidebar.collapsed .nav-btn::before { display: none; }
-.nav-btn[data-tab="generate"] { --job-colour: var(--job-generate); }
-.nav-btn[data-tab="check"] { --job-colour: var(--job-check); }
-.nav-btn[data-tab="dsk"] { --job-colour: var(--job-dsk); }
-.nav-btn[data-tab="resize"] { --job-colour: var(--job-resize); }
-.nav-btn[data-tab="maps"] { --job-colour: var(--job-maps); }
-.nav-btn[data-tab="watercolour"] { --job-colour: var(--job-watercolour); }
 .nav-btn:hover { background: var(--bg-surface-glass); color: var(--ink-primary); }
 .nav-btn.active {
   background: var(--bg-surface-solid);
@@ -404,6 +382,25 @@ h3 {
 }
 .actions { display: flex; gap: var(--gap-ctl); margin: 16px 0; flex-wrap: wrap; }
 .export-actions { align-items: center; }
+.export-dest {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-ctl);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.export-dest.inline { display: contents; }
+.export-dest.inline .export-dest-path { flex: 0 1 auto; max-width: 32ch; }
+.export-dest-label { font-size: 12px; color: var(--muted); }
+.export-dest-path {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
 
 /* Control tiers. A container names its tier and every control inside inherits it;
    nothing below reads a raw pixel height. Anything unlisted stays on the lg page tier. */
@@ -1861,20 +1858,34 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   overflow-y: auto;
   margin-bottom: 12px;
   padding: 12px;
-  background: var(--bg-surface-glass-sub);
+  background: linear-gradient(180deg, rgba(0, 229, 255, 0.1), rgba(18, 18, 26, 0.72));
   backdrop-filter: var(--backdrop-glass-card);
   -webkit-backdrop-filter: var(--backdrop-glass-card);
-  border: var(--border-glass);
+  border: 1px solid rgba(0, 229, 255, 0.28);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
 }
-.maps-manual .cap {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted);
-  margin: 0 0 6px;
+.maps-manual-top {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 2px;
 }
-.maps-manual .note { margin: 0; }
+.maps-manual-info { margin: 0; padding: 0; height: var(--ctl-h); min-width: var(--ctl-h); }
+.maps-manual-note {
+  margin: 0;
+  animation: maps-manual-note-in 160ms ease-out;
+}
+.maps-manual-note ul { margin: 0; padding-left: 18px; }
+.maps-manual-note li { font-size: 12px; }
+@keyframes maps-manual-note-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .maps-manual-note { animation: none; }
+}
 .maps-manual-head,
 .maps-manual-row {
   display: grid;
@@ -1885,20 +1896,27 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
 .maps-manual-slides .maps-manual-row { grid-template-columns: 1.2fr 1.2fr 1.6fr 0.7fr 0.7fr auto; }
 .maps-manual-pins .maps-manual-head,
 .maps-manual-pins .maps-manual-row { grid-template-columns: 1.2fr 1.2fr 1.6fr 0.7fr 0.7fr 0.8fr auto; }
-.maps-manual-head { font-size: 12px; color: var(--muted); }
+.maps-manual-head { font-size: 12px; color: var(--ink-secondary); font-weight: 600; letter-spacing: 0.02em; }
 .maps-manual-row input, .maps-manual-row select { padding: 0 9px; min-width: 0; }
 .maps-manual-row input[aria-invalid="true"] { border-color: var(--warn); }
 .maps-manual-actions { display: flex; gap: 8px; align-items: center; }
 .maps-manual-actions .spacer { flex: 1; }
 .maps-manual-errors { color: var(--warn); font-size: 12px; }
 .maps-manual-errors p { margin: 2px 0; }
+.btn.maps-manual-done {
+  background: var(--accent-primary);
+  color: var(--accent-primary-fg);
+  box-shadow: 0 0 20px rgba(184, 246, 75, 0.28);
+}
+.btn.maps-manual-done:hover:not(:disabled) { box-shadow: 0 0 28px rgba(184, 246, 75, 0.4); }
 .maps-layers { position: relative; }
 .maps-layers-btn {
   gap: 6px;
 }
 .maps-layers-count {
   font-size: 12px;
-  color: var(--muted);
+  color: inherit;
+  opacity: 0.72;
   min-width: 0.8em;
 }
 .maps-layers-menu {
@@ -3012,18 +3030,6 @@ input.maps-thumb-title-input:focus {
   font-size: 13px;
   color: var(--ink);
 }
-/* The switch itself stays green when on — that is state. The dot is the audience. */
-.maps-check.aud-lw::before,
-.maps-check.aud-cg::before,
-.maps-check.aud-dsk::before {
-  content: "";
-  flex: 0 0 10px;
-  height: 10px;
-  border-radius: 50%;
-}
-.maps-check.aud-lw::before { background: var(--aud-lw); }
-.maps-check.aud-cg::before { background: var(--aud-cg); }
-.maps-check.aud-dsk::before { background: var(--aud-dsk); }
 .maps-check input[type="radio"] {
   accent-color: var(--sky);
   width: auto;
