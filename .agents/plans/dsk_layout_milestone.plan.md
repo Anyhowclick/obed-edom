@@ -351,3 +351,10 @@ cyan highlight box *can* be preserved (geometry-only writes keep builds) and wou
 through `dsk_stage_export.py`, **but only if we do not write a text size on that slide** —
 slide 17's `dissolve character` build was destroyed exactly that way. Accept a refusal for
 GW 7, or accept the slide with the arrows dropped and the highlight box's LineDraw kept?
+
+## Owner decisions (2026-09-14)
+
+- **Q1 — two-column:** KEEP D1b's single-slide hand two-column (matches gold 29/30/34); do not adopt the Pre/Post split.
+- **Q2 — 4-line verses:** SPLIT into two or more slides (reuse the existing split path with the layout's slot as the budget); never hand-place a 267 panel.
+- **Q3 — GW payload 7:** KEEP THE ARROWS TOO. Connection lines survive copy-and-transform; since they have no AppleScript handle, piece L6 moves them OFFLINE after the live pass with the same affine as their sibling group (geometry-only write, builds preserved) instead of refusing. The slide's text must not be resized (character/line builds die on a size write) — refuse with a named reason only if its text does not fit unscaled.
+- Live verification is deferred until Keynote is free (no Keynote 2026-09-14 ~11:50–12:50).
