@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/overlays.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { movieObjectsAt, withoutRevealed } = require(path.join(out, "overlays.js"));
+const { movieObjectsAt, withoutRevealed, MOVIE_LABEL_FADE } = require(path.join(out, "overlays.js"));
 
 function pin(id) {
   return { id, kind: "pin", name: id, lat: 0, lon: 0 };
@@ -93,4 +93,75 @@ test("movieObjectsAt opacity ramps are unaffected for plain objects", () => {
   const atMid = movieObjectsAt(from, to, 0.75, "fade");
   const toItem = atMid.find((o) => o.id === "to-to-1");
   assert.equal(toItem.opacity, 0.5);
+});
+
+function labelOpacityOf(objects, id) {
+  const item = objects.find((o) => o.id === id);
+  return item ? item.labelOpacity : undefined;
+}
+
+for (const transition of ["fade", "hold"]) {
+  test(`movieObjectsAt (${transition}) label opacity fades source out over [0, MOVIE_LABEL_FADE]`, () => {
+    const from = [pin("from-1")];
+    const to = [pin("to-1")];
+    assert.equal(labelOpacityOf(movieObjectsAt(from, to, 0, transition), "from-1"), 1);
+    assert.ok(Math.abs(labelOpacityOf(movieObjectsAt(from, to, 0.1, transition), "from-1") - (1 - 0.1 / MOVIE_LABEL_FADE)) < 1e-9);
+    assert.equal(labelOpacityOf(movieObjectsAt(from, to, 0.5, transition), "from-1"), 0);
+    assert.equal(labelOpacityOf(movieObjectsAt(from, to, 0.9, transition), "from-1"), 0);
+  });
+
+  test(`movieObjectsAt (${transition}) label opacity fades destination in over [1 - MOVIE_LABEL_FADE, 1]`, () => {
+    const from = [pin("from-1")];
+    const to = [pin("to-1")];
+    const belowWindow = transition === "hold" ? undefined : 0;
+    assert.equal(labelOpacityOf(movieObjectsAt(from, to, 0, transition), "to-to-1"), belowWindow);
+    assert.equal(labelOpacityOf(movieObjectsAt(from, to, 0.5, transition), "to-to-1"), belowWindow);
+    assert.ok(Math.abs(labelOpacityOf(movieObjectsAt(from, to, 0.9, transition), "to-to-1") - (0.9 - (1 - MOVIE_LABEL_FADE)) / MOVIE_LABEL_FADE) < 1e-9);
+    const atEnd = movieObjectsAt(from, to, 1, transition);
+    const endId = transition === "hold" ? "to-1" : "to-to-1";
+    assert.ok(Math.abs(labelOpacityOf(atEnd, endId) - 1) < 1e-9);
+  });
+}
+
+test("movieObjectsAt fade marker opacity is unchanged from before by the labelOpacity addition", () => {
+  const from = [pin("from-1")];
+  const to = [pin("to-1")];
+  for (const t of [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1]) {
+    const objects = movieObjectsAt(from, to, t, "fade");
+    const fromItem = objects.find((o) => o.id === "from-1");
+    const toItem = objects.find((o) => o.id === "to-to-1");
+    assert.equal(fromItem.opacity, Math.max(0, 1 - 2 * t));
+    assert.equal(toItem.opacity, Math.max(0, 2 * t - 1));
+  }
+});
+
+test("movieObjectsAt hold at t=0.9 keeps the destination marker hidden while its label fades in", () => {
+  const from = [pin("from-1")];
+  const to = [pin("to-1")];
+  const objects = movieObjectsAt(from, to, 0.9, "hold");
+  const destItem = objects.find((o) => o.id === "to-to-1");
+  assert.equal(destItem.opacity, 0);
+  assert.ok(destItem.labelOpacity > 0);
+});
+
+test("movieObjectsAt hold at t=1 shows the destination marker at full opacity", () => {
+  const from = [pin("from-1")];
+  const to = [pin("to-1")];
+  const objects = movieObjectsAt(from, to, 1, "hold");
+  const destItem = objects.find((o) => o.id === "to-1");
+  assert.equal(destItem.opacity, 1);
+});
+
+test("movieObjectsAt hold marker opacity is unchanged from before by the labelOpacity addition", () => {
+  const from = [pin("from-1")];
+  const to = [pin("to-1")];
+  for (const t of [0, 0.1, 0.5, 0.9]) {
+    const objects = movieObjectsAt(from, to, t, "hold");
+    const fromItem = objects.find((o) => o.id === "from-1");
+    assert.equal(fromItem.opacity, 1);
+    assert.ok(!objects.some((o) => o.id === "to-1"));
+  }
+  const atEnd = movieObjectsAt(from, to, 1, "hold");
+  assert.deepEqual(atEnd.map((o) => o.id), ["to-1"]);
+  assert.equal(atEnd[0].opacity, 1);
 });

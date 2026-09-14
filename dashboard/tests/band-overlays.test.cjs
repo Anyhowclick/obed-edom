@@ -88,6 +88,19 @@ test("BandOverlays: box style is k/bandTop-mapped band-local coords (matches obj
   assert.match(markup, /height:30px/);
 });
 
+test("BandOverlays: center (LW) frame renders an LW label", () => {
+  const markup = render({ splitCg: false, fullWall: false });
+  assert.ok(markup.includes('class="maps-crop-frame center"'));
+  assert.ok(markup.includes('class="maps-crop-lw-label">LW</span>'));
+});
+
+test("BandOverlays: FW frame renders an FW label, not LW", () => {
+  const markup = render({ splitCg: false, fullWall: true });
+  assert.ok(markup.includes('class="maps-crop-frame fw"'));
+  assert.ok(markup.includes('class="maps-crop-fw-label">FW</span>'));
+  assert.ok(!markup.includes("maps-crop-lw-label"));
+});
+
 test("BandOverlays: no box means no object layer at all", () => {
   const markup = render({ box: null });
   assert.ok(!markup.includes("maps-object-layer"));
@@ -141,6 +154,39 @@ test("styles.css: .maps-snap-guide is click-through and ordered above the crop o
   const cropZ = zIndexOf(cropOverlay);
   const guideZ = zIndexOf(guide);
   assert.ok(cropZ === null || guideZ === null || cropZ <= guideZ, "crop overlay must not out-rank the snap guide");
+});
+
+test("styles.css: FW crop frame/label are neutral white, LW stays --aud-lw, CG stays plum", () => {
+  const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
+  const block = (selector) => {
+    const m = css.match(new RegExp(selector.replace(/[.]/g, "\\.") + "\\s*\\{([^}]*)\\}"));
+    assert.ok(m, `missing ${selector} block`);
+    return m[1];
+  };
+  assert.match(block(".maps-crop-frame.fw"), /border-color:\s*rgba\(255,\s*255,\s*255,\s*0\.75\)/);
+  assert.match(block(".maps-crop-fw-label"), /color:\s*#FFFFFF/);
+  assert.match(block(".maps-crop-frame"), /border:\s*2px solid var\(--aud-lw\)/);
+  assert.match(block(".maps-crop-frame.cg"), /border-color:\s*var\(--plum\)/);
+  const cgLabelOverride = css.match(/\.maps-crop-cg-label\s*\{\s*top:\s*8px;[^}]*\}/);
+  assert.ok(cgLabelOverride, "missing .maps-crop-cg-label colour override block");
+  assert.match(cgLabelOverride[0], /color:\s*var\(--plum\)/);
+});
+
+test("styles.css: .maps-manual-pins tints gold, .maps-manual stays teal", () => {
+  const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
+  const block = (selector) => {
+    const m = css.match(new RegExp(selector.replace(/[.]/g, "\\.") + "\\s*\\{([^}]*)\\}"));
+    assert.ok(m, `missing ${selector} block`);
+    return m[1];
+  };
+  const manual = block(".maps-manual");
+  assert.match(manual, /rgba\(0, 229, 255/);
+  const manualPins = block(".maps-manual-pins");
+  assert.match(manualPins, /rgba\(255, 199, 44/);
+  assert.match(manualPins, /background:/);
+  assert.match(manualPins, /border:/);
+  const done = block(".maps-manual-pins .btn.maps-manual-done");
+  assert.match(done, /var\(--accent-collab\)/);
 });
 
 test("MapView.tsx: uses previewLayout from ./types and no longer computes inner height as 1080 * scale", () => {
