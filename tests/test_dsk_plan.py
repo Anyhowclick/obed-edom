@@ -1159,12 +1159,16 @@ def test_gw_deck_builds_and_categories():
 
 
 def test_dsk_deck_builds():
+    # Gold deck edited by the owner 2026-09-14 (slide 5: 1 -> 3 builds: group
+    # "Elohim (Plural)" apple:dissolve, shape LineDraw, plus one connection-line
+    # build; a top-level connection-line build was added alongside the pre-existing
+    # group and shape builds).
     _require_deck(DSK_DECK)
     classes = {c.number: c for c in classify_deck(DSK_DECK)}
     assert {n: c.category for n, c in classes.items()} == DSK_CATEGORIES
     built_numbers = {n for n, c in classes.items() if c.build_count > 0}
     assert built_numbers == {5, 13, 14, 17, 26, 29, 30}
-    DSK_BUILD_COUNTS = {5: 1, 13: 1, 14: 1, 17: 1, 26: 1, 29: 2, 30: 2}
+    DSK_BUILD_COUNTS = {5: 3, 13: 1, 14: 1, 17: 1, 26: 1, 29: 2, 30: 2}
     assert {n: c.build_count for n, c in classes.items() if c.build_count > 0} == DSK_BUILD_COUNTS
     # Slide 13's build resolves directly to its top-level movie (movie:0) via
     # iwa_builds.deck_builds; movie_count and build_count both being > 0 is what
