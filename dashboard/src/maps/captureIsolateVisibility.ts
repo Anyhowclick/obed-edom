@@ -39,14 +39,14 @@ export function setHighlightOpacity(map: CaptureMapLike, value: number | null, h
 }
 
 /** Hides the highlight layers for the "base" capture of an isolate pair — the base always drops
- * the orange, regardless of isolate mode. */
+ * the highlight, regardless of isolate mode. */
 export function isolatePairBaseVisibility(map: CaptureMapLike, highlights: string[]): void {
   setHighlightOpacity(map, 0, highlights);
 }
 
 /** The cutout capture's toggle. The isolate mask itself must never bake into either raster, so
- * it is hidden first, unconditionally; the highlight orange only returns for a non-isolated
- * slide (an isolated slide's orange lives in neither raster, matching the base). */
+ * it is hidden first, unconditionally; the highlight colour only returns for a non-isolated
+ * slide (an isolated slide's highlight lives in neither raster, matching the base). */
 export function isolatePairCutoutVisibility(map: CaptureMapLike, highlights: string[], isolated: boolean): void {
   if (map.getLayer("isolate-fill")) map.setLayoutProperty("isolate-fill", "visibility", "none");
   if (!isolated) setHighlightOpacity(map, null, highlights);

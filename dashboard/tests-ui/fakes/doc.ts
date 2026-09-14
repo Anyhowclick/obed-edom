@@ -29,7 +29,7 @@ export function makeDoc(overrides: Partial<MapsDocument> = {}): MapsDocument {
     exportDsk: false,
     hiddenLayers: [],
     cachedCountries: [],
-    attribution: "stamp",
+    attribution: "credits",
     assets: [],
     slides: [makeSlide()],
     links: [],

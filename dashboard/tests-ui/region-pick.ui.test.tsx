@@ -1,8 +1,10 @@
 import { act, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flushMicrotasks, loadAdmin0Stub, loadAdmin1Stub, renderMapsTab } from "./renderMapsTab";
+import { flushMicrotasks, loadAdmin0Stub, loadAdmin1Stub, renderMapsTab, tick } from "./renderMapsTab";
 import { MAPS_PICK_MODE_KEY } from "../src/prefs";
 import { makeCamera, makeDoc, makeJob, makeSlide } from "./fakes/doc";
+import { mapsApiScript } from "./fakes/mapsApi";
+import type { MapsIsolate } from "../src/maps/types";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -178,7 +180,9 @@ describe("Pick: Countries | Regions", () => {
 
 describe("Isolate toggle label", () => {
   it("reads Isolate OFF by default and Isolate ON after toggling", async () => {
-    await renderMapsTab();
+    await renderMapsTab({
+      job: makeJob({ result: { ...makeDoc({ slides: [makeSlide({ highlights: ["SGP"] })] }), stateRevision: 1 } }),
+    });
     await openProperties();
 
     const checkbox = screen.getByRole("checkbox", { name: /Isolate/ });
@@ -189,5 +193,90 @@ describe("Isolate toggle label", () => {
     });
 
     expect(screen.getByText("ON")).toBeInTheDocument();
+  });
+
+  it("is absent when the slide has no highlights", async () => {
+    await renderMapsTab();
+    await openProperties();
+
+    expect(screen.queryByRole("checkbox", { name: /Isolate/ })).not.toBeInTheDocument();
+  });
+
+  it("disappears, and isolate clears, once the last highlight chip is removed", async () => {
+    await renderMapsTab({
+      job: makeJob({
+        result: {
+          ...makeDoc({ slides: [makeSlide({ highlights: ["SGP"], isolate: { mode: "darken", strength: 0.6 } })] }),
+          stateRevision: 1,
+        },
+      }),
+    });
+    await openProperties();
+
+    expect(screen.getByRole("checkbox", { name: /Isolate/ })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Remove highlight"));
+    });
+    await tick(500);
+
+    expect(screen.queryByRole("checkbox", { name: /Isolate/ })).not.toBeInTheDocument();
+    const calls = mapsApiScript.saveMapsState.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const slides = calls[calls.length - 1].document.slides as Array<{ id: string; isolate?: unknown }>;
+    const lastSlide = slides.find((s) => s.id === "slide-1");
+    expect(lastSlide?.isolate).toBeUndefined();
+  });
+
+  it("clears the CG override's isolate on its last highlight chip without touching LW", async () => {
+    const lwIsolate: MapsIsolate = { mode: "darken", strength: 0.6 };
+    const cgIsolate: MapsIsolate = { mode: "darken", strength: 0.6 };
+    await renderMapsTab({
+      job: makeJob({
+        result: {
+          ...makeDoc({
+            slides: [
+              makeSlide({
+                highlights: ["SGP"],
+                isolate: lwIsolate,
+                cg: {
+                  camera: makeCamera(),
+                  style: "positron",
+                  highlights: ["MYS"],
+                  churches: [],
+                  isolate: cgIsolate,
+                },
+              }),
+            ],
+          }),
+          stateRevision: 1,
+        },
+      }),
+    });
+    await openProperties();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "CG" }));
+    });
+    await flushMicrotasks();
+
+    expect(screen.getByRole("checkbox", { name: /Isolate/ })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Remove highlight"));
+    });
+    await tick(500);
+
+    expect(screen.queryByRole("checkbox", { name: /Isolate/ })).not.toBeInTheDocument();
+    const calls2 = mapsApiScript.saveMapsState.calls;
+    expect(calls2.length).toBeGreaterThan(0);
+    const slides2 = calls2[calls2.length - 1].document.slides as Array<{
+      id: string;
+      isolate?: unknown;
+      cg?: { isolate?: unknown };
+    }>;
+    const lastSlide2 = slides2.find((s) => s.id === "slide-1");
+    expect(lastSlide2?.cg?.isolate).toBeUndefined();
+    expect(lastSlide2?.isolate).toEqual(lwIsolate);
   });
 });

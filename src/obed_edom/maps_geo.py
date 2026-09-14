@@ -42,7 +42,7 @@ DEFAULT_POINT_ZOOM = 8
 
 SEA_OVERVIEW_BBOX = {"west": 70.0, "south": -42.0, "east": 155.0, "north": 28.0}
 
-DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows")
+DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows", "labels", "boundaries")
 
 
 def slide_hidden_layers(slide: dict[str, Any]) -> list[str]:
@@ -521,3 +521,8 @@ def geocode(query: str, *, wait: bool = False) -> dict[str, Any]:
                 "placeType": "country",
             }
     return nominatim_search(text, wait=wait)
+
+
+def default_landmark_size(asset_width: int) -> int:
+    """Spans roughly a third to two-thirds of the 1920 px CG; never upscales a tiny asset beyond native px."""
+    return int(max(240, min(1600, min(asset_width, 1920 // 3 * 2))))

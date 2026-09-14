@@ -7,32 +7,32 @@ zoom stay out of the cache key.
 
 Label pills are the exception: a rounded rectangle is NOT scale-invariant
 (stretching one ovals its corners), so `render_label_pill` renders at the exact
-placement size in points and the cache key carries that size (36 widths x 1
-colour bounds the file count).
+placement size in points and the cache key carries that size (callers must
+pass whole-pixel widths/heights, so the file count is bounded by the distinct
+rounded pill sizes a deck actually exports, not a fixed constant).
 
-Changing `_TAIL_W`, `_TAIL_TOP`, `_HOLE`, `PIN_ASPECT`, `DOT_PX`,
-`SUPERSAMPLE` or `LABEL_RADIUS_FRAC` changes the pixels behind a cached
-filename and requires bumping `RENDER_VERSION`.
+Changing `_HOLE`, `PIN_ASPECT`, `DOT_PX`, `SUPERSAMPLE` or
+`LABEL_RADIUS_FRAC` changes the pixels behind a cached filename and requires
+bumping `RENDER_VERSION`.
 """
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-RENDER_VERSION = 2
+RENDER_VERSION = 3
 
 DOT_PX = 512
-PIN_ASPECT = 1.08
+PIN_ASPECT = 1.45
 SUPERSAMPLE = 4
 
 # Gold_Wall_Input.key slide 8: corner scalar 9.57 at h~46 -> radius ~= 0.21*h.
 LABEL_PILL_RGB = (0xEE * 257, 0x22 * 257, 0x0C * 257)
 LABEL_RADIUS_FRAC = 0.21
 
-_TAIL_W = 0.46
-_TAIL_TOP = 0.68
 _HOLE = 0.36
 
 
@@ -67,9 +67,12 @@ def render_drop_pin(color: tuple[int, int, int]) -> Image.Image:
     image = Image.new("RGBA", (w, h), (*rgb, 0))
     draw = ImageDraw.Draw(image)
     fill = (*rgb, 255)
-    tail_w = w * _TAIL_W
+    r = w / 2
+    d = h - r
+    contact_y = r + r * r / d
+    contact_half_w = r * math.sqrt(d * d - r * r) / d
     draw.polygon(
-        [((w - tail_w) / 2, w * _TAIL_TOP), ((w + tail_w) / 2, w * _TAIL_TOP), (w / 2, h)],
+        [(w / 2 - contact_half_w, contact_y), (w / 2 + contact_half_w, contact_y), (w / 2, h)],
         fill=fill,
     )
     draw.ellipse((0, 0, w - 1, w - 1), fill=fill)

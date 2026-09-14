@@ -58,11 +58,24 @@ test("the ＋ menu labels are terse — no trailing ellipsis", () => {
 
 test("the highlight list is captioned \"Selected regions\", not \"Orange countries\"", () => {
   const text = src("tabs/MapsTab.tsx");
-  assert.match(text, /<div className="cap">\s*Selected regions\s*<\/div>/);
+  assert.match(text, /<InspSection id="regions" title="Selected regions">/);
   assert.doesNotMatch(text, /Orange countries/);
 });
 
 test("the export checkboxes no longer carry an audience-colour class", () => {
   const text = src("tabs/MapsTab.tsx");
   assert.doesNotMatch(text, /className="maps-check aud-(lw|cg|dsk)"/);
+});
+
+test("the Countries/Regions segmented indicator carries --seg-n so its width isn't hard-coded", () => {
+  const text = src("tabs/MapsTab.tsx");
+  assert.match(text, /"--seg-i":\s*pickRegions\s*\?\s*1\s*:\s*0,\s*"--seg-n":\s*2/);
+
+  const ind = blocks().find((b) => b.selector === ".seg-slide-ind");
+  assert.ok(ind, ".seg-slide-ind rule not found");
+  assert.match(ind.body, /width:\s*calc\(100%\s*\/\s*var\(--seg-n/);
+  assert.doesNotMatch(ind.body, /width:\s*50%/);
+
+  const reducedMotion = css.match(/@media \(prefers-reduced-motion: reduce\) \{[^}]*\.seg-slide-ind[^}]*\}[^}]*\}/);
+  assert.ok(reducedMotion, "missing reduced-motion rule for .seg-slide-ind");
 });

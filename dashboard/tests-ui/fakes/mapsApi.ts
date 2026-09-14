@@ -18,6 +18,7 @@ let saveCalls: Array<{ id: string; document: Record<string, unknown>; expectedRe
 
 let staleOnce: { stateRevision: number } | null = null;
 let postMapsPngCalls: PostMapsPngOpts[] = [];
+let lastSavedDocument: Record<string, unknown> | null = null;
 
 let renameFailOnce: Error | null = null;
 let renameCalls: Array<{ id: string; name: string }> = [];
@@ -51,7 +52,8 @@ export const saveMapsState = vi.fn<typeof actual.saveMapsState>(async (id: SaveM
     saveDeferOnce = null;
     return deferred;
   }
-  return makeJob({ id, result: { ...document, stateRevision: expectedRevision + 1 } });
+  lastSavedDocument = { ...document, stateRevision: expectedRevision + 1 };
+  return makeJob({ id, result: lastSavedDocument });
 });
 
 export const postMapsPng = vi.fn<typeof actual.postMapsPng>(async (id: PostMapsPngArgs[0], _blob: PostMapsPngArgs[1], opts: PostMapsPngOpts = {}): Promise<Job> => {
@@ -60,6 +62,11 @@ export const postMapsPng = vi.fn<typeof actual.postMapsPng>(async (id: PostMapsP
     const { stateRevision } = staleOnce;
     staleOnce = null;
     throw new actual.MapsStaleThumbnailError(stateRevision);
+  }
+  const baseDocument = lastSavedDocument ?? getJobResolution?.result;
+  if (baseDocument) {
+    const stateRevision = Number(baseDocument.stateRevision ?? 0) + 1;
+    return makeJob({ id, result: { ...baseDocument, stateRevision } });
   }
   return makeJob({ id });
 });
@@ -119,13 +126,23 @@ export const planMapsTiles = vi.fn<typeof actual.planMapsTiles>(async () => plan
 
 export const prefetchMapsTiles = vi.fn<typeof actual.prefetchMapsTiles>(async () => prefetchMapsTilesResolution);
 
+let getSettingsDeferOnce: Promise<Settings> | null = null;
+
 export const getSettings = vi.fn<typeof actual.getSettings>(
-  async (): Promise<Settings> => ({
-    reuseThreshold: 0,
-    reusePairings: false,
-    reusePreviews: false,
-    defaultExportDir: "",
-  })
+  async (): Promise<Settings> => {
+    if (getSettingsDeferOnce) {
+      const deferred = getSettingsDeferOnce;
+      getSettingsDeferOnce = null;
+      return deferred;
+    }
+    return {
+      reuseThreshold: 0,
+      reusePairings: false,
+      reusePreviews: false,
+      defaultExportDir: "",
+      highlightColour: "#e8772a",
+    };
+  }
 );
 
 export function resetMapsApiScript() {
@@ -134,6 +151,7 @@ export function resetMapsApiScript() {
   saveCalls = [];
   staleOnce = null;
   postMapsPngCalls = [];
+  lastSavedDocument = null;
   renameFailOnce = null;
   renameCalls = [];
   getJobResolution = null;
@@ -159,6 +177,7 @@ export function resetMapsApiScript() {
   planMapsTiles.mockClear();
   prefetchMapsTiles.mockClear();
   getSettings.mockClear();
+  getSettingsDeferOnce = null;
 }
 
 export const mapsApiScript = {
@@ -231,6 +250,11 @@ export const mapsApiScript = {
   cancelMapsExport: {
     get calls() {
       return cancelMapsExportCalls;
+    },
+  },
+  getSettings: {
+    deferOnce(promise: Promise<Settings>) {
+      getSettingsDeferOnce = promise;
     },
   },
 };

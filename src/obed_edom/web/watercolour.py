@@ -18,6 +18,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
+from obed_edom.maps_geo import default_landmark_size
 from obed_edom.paths import ensure_export_dir, export_destination, output_root, validate_export_dir
 from obed_edom.watercolour import MAX_ENCODED_BYTES, Cancel, WatercolourCancelled, WatercolourError, WatercolourOptions, _has_paint, convert, decode_image, grabcut_mask, render
 
@@ -416,9 +417,7 @@ def cancel_watercolour(job_id: str) -> dict:
     return _runner().public_dict(cancelled)
 
 
-def _default_landmark_size(asset_width: int) -> int:
-    """Spans roughly a third to two-thirds of the 1920 px CG; never upscales a tiny asset beyond native px."""
-    return int(max(240, min(1600, min(asset_width, 1920 // 3 * 2))))
+_default_landmark_size = default_landmark_size
 
 
 @router.post("/{job_id}/items/{item_id}/add-to-map/{maps_job_id}/{slide_id}")

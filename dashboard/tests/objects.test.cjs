@@ -15,16 +15,29 @@ const compile = spawnSync(runtime, [
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 const { OBJECT_SIZE_MIN, OBJECT_SIZE_MAX, SIZE_ZOOM_MIN, SIZE_ZOOM_MAX, defaultLandmarkSize, defaultObjectSize, pasteRebase, rebaseForPaste, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
 
-test("defaultObjectSize matches DOT_SIZE/DROP_SIZE (maps_keynote.py) and the landmark default", () => {
+const typesOut = fs.mkdtempSync(path.join(os.tmpdir(), "maps-objects-types-"));
+const typesCompile = spawnSync(runtime, [
+  path.join(root, "node_modules/typescript/bin/tsc"), "--module", "commonjs", "--target", "ES2020", "--skipLibCheck", "true",
+  "--outDir", typesOut, path.join(root, "src/maps/types.ts"),
+], { cwd: root, encoding: "utf8" });
+assert.equal(typesCompile.status, 0, typesCompile.stderr || typesCompile.stdout);
+const { DEFAULT_HIDDEN_LAYERS } = require(path.join(typesOut, "types.js"));
+
+test("DEFAULT_HIDDEN_LAYERS mirrors maps_geo.DEFAULT_HIDDEN_LAYERS", () => {
+  assert.deepEqual(DEFAULT_HIDDEN_LAYERS, ["roadnames", "arrows", "labels", "boundaries"]);
+});
+
+test("defaultObjectSize matches DOT_SIZE/DROP_SIZE (maps_keynote.py) and defaultLandmarkSize", () => {
   assert.equal(defaultObjectSize("dot"), 28);
   assert.equal(defaultObjectSize("dropPin"), 64);
-  assert.equal(defaultObjectSize("landmark"), 120);
+  assert.equal(defaultObjectSize("landmark", 600), defaultLandmarkSize(600));
+  assert.equal(defaultObjectSize("landmark"), defaultLandmarkSize(0));
 });
 
 test("effectiveObjectSize falls back to the per-kind default when size is missing", () => {
   assert.equal(effectiveObjectSize({ kind: "dot" }, 6), 28);
   assert.equal(effectiveObjectSize({ kind: "dropPin" }, 6), 64);
-  assert.equal(effectiveObjectSize({ kind: "landmark" }, 6), 120);
+  assert.equal(effectiveObjectSize({ kind: "landmark", assetWidth: 600 }, 6), defaultLandmarkSize(600));
 });
 
 test("defaultLandmarkSize floors tiny assets at 240", () => {

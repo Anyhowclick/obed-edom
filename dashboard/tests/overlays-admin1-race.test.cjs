@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/overlays.ts"), path.join(root, "src/maps/adminSync.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { ensureAdmin0Highlights, syncAdmin1Source, applyHighlights, applyAdmin1Highlights, applyIsolate, addOverlays } = require(path.join(out, "overlays.js"));
+const { ensureAdmin0Highlights, syncAdmin1Source, applyHighlights, applyAdmin1Highlights, applyIsolate, addOverlays, ensureLabelPillImage, labelPillImageId, LABEL_PILL_BUCKETS } = require(path.join(out, "overlays.js"));
 const { AdminSyncGate } = require(path.join(out, "adminSync.js"));
 
 /** A fake MapLibre map recording every mutation `ensureAdmin0Highlights`/`syncAdmin1Source`
@@ -21,6 +21,7 @@ const { AdminSyncGate } = require(path.join(out, "adminSync.js"));
 function fakeMap() {
   const sources = new Map();
   const layers = new Map();
+  const images = new Map();
   const calls = [];
   return {
     calls,
@@ -46,8 +47,34 @@ function fakeMap() {
     setLayoutProperty: (id, prop, value) => calls.push(["setLayoutProperty", id, prop, value]),
     setFeatureState: (target, state) => calls.push(["setFeatureState", target, state]),
     getStyle: () => ({ layers: [] }),
+    images,
+    hasImage: (id) => images.has(id),
+    addImage: (id, data, options) => {
+      calls.push(["addImage", id]);
+      images.set(id, { data, options });
+    },
   };
 }
+
+/** Canvas stub: `labelPillImage` only needs a 2d context that records nothing. */
+global.document = {
+  createElement: () => ({
+    width: 0,
+    height: 0,
+    getContext: () => ({
+      beginPath() {},
+      roundRect() {},
+      fill() {},
+      getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+    }),
+  }),
+};
+global.ImageData = class {
+  constructor(width, height) {
+    this.width = width;
+    this.height = height;
+  }
+};
 
 function deferred() {
   let resolve;
@@ -471,4 +498,47 @@ test("dispose then reuse: a tracked promise outstanding at dispose must not sett
   await fresh;
   await settled;
   assert.equal(settledDone, true, "settled() must resolve once the new lifecycle's own sync finishes");
+});
+
+test("ensureLabelPillImage registers one stretchable pill per scale bucket", () => {
+  const map = fakeMap();
+  ensureLabelPillImage(map);
+  for (const bucket of LABEL_PILL_BUCKETS) {
+    const entry = map.images.get(labelPillImageId(bucket));
+    assert.ok(entry, `missing pill variant for bucket ${bucket}`);
+    assert.equal(entry.options.pixelRatio, 2);
+    assert.equal(entry.options.stretchX.length, 1);
+    assert.equal(entry.options.stretchY.length, 1);
+    assert.equal(entry.options.content.length, 4);
+    const [left, top, right, bottom] = entry.options.content;
+    assert.ok(left > 0 && top > 0 && right > left && bottom > top);
+  }
+});
+
+test("ensureLabelPillImage scales pill padding and corner with the bucket", () => {
+  const map = fakeMap();
+  ensureLabelPillImage(map);
+  const one = map.images.get(labelPillImageId(1)).options;
+  const four = map.images.get(labelPillImageId(4)).options;
+  assert.equal(four.content[0], one.content[0] * 4);
+  assert.equal(four.content[1], one.content[1] * 4);
+  assert.equal(four.stretchX[0][0], one.stretchX[0][0] * 4);
+});
+
+test("ensureLabelPillImage is idempotent and re-registers after a style reload", () => {
+  const map = fakeMap();
+  ensureLabelPillImage(map);
+  const first = map.calls.filter((c) => c[0] === "addImage").length;
+  assert.equal(first, LABEL_PILL_BUCKETS.length);
+  ensureLabelPillImage(map);
+  assert.equal(map.calls.filter((c) => c[0] === "addImage").length, first);
+  map.images.clear(); // a style reload drops every registered image
+  ensureLabelPillImage(map);
+  assert.equal(map.calls.filter((c) => c[0] === "addImage").length, first * 2);
+});
+
+test("addOverlays registers the label pill images", async () => {
+  const map = fakeMap();
+  await addOverlays(map, [], [], null, "positron", false, undefined, 1, undefined, [], () => true);
+  for (const bucket of LABEL_PILL_BUCKETS) assert.ok(map.hasImage(labelPillImageId(bucket)));
 });
