@@ -268,10 +268,19 @@ def _build_export_script(
         "        end ignoring",
         "      end repeat",
         "      set blackLayoutName to blackName",
-        "      set donorSlide to missing value",
     ]
     if layout_template is not None:
-        lines += dsk_live.layout_import_lines("theDoc", "approvedBlackNames", layout_template)
+        lines += ['      if blackLayoutName is "" then']
+        lines += dsk_live.layout_import_lines("theDoc", list(black_layout_names), layout_template)
+        lines += [
+            "        repeat with lay in slide layouts of theDoc",
+            "          set lname to (name of lay as text)",
+            "          ignoring case",
+            '            if blackLayoutName is "" and lname is in approvedBlackNames then set blackLayoutName to lname',
+            "          end ignoring",
+            "        end repeat",
+            "      end if",
+        ]
     lines += [
         '      if blackLayoutName is "" then',
         '        error "no layout matching \\"black\\" resolvable in the FW deck or layout_template"',
@@ -285,14 +294,13 @@ def _build_export_script(
         "      end repeat",
         "      if targetLayout is missing value then error \"resolved layout name not found in theDoc\"",
         "      repeat with s in slides of theDoc",
-        "        if s is not donorSlide then set base layout of s to targetLayout",
+        "        set base layout of s to targetLayout",
         "      end repeat",
         "      repeat with s in slides of theDoc",
-        "        if s is not donorSlide and (name of base layout of s as text) is not blackLayoutName then",
+        "        if (name of base layout of s as text) is not blackLayoutName then",
         '          error "base layout verify failed"',
         "        end if",
         "      end repeat",
-        "      if donorSlide is not missing value then delete donorSlide",
         "      repeat with s in slides of theDoc",
         "        set skipped of s to true",
         "      end repeat",

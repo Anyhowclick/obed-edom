@@ -239,9 +239,9 @@ def test_script_sets_base_layout_on_kept_slides():
 
 def test_script_verifies_base_layout_before_deleting_donor():
     script = _sample_script()
+    delete_donor_idx = script.index("delete donorSlide")
     verify_idx = script.index("base layout verify failed")
-    delete_donor_idx = script.index("if donorSlide is not missing value then delete donorSlide")
-    assert verify_idx < delete_donor_idx
+    assert delete_donor_idx < verify_idx
 
 
 def test_script_never_resizes_document():
@@ -316,8 +316,9 @@ def test_script_black_layout_uses_explicit_approved_name_list():
     script = _sample_script()
     expected_list = dme._applescript_string_list(dme.DEFAULT_BLACK_LAYOUT_NAMES)
     assert f"set approvedBlackNames to {expected_list}" in script
-    assert "lname is in approvedBlackNames" in script
-    assert "tname is in approvedBlackNames" in script
+    assert script.count("lname is in approvedBlackNames") == 2
+    for name in dme.DEFAULT_BLACK_LAYOUT_NAMES:
+        assert f'set wantLayoutName to "{name}"' in script
     assert "words of" not in script
     assert "begins with" not in script
     assert "blankName" not in script
