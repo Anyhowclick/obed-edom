@@ -300,6 +300,31 @@ reports heights and applies writes.
     treats a stacked text child as autosize and never sets its height) and a live check
     against an actual fixed-frame-verse deck, since none exists in GW today.
 
+## D1 Codex fix round 2 (codex-D1-codexfix-review1)
+
+- **MAJOR: Finding 2's `kind != "text"` guard missed a fixed-frame TEXT-ONLY child.**
+  `_all_group_child_records` labels a child `kind = "shape" if "shape" in assigned else
+  kinds[0]` -- when its ONLY membership is text (no shape), `kind` reads `"text"` even
+  though `autosize` is `False`. Round 1's `_is_text_slide_kept` accepted any
+  `kind == "text"` child as a long id regardless of `autosize`, and round 1's refusal
+  only fired for `kind != "text"`, so this shape sailed through both: emitted as a
+  supported `GroupChildId` and stacked/written with no `set height`. Fixed by making the
+  long-id rule autosize-only (`child.get("kind") == "text" and child.get("autosize")` in
+  `_is_text_slide_kept`) and the refusal kind-agnostic (`has_text and autosize is
+  False`, dropping the `kind != "text"` guard) -- the group-level exemption
+  (`group_ki in text_group_kis`) still lets a real badge-only fixed-frame child through
+  once the group has a supported autosize verse, so GW 5/44/50/51/53/54 plan identically.
+- **MINOR: the refusal test hand-injected `has_text=True`.** Rebuilt
+  `test_fixed_frame_group_text_over_threshold_refuses` from a raw dual-membership
+  archive run through the real `_all_group_child_records` path (a `TSWP.ShapeInfoArchive`
+  with `isTextBox` and a custom Bezier path, fixed height), and added
+  `test_fixed_frame_group_text_kind_text_over_threshold_refuses` for the new MAJOR's
+  shape (fixed-frame, text-only membership, `kind == "text"`). Extended
+  `test_groupchild_id_carries_kind_no_shape_text_kindindex_collision` to assert the
+  emitted script contains both `shape 2 of group 1` and `text item 2 of group 1`.
+- Deck-wide A/B (`ab-D1fix2/`): zero differences against the pre-fix (61cb650) output --
+  no GW slide exercises either changed path.
+
 ## Open questions (design-changing)
 
 1. **Stale read-back (F3).** Is the two-consecutive-reads poll enough, or does Keynote only settle the height

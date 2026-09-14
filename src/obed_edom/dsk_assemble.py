@@ -601,12 +601,16 @@ def plan_assembly(
 
             # Finding 2 (D1 Codex fix round): a group's DFS word join can exceed
             # ``text_slide_words`` (making the group text-triggering) even when NONE of
-            # its children resolved to ``kind == "text"`` -- ``_all_group_child_records``
-            # labels a text-bearing FIXED-FRAME child ``shape`` when it also carries shape
-            # membership, so `_is_text_slide_kept` never emits a long groupchild id for
-            # it and the group is silently left off `text_group_kis`, taking the normal
-            # affine path (keeping a full-wall photo) instead. Piece D1 handles autosize
-            # group text only -- refuse explicitly rather than write that blind.
+            # its children is a supported AUTOSIZE text child -- a fixed-frame text-
+            # bearing child never contributes a long groupchild id (`_is_text_slide_kept`,
+            # D1 Codex fix round 2: autosize-only, regardless of its own ``kind``), so the
+            # group would be silently left off `text_group_kis`, taking the normal affine
+            # path (keeping a full-wall photo) instead. Piece D1 handles autosize group
+            # text only -- refuse explicitly rather than write that blind. The check is
+            # kind-agnostic (any ``has_text`` + ``autosize is False`` child, not just one
+            # whose ``kind`` collapsed to ``shape``); the group-level exemption above
+            # (``group_ki in text_group_kis``) still lets a real badge-only fixed-frame
+            # child through untouched once the group has a supported autosize verse.
             for iid in cls.kept:
                 if iid[0] != "group":
                     continue
@@ -616,7 +620,7 @@ def plan_assembly(
                 if _word_count(group_child_words.get(group_ki) if group_child_words else None) <= text_slide_words:
                     continue
                 for child in group_children_geo.get(group_ki, ()):
-                    if child.get("has_text") and child.get("kind") != "text" and child.get("autosize") is False:
+                    if child.get("has_text") and child.get("autosize") is False:
                         raise AssemblyRefusal(
                             f"slide {number}: fixed-frame text inside group {group_ki} unsupported "
                             "(piece D1 handles autosize group text only)"

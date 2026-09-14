@@ -322,7 +322,8 @@ def _gw5_shaped_slide():
         "anything they ask for, it will be done for them by My Father in heaven."
     )
     group_children = {0: [
-        {"kind": "shape", "kindIndex": 0}, {"kind": "text", "kindIndex": 1},
+        {"kind": "shape", "kindIndex": 0, "autosize": False},
+        {"kind": "text", "kindIndex": 1, "autosize": True},
     ]}
     return _slide(5, [photo, left, right, scrim, group]), verse, group_children
 

@@ -153,9 +153,11 @@ def _is_text_slide_kept(
     """``(is_text, long_text_ids)`` -- a slide is text when some kept ``text`` item's
     content has more than ``text_slide_words`` whitespace-separated words (F2/D1), OR a
     kept ``group``'s child text (``group_child_words``, the DFS join of every child's
-    text) does (Design A step 1, F1) -- such a group contributes its TEXT children
-    (looked up in ``group_children``) as ``GroupChildId`` long ids; its non-text
-    children (a badge shape) are left for the caller's short-row placement."""
+    text) does (Design A step 1, F1) -- such a group contributes its AUTOSIZE text
+    children (looked up in ``group_children``) as ``GroupChildId`` long ids (D1 Codex
+    fix round 2: a fixed-frame text-bearing child never qualifies, even when its
+    ``kind`` reads ``"text"``); its other children (a badge shape, or a fixed-frame
+    text child) are left for the caller's short-row placement or refusal."""
     long_ids: list[ItemId] = [
         (item["kind"], item["kindIndex"])
         for item in kept
@@ -170,7 +172,7 @@ def _is_text_slide_kept(
         if _word_count(group_child_words.get(group_ki)) <= text_slide_words:
             continue
         for child in group_children.get(group_ki, ()):
-            if child.get("kind") == "text":
+            if child.get("kind") == "text" and child.get("autosize"):
                 long_ids.append(("groupchild", group_ki, "text", child["kindIndex"]))
     return (bool(long_ids), tuple(long_ids))
 

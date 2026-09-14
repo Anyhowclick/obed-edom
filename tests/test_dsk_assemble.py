@@ -854,26 +854,85 @@ def test_groupchild_id_carries_kind_no_shape_text_kindindex_collision():
     assert badge_rect.h == pytest.approx(60.0)
     assert badge_rect.y + badge_rect.h <= verse_rect.y + 0.01
 
+    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
+    assert "shape 2 of group 1" in script
+    assert "text item 2 of group 1" in script
+
+
+def _dual_membership_group_records():
+    """Raw archive for a group whose one child carries BOTH shape and text membership
+    (dual membership: assigned kindIndex 0 in each) with a fixed frame (autosize False)
+    -- the real `_all_group_child_records` path collapses its `kind` to `shape` while
+    keeping `has_text`."""
+    objects = {
+        "900": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 4702.0, "y": 15.0}, "size": {"width": 645.0, "height": 443.0}, "angle": 0.0},
+            "children": [{"identifier": "901"}],
+        },
+        "901": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+            "super": {
+                "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 645.0, "height": 443.0}, "angle": 0.0},
+                "pathsource": {"editableBezierPathSource": {"identifier": "902"}},
+            },
+        },
+    }
+    return dsa._all_group_child_records(objects["900"], objects)
+
 
 def test_fixed_frame_group_text_over_threshold_refuses():
-    # D1 Codex fix round, Finding 2: a group's DFS word join exceeds `text_slide_words`
-    # but its only long-text-bearing child is a FIXED FRAME (autosize False) one whose
-    # `kind` collapsed to `shape` (dual text+shape membership) -- `_is_text_slide_kept`
-    # then emits no groupchild long id for this group at all, so unguarded it would
-    # silently fall through to the normal affine path. Must refuse instead.
+    # D1 Codex fix round, Finding 2, rebuilt in D1 Codex fix round 2 (Codex MINOR): a
+    # group's DFS word join exceeds `text_slide_words` but its only long-text-bearing
+    # child is a FIXED FRAME (autosize False) one -- `_is_text_slide_kept` emits no
+    # groupchild long id for this group at all, so unguarded it would silently fall
+    # through to the normal affine path. Must refuse instead. The dual-membership shape
+    # is a raw archive (`_all_group_child_records`, not hand-injected `has_text`), which
+    # `kind`-collapses to `shape`.
+    records = _dual_membership_group_records()
+    assert [r["kind"] for r in records] == ["shape"]
     group = _group_item(0, x=4702, y=15, w=645, h=443)
     slide = _slide(5, [group])
     slide["groupChildText"] = {0: _GW5_VERSE}
     slide["groupChildSignature"] = {0: f"shape:{_GW5_VERSE}"}
-    slide["groupChildren"] = {0: [
-        {
-            "kind": "shape", "kindIndex": 0, "autosize": False, "has_text": True,
-            "x": 4702.0, "y": 15.0, "w": 645.0, "h": 443.0,
-        },
-    ]}
+    slide["groupChildren"] = {0: records}
     payload = _payload([slide])
     cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
-    assert not cls.long_text_ids  # no `kind == "text"` child -> no groupchild long id at all
+    assert not cls.long_text_ids  # no autosize `kind == "text"` child -> no groupchild long id at all
+    decisions = {5: SlideDecision(5, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="fixed-frame text inside group 0 unsupported"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+
+def test_fixed_frame_group_text_kind_text_over_threshold_refuses():
+    # D1 Codex fix round 2 MAJOR: a fixed-frame (autosize False) child whose ONLY
+    # membership is text (no shape) keeps `kind == "text"` from `_all_group_child_records`
+    # -- before the fix, `_is_text_slide_kept` mistook it for a supported autosize long
+    # id (its check was `kind == "text"` alone) and the refusal's `kind != "text"` guard
+    # then let it through unrefused, so it was stacked and emitted with no `set height`.
+    # The kind-agnostic `has_text and autosize is False` refusal must still catch it.
+    objects = {
+        "900": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 4702.0, "y": 15.0}, "size": {"width": 645.0, "height": 443.0}, "angle": 0.0},
+            "children": [{"identifier": "901"}],
+        },
+        "901": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 645.0, "height": 443.0}, "angle": 0.0}},
+        },
+    }
+    records = dsa._all_group_child_records(objects["900"], objects)
+    assert [r["kind"] for r in records] == ["text"]
+    assert [r["autosize"] for r in records] == [False]
+    group = _group_item(0, x=4702, y=15, w=645, h=443)
+    slide = _slide(5, [group])
+    slide["groupChildText"] = {0: _GW5_VERSE}
+    slide["groupChildSignature"] = {0: f"text:{_GW5_VERSE}"}
+    slide["groupChildren"] = {0: records}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    assert not cls.long_text_ids  # not autosize -> no groupchild long id despite kind == "text"
     decisions = {5: SlideDecision(5, "in_deck")}
     with pytest.raises(AssemblyRefusal, match="fixed-frame text inside group 0 unsupported"):
         plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
