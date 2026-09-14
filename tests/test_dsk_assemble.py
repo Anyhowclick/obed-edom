@@ -5471,6 +5471,13 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
     assert captured["reference_deck"] is None
 
 
+def test_default_transparent_layout_names_aliases_dsk_live():
+    from obed_edom import dsk_stage_export as dse
+
+    assert dsa.DEFAULT_TRANSPARENT_LAYOUT_NAMES is dsk_live.DEFAULT_TRANSPARENT_LAYOUT_NAMES
+    assert dse.DEFAULT_TRANSPARENT_LAYOUT_NAMES is dsk_live.DEFAULT_TRANSPARENT_LAYOUT_NAMES
+
+
 def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
     from obed_edom import cli
 

@@ -21,6 +21,7 @@ from obed_edom import dsk_live
 from obed_edom.dsk_live import (
     DEFAULT_LAYOUT_TEMPLATE,
     DEFAULT_RSS_LIMIT_BYTES,
+    DEFAULT_TRANSPARENT_LAYOUT_NAMES,
     LiveBatch,
     LayoutImportRefusal,
     _applescript_string_list,
@@ -99,8 +100,6 @@ DEFAULT_MIN_TEXT_PT = 24.0
 _TEXT_STACK_GAP = _TEXT_GAP_PT
 
 LayoutPolicy = Literal["preserve", "import"]
-
-DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank Black",)
 
 DEFAULT_DSK_LAYOUT_NAMES: tuple[str, ...] = (
     "Verse Standard (Variation 2)",
