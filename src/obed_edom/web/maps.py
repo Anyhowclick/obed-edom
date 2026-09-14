@@ -35,6 +35,7 @@ from obed_edom.maps_geo import (
     camera_from_bbox,
     clamp_cg_shift,
     clamp_zoom,
+    coerce_maps_style,
     find_country,
     geocode,
     geometry_bbox,
@@ -219,8 +220,12 @@ def mutate_document(job_id: str, expected_revision: int | None, fn) -> dict[str,
     return commit.payload
 
 
-STYLE_IDS = ("positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour")
-MapsStyleId = Literal["positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour"]
+STYLE_IDS = ("positron", "bright", "dark", "fiord", "buildings3d", "borderlands", "toner", "toner-background", "toner-lines", "watercolour")
+MapsStyleId = Literal["positron", "bright", "dark", "fiord", "buildings3d", "borderlands", "toner", "toner-background", "toner-lines", "watercolour"]
+
+
+def _coerce_maps_style(value: object) -> object:
+    return coerce_maps_style(value) if isinstance(value, str) else value
 MapsCropId = Literal["wall", "center+cg"]
 MapsLayerFilterId = Literal[
     "roads", "roadnames", "shields", "arrows", "pois", "rail", "buildings", "labels", "boundaries"
@@ -357,6 +362,7 @@ class MapsCgOverride(BaseModel):
 
     _check_highlights = field_validator("highlights", mode="before")(_validate_highlights)
     _check_highlight_colours = field_validator("highlightColours", mode="before")(_validate_highlight_colours)
+    _coerce_style = field_validator("style", mode="before")(_coerce_maps_style)
 
 
 class MapsSlide(BaseModel):
@@ -382,6 +388,7 @@ class MapsSlide(BaseModel):
 
     _check_highlights = field_validator("highlights", mode="before")(_validate_highlights)
     _check_highlight_colours = field_validator("highlightColours", mode="before")(_validate_highlight_colours)
+    _coerce_style = field_validator("style", mode="before")(_coerce_maps_style)
 
     @field_validator("includeSidePanels", mode="before")
     @classmethod
@@ -452,6 +459,8 @@ class MapsDocument(BaseModel):
     cachedCountries: list[str] = Field(default_factory=list)
     assets: list[MapsAsset] = Field(default_factory=list)
     attribution: MapsAttribution = "credits"
+
+    _coerce_default_style = field_validator("defaultStyle", mode="before")(_coerce_maps_style)
 
     @model_validator(mode="before")
     @classmethod

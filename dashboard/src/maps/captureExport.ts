@@ -16,6 +16,7 @@ import { highlightPieces, pieceClip } from "./isolate";
 import { stampOsmCropOnCanvas } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
+import { syncBorderlandsInk, waitForBorderlandsInk } from "./borderlandsInk";
 import { installPatternById, installPatterns, stylePatterns } from "./watercolourStyle";
 import {
   exportCamera,
@@ -130,6 +131,7 @@ export async function waitIdleForFrame(
     if (map.areTilesLoaded()) {
       map.triggerRepaint();
       await nextRender(); // guarantee a paint with those tiles
+      await waitForBorderlandsInk(map, { isCancelled, deadlineMs: Math.max(1, deadline - Date.now()) });
       return;
     }
     map.triggerRepaint();
@@ -216,6 +218,7 @@ export async function createExportMap(
   try {
     await waitEvent(map, "load", TILE_WAIT_MS, isCancelled);
     installPatterns(map, stylePatterns(styleId));
+    syncBorderlandsInk(map, styleId, { authoredZoomDelta: zoomDelta });
     // Toner boundaries and relief gates are already baked into `style` at the authored offset
     // via resolveOpenFreeMapStyle above; only the JS-added ne2 fallback layer needs the offset here.
     ensureLowZoomRaster(map, styleId, zoomDelta);

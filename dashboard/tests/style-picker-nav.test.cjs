@@ -68,6 +68,14 @@ test("STYLE_THUMB_CAMERA records the Marina Bay camera every thumbnail is captur
   assert.match(source, /cgShiftX:\s*0/);
 });
 
+test("STYLE_SWATCHES no longer lists liberty", () => {
+  const source = fs.readFileSync(path.join(root, "src/maps/styles.ts"), "utf8");
+  const ids = [...source.matchAll(/\{ id: "([^"]+)", label: "[^"]*", color: "[^"]*" \}/g)].map((m) => m[1]);
+  assert.ok(!ids.includes("liberty"), ids.join(","));
+  assert.ok(ids.includes("buildings3d"));
+  assert.ok(ids.includes("borderlands"));
+});
+
 test("every STYLE_SWATCHES id has a 480x240 thumbnail in public/style-thumbs", () => {
   const source = fs.readFileSync(path.join(root, "src/maps/styles.ts"), "utf8");
   const ids = [...source.matchAll(/\{ id: "([^"]+)", label: "[^"]*", color: "[^"]*" \}/g)].map((m) => m[1]);

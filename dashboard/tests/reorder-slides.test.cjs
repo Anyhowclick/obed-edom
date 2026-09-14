@@ -374,6 +374,17 @@ test("restitchWithMemory keys are collision-free across slide ids containing sep
   assert.notEqual(restored.duration, 5);
 });
 
+test("documentFromResult remaps retired liberty style to buildings3d", () => {
+  const s1 = slide("s1", { style: "liberty" });
+  s1.cg = { camera: baseCamera, style: "liberty", highlights: [], churches: [] };
+  const raw = doc([s1], []);
+  raw.defaultStyle = "liberty";
+  const loaded = documentFromResult(JSON.parse(JSON.stringify(raw)));
+  assert.equal(loaded.defaultStyle, "buildings3d");
+  assert.equal(loaded.slides[0].style, "buildings3d");
+  assert.equal(loaded.slides[0].cg.style, "buildings3d");
+});
+
 test("documentFromResult round-trips flight, drops invalid values, leaves missing absent", () => {
   const s1 = slide("s1");
   const s2 = slide("s2");
