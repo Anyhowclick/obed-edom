@@ -490,6 +490,23 @@ def test_script_has_transparent_layout_block_with_names():
     assert '"blank"' in script
 
 
+def test_script_with_layout_template_emits_literal_layout_names_not_the_var_name():
+    script = dse.build_stage_script(
+        Path("/work/Scratch.key"),
+        [3, 7],
+        10,
+        Path("/work/stages"),
+        transparent_layout_names=dse.DEFAULT_TRANSPARENT_LAYOUT_NAMES,
+        layout_template=Path("/templates/Donor.key"),
+    )
+    assert 'set wantLayoutName to "Blank"' in script
+    assert 'set wantLayoutName to "BLANK"' in script
+    assert 'set wantLayoutName to "blank"' in script
+    assert 'set wantLayoutName to "approvedBlackNames"' not in script
+    assert 'POSIX file "/templates/Donor.key"' in script
+    assert "set pendingDonor to missing value" in script
+
+
 def test_script_default_args_touch_no_layouts():
     script = dse.build_stage_script(
         Path("/work/Scratch.key"), [3, 7], 10, Path("/work/stages")
@@ -662,6 +679,57 @@ def test_export_stage_pngs_allows_skipped_slide_when_opted_in(tmp_path, monkeypa
         expected_stage_counts={2: 3},
         include_skipped=True,
     )
+    assert len(assets) == 3
+
+
+def test_export_stage_pngs_runs_offline_layout_precondition_before_batch(tmp_path, monkeypatch):
+    """`export_stage_pngs` must run the shared offline precondition before `LiveBatch`
+    ever opens (i.e. before Keynote could launch) whenever both `transparent_layout_names`
+    and `layout_template` are given; a refusal there must never reach the fake batch."""
+    deck = tmp_path / "Deck.key"
+    deck.touch()
+    template = tmp_path / "Donor.key"
+    template.touch()
+
+    def _batch_forbidden(*_a, **_k):
+        raise AssertionError("LiveBatch must not open once the precondition refuses")
+
+    calls = []
+
+    def _fake_check(fw_deck, *, layout_template, layout_names):
+        calls.append((fw_deck, layout_template, tuple(layout_names)))
+        raise dse.dsk_live.LayoutImportRefusal("unsafe donor")
+
+    monkeypatch.setattr(dse, "LiveBatch", _batch_forbidden)
+    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
+    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+    monkeypatch.setattr(dse.dsk_live, "check_layout_import_preconditions", _fake_check)
+
+    with pytest.raises(dse.dsk_live.LayoutImportRefusal, match="unsafe donor"):
+        dse.export_stage_pngs(
+            deck, [2], tmp_path / "out",
+            expected_stage_counts={2: 3},
+            transparent_layout_names=dse.DEFAULT_TRANSPARENT_LAYOUT_NAMES,
+            layout_template=template,
+        )
+
+    assert calls == [(deck, template, dse.DEFAULT_TRANSPARENT_LAYOUT_NAMES)]
+
+
+def test_export_stage_pngs_skips_precondition_when_layouts_untouched(tmp_path, monkeypatch):
+    deck = tmp_path / "Deck.key"
+    deck.touch()
+
+    monkeypatch.setattr(dse, "LiveBatch", _make_fake_batch({2: 3}))
+    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
+    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+
+    def _forbidden(*_a, **_k):
+        raise AssertionError("precondition must not run when layouts are left untouched")
+
+    monkeypatch.setattr(dse.dsk_live, "check_layout_import_preconditions", _forbidden)
+
+    assets = dse.export_stage_pngs(deck, [2], tmp_path / "out", expected_stage_counts={2: 3})
     assert len(assets) == 3
 
 

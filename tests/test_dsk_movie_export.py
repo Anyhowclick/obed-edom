@@ -24,6 +24,9 @@ def _set(monkeypatch, name, value):
     monkeypatch.setattr(dme.dsk_live, name, value)
 
 
+_REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS = dme.dsk_live.check_layout_import_preconditions
+
+
 @pytest.fixture(autouse=True)
 def no_keynote(monkeypatch):
     def _forbidden(*_args, **_kwargs):
@@ -32,6 +35,16 @@ def no_keynote(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _forbidden)
     monkeypatch.setattr(subprocess, "Popen", _forbidden)
     yield
+
+
+@pytest.fixture(autouse=True)
+def no_layout_precondition(monkeypatch):
+    """`export_slide_clips` runs `check_layout_import_preconditions` offline against the
+    real, on-disk `DEFAULT_LAYOUT_TEMPLATE` whenever a test omits `layout_template` -- a
+    no-op here so tests that don't care about layout import aren't coupled to that file's
+    contents. Tests that DO exercise the precondition restore the real function via
+    `_REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS`."""
+    monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", lambda *_a, **_k: None)
 
 
 # --- ordinal_map -------------------------------------------------------------
@@ -633,6 +646,69 @@ def _patch_build_export_script_capture(monkeypatch):
         return orig(**kwargs)
 
     monkeypatch.setattr(dme, "_build_export_script", wrapper)
+
+
+def _layout_objects_for_precondition(*, donor_rects, fw_rects):
+    """Minimal `KN.ThemeArchive` graph with one layout named "Black" -- `donor_rects`
+    (in the template) and `fw_rects` (already owned by the FW deck), each a list of
+    (x, y, w, h) drawable frames on a 1920x1080 canvas."""
+    def _objects(rects):
+        drawables = []
+        for i, (x, y, w, h) in enumerate(rects):
+            did = f"d{i}"
+            drawables.append({"identifier": did})
+        objects = {
+            "theme": {"_pbtype": "KN.ThemeArchive", "templates": [{"identifier": "node"}]},
+            "node": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "slide"}},
+            "slide": {"_pbtype": "KN.SlideArchive", "name": "Black", "drawablesZOrder": drawables},
+            "show": {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}},
+        }
+        for i, (x, y, w, h) in enumerate(rects):
+            objects[f"d{i}"] = {
+                "_pbtype": "TSD.ImageArchive",
+                "geometry": {"position": {"x": x, "y": y}, "size": {"width": w, "height": h}},
+            }
+        return objects
+
+    return _objects(donor_rects), _objects(fw_rects)
+
+
+def test_export_slide_clips_refuses_unsafe_same_named_fw_layout_with_safe_donor(monkeypatch, tmp_path):
+    """A safe template donor named "Black" must not save a full-canvas FW-owned "Black"
+    layout from being baked into every clip: `export_slide_clips` must run the shared
+    offline precondition (restored here to the real implementation) and refuse before
+    Keynote is ever launched (`copy_keynote` must not be reached)."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    template = tmp_path / "Donor.key"
+    template.write_bytes(b"template")
+
+    donor_objects, fw_objects = _layout_objects_for_precondition(
+        donor_rects=[],
+        fw_rects=[(-10.0, 0.0, 8000.0, 1080.0)],
+    )
+
+    def _dispatched_load_deck(path):
+        return (donor_objects, {}, {}) if Path(path) == template else (fw_objects, {}, {})
+
+    _stub_offline_payload(monkeypatch)
+    monkeypatch.setattr(dme.dsk_live, "check_layout_import_preconditions", _REAL_CHECK_LAYOUT_IMPORT_PRECONDITIONS)
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", _dispatched_load_deck)
+
+    def _copy_keynote_forbidden(src, dest):
+        raise AssertionError("Keynote must not launch once the precondition refuses")
+
+    monkeypatch.setattr(dme, "copy_keynote", _copy_keynote_forbidden)
+    _set(monkeypatch, "_keynote_running", lambda: False)
+    _set(monkeypatch, "_acquire_lock", lambda: None)
+    _set(monkeypatch, "_release_lock", lambda fd: None)
+
+    with pytest.raises(dme.dsk_live.LayoutImportRefusal, match="not alpha-safe"):
+        dme.export_slide_clips(
+            fw, [17], out_dir, layout_template=template, black_layout_names=("Black",),
+        )
 
 
 def test_export_slide_clips_happy_path(monkeypatch, tmp_path):

@@ -712,6 +712,10 @@ def export_slide_clips(
 
         resolved_template = layout_template or DEFAULT_LAYOUT_TEMPLATE
         resolved_template = resolved_template if resolved_template.exists() else None
+        if resolved_template is not None:
+            dsk_live.check_layout_import_preconditions(
+                fw_deck, layout_template=resolved_template, layout_names=black_layout_names
+            )
         script = _build_export_script(
             scratch_path=scratch,
             stem=fw_deck.stem,

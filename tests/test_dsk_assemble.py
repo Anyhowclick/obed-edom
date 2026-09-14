@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import obed_edom.dsk_assemble as dsa
+import obed_edom.dsk_live as dsk_live
 from obed_edom.dsk_assemble import (
     AssembleResult,
     AssemblyPlan,
@@ -1591,7 +1592,7 @@ def test_check_layout_import_preconditions_ok_when_fw_lacks_layout(monkeypatch):
     template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
     fw_objects = _layout_objects()
     fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
-    monkeypatch.setattr(dsa, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
+    monkeypatch.setattr(dsk_live, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
     dsa.check_layout_import_preconditions(
         Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
     )
@@ -1602,7 +1603,7 @@ def test_check_layout_import_preconditions_refuses_unsafe_donor(monkeypatch):
         ("n1", "s1", "Blank Black", {"lower": "1", "upper": "1"}, [(-10.0, 0.0, 2000.0, 1080.0)])
     )
     template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
-    monkeypatch.setattr(dsa, "_load_deck", lambda path: (template_objects, {}, {}))
+    monkeypatch.setattr(dsk_live, "_load_deck", lambda path: (template_objects, {}, {}))
     with pytest.raises(AssemblyRefusal, match="not alpha-safe"):
         dsa.check_layout_import_preconditions(
             Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
@@ -1616,7 +1617,7 @@ def test_check_layout_import_preconditions_dedupe_trap_refuses(monkeypatch):
         ("n2", "s2", "Blank Black", {"lower": "9", "upper": "9"}, [(-10.0, 0.0, 8000.0, 1080.0)])
     )
     fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
-    monkeypatch.setattr(dsa, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
+    monkeypatch.setattr(dsk_live, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
     with pytest.raises(AssemblyRefusal, match="dedupe"):
         dsa.check_layout_import_preconditions(
             Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
@@ -1628,7 +1629,7 @@ def test_check_layout_import_preconditions_dedupe_ok_when_fw_layout_safe(monkeyp
     template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
     fw_objects = _layout_objects(("n2", "s2", "Blank Black", {"lower": "9", "upper": "9"}, []))
     fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
-    monkeypatch.setattr(dsa, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
+    monkeypatch.setattr(dsk_live, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
     dsa.check_layout_import_preconditions(
         Path("fw"), layout_template=Path("template"), layout_names=("Blank Black",)
     )
@@ -1663,7 +1664,7 @@ def test_check_layout_import_preconditions_refuses_duplicate_named_donor(monkeyp
     template_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 1920.0, "height": 1080.0}}
     fw_objects = _layout_objects()
     fw_objects["show"] = {"_pbtype": "KN.ShowArchive", "size": {"width": 7680.0, "height": 1080.0}}
-    monkeypatch.setattr(dsa, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
+    monkeypatch.setattr(dsk_live, "_load_deck", _dispatched_load_deck(template_objects, fw_objects))
     with pytest.raises(AssemblyRefusal, match="duplicate-name donor"):
         dsa.check_layout_import_preconditions(
             Path("fw"), layout_template=Path("template"), layout_names=("Point 3 Lines",)
@@ -1851,23 +1852,119 @@ def _require_gold_deck():
         pytest.skip("keynote-parser (iwa extra) not installed")
 
 
+# Plan §1.1 gold-deck layout inventory (`p1_layout_inventory.py`), pinned by slide
+# number -- independent of `KN.SlideArchive.templateSlide`, the field under test.
+GOLD_SLIDE_LAYOUT_NAMES: dict[int, str] = {
+    **{n: "Blank Black" for n in (1, 4, 12, 13, 18, 19, 31, 32, 33, 34, 43)},
+    **{n: "Point (2 Lines)" for n in (2, 40, 42)},
+    **{n: "Verse Standard (Variation 2)" for n in (
+        3, 9, 10, 11, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 27, 28, 35, 36, 37, 38
+    )},
+    **{n: "Verse 1 Line (Variation 2)" for n in (5, 6, 7, 8)},
+    **{n: "Point 3 Lines" for n in (29, 30, 39, 41)},
+}
+
+
 @pytest.mark.deck
 def test_base_layout_slide_for_ordinal_matches_gold_deck_layout_map():
     _require_gold_deck()
     objects, _id_to_file, _file_ids = dsa._load_deck(GOLD_DECK)
-    by_slide_id = {}
-    for name, node, slide in dsa._theme_layout_slides(objects):
-        sid = str((node.get("slide") or {}).get("identifier"))
-        by_slide_id[sid] = name
     nodes = dsa._slide_nodes(objects)
     assert len(nodes) == 43
+    assert set(GOLD_SLIDE_LAYOUT_NAMES) == set(range(1, 44))
     for ordinal in range(1, len(nodes) + 1):
-        slide = dsa._slide_archive_for_ordinal(objects, ordinal)
-        expected_target = str((slide.get("templateSlide") or {}).get("identifier"))
-        expected_name = by_slide_id[expected_target]
+        expected_name = GOLD_SLIDE_LAYOUT_NAMES[ordinal]
         layout = dsa._base_layout_slide_for_ordinal(objects, ordinal)
         assert layout is not None, f"ordinal {ordinal}: base layout not resolvable"
         assert layout.get("name") == expected_name, f"ordinal {ordinal}: expected {expected_name!r}"
+
+
+@pytest.mark.deck
+def test_base_layout_slide_for_ordinal_matches_legacy_template_slide_id_map():
+    """Cross-checks `_base_layout_slide_for_ordinal` (which resolves via the direct
+    `templateSlide` object reference) against the legacy `templateSlideId` UUID mapping
+    -- an independent resolution path over the same gold deck."""
+    _require_gold_deck()
+    objects, _id_to_file, _file_ids = dsa._load_deck(GOLD_DECK)
+    by_tsid = {}
+    for name, node, _slide in dsa._theme_layout_slides(objects):
+        import json as _json
+
+        by_tsid[_json.dumps(node.get("templateSlideId"), sort_keys=True)] = name
+    nodes = dsa._slide_nodes(objects)
+    for ordinal, node in enumerate(nodes, 1):
+        import json as _json
+
+        key = _json.dumps(node.get("templateSlideId"), sort_keys=True)
+        expected_name = by_tsid[key]
+        layout = dsa._base_layout_slide_for_ordinal(objects, ordinal)
+        assert layout is not None
+        assert layout.get("name") == expected_name
+
+
+def test_base_layout_slide_for_ordinal_none_when_template_slide_missing():
+    objects = {
+        "show": {
+            "_pbtype": "KN.ShowArchive",
+            "slideTree": {"slides": [{"identifier": "node1"}]},
+        },
+        "node1": {"slide": {"identifier": "slide1"}},
+        "slide1": {"_pbtype": "KN.SlideArchive", "name": None},
+    }
+    assert dsa._base_layout_slide_for_ordinal(objects, 1) is None
+
+
+def test_base_layout_slide_for_ordinal_none_when_template_slide_dangling():
+    objects = {
+        "show": {
+            "_pbtype": "KN.ShowArchive",
+            "slideTree": {"slides": [{"identifier": "node1"}]},
+        },
+        "node1": {"slide": {"identifier": "slide1"}},
+        "slide1": {
+            "_pbtype": "KN.SlideArchive",
+            "name": None,
+            "templateSlide": {"identifier": "nonexistent-layout-slide"},
+        },
+    }
+    assert dsa._base_layout_slide_for_ordinal(objects, 1) is None
+
+
+def test_verify_staged_layouts_alpha_safe_refuses_missing_template_slide(tmp_path, monkeypatch):
+    objects = {
+        "show": {
+            "_pbtype": "KN.ShowArchive",
+            "size": {"width": 1920.0, "height": 1080.0},
+            "slideTree": {"slides": [{"identifier": "node1"}]},
+        },
+        "node1": {"slide": {"identifier": "slide1"}},
+        "slide1": {"_pbtype": "KN.SlideArchive", "name": None, "drawablesZOrder": []},
+    }
+    monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
+    plan = AssemblyPlan(kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=())
+    with pytest.raises(AssemblyRefusal, match="base layout not resolvable"):
+        dsa.verify_staged_layouts_alpha_safe(Path("/tmp/staged.key"), plan)
+
+
+def test_verify_staged_layouts_alpha_safe_refuses_dangling_template_slide(tmp_path, monkeypatch):
+    objects = {
+        "show": {
+            "_pbtype": "KN.ShowArchive",
+            "size": {"width": 1920.0, "height": 1080.0},
+            "slideTree": {"slides": [{"identifier": "node1"}]},
+        },
+        "node1": {"slide": {"identifier": "slide1"}},
+        "slide1": {
+            "_pbtype": "KN.SlideArchive",
+            "name": None,
+            "drawablesZOrder": [],
+            "templateSlide": {"identifier": "nonexistent-layout-slide"},
+        },
+    }
+    monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
+    plan = AssemblyPlan(kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=())
+    with pytest.raises(AssemblyRefusal, match="base layout not resolvable"):
+        dsa.verify_staged_layouts_alpha_safe(Path("/tmp/staged.key"), plan)
 
 
 def test_load_and_plan_against_gw_deck():

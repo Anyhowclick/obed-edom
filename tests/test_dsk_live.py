@@ -308,3 +308,31 @@ def test_layout_import_lines_skips_already_owned_name_at_runtime():
     script = "\n".join(lines)
     assert "if not haveLayout then" in script
     assert "set haveLayout to false" in script
+
+
+def test_layout_import_lines_error_handler_deletes_pending_donor_before_closing_tmpldoc():
+    """A per-name destination donor reference is initialised before any `make`, tracked
+    only while it might exist undeleted in the destination doc, and the `on error`
+    handler must attempt to delete it -- guarded by its own `try` so a donor that was
+    never made (or already deleted) doesn't itself raise -- strictly before `close
+    tmplDoc`, so an error mid-import never leaves a donor slide behind in `theDoc`."""
+    lines = dl.layout_import_lines("theDoc", ["Point 3 Lines", "Blank Black"], Path("/tmp/tmpl.key"))
+    script = "\n".join(lines)
+
+    init_idx = next(i for i, l in enumerate(lines) if "set pendingDonor to missing value" in l)
+    on_error_idx = next(i for i, l in enumerate(lines) if l.strip().startswith("on error errMsg number errNum"))
+    assert init_idx < on_error_idx, "pendingDonor must be initialised before the try body, not in the handler"
+
+    handler_lines = lines[on_error_idx:]
+    delete_idx = next(
+        i for i, l in enumerate(handler_lines) if "if pendingDonor is not missing value then delete pendingDonor" in l
+    )
+    close_idx = next(i for i, l in enumerate(handler_lines) if "close tmplDoc saving no" in l)
+    assert delete_idx < close_idx, "the handler must delete a pending donor before closing tmplDoc"
+    assert handler_lines[delete_idx - 1].strip() == "try", "the donor delete must be its own guarded try"
+
+    # `pendingDonor` is set immediately after each `move` (donor now lives in theDoc) and
+    # cleared immediately after each successful `delete` -- once per name, matching the
+    # number of make/move/delete triples.
+    assert script.count("set pendingDonor to donorSlide") == 2
+    assert script.count("set pendingDonor to missing value") == 3  # 1 init + 2 clears

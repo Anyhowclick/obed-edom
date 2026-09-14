@@ -22,15 +22,20 @@ from obed_edom.dsk_live import (
     DEFAULT_LAYOUT_TEMPLATE,
     DEFAULT_RSS_LIMIT_BYTES,
     LiveBatch,
+    LayoutImportRefusal,
     _applescript_string_list,
     _as_escape,
     _ERROR_RE,
+    _find_layout_by_name,
     _keynote_tell,
     _keynote_terms,
     _osascript_path,
+    _theme_layout_slides,
+    layout_alpha_safe,
     layout_import_lines,
     ordinal_map,
 )
+from obed_edom.dsk_live import check_layout_import_preconditions as _live_check_layout_import_preconditions
 from obed_edom.dsk_plan import (
     Band,
     CropRefusal,
@@ -1700,49 +1705,6 @@ def load_assembly_inputs(
     return payload, classes, runs
 
 
-def _theme_layout_slides(objects: dict[str, dict]) -> list[tuple[str, dict, dict]]:
-    """``[(name, layoutNode, layoutSlide)]`` for every ``KN.ThemeArchive.templates``
-    entry -- Keynote's IWA graph has no separate layout type; a layout IS a
-    ``KN.SlideArchive`` referenced from the theme's ``templates`` list (each a
-    ``KN.SlideNodeArchive`` wrapping the slide, same shape as an ordinary slide)."""
-    theme = next((o for o in objects.values() if o.get("_pbtype") == "KN.ThemeArchive"), None)
-    if theme is None:
-        return []
-    out: list[tuple[str, dict, dict]] = []
-    for ref in theme.get("templates") or []:
-        node = objects.get(str(ref.get("identifier")))
-        if not node:
-            continue
-        slide_id = (node.get("slide") or {}).get("identifier")
-        slide = objects.get(str(slide_id)) if slide_id is not None else None
-        if slide is None:
-            continue
-        out.append((slide.get("name") or "", node, slide))
-    return out
-
-
-def _find_layout_by_name(objects: dict[str, dict], name: str) -> dict | None:
-    target = name.strip().lower()
-    for layout_name, _node, slide in _theme_layout_slides(objects):
-        if layout_name.strip().lower() == target:
-            return slide
-    return None
-
-
-def layout_alpha_safe(slide_archive: dict, objects: dict[str, dict], canvas: tuple[float, float]) -> bool:
-    """A slide/layout PNG-exports opaque whenever it owns a drawable spanning the full
-    ``canvas`` (``x<=0``, ``y<=0``, ``x+w>=W``, ``y+h>=H``); one with no such drawable
-    -- including zero drawables -- exports transparent. Frames come from
-    ``compose_geometry`` (masks, rotation and group unions composed, not raw
-    ``geometry``)."""
-    width, height = canvas
-    for rec in compose_geometry(slide_archive, objects):
-        x, y, w, h = rec["x"], rec["y"], rec["w"], rec["h"]
-        if x <= 0 and y <= 0 and x + w >= width and y + h >= height:
-            return False
-    return True
-
-
 def template_layout_alpha_safe(template_path: Path, layout_name: str) -> bool:
     """Offline pre-check, never touches Keynote: resolves ``layout_name`` in
     ``template_path`` by walking ``KN.ThemeArchive.templates`` (Keynote's only offline
@@ -1801,53 +1763,15 @@ def check_layout_import_preconditions(
     layout_names: Sequence[str],
 ) -> None:
     """Offline plan-time precondition for ``layout_policy="import"``, run before Keynote
-    ever launches, for every name in `layout_names`. Refuses (``AssemblyRefusal``) when:
-
-    - a name is ``Blank`` -- never alpha-safe, never an import candidate.
-    - `layout_template` has more than one layout named `name` -- a duplicate-name donor
-      would be picked arbitrarily by `layout_import_lines`' own exact-name search.
-    - `layout_template` has no layout named `name`, or that layout is not alpha-safe --
-      importing a donor that isn't alpha-safe defeats the point.
-    - `fw_deck` already owns a layout named `name` and it is NOT alpha-safe: the live
-      import (`layout_import_lines`) skips a name `fw_deck` already owns, so it would
-      silently keep the FW deck's own (unsafe) layout instead of the template's donor.
-    """
-    for name in layout_names:
-        if name.strip().lower() == "blank":
-            raise AssemblyRefusal(f"refusing to import layout {name!r}: Blank is never alpha-safe")
-
-    template_objects, _tf, _tfi = _load_deck(layout_template)
-    fw_objects, _ff, _ffi = _load_deck(fw_deck)
-    template_canvas = _canvas_size(template_objects)
-    fw_canvas = _canvas_size(fw_objects)
-
-    template_name_counts: dict[str, int] = {}
-    for layout_name, _node, _slide in _theme_layout_slides(template_objects):
-        key = layout_name.strip().lower()
-        template_name_counts[key] = template_name_counts.get(key, 0) + 1
-
-    for name in layout_names:
-        key = name.strip().lower()
-        if template_name_counts.get(key, 0) > 1:
-            raise AssemblyRefusal(
-                f"layout template {layout_template} has "
-                f"{template_name_counts[key]} layouts named {name!r}; a duplicate-name "
-                "donor would be picked arbitrarily"
-            )
-
-        donor_slide = _find_layout_by_name(template_objects, name)
-        if donor_slide is None:
-            raise AssemblyRefusal(f"no layout named {name!r} found in layout template {layout_template}")
-        if not layout_alpha_safe(donor_slide, template_objects, template_canvas):
-            raise AssemblyRefusal(f"layout template donor {name!r} in {layout_template} is not alpha-safe")
-
-        fw_owned = _find_layout_by_name(fw_objects, name)
-        if fw_owned is not None and not layout_alpha_safe(fw_owned, fw_objects, fw_canvas):
-            raise AssemblyRefusal(
-                f"FW deck already owns a layout named {name!r} that is not alpha-safe; "
-                "layout_import_lines' own dedupe (skip a name fw_deck already owns) "
-                "would keep it instead of importing the template's donor"
-            )
+    ever launches, for every name in `layout_names`. Thin ``AssemblyRefusal`` wrapper
+    over the shared ``dsk_live.check_layout_import_preconditions`` (also used by the
+    movie/stage exporters) -- see that docstring for the refusal conditions."""
+    try:
+        _live_check_layout_import_preconditions(
+            fw_deck, layout_template=layout_template, layout_names=layout_names
+        )
+    except LayoutImportRefusal as exc:
+        raise AssemblyRefusal(str(exc)) from exc
 
 
 def verify_staged_layouts_alpha_safe(staging_path: Path, plan: AssemblyPlan) -> None:
