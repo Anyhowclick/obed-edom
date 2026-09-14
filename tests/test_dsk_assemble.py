@@ -2043,6 +2043,123 @@ def test_heading_cluster_rejects_two_point_numbers():
     assert dsa._heading_cluster(cls, items_by_id) is None
 
 
+def test_heading_cluster_rejects_stray_text_over_textless_shape():
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    stray = {
+        "kind": "text", "kindIndex": 3, "x": 100, "y": 44, "w": 645, "h": 92,
+        "text": "James 5 (AMP)", "font": "AzoSans-Bold",
+    }
+    decorative_shape = {"kind": "shape", "kindIndex": 1, "x": 100, "y": 44, "w": 645, "h": 92, "text": ""}
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
+        ("text", 2): verse, ("text", 3): stray, ("shape", 1): decorative_shape,
+    }
+    cls = _cls_for(
+        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3), ("shape", 1)),
+        (("text", 2),),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_two_badge_like_pairs():
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    badge_text0 = {
+        "kind": "text", "kindIndex": 3, "x": 100, "y": 44, "w": 645, "h": 92,
+        "text": "James 5 (AMP)", "font": "AzoSans-Bold",
+    }
+    badge_shape0 = {"kind": "shape", "kindIndex": 1, "x": 100, "y": 44, "w": 645, "h": 92, "text": "James 5 (AMP)"}
+    badge_text1 = {
+        "kind": "text", "kindIndex": 4, "x": 100, "y": 200, "w": 200, "h": 40,
+        "text": "Extra badge", "font": "AzoSans-Bold",
+    }
+    badge_shape1 = {"kind": "shape", "kindIndex": 2, "x": 100, "y": 200, "w": 200, "h": 40, "text": "Extra badge"}
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse,
+        ("text", 3): badge_text0, ("shape", 1): badge_shape0,
+        ("text", 4): badge_text1, ("shape", 2): badge_shape1,
+    }
+    cls = _cls_for(
+        (
+            ("text", 0), ("text", 1), ("shape", 0), ("text", 2),
+            ("text", 3), ("shape", 1), ("text", 4), ("shape", 2),
+        ),
+        (("text", 2),),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_badge_text_mismatch():
+    heading = _heading_item(0, "Faith")
+    number = _number_item(1)
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    badge_text = {
+        "kind": "text", "kindIndex": 3, "x": 100, "y": 44, "w": 645, "h": 92,
+        "text": "James 5 (AMP)", "font": "AzoSans-Bold",
+    }
+    badge_shape = {"kind": "shape", "kindIndex": 1, "x": 100, "y": 44, "w": 645, "h": 92, "text": "Different"}
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number, ("shape", 0): circle,
+        ("text", 2): verse, ("text", 3): badge_text, ("shape", 1): badge_shape,
+    }
+    cls = _cls_for(
+        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3), ("shape", 1)),
+        (("text", 2),),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_second_numeral_matching_a_shape():
+    heading = _heading_item(0, "Faith")
+    number0 = _number_item(1)
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    number1 = {"kind": "text", "kindIndex": 3, "x": 300, "y": 300, "w": 35, "h": 35, "text": "4", "font": "AzoSans-Bold"}
+    matching_shape = {"kind": "shape", "kindIndex": 1, "x": 300, "y": 300, "w": 35, "h": 35, "text": "4"}
+    items_by_id = {
+        ("text", 0): heading, ("text", 1): number0, ("shape", 0): circle, ("text", 2): verse,
+        ("text", 3): number1, ("shape", 1): matching_shape,
+    }
+    cls = _cls_for(
+        (("text", 0), ("text", 1), ("shape", 0), ("text", 2), ("text", 3), ("shape", 1)),
+        (("text", 2),),
+    )
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_numeral_centre_at_circle_corner():
+    heading = _heading_item(0, "Faith")
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    # Circle centre (40.5, 40.5), radius 40.5+1.0 tol; place numeral centre at
+    # the corner (0, 0) -- distance ~57.3pt, well outside the radial tolerance.
+    number = {"kind": "text", "kindIndex": 1, "x": -1, "y": -1, "w": 2, "h": 2, "text": "3", "font": "AzoSans-Bold"}
+    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse}
+    cls = _cls_for((("text", 0), ("text", 1), ("shape", 0), ("text", 2)), (("text", 2),))
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
+def test_heading_cluster_rejects_numeral_just_outside_radius():
+    heading = _heading_item(0, "Faith")
+    circle = _circle_item(0)
+    verse = _verse_item(2)
+    # Circle centre (40.5, 40.5); place numeral centre 41.6pt away (radius + 1.1pt),
+    # just past the 41.5pt (radius 40.5 + 1.0pt tolerance) boundary.
+    number = {
+        "kind": "text", "kindIndex": 1, "x": 40.5 - 0.5, "y": (40.5 + 41.6) - 0.5, "w": 1, "h": 1,
+        "text": "3", "font": "AzoSans-Bold",
+    }
+    items_by_id = {("text", 0): heading, ("text", 1): number, ("shape", 0): circle, ("text", 2): verse}
+    cls = _cls_for((("text", 0), ("text", 1), ("shape", 0), ("text", 2)), (("text", 2),))
+    assert dsa._heading_cluster(cls, items_by_id) is None
+
+
 def _badge_and_stack_plan():
     _require_font("AzoSans-Regular")
     _require_font("AzoSans-Bold")
