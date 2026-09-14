@@ -341,7 +341,12 @@ def render_reveal(
     return dest
 
 
-def reveal_movie_fingerprint(base_png: Path, landmarks: list[dict]) -> str:
+def reveal_movie_fingerprint(
+    base_png: Path,
+    landmarks: list[dict],
+    manifest_path: Path | None = None,
+    piece_paths: list[Path] | None = None,
+) -> str:
     stat = Path(base_png).stat()
     geometry = tuple(
         (
@@ -357,7 +362,20 @@ def reveal_movie_fingerprint(base_png: Path, landmarks: list[dict]) -> str:
         )
         for landmark in landmarks
     )
-    payload = "|".join(str(part) for part in (stat.st_mtime_ns, stat.st_size, geometry, REVEAL_ALGO_VERSION))
+    manifest_stat = Path(manifest_path).stat() if manifest_path is not None and Path(manifest_path).is_file() else None
+    manifest_part = (manifest_stat.st_mtime_ns, manifest_stat.st_size) if manifest_stat else None
+    def _piece_part(piece_path: Path) -> tuple:
+        p = Path(piece_path)
+        if not p.is_file():
+            return (str(p), None)
+        piece_stat = p.stat()
+        return (str(p), piece_stat.st_mtime_ns, piece_stat.st_size)
+
+    pieces_part = tuple(_piece_part(piece_path) for piece_path in piece_paths or [])
+    payload = "|".join(
+        str(part)
+        for part in (stat.st_mtime_ns, stat.st_size, geometry, REVEAL_ALGO_VERSION, manifest_part, pieces_part)
+    )
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -368,7 +386,7 @@ def reveal_movie_path(output_dir: Path, slide_id: str, audience: str = "lw") -> 
 
 def render_slide_reveal_movie(
     base_png: Path,
-    country_png: Path | None,
+    pieces: list[tuple[Path, int, int, int, int]] | None,
     landmarks: list[dict],
     dest: Path,
     *,
@@ -386,12 +404,16 @@ def render_slide_reveal_movie(
         base = image.convert("RGBA")
         if base.size != (w, h):
             base = base.resize((w, h), Image.LANCZOS)
-    if country_png is not None and Path(country_png).is_file():
-        with Image.open(country_png) as image:
-            country = image.convert("RGBA")
-            if country.size != (w, h):
-                country = country.resize((w, h), Image.LANCZOS)
-            base = Image.alpha_composite(base, country)
+    for piece_path, x, y, pw, ph in pieces or []:
+        if not Path(piece_path).is_file():
+            continue
+        with Image.open(piece_path) as image:
+            piece = image.convert("RGBA")
+        if piece.size != (pw, ph):
+            piece = piece.resize((max(1, pw), max(1, ph)), Image.LANCZOS)
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        overlay.paste(piece, (x, y))
+        base = Image.alpha_composite(base, overlay)
     base_rgb = np.array(base.convert("RGB"), np.uint8)
 
     prepared = []

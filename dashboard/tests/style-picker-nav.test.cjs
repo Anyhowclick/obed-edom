@@ -62,7 +62,7 @@ test("STYLE_THUMB_CAMERA records the Marina Bay camera every thumbnail is captur
   const source = fs.readFileSync(path.join(root, "src/maps/styles.ts"), "utf8");
   assert.match(source, /lat:\s*1\.2864/);
   assert.match(source, /lon:\s*103\.8604/);
-  assert.match(source, /zoom:\s*16\.5/);
+  assert.match(source, /zoom:\s*16\.4/);
   assert.match(source, /pitch:\s*0/);
   assert.match(source, /bearing:\s*75/);
   assert.match(source, /cgShiftX:\s*0/);

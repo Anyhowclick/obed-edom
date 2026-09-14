@@ -6,8 +6,9 @@ import {
 } from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
-import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
+import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, ML_MAX_ZOOM, ML_MIN_ZOOM, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
 import { defaultObjectSize, zoomScaledStops } from "./objects";
+import { highlightColour, setHighlightColour } from "./highlight";
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -287,7 +288,8 @@ export async function ensureAdmin0Highlights(
   isolate?: MapsIsolate,
   zoomOffset = 0,
   extraAdmin1: string[] = [],
-  isCurrent: IsCurrent = ALWAYS_CURRENT
+  isCurrent: IsCurrent = ALWAYS_CURRENT,
+  highlightColourOverride?: string
 ): Promise<void> {
   ensureLowZoomRaster(map, styleId, zoomOffset);
   const data = await loadAdmin0();
@@ -298,6 +300,7 @@ export async function ensureAdmin0Highlights(
   const admin1Codes = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(highlights) : []), ...extraAdmin1])];
   if (admin1Codes.length) await Promise.all(admin1Codes.map(loadAdmin1));
   if (!isCurrent()) return;
+  const colour = highlightColourOverride ?? highlightColour();
   if (!map.getSource("admin0")) {
     map.addSource("admin0", { type: "geojson", data: data as GeoJSON.GeoJSON, promoteId: "ADM0_A3" });
   }
@@ -309,7 +312,7 @@ export async function ensureAdmin0Highlights(
         type: "fill",
         source: "admin0",
         paint: {
-          "fill-color": "#e8772a",
+          "fill-color": colour,
           "fill-opacity": admin0PaintExpression(ADMIN0_FILL_OPACITY),
         },
       },
@@ -321,7 +324,7 @@ export async function ensureAdmin0Highlights(
         type: "line",
         source: "admin0",
         paint: {
-          "line-color": "#e8772a",
+          "line-color": colour,
           "line-width": 1.2,
           "line-opacity": admin0PaintExpression(ADMIN0_LINE_OPACITY),
         },
@@ -329,10 +332,20 @@ export async function ensureAdmin0Highlights(
       before
     );
   }
-  ensureAdmin1Layers(map, admin1Codes);
+  ensureAdmin1Layers(map, admin1Codes, colour);
   applyHighlights(map, highlights);
   applyAdmin1Highlights(map, highlights);
   applyIsolate(map, highlights, isolate);
+}
+
+/** Sets the module-level highlight colour and repaints the admin-0/admin-1 layers already on `map`. */
+export function applyHighlightColour(map: MapLibreMap, colour: string): void {
+  setHighlightColour(colour);
+  const next = highlightColour();
+  if (map.getLayer("admin0-fill")) map.setPaintProperty("admin0-fill", "fill-color", next);
+  if (map.getLayer("admin0-line")) map.setPaintProperty("admin0-line", "line-color", next);
+  if (map.getLayer("admin1-fill")) map.setPaintProperty("admin1-fill", "fill-color", next);
+  if (map.getLayer("admin1-line")) map.setPaintProperty("admin1-line", "line-color", next);
 }
 
 /** Loads `codes` and re-feeds the merged `admin1` source from the cache — the explicit
@@ -350,7 +363,7 @@ export async function syncAdmin1Source(
 }
 
 /** Adds (or re-feeds) the merged admin-1 source for `codes`. No-op while nothing is highlighted. */
-function ensureAdmin1Layers(map: MapLibreMap, codes: string[]): void {
+function ensureAdmin1Layers(map: MapLibreMap, codes: string[], highlightColourOverride?: string): void {
   if (!codes.length) {
     if (map.getLayer("admin1-line")) map.removeLayer("admin1-line");
     if (map.getLayer("admin1-fill")) map.removeLayer("admin1-fill");
@@ -369,12 +382,13 @@ function ensureAdmin1Layers(map: MapLibreMap, codes: string[]): void {
   // Pin admin1-fill below isolate-fill regardless of which layer is (re)created first, so the
   // isolate mask always stays on top of the region fill, matching today's look.
   const before = map.getLayer("isolate-fill") ? "isolate-fill" : firstSymbolId(map);
+  const colour = highlightColourOverride ?? highlightColour();
   map.addLayer(
     {
       id: "admin1-fill",
       type: "fill",
       source: "admin1",
-      paint: { "fill-color": "#e8772a", "fill-opacity": 0 },
+      paint: { "fill-color": colour, "fill-opacity": 0 },
     },
     before
   );
@@ -383,10 +397,110 @@ function ensureAdmin1Layers(map: MapLibreMap, codes: string[]): void {
       id: "admin1-line",
       type: "line",
       source: "admin1",
-      paint: { "line-color": "#e8772a", "line-width": 1.2, "line-opacity": 0 },
+      paint: { "line-color": colour, "line-width": 1.2, "line-opacity": 0 },
     },
     before
   );
+}
+
+const LABEL_SCALE_MIN = 0.5;
+const LABEL_SCALE_MAX = 8;
+export const LABEL_GAP_EMS = 0.35;
+/** Mirrors `maps_keynote.PILL_PAD_X` / `PILL_PAD_Y`. */
+const PILL_PAD_X_PX = 6;
+export const PILL_PAD_Y_PX = 2;
+
+/** Mirrors `maps_keynote._label_scale`: authored size over the kind's default, every kind alike.
+ * The zoom-driven half of the total scale lives in the `text-size` stops, which carry the clamp. */
+function labelScale(kind: string, size: number, assetWidth = 0): number {
+  const base = defaultObjectSize(kind, assetWidth);
+  return base ? size / base : 1;
+}
+
+/** `icon-text-fit-padding` and an image's corner radius are layout constants, so the pill's
+ * padding and radius can only follow the label through a data-driven `icon-image`: one baked
+ * variant per bucket of `scale * objectScale`, which is the non-zoom half of the rendered text
+ * size (`24 * labelScale * objectScale`, see `text-size` below). The buckets are an octave apart
+ * and the geometry is geometric, so snapping to the nearest in log2 bounds that half's
+ * padding/radius error at sqrt(2) — the zoom-driven half of the total scale (`scaleWithMap`
+ * features only) cannot feed a data property and is not covered by this bound. */
+export const LABEL_PILL_BUCKETS: number[] = [0.5, 1, 2, 4, 8];
+
+export function labelPillBucket(scale: number): number {
+  const target = Math.log2(Math.max(scale, Number.MIN_VALUE));
+  let bucket = LABEL_PILL_BUCKETS[0];
+  for (const candidate of LABEL_PILL_BUCKETS) {
+    if (Math.abs(target - Math.log2(candidate)) < Math.abs(target - Math.log2(bucket))) bucket = candidate;
+  }
+  return bucket;
+}
+
+function labelOffsetProperty(zoom: number): string {
+  return `labelOffset${zoom}`;
+}
+
+/** LABEL: the pill's bottom sits `LABEL_GAP_EMS` of the rendered text size above the marker's
+ * rendered top, as the export's `top - LABEL_GAP * scale` pill bottom does. `text-offset` is in
+ * ems of the rendered — i.e. clamped — text size, so past the 0.5x..8x clamp a fixed ratio stops
+ * tracking a `scaleWithMap` marker, which keeps growing with zoom. Expressions cannot build an
+ * array, so the zoom-dependent ratio ships as one offset property per integer zoom and
+ * `text-offset` interpolates between them (see `labelOffsetExpression`). A selected drop pin's
+ * `icon-size` carries `DROP_PIN_SELECTED_SCALE` (see below): selection is known per-feature at
+ * GeoJSON build time (`sel`, from `selectedPinId`), so `markerHeightPx` folds that scale into the
+ * marker height feeding these offsets instead of needing `text-offset` to read the icon's state. */
+function labelOffsets(markerPx: number, totalScale: number, bucket: number, scaleWithMap: boolean, sizeZoomRef: number): Record<string, [number, number]> {
+  const factorAt = (zoom: number) => (scaleWithMap ? Math.pow(2, zoom - sizeZoomRef) : 1);
+  const textAt = (zoom: number) => Math.min(24 * LABEL_SCALE_MAX, Math.max(24 * LABEL_SCALE_MIN, 24 * totalScale * factorAt(zoom)));
+  const needAt = (zoom: number, textPx: number) => (markerPx * factorAt(zoom) + PILL_PAD_Y_PX * bucket) / textPx + LABEL_GAP_EMS;
+  const zooms = Array.from({ length: ML_MAX_ZOOM - ML_MIN_ZOOM + 1 }, (_, index) => ML_MIN_ZOOM + index);
+  const text = zooms.map(textAt);
+  const need = zooms.map((zoom, index) => needAt(zoom, text[index]));
+  // Between two stops MapLibre interpolates the offset and the text size independently, and the
+  // product of those two chords dips below what the (still geometric) marker needs. Substituting
+  // u = 2^(z - z0), u in [1, 2] — base-2 interpolation is affine in u — the size chord is
+  // S(u) = a + b*u, the offset chord is N(u) = c + d*u, and a scaleWithMap marker is exactly K*u,
+  // so the shortfall in ems is h(u) = (K*u + P)/S(u) + LABEL_GAP_EMS - N(u), with P the pill
+  // padding. h'(u) = (K*a - b*P)/S(u)^2 - d is monotone in u (S > 0 across the segment), so h has
+  // at most one interior extremum and h(1) = h(2) = 0 by construction: the exact dip is h at the
+  // closed-form root of h'. Lifting both stops of the segment by it lifts the whole chord clear.
+  const slack = zooms.map(() => 0);
+  const padPx = PILL_PAD_Y_PX * bucket;
+  for (let index = 0; index + 1 < zooms.length; index++) {
+    const b = text[index + 1] - text[index];
+    const a = text[index] - b;
+    const d = need[index + 1] - need[index];
+    const c = need[index] - d;
+    if (!scaleWithMap || b === 0 || d === 0) continue;
+    const marker = markerPx * factorAt(zooms[index]);
+    const square = (marker * a - b * padPx) / d;
+    if (!(square > 0)) continue;
+    const root = (Math.sqrt(square) - a) / b;
+    if (!(root > 1 && root < 2)) continue;
+    const dip = (marker * root + padPx) / (a + b * root) + LABEL_GAP_EMS - (c + d * root);
+    if (!(dip > 0)) continue;
+    slack[index] = Math.max(slack[index], dip);
+    slack[index + 1] = Math.max(slack[index + 1], dip);
+  }
+  const offsets: Record<string, [number, number]> = {};
+  zooms.forEach((zoom, index) => {
+    offsets[labelOffsetProperty(zoom)] = [0, -(need[index] + slack[index])];
+  });
+  return offsets;
+}
+
+/** Base-2 interpolation between the per-zoom offsets, the same ramp shape `text-size` uses. */
+function labelOffsetExpression(): DataDrivenPropertyValueSpecification<[number, number]> {
+  const stops: unknown[] = ["interpolate", ["exponential", 2], ["zoom"]];
+  for (let zoom = ML_MIN_ZOOM; zoom <= ML_MAX_ZOOM; zoom++) stops.push(zoom, ["array", "number", 2, ["get", labelOffsetProperty(zoom)]]);
+  return stops as unknown as DataDrivenPropertyValueSpecification<[number, number]>;
+}
+
+function markerHeightPx(church: MapsChurch, size: number, selected: boolean): number {
+  if (church.kind === "dot") return size / 2;
+  if (church.kind === "dropPin") return size * DROP_PIN_ASPECT * (selected ? DROP_PIN_SELECTED_SCALE : 1);
+  const width = church.assetWidth || 1;
+  const height = church.assetHeight || 1;
+  return (size * height) / width;
 }
 
 export function churchesGeo(
@@ -397,29 +511,43 @@ export function churchesGeo(
 ): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
-    features: churches.map((church, index) => ({
-      type: "Feature",
-      properties: {
-        id: church.id,
-        name: numberPins ? `${index + 1}. ${church.name}` : church.name,
-        showLabel: church.showLabel !== false,
-        color: church.color,
-        kind: church.kind,
-        pinImage: dropPinImageId(church.color),
-        assetId: church.assetId || "",
-        assetVersion: church.assetVersion || "v1",
-        assetWidth: church.assetWidth || 1,
-        assetRenderWidth: landmarkRenderWidths.get(`landmark-${church.assetId}-${church.assetVersion || "v1"}`) || church.assetWidth || 1,
-        assetHeight: church.assetHeight || 1,
-        size: church.size || defaultObjectSize(church.kind),
-        opacity: church.opacity ?? 1,
-        sel: church.id === selectedPinId,
-        objectScale,
-        scaleWithMap: church.scaleWithMap === true,
-        sizeZoomRef: (church.sizeZoom ?? 0) + Math.log2(objectScale),
-      },
-      geometry: { type: "Point", coordinates: [church.lon, church.lat] },
-    })),
+    features: churches.map((church, index) => {
+      const size = church.size || defaultObjectSize(church.kind, church.assetWidth);
+      const scale = labelScale(church.kind, size, church.assetWidth);
+      const bucket = labelPillBucket(Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, scale * objectScale)));
+      return {
+        type: "Feature",
+        properties: {
+          id: church.id,
+          name: numberPins ? `${index + 1}. ${church.name}` : church.name,
+          showLabel: church.showLabel === true,
+          color: church.color,
+          kind: church.kind,
+          pinImage: dropPinImageId(church.color),
+          assetId: church.assetId || "",
+          assetVersion: church.assetVersion || "v1",
+          assetWidth: church.assetWidth || 1,
+          assetRenderWidth: landmarkRenderWidths.get(`landmark-${church.assetId}-${church.assetVersion || "v1"}`) || church.assetWidth || 1,
+          assetHeight: church.assetHeight || 1,
+          size,
+          opacity: church.opacity ?? 1,
+          sel: church.id === selectedPinId,
+          objectScale,
+          scaleWithMap: church.scaleWithMap === true,
+          sizeZoomRef: (church.sizeZoom ?? 0) + Math.log2(objectScale),
+          labelScale: scale,
+          labelBucket: String(bucket),
+          ...labelOffsets(
+            markerHeightPx(church, size, church.id === selectedPinId) * objectScale,
+            scale * objectScale,
+            bucket,
+            church.scaleWithMap === true,
+            (church.sizeZoom ?? 0) + Math.log2(objectScale)
+          ),
+        },
+        geometry: { type: "Point", coordinates: [church.lon, church.lat] },
+      };
+    }),
   };
 }
 
@@ -459,16 +587,19 @@ function dropPinImageId(color: string): string {
 
 /**
  * Preview drop pin, drawn to Keynote's `_place_churches` geometry: a head circle of
- * diameter = size, a tail triangle 0.46 wide x 0.4 tall starting at 0.68, and a white
- * hole of diameter 0.36 at the head centre. Total height is 1.08 x size, tip on the anchor.
+ * diameter = size, a tail triangle tangent to the head, and a white hole of diameter
+ * 0.36 at the head centre. Total height is `DROP_PIN_ASPECT` x size, tip on the anchor.
  */
 const DROP_PIN_DEVICE_HEAD = 100;
 const DROP_PIN_PIXEL_RATIO = 2;
 
+/** Head-to-tip aspect ratio, matching `maps_pins.PIN_ASPECT`. */
+export const DROP_PIN_ASPECT = 1.45;
+
 /** Head diameter in CSS px of the raster `dropPinImage` returns. */
 export const DROP_PIN_HEAD_PX = DROP_PIN_DEVICE_HEAD / DROP_PIN_PIXEL_RATIO;
 /** Head-to-tip height in CSS px of that raster. */
-export const DROP_PIN_TOTAL_PX = DROP_PIN_HEAD_PX * 1.08;
+export const DROP_PIN_TOTAL_PX = DROP_PIN_HEAD_PX * DROP_PIN_ASPECT;
 /** Emphasis applied to a selected drop pin's `icon-size`. */
 export const DROP_PIN_SELECTED_SCALE = 1.08;
 
@@ -486,19 +617,20 @@ export function dropPinSelectionBox(headPx: number): { w: number; h: number } {
 
 function dropPinImage(color: string): ImageData {
   const size = DROP_PIN_DEVICE_HEAD;
-  const height = Math.round(size * 1.08);
+  const height = Math.round(size * DROP_PIN_ASPECT);
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
   if (!ctx) return new ImageData(size, height);
   const half = size / 2;
-  const tailW = size * 0.46;
-  const tailTop = size * 0.68;
+  const d = height - half;
+  const contactY = half + (half * half) / d;
+  const contactHalfW = (half * Math.sqrt(d * d - half * half)) / d;
   ctx.beginPath();
-  ctx.moveTo(half - tailW / 2, tailTop);
-  ctx.lineTo(half + tailW / 2, tailTop);
-  ctx.lineTo(half, tailTop + size * 0.4);
+  ctx.moveTo(half - contactHalfW, contactY);
+  ctx.lineTo(half + contactHalfW, contactY);
+  ctx.lineTo(half, height);
   ctx.closePath();
   ctx.moveTo(size, half);
   ctx.arc(half, half, half, 0, Math.PI * 2);
@@ -522,6 +654,59 @@ export function ensureDropPinImages(map: MapLibreMap, churches: MapsChurch[]) {
     if (church.kind !== "dropPin") continue;
     const id = dropPinImageId(church.color);
     if (!map.hasImage(id)) map.addImage(id, dropPinImage(church.color), { pixelRatio: DROP_PIN_PIXEL_RATIO });
+  }
+}
+
+/** Gold_Wall_Input.key slide 8: corner scalar 9.57 at h~46 -> radius ~= 0.21*h. Mirrors `maps_pins.LABEL_RADIUS_FRAC`. */
+const LABEL_RADIUS_FRAC = 0.21;
+export const LABEL_PILL_ID = "church-label-pill";
+const LABEL_PILL_TEMPLATE_W = 64;
+const LABEL_PILL_TEMPLATE_H = 32;
+
+export function labelPillImageId(bucket: number): string {
+  return `${LABEL_PILL_ID}-${bucket}`;
+}
+
+function labelPillBox(bucket: number): { w: number; h: number; cornerPx: number; padX: number; padY: number } {
+  const w = LABEL_PILL_TEMPLATE_W * bucket * DROP_PIN_PIXEL_RATIO;
+  const h = LABEL_PILL_TEMPLATE_H * bucket * DROP_PIN_PIXEL_RATIO;
+  return {
+    w,
+    h,
+    cornerPx: LABEL_RADIUS_FRAC * h,
+    padX: PILL_PAD_X_PX * bucket * DROP_PIN_PIXEL_RATIO,
+    padY: PILL_PAD_Y_PX * bucket * DROP_PIN_PIXEL_RATIO,
+  };
+}
+
+function labelPillImage(bucket: number): ImageData {
+  const { w, h, cornerPx } = labelPillBox(bucket);
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return new ImageData(w, h);
+  ctx.beginPath();
+  ctx.roundRect(0, 0, w, h, cornerPx);
+  ctx.fillStyle = "#EE220C";
+  ctx.fill();
+  return ctx.getImageData(0, 0, w, h);
+}
+
+/** Re-runnable: a style reload drops every image, so `addOverlays` calls this again. */
+export function ensureLabelPillImage(map: MapLibreMap) {
+  for (const bucket of LABEL_PILL_BUCKETS) {
+    const id = labelPillImageId(bucket);
+    if (map.hasImage(id)) continue;
+    const { w, h, cornerPx, padX, padY } = labelPillBox(bucket);
+    map.addImage(id, labelPillImage(bucket), {
+      pixelRatio: DROP_PIN_PIXEL_RATIO,
+      stretchX: [[cornerPx, w - cornerPx]],
+      stretchY: [[cornerPx, h - cornerPx]],
+      // The content inset is the pill padding: `icon-text-fit` sizes the image so this box
+      // covers the text, leaving a bucket-scaled margin all round.
+      content: [padX, padY, w - padX, h - padY],
+    });
   }
 }
 
@@ -600,11 +785,17 @@ export function churchesLayers(): LayerSpecification[] {
       filter: ["==", ["get", "showLabel"], true],
       layout: {
         "text-field": ["get", "name"],
-        "text-size": ["*", 24, ["get", "objectScale"]],
-        "text-offset": [0, 1.35],
-        "text-anchor": "top",
+        "text-size": zoomScaledStops(["*", 24, ["get", "labelScale"], ["get", "objectScale"]], 24 * LABEL_SCALE_MAX, 24 * LABEL_SCALE_MIN),
+        "text-offset": labelOffsetExpression(),
+        "text-anchor": "bottom",
+        "text-allow-overlap": true,
+        "text-ignore-placement": true,
+        "icon-image": ["concat", `${LABEL_PILL_ID}-`, ["get", "labelBucket"]],
+        "icon-text-fit": "both",
+        "icon-allow-overlap": true,
+        "icon-ignore-placement": true,
       },
-      paint: { "text-color": "#FFFFFF", "text-halo-color": "#07070A", "text-halo-width": ["*", 1.2, ["get", "objectScale"]], "text-opacity": ["coalesce", ["get", "opacity"], 1] },
+      paint: { "text-color": "#FFFFFF", "text-opacity": ["coalesce", ["get", "opacity"], 1], "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
     },
   ] as LayerSpecification[];
 }
@@ -620,11 +811,13 @@ export async function addOverlays(
   objectScale = 1,
   isolate?: MapsIsolate,
   extraAdmin1: string[] = [],
-  isCurrent: IsCurrent = ALWAYS_CURRENT
+  isCurrent: IsCurrent = ALWAYS_CURRENT,
+  highlightColourOverride?: string
 ) {
-  await ensureAdmin0Highlights(map, highlights, styleId, isolate, 0, extraAdmin1, isCurrent);
+  await ensureAdmin0Highlights(map, highlights, styleId, isolate, 0, extraAdmin1, isCurrent, highlightColourOverride);
   if (!isCurrent()) return;
   ensureDropPinImages(map, churches);
+  ensureLabelPillImage(map);
   await ensureLandmarkImages(map, churches, assetBaseUrl);
   if (!isCurrent()) return;
   const pins = churchesGeo(churches, selectedPinId, numberPins, objectScale);

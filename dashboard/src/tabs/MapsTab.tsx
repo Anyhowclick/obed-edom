@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from "react";
 import {
   bootstrapMapsCsv,
   bootstrapMapsPinsCsv,
@@ -31,8 +31,10 @@ import { ErrorNotice } from "../components/ErrorNotice";
 import {
   IconArrowLeft,
   IconCaret,
+  IconChevron,
   IconClose,
   IconCopy,
+  IconCountry,
   IconDot,
   IconDropPin,
   IconLabel,
@@ -44,6 +46,7 @@ import {
   IconPasteSlides,
   IconPlay,
   IconPlus,
+  IconRegion,
   IconRelief,
   IconTrash,
 } from "../components/icons";
@@ -55,10 +58,13 @@ import {
   MAPS_INSPECTOR_KEY,
   MAPS_PICK_MODE_KEY,
   MAPS_SIDE_PANELS_KEY,
+  highlightColourReady,
   useDefaultExportDir,
+  useHighlightColour,
   useSessionPath,
   useSessionToggle,
 } from "../prefs";
+import { highlightCssVars, setHighlightColour } from "../maps/highlight";
 import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
@@ -148,10 +154,40 @@ function pinKindClass(kind: MapsPinKind): string {
   return kind === "dropPin" ? "droppin" : kind;
 }
 
+/** A collapsible inspector sub-section; open state persists per-session, keyed by `id`. */
+function InspSection({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  const [open, setOpen] = useSessionToggle(`obed-edom.maps.section.${id}`, true);
+  return (
+    <>
+      <button
+        type="button"
+        className="insp-sec-head"
+        aria-expanded={open}
+        aria-controls={`insp-sec-${id}`}
+        onClick={() => setOpen(!open)}
+      >
+        <IconChevron className="insp-sec-chev" />
+        {title}
+      </button>
+      <div id={`insp-sec-${id}`} className="insp-sec-body" hidden={!open}>
+        {children}
+      </div>
+    </>
+  );
+}
+
 function PinKindIcon({ kind }: { kind: MapsPinKind }) {
   if (kind === "dropPin") return <IconDropPin />;
   if (kind === "landmark") return <IconLandmark />;
   return <IconDot />;
+}
+
+function highlightClass(code: string): string {
+  return code.startsWith("A1:") ? "region" : "country";
+}
+
+function HighlightIcon({ code }: { code: string }) {
+  return code.startsWith("A1:") ? <IconRegion /> : <IconCountry />;
 }
 
 function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
@@ -249,6 +285,7 @@ export function MapsTab() {
   const navDrag = useRef<{ x: number; w: number } | null>(null);
   const [exportDir, setExportDir] = useSessionPath("obed-edom.maps.exportDir");
   const defaultExportDir = useDefaultExportDir();
+  const highlightColour = useHighlightColour();
   const [sidePanels, setSidePanels] = useSessionToggle(MAPS_SIDE_PANELS_KEY, true);
   const [inspectorOpen, setInspectorOpen] = useSessionToggle(MAPS_INSPECTOR_KEY, true);
   const [pickRegions, setPickRegions] = useSessionToggle(MAPS_PICK_MODE_KEY, false);
@@ -274,6 +311,12 @@ export function MapsTab() {
   useEffect(() => {
     void loadAdmin0().then(() => setNamesTick((n) => n + 1));
   }, []);
+
+  useEffect(() => {
+    setHighlightColour(highlightColour);
+    const vars = highlightCssVars(highlightColour);
+    for (const [key, value] of Object.entries(vars)) document.documentElement.style.setProperty(key, value);
+  }, [highlightColour]);
 
   const doc = documentFromResult(job?.result as Record<string, unknown> | undefined);
   const activeSlideRaw = (doc?.slides || []).find((s) => s.id === activeId);
@@ -764,6 +807,9 @@ export function MapsTab() {
     const current = docRef.current;
     const id = activeRef.current;
     if (!current || !id) return;
+    if (partial.highlights !== undefined && partial.highlights.length === 0) {
+      partial = { ...partial, isolate: undefined };
+    }
     patchDoc({
       ...current,
       slides: current.slides.map((slide) => {
@@ -1470,6 +1516,13 @@ export function MapsTab() {
       if (exportAbort.current) throw new Error("Export cancelled.");
     };
     try {
+      throwIfCancelled();
+      const readyColour = await Promise.race([
+        highlightColourReady(),
+        new Promise<string>((resolve) => setTimeout(() => resolve(highlightColour), 2000)),
+      ]);
+      throwIfCancelled();
+      setHighlightColour(readyColour);
       await flushAndSave(true);
       throwIfCancelled();
       const id = jobRef.current?.id;
@@ -1565,6 +1618,23 @@ export function MapsTab() {
         setLogs((prev) => [...prev, `Cached ${cached + fetched} / ${total} tiles (${failed} failed).`]);
       };
 
+      const postIsolatePair = async (
+        pair: { base: Blob; pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] },
+        target: { kind: "still" | "plate"; slideId?: string; plateId?: string; audience?: "lw" | "cg" },
+        width: number,
+        height: number
+      ) => {
+        reconcileServerJob(await postMapsPng(id, pair.base, target));
+        for (const [k, piece] of pair.pieces.entries()) {
+          throwIfCancelled();
+          reconcileServerJob(await postMapsPng(id, piece.blob, { ...target, variant: "region", index: k }));
+        }
+        throwIfCancelled();
+        const manifest = { width, height, pieces: pair.pieces.map(({ blob: _blob, ...rest }) => rest) };
+        const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/json" });
+        reconcileServerJob(await postMapsPng(id, manifestBlob, { ...target, variant: "regions" }));
+      };
+
       const makeFrameTracker = (phase: string) => {
         const frameTimes: number[] = [];
         let lastFrameAt = performance.now();
@@ -1596,13 +1666,13 @@ export function MapsTab() {
           isolate: still.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
           stamp,
+          highlightColour: readyColour,
         };
         if (still.highlights.length) {
           const pair = await captureIsolatePair(exportOpts);
           throwIfCancelled();
           if (pair) {
-            reconcileServerJob(await postMapsPng(id, pair.base, { kind: "still", slideId: still.slideId }));
-            reconcileServerJob(await postMapsPng(id, pair.country, { kind: "still", slideId: still.slideId, variant: "country" }));
+            await postIsolatePair(pair, { kind: "still", slideId: still.slideId }, exportOpts.width, exportOpts.height);
           }
         } else {
           const blob = await captureExportRaster(exportOpts);
@@ -1627,13 +1697,13 @@ export function MapsTab() {
           isolate: plate.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
           stamp,
+          highlightColour: readyColour,
         };
         if (plate.highlights.length) {
           const pair = await captureIsolatePair(plateOpts);
           throwIfCancelled();
           if (pair) {
-            reconcileServerJob(await postMapsPng(id, pair.base, { kind: "plate", plateId: plate.plateId }));
-            reconcileServerJob(await postMapsPng(id, pair.country, { kind: "plate", plateId: plate.plateId, variant: "country" }));
+            await postIsolatePair(pair, { kind: "plate", plateId: plate.plateId }, plateOpts.width, plateOpts.height);
           }
         } else {
           const blob = await captureExportRaster(plateOpts);
@@ -1658,13 +1728,18 @@ export function MapsTab() {
             isolate: still.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
             stamp,
+            highlightColour: readyColour,
           };
           if (still.highlights.length) {
             const pair = await captureIsolatePair(exportOpts);
             throwIfCancelled();
             if (pair) {
-              reconcileServerJob(await postMapsPng(id, pair.base, { kind: "still", slideId: still.slideId, audience: "cg" }));
-              reconcileServerJob(await postMapsPng(id, pair.country, { kind: "still", slideId: still.slideId, audience: "cg", variant: "country" }));
+              await postIsolatePair(
+                pair,
+                { kind: "still", slideId: still.slideId, audience: "cg" },
+                exportOpts.width,
+                exportOpts.height
+              );
             }
           } else {
             const blob = await captureExportRaster(exportOpts);
@@ -1689,13 +1764,18 @@ export function MapsTab() {
             isolate: plate.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
             stamp,
+            highlightColour: readyColour,
           };
           if (plate.highlights.length) {
             const pair = await captureIsolatePair(plateOpts);
             throwIfCancelled();
             if (pair) {
-              reconcileServerJob(await postMapsPng(id, pair.base, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
-              reconcileServerJob(await postMapsPng(id, pair.country, { kind: "plate", plateId: plate.plateId, audience: "cg", variant: "country" }));
+              await postIsolatePair(
+                pair,
+                { kind: "plate", plateId: plate.plateId, audience: "cg" },
+                plateOpts.width,
+                plateOpts.height
+              );
             }
           } else {
             const blob = await captureExportRaster(plateOpts);
@@ -1774,6 +1854,7 @@ export function MapsTab() {
           flight: link.flight,
           isCancelled: () => exportAbort.current,
           stamp,
+          highlightColour: readyColour,
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
             await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 });
@@ -1858,6 +1939,7 @@ export function MapsTab() {
             },
             isCancelled: () => exportAbort.current,
             stamp,
+            highlightColour: readyColour,
             onFrame: async (blob, i, n) => {
               if (exportAbort.current) throw new Error("Export cancelled.");
               await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps, audience: "cg" });
@@ -2397,6 +2479,7 @@ export function MapsTab() {
                 exportCg={showCgBand(active)}
                 hiddenLayers={slideHiddenLayers(renderedView)}
                 hillshade={renderedView?.hillshade === true}
+                highlightColour={highlightColour}
                 cgShiftX={activeAudience === "cg" ? 0 : active.cgShiftX}
                 authoredWidth={renderedAuthoredWidth}
                 previewing={previewing}
@@ -2423,6 +2506,7 @@ export function MapsTab() {
                     lon,
                     kind: "dropPin",
                     color: "#c44a42",
+                    showLabel: false,
                     size: defaultObjectSize("dropPin"),
                     scaleWithMap: true,
                     sizeZoom: activeView.camera.zoom,
@@ -2501,11 +2585,23 @@ export function MapsTab() {
                 onClick={() => setInspTab(tab.id)}
               >
                 {tab.label}
-                {tab.id === "pins" && (activeView?.churches.length || 0) > 0 && (
-                  <span className="maps-insp-count">{activeView?.churches.length}</span>
+                {tab.id === "pins" && (activeView?.churches.length || 0) + (activeView?.highlights.length || 0) > 0 && (
+                  <span className="maps-insp-count">
+                    {(activeView?.churches.length || 0) + (activeView?.highlights.length || 0)}
+                  </span>
                 )}
               </button>
             ))}
+            <span
+              className="maps-insp-ind"
+              aria-hidden="true"
+              style={
+                {
+                  "--seg-i": INSPECTOR_TABS.findIndex((t) => t.id === inspTab),
+                  "--seg-n": INSPECTOR_TABS.length,
+                } as CSSProperties
+              }
+            />
           </div>
           {active && (
             <div className="maps-insp-body">
@@ -2554,7 +2650,7 @@ export function MapsTab() {
                       )}
                     </select>
                   </label>
-                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || defaultObjectSize(pin.kind)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
+                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
                   <label className="maps-check">
                     <input
@@ -2566,7 +2662,7 @@ export function MapsTab() {
                         updateActive({
                           churches: (activeView?.churches || []).map((c) => {
                             if (c.id !== pin.id) return c;
-                            const defaultSize = defaultObjectSize(c.kind);
+                            const defaultSize = defaultObjectSize(c.kind, c.assetWidth);
                             if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
                             const size = c.sizeZoom != null ? (c.size || defaultSize) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || defaultSize;
                             return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, size))), sizeZoom: undefined };
@@ -2639,7 +2735,8 @@ export function MapsTab() {
                       )}
                     </>
                   )}
-                  <label className="maps-check"><input type="checkbox" checked={pin.showLabel !== false} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
+                  <label className="maps-check"><input type="checkbox" checked={pin.showLabel === true} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
+                  {pin.showLabel === true && <p className="note">Preview only: Keynote sets this label in Amplitude Bold on the red pill.</p>}
                   <label>
                     Colour:
                     <input
@@ -2668,226 +2765,231 @@ export function MapsTab() {
               )}
               {inspTab === "properties" && !pin && (
                 <>
-                  <div className="cap">Viewport</div>
-                  {active.cg ? (
-                    <div className="seg">
-                      <button
-                        type="button"
-                        className={`aud-lw${activeAudience === "lw" ? " on" : ""}`}
-                        disabled={locked}
-                        onClick={() => void selectSlide(active.id, { audience: "lw" })}
-                      >
-                        {sidePanels || active.includeSidePanels ? "FW" : "LW"}
+                  <InspSection id="viewport" title="Viewport">
+                    {active.cg ? (
+                      <div className="seg">
+                        <button
+                          type="button"
+                          className={`aud-lw${activeAudience === "lw" ? " on" : ""}`}
+                          disabled={locked}
+                          onClick={() => void selectSlide(active.id, { audience: "lw" })}
+                        >
+                          {sidePanels || active.includeSidePanels ? "FW" : "LW"}
+                        </button>
+                        <button
+                          type="button"
+                          className={`aud-cg${activeAudience === "cg" ? " on" : ""}`}
+                          disabled={locked}
+                          onClick={() => void selectSlide(active.id, { audience: "cg" })}
+                        >
+                          CG
+                        </button>
+                        <button type="button" disabled={locked} onClick={mergeCg}>
+                          Merge CG
+                        </button>
+                      </div>
+                    ) : (
+                      <button className="btn secondary" type="button" disabled={locked} onClick={splitCg}>
+                        Split CG viewport
                       </button>
-                      <button
-                        type="button"
-                        className={`aud-cg${activeAudience === "cg" ? " on" : ""}`}
-                        disabled={locked}
-                        onClick={() => void selectSlide(active.id, { audience: "cg" })}
-                      >
-                        CG
-                      </button>
-                      <button type="button" disabled={locked} onClick={mergeCg}>
-                        Merge CG
-                      </button>
-                    </div>
-                  ) : (
-                    <button className="btn secondary" type="button" disabled={locked} onClick={splitCg}>
-                      Split CG viewport
-                    </button>
-                  )}
-                  <div className="cap">Camera</div>
-                  <label>
-                    Title:
-                    <input value={active.title} disabled={locked} onChange={(event) => updateActive({ title: event.target.value })} />
-                  </label>
-                  <AeScrub
-                    label="Latitude"
-                    value={activeView?.camera.lat ?? 0}
-                    min={-MAX_LAT}
-                    max={MAX_LAT}
-                    step={0.01}
-                    digits={4}
-                    disabled={locked}
-                    onChange={(lat) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, lat };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  <AeScrub
-                    label="Longitude"
-                    value={activeView?.camera.lon ?? 0}
-                    min={-180}
-                    max={180}
-                    step={0.01}
-                    digits={4}
-                    disabled={locked}
-                    onChange={(lon) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, lon };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  <AeScrub
-                    label="Zoom"
-                    value={activeView?.camera.zoom ?? zoomFloor}
-                    min={zoomFloor}
-                    max={22}
-                    step={0.1}
-                    slider
-                    disabled={locked}
-                    onChange={(zoom) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, zoom: clampZoom(zoom, zoomFloor) };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  {wrapWarn && <p className="maps-wrap-note">{wrapWarn}</p>}
-                  <AeScrub
-                    label="Pitch"
-                    value={activeView?.camera.pitch ?? 0}
-                    min={0}
-                    max={60}
-                    step={1}
-                    digits={0}
-                    disabled={locked}
-                    onChange={(pitch) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, pitch };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  <AeScrub
-                    label="Bearing"
-                    value={activeView?.camera.bearing ?? 0}
-                    min={-180}
-                    max={180}
-                    step={1}
-                    digits={0}
-                    disabled={locked}
-                    onChange={(bearing) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, bearing };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  {activeAudience === "lw" && (
-                    <>
-                      <AeScrub
-                        label="CG shift X"
-                        value={active.cgShiftX}
-                        min={-CG_SHIFT_MAX}
-                        max={CG_SHIFT_MAX}
-                        step={1}
-                        digits={0}
-                        disabled={locked}
-                        onChange={(dx) => updateActive(clampCgShift(dx, 0))}
-                        onCommit={() => fireAndForgetSave()}
-                      />
-                      <label className="maps-check" title="Off (default) captures the 3840×1080 LED centre so Keynote side-panel art can show. On fills the 7680×1080 wall.">
+                    )}
+                  </InspSection>
+                  <InspSection id="camera" title="Camera">
+                    <label>
+                      Title:
+                      <input value={active.title} disabled={locked} onChange={(event) => updateActive({ title: event.target.value })} />
+                    </label>
+                    <AeScrub
+                      label="Latitude"
+                      value={activeView?.camera.lat ?? 0}
+                      min={-MAX_LAT}
+                      max={MAX_LAT}
+                      step={0.01}
+                      digits={4}
+                      disabled={locked}
+                      onChange={(lat) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, lat };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    <AeScrub
+                      label="Longitude"
+                      value={activeView?.camera.lon ?? 0}
+                      min={-180}
+                      max={180}
+                      step={0.01}
+                      digits={4}
+                      disabled={locked}
+                      onChange={(lon) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, lon };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    <AeScrub
+                      label="Zoom"
+                      value={activeView?.camera.zoom ?? zoomFloor}
+                      min={zoomFloor}
+                      max={22}
+                      step={0.1}
+                      slider
+                      disabled={locked}
+                      onChange={(zoom) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, zoom: clampZoom(zoom, zoomFloor) };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    {wrapWarn && <p className="maps-wrap-note">{wrapWarn}</p>}
+                    <AeScrub
+                      label="Pitch"
+                      value={activeView?.camera.pitch ?? 0}
+                      min={0}
+                      max={60}
+                      step={1}
+                      digits={0}
+                      disabled={locked}
+                      onChange={(pitch) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, pitch };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    <AeScrub
+                      label="Bearing"
+                      value={activeView?.camera.bearing ?? 0}
+                      min={-180}
+                      max={180}
+                      step={1}
+                      digits={0}
+                      disabled={locked}
+                      onChange={(bearing) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, bearing };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    {activeAudience === "lw" && (
+                      <>
+                        <AeScrub
+                          label="CG shift X"
+                          value={active.cgShiftX}
+                          min={-CG_SHIFT_MAX}
+                          max={CG_SHIFT_MAX}
+                          step={1}
+                          digits={0}
+                          disabled={locked}
+                          onChange={(dx) => updateActive(clampCgShift(dx, 0))}
+                          onCommit={() => fireAndForgetSave()}
+                        />
+                        <label className="maps-check" title="Off (default) captures the 3840×1080 LED centre so Keynote side-panel art can show. On fills the 7680×1080 wall.">
+                          <input
+                            type="checkbox"
+                            checked={active.includeSidePanels === true}
+                            disabled={locked}
+                            onChange={(event) => updateActive({ includeSidePanels: event.target.checked })}
+                          />
+                          Include side panels for render
+                        </label>
+                      </>
+                    )}
+                  </InspSection>
+                  <div className="maps-hl">
+                    <InspSection id="regions" title="Selected regions">
+                      <div className="seg seg-slide">
+                        <span
+                          className="seg-slide-ind"
+                          aria-hidden="true"
+                          style={{ "--seg-i": pickRegions ? 1 : 0, "--seg-n": 2 } as CSSProperties}
+                        />
+                        <button
+                          type="button"
+                          className={pickRegions ? "" : "on"}
+                          disabled={locked}
+                          onClick={() => setPickRegions(false)}
+                        >
+                          Countries
+                        </button>
+                        <button
+                          type="button"
+                          className={pickRegions ? "on" : ""}
+                          disabled={locked}
+                          onClick={() => setPickRegions(true)}
+                        >
+                          Regions
+                        </button>
+                      </div>
+                      {pickRegions && regionsLoading && <div className="note">Loading regions…</div>}
+                      {pickRegions && !regionsLoading && regionCameraCountries.length === 0 && (
+                        <div className="note">Pan a country under the centre to pick its regions.</div>
+                      )}
+                      {(activeView?.highlights.length || 0) > 0 && (
+                        <div className="maps-hl-list">
+                          {(activeView?.highlights || []).map((code) => (
+                            <button
+                              key={`${code}-${namesTick}`}
+                              className="maps-hl-chip"
+                              type="button"
+                              disabled={locked}
+                              title="Remove highlight"
+                              onClick={() =>
+                                updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
+                              }
+                            >
+                              {code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}
+                              <IconClose />
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </InspSection>
+                  </div>
+                  {(activeView?.highlights.length || 0) > 0 && (
+                    <div className="maps-hl">
+                      <label className="maps-check">
                         <input
                           type="checkbox"
-                          checked={active.includeSidePanels === true}
+                          checked={!!activeView?.isolate}
                           disabled={locked}
-                          onChange={(event) => updateActive({ includeSidePanels: event.target.checked })}
-                        />
-                        Include side panels for render
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            updateActive({
+                              isolate: checked
+                                ? { mode: "darken", strength: activeView?.isolate?.strength ?? DEFAULT_ISOLATE_STRENGTH }
+                                : undefined,
+                            });
+                          }}
+                        />{" "}
+                        Isolate <span className="muted">{activeView?.isolate ? "ON" : "OFF"}</span>
                       </label>
-                    </>
-                  )}
-                  <div className="maps-hl">
-                    <div className="cap">Selected regions</div>
-                    <div className="seg">
-                      <button
-                        type="button"
-                        className={pickRegions ? "" : "on"}
-                        disabled={locked}
-                        onClick={() => setPickRegions(false)}
-                      >
-                        Countries
-                      </button>
-                      <button
-                        type="button"
-                        className={pickRegions ? "on" : ""}
-                        disabled={locked}
-                        onClick={() => setPickRegions(true)}
-                      >
-                        Regions
-                      </button>
+                      {activeView?.isolate && (
+                        <AeScrub
+                          label="Strength"
+                          value={activeView.isolate.strength}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          slider
+                          digits={2}
+                          disabled={locked}
+                          onChange={(strength) => updateActive({ isolate: { ...activeView.isolate!, strength } })}
+                          onCommit={() => fireAndForgetSave()}
+                        />
+                      )}
+                      <p className="note">Applies to the highlighted countries above.</p>
                     </div>
-                    {pickRegions && regionsLoading && <div className="note">Loading regions…</div>}
-                    {pickRegions && !regionsLoading && regionCameraCountries.length === 0 && (
-                      <div className="note">Pan a country under the centre to pick its regions.</div>
-                    )}
-                    {(activeView?.highlights.length || 0) > 0 && (
-                      <div className="maps-hl-list">
-                        {(activeView?.highlights || []).map((code) => (
-                          <button
-                            key={`${code}-${namesTick}`}
-                            className="maps-hl-chip"
-                            type="button"
-                            disabled={locked}
-                            title="Remove highlight"
-                            onClick={() =>
-                              updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
-                            }
-                          >
-                            {code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}
-                            <IconClose />
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <div className="maps-hl">
-                    <div className="cap">Isolate country</div>
-                    <label className="maps-check">
-                      <input
-                        type="checkbox"
-                        checked={!!activeView?.isolate}
-                        disabled={locked}
-                        onChange={(event) => {
-                          const checked = event.target.checked;
-                          updateActive({
-                            isolate: checked
-                              ? { mode: "darken", strength: activeView?.isolate?.strength ?? DEFAULT_ISOLATE_STRENGTH }
-                              : undefined,
-                          });
-                        }}
-                      />{" "}
-                      Isolate country
-                    </label>
-                    {activeView?.isolate && (
-                      <AeScrub
-                        label="Strength"
-                        value={activeView.isolate.strength}
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        slider
-                        digits={2}
-                        disabled={locked}
-                        onChange={(strength) => updateActive({ isolate: { ...activeView.isolate!, strength } })}
-                        onCommit={() => fireAndForgetSave()}
-                      />
-                    )}
-                    <p className="note">
-                      {(activeView?.highlights.length || 0)
-                        ? "Applies to the orange countries above."
-                        : "Add an orange country first — isolate does nothing without one."}
-                    </p>
-                  </div>
+                  )}
                 </>
               )}
               {inspTab === "pins" && (
@@ -2967,9 +3069,10 @@ export function MapsTab() {
                       </div>
                     )}
                   </div>
-                  {(activeView?.churches.length || 0) === 0 ? (
+                  {(activeView?.churches.length || 0) === 0 && (activeView?.highlights.length || 0) === 0 && (
                     <p className="note">Shift-click the map to add a pin, or add a transparent landmark.</p>
-                  ) : (
+                  )}
+                  {(activeView?.churches.length || 0) > 0 && (
                     <>
                       <div className="maps-pin-bulk" role="group" aria-label="Selected objects">
                         {selectedPins.length > 0 && <span className="note">{selectedPins.length} selected</span>}
@@ -3011,7 +3114,34 @@ export function MapsTab() {
                               <span className="maps-pin-swatch" style={{ background: church.color }} />
                               <span className="maps-pin-name">{church.name}</span>
                               {church.reveal && <span className="maps-pin-hidden">Paint-on {church.reveal.duration}s</span>}
-                              {church.showLabel === false && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
+                              {church.showLabel !== true && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {(activeView?.highlights.length || 0) > 0 && (
+                    <>
+                      <div className="cap">Highlights</div>
+                      <div className="maps-pin-list">
+                        {(activeView?.highlights || []).map((code) => (
+                          <div key={`${code}-${namesTick}`} className={`maps-pin-row kind-${highlightClass(code)}`}>
+                            <span className={`maps-pin-kind kind-${highlightClass(code)}`} aria-hidden="true">
+                              <HighlightIcon code={code} />
+                            </span>
+                            <span className="maps-pin-name">{code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}</span>
+                            <button
+                              className="btn maps-delete icon-btn"
+                              type="button"
+                              disabled={locked}
+                              title="Remove highlight"
+                              aria-label={`Remove ${code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}`}
+                              onClick={() =>
+                                updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
+                              }
+                            >
+                              <IconClose />
                             </button>
                           </div>
                         ))}

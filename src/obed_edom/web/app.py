@@ -138,6 +138,7 @@ class SettingsBody(BaseModel):
     reusePairings: bool | None = None
     reusePreviews: bool | None = None
     defaultExportDir: str | None = None
+    highlightColour: str | None = None
 
 
 OPENABLE_SUFFIXES = {".key", ".docx", ".pdf", ".png", ".jpg", ".jpeg", ".mov", ".mp4"}
@@ -193,6 +194,8 @@ def create_app() -> FastAPI:
             current["reusePreviews"] = payload.reusePreviews
         if payload.defaultExportDir is not None:
             current["defaultExportDir"] = payload.defaultExportDir
+        if payload.highlightColour is not None:
+            current["highlightColour"] = payload.highlightColour
         try:
             return save_settings(current, validate_dir=payload.defaultExportDir is not None)
         except ValueError as exc:

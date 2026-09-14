@@ -48,10 +48,13 @@ from obed_edom.maps_geo import (
 from obed_edom.maps_keynote import (
     DOT_SIZE,
     DROP_SIZE,
+    REGION_MANIFEST_MAX_PIECES,
     coerce_link_kinds,
     maps_export_plan,
     normalise_credit_line,
     plate_filename,
+    region_manifest_dims_valid,
+    region_piece_is_valid,
     split_cg_export_plan,
 )
 from obed_edom.maps_tiles import (
@@ -265,7 +268,7 @@ class MapsChurch(BaseModel):
     lon: float
     kind: MapsPinKind
     color: str
-    showLabel: bool = True
+    showLabel: bool = False
     icon: MapsIconId | None = None
     photoPath: str | None = None
     assetId: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,80}$")
@@ -277,6 +280,15 @@ class MapsChurch(BaseModel):
     reveal: MapsReveal | None = None
     scaleWithMap: bool | None = None
     sizeZoom: float | None = Field(default=None, ge=0, le=22)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_label(cls, data: object) -> object:
+        """`showLabel` defaulted to True before it was written explicitly, so a saved church
+        with no key predates the flip and keeps its label; every creation path writes the key."""
+        if isinstance(data, dict) and "showLabel" not in data:
+            return {**data, "showLabel": True}
+        return data
 
 
 class MapsAsset(BaseModel):
@@ -411,7 +423,7 @@ class MapsDocument(BaseModel):
     hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_LAYERS))
     cachedCountries: list[str] = Field(default_factory=list)
     assets: list[MapsAsset] = Field(default_factory=list)
-    attribution: MapsAttribution = "stamp"
+    attribution: MapsAttribution = "credits"
 
     @model_validator(mode="before")
     @classmethod
@@ -446,7 +458,7 @@ class MapsDocument(BaseModel):
     @classmethod
     def _attribution(cls, value: object) -> object:
         if value not in ("stamp", "credits"):
-            return "stamp"
+            return "credits"
         return value
 
     slides: list[MapsSlide]
@@ -711,7 +723,7 @@ def decode_png(raw: bytes) -> tuple[bytes, int, int, str]:
 
 
 def append_landmark(result: dict[str, Any], slide_id: str, audience: Literal["lw", "cg"], name: str, width: int, height: int, version: str, asset_id: str) -> dict[str, Any]:
-    from obed_edom.web.watercolour import _default_landmark_size
+    from obed_edom.maps_geo import default_landmark_size
 
     slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
     if not slide:
@@ -723,7 +735,7 @@ def append_landmark(result: dict[str, Any], slide_id: str, audience: Literal["lw
     while church_id in used:
         church_id = f"w{uuid.uuid4().hex[:8]}"
     camera = view.get("camera") or {}
-    churches.append({"id": church_id, "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": _default_landmark_size(width), "opacity": 1, "scaleWithMap": True, "sizeZoom": float(camera.get("zoom") or 0)})
+    churches.append({"id": church_id, "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": False, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": default_landmark_size(width), "opacity": 1, "scaleWithMap": True, "sizeZoom": float(camera.get("zoom") or 0)})
     view["churches"] = churches
     result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]
     view.pop("stillPng", None)
@@ -774,6 +786,61 @@ def _validate_raster(raw: bytes, *, max_side: int | None = None) -> tuple[int, i
     if width < 1 or height < 1 or width > cap or height > cap:
         raise HTTPException(400, f"Image dimensions must be between 1 and {cap} pixels")
     return width, height
+
+
+def _parse_region_manifest(raw: bytes) -> dict[str, Any]:
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        raise HTTPException(400, "Invalid region manifest") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Invalid region manifest")
+    width, height = data.get("width"), data.get("height")
+    if not region_manifest_dims_valid(width, height, max_side=RASTER_MAX_SIDE):
+        raise HTTPException(400, f"Manifest dimensions must be between 1 and {RASTER_MAX_SIDE} pixels")
+    pieces = data.get("pieces")
+    if not isinstance(pieces, list) or len(pieces) > REGION_MANIFEST_MAX_PIECES:
+        raise HTTPException(400, "Invalid region manifest")
+    clean_pieces = []
+    for piece in pieces:
+        if not isinstance(piece, dict):
+            raise HTTPException(400, "Invalid region manifest")
+        piece_id = piece.get("id")
+        if not isinstance(piece_id, str):
+            raise HTTPException(400, "Invalid region manifest")
+        if not region_piece_is_valid(piece, width, height):
+            raise HTTPException(400, "Invalid region manifest")
+        clean_pieces.append({"id": piece_id, "x": piece["x"], "y": piece["y"], "w": piece["w"], "h": piece["h"]})
+    return {"width": width, "height": height, "pieces": clean_pieces}
+
+
+def _check_region_manifest_raster(manifest: dict[str, Any], base_path: Path) -> None:
+    if not base_path.is_file():
+        return
+    try:
+        with Image.open(base_path) as image:
+            width, height = image.width, image.height
+    except Exception:
+        return
+    if manifest["width"] != width or manifest["height"] != height:
+        raise HTTPException(400, "Region manifest dimensions do not match the staged base image")
+
+
+def _region_manifest_body(manifest: dict[str, Any]) -> bytes:
+    return json.dumps(manifest).encode("utf-8")
+
+
+_REGION_PIECE_RE = re.compile(r"-region-(\d+)$")
+
+
+def _sweep_stale_region_pieces(folder: Path, base_name: str, piece_count: int) -> None:
+    stem, suffix = Path(base_name).stem, Path(base_name).suffix
+    for path in folder.glob(f"{stem}-region-*{suffix}"):
+        match = _REGION_PIECE_RE.match(path.stem[len(stem) :])
+        if match and int(match.group(1)) >= piece_count:
+            path.unlink(missing_ok=True)
+    country_path = folder / f"{stem}-country{suffix}"
+    country_path.unlink(missing_ok=True)
 
 
 def _referenced_asset_ids(doc: MapsDocument) -> set[str]:
@@ -894,7 +961,7 @@ def _seed_result(name: str) -> dict[str, Any]:
         "crop": "center+cg",
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
         "cachedCountries": [],
-        "attribution": "stamp",
+        "attribution": "credits",
         "assets": [],
         "slides": [
             {
@@ -927,7 +994,7 @@ def _next_slide_id(slides: list[dict[str, Any]]) -> str:
     return f"s{index}"
 
 
-def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = None) -> dict[str, Any]:
+def _resolve_place(place: Place) -> tuple[str, dict[str, float]]:
     name = place.name.strip() or "Untitled"
     camera: dict[str, float] | None = None
     place_type: str | None = None
@@ -964,25 +1031,35 @@ def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = No
         if not name or name == "Untitled":
             name = str(hit.get("label") or name)
     camera["zoom"] = clamp_zoom(resolve_zoom(place, place_type=place_type, zoom_from_url=zoom_from_url))
+    return name, camera
+
+
+def _row_pin(place: Place, pin_id: str) -> dict[str, Any]:
+    name, camera = _resolve_place(place)
     kind = place.kind or "dropPin"
-    church = {
-        "id": f"{slide_id}-pin",
+    return {
+        "id": pin_id,
         "name": name,
         "lat": camera["lat"],
         "lon": camera["lon"],
         "kind": kind,
         "color": "#c44a42",
+        "showLabel": False,
         "size": DOT_SIZE if kind == "dot" else DROP_SIZE,
         "scaleWithMap": True,
         "sizeZoom": camera["zoom"],
     }
+
+
+def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = None) -> dict[str, Any]:
+    name, camera = _resolve_place(place)
     return {
         "id": slide_id,
         "title": name,
         "style": "positron",
         "camera": camera,
         "highlights": [],
-        "churches": [church],
+        "churches": [],
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS) if hidden_layers is None else list(hidden_layers),
         "hillshade": False,
         "cgShiftX": 0,
@@ -1051,8 +1128,7 @@ def _run_pin_bootstrap(job, places: list[Place], slide_id: str, audience: str) -
     except (TypeError, ValueError):
         size_zoom = None
     for place in places:
-        generated = _row_slide(place, "csv")["churches"][0]
-        pin = {**generated, "id": _next_pin_id(churches)}
+        pin = _row_pin(place, _next_pin_id(churches))
         if size_zoom is not None:
             pin["sizeZoom"] = size_zoom
         churches.append(pin)
@@ -1573,6 +1649,7 @@ async def post_png(
     kind: str = Query("thumb"),
     audience: Literal["lw", "cg"] = Query("lw"),
     variant: str | None = Query(None),
+    index: int | None = Query(None),
     revision: int | None = Query(None),
 ) -> dict:
     job = _job_or_404(job_id)
@@ -1585,27 +1662,41 @@ async def post_png(
         raise HTTPException(400, "PNG body required")
     if kind not in {"thumb", "still", "plate"}:
         raise HTTPException(400, "kind must be thumb, still, or plate")
-    _validate_raster(body)
+    if variant is not None and variant not in {"region", "regions"}:
+        raise HTTPException(400, "variant must be region or regions")
+    if variant in {"region", "regions"} and kind not in {"still", "plate"}:
+        raise HTTPException(400, "variant=region/regions requires kind=still or kind=plate")
+    if variant == "region" and (index is None or not (0 <= index < 512)):
+        raise HTTPException(400, "index is required for variant=region and must be 0-511")
+    region_manifest = _parse_region_manifest(body) if variant == "regions" else None
+    if variant != "regions":
+        _validate_raster(body)
     output_dir = Path(str(result.get("outputDir") or ""))
     if kind == "plate":
         if not plateId:
             raise HTTPException(400, "plateId is required for kind=plate")
-        if variant is not None and variant != "country":
-            raise HTTPException(400, "variant must be country")
         safe_plate = _safe_name(plateId)
         folder = output_dir / "plates"
         plate_name = safe_plate if audience != "cg" or safe_plate.endswith("-cg") else f"{safe_plate}-cg"
-        name = plate_filename(plate_name)
-        if variant == "country":
-            name = f"{Path(name).stem}-country{Path(name).suffix}"
+        base_name = plate_filename(plate_name)
+        name = base_name
+        if variant == "region":
+            name = f"{Path(name).stem}-region-{index}{Path(name).suffix}"
+        elif variant == "regions":
+            if region_manifest is not None:
+                _check_region_manifest_raster(region_manifest, folder / base_name)
+                body = _region_manifest_body(region_manifest)
+            name = f"{Path(name).stem}-regions.json"
         path = folder / name
         with maps_commit(job_id, None, bump=False) as commit:
             commit.stage_bytes(path, body)
+        if variant == "regions" and region_manifest is not None:
+            _sweep_stale_region_pieces(folder, base_name, len(region_manifest["pieces"]))
         return commit.payload
     if not slideId:
         raise HTTPException(400, "slideId is required")
     landing_base = slideId[: -len("__landing")] if slideId.endswith("__landing") else None
-    landing_ok = landing_base in ids and kind == "still" and variant != "country" if landing_base else False
+    landing_ok = landing_base in ids and kind == "still" and variant is None if landing_base else False
     if slideId not in ids and not landing_ok:
         raise HTTPException(400, "slideId is not in this deck")
     safe = _safe_name(slideId)
@@ -1614,14 +1705,20 @@ async def post_png(
     if not safe.endswith(".png"):
         safe = f"{safe}.png"
     if kind == "still":
-        if variant is not None and variant != "country":
-            raise HTTPException(400, "variant must be country")
         folder = output_dir / "stills"
-        name = Path(safe).name
-        if variant == "country":
-            name = f"{Path(name).stem}-country{Path(name).suffix}"
+        base_name = Path(safe).name
+        name = base_name
+        if variant == "region":
+            name = f"{Path(name).stem}-region-{index}{Path(name).suffix}"
+        elif variant == "regions":
+            if region_manifest is not None:
+                _check_region_manifest_raster(region_manifest, folder / base_name)
+                body = _region_manifest_body(region_manifest)
+            name = f"{Path(name).stem}-regions.json"
         with maps_commit(job_id, None, bump=False) as commit:
             commit.stage_bytes(folder / name, body)
+        if variant == "regions" and region_manifest is not None:
+            _sweep_stale_region_pieces(folder, base_name, len(region_manifest["pieces"]))
         return commit.payload
     folder = Path(str(result.get("previewDir") or ""))
     path = folder / Path(safe).name

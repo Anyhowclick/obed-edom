@@ -169,7 +169,7 @@ export const LAYER_FILTERS: { id: MapsLayerFilterId; label: string }[] = [
 
 const LAYER_FILTER_IDS = new Set(LAYER_FILTERS.map((item) => item.id));
 
-export const DEFAULT_HIDDEN_LAYERS: MapsLayerFilterId[] = ["roadnames", "arrows"];
+export const DEFAULT_HIDDEN_LAYERS: MapsLayerFilterId[] = ["roadnames", "arrows", "labels", "boundaries"];
 
 export function parseHiddenLayers(raw: unknown): MapsLayerFilterId[] {
   if (raw == null) return [...DEFAULT_HIDDEN_LAYERS];
@@ -643,7 +643,7 @@ export function worldCopyWarning(zoom: number): string | null {
   const tiled: string[] = ["FW"];
   if (zoom < CENTRE_MIN_ZOOM) tiled.push("LW");
   if (zoom < CG_MIN_ZOOM) tiled.push("CG");
-  return `World copies tile in ${tiled.join(" / ")}. Pins and orange countries will repeat.`;
+  return `World copies tile in ${tiled.join(" / ")}. Pins and highlighted countries will repeat.`;
 }
 
 /** Same wrap as `maps_geo.clamp_lon` — persist cameras in (−180, 180]. */
@@ -723,6 +723,12 @@ export function parseIsolate(raw: unknown): MapsIsolate | undefined {
   return { mode: "darken", strength };
 }
 
+/** `showLabel` defaulted to true before it was written explicitly, so a saved church with no
+ * key predates the flip and keeps its label; every creation path writes the key. */
+function churchesFromResult(churches: MapsChurch[] | undefined): MapsChurch[] {
+  return (churches || []).map((church) => ("showLabel" in church ? church : { ...church, showLabel: true }));
+}
+
 function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefined {
   if (!cg) return undefined;
   const { hiddenLayers, hillshade, isolate, ...rest } = cg;
@@ -730,7 +736,7 @@ function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefine
   return {
     ...rest,
     highlights: cg.highlights || [],
-    churches: cg.churches || [],
+    churches: churchesFromResult(cg.churches),
     ...(hiddenLayers ? { hiddenLayers: parseHiddenLayers(hiddenLayers) } : {}),
     ...(typeof hillshade === "boolean" ? { hillshade } : {}),
     ...(iso ? { isolate: iso } : {}),
@@ -747,7 +753,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     cgShiftY: slide.cgShiftY ?? 0,
     includeSidePanels: slide.includeSidePanels === true,
     highlights: slide.highlights || [],
-    churches: slide.churches || [],
+    churches: churchesFromResult(slide.churches),
     hiddenLayers: parseHiddenLayers(slide.hiddenLayers ?? deckHidden),
     hillshade: slide.hillshade === true,
     isolate: parseIsolate(slide.isolate),
@@ -786,7 +792,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     cachedCountries: Array.isArray(result.cachedCountries)
       ? (result.cachedCountries as unknown[]).filter((item): item is string => typeof item === "string")
       : [],
-    attribution: result.attribution === "credits" ? "credits" : "stamp",
+    attribution: result.attribution === "stamp" ? "stamp" : "credits",
     assets: Array.isArray(result.assets)
       ? (result.assets as MapsAsset[]).filter((asset) => asset && typeof asset.id === "string" && typeof asset.version === "string")
       : [],

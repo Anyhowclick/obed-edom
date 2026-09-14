@@ -203,6 +203,14 @@ export function IconChevronLeft({ className }: IconProps) {
   );
 }
 
+export function IconChevron({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls(className)}>
+      <path d="M6 9.5l6 6 6-6" />
+    </svg>
+  );
+}
+
 export function IconArrowLeft({ className }: IconProps) {
   return (
     <svg {...base} className={cls(className)}>
@@ -245,6 +253,23 @@ export function IconLandmark({ className }: IconProps) {
       <path d="M3.5 10 12 4.5l8.5 5.5" />
       <path d="M6 10.5v8M10 10.5v8M14 10.5v8M18 10.5v8" />
       <path d="M4 19.5h16" />
+    </svg>
+  );
+}
+
+export function IconRegion({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls(className)}>
+      <path d="M4 6.5 10 4l4.5 2 5.5-1.8v13.6L14.5 20 10 18l-6 2z" />
+      <path d="M10 4v14" />
+    </svg>
+  );
+}
+
+export function IconCountry({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls("filled", className)}>
+      <path d="M4 6.5 10 4l4.5 2 5.5-1.8v13.6L14.5 20 10 18l-6 2z" />
     </svg>
   );
 }

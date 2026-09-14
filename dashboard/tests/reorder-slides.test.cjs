@@ -448,3 +448,12 @@ test("links.length is always slides.length - 1 and endpoints exist", () => {
     assert.ok(ids.has(link.to));
   }
 });
+
+test("documentFromResult labels a legacy church that carries no showLabel key", () => {
+  const legacy = { id: "p1", name: "Legacy", lat: 0, lon: 0, kind: "dot", color: "#fff" };
+  const hidden = { id: "p2", name: "Hidden", lat: 0, lon: 0, kind: "dot", color: "#fff", showLabel: false };
+  const s1 = slide("s1", { churches: [legacy, hidden], cg: { camera: baseCamera, highlights: [], churches: [legacy] } });
+  const read = documentFromResult(doc([s1], []));
+  assert.deepEqual(read.slides[0].churches.map((c) => c.showLabel), [true, false]);
+  assert.deepEqual(read.slides[0].cg.churches.map((c) => c.showLabel), [true]);
+});

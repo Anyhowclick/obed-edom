@@ -24,6 +24,9 @@
   --glow-indigo: #2D1B69;
   --glow-teal: #00E5FF;
   --glow-orange: #FF8A00;
+  --maps-highlight: #e8772a;
+  --maps-highlight-soft: rgba(232, 119, 42, 0.16);
+  --maps-highlight-edge: rgba(232, 119, 42, 0.45);
   --status-success: #B8F64B;
   --status-warning: #FFC72C;
   --status-danger: #FF4D4D;
@@ -84,6 +87,8 @@
   --obj-dot:      var(--status-info);
   --obj-droppin:  var(--glow-orange);
   --obj-landmark: var(--job-watercolour);
+  --obj-region:   var(--accent-primary);
+  --obj-country:  var(--glow-orange);
 
   --navy: var(--bg-canvas);
   --navy-2: var(--bg-surface-highlight);
@@ -346,6 +351,7 @@ h3 {
 .framing-chip:focus-visible,
 .framing-option:focus-visible,
 .job-name-edit:focus-visible,
+.insp-sec-head:focus-visible,
 .info-chip:focus-visible {
   outline: 2px solid var(--sky);
   outline-offset: 2px;
@@ -787,6 +793,7 @@ h3 {
 }
 .settings-block { flex-direction: column; align-items: stretch; }
 .settings-block input[type="range"] { width: 100%; height: 22px; accent-color: var(--sky); cursor: pointer; }
+.settings-block input[type="color"] { width: 36px; height: 28px; padding: 0; border: var(--border-glass); border-radius: var(--radius-sm); background: none; cursor: pointer; }
 .ok { color: var(--ok); }
 .playlist-bar {
   position: sticky;
@@ -1155,6 +1162,39 @@ label.check input[type="checkbox"]:disabled,
   font-weight: 600;
 }
 .seg button.on { background: var(--bg-surface-solid); color: var(--ink-inverse); border-color: transparent; }
+.seg.seg-slide {
+  position: relative;
+  gap: 0;
+  border: var(--border-glass);
+  border-radius: var(--radius-pill);
+}
+.seg.seg-slide button {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  background: transparent;
+  border-color: transparent;
+  transition: color 200ms ease-out;
+}
+.seg.seg-slide button.on { background: transparent; color: var(--ink-inverse); }
+@media (prefers-reduced-motion: reduce) {
+  .seg.seg-slide button { transition: none; }
+}
+.seg-slide-ind {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(100% / var(--seg-n, 2));
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface-solid);
+  transform: translateX(calc(var(--seg-i) * 100%));
+  transition: transform 200ms ease-out;
+  pointer-events: none;
+  z-index: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .seg-slide-ind { transition: none; }
+}
 /* Audience spine, drawn inside the pill so it survives the solid-white on-state. */
 .seg button.aud-lw, .seg button.aud-cg, .seg button.aud-dsk {
   position: relative;
@@ -2554,12 +2594,14 @@ input.maps-thumb-title-input:focus {
 }
 .maps-insp-tabs {
   display: flex;
+  position: relative;
   flex-shrink: 0;
   background: rgba(0, 0, 0, 0.28);
   border-bottom: 1px solid var(--line);
 }
 .maps-insp-tab {
   flex: 1 1 0;
+  min-width: 0;
   position: relative;
   margin: 0;
   padding: 9px 4px 8px;
@@ -2573,6 +2615,9 @@ input.maps-thumb-title-input:focus {
   font-weight: 650;
   letter-spacing: 0.01em;
   line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
 }
 .maps-insp-tab:hover {
@@ -2583,14 +2628,19 @@ input.maps-thumb-title-input:focus {
   background: rgba(255, 255, 255, 0.08);
   color: var(--ink-primary);
 }
-.maps-insp-tab.active::before {
-  content: "";
+.maps-insp-ind {
   position: absolute;
-  top: 0;
   left: 0;
-  right: 0;
+  bottom: 0;
   height: 2px;
+  width: calc(100% / var(--seg-n, 4));
   background: var(--ink-secondary);
+  transform: translateX(calc(var(--seg-i) * 100%));
+  transition: transform 200ms ease-out;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .maps-insp-ind { transition: none; }
 }
 .maps-insp-count {
   margin-left: 4px;
@@ -2609,6 +2659,14 @@ input.maps-thumb-title-input:focus {
 .maps-insp-body .maps-hop {
   border-top: 0;
   padding-top: 0;
+}
+.insp-sec-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.insp-sec-body[hidden] {
+  display: none;
 }
 .maps-insp-back {
   align-self: flex-start;
@@ -2657,6 +2715,11 @@ input.maps-thumb-title-input:focus {
 .maps-pin-kind.kind-dot { color: var(--obj-dot); }
 .maps-pin-kind.kind-droppin { color: var(--obj-droppin); }
 .maps-pin-kind.kind-landmark { color: var(--obj-landmark); }
+.maps-pin-row.kind-region { border-left: 2px solid var(--obj-region); }
+.maps-pin-row.kind-country { border-left: 2px solid var(--obj-country); }
+.maps-pin-kind.kind-region { color: var(--obj-region); }
+.maps-pin-kind.kind-country { color: var(--obj-country); }
+.maps-pin-row > .maps-delete { margin-left: auto; }
 .maps-pin-select {
   display: flex;
   align-items: center;
@@ -2952,23 +3015,51 @@ input.maps-thumb-title-input:focus {
   color: var(--muted);
   margin: 0 0 6px;
 }
+.insp-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.insp-sec-head:hover {
+  color: var(--ink-secondary);
+}
+.insp-sec-chev {
+  width: 14px;
+  height: 14px;
+  transition: transform 120ms ease-out;
+}
+.insp-sec-head[aria-expanded="false"] .insp-sec-chev {
+  transform: rotate(-90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .insp-sec-chev { transition: none; }
+}
 .maps-hl-list {
   display: flex;
   flex-wrap: wrap;
   gap: var(--gap-ctl);
   margin: 0 0 10px;
 }
-/* The same orange the map paints those countries (maps/overlays.ts). */
+/* The operator's highlight colour (maps/highlight.ts), also what the map paints those countries. */
 .maps-hl-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   margin: 0;
   padding: 3px 8px;
-  border: 1px solid rgba(232, 119, 42, 0.45);
+  border: 1px solid var(--maps-highlight-edge);
   border-radius: var(--radius-pill);
-  background: rgba(232, 119, 42, 0.16);
-  color: #e8772a;
+  background: var(--maps-highlight-soft);
+  color: var(--maps-highlight);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
