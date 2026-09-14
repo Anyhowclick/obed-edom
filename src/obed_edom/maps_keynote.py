@@ -28,6 +28,7 @@ from obed_edom.maps_geo import (
     camera_dict,
     clamp_cg_shift,
     clamp_lon,
+    default_landmark_size,
     infer_hop_kind,
     inherit_hidden_layers,
     inverse_mercator_y,
@@ -58,9 +59,13 @@ PHOTO_SIZE = 96
 NAME_HEIGHT = 32
 LABEL_BOLD_FONT = "Amplitude-Bold"
 LABEL_BOLD_FALLBACK = "HelveticaNeue-Bold"
+LABEL_FONT_PT = 24
+LABEL_GAP = 8
 LABEL_CHAR_W = 13
 PILL_PAD_X = 6
 PILL_PAD_Y = 2
+LABEL_SCALE_MIN = 0.5
+LABEL_SCALE_MAX = 8
 CREDITS_TITLE = "Map data"
 CREDITS_FONT = 28
 CREDITS_TITLE_FONT = 40
@@ -856,7 +861,26 @@ def _pin_size(church: dict[str, Any], movie: Path | None) -> int:
         return DROP_SIZE
     if kind == "dropPin":
         return min(PIN_MAX_PT, DROP_SIZE)
+    if kind == "landmark":
+        return _default_object_size(kind, church)
     return min(PIN_MAX_PT, DOT_SIZE)
+
+
+def _default_object_size(kind: str, church: dict[str, Any] | None = None) -> int:
+    """Mirrors `defaultObjectSize` in dashboard/src/maps/objects.ts; landmarks are
+    authored at `default_landmark_size(assetWidth)`, so that is their label baseline."""
+    if kind == "dropPin":
+        return DROP_SIZE
+    if kind == "landmark":
+        return default_landmark_size(int((church or {}).get("assetWidth") or 0))
+    return DOT_SIZE
+
+
+def _label_scale(church: dict[str, Any], size: float) -> float:
+    """`size` is the zoom-scaled marker size, so the clamp bounds the total scale."""
+    base = _default_object_size(str(church.get("kind") or "dot"), church)
+    scale = size / base if base else 1.0
+    return min(LABEL_SCALE_MAX, max(LABEL_SCALE_MIN, scale))
 
 
 EFFECTIVE_SIZE_MAX = 20000
@@ -926,6 +950,9 @@ def _place_churches(
         static_drop = kind == "dropPin" and movie is None
         name = str(church.get("name") or "").strip()
         photo = None
+        if kind == "landmark":
+            with Image.open(landmark) as probe:
+                landmark_h = size * probe.height / max(1, probe.width)
         copy_span = max(1.0, math.hypot(copy_dx, copy_dy))
         copy_count = math.ceil((capture_w + WALL_HEIGHT) / copy_span) + 2
         for copy_index in range(-copy_count, copy_count + 1):
@@ -936,7 +963,7 @@ def _place_churches(
             x = cx + origin_x - size / 2.0
             drop_h = whole(size * PIN_ASPECT)
             if kind == "landmark":
-                y = cy - size
+                y = cy - landmark_h
             elif static_drop:
                 y = whole(cy) - drop_h
             else:
@@ -944,36 +971,36 @@ def _place_churches(
             if wall:
                 x = avoid_straddle(x, size)
             if kind == "landmark":
-                with Image.open(landmark) as image:
-                    height = size * image.height / max(1, image.width)
-                    opacity = float(church.get("opacity") if church.get("opacity") is not None else 1)
-                    church_id = str(church.get("id") or "")
-                    reveal_mov = reveals.get((reveal_audience, sid, church_id)) if allow_reveal and reveals else None
-                    if opacity < 1:
-                        faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
-                        if not faded.exists():
+                height = landmark_h
+                opacity = float(church.get("opacity") if church.get("opacity") is not None else 1)
+                church_id = str(church.get("id") or "")
+                reveal_mov = reveals.get((reveal_audience, sid, church_id)) if allow_reveal and reveals else None
+                if opacity < 1:
+                    faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
+                    if not faded.exists():
+                        with Image.open(landmark) as image:
                             rgba = image.convert("RGBA")
                             rgba.putalpha(rgba.getchannel("A").point(lambda value: round(value * opacity)))
                             rgba.save(faded, "PNG")
-                        landmark = faded
-                    if reveal_mov:
-                        items.append(
-                            _item(
-                                "movie",
-                                x,
-                                cy - height,
-                                size,
-                                height,
-                                path=str(reveal_mov),
-                                fallback=str(landmark),
-                                landmark=True,
-                                revealKey=(reveal_audience, sid, church_id),
-                            )
+                    landmark = faded
+                if reveal_mov:
+                    items.append(
+                        _item(
+                            "movie",
+                            x,
+                            cy - height,
+                            size,
+                            height,
+                            path=str(reveal_mov),
+                            fallback=str(landmark),
+                            landmark=True,
+                            revealKey=(reveal_audience, sid, church_id),
                         )
-                    else:
-                        item = _item("image", x, cy - height, size, height, path=str(landmark), landmark=True)
-                        item["opacity"] = opacity
-                        items.append(item)
+                    )
+                else:
+                    item = _item("image", x, cy - height, size, height, path=str(landmark), landmark=True)
+                    item["opacity"] = opacity
+                    items.append(item)
             elif kind == "dropPin" and movie is not None:
                 items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
             else:
@@ -990,28 +1017,42 @@ def _place_churches(
                         color=color,
                     )
                 )
-            if name and church.get("showLabel", True):
-                nw = max(48, min(420, LABEL_CHAR_W * len(name)))
+            if name and church.get("showLabel", True) is True:
+                scale = _label_scale(church, size)
+                font = whole(LABEL_FONT_PT * scale)
+                nh = whole(NAME_HEIGHT * scale)
+                nh += nh % 2
+                nw = whole(max(48 * scale, min(420 * scale, LABEL_CHAR_W * scale * len(name))))
                 nw += nw % 2
-                nx = x + size + 8
-                ny = y + (size - NAME_HEIGHT) / 2.0
-                pw = nw + 2 * PILL_PAD_X
-                ph = NAME_HEIGHT + 2 * PILL_PAD_Y
+                # Even pads keep pill and text sharing one centre after `dsk_item` halves both.
+                pad_x = whole(PILL_PAD_X * scale)
+                pad_x += pad_x % 2
+                pad_y = whole(PILL_PAD_Y * scale)
+                pad_y += pad_y % 2
+                pw = nw + 2 * pad_x
+                ph = nh + 2 * pad_y
+                top = y if kind in ("dropPin", "landmark") else cy - size / 2.0
+                # Even origins as well as even extents: `dsk_item` halves each box on its own,
+                # and an odd coordinate would round the pill and its text apart.
+                nx = whole(x + size / 2.0 - nw / 2.0)
+                nx -= nx % 2
+                ny = whole(top - LABEL_GAP * scale) - nh - pad_y
+                ny -= ny % 2
                 if wall:
-                    px = nx - PILL_PAD_X
+                    px = nx - pad_x
                     nx += avoid_straddle(px, pw) - px
                 items.append(
                     _item(
                         "image",
-                        nx - PILL_PAD_X,
-                        ny - PILL_PAD_Y,
+                        nx - pad_x,
+                        ny - pad_y,
                         pw,
                         ph,
                         path=str(ensure_label_pill_png(pin_root, LABEL_PILL_RGB, pw, ph)),
                         labelPill=True,
                     )
                 )
-                items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name, bold=True))
+                items.append(_item("text", nx, ny, nw, nh, text=name, bold=True, fontSize=font))
     return items
 
 
@@ -1376,7 +1417,7 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
         lines.append("        end try")
         return lines
     text = _as_escape(str(item.get("text") or ""))
-    font_size = float(item.get("fontSize") or 24)
+    font_size = whole(item.get("fontSize") or 24)
     lines = [
         "        set txt to make new text item with properties "
         f'{{object text:"{text}", position:{{{x}, {y}}}, width:{w}, height:{h}}}',

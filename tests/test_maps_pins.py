@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PIL import Image
@@ -56,6 +57,41 @@ def test_drop_pin_has_the_keynote_aspect_and_a_tip_at_the_bottom_centre():
     assert opaque
     assert abs(sum(opaque) / len(opaque) - image.width / 2) <= 2
     assert len(opaque) <= 8
+
+
+def test_render_version_is_bumped_for_the_new_pin_geometry():
+    assert RENDER_VERSION == 3
+
+
+def test_pin_aspect_is_the_keynote_constant():
+    assert PIN_ASPECT == 1.45
+
+
+def test_drop_pin_tail_is_tangent_to_the_head_and_protrudes_by_the_aspect_delta():
+    image = render_drop_pin(ORANGE)
+    alpha = image.getchannel("A")
+    w, h = image.width, image.height
+    r = w / 2
+    d = h - r
+    contact_y = r + r * r / d
+    contact_half_w = r * math.sqrt(d * d - r * r) / d
+
+    row = round(contact_y)
+    opaque = [x for x in range(w) if alpha.getpixel((x, row)) > 128]
+    assert opaque
+    contact_width = max(opaque) - min(opaque)
+    assert abs(contact_width - 2 * contact_half_w) <= 3
+
+    # Just above the contact row the silhouette is the head's chord (wider,
+    # no notch), confirming the tail meets the head tangentially rather than
+    # cutting into it.
+    above = [x for x in range(w) if alpha.getpixel((x, row - 2)) > 128]
+    assert above
+    assert (max(above) - min(above)) > contact_width
+
+    protrusion = h - w
+    assert protrusion == round((PIN_ASPECT - 1) * w)
+    assert abs(protrusion / w - 0.45) <= 0.02
 
 
 def test_drop_pin_hole_is_opaque_white_and_the_head_is_the_requested_colour():

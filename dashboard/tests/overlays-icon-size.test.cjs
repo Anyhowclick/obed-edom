@@ -124,7 +124,8 @@ const overlaysCompile = spawnSync(runtime, [
   "--outDir", overlaysOut, path.join(root, "src/maps/overlays.ts"), path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(overlaysCompile.status, 0, overlaysCompile.stderr || overlaysCompile.stdout);
-const { churchesGeo, churchesLayers } = require(path.join(overlaysOut, "overlays.js"));
+const { churchesGeo, churchesLayers, labelPillBucket, LABEL_GAP_EMS, LABEL_PILL_BUCKETS, PILL_PAD_Y_PX, DROP_PIN_SELECTED_SCALE } = require(path.join(overlaysOut, "overlays.js"));
+const { defaultLandmarkSize } = require(path.join(overlaysOut, "objects.js"));
 
 test("churchesLayers (churches-dots/-drops/-landmarks) validates with the real maplibre style spec", () => {
   const style = {
@@ -187,4 +188,239 @@ test("churches-drops icon-size scales geometrically off the drop-pin head px and
     layers: [{ id: "l", type: "symbol", source: "src", layout: { "icon-image": "x", "icon-size": expr } }],
   };
   assert.deepEqual(validateStyleMin(style), []);
+});
+
+test("churchesGeo emits labelScale and one labelOffset per integer zoom", () => {
+  const church = { id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size: 128 };
+  const geo = churchesGeo([church], null, false, 1);
+  const props = geo.features[0].properties;
+  assert.equal(typeof props.labelScale, "number");
+  for (let zoom = -2; zoom <= 22; zoom++) {
+    const offset = props[`labelOffset${zoom}`];
+    assert.ok(Array.isArray(offset), `labelOffset${zoom}`);
+    assert.equal(offset.length, 2);
+    assert.equal(offset[0], 0);
+    assert.ok(offset[1] < 0);
+  }
+});
+
+test("a church with no showLabel is showLabel: false in churchesGeo", () => {
+  const church = { id: "a", name: "a", lat: 0, lon: 0, kind: "dot", color: "#fff" };
+  const geo = churchesGeo([church], null, false, 1);
+  assert.equal(geo.features[0].properties.showLabel, false);
+});
+
+test("labelOffset is negative and authored-size-independent for a non-scaling dropPin", () => {
+  const small = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size: 64 }], null, false, 1);
+  const large = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size: 256 }], null, false, 1);
+  const smallOffset = small.features[0].properties.labelOffset0[1];
+  const largeOffset = large.features[0].properties.labelOffset0[1];
+  assert.ok(smallOffset < 0);
+  // Marker height and text size both scale with the authored size, so the em ratio is the same;
+  // only the pill padding, which follows the bucket, differs (both land in the same bucket here).
+  assert.ok(Math.abs(smallOffset - largeOffset) < 0.01);
+});
+
+test("a landmark's labelScale is 1 at the size it is created at, defaultLandmarkSize(assetWidth)", () => {
+  const baseline = defaultLandmarkSize(600);
+  const one = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "landmark", color: "#fff", assetWidth: 600, size: baseline }], null, false, 1);
+  const two = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "landmark", color: "#fff", assetWidth: 600, size: baseline * 2 }], null, false, 1);
+  assert.equal(one.features[0].properties.labelScale, 1);
+  assert.equal(two.features[0].properties.labelScale, 2);
+});
+
+test("a size-less landmark labels at 1x, so the preview matches _pin_size on the export side", () => {
+  const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "landmark", color: "#fff", assetWidth: 600 }], null, false, 1);
+  assert.equal(geo.features[0].properties.labelScale, 1);
+});
+
+test("labelOffset clears a non-scaling marker past the text-size clamp", () => {
+  const size = 64 * 16;
+  const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size }], null, false, 1);
+  const props = geo.features[0].properties;
+  assert.equal(props.labelScale, 16);
+  // Rendered px = |offset em| * clamped text size; the marker's height must fit under it.
+  assert.ok(-props.labelOffset0[1] * 24 * 8 > size * 1.45);
+});
+
+function labelTextOffset() {
+  const layer = churchesLayers().find((item) => item.id === "churches-labels");
+  const parsed = createExpression(layer.layout["text-offset"], {
+    type: "array",
+    value: "number",
+    length: 2,
+    "property-type": "data-driven",
+    expression: { interpolated: true, parameters: ["zoom", "feature"] },
+  });
+  assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
+  return (zoom, properties) => parsed.value.evaluate({ zoom }, { properties });
+}
+
+// A scaleWithMap marker keeps growing with zoom while text-size clamps at 8x the authored size,
+// so the label's em offset has to grow with it. Marker top, pill bottom and the gap are all in
+// screen px above the feature's anchor.
+test("the label pill clears a scaleWithMap marker at and past the 8x text-size clamp", () => {
+  const ref = 8;
+  const textSize = labelTextSize();
+  const offsetAt = labelTextOffset();
+  const cases = [
+    { kind: "dot", church: { size: 28 }, markerPx: 28 / 2 },
+    { kind: "dropPin", church: { size: 100 }, markerPx: 100 * 1.45 },
+    { kind: "landmark", church: { size: 480, assetWidth: 600, assetHeight: 300 }, markerPx: 480 * (300 / 600) },
+  ];
+  for (const { kind, church, markerPx } of cases) {
+    const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, color: "#fff", kind, scaleWithMap: true, sizeZoom: ref, ...church }], null, false, 1);
+    const props = geo.features[0].properties;
+    const bucket = Number(props.labelBucket);
+    // ref + 3 is the last zoom below the 8x clamp; ref + 4 is 16x of the authored size.
+    for (const zoom of [ref, ref + 3, ref + 3.5, ref + 4]) {
+      const text = textSize(zoom, props);
+      const markerTop = markerPx * Math.pow(2, zoom - ref);
+      const pillBottom = -offsetAt(zoom, props)[1] * text - PILL_PAD_Y_PX * bucket;
+      assert.ok(pillBottom >= markerTop - 1e-9, `${kind} z=${zoom}: pill bottom ${pillBottom} < marker top ${markerTop}`);
+      // The clearance is the export's LABEL_GAP in ems of the text size, never less, and never
+      // more than 5% of the marker beyond it (the clamp-straddle slack, see labelOffsets).
+      const clearance = pillBottom - markerTop;
+      assert.ok(clearance >= LABEL_GAP_EMS * text - 1e-9, `${kind} z=${zoom}: clearance ${clearance}`);
+      assert.ok(clearance <= LABEL_GAP_EMS * text + PILL_PAD_Y_PX * bucket + 0.05 * markerTop, `${kind} z=${zoom}: clearance ${clearance}`);
+    }
+  }
+});
+
+test("a non-scaling label keeps one offset at every zoom", () => {
+  const offsetAt = labelTextOffset();
+  const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size: 100 }], null, false, 1);
+  const props = geo.features[0].properties;
+  for (const zoom of [-2, 0, 8, 14, 22]) {
+    assert.ok(Math.abs(offsetAt(zoom, props)[1] - offsetAt(0, props)[1]) < 1e-9, `z=${zoom}`);
+  }
+});
+
+function labelTextSize() {
+  const layer = churchesLayers().find((item) => item.id === "churches-labels");
+  const parsed = createExpression(layer.layout["text-size"], { type: "number" });
+  assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
+  return (zoom, properties) => parsed.value.evaluate({ zoom }, { properties });
+}
+
+test("churches-labels text-size clamps the total scale to 0.5x..8x", () => {
+  const evaluate = labelTextSize();
+  const props = { labelScale: 1, objectScale: 1, scaleWithMap: true, sizeZoomRef: 8 };
+  assert.equal(evaluate(8, props), 24);
+  assert.equal(evaluate(9, props), 48);
+  // 0.25x and 16x of the authored size clamp to 0.5x and 8x.
+  assert.equal(evaluate(6, props), 24 * 0.5);
+  assert.equal(evaluate(12, props), 24 * 8);
+});
+
+test("churches-labels text-size clamps a non-scaling feature's authored size too", () => {
+  const evaluate = labelTextSize();
+  assert.equal(evaluate(8, { labelScale: 0.25, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0 }), 24 * 0.5);
+  assert.equal(evaluate(8, { labelScale: 16, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0 }), 24 * 8);
+});
+
+test("labelPillBucket snaps to the nearest registered variant in log2, bounding the error at sqrt(2)", () => {
+  assert.equal(labelPillBucket(0.5), 0.5);
+  assert.equal(labelPillBucket(0.9), 1);
+  assert.equal(labelPillBucket(1), 1);
+  assert.equal(labelPillBucket(1.4), 1);
+  assert.equal(labelPillBucket(1.5), 2);
+  assert.equal(labelPillBucket(1.9), 2);
+  assert.equal(labelPillBucket(3.5), 4);
+  assert.equal(labelPillBucket(8), 8);
+});
+
+test("churchesGeo emits a labelBucket naming a registered pill image", () => {
+  for (const [size, bucket] of [[16, "0.5"], [64, "1"], [200, "4"], [4000, "8"]]) {
+    const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size }], null, false, 1);
+    assert.equal(geo.features[0].properties.labelBucket, bucket);
+    assert.ok(LABEL_PILL_BUCKETS.map(String).includes(geo.features[0].properties.labelBucket));
+  }
+});
+
+test("churchesGeo folds objectScale into labelBucket, halving it on a 0.5x wall-width surface", () => {
+  const church = { id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size: 64 };
+  const unscaled = churchesGeo([church], null, false, 1);
+  const halved = churchesGeo([church], null, false, 0.5);
+  assert.equal(unscaled.features[0].properties.labelBucket, "1");
+  assert.equal(halved.features[0].properties.labelBucket, "0.5");
+});
+
+// The offsets only guarantee clearance if the analytic per-segment dip is exact, so sweep the
+// rendered geometry finely rather than at the handful of zooms the clamp knee happens to land on.
+function assertPillClears(church, markerHeightPx, zooms, ref) {
+  const textSize = labelTextSize();
+  const offsetAt = labelTextOffset();
+  const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, color: "#fff", scaleWithMap: true, sizeZoom: ref, ...church }], null, false, 1);
+  const props = geo.features[0].properties;
+  const bucket = Number(props.labelBucket);
+  for (const zoom of zooms) {
+    const text = textSize(zoom, props);
+    const markerTop = markerHeightPx * Math.pow(2, zoom - ref);
+    const pillBottom = -offsetAt(zoom, props)[1] * text - PILL_PAD_Y_PX * bucket;
+    assert.ok(pillBottom >= markerTop - 1e-9, `${church.kind} z=${zoom}: pill bottom ${pillBottom} < marker top ${markerTop}`);
+    assert.ok(pillBottom - markerTop >= LABEL_GAP_EMS * text - 1e-9, `${church.kind} z=${zoom}: clearance ${pillBottom - markerTop}`);
+  }
+}
+
+test("the label pill clears the marker when the text-size clamp lands mid-segment", () => {
+  const ref = 8;
+  // totalScale * 2^(z-ref) === 8 at z === ref + knee, i.e. totalScale === 2^(3 - knee).
+  for (const knee of [3.25, 3.5, 3.75]) {
+    const scale = Math.pow(2, 3 - knee);
+    const zooms = [];
+    for (let step = 0; step <= 500; step++) zooms.push(ref + step / 100);
+    assertPillClears({ kind: "dropPin", size: 64 * scale }, 64 * scale * 1.45, zooms, ref);
+    assertPillClears({ kind: "dot", size: 28 * scale }, (28 * scale) / 2, zooms, ref);
+  }
+});
+
+test("the label pill clears a tall portrait landmark across a dense zoom sweep", () => {
+  const ref = 8;
+  const size = defaultLandmarkSize(100);
+  const zooms = [];
+  for (let step = 0; step <= 500; step++) zooms.push(ref + step / 100);
+  assertPillClears({ kind: "landmark", size, assetWidth: 100, assetHeight: 600 }, (size * 600) / 100, zooms, ref);
+});
+
+test("the label pill clears dot, dropPin and landmark at every 0.01 zoom step over ref..ref+5", () => {
+  const ref = 8;
+  const zooms = [];
+  for (let step = 0; step <= 500; step++) zooms.push(ref + step / 100);
+  assertPillClears({ kind: "dot", size: 28 }, 28 / 2, zooms, ref);
+  assertPillClears({ kind: "dropPin", size: 100 }, 100 * 1.45, zooms, ref);
+  assertPillClears({ kind: "landmark", size: 480, assetWidth: 600, assetHeight: 300 }, 480 * (300 / 600), zooms, ref);
+});
+
+// A selected drop pin's icon is enlarged by DROP_PIN_SELECTED_SCALE (see churchesLayers'
+// churches-icons icon-size), so its rendered marker top is DROP_PIN_SELECTED_SCALE taller than
+// an unselected pin's. markerHeightPx must fold that into the label offset or the pill sits over
+// the enlarged marker once the text-size clamp is crossed.
+function assertSelectedPillClears(church, markerHeightPx, zooms, ref) {
+  const textSize = labelTextSize();
+  const offsetAt = labelTextOffset();
+  const id = "selected";
+  const geo = churchesGeo([{ id, name: "a", lat: 0, lon: 0, color: "#fff", scaleWithMap: true, sizeZoom: ref, ...church }], id, false, 1);
+  const props = geo.features[0].properties;
+  assert.equal(props.sel, true);
+  const bucket = Number(props.labelBucket);
+  for (const zoom of zooms) {
+    const text = textSize(zoom, props);
+    const markerTop = markerHeightPx * DROP_PIN_SELECTED_SCALE * Math.pow(2, zoom - ref);
+    const pillBottom = -offsetAt(zoom, props)[1] * text - PILL_PAD_Y_PX * bucket;
+    assert.ok(pillBottom >= markerTop - 1e-9, `z=${zoom}: pill bottom ${pillBottom} < marker top ${markerTop}`);
+    assert.ok(pillBottom - markerTop >= LABEL_GAP_EMS * text - 1e-9, `z=${zoom}: clearance ${pillBottom - markerTop}`);
+  }
+}
+
+test("the label pill clears a selected drop pin's enlarged marker across the text-size clamp", () => {
+  const ref = 8;
+  const zooms = [];
+  for (let step = 0; step <= 500; step++) zooms.push(ref + step / 100);
+  assertSelectedPillClears({ kind: "dropPin", size: 100 }, 100 * 1.45, zooms, ref);
+  // Also sweep a knee landing mid-segment, as with the unselected clamp test above.
+  for (const knee of [3.25, 3.5, 3.75]) {
+    const scale = Math.pow(2, 3 - knee);
+    assertSelectedPillClears({ kind: "dropPin", size: 64 * scale }, 64 * scale * 1.45, zooms, ref);
+  }
 });

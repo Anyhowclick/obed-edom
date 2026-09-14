@@ -12,18 +12,22 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
-from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, clamp_cg_shift, world_width
+from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, clamp_cg_shift, default_landmark_size, world_width
 from obed_edom.maps_keynote import (
     CG_HEIGHT,
     CG_WIDTH,
     CREDITS_FONT,
     DOT_SIZE,
+    DROP_SIZE,
     DSK_HEIGHT,
     DSK_SCALE,
     DSK_WIDTH,
     LABEL_BOLD_FALLBACK,
     LABEL_BOLD_FONT,
     LABEL_CHAR_W,
+    LABEL_FONT_PT,
+    LABEL_SCALE_MAX,
+    LABEL_SCALE_MIN,
     MAP_BG_RE,
     NAME_HEIGHT,
     PANEL_EDGES,
@@ -31,6 +35,7 @@ from obed_edom.maps_keynote import (
     PILL_PAD_Y,
     WALL_HEIGHT,
     WALL_WIDTH,
+    _default_object_size,
     _place_churches,
     _read_region_manifest,
     _render_reveals,
@@ -343,9 +348,9 @@ def test_export_maps_job_appends_credits_slide_when_attribution_missing(monkeypa
 def test_credits_slide_not_rescaled_in_dsk_script(monkeypatch, tmp_path: Path):
     scripts = _export_scripts(monkeypatch, tmp_path, attribution="credits", credits=["© OpenStreetMap contributors"])
     lw_script, dsk_script, _cg_script = scripts
-    assert f"to {float(CREDITS_FONT)}" in dsk_script
-    assert f"to {float(CREDITS_FONT)}" in lw_script
-    assert f"to {float(CREDITS_FONT) * DSK_SCALE}" not in dsk_script
+    assert f"to {CREDITS_FONT}\n" in dsk_script
+    assert f"to {CREDITS_FONT}\n" in lw_script
+    assert f"to {whole(CREDITS_FONT * DSK_SCALE)}\n" not in dsk_script
 
 
 def test_both_dest_keys_when_both_flags_on(monkeypatch, tmp_path: Path):
@@ -883,7 +888,7 @@ def test_reveal_movie_slide_emits_bg_movie_and_no_still(tmp_path: Path):
     _dummy_png(output_dir / "assets" / "asset1.png")
     camera = _camera(3.0, 101.0, 8)
     landmark = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
-    dot = {"id": "d1", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"}
+    dot = {"id": "d1", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42", "showLabel": True}
     slide = _slide("s1", camera, churches=[landmark, dot], revealMovie=True)
     slide2 = _slide("s2", camera)
     _dummy_png(output_dir / "stills" / "s2.png")
@@ -1326,11 +1331,11 @@ def test_export_plan_hidden_layers_default_when_unset():
     b = _slide("s2", cam_b)
     plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
     assert plan["stills"] == []
-    assert plan["plates"][0]["hiddenLayers"] == ["roadnames", "arrows"]
+    assert plan["plates"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
     plan_cut = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.2}])
     assert {row["slideId"]: row["hiddenLayers"] for row in plan_cut["stills"]} == {
-        "s1": ["roadnames", "arrows"],
-        "s2": ["roadnames", "arrows"],
+        "s1": ["roadnames", "arrows", "labels", "boundaries"],
+        "s2": ["roadnames", "arrows", "labels", "boundaries"],
     }
 
 
@@ -1360,7 +1365,7 @@ def test_export_plan_stills_and_plates_carry_hillshade():
 def test_export_plan_still_defaults_hidden_layers_when_missing():
     a = _slide("s1", _camera(3.0, 101.0, 8))
     plan = maps_export_plan([a], [])
-    assert plan["stills"][0]["hiddenLayers"] == ["roadnames", "arrows"]
+    assert plan["stills"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
 
 
 def test_export_plan_still_preserves_explicit_empty_hidden_layers():
@@ -2693,8 +2698,8 @@ def test_static_drop_pin_geometry_survives_the_dsk_scale(tmp_path: Path):
 
 def _label_churches() -> list[dict]:
     return [
-        {"id": "c1", "name": "Dot City", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"},
-        {"id": "c2", "name": "Pin City", "lat": 3.05, "lon": 101.05, "kind": "dropPin", "color": "#ff8a00"},
+        {"id": "c1", "name": "Dot City", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42", "showLabel": True},
+        {"id": "c2", "name": "Pin City", "lat": 3.05, "lon": 101.05, "kind": "dropPin", "color": "#ff8a00", "showLabel": True},
     ]
 
 
@@ -2746,7 +2751,7 @@ def test_emitted_script_sets_the_bold_label_font_with_a_system_fallback(tmp_path
     )
     assert f'set font of object text of txt to "{LABEL_BOLD_FONT}"' in script
     assert f'set font of object text of txt to "{LABEL_BOLD_FALLBACK}"' in script
-    assert "set size of object text of txt to 24" in script
+    assert "set size of object text of txt to 24\n" in script
 
 
 def test_unflagged_text_items_keep_the_theme_font(tmp_path: Path):
@@ -2775,27 +2780,76 @@ def test_show_label_false_emits_neither_pill_nor_text(tmp_path: Path):
     assert not any(item.get("labelPill") for item in items)
 
 
-def test_label_geometry_is_invariant_under_scale_with_map(tmp_path: Path):
+def test_show_label_defaults_to_on_for_a_legacy_export_with_no_key(tmp_path: Path):
+    # A deck persisted before showLabel existed reaches export as a raw dict with no
+    # showLabel key at all (export_maps_job works off job.result raw, no MapsChurch
+    # validation). It must label, matching the UI's migration, or exporting without a
+    # prior re-save would silently drop every label.
+    church = {"id": "c1", "name": "No Flag", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"}
+    items = _place_labels(tmp_path, [church])
+    assert any(item.get("kind") == "text" for item in items)
+    assert any(item.get("labelPill") for item in items)
+
+
+def test_label_geometry_scales_with_the_marker(tmp_path: Path):
     plain = _place_labels(tmp_path, _label_churches())
+    zoom = 8
+    size_zoom = 7
+    factor = 2 ** (zoom - size_zoom)
     scaled = _place_labels(
         tmp_path,
-        [dict(church, scaleWithMap=True, sizeZoom=4) for church in _label_churches()],
+        [dict(church, scaleWithMap=True, sizeZoom=size_zoom) for church in _label_churches()],
     )
 
     def labels(items):
-        return [
-            (item["w"], item["h"])
-            for item in items
-            if item.get("kind") == "text" or item.get("labelPill")
-        ]
+        return [item for item in items if item.get("kind") == "text" or item.get("labelPill")]
 
-    assert labels(plain) == labels(scaled)
+    for plain_item, scaled_item in zip(labels(plain), labels(scaled)):
+        assert scaled_item["w"] == pytest.approx(plain_item["w"] * factor, abs=2)
+        assert scaled_item["h"] == pytest.approx(plain_item["h"] * factor, abs=2)
+        if "fontSize" in plain_item:
+            assert scaled_item["fontSize"] == pytest.approx(plain_item["fontSize"] * factor, rel=1e-6)
 
 
-def test_dsk_and_cg_keep_the_pill_registered_with_its_text(tmp_path: Path):
+def test_label_sits_above_its_marker(tmp_path: Path):
+    for church in _label_churches():
+        items = _place_labels(tmp_path, [church])
+        pin = _pin_items(items)[0]
+        pill = next(item for item in items if item.get("labelPill"))
+        assert pill["y"] + pill["h"] <= pin["y"]
+        pin_cx = pin["x"] + pin["w"] / 2.0
+        pill_cx = pill["x"] + pill["w"] / 2.0
+        assert abs(pin_cx - pill_cx) <= 1
+
+
+def test_label_sits_above_a_non_square_landmark(tmp_path: Path):
+    """A square asset makes the landmark's `y` (top-left of a `size` x `size` box)
+    coincide with the rendered top-left, hiding a mismatch between the two. This
+    landmark asset is 100x300 (portrait), so the rendered top is `cy - height`
+    with `height = size * 3`, not `cy - size`."""
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (100, 300), (20, 30, 40, 255)).save(asset_root / "asset1.png", "PNG")
+    church = _landmark_church(size=100, showLabel=True, name="Tall Landmark")
+    items = _place_labels(tmp_path, [church], asset_root=asset_root)
+    landmark = next(item for item in items if item.get("landmark"))
+    pill = next(item for item in items if item.get("labelPill"))
+    assert pill["y"] + pill["h"] <= landmark["y"]
+    landmark_cx = landmark["x"] + landmark["w"] / 2.0
+    pill_cx = pill["x"] + pill["w"] / 2.0
+    assert abs(landmark_cx - pill_cx) <= 1
+
+
+@pytest.mark.parametrize("label_scale", [1, 2], ids=["scale-1", "scaleWithMap-sizeZoom-2x"])
+def test_dsk_and_cg_keep_the_pill_registered_with_its_text(tmp_path: Path, label_scale: float):
     import obed_edom.maps_keynote as mod
 
-    items = _place_labels(tmp_path, _label_churches())
+    churches = _label_churches()
+    if label_scale != 1:
+        # zoom=8 (the _place_labels default camera) over sizeZoom=7 scales the marker,
+        # and with it the label, by 2**(8-7) == label_scale.
+        churches = [dict(church, scaleWithMap=True, sizeZoom=7) for church in churches]
+    items = _place_labels(tmp_path, churches)
     pairs = [
         (items[index], items[index + 1])
         for index, item in enumerate(items)
@@ -2803,19 +2857,107 @@ def test_dsk_and_cg_keep_the_pill_registered_with_its_text(tmp_path: Path):
     ]
     assert pairs
     for pill, text in pairs:
-        for mapped_pill, mapped_text in (
-            (dsk_item(pill), dsk_item(text)),
-            tuple(mod._to_cg([pill, text], (CENTRE_ORIGIN_X, 0.0))),
+        for mapped_pill, mapped_text, pad_scale in (
+            (dsk_item(pill), dsk_item(text), DSK_SCALE),
+            (*mod._to_cg([pill, text], (CENTRE_ORIGIN_X, 0.0)), 1),
         ):
-            assert mapped_pill["x"] == mapped_text["x"] - round(
-                PILL_PAD_X * (DSK_SCALE if "fontSize" in mapped_text else 1)
-            )
-            assert mapped_pill["w"] - mapped_text["w"] == round(
-                2 * PILL_PAD_X * (DSK_SCALE if "fontSize" in mapped_text else 1)
-            )
-            assert mapped_pill["h"] - mapped_text["h"] == round(
-                2 * PILL_PAD_Y * (DSK_SCALE if "fontSize" in mapped_text else 1)
-            )
+            assert mapped_pill["x"] == mapped_text["x"] - round(PILL_PAD_X * label_scale * pad_scale)
+            assert mapped_pill["w"] - mapped_text["w"] == round(2 * PILL_PAD_X * label_scale * pad_scale)
+            assert mapped_pill["h"] - mapped_text["h"] == round(2 * PILL_PAD_Y * label_scale * pad_scale)
+
+
+@pytest.mark.parametrize(
+    ("size_zoom", "expected"),
+    [(10, LABEL_SCALE_MIN), (4, LABEL_SCALE_MAX)],
+    ids=["quarter-clamps-to-half", "sixteen-clamps-to-eight"],
+)
+def test_label_scale_clamps_the_total_scale(tmp_path: Path, size_zoom: float, expected: float):
+    """The camera zoom is 8, so sizeZoom 10 is 0.25x and sizeZoom 4 is 16x."""
+    churches = [dict(church, scaleWithMap=True, sizeZoom=size_zoom) for church in _label_churches()]
+    items = _place_labels(tmp_path, churches)
+    texts = [item for item in items if item.get("kind") == "text"]
+    assert texts
+    for text in texts:
+        assert text["fontSize"] == pytest.approx(LABEL_FONT_PT * expected)
+        assert text["h"] == NAME_HEIGHT * expected
+
+
+def test_landmark_label_scale_follows_its_authored_size(tmp_path: Path):
+    """A landmark is created at `default_landmark_size(assetWidth)`, so that size — not
+    some other default — is the 1x label baseline."""
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (600, 600), (20, 30, 40, 255)).save(asset_root / "asset1.png", "PNG")
+    baseline = default_landmark_size(600)
+    fonts = {}
+    for size in (baseline, baseline * 2):
+        items = _place_labels(
+            tmp_path,
+            [_landmark_church(size=size, assetWidth=600, showLabel=True)],
+            asset_root=asset_root,
+        )
+        fonts[size] = next(item for item in items if item.get("kind") == "text")["fontSize"]
+    assert fonts[baseline] == pytest.approx(LABEL_FONT_PT)
+    assert fonts[baseline * 2] == pytest.approx(LABEL_FONT_PT * 2)
+
+
+def test_a_size_less_landmark_labels_at_1x(tmp_path: Path):
+    """`_pin_size` and `_default_object_size` must agree, or a landmark the schema lets
+    through without a `size` would label at the clamp instead of 1x."""
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (600, 600), (20, 30, 40, 255)).save(asset_root / "asset1.png", "PNG")
+    church = _landmark_church(assetWidth=600, showLabel=True)
+    church.pop("size")
+    items = _place_labels(tmp_path, [church], asset_root=asset_root)
+    assert next(item for item in items if item.get("kind") == "text")["fontSize"] == pytest.approx(LABEL_FONT_PT)
+
+
+def test_emitted_script_sets_an_integer_font_size_for_a_scaled_label(tmp_path: Path):
+    """Keynote's `size` property takes a whole number and the setter runs inside a bare
+    `try`, so a fractional scale must be rounded before it reaches the script."""
+    import obed_edom.maps_keynote as mod
+
+    churches = [dict(_label_churches()[1], size=round(DROP_SIZE * 2.7))]
+    items = _place_labels(tmp_path, churches)
+    font = next(item for item in items if item.get("kind") == "text")["fontSize"]
+    assert isinstance(font, int)
+    script = build_deck_script(
+        [{"id": "s1", "duplicate": False, "items": items, "transition": None}],
+        tmp_path / "deck.key",
+        width=int(WALL_WIDTH),
+        height=int(WALL_HEIGHT),
+    )
+    sizes = re.findall(r"set size of object text of txt to (\S+)", script)
+    assert sizes
+    assert all(re.fullmatch(r"\d+", value) for value in sizes), sizes
+    assert str(font) in sizes
+
+
+@pytest.mark.parametrize("scale", [1.3, 2.7], ids=["scale-1.3", "scale-2.7"])
+def test_fractional_label_scales_keep_the_pill_centred_on_its_text(tmp_path: Path, scale: float):
+    """Fractional lat/lon put the marker on a fractional projected centre too."""
+    churches = [
+        dict(church, size=round(_default_object_size(church["kind"]) * scale), lat=3.0137, lon=101.0219)
+        for church in _label_churches()
+    ]
+    items = _place_labels(tmp_path, churches)
+    pairs = [(items[index], items[index + 1]) for index, item in enumerate(items) if item.get("labelPill")]
+    assert pairs
+    for pill, text in pairs:
+        for mapped_pill, mapped_text in ((dsk_item(pill), dsk_item(text)), (pill, text)):
+            pill_cx = mapped_pill["x"] + mapped_pill["w"] / 2.0
+            text_cx = mapped_text["x"] + mapped_text["w"] / 2.0
+            assert pill_cx == pytest.approx(text_cx)
+            pill_cy = mapped_pill["y"] + mapped_pill["h"] / 2.0
+            text_cy = mapped_text["y"] + mapped_text["h"] / 2.0
+            assert pill_cy == pytest.approx(text_cy)
+            left = mapped_text["x"] - mapped_pill["x"]
+            right = (mapped_pill["x"] + mapped_pill["w"]) - (mapped_text["x"] + mapped_text["w"])
+            assert left == right
+            top = mapped_text["y"] - mapped_pill["y"]
+            bottom = (mapped_pill["y"] + mapped_pill["h"]) - (mapped_text["y"] + mapped_text["h"])
+            assert top == bottom
 
 
 def test_movie_backdrop_slides_emit_no_label_pills(tmp_path: Path):
@@ -2881,7 +3023,7 @@ def test_odd_length_names_scale_to_dsk_without_distorting_the_pill(tmp_path: Pat
 
 
 def test_label_pill_outer_bounds_clear_the_wall_seam(tmp_path: Path):
-    church = {"id": "c1", "name": "Seam Church", "lat": 3.0, "lon": 95.673, "kind": "dot", "color": "#c44a42"}
+    church = {"id": "c1", "name": "Seam Church", "lat": 3.0, "lon": 95.673, "kind": "dot", "color": "#c44a42", "showLabel": True}
     unguarded = _place_labels(tmp_path, [church], wall=False)
     straddler = next(item for item in unguarded if item.get("labelPill"))
     assert straddler["x"] < 1920 < straddler["x"] + straddler["w"]

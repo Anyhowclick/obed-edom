@@ -2506,6 +2506,7 @@ export function MapsTab() {
                     lon,
                     kind: "dropPin",
                     color: "#c44a42",
+                    showLabel: false,
                     size: defaultObjectSize("dropPin"),
                     scaleWithMap: true,
                     sizeZoom: activeView.camera.zoom,
@@ -2649,7 +2650,7 @@ export function MapsTab() {
                       )}
                     </select>
                   </label>
-                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || defaultObjectSize(pin.kind)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
+                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
                   <label className="maps-check">
                     <input
@@ -2661,7 +2662,7 @@ export function MapsTab() {
                         updateActive({
                           churches: (activeView?.churches || []).map((c) => {
                             if (c.id !== pin.id) return c;
-                            const defaultSize = defaultObjectSize(c.kind);
+                            const defaultSize = defaultObjectSize(c.kind, c.assetWidth);
                             if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
                             const size = c.sizeZoom != null ? (c.size || defaultSize) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || defaultSize;
                             return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, size))), sizeZoom: undefined };
@@ -2734,7 +2735,8 @@ export function MapsTab() {
                       )}
                     </>
                   )}
-                  <label className="maps-check"><input type="checkbox" checked={pin.showLabel !== false} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
+                  <label className="maps-check"><input type="checkbox" checked={pin.showLabel === true} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
+                  {pin.showLabel === true && <p className="note">Preview only: Keynote sets this label in Amplitude Bold on the red pill.</p>}
                   <label>
                     Colour:
                     <input
@@ -3112,7 +3114,7 @@ export function MapsTab() {
                               <span className="maps-pin-swatch" style={{ background: church.color }} />
                               <span className="maps-pin-name">{church.name}</span>
                               {church.reveal && <span className="maps-pin-hidden">Paint-on {church.reveal.duration}s</span>}
-                              {church.showLabel === false && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
+                              {church.showLabel !== true && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
                             </button>
                           </div>
                         ))}

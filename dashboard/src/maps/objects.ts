@@ -7,7 +7,7 @@ export const OBJECT_SIZE_MAX = 4000;
 export const SIZE_ZOOM_MIN = 0;
 export const SIZE_ZOOM_MAX = 22;
 
-/** Mirrors `_default_landmark_size` in src/obed_edom/web/watercolour.py. */
+/** Mirrors `default_landmark_size` in src/obed_edom/maps_geo.py. */
 export function defaultLandmarkSize(assetWidth: number): number {
   return Math.trunc(Math.max(240, Math.min(1600, Math.min(assetWidth, Math.trunc(1920 / 3) * 2))));
 }
@@ -17,16 +17,17 @@ export function zoomSizeFactor(sizeZoom: number, authoredZoom: number): number {
   return Math.pow(2, authoredZoom - sizeZoom);
 }
 
-/** Default authored px per object kind when a church carries no `size`. */
-export function defaultObjectSize(kind: string): number {
+/** Default authored px per object kind when a church carries no `size`; a landmark is
+ * created at `defaultLandmarkSize(assetWidth)`, so that is also its label baseline. */
+export function defaultObjectSize(kind: string, assetWidth = 0): number {
   if (kind === "dot") return 28;
   if (kind === "dropPin") return 64;
-  return 120;
+  return defaultLandmarkSize(assetWidth);
 }
 
 /** Authored px for `church` at `authoredZoom`, honouring "scale with map" when set. */
-export function effectiveObjectSize(church: { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string }, authoredZoom: number): number {
-  const size = church.size ?? defaultObjectSize(church.kind || "landmark");
+export function effectiveObjectSize(church: { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string; assetWidth?: number }, authoredZoom: number): number {
+  const size = church.size ?? defaultObjectSize(church.kind || "landmark", church.assetWidth);
   if (!church.scaleWithMap || church.sizeZoom == null) return size;
   return size * zoomSizeFactor(church.sizeZoom, authoredZoom);
 }
@@ -35,12 +36,17 @@ export function effectiveObjectSize(church: { size?: number; scaleWithMap?: bool
  * `size`-like stops for a top-level `["zoom"]` interpolate. `base` is the current
  * (non-scaling) size expression; the stops fold in the geometric zoom growth for
  * features with `scaleWithMap` via `sizeZoomRef` (see overlays.ts `churchesGeo`).
+ * `max`/`min` clamp each stop: a zoom expression may not be nested inside `min`/`max`,
+ * so a clamped ramp needs one stop per integer zoom.
  */
-export function zoomScaledStops(base: unknown, max?: number): ExpressionSpecification {
+export function zoomScaledStops(base: unknown, max?: number, min?: number): ExpressionSpecification {
   const swm = ["boolean", ["get", "scaleWithMap"], false];
+  const clamped = max != null || min != null;
   const stopAt = (z: number): ExpressionSpecification => {
-    const value = ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base];
-    return (max == null ? value : ["min", max, value]) as unknown as ExpressionSpecification;
+    let value: unknown = ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base];
+    if (min != null) value = ["max", min, value];
+    if (max != null) value = ["min", max, value];
+    return value as ExpressionSpecification;
   };
   // A pair of interpolate stops reproduces an exact 2^z curve between them (algebraically, base-2
   // interpolation of two true samples of A*2^z recovers A*2^z everywhere in between) but NOT when a
@@ -50,7 +56,7 @@ export function zoomScaledStops(base: unknown, max?: number): ExpressionSpecific
   // endpoints, so it undershoots max in between (e.g. 949 vs 1024 at z14.5).
   // The stops span the render map's full zoom range, not 0..22: wall exports render at authored
   // zoom + exportZoomDelta(WALL_W) === -2, and below the first stop MapLibre clamps to it.
-  if (max == null) return ["interpolate", ["exponential", 2], ["zoom"], ML_MIN_ZOOM, stopAt(ML_MIN_ZOOM), ML_MAX_ZOOM, stopAt(ML_MAX_ZOOM)];
+  if (!clamped) return ["interpolate", ["exponential", 2], ["zoom"], ML_MIN_ZOOM, stopAt(ML_MIN_ZOOM), ML_MAX_ZOOM, stopAt(ML_MAX_ZOOM)];
   const stops: unknown[] = ["interpolate", ["exponential", 2], ["zoom"]];
   for (let z = ML_MIN_ZOOM; z <= ML_MAX_ZOOM; z++) stops.push(z, stopAt(z));
   return stops as unknown as ExpressionSpecification;

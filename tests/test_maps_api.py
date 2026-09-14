@@ -67,8 +67,8 @@ def test_post_maps_seeds_under_output_root_without_dest():
     assert "destPath" not in result
     assert result["exportLw"] is True
     assert result["exportCg"] is True
-    assert result["hiddenLayers"] == ["roadnames", "arrows"]
-    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows"]
+    assert result["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
+    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
     assert result["slides"][0]["id"] == "s1"
     assert result["previewDir"].endswith("/previews")
     assert "/.maps/" in result["outputDir"].replace("\\", "/")
@@ -117,12 +117,14 @@ def test_state_and_frame_ok_after_error():
     assert framed.status_code == 200, framed.text
 
 
-def test_pin_label_visibility_round_trips_with_backward_compatible_default():
+def test_a_legacy_church_without_show_label_keeps_its_label():
+    """`showLabel` defaulted to True before it was written explicitly, so a deck saved
+    then has no key and must not lose its labels to the flipped default."""
     job = _seed()
     doc = _doc(job)
     slide = dict(doc["slides"][0])
     slide["churches"] = [
-        {"id": "p1", "name": "Visible by default", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#ff8a00"},
+        {"id": "p1", "name": "Legacy", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#ff8a00"},
         {"id": "p2", "name": "Hidden", "lat": 4.0, "lon": 102.0, "kind": "dropPin", "color": "#c44a42", "showLabel": False},
     ]
     doc["slides"] = [slide]
@@ -353,7 +355,7 @@ def test_per_slide_hidden_layers_roundtrip_and_demotes_morph():
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
-    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows"]
+    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
     assert result["slides"][1]["hiddenLayers"] == ["pois"]
     assert result["links"][0]["kind"] == "cut"
 
@@ -465,7 +467,7 @@ def test_bootstrap_csv_preserves_empty_deck_layers(monkeypatch):
     assert new_slide["hiddenLayers"] == []
 
 
-def test_bootstrap_csv_pins_scale_with_map(monkeypatch):
+def test_bootstrap_csv_slides_mode_adds_pure_framing_slides(monkeypatch):
     job = _seed()
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     started = client.post(
@@ -476,9 +478,24 @@ def test_bootstrap_csv_pins_scale_with_map(monkeypatch):
     done = _wait(job["id"])
     assert done["status"] == "done", done.get("error")
     new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
-    church = new_slide["churches"][0]
+    assert new_slide["churches"] == []
+
+
+def test_bootstrap_csv_pins_mode_appends_one_scaling_church_per_row(monkeypatch):
+    job = _seed()
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name\nSingapore\n", "replace": "false", "targetSlideId": "s1"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    slide = next(s for s in done["result"]["slides"] if s["id"] == "s1")
+    assert len(slide["churches"]) == 1
+    church = slide["churches"][0]
     assert church["scaleWithMap"] is True
-    assert church["sizeZoom"] == new_slide["camera"]["zoom"]
+    assert church["sizeZoom"] == slide["camera"]["zoom"]
     assert church["size"]
 
 
@@ -3731,9 +3748,7 @@ def test_bootstrap_rows_creates_one_slide_per_row_with_ladder_zoom(monkeypatch):
     assert new_slides[0]["camera"]["zoom"] == pytest.approx(4.3)
     assert new_slides[1]["camera"]["zoom"] == pytest.approx(13.0)
     for slide in new_slides:
-        church = slide["churches"][0]
-        assert church["scaleWithMap"] is True
-        assert church["sizeZoom"] == slide["camera"]["zoom"]
+        assert slide["churches"] == []
 
 
 def test_bootstrap_rows_place_field_overrides_the_geocode_query(monkeypatch):
@@ -3772,7 +3787,7 @@ def test_bootstrap_rows_nameless_place_row_takes_the_geocoded_label(monkeypatch)
     assert done["status"] == "done", done.get("error")
     new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
     assert new_slide["title"] == "Bedok, Singapore"
-    assert new_slide["churches"][0]["name"] == "Bedok, Singapore"
+    assert new_slide["churches"] == []
 
 
 def test_bootstrap_rows_url_supplies_the_camera(monkeypatch):
@@ -3961,6 +3976,20 @@ def test_bootstrap_rows_bumps_state_revision(monkeypatch):
     done_pin = _wait(job["id"])
     assert done_pin["status"] == "done", done_pin.get("error")
     assert int(done_pin["result"]["stateRevision"] or 0) == before + 2
+
+
+def test_a_bootstrapped_pin_writes_showLabel_false_explicitly():
+    """Creation paths must write the key, or the legacy-read default would label them."""
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "Bedok", "lat": 1.3236, "lon": 103.9273}], "targetSlideId": "s1"},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    slide = next(s for s in done["result"]["slides"] if s["id"] == "s1")
+    assert [church["showLabel"] for church in slide["churches"]] == [False]
 
 
 def test_document_attribution_defaults_to_credits():

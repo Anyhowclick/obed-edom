@@ -268,7 +268,7 @@ class MapsChurch(BaseModel):
     lon: float
     kind: MapsPinKind
     color: str
-    showLabel: bool = True
+    showLabel: bool = False
     icon: MapsIconId | None = None
     photoPath: str | None = None
     assetId: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,80}$")
@@ -280,6 +280,15 @@ class MapsChurch(BaseModel):
     reveal: MapsReveal | None = None
     scaleWithMap: bool | None = None
     sizeZoom: float | None = Field(default=None, ge=0, le=22)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_label(cls, data: object) -> object:
+        """`showLabel` defaulted to True before it was written explicitly, so a saved church
+        with no key predates the flip and keeps its label; every creation path writes the key."""
+        if isinstance(data, dict) and "showLabel" not in data:
+            return {**data, "showLabel": True}
+        return data
 
 
 class MapsAsset(BaseModel):
@@ -714,7 +723,7 @@ def decode_png(raw: bytes) -> tuple[bytes, int, int, str]:
 
 
 def append_landmark(result: dict[str, Any], slide_id: str, audience: Literal["lw", "cg"], name: str, width: int, height: int, version: str, asset_id: str) -> dict[str, Any]:
-    from obed_edom.web.watercolour import _default_landmark_size
+    from obed_edom.maps_geo import default_landmark_size
 
     slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
     if not slide:
@@ -726,7 +735,7 @@ def append_landmark(result: dict[str, Any], slide_id: str, audience: Literal["lw
     while church_id in used:
         church_id = f"w{uuid.uuid4().hex[:8]}"
     camera = view.get("camera") or {}
-    churches.append({"id": church_id, "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": _default_landmark_size(width), "opacity": 1, "scaleWithMap": True, "sizeZoom": float(camera.get("zoom") or 0)})
+    churches.append({"id": church_id, "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": False, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": default_landmark_size(width), "opacity": 1, "scaleWithMap": True, "sizeZoom": float(camera.get("zoom") or 0)})
     view["churches"] = churches
     result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]
     view.pop("stillPng", None)
@@ -985,7 +994,7 @@ def _next_slide_id(slides: list[dict[str, Any]]) -> str:
     return f"s{index}"
 
 
-def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = None) -> dict[str, Any]:
+def _resolve_place(place: Place) -> tuple[str, dict[str, float]]:
     name = place.name.strip() or "Untitled"
     camera: dict[str, float] | None = None
     place_type: str | None = None
@@ -1022,25 +1031,35 @@ def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = No
         if not name or name == "Untitled":
             name = str(hit.get("label") or name)
     camera["zoom"] = clamp_zoom(resolve_zoom(place, place_type=place_type, zoom_from_url=zoom_from_url))
+    return name, camera
+
+
+def _row_pin(place: Place, pin_id: str) -> dict[str, Any]:
+    name, camera = _resolve_place(place)
     kind = place.kind or "dropPin"
-    church = {
-        "id": f"{slide_id}-pin",
+    return {
+        "id": pin_id,
         "name": name,
         "lat": camera["lat"],
         "lon": camera["lon"],
         "kind": kind,
         "color": "#c44a42",
+        "showLabel": False,
         "size": DOT_SIZE if kind == "dot" else DROP_SIZE,
         "scaleWithMap": True,
         "sizeZoom": camera["zoom"],
     }
+
+
+def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = None) -> dict[str, Any]:
+    name, camera = _resolve_place(place)
     return {
         "id": slide_id,
         "title": name,
         "style": "positron",
         "camera": camera,
         "highlights": [],
-        "churches": [church],
+        "churches": [],
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS) if hidden_layers is None else list(hidden_layers),
         "hillshade": False,
         "cgShiftX": 0,
@@ -1109,8 +1128,7 @@ def _run_pin_bootstrap(job, places: list[Place], slide_id: str, audience: str) -
     except (TypeError, ValueError):
         size_zoom = None
     for place in places:
-        generated = _row_slide(place, "csv")["churches"][0]
-        pin = {**generated, "id": _next_pin_id(churches)}
+        pin = _row_pin(place, _next_pin_id(churches))
         if size_zoom is not None:
             pin["sizeZoom"] = size_zoom
         churches.append(pin)
