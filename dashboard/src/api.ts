@@ -484,7 +484,15 @@ export class MapsStaleThumbnailError extends Error {
 export async function postMapsPng(
   id: string,
   blob: Blob,
-  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg"; variant?: "country"; revision?: number } = {}
+  opts: {
+    kind?: MapsPngKind;
+    slideId?: string;
+    plateId?: string;
+    audience?: "lw" | "cg";
+    variant?: "region" | "regions";
+    index?: number;
+    revision?: number;
+  } = {}
 ): Promise<Job> {
   const params = new URLSearchParams();
   if (opts.kind) params.set("kind", opts.kind);
@@ -492,6 +500,7 @@ export async function postMapsPng(
   if (opts.plateId) params.set("plateId", opts.plateId);
   if (opts.audience) params.set("audience", opts.audience);
   if (opts.variant) params.set("variant", opts.variant);
+  if (opts.index !== undefined) params.set("index", String(opts.index));
   if (opts.revision !== undefined) params.set("revision", String(opts.revision));
   const res = await fetch(`/api/maps/${id}/png?${params.toString()}`, {
     method: "POST",

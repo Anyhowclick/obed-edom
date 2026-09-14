@@ -4099,19 +4099,194 @@ def test_maps_slide_accepts_admin1_highlight():
     assert saved.json()["result"]["slides"][0]["highlights"] == ["MYS", "A1:MYS-1186"]
 
 
-def test_post_png_plate_country_variant():
+def test_post_png_region_variant():
     job = _seed()
     body = _landmark_png()
+    response = client.post(f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=region&index=0", content=body)
+    assert response.status_code == 200
+    out = Path(job["result"]["outputDir"])
+    assert (out / "stills" / "s1-region-0.png").read_bytes() == body
+
+    plate = client.post(
+        f"/api/maps/{job['id']}/png?plateId=p-s1-s2&kind=plate&variant=region&index=1", content=body
+    )
+    assert plate.status_code == 200
+    assert (out / "plates" / "map BG_p-s1-s2-region-1.png").read_bytes() == body
+
+    missing_index = client.post(f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=region", content=body)
+    assert missing_index.status_code == 400
+
+
+def test_post_png_regions_manifest_variant():
+    job = _seed()
+    manifest = {"width": 100, "height": 50, "pieces": [{"id": "MYS", "x": 0, "y": 0, "w": 10, "h": 10}]}
     response = client.post(
-        f"/api/maps/{job['id']}/png?plateId=p-s1-s2&kind=plate&variant=country", content=body
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(manifest).encode("utf-8"),
     )
     assert response.status_code == 200
     out = Path(job["result"]["outputDir"])
-    assert (out / "plates" / "map BG_p-s1-s2-country.png").read_bytes() == body
+    assert json.loads((out / "stills" / "s1-regions.json").read_text()) == manifest
+
+    plate_response = client.post(
+        f"/api/maps/{job['id']}/png?plateId=p-s1-s2&kind=plate&variant=regions",
+        content=json.dumps(manifest).encode("utf-8"),
+    )
+    assert plate_response.status_code == 200
+    assert json.loads((out / "plates" / "map BG_p-s1-s2-regions.json").read_text()) == manifest
+
     bad = client.post(
-        f"/api/maps/{job['id']}/png?plateId=p-s1-s2&kind=plate&variant=nope", content=body
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions", content=b"not json"
     )
     assert bad.status_code == 400
+
+    out_of_bounds = dict(manifest, pieces=[{"id": "MYS", "x": 90, "y": 0, "w": 20, "h": 10}])
+    oob = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(out_of_bounds).encode("utf-8"),
+    )
+    assert oob.status_code == 400
+
+    negative = dict(manifest, pieces=[{"id": "MYS", "x": -1, "y": 0, "w": 10, "h": 10}])
+    neg = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(negative).encode("utf-8"),
+    )
+    assert neg.status_code == 400
+
+
+def test_post_png_thumb_rejects_region_variants():
+    job = _seed()
+    manifest = {"width": 100, "height": 50, "pieces": [{"id": "MYS", "x": 0, "y": 0, "w": 10, "h": 10}]}
+    regions = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=thumb&variant=regions",
+        content=json.dumps(manifest).encode("utf-8"),
+    )
+    assert regions.status_code == 400
+
+    region = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=thumb&variant=region&index=0", content=_landmark_png()
+    )
+    assert region.status_code == 400
+
+
+def test_post_png_regions_manifest_rejects_bool_dimensions():
+    job = _seed()
+    manifest = {"width": True, "height": 50, "pieces": []}
+    response = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(manifest).encode("utf-8"),
+    )
+    assert response.status_code == 400
+
+    piece_bool = {
+        "width": 100,
+        "height": 50,
+        "pieces": [{"id": "MYS", "x": False, "y": 0, "w": 10, "h": 10}],
+    }
+    piece_response = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(piece_bool).encode("utf-8"),
+    )
+    assert piece_response.status_code == 400
+
+
+def test_post_png_regions_manifest_rejects_dims_over_raster_max_side():
+    job = _seed()
+    manifest = {"width": 8193, "height": 50, "pieces": []}
+    response = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(manifest).encode("utf-8"),
+    )
+    assert response.status_code == 400
+
+    tall = dict(manifest, width=50, height=8193)
+    tall_response = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(tall).encode("utf-8"),
+    )
+    assert tall_response.status_code == 400
+
+    ok = dict(manifest, width=8192, height=8192)
+    ok_response = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(ok).encode("utf-8"),
+    )
+    assert ok_response.status_code == 200
+
+
+def test_post_png_regions_manifest_must_match_staged_base_raster_dims():
+    job = _seed()
+    still_body = _landmark_png()
+    still_response = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still", content=still_body
+    )
+    assert still_response.status_code == 200
+
+    mismatched = {"width": 100, "height": 50, "pieces": []}
+    response = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(mismatched).encode("utf-8"),
+    )
+    assert response.status_code == 400
+
+    with Image.open(BytesIO(still_body)) as image:
+        matching = {"width": image.width, "height": image.height, "pieces": []}
+    ok = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(matching).encode("utf-8"),
+    )
+    assert ok.status_code == 200
+
+
+def test_post_png_regions_manifest_sweeps_stale_pieces():
+    job = _seed()
+    still_body = _landmark_png()
+    still_response = client.post(f"/api/maps/{job['id']}/png?slideId=s1&kind=still", content=still_body)
+    assert still_response.status_code == 200
+
+    out = Path(job["result"]["outputDir"]) / "stills"
+    (out / "s1-region-0.png").write_bytes(still_body)
+    (out / "s1-region-1.png").write_bytes(still_body)
+    (out / "s1-country.png").write_bytes(still_body)
+
+    with Image.open(BytesIO(still_body)) as image:
+        manifest = {
+            "width": image.width,
+            "height": image.height,
+            "pieces": [{"id": "A", "x": 0, "y": 0, "w": 1, "h": 1}],
+        }
+    response = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=regions",
+        content=json.dumps(manifest).encode("utf-8"),
+    )
+    assert response.status_code == 200
+    assert (out / "s1-region-0.png").is_file()
+    assert not (out / "s1-region-1.png").is_file()
+    assert not (out / "s1-country.png").is_file()
+
+
+def test_post_png_bogus_variant_rejected():
+    job = _seed()
+    body = _landmark_png()
+    response = client.post(f"/api/maps/{job['id']}/png?slideId=s1&kind=still&variant=bogus", content=body)
+    assert response.status_code == 400
+
+
+def test_post_png_landing_rejects_any_variant():
+    job = _seed()
+    body = _landmark_png()
+    region = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1__landing&kind=still&variant=region&index=0", content=body
+    )
+    assert region.status_code == 400
+
+    manifest = {"width": 100, "height": 50, "pieces": [{"id": "MYS", "x": 0, "y": 0, "w": 10, "h": 10}]}
+    regions = client.post(
+        f"/api/maps/{job['id']}/png?slideId=s1__landing&kind=still&variant=regions",
+        content=json.dumps(manifest).encode("utf-8"),
+    )
+    assert regions.status_code == 400
 
 
 def test_session_zip_excludes_admin1(admin1_root):

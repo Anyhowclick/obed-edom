@@ -249,6 +249,23 @@ export function IconLandmark({ className }: IconProps) {
   );
 }
 
+export function IconRegion({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls(className)}>
+      <path d="M4 6.5 10 4l4.5 2 5.5-1.8v13.6L14.5 20 10 18l-6 2z" />
+      <path d="M10 4v14" />
+    </svg>
+  );
+}
+
+export function IconCountry({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls("filled", className)}>
+      <path d="M4 6.5 10 4l4.5 2 5.5-1.8v13.6L14.5 20 10 18l-6 2z" />
+    </svg>
+  );
+}
+
 /* The watercolour toolbar keeps its 16 grid; 1.2 is the same optical weight
    as 1.8 on the 24 grid. */
 export const TOOL_ICONS: Record<string, JSX.Element> = {

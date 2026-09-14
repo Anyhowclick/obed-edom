@@ -33,6 +33,7 @@ import {
   IconCaret,
   IconClose,
   IconCopy,
+  IconCountry,
   IconDot,
   IconDropPin,
   IconLabel,
@@ -44,6 +45,7 @@ import {
   IconPasteSlides,
   IconPlay,
   IconPlus,
+  IconRegion,
   IconRelief,
   IconTrash,
 } from "../components/icons";
@@ -152,6 +154,14 @@ function PinKindIcon({ kind }: { kind: MapsPinKind }) {
   if (kind === "dropPin") return <IconDropPin />;
   if (kind === "landmark") return <IconLandmark />;
   return <IconDot />;
+}
+
+function highlightClass(code: string): string {
+  return code.startsWith("A1:") ? "region" : "country";
+}
+
+function HighlightIcon({ code }: { code: string }) {
+  return code.startsWith("A1:") ? <IconRegion /> : <IconCountry />;
 }
 
 function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
@@ -1565,6 +1575,23 @@ export function MapsTab() {
         setLogs((prev) => [...prev, `Cached ${cached + fetched} / ${total} tiles (${failed} failed).`]);
       };
 
+      const postIsolatePair = async (
+        pair: { base: Blob; pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] },
+        target: { kind: "still" | "plate"; slideId?: string; plateId?: string; audience?: "lw" | "cg" },
+        width: number,
+        height: number
+      ) => {
+        reconcileServerJob(await postMapsPng(id, pair.base, target));
+        for (const [k, piece] of pair.pieces.entries()) {
+          throwIfCancelled();
+          reconcileServerJob(await postMapsPng(id, piece.blob, { ...target, variant: "region", index: k }));
+        }
+        throwIfCancelled();
+        const manifest = { width, height, pieces: pair.pieces.map(({ blob: _blob, ...rest }) => rest) };
+        const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/json" });
+        reconcileServerJob(await postMapsPng(id, manifestBlob, { ...target, variant: "regions" }));
+      };
+
       const makeFrameTracker = (phase: string) => {
         const frameTimes: number[] = [];
         let lastFrameAt = performance.now();
@@ -1601,8 +1628,7 @@ export function MapsTab() {
           const pair = await captureIsolatePair(exportOpts);
           throwIfCancelled();
           if (pair) {
-            reconcileServerJob(await postMapsPng(id, pair.base, { kind: "still", slideId: still.slideId }));
-            reconcileServerJob(await postMapsPng(id, pair.country, { kind: "still", slideId: still.slideId, variant: "country" }));
+            await postIsolatePair(pair, { kind: "still", slideId: still.slideId }, exportOpts.width, exportOpts.height);
           }
         } else {
           const blob = await captureExportRaster(exportOpts);
@@ -1632,8 +1658,7 @@ export function MapsTab() {
           const pair = await captureIsolatePair(plateOpts);
           throwIfCancelled();
           if (pair) {
-            reconcileServerJob(await postMapsPng(id, pair.base, { kind: "plate", plateId: plate.plateId }));
-            reconcileServerJob(await postMapsPng(id, pair.country, { kind: "plate", plateId: plate.plateId, variant: "country" }));
+            await postIsolatePair(pair, { kind: "plate", plateId: plate.plateId }, plateOpts.width, plateOpts.height);
           }
         } else {
           const blob = await captureExportRaster(plateOpts);
@@ -1663,8 +1688,12 @@ export function MapsTab() {
             const pair = await captureIsolatePair(exportOpts);
             throwIfCancelled();
             if (pair) {
-              reconcileServerJob(await postMapsPng(id, pair.base, { kind: "still", slideId: still.slideId, audience: "cg" }));
-              reconcileServerJob(await postMapsPng(id, pair.country, { kind: "still", slideId: still.slideId, audience: "cg", variant: "country" }));
+              await postIsolatePair(
+                pair,
+                { kind: "still", slideId: still.slideId, audience: "cg" },
+                exportOpts.width,
+                exportOpts.height
+              );
             }
           } else {
             const blob = await captureExportRaster(exportOpts);
@@ -1694,8 +1723,12 @@ export function MapsTab() {
             const pair = await captureIsolatePair(plateOpts);
             throwIfCancelled();
             if (pair) {
-              reconcileServerJob(await postMapsPng(id, pair.base, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
-              reconcileServerJob(await postMapsPng(id, pair.country, { kind: "plate", plateId: plate.plateId, audience: "cg", variant: "country" }));
+              await postIsolatePair(
+                pair,
+                { kind: "plate", plateId: plate.plateId, audience: "cg" },
+                plateOpts.width,
+                plateOpts.height
+              );
             }
           } else {
             const blob = await captureExportRaster(plateOpts);
@@ -2501,8 +2534,10 @@ export function MapsTab() {
                 onClick={() => setInspTab(tab.id)}
               >
                 {tab.label}
-                {tab.id === "pins" && (activeView?.churches.length || 0) > 0 && (
-                  <span className="maps-insp-count">{activeView?.churches.length}</span>
+                {tab.id === "pins" && (activeView?.churches.length || 0) + (activeView?.highlights.length || 0) > 0 && (
+                  <span className="maps-insp-count">
+                    {(activeView?.churches.length || 0) + (activeView?.highlights.length || 0)}
+                  </span>
                 )}
               </button>
             ))}
@@ -2966,9 +3001,10 @@ export function MapsTab() {
                       </div>
                     )}
                   </div>
-                  {(activeView?.churches.length || 0) === 0 ? (
+                  {(activeView?.churches.length || 0) === 0 && (activeView?.highlights.length || 0) === 0 && (
                     <p className="note">Shift-click the map to add a pin, or add a transparent landmark.</p>
-                  ) : (
+                  )}
+                  {(activeView?.churches.length || 0) > 0 && (
                     <>
                       <div className="maps-pin-bulk" role="group" aria-label="Selected objects">
                         {selectedPins.length > 0 && <span className="note">{selectedPins.length} selected</span>}
@@ -3011,6 +3047,33 @@ export function MapsTab() {
                               <span className="maps-pin-name">{church.name}</span>
                               {church.reveal && <span className="maps-pin-hidden">Paint-on {church.reveal.duration}s</span>}
                               {church.showLabel === false && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {(activeView?.highlights.length || 0) > 0 && (
+                    <>
+                      <div className="cap">Highlights</div>
+                      <div className="maps-pin-list">
+                        {(activeView?.highlights || []).map((code) => (
+                          <div key={`${code}-${namesTick}`} className={`maps-pin-row kind-${highlightClass(code)}`}>
+                            <span className={`maps-pin-kind kind-${highlightClass(code)}`} aria-hidden="true">
+                              <HighlightIcon code={code} />
+                            </span>
+                            <span className="maps-pin-name">{code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}</span>
+                            <button
+                              className="btn maps-delete icon-btn"
+                              type="button"
+                              disabled={locked}
+                              title="Remove highlight"
+                              aria-label={`Remove ${code.startsWith("A1:") ? admin1Name(code) : admin0Name(code)}`}
+                              onClick={() =>
+                                updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
+                              }
+                            >
+                              <IconClose />
                             </button>
                           </div>
                         ))}

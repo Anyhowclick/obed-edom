@@ -5,7 +5,10 @@ import { mapsApiScript } from "./fakes/mapsApi";
 
 vi.mock("../src/maps/captureExport", () => ({
   captureExportRaster: vi.fn(async () => new Blob(["raster"])),
-  captureIsolatePair: vi.fn(async () => ({ base: new Blob(["base"]), country: new Blob(["country"]) })),
+  captureIsolatePair: vi.fn(async () => ({
+    base: new Blob(["base"]),
+    pieces: [{ id: "MYS", x: 0, y: 0, w: 10, h: 10, blob: new Blob(["piece"]) }],
+  })),
 }));
 import { ExportDestinationRow } from "../src/components/ExportDestinationRow";
 
@@ -45,7 +48,7 @@ describe("ExportDestinationRow default (non-inline) rendering", () => {
 });
 
 describe("export stills with highlights but no isolate", () => {
-  it("takes the base + cutout pair path and POSTs the second as variant=country", async () => {
+  it("takes the base + pieces path and POSTs region pieces then the manifest", async () => {
     const { captureIsolatePair, captureExportRaster } = await import("../src/maps/captureExport");
     await renderMapsTab();
     mapsApiScript.exportPlan.set({
@@ -78,6 +81,7 @@ describe("export stills with highlights but no isolate", () => {
     expect(captureIsolatePair).toHaveBeenCalledTimes(1);
     expect(captureExportRaster).not.toHaveBeenCalled();
     const posts = mapsApiScript.postMapsPng.calls.filter((opts) => opts?.kind === "still");
-    expect(posts.map((opts) => opts?.variant)).toEqual([undefined, "country"]);
+    expect(posts.map((opts) => opts?.variant)).toEqual([undefined, "region", "regions"]);
+    expect(posts.map((opts) => opts?.index)).toEqual([undefined, 0, undefined]);
   });
 });

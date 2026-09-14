@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -31,6 +32,7 @@ from obed_edom.maps_keynote import (
     WALL_HEIGHT,
     WALL_WIDTH,
     _place_churches,
+    _read_region_manifest,
     _render_reveals,
     assign_morph_plates,
     avoid_straddle,
@@ -54,11 +56,13 @@ from obed_edom.maps_keynote import (
     plan_deck,
     project_into_camera,
     project_into_plate,
+    slide_capture_size,
     split_cg_export_plan,
     whole,
+    _emit_adjust_map,
 )
 from obed_edom.maps_pins import LABEL_PILL_RGB, PIN_ASPECT, label_pill_png_path
-from obed_edom.maps_reveal import REVEAL_FPS
+from obed_edom.maps_reveal import REVEAL_FPS, reveal_movie_fingerprint
 from obed_edom.maps_movie import movie_path
 from obed_edom.web.jobs import Job
 
@@ -114,6 +118,23 @@ def _dummy_png(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (16, 16), (20, 30, 40)).save(path, "PNG")
     return path
+
+
+def _region_manifest(pieces: list[dict] | None = None, width: int = 16, height: int = 16) -> dict:
+    pieces = pieces if pieces is not None else [{"id": "USA", "x": 0, "y": 0, "w": width, "h": height}]
+    pieces = [{**piece, "index": k} for k, piece in enumerate(pieces)]
+    return {"width": width, "height": height, "pieces": pieces}
+
+
+def _dummy_region(base_path: Path, pieces: list[dict] | None = None, width: int = 16, height: int = 16) -> Path:
+    """Writes a `-regions.json` manifest plus one `-region-<k>.png` per piece next to `base_path`."""
+    stem, suffix = base_path.stem, base_path.suffix
+    manifest = _region_manifest(pieces, width, height)
+    for k in range(len(manifest["pieces"])):
+        _dummy_png(base_path.with_name(f"{stem}-region-{k}{suffix}"))
+    manifest_path = base_path.with_name(f"{stem}-regions.json")
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest_path
 
 
 def _pin_items(items: list[dict]) -> list[dict]:
@@ -1689,8 +1710,8 @@ def test_export_plan_still_carries_country_cutout_when_isolated():
     b = _slide("s2", _camera(3.0, 102.0))
     plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0}])
     stills = {row["slideId"]: row for row in plan["stills"]}
-    assert stills["s1"]["stillPngCountry"] == "s1-country.png"
-    assert "stillPngCountry" not in stills["s2"]
+    assert stills["s1"]["stillPngRegions"] == "s1-regions.json"
+    assert "stillPngRegions" not in stills["s2"]
 
 
 def test_plan_deck_emits_country_cutout_image_above_base(tmp_path: Path):
@@ -1698,7 +1719,8 @@ def test_plan_deck_emits_country_cutout_image_above_base(tmp_path: Path):
     b = _slide("s2", _camera(3.0, 102.0))
     links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
     _dummy_png(tmp_path / "stills" / "s1.png")
-    _dummy_png(tmp_path / "stills" / "s1-country.png")
+    cap_w, cap_h = slide_capture_size(a)
+    _dummy_region(tmp_path / "stills" / "s1.png", width=cap_w, height=cap_h)
     _dummy_png(tmp_path / "stills" / "s2.png")
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     items = ops[0]["items"]
@@ -1707,7 +1729,7 @@ def test_plan_deck_emits_country_cutout_image_above_base(tmp_path: Path):
     assert len(map_items) == 1
     assert len(country_items) == 1
     assert Path(map_items[0]["path"]).name == "s1.png"
-    assert Path(country_items[0]["path"]).name == "s1-country.png"
+    assert Path(country_items[0]["path"]).name == "s1-region-0.png"
     assert (map_items[0]["x"], map_items[0]["y"], map_items[0]["w"], map_items[0]["h"]) == (
         country_items[0]["x"],
         country_items[0]["y"],
@@ -1725,13 +1747,13 @@ def test_plan_deck_magic_move_duplicate_keeps_country_cutout(tmp_path: Path):
     plates, links = assign_morph_plates([a, b], links)
     plan = _write_plan_rasters(tmp_path, [a, b], links)
     for plate in plan["plates"]:
-        stem = Path(plate_filename(plate["plateId"])).stem
-        _dummy_png(tmp_path / "plates" / f"{stem}-country.png")
+        name = plate_filename(plate["plateId"])
+        _dummy_region(tmp_path / "plates" / name)
     ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     assert ops[1]["duplicate"] is True
     country_items = [item for item in ops[1]["items"] if item.get("country")]
     assert len(country_items) == 1
-    assert Path(country_items[0]["path"]).name.endswith("-country.png")
+    assert Path(country_items[0]["path"]).name.endswith("-region-0.png")
 
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
     tell_start = script.index("tell slide 2")
@@ -1751,13 +1773,13 @@ def test_plan_deck_morph_member_with_no_own_highlights_still_gets_plate_cutout(t
     links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
     plates, links = assign_morph_plates([a, b], links)
     for plate_id in plates:
-        stem = Path(plate_filename(plate_id)).stem
-        _dummy_png(tmp_path / "plates" / plate_filename(plate_id))
-        _dummy_png(tmp_path / "plates" / f"{stem}-country.png")
+        name = plate_filename(plate_id)
+        _dummy_png(tmp_path / "plates" / name)
+        _dummy_region(tmp_path / "plates" / name)
     ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     country_items = [item for item in ops[1]["items"] if item.get("country")]
     assert len(country_items) == 1
-    assert Path(country_items[0]["path"]).name.endswith("-country.png")
+    assert Path(country_items[0]["path"]).name.endswith("-region-0.png")
 
 
 def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
@@ -1771,7 +1793,7 @@ def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
     assert landing["camera"] == b["camera"]
     assert landing["highlights"] == []
     assert landing["isolate"] is None
-    assert "stillPngCountry" not in landing
+    assert "stillPngRegions" not in landing
     assert landing["_landingFor"] == "s2"
 
 
@@ -1796,7 +1818,7 @@ def test_plan_deck_inserts_landing_slide_between_movie_and_isolated_destination(
     mov.write_bytes(b"fake-mov")
     _dummy_png(tmp_path / "stills" / "s2__landing.png")
     _dummy_png(tmp_path / "stills" / "s2.png")
-    _dummy_png(tmp_path / "stills" / "s2-country.png")
+    _dummy_region(tmp_path / "stills" / "s2.png")
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     assert [op["id"] for op in ops] == ["s1", "s2__landing", "s2"]
     assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.0}
@@ -2537,16 +2559,18 @@ def _kitchen_sink_ops(tmp_path: Path, *, wall: bool = True) -> list[dict]:
             _landmark_church(id="lm", lat=3.2, lon=101.2),
         ],
     )
+    still_path = _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s1-region-0.png")
     items = build_slide_items(
         slide,
         plate=None,
         plate_path=None,
-        still=_dummy_png(tmp_path / "stills" / "s1.png"),
+        still=still_path,
         movie=None,
         wall=wall,
         asset_root=asset_root,
         pin_root=tmp_path / "pins",
-        country_still=_dummy_png(tmp_path / "stills" / "s1-country.png"),
+        region_manifest=_region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": 16, "h": 16}]),
         reveals={("lw", "s1", "lm"): str(reveal_mov)},
         sid="s1",
     )
@@ -2875,9 +2899,9 @@ def test_still_plans_a_cutout_without_isolate():
     plan = maps_export_plan([plain, isolated, bare], [])
     rows = {row["slideId"]: row for row in plan["stills"]}
 
-    assert rows["s1"]["stillPngCountry"] == "s1-country.png"
-    assert rows["s2"]["stillPngCountry"] == "s2-country.png"
-    assert "stillPngCountry" not in rows["s3"]
+    assert rows["s1"]["stillPngRegions"] == "s1-regions.json"
+    assert rows["s2"]["stillPngRegions"] == "s2-regions.json"
+    assert "stillPngRegions" not in rows["s3"]
 
 
 def test_landing_slide_plans_no_cutout():
@@ -2890,7 +2914,7 @@ def test_landing_slide_plans_no_cutout():
     landing = [row for row in plan["stills"] if row["slideId"].endswith("__landing")]
 
     assert landing, "expected a synthetic landing still"
-    assert all("stillPngCountry" not in row for row in landing)
+    assert all("stillPngRegions" not in row for row in landing)
 
 
 def test_plate_plans_a_cutout_when_highlighted():
@@ -2902,7 +2926,7 @@ def test_plate_plans_a_cutout_when_highlighted():
     plates = plan["plates"]
 
     assert plates, "expected a morph plate"
-    assert plates[0]["platePngCountry"] == f"{plates[0]['plateId']}-country.png"
+    assert plates[0]["platePngRegions"] == f"{plates[0]['plateId']}-regions.json"
 
 
 def test_plate_plans_no_cutout_without_highlights():
@@ -2913,29 +2937,31 @@ def test_plate_plans_no_cutout_without_highlights():
     plan = maps_export_plan([a, b], links)
 
     assert plan["plates"]
-    assert "platePngCountry" not in plan["plates"][0]
+    assert "platePngRegions" not in plan["plates"][0]
 
 
 def test_build_slide_items_stacks_the_cutout_without_isolate(tmp_path: Path):
     slide = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"], isolate=None)
-    country = _dummy_png(tmp_path / "stills" / "s1-country.png")
+    still_path = _dummy_png(tmp_path / "stills" / "s1.png")
+    piece_path = _dummy_png(tmp_path / "stills" / "s1-region-0.png")
+    cap_w, cap_h = slide_capture_size(slide)
 
     items = build_slide_items(
         slide,
         plate=None,
         plate_path=None,
-        still=_dummy_png(tmp_path / "stills" / "s1.png"),
+        still=still_path,
         movie=None,
         wall=True,
         pin_root=tmp_path / "pins",
-        country_still=country,
+        region_manifest=_region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": cap_w, "h": cap_h}], width=cap_w, height=cap_h),
     )
     map_items = [item for item in items if item.get("map")]
     country_items = [item for item in items if item.get("country")]
 
     assert len(map_items) == 1
     assert len(country_items) == 1
-    assert country_items[0]["path"] == str(country)
+    assert country_items[0]["path"] == str(piece_path)
     assert (country_items[0]["x"], country_items[0]["y"]) == (map_items[0]["x"], map_items[0]["y"])
     assert (country_items[0]["w"], country_items[0]["h"]) == (map_items[0]["w"], map_items[0]["h"])
 
@@ -2945,7 +2971,14 @@ def test_build_slide_items_gives_a_plate_cutout_the_plate_geometry(tmp_path: Pat
     b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
     geom = morph_plate_geom([a, b])
     plate_path = _dummy_png(tmp_path / "plates" / plate_filename("p-s1-s2"))
-    country = _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-country.png")
+    piece_path = _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-region-0.png")
+
+    unmapped = build_slide_items(
+        a, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True,
+        pin_root=tmp_path / "pins", region_manifest=None,
+    )
+    plate_w = next(item for item in unmapped if item.get("map"))["w"]
+    plate_h = next(item for item in unmapped if item.get("map"))["h"]
 
     items = build_slide_items(
         a,
@@ -2955,12 +2988,346 @@ def test_build_slide_items_gives_a_plate_cutout_the_plate_geometry(tmp_path: Pat
         movie=None,
         wall=True,
         pin_root=tmp_path / "pins",
-        country_still=country,
+        region_manifest=_region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": plate_w, "h": plate_h}], width=plate_w, height=plate_h),
     )
     map_items = [item for item in items if item.get("map")]
     country_items = [item for item in items if item.get("country")]
 
     assert len(map_items) == 1
     assert len(country_items) == 1
-    assert country_items[0]["path"] == str(country)
+    assert country_items[0]["path"] == str(piece_path)
     assert [country_items[0][key] for key in ("x", "y", "w", "h")] == [map_items[0][key] for key in ("x", "y", "w", "h")]
+
+
+def test_build_slide_items_emits_n_pieces_in_manifest_order(tmp_path: Path):
+    slide = _slide("s1", _camera(3.0, 101.0), highlights=["MYS", "IDN"])
+    still_path = _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s1-region-0.png")
+    _dummy_png(tmp_path / "stills" / "s1-region-1.png")
+    _dummy_png(tmp_path / "stills" / "s1-region-2.png")
+    manifest = _region_manifest(
+        [
+            {"id": "A", "x": 0, "y": 0, "w": 4, "h": 4},
+            {"id": "B", "x": 10, "y": 10, "w": 5, "h": 5},
+            {"id": "C", "x": 20, "y": 20, "w": 6, "h": 6},
+        ],
+        width=32,
+        height=9,
+    )
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still_path, movie=None, wall=True,
+        pin_root=tmp_path / "pins", region_manifest=manifest,
+    )
+    map_index = next(i for i, item in enumerate(items) if item.get("map"))
+    country_items = [item for item in items if item.get("country")]
+    assert len(country_items) == 3
+    assert items[map_index + 1 : map_index + 4] == country_items
+    assert [Path(item["path"]).name for item in country_items] == [
+        "s1-region-0.png", "s1-region-1.png", "s1-region-2.png",
+    ]
+
+
+def test_build_slide_items_scales_pieces_to_plate_placement(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
+    geom = morph_plate_geom([a, b])
+    plate_path = _dummy_png(tmp_path / "plates" / plate_filename("p-s1-s2"))
+    piece_path = _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-region-0.png")
+    manifest = _region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": 320, "h": 45}], width=640, height=90)
+
+    items = build_slide_items(
+        a, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True,
+        pin_root=tmp_path / "pins", region_manifest=manifest,
+    )
+    mapped = next(item for item in items if item.get("map"))
+    piece = next(item for item in items if item.get("country"))
+    assert piece["path"] == str(piece_path)
+    scale = mapped["w"] / 640.0
+    assert piece["w"] == pytest.approx(320 * scale)
+    assert piece["h"] == pytest.approx(45 * scale)
+    assert piece["x"] == pytest.approx(mapped["x"] + 0 * scale)
+    assert piece["y"] == pytest.approx(mapped["y"] + 0 * scale)
+    assert (mapped["w"], mapped["h"]) != (640, 90), "plate placement should not coincidentally match the manifest size"
+
+
+def test_build_slide_items_warns_but_does_not_crash_on_aspect_mismatch(tmp_path: Path):
+    slide = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    still_path = _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s1-region-0.png")
+    manifest = _region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": 16, "h": 16}], width=16, height=16)
+    with pytest.warns(UserWarning, match="aspect ratio mismatch"):
+        items = build_slide_items(
+            slide, plate=None, plate_path=None, still=still_path, movie=None, wall=True,
+            pin_root=tmp_path / "pins", region_manifest=manifest,
+        )
+    country_items = [item for item in items if item.get("country")]
+    assert len(country_items) == 1
+
+
+def test_build_slide_items_warns_and_skips_a_missing_piece(tmp_path: Path):
+    slide = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    still_path = _dummy_png(tmp_path / "stills" / "s1.png")
+    manifest = _region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": 16, "h": 16}])
+    with pytest.warns(UserWarning, match="missing region cutout"):
+        items = build_slide_items(
+            slide, plate=None, plate_path=None, still=still_path, movie=None, wall=True,
+            pin_root=tmp_path / "pins", region_manifest=manifest,
+        )
+    assert not [item for item in items if item.get("country")]
+
+
+def test_build_slide_items_shifts_pieces_for_cg(tmp_path: Path):
+    slide = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"], cgShiftX=300)
+    still_path = _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s1-region-0.png")
+    manifest = _region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": 16, "h": 16}])
+
+    items_wall = build_slide_items(
+        slide, plate=None, plate_path=None, still=still_path, movie=None, wall=True,
+        pin_root=tmp_path / "pins", region_manifest=manifest,
+    )
+    items_cg = build_slide_items(
+        slide, plate=None, plate_path=None, still=still_path, movie=None, wall=False,
+        pin_root=tmp_path / "pins", region_manifest=manifest,
+    )
+    mapped_wall = next(item for item in items_wall if item.get("map"))
+    piece_wall = next(item for item in items_wall if item.get("country"))
+    mapped_cg = next(item for item in items_cg if item.get("map"))
+    piece_cg = next(item for item in items_cg if item.get("country"))
+
+    assert piece_cg["x"] - mapped_cg["x"] == piece_wall["x"] - mapped_wall["x"]
+    assert piece_cg["x"] != piece_wall["x"]
+
+
+def test_emit_adjust_map_emits_one_triple_per_cutout_and_collapses_the_delete_formula():
+    mapped = {"x": 0, "y": 0, "w": 100, "h": 50}
+    cutouts = [{"x": 1, "y": 2, "w": 3, "h": 4}, {"x": 5, "y": 6, "w": 7, "h": 8}]
+    body = "\n".join(_emit_adjust_map(mapped, cutouts))
+    assert "set position of image 2 to {1, 2}" in body
+    assert "set width of image 2 to 3" in body
+    assert "set height of image 2 to 4" in body
+    assert "set position of image 3 to {5, 6}" in body
+    assert "set width of image 3 to 7" in body
+    assert "set height of image 3 to 8" in body
+    assert re.search(r"repeat with i from \(count of images\) to 4 by -1", body)
+
+    empty_body = "\n".join(_emit_adjust_map(mapped, []))
+    assert re.search(r"repeat with i from \(count of images\) to 2 by -1", empty_body)
+    assert "image 2" not in empty_body
+
+
+def test_render_reveals_composites_region_pieces_in_order(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    captured: dict[str, list] = {}
+
+    def fake_render_slide(base_png, pieces, landmarks, dest, **_kw):
+        captured["pieces"] = pieces
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mov")
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.render_slide_reveal_movie", fake_render_slide)
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    _dummy_png(output_dir / "stills" / "s1.png")
+    _dummy_png(output_dir / "stills" / "s1-region-0.png")
+    _dummy_png(output_dir / "stills" / "s1-region-1.png")
+    manifest_path = output_dir / "stills" / "s1-regions.json"
+    manifest_path.write_text(json.dumps({
+        "width": 3840, "height": 1080,
+        "pieces": [
+            {"id": "A", "x": 0, "y": 0, "w": 4, "h": 4},
+            {"id": "B", "x": 100, "y": 200, "w": 4, "h": 4},
+        ],
+    }))
+    church = _landmark_church(id="lm", assetId="asset1", size=100, reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church], highlights=["A", "B"], revealMovie=True)
+
+    _, reveal_movies, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+
+    assert ("lw", "s1") in reveal_movies
+    pieces = captured["pieces"]
+    assert [Path(p[0]).name for p in pieces] == ["s1-region-0.png", "s1-region-1.png"]
+    assert (pieces[0][1], pieces[0][2]) == (0, 0)
+    assert (pieces[1][1], pieces[1][2]) == (100, 200)
+    assert (pieces[0][3], pieces[0][4]) == (4, 4)
+    assert (pieces[1][3], pieces[1][4]) == (4, 4)
+
+
+def test_read_region_manifest_returns_none_for_shape_missing_dimensions(tmp_path: Path):
+    missing_dims = tmp_path / "s1-regions.json"
+    missing_dims.write_text(json.dumps({"pieces": []}))
+    assert _read_region_manifest(missing_dims) is None
+
+    not_a_dict = tmp_path / "s2-regions.json"
+    not_a_dict.write_text(json.dumps([1, 2, 3]))
+    assert _read_region_manifest(not_a_dict) is None
+
+    valid = tmp_path / "s3-regions.json"
+    valid.write_text(json.dumps({"width": 10, "height": 10, "pieces": []}))
+    assert _read_region_manifest(valid) == {"width": 10, "height": 10, "pieces": []}
+
+
+def test_read_region_manifest_skips_malformed_pieces(tmp_path: Path):
+    path = tmp_path / "s1-regions.json"
+    path.write_text(
+        json.dumps(
+            {
+                "width": 10,
+                "height": 10,
+                "pieces": [
+                    {"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1},
+                    {"id": "SGP", "x": 0, "y": 0},
+                    "not-a-dict",
+                ],
+            }
+        )
+    )
+    manifest = _read_region_manifest(path)
+    assert manifest["pieces"] == [{"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1, "index": 0}]
+
+
+def test_read_region_manifest_rejects_bool_and_non_int_dimensions(tmp_path: Path):
+    bool_dims = tmp_path / "s1-regions.json"
+    bool_dims.write_text(json.dumps({"width": True, "height": 10, "pieces": []}))
+    assert _read_region_manifest(bool_dims) is None
+
+    float_dims = tmp_path / "s2-regions.json"
+    float_dims.write_text(json.dumps({"width": 10.5, "height": 10, "pieces": []}))
+    assert _read_region_manifest(float_dims) is None
+
+    negative_dims = tmp_path / "s3-regions.json"
+    negative_dims.write_text(json.dumps({"width": -1, "height": 10, "pieces": []}))
+    assert _read_region_manifest(negative_dims) is None
+
+
+def test_read_region_manifest_skips_pieces_with_invalid_value_types(tmp_path: Path):
+    path = tmp_path / "s1-regions.json"
+    path.write_text(
+        json.dumps(
+            {
+                "width": 10,
+                "height": 10,
+                "pieces": [
+                    {"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1},
+                    {"id": "STR", "x": "0", "y": 0, "w": 1, "h": 1},
+                    {"id": "BOOL", "x": True, "y": 0, "w": 1, "h": 1},
+                    {"id": "NEG", "x": -1, "y": 0, "w": 1, "h": 1},
+                    {"id": "ZERO_W", "x": 0, "y": 0, "w": 0, "h": 1},
+                    {"id": "OOB", "x": 9, "y": 9, "w": 5, "h": 5},
+                ],
+            }
+        )
+    )
+    manifest = _read_region_manifest(path)
+    assert manifest["pieces"] == [{"id": "MYS", "x": 0, "y": 0, "w": 1, "h": 1, "index": 0}]
+
+
+def test_read_region_manifest_treats_non_list_pieces_as_empty(tmp_path: Path):
+    path = tmp_path / "s1-regions.json"
+    path.write_text(json.dumps({"width": 10, "height": 10, "pieces": {"id": "MYS"}}))
+    assert _read_region_manifest(path) == {"width": 10, "height": 10, "pieces": []}
+
+
+def test_read_region_manifest_treats_oversized_pieces_list_as_empty(tmp_path: Path):
+    path = tmp_path / "s1-regions.json"
+    pieces = [{"id": f"p{i}", "x": 0, "y": 0, "w": 1, "h": 1} for i in range(513)]
+    path.write_text(json.dumps({"width": 10, "height": 10, "pieces": pieces}))
+    assert _read_region_manifest(path) == {"width": 10, "height": 10, "pieces": []}
+
+
+def test_read_region_manifest_preserves_original_index_across_dropped_pieces(tmp_path: Path):
+    path = tmp_path / "s1-regions.json"
+    path.write_text(
+        json.dumps(
+            {
+                "width": 10,
+                "height": 10,
+                "pieces": [
+                    {"id": "valid-0", "x": 0, "y": 0, "w": 1, "h": 1},
+                    {"id": "invalid-1", "x": 0, "y": 0},
+                    {"id": "valid-2", "x": 2, "y": 2, "w": 1, "h": 1},
+                ],
+            }
+        )
+    )
+    manifest = _read_region_manifest(path)
+    assert manifest["pieces"] == [
+        {"id": "valid-0", "x": 0, "y": 0, "w": 1, "h": 1, "index": 0},
+        {"id": "valid-2", "x": 2, "y": 2, "w": 1, "h": 1, "index": 2},
+    ]
+
+
+def test_build_slide_items_and_render_reveals_use_original_manifest_index(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    captured: dict[str, list] = {}
+
+    def fake_render_slide(base_png, pieces, landmarks, dest, **_kw):
+        captured["pieces"] = pieces
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mov")
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.render_slide_reveal_movie", fake_render_slide)
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    _dummy_png(output_dir / "stills" / "s1.png")
+    _dummy_png(output_dir / "stills" / "s1-region-0.png")
+    _dummy_png(output_dir / "stills" / "s1-region-2.png")
+    manifest_path = output_dir / "stills" / "s1-regions.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "width": 3840,
+                "height": 1080,
+                "pieces": [
+                    {"id": "valid-0", "x": 0, "y": 0, "w": 4, "h": 4},
+                    {"id": "invalid-1", "x": 100, "y": 200},
+                    {"id": "valid-2", "x": 300, "y": 400, "w": 4, "h": 4},
+                ],
+            }
+        )
+    )
+    church = _landmark_church(id="lm", assetId="asset1", size=100, reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide(
+        "s1", _camera(3.0, 101.0, 8), churches=[church], highlights=["valid-0", "valid-2"], revealMovie=True
+    )
+
+    _, reveal_movies, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+
+    assert ("lw", "s1") in reveal_movies
+    pieces = captured["pieces"]
+    assert [Path(p[0]).name for p in pieces] == ["s1-region-0.png", "s1-region-2.png"]
+    assert (pieces[1][1], pieces[1][2]) == (300, 400)
+
+    items = build_slide_items(
+        slide,
+        plate=None,
+        plate_path=None,
+        still=output_dir / "stills" / "s1.png",
+        movie=None,
+        wall=True,
+        asset_root=output_dir / "assets",
+        pin_root=output_dir / "pins",
+        region_manifest=_read_region_manifest(manifest_path),
+        sid="s1",
+    )
+    country_items = [item for item in items if item.get("country")]
+    assert [Path(item["path"]).name for item in country_items] == ["s1-region-0.png", "s1-region-2.png"]
+
+
+def test_reveal_movie_fingerprint_changes_when_manifest_changes(tmp_path: Path):
+    still = _dummy_png(tmp_path / "s1.png")
+    manifest_path = tmp_path / "s1-regions.json"
+    manifest_path.write_text(json.dumps({"width": 16, "height": 16, "pieces": [{"id": "A", "x": 0, "y": 0, "w": 4, "h": 4}]}))
+    fp1 = reveal_movie_fingerprint(still, [], manifest_path)
+    manifest_path.write_text(json.dumps({"width": 16, "height": 16, "pieces": [{"id": "A", "x": 1, "y": 1, "w": 4, "h": 4}]}))
+    fp2 = reveal_movie_fingerprint(still, [], manifest_path)
+    assert fp1 != fp2
+    assert reveal_movie_fingerprint(still, [], None) != fp1

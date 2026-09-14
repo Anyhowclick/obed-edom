@@ -84,6 +84,8 @@
   --obj-dot:      var(--status-info);
   --obj-droppin:  var(--glow-orange);
   --obj-landmark: var(--job-watercolour);
+  --obj-region:   var(--accent-primary);
+  --obj-country:  var(--glow-orange);
 
   --navy: var(--bg-canvas);
   --navy-2: var(--bg-surface-highlight);
@@ -2657,6 +2659,11 @@ input.maps-thumb-title-input:focus {
 .maps-pin-kind.kind-dot { color: var(--obj-dot); }
 .maps-pin-kind.kind-droppin { color: var(--obj-droppin); }
 .maps-pin-kind.kind-landmark { color: var(--obj-landmark); }
+.maps-pin-row.kind-region { border-left: 2px solid var(--obj-region); }
+.maps-pin-row.kind-country { border-left: 2px solid var(--obj-country); }
+.maps-pin-kind.kind-region { color: var(--obj-region); }
+.maps-pin-kind.kind-country { color: var(--obj-country); }
+.maps-pin-row > .maps-delete { margin-left: auto; }
 .maps-pin-select {
   display: flex;
   align-items: center;

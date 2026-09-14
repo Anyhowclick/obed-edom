@@ -12,7 +12,7 @@ import {
   loadAdmin1,
 } from "./overlays";
 import { isolatePairBaseVisibility, isolatePairCutoutVisibility } from "./captureIsolateVisibility";
-import { countryClipRings } from "./isolate";
+import { highlightPieces, pieceClip } from "./isolate";
 import { stampOsmCropOnCanvas } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
@@ -258,7 +258,9 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
  *
  * The base always drops the orange, matching today's shipped look. The cutout keeps it only when
  * the slide is not isolated — an isolate slide's orange lives in neither raster, as it does today. */
-export async function captureIsolatePair(opts: ExportMapOpts): Promise<{ base: Blob; country: Blob } | null> {
+export async function captureIsolatePair(
+  opts: ExportMapOpts
+): Promise<{ base: Blob; pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] } | null> {
   if (!opts.highlights.length) return null;
   const { map, host, surface } = await createExportMap(opts);
   try {
@@ -284,30 +286,57 @@ export async function captureIsolatePair(opts: ExportMapOpts): Promise<{ base: B
     if (opts.highlights.some((h) => h.startsWith("A1:"))) {
       await Promise.all(highlightedCountries(opts.highlights).map(loadAdmin1));
     }
-    const rings = countryClipRings((admin0?.features || []) as never, opts.highlights, admin1FeaturesInPlay(opts.highlights));
-    const canvas = document.createElement("canvas");
-    canvas.width = opts.width;
-    canvas.height = opts.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("2D canvas context is unavailable for the isolate cut-out.");
+    const highlightedPieces = highlightPieces(
+      (admin0?.features || []) as never,
+      opts.highlights,
+      admin1FeaturesInPlay(opts.highlights)
+    );
     const pr = surface.pixelRatio;
-    ctx.beginPath();
-    for (const ring of rings) {
-      ring.forEach(([lon, lat], index) => {
-        const { x, y } = map.project([lon, lat]);
-        const px = x * pr - surface.cropX;
-        const py = y * pr - surface.cropY;
-        if (index === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
+    const pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] = [];
+    for (const piece of highlightedPieces) {
+      const clip = pieceClip(
+        piece.rings,
+        (lonLat) => map.project(lonLat),
+        pr,
+        surface.cropX,
+        surface.cropY,
+        opts.width,
+        opts.height
+      );
+      if (!clip) continue;
+      const { box, ringsPx, source, dest } = clip;
+      const canvas = document.createElement("canvas");
+      canvas.width = box.w;
+      canvas.height = box.h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("2D canvas context is unavailable for the isolate cut-out.");
+      ctx.translate(-box.x, -box.y);
+      ctx.beginPath();
+      for (const ring of ringsPx) {
+        ring.forEach(([px, py], index) => {
+          if (index === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        });
+        ctx.closePath();
+      }
+      ctx.clip();
+      ctx.drawImage(
+        map.getCanvas(),
+        source.sx,
+        source.sy,
+        source.sw,
+        source.sh,
+        dest.dx,
+        dest.dy,
+        dest.dw,
+        dest.dh
+      );
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Isolate cut-out toBlob failed."))), "image/png");
       });
-      ctx.closePath();
+      pieces.push({ id: piece.id, x: box.x, y: box.y, w: box.w, h: box.h, blob });
     }
-    ctx.clip();
-    ctx.drawImage(map.getCanvas(), surface.cropX, surface.cropY, opts.width, opts.height, 0, 0, opts.width, opts.height);
-    const country = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Isolate cut-out toBlob failed."))), "image/png");
-    });
-    return { base, country };
+    return { base, pieces };
   } finally {
     map.remove();
     host.remove();

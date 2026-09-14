@@ -5,6 +5,7 @@ P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -486,7 +487,7 @@ def maps_export_plan(
             "revealMovie": bool(slide.get("revealMovie")),
         }
         if highlights:
-            row["stillPngCountry"] = f"{sid}{'_CG' if audience == 'cg' else ''}-country.png"
+            row["stillPngRegions"] = f"{sid}{'_CG' if audience == 'cg' else ''}-regions.json"
         stills.append(row)
         if sid in landing_targets:
             stills.append(
@@ -525,7 +526,7 @@ def maps_export_plan(
                 "hillshade": bool((first or {}).get("hillshade")),
                 "isolate": (first or {}).get("isolate"),
                 **(
-                    {"platePngCountry": f"{output_id}-country.png"}
+                    {"platePngRegions": f"{output_id}-regions.json"}
                     if (first or {}).get("highlights")
                     else {}
                 ),
@@ -682,17 +683,81 @@ def _still_path(slide: dict[str, Any], output_dir: Path, preview_dir: Path | Non
     return path
 
 
-def _country_still_path(slide: dict[str, Any], output_dir: Path, audience: str = "lw") -> Path | None:
+def _region_manifest_scale(mapped_w: float, mapped_h: float, manifest: dict[str, Any]) -> float:
+    """Uniform width-derived scale for mapping manifest-space region pieces onto `mapped_w`x`mapped_h`."""
+    manifest_w = float(manifest["width"])
+    manifest_h = float(manifest["height"])
+    scale = mapped_w / manifest_w
+    expected_h = manifest_h * scale
+    if mapped_h > 0 and abs(expected_h - mapped_h) > max(1.0, mapped_h * 0.02):
+        warnings.warn(
+            f"region manifest aspect ratio mismatch: mapped {mapped_w:g}x{mapped_h:g} vs manifest {manifest_w:g}x{manifest_h:g}"
+        )
+    return scale
+
+
+REGION_MANIFEST_MAX_SIDE = 8192
+REGION_MANIFEST_MAX_PIECES = 512
+
+
+def region_manifest_dims_valid(width: Any, height: Any, *, max_side: int = REGION_MANIFEST_MAX_SIDE) -> bool:
+    return (
+        isinstance(width, int)
+        and not isinstance(width, bool)
+        and isinstance(height, int)
+        and not isinstance(height, bool)
+        and 1 <= width <= max_side
+        and 1 <= height <= max_side
+    )
+
+
+def region_piece_is_valid(piece: Any, width: int, height: int) -> bool:
+    if not isinstance(piece, dict):
+        return False
+    x, y, w, h = piece.get("x"), piece.get("y"), piece.get("w"), piece.get("h")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (x, y, w, h)):
+        return False
+    return w >= 1 and h >= 1 and x >= 0 and y >= 0 and x + w <= width and y + h <= height
+
+
+def _read_region_manifest(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    width, height = data.get("width"), data.get("height")
+    if not region_manifest_dims_valid(width, height):
+        return None
+    pieces = data.get("pieces")
+    if not isinstance(pieces, list) or len(pieces) > REGION_MANIFEST_MAX_PIECES:
+        pieces = []
+    return {
+        **data,
+        "pieces": [
+            {**piece, "index": k}
+            for k, piece in enumerate(pieces)
+            if region_piece_is_valid(piece, width, height)
+        ],
+    }
+
+
+def _still_region_manifest_path(slide: dict[str, Any], output_dir: Path, audience: str = "lw") -> Path:
     sid = str(slide.get("id") or "slide")
-    name = Path(f"{sid}{'_CG' if audience == 'cg' else ''}-country.png").name
-    path = Path(output_dir) / "stills" / name
-    return path if path.is_file() else None
+    name = Path(f"{sid}{'_CG' if audience == 'cg' else ''}-regions.json").name
+    return Path(output_dir) / "stills" / name
 
 
-def _plate_country_path(plate_id: str, output_dir: Path) -> Path | None:
+def _still_region_manifest(slide: dict[str, Any], output_dir: Path, audience: str = "lw") -> dict[str, Any] | None:
+    return _read_region_manifest(_still_region_manifest_path(slide, output_dir, audience))
+
+
+def _plate_region_manifest(plate_id: str, output_dir: Path) -> dict[str, Any] | None:
     name = plate_filename(plate_id)
-    path = Path(output_dir) / "plates" / f"{Path(name).stem}-country{Path(name).suffix}"
-    return path if path.is_file() else None
+    return _read_region_manifest(Path(output_dir) / "plates" / f"{Path(name).stem}-regions.json")
 
 
 def _plate_path(plate_id: str, output_dir: Path) -> Path:
@@ -998,7 +1063,7 @@ def build_slide_items(
     dest_slide: dict[str, Any] | None = None,
     pin_root: Path,
     asset_root: Path | None = None,
-    country_still: Path | None = None,
+    region_manifest: dict[str, Any] | None = None,
     allow_reveal: bool = True,
     reveals: dict[tuple[str, str, str], str] | None = None,
     reveal_audience: str = "lw",
@@ -1018,8 +1083,26 @@ def build_slide_items(
     )
     items = [mapped]
     cutout_gate = slide.get("highlights") if cutout_highlights is None else cutout_highlights
-    if country_still is not None and mapped.get("kind") == "image" and cutout_gate:
-        items.append(_item("image", mapped["x"], mapped["y"], mapped["w"], mapped["h"], path=str(country_still), country=True))
+    if region_manifest is not None and mapped.get("kind") == "image" and cutout_gate:
+        base_path = Path(mapped["path"])
+        scale = _region_manifest_scale(float(mapped["w"]), float(mapped["h"]), region_manifest)
+        for piece in region_manifest.get("pieces") or []:
+            k = piece["index"]
+            png = base_path.with_name(f"{base_path.stem}-region-{k}{base_path.suffix}")
+            if not png.is_file():
+                warnings.warn(f"missing region cutout {png}")
+                continue
+            items.append(
+                _item(
+                    "image",
+                    mapped["x"] + piece["x"] * scale,
+                    mapped["y"] + piece["y"] * scale,
+                    piece["w"] * scale,
+                    piece["h"] * scale,
+                    path=str(png),
+                    country=True,
+                )
+            )
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
     if bg_movie is None or skip_landmarks:
@@ -1151,16 +1234,16 @@ def plan_deck(
             and prev_link.get("plateId")
             and prev_link.get("plateId") == plate_id
         )
-        country_still = None
+        region_manifest = None
         if bg_movie is None:
-            country_still = (
-                _country_still_path(slide, output_dir, asset_audience)
+            region_manifest = (
+                _still_region_manifest(slide, output_dir, asset_audience)
                 if plate_id is None
-                else _plate_country_path(plate_id, output_dir)
+                else _plate_region_manifest(plate_id, output_dir)
             )
             cutout_expected = plate_highlights.get(plate_id) if plate_id else slide.get("highlights")
-            if cutout_expected and country_still is None:
-                warnings.warn(f"missing country cutout for slide {sid} (expected -country.png)")
+            if cutout_expected and region_manifest is None:
+                warnings.warn(f"missing region manifest for slide {sid} (expected -regions.json)")
         items = build_slide_items(
             item_slide,
             plate=plate,
@@ -1172,7 +1255,7 @@ def plan_deck(
             dest_slide=item_dest,
             asset_root=output_dir / "assets",
             pin_root=output_dir / "pins",
-            country_still=country_still,
+            region_manifest=region_manifest,
             allow_reveal=not duplicate,
             reveals=reveals,
             reveal_audience="cg" if item_slide.get("_splitCg") else "lw",
@@ -1208,7 +1291,7 @@ def _emit_clear() -> list[str]:
     ]
 
 
-def _emit_adjust_map(item: dict[str, Any], cutout: dict[str, Any] | None = None) -> list[str]:
+def _emit_adjust_map(item: dict[str, Any], cutouts: list[dict[str, Any]] | None = None) -> list[str]:
     lines = [
         "        try",
         f"          set position of image 1 to {{{item['x']}, {item['y']}}}",
@@ -1216,27 +1299,22 @@ def _emit_adjust_map(item: dict[str, Any], cutout: dict[str, Any] | None = None)
         f"          set height of image 1 to {item['h']}",
         "        end try",
     ]
-    if cutout is not None:
+    for i, cutout in enumerate(cutouts or [], start=2):
         lines += [
             "        try",
-            f"          set position of image 2 to {{{cutout['x']}, {cutout['y']}}}",
-            f"          set width of image 2 to {cutout['w']}",
-            f"          set height of image 2 to {cutout['h']}",
-            "        end try",
-            "        try",
-            "          repeat with i from (count of images) to 3 by -1",
-            "            delete image i",
-            "          end repeat",
+            f"          set position of image {i} to {{{cutout['x']}, {cutout['y']}}}",
+            f"          set width of image {i} to {cutout['w']}",
+            f"          set height of image {i} to {cutout['h']}",
             "        end try",
         ]
-    else:
-        lines += [
-            "        try",
-            "          repeat with i from (count of images) to 2 by -1",
-            "            delete image i",
-            "          end repeat",
-            "        end try",
-        ]
+    last = len(cutouts or []) + 2
+    lines += [
+        "        try",
+        f"          repeat with i from (count of images) to {last} by -1",
+        "            delete image i",
+        "          end repeat",
+        "        end try",
+    ]
     lines += [
         "        try",
         "          delete every shape",
@@ -1354,10 +1432,10 @@ def _emit_slide_body(op: dict[str, Any], slide_no: int) -> list[str]:
     lines = [f"      tell slide {slide_no}"]
     if op.get("duplicate"):
         mapped = next((item for item in items if item.get("map")), items[0] if items else None)
-        cutout = next((item for item in items if item.get("country")), None)
+        cutouts = [item for item in items if item.get("country")]
         if mapped:
-            lines += _emit_adjust_map(mapped, cutout)
-        overlays = [item for item in items if item is not mapped and item is not cutout]
+            lines += _emit_adjust_map(mapped, cutouts)
+        overlays = [item for item in items if item is not mapped and item not in cutouts]
         for item in overlays:
             lines += _emit_item(item)
     else:
@@ -1971,7 +2049,7 @@ def _render_reveals(
                 still = _still_path(item_slide, output_dir, audience=audience)
             except FileNotFoundError:
                 continue
-            country_still = _country_still_path(item_slide, output_dir, audience)
+            region_manifest = _still_region_manifest(item_slide, output_dir, audience)
             cap_w, cap_h = slide_capture_size(item_slide)
             origin_x = slide_map_origin_x(item_slide)
             slide_zoom = float((item_slide.get("camera") or {}).get("zoom") or 0)
@@ -2019,13 +2097,30 @@ def _render_reveals(
             if not landmarks:
                 continue
             movie_dest = reveal_movie_path(output_dir, sid, audience)
-            fingerprint = reveal_movie_fingerprint(still, landmarks)
+            manifest_path = _still_region_manifest_path(item_slide, output_dir, audience)
+            pieces = []
+            if region_manifest is not None:
+                pscale = _region_manifest_scale(float(cap_w), float(cap_h), region_manifest)
+                for piece in region_manifest.get("pieces") or []:
+                    k = piece["index"]
+                    piece_png = still.with_name(f"{still.stem}-region-{k}{still.suffix}")
+                    pieces.append(
+                        (
+                            piece_png,
+                            round(piece["x"] * pscale),
+                            round(piece["y"] * pscale),
+                            round(piece["w"] * pscale),
+                            round(piece["h"] * pscale),
+                        )
+                    )
+            piece_paths = [piece_path for piece_path, *_ in pieces]
+            fingerprint = reveal_movie_fingerprint(still, landmarks, manifest_path, piece_paths)
             if reveal_stale(movie_dest, fingerprint):
                 _raise_if_cancelled(is_cancelled)
                 log(f"Rendering reveal slide movie for {sid}…")
                 render_slide_reveal_movie(
                     still,
-                    country_still,
+                    pieces,
                     landmarks,
                     movie_dest,
                     output_dir=output_dir,

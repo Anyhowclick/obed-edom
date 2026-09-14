@@ -48,10 +48,13 @@ from obed_edom.maps_geo import (
 from obed_edom.maps_keynote import (
     DOT_SIZE,
     DROP_SIZE,
+    REGION_MANIFEST_MAX_PIECES,
     coerce_link_kinds,
     maps_export_plan,
     normalise_credit_line,
     plate_filename,
+    region_manifest_dims_valid,
+    region_piece_is_valid,
     split_cg_export_plan,
 )
 from obed_edom.maps_tiles import (
@@ -774,6 +777,61 @@ def _validate_raster(raw: bytes, *, max_side: int | None = None) -> tuple[int, i
     if width < 1 or height < 1 or width > cap or height > cap:
         raise HTTPException(400, f"Image dimensions must be between 1 and {cap} pixels")
     return width, height
+
+
+def _parse_region_manifest(raw: bytes) -> dict[str, Any]:
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        raise HTTPException(400, "Invalid region manifest") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Invalid region manifest")
+    width, height = data.get("width"), data.get("height")
+    if not region_manifest_dims_valid(width, height, max_side=RASTER_MAX_SIDE):
+        raise HTTPException(400, f"Manifest dimensions must be between 1 and {RASTER_MAX_SIDE} pixels")
+    pieces = data.get("pieces")
+    if not isinstance(pieces, list) or len(pieces) > REGION_MANIFEST_MAX_PIECES:
+        raise HTTPException(400, "Invalid region manifest")
+    clean_pieces = []
+    for piece in pieces:
+        if not isinstance(piece, dict):
+            raise HTTPException(400, "Invalid region manifest")
+        piece_id = piece.get("id")
+        if not isinstance(piece_id, str):
+            raise HTTPException(400, "Invalid region manifest")
+        if not region_piece_is_valid(piece, width, height):
+            raise HTTPException(400, "Invalid region manifest")
+        clean_pieces.append({"id": piece_id, "x": piece["x"], "y": piece["y"], "w": piece["w"], "h": piece["h"]})
+    return {"width": width, "height": height, "pieces": clean_pieces}
+
+
+def _check_region_manifest_raster(manifest: dict[str, Any], base_path: Path) -> None:
+    if not base_path.is_file():
+        return
+    try:
+        with Image.open(base_path) as image:
+            width, height = image.width, image.height
+    except Exception:
+        return
+    if manifest["width"] != width or manifest["height"] != height:
+        raise HTTPException(400, "Region manifest dimensions do not match the staged base image")
+
+
+def _region_manifest_body(manifest: dict[str, Any]) -> bytes:
+    return json.dumps(manifest).encode("utf-8")
+
+
+_REGION_PIECE_RE = re.compile(r"-region-(\d+)$")
+
+
+def _sweep_stale_region_pieces(folder: Path, base_name: str, piece_count: int) -> None:
+    stem, suffix = Path(base_name).stem, Path(base_name).suffix
+    for path in folder.glob(f"{stem}-region-*{suffix}"):
+        match = _REGION_PIECE_RE.match(path.stem[len(stem) :])
+        if match and int(match.group(1)) >= piece_count:
+            path.unlink(missing_ok=True)
+    country_path = folder / f"{stem}-country{suffix}"
+    country_path.unlink(missing_ok=True)
 
 
 def _referenced_asset_ids(doc: MapsDocument) -> set[str]:
@@ -1573,6 +1631,7 @@ async def post_png(
     kind: str = Query("thumb"),
     audience: Literal["lw", "cg"] = Query("lw"),
     variant: str | None = Query(None),
+    index: int | None = Query(None),
     revision: int | None = Query(None),
 ) -> dict:
     job = _job_or_404(job_id)
@@ -1585,27 +1644,41 @@ async def post_png(
         raise HTTPException(400, "PNG body required")
     if kind not in {"thumb", "still", "plate"}:
         raise HTTPException(400, "kind must be thumb, still, or plate")
-    _validate_raster(body)
+    if variant is not None and variant not in {"region", "regions"}:
+        raise HTTPException(400, "variant must be region or regions")
+    if variant in {"region", "regions"} and kind not in {"still", "plate"}:
+        raise HTTPException(400, "variant=region/regions requires kind=still or kind=plate")
+    if variant == "region" and (index is None or not (0 <= index < 512)):
+        raise HTTPException(400, "index is required for variant=region and must be 0-511")
+    region_manifest = _parse_region_manifest(body) if variant == "regions" else None
+    if variant != "regions":
+        _validate_raster(body)
     output_dir = Path(str(result.get("outputDir") or ""))
     if kind == "plate":
         if not plateId:
             raise HTTPException(400, "plateId is required for kind=plate")
-        if variant is not None and variant != "country":
-            raise HTTPException(400, "variant must be country")
         safe_plate = _safe_name(plateId)
         folder = output_dir / "plates"
         plate_name = safe_plate if audience != "cg" or safe_plate.endswith("-cg") else f"{safe_plate}-cg"
-        name = plate_filename(plate_name)
-        if variant == "country":
-            name = f"{Path(name).stem}-country{Path(name).suffix}"
+        base_name = plate_filename(plate_name)
+        name = base_name
+        if variant == "region":
+            name = f"{Path(name).stem}-region-{index}{Path(name).suffix}"
+        elif variant == "regions":
+            if region_manifest is not None:
+                _check_region_manifest_raster(region_manifest, folder / base_name)
+                body = _region_manifest_body(region_manifest)
+            name = f"{Path(name).stem}-regions.json"
         path = folder / name
         with maps_commit(job_id, None, bump=False) as commit:
             commit.stage_bytes(path, body)
+        if variant == "regions" and region_manifest is not None:
+            _sweep_stale_region_pieces(folder, base_name, len(region_manifest["pieces"]))
         return commit.payload
     if not slideId:
         raise HTTPException(400, "slideId is required")
     landing_base = slideId[: -len("__landing")] if slideId.endswith("__landing") else None
-    landing_ok = landing_base in ids and kind == "still" and variant != "country" if landing_base else False
+    landing_ok = landing_base in ids and kind == "still" and variant is None if landing_base else False
     if slideId not in ids and not landing_ok:
         raise HTTPException(400, "slideId is not in this deck")
     safe = _safe_name(slideId)
@@ -1614,14 +1687,20 @@ async def post_png(
     if not safe.endswith(".png"):
         safe = f"{safe}.png"
     if kind == "still":
-        if variant is not None and variant != "country":
-            raise HTTPException(400, "variant must be country")
         folder = output_dir / "stills"
-        name = Path(safe).name
-        if variant == "country":
-            name = f"{Path(name).stem}-country{Path(name).suffix}"
+        base_name = Path(safe).name
+        name = base_name
+        if variant == "region":
+            name = f"{Path(name).stem}-region-{index}{Path(name).suffix}"
+        elif variant == "regions":
+            if region_manifest is not None:
+                _check_region_manifest_raster(region_manifest, folder / base_name)
+                body = _region_manifest_body(region_manifest)
+            name = f"{Path(name).stem}-regions.json"
         with maps_commit(job_id, None, bump=False) as commit:
             commit.stage_bytes(folder / name, body)
+        if variant == "regions" and region_manifest is not None:
+            _sweep_stale_region_pieces(folder, base_name, len(region_manifest["pieces"]))
         return commit.payload
     folder = Path(str(result.get("previewDir") or ""))
     path = folder / Path(safe).name
