@@ -175,3 +175,19 @@ describe("Pick: Countries | Regions", () => {
     expect(screen.getByText("Loading regions…")).toBeInTheDocument();
   });
 });
+
+describe("Isolate toggle label", () => {
+  it("reads Isolate OFF by default and Isolate ON after toggling", async () => {
+    await renderMapsTab();
+    await openProperties();
+
+    const checkbox = screen.getByRole("checkbox", { name: /Isolate/ });
+    expect(screen.getByText("OFF")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(checkbox);
+    });
+
+    expect(screen.getByText("ON")).toBeInTheDocument();
+  });
+});
