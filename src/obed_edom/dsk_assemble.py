@@ -175,7 +175,6 @@ class AssemblyPlan:
     anchors: dict[int, str] = field(default_factory=dict)
     two_column: dict[int, Band] = field(default_factory=dict)
     two_column_cluster: dict[int, HeadingCluster] = field(default_factory=dict)
-    cluster_autosize_ids: dict[int, frozenset[ItemId]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -667,22 +666,23 @@ def _repeat_heading_state(
     return repeats
 
 
-def _cluster_autosize_ids(
-    cluster: HeadingCluster,
+def _raw_autosize_ids(
+    item_ids: Iterable[ItemId],
     id_by_item: Mapping[ItemId, str] | None,
     objects_graph: Mapping[str, dict] | None,
 ) -> frozenset[ItemId]:
-    """Live r12 finding, live-probed round 2: the two-column heading/numeral text boxes
-    can be genuine Keynote-autosize frames (raw geometry height 0, same test
-    `iwa_geometry._compose_record` uses), in which case an emitted `set height` is
-    silently overridden on save. Returns the subset of `heading_id`/`number_id` that is
-    genuinely autosize; a non-autosize id is omitted. `position` is the live visual
-    top-left for an autosize box (no vertical-alignment offset applies -- probe log:
-    `<scratchpad>/probe-autosize/log.txt`), so no alignment is resolved or returned."""
+    """Live r12 finding, live-probed round 2, generalised to any top-level text id (not
+    only a two-column cluster's heading/numeral): a text box can be a genuine
+    Keynote-autosize frame (raw geometry height 0, same test `iwa_geometry._compose_record`
+    uses), in which case an emitted `set height` is silently overridden on save. Returns
+    the subset of `item_ids` that is genuinely autosize; a non-autosize id is omitted.
+    `position` is the live visual top-left for an autosize box (no vertical-alignment
+    offset applies -- probe log: `<scratchpad>/probe-autosize/log.txt`), so no alignment
+    is resolved or returned."""
     ids: set[ItemId] = set()
     if id_by_item is None or objects_graph is None:
         return frozenset(ids)
-    for item_id in (cluster.heading_id, cluster.number_id):
+    for item_id in item_ids:
         obj_id = id_by_item.get(item_id)
         obj = objects_graph.get(obj_id) if obj_id is not None else None
         if obj is None:
@@ -1294,7 +1294,9 @@ def plan_assembly(
                             stacked_run_sizes.update(two_col_run_sizes)
                             two_column_map[number] = left_band
                             two_column_cluster_map[number] = cluster
-                            cluster_autosize = _cluster_autosize_ids(cluster, id_by_item, objects_graph)
+                            cluster_autosize = _raw_autosize_ids(
+                                (cluster.heading_id, cluster.number_id), id_by_item, objects_graph
+                            )
                             if cluster_autosize:
                                 cluster_autosize_map[number] = cluster_autosize
                     elif cluster is not None:
@@ -1408,13 +1410,20 @@ def plan_assembly(
             slide_text_sizes: dict[ItemId, float] = {}
             slide_shrink_sizes: dict[ItemId, float] = {}
             slide_autosize: set[ItemId] = set(cluster_autosize_map.get(number, frozenset()))
-            for iid in cls.kept:
-                if iid[0] != "text" or iid in stacked_ids or iid in cluster_ids:
-                    continue
+            all_kept_text_ids = [iid for iid in cls.kept if iid[0] == "text" and iid not in cluster_ids]
+            slide_raw_autosize = (
+                _raw_autosize_ids(all_kept_text_ids, id_by_item, objects_graph)
+                if id_by_item is not None and objects_graph is not None
+                else None
+            )
+            if slide_raw_autosize is not None:
+                slide_autosize.update(slide_raw_autosize)
+            candidate_text_ids = [iid for iid in all_kept_text_ids if iid not in stacked_ids]
+            for iid in candidate_text_ids:
                 item = items_by_id.get(iid)
                 if item is None:
                     continue
-                if item.get("w") == 0.0 or item.get("h") == 0.0:
+                if slide_raw_autosize is None and (item.get("w") == 0.0 or item.get("h") == 0.0):
                     slide_autosize.add(iid)
                 if runs is not None:
                     item_sizes = list(runs.get(number, {}).get(iid) or [])
@@ -1510,7 +1519,6 @@ def plan_assembly(
         anchors=anchors_out,
         two_column=two_column_map,
         two_column_cluster=two_column_cluster_map,
-        cluster_autosize_ids=cluster_autosize_map,
     )
 
 
@@ -1991,7 +1999,7 @@ def _group_stacked_child_lines(
     each child is unlocked/written/relocked individually, the whole set wrapped in one
     guaranteed lock/relock on the group itself (mirrors `_group_known_child_lines`). A
     stacked ``text`` child (the verse, carrying a resolved ``text_size``/``run_ranges``)
-    gets width+position and its run/lead size, NEVER height (always autosize); every
+    gets width, its run/lead size, then position last, NEVER height (always autosize); every
     other child -- a short-row ``shape`` (the badge) or a short-row ``text`` label that
     did not pass the stack-vs-short-row word threshold -- gets position only, left at
     source size, per the owner decision. An unmapped kind is skipped, matching
@@ -2005,7 +2013,6 @@ def _group_stacked_child_lines(
         body: list[str] = []
         if child["kind"] == "text" and (text_size is not None or run_ranges):
             body.append(f"            set width of theObj to {_as_num(rect.w)}")
-            body.append(f"            set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
             if run_ranges:
                 for start, end, size in run_ranges:
                     body.append(
@@ -2014,6 +2021,7 @@ def _group_stacked_child_lines(
                     )
             elif text_size is not None:
                 body.append(f"            set size of object text of theObj to {_as_num(text_size)}")
+            body.append(f"            set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
         else:
             body.append(f"            set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
         child_lines += _locked_write_block(number, addr, body)
@@ -2093,7 +2101,6 @@ def _slide_lines(
         stacked_ids_here = plan.stacked_ids.get(number, frozenset())
         autosize_ids = plan.autosize.get(number, frozenset())
         shrink_text_sizes = plan.shrink_text_sizes.get(number, {})
-    cluster_ids = plan.cluster_autosize_ids.get(number, frozenset())
     known_children = plan.group_children.get(number, {})
     group_text_sizes = plan.group_text_sizes.get(number, {})
     group_origin = plan.group_origin.get(number, {})
@@ -2162,7 +2169,7 @@ def _slide_lines(
             size_lines.append(
                 f"          set size of object text of theObj to {_as_num(shrink_text_sizes[item_id])}"
             )
-        if item_id in cluster_ids:
+        if item_id in autosize_ids:
             body += size_lines
             body.append(position_line)
         else:
@@ -2408,20 +2415,24 @@ def build_refit_script(
                 continue
             addr = f"{name} {staged_id[1] + 1} of slide {ordinal}"
             rect = refit.rect
-            body = [
-                f"          set width of theObj to {_as_num(rect.w)}",
-                f"          set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}",
-            ]
-            if item_id not in autosize_ids:
-                body.insert(1, f"          set height of theObj to {_as_num(rect.h)}")
+            position_line = f"          set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}"
+            size_lines: list[str] = []
             if isinstance(refit.run_sizes, tuple):
                 for start, end, size in refit.run_sizes:
-                    body.append(
+                    size_lines.append(
                         f"          set size of characters {start} thru {end} "
                         f"of object text of theObj to {_as_num(size)}"
                     )
             elif isinstance(refit.run_sizes, (int, float)):
-                body.append(f"          set size of object text of theObj to {_as_num(refit.run_sizes)}")
+                size_lines.append(f"          set size of object text of theObj to {_as_num(refit.run_sizes)}")
+            body = [f"          set width of theObj to {_as_num(rect.w)}"]
+            if item_id in autosize_ids:
+                body += size_lines
+                body.append(position_line)
+            else:
+                body.append(f"          set height of theObj to {_as_num(rect.h)}")
+                body.append(position_line)
+                body += size_lines
             lines += _locked_write_block(number, addr, body)
             lines += _text_measure_lines(number, kind_index, addr, rect.h)
     lines.append("    end tell")

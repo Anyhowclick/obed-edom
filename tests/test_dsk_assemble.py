@@ -5201,6 +5201,48 @@ def test_slide_lines_shrink_sets_size_from_max_run_size():
     assert "set size of object text of theObj to 42.5" in shrink_script
 
 
+def test_slide_lines_non_cluster_autosize_text_writes_size_before_position():
+    # L1: a plain top-level autosize text item (not a two-column cluster) must also
+    # skip `set height` and write position last, after width and size.
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1},
+        fits={1: {("text", 0): Rect(100.0, 200.0, 300.0, 50.0)}},
+        deletes={1: ()}, clips={}, text_sizes={1: {("text", 0): 42.0}},
+        autosize={1: frozenset({("text", 0)})}, warnings=(),
+    )
+    lines = dsa._slide_lines(plan, 1, 1)
+    start = lines.index("          set theObj to text item 1 of slide 1")
+    block = lines[start:start + 12]
+    assert not any("set height" in l for l in block)
+    width_i = next(i for i, l in enumerate(block) if "set width" in l)
+    size_i = next(i for i, l in enumerate(block) if "set size" in l)
+    position_i = next(i for i, l in enumerate(block) if "set position" in l)
+    assert width_i < size_i < position_i
+
+
+def test_build_refit_script_non_cluster_autosize_text_writes_size_before_position():
+    item = _text_item(0, x=2000, y=0, w=0.0, h=300, runs=[{"size": 20.0}])
+    slide = _slide(1, [item])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    assert ("text", 0) in plan.autosize[1]
+    refits = {1: {("text", 0): TextRefit(Rect(43.0, 704.0, 1892.0, 200.0), run_sizes=44.0)}}
+    script = build_refit_script(
+        plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
+        staging_path=Path("/tmp/staged.key"),
+    )
+    lines = script.splitlines()
+    start = next(i for i, l in enumerate(lines) if "set theObj to text item 1 of slide 1" in l)
+    block = lines[start:start + 12]
+    assert not any("set height" in l for l in block)
+    width_i = next(i for i, l in enumerate(block) if "set width" in l)
+    size_i = next(i for i, l in enumerate(block) if "set size" in l)
+    position_i = next(i for i, l in enumerate(block) if "set position" in l)
+    assert width_i < size_i < position_i
+
+
 def test_group_known_child_lines_locks_and_relocks_each_nested_level():
     group = _group_item(0, x=1920, y=0, w=400, h=200)
     slide = _slide(1, [group])
@@ -8415,3 +8457,92 @@ def test_gw44_cluster_heading_and_numeral_are_autosize():
         assert block[position_i] == (
             f"          set position of theObj to {{{dsa._as_num(rect.x)}, {dsa._as_num(rect.y)}}}"
         ), (label, block)
+
+
+def _gw_raw_autosize_text_ids(number):
+    deck = dsa._load_deck(GW_DECK)
+    objects_graph = deck[0]
+    id_slide_archive = dsa._slide_archive_for_number(objects_graph, number)
+    id_by_item = dsa._item_object_ids(id_slide_archive, objects_graph)
+    payload, classes, _runs = load_assembly_inputs(GW_DECK)
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+    text_ids = [
+        ("text", item["kindIndex"]) for item in slides_by_number[number]["items"] if item["kind"] == "text"
+    ]
+    return dsa._raw_autosize_ids(text_ids, id_by_item, objects_graph)
+
+
+def _write_block_at(lines, addr):
+    obj_i = lines.index(f"          set theObj to {addr}")
+    start = next(
+        i for i in range(obj_i, -1, -1) if lines[i] == "        set wasLocked to false"
+    )
+    for end in range(start + 1, len(lines)):
+        if lines[end] == "        set wasLocked to false":
+            return lines[start:end]
+    return lines[start:]
+
+
+def test_gw13_stacked_long_box_is_raw_autosize_position_last():
+    # L1 regression (Codex D1b live review 2 follow-up): GW 13's stacked verse box
+    # (text 1) is a genuine raw-autosize frame (raw geometry height 0) even though
+    # it is a plain top-level text item, not a two-column cluster -- confirm the
+    # generalised detection flags it and `_slide_lines` writes size before position
+    # with no `set height`.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[13]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK,
+    )
+    raw_autosize = _gw_raw_autosize_text_ids(13)
+    assert ("text", 1) in raw_autosize
+    assert ("text", 1) in plan.autosize[13]
+
+    ordinal = plan.ordinals[13]
+    lines = dsa._slide_lines(plan, 13, ordinal)
+    addr = f"text item 2 of slide {ordinal}"
+    block = _write_block_at(lines, addr)
+    assert not any("set height" in l for l in block), block
+    width_i = next(i for i, l in enumerate(block) if "set width" in l)
+    position_i = next(i for i, l in enumerate(block) if "set position" in l)
+    size_indices = [i for i, l in enumerate(block) if "set size" in l]
+    assert size_indices, block
+    assert width_i < min(size_indices) and max(size_indices) < position_i, block
+
+
+def test_gw17_stacked_long_boxes_are_raw_autosize_position_last():
+    # Same L1 regression as GW 13, on GW 17's two stacked verse boxes (text 1, text 4).
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[17]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK,
+    )
+    raw_autosize = _gw_raw_autosize_text_ids(17)
+    assert ("text", 1) in raw_autosize
+    assert ("text", 4) in raw_autosize
+
+    ordinal = plan.ordinals[17]
+    lines = dsa._slide_lines(plan, 17, ordinal)
+    for kind_index in (1, 4):
+        iid = ("text", kind_index)
+        if iid not in plan.fits.get(17, {}):
+            continue
+        assert iid in plan.autosize[17]
+        addr = f"text item {kind_index + 1} of slide {ordinal}"
+        block = _write_block_at(lines, addr)
+        assert not any("set height" in l for l in block), (kind_index, block)
+        width_i = next(i for i, l in enumerate(block) if "set width" in l)
+        position_i = next(i for i, l in enumerate(block) if "set position" in l)
+        size_indices = [i for i, l in enumerate(block) if "set size" in l]
+        assert size_indices, (kind_index, block)
+        assert width_i < min(size_indices) and max(size_indices) < position_i, (kind_index, block)

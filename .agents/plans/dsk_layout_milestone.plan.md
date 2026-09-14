@@ -259,6 +259,19 @@ text; add GW 13 and GW 17 regressions asserting no `set height` and position-las
 Offline A/B: emitted script diff only — no geometry change expected until a live run.
 ~120 lines.
 
+**L1 landed (2026-09-14).** `_raw_autosize_ids` (renamed/generalised from
+`_cluster_autosize_ids`) now covers every kept top-level text id per slide, including
+stacked ids (GW 13/17's stacked verse boxes were previously excluded from autosize
+detection and still got `set height`); `cluster_autosize_ids` dropped from `AssemblyPlan`
+(redundant once ordering keys off `plan.autosize`). `_slide_lines`, `build_refit_script`,
+and `_group_stacked_child_lines` all emit `width → size/run sizes → position` with height
+omitted for autosize text; fixed-frame order is unchanged (no probe evidence for it).
+Fixed-frame regressions still pass. Full suite: 2458 passed / 84 skipped / 1 xfailed, one
+pre-existing unrelated failure (`test_dsk_deck_builds`, a shared external-deck-state
+issue, not caused by this change). Deck-wide A/B against `0bfd8d1` on all 41 non-empty/
+non-movie GW slides: geometry/deletes byte-identical; 32 slides' scripts changed, every
+changed line either a dropped `set height` or a width/position/size reorder.
+
 **L2 — multi-layout import, dedupe-gated.** `dsk_live.layout_import_lines` takes a list of
 layout names and imports each missing one (donor slide per layout, deleted after);
 `dsk_assemble.check_layout_import_preconditions` loops the whole list (name absent from the
