@@ -405,3 +405,4 @@ Same CSV shape as `~/Desktop/dsk-d4-work/accept12.py` (`check,expected,actual,re
 
 - **Emphasis size: CAP at gold's 50 pt** on a 45 pt lead (do not carry the source 85/70 ratio). Fewer slides split; matches gold.
 - Live probe (§4) approved and run immediately; results appended below by the orchestrator.
+- **Probe results (17:35, `.agents/reviews/dsk-layout/probe-split-delete-2026-09-14.log`):** H1 CONFIRMED — on GW 38's verse each `delete characters` shrank `height` (385 → 281 → 177) with `position` y unchanged (top-anchored); H2 CONFIRMED — `set position {54, 866}` read back {54, 866} after a 1 s delay; H3 CONFIRMED — GW 5's group `apple:dissolve` build survived a tail delete on `text item 2 of group 1` (identity now the surviving half of the verse text) → GW 5/54 SPLIT (design §2.5 stands). Keynote's `size of object text` read on a mixed-run box reports the smallest run (30) — read-back is not a size authority.
