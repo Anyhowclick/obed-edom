@@ -742,6 +742,7 @@ def test_run_offline_write_omits_offline_verify_pass_in_on_mode(monkeypatch):
 
 def test_run_offline_write_sets_offline_verify_pass_in_verify_mode(monkeypatch):
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
@@ -762,6 +763,7 @@ def test_run_offline_write_sets_offline_verify_pass_in_verify_mode(monkeypatch):
 def test_run_offline_write_group_bar_gates_at_group_tolerance(monkeypatch):
     # Proves group is judged at OFFLINE_VERIFY_TOL["group"] (2.5px), not the 0.5px default.
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
@@ -780,6 +782,7 @@ def test_run_offline_write_fails_when_group_specs_planned_but_no_group_line(monk
     # Regression for the silent PASS that shipped the writer bug: a "group" line missing
     # from the report entirely (not just failing) must itself fail offlineVerifyPass.
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
@@ -796,6 +799,7 @@ def test_run_offline_write_fails_when_group_specs_planned_but_no_group_line(monk
 
 def test_run_offline_write_group_verify_payload(monkeypatch):
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
@@ -814,6 +818,7 @@ def test_run_offline_write_group_verify_max_none_when_zero_rows(monkeypatch):
     # bar produced zero comparable rows (no "group" key in the report at all), max must
     # be None, not the falsely-perfect 0.0 default.
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
@@ -830,6 +835,7 @@ def test_run_offline_write_reports_group_approx_not_gated(monkeypatch):
     # still surface -- a `verify` run must never look silently perfect while 13.5% of
     # groups sat outside the compare, unnoticed.
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
@@ -850,6 +856,7 @@ def test_run_offline_write_group_missed_reports_and_does_not_fail(monkeypatch):
     # fallback) must not be scored by the gating group bar, but its magnitude must still
     # surface on a `group-missed ... NOT GATED` line, and it must not sink offlineVerifyPass.
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     written_spec = _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=100, h=50)
     missed_spec = _spec(slide=1, kind="group", kindIndex=1, x=200, y=200, w=100, h=50)
@@ -896,6 +903,7 @@ def test_run_offline_write_group_bar_still_gates_the_written_group(monkeypatch):
     # T6 -- fix 3 must not weaken the writer's own bar: a WRITTEN group 5px off-plan
     # still fails offlineVerifyPass (2.5px tolerance).
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     written_spec = _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=100, h=50)
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
@@ -971,6 +979,7 @@ def test_run_offline_write_skips_offline_decode_in_on_mode(monkeypatch):
 
 def test_run_offline_write_runs_offline_decode_in_verify_mode(monkeypatch):
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     composed_calls = []
@@ -980,6 +989,24 @@ def test_run_offline_write_runs_offline_decode_in_verify_mode(monkeypatch):
         Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
     )
     assert composed_calls == [1]
+
+
+def test_run_offline_write_decodes_once_for_the_frames_and_audit_pair(monkeypatch):
+    # fix5: _composed_frames and _natural_audit each did their own _load_deck; verify
+    # mode must now load once and pass the same deck to both.
+    import obed_edom.offline_write as ow_mod
+
+    load_calls = []
+    monkeypatch.setattr(
+        "obed_edom.iwa_runs._load_deck",
+        lambda *a, **k: (load_calls.append(1), ({}, {}, {}))[1],
+        raising=False,
+    )
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    run_offline_write(
+        Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    assert load_calls == [1]
 
 
 def test_run_offline_write_skips_natural_audit_in_on_mode(monkeypatch):
@@ -996,6 +1023,7 @@ def test_run_offline_write_skips_natural_audit_in_on_mode(monkeypatch):
 
 def test_run_offline_write_runs_natural_audit_in_verify_mode(monkeypatch):
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
@@ -1009,6 +1037,7 @@ def test_run_offline_write_runs_natural_audit_in_verify_mode(monkeypatch):
 
 def test_run_offline_write_natural_consistency_fails_offline_verify_pass(monkeypatch):
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
@@ -1028,6 +1057,7 @@ def test_run_offline_write_natural_consistency_fails_offline_verify_pass(monkeyp
 
 def test_run_offline_write_natural_consistency_keys_present_in_verify_mode(monkeypatch):
     import obed_edom.offline_write as ow_mod
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda *a, **k: ({}, {}, {}), raising=False)
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
