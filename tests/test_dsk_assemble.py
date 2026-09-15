@@ -9120,6 +9120,117 @@ def test_offline_measure_hidden_placeholder_retains_staged_id(monkeypatch):
     assert any("staged text count 2 != offline text count 3" in w for w in unlogged_measure_warnings)
 
 
+def _text_shape_obj(storage_id, text):
+    return {
+        "_pbtype": "TSWP.ShapeInfoArchive",
+        "isTextBox": True,
+        "ownedStorage": {"identifier": storage_id},
+    }, {"text": [text]}
+
+
+def _layout_import_deck(*, layout_texts, slide_texts):
+    """A minimal offline-reader object graph for one slide whose base layout is
+    ``layout1``: ``layout1`` owns ``layout_texts`` (its own slot sample content,
+    ``derive_kind_index`` order) and ``slide1`` owns ``slide_texts`` (also
+    ``derive_kind_index`` order) -- shaped exactly like r13's refused deck (a base
+    layout's own tagged ``Text``/``Text-1`` slots materialize onto the slide, ahead of
+    the slide's real content, whenever the slide does not already fill them)."""
+    objects: dict[str, dict] = {
+        "show1": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
+        "node1": {"slide": {"identifier": "slide1"}},
+        "slide1": {
+            "_pbtype": "KN.SlideArchive",
+            "templateSlide": {"identifier": "layout1"},
+            "drawablesZOrder": [],
+        },
+        "layout1": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": []},
+    }
+    for i, text in enumerate(layout_texts):
+        obj_id = f"layout_item{i}"
+        storage_id = f"layout_storage{i}"
+        obj, storage = _text_shape_obj(storage_id, text)
+        objects[obj_id] = obj
+        objects[storage_id] = storage
+        objects["layout1"]["drawablesZOrder"].append({"identifier": obj_id})
+    for i, text in enumerate(slide_texts):
+        obj_id = f"slide_item{i}"
+        storage_id = f"slide_storage{i}"
+        obj, storage = _text_shape_obj(storage_id, text)
+        objects[obj_id] = obj
+        objects[storage_id] = storage
+        objects["slide1"]["drawablesZOrder"].append({"identifier": obj_id})
+    return objects, {}, {}
+
+
+# --------------------------------------------------------------------------
+# r13 finding -- ``set base layout`` materializes a layout's own unfilled Text/Text-1
+# slots onto the slide as new, content-identical drawables ahead of the slide's real
+# content; the offline text-count cross-check must exclude those instances (matched by
+# content against the resolved base layout's own text) rather than refuse the round,
+# while a genuinely missing staged box must still refuse.
+# --------------------------------------------------------------------------
+def test_offline_measure_excludes_materialized_layout_placeholder_instances(monkeypatch):
+    plan, _slides_by_number = _badge_and_stack_plan()
+    deck = _layout_import_deck(
+        layout_texts=["35 I tell you the truth...", "John 1 (NIV) - Jesus loves you"],
+        slide_texts=[
+            "35 I tell you the truth...",
+            "John 1 (NIV) - Jesus loves you",
+            "Genesis 11",
+            "6 The Lord said, If as one people speaking",
+        ],
+    )
+    monkeypatch.setattr(dsa, "_load_deck", lambda path: deck)
+    rects = {
+        1: {
+            ("text", 0): (63.0, 786.0, 933.0, 262.4),
+            ("text", 1): (45.0, 775.0, 651.0, 82.0),
+            ("text", 2): (906.2, 408.8, 183.7, 23.0),
+            ("text", 3): (905.7, 427.6, 521.8, 46.0),
+        },
+    }
+    monkeypatch.setattr(dsa, "offline_text_rects", lambda key_path, *, deck=None: (rects, set()))
+
+    warnings: list[str] = []
+    measured, bands, measure_warnings = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
+
+    assert measured[(13, "text:0")] == 23.0
+    assert measured[(13, "text:1")] == 46.0
+    assert bands[(13, "text:1")] == (427.6, 473.6)
+    assert not warnings
+    assert not measure_warnings
+
+
+def test_offline_measure_still_refuses_when_a_staged_box_is_genuinely_missing(monkeypatch):
+    plan, _slides_by_number = _badge_and_stack_plan()
+    # Same materialized placeholders, but only one of the two planned real items is
+    # actually on the slide -- a true content loss, not a placeholder-instance artifact.
+    deck = _layout_import_deck(
+        layout_texts=["35 I tell you the truth...", "John 1 (NIV) - Jesus loves you"],
+        slide_texts=[
+            "35 I tell you the truth...",
+            "John 1 (NIV) - Jesus loves you",
+            "Genesis 11",
+        ],
+    )
+    monkeypatch.setattr(dsa, "_load_deck", lambda path: deck)
+    rects = {
+        1: {
+            ("text", 0): (63.0, 786.0, 933.0, 262.4),
+            ("text", 1): (45.0, 775.0, 651.0, 82.0),
+            ("text", 2): (906.2, 408.8, 183.7, 23.0),
+        },
+    }
+    monkeypatch.setattr(dsa, "offline_text_rects", lambda key_path, *, deck=None: (rects, set()))
+
+    warnings: list[str] = []
+    measured, _bands, measure_warnings = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
+
+    assert measured == {}
+    assert any("staged text count 2 != offline text count 1" in w for w in warnings)
+    assert any("staged text count 2 != offline text count 1" in w for w in measure_warnings)
+
+
 # --------------------------------------------------------------------------
 # C1 (Codex review 1) -- a failed refit/shrink pass must never be accepted.
 # --------------------------------------------------------------------------

@@ -4479,6 +4479,47 @@ def _build_refit_round(
     return refits
 
 
+def _layout_slot_texts(objects: dict[str, dict], layout: dict) -> frozenset[str]:
+    """Content strings of a base layout's own top-level text drawables -- Keynote's slot
+    sample text, which ``set base layout`` materializes verbatim onto a slide (a new,
+    slide-owned drawable, ahead of the slide's own content in ``drawablesZOrder``) when
+    the slide does not already fill every tagged slot (r13 finding: the layout's ``Text``/
+    ``Text-1`` sample verse/badge showed up as extra offline text items, new ids never
+    seen at plan time, content-identical to this layout's own text). Never matches a
+    slide's real staged content -- that content differs from the layout's own sample."""
+    return frozenset(
+        rec.get("text") or "" for rec in derive_kind_index(layout, objects) if rec["kind"] == "text"
+    ) - {""}
+
+
+def _kept_ordinal_text_idxs(
+    objects: dict[str, dict],
+    ordinal: int,
+    rects: Mapping[tuple[str, int], tuple[float, float, float, float]],
+    layout_texts_cache: dict[int, frozenset[str]],
+) -> list[int]:
+    """This ordinal's offline text ``kindIndex``es, ascending, minus any that are a
+    materialized layout-slot placeholder instance (``_layout_slot_texts``)."""
+    text_idxs = sorted(idx for (kind, idx) in rects if kind == "text")
+    layout = _base_layout_slide_for_ordinal(objects, ordinal)
+    if layout is None:
+        return text_idxs
+    cache_key = id(layout)
+    placeholder_texts = layout_texts_cache.get(cache_key)
+    if placeholder_texts is None:
+        placeholder_texts = _layout_slot_texts(objects, layout)
+        layout_texts_cache[cache_key] = placeholder_texts
+    if not placeholder_texts:
+        return text_idxs
+    slide = _slide_archive_for_ordinal(objects, ordinal)
+    if slide is None:
+        return text_idxs
+    text_by_idx = {
+        rec["kindIndex"]: (rec.get("text") or "") for rec in derive_kind_index(slide, objects) if rec["kind"] == "text"
+    }
+    return [idx for idx in text_idxs if text_by_idx.get(idx, "") not in placeholder_texts]
+
+
 def _offline_measure(
     staging_path: Path,
     plan: AssemblyPlan,
@@ -4495,57 +4536,66 @@ def _offline_measure(
     distinctly. The third element carries this call's own measure-failure warnings (a
     full read failure, or an ordinal skipped by the staged/offline text-count
     cross-check) so a caller can refuse immediately on missing measures instead of
-    treating them as merely over budget."""
+    treating them as merely over budget. The cross-check first drops any offline text
+    item that is a materialized layout-slot placeholder instance (``_kept_ordinal_text_idxs``)
+    and re-ranks what remains before comparing against ``_staged_kind_ranks`` -- a
+    genuinely missing staged box still mismatches and still refuses."""
     measured: dict[tuple[int, str], float] = {}
     bands: dict[tuple[int, str], tuple[float, float]] = {}
     measure_warnings: list[str] = []
+    deck = None
+    objects: dict[str, dict] = {}
     try:
-        rects_by_ordinal, _soft = offline_text_rects(staging_path)
+        deck = _load_deck(staging_path)
+        objects = deck[0]
+    except Exception:  # noqa: BLE001 -- placeholder-instance detection degrades gracefully to unfiltered counts
+        deck = None
+    try:
+        rects_by_ordinal, _soft = offline_text_rects(staging_path, deck=deck)
     except Exception as exc:  # noqa: BLE001 -- any offline-read failure just skips this round's measure
         msg = f"offline measure failed: {exc}"
         warnings.append(msg)
         measure_warnings.append(msg)
         return measured, bands, measure_warnings
+    layout_texts_cache: dict[int, frozenset[str]] = {}
     for number, ordinal in plan.ordinals.items():
         split_parts = plan.splits.get(number)
         if split_parts is not None:
             for part, split_part in enumerate(split_parts):
                 part_ordinal = ordinal + part
                 part_rects = rects_by_ordinal.get(part_ordinal, {})
-                offline_text_count = sum(1 for kind, _idx in part_rects if kind == "text")
+                kept_idxs = _kept_ordinal_text_idxs(objects, part_ordinal, part_rects, layout_texts_cache)
                 ranks = _staged_kind_ranks(
                     number, plan, part=part, hidden=hidden.get(number, frozenset())
                 ).get("text", [])
-                if offline_text_count != len(ranks):
+                if len(kept_idxs) != len(ranks):
                     msg = (
                         f"slide {number} part {part}: staged text count {len(ranks)} != offline "
-                        f"text count {offline_text_count} on ordinal {part_ordinal}, refit "
+                        f"text count {len(kept_idxs)} on ordinal {part_ordinal}, refit "
                         "measurement skipped"
                     )
                     warnings.append(msg)
                     measure_warnings.append(msg)
                     continue
-                for (kind, staged_idx), (_x, y, _w, h) in part_rects.items():
-                    if kind != "text" or staged_idx >= len(ranks):
-                        continue
+                for staged_idx, old_idx in enumerate(kept_idxs):
+                    _x, y, _w, h = part_rects[("text", old_idx)]
                     key = (number, f"text:{ranks[staged_idx]}:{part_ordinal}")
                     measured[key] = h
                     bands[key] = (y, y + h)
             continue
         rects = rects_by_ordinal.get(ordinal, {})
-        offline_text_count = sum(1 for kind, _idx in rects if kind == "text")
+        kept_idxs = _kept_ordinal_text_idxs(objects, ordinal, rects, layout_texts_cache)
         ranks = _staged_kind_ranks(number, plan, hidden=hidden.get(number, frozenset())).get("text", [])
-        if offline_text_count != len(ranks):
+        if len(kept_idxs) != len(ranks):
             msg = (
                 f"slide {number}: staged text count {len(ranks)} != offline text count "
-                f"{offline_text_count} on ordinal {ordinal}, refit measurement skipped"
+                f"{len(kept_idxs)} on ordinal {ordinal}, refit measurement skipped"
             )
             warnings.append(msg)
             measure_warnings.append(msg)
             continue
-        for (kind, staged_idx), (_x, y, _w, h) in rects.items():
-            if kind != "text" or staged_idx >= len(ranks):
-                continue
+        for staged_idx, old_idx in enumerate(kept_idxs):
+            _x, y, _w, h = rects[("text", old_idx)]
             key = (number, f"text:{ranks[staged_idx]}")
             measured[key] = h
             bands[key] = (y, y + h)
