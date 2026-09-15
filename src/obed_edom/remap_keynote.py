@@ -52,6 +52,46 @@ _AS_KIND_NAMES = {
     "line": "line",
 }
 
+
+def _as_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", '" & return & "')
+    )
+
+
+def _delete_or_hide_placeholder_lines(
+    number: int, ordinal: int, addr: str, *, indent: str = "        "
+) -> list[str]:
+    """``delete theObj``, except Keynote refuses to delete the slide's default title/body
+    item (errNum -10003, read-only per Keynote.sdef) -- hide it instead and log
+    ``HIDDEN\\t<number>\\t<addr>\\ttitle``/``body``."""
+    escaped_addr = _as_escape(addr)
+    body = [
+        "set isTitle to false",
+        "set isBody to false",
+        "try",
+        f"  set isTitle to (theObj is (default title item of slide {ordinal}))",
+        "end try",
+        "try",
+        f"  if not isTitle then set isBody to (theObj is (default body item of slide {ordinal}))",
+        "end try",
+        "if isTitle then",
+        f"  set title showing of slide {ordinal} to false",
+        f'  log ("HIDDEN" & tab & "{number}" & tab & "{escaped_addr}" & tab & "title")',
+        "else if isBody then",
+        f"  set body showing of slide {ordinal} to false",
+        f'  log ("HIDDEN" & tab & "{number}" & tab & "{escaped_addr}" & tab & "body")',
+        "else",
+        "  delete theObj",
+        "end if",
+    ]
+    return [f"{indent}{ln}" for ln in body]
+
 # Emitted by `_build_slide_geometry_script`'s per-spec `on error` and parsed back out of
 # osascript's stderr by `offline_write._run_fallback_scripts`. Pass 1 runs the same body
 # via JXA's `runAppleScript` -> `doShellScript`, which discards stderr on a zero exit, so

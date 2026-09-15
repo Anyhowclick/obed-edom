@@ -67,6 +67,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     patch_slide_builds,
     patch_deck_geometry,
     patch_slide_geometry,
+    reorder_drawables,
 )
 from obed_edom.offline_inspect import _line_endpoints  # noqa: E402
 
@@ -2438,3 +2439,150 @@ def test_restore_source_builds_warns_the_operator_of_an_ambiguous_pairing(tmp_pa
         "within them is arbitrary." in m
         for m in messages
     )
+
+
+# --------------------------------------------------------------------------
+# reorder_drawables (D2 z-order restore for a re-inserted cropped image)
+# --------------------------------------------------------------------------
+def test_reorder_drawables_moves_id_to_new_index(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    result = reorder_drawables(deck, "100", {"230": 0})
+    assert not result["refused"]
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    assert [ref["identifier"] for ref in objects["100"]["drawablesZOrder"]] == ["230", "220", "250"]
+
+
+def test_reorder_drawables_value_clean_touches_only_the_slide_archive(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    with zipfile.ZipFile(deck) as z:
+        before = {name: z.read(name) for name in z.namelist()}
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert not result["refused"]
+    with zipfile.ZipFile(deck) as z:
+        after = {name: z.read(name) for name in z.namelist()}
+    assert set(before) == set(after)
+    changed = [name for name in before if before[name] != after[name]]
+    assert changed == ["Index/Slide-100.iwa"]
+
+
+def _build_owned_drawables_deck(path, owned_ids):
+    """One slide whose ``drawablesZOrder`` is ``[220, 230, 250]`` and ``ownedDrawables``
+    is ``owned_ids`` -- real slides carry the two in lockstep; these tests probe what
+    happens when a caller's ``ownedDrawables`` disagrees."""
+    slide = _arch(
+        100,
+        "KN.SlideArchive",
+        {
+            "drawablesZOrder": [{"identifier": 220}, {"identifier": 230}, {"identifier": 250}],
+            "ownedDrawables": [{"identifier": i} for i in owned_ids],
+        },
+    )
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_reorder_drawables_mirrors_permutation_into_owned_drawables_when_same_id_set(tmp_path):
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert not result["refused"]
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    assert [ref["identifier"] for ref in objects["100"]["drawablesZOrder"]] == ["250", "220", "230"]
+    assert [ref["identifier"] for ref in objects["100"]["ownedDrawables"]] == ["250", "220", "230"]
+
+
+def test_reorder_drawables_refuses_when_owned_drawables_id_set_differs(tmp_path):
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 999])
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "ownedDrawables" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_when_owned_drawables_has_a_duplicate_id(tmp_path):
+    """``owned_ids = [220, 230, 230]`` is the same *set* as ``order`` but a different
+    length -- the set comparison alone would wrongly pass this."""
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 230])
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "ownedDrawables" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_when_owned_drawables_has_an_identifierless_ref(tmp_path, monkeypatch):
+    """A ref with no ``identifier`` is skipped when building ``owned_ids``, so the id
+    *set* still matches ``order`` -- the raw list length must be checked too."""
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
+    objects, id_to_file, file_ids = _load_deck(deck)
+    objects["100"]["ownedDrawables"].append({})
+    monkeypatch.setattr(
+        "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
+    )
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "ownedDrawables" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_when_zorder_has_an_identifierless_ref(tmp_path, monkeypatch):
+    """A ref with no ``identifier`` in ``drawablesZOrder`` itself must refuse, not just
+    silently filter it out of ``order`` (round-2 finding 6)."""
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
+    objects, id_to_file, file_ids = _load_deck(deck)
+    objects["100"]["drawablesZOrder"].append({})
+    monkeypatch.setattr(
+        "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
+    )
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "drawablesZOrder" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_when_zorder_has_a_duplicate_id(tmp_path, monkeypatch):
+    """A duplicate id in ``drawablesZOrder`` makes ``order.remove()`` ambiguous during a
+    move -- must refuse instead of silently moving the wrong occurrence."""
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
+    objects, id_to_file, file_ids = _load_deck(deck)
+    objects["100"]["drawablesZOrder"].append({"identifier": 220})
+    monkeypatch.setattr(
+        "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
+    )
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "drawablesZOrder" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_an_id_not_in_zorder(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"999": 0})
+    assert result["refused"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_an_out_of_range_index(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"230": 5})
+    assert result["refused"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_a_non_slide_archive(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "230", {"230": 0})
+    assert result["refused"]
+    assert deck.read_bytes() == before

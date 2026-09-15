@@ -230,10 +230,74 @@ export async function validateKeynote(
   return res.json();
 }
 
-export async function stubDsk(): Promise<string> {
-  const res = await fetch("/api/dsk", { method: "POST" });
-  const data = await res.json();
-  return data.detail || "Not implemented";
+export type DskSlide = {
+  number: number;
+  class: string;
+  skipped: boolean;
+  thumbnail?: string;
+};
+
+export type DskProposal = {
+  id: string;
+  slides: DskSlide[];
+};
+
+export async function startDsk(keynotePath: string): Promise<DskProposal> {
+  const res = await fetch("/api/dsk", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keynote: keynotePath }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function saveDskDecisions(
+  id: string,
+  slides: Record<string, { include: boolean; clip?: string; anchor?: string; keepSide?: boolean }>
+): Promise<DskProposal> {
+  const res = await fetch(`/api/dsk/${id}/decisions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slides }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function applyDsk(id: string, outDir?: string): Promise<Job> {
+  const res = await fetch(`/api/dsk/${id}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(outDir ? { outDir } : {}),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function dskThumbUrl(id: string, filename: string): string {
+  return `/api/dsk/${id}/thumb/${encodeURIComponent(filename)}`;
+}
+
+export type DskExportKind = "stages" | "clips";
+
+export async function startDskExport(
+  keynotePath: string,
+  kind: DskExportKind,
+  opts?: { slides?: number[]; outDir?: string }
+): Promise<Job> {
+  const res = await fetch("/api/dsk/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      keynote: keynotePath,
+      kind,
+      slides: opts?.slides?.length ? opts.slides : undefined,
+      outDir: opts?.outDir,
+    }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 export async function startResize(

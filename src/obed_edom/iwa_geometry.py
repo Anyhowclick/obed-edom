@@ -88,6 +88,15 @@ def _frame_rect(geom: dict) -> tuple[float, float, float, float]:
     return (x0, y0, w, h)
 
 
+def _frame_aabb(geom: dict) -> tuple[float, float, float, float]:
+    """True rotated AABB of a frame (unlike ``_frame_rect``'s unrotated w/h)."""
+    x, y, w, h, angle = _xywha(geom)
+    if not _is_rotated(angle):
+        return (x, y, w, h)
+    x0, y0, x1, y1 = _corners_aabb(_frame_transform(x, y, w, h, angle), w, h)
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
 def _mask_geom(obj: dict, objects: dict[str, dict]) -> dict:
     ref = (obj.get("mask") or {}).get("identifier")
     if ref is None:
@@ -106,6 +115,14 @@ def _mask_corner_aabb(fx: float, fy: float, fw: float, fh: float, fa: float,
     to_image = _frame_transform(mx, my, mw, mh, ma)
     to_slide = _frame_transform(fx, fy, fw, fh, fa)
     return _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
+
+
+def _mask_aabb(frame_geom: dict, mask_geom: dict) -> tuple[float, float, float, float]:
+    """True rotated AABB of a mask composed through its parent frame transform."""
+    fx, fy, fw, fh, fa = _xywha(frame_geom)
+    mx, my, mw, mh, ma = _xywha(mask_geom)
+    x0, y0, x1, y1 = _mask_corner_aabb(fx, fy, fw, fh, fa, mx, my, mw, mh, ma)
+    return (x0, y0, x1 - x0, y1 - y0)
 
 
 def _masked_rect(frame_geom: dict, mask_geom: dict

@@ -55,6 +55,22 @@ def _build_data_index(zip_names: list[str]) -> dict[str, str]:
     return index
 
 
+def data_member_index(zip_names: list[str]) -> dict[str, str]:
+    """``{data id: raw zip member name}``, matched via the CP437-normalized name but
+    keyed by the raw ``namelist()`` entry so ``ZipFile.open`` can use it directly."""
+    index: dict[str, str] = {}
+    for raw_name in zip_names:
+        try:
+            name = raw_name.encode("cp437").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            name = raw_name
+        m = _DATA_MEMBER.match(name)
+        if not m:
+            continue
+        index[m.group("id")] = raw_name
+    return index
+
+
 def _data_identifier(obj: dict) -> str | None:
     for key in ("data", "movieData"):
         ref = (obj.get(key) or {}).get("identifier")
@@ -323,6 +339,29 @@ def offline_wall_payload(
             "soft_geometry": soft_geometry,
         },
     }
+
+
+def offline_text_rects(
+    key_path: str | Path, *, deck: Any = None
+) -> tuple[dict[int, dict[tuple[str, int], tuple[float, float, float, float]]], set[tuple[int, str, int]]]:
+    """Saved-deck ``{ordinal: {(kind, kindIndex): (x, y, w, h)}}`` for text/shape items,
+    plus the ``(ordinal, kind, kindIndex)`` set flagged ``soft_geometry`` (informational)."""
+    payload = offline_wall_payload(key_path, deck=deck)
+    rects: dict[int, dict[tuple[str, int], tuple[float, float, float, float]]] = {}
+    for slide in payload["slides"]:
+        number = int(slide["number"])
+        bucket: dict[tuple[str, int], tuple[float, float, float, float]] = {}
+        for item in slide["items"]:
+            if item["kind"] in ("text", "shape"):
+                bucket[(item["kind"], int(item["kindIndex"]))] = (
+                    float(item["x"]), float(item["y"]), float(item["w"]), float(item["h"]),
+                )
+        rects[number] = bucket
+    soft = {
+        (int(entry["slide"]), entry["kind"], int(entry["kindIndex"]))
+        for entry in payload["_offline"]["soft_geometry"]
+    }
+    return rects, soft
 
 
 def _guard_tripped(guard: list[dict[str, Any]], slide_range: Any) -> bool:

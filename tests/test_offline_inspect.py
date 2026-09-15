@@ -33,16 +33,19 @@ from obed_edom.offline_inspect import (
     _build_data_index,
     _canvas_size,
     _data_identifier,
+    data_member_index,
     _guard_tripped,
     _item_from_record,
     _item_text_style,
     _line_endpoints,
     _locked,
     _splice_bulk_geometry,
+    offline_text_rects,
     offline_wall_payload,
     two_tier_wall_payload,
     unvouched_items,
 )
+import obed_edom.offline_inspect as offline_inspect
 
 MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
 FULL_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key")
@@ -381,6 +384,25 @@ def test_data_member_names_decode_as_utf8(tmp_path):
 
     index = _build_data_index(names)
     assert index["1"] == "x y.png"
+
+
+def test_data_member_index_returns_raw_name_openable_via_zipfile(tmp_path):
+    name = "Data/x y-1.png"
+    path = tmp_path / "mojibake.zip"
+    zi = zipfile.ZipInfo(name)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(zi, b"payload")
+    raw = _clear_utf8_flag(bytearray(path.read_bytes()), name.encode("utf-8"))
+    path.write_bytes(raw)
+
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        assert names != [name]
+        index = data_member_index(names)
+        raw_name = index["1"]
+        assert raw_name == names[0]
+        with zf.open(raw_name) as fh:
+            assert fh.read() == b"payload"
 
 
 def test_filename_clean_resolves_and_dirty_id_flags():
@@ -1375,3 +1397,50 @@ def test_two_tier_splice_does_not_touch_addressing_or_style():
         for bi, si in zip(bs["items"], ss["items"]):
             for key in keep:
                 assert bi.get(key) == si.get(key), (bs["number"], key, bi.get(key), si.get(key))
+
+
+# --------------------------------------------------------------------------
+# offline_text_rects (D2b step 1) -- pure unit tests, offline_wall_payload faked.
+# --------------------------------------------------------------------------
+def _fake_payload_for_text_rects():
+    return {
+        "path": "fake.key",
+        "slideWidth": 1920.0,
+        "slideHeight": 1080.0,
+        "slideCount": 1,
+        "slides": [
+            {
+                "index": 0,
+                "number": 1,
+                "skipped": False,
+                "items": [
+                    {"kind": "text", "kindIndex": 0, "x": 43.0, "y": 704.0, "w": 1849.0, "h": 269.0},
+                    {"kind": "shape", "kindIndex": 0, "x": 100.0, "y": 50.0, "w": 200.0, "h": 60.0},
+                    {"kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
+                ],
+            }
+        ],
+        "_offline": {
+            "guard": [],
+            "tripped": False,
+            "soft_geometry": [{"slide": 1, "kind": "text", "kindIndex": 0}],
+        },
+    }
+
+
+def test_offline_text_rects_buckets_by_ordinal_and_kind_index(monkeypatch):
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload", lambda key_path, *_a, **_kw: _fake_payload_for_text_rects()
+    )
+    rects, _soft = offline_text_rects("fake.key")
+    assert rects[1][("text", 0)] == (43.0, 704.0, 1849.0, 269.0)
+    assert rects[1][("shape", 0)] == (100.0, 50.0, 200.0, 60.0)
+    assert ("image", 0) not in rects[1]
+
+
+def test_offline_text_rects_reports_soft_geometry_items(monkeypatch):
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload", lambda key_path, *_a, **_kw: _fake_payload_for_text_rects()
+    )
+    _rects, soft = offline_text_rects("fake.key")
+    assert soft == {(1, "text", 0)}

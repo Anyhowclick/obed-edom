@@ -909,6 +909,22 @@ label.check input[type="checkbox"]:disabled,
   font-weight: 600;
 }
 .seg button.on { background: var(--bg-surface-solid); color: var(--ink-inverse); border-color: transparent; }
+.dsk-review { margin: 12px 0; overflow-x: auto; }
+.dsk-review-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.dsk-review-table th, .dsk-review-table td { padding: 6px 8px; border-bottom: var(--border-glass); text-align: left; vertical-align: middle; }
+.dsk-row-skipped { opacity: 0.55; }
+.dsk-review-table img { width: 96px; height: auto; border-radius: 4px; display: block; }
+.thumb-btn { border: none; background: none; padding: 0; cursor: pointer; }
+.chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface-glass);
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
 .thumbs-row {
   display: flex;
   gap: 8px;

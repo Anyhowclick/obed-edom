@@ -1,0 +1,6 @@
+REVISE
+
+1. [src/obed_edom/dsk_assemble.py:669](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/src/obed_edom/dsk_assemble.py:669), [src/obed_edom/dsk_assemble.py:1311](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/src/obed_edom/dsk_assemble.py:1311) — Minor — `_autosize_text_ids` is not the single detector as claimed: it merely wraps `_raw_autosize_ids`, while the two-column cluster path contributing to `plan.autosize` bypasses it and calls `_raw_autosize_ids` directly. The GW test helper does likewise at [tests/test_dsk_assemble.py:8573](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/tests/test_dsk_assemble.py:8573).  
+   Concrete fix: move the raw-height-zero implementation into `_autosize_text_ids`, delete `_raw_autosize_ids`, and update the cluster path and GW helper to call `_autosize_text_ids`.
+
+Findings 1 and 3 are closed. The payload heuristic is removed, graphless tests deliberately assert fixed-frame behavior, and the sole production caller at [src/obed_edom/dsk_assemble.py:3764](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/src/obed_edom/dsk_assemble.py:3764) passes the graph loaded at line 3758. Static review only.

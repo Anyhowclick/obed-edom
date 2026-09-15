@@ -1,0 +1,11 @@
+OBEDSPLIT	gw38verse	A_initial	position	{2817, 76}	width	2046	height	608	size	46.666668057442	chars	296
+OBEDSPLIT	gw38verse	B_after_width	position	{2817, 76}	width	1799	height	608	size	46.666668057442	chars	296
+OBEDSPLIT	gw38verse	C_after_size	position	{2817, 76}	width	1799	height	385	size	30.00000089407	chars	296
+OBEDSPLIT	gw38verse	D_after_tail_delete	position	{2817, 76}	width	1799	height	281	size	30.00000089407	chars	197
+OBEDSPLIT	gw38verse	E_after_head_delete	position	{2817, 76}	width	1799	height	177	size	45.0	chars	99
+OBEDSPLIT	gw38verse	F_after_position	position	{54, 866}	width	1799	height	177	size	45.0	chars	99
+OBEDSPLIT	gw38verse	G_after_delay1	position	{54, 866}	width	1799	height	177	size	45.0	chars	99
+OBEDSPLIT	gw5child	A_initial	position	{4304, 89}	width	1443	height	437	size	46.666668057442	chars	141
+OBEDSPLIT	gw5child	B_after_size	position	{4304, 89}	width	1799	height	272	size	30.00000089407	chars	141
+OBEDSPLIT	gw5child	C_after_tail_delete	position	{4304, 89}	width	1799	height	157	size	30.00000089407	chars	70
+OBEDSPLIT	gw5child	D_after_position	position	{54, 866}	width	1799	height	157	size	30.00000089407	chars	70

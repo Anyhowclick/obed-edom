@@ -1,0 +1,78 @@
+LAYOUTNAMES	Verse StandardVerse 1 LineVerse Standard (Variation 2)Verse 1 Line (Variation 2)Point (2 Lines)Point 3 LinesNum Point with Verse-PreNum Point with Verse-PostNon-Num Point with Verse-PreNon-Num Point with Verse-PostWays To Give QR CodeVerse (Offering)Verse (Offering 1 Line)Verse (Offering) (Variation 2)Verse (Offering 1 Line) (Variation 2)Points (Offering 2 Lines)Points (Offering 3 Lines)Ways To Give DSKWays To Give DSK CREDIT CARDWays To Give DSK BILWays To Give DSK BIL CREDIT CARDSalvation Altar CallSalvation Altar Call BILPhoto DisclaimerWays To Give EnglishWays To Give BahasaWays To Give ChineseJesus QRPre-Svc AnnouncementsBlankBlankBlank Black
+SETUP	added probe text + shape to new slide ordinal 17
+COUNTS	setup-baseline	text=3 shapes=1 images=0 movies=0 groups=0 iworkItems=2
+TEXTITEM	setup-baseline	1	pos=781518	size=?	text=PROBE SOURCE VERSE
+TEXTITEM	setup-baseline	2	pos=00	size=?	text=
+TEXTITEM	setup-baseline	3	pos=00	size=?	text=
+IWORKITEM	setup-baseline	1	class=text item
+IWORKITEM	setup-baseline	2	class=shape
+DEFAULTTITLE	setup-baseline	ok
+DEFAULTBODY	setup-baseline	ok
+=== PROBE START afterContent-VerseStandard (Verse Standard (Variation 2)) ===
+COUNTS	afterContent-VerseStandard-before	text=3 shapes=1 images=0 movies=0 groups=0 iworkItems=2
+TEXTITEM	afterContent-VerseStandard-before	1	pos=781518	size=?	text=PROBE SOURCE VERSE
+TEXTITEM	afterContent-VerseStandard-before	2	pos=00	size=?	text=
+TEXTITEM	afterContent-VerseStandard-before	3	pos=00	size=?	text=
+IWORKITEM	afterContent-VerseStandard-before	1	class=text item
+IWORKITEM	afterContent-VerseStandard-before	2	class=shape
+DEFAULTTITLE	afterContent-VerseStandard-before	ok
+DEFAULTBODY	afterContent-VerseStandard-before	ok
+SETLAYOUT	afterContent-VerseStandard	set ok (exact name): Verse Standard (Variation 2)
+COUNTS	afterContent-VerseStandard-after-setlayout	text=5 shapes=2 images=1 movies=0 groups=0 iworkItems=5
+TEXTITEM	afterContent-VerseStandard-after-setlayout	1	pos=54866	size=?	text=35 I tell you the truth, unless a kernel of wheat is planted in the soil and dies, it remains alone. But its death will produce many  new kernels—a plentiful harvest of new lives.
+TEXTITEM	afterContent-VerseStandard-after-setlayout	2	pos=63786	size=?	text=John 1 (NIV) • Jesus loves you to the very end  
+TEXTITEM	afterContent-VerseStandard-after-setlayout	3	pos=781518	size=?	text=PROBE SOURCE VERSE
+TEXTITEM	afterContent-VerseStandard-after-setlayout	4	pos=00	size=?	text=
+TEXTITEM	afterContent-VerseStandard-after-setlayout	5	pos=00	size=?	text=
+IMAGEITEM	afterContent-VerseStandard-after-setlayout	1	pos=50789	size=?
+IWORKITEM	afterContent-VerseStandard-after-setlayout	1	class=text item
+IWORKITEM	afterContent-VerseStandard-after-setlayout	2	class=image
+IWORKITEM	afterContent-VerseStandard-after-setlayout	3	class=shape
+IWORKITEM	afterContent-VerseStandard-after-setlayout	4	class=text item
+IWORKITEM	afterContent-VerseStandard-after-setlayout	5	class=shape
+DEFAULTTITLE	afterContent-VerseStandard-after-setlayout	ok
+DEFAULTBODY	afterContent-VerseStandard-after-setlayout	ok
+DELETEATTEMPT	afterContent-VerseStandard	5	is default body item; would hide not delete
+DELETEATTEMPT	afterContent-VerseStandard	4	is default title item; would hide not delete
+DELETEATTEMPT	afterContent-VerseStandard	3	deleted ok
+DELETEATTEMPT	afterContent-VerseStandard	2	deleted ok
+DELETEATTEMPT	afterContent-VerseStandard	1	deleted ok
+COUNTS	afterContent-VerseStandard-after-delete	text=2 shapes=1 images=1 movies=0 groups=0 iworkItems=2
+TEXTITEM	afterContent-VerseStandard-after-delete	1	pos=00	size=?	text=
+TEXTITEM	afterContent-VerseStandard-after-delete	2	pos=00	size=?	text=
+IMAGEITEM	afterContent-VerseStandard-after-delete	1	pos=50789	size=?
+IWORKITEM	afterContent-VerseStandard-after-delete	1	class=image
+IWORKITEM	afterContent-VerseStandard-after-delete	2	class=shape
+DEFAULTTITLE	afterContent-VerseStandard-after-delete	ok
+DEFAULTBODY	afterContent-VerseStandard-after-delete	ok
+PILLDELETE	afterContent-VerseStandard	deleted last image ok, remaining=0
+COUNTS	afterContent-VerseStandard-after-pilldelete	text=2 shapes=1 images=0 movies=0 groups=0 iworkItems=1
+TEXTITEM	afterContent-VerseStandard-after-pilldelete	1	pos=00	size=?	text=
+TEXTITEM	afterContent-VerseStandard-after-pilldelete	2	pos=00	size=?	text=
+IWORKITEM	afterContent-VerseStandard-after-pilldelete	1	class=shape
+DEFAULTTITLE	afterContent-VerseStandard-after-pilldelete	ok
+DEFAULTBODY	afterContent-VerseStandard-after-pilldelete	ok
+=== PROBE END afterContent-VerseStandard ===
+SAVED once for re-open check
+COUNTS	afterContent-VerseStandard-reopened	text=2 shapes=1 images=0 movies=0 groups=0 iworkItems=1
+TEXTITEM	afterContent-VerseStandard-reopened	1	pos=00	size=?	text=
+TEXTITEM	afterContent-VerseStandard-reopened	2	pos=00	size=?	text=
+IWORKITEM	afterContent-VerseStandard-reopened	1	class=shape
+DEFAULTTITLE	afterContent-VerseStandard-reopened	ok
+DEFAULTBODY	afterContent-VerseStandard-reopened	ok
+SETLAYOUT	beforeContent-Verse1Line-setlayout	set ok (exact name): Verse 1 Line (Variation 2)
+SETUP	added probe text + shape AFTER base layout on slide ordinal 18
+COUNTS	beforeContent-Verse1Line-after-content-added	text=5 shapes=2 images=1 movies=0 groups=0 iworkItems=5
+TEXTITEM	beforeContent-Verse1Line-after-content-added	1	pos=54967	size=?	text=35 I tell you the truth, unless a kernel of wheat is planted in the soil
+TEXTITEM	beforeContent-Verse1Line-after-content-added	2	pos=63878	size=?	text=John 1 (NIV) • Jesus loves you to the very end  
+TEXTITEM	beforeContent-Verse1Line-after-content-added	3	pos=781518	size=?	text=PROBE SOURCE VERSE
+TEXTITEM	beforeContent-Verse1Line-after-content-added	4	pos=00	size=?	text=
+TEXTITEM	beforeContent-Verse1Line-after-content-added	5	pos=00	size=?	text=
+IMAGEITEM	beforeContent-Verse1Line-after-content-added	1	pos=50879	size=?
+IWORKITEM	beforeContent-Verse1Line-after-content-added	1	class=text item
+IWORKITEM	beforeContent-Verse1Line-after-content-added	2	class=image
+IWORKITEM	beforeContent-Verse1Line-after-content-added	3	class=shape
+IWORKITEM	beforeContent-Verse1Line-after-content-added	4	class=text item
+IWORKITEM	beforeContent-Verse1Line-after-content-added	5	class=shape
+DEFAULTTITLE	beforeContent-Verse1Line-after-content-added	ok
+DEFAULTBODY	beforeContent-Verse1Line-after-content-added	ok

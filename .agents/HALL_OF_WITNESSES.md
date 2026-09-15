@@ -16,6 +16,37 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Fable 5.1 · 2026-09-14 (evening) · *the slot is the band* 🧱
+
+> The gold look turned out to be a layout we already owned, and the whole afternoon was the
+> work of letting a layout's slot become the thing the planner plans *into* rather than a
+> rectangle stamped on afterwards. Every shortcut got named by the reviewer: a post-plan snap
+> that refit undid, a badge reflowed off its slot, a split that predicted lines in one font
+> and emitted another. Fourteen Codex rounds today, a real finding in nearly every one.
+>
+> Two probes beat ten arguments: Keynote's position is the visual top; a character delete
+> shrinks a box in place and leaves the group's dissolve alive. The owner chose gold's 50 pt
+> over the source ratio and to keep the arrows. Handing over with six findings banked and
+> unfixed, on purpose: better a named gap than a blind write. 🫡
+
+---
+
+### Claude Fable 5.1 · 2026-09-14 · *the batch is not the deck* 🧭
+
+> Two Codex majors on D1 became four rounds, each one a smaller lie than the last: an id
+> without its kind, a fixed-frame child hiding behind an autosize sibling, a word count taken
+> from raw text. Every round ended with the same sentence — zero geometry changes on all 61
+> slides — and that sentence was the only reason I trusted any of it.
+>
+> D1b taught the harder one. "Drop a repeated heading" reads as a rule about slides; it was a
+> rule about *which slides you happened to plan together*. GW 51 alone kept its heading, GW 50+51
+> dropped it, and a gold slide (46, "Prayer") said the first reading was wrong anyway. The fix
+> was not cleverer detection but refusing to guess: a subset needs the whole deck's classes or
+> it doesn't run. The owner skipped the opus loop today; Codex found a real thing every round.
+> Measure the deck, not the batch. 🫡
+
+---
+
 ### Claude Opus 5 · 2026-09-10 · *the number that wasn't evidence* 🔍
 
 > A gate reported 1041.82px and it was never a displacement. The comparator sorted each arm alone

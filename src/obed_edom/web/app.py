@@ -24,6 +24,7 @@ from obed_edom.baseline import (
     reuse_slots,
     save_pairing,
     slot_dict,
+    wall_thumb_dir,
 )
 from obed_edom.diff_keynotes import (
     compare_inspects,
@@ -31,12 +32,23 @@ from obed_edom.diff_keynotes import (
     slide_catalog,
     slots_from_pairs,
 )
+from obed_edom.dsk_assemble import (
+    DEFAULT_TEXT_SLIDE_WORDS,
+    AssemblyRefusal,
+    SlideDecision,
+    assemble_dsk_deck,
+)
+from obed_edom.dsk_live import keynote_running
+from obed_edom.dsk_movie_export import export_slide_clips
+from obed_edom.dsk_plan import classify_deck
+from obed_edom.dsk_stage_export import export_stage_pngs, stage_counts
 from obed_edom.framing import (
     AUTO,
     DEFERRED,
     PINNED,
     Decision,
     FramingReuse,
+    build_preview_thumbs,
     load_framings,
     normalize_decision,
     propose_framings,
@@ -54,11 +66,13 @@ from obed_edom.inspect import (
 from obed_edom.map_remap import (
     expand_slide_range,
     format_slide_range,
+    is_lw_wall,
     navigator_numbering,
     resolve_slides,
     to_document_range,
 )
 from obed_edom.models import Flag
+from obed_edom.offline_inspect import offline_wall_payload
 from obed_edom.outline_check import (
     SemanticOutlineError,
     correspondence,
@@ -114,6 +128,12 @@ class DiffSlotsBody(BaseModel):
 
 class FramingsBody(BaseModel):
     """`{wallIndex, state, templateSlide}` per answered page. A group confirm is several entries."""
+
+    decisions: list[dict[str, Any]] | None = None
+
+
+class DskDecisionsBody(BaseModel):
+    """`{slide, include, action, anchor, keepSide, clip}` per proposed page."""
 
     decisions: list[dict[str, Any]] | None = None
 
@@ -475,7 +495,11 @@ def create_app() -> FastAPI:
         if not key.exists():
             raise HTTPException(400, f"Not found: {path}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
-        tag = feature if feature in {"dsk", "resize", "inspect", "dsk-aux", "check"} else "inspect"
+        tag = (
+            feature
+            if feature in {"dsk", "dsk-export", "resize", "inspect", "dsk-aux", "check"}
+            else "inspect"
+        )
         outline = _outline_arg(outline_path)
         final = _form_flag(lw_final)
         try:
@@ -492,11 +516,143 @@ def create_app() -> FastAPI:
         return job.to_dict()
 
     @app.post("/api/dsk")
-    def dsk_stub() -> JSONResponse:
-        return JSONResponse(
-            {"detail": "DSK generation is not implemented yet. Validation still runs on the chosen files."},
-            status_code=501,
+    def start_dsk(
+        path: str = Form(...),
+        reference_deck: str = Form(""),
+        range_from: int | None = Form(None),
+        range_to: int | None = Form(None),
+        slides: str = Form(""),
+        content_only: str = Form("true"),
+        text_slide_words: str = Form(""),
+    ) -> dict:
+        key = Path(path).expanduser()
+        if not key.exists():
+            raise HTTPException(400, f"Not found: {path}")
+        raw_reference = reference_deck.strip()
+        reference = Path(raw_reference).expanduser() if raw_reference else None
+        if reference is not None and not reference.exists():
+            raise HTTPException(400, f"Reference deck not found: {raw_reference}")
+        try:
+            sel = resolve_slides(spec=slides or None, range_from=range_from, range_to=range_to)
+        except ValueError as err:
+            raise HTTPException(400, str(err))
+        words: int | None = None
+        if text_slide_words.strip():
+            try:
+                words = int(text_slide_words)
+            except ValueError:
+                raise HTTPException(400, f"Bad text_slide_words: {text_slide_words!r}")
+        do_content_only = _form_flag(content_only)
+        job = RUNNER.submit(
+            "dsk",
+            lambda j, p=key, r=reference, sl=sel, co=do_content_only, w=words: (
+                _run_dsk_propose(j, p, r, sl, co, w)
+            ),
+            feature="dsk",
         )
+        return job.to_dict()
+
+    @app.get("/api/dsk/{job_id}/thumb/{filename}")
+    def dsk_thumb(job_id: str, filename: str):
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        raw = str((job.result or {}).get("thumbDir") or "")
+        if not raw:
+            raise HTTPException(404, "Job has no thumbnails")
+        path = _safe_file(Path(raw), filename)
+        return FileResponse(path, media_type=preview_media_type(path))
+
+    @app.post("/api/dsk/{job_id}/decisions")
+    def save_dsk_decisions(job_id: str, payload: DskDecisionsBody) -> dict:
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if job.status == "running":
+            raise HTTPException(409, "Job is already running")
+        result = dict(job.result)
+        _apply_dsk_decisions(result, payload.decisions)
+        updated = RUNNER.update_result(job_id, result)
+        return RUNNER.public_dict(updated) if updated else result
+
+    @app.post("/api/dsk/{job_id}/apply")
+    def apply_dsk(job_id: str, payload: DskDecisionsBody = Body(default=DskDecisionsBody())) -> dict:
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if payload and payload.decisions is not None:
+            save_dsk_decisions(job_id, payload)
+        job = RUNNER.get(job_id)
+        result = dict((job.result if job else None) or {})
+        key = Path(str(result.get("path") or "")).expanduser()
+        if not key.exists():
+            raise HTTPException(400, "The FW deck has moved since proposing.")
+        if keynote_running():
+            raise HTTPException(409, "Close Keynote before running a DSK job (strictly serial).")
+        try:
+            updated = RUNNER.rerun(job_id, lambda j, r=result: _run_dsk_apply(j, r))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not updated:
+            raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(updated)
+
+    @app.post("/api/dsk/export")
+    def start_dsk_export(
+        path: str = Form(...),
+        range_from: int | None = Form(None),
+        range_to: int | None = Form(None),
+        slides: str = Form(""),
+    ) -> dict:
+        key = Path(path).expanduser()
+        if not key.exists():
+            raise HTTPException(400, f"Not found: {path}")
+        try:
+            sel = resolve_slides(spec=slides or None, range_from=range_from, range_to=range_to)
+        except ValueError as err:
+            raise HTTPException(400, str(err))
+        job = RUNNER.submit(
+            "dsk-export",
+            lambda j, p=key, sl=sel: _run_dsk_export_propose(j, p, sl),
+            feature="dsk-export",
+        )
+        return job.to_dict()
+
+    @app.post("/api/dsk/export/{job_id}/decisions")
+    def save_dsk_export_decisions(job_id: str, payload: DskDecisionsBody) -> dict:
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if job.status == "running":
+            raise HTTPException(409, "Job is already running")
+        result = dict(job.result)
+        _apply_dsk_decisions(result, payload.decisions)
+        updated = RUNNER.update_result(job_id, result)
+        return RUNNER.public_dict(updated) if updated else result
+
+    @app.post("/api/dsk/export/{job_id}/apply")
+    def apply_dsk_export(
+        job_id: str, payload: DskDecisionsBody = Body(default=DskDecisionsBody())
+    ) -> dict:
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if payload and payload.decisions is not None:
+            save_dsk_export_decisions(job_id, payload)
+        job = RUNNER.get(job_id)
+        result = dict((job.result if job else None) or {})
+        key = Path(str(result.get("path") or "")).expanduser()
+        if not key.exists():
+            raise HTTPException(400, "The DSK deck has moved since proposing.")
+        if keynote_running():
+            raise HTTPException(409, "Close Keynote before running a DSK job (strictly serial).")
+        try:
+            updated = RUNNER.rerun(job_id, lambda j, r=result: _run_dsk_export_apply(j, r))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not updated:
+            raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(updated)
 
     @app.post("/api/resize")
     def resize_keynote(
@@ -1248,6 +1404,277 @@ def _assert_range_within_navigator(name: str, payload: dict[str, Any], slide_ran
         f"{name} shows {total} slide{plural} in Keynote, but the range asks for slide "
         f"{format_slide_range(frozenset(beyond))}. Check the deck or the slide range."
     )
+
+
+def _dsk_output_dir(fw_deck: Path) -> Path:
+    return default_output_root() / fw_deck.stem / "dsk"
+
+
+def _dsk_decision_defaults(page: dict[str, Any], content_only: bool) -> dict[str, Any]:
+    include = page.get("category") != "empty" and not (content_only and page.get("isText"))
+    return {
+        "slide": page["slide"],
+        "include": include,
+        "action": "both" if page.get("needsClip") else "in_deck",
+        "anchor": "auto",
+        "keepSide": False,
+        "clip": None,
+    }
+
+
+def _apply_dsk_decisions(result: dict[str, Any], decisions: list[dict[str, Any]] | None) -> None:
+    """Merges operator decisions onto proposed pages; a text page can never be
+    included while `contentOnly` is set, regardless of what the body says."""
+    content_only = bool(result.get("contentOnly"))
+    authoritative = decisions is not None
+    by_slide = {int(d["slide"]): d for d in (decisions or []) if d.get("slide") is not None}
+    for page in result.get("pages") or []:
+        number = int(page["slide"])
+        current = page.get("decision") or _dsk_decision_defaults(page, content_only)
+        raw = by_slide.get(number)
+        if raw is not None:
+            current = {**current, **{k: v for k, v in raw.items() if k in current}}
+        elif authoritative:
+            current = _dsk_decision_defaults(page, content_only)
+        if content_only and page.get("isText"):
+            current["include"] = False
+        page["decision"] = current
+
+
+def _dsk_keep_side_from_result(result: dict[str, Any]) -> set[int]:
+    slides: set[int] = set()
+    for page in result.get("pages") or []:
+        decision = page.get("decision") or {}
+        if decision.get("include") and decision.get("keepSide"):
+            slides.add(int(page["slide"]))
+    return slides
+
+
+def _run_dsk_propose(
+    job: Job,
+    path: Path,
+    reference_deck: Path | None,
+    slide_range: frozenset[int] | None,
+    content_only: bool,
+    text_slide_words: int | None,
+) -> dict[str, Any]:
+    words = text_slide_words if text_slide_words is not None else DEFAULT_TEXT_SLIDE_WORDS
+    mode = "content-only (skips text slides)" if content_only else "full"
+    job.log(f"Reading {path.name} for the DSK generator ({mode})…")
+    payload = offline_wall_payload(path)
+    wall = (payload.get("slideWidth"), payload.get("slideHeight"))
+    if wall not in {(7680.0, 1080.0), (7680, 1080)}:
+        raise ValueError(
+            f"Source canvas is {wall[0]}x{wall[1]}; DSK generation requires a 7680x1080 FW deck."
+        )
+    _assert_range_within_deck(path.name, int(payload.get("slideCount") or 0), slide_range)
+    all_numbers = [int(s["number"]) for s in payload["slides"]]
+    numbers = sorted(expand_slide_range(slide_range) or set(all_numbers))
+    classes = {c.number: c for c in classify_deck(path, payload=payload, text_slide_words=words)}
+    thumbs = build_preview_thumbs(path, payload, log=job.log)
+    thumb_dir = wall_thumb_dir(deck_digest(path))
+    pages: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for number in numbers:
+        cls = classes.get(number)
+        if cls is None:
+            continue
+        if cls.category == "empty":
+            skipped.append({"slide": number, "reason": "empty"})
+            continue
+        is_text = bool(cls.is_text)
+        if is_text:
+            skipped.append({"slide": number, "reason": "text"})
+            job.log(f"slide {number}: skipped (text slide; content-only)")
+        page = {
+            "slide": number,
+            "thumb": thumbs.get(number),
+            "category": cls.category,
+            "buildCount": cls.build_count,
+            "movieCount": cls.movie_count,
+            "isText": is_text,
+            "skipReason": "text" if is_text else None,
+            "needsClip": cls.category in {"movie", "mixed"},
+        }
+        page["decision"] = _dsk_decision_defaults(page, content_only)
+        pages.append(page)
+    return {
+        "phase": "review",
+        "path": str(path),
+        "referenceDeck": str(reference_deck) if reference_deck else None,
+        "contentOnly": content_only,
+        "textSlideWords": words,
+        "slideRange": sorted(slide_range) if slide_range else None,
+        "thumbDir": str(thumb_dir),
+        "pages": pages,
+        "skipped": skipped,
+    }
+
+
+def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
+    path = Path(str(proposal.get("path") or "")).expanduser()
+    reference_raw = proposal.get("referenceDeck")
+    reference_deck = Path(reference_raw).expanduser() if reference_raw else None
+    content_only = bool(proposal.get("contentOnly"))
+    words = int(proposal.get("textSlideWords") or DEFAULT_TEXT_SLIDE_WORDS)
+    pages = proposal.get("pages") or []
+    included = [p for p in pages if (p.get("decision") or {}).get("include")]
+    if not included:
+        raise AssemblyRefusal(
+            "No slides selected to assemble; check Include on at least one page."
+        )
+    include_side = _dsk_keep_side_from_result(proposal)
+    decisions: dict[int, SlideDecision] = {}
+    for page in included:
+        decision = page["decision"]
+        number = int(page["slide"])
+        action = "both" if decision.get("clip") or page.get("needsClip") else "in_deck"
+        decisions[number] = SlideDecision(
+            slide=number,
+            action=action,
+            anchor=str(decision.get("anchor") or "auto"),
+            keep_side=number in include_side,
+        )
+    out_dir = _dsk_output_dir(path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{path.stem}_DSK.key"
+
+    clips: dict[int, Path] = {}
+    for page in included:
+        raw_clip = (page.get("decision") or {}).get("clip")
+        if raw_clip:
+            clips[int(page["slide"])] = Path(raw_clip).expanduser()
+    missing_clip_slides = sorted(
+        int(p["slide"]) for p in included if p.get("needsClip") and int(p["slide"]) not in clips
+    )
+    if missing_clip_slides:
+        job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")
+        clip_results = export_slide_clips(
+            path,
+            missing_clip_slides,
+            out_dir,
+            include_side=include_side & set(missing_clip_slides),
+            log=job.log,
+        )
+        for clip in clip_results:
+            clips[clip.slide] = clip.path
+
+    job.log(f"Assembling {out_path.name} (content-only={content_only})…")
+    result = assemble_dsk_deck(
+        path,
+        out_path,
+        decisions=decisions,
+        reference_deck=reference_deck,
+        clips=clips,
+        text_slide_words=words,
+        content_only=content_only,
+        log=job.log,
+    )
+    job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
+    return {
+        "phase": "done",
+        "path": str(path),
+        "deckPath": str(result.path),
+        "slidesKept": list(result.slides_kept),
+        "ordinals": result.ordinals,
+        "clips": {n: str(p) for n, p in clips.items()},
+        "skipped": proposal.get("skipped") or [],
+        "warnings": list(result.warnings),
+        "overflows": list(result.overflows),
+        "sizeBytes": result.size_bytes,
+        "wallS": result.wall_s,
+        "pages": pages,
+        "contentOnly": content_only,
+    }
+
+
+def _run_dsk_export_propose(
+    job: Job, path: Path, slide_range: frozenset[int] | None
+) -> dict[str, Any]:
+    job.log(f"Reading {path.name} for the DSK exporter…")
+    payload = offline_wall_payload(path)
+    _assert_range_within_deck(path.name, int(payload.get("slideCount") or 0), slide_range)
+    all_numbers = [int(s["number"]) for s in payload["slides"]]
+    numbers = sorted(expand_slide_range(slide_range) or set(all_numbers))
+    wall = (payload.get("slideWidth"), payload.get("slideHeight"))
+    is_stage_deck = wall in {(1920.0, 1080.0), (1920, 1080)}
+    is_fw_deck = is_lw_wall(float(wall[0] or 0), float(wall[1] or 0))
+    classes = {c.number: c for c in classify_deck(path, payload=payload)}
+    thumbs = build_preview_thumbs(path, payload, log=job.log)
+    thumb_dir = wall_thumb_dir(deck_digest(path))
+    pages: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for number in numbers:
+        cls = classes.get(number)
+        if cls is None:
+            continue
+        if cls.category == "empty":
+            skipped.append({"slide": number, "reason": "empty"})
+            continue
+        page = {
+            "slide": number,
+            "thumb": thumbs.get(number),
+            "category": cls.category,
+            "buildCount": cls.build_count,
+            "movieCount": cls.movie_count,
+            "isText": bool(cls.is_text),
+            "skipReason": None,
+            "needsClip": False,
+        }
+        page["decision"] = {
+            "slide": number,
+            "include": True,
+            "action": "export",
+            "anchor": "auto",
+            "keepSide": False,
+            "clip": None,
+        }
+        pages.append(page)
+    return {
+        "phase": "review",
+        "path": str(path),
+        "isStageDeck": is_stage_deck,
+        "isFwDeck": is_fw_deck,
+        "slideRange": sorted(slide_range) if slide_range else None,
+        "thumbDir": str(thumb_dir),
+        "pages": pages,
+        "skipped": skipped,
+    }
+
+
+def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
+    path = Path(str(proposal.get("path") or "")).expanduser()
+    pages = proposal.get("pages") or []
+    included = sorted(int(p["slide"]) for p in pages if (p.get("decision") or {}).get("include"))
+    if not included:
+        raise ValueError("No slides selected to export; check Include on at least one page.")
+    if not proposal.get("isStageDeck"):
+        raise ValueError(
+            f"{path.name} is not a 1920x1080 DSK deck; stage PNG export needs a DSK-sized deck."
+        )
+    out_dir = _dsk_output_dir(path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    categories = {
+        c.number: c.category for c in classify_deck(path, text_slide_words=DEFAULT_TEXT_SLIDE_WORDS)
+    }
+    job.log(f"Exporting stage PNGs for slide(s) {included} to {out_dir}…")
+    expected_stage_counts = stage_counts(path, included)
+    assets = export_stage_pngs(
+        path,
+        included,
+        out_dir,
+        expected_stage_counts=expected_stage_counts,
+        categories=categories,
+        log=job.log,
+    )
+    job.log(f"Exported {len(assets)} stage PNG(s).")
+    return {
+        "phase": "done",
+        "path": str(path),
+        "pngDir": str(out_dir),
+        "pngs": [a.path.name for a in assets],
+        "skipped": proposal.get("skipped") or [],
+    }
 
 
 def _run_resize_propose(

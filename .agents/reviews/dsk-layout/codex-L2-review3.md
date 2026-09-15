@@ -1,0 +1,5 @@
+REVISE
+
+1. **Medium — the transparent-layout default still has two independent definitions and can drift.** [src/obed_edom/dsk_assemble.py:103](/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom/b0fe5f66-5d53-46a1-ad2a-6074e9f6ea03/scratchpad/wt-L2/src/obed_edom/dsk_assemble.py:103) recreates `("Blank Black",)` instead of aliasing [dsk_live.py:42](/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom/b0fe5f66-5d53-46a1-ad2a-6074e9f6ea03/scratchpad/wt-L2/src/obed_edom/dsk_live.py:42). Import `DEFAULT_TRANSPARENT_LAYOUT_NAMES` from `dsk_live`, remove the assembly-local assignment, and add a regression asserting the assembly and live exports share the same constant.
+
+Round-2 findings 1–2 are otherwise closed: stage export imports the live constant and has a real-checker success test; `pendingDonor` is tracked before `move`, re-resolved afterward, and cleared after deletion, with ordering coverage. No other regression found across the three rounds. Static review only; tests not run.
