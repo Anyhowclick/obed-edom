@@ -1230,3 +1230,60 @@ def test_attach_group_child_runs_keys_by_group_and_child(monkeypatch):
     # each group has exactly the one text child.
     assert set(groups[0].keys()) == {0}
     assert set(groups[1].keys()) == {0}
+
+
+def _dual_badge_deck():
+    """Slide 260 owns GW 44's shape: a dual shape+text badge (custom-path text box,
+    `_memberships` -> ["text", "shape"]) plus an autosize verse text child -- the
+    finding gw44-group-badge shape. The badge's kindIndex under `_group_child_records`'
+    counter rule is `assigned["shape"]` (it is a shape as far as addressing goes), so
+    its caption must be keyed there too, not under `assigned["text"]`."""
+
+    def storage(text, style_id):
+        return {
+            "_pbtype": "TSWP.StorageArchive",
+            "text": [text],
+            "tableCharStyle": {"entries": [{"characterIndex": 0, "object": {"identifier": style_id}}]},
+        }
+
+    objects = {
+        "160": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "260"}},
+        "260": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "980"}]},
+        "980": {
+            "_pbtype": "TSD.GroupArchive",
+            "children": [{"identifier": "981"}, {"identifier": "982"}],
+        },
+        "981": {  # badge: isTextBox + custom bezier path -> dual ["text", "shape"]
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "981-st"},
+            "super": {
+                "geometry": {"position": {"x": 409.6, "y": 0.0}, "size": {"width": 645.0, "height": 92.0}, "angle": 0.0},
+                "pathsource": {"editableBezierPathSource": True},
+            },
+        },
+        "981-st": storage("2 Kings 3", "500"),
+        "982": {  # verse: autosize text-only child -> kind "text"
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "982-st"},
+        },
+        "982-st": storage("15 the verse body", "501"),
+        "500": _charstyle("BadgeStyle", fontName="AzoSans-Bold", fontSize=65.0),
+        "501": _charstyle("VerseStyle", fontName="AzoSans-Regular", fontSize=70.0),
+        "show": {
+            "_pbtype": "KN.ShowArchive",
+            "slideTree": {"slides": [{"identifier": "160"}]},
+        },
+    }
+    return objects, {}, {}
+
+
+def test_attach_group_child_runs_exposes_dual_shape_text_badge_caption(monkeypatch):
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _dual_badge_deck())
+    payload = {"slides": [{"index": 0, "items": []}]}
+    attach_group_child_runs("ignored.key", payload)
+    groups = payload["slides"][0]["groupChildRuns"]
+    # The badge is child kindIndex 0 under `_group_child_records`' "shape" counter
+    # (it is addressed as a shape); its caption must be keyed there, not under the
+    # separate "text" counter (which would also read 0 and mask the bug).
+    assert groups[0][0]["text"] == "2 Kings 3"
+    assert groups[0][0]["font"] == "AzoSans-Bold"
+    assert groups[0][0]["size"] == pytest.approx(65.0)
+    assert groups[0][1]["text"] == "15 the verse body"

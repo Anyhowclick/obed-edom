@@ -345,6 +345,11 @@ def test_gw44_two_column_heading_and_verse(gw_inputs):
     assert verse_badge.y == pytest.approx(719.4, abs=0.5)
     assert verse_badge.w == pytest.approx(645.03, abs=0.5)
     assert verse_badge.h == pytest.approx(92.0, abs=0.5)
+    # finding gw44-group-badge: the badge is a dual shape+text group child, so its
+    # caption must get an explicit size write -- it used to be invisible to the
+    # planner entirely (`iwa_runs._group_child_runs` keyed it under "text"'s own
+    # counter, never the "shape" counter this id addresses).
+    assert plan.text_sizes[44][("groupchild", 0, "shape", 0)] == pytest.approx(40.0, abs=0.01)
 
     assert verse.x == pytest.approx(501.0, abs=0.5)
     assert verse.y == pytest.approx(821.4, abs=0.5)
@@ -385,6 +390,7 @@ def test_gw50_two_column_heading_and_verse(gw_inputs):
     assert verse_badge.y == pytest.approx(720.0, abs=0.5)
     assert verse_badge.w == pytest.approx(645.03, abs=0.5)
     assert verse_badge.h == pytest.approx(92.0, abs=0.5)
+    assert plan.text_sizes[50][("groupchild", 0, "shape", 0)] == pytest.approx(40.0, abs=0.01)
 
     assert verse.x == pytest.approx(501.0, abs=0.5)
     assert verse.y == pytest.approx(822.0, abs=0.5)

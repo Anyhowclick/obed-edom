@@ -2380,6 +2380,34 @@ def test_gw44_badge_x_clears_title_right_edge():
     assert badge_rect.x == pytest.approx(501.0, abs=0.5)
 
 
+def test_gw44_50_group_child_badge_caption_gets_text_size_write():
+    # finding gw44-group-badge: the verse badge is a dual shape+text group child
+    # (`_memberships` -> ["text", "shape"]) -- `iwa_runs._group_child_runs` used to
+    # key its caption under "text"'s own counter (never matching its "shape"
+    # addressing kindIndex), so the planner never saw its font/size and never wrote
+    # a caption size -- the live script wrote the pill's position/size but left the
+    # caption at whatever size the group's own (now-arbitrary) resize left it.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    for number in (44, 50):
+        decisions = {number: SlideDecision(number, "in_deck")}
+        plan = plan_assembly(
+            payload, [by_number[number]], decisions=decisions, band=BAND, clips={}, runs=runs,
+            all_classes=classes,
+        )
+        badge_id = ("groupchild", 0, "shape", 0)
+        assert plan.text_sizes[number][badge_id] == pytest.approx(40.0)
+        script = build_assembly_script(
+            plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        )
+        addr = "shape 1 of group 1"
+        assert "set size of object text of theObj to 40" in script
+        # The badge write is addressed via the shape's own AS name/kindIndex.
+        assert addr in script
+
+
 def test_gw_group_text_slides_short_fit_stays_within_band_x():
     # New finding 1: every group-text slide's short-row (badge) groupchild rect must
     # clamp into [band.x_min, band.x_max] -- GW 53's badge overhung the canvas before

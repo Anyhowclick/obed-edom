@@ -765,10 +765,14 @@ def attach_group_children(key_path: str | Path, payload: dict, *, deck: Any = No
 
 
 def _group_child_runs(group_obj: dict, objects: dict[str, dict], cache: dict) -> dict[int, dict] | None:
-    """{text-kind child kindIndex: {text, font, size, runs}} for a flat top-level group's
-    non-dual text children -- same per-kind kindIndex counters and kind-preference rule
-    (`"shape" if "shape" in assigned else kinds[0]`) as `_group_child_records`, so a text
-    child's key here matches its `groupChildren` entry. `None` for a nested group."""
+    """{child kindIndex: {text, font, size, runs}} for a flat top-level group's
+    text-bearing children -- keyed by the SAME per-kind kindIndex counters and
+    kind-preference rule (`"shape" if "shape" in assigned else kinds[0]`) as
+    `_group_child_records`, so a child's key here always matches its `groupChildren`
+    entry, dual shape+text child (a custom-path pill badge) included: it is addressed
+    as `"shape"` there and must be keyed by `assigned["shape"]`, not `assigned["text"]`,
+    else its caption is invisible to callers keying off the shape's kindIndex. `None`
+    for a nested group."""
     from obed_edom.iwa_kindindex import _memberships  # noqa: PLC0415
     from obed_edom.offline_inspect import _item_text_style  # noqa: PLC0415
 
@@ -787,7 +791,7 @@ def _group_child_runs(group_obj: dict, objects: dict[str, dict], cache: dict) ->
             assigned[kind] = counters.get(kind, 0)
             counters[kind] = assigned[kind] + 1
         kind = "shape" if "shape" in assigned else kinds[0]
-        if kind != "text" or child.get("_pbtype") != "TSWP.ShapeInfoArchive":
+        if "text" not in assigned or child.get("_pbtype") != "TSWP.ShapeInfoArchive":
             continue
         stor_id = (child.get("ownedStorage") or {}).get("identifier")
         storage = objects.get(str(stor_id)) if stor_id is not None else None
@@ -798,7 +802,7 @@ def _group_child_runs(group_obj: dict, objects: dict[str, dict], cache: dict) ->
             continue
         text = "".join(storage.get("text") or [])
         font, size, _color = _item_text_style(child, objects, cache)
-        out[assigned["text"]] = {"text": text, "font": font, "size": size, "runs": runs}
+        out[assigned[kind]] = {"text": text, "font": font, "size": size, "runs": runs}
     return out or None
 
 

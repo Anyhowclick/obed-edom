@@ -856,6 +856,9 @@ COL_GUTTER = 8.0
 NUMBER_BADGE_PT = 46.0
 MAX_HEADING_PT = 80.0
 MAX_HEADING_BLOCK_PT = 140.0
+# GW 29/30/34 (gold): a group-child verse badge's caption is 40.0 pt AzoSans-Bold in
+# every measured gold slide, dual shape+text child or not (finding gw44-group-badge).
+_GROUP_BADGE_TEXT_PT = 40.0
 
 _HEADING_FONT_PREFIX = "ArgentCF"
 _HEADING_MAX_WORDS = 5
@@ -1631,6 +1634,14 @@ def plan_assembly(
                             )
                         badge_x = clamped_x
                         short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
+                        if child.get("has_text") and child["kind"] != "text":
+                            c_info = (group_child_runs_map.get(group_ki) or {}).get(child["kindIndex"]) or {}
+                            if not (c_info.get("text") and c_info.get("font") and c_info.get("size")):
+                                raise AssemblyRefusal(
+                                    f"slide {number}: group {group_ki} child {child['kindIndex']} badge "
+                                    "caption could not be resolved -- refusing to write blind"
+                                )
+                            stacked_text_sizes[badge_id] = _GROUP_BADGE_TEXT_PT
                     if cluster is not None:
                         for badge_id, rect in short_fit.items():
                             if rect.w > col_band.width:
