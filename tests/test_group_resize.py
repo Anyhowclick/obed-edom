@@ -744,6 +744,13 @@ def test_finalize_script_empty_when_no_jobs():
     assert _build_stat_finalize_script(Path("/tmp/x.key"), [], {"269": 200.0}) == ""
 
 
+def test_finalize_empty_group_removes_emits_no_dedup_call_lines():
+    jobs = [{"slide": 9, "groupIndex": 7, "childSig": "UPG"}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {}, None, group_removes=[])
+    assert "my obedDedupPick(" not in script
+    assert "my obedApplyDeletes(" not in script
+
+
 def test_finalize_script_runs_for_badge_alone_with_zero_stat_jobs():
     """A deck can have a badge and no stat groups at all (slides 1-2 in the diagnosis);
     the pass must still run instead of the old jobs-and-group_removes-only gate."""
@@ -1582,6 +1589,16 @@ def test_adjust_excludes_reuse_slides():
     adjustments = adjust_child_resize_indexes(child_resize, transforms, {5})
     assert child_resize[0]["groupIndex"] == 0
     assert adjustments == [{"slide": 5, "from": 5, "to": 0}]
+
+
+def test_adjust_empty_reuse_set_leaves_group_index_and_only_shifts_hides():
+    transforms = [_hide(5, 0), _hide(5, 3)]
+    child_resize = [{"slide": 5, "groupIndex": 5}, {"slide": 6, "groupIndex": 3}]
+    adjustments = adjust_child_resize_indexes(child_resize, transforms, set())
+    assert child_resize[0]["groupIndex"] == 3
+    assert child_resize[1]["groupIndex"] == 3
+    assert adjustments == [{"slide": 5, "from": 5, "to": 3}]
+    assert all(a["to"] != 0 for a in adjustments)
 
 
 def test_adjust_only_counts_hides_lower_than_job():

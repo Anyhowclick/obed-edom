@@ -12,12 +12,13 @@
   "OBED_GEOM_PROPS": null,
   "OBED_OFFLINE_READ": "on",
   "OBED_OFFLINE_WRITE": "off",
+  "OBED_SLIDE_REUSE": "off",
   "OBED_SUPPRESS_GEOMETRY": null,
   "OBED_WRITE_TIMING": null
  },
  "goldenVersion": 1,
  "inspectVersion": 5,
- "planSha256": "3443be78e3f9343fe54fdbe7fe7168abfd54049f4d68310db6a7eb213073c649",
+ "planSha256": "2829aa34be8a3388a3e656f2b0ff200d45927f0c13a4d08320184336e5ef1b7b",
  "plannerEnv": {
   "faces": {
    "Amplitude-Bold|True|False": "Amplitude-Bold|Amplitude",
@@ -26,68 +27,7 @@
   "osBuild": "25G83"
  },
  "previews": "none",
- "reuses": [
-  {
-   "add": 85,
-   "from": 11,
-   "groupRemove": 0,
-   "mutate": 0,
-   "persist": 161,
-   "remove": 6,
-   "slide": 12,
-   "strip": 275
-  },
-  {
-   "add": 9,
-   "from": 12,
-   "groupRemove": 0,
-   "mutate": 0,
-   "persist": 161,
-   "remove": 0,
-   "slide": 13,
-   "strip": 358
-  },
-  {
-   "add": 45,
-   "from": 13,
-   "groupRemove": 3,
-   "mutate": 0,
-   "persist": 167,
-   "remove": 0,
-   "slide": 14,
-   "strip": 169
-  },
-  {
-   "add": 29,
-   "from": 14,
-   "groupRemove": 47,
-   "mutate": 0,
-   "persist": 170,
-   "remove": 0,
-   "slide": 15,
-   "strip": 170
-  },
-  {
-   "add": 3,
-   "from": 15,
-   "groupRemove": 76,
-   "mutate": 0,
-   "persist": 170,
-   "remove": 0,
-   "slide": 16,
-   "strip": 171
-  },
-  {
-   "add": 3,
-   "from": 16,
-   "groupRemove": 80,
-   "mutate": 0,
-   "persist": 169,
-   "remove": 0,
-   "slide": 17,
-   "strip": 169
-  }
- ],
+ "reuses": [],
  "slides": [
   {
    "asGeomLines": 130,
@@ -289,7 +229,7 @@
    "asGeomLines": 4512,
    "asGeomSha": "102c5cbf0fef",
    "badgeRaises": 3,
-   "groupRemoves": 3,
+   "groupRemoves": 0,
    "n": 214,
    "roles": {
     "hide": 2,
@@ -306,7 +246,7 @@
    "asGeomLines": 4197,
    "asGeomSha": "7ed497f5abd8",
    "badgeRaises": 3,
-   "groupRemoves": 47,
+   "groupRemoves": 0,
    "n": 199,
    "roles": {
     "hide": 2,
@@ -323,7 +263,7 @@
    "asGeomLines": 3651,
    "asGeomSha": "08b791786c75",
    "badgeRaises": 3,
-   "groupRemoves": 76,
+   "groupRemoves": 0,
    "n": 174,
    "roles": {
     "hide": 3,
@@ -340,7 +280,7 @@
    "asGeomLines": 3703,
    "asGeomSha": "18211afe5ebe",
    "badgeRaises": 3,
-   "groupRemoves": 80,
+   "groupRemoves": 0,
    "n": 172,
    "roles": {
     "hide": 2,
@@ -402,8 +342,8 @@
  "totals": {
   "asGeom": 19,
   "badgeRaises": 55,
-  "groupRemoves": 206,
-  "reuses": 6,
+  "groupRemoves": 0,
+  "reuses": 0,
   "statJobs": 182,
   "statSlides": 10,
   "suppressGeometry": 0,

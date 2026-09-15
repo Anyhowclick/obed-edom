@@ -196,6 +196,12 @@ def test_offline_slides_intersects_slide_range():
     assert out == {3, 4}
 
 
+def test_offline_slides_includes_former_reuse_chain_when_reuses_empty():
+    specs = [_spec(slide=n, kind="text", kindIndex=0) for n in range(120, 130)]
+    out = _offline_write_slides(specs, reuses=[], reuse_slides=set(), wanted=None)
+    assert {123, 124, 125, 126, 127, 128} <= out
+
+
 # --- _soft_seed_slides --------------------------------------------------------
 
 
@@ -1481,6 +1487,7 @@ def test_reuse_chain_line_marks_the_preadd_links(monkeypatch, tmp_path):
     import obed_edom.remap_keynote as rk
 
     monkeypatch.setenv("OBED_OFFLINE_WRITE", "off")
+    monkeypatch.setenv("OBED_SLIDE_REUSE", "on")
     monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
     monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
 
