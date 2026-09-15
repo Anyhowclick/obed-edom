@@ -141,6 +141,94 @@ def test_dsk_assemble_rss_limit_gb_rejects_non_positive(tmp_path, capsys, monkey
     assert "Bad --rss-limit-gb" in capsys.readouterr().err
 
 
+def test_dsk_export_stages_missing_file_rejected(tmp_path, capsys):
+    missing = tmp_path / "no.key"
+    rc = cli.main(
+        ["dsk-export-stages", str(missing), "--out", str(tmp_path / "out"), "--slides", "2"]
+    )
+    assert rc == 1
+    assert "File not found" in capsys.readouterr().err
+
+
+def test_dsk_export_stages_no_slides_rejected(tmp_path, capsys):
+    source = tmp_path / "deck.key"
+    source.touch()
+    rc = cli.main(["dsk-export-stages", str(source), "--out", str(tmp_path / "out"), "--slides", ""])
+    assert rc == 1
+    assert "No slides given" in capsys.readouterr().err
+
+
+def test_dsk_export_stages_rss_limit_gb_rejects_non_positive(tmp_path, capsys):
+    source = tmp_path / "deck.key"
+    source.touch()
+    rc = cli.main(
+        [
+            "dsk-export-stages", str(source), "--out", str(tmp_path / "out"), "--slides", "2",
+            "--rss-limit-gb", "0",
+        ]
+    )
+    assert rc == 1
+    assert "Bad --rss-limit-gb" in capsys.readouterr().err
+
+
+def test_dsk_export_stages_reaches_export_stage_pngs(tmp_path, monkeypatch):
+    import obed_edom.dsk_stage_export as dsk_stage_export
+
+    source = tmp_path / "deck.key"
+    source.touch()
+    captured = {}
+
+    def fake_stage_counts(deck, slides, **_kwargs):
+        captured["stage_counts_slides"] = list(slides)
+        return {2: 3, 4: 1}
+
+    def fake_export_stage_pngs(deck, slides, out_dir, *, expected_stage_counts, rss_limit_bytes, log):
+        captured["slides"] = list(slides)
+        captured["out_dir"] = out_dir
+        captured["expected_stage_counts"] = expected_stage_counts
+        captured["rss_limit_bytes"] = rss_limit_bytes
+        return [
+            dsk_stage_export.StageAsset(
+                slide=n, stage_index=i, path=out_dir / f"s{n}.{i}.png", width=1920, height=1080,
+                alpha_ok=True, bg_alpha_max=0, content_alpha_frac=0.0, transparent_frac=0.0,
+                source_name=f"s{n}.{i}.png",
+            )
+            for n, count in expected_stage_counts.items()
+            for i in range(1, count + 1)
+        ]
+
+    monkeypatch.setattr(dsk_stage_export, "stage_counts", fake_stage_counts)
+    monkeypatch.setattr(dsk_stage_export, "export_stage_pngs", fake_export_stage_pngs)
+    out_dir = tmp_path / "out"
+    rc = cli.main(
+        [
+            "dsk-export-stages", str(source), "--out", str(out_dir), "--slides", "2,4",
+            "--rss-limit-gb", "3",
+        ]
+    )
+    assert rc == 0
+    assert captured["slides"] == [2, 4]
+    assert captured["out_dir"] == out_dir
+    assert captured["rss_limit_bytes"] == 3_000_000_000
+
+
+def test_dsk_export_stages_refusal_reaches_stderr(tmp_path, capsys, monkeypatch):
+    import obed_edom.dsk_stage_export as dsk_stage_export
+
+    source = tmp_path / "deck.key"
+    source.touch()
+
+    def fake_stage_counts(deck, slides, **_kwargs):
+        raise dsk_stage_export.StageCountAmbiguous("Stage count undecidable offline on slides [2]")
+
+    monkeypatch.setattr(dsk_stage_export, "stage_counts", fake_stage_counts)
+    rc = cli.main(
+        ["dsk-export-stages", str(source), "--out", str(tmp_path / "out"), "--slides", "2"]
+    )
+    assert rc == 1
+    assert "Export failed" in capsys.readouterr().err
+
+
 def test_dsk_assemble_split_slide_not_in_slides_rejected(tmp_path, capsys, monkeypatch):
     import obed_edom.offline_inspect as offline_inspect
 

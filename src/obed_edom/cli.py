@@ -111,6 +111,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     dsk_export.add_argument("--codec", default="AppleProRes422LT", help="Keynote movie codec for the export.")
     dsk_export.add_argument("--fps", type=float, default=30, help="Export framerate.")
+    dsk_export_stages = sub.add_parser(
+        "dsk-export-stages",
+        help="Export per-slide, per-build-stage PNGs from a 1920x1080 DSK Keynote for the PP7 asset folder.",
+    )
+    dsk_export_stages.add_argument("keynote", type=Path, help="Source DSK .key (1920x1080).")
+    dsk_export_stages.add_argument("--slides", required=True, help="Slides to export, e.g. 2,4 or 2-6.")
+    dsk_export_stages.add_argument(
+        "--out", type=Path, required=True, help="Destination folder for stage PNGs (and any .mov clips)."
+    )
+    dsk_export_stages.add_argument(
+        "--rss-limit-gb", type=float, default=DEFAULT_RSS_LIMIT_BYTES / 1e9,
+        help="Keynote RSS watchdog limit in GB; the run aborts above it.",
+    )
     dsk_assemble = sub.add_parser(
         "dsk-assemble",
         help="Assemble a DSK deck from a wall Keynote via copy-and-transform.",
@@ -268,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "dsk-export-clips":
         return _run_dsk_export_clips(args)
 
+    if args.command == "dsk-export-stages":
+        return _run_dsk_export_stages(args)
+
     if args.command == "dsk-assemble":
         return _run_dsk_assemble(args)
     return 2
@@ -319,6 +335,50 @@ def _run_dsk_export_clips(args: argparse.Namespace) -> int:
             f"slide {r.slide}: {r.path} {r.width}x{r.height} @ {r.duration_s:.2f}s "
             f"(crop {r.crop_width}px, {r.wall_s:.1f}s wall)"
         )
+    print(f"Total wall time: {time.monotonic() - t0:.1f}s")
+    return 0
+
+
+def _run_dsk_export_stages(args: argparse.Namespace) -> int:
+    from obed_edom.dsk_stage_export import export_stage_pngs, stage_counts
+
+    source = Path(args.keynote).expanduser()
+    if not source.exists():
+        print(f"File not found: {source}", file=sys.stderr)
+        return 1
+    try:
+        slide_numbers = sorted(parse_slide_spec(args.slides) or ())
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    if not slide_numbers:
+        print("No slides given (--slides).", file=sys.stderr)
+        return 1
+    if args.rss_limit_gb <= 0:
+        print(f"Bad --rss-limit-gb {args.rss_limit_gb!r}; must be > 0.", file=sys.stderr)
+        return 1
+
+    out_dir = Path(args.out).expanduser()
+    t0 = time.monotonic()
+    try:
+        expected_stage_counts = stage_counts(source, slide_numbers)
+        assets = export_stage_pngs(
+            source,
+            slide_numbers,
+            out_dir,
+            expected_stage_counts=expected_stage_counts,
+            rss_limit_bytes=int(args.rss_limit_gb * 1e9),
+            log=print,
+        )
+    except Exception as exc:
+        print(f"Export failed: {exc}", file=sys.stderr)
+        return 1
+
+    by_slide: dict[int, int] = {}
+    for a in assets:
+        by_slide[a.slide] = by_slide.get(a.slide, 0) + 1
+    for n in slide_numbers:
+        print(f"slide {n}: {by_slide.get(n, 0)} stage(s)")
     print(f"Total wall time: {time.monotonic() - t0:.1f}s")
     return 0
 
