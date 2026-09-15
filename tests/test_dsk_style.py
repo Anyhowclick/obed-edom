@@ -2,9 +2,12 @@
 
 Synthetic ``Index/DocumentStylesheet.iwa`` built with ``test_iwa_write``'s ``_arch``/
 ``_member`` helpers: two verse-badge paragraph styles (40/60 pt, kAllCaps/cyan/
-AzoSans-Bold), one point-column badge style (52.66 pt, same predicate but excluded
-size), a plain kNoCaps paragraph style (must be skipped), and the named "SuperScript"
-character style (the verse-number colour target).
+AzoSans-Bold, TATvalue2/centre), one point-column badge style (52.66 pt, same predicate
+but excluded size), a plain kNoCaps paragraph style (must be skipped), and the named
+"SuperScript" character style (the verse-number colour target). Badge alignment fix:
+gold's badge paragraph styles resolve to TATvalue0 (left); the size/caps write pipeline
+leaves a TATvalue2 (centre) override on the anonymous paragraph styles it derives, which
+centres the badge text inside its wide slot instead of sitting flush over the pill.
 """
 from __future__ import annotations
 
@@ -30,19 +33,22 @@ from obed_edom.dsk_style import (  # noqa: E402
     WHITE,
     write_styles,
 )
+from obed_edom.iwa_runs import resolve_para_style  # noqa: E402
 
 _CYAN_COLOR = {"model": "rgb", "r": CYAN[0], "g": CYAN[1], "b": CYAN[2], "a": 1.0, "rgbspace": "srgb"}
 _WHITE_COLOR = {"model": "rgb", "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0, "rgbspace": "srgb"}
 
 
 def _para(ident, *, font_size, capitalization="kAllCaps", font_name="AzoSans-Bold",
-         color=None, tsd_fill=True, name=None):
+         color=None, tsd_fill=True, name=None, alignment="TATvalue2", has_para_properties=True):
     cp = {"fontName": font_name, "capitalization": capitalization, "fontSize": float(font_size)}
     if color is not None:
         cp["fontColor"] = dict(color)
         if tsd_fill:
             cp["tsdFill"] = {"color": dict(color)}
     obj = {"charProperties": cp}
+    if has_para_properties:
+        obj["paraProperties"] = {"alignment": alignment}
     if name is not None:
         obj["super"] = {"name": name}
     return _arch(ident, "TSWP.ParagraphStyleArchive", obj)
@@ -98,6 +104,7 @@ def test_verse_badges_whitened_and_kNoCaps(deck, tmp_path):
         resolved = resolve_style(sid, objects, cache)
         assert resolved["color"] == [255, 255, 255]
         assert resolved["capitalization"] == "kNoCaps"
+        assert resolve_para_style(sid, objects, cache)["alignment"] == "TATvalue0"
 
 
 def test_point_column_badge_keeps_cyan_only_caps_cleared(deck, tmp_path):
@@ -107,6 +114,20 @@ def test_point_column_badge_keeps_cyan_only_caps_cleared(deck, tmp_path):
     resolved = resolve_style("12", objects, {})
     assert resolved["capitalization"] == "kNoCaps"
     assert resolved["color"] == [0, 253, 255]  # cyan, unchanged
+    assert resolve_para_style("12", objects, {})["alignment"] == "TATvalue0"
+
+
+def test_refuses_candidate_without_paraProperties(tmp_path):
+    archives = [
+        _para("10", font_size=40.0, color=_CYAN_COLOR, has_para_properties=False),
+    ]
+    deck = _build_stylesheet(tmp_path / "noparaprops.key", archives=archives)
+    before = deck.read_bytes()
+    out = tmp_path / "out.key"
+    with pytest.raises(OfflineWriteRefused, match="paraProperties"):
+        write_styles(deck, out_path=out)
+    assert deck.read_bytes() == before
+    assert not out.exists()
 
 
 def test_kNoCaps_style_untouched(deck, tmp_path):
@@ -203,7 +224,7 @@ def test_r13_deck_role_table_matches_gold_after_patch():
     point-column badge elsewhere in the deck (if present) keeps cyan.
     """
     from obed_edom.iwa_runs import slide_order, storage_runs
-    from obed_edom.offline_inspect import _storage_of
+    from obed_edom.offline_inspect import _leading_sid, _storage_of
 
     _R13_TMP_DIR.mkdir(parents=True, exist_ok=True)
     patched = _R13_TMP_DIR / "style_patch_test.key"
@@ -230,6 +251,9 @@ def test_r13_deck_role_table_matches_gold_after_patch():
                     assert run["color"] == [255, 255, 255]
                     assert run["capitalization"] == "kNoCaps"
                     found_badge = True
+                    para_sid = _leading_sid(storage.get("tableParaStyle"))
+                    assert para_sid is not None
+                    assert resolve_para_style(para_sid, objects, cache)["alignment"] == "TATvalue0"
                 if run.get("superscript") == "kSuperscript" and run["color"] is not None:
                     assert run["color"] == [round(c * 255) for c in GOLD_YELLOW]
                     found_superscript = True
@@ -241,10 +265,14 @@ def test_r13_deck_role_table_matches_gold_after_patch():
 
 def test_custom_spec_overrides_defaults(deck, tmp_path):
     out = tmp_path / "out.key"
-    spec = StyleSpec(badge_color=(0.5, 0.5, 0.5), badge_caps="kNoCaps", verse_number_color=(1.0, 0.0, 0.0))
+    spec = StyleSpec(
+        badge_color=(0.5, 0.5, 0.5), badge_caps="kNoCaps", badge_alignment="TATvalue1",
+        verse_number_color=(1.0, 0.0, 0.0),
+    )
     write_styles(deck, out_path=out, spec=spec)
     objects, _id_to_file, _fi = _load_deck(out)
     resolved = resolve_style("10", objects, {})
     assert resolved["color"] == [128, 128, 128]
+    assert resolve_para_style("10", objects, {})["alignment"] == "TATvalue1"
     resolved_ss = resolve_style("14", objects, {})
     assert resolved_ss["color"] == [255, 0, 0]

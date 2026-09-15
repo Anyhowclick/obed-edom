@@ -26,7 +26,13 @@ from pathlib import Path
 
 from keynote_parser.codec import IWAFile
 
-from obed_edom.iwa_runs import UndecodableIWAMember, _load_deck, _load_deck_full, resolve_style
+from obed_edom.iwa_runs import (
+    UndecodableIWAMember,
+    _load_deck,
+    _load_deck_full,
+    resolve_para_style,
+    resolve_style,
+)
 from obed_edom.iwa_write import OfflineWriteCorrupted, _rewrite_members
 
 _STYLESHEET_MEMBER = "Index/DocumentStylesheet.iwa"
@@ -38,6 +44,14 @@ _NO_CAPS = "kNoCaps"
 _SUPERSCRIPT_NAME = "SuperScript"
 _COLOR_TOL = 0.02
 _SIZE_TOL = 0.05
+
+# Plan section 2.3/badge-alignment measurement: gold's badge paragraph styles resolve
+# (own or inherited) to TATvalue0 (left) for both the verse badge and the cyan
+# point-column reference badge; template style patch measured a TATvalue2 (centre)
+# override sitting directly on some output paragraph-style archives (a "wall" value
+# carried into the anonymous per-size derivative), which centres the badge text inside
+# its wide slot box instead of sitting flush over the pill's left edge.
+_ALIGN_LEFT = "TATvalue0"
 
 # Plan section 1.2 measurement: DSK cyan, and the gold "Yellow Bold" (2651127) float
 # triple the plan pins bit-for-bit for the verse-number recolour.
@@ -56,6 +70,7 @@ _VERSE_BADGE_SIZES = (40.0, 60.0)
 class StyleSpec:
     badge_color: tuple[float, float, float] = WHITE
     badge_caps: str = _NO_CAPS
+    badge_alignment: str = _ALIGN_LEFT
     verse_number_color: tuple[float, float, float] = GOLD_YELLOW
 
 
@@ -159,9 +174,18 @@ def write_styles(
 
     edits: dict[str, dict] = {}
     for ident in verse_badges:
-        edits[ident] = {"role": "verse_badge", "fontColor": spec.badge_color, "capitalization": spec.badge_caps}
+        edits[ident] = {
+            "role": "verse_badge",
+            "fontColor": spec.badge_color,
+            "capitalization": spec.badge_caps,
+            "alignment": spec.badge_alignment,
+        }
     for ident in point_column:
-        edits[ident] = {"role": "point_column_badge", "capitalization": spec.badge_caps}
+        edits[ident] = {
+            "role": "point_column_badge",
+            "capitalization": spec.badge_caps,
+            "alignment": spec.badge_alignment,
+        }
     if superscript_id is not None:
         edits[superscript_id] = {"role": "superscript", "fontColor": spec.verse_number_color}
 
@@ -188,6 +212,14 @@ def write_styles(
                     cp["tsdFill"]["color"] = dict(cp["fontColor"])
                 if "capitalization" in edit:
                     cp["capitalization"] = edit["capitalization"]
+                if "alignment" in edit:
+                    pp = o.get("paraProperties")
+                    if not isinstance(pp, dict):
+                        raise OfflineWriteRefused(
+                            f"style {aid} ({edit['role']}) has no paraProperties to write "
+                            "alignment into"
+                        )
+                    pp["alignment"] = edit["alignment"]
                 break
             result.edited_ids[aid] = edit["role"]
             applied += 1
@@ -237,6 +269,11 @@ def _verify(
             raise OfflineWriteRefused(
                 f"re-read verse badge {ident} capitalization {resolved['capitalization']!r} != {spec.badge_caps!r}"
             )
+        para = resolve_para_style(ident, objects, cache)
+        if para.get("alignment") != spec.badge_alignment:
+            raise OfflineWriteRefused(
+                f"re-read verse badge {ident} alignment {para.get('alignment')!r} != {spec.badge_alignment!r}"
+            )
     for ident in point_column:
         resolved = resolve_style(ident, objects, cache)
         if resolved["capitalization"] != spec.badge_caps:
@@ -247,6 +284,12 @@ def _verify(
         if not _is_color({"r": resolved["color"][0] / 255.0, "g": resolved["color"][1] / 255.0,
                           "b": resolved["color"][2] / 255.0}, CYAN):
             raise OfflineWriteRefused(f"re-read point-column badge {ident} colour {resolved['color']} != cyan")
+        para = resolve_para_style(ident, objects, cache)
+        if para.get("alignment") != spec.badge_alignment:
+            raise OfflineWriteRefused(
+                f"re-read point-column badge {ident} alignment {para.get('alignment')!r} "
+                f"!= {spec.badge_alignment!r}"
+            )
     if superscript_id is not None:
         resolved = resolve_style(superscript_id, objects, cache)
         expected = [round(c * 255) for c in spec.verse_number_color]
