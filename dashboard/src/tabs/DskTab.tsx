@@ -1,126 +1,45 @@
-import { useEffect, useState } from "react";
-import {
-  chooseKeynote,
-  deleteJob,
-  patchJob,
-  pollJob,
-  stubDsk,
-  validateKeynote,
-  type ChosenFile,
-  type Flag,
-} from "../api";
-import { FileWell } from "../components/FileWell";
-import { ErrorNotice } from "../components/ErrorNotice";
-import { InspectResultView } from "../components/InspectResultView";
-import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
-import { useCurrentJob } from "../sessions";
+import { useState } from "react";
+import { DskGenerator } from "./dsk/DskGenerator";
+import { DskExporter } from "./dsk/DskExporter";
+
+const SUB_TAB_KEY = "obed-edom.dsk.subtab";
+
+type DskSubTab = "generator" | "exporter";
+
+function loadSubTab(): DskSubTab {
+  try {
+    const raw = sessionStorage.getItem(SUB_TAB_KEY);
+    if (raw === "generator" || raw === "exporter") return raw;
+  } catch {
+    /* ignore */
+  }
+  return "generator";
+}
 
 export function DskTab() {
-  const { job, upsert, error: openError } = useCurrentJob("dsk");
-  const [lw, setLw] = useState<ChosenFile | null>(null);
-  const [dsk, setDsk] = useState<ChosenFile | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
-  const result = (job?.result || undefined) as { path?: string } | undefined;
+  const [sub, setSub] = useState<DskSubTab>(loadSubTab);
 
-  useEffect(() => {
-    const path = result?.path;
-    if (path) setLw({ path, name: path.split("/").pop() || path });
-  }, [job?.id, result?.path]);
-
-  async function inspectAll() {
-    if (!lw) {
-      setError("Choose a finalised LW.key first.");
-      return;
-    }
-    setError(null);
-    setBusy(true);
+  function choose(next: DskSubTab) {
+    setSub(next);
     try {
-      const first = await validateKeynote(lw.path, { export: true, feature: "dsk" });
-      upsert(first);
-      let done = await pollJob(first.id, (tick) => {
-        setLogs(tick.logs);
-        upsert(tick);
-      });
-      upsert(done);
-      if (dsk) {
-        const second = await validateKeynote(dsk.path, { export: false, feature: "dsk-aux" });
-        const dskDone = await pollJob(second.id, (tick) => setLogs((prev) => [...prev, ...tick.logs]));
-        const a = (done.result || {}) as { flags?: Flag[] };
-        const b = (dskDone.result || {}) as { flags?: Flag[] };
-        const merged = {
-          ...(done.result || {}),
-          flags: [...(a.flags || []), ...(b.flags || [])],
-        };
-        done = await patchJob(done.id, merged);
-        upsert(done);
-        await deleteJob(second.id).catch(() => undefined);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
+      sessionStorage.setItem(SUB_TAB_KEY, next);
+    } catch {
+      /* ignore */
     }
-  }
-
-  async function generateStub() {
-    setNotice(await stubDsk());
   }
 
   return (
     <div>
-      <h1>DSK Generator</h1>
-      <p className="lede">
-        Shadow content from a finalised LW into a DSK deck (from an existing DSK or a dropped template).
-        Generation logic is not implemented yet; validation still runs. Finished checks are kept under
-        History.
-      </p>
-      <div className="row">
-        <FileWell
-          label="Finalised LW.key"
-          hint="Required"
-          file={lw}
-          onChoose={async () => {
-            try {
-              setLw(await chooseKeynote("Finalised LW"));
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-          }}
-          onPath={(path) => setLw({ path, name: path.split("/").pop() || path })}
-          onError={setError}
-        />
-        <FileWell
-          label="Optional DSK.key to modify"
-          hint="Drop an existing DSK, or a DSK template .key"
-          file={dsk}
-          onChoose={async () => {
-            try {
-              setDsk(await chooseKeynote("Existing DSK (optional)"));
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-          }}
-          onPath={(path) => setDsk({ path, name: path.split("/").pop() || path })}
-          onError={setError}
-        />
-      </div>
-      <div className="actions">
-        <button className="btn secondary" type="button" disabled={!lw || busy} onClick={inspectAll}>
-          Run validation
+      <h1>DSK</h1>
+      <div className="seg">
+        <button type="button" className={sub === "generator" ? "on" : ""} onClick={() => choose("generator")}>
+          Generator
         </button>
-        <button className="btn" type="button" disabled={!lw} onClick={generateStub}>
-          Generate DSK
+        <button type="button" className={sub === "exporter" ? "on" : ""} onClick={() => choose("exporter")}>
+          Exporter
         </button>
       </div>
-      {notice && <p className="note">{notice}</p>}
-      <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
-      {busy && <LoadingOverlay title="Validating Keynote…" logs={logs} />}
-      {job && <InspectResultView job={job} labelPrefix="LW" onOpen={setOpen} />}
-      <Lightbox src={open} onClose={() => setOpen(null)} />
+      {sub === "generator" ? <DskGenerator /> : <DskExporter />}
     </div>
   );
 }
