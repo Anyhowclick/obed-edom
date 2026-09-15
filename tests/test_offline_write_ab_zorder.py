@@ -11,6 +11,7 @@ from scripts.offline_write_ab import (
     ZORDER_SURFACE_KEYS,
     ZORDER_ZERO_KEYS,
     badge_fallback_exempt,
+    badge_fallback_hard_for,
     claimed_patched_slides,
     expect_gui_raises,
     expected_zorder_sets,
@@ -394,6 +395,48 @@ def test_persisted_raise_jobs_reads_both_from_record():
         {"transforms": []},
         {"statJobs": [{"slide": 1}], "badgeRaises": [{"slide": 2}]},
     ) == ([{"slide": 1}], [{"slide": 2}])
+
+
+def test_badge_fallback_exempt_from_record_shaped_plan_via_persisted_raise_jobs():
+    # A trimmed, reused run record's ``plan`` sub-dict has neither key — the rows live
+    # at the record's top level (run_record). Reading `plan.get("badgeRaises")` directly
+    # (the old bug) sees None and the exemption never fires; routing through
+    # persisted_raise_jobs finds the top-level rows.
+    plan = {"transforms": [], "reuses": [], "suppressGeometry": None}
+    record = {"plan": plan, "statJobs": [], "badgeRaises": [{"slide": 56}]}
+    jobs = persisted_raise_jobs(plan, record)
+    zw = _zorder_write(slides=[56, 109])
+    assert badge_fallback_exempt(zw, jobs[1]) is True
+
+
+def test_badge_fallback_exempt_from_live_shaped_plan_via_persisted_raise_jobs():
+    # A fresh plan_out dict (live run, no reuse) carries both keys directly.
+    plan = {"transforms": [], "statJobs": [], "badgeRaises": [{"slide": 56}]}
+    jobs = persisted_raise_jobs(plan, {})
+    zw = _zorder_write(slides=[56, 109])
+    assert badge_fallback_exempt(zw, jobs[1]) is True
+
+
+def test_badge_fallback_hard_for_exempt_on_reused_record_shape():
+    # Reused-record shape: rows live at the record's top level, plan carries neither
+    # key. The old bug (`plan_b.get("badgeRaises")`) would see None here and stay hard.
+    plan = {"transforms": [], "reuses": [], "suppressGeometry": None}
+    record = {"plan": plan, "statJobs": [], "badgeRaises": [{"slide": 56}]}
+    zw = _zorder_write(slides=[56, 109])
+    assert badge_fallback_hard_for(plan, record, zw) is False
+
+
+def test_badge_fallback_hard_for_exempt_on_live_plan_shape():
+    plan = {"transforms": [], "statJobs": [], "badgeRaises": [{"slide": 56}]}
+    zw = _zorder_write(slides=[56, 109])
+    assert badge_fallback_hard_for(plan, {}, zw) is False
+
+
+def test_badge_fallback_hard_for_hard_when_rows_in_neither_place():
+    plan = {"transforms": [], "reuses": [], "suppressGeometry": None}
+    record = {"plan": plan}
+    zw = _zorder_write(slides=[56, 109])
+    assert badge_fallback_hard_for(plan, record, zw) is True
 
 
 def test_plan_parity_w2_both_arms_suppress_compared_set():
