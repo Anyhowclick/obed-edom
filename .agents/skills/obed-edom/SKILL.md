@@ -537,6 +537,20 @@ Load-bearing rules:
   Keynote permutes on save, so never read `builds` order as reveal order (measured:
   chain-coherent 45/45 under `buildChunks` vs 13/45 under `builds` — D8).
 
+#### Offline z-order (W2)
+
+`OBED_ZORDER_WRITE` = `off` (default) | `on` | `verify`; forced `off` without the `iwa`
+extra or when `offline_write_mode()` is `off`. The patch runs on the saved deck after
+pass 2 (`_run_stat_finalize`), before `restore_source_builds`. Eligible slides' raises
+are suppressed in pass 2 — no `obedRaiseSlide`/`obedBadgeSlide` emitted — so each slide's
+raise runs exactly once, offline or GUI, never both. Pass 2 reports whether it completed
+via the `closed=` AppleScript token; if it did not, the deck may still be open in Keynote
+and the z-order patch is skipped, raising `RuntimeError` for the suppressed slides rather
+than risk patching an open document. Progress surfaces on one `Stat zorder detail:` line.
+Export consequence: when the knob is on, pass 2 exports nothing, and
+`remap_and_inspect`'s existing fallback exports previews after the z-order patch —
+one extra Keynote open per knob-on run.
+
 ### External reference: KeynoteKit
 
 https://github.com/memfrag/KeynoteKit — Swift 6 offline `.key` reader/writer on the
