@@ -1496,6 +1496,37 @@ def test_all_group_child_records_returns_for_flat_group_without_autosize():
     assert records[1]["x"] == pytest.approx(100.0)
 
 
+def test_all_group_child_records_top_anchored_autosize_child_keeps_stored_top():
+    # r13 attempt 6, Part B: a group child's own `verticalAlignment` (kFrameAlignTop, code
+    # 0) must be honoured the same way `_autosize_rect` honours it for top-level items --
+    # composing `y = abs_gy + cy` (the stored top), not `abs_gy + cy - h/2` (the middle-
+    # anchored fallback). Numbers pinned to the GW 5 group from the refused r13 staging
+    # deck (`~/Desktop/dsk-d4-work/out-r13/Sermon_PK_DSK.refused.key`, object 17548203/
+    # 17548251): group at (1075.9092, 408.83987), child local y 457.16013, naturalSize
+    # height 115.0 -- before this fix, the composed y was 808.50 (a ~57.9pt undershoot
+    # against the 866.4pt slot top), which spuriously refused the assembly.
+    objects = {
+        "900": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 1075.9092, "y": 408.83987}, "size": {"width": 360.68298, "height": 107.39138}},
+            "children": [{"identifier": "901"}],
+        },
+        "901": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+            "super": {
+                "geometry": {"position": {"x": -1021.9092, "y": 457.16013}, "size": {"width": 1799.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 1799.0, "height": 115.0}}},
+                "style": {"identifier": "902"},
+            },
+        },
+        "902": {"shapeProperties": {"verticalAlignment": 0}},
+    }
+    records = dsa._all_group_child_records(objects["900"], objects)
+    assert records is not None
+    assert records[0]["y"] == pytest.approx(408.83987 + 457.16013)
+    assert records[0]["h"] == pytest.approx(115.0)
+
+
 def test_all_group_child_records_recurses_into_nested_group():
     """Nested groups are walked recursively, not refused."""
     nested = {
@@ -3371,6 +3402,28 @@ def test_refit_still_over_budget_eligible_keys_catches_shrink_displaced_sibling(
 
     over_via_eligible = dsa._refit_still_over_budget(plan, measured, eligible_keys, bands=bands)
     assert (13, "text:2") in over_via_eligible, "text:2 was pushed out of band and must still be caught"
+
+
+def test_log_offline_measures_split_part_reads_its_own_split_fits():
+    # r13 attempt 6, Part A: for a split slide, the long box's rect lives in
+    # `plan.splits[number][part].fits`, not `plan.fits[number]` (`plan.fits[number]`
+    # holds only the short items' part-0 row rects). `_log_offline_measures` used to
+    # look the rect up in `plan.fits` unconditionally, so a split part's measured height
+    # was reported as "missing a rect or height" even though it was correctly measured
+    # and within budget -- a cosmetic false positive that could mask a real refusal.
+    plan = AssemblyPlan(
+        kept=(28,), ordinals={28: 8}, deletes={}, clips={}, text_sizes={}, autosize={},
+        warnings=(), fits={28: {}},
+        splits={28: (
+            SplitPart(fits={("text", 1): Rect(54.0, 100.0, 1799.0, 200.0)}, deletes=(), text_sizes={}),
+            SplitPart(fits={("text", 1): Rect(54.0, 100.0, 1799.0, 200.0)}, deletes=(), text_sizes={}),
+        )},
+    )
+    measured = {(28, "text:1:8"): 190.0, (28, "text:1:9"): 195.0}
+    eligible_keys = {(28, "text:1:8"), (28, "text:1:9")}
+    logged = []
+    dsa._log_offline_measures(plan, measured, eligible_keys, logged.append)
+    assert not any("missing" in line for line in logged)
 
 
 def test_refit_loop_refuses_when_still_overflowing(tmp_path, monkeypatch):

@@ -70,12 +70,15 @@ from obed_edom.dsk_plan import (
 )
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import (
+    _ALIGN_BOTTOM,
+    _ALIGN_TOP,
     _frame_rect,
     _geom_dict,
     _leaf_bbox,
     _mask_geom,
     _masked_rect,
     _natural_size,
+    _vertical_alignment,
     _xywha,
     compose_geometry,
 )
@@ -2286,10 +2289,17 @@ def _all_group_child_records(
                 return None
             if cw > 0 and abs(cw - nw) > 0.01 * nw:
                 return None
+            align = _vertical_alignment(child, objects)
+            if align == _ALIGN_TOP:
+                top = abs_gy + cy
+            elif align == _ALIGN_BOTTOM:
+                top = abs_gy + cy - nh
+            else:
+                top = abs_gy + cy - nh / 2.0
             out.append({
                 "kind": "text", "kindIndex": assigned["text"], "autosize": True,
                 "has_text": True, "words": _child_word_count(child, objects),
-                "x": abs_gx + cx, "cy": abs_gy + cy, "y": abs_gy + cy - nh / 2.0, "w": nw, "h": nh,
+                "x": abs_gx + cx, "cy": abs_gy + cy, "y": top, "w": nw, "h": nh,
                 "group_path": group_path,
             })
             continue
@@ -4622,8 +4632,14 @@ def _log_offline_measures(
     quiet = 0
     missing = []
     for slide_no, item_key in sorted(eligible_keys):
-        item_id: ItemId = ("text", int(item_key.split(":")[1]))
-        rect = plan.fits.get(slide_no, {}).get(item_id)
+        parts = item_key.split(":")
+        item_id: ItemId = ("text", int(parts[1]))
+        split_parts = plan.splits.get(slide_no)
+        if split_parts is not None and len(parts) > 2:
+            part = int(parts[2]) - plan.ordinals.get(slide_no, 0)
+            rect = split_parts[part].fits.get(item_id) if 0 <= part < len(split_parts) else None
+        else:
+            rect = plan.fits.get(slide_no, {}).get(item_id)
         h = measured.get((slide_no, item_key))
         if rect is None or h is None:
             missing.append((slide_no, item_key))
