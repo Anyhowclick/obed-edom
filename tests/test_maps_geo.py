@@ -151,6 +151,7 @@ def test_highlight_colours_key_is_order_independent_and_normalises_hex():
     assert highlight_colours_key({}) == ""
     assert highlight_colours_key({"highlightColours": {}}) == ""
     assert highlight_colours_key({"highlightColours": {"NOPE": "#00aaff"}}) == ""
+    assert highlight_colours_key({"highlightColours": {"MYS": "none", "SGP": "#0A84FF"}}) == "MYS:none,SGP:#0a84ff"
 
 
 def test_infer_hop_kind_cut_on_highlight_colours():
@@ -171,6 +172,10 @@ def test_infer_hop_kind_cut_on_highlight_colours():
         {**same, "highlightColours": {"SGP": "#ff0000"}},
     ) == "cut"
     assert infer_hop_kind(same, {**same, "highlightColours": {"SGP": "#00aaff"}}) == "cut"
+    assert infer_hop_kind(
+        {**same, "highlightColours": {"SGP": "none"}},
+        {**same, "highlightColours": {"SGP": "#00aaff"}},
+    ) == "cut"
     assert infer_hop_kind(same, {**same, "highlightColours": {}}) == "morph"
 
 

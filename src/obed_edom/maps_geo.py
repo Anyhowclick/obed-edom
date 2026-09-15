@@ -235,7 +235,11 @@ def highlight_colours_key(slide: dict[str, Any]) -> str:
         code = text if ":" in text else text.upper()
         if not _HIGHLIGHT_CODE_RE.fullmatch(code):
             continue
-        match = _HIGHLIGHT_COLOUR_RE.fullmatch(str(value or "").strip())
+        raw_colour = str(value or "").strip()
+        if raw_colour.lower() == "none":
+            items.append(f"{code}:none")
+            continue
+        match = _HIGHLIGHT_COLOUR_RE.fullmatch(raw_colour)
         if not match:
             continue
         hex_digits = match.group(1).lower()

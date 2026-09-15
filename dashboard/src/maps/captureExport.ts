@@ -279,8 +279,8 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
 /** Highlighted slides render a second still: the highlighted area cut out of the base, so Keynote
  * can stack it above the mask with pins on top. Null when there is nothing highlighted.
  *
- * The base always drops the highlight, matching today's shipped look. The cutout keeps it only when
- * the slide is not isolated — an isolate slide's highlight lives in neither raster, as it does today. */
+ * The base always drops the highlight. The cutout restores it so filled colours land in the piece;
+ * no-fill (`none`) highlights stay map-style only. */
 export async function captureIsolatePair(
   opts: ExportMapOpts
 ): Promise<{ base: Blob; pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] } | null> {
@@ -302,7 +302,7 @@ export async function captureIsolatePair(
       opts.stamp !== false
     );
 
-    isolatePairCutoutVisibility(map, opts.highlights, !!opts.isolate);
+    isolatePairCutoutVisibility(map, opts.highlights, opts.highlightColours);
     await waitIdleForFrame(map, undefined, opts.isCancelled);
 
     const admin0 = await loadAdmin0();

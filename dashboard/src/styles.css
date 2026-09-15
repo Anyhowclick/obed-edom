@@ -1226,7 +1226,7 @@ label.check input[type="checkbox"]:disabled,
   .seg-slide-ind { transition: none !important; }
 }
 .maps-pick-hint {
-  min-height: 1.35em;
+  min-height: 2.7em;
   margin-top: 6px;
 }
 .maps-aud-row {
@@ -2740,6 +2740,7 @@ input.maps-thumb-title-input:focus {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: 8px;

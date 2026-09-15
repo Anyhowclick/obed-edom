@@ -50,6 +50,8 @@ from obed_edom.maps_keynote import (
     dsk_item,
     dsk_ops,
     export_maps_job,
+    maps_export_dests,
+    maps_export_stem,
     hop_capture_size,
     maps_export_plan,
     maps_movie_autoplay_mode,
@@ -390,6 +392,57 @@ def test_both_dest_keys_when_both_flags_on(monkeypatch, tmp_path: Path):
     assert "set width of theDoc to 1920" in cg
     assert "set position of image 1 to" in wall
     assert "set width of image 1 to" in wall
+
+
+def test_maps_export_stem_strips_audience_suffix():
+    assert maps_export_stem("Sunday.key") == "Sunday"
+    assert maps_export_stem("Sunday_CG.key") == "Sunday"
+    assert maps_export_stem("Sunday_DSK.key") == "Sunday"
+    assert maps_export_stem("Sunday_LW.key") == "Sunday"
+
+
+def test_maps_export_dests_single_target_uses_chosen_path(tmp_path: Path):
+    chosen = tmp_path / "Desktop" / "My Maps.key"
+    dest_lw, dest_cg, dest_dsk = maps_export_dests(
+        export_lw=False,
+        export_cg=True,
+        export_dsk=False,
+        output_dir=tmp_path / "out",
+        stem="maps-t1",
+        export_path=chosen,
+    )
+    assert dest_lw is None and dest_dsk is None
+    assert dest_cg == chosen
+
+
+def test_maps_export_dests_multiple_targets_use_stem_suffixes(tmp_path: Path):
+    dest_lw, dest_cg, dest_dsk = maps_export_dests(
+        export_lw=True,
+        export_cg=True,
+        export_dsk=True,
+        output_dir=tmp_path / "out",
+        stem="maps-t1",
+        export_path=tmp_path / "Desktop" / "Sunday_CG.key",
+    )
+    assert dest_lw == tmp_path / "Desktop" / "Sunday.key"
+    assert dest_cg == tmp_path / "Desktop" / "Sunday_CG.key"
+    assert dest_dsk == tmp_path / "Desktop" / "Sunday_DSK.key"
+
+
+def test_export_maps_job_uses_export_path_for_dest(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a)
+    b = _slide("s2", cam_b)
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": True}]
+    job = _job(tmp_path, [a, b], links)
+    _write_plan_rasters(Path(job.result["outputDir"]), [a, b], links)
+    dest = tmp_path / "exports" / "Sunday.key"
+    dest.parent.mkdir()
+    result = export_maps_job(job, export_lw=True, export_cg=False, export_path=dest)
+    assert result["destPath"] == str(dest)
+    assert "destPathCg" not in result
 
 
 def test_stale_dest_path_dropped_when_target_not_reexported(monkeypatch, tmp_path: Path):
@@ -2744,14 +2797,14 @@ def test_label_text_is_flagged_bold_and_sized_by_the_bold_char_width(tmp_path: P
 
 
 def test_emitted_script_sets_the_bold_label_font_with_a_system_fallback(tmp_path: Path):
-    """24 pt bold white (owner decision L3): the Gold reference face, falling back
+    """1x bold white (owner decision L3): the Gold reference face, falling back
     to a guaranteed system bold so a missing Amplitude never aborts the export."""
     script = build_deck_script(
         _kitchen_sink_ops(tmp_path), tmp_path / "deck.key", width=int(WALL_WIDTH), height=int(WALL_HEIGHT)
     )
     assert f'set font of object text of txt to "{LABEL_BOLD_FONT}"' in script
     assert f'set font of object text of txt to "{LABEL_BOLD_FALLBACK}"' in script
-    assert "set size of object text of txt to 24\n" in script
+    assert f"set size of object text of txt to {LABEL_FONT_PT}\n" in script
 
 
 def test_unflagged_text_items_keep_the_theme_font(tmp_path: Path):
@@ -2866,6 +2919,26 @@ def test_dsk_and_cg_keep_the_pill_registered_with_its_text(tmp_path: Path, label
             assert mapped_pill["h"] - mapped_text["h"] == round(2 * PILL_PAD_Y * label_scale * pad_scale)
 
 
+def test_a_zoom_scaled_drop_pin_label_follows_the_dynamic_font(tmp_path: Path):
+    """A scaleWithMap drop pin's Keynote size is LABEL_FONT_PT × (effective px / DROP_SIZE)."""
+    church = {
+        "id": "p1",
+        "name": "CHC Medan",
+        "lat": 3.555,
+        "lon": 98.644,
+        "kind": "dropPin",
+        "color": "#c44a42",
+        "showLabel": True,
+        "size": 224,
+        "scaleWithMap": True,
+        "sizeZoom": 17.6,
+    }
+    items = _place_labels(tmp_path, [church], camera=_camera(3.555, 98.644, 17.9))
+    text = next(item for item in items if item.get("kind") == "text")
+    size = int(min(20000, 224 * 2 ** (17.9 - 17.6)))
+    assert text["fontSize"] == whole(LABEL_FONT_PT * (size / DROP_SIZE))
+
+
 @pytest.mark.parametrize(
     ("size_zoom", "expected"),
     [(10, LABEL_SCALE_MIN), (4, LABEL_SCALE_MAX)],
@@ -2878,7 +2951,7 @@ def test_label_scale_clamps_the_total_scale(tmp_path: Path, size_zoom: float, ex
     texts = [item for item in items if item.get("kind") == "text"]
     assert texts
     for text in texts:
-        assert text["fontSize"] == pytest.approx(LABEL_FONT_PT * expected)
+        assert text["fontSize"] == whole(LABEL_FONT_PT * expected)
         assert text["h"] == NAME_HEIGHT * expected
 
 

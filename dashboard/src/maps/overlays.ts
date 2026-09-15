@@ -8,7 +8,7 @@ import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, ML_MAX_ZOOM, ML_MIN_ZOOM, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
 import { defaultObjectSize, zoomScaledStops } from "./objects";
-import { highlightColour, highlightColourExpression, setHighlightColour } from "./highlight";
+import { filledHighlights, highlightColour, highlightColourExpression, setHighlightColour } from "./highlight";
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -194,9 +194,14 @@ export function applyHillshade(map: MapLibreMap, on: boolean): void {
   }
 }
 
-export function applyHighlights(map: MapLibreMap, highlights: string[]) {
+export function applyHighlights(map: MapLibreMap, highlights: string[], highlightColours?: Record<string, string>) {
   if (!map.getSource("admin0") || !admin0Cache) return;
-  const wanted = new Set(highlights.filter((h) => !h.startsWith("A1:")).map((h) => h.toUpperCase()));
+  const wanted = new Set(
+    filledHighlights(
+      highlights.filter((h) => !h.startsWith("A1:")),
+      highlightColours
+    ).map((h) => h.toUpperCase())
+  );
   for (const feat of admin0Cache.features) {
     const id = String(feat.properties?.ADM0_A3 || "");
     if (!id) continue;
@@ -218,12 +223,13 @@ export function admin0PaintExpression(on: number): DataDrivenPropertyValueSpecif
  * `setPaintProperty` repaints every region, and no `promoteId` is needed on the source. */
 export function admin1PaintExpression(
   highlights: string[],
-  on: number
+  on: number,
+  highlightColours?: Record<string, string>
 ): DataDrivenPropertyValueSpecification<number> {
   const bare = new Set(highlights.filter((h) => !h.startsWith("A1:")).map((h) => h.toUpperCase()));
   const ids = [
     ...new Set(
-      highlights
+      filledHighlights(highlights, highlightColours)
         .filter((h) => h.startsWith("A1:"))
         .map((h) => h.slice(3))
         .filter((id) => !bare.has(id.slice(0, 3).toUpperCase()))
@@ -232,10 +238,14 @@ export function admin1PaintExpression(
   return ["case", ["in", ["get", "adm1_code"], ["literal", ids]], on, 0] as DataDrivenPropertyValueSpecification<number>;
 }
 
-export function applyAdmin1Highlights(map: MapLibreMap, highlights: string[]): void {
+export function applyAdmin1Highlights(
+  map: MapLibreMap,
+  highlights: string[],
+  highlightColours?: Record<string, string>
+): void {
   if (!map.getLayer("admin1-fill")) return;
-  map.setPaintProperty("admin1-fill", "fill-opacity", admin1PaintExpression(highlights, ADMIN1_FILL_OPACITY));
-  map.setPaintProperty("admin1-line", "line-opacity", admin1PaintExpression(highlights, ADMIN1_LINE_OPACITY));
+  map.setPaintProperty("admin1-fill", "fill-opacity", admin1PaintExpression(highlights, ADMIN1_FILL_OPACITY, highlightColours));
+  map.setPaintProperty("admin1-line", "line-opacity", admin1PaintExpression(highlights, ADMIN1_LINE_OPACITY, highlightColours));
 }
 
 function firstSymbolId(map: MapLibreMap): string | undefined {
@@ -335,8 +345,8 @@ export async function ensureAdmin0Highlights(
     );
   }
   ensureAdmin1Layers(map, admin1Codes, colour, highlightColours);
-  applyHighlights(map, highlights);
-  applyAdmin1Highlights(map, highlights);
+  applyHighlights(map, highlights, highlightColours);
+  applyAdmin1Highlights(map, highlights, highlightColours);
   applyIsolate(map, highlights, isolate);
   applyHighlightColour(map, colour, highlightColours);
 }
@@ -416,6 +426,8 @@ function ensureAdmin1Layers(
 
 const LABEL_SCALE_MIN = 0.5;
 const LABEL_SCALE_MAX = 8;
+/** Mirrors `maps_keynote.LABEL_FONT_PT`. */
+export const LABEL_FONT_PX = 23;
 export const LABEL_GAP_EMS = 0.35;
 /** Mirrors `maps_keynote.PILL_PAD_X` / `PILL_PAD_Y`. */
 const PILL_PAD_X_PX = 6;
@@ -431,7 +443,7 @@ function labelScale(kind: string, size: number, assetWidth = 0): number {
 /** `icon-text-fit-padding` and an image's corner radius are layout constants, so the pill's
  * padding and radius can only follow the label through a data-driven `icon-image`: one baked
  * variant per bucket of `scale * objectScale`, which is the non-zoom half of the rendered text
- * size (`24 * labelScale * objectScale`, see `text-size` below). The buckets are an octave apart
+ * size (`LABEL_FONT_PX * labelScale * objectScale`, see `text-size` below). The buckets are an octave apart
  * and the geometry is geometric, so snapping to the nearest in log2 bounds that half's
  * padding/radius error at sqrt(2) — the zoom-driven half of the total scale (`scaleWithMap`
  * features only) cannot feed a data property and is not covered by this bound. */
@@ -461,7 +473,7 @@ function labelOffsetProperty(zoom: number): string {
  * marker height feeding these offsets instead of needing `text-offset` to read the icon's state. */
 function labelOffsets(markerPx: number, totalScale: number, bucket: number, scaleWithMap: boolean, sizeZoomRef: number): Record<string, [number, number]> {
   const factorAt = (zoom: number) => (scaleWithMap ? Math.pow(2, zoom - sizeZoomRef) : 1);
-  const textAt = (zoom: number) => Math.min(24 * LABEL_SCALE_MAX, Math.max(24 * LABEL_SCALE_MIN, 24 * totalScale * factorAt(zoom)));
+  const textAt = (zoom: number) => Math.min(LABEL_FONT_PX * LABEL_SCALE_MAX, Math.max(LABEL_FONT_PX * LABEL_SCALE_MIN, LABEL_FONT_PX * totalScale * factorAt(zoom)));
   const needAt = (zoom: number, textPx: number) => (markerPx * factorAt(zoom) + PILL_PAD_Y_PX * bucket) / textPx + LABEL_GAP_EMS;
   const zooms = Array.from({ length: ML_MAX_ZOOM - ML_MIN_ZOOM + 1 }, (_, index) => ML_MIN_ZOOM + index);
   const text = zooms.map(textAt);
@@ -799,7 +811,7 @@ export function churchesLayers(): LayerSpecification[] {
       filter: ["==", ["get", "showLabel"], true],
       layout: {
         "text-field": ["get", "name"],
-        "text-size": zoomScaledStops(["*", 24, ["get", "labelScale"], ["get", "objectScale"]], 24 * LABEL_SCALE_MAX, 24 * LABEL_SCALE_MIN),
+        "text-size": zoomScaledStops(["*", LABEL_FONT_PX, ["get", "labelScale"], ["get", "objectScale"]], LABEL_FONT_PX * LABEL_SCALE_MAX, LABEL_FONT_PX * LABEL_SCALE_MIN),
         "text-offset": labelOffsetExpression(),
         "text-anchor": "bottom",
         "text-allow-overlap": true,
@@ -842,7 +854,7 @@ export async function addOverlays(
   } else {
     (map.getSource("churches") as GeoJSONSource).setData(pins);
   }
-  applyHighlights(map, highlights);
-  applyAdmin1Highlights(map, highlights);
+  applyHighlights(map, highlights, highlightColours);
+  applyAdmin1Highlights(map, highlights, highlightColours);
   applyIsolate(map, highlights, isolate);
 }

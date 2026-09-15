@@ -49,6 +49,13 @@ test("a repeated A1: id is not duplicated in the region expression", () => {
   assert.deepEqual(admin1PaintExpression(["A1:MYS-1186", "A1:MYS-1186"], 0.4)[1][2], ["literal", ["MYS-1186"]]);
 });
 
+test("no-fill admin1 ids are omitted from the paint list", () => {
+  assert.deepEqual(
+    admin1PaintExpression(["A1:MYS-1186", "A1:MYS-1187"], 0.4, { "A1:MYS-1186": "none" })[1][2],
+    ["literal", ["MYS-1187"]]
+  );
+});
+
 test("admin1Countries derives the country from the adm1_code prefix", () => {
   assert.deepEqual(admin1Countries(["A1:MYS-1186"]), ["MYS"]);
   assert.deepEqual(admin1Countries(["MYS", "IDN"]), []);

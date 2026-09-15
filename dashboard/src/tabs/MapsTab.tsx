@@ -3,6 +3,7 @@ import {
   bootstrapMapsCsv,
   bootstrapMapsPinsCsv,
   bootstrapMapsRows,
+  chooseSave,
   downloadMapsSession,
   exportMaps,
   cancelMapsExport,
@@ -68,17 +69,19 @@ import {
 } from "../prefs";
 import {
   DEFAULT_HIGHLIGHT_COLOUR,
+  HIGHLIGHT_NO_FILL,
   highlightCssVars,
   isHighlightHex,
+  isHighlightNone,
   normaliseHighlightColour,
+  parseHighlightColourValue,
   pruneHighlightColours,
   setHighlightColour,
 } from "../maps/highlight";
-import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub, DraftNumberInput } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
-import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
+import { autoCruiseZoom, cameraAtHop, captureFlyFrames, FLY_EXPORT_FPS } from "../maps/captureFly";
 import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { creditLines } from "../maps/credits";
@@ -204,6 +207,29 @@ function highlightName(code: string): string {
   return code.startsWith("A1:") ? admin1Name(code) : admin0Name(code);
 }
 
+function parentDir(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const slash = trimmed.lastIndexOf("/");
+  return slash > 0 ? trimmed.slice(0, slash) : trimmed;
+}
+
+function mapsExportDefaultName(job: Job | null, doc: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean } | null): string {
+  const dest = (job?.result || {}) as { destPath?: string; destPathCg?: string; destPathDsk?: string };
+  const last = dest.destPath || dest.destPathCg || dest.destPathDsk;
+  if (last) {
+    const base = last.split("/").pop();
+    if (base) return base.toLowerCase().endsWith(".key") ? base : `${base}.key`;
+  }
+  const stem = (job?.name || "maps").replace(/[/\\]/g, "-").trim() || "maps";
+  const lw = doc?.exportLw !== false;
+  const cg = doc?.exportCg !== false;
+  const dsk = doc?.exportDsk === true;
+  const n = [lw, cg, dsk].filter(Boolean).length;
+  if (n === 1 && cg && !lw) return `${stem}_CG.key`;
+  if (n === 1 && dsk && !lw && !cg) return `${stem}_DSK.key`;
+  return `${stem}.key`;
+}
+
 const COLOUR_DEBOUNCE_MS = 250;
 
 type PendingHighlightOverride = {
@@ -321,6 +347,7 @@ export function MapsTab() {
   const pendingOverrideRef = useRef<PendingHighlightOverride | null>(null);
   const [objectClipboard, setObjectClipboard] = useState<ObjectClipboard<MapsChurch>>({ churches: [], sourceZoom: 0 });
   const [pasteTargets, setPasteTargets] = useState<string[]>([]);
+  const [pastePickerOpen, setPastePickerOpen] = useState(false);
   const [renamingSlide, setRenamingSlide] = useState<{ id: string; title: string } | null>(null);
   const [inspTab, setInspTab] = useState<InspectorTab>("properties");
   const [previewing, setPreviewing] = useState(false);
@@ -366,6 +393,7 @@ export function MapsTab() {
   const [pickRegions, setPickRegions] = useSessionToggle(MAPS_PICK_MODE_KEY, false);
   const [regionsLoading, setRegionsLoading] = useState(false);
   const [regionCameraCountries, setRegionCameraCountries] = useState<string[]>([]);
+  const [regionHintReady, setRegionHintReady] = useState(false);
   const [layersOpen, setLayersOpen] = useState(false);
   const layersRef = useRef<HTMLDivElement | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -416,12 +444,15 @@ export function MapsTab() {
   useEffect(() => {
     if (!pickRegions) {
       setRegionsLoading(false);
-      setRegionCameraCountries([]);
+      setRegionHintReady(false);
       return;
     }
-    const codes = mapRef.current?.getRegionCountries() ?? [];
-    setRegionCameraCountries(codes);
-    const missing = codes.filter((code) => !isAdmin1Loaded(code));
+    const codes = mapRef.current?.getRegionCountries();
+    if (codes != null) {
+      setRegionCameraCountries(codes);
+      setRegionHintReady(true);
+    }
+    const missing = (codes ?? []).filter((code) => !isAdmin1Loaded(code));
     if (!missing.length) {
       setRegionsLoading(false);
       return;
@@ -487,7 +518,8 @@ export function MapsTab() {
 
   useEffect(() => {
     if (!selectedHighlight) return;
-    setOverrideText(activeView?.highlightColours?.[selectedHighlight] ?? highlightColour);
+    const raw = activeView?.highlightColours?.[selectedHighlight];
+    setOverrideText(isHighlightHex(raw) ? raw : highlightColour);
   }, [selectedHighlight, activeView?.highlightColours, highlightColour]);
 
   useEffect(() => {
@@ -1141,8 +1173,8 @@ export function MapsTab() {
   }
 
   function applyHighlightOverride(target: PendingHighlightOverride) {
-    if (!isHighlightHex(target.value)) return;
-    const colour = normaliseHighlightColour(target.value);
+    const colour = parseHighlightColourValue(target.value);
+    if (!colour) return;
     const current = docRef.current;
     if (!current) return;
     const slide = current.slides.find((item) => item.id === target.slideId);
@@ -1244,6 +1276,22 @@ export function MapsTab() {
     setOverrideText(highlightColour);
   }
 
+  function setHighlightNoFill(code: string, noFill: boolean) {
+    const slideId = activeRef.current;
+    if (!slideId) return;
+    if (overrideDebounceRef.current) {
+      clearTimeout(overrideDebounceRef.current);
+      overrideDebounceRef.current = null;
+    }
+    pendingOverrideRef.current = null;
+    if (noFill) {
+      applyHighlightOverride({ slideId, audience: activeAudienceRef.current, code, value: HIGHLIGHT_NO_FILL });
+      setOverrideText(highlightColour);
+      return;
+    }
+    clearHighlightOverride(code);
+  }
+
   function beginSlideRename(slide: MapsSlide) {
     if (!locked) setRenamingSlide({ id: slide.id, title: slide.title });
   }
@@ -1304,6 +1352,25 @@ export function MapsTab() {
     updateActive({ churches: activeView.churches.map((church) => (selected.has(church.id) ? { ...church, ...partial } : church)) });
   }
 
+  function isPinOrDot(church: MapsChurch): boolean {
+    return church.kind === "dot" || church.kind === "dropPin";
+  }
+
+  function withScaleWithMap(church: MapsChurch, enabled: boolean, zoom: number): MapsChurch {
+    const defaultSize = defaultObjectSize(church.kind, church.assetWidth);
+    if (enabled) return { ...church, scaleWithMap: true, sizeZoom: zoom };
+    const size = church.sizeZoom != null ? (church.size || defaultSize) * zoomSizeFactor(church.sizeZoom, zoom) : church.size || defaultSize;
+    return { ...church, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, size))), sizeZoom: undefined };
+  }
+
+  function updateSelectedMarkers(mutate: (church: MapsChurch) => MapsChurch) {
+    if (!activeView || selectedPins.length === 0) return;
+    const selected = new Set(selectedPins);
+    updateActive({
+      churches: activeView.churches.map((church) => (selected.has(church.id) && isPinOrDot(church) ? mutate(church) : church)),
+    });
+  }
+
   function deleteSelectedPins() {
     if (!activeView || selectedPins.length === 0 || locked) return;
     if (!window.confirm(`Remove ${selectedPins.length} selected object${selectedPins.length === 1 ? "" : "s"}?`)) return;
@@ -1312,6 +1379,7 @@ export function MapsTab() {
     updateActive({ churches, ...revealMovieGuard(churches) });
     if (selectedPin && selected.has(selectedPin)) setSelectedPin(null);
     setSelectedPins([]);
+    setPastePickerOpen(false);
   }
 
   function copySelectedPins() {
@@ -1321,11 +1389,13 @@ export function MapsTab() {
       churches: activeView.churches.filter((church) => selected.has(church.id)).map((church) => ({ ...church })),
       sourceZoom: activeView.camera.zoom,
     });
+    setPastePickerOpen(true);
   }
 
   function pasteObjects(toAllSlides = false) {
     if (!objectClipboard.churches.length || !doc || locked) return;
     const targets = toAllSlides ? new Set(pasteTargets) : new Set([active?.id]);
+    if (toAllSlides) setPastePickerOpen(false);
     const slides = doc.slides.map((slide) => {
       if (!targets.has(slide.id)) return slide;
       const targetView = activeAudience === "cg" && slide.cg ? slide.cg : slide;
@@ -1735,6 +1805,19 @@ export function MapsTab() {
     const currentJob = jobRef.current;
     if (!currentJob) return;
     if (currentJob.status === "queued" || currentJob.status === "running") return;
+    let chosen;
+    try {
+      chosen = await chooseSave({
+        prompt: "Export Keynote",
+        defaultName: mapsExportDefaultName(currentJob, docRef.current),
+        defaultLocation: exportDir || defaultExportDir || undefined,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (!chosen) return;
+    setExportDir(parentDir(chosen.path));
     if (previewingRef.current) stopPreview(true);
     exportAbort.current = false;
     exportingRef.current = true;
@@ -2030,7 +2113,7 @@ export function MapsTab() {
         if (!from || !to) continue;
         const width = hopSurfaceWidth(from, to, "lw");
         const height = 1080;
-        const fps = 30;
+        const fps = FLY_EXPORT_FPS;
         const count = Math.max(2, Math.round(link.duration * fps));
         const cameras = Array.from({ length: count }, (_, i) =>
           cameraAtHop(from.camera, to.camera, i / (count - 1), {
@@ -2081,7 +2164,7 @@ export function MapsTab() {
           assetBaseUrl: `/api/maps/${id}/assets`,
           numberPins: true,
           duration: link.duration,
-          fps: 30,
+          fps,
           easing: link.easing,
           routePoints: link.route?.points,
           curve: link.curve,
@@ -2095,7 +2178,7 @@ export function MapsTab() {
           highlightColours: from.highlightColours,
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
-            await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 });
+            await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps });
             trackFrame(i, n);
           },
         });
@@ -2111,7 +2194,7 @@ export function MapsTab() {
           const width = hopSurfaceWidth(baseFrom, baseTo, "cg");
           const cropFromX = (width - 1920) / 2 + (baseFrom.cg ? 0 : baseFrom.cgShiftX);
           const cropToX = (width - 1920) / 2 + (baseTo.cg ? 0 : baseTo.cgShiftX);
-          const fps = 30;
+          const fps = FLY_EXPORT_FPS;
           const count = Math.max(2, Math.round(link.duration * fps));
           const cameras = Array.from({ length: count }, (_, i) =>
             cameraAtHop(from.camera, to.camera, i / (count - 1), {
@@ -2200,7 +2283,7 @@ export function MapsTab() {
         exportLw: latest?.exportLw,
         exportCg: latest?.exportCg,
         exportDsk: latest?.exportDsk,
-        exportDir,
+        exportPath: chosen.path,
         credits,
       });
       setJob(started);
@@ -2252,6 +2335,8 @@ export function MapsTab() {
   }, []);
 
   const pin = activeView?.churches.find((c) => c.id === selectedPin) || null;
+  const selectedMarkers = (activeView?.churches || []).filter((church) => selectedPins.includes(church.id) && isPinOrDot(church));
+  const selectedMarkerSize = selectedMarkers[0] ? selectedMarkers[0].size || defaultObjectSize(selectedMarkers[0].kind, selectedMarkers[0].assetWidth) : 28;
   const nextSlide = outgoing && activeIndex >= 0 ? slides[activeIndex + 1] : null;
   const nextView = nextSlide ? slideForAudience(nextSlide, activeAudience) : null;
   const otherAudience: MapsAudience = activeAudience === "lw" ? "cg" : "lw";
@@ -2726,6 +2811,12 @@ export function MapsTab() {
                 selectedPinId={selectedPin}
                 onCameraCommit={onCameraCommit}
                 pickRegions={pickRegions}
+                onRegionCountries={(codes) => {
+                  setRegionCameraCountries((prev) =>
+                    prev.length === codes.length && prev.every((code, index) => code === codes[index]) ? prev : codes
+                  );
+                  setRegionHintReady(true);
+                }}
                 onToggleCountry={(adm0) => {
                   if (!activeView) return;
                   const has = activeView.highlights.includes(adm0);
@@ -2894,7 +2985,6 @@ export function MapsTab() {
                     </select>
                   </label>
                   <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><DraftNumberInput min={24} max={4000} digits={0} value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} aria-label="Size" onChange={(size) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size } : c) })} onCommit={() => fireAndForgetSave()} /></label>
-                  <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
                   <label className="maps-check">
                     <input
                       type="checkbox"
@@ -2903,13 +2993,7 @@ export function MapsTab() {
                       onChange={(event) => {
                         const zoom = activeView?.camera.zoom ?? 0;
                         updateActive({
-                          churches: (activeView?.churches || []).map((c) => {
-                            if (c.id !== pin.id) return c;
-                            const defaultSize = defaultObjectSize(c.kind, c.assetWidth);
-                            if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
-                            const size = c.sizeZoom != null ? (c.size || defaultSize) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || defaultSize;
-                            return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, size))), sizeZoom: undefined };
-                          }),
+                          churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? withScaleWithMap(c, event.target.checked, zoom) : c)),
                         });
                       }}
                     />{" "}
@@ -3020,15 +3104,24 @@ export function MapsTab() {
                         Name
                         <span>{highlightName(selectedHighlight)}</span>
                       </label>
+                      <label className="maps-check">
+                        <input
+                          type="checkbox"
+                          checked={isHighlightNone(activeView?.highlightColours?.[selectedHighlight])}
+                          disabled={locked}
+                          onChange={(event) => setHighlightNoFill(selectedHighlight, event.target.checked)}
+                        />{" "}
+                        No fill
+                      </label>
                       <HighlightColourFields
                         colour={overrideText || highlightColour}
                         text={overrideText}
-                        disabled={locked}
+                        disabled={locked || isHighlightNone(activeView?.highlightColours?.[selectedHighlight])}
                         onColour={scheduleOverrideColour}
                         onText={setOverrideText}
                         onCommit={commitOverrideColour}
                       />
-                      {activeView?.highlightColours?.[selectedHighlight] && (
+                      {isHighlightHex(activeView?.highlightColours?.[selectedHighlight]) && (
                         <button className="btn secondary" type="button" disabled={locked} onClick={() => clearHighlightOverride(selectedHighlight)}>
                           Use global colour
                         </button>
@@ -3195,12 +3288,24 @@ export function MapsTab() {
                           { id: "countries", label: "Countries" },
                           { id: "regions", label: "Regions" },
                         ]}
-                        onChange={(id) => setPickRegions(id === "regions")}
+                        onChange={(id) => {
+                          const next = id === "regions";
+                          if (next) {
+                            const codes = mapRef.current?.getRegionCountries();
+                            if (codes != null) {
+                              setRegionCameraCountries(codes);
+                              setRegionHintReady(true);
+                            }
+                          } else {
+                            setRegionHintReady(false);
+                          }
+                          setPickRegions(next);
+                        }}
                       />
                       <div className="maps-pick-hint note">
-                        {pickRegions && regionsLoading
+                        {pickRegions && regionHintReady && regionsLoading
                           ? "Loading regions…"
-                          : pickRegions && regionCameraCountries.length === 0
+                          : pickRegions && regionHintReady && regionCameraCountries.length === 0
                             ? "Pan a country into view to pick its regions."
                             : null}
                       </div>
@@ -3370,14 +3475,82 @@ export function MapsTab() {
                         <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => pasteObjects(false)} title="Paste" aria-label="Paste">
                           <IconPaste />
                         </button>
-                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => setPastePickerOpen(true)} title="Paste to slides" aria-label="Paste to slides">
                           <IconPasteSlides />
                         </button>
                         <button className="btn maps-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>
-                      {objectClipboard.churches.length > 0 && <div className="maps-pin-bulk" role="group" aria-label="Paste destinations">{slides.map((slide) => <label key={slide.id}><input type="checkbox" checked={pasteTargets.includes(slide.id)} onChange={(event) => setPasteTargets((targets) => event.target.checked ? [...new Set([...targets, slide.id])] : targets.filter((id) => id !== slide.id))} /> {slide.title}</label>)}<button className="btn secondary" type="button" disabled={locked || !pasteTargets.length} onClick={() => pasteObjects(true)}>Paste selected slides</button></div>}
+                      {pastePickerOpen && objectClipboard.churches.length > 0 && selectedPins.length > 0 && (
+                        <div className="maps-pin-bulk" role="group" aria-label="Paste destinations">
+                          {slides.map((slide) => (
+                            <label key={slide.id}>
+                              <input
+                                type="checkbox"
+                                checked={pasteTargets.includes(slide.id)}
+                                onChange={(event) =>
+                                  setPasteTargets((targets) =>
+                                    event.target.checked ? [...new Set([...targets, slide.id])] : targets.filter((id) => id !== slide.id)
+                                  )
+                                }
+                              />{" "}
+                              {slide.title}
+                            </label>
+                          ))}
+                          <button className="btn secondary" type="button" disabled={locked || !pasteTargets.length} onClick={() => pasteObjects(true)}>
+                            Paste selected slides
+                          </button>
+                        </div>
+                      )}
+                      {selectedMarkers.length > 0 && (
+                        <div className="maps-pin-bulk" role="group" aria-label="Selected pin style">
+                          <label>
+                            Size
+                            <input
+                              type="range"
+                              min="24"
+                              max="4000"
+                              step="10"
+                              value={selectedMarkerSize}
+                              disabled={locked}
+                              onChange={(event) => updateSelectedMarkers((church) => ({ ...church, size: Number(event.target.value) }))}
+                            />
+                            <DraftNumberInput
+                              min={24}
+                              max={4000}
+                              digits={0}
+                              value={selectedMarkerSize}
+                              disabled={locked}
+                              aria-label="Pin size"
+                              onChange={(size) => updateSelectedMarkers((church) => ({ ...church, size }))}
+                              onCommit={() => fireAndForgetSave()}
+                            />
+                          </label>
+                          <label className="maps-check">
+                            <input
+                              type="checkbox"
+                              checked={selectedMarkers.every((item) => !!item.scaleWithMap)}
+                              disabled={locked}
+                              onChange={(event) => {
+                                const zoom = activeView?.camera.zoom ?? 0;
+                                updateSelectedMarkers((church) => withScaleWithMap(church, event.target.checked, zoom));
+                              }}
+                            />{" "}
+                            Scale with map
+                          </label>
+                          <label>
+                            Colour
+                            <input
+                              type="color"
+                              aria-label="Colour"
+                              value={selectedMarkers[0].color}
+                              disabled={locked}
+                              onChange={(event) => updateSelectedMarkers((church) => ({ ...church, color: event.target.value }))}
+                            />
+                          </label>
+                        </div>
+                      )}
                       <div className="maps-pin-list">
                         {(activeView?.churches || []).map((church) => (
                           <div key={church.id} className={`maps-pin-row kind-${pinKindClass(church.kind)}${selectedPin === church.id ? " active" : ""}`}>
@@ -3675,13 +3848,6 @@ export function MapsTab() {
                     Credits slide instead of stamped attribution
                   </label>
                   <div className="actions export-actions">
-                    <ExportDestinationRow
-                      value={exportDir}
-                      onChange={setExportDir}
-                      defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
-                      onError={setError}
-                      inline
-                    />
                     <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
                       Export
                     </button>

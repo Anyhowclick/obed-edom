@@ -2934,6 +2934,35 @@ def test_export_body_rejects_unknown_field_other_than_export_dir():
     assert response.status_code == 422
 
 
+def test_export_forwards_export_path(monkeypatch, tmp_path):
+    job = _seed()
+    captured = {}
+
+    def spy(j, **kwargs):
+        captured.update(kwargs)
+        return {**(getattr(j, "result", None) or {}), "destPath": str(kwargs["export_path"])}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", spy)
+    dest = tmp_path / "exports" / "Sunday.key"
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportPath": str(dest)})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert captured["export_path"] == dest.resolve()
+    assert done["result"]["exportDir"] == str(dest.parent.resolve())
+
+
+def test_export_rejects_export_path_inside_private_root():
+    from obed_edom.paths import output_root
+
+    job = _seed()
+    response = client.post(
+        f"/api/maps/{job['id']}/export",
+        json={"exportPath": str(output_root() / ".maps" / "Sunday.key")},
+    )
+    assert response.status_code == 400
+
+
 def test_bootstrap_csv_bumps_state_revision(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     job = _seed()
@@ -4176,6 +4205,16 @@ def test_maps_slide_accepts_highlight_colours():
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     assert saved.json()["result"]["slides"][0]["highlightColours"] == {"MYS": "#00aaff"}
+
+
+def test_maps_slide_accepts_highlight_no_fill():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["highlights"] = ["MYS"]
+    doc["slides"][0]["highlightColours"] = {"MYS": "NONE"}
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["highlightColours"] == {"MYS": "none"}
 
 
 def test_maps_slide_rejects_bad_highlight_colours():

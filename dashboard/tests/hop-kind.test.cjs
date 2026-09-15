@@ -67,6 +67,13 @@ test("missing colours vs an override become a Cut", () => {
   assert.equal(inferHopKind(from, to), "cut");
 });
 
+test("no-fill vs a colour becomes a Cut", () => {
+  const from = slide({ highlightColours: { SGP: "none" } });
+  const to = slide({ id: "t", highlightColours: { SGP: "#00aaff" } });
+  assert.deepEqual(appearanceMismatch(from, to), ["highlightColours"]);
+  assert.equal(inferHopKind(from, to), "cut");
+});
+
 test("missing colours vs an empty map stay a Morph", () => {
   const from = slide({});
   const to = slide({ id: "t", highlightColours: {} });
