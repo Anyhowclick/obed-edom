@@ -2,6 +2,8 @@ import { MercatorCoordinate, type CustomLayerInterface, type Map as MapLibreMap 
 import { planBuildingsInk, type WireFeature } from "./borderlandsFacade";
 import {
   buildingLayerActive,
+  expandBoundsToPlanZoom,
+  inkLayerMode,
   inkRebuildKey,
   shouldReplaceInkMesh,
   type CollectResult,
@@ -20,10 +22,11 @@ import {
 
 export const BORDERLANDS_INK_LAYER_ID = "borderlands-ink";
 export { planBuildingFacade, buildingExtents } from "./borderlandsFacade";
-export { inkFragmentKey, inkPlanZoom, inkRebuildKey, shouldReplaceInkMesh } from "./borderlandsInkPolicy";
+export { expandBoundsToPlanZoom, inkFragmentKey, inkLayerMode, inkPlanZoom, inkRebuildKey, shouldReplaceInkMesh } from "./borderlandsInkPolicy";
 
 export type BorderlandsInkContext = {
   authoredZoomDelta: number;
+  seamsOnly?: boolean;
 };
 
 export type InkDiagnostics = {
@@ -261,6 +264,9 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
   let rebuilding = false;
   let rebuildAgain = false;
   let context = initialContext;
+  let lastFeatureCount = 0;
+  let lastCollectLng = NaN;
+  let lastCollectLat = NaN;
   let lastDiag: InkDiagnostics = {
     styleGeneration: 1,
     sourceRevision: 0,
@@ -338,6 +344,7 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
       viewportW: canvas.clientWidth || 0,
       viewportH: canvas.clientHeight || 0,
       buildingsVisible: enabled && buildingsEligible(map),
+      seamsOnly: !!context.seamsOnly,
       ...bounds,
     });
   }
@@ -387,18 +394,37 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
       rebuilding = false;
       return;
     }
+    const collectCenter = map.getCenter();
+    const sameAnchor =
+      Number.isFinite(lastCollectLng) &&
+      Math.hypot(collectCenter.lng - lastCollectLng, collectCenter.lat - lastCollectLat) < 1e-4;
+    if (
+      !force &&
+      committedGen > 0 &&
+      sameAnchor &&
+      collected.features.length < lastFeatureCount * 0.85
+    ) {
+      requestedGen = committedGen;
+      lastDiag.requestedGeneration = requestedGen;
+      rebuilding = false;
+      return;
+    }
     try {
       const started = performance.now();
       let viewBounds: { west: number; south: number; east: number; north: number } | undefined;
       try {
         const box = map.getBounds();
-        viewBounds = { west: box.getWest(), south: box.getSouth(), east: box.getEast(), north: box.getNorth() };
+        viewBounds = expandBoundsToPlanZoom(
+          { west: box.getWest(), south: box.getSouth(), east: box.getEast(), north: box.getNorth() },
+          map.getZoom(),
+        );
       } catch {
         viewBounds = undefined;
       }
       const planned = planBuildingsInk(collected.features, {
         bounds: viewBounds,
         padDeg: 0.002,
+        seamsOnly: !!context.seamsOnly,
       });
       const center = map.getCenter();
       const nextOrigin = mercator(center.lng, center.lat, 0);
@@ -419,6 +445,9 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
       cacheKey = key;
       cameraDirty = false;
       sourceDirty = false;
+      lastFeatureCount = collected.features.length;
+      lastCollectLng = collectCenter.lng;
+      lastCollectLat = collectCenter.lat;
       lastDiag = {
         ...lastDiag,
         ...planned.diagnostics,
@@ -493,7 +522,17 @@ export function createBorderlandsInkLayer(map: MapLibreMap, initialContext: Bord
       }
     },
     setContext(next) {
-      context = next;
+      const merged: BorderlandsInkContext = {
+        authoredZoomDelta: next.authoredZoomDelta ?? context.authoredZoomDelta,
+        seamsOnly: next.seamsOnly !== undefined ? next.seamsOnly : context.seamsOnly,
+      };
+      const meshChanged = !!context.seamsOnly !== !!merged.seamsOnly;
+      context = merged;
+      if (meshChanged) {
+        cameraDirty = true;
+        scheduleRebuild(true);
+        return;
+      }
       map.triggerRepaint();
     },
     refresh() {
@@ -730,18 +769,23 @@ export async function waitForBorderlandsInk(
 }
 
 export function syncBorderlandsInk(map: MapLibreMap, styleId: string, context?: BorderlandsInkContext): void {
+  const mode = inkLayerMode(styleId);
+  const next: BorderlandsInkContext = {
+    authoredZoomDelta: context?.authoredZoomDelta ?? 0,
+    seamsOnly: mode === "seams",
+  };
   const has = !!map.getLayer(BORDERLANDS_INK_LAYER_ID);
-  if (styleId !== "borderlands") {
+  if (!mode) {
     if (has) map.removeLayer(BORDERLANDS_INK_LAYER_ID);
     return;
   }
   if (has) {
-    if (context) setBorderlandsInkContext(map, context);
+    setBorderlandsInkContext(map, next);
     return;
   }
   if (!map.getStyle()) return;
   try {
-    map.addLayer(createBorderlandsInkLayer(map, context || { authoredZoomDelta: 0 }), inkBeforeLayerId(map.getStyle()?.layers));
+    map.addLayer(createBorderlandsInkLayer(map, next), inkBeforeLayerId(map.getStyle()?.layers));
   } catch (err) {
     console.warn("borderlands ink", err);
   }

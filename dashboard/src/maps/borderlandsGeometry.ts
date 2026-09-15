@@ -1110,7 +1110,10 @@ export function planComponent(
   return segs;
 }
 
-export function planNormalizedInk(components: NormalizedComponent[]): { segs: FacadeSeg[]; diagnostics: GeometryDiagnostics } {
+export function planNormalizedInk(
+  components: NormalizedComponent[],
+  opts?: { seamsOnly?: boolean },
+): { segs: FacadeSeg[]; diagnostics: GeometryDiagnostics } {
   const selected = components.slice(0, MAX_COMPONENTS);
   const diagnostics: GeometryDiagnostics = {
     sourceFeatureCount: 0,
@@ -1129,13 +1132,15 @@ export function planNormalizedInk(components: NormalizedComponent[]): { segs: Fa
   const rails = findClipRails(selected);
   diagnostics.sharedEdgesRemoved = shared.keys.size;
   const segs: FacadeSeg[] = [];
-  for (const component of selected) {
-    const next = planComponent(component, shared, diagnostics, rails);
-    if (segs.length + next.length > MAX_SEGMENTS) {
-      diagnostics.budgetDropped += 1;
-      continue;
+  if (!opts?.seamsOnly) {
+    for (const component of selected) {
+      const next = planComponent(component, shared, diagnostics, rails);
+      if (segs.length + next.length > MAX_SEGMENTS) {
+        diagnostics.budgetDropped += 1;
+        continue;
+      }
+      segs.push(...next);
     }
-    segs.push(...next);
   }
   for (const span of shared.spans) {
     if (segs.length >= MAX_SEGMENTS) {

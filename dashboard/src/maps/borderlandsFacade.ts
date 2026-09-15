@@ -35,6 +35,7 @@ export function planBuildingsInk(
   opts?: {
     bounds?: { west: number; south: number; east: number; north: number };
     padDeg?: number;
+    seamsOnly?: boolean;
   }
 ): { segs: FacadeSeg[]; components: NormalizedComponent[]; diagnostics: GeometryDiagnostics; signature: string } {
   const gated = opts?.bounds
@@ -46,7 +47,7 @@ export function planBuildingsInk(
     : components;
   diagnostics.normalizedCount = visible.length;
   diagnostics.budgetDropped += Math.max(0, components.length - visible.length);
-  const planned = planNormalizedInk(visible);
+  const planned = planNormalizedInk(visible, { seamsOnly: opts?.seamsOnly });
   diagnostics.sharedEdgesRemoved = planned.diagnostics.sharedEdgesRemoved;
   diagnostics.roofFallbacks = planned.diagnostics.roofFallbacks;
   diagnostics.selectedPosts = planned.diagnostics.selectedPosts;
