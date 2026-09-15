@@ -98,6 +98,34 @@ def offline_write_mode(explicit: str | None = None, *, say: Callable[[str], None
     return mode
 
 
+def zorder_write_mode(
+    explicit: str | None = None, *, offline_mode: str | None = None,
+    say: Callable[[str], None] | None = None,
+) -> str:
+    """`off` (default, tranche 1), `on` (offline z-order patch), or `verify` (patch + a
+    second read-back decode). Env `OBED_ZORDER_WRITE`; unknown tokens fall back to `off`.
+    Forced `off` without the `iwa` extra (mirrors `probe_iwa_extra`), and forced `off`
+    when `offline_mode` (the caller's already-resolved `offline_write_mode()`) is `off`
+    — there are no offline slides to raise against."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_ZORDER_WRITE", "")).strip().lower()
+    mode = raw if raw in {"on", "verify"} else "off"
+    if mode == "off":
+        return mode
+    if offline_mode == "off":
+        if say:
+            say(f"OBED_ZORDER_WRITE={mode!r} needs OBED_OFFLINE_WRITE on; forcing z-order write off.")
+        return "off"
+    try:
+        import keynote_parser  # noqa: F401,PLC0415
+        import obed_edom.iwa_write  # noqa: F401,PLC0415
+    except Exception as exc:  # noqa: BLE001 — any import failure forces off
+        if say:
+            say(f"OBED_ZORDER_WRITE={mode!r} needs the `iwa` extra ({type(exc).__name__}: {exc}); "
+                "forcing z-order write off.")
+        return "off"
+    return mode
+
+
 def slide_reuse_mode(explicit: str | None = None) -> str:
     """`off` (default) or `on`. Env `OBED_SLIDE_REUSE`; unknown tokens fall back to `off`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_SLIDE_REUSE", "")).strip().lower()
@@ -1473,6 +1501,19 @@ def remap_keynote(
     offline_write_info = offline_write.run_offline_write(
         dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say
     )
+    zorder_mode = zorder_write_mode(offline_mode=offline_mode, say=say)
+    zorder_refused = set((offline_write_info or {}).get("refused") or [])
+    zorder_targets, zorder_eligibility = offline_write.zorder_eligible_slides(
+        dest, zorder_mode, offline_slides, zorder_refused, child_resize, badge_raises,
+        transform_dicts, say,
+    )
+    if zorder_mode != "off":
+        gui_slides = zorder_eligibility["zorderGui"]
+        say(
+            f"OBED_ZORDER_WRITE={zorder_mode}: {len(zorder_targets)} slide(s) go offline "
+            f"(surgical z-order patch); {len(gui_slides)} slide(s) stay on the GUI raise "
+            f"(Accessibility still required{': ' + str(gui_slides) if gui_slides else ''})."
+        )
     # Card border stroke widths shrink with the canvas; restore them before the stat-finalize
     # pass. Always runs — not gated by OBED_OFFLINE_WRITE.
     card_stroke_result = restore_card_stroke_widths(dest, source, wall, say)
@@ -1523,6 +1564,8 @@ def remap_keynote(
         say("WARNING remap: " + " ".join(group_collapse_tokens))
     # JXA cannot size grouped stat numbers or restack them; AppleScript sets template point size and Bring to Front.
     export_path = Path(export_dir).expanduser().resolve() if export_dir else None
+    suppress_raises = set(zorder_targets)
+    pass2_export_path = None if zorder_mode != "off" else export_path
     child_resize_result: dict[str, Any] | None = None
     if child_resize or group_removes or badge_raises:
         stat_sizes = read_template_stat_sizes(template_path) if child_resize else {}
@@ -1536,16 +1579,21 @@ def remap_keynote(
                 else ""
             )
             + (f"; raising {len(badge_raises)} badge object(s)" if badge_raises else "")
+            + (f"; suppressing GUI raise on {len(suppress_raises)} offline-raised slide(s)"
+               if suppress_raises else "")
             + "."
-            + (" Exporting previews in the same session." if export_path else "")
+            + (" Exporting previews in the same session." if pass2_export_path else "")
+            + (" Preview export moved after the z-order patch (extra Keynote open)."
+               if export_path and pass2_export_path is None else "")
         )
         child_resize_result = _run_stat_finalize(
             dest,
             child_resize,
             stat_sizes,
-            export_dir=export_path,
+            export_dir=pass2_export_path,
             group_removes=group_removes,
             badge_raises=badge_raises,
+            suppress_raises=suppress_raises,
         )
         done = child_resize_result.get("done") or 0
         skipped = child_resize_result.get("skipped") or 0
@@ -1614,8 +1662,17 @@ def remap_keynote(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
                 "placement/size. See the .stat-finalize.applescript dump."
             )
+    if suppress_raises and child_resize_result is not None and not (
+        child_resize_result.get("ok") and child_resize_result.get("closed")
+    ):
+        raise RuntimeError(
+            f"zorder patch skipped on suppressed slide(s) {sorted(suppress_raises)}: "
+            "pass 2 (stat-finalize) did not complete, so the deck may still be open in "
+            "Keynote; its GUI raise was suppressed; re-run with OBED_ZORDER_WRITE=off"
+        )
+    zorder_write_info = offline_write.run_offline_zorder(dest, zorder_mode, zorder_targets, say)
     # Builds/transitions follow the source. Unconditional and runs last — verify-all,
-    # patch-none when the slide set is empty.
+    # patch-none when the slide set is empty; must keep running LAST, after the z-order write.
     build_result = restore_source_builds(dest, source, reuse_slides, say)
     result: dict[str, Any] = {
         "source": str(source),
@@ -1648,6 +1705,33 @@ def remap_keynote(
     }
     if offline_write_info is not None:
         result["offlineWrite"] = offline_write_info
+    if zorder_mode != "off":
+        merged_zorder = dict(zorder_write_info) if zorder_write_info is not None else {
+            "mode": zorder_mode, "slides": [], "zorderSlides": 0, "zorderStatRaised": 0,
+            "zorderBadgeRaised": 0, "zorderNoop": 0, "zorderRefused": 0, "zorderLost": 0,
+        }
+        merged_zorder["zorderRefused"] = (
+            merged_zorder.get("zorderRefused", 0) + zorder_eligibility["zorderRefused"]
+        )
+        merged_zorder["zorderUnresolved"] = zorder_eligibility["zorderUnresolved"]
+        merged_zorder["zorderGui"] = zorder_eligibility["zorderGui"]
+        say(
+            f"Stat zorder detail: zorderSlides={merged_zorder.get('zorderSlides', 0)} "
+            f"zorderStatRaised={merged_zorder.get('zorderStatRaised', 0)} "
+            f"zorderBadgeRaised={merged_zorder.get('zorderBadgeRaised', 0)} "
+            f"zorderNoop={merged_zorder.get('zorderNoop', 0)} "
+            f"zorderRefused={merged_zorder['zorderRefused']} "
+            f"zorderUnresolved={zorder_eligibility['zorderUnresolved']} "
+            f"zorderLost={merged_zorder.get('zorderLost', 0)} "
+            f"zorderGui={len(zorder_eligibility['zorderGui'])}."
+        )
+        result["zorderWrite"] = merged_zorder
+        failures = merged_zorder.get("failures") or []
+        if failures:
+            raise RuntimeError(
+                f"zorder patch failed on suppressed slide(s) {sorted(n for n, _ in failures)}: "
+                "its GUI raise was suppressed; deck saved; re-run with OBED_ZORDER_WRITE=off"
+            )
     result["cardStroke"] = card_stroke_result
     result["builds"] = build_result
     return result

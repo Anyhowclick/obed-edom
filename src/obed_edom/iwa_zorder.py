@@ -11,7 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 from obed_edom.iwa_kindindex import derive_kind_index
-from obed_edom.iwa_runs import _load_deck, slide_order
+from obed_edom.iwa_runs import _group_child_signature, _load_deck, slide_order
 from obed_edom.iwa_write import (
     OfflineWriteCorrupted,
     PatchResult,
@@ -46,10 +46,15 @@ def resolve_raise_targets(
     """-> (stat_ids ascending by z-position, badge_ids in row order, unresolved tokens).
 
     A stat job with a falsy `childSig` is skipped (neither a target nor unresolved),
-    matching the live raise path's filter at keynote.py:1411."""
+    matching the live raise path's filter at keynote.py:1411. A resolved job is also
+    verified: the saved-deck group's own child signature (computed offline via
+    `_group_child_signature`, the same normalisation the planner used to mint
+    `childSig`) must equal the job's `childSig` — a hint pointing at the wrong group
+    (stale `groupIndex`) is caught here rather than silently raising the wrong object."""
     z = [str(ref["identifier"]) for ref in slide.get("drawablesZOrder") or []]
     records = derive_kind_index(slide, objects)
     by_key = {(r["kind"], r["kindIndex"]): r["id"] for r in records}
+    sig_cache: dict = {}
 
     unresolved: list[str] = []
     ambiguous_sigs = {
@@ -74,6 +79,10 @@ def resolve_raise_targets(
         drawable_id = by_key.get(("group", ki))
         if drawable_id is None:
             unresolved.append(f"stat:s={job.get('slide')},gi={wall_gi}")
+            continue
+        actual_sig = _group_child_signature(drawable_id, objects, sig_cache)
+        if actual_sig != sig:
+            unresolved.append(f"stat:s={job.get('slide')},gi={wall_gi},sig={sig}(mismatch)")
             continue
         stat_ids.append(drawable_id)
     stat_ids = sorted(stat_ids, key=z.index)
@@ -137,6 +146,23 @@ def _zorder_slide_edit(
         return target_member, slide_id, "requested order id set/length mismatch with drawablesZOrder"
 
     return target_member, slide_id, None
+
+
+def validate_slide_order(
+    slide_number: int, new_order: list[str], objects: dict[str, dict],
+    id_to_file: dict[str, str], order: list[tuple[str, bool]],
+) -> tuple[str | None, str | None]:
+    """Dry-run, no-I/O, of everything `patch_deck_zorder` would refuse a slide on:
+    member resolution, `ownedDrawables` permutation, and the requested order's id-set
+    permutation against the slide's current `drawablesZOrder`. Returns
+    `(target_member, refuse_reason)` -- `refuse_reason` is None iff the slide would be
+    patched cleanly in isolation. Cross-slide member collision is NOT checked here (it
+    needs the whole candidate set); see `patch_deck_zorder`'s own grouping, which callers
+    computing eligibility ahead of a real patch must replicate over their candidates'
+    `target_member`s."""
+    target_member, _slide_id, refuse_reason = _zorder_slide_edit(
+        slide_number, new_order, objects, id_to_file, order)
+    return target_member, refuse_reason
 
 
 def patch_deck_zorder(deck: Path | str, orders_by_slide: dict[int, list[str]]) -> dict[int, PatchResult]:

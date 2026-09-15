@@ -15,6 +15,7 @@ module at its own top level, so a module-level import back would cycle.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -772,3 +773,262 @@ def run_offline_write(
     if group_verify is not None:
         result["groupVerify"] = group_verify
     return result
+
+
+def zorder_eligible_slides(
+    dest: Path,
+    mode: str,
+    offline_slides: set[int],
+    refused: set[int],
+    stat_jobs: list[dict[str, Any]],
+    badge_rows: list[dict[str, Any]],
+    transform_dicts: list[dict[str, Any]],
+    say: Callable[[str], None],
+) -> tuple[dict[int, dict[str, list[str]]], dict[str, Any]]:
+    """One deck decode, right after `run_offline_write`. Eligibility (Contract, tranche 1):
+    `s` in `offline_slides`, not in `refused`, every stat/badge target on `s` resolves to
+    exactly one archive id with no ambiguous or mismatched `childSig`, and the slide's
+    candidate order would not be refused by `patch_deck_zorder` (member resolution,
+    `ownedDrawables` permutation, id-set permutation, member collision with another
+    candidate) -- run here, on the post-pass-1 saved deck, via the same
+    `validate_slide_order`/`_zorder_slide_edit` code path `patch_deck_zorder` itself uses,
+    so a slide that would refuse post-pass-2 is simply never made eligible and stays on
+    GUI (see Design > Fallback). A slide with no targets is not included (no-op, no
+    write). Returns `({slide: {"stat": [ids], "badge": [ids]}}, eligibility_counts)`
+    where `eligibility_counts` carries `zorderUnresolved`/`zorderRefused`/`zorderGui`
+    for the caller to thread into the final result."""
+    counts: dict[str, Any] = {"zorderUnresolved": 0, "zorderRefused": 0, "zorderGui": []}
+    if mode == "off":
+        return {}, counts
+    candidates = sorted(offline_slides - set(refused))
+    if not candidates:
+        return {}, counts
+    from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415 (optional iwa extra)
+    from obed_edom.iwa_zorder import (  # noqa: PLC0415 (optional iwa extra)
+        plan_slide_order,
+        resolve_raise_targets,
+        validate_slide_order,
+    )
+
+    stat_by_slide: dict[int, list[dict[str, Any]]] = {}
+    for job in stat_jobs:
+        stat_by_slide.setdefault(int(job["slide"]), []).append(job)
+    badge_by_slide: dict[int, list[dict[str, Any]]] = {}
+    for row in badge_rows:
+        badge_by_slide.setdefault(int(row["slide"]), []).append(row)
+    hide_by_slide: dict[int, list[dict[str, Any]]] = {}
+    for t in transform_dicts:
+        if t.get("role") == "hide":
+            hide_by_slide.setdefault(int(t.get("slide", -1)), []).append(t)
+
+    objects, id_to_file, _file_ids = _load_deck(dest)
+    order = slide_order(objects)
+    raise_bearing = {int(j["slide"]) for j in stat_jobs if j.get("childSig")} | set(badge_by_slide)
+
+    accepted: dict[int, dict[str, list[str]]] = {}
+    target_members: dict[int, str | None] = {}
+    for n in candidates:
+        s_jobs = stat_by_slide.get(n, [])
+        b_rows = badge_by_slide.get(n, [])
+        if not s_jobs and not b_rows:
+            continue
+        if not (1 <= n <= len(order)):
+            say(f"zorderRefused(s={n},reason=slide out of range)")
+            counts["zorderRefused"] += 1
+            continue
+        slide = objects.get(order[n - 1][0])
+        if not slide:
+            say(f"zorderRefused(s={n},reason=slide archive not decoded)")
+            counts["zorderRefused"] += 1
+            continue
+        stat_ids, badge_ids, unresolved = resolve_raise_targets(
+            slide, objects, s_jobs, b_rows, hide_by_slide.get(n, [])
+        )
+        if unresolved:
+            for token in unresolved:
+                say(f"zorderUnresolved(s={n},{token})")
+            counts["zorderUnresolved"] += len(unresolved)
+            continue
+        if not stat_ids and not badge_ids:
+            continue
+        try:
+            candidate_order = plan_slide_order(slide, objects, stat_ids, badge_ids)
+        except ValueError as exc:
+            say(f"zorderRefused(s={n},reason={exc})")
+            counts["zorderRefused"] += 1
+            continue
+        target_member, refuse_reason = validate_slide_order(n, candidate_order, objects, id_to_file, order)
+        if refuse_reason:
+            say(f"zorderRefused(s={n},reason={refuse_reason})")
+            counts["zorderRefused"] += 1
+            continue
+        accepted[n] = {"stat": stat_ids, "badge": badge_ids}
+        target_members[n] = target_member
+
+    member_slides: dict[str, list[int]] = {}
+    for n, member in target_members.items():
+        if member is not None:
+            member_slides.setdefault(member, []).append(n)
+    colliding: set[int] = set()
+    for member, slides in member_slides.items():
+        if len(slides) > 1:
+            colliding.update(slides)
+
+    result: dict[int, dict[str, list[str]]] = {}
+    for n, targets in accepted.items():
+        if n in colliding:
+            say(f"zorderRefused(s={n},reason=member shared with slide(s) "
+                f"{sorted(set(member_slides[target_members[n]]) - {n})})")
+            counts["zorderRefused"] += 1
+            continue
+        result[n] = targets
+
+    counts["zorderGui"] = sorted(raise_bearing - set(result))
+    return result, counts
+
+
+def run_offline_zorder(
+    dest: Path,
+    mode: str,
+    targets_by_slide: dict[int, dict[str, list[str]]],
+    say: Callable[[str], None],
+) -> dict[str, Any] | None:
+    """Re-reads the POST-pass-2 order, rebuilds each eligible slide's order via
+    `plan_slide_order`, patches with `patch_deck_zorder` (which itself always verifies
+    the read-back), then in `verify` mode does one more independent decode confirming it.
+    An id resolved pre-pass-2 that is gone post-pass-2 is `zorderLost`.
+
+    Every slide in `targets_by_slide` is, by construction, a slide whose GUI raise was
+    suppressed (see Design > Fallback in ``w2-plan-of-record.md``). Eligibility already
+    validated these slides on the post-pass-1 deck, so a refusal or a lost id here means
+    pass 2 changed something eligibility could not see -- there is no GUI raise left to
+    fall back to. Rather than raise here, this patches every OTHER slide and returns a
+    `failures` list of `(slide, reason)`; the caller emits the single `Stat zorder detail:`
+    summary line after merging this result with eligibility counts, then raises
+    `RuntimeError` naming the failed slides. `patch_deck_zorder`'s mandatory read-back
+    mismatch and this function's own `verify`-mode mismatch are caught as `failures` too
+    (the deck is already written at that point); `OfflineWriteCorrupted` (a corrupted
+    rewrite) still propagates."""
+    if mode == "off" or not targets_by_slide:
+        return None
+    from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415 (optional iwa extra)
+    from obed_edom.iwa_write import read_slide_zorder  # noqa: PLC0415 (optional iwa extra)
+    from obed_edom.iwa_zorder import patch_deck_zorder, plan_slide_order  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = _load_deck(dest)
+    order = slide_order(objects)
+
+    refused_n = 0
+    lost_n = 0
+    suppressed_failed: set[int] = set()
+    failures: list[tuple[int, str]] = []
+
+    pre_order: dict[int, list[str]] = {}
+    orders_by_slide: dict[int, list[str]] = {}
+    for n, targets in sorted(targets_by_slide.items()):
+        if not (1 <= n <= len(order)):
+            say(f"zorderRefused(s={n},reason=slide out of range post-pass-2)")
+            refused_n += 1
+            suppressed_failed.add(n)
+            failures.append((n, "slide out of range post-pass-2"))
+            continue
+        slide = objects.get(order[n - 1][0])
+        if not slide:
+            say(f"zorderRefused(s={n},reason=slide archive not decoded post-pass-2)")
+            refused_n += 1
+            suppressed_failed.add(n)
+            failures.append((n, "slide archive not decoded post-pass-2"))
+            continue
+        current = [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []]
+        stat_ids = list(targets.get("stat") or [])
+        badge_ids = list(targets.get("badge") or [])
+        missing = [i for i in stat_ids + badge_ids if i not in current]
+        if missing:
+            for i in missing:
+                say(f"zorderLost(s={n},id={i})")
+            refused_n += 1
+            lost_n += len(missing)
+            suppressed_failed.add(n)
+            failures.append((n, f"lost id(s) {missing}"))
+            continue
+        try:
+            new_order = plan_slide_order(slide, objects, stat_ids, badge_ids)
+        except ValueError as exc:
+            say(f"zorderRefused(s={n},reason={exc})")
+            refused_n += 1
+            suppressed_failed.add(n)
+            failures.append((n, str(exc)))
+            continue
+        pre_order[n] = current
+        orders_by_slide[n] = new_order
+
+    zorder_slides = 0
+    stat_raised = 0
+    badge_raised = 0
+    noop = 0
+    patched_slides: list[int] = []
+    if orders_by_slide:
+        try:
+            patch_results = patch_deck_zorder(dest, orders_by_slide)
+        except ValueError as exc:
+            m = re.search(r"on slide (\d+)", str(exc))
+            n = int(m.group(1)) if m else min(orders_by_slide)
+            say(f"zorderRefused(s={n},reason={exc})")
+            refused_n += 1
+            suppressed_failed.add(n)
+            failures.append((n, f"deck already written; {exc}"))
+            patch_results = {}
+
+        for n, res in sorted(patch_results.items()):
+            if getattr(res, "refused", False):
+                say(f"zorderRefused(s={n},reason={res.reason})")
+                refused_n += 1
+                suppressed_failed.add(n)
+                failures.append((n, str(res.reason)))
+                continue
+            zorder_slides += 1
+            patched_slides.append(n)
+            targets = targets_by_slide[n]
+            stat_raised += len(targets.get("stat") or [])
+            badge_raised += len(targets.get("badge") or [])
+            if pre_order[n] == orders_by_slide[n]:
+                noop += 1
+
+        if mode == "verify" and patch_results:
+            for n in sorted(orders_by_slide):
+                if getattr(patch_results.get(n), "refused", False):
+                    continue
+                want = orders_by_slide[n]
+                try:
+                    z, owned = read_slide_zorder(dest, n)
+                    mismatch = z != want or owned != z
+                except ValueError as exc:
+                    z = None
+                    mismatch = True
+                    reason = f"deck already written; zorder verify read failed: {exc}"
+                else:
+                    reason = f"deck already written; zorder verify mismatch: got {z}, want {want}"
+                if mismatch:
+                    say(f"zorderRefused(s={n},reason=verify mismatch: got {z}, want {want})")
+                    refused_n += 1
+                    suppressed_failed.add(n)
+                    failures.append((n, reason))
+                    zorder_slides -= 1
+                    patched_slides.remove(n)
+                    targets = targets_by_slide[n]
+                    stat_raised -= len(targets.get("stat") or [])
+                    badge_raised -= len(targets.get("badge") or [])
+                    if pre_order[n] == want:
+                        noop -= 1
+
+    return {
+        "mode": mode,
+        "slides": sorted(patched_slides),
+        "zorderSlides": zorder_slides,
+        "zorderStatRaised": stat_raised,
+        "zorderBadgeRaised": badge_raised,
+        "zorderNoop": noop,
+        "zorderRefused": refused_n,
+        "zorderLost": lost_n,
+        "failures": failures,
+    }

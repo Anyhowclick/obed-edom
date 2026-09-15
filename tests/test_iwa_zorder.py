@@ -65,9 +65,20 @@ def test_raise_to_front_does_not_mutate_input():
 # ==========================================================================
 # Deck builders.
 # ==========================================================================
-def _group(gid, child_id):
+def _group(gid, child_id, text=None):
+    """`text=None` leaves the child textless (`_group_child_signature` == ""), fine for
+    any test that doesn't verify a stat job's `childSig` against it. A test resolving a
+    stat job that must succeed needs `text` set to that job's `childSig`, since
+    `resolve_raise_targets` now checks the two match."""
+    child = {"isTextBox": False, "super": _shape_super(0, 0, 30, 30)}
+    members = []
+    if text is not None:
+        storage_id = child_id * 100
+        child["ownedStorage"] = {"identifier": storage_id}
+        members.append(_arch(storage_id, "TSWP.StorageArchive", {"text": [text]}))
     return [
-        _arch(child_id, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 30, 30)}),
+        _arch(child_id, "TSWP.ShapeInfoArchive", child),
+        *members,
         _arch(gid, "TSD.GroupArchive", {"super": _shape_super(0, 0, 0, 0)["super"], "children": [{"identifier": child_id}]}),
     ]
 
@@ -95,7 +106,7 @@ def _slide_and_objects(deck):
 # ==========================================================================
 def test_resolve_stat_targets_ascending_by_z_regardless_of_job_order(tmp_path):
     # Two groups: A (children 301) at z-slot 0, B (children 303) at z-slot 1.
-    members = [*_group(300, 301), *_group(302, 303)]
+    members = [*_group(300, 301, "a"), *_group(302, 303, "b")]
     deck = _write_deck(tmp_path / "stat.key", members, [300, 302])
     slide, objects = _slide_and_objects(deck)
 
@@ -115,7 +126,7 @@ def test_resolve_stat_group_index_is_not_bridged_again_when_hides_exist(tmp_path
     # Three wall groups A, B, C (children 301, 303, 305). A (wall kindIndex 0) is hidden,
     # so the saved deck's drawablesZOrder only contains B, C post-hide — B lands at
     # kindIndex 0, C at kindIndex 1.
-    members = [*_group(300, 301), *_group(302, 303), *_group(304, 305)]
+    members = [*_group(300, 301), *_group(302, 303), *_group(304, 305, "c")]
     deck = _write_deck(tmp_path / "stat_hide.key", members, [302, 304])
     slide, objects = _slide_and_objects(deck)
     hide_specs = [{"kind": "group", "kindIndex": 0}]  # A deleted
@@ -270,7 +281,7 @@ def test_plan_slide_order_badge_block_ends_above_stat_block(tmp_path):
 
 
 def test_plan_slide_order_stat_block_ascending_by_z_regardless_of_job_order(tmp_path):
-    members = [*_group(300, 301), *_group(302, 303), *_group(304, 305)]
+    members = [*_group(300, 301, "a"), *_group(302, 303, "b"), *_group(304, 305, "c")]
     deck = _write_deck(tmp_path / "order2.key", members, [300, 302, 304])
     slide, objects = _slide_and_objects(deck)
 
