@@ -145,7 +145,7 @@ after is how a threshold change gets checked against real staff data without
 ever seeing the `.key` files. Add `--strict` to also fail on message-only
 mismatches (same rule and default, reworded message) — useful in CI where
 any drift from the recorded wording should be caught, not just a changed
-verdict. See `.agents/plans/checker_diagnostics.plan.md` for the format.
+verdict. See `.agents/plans/checker.plan.md` for the format and privacy contract.
 
 ## Runtime
 
