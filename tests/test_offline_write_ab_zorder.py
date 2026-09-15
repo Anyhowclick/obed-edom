@@ -10,6 +10,7 @@ from scripts.offline_write_ab import (
     ZORDER_SCHEMA_KEYS,
     ZORDER_SURFACE_KEYS,
     ZORDER_ZERO_KEYS,
+    claimed_patched_slides,
     expect_gui_raises,
     expected_zorder_sets,
     front_block_ok,
@@ -182,6 +183,29 @@ def test_zorder_write_reasons_red_on_count_not_list():
     )
     assert any("not a slide list" in r and "slides=" in r for r in reasons)
     assert any("not a slide list" in r and "zorderGui=" in r for r in reasons)
+
+
+def test_claimed_patched_slides_count_is_empty_not_crash():
+    assert claimed_patched_slides({"slides": 2}) == set()
+    assert claimed_patched_slides({"slides": 0}) == set()
+    assert claimed_patched_slides({"slides": [40, 55]}) == {40, 55}
+    assert claimed_patched_slides({"slides": []}) == set()
+    assert claimed_patched_slides(None) == set()
+
+
+def test_malformed_slides_count_does_not_crash_orchestration():
+    # main() used to TypeError on `{int(s) for s in 2}` before zorder_write_reasons.
+    zw = _zorder_write(slides=2, zorderGui=0)
+    suppressed = claimed_patched_slides(zw)
+    reasons = zorder_write_reasons(zw, {40, 55}, compared_slides=[40, 55])
+    assert suppressed == set()
+    assert any("not a slide list" in r for r in reasons)
+    assert expect_gui_raises(
+        [{"slide": 40, "childSig": "n=1"}], [{"slide": 55}], zw,
+    ) is True
+    assert suppressed_raise_reasons(
+        {"tokens": {"raiseDead": ["s=40,idx=1"]}}, suppressed,
+    ) == []
 
 
 def test_zorder_write_reasons_refused_belongs_on_gui():

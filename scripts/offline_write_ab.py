@@ -1359,6 +1359,16 @@ def _as_slide_set(value: Any) -> set[int] | None:
     return None
 
 
+def claimed_patched_slides(zorder_write: dict[str, Any] | None) -> set[int]:
+    """Patched-slide set from ``zorderWrite.slides``. Empty if missing or not a list.
+
+    A count must not be iterated (``{int(s) for s in 2}`` is ``TypeError``). The
+    schema/GUI gate REDs that shape; callers just must not crash first.
+    """
+    parsed = _as_slide_set((zorder_write or {}).get("slides"))
+    return parsed if parsed is not None else set()
+
+
 def raise_slides_from_jobs(
     stat_jobs: list[dict[str, Any]] | None,
     badge_rows: list[dict[str, Any]] | None,
@@ -1509,8 +1519,7 @@ def expect_gui_raises(
     zorder_write: dict[str, Any] | None,
 ) -> bool:
     """``front >= 1`` is only owed when at least one raise-bearing slide stayed on GUI."""
-    suppressed = {int(s) for s in (zorder_write or {}).get("slides") or []}
-    return bool(raise_slides_from_jobs(stat_jobs, badge_raises) - suppressed)
+    return bool(raise_slides_from_jobs(stat_jobs, badge_raises) - claimed_patched_slides(zorder_write))
 
 
 def slide_zorder_ids(objects: dict[str, Any], slide_number: int) -> list[str] | None:
@@ -1933,7 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
     for r in damage_b:
         _log(f"RED: {r}")
 
-    zorder_suppressed = bool(zorder_write_b.get("slides"))
+    zorder_suppressed = bool(claimed_patched_slides(zorder_write_b))
     # W2: B's eligible slides skip the GUI raise, so `front` A!=B is expected and
     # must not RED the strict bar. Other PASS2_PARITY_KEYS still gate.
     parity = pass2_parity(
@@ -2002,7 +2011,7 @@ def main(argv: list[str] | None = None) -> int:
         stat_jobs_a, badge_rows_a = raise_jobs
     raise_slides = raise_slides_from_jobs(stat_jobs_a, badge_rows_a)
 
-    suppressed_slides = {int(s) for s in (zorder_write_b.get("slides") or [])}
+    suppressed_slides = claimed_patched_slides(zorder_write_b)
     zorder_reasons = zorder_write_reasons(
         zorder_write_b, raise_slides,
         compared_slides=compared_slides, refused=ow_b.get("refused"),
@@ -2041,8 +2050,7 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"CONTROL A: {args.control_a} (SAME_ORDER A-vs-A on RAISE10).")
 
     b_objects, b_by_slide = decode_deck(b_deck)
-    zw_slides = zorder_write_b.get("slides")
-    zw_slide_set = {int(s) for s in zw_slides} if zw_slides else None
+    zw_slide_set = claimed_patched_slides(zorder_write_b) or None
 
     _log(
         f"Comparing {len(compared_slides)} planned non-reuse, non-donor slide(s): "
