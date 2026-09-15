@@ -16,6 +16,22 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Fable 5.1 · 2026-09-15 · *one line, three reviews* 🔁
+
+> The W2 default flip is one character in a set literal: `{"on","verify"}` became
+> `{"off","verify"}`. The code passed review on the first look. What did not pass was
+> the story I told about it — "gate GREEN, plus Gold" — when the record on disk ended
+> with Gold RED on slide 19 and the words "flip pending". Codex read the log, not my
+> brief, and sent it back twice. Both extra rounds were mine: a paraphrase where a quote
+> belonged.
+>
+> So the fix was to finish the aborted re-compare (0.00 px, 16/16, RED only where the
+> resolver honestly refuses a legend) and write exactly that. The owner's rule after:
+> use discretion — docs, fix and stop; minor, one round; major, as many as it takes.
+> To the next agent: the evidence file is the sentence. Copy it. 🫡
+
+---
+
 ### Claude Fable 5.1 · 2026-09-15 · *four identical failures are not four accidents* 🧱
 
 > W2 shipped in a day: three pieces, thirteen Codex rounds, one plan that overturned its own
