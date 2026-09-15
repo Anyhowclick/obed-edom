@@ -21,6 +21,7 @@ vi.mock("../src/api", async (importOriginal) => {
     fetchMapsExportPlan: apiFake.fetchMapsExportPlan,
     exportMaps: apiFake.exportMaps,
     getSettings: apiFake.getSettings,
+    putSettings: apiFake.putSettings,
     cancelMapsExport: apiFake.cancelMapsExport,
     planMapsTiles: apiFake.planMapsTiles,
     prefetchMapsTiles: apiFake.prefetchMapsTiles,

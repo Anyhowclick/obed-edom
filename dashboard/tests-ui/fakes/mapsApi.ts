@@ -128,6 +128,16 @@ export const prefetchMapsTiles = vi.fn<typeof actual.prefetchMapsTiles>(async ()
 
 let getSettingsDeferOnce: Promise<Settings> | null = null;
 
+const DEFAULT_SETTINGS: Settings = {
+  reuseThreshold: 0,
+  reusePairings: false,
+  reusePreviews: false,
+  defaultExportDir: "",
+  highlightColour: "#e8772a",
+};
+
+let settingsValue: Settings = { ...DEFAULT_SETTINGS };
+
 export const getSettings = vi.fn<typeof actual.getSettings>(
   async (): Promise<Settings> => {
     if (getSettingsDeferOnce) {
@@ -135,15 +145,14 @@ export const getSettings = vi.fn<typeof actual.getSettings>(
       getSettingsDeferOnce = null;
       return deferred;
     }
-    return {
-      reuseThreshold: 0,
-      reusePairings: false,
-      reusePreviews: false,
-      defaultExportDir: "",
-      highlightColour: "#e8772a",
-    };
+    return { ...settingsValue };
   }
 );
+
+export const putSettings = vi.fn<typeof actual.putSettings>(async (next: Partial<Settings>): Promise<Settings> => {
+  settingsValue = { ...settingsValue, ...next };
+  return { ...settingsValue };
+});
 
 export function resetMapsApiScript() {
   saveConflictOnce = null;
@@ -177,7 +186,9 @@ export function resetMapsApiScript() {
   planMapsTiles.mockClear();
   prefetchMapsTiles.mockClear();
   getSettings.mockClear();
+  putSettings.mockClear();
   getSettingsDeferOnce = null;
+  settingsValue = { ...DEFAULT_SETTINGS };
 }
 
 export const mapsApiScript = {
@@ -255,6 +266,11 @@ export const mapsApiScript = {
   getSettings: {
     deferOnce(promise: Promise<Settings>) {
       getSettingsDeferOnce = promise;
+    },
+  },
+  putSettings: {
+    get calls() {
+      return putSettings.mock.calls;
     },
   },
 };

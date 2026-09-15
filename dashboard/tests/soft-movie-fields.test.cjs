@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { softMovieFields, appearanceMismatch } = require(path.join(out, "types.js"));
+const { softMovieFields, appearanceMismatch, movieAppearanceMismatch, plainIsolateTarget } = require(path.join(out, "types.js"));
 
 const baseCamera = { lat: 0, lon: 0, zoom: 4, bearing: 0, pitch: 0 };
 function slide(overrides) {
@@ -56,4 +56,33 @@ test("style mismatch stays hard (not soft)", () => {
   assert.ok(mismatch.has("style"));
   const soft = softMovieFields(from, to);
   assert.ok(!soft.has("style"));
+});
+
+test("highlightColours mismatch stays hard (not soft)", () => {
+  const from = slide({ highlights: ["SGP"], highlightColours: { SGP: "#00aaff" } });
+  const to = slide({ highlights: ["SGP"], highlightColours: { SGP: "#ff0000" } });
+  const mismatch = new Set(appearanceMismatch(from, to));
+  assert.ok(mismatch.has("highlightColours"));
+  assert.ok(!mismatch.has("highlights"));
+  const soft = softMovieFields(from, to);
+  assert.ok(!soft.has("highlightColours"));
+});
+
+test("dest-isolated FRA with a custom colour stays a soft Movie heads-up", () => {
+  // FRA is a real ADM0 code; FR is dropped by highlightColoursKey and hid this path.
+  const from = slide({});
+  const to = slide({
+    highlights: ["FRA"],
+    highlightColours: { FRA: "#00aaff" },
+    isolate: { mode: "darken", strength: 0.6 },
+  });
+  const mismatch = new Set(appearanceMismatch(from, to));
+  assert.ok(mismatch.has("isolate") && mismatch.has("highlights") && mismatch.has("highlightColours"));
+  const soft = softMovieFields(from, to);
+  assert.ok(soft.has("isolate") && soft.has("highlights") && soft.has("highlightColours"));
+  const plain = plainIsolateTarget(to);
+  assert.deepEqual(plain.highlights, []);
+  assert.equal(plain.isolate, undefined);
+  assert.equal(plain.highlightColours, undefined);
+  assert.equal(movieAppearanceMismatch(from, to), false);
 });

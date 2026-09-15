@@ -316,11 +316,36 @@ def _validate_highlights(value: object) -> object:
     return out
 
 
+_HEX_COLOUR_RE = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+def _validate_highlight_colours(value: object) -> object:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("highlightColours must be an object")
+    out: dict[str, str] = {}
+    for raw_key, raw_colour in value.items():
+        text = str(raw_key).strip()
+        candidate = text if ":" in text else text.upper()
+        if not _HIGHLIGHT_RE.match(candidate):
+            raise ValueError(f"Invalid highlight colour key: {raw_key!r}")
+        match = _HEX_COLOUR_RE.fullmatch(str(raw_colour or "").strip())
+        if not match:
+            raise ValueError(f"Invalid highlight colour: {raw_colour!r}")
+        hex_digits = match.group(1).lower()
+        if len(hex_digits) == 3:
+            hex_digits = "".join(ch * 2 for ch in hex_digits)
+        out[candidate] = f"#{hex_digits}"
+    return out or None
+
+
 class MapsCgOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
     camera: MapsCamera
     style: MapsStyleId
     highlights: list[str] = Field(default_factory=list)
+    highlightColours: dict[str, str] | None = None
     churches: list[MapsChurch] = Field(default_factory=list)
     hiddenLayers: list[MapsLayerFilterId] | None = None
     hillshade: bool | None = None
@@ -331,6 +356,7 @@ class MapsCgOverride(BaseModel):
     revealMovie: bool = False
 
     _check_highlights = field_validator("highlights", mode="before")(_validate_highlights)
+    _check_highlight_colours = field_validator("highlightColours", mode="before")(_validate_highlight_colours)
 
 
 class MapsSlide(BaseModel):
@@ -340,6 +366,7 @@ class MapsSlide(BaseModel):
     style: MapsStyleId
     camera: MapsCamera
     highlights: list[str] = Field(default_factory=list)
+    highlightColours: dict[str, str] | None = None
     churches: list[MapsChurch] = Field(default_factory=list)
     hiddenLayers: list[MapsLayerFilterId] | None = None
     hillshade: bool = False
@@ -354,6 +381,7 @@ class MapsSlide(BaseModel):
     cg: MapsCgOverride | None = None
 
     _check_highlights = field_validator("highlights", mode="before")(_validate_highlights)
+    _check_highlight_colours = field_validator("highlightColours", mode="before")(_validate_highlight_colours)
 
     @field_validator("includeSidePanels", mode="before")
     @classmethod

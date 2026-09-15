@@ -72,6 +72,7 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   if (from.style === "buildings3d" || to.style === "buildings3d") threeDDetail = "3D buildings";
   else if (pitch > MORPH_MAX_PITCH) threeDDetail = `pitch ${fmtDeg(pitch)}`;
   const layersSame = !mismatch.has("hiddenLayers") && !mismatch.has("hillshade");
+  const highlightsSame = !mismatch.has("highlights") && !mismatch.has("highlightColours");
   return [
     {
       id: "style",
@@ -83,12 +84,14 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
     {
       id: "countries",
       label: "Same region highlights",
-      ok: !mismatch.has("highlights"),
+      ok: highlightsSame,
       detail:
         fromHi.join(",") === toHi.join(",")
-          ? countriesLabel(fromHi)
+          ? mismatch.has("highlightColours")
+            ? `${countriesLabel(fromHi)} · colours differ`
+            : countriesLabel(fromHi)
           : `${countriesLabel(fromHi)} → ${countriesLabel(toHi)}`,
-      tip: "Highlighted regions must match on both shots. Panning part of the map off-screen is fine.",
+      tip: "Highlighted regions and their colours must match on both shots. Panning part of the map off-screen is fine.",
     },
     {
       id: "isolate",
@@ -203,11 +206,14 @@ export function MovieAppearanceGate({
   const destIsolated = isolateDissolveNeeded(from, to);
   const sourceIsolated = !!from.isolate && !destIsolated;
   const softFields = softMovieFields(from, to);
+  const mismatch = new Set(appearanceMismatch(from, to));
   const allRows = morphGateList(from, to).filter(
     (gate) => (gate.id === "style" || gate.id === "countries" || gate.id === "isolate" || gate.id === "layers") && !gate.ok,
   );
+  const colourHard = mismatch.has("highlightColours") && !softFields.has("highlightColours");
   const isSoftRow = (gate: Gate) =>
-    (gate.id === "countries" && softFields.has("highlights")) || (gate.id === "isolate" && softFields.has("isolate"));
+    (gate.id === "countries" && softFields.has("highlights") && !colourHard) ||
+    (gate.id === "isolate" && softFields.has("isolate"));
   const hardRows = allRows.filter((gate) => !isSoftRow(gate));
   const softRows = allRows.filter(isSoftRow);
   const hasHard = hardRows.length > 0 || crossAudience;

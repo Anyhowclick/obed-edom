@@ -30,8 +30,8 @@ describe("Pick: Countries | Regions", () => {
     await openProperties();
 
     expect(screen.getByText("Selected regions")).toBeInTheDocument();
-    const regions = screen.getByRole("button", { name: "Regions" });
-    const countries = screen.getByRole("button", { name: "Countries" });
+    const regions = screen.getByRole("tab", { name: "Regions" });
+    const countries = screen.getByRole("tab", { name: "Countries" });
     expect(countries).toHaveClass("on");
     expect(regions).not.toHaveClass("on");
 
@@ -39,7 +39,7 @@ describe("Pick: Countries | Regions", () => {
       fireEvent.click(regions);
     });
 
-    expect(screen.getByRole("button", { name: "Regions" })).toHaveClass("on");
+    expect(screen.getByRole("tab", { name: "Regions" })).toHaveClass("on");
     expect(sessionStorage.getItem(MAPS_PICK_MODE_KEY)).toBe("1");
   });
 
@@ -55,10 +55,17 @@ describe("Pick: Countries | Regions", () => {
     expect(props.highlights).toEqual(["A1:MYS-1186"]);
 
     const chip = screen.getByRole("button", { name: /Sabah/ });
-    expect(chip).toHaveClass("maps-hl-chip");
+    expect(chip.closest(".maps-hl-chip")).toBeTruthy();
 
     await act(async () => {
       fireEvent.click(chip);
+    });
+
+    expect(mapFake.getLatestProps().highlights).toEqual(["A1:MYS-1186"]);
+    expect(chip.closest(".maps-hl-chip")).toHaveClass("on");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Remove highlight"));
     });
 
     expect(mapFake.getLatestProps().highlights).toEqual([]);
@@ -70,7 +77,7 @@ describe("Pick: Countries | Regions", () => {
 
     await openProperties();
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Regions" }));
+      fireEvent.click(screen.getByRole("tab", { name: "Regions" }));
     });
 
     expect(mapFake.getLatestProps().pickRegions).toBe(true);
@@ -101,7 +108,7 @@ describe("Pick: Countries | Regions", () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByRole("button", { name: /Sabah/ })).toHaveClass("maps-hl-chip");
+    expect(screen.getByRole("button", { name: /Sabah/ }).closest(".maps-hl-chip")).toBeTruthy();
     expect(loadAdmin1Stub).toHaveBeenCalledWith("MYS");
   });
 
@@ -154,7 +161,7 @@ describe("Pick: Countries | Regions", () => {
 
     mapFake.setRegionCountries(["MYS"]);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "CG" }));
+      fireEvent.click(screen.getByRole("tab", { name: "CG" }));
     });
     await flushMicrotasks();
 
@@ -256,7 +263,7 @@ describe("Isolate toggle label", () => {
     await openProperties();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "CG" }));
+      fireEvent.click(screen.getByRole("tab", { name: "CG" }));
     });
     await flushMicrotasks();
 

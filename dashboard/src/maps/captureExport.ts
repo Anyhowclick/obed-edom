@@ -159,6 +159,7 @@ export type ExportMapOpts = {
   /** Overrides the module-level highlight colour for this map only, so an in-progress export
    * keeps a single colour even if the operator's settings resolve mid-export. */
   highlightColour?: string;
+  highlightColours?: Record<string, string>;
 };
 
 export async function createExportMap(
@@ -178,6 +179,7 @@ export async function createExportMap(
     assetBaseUrl,
     isCancelled,
     highlightColour: highlightColourOverride,
+    highlightColours,
   } = opts;
   const surfaceWidth = opts.surfaceWidth ?? width;
   const surface = exportSurface(width, height, surfaceWidth);
@@ -233,10 +235,11 @@ export async function createExportMap(
         isolate,
         [],
         undefined,
-        highlightColourOverride
+        highlightColourOverride,
+        highlightColours
       );
     } else {
-      await ensureAdmin0Highlights(map, highlights, styleId, isolate, zoomDelta, [], undefined, highlightColourOverride);
+      await ensureAdmin0Highlights(map, highlights, styleId, isolate, zoomDelta, [], undefined, highlightColourOverride, highlightColours);
     }
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);

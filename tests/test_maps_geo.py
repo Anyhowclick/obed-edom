@@ -15,6 +15,7 @@ from obed_edom.maps_geo import (
     clamp_zoom,
     geocode,
     geometry_bbox,
+    highlight_colours_key,
     infer_hop_kind,
     inherit_hidden_layers,
     mercator_y,
@@ -122,6 +123,36 @@ def test_infer_hop_kind_cut_on_style_or_highlights():
     assert infer_hop_kind(a, b) == "cut"
     c = {"style": "positron", "highlights": ["MMR"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
     assert infer_hop_kind(a, c) == "cut"
+
+
+def test_highlight_colours_key_is_order_independent_and_normalises_hex():
+    # Mirrors dashboard/tests/highlight-colour.test.cjs highlightColoursKey.
+    assert highlight_colours_key({"highlightColours": {"SGP": "#0A84FF", "MYS": "#abc"}}) == "MYS:#aabbcc,SGP:#0a84ff"
+    assert highlight_colours_key({"highlightColours": {"MYS": "#AABBCC", "SGP": "0a84ff"}}) == "MYS:#aabbcc,SGP:#0a84ff"
+    assert highlight_colours_key({}) == ""
+    assert highlight_colours_key({"highlightColours": {}}) == ""
+    assert highlight_colours_key({"highlightColours": {"NOPE": "#00aaff"}}) == ""
+
+
+def test_infer_hop_kind_cut_on_highlight_colours():
+    # Parity with dashboard/tests/hop-kind.test.cjs.
+    cam = {"zoom": 4, "pitch": 0, "bearing": 0}
+    same = {"style": "positron", "highlights": ["SGP"], "camera": cam}
+    assert infer_hop_kind(same, {"style": "positron", "highlights": ["SGP"], "camera": cam}) == "morph"
+    assert infer_hop_kind(
+        {**same, "highlightColours": {"SGP": "#0a84ff"}},
+        {**same, "highlightColours": {"SGP": "#0A84FF"}},
+    ) == "morph"
+    assert infer_hop_kind(
+        {**same, "highlights": ["SGP", "MYS"], "highlightColours": {"SGP": "#abc", "MYS": "#0A84FF"}},
+        {**same, "highlights": ["SGP", "MYS"], "highlightColours": {"MYS": "0a84ff", "SGP": "#AABBCC"}},
+    ) == "morph"
+    assert infer_hop_kind(
+        {**same, "highlightColours": {"SGP": "#00aaff"}},
+        {**same, "highlightColours": {"SGP": "#ff0000"}},
+    ) == "cut"
+    assert infer_hop_kind(same, {**same, "highlightColours": {"SGP": "#00aaff"}}) == "cut"
+    assert infer_hop_kind(same, {**same, "highlightColours": {}}) == "morph"
 
 
 def test_infer_hop_kind_cut_on_hidden_layers():

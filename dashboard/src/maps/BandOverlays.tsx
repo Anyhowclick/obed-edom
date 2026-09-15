@@ -13,6 +13,7 @@ type Props = {
   box: Box | null;
   k: number;
   bandTop: number;
+  cgInteract?: "select" | "move";
   onCgPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
   onCgPointerMove: (event: React.PointerEvent<HTMLElement>) => void;
   onCgPointerUp: (event: React.PointerEvent<HTMLElement>) => void;
@@ -36,6 +37,7 @@ export function BandOverlays({
   box,
   k,
   bandTop,
+  cgInteract = "select",
   onCgPointerDown,
   onCgPointerMove,
   onCgPointerUp,
@@ -61,12 +63,12 @@ export function BandOverlays({
         )}
         {exportCg && !splitCg && (
           <div
-            className={`maps-crop-cg${cgSnapped ? " snapped" : ""}`}
+            className={`maps-crop-cg ${cgInteract}${cgSnapped ? " snapped" : ""}`}
             style={{ left: `${cgLeft}%`, width: `${cgWidth}%` }}
-            onPointerDown={onCgPointerDown}
-            onPointerMove={onCgPointerMove}
-            onPointerUp={onCgPointerUp}
-            onPointerCancel={onCgPointerUp}
+            onPointerDown={cgInteract === "move" ? onCgPointerDown : undefined}
+            onPointerMove={cgInteract === "move" ? onCgPointerMove : undefined}
+            onPointerUp={cgInteract === "move" ? onCgPointerUp : undefined}
+            onPointerCancel={cgInteract === "move" ? onCgPointerUp : undefined}
           >
             <span className="maps-crop-cg-label">CG</span>
           </div>

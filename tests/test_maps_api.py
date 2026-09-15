@@ -4148,6 +4148,26 @@ def test_maps_slide_accepts_admin1_highlight():
     assert saved.json()["result"]["slides"][0]["highlights"] == ["MYS", "A1:MYS-1186"]
 
 
+def test_maps_slide_accepts_highlight_colours():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["highlights"] = ["MYS"]
+    doc["slides"][0]["highlightColours"] = {"mys": "#00AAFF"}
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["highlightColours"] == {"MYS": "#00aaff"}
+
+
+def test_maps_slide_rejects_bad_highlight_colours():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["highlightColours"] = {"USAA": "#00aaff"}
+    assert _save(job, doc).status_code == 400
+    doc = _doc(job)
+    doc["slides"][0]["highlightColours"] = {"MYS": "orange"}
+    assert _save(job, doc).status_code == 400
+
+
 def test_post_png_region_variant():
     job = _seed()
     body = _landmark_png()

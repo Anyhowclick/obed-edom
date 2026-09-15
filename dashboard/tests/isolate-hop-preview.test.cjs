@@ -49,6 +49,28 @@ test("movieAppearanceMismatch is false when only isolate/highlights differ", () 
   assert.equal(movieAppearanceMismatch(from, to), false);
 });
 
+test("plainIsolateTarget drops highlightColours with the highlight set", () => {
+  const to = slide("b", {
+    highlights: ["FRA"],
+    highlightColours: { FRA: "#00aaff" },
+    isolate: { mode: "darken", strength: 0.65 },
+  });
+  const plain = plainIsolateTarget(to);
+  assert.deepEqual(plain.highlights, []);
+  assert.equal(plain.isolate, undefined);
+  assert.equal(plain.highlightColours, undefined);
+});
+
+test("movieAppearanceMismatch is false for dest-isolated FRA with a custom colour", () => {
+  const from = slide("a");
+  const to = slide("b", {
+    highlights: ["FRA"],
+    highlightColours: { FRA: "#00aaff" },
+    isolate: { mode: "darken", strength: 0.65 },
+  });
+  assert.equal(movieAppearanceMismatch(from, to), false);
+});
+
 test("movieAppearanceMismatch is true when style also differs", () => {
   const from = slide("a");
   const to = slide("b", { style: "buildings3d", highlights: ["FR"], isolate: { mode: "darken", strength: 0.65 } });

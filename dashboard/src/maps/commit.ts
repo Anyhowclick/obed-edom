@@ -1,3 +1,4 @@
+import { highlightColoursKey } from "./highlight";
 import type { MapsAudience, MapsCamera, MapsDocument, MapsSlide } from "./types";
 
 export interface ThumbnailGeometry {
@@ -13,6 +14,7 @@ export function thumbnailFingerprint(slideId: string, audience: MapsAudience, vi
     style: view.style,
     camera: view.camera,
     highlights: view.highlights,
+    highlightColours: highlightColoursKey(view.highlightColours),
     churches: view.churches,
     hiddenLayers: view.hiddenLayers,
     hillshade: view.hillshade,

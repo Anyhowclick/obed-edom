@@ -302,6 +302,10 @@ function fakeMapView() {
   return state;
 }
 
+function admin1SelectionPaints(map) {
+  return map.calls.filter((c) => c[0] === "setPaintProperty" && c[1] === "admin1-fill" && c[2] === "fill-opacity");
+}
+
 test("paintOverlays vs the highlight effect: a highlight change during a style load defers, then replays, and never wedges styleReady", async () => {
   const view = fakeMapView();
   // A first style load, so admin0 exists the way it does for a style-picker switch.
@@ -322,7 +326,7 @@ test("paintOverlays vs the highlight effect: a highlight change during a style l
 
   assert.equal(view.styleReady, true, "the style load must still mark the map ready");
   assert.equal(view.replays, 1, "the deferred highlight work must be replayed once");
-  const paints = view.map.calls.filter((c) => c[0] === "setPaintProperty" && c[1] === "admin1-fill");
+  const paints = admin1SelectionPaints(view.map);
   assert.ok(paints.length, "the replay must repaint the admin-1 fill");
   assert.ok(
     JSON.stringify(paints[paints.length - 1][3]).includes("RJJ-1"),
@@ -382,7 +386,7 @@ test("a camera sync with no countries under the camera must not discard an in-fl
 
   gateFor("RNN").resolve();
   await effect;
-  const paints = view.map.calls.filter((c) => c[0] === "setPaintProperty" && c[1] === "admin1-fill");
+  const paints = admin1SelectionPaints(view.map);
   assert.ok(paints.length, "the in-flight highlight load must still apply");
   assert.ok(JSON.stringify(paints[paints.length - 1][3]).includes("RNN-1"));
 });
@@ -407,7 +411,7 @@ test("setStyle→style.load interval: a highlight request arriving before style.
 
   assert.equal(view.replays, 1, "the highlight request from the setStyle interval must be replayed");
   assert.equal(view.styleReady, true);
-  const paints = view.map.calls.filter((c) => c[0] === "setPaintProperty" && c[1] === "admin1-fill");
+  const paints = admin1SelectionPaints(view.map);
   assert.ok(paints.length && JSON.stringify(paints[paints.length - 1][3]).includes("RPP-1"));
 });
 
@@ -435,7 +439,7 @@ test("waitUntilIdle stays pending until a deferred admin-1 fetch and its replay 
   await painting;
   await idle.promise;
   assert.equal(idle.done, true);
-  const paints = view.map.calls.filter((c) => c[0] === "setPaintProperty" && c[1] === "admin1-fill");
+  const paints = admin1SelectionPaints(view.map);
   assert.ok(JSON.stringify(paints[paints.length - 1][3]).includes("RTT-1"), "the capture waits for the newest selection to be painted");
 });
 

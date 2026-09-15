@@ -8,7 +8,7 @@ import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, ML_MAX_ZOOM, ML_MIN_ZOOM, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
 import { defaultObjectSize, zoomScaledStops } from "./objects";
-import { highlightColour, setHighlightColour } from "./highlight";
+import { highlightColour, highlightColourExpression, setHighlightColour } from "./highlight";
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -289,7 +289,8 @@ export async function ensureAdmin0Highlights(
   zoomOffset = 0,
   extraAdmin1: string[] = [],
   isCurrent: IsCurrent = ALWAYS_CURRENT,
-  highlightColourOverride?: string
+  highlightColourOverride?: string,
+  highlightColours?: Record<string, string>
 ): Promise<void> {
   ensureLowZoomRaster(map, styleId, zoomOffset);
   const data = await loadAdmin0();
@@ -301,6 +302,7 @@ export async function ensureAdmin0Highlights(
   if (admin1Codes.length) await Promise.all(admin1Codes.map(loadAdmin1));
   if (!isCurrent()) return;
   const colour = highlightColourOverride ?? highlightColour();
+  const admin0Paint = highlightColourExpression("ADM0_A3", colour, highlightColours) as string;
   if (!map.getSource("admin0")) {
     map.addSource("admin0", { type: "geojson", data: data as GeoJSON.GeoJSON, promoteId: "ADM0_A3" });
   }
@@ -312,7 +314,7 @@ export async function ensureAdmin0Highlights(
         type: "fill",
         source: "admin0",
         paint: {
-          "fill-color": colour,
+          "fill-color": admin0Paint,
           "fill-opacity": admin0PaintExpression(ADMIN0_FILL_OPACITY),
         },
       },
@@ -324,7 +326,7 @@ export async function ensureAdmin0Highlights(
         type: "line",
         source: "admin0",
         paint: {
-          "line-color": colour,
+          "line-color": admin0Paint,
           "line-width": 1.2,
           "line-opacity": admin0PaintExpression(ADMIN0_LINE_OPACITY),
         },
@@ -332,20 +334,23 @@ export async function ensureAdmin0Highlights(
       before
     );
   }
-  ensureAdmin1Layers(map, admin1Codes, colour);
+  ensureAdmin1Layers(map, admin1Codes, colour, highlightColours);
   applyHighlights(map, highlights);
   applyAdmin1Highlights(map, highlights);
   applyIsolate(map, highlights, isolate);
+  applyHighlightColour(map, colour, highlightColours);
 }
 
 /** Sets the module-level highlight colour and repaints the admin-0/admin-1 layers already on `map`. */
-export function applyHighlightColour(map: MapLibreMap, colour: string): void {
+export function applyHighlightColour(map: MapLibreMap, colour: string, overrides?: Record<string, string>): void {
   setHighlightColour(colour);
   const next = highlightColour();
-  if (map.getLayer("admin0-fill")) map.setPaintProperty("admin0-fill", "fill-color", next);
-  if (map.getLayer("admin0-line")) map.setPaintProperty("admin0-line", "line-color", next);
-  if (map.getLayer("admin1-fill")) map.setPaintProperty("admin1-fill", "fill-color", next);
-  if (map.getLayer("admin1-line")) map.setPaintProperty("admin1-line", "line-color", next);
+  const admin0 = highlightColourExpression("ADM0_A3", next, overrides) as string;
+  const admin1 = highlightColourExpression("adm1_code", next, overrides) as string;
+  if (map.getLayer("admin0-fill")) map.setPaintProperty("admin0-fill", "fill-color", admin0);
+  if (map.getLayer("admin0-line")) map.setPaintProperty("admin0-line", "line-color", admin0);
+  if (map.getLayer("admin1-fill")) map.setPaintProperty("admin1-fill", "fill-color", admin1);
+  if (map.getLayer("admin1-line")) map.setPaintProperty("admin1-line", "line-color", admin1);
 }
 
 /** Loads `codes` and re-feeds the merged `admin1` source from the cache — the explicit
@@ -363,7 +368,12 @@ export async function syncAdmin1Source(
 }
 
 /** Adds (or re-feeds) the merged admin-1 source for `codes`. No-op while nothing is highlighted. */
-function ensureAdmin1Layers(map: MapLibreMap, codes: string[], highlightColourOverride?: string): void {
+function ensureAdmin1Layers(
+  map: MapLibreMap,
+  codes: string[],
+  highlightColourOverride?: string,
+  highlightColours?: Record<string, string>
+): void {
   if (!codes.length) {
     if (map.getLayer("admin1-line")) map.removeLayer("admin1-line");
     if (map.getLayer("admin1-fill")) map.removeLayer("admin1-fill");
@@ -383,12 +393,13 @@ function ensureAdmin1Layers(map: MapLibreMap, codes: string[], highlightColourOv
   // isolate mask always stays on top of the region fill, matching today's look.
   const before = map.getLayer("isolate-fill") ? "isolate-fill" : firstSymbolId(map);
   const colour = highlightColourOverride ?? highlightColour();
+  const admin1Paint = highlightColourExpression("adm1_code", colour, highlightColours) as string;
   map.addLayer(
     {
       id: "admin1-fill",
       type: "fill",
       source: "admin1",
-      paint: { "fill-color": colour, "fill-opacity": 0 },
+      paint: { "fill-color": admin1Paint, "fill-opacity": 0 },
     },
     before
   );
@@ -397,7 +408,7 @@ function ensureAdmin1Layers(map: MapLibreMap, codes: string[], highlightColourOv
       id: "admin1-line",
       type: "line",
       source: "admin1",
-      paint: { "line-color": colour, "line-width": 1.2, "line-opacity": 0 },
+      paint: { "line-color": admin1Paint, "line-width": 1.2, "line-opacity": 0 },
     },
     before
   );
@@ -559,14 +570,9 @@ export function withoutRevealed(list: MapsChurch[]): MapsChurch[] {
   return list.filter((c) => !painted(c));
 }
 
-export const MOVIE_LABEL_FADE = 0.15;
-
-function sourceLabelAlpha(t: number): number {
-  return t >= MOVIE_LABEL_FADE ? 0 : 1 - t / MOVIE_LABEL_FADE;
-}
-
-function destLabelAlpha(t: number): number {
-  return t <= 1 - MOVIE_LABEL_FADE ? 0 : (t - (1 - MOVIE_LABEL_FADE)) / MOVIE_LABEL_FADE;
+/** Pins and landmarks stay; Keynote paints Amplitude Bold labels on stills, not on movie rasters. */
+function withoutMovieLabel(item: MapsChurch): MapsChurch {
+  return { ...item, showLabel: false };
 }
 
 /**
@@ -578,20 +584,15 @@ function destLabelAlpha(t: number): number {
 export function movieObjectsAt(from: MapsChurch[], to: MapsChurch[], t: number, transition: "fade" | "hold" | undefined, destinationPaintsReveal = true): MapsChurch[] {
   const clamped = Math.max(0, Math.min(1, t));
   const destination = destinationPaintsReveal ? withoutRevealed(to) : to;
-  const sourceLabel = sourceLabelAlpha(clamped);
-  const destLabel = destLabelAlpha(clamped);
   if ((transition || "hold") === "hold") {
-    if (clamped >= 1) return destination.map((item) => ({ ...item, opacity: item.opacity ?? 1, labelOpacity: item.opacity ?? 1 }));
-    const sourceItems = from.map((item) => ({ ...item, opacity: item.opacity ?? 1, labelOpacity: (item.opacity ?? 1) * sourceLabel }));
-    if (destLabel <= 0) return sourceItems;
-    const destLabelItems = destination.map((item) => ({ ...item, id: `to-${item.id}`, opacity: 0, labelOpacity: (item.opacity ?? 1) * destLabel }));
-    return [...sourceItems, ...destLabelItems];
+    if (clamped >= 1) return destination.map((item) => withoutMovieLabel({ ...item, opacity: item.opacity ?? 1 }));
+    return from.map((item) => withoutMovieLabel({ ...item, opacity: item.opacity ?? 1 }));
   }
   const sourceAlpha = Math.max(0, 1 - 2 * clamped);
   const destAlpha = Math.max(0, 2 * clamped - 1);
   return [
-    ...from.map((item) => ({ ...item, opacity: (item.opacity ?? 1) * sourceAlpha, labelOpacity: (item.opacity ?? 1) * sourceLabel })),
-    ...destination.map((item) => ({ ...item, id: `to-${item.id}`, opacity: (item.opacity ?? 1) * destAlpha, labelOpacity: (item.opacity ?? 1) * destLabel })),
+    ...from.map((item) => withoutMovieLabel({ ...item, opacity: (item.opacity ?? 1) * sourceAlpha })),
+    ...destination.map((item) => withoutMovieLabel({ ...item, id: `to-${item.id}`, opacity: (item.opacity ?? 1) * destAlpha })),
   ];
 }
 
@@ -825,9 +826,10 @@ export async function addOverlays(
   isolate?: MapsIsolate,
   extraAdmin1: string[] = [],
   isCurrent: IsCurrent = ALWAYS_CURRENT,
-  highlightColourOverride?: string
+  highlightColourOverride?: string,
+  highlightColours?: Record<string, string>
 ) {
-  await ensureAdmin0Highlights(map, highlights, styleId, isolate, 0, extraAdmin1, isCurrent, highlightColourOverride);
+  await ensureAdmin0Highlights(map, highlights, styleId, isolate, 0, extraAdmin1, isCurrent, highlightColourOverride, highlightColours);
   if (!isCurrent()) return;
   ensureDropPinImages(map, churches);
   ensureLabelPillImage(map);

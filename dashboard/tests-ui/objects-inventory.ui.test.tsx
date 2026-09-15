@@ -99,6 +99,22 @@ describe("Objects tab: pins and highlights", () => {
     expect(within(tab).getByText("3")).toBeInTheDocument();
   });
 
+  it("opening a highlight row shows its colour override in Properties", async () => {
+    const job = makeJob({
+      result: { ...makeDoc({ slides: [makeSlide({ highlights: ["MYS"] })] }), stateRevision: 1 },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "MYS" }));
+    });
+
+    expect(screen.getByRole("button", { name: "Camera" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Highlight colour")).toBeInTheDocument();
+    expect(screen.getByText("Highlight")).toBeInTheDocument();
+  });
+
   it("hides the empty-state note when only highlights exist", async () => {
     const job = makeJob({
       result: { ...makeDoc({ slides: [makeSlide({ highlights: ["MYS"] })] }), stateRevision: 1 },
