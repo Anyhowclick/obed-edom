@@ -81,6 +81,7 @@ from obed_edom.iwa_geometry import (
 )
 from obed_edom.iwa_kindindex import _memberships, derive_kind_index
 from obed_edom.iwa_runs import (
+    _SIG_JOIN,
     _load_deck,
     _normalize_text,
     attach_group_captions,
@@ -385,11 +386,16 @@ def _union_rect(rects: Sequence[Rect]) -> Rect:
     return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
-def _stacked_text_rects(boxes: Sequence[TextBox], heights: dict[ItemId, float], band: Band) -> dict[ItemId, Rect]:
-    """One long box per part or per slide, full band width, stacked from the band bottom
-    upward in ``boxes`` order, using the heights ``fit_text_stack`` already computed (D4)."""
+def _stacked_text_rects(
+    boxes: Sequence[TextBox], heights: dict[ItemId, float], band: Band, *, top_anchor: bool = False,
+) -> dict[ItemId, Rect]:
+    """One long box per part or per slide, full band width, stacked in ``boxes`` order,
+    using the heights ``fit_text_stack`` already computed (D4). ``top_anchor`` (finding 1:
+    an authoritative layout slot is top-anchored, position-last per the gold measurement/
+    deletion probe) stacks from the band's own top downward instead of upward from the
+    band bottom -- legacy (non-slot) band placement is unchanged."""
     total = sum(heights.values()) + _TEXT_STACK_GAP * (len(boxes) - 1)
-    y = band.bottom - total
+    y = (band.bottom - band.height) if top_anchor else (band.bottom - total)
     rects: dict[ItemId, Rect] = {}
     for box in boxes:
         h = heights[box.item_id]
@@ -434,7 +440,12 @@ def _refuse_split_box_char_word_builds(
 def _identity_is_narrowed_slice(part_identity: tuple, src_identity: tuple) -> bool:
     """True if a split part's build identity is the source's identity narrowed to a
     contiguous slice of its text (probe H3) -- the only legitimate way a cloned build's
-    identity may differ from its source."""
+    identity may differ from its source. A group identity's text (``iwa_runs._SIG_JOIN``
+    = ``"\\n"``-joined per-child signatures, finding 4) is compared CHILD-WISE: every
+    unchanged child (badge or otherwise) must match its source child exactly, and at
+    most one child -- the one the split actually narrowed -- may instead be a contiguous
+    slice of its own source child's text. A bare (non-group) identity keeps the older
+    whole-string substring check."""
     if part_identity == src_identity:
         return True
     if len(part_identity) != 2 or len(src_identity) != 2 or part_identity[0] != src_identity[0]:
@@ -442,7 +453,20 @@ def _identity_is_narrowed_slice(part_identity: tuple, src_identity: tuple) -> bo
     part_text, src_text = part_identity[1], src_identity[1]
     if not part_text or not src_text:
         return False
-    return part_text in src_text
+    if part_identity[0] != "group":
+        return part_text in src_text
+    part_children = part_text.split(_SIG_JOIN)
+    src_children = src_text.split(_SIG_JOIN)
+    if len(part_children) != len(src_children):
+        return False
+    narrowed_count = 0
+    for part_child, src_child in zip(part_children, src_children):
+        if part_child == src_child:
+            continue
+        if not part_child or part_child not in src_child:
+            return False
+        narrowed_count += 1
+    return narrowed_count <= 1
 
 
 def _refuse_on_short_row_overlap(number: int, short_fit: dict[ItemId, Rect]) -> None:
@@ -1478,6 +1502,7 @@ def plan_assembly(
             stacked_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
             slot_badge_id: ItemId | None = None
             slot_badge_pt: float | None = None
+            used_slot_layout_name: str | None = None
             if cls.is_text and cls.long_text_ids:
                 long_ids = []
                 for iid in cls.long_text_ids:
@@ -1728,9 +1753,13 @@ def plan_assembly(
                     if slot_layout_name is not None:
                         layout_names[number] = slot_layout_name
                     if result is not None:
+                        if slot_layout_name is not None:
+                            used_slot_layout_name = slot_layout_name
                         t, sizes, heights = result
                         stack_t_map[number] = t
-                        long_rects = _stacked_text_rects(boxes, heights, stack_band)
+                        long_rects = _stacked_text_rects(
+                            boxes, heights, stack_band, top_anchor=slot_layout_name is not None,
+                        )
                         fit.update(long_rects)
                         short_rects: dict[ItemId, Rect] = {}
                         if short_fit:
@@ -1836,11 +1865,21 @@ def plan_assembly(
                         split_rect = split_slot.verse if slot_category == "verse" else split_slot.text
                         split_pt = split_slot.verse_pt if slot_category == "verse" else split_slot.text_pt
                         split_box = boxes[0]
-                        if slot_category == "verse" and slot_badge_id is not None and split_slot.badge is not None \
-                                and slot_badge_id in short_fit:
+                        split_slot_badge_pinned = (
+                            slot_category == "verse" and slot_badge_id is not None and split_slot.badge is not None
+                            and slot_badge_id in short_fit
+                        )
+                        if split_slot_badge_pinned:
                             short_fit[slot_badge_id] = split_slot.badge
                             slot_badge_pt = split_slot.badge_pt
+                        split_badge_pinned_ids = frozenset({slot_badge_id}) if split_slot_badge_pinned else None
+                        # Finding 3: entering the split branch re-anchors measurement/refit
+                        # state (stack_band, stack_t_map) to the Standard slot's own band --
+                        # never the reduced pre-split band -- so per-ordinal measurement and
+                        # the refit round check the same bounds as a non-split slot fit.
+                        stack_band = _slot_band(split_rect)
                         split_t = split_pt / split_box.size if split_box.size else 1.0
+                        stack_t_map[number] = split_t
                         if split_t < _box_min_t(split_box, min_text_pt):
                             raise AssemblyRefusal(
                                 f"slide {number} box {_item_label(split_box.item_id)}: the slot's "
@@ -1894,6 +1933,7 @@ def plan_assembly(
                         layout_names[number] = (
                             "Verse Standard (Variation 2)" if slot_category == "verse" else "Point 3 Lines"
                         )
+                        used_slot_layout_name = layout_names[number]
                         chunks = _pack_split_lines(
                             spans, run_table, split_pt, split_rect.h, number, split_box.item_id,
                         )
@@ -1904,7 +1944,11 @@ def plan_assembly(
                             # emitting a no-op split that deletes nothing.
                             fit[split_box.item_id] = split_rect
                             if short_fit:
-                                fit.update(_short_row_rects(short_fit, short_row_h, split_rect.y))
+                                fit.update(
+                                    _short_row_rects(
+                                        short_fit, short_row_h, split_rect.y, pinned_ids=split_badge_pinned_ids,
+                                    )
+                                )
                             ranges = _windowed_run_ranges(run_table, 0, full_len, split_pt)
                             if isinstance(ranges, tuple):
                                 stacked_run_sizes[split_box.item_id] = ranges
@@ -1916,7 +1960,11 @@ def plan_assembly(
                                 start0, end0 = chunk[0][0], chunk[-1][1]
                                 part_fit = dict(short_fit)
                                 if short_fit:
-                                    part_fit.update(_short_row_rects(short_fit, short_row_h, split_rect.y))
+                                    part_fit.update(
+                                        _short_row_rects(
+                                            short_fit, short_row_h, split_rect.y, pinned_ids=split_badge_pinned_ids,
+                                        )
+                                    )
                                 part_fit[split_box.item_id] = split_rect
                                 ranges = _windowed_run_ranges(run_table, start0, end0, split_pt)
                                 part_text_sizes: dict[ItemId, float] = {}
@@ -2089,7 +2137,7 @@ def plan_assembly(
                 stack_band_map[number] = stack_band
                 short_fit_map[number] = dict(short_fit)
                 short_row_h_map[number] = short_row_h
-                if slot_layout_name is not None and slot_badge_id is not None and slot_badge_id in short_fit:
+                if used_slot_layout_name is not None and slot_badge_id is not None and slot_badge_id in short_fit:
                     slot_badge_ids_map[number] = slot_badge_id
         except Exception:
             _discard_pending_crop_writes(pending_crop_writes)
@@ -2480,8 +2528,9 @@ def verify_staged_layouts_alpha_safe(
     (read straight off the staged deck, not the plan) must equal the expected one for
     its slide number, and -- for a verse/point layout, whose slot carries a ``verse``/
     ``text`` rect -- the slide's own top-level long-text item(s) (``plan.stacked_ids``/
-    ``SplitPart.stacked_ids``) must sit at the slot's x/width, bottom-aligned to the
-    slot's own bottom, within `_SLOT_RECT_TOL_PT`; a slot carrying a ``badge`` rect is
+    ``SplitPart.stacked_ids``) must sit at the slot's x/width/y (top-anchored,
+    position-last per the gold measurement/deletion probe) within `_SLOT_RECT_TOL_PT`,
+    with saved height at most the slot's own height + 2.0pt; a slot carrying a ``badge`` rect is
     checked the same way (full x/y/w/h) against the plan's own recorded slot badge id
     (`plan.slot_badge_ids`). A source id (finding 5) is translated through
     ``_staged_id_for``/``hidden`` before lookup -- deletions shift the staged
@@ -2571,7 +2620,8 @@ def verify_staged_layouts_alpha_safe(
                 if (
                     abs(x - slot_rect.x) > _SLOT_RECT_TOL_PT
                     or abs(w - slot_rect.w) > _SLOT_RECT_TOL_PT
-                    or abs((y + h) - (slot_rect.y + slot_rect.h)) > _SLOT_RECT_TOL_PT
+                    or abs(y - slot_rect.y) > _SLOT_RECT_TOL_PT
+                    or h > slot_rect.h + 2.0
                 ):
                     _refuse_rect(item_id, x, y, w, h, "verse/point text")
 
@@ -4085,7 +4135,17 @@ def _eligible_refit_items(plan: AssemblyPlan, slide_no: int) -> frozenset[tuple[
     run-aware estimator and its safety margin, never refit live (D1 step 6). A split
     slide (S3) yields one pair per part, keyed by that part's own output ordinal --
     ``SplitPart.stacked_ids`` -- since a char-window split can reuse the same source
-    item id across parts and only the ordinal tells them apart."""
+    item id across parts and only the ordinal tells them apart.
+
+    Finding 5: a group-child split part's own saved height is still not folded into
+    this offline-measure/live-refit round -- the live refit script and its
+    ``text:<idx>`` key format assume a plain top-level text item, and group text is
+    never refit live regardless (D1 step 6), so widening eligibility here would only
+    make an unmeasurable item look "checked". Group-child split-part containment is
+    instead enforced authoritatively at STAGE-VERIFY time (finding 5's fallback,
+    ``verify_staged_layouts_alpha_safe`` / ``_staged_group_child_rect``): exact top +
+    saved-height containment against the slot, so a mis-sized part still refuses
+    before delivery even though it was never live-refit."""
     split_parts = plan.splits.get(slide_no)
     if split_parts is not None:
         base = plan.ordinals.get(slide_no, 0)
@@ -4220,7 +4280,7 @@ def _build_refit_round(
         t, sizes, heights = fit
         if last_t is not None:
             last_t[slide_no] = t
-        rects = _stacked_text_rects(boxes, heights, stack_band)
+        rects = _stacked_text_rects(boxes, heights, stack_band, top_anchor=slide_no in plan.layout_names)
         slide_refits: dict[ItemId, TextRefit] = {}
         for box in boxes:
             item = items_by_id[box.item_id]

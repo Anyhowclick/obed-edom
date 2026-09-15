@@ -6982,19 +6982,24 @@ def _char_window_groupchild_split_part(kind_index: int, char_window: tuple) -> S
 
 
 def test_verify_builds_groupchild_char_window_split_clones_the_group_build(monkeypatch):
+    # Finding 4: GW 5/54's real identity is ("group", "Matthew 18\n<full verse>") -- the
+    # badge/heading child stays a stable prefix and only the verse child narrows. A
+    # synthetic identity with no such badge prefix (the old fixture) misses the case
+    # `_identity_is_narrowed_slice` must handle child-wise.
     from obed_edom import iwa_builds
 
+    full_verse = "In whole box text here completely more"
     src_dissolve = {
         "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
         "kind": "group", "kindIndex": 0, "effect": "apple:dissolve", "animationType": "In",
-        "identity": ("group", "whole box text here"),
+        "identity": ("group", f"Matthew 18\n{full_verse}"),
     }
     src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
-    part_texts = ["whole box", "box text", "text here"]
+    part_texts = ["In whole box", "text here completely", "more"]
     out_builds = {
         2 + i: {
             "slideId": f"o{i}",
-            "builds": [dict(src_dissolve, identity=("group", t))],
+            "builds": [dict(src_dissolve, identity=("group", f"Matthew 18\n{t}"))],
             "transition": None,
         }
         for i, t in enumerate(part_texts)
@@ -7012,6 +7017,32 @@ def test_verify_builds_groupchild_char_window_split_clones_the_group_build(monke
     builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
     assert len(builds["out_rekeyed"][17]["builds"]) == 3
     assert any("cloned build on split part" in w for w in warnings)
+
+
+def test_identity_is_narrowed_slice_gw5_54_shaped_group_identity_child_wise():
+    # Finding 4: a literal GW 5/54-shaped identity ("group", "Matthew 18\n<verse>") --
+    # the unchanged badge child ("Matthew 18") must match exactly and only the verse
+    # child may narrow, for the first, middle, and final part of a 3-way split.
+    full_verse = "In the beginning was the Word and the Word was with God"
+    src_identity = ("group", f"Matthew 18\n{full_verse}")
+    first = ("group", "Matthew 18\nIn the beginning was the Word")
+    middle = ("group", "Matthew 18\nthe Word was with")
+    final = ("group", "Matthew 18\nwas with God")
+    for part in (first, middle, final):
+        assert dsa._identity_is_narrowed_slice(part, src_identity)
+
+    # A changed badge child must refuse even if the verse child is a valid slice.
+    wrong_badge = ("group", "Luke 5\nIn the beginning was the Word")
+    assert not dsa._identity_is_narrowed_slice(wrong_badge, src_identity)
+
+    # A verse "slice" that is not actually contained in the source verse must refuse.
+    not_a_slice = ("group", "Matthew 18\nsomething not in the verse at all")
+    assert not dsa._identity_is_narrowed_slice(not_a_slice, src_identity)
+
+    # A different child count (badge dropped) must refuse rather than fall back to the
+    # whole-string substring check.
+    dropped_child = ("group", "In the beginning was the Word")
+    assert not dsa._identity_is_narrowed_slice(dropped_child, src_identity)
 
 
 def test_refuse_split_box_char_word_builds_group_child_checks_the_groups_own_build():
@@ -9540,13 +9571,13 @@ def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):
     verse_id = by_number[13].long_text_ids[0]
     slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
     verse_rect = plan.fits[13][verse_id]
-    # The verse stacks bottom-anchored inside the slot band (content-height rect, not a
-    # literal slot-rect override) -- x/w match the slot exactly, and the rect's bottom
-    # coincides with the slot's own bottom (`_stacked_text_rects` stacks upward from
-    # `stack_band.bottom`, and `stack_bands[13]` IS the slot band, see below).
+    # Finding 1: the verse is TOP-anchored inside the slot band (content-height rect,
+    # not a literal slot-rect override) -- x/w/y match the slot exactly (position-last,
+    # per the gold measurement/deletion probe), and the saved height stays within the
+    # slot's own height (`stack_bands[13]` IS the slot band, see below).
     assert verse_rect.x == slot.verse.x
     assert verse_rect.w == slot.verse.w
-    assert verse_rect.y + verse_rect.h == pytest.approx(slot.verse.y + slot.verse.h)
+    assert verse_rect.y == pytest.approx(slot.verse.y)
     assert verse_rect.h <= slot.verse.h
     badge_id = dsa._find_verse_badge_id(by_number[13], {
         (item["kind"], item["kindIndex"]): item for item in payload["slides"][12]["items"]
@@ -9616,7 +9647,7 @@ def test_build_refit_round_keeps_slot_rect_as_refit_authority(tmp_path):
     refit_rect = refits[13][verse_id].rect
     assert refit_rect.x == slot.verse.x
     assert refit_rect.w == slot.verse.w
-    assert refit_rect.y + refit_rect.h == pytest.approx(slot.verse.y + slot.verse.h)
+    assert refit_rect.y == pytest.approx(slot.verse.y)
     assert refit_rect.h <= slot.verse.h + 0.01
 
 
@@ -9870,19 +9901,37 @@ def test_split_part_emitted_script_order_is_width_size_delete_position_no_height
 
 @pytest.mark.deck
 def test_gw38_split_part_rects_pinned_to_the_standard_slot():
+    # Finding 2/3/6: every part's verse rect is the exact Standard slot (top-anchored,
+    # position-last), the badge is snapped to the slot badge on every part (not the
+    # pre-fix (63.1, 774.3) reflowed position), `layout_names`/`slot_badge_ids` are
+    # recorded, and the recorded band/measurement key are the Standard slot band --
+    # never the reduced pre-split band. Windows are pinned literals from the review.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
     payload, classes, runs = load_assembly_inputs(GW_DECK)
     by_number = {c.number: c for c in classes}
     decisions = {38: SlideDecision(38, "in_deck")}
     plan = plan_assembly(
         payload, [by_number[38]], decisions=decisions, band=BAND, clips={}, runs=runs,
-        all_classes=classes, fw_deck=GW_DECK, layout_policy="import",
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
     )
-    for part in plan.splits[38]:
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    assert plan.layout_names[38] == "Verse Standard (Variation 2)"
+    assert plan.stack_bands[38] == dsa._slot_band(slot.verse)
+    assert 38 in plan.stack_t
+    badge_id = plan.slot_badge_ids.get(38)
+    assert badge_id is not None
+    expected_windows = [(1, 91), (93, 185), (187, 271), (273, 296)]
+    parts = plan.splits[38]
+    assert len(parts) == len(expected_windows)
+    for part, expected_window in zip(parts, expected_windows):
         verse_id = next(iter(part.stacked_ids))
         rect = part.fits[verse_id]
         assert (round(rect.x, 1), round(rect.y, 1), round(rect.w, 1)) == (53.6, 866.4, 1799.0)
+        assert part.char_window == expected_window
+        badge_rect = part.fits[badge_id]
+        assert (round(badge_rect.x, 1), round(badge_rect.y, 1)) == (63.1, 785.8)
 
 
 R12B = Path.home() / "Desktop/dsk-d4-work/out-r12b/Sermon_PK_DSK.key"
@@ -10101,7 +10150,7 @@ def test_gw51_group_child_verse_resolves_verse_standard_and_slot_rects():
     verse_rect = plan.fits[51][verse_id]
     assert verse_rect.x == slot.verse.x
     assert verse_rect.w == slot.verse.w
-    assert verse_rect.y + verse_rect.h == pytest.approx(slot.verse.y + slot.verse.h)
+    assert verse_rect.y == pytest.approx(slot.verse.y)
     badge_ids = [
         iid for iid in plan.fits[51]
         if iid[0] == "groupchild" and iid != verse_id
@@ -10175,8 +10224,8 @@ def test_gw17_two_top_level_boxes_stack_inside_the_verse_slot():
         assert rect.w == slot.verse.w
     tops = sorted(plan.fits[17][iid].y for iid in long_ids)
     bottoms = sorted(plan.fits[17][iid].y + plan.fits[17][iid].h for iid in long_ids)
-    assert bottoms[-1] == pytest.approx(slot.verse.y + slot.verse.h)
-    assert tops[0] >= slot.verse.y - 0.01
+    assert tops[0] == pytest.approx(slot.verse.y)
+    assert bottoms[-1] <= slot.verse.y + slot.verse.h + 0.01
 
 
 def test_gw52_repeat_heading_dropped_resolves_verse_standard():
@@ -10297,7 +10346,9 @@ def test_verify_staged_layouts_refuses_wrong_verse_rect(monkeypatch, tmp_path):
 
 
 def test_verify_staged_layouts_accepts_matching_verse_rect(monkeypatch, tmp_path):
-    # `fits` carries both retained top-level items so `_staged_id_for` ranks them
+    # Finding 1/6: a TOP-anchored, contained verse rect (y == slot.y, h < slot.h, the
+    # gold measurement/deletion-probe shape -- not the old bottom-aligned fixture) must
+    # pass. `fits` carries both retained top-level items so `_staged_id_for` ranks them
     # (badge (text, 0) -> staged (text, 0), verse (text, 1) -> staged (text, 1)); the
     # badge rect is the CORRECT slot badge x/y/w/h (finding 4/7: a wrong y must no
     # longer pass silently -- see test_verify_staged_layouts_refuses_wrong_badge_y).
@@ -10316,7 +10367,7 @@ def test_verify_staged_layouts_accepts_matching_verse_rect(monkeypatch, tmp_path
 
     verse_rec = {
         "kind": "text", "kindIndex": 1,
-        "x": slot.verse.x, "y": slot.verse.y + slot.verse.h - 100.0, "w": slot.verse.w, "h": 100.0,
+        "x": slot.verse.x, "y": slot.verse.y, "w": slot.verse.w, "h": 100.0,
     }
     badge_rec = {
         "kind": "text", "kindIndex": 0,
@@ -10335,6 +10386,87 @@ def test_verify_staged_layouts_accepts_matching_verse_rect(monkeypatch, tmp_path
     dsa.verify_staged_layouts_alpha_safe(
         tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
     )
+
+
+def test_verify_staged_layouts_refuses_verse_overflowing_slot_height(monkeypatch, tmp_path):
+    # Finding 1/6: a verse rect at the correct top-anchored x/y but taller than
+    # slot.h + 2.0pt must refuse -- the old bottom-only check let an oversized box
+    # extend above the slot as long as its bottom matched.
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1},
+        fits={1: {("text", 1): slot.verse, ("text", 0): slot.badge}}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={1: frozenset({("text", 1)})},
+        short_fit={1: {("text", 0): slot.badge}},
+        slot_badge_ids={1: ("text", 0)},
+    )
+
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    verse_rec = {
+        "kind": "text", "kindIndex": 1,
+        "x": slot.verse.x, "y": slot.verse.y, "w": slot.verse.w, "h": slot.verse.h + 20.0,
+    }
+    badge_rec = {
+        "kind": "text", "kindIndex": 0,
+        "x": slot.badge.x, "y": slot.badge.y, "w": slot.badge.w, "h": slot.badge.h,
+    }
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (1920.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        dsa, "_base_layout_slide_for_ordinal",
+        lambda objects, ordinal: {"name": "Verse Standard (Variation 2)"},
+    )
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+    monkeypatch.setattr(dsa, "compose_geometry", lambda slide, objects: [verse_rec, badge_rec])
+
+    with pytest.raises(AssemblyRefusal, match="does not match"):
+        dsa.verify_staged_layouts_alpha_safe(
+            tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
+        )
+
+
+def test_verify_staged_layouts_refuses_group_child_overflowing_slot_height(monkeypatch, tmp_path):
+    # Finding 5: a group-child split part (GW 5/54-shaped) has no offline run-aware fit
+    # of its own, so a mis-sized part must still refuse at STAGE-VERIFY time on the
+    # SAVED group geometry (`_staged_group_child_rect`, never a stale live `height`
+    # read) -- exact top + saved-height containment against the slot, the same
+    # ``stacked``-loop containment check a top-level text item gets.
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    verse_id = ("groupchild", 0, "text", 1)
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1},
+        fits={1: {verse_id: slot.verse}}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={1: frozenset({verse_id})},
+        short_fit={1: {}},
+    )
+
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    overflowing_rect = Rect(slot.verse.x, slot.verse.y, slot.verse.w, slot.verse.h + 20.0)
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (1920.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        dsa, "_base_layout_slide_for_ordinal",
+        lambda objects, ordinal: {"name": "Verse Standard (Variation 2)"},
+    )
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+    monkeypatch.setattr(dsa, "compose_geometry", lambda slide, objects: [])
+    monkeypatch.setattr(
+        dsa, "_staged_group_child_rect",
+        lambda objects, slide, number, plan, item_id, *, part=0, hidden=frozenset(): overflowing_rect,
+    )
+
+    with pytest.raises(AssemblyRefusal, match="does not match"):
+        dsa.verify_staged_layouts_alpha_safe(
+            tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
+        )
 
 
 def test_verify_staged_layouts_refuses_wrong_badge_y(monkeypatch, tmp_path):
