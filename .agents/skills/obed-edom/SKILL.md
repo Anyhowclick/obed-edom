@@ -243,10 +243,12 @@ whitelisted; content inside the band is a separate question. The owner's roster 
 slide it first appears on, plus an immediately following slide that is purely that
 roster's own re-layout — and there it is packed into the visible frame, not left at
 its wall extent. Every later slide that still carries the roster as a wall leftover
-hides it entirely, side band or centre band alike. Reuse must honour this on both the
-donor and the target: a persisted item invisible on one side and visible on the other
-needs an explicit add/remove job, not silent inheritance from whichever side reuse
-happened to copy.
+hides it entirely, side band or centre band alike. A roster carrier may be a persisted
+GROUP whose names live only in its child text, so the rule is evaluated from
+`groupChildText` and fires independently of `--keep-side-panels`. Reuse must honour
+this on both the donor and the target: a persisted item invisible on one side and
+visible on the other needs an explicit add/remove job, not silent inheritance from
+whichever side reuse happened to copy.
 
 ### Loose text
 
