@@ -3,8 +3,9 @@
 Pieces 1-3 of this plan landed on `feat/w2-zorder` (commits `6c7c10e`, `a4ad76c`,
 `1adb4e4`), each with a Codex review verdict. Piece 4 (`scripts/offline_write_ab.py`
 A/B extension for z-order, plus two isolated follow-ups) shipped separately as
-PR #126 by another agent. `OBED_ZORDER_WRITE` defaults to `on` since 2026-09-15, after
-the live gate (see "Gates" below) went green. Owner decisions taken 2026-09-15: the extra Keynote
+PR #126 by another agent. RAISE10 gate GREEN (re-gate + A-vs-A control); Gold RED only on
+slide 19 (legend, `w2-ambiguous-sig-positional`), owner-deferred and accepted as
+non-blocking; default flipped `on` 2026-09-15. Owner decisions taken 2026-09-15: the extra Keynote
 open for post-patch export (R2) is accepted; badges stay in tranche 1 (C6); slide
 reuse eligibility is dropped from scope (#124) — since reuse slides are never
 addressable, every remaining slide is addressable; the live gate deck/slide set is
@@ -80,7 +81,7 @@ The draft proposes promoting it as a production function. P16: it *rotates* the 
 The plan of record scopes W2 as "replacing 699 GUI clicks + the Accessibility dependency". P8: `obedFront` is the single click path for both phases, so leaving badges on GUI keeps System Events, keeps Accessibility, keeps `OBED_RAISE_SETTLE_MAX`, keeps `frontErr`/`raiseBlind`, and keeps the strict pass-2 bar's whole failure class. And P7 shows the deferral is unnecessary: badge rows are `(kind, wall kindIndex)` + planned frame — the same address shape `_resolve_positional` already handles. The fuzzy `obedBadgeFind` re-probe exists because the *live* index can be stale after live operations; offline, against the saved deck, `derive_kind_index` is exact and positions are irrelevant. **Badge raises are in tranche 1.** The honest win statement: tranche 1 removes Accessibility from the *remap* path only for decks whose eligible slides are 100 % of their raise-bearing slides; any slide that hard-misses falls back to GUI and re-arms Accessibility for the whole run. State this in the run log.
 
 **C7 — "default off / unknown tokens fall back to on" was flagged as a subtlety; it is simply the shipped W1 behaviour and the default is now `on`.**
-P13. `OBED_OFFLINE_WRITE` default is `on` since the W1 default flip (`8bd6197`'s ancestry, PR #119 region). W2's knob should mirror the *mechanism* but ship **default `off`** until the live gate is green — that is a deliberate difference, not a copy.
+P13. `OBED_OFFLINE_WRITE` default is `on` since the W1 default flip (`8bd6197`'s ancestry, PR #119 region). W2's knob should mirror the *mechanism* but ship **default `off`** until the live gate is green — that is a deliberate difference, not a copy (superseded 2026-09-15: RAISE10 gate GREEN (re-gate + A-vs-A control); Gold RED only on slide 19 (legend, `w2-ambiguous-sig-positional`), owner-deferred and accepted as non-blocking; default flipped `on` 2026-09-15, commit `a6842e4`).
 
 **C8 — The Keynote-scrambling caveat is real on Gold but empirically false on RAISE10.**
 P18: six RAISE10 runs (3 treatment + 3 control, same code, same deck, days-stable source) gave `SAME_ORDER=yes` on 7/7 ordinals in all 5 comparisons. So on the gate deck the brief names, a same-code A-vs-A control **is** valid and should be run as a control, and A-vs-B differences on RAISE10 are attributable. The 2026-09-04 scrambling evidence is from the **Gold** deck. The draft generalised the Gold caveat to all decks and would have thrown away the strongest available control.
@@ -233,8 +234,8 @@ Eligibility (`zorder_eligible_slides`) does not stop at id resolution: on the po
 
 **Piece 3 — wiring, knob, suppression.**
 - `zorder_write_mode()` in `remap_keynote.py` next to `offline_write_mode`; `zorder_eligible_slides` + `run_offline_zorder` in `offline_write.py`; call sites at `remap_keynote.py` ~1465 (eligibility), ~1531 (`export_dir=None` when on; `suppress_raises=` new arg), ~1607 (patch, before `restore_source_builds`); counters + `Stat zorder detail:` line.
-- Tests: `_build_stat_finalize_script` emits no `obedRaiseSlide`/`obedBadgeSlide` for suppressed slides and is otherwise character-identical (string assertion); mutual exclusion (every raise-bearing slide appears in exactly one of the two sets); `export_dir` threading — pass 2 gets `None` iff the knob is on; `tests/test_export_fold.py` gains the knob-on/knob-off fold cases; knob parse table (`""`→off, `on`, `verify`, `garbage`→off, forced off without the iwa extra, forced off when `OBED_OFFLINE_WRITE=off`).
-- Gate: `scripts/golden_plan.py` re-run — the plan dict gains no key when the knob is off, so the SHA-256 must be **unchanged at default**; that is the piece's headline assertion.
+- Tests: `_build_stat_finalize_script` emits no `obedRaiseSlide`/`obedBadgeSlide` for suppressed slides and is otherwise character-identical (string assertion); mutual exclusion (every raise-bearing slide appears in exactly one of the two sets); `export_dir` threading — pass 2 gets `None` iff the knob is on; `tests/test_export_fold.py` gains the knob-on/knob-off fold cases; knob parse table (`""`→on, `on`, `verify`, `garbage`→on, `off`→off, forced off without the iwa extra, forced off when `OBED_OFFLINE_WRITE=off`).
+- Gate: `scripts/golden_plan.py` re-run — the golden-plan gate pins `OBED_ZORDER_WRITE=off` explicitly (`ENV_PINS`), so the SHA-256 stays unchanged regardless of the default; that is the piece's headline assertion.
 
 **Piece 4 — A/B gate extension.**
 - Extend `scripts/offline_write_ab.py`: arm A = `OBED_ZORDER_WRITE=off`, arm B = `on`, both with `OBED_OFFLINE_WRITE` at the run's mode. Add a per-slide z-order verdict reusing `zorder_compare.py`'s method (P17) in two forms: `SAME_ORDER` (full id-list equality — the A-vs-A control metric) and `FRONT_BLOCK_OK` (A vs B: the target ids occupy the final `|T|` slots in the same order in both arms). Surface the new counters in the run record and summary.
@@ -245,9 +246,10 @@ Eligibility (`zorder_eligible_slides`) does not stop at id resolution: on the po
 
 ## Gates
 
-**Keynote-free (every piece):** the piece's own pytest, plus `scripts/golden_plan.py` unchanged-at-default (piece 3 onward), plus `scripts/probe_zorder_patch.py` (pure mode) still exits 0.
+**Keynote-free (every piece):** the piece's own pytest, plus `scripts/golden_plan.py` unchanged with the golden gate's explicit `OBED_ZORDER_WRITE=off` pin (piece 3 onward), plus `scripts/probe_zorder_patch.py` (pure mode) still exits 0.
 
 **One live window (the only one budgeted before the 2026-09-19/20 owner deadline):**
+(DONE 2026-09-15: the actual RAISE10 set was `40,55,56,109,110,123-128`, not `47,82,113`, plus Gold.)
 `scripts/offline_write_ab.py` on **RAISE10**, `--slides 47,82,113 --pass2-bar strict`, plus the **Gold** deck, under the standing protocol (SKILL.md:296-320): unlocked working copy, Accessibility granted, refuse any already-open Keynote document, serial, quit Keynote between arms, `--mode verify --no-validate` on the Full-style deck.
 
 Bar, per slide, on both decks:
@@ -273,9 +275,9 @@ Bar, per slide, on both decks:
 
 ## Open questions for the owner (only these change the design)
 
-1. **Is one extra Keynote open + preview export per knob-on run acceptable?** (R2.) If not, the only alternatives are rejected option (i) or shipping stale previews; the design would have to change materially, so this needs an answer before piece 3.
-2. **Badge raises in tranche 1: confirm yes.** The plan assumes yes (C6) because deferring them forfeits the Accessibility win. If the owner wants them deferred, say so now — piece 1's `resolve_raise_targets` shrinks and the live gate's success criterion must be restated as "speed only, Accessibility retained".
-3. **Are `47,82,113` the right RAISE10 slides for the one live window?** They must include at least one slide with ≥2 stat raises (to exercise the ascending-order rule, C4) and one badge slide; the banked evidence is for `8,40,55,56,106,109,110`, where s=55 carries the badge `raiseVacuous`/`-1719` history and s=8 the `badgeProbeUnknown` blind spot (R3). If `47,82,113` lack a multi-raise slide, the gate cannot distinguish C4 from a no-op.
+1. (RESOLVED 2026-09-15: the extra Keynote open is accepted.) **Is one extra Keynote open + preview export per knob-on run acceptable?** (R2.) If not, the only alternatives are rejected option (i) or shipping stale previews; the design would have to change materially, so this needs an answer before piece 3.
+2. (RESOLVED 2026-09-15: badges stay in tranche 1.) **Badge raises in tranche 1: confirm yes.** The plan assumes yes (C6) because deferring them forfeits the Accessibility win. If the owner wants them deferred, say so now — piece 1's `resolve_raise_targets` shrinks and the live gate's success criterion must be restated as "speed only, Accessibility retained".
+3. (RESOLVED 2026-09-15: slide reuse eligibility dropped from scope, #124; the actual live-window slides were `40,55,56,109,110,123-128` plus Gold, not `47,82,113`.) **Are `47,82,113` the right RAISE10 slides for the one live window?** They must include at least one slide with ≥2 stat raises (to exercise the ascending-order rule, C4) and one badge slide; the banked evidence is for `8,40,55,56,106,109,110`, where s=55 carries the badge `raiseVacuous`/`-1719` history and s=8 the `badgeProbeUnknown` blind spot (R3). If `47,82,113` lack a multi-raise slide, the gate cannot distinguish C4 from a no-op.
 
 ### Critical Files for Implementation
 
