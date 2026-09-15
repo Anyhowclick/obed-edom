@@ -1121,17 +1121,20 @@ def run_record(
     Raises ``ValueError`` if ``plan`` has NEITHER key: that means ``plan`` is already a
     trimmed, PERSISTED plan (a loaded run record's ``plan``, not a fresh ``plan_out``) —
     computing ``expectRaises`` from it would silently read as "no jobs" instead of
-    failing loudly on the caller's mistake.
+    failing loudly on the caller's mistake. One key without the other is also a
+    refuse — do not persist the missing side as ``[]``.
     """
-    if "statJobs" not in plan and "badgeRaises" not in plan:
+    jobs = raise_job_pair(plan, label="run_record: plan")
+    if jobs is None:
         raise ValueError(
             "run_record: plan carries neither 'statJobs' nor 'badgeRaises' — this looks "
             "like an already-trimmed persisted plan, not a fresh plan_out dict; "
             "expectRaises cannot be derived from it."
         )
+    stat_jobs, badge_raises = jobs
     ow = dict(offline_write or {})
     ow.pop("specs", None)
-    computed = bool(plan.get("statJobs")) or bool(plan.get("badgeRaises"))
+    computed = bool(stat_jobs) or bool(badge_raises)
     return {
         "gateVersion": GATE_VERSION,
         "commit": commit,
@@ -1143,8 +1146,8 @@ def run_record(
             "suppressGeometry": plan.get("suppressGeometry"),
         },
         "expectRaises": computed if expect_raises is None else bool(expect_raises),
-        "statJobs": list(plan.get("statJobs") or []),
-        "badgeRaises": list(plan.get("badgeRaises") or []),
+        "statJobs": stat_jobs,
+        "badgeRaises": badge_raises,
         "childResize": child_resize,
         "applied": applied,
         "missed": missed,
@@ -1609,32 +1612,38 @@ def zorder_targets_from_plan(
     return out
 
 
+def raise_job_pair(
+    src: dict[str, Any], *, label: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Both job lists from one dict, or ``None`` if neither key is present.
+
+    One key without the other is a refuse — do not infer ``[]`` for the missing
+    side, or a badge-only source would silently drop every stat target.
+    """
+    has_stat = "statJobs" in src
+    has_badge = "badgeRaises" in src
+    if has_stat != has_badge:
+        raise ValueError(
+            f"{label} carries only one of statJobs/badgeRaises; refuse to "
+            "treat the missing key as empty"
+        )
+    if not has_stat:
+        return None
+    return list(src.get("statJobs") or []), list(src.get("badgeRaises") or [])
+
+
 def persisted_raise_jobs(
     plan: dict[str, Any], record: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
     """Return ``(statJobs, badgeRaises)`` from a fresh plan or a persisted record.
 
-    ``None`` means a legacy record with neither key (W1 run records). One key
-    without the other is a refuse — do not infer an empty list for the missing
-    side, or a badge-only record would silently drop every stat target.
+    ``None`` means a legacy record with neither key (W1 run records). Both keys
+    must come from the same source — do not fill a one-key plan from the record
+    (or the reverse), or ``run_record`` synthesizing ``[]`` would hide the gap.
     """
-    def pick(key: str) -> list[dict[str, Any]] | None:
-        if key in plan:
-            return list(plan.get(key) or [])
-        if key in record:
-            return list(record.get(key) or [])
-        return None
-
-    stat = pick("statJobs")
-    badge = pick("badgeRaises")
-    if (stat is None) != (badge is None):
-        raise ValueError(
-            "plan/record carries only one of statJobs/badgeRaises; refuse to "
-            "treat the missing key as empty"
-        )
-    if stat is None:
-        return None
-    return stat, badge
+    if "statJobs" in plan or "badgeRaises" in plan:
+        return raise_job_pair(plan, label="plan")
+    return raise_job_pair(record, label="record")
 
 
 # ==========================================================================

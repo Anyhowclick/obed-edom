@@ -332,6 +332,32 @@ def test_persisted_raise_jobs_refuses_one_key_only():
         persisted_raise_jobs({"badgeRaises": []}, {})
 
 
+def test_persisted_raise_jobs_refuses_split_plan_and_record():
+    with pytest.raises(ValueError, match="only one of"):
+        persisted_raise_jobs(
+            {"statJobs": [{"slide": 1}]},
+            {"badgeRaises": [{"slide": 2}]},
+        )
+
+
+def test_run_record_refuses_one_job_key():
+    kwargs = dict(
+        commit="c", deck_digest="dA", source_digest="dS",
+        child_resize={"ok": True}, applied=1, missed=0,
+        offline_write={"slides": [1]}, spec_id_map={},
+    )
+    with pytest.raises(ValueError, match="only one of"):
+        run_record(
+            **kwargs,
+            plan={"transforms": [], "reuses": [], "statJobs": [{"slide": 1}]},
+        )
+    with pytest.raises(ValueError, match="only one of"):
+        run_record(
+            **kwargs,
+            plan={"transforms": [], "reuses": [], "badgeRaises": [{"slide": 2}]},
+        )
+
+
 def test_persisted_raise_jobs_reads_both_from_record():
     assert persisted_raise_jobs(
         {"transforms": []},

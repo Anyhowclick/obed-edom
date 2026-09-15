@@ -2993,7 +2993,7 @@ def _record(**over):
     base = dict(
         commit="abc123", deck_digest="dA", source_digest="dS",
         plan={"transforms": [{"slide": 1}], "reuses": [], "suppressGeometry": [],
-             "statJobs": [{"slide": 3}]},
+             "statJobs": [{"slide": 3}], "badgeRaises": []},
         child_resize={"ok": True, "jobs": 0}, applied=5, missed=0,
         offline_write={"slides": [1], "specs": {1: []}},
         spec_id_map={"1": [{"kind": "shape", "kindIndex": 0, "id": "obj1"}]},
@@ -3010,19 +3010,20 @@ def test_run_record_drops_specs_from_offline_write():
 
 def test_run_record_trims_plan_to_three_keys():
     record = run_record(**_record(plan={"transforms": [1], "reuses": [2], "suppressGeometry": [3],
-                                        "asGeom": {"junk": True}, "statJobs": []}))
+                                        "asGeom": {"junk": True}, "statJobs": [],
+                                        "badgeRaises": []}))
     assert set(record["plan"]) == {"transforms", "reuses", "suppressGeometry"}
 
 
 def test_run_record_computes_expect_raises_from_stat_jobs():
     record = run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": [],
-                                        "statJobs": [{"slide": 3}]}))
+                                        "statJobs": [{"slide": 3}], "badgeRaises": []}))
     assert record["expectRaises"] is True
 
 
 def test_run_record_computes_expect_raises_from_badge_raises():
     record = run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": [],
-                                        "badgeRaises": [{"slide": 5}]}))
+                                        "statJobs": [], "badgeRaises": [{"slide": 5}]}))
     assert record["expectRaises"] is True
 
 
