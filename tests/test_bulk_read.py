@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from conftest import _fake_osascript
 from obed_edom import inspect as inspect_mod
 from obed_edom.inspect import bulk_read_enabled, inspect_keynote
 
@@ -42,22 +42,26 @@ def test_flag_forced_off_values(monkeypatch):
 def _capture_plan(monkeypatch):
     """Run inspect_keynote with osascript stubbed; return the plan dict it wrote."""
     captured: dict = {}
+    from obed_edom import osascript_runner
 
-    def fake_popen(args, *a, **kw):
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
         # inspect_keynote calls: ["osascript", "-l", "JavaScript", JS, plan_path]
-        plan_path = args[-1]
-        captured["plan"] = json.loads(open(plan_path, encoding="utf-8").read())
+        plan_path = argv[-1]
+        plan = json.loads(open(plan_path, encoding="utf-8").read())
+        captured["plan"] = plan
         payload = {
-            "path": captured["plan"]["path"],
+            "path": plan["path"],
             "slideWidth": 1920,
             "slideHeight": 1080,
             "slideCount": 1,
             "slides": [{"index": 0, "number": 1, "skipped": False, "items": []}],
         }
-        kw["stdout"].write(json.dumps(payload).encode())
-        return SimpleNamespace(args=args, returncode=0, poll=lambda: 0)
+        return osascript_runner.OsaResult(
+            argv=argv, returncode=0, stdout=json.dumps(payload), stderr="", elapsed=0.0
+        )
 
-    monkeypatch.setattr(inspect_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
     return captured
 
 
@@ -115,19 +119,15 @@ def test_successful_fallback_export_clears_stale_jxa_export_error(tmp_path, monk
     key.write_text("stub")
     export_dir = tmp_path / "previews"
 
-    def fake_run(*_args, **_kwargs):
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps({"slideCount": 0, "slides": [], "exportError": "JXA export failed"}),
-            stderr="",
-        )
-
     def fake_export(_key_path, dest):
         Path(dest).mkdir(parents=True, exist_ok=True)
         (Path(dest) / "slide-1.png").write_bytes(b"\x89PNG")
         return None
 
-    monkeypatch.setattr(inspect_mod, "_run_jxa_inspect", fake_run)
+    _fake_osascript(
+        monkeypatch,
+        stdout=json.dumps({"slideCount": 0, "slides": [], "exportError": "JXA export failed"}),
+    )
     monkeypatch.setattr(inspect_mod, "export_slide_images", fake_export)
 
     out = inspect_keynote(key, export_dir=export_dir, use_cache=False)
@@ -140,18 +140,16 @@ def test_failed_fallback_export_keeps_its_error(tmp_path, monkeypatch):
     key = tmp_path / "deck.key"
     key.write_text("stub")
 
-    def fake_run(*_args, **_kwargs):
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps({
+    _fake_osascript(
+        monkeypatch,
+        stdout=json.dumps(
+            {
                 "slideCount": 1,
                 "slides": [{"index": 0, "number": 1, "skipped": False}],
                 "exportError": "old error",
-            }),
-            stderr="",
-        )
-
-    monkeypatch.setattr(inspect_mod, "_run_jxa_inspect", fake_run)
+            }
+        ),
+    )
     monkeypatch.setattr(inspect_mod, "export_slide_images", lambda *_args, **_kwargs: "fallback failed")
 
     out = inspect_keynote(key, export_dir=tmp_path / "previews", use_cache=False)
@@ -188,7 +186,9 @@ def _boom_jxa(monkeypatch):
     def boom(*_args, **_kwargs):  # pragma: no cover - must not run
         raise AssertionError("legacy JXA inspect must not run on an export-only hit")
 
-    monkeypatch.setattr(inspect_mod, "_run_jxa_inspect", boom)
+    from obed_edom import osascript_runner
+
+    monkeypatch.setattr(osascript_runner, "_execute", boom)
 
 
 def test_legacy_cache_hit_export_only_skips_jxa(cached_deck, monkeypatch, tmp_path):
@@ -347,22 +347,20 @@ def test_legacy_cross_serves_offline_and_jxa_readers_alike(cached_deck, monkeypa
 def _capture_bulk_plan(monkeypatch, *, kept_open: bool):
     captured: dict = {}
 
-    def fake_run(args, **kwargs):
+    def on_argv(args):
         plan_path = args[-1]
         captured["plan"] = json.loads(Path(plan_path).read_text(encoding="utf-8"))
-        payload = {
-            "path": captured["plan"]["path"],
-            "slideCount": 0,
-            "geometry": {},
-            "errors": [],
-            "errorCount": 0,
-            "notes": [],
-            "noteCount": 0,
-            "keptOpen": kept_open,
-        }
-        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    payload = {
+        "slideCount": 0,
+        "geometry": {},
+        "errors": [],
+        "errorCount": 0,
+        "notes": [],
+        "noteCount": 0,
+        "keptOpen": kept_open,
+    }
+    _fake_osascript(monkeypatch, stdout=json.dumps(payload), on_argv=on_argv)
     return captured
 
 
@@ -406,10 +404,7 @@ def test_bulk_geometry_keep_open_closes_by_name_on_invalid_json(tmp_path, monkey
     key.write_text("stub")
     closed: list[Path] = []
 
-    def fake_run(args, **kwargs):
-        return SimpleNamespace(returncode=0, stdout="not json", stderr="")
-
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    _fake_osascript(monkeypatch, stdout="not json")
     monkeypatch.setattr(
         inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p))
     )
@@ -426,10 +421,7 @@ def test_bulk_geometry_default_no_close_by_name_on_invalid_json(tmp_path, monkey
     key.write_text("stub")
     closed: list[Path] = []
 
-    def fake_run(args, **kwargs):
-        return SimpleNamespace(returncode=0, stdout="not json", stderr="")
-
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    _fake_osascript(monkeypatch, stdout="not json")
     monkeypatch.setattr(
         inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p))
     )
@@ -438,6 +430,27 @@ def test_bulk_geometry_default_no_close_by_name_on_invalid_json(tmp_path, monkey
         inspect_mod.bulk_geometry(key)
 
     assert closed == []
+
+
+def test_bulk_geometry_keep_open_closes_by_name_on_runner_timeout(tmp_path, monkeypatch):
+    from obed_edom import osascript_runner
+
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+    closed: list[Path] = []
+
+    def boom(argv, *, timeout=None, is_cancelled=None):
+        raise osascript_runner.OsascriptTimeout("osascript timed out after 30s")
+
+    monkeypatch.setattr(osascript_runner, "_execute", boom)
+    monkeypatch.setattr(
+        inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p))
+    )
+
+    with pytest.raises(osascript_runner.OsascriptTimeout):
+        inspect_mod.bulk_geometry(key, keep_open=True)
+
+    assert closed == [key.resolve()]
 
 
 if __name__ == "__main__":

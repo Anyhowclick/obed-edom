@@ -1,8 +1,35 @@
+import { highlightColoursKey, parseHighlightColours } from "./highlight";
+
 export const HILLSHADE_LAYER_ID = "hillshade";
 export const HILLSHADE_SOURCE_ID = "terrarium";
 export const HILLSHADE_NE2_LAYER_ID = "terrarium-ne2";
 
-export type MapsStyleId = "positron" | "liberty" | "bright" | "dark" | "fiord" | "buildings3d" | "toner" | "toner-background" | "toner-lines" | "watercolour";
+export type MapsStyleId = "positron" | "bright" | "dark" | "fiord" | "buildings3d" | "borderlands" | "toner" | "toner-background" | "toner-lines" | "watercolour";
+
+/** Retired picker id; OpenFreeMap Liberty is what `buildings3d` already loads. */
+export function coerceMapsStyleId(value: unknown, fallback: MapsStyleId = "positron"): MapsStyleId {
+  if (value === "liberty") return "buildings3d";
+  if (
+    value === "positron" ||
+    value === "bright" ||
+    value === "dark" ||
+    value === "fiord" ||
+    value === "buildings3d" ||
+    value === "borderlands" ||
+    value === "toner" ||
+    value === "toner-background" ||
+    value === "toner-lines" ||
+    value === "watercolour"
+  ) {
+    return value;
+  }
+  return fallback;
+}
+
+export function isExtrudedStyle(value: unknown): boolean {
+  const id = coerceMapsStyleId(value);
+  return id === "buildings3d" || id === "borderlands";
+}
 export type MapsCropId = "wall" | "center+cg";
 export type MapsLayerFilterId =
   | "roads"
@@ -47,13 +74,18 @@ export type MapsChurch = {
   assetHeight?: number;
   size?: number;
   opacity?: number;
+  /** Runtime-only, never persisted. */
+  labelOpacity?: number;
   reveal?: { kind: "brush"; duration: number; strokes?: number };
+  scaleWithMap?: boolean;
+  sizeZoom?: number;
 };
 
 export type MapsCgOverride = {
   camera: MapsCamera;
   style: MapsStyleId;
   highlights: string[];
+  highlightColours?: Record<string, string>;
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
   hillshade?: boolean;
@@ -70,6 +102,7 @@ export type MapsSlide = {
   style: MapsStyleId;
   camera: MapsCamera;
   highlights: string[];
+  highlightColours?: Record<string, string>;
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
   hillshade?: boolean;
@@ -94,6 +127,14 @@ export function slideForAudience(slide: MapsSlide, audience: MapsAudience): Maps
 export function authoredSurfaceWidth(slide: MapsSlide, audience: MapsAudience): number {
   if (audience === "cg" && slide.cg) return CG_W;
   return captureWidth(slide);
+}
+
+/** Export render surface for a movie hop: the wider of the two endpoints' own capture surfaces
+ * (mirrors the export's captureFlyFrames call — a mixed-surface hop renders, both in export and
+ * in preview, at the denser of the two). Used by both the export call sites and MapView's preview
+ * so they cannot drift. */
+export function hopSurfaceWidth(from: MapsSlide, to: MapsSlide, audience: MapsAudience): number {
+  return Math.max(authoredSurfaceWidth(from, audience), authoredSurfaceWidth(to, audience));
 }
 
 export type MapsFlight = "arc" | "phases";
@@ -134,11 +175,14 @@ export type MapsDocument = {
   exportDsk: boolean;
   hiddenLayers: MapsLayerFilterId[];
   cachedCountries: string[];
+  attribution: MapsAttribution;
   assets: MapsAsset[];
   slides: MapsSlide[];
   links: MapsLink[];
   retiredLinks?: MapsLink[];
 };
+
+export type MapsAttribution = "stamp" | "credits";
 
 export const MAX_RETIRED_LINKS = 200;
 
@@ -156,7 +200,7 @@ export const LAYER_FILTERS: { id: MapsLayerFilterId; label: string }[] = [
 
 const LAYER_FILTER_IDS = new Set(LAYER_FILTERS.map((item) => item.id));
 
-export const DEFAULT_HIDDEN_LAYERS: MapsLayerFilterId[] = ["roadnames", "arrows"];
+export const DEFAULT_HIDDEN_LAYERS: MapsLayerFilterId[] = ["roadnames", "arrows", "labels", "boundaries"];
 
 export function parseHiddenLayers(raw: unknown): MapsLayerFilterId[] {
   if (raw == null) return [...DEFAULT_HIDDEN_LAYERS];
@@ -182,6 +226,109 @@ export const HOP_TIPS: Record<MapsHopKind, string> = {
   cut: "Instant cut. Used when the map style or region highlights change.",
 };
 
+/** Reference CSS width for export rendering: every surface renders as if it were an
+ * EXPORT_REF_WIDTH-px-wide screen, at pixelRatio = its own scale, so tiles/relief/text are
+ * fetched at the same density everywhere and output px still equals authored px. */
+export const EXPORT_REF_WIDTH = 1920;
+
+export function exportScale(surfaceWidth: number): number {
+  return 2 ** Math.max(0, Math.round(Math.log2(surfaceWidth / EXPORT_REF_WIDTH)));
+}
+
+export function exportZoomDelta(surfaceWidth: number): number {
+  return -Math.log2(exportScale(surfaceWidth)) || 0;
+}
+
+/** MapLibre's cameraToCenterDistance = 0.5*canvasHeight/tan(fov/2). Widening the render canvas
+ * past the band (full-frame preview host) needs a matching fov widening so the band region
+ * projects exactly as the export while the margins around it show live map for nav context. */
+export const BASE_FOV_DEG = 36.87;
+
+export function compensatedFov(canvasHeight: number, bandHeight: number, baseFovDeg = BASE_FOV_DEG): number {
+  if (!bandHeight) return baseFovDeg;
+  const baseFovRad = (baseFovDeg * Math.PI) / 180;
+  const fovRad = 2 * Math.atan((Math.tan(baseFovRad / 2) * canvasHeight) / bandHeight);
+  return (fovRad * 180) / Math.PI;
+}
+
+/** Cap on how much taller than the band the preview host is allowed to grow, so an
+ * extreme window aspect doesn't widen the fov to a degenerate angle. */
+export const PREVIEW_NAV_MAX = 3;
+
+export type PreviewLayout = {
+  innerW: number;
+  innerH: number;
+  bandW: number;
+  bandH: number;
+  bandTop: number;
+  bandInnerH: number;
+  k: number;
+  fov: number;
+};
+
+/** Sizes and positions the pinned preview surface for one frame: `inner` fills the whole frame
+ * (not just the band) at the same CSS-px-per-authored-px density, so the margins above/below the
+ * band render live map instead of a dimmed void. `scale` is `exportScale(authoredWidth)`; the
+ * band itself always mirrors the CSS `min(100cqw, 100cqh*W/1080)` sizing. */
+export function previewLayout(frameW: number, frameH: number, surfaceWidth: number, scale: number): PreviewLayout {
+  if (frameW <= 0 || frameH <= 0 || surfaceWidth <= 0 || scale <= 0) {
+    return { innerW: 0, innerH: 0, bandW: 0, bandH: 0, bandTop: 0, bandInnerH: 0, k: 1, fov: BASE_FOV_DEG };
+  }
+  const s = 1 / scale;
+  const innerW = surfaceWidth * s;
+  const bandInnerH = 1080 * s;
+  const bandW = Math.min(frameW, (frameH * surfaceWidth) / 1080);
+  const bandH = (bandW * 1080) / surfaceWidth;
+  const k = innerW > 0 ? bandW / innerW : 1;
+  const innerH = k > 0 ? Math.min(Math.max(frameH / k, bandInnerH), bandInnerH * PREVIEW_NAV_MAX) : bandInnerH;
+  const bandTop = (innerH - bandInnerH) / 2;
+  const fov = compensatedFov(innerH, bandInnerH);
+  return { innerW, innerH, bandW, bandH, bandTop, bandInnerH, k, fov };
+}
+
+/** Maps a band-local object box (authored px) to inner-local CSS px, the same way the inner
+ * transform (`translateY(-bandTop*k) scale(k)`) maps the band row into view. */
+export function objectBoxStyle(
+  box: { x: number; y: number; w: number; h: number },
+  k: number,
+  bandTop: number
+): { left: number; top: number; width: number; height: number } {
+  return { left: box.x * k, top: (box.y - bandTop) * k, width: box.w * k, height: box.h * k };
+}
+
+export type ExportSurface = {
+  cssWidth: number;
+  cssHeight: number;
+  pixelRatio: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  cropX: number;
+  cropY: number;
+};
+
+/** `surfaceWidth` defaults to `width` (stills, movies, CG); morph plates pass the slide's
+ * surface width explicitly since the plate itself can be larger than one authored surface. */
+export function exportSurface(width: number, height: number, surfaceWidth = width): ExportSurface {
+  const scale = exportScale(surfaceWidth);
+  const cssWidth = Math.ceil(width / scale);
+  const cssHeight = Math.ceil(height / scale);
+  const canvasWidth = cssWidth * scale;
+  const canvasHeight = cssHeight * scale;
+  return {
+    cssWidth,
+    cssHeight,
+    pixelRatio: scale,
+    canvasWidth,
+    canvasHeight,
+    cropX: Math.floor((canvasWidth - width) / 2),
+    cropY: Math.floor((canvasHeight - height) / 2),
+  };
+}
+
+export function exportCamera(camera: MapsCamera, surfaceWidth: number): MapsCamera {
+  return { ...camera, zoom: camera.zoom + exportZoomDelta(surfaceWidth) };
+}
+
 export const MORPH_MAX_PITCH = 0.5;
 export const MORPH_MAX_DBEARING = 0.05;
 export const MORPH_MAX_DZOOM = 2;
@@ -192,34 +339,38 @@ export const WALL_H = 1080;
 export const CENTRE_W = 3840;
 export const CENTRE_ORIGIN_X = 1920;
 export const CG_W = 1920;
+export const FW_W = 1920;
 
 export function captureWidth(slide: { includeSidePanels?: boolean }): number {
   return slide.includeSidePanels ? WALL_W : CENTRE_W;
 }
 
+/** Displayed band width in authored px: the CG split shows only the CG crop; a full-wall slide
+ * (authoredWidth === WALL_W) always shows the full wall; a centre-only slide (authoredWidth ===
+ * CENTRE_W) shows just the centre unless "Show side panels" widens the visible band to the full
+ * wall for context — density (authoredWidth) is unchanged either way. */
+export function surfaceWidthOf(authoredWidth: number, sidePanels: boolean): number {
+  const splitCg = authoredWidth <= CG_W;
+  const fullWall = authoredWidth === WALL_W || (sidePanels && !splitCg);
+  return splitCg ? CG_W : fullWall ? WALL_W : WALL_W - FW_W * 2;
+}
+
+/** Widest capture surface among a plate's constituent slides — this picks the render scale
+ * (exportScale/exportSurface) for the plate, since one plate's slides can mix FW and centre-only.
+ * When no slideIds resolve, falls back to a guess from the plate's own pixel width rather than
+ * silently assuming centre-only. */
+export function plateSurfaceWidth(
+  slideIds: string[],
+  slidesById: Map<string, { includeSidePanels?: boolean }>,
+  plateW?: number
+): number {
+  const resolved = slideIds.map((sid) => slidesById.get(sid)).filter((s): s is { includeSidePanels?: boolean } => Boolean(s));
+  if (!resolved.length) return plateW !== undefined && plateW > CENTRE_W ? WALL_W : CENTRE_W;
+  return resolved.reduce((max, slide) => Math.max(max, captureWidth(slide)), CENTRE_W);
+}
+
 export function showCgBand(slide: { cg?: unknown }): boolean {
   return !slide.cg;
-}
-
-/** Band the preview canvas occupies inside the frame, at the authored aspect ratio (surfaceWidth × surfaceHeight). Matches the `.maps-map-band` CSS sizing. */
-export function previewHostRect(
-  frameWidth: number,
-  frameHeight: number,
-  surfaceWidth: number,
-  surfaceHeight = 1080
-): { x: number; y: number; width: number; height: number } {
-  if (!frameWidth || !frameHeight) return { x: 0, y: 0, width: 0, height: 0 };
-  const width = Math.min(frameWidth, (frameHeight * surfaceWidth) / surfaceHeight);
-  const height = (width * surfaceHeight) / surfaceWidth;
-  return { x: (frameWidth - width) / 2, y: (frameHeight - height) / 2, width, height };
-}
-
-/** MapLibre's cameraToCenterDistance = 0.5*canvasHeight/tan(fov/2). Widening the canvas past the band (full-frame host) needs a matching fov widening so the band region projects the same as an export sized to the band alone. */
-export function compensatedFov(canvasHeight: number, bandHeight: number, baseFovDeg = 36.87): number {
-  if (!bandHeight) return baseFovDeg;
-  const baseFovRad = (baseFovDeg * Math.PI) / 180;
-  const fovRad = 2 * Math.atan((Math.tan(baseFovRad / 2) * canvasHeight) / bandHeight);
-  return (fovRad * 180) / Math.PI;
 }
 
 export function coerceHopKinds(doc: MapsDocument): MapsDocument {
@@ -257,13 +408,14 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
   };
 }
 
-export type MapsAppearanceField = "style" | "highlights" | "hiddenLayers" | "hillshade" | "isolate";
+export type MapsAppearanceField = "style" | "highlights" | "highlightColours" | "hiddenLayers" | "hillshade" | "isolate";
 
 export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearanceField[] {
   const out: MapsAppearanceField[] = [];
-  if (from.style !== to.style) out.push("style");
+  if (coerceMapsStyleId(from.style) !== coerceMapsStyleId(to.style)) out.push("style");
   const hi = (s: MapsSlide) => [...s.highlights].map((h) => h.toUpperCase()).sort().join(",");
   if (hi(from) !== hi(to)) out.push("highlights");
+  if (highlightColoursKey(from.highlightColours) !== highlightColoursKey(to.highlightColours)) out.push("highlightColours");
   const layers = (s: MapsSlide) => slideHiddenLayers(s).sort().join(",");
   if (layers(from) !== layers(to)) out.push("hiddenLayers");
   if ((from.hillshade === true) !== (to.hillshade === true)) out.push("hillshade");
@@ -272,13 +424,25 @@ export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearan
   return out;
 }
 
-/** Isolate/highlight mismatches on a Movie hop are expected (landing slide or darkened fly + cut) — never style/layers. */
-export function softMovieFields(_from: MapsSlide, _to: MapsSlide): Set<MapsAppearanceField> {
-  return new Set<MapsAppearanceField>(["highlights", "isolate"]);
+/** Isolate/highlight mismatches on a Movie hop are expected (landing slide or darkened fly + cut) — never style/layers.
+ *  Colour overrides ride with the highlight set: hard only when the IDs themselves match. */
+export function softMovieFields(from: MapsSlide, to: MapsSlide): Set<MapsAppearanceField> {
+  const fields = new Set<MapsAppearanceField>(["highlights", "isolate"]);
+  const hi = (s: MapsSlide) => [...s.highlights].map((h) => h.toUpperCase()).sort().join(",");
+  if (hi(from) !== hi(to)) fields.add("highlightColours");
+  return fields;
+}
+
+export function isolateDissolveNeeded(_from: MapsSlide, to: MapsSlide): boolean {
+  return !!(to.isolate && to.highlights.length);
+}
+
+export function plainIsolateTarget(slide: MapsSlide): MapsSlide {
+  return { ...slide, highlights: [], isolate: undefined, highlightColours: undefined };
 }
 
 export function movieAppearanceMismatch(from: MapsSlide, to: MapsSlide): boolean {
-  const target: MapsSlide = to.isolate && to.highlights.length ? { ...to, highlights: [], isolate: undefined } : to;
+  const target: MapsSlide = isolateDissolveNeeded(from, to) ? plainIsolateTarget(to) : to;
   if (appearanceMismatch(from, target).length > 0) return true;
   if (!from.cg && !target.cg) return false;
   return appearanceMismatch(slideForAudience(from, "cg"), slideForAudience(target, "cg")).length > 0;
@@ -289,7 +453,7 @@ export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
-  if (from.style === "buildings3d" || to.style === "buildings3d" || pitch > MORPH_MAX_PITCH || dBearing > MORPH_MAX_DBEARING || dZoom > MORPH_MAX_DZOOM) {
+  if (isExtrudedStyle(from.style) || isExtrudedStyle(to.style) || pitch > MORPH_MAX_PITCH || dBearing > MORPH_MAX_DBEARING || dZoom > MORPH_MAX_DZOOM) {
     return "movie";
   }
   return "morph";
@@ -515,7 +679,7 @@ export function worldCopyWarning(zoom: number): string | null {
   const tiled: string[] = ["FW"];
   if (zoom < CENTRE_MIN_ZOOM) tiled.push("LW");
   if (zoom < CG_MIN_ZOOM) tiled.push("CG");
-  return `World copies tile in ${tiled.join(" / ")}. Pins and orange countries will repeat.`;
+  return `World copies tile in ${tiled.join(" / ")}. Pins and highlighted countries will repeat.`;
 }
 
 /** Same wrap as `maps_geo.clamp_lon` — persist cameras in (−180, 180]. */
@@ -528,6 +692,24 @@ export function wrapLon(lon: number): number {
 
 export function clampZoom(zoom: number, minZoom = 0): number {
   return Math.max(minZoom, Math.min(22, zoom));
+}
+
+/** MapLibre map-zoom bounds for the render map (preview and, via exportZoomDelta, export):
+ * authored zoom 0 at the deepest export scale (exportZoomDelta(WALL_W) === -2) must stay
+ * unclamped, so the floor sits at -2, not 0. */
+export const ML_MIN_ZOOM = -2;
+export const ML_MAX_ZOOM = 22;
+
+export function clampMapZoom(zoom: number): number {
+  return Math.max(ML_MIN_ZOOM, Math.min(ML_MAX_ZOOM, zoom));
+}
+
+/** Converts a raw CG-crop pointer-drag delta (client px) into an authored-px shift: the drag
+ * spans `bandWidth` client px across `surfaceWidth` authored px — the DISPLAYED surface width,
+ * not the density-driving authoredWidth (those differ when "Show side panels" widens the band
+ * without changing capture density). */
+export function cgDragDx(clientDx: number, surfaceWidth: number, bandWidth: number): number {
+  return bandWidth > 0 ? (clientDx * surfaceWidth) / bandWidth : 0;
 }
 
 export function nextSlideId(slides: MapsSlide[]): string {
@@ -577,14 +759,22 @@ export function parseIsolate(raw: unknown): MapsIsolate | undefined {
   return { mode: "darken", strength };
 }
 
+/** `showLabel` defaulted to true before it was written explicitly, so a saved church with no
+ * key predates the flip and keeps its label; every creation path writes the key. */
+function churchesFromResult(churches: MapsChurch[] | undefined): MapsChurch[] {
+  return (churches || []).map((church) => ("showLabel" in church ? church : { ...church, showLabel: true }));
+}
+
 function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefined {
   if (!cg) return undefined;
   const { hiddenLayers, hillshade, isolate, ...rest } = cg;
   const iso = parseIsolate(isolate);
   return {
     ...rest,
+    style: coerceMapsStyleId(cg.style),
     highlights: cg.highlights || [],
-    churches: cg.churches || [],
+    highlightColours: parseHighlightColours(cg.highlightColours),
+    churches: churchesFromResult(cg.churches),
     ...(hiddenLayers ? { hiddenLayers: parseHiddenLayers(hiddenLayers) } : {}),
     ...(typeof hillshade === "boolean" ? { hillshade } : {}),
     ...(iso ? { isolate: iso } : {}),
@@ -597,11 +787,13 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
   const deckHidden = parseHiddenLayers(result.hiddenLayers);
   const slides = (result.slides as MapsSlide[]).map((slide) => ({
     ...slide,
+    style: coerceMapsStyleId(slide.style),
     cgShiftX: slide.cgShiftX ?? 0,
     cgShiftY: slide.cgShiftY ?? 0,
     includeSidePanels: slide.includeSidePanels === true,
     highlights: slide.highlights || [],
-    churches: slide.churches || [],
+    highlightColours: parseHighlightColours(slide.highlightColours),
+    churches: churchesFromResult(slide.churches),
     hiddenLayers: parseHiddenLayers(slide.hiddenLayers ?? deckHidden),
     hillshade: slide.hillshade === true,
     isolate: parseIsolate(slide.isolate),
@@ -631,7 +823,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     .map(normaliseLink)
     .filter((link) => slideIds.has(link.from) && slideIds.has(link.to));
   const coerced = coerceHopKinds({
-    defaultStyle: (result.defaultStyle as MapsStyleId) || "positron",
+    defaultStyle: coerceMapsStyleId(result.defaultStyle),
     crop: (result.crop as MapsCropId) || "center+cg",
     exportLw: result.exportLw !== false,
     exportCg: result.exportCg !== false,
@@ -640,6 +832,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     cachedCountries: Array.isArray(result.cachedCountries)
       ? (result.cachedCountries as unknown[]).filter((item): item is string => typeof item === "string")
       : [],
+    attribution: result.attribution === "stamp" ? "stamp" : "credits",
     assets: Array.isArray(result.assets)
       ? (result.assets as MapsAsset[]).filter((asset) => asset && typeof asset.id === "string" && typeof asset.version === "string")
       : [],

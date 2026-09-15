@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import _fake_osascript
 from obed_edom import keynote_app
 from obed_edom.baseline import inspect_cache_path, preview_cache_dir
 from obed_edom.inspect import export_applescript
@@ -136,12 +137,11 @@ def test_close_document_by_name_runs_osascript_with_both_name_forms(tmp_path: Pa
 
     captured: dict = {}
 
-    def fake_run(args, **kwargs):
+    def on_argv(args):
         script_path = Path(args[-1])
         captured["script"] = script_path.read_text(encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    _fake_osascript(monkeypatch, on_argv=on_argv)
     inspect_mod._close_document_by_name(tmp_path / "Sermon.key")
     script = captured["script"]
     assert 'name is "Sermon"' in script
@@ -159,10 +159,7 @@ def test_run_applescript_export_nonzero_exit_wins_over_stale_pngs(tmp_path, monk
     export_dir.mkdir()
     (export_dir / "stale.png").write_bytes(b"\x89PNG")
 
-    def fake_run(args, **kwargs):
-        return SimpleNamespace(returncode=1, stdout="", stderr="export bound wrong document")
-
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    _fake_osascript(monkeypatch, returncode=1, stderr="export bound wrong document")
     err = inspect_mod._run_applescript_export("script text", export_dir)
     assert err == "Preview export failed: export bound wrong document"
 
@@ -174,10 +171,7 @@ def test_run_applescript_export_expected_count_mismatch_is_an_error(tmp_path, mo
     export_dir.mkdir()
     (export_dir / "slide-1.png").write_bytes(b"\x89PNG")
 
-    def fake_run(args, **kwargs):
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    _fake_osascript(monkeypatch)
     err = inspect_mod._run_applescript_export("script text", export_dir, expected=2)
     assert err == "Preview export wrote 1 of 2 PNGs"
 
@@ -189,10 +183,7 @@ def test_run_applescript_export_expected_count_match_succeeds(tmp_path, monkeypa
     export_dir.mkdir()
     (export_dir / "slide-1.png").write_bytes(b"\x89PNG")
 
-    def fake_run(args, **kwargs):
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    _fake_osascript(monkeypatch)
     assert inspect_mod._run_applescript_export("script text", export_dir, expected=1) is None
 
 

@@ -55,6 +55,7 @@ ENV_PINS: dict[str, str | None] = {
     "OBED_SUPPRESS_GEOMETRY": None,
     "OBED_WRITE_TIMING": None,
     "OBED_GEOM_PROPS": None,
+    "OBED_SLIDE_REUSE": "off",
 }
 
 ROLE_SET = {"map", "list", "pin", "title", "other"}

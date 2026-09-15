@@ -22,10 +22,12 @@ box listed in both textItems and shapes — the count guard falls back on it.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
+from obed_edom import baseline
 from obed_edom.iwa_kindindex import (
     _is_line,
     deck_kind_counts,
@@ -35,9 +37,13 @@ from obed_edom.iwa_kindindex import (
     kind_counts_from_records,
     reconcile_counts,
 )
+from scripts.bank_jxa_kind_counts import BANK_VERSION as KIND_COUNTS_BANK_VERSION, bank_path as kind_counts_bank_path
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
 FULL_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key")
+GOLD_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Gold_Wall_Input.key")
 
 
 # --------------------------------------------------------------------------
@@ -233,6 +239,21 @@ def test_reconcile_flags_missing_kind():
     assert reconcile_counts({"text": 2}, {"text": 2, "line": 4}) == ["line"]
 
 
+def test_guard_trips_on_jxa_only_dual_listing():
+    # Slide 73's shape: a plain text box that JXA additionally lists under shapes
+    # (custom=False, so derive classifies it text-only) plus two ordinary shapes.
+    objects = {}
+    ids = [
+        _shape(objects, "t", is_textbox=True, text="Title"),
+        _shape(objects, "s0", is_textbox=False),
+        _shape(objects, "s1", is_textbox=False),
+    ]
+    recs = derive_kind_index(_slide(*ids), objects)
+    derived = derived_kind_counts(recs)
+    jxa = {"text": 1, "shape": 3}
+    assert reconcile_counts(derived, jxa) == ["shape"]
+
+
 def test_derived_kind_counts():
     objects = {}
     ids = [_shape(objects, "t0", is_textbox=True, text="a"),
@@ -362,7 +383,10 @@ def _cached_exact_payload(deck: Path):
         path = inspect_cache_path(deck_digest(deck))
     except Exception:  # pragma: no cover
         return None
-    return json.loads(path.read_text()) if path.is_file() else None
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text())
+    return payload if payload.get("reader") == "jxa" else None
 
 
 @pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
@@ -370,7 +394,10 @@ def test_integration_map_deck_reconstructs_addressing():
     pytest.importorskip("keynote_parser")
     payload = _cached_exact_payload(MAP_DECK)
     if payload is None:
-        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+        pytest.skip(
+            "no reader='jxa' payload cached for the current deck bytes: warm the shared "
+            "inspect cache with scripts/inspect_gold.py (a live Keynote read)"
+        )
     from obed_edom.iwa_runs import _normalize_text
 
     derived = derive_deck_kind_index(MAP_DECK)
@@ -399,11 +426,19 @@ def test_integration_map_deck_reconstructs_addressing():
 def test_integration_full_deck_guard_trips_on_dual_slide():
     """The guard's whole justification: on the one residual slide (a filled/variation
     text box JXA lists in both text and shape), reconcile_counts must flag it — and be
-    clean on every other slide. This is the only test that watches the guard fall back."""
+    clean on every other slide. This is the only test that watches the guard fall back,
+    and it only does so when a real reader='jxa' payload is cached for FULL_DECK's
+    current bytes; Full is deliberately unbanked (a 155-slide, 6.7 GB legacy read), so
+    this test is expected to skip on this machine."""
     pytest.importorskip("keynote_parser")
     payload = _cached_exact_payload(FULL_DECK)
     if payload is None:
-        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+        pytest.skip(
+            "no reader='jxa' payload cached for the current deck bytes: Full is "
+            "deliberately unbanked (155-slide, 6.7 GB legacy read); warm the shared "
+            "inspect cache with scripts/inspect_gold.py (a live Keynote read of "
+            "Full_Report_Card_Wall.key)"
+        )
     derived = derive_deck_kind_index(FULL_DECK)
     pslides = {s["index"]: s for s in payload.get("slides") or []}
     flagged = []
@@ -416,3 +451,62 @@ def test_integration_full_deck_guard_trips_on_dual_slide():
             flagged.append(idx)
     # Exactly the known dual slide trips the guard; everything else reconciles.
     assert flagged == [73], f"expected only slide 73 to fall back, got {flagged}"
+
+
+def test_integration_gold_deck_kind_counts_match_banked_jxa():
+    """Standing, non-vacuous cross-check: Gold's committed JXA kind-count bank (banked
+    Keynote-free via `--payload`, no `.cache` needed) against `derive_kind_index`
+    reconstructed offline. Recovers real coverage even though the shared inspect-cache
+    slot no longer carries a `reader='jxa'` payload for either gold deck."""
+    pytest.importorskip("keynote_parser")
+    if not GOLD_DECK.exists():
+        pytest.skip("local gold deck only")
+    bank_file = kind_counts_bank_path("Gold_Wall_Input.key")
+    if not bank_file.exists():
+        pytest.skip(
+            f"no JXA kind-count bank for Gold_Wall_Input.key: {bank_file}; regenerate with "
+            "scripts/bank_jxa_kind_counts.py --deck Gold_Wall_Input.key"
+        )
+    bank = json.loads(bank_file.read_text())
+
+    for field, expected in (
+        ("bankVersion", KIND_COUNTS_BANK_VERSION),
+        ("inspectVersion", baseline.INSPECT_VERSION),
+        ("deck", "Gold_Wall_Input.key"),
+        ("reader", "jxa"),
+    ):
+        actual = bank.get(field, "<missing>")
+        if actual != expected:
+            pytest.fail(f"bank schema drift: {field} expected {expected!r}, got {actual!r}")
+
+    source_digest = bank.get("sourceDigest")
+    if not isinstance(source_digest, str) or not _HEX64.fullmatch(source_digest):
+        pytest.fail(
+            f"bank schema drift: sourceDigest expected a 64-char lowercase hex digest, got {source_digest!r}"
+        )
+
+    slides = bank.get("slides")
+    slide_count = bank.get("slideCount")
+    if not isinstance(slides, list) or slide_count != len(slides) or not slide_count:
+        pytest.fail(
+            f"bank schema drift: slideCount {slide_count!r} does not match "
+            f"{len(slides) if isinstance(slides, list) else '<slides is not a list>'} banked slides"
+        )
+
+    actual_digest = baseline.deck_digest(GOLD_DECK)
+    if actual_digest != bank.get("sourceDigest"):
+        pytest.skip(
+            f"deck digest drift (source {actual_digest} vs {bank.get('sourceDigest')}); "
+            "regenerate with scripts/bank_jxa_kind_counts.py --deck Gold_Wall_Input.key "
+            "--accept-input-drift"
+        )
+
+    derived = derive_deck_kind_index(GOLD_DECK)
+    bank_by_slide = {row["slide"]: row["counts"] for row in bank["slides"]}
+    assert set(derived) == set(bank_by_slide)
+    flagged = []
+    for idx, recs in derived.items():
+        bad = reconcile_counts(derived_kind_counts(recs), bank_by_slide[idx])
+        if bad:
+            flagged.append((idx, bad))
+    assert flagged == []

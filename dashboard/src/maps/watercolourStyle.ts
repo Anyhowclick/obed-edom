@@ -1,8 +1,42 @@
 export type PortableStyle = { version: number; sources: Record<string, unknown>; layers: Array<Record<string, unknown>> };
 export type PatternImage = { id: string; image: ImageData; options?: { pixelRatio?: number } };
 export type PatternHost = { hasImage(id: string): boolean; addImage(id: string, image: ImageData, options?: object): void };
-export type ScribbleSpec = { id: string; colour: string; angles: number[]; count: number; length: number; width: number; alpha: number; seed: number; size?: number };
+export type ScribbleOrient = "id" | "flipX" | "flipY" | "rot90" | "rot180" | "rot270";
+export type ScribbleSpec = {
+  id: string;
+  colour: string;
+  angles: number[];
+  count: number;
+  length: number;
+  width: number;
+  alpha: number;
+  seed: number;
+  size?: number;
+  jitter?: number;
+  orients?: ScribbleOrient[];
+  /** Amplitude of the wrapped density field. 0 = even hatch (no tiled blotches). Default 0.25. */
+  patchContrast?: number;
+};
 export type ScribbleStroke = { x: number; y: number; angle: number; length: number; width: number; alpha: number; bend: number };
+
+export const SCRIBBLE_ORIENTS: ScribbleOrient[] = ["id", "flipX", "flipY", "rot90", "rot180", "rot270"];
+
+function orientAngle(angle: number, orient: ScribbleOrient): number {
+  switch (orient) {
+    case "flipX":
+      return Math.PI - angle;
+    case "flipY":
+      return -angle;
+    case "rot90":
+      return angle + Math.PI / 2;
+    case "rot180":
+      return angle + Math.PI;
+    case "rot270":
+      return angle + (3 * Math.PI) / 2;
+    default:
+      return angle;
+  }
+}
 
 export function tonerPatterns(size = 32): PatternImage[] {
   const make = (id: string, draw: (ctx: CanvasRenderingContext2D) => void): PatternImage => {
@@ -154,7 +188,7 @@ export function paperGrainCss(previewWidth: number, authoredWidth: number): { ba
   return { backgroundSize: `${tile}px ${tile}px`, backgroundPosition: "0px 0px" };
 }
 
-/** Restores globalCompositeOperation: stampOsm.ts reuses one scratch canvas and must paint the attribution bar normally afterwards. */
+/** Restores globalCompositeOperation: stampOsm.ts reuses one scratch canvas and must leave the context clean for whatever paints next. */
 export function compositePaperGrain(ctx: CanvasRenderingContext2D, width: number, height: number): void {
   const pattern = ctx.createPattern(paperGrainCanvas(), "repeat");
   if (!pattern) return;
@@ -167,21 +201,25 @@ export function compositePaperGrain(ctx: CanvasRenderingContext2D, width: number
 
 /** Pencil scribble strokes: patchy via a wrapped low-frequency field, seeded so a spec always yields the same strokes. */
 export function scribbleStrokes(spec: ScribbleSpec): ScribbleStroke[] {
-  const { angles, count, length, width, alpha, seed, size = 512 } = spec;
+  const { angles, count, length, width, alpha, seed, size = 512, jitter = 0.12, orients = ["id"], patchContrast = 0.25 } = spec;
   const rand = mulberry(seed);
   const n = 128;
-  const patch = normalise(blurWrap(field(n, rand), n, 10, 2));
+  const patch = patchContrast > 0 ? normalise(blurWrap(field(n, rand), n, 10, 2)) : null;
   const strokes: ScribbleStroke[] = [];
   for (let i = 0; i < count; i++) {
     const x = rand() * size;
     const y = rand() * size;
-    const p = Math.max(0, Math.min(1, patch[((y * n) / size | 0) * n + (((x * n) / size) | 0)] * 0.25 + 0.8));
+    const p = patch
+      ? Math.max(0, Math.min(1, patch[((y * n) / size | 0) * n + (((x * n) / size) | 0)] * patchContrast + 0.8))
+      : 1;
     if (rand() > p) continue;
-    const angle = angles[(rand() * angles.length) | 0] + (rand() - 0.5) * 0.12;
+    const base = angles[(rand() * angles.length) | 0];
+    const orient = orients[(rand() * orients.length) | 0];
+    const angle = orientAngle(base, orient) + (rand() - 0.5) * jitter;
     const strokeLength = length * (0.6 + 0.8 * rand());
     const bend = (rand() - 0.5) * 3;
     const strokeWidth = width * (0.7 + 0.6 * rand());
-    const strokeAlpha = alpha * (0.5 + 0.9 * rand()) * (0.4 + 0.6 * p);
+    const strokeAlpha = alpha * (0.5 + 0.9 * rand()) * (patch ? 0.4 + 0.6 * p : 1);
     strokes.push({ x, y, angle, length: strokeLength, width: strokeWidth, alpha: strokeAlpha, bend });
   }
   return strokes;
@@ -219,15 +257,158 @@ function scribbleImage(spec: ScribbleSpec): PatternImage {
 
 const deg = (d: number) => (d * Math.PI) / 180;
 
+const WATER_SCRIBBLE_LAYERS = [
+  { id: "scribble-water", opacity: 0.95 },
+  { id: "scribble-water-2", opacity: 0.85 },
+  { id: "scribble-water-3", opacity: 0.7 },
+] as const;
+const PARK_SCRIBBLE_LAYERS = [
+  { id: "scribble-park", opacity: 0.9 },
+  { id: "scribble-park-2", opacity: 0.75 },
+  { id: "scribble-park-3", opacity: 0.6 },
+] as const;
+const WOOD_SCRIBBLE_LAYERS = [
+  { id: "scribble-wood", opacity: 0.9 },
+  { id: "scribble-wood-2", opacity: 0.75 },
+  { id: "scribble-wood-3", opacity: 0.6 },
+] as const;
+
+function scribbleTwinId(parentId: string, patternId: string, kind: "water" | "park" | "wood"): string {
+  return `${parentId}-${patternId.replace(`scribble-${kind}`, "scribble")}`;
+}
+
 export function watercolourPatterns(): PatternImage[] {
   return [
-    scribbleImage({ id: "scribble-water", colour: "#3d86bd", angles: [deg(-26), deg(-14)], count: 1500, length: 70, width: 1.4, alpha: 0.42, seed: 11 }),
-    scribbleImage({ id: "scribble-park", colour: "#7fa24a", angles: [deg(-26), deg(-20)], count: 600, length: 60, width: 1.3, alpha: 0.3, seed: 12 }),
-    scribbleImage({ id: "scribble-wood", colour: "#6f9740", angles: [deg(-24), deg(-16)], count: 900, length: 55, width: 1.3, alpha: 0.32, seed: 13 }),
+    scribbleImage({
+      id: "scribble-water",
+      colour: "#3d86bd",
+      angles: [deg(-26), deg(-14)],
+      orients: [...SCRIBBLE_ORIENTS],
+      jitter: 0.22,
+      count: 2800,
+      length: 70,
+      width: 1.4,
+      alpha: 0.42,
+      seed: 11,
+      size: 1024,
+      patchContrast: 0,
+    }),
+    scribbleImage({
+      id: "scribble-water-2",
+      colour: "#3d86bd",
+      angles: [deg(-20), deg(-8)],
+      jitter: 0.18,
+      count: 1500,
+      length: 70,
+      width: 1.4,
+      alpha: 0.28,
+      seed: 27,
+      size: 512,
+      patchContrast: 0,
+    }),
+    scribbleImage({
+      id: "scribble-water-3",
+      colour: "#3d86bd",
+      angles: [deg(-30), deg(-18)],
+      jitter: 0.2,
+      count: 900,
+      length: 70,
+      width: 1.2,
+      alpha: 0.22,
+      seed: 43,
+      size: 256,
+      patchContrast: 0,
+    }),
+    scribbleImage({
+      id: "scribble-park",
+      colour: "#7fa24a",
+      angles: [deg(-26), deg(-20)],
+      orients: ["id", "flipX", "flipY", "rot180"],
+      count: 600,
+      length: 60,
+      width: 1.3,
+      alpha: 0.3,
+      seed: 12,
+      patchContrast: 0,
+    }),
+    scribbleImage({
+      id: "scribble-park-2",
+      colour: "#7fa24a",
+      angles: [deg(-18), deg(-8)],
+      jitter: 0.16,
+      count: 1400,
+      length: 55,
+      width: 1.2,
+      alpha: 0.22,
+      seed: 31,
+      size: 1024,
+      patchContrast: 0,
+    }),
+    scribbleImage({
+      id: "scribble-park-3",
+      colour: "#7fa24a",
+      angles: [deg(-32), deg(-16)],
+      jitter: 0.18,
+      count: 350,
+      length: 50,
+      width: 1.1,
+      alpha: 0.16,
+      seed: 47,
+      size: 256,
+      patchContrast: 0,
+    }),
+    scribbleImage({
+      id: "scribble-wood",
+      colour: "#6f9740",
+      angles: [deg(-24), deg(-16)],
+      orients: ["id", "flipX", "flipY", "rot180"],
+      count: 900,
+      length: 55,
+      width: 1.3,
+      alpha: 0.32,
+      seed: 13,
+      patchContrast: 0,
+    }),
+    scribbleImage({
+      id: "scribble-wood-2",
+      colour: "#6f9740",
+      angles: [deg(-28), deg(-10)],
+      jitter: 0.16,
+      count: 1800,
+      length: 50,
+      width: 1.2,
+      alpha: 0.24,
+      seed: 33,
+      size: 1024,
+      patchContrast: 0,
+    }),
+    scribbleImage({
+      id: "scribble-wood-3",
+      colour: "#6f9740",
+      angles: [deg(-20), deg(-12)],
+      jitter: 0.18,
+      count: 450,
+      length: 48,
+      width: 1.1,
+      alpha: 0.18,
+      seed: 51,
+      size: 256,
+      patchContrast: 0,
+    }),
   ];
 }
 
-export const WATERCOLOUR_PATTERN_IDS = ["scribble-water", "scribble-park", "scribble-wood"] as const;
+export const WATERCOLOUR_PATTERN_IDS = [
+  "scribble-water",
+  "scribble-water-2",
+  "scribble-water-3",
+  "scribble-park",
+  "scribble-park-2",
+  "scribble-park-3",
+  "scribble-wood",
+  "scribble-wood-2",
+  "scribble-wood-3",
+] as const;
 
 const patternCache = new Map<string, PatternImage[]>();
 
@@ -321,7 +502,13 @@ export function buildWatercolourStyle(base: PortableStyle, options: { sourceUrl?
     } else if (next.type === "fill" && (sourceLayer === "water" || /(^|[-_])water/.test(layerId))) {
       next.paint = { ...paint, "fill-color": WATER_FILL, "fill-opacity": 1, "fill-outline-color": COAST };
       out.push(next);
-      out.push({ ...structuredClone(layer), id: `${layerId}-scribble`, paint: { "fill-pattern": "scribble-water", "fill-opacity": 0.95 } });
+      for (const scribble of WATER_SCRIBBLE_LAYERS) {
+        out.push({
+          ...structuredClone(layer),
+          id: scribbleTwinId(layerId, scribble.id, "water"),
+          paint: { "fill-pattern": scribble.id, "fill-opacity": scribble.opacity },
+        });
+      }
       continue;
     } else if (next.type === "fill" && /ice|glacier/.test(key)) {
       next.paint = { ...paint, "fill-color": ICE, "fill-opacity": 1 };
@@ -330,17 +517,21 @@ export function buildWatercolourStyle(base: PortableStyle, options: { sourceUrl?
       next.paint = { ...paint, "fill-color": PARK_FILL, "fill-opacity": 1 };
       landIds.add(layerId);
       out.push(next);
-      const twinId = `${layerId}-scribble`;
-      landIds.add(twinId);
-      out.push({ ...structuredClone(layer), id: twinId, paint: { "fill-pattern": "scribble-park", "fill-opacity": 0.9 } });
+      for (const scribble of PARK_SCRIBBLE_LAYERS) {
+        const twinId = scribbleTwinId(layerId, scribble.id, "park");
+        landIds.add(twinId);
+        out.push({ ...structuredClone(layer), id: twinId, paint: { "fill-pattern": scribble.id, "fill-opacity": scribble.opacity } });
+      }
       continue;
     } else if (next.type === "fill" && /wood/.test(key)) {
       next.paint = { ...paint, "fill-color": WOOD_FILL, "fill-opacity": 1 };
       landIds.add(layerId);
       out.push(next);
-      const twinId = `${layerId}-scribble`;
-      landIds.add(twinId);
-      out.push({ ...structuredClone(layer), id: twinId, paint: { "fill-pattern": "scribble-wood", "fill-opacity": 0.9 } });
+      for (const scribble of WOOD_SCRIBBLE_LAYERS) {
+        const twinId = scribbleTwinId(layerId, scribble.id, "wood");
+        landIds.add(twinId);
+        out.push({ ...structuredClone(layer), id: twinId, paint: { "fill-pattern": scribble.id, "fill-opacity": scribble.opacity } });
+      }
       continue;
     } else if (next.type === "fill" && /building/.test(key)) {
       next.paint = { ...paint, "fill-color": BUILDING, "fill-opacity": 0.9, "fill-outline-color": EDGE };

@@ -1,0 +1,35 @@
+{
+  "provenance": "Synthetic subset matching the 2026-09-14 cached OpenFreeMap building tile 14/12918/8133 review, not live network geometry.",
+  "tile": "planet/20260906_080001_pt/14/12918/8133.pbf",
+  "features": [
+    {
+      "id": "5913018512",
+      "note": "Suntec convention-hall main footprint: one polygon, top 28 m / base 0 m.",
+      "properties": { "render_height": 28, "render_min_height": 0 },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [103.85670, 1.29310],
+          [103.85780, 1.29310],
+          [103.85790, 1.29320],
+          [103.85795, 1.29355],
+          [103.85780, 1.29390],
+          [103.85740, 1.29400],
+          [103.85690, 1.29395],
+          [103.85655, 1.29380],
+          [103.85640, 1.29355],
+          [103.85642, 1.29330],
+          [103.85650, 1.29318],
+          [103.85660, 1.29312],
+          [103.85670, 1.29310]
+        ]]
+      }
+    },
+    {
+      "id": "3930904030",
+      "note": "Suntec roof-panel collection: many members, top 33 m / base 28 m (shallow elevated slab).",
+      "properties": { "render_height": 33, "render_min_height": 28 },
+      "memberCount": 71
+    }
+  ]
+}

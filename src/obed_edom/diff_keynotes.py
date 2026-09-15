@@ -5,9 +5,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PIL import Image, ImageChops, ImageOps
 
+from obed_edom import __version__
 from obed_edom.images import open_rgb
 from obed_edom.inspect import (
     PREVIEW_VIDEO_SUFFIXES,
@@ -18,9 +20,19 @@ from obed_edom.inspect import (
     slide_plain_text,
 )
 from obed_edom.models import Flag
-from obed_edom.rendered import CENTER_WALL, center_wall_box, point_number_lines, render_slide
+from obed_edom.rendered import (
+    CENTER_WALL,
+    NEAR_DUPLICATE,
+    center_wall_box,
+    ocr_unavailable,
+    point_number_lines,
+    render_slide,
+)
 from obed_edom.text_diff import (
     BIBLE_BOOK_WORDS,
+    BLOCK_MIN_TOKENS,
+    LINE_MATCH,
+    VERSE_RUN_TOKENS,
     canonical_token,
     classify_text_diff,
     collapse_repeat as _collapse_repeat,
@@ -30,7 +42,10 @@ from obed_edom.text_diff import (
     text_score,
     texts_equivalent,
 )
-from obed_edom.validate import make_flag, validate_inspect
+from obed_edom.validate import load_rules, make_flag, validate_inspect
+
+if TYPE_CHECKING:
+    from obed_edom.diagnostics import DiagnosticsWriter
 
 LW_WIDTH = 3000
 ALIGN_THRESHOLD = 0.58
@@ -976,16 +991,67 @@ def _filter_symmetric(a_clean: str, a_text: str, b_clean: str, b_text: str) -> b
     return abs(_share(a_clean, a_text) - _share(b_clean, b_text)) <= FILTER_TOLERANCE
 
 
+def select_text_sources(
+    a_text: str, a_typed: str, a_clean: str,
+    b_text: str, b_typed: str, b_clean: str,
+) -> tuple[list[tuple[str, str, str, str]], str | None]:
+    """Candidate (source, left, right, reason) text pairs, in the order they are tried,
+    plus why the typed attempt was skipped (None when it was attempted). ``reason`` is
+    the branch that admitted the attempt: ``typed-covers-both``, ``filter-symmetric``,
+    or ``filter-asymmetric``."""
+    attempts: list[tuple[str, str, str, str]] = []
+    both_typed = bool(a_typed.strip() and b_typed.strip())
+    if not both_typed:
+        typed_skip = "typed-empty"
+    elif not (_covers_slide(a_typed, a_text) and _covers_slide(b_typed, b_text)):
+        typed_skip = "typed-below-coverage"
+    else:
+        typed_skip = None
+        attempts.append(("typed", a_typed, b_typed, "typed-covers-both"))
+    if _filter_symmetric(a_clean, a_text, b_clean, b_text):
+        attempts.append(("clean", a_clean or a_text, b_clean or b_text, "filter-symmetric"))
+    else:
+        attempts.append(("full", a_text, b_text, "filter-asymmetric"))
+    return attempts, typed_skip
+
+
 def wording_message(left: str, right: str, left_label: str, right_label: str) -> str | None:
     finding = classify_text_diff(left, right, left_label, right_label)
     return finding.message if finding else None
 
 
-def _add_flag(bucket: list[Flag], flags: list[Flag], flag: Flag | None) -> None:
+def record_flag(diag: "DiagnosticsWriter | None", flag: Flag, pair_index: int | None) -> None:
+    if diag is None:
+        return
+    diag.record(
+        "finding",
+        rule=flag.rule,
+        severity=flag.severity,
+        category=flag.category,
+        message=flag.message,
+        location=flag.location,
+        slide=flag.slide,
+        deck=flag.deck,
+        evidence=flag.evidence,
+        pairIndex=pair_index,
+    )
+
+
+def _add_flag(
+    bucket: list[Flag],
+    flags: list[Flag],
+    flag: Flag | None,
+    *,
+    diag: "DiagnosticsWriter | None" = None,
+    pair_index: int | None = None,
+    record: bool = True,
+) -> None:
     if flag is None:
         return
     bucket.append(flag)
     flags.append(flag)
+    if record:
+        record_flag(diag, flag, pair_index)
 
 
 def slide_catalog(slides: list[dict], png_map: dict[int, Path]) -> list[dict]:
@@ -1073,6 +1139,8 @@ def compare_inspects(
     slots: list[tuple[int | None, int | None | list[int], float]] | None = None,
     check: bool = True,
     use_ocr: bool = True,
+    diag: "DiagnosticsWriter | None" = None,
+    diag_context: dict | None = None,
 ) -> dict:
     left_pngs = preview_media(left_previews) or preview_pngs(left_previews)
     right_pngs = preview_media(right_previews) or preview_pngs(right_previews)
@@ -1084,6 +1152,7 @@ def compare_inspects(
     n_right = right.get("slideCount") or len(right_slides)
     flags: list[Flag] = []
     same_type = _same_deck_type(left, right, left_label, right_label)
+    count_flag = None
     if check and same_type and n_left != n_right:
         count_flag = make_flag(
             "diff.count",
@@ -1139,6 +1208,38 @@ def compare_inspects(
     }
     build_repeats = build_repeat_indices(left_slides, matched_left) if not same_type else set()
     point_titles = point_title_keys(left_slides) if not same_type else []
+    if diag is not None:
+        diag.header(
+            **(diag_context or {}),
+            version=__version__,
+            createdAt=time.time(),
+            leftLabel=left_label,
+            rightLabel=right_label,
+            leftDeck=_deck_type(left, left_label),
+            rightDeck=_deck_type(right, right_label),
+            sameType=same_type,
+            leftSlideCount=n_left,
+            rightSlideCount=n_right,
+            leftSize=list(left_size),
+            rightSize=list(right_size),
+            useOcr=use_ocr,
+            ocrUnavailable=ocr_unavailable() if use_ocr else None,
+            pointTitles=point_titles,
+            thresholds={
+                "alignThreshold": ALIGN_THRESHOLD,
+                "typedCoverage": TYPED_COVERAGE,
+                "filterTolerance": FILTER_TOLERANCE,
+                "lineMatch": LINE_MATCH,
+                "nearDuplicate": NEAR_DUPLICATE,
+                "verseRunTokens": VERSE_RUN_TOKENS,
+                "blockMinTokens": BLOCK_MIN_TOKENS,
+                "pointTitleTokens": _POINT_TITLE_TOKENS,
+            },
+            ruleSeverities=load_rules().get("rules"),
+            contains="rendered slide text, both decks",
+        )
+        if count_flag is not None:
+            record_flag(diag, count_flag, None)
     evidence_dir = heat_dir.parent / "evidence"
     if check:
         evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -1211,6 +1312,8 @@ def compare_inspects(
                             "diff.missing", "diff", f"Missing on {left_label}.", location=loc,
                             slide=right_num, deck="dsk",
                         ),
+                        diag=diag,
+                        pair_index=pair_i,
                     )
                 elif rs and not all(_layout_only(slide) for _, slide in right_hits):
                     _add_flag(
@@ -1225,6 +1328,8 @@ def compare_inspects(
                             slide=right_num,
                             deck="dsk",
                         ),
+                        diag=diag,
+                        pair_index=pair_i,
                     )
             pair["missing"] = left_label
             pair["flags"] = pair_flags
@@ -1240,6 +1345,8 @@ def compare_inspects(
                             "diff.missing", "diff", f"Missing on {right_label}.", location=loc,
                             slide=left_num, deck="lw",
                         ),
+                        diag=diag,
+                        pair_index=pair_i,
                     )
                 elif not _layout_only(ls) and li not in build_repeats:
                     _add_flag(
@@ -1254,6 +1361,8 @@ def compare_inspects(
                             slide=left_num,
                             deck="lw",
                         ),
+                        diag=diag,
+                        pair_index=pair_i,
                     )
             if li in build_repeats:
                 pair["buildRepeat"] = True
@@ -1282,6 +1391,8 @@ def compare_inspects(
                     slide=left_num,
                     deck="lw",
                 ),
+                diag=diag,
+                pair_index=pair_i,
             )
 
         a_render = left_shots.get(li) if li is not None else None
@@ -1319,22 +1430,33 @@ def compare_inspects(
         a_typed = a_render.typed
         b_typed = "\n".join(r.typed for r in b_renders)
         pair["typed"] = bool(a_typed.strip() or b_typed.strip())
-        both_typed = bool(a_typed.strip() and b_typed.strip())
+        a_clean = a_render.outside_photos
+        b_clean = "\n".join(r.outside_photos for r in b_renders)
+        attempts, typed_skip = select_text_sources(a_text, a_typed, a_clean, b_text, b_typed, b_clean)
         finding = carried = None
         compare_text = a_text
-        if both_typed and _covers_slide(a_typed, a_text) and _covers_slide(b_typed, b_text):
-            finding, carried, compare_text = compare(a_typed, b_typed)
-        if finding is None:
-            a_clean = a_render.outside_photos
-            b_clean = "\n".join(r.outside_photos for r in b_renders)
-            if _filter_symmetric(a_clean, a_text, b_clean, b_text):
-                a_seen, b_seen = a_clean or a_text, b_clean or b_text
-            else:
-                a_seen, b_seen = a_text, b_text
-            found, dropped, text = compare(a_seen, b_seen)
-            finding = found
+        diag_attempts = []
+        for source, a_src, b_src, reason in attempts:
+            found, dropped, text = compare(a_src, b_src)
             carried = carried or dropped
             compare_text = text
+            if diag is not None:
+                diag_attempts.append(
+                    {
+                        "source": source,
+                        "reason": reason,
+                        "inputLeft": text,
+                        "inputRight": b_src,
+                        "ignoreLeftTokens": sorted(point_number_lines(text)),
+                        "carried": dropped,
+                        "finding": {"rule": found.rule, "message": found.message, "default": found.default}
+                        if found
+                        else None,
+                    }
+                )
+            if found is not None:
+                finding = found
+                break
         if carried:
             _add_flag(
                 pair_flags,
@@ -1349,8 +1471,11 @@ def compare_inspects(
                     slide=left_num,
                     deck="lw",
                 ),
+                diag=diag,
+                pair_index=pair_i,
             )
         copy_warning = False
+        text_flag = None
         if finding:
             text_flag = make_flag(
                 finding.rule,
@@ -1362,10 +1487,45 @@ def compare_inspects(
                 deck="lw",
             )
             if text_flag:
-                _add_flag(pair_flags, flags, text_flag)
+                _add_flag(pair_flags, flags, text_flag, diag=diag, pair_index=pair_i, record=False)
                 if text_flag.severity in {"warning", "error"}:
                     copy_warning = True
-        else:
+        if diag is not None:
+            diag.record(
+                "text",
+                pairIndex=pair_i,
+                pairNumber=pair_i + 1,
+                leftIndex=li,
+                rightIndexes=[i for i, _ in right_hits],
+                leftNumber=left_num,
+                rightNumbers=right_nums,
+                score=score,
+                leftSkipped=_skipped(ls),
+                rightSkipped=skipped_right,
+                ocrUsed=pair["ocr"],
+                location=loc,
+                left={
+                    "text": a_text, "typed": a_typed, "extracted": a_render.extracted,
+                    "ocr": a_render.ocr, "outsidePhotos": a_clean, "ocrUsed": a_render.ocr_used,
+                },
+                right={
+                    "text": b_text, "typed": b_typed,
+                    "extracted": "\n".join(r.extracted for r in b_renders),
+                    "ocr": "\n".join(r.ocr for r in b_renders), "outsidePhotos": b_clean,
+                    "ocrUsed": any(r.ocr_used for r in b_renders),
+                },
+                shares={
+                    "typedLeft": _share(a_typed, a_text), "typedRight": _share(b_typed, b_text),
+                    "cleanLeft": _share(a_clean, a_text), "cleanRight": _share(b_clean, b_text),
+                },
+                typedSkip=typed_skip,
+                attempts=diag_attempts,
+                carried=carried,
+                outcome={"rule": text_flag.rule, "message": text_flag.message, "severity": text_flag.severity}
+                if text_flag
+                else None,
+            )
+        if not finding:
             shared = _canonical_words(slide_plain_text(ls))
             for _, slide in right_hits:
                 shared &= _canonical_words(slide_plain_text(slide))
@@ -1394,7 +1554,7 @@ def compare_inspects(
                         slide=left_num, deck="lw",
                     )
             if style_flag:
-                _add_flag(pair_flags, flags, style_flag)
+                _add_flag(pair_flags, flags, style_flag, diag=diag, pair_index=pair_i)
 
         extra_photo = [
             (slide, png, right_size)
@@ -1441,6 +1601,8 @@ def compare_inspects(
                         deck="lw",
                         evidence=region.evidence,
                     ),
+                    diag=diag,
+                    pair_index=pair_i,
                 )
             first_evidence = next((r.evidence for r in shown_regions if r.evidence), "")
             if first_evidence:
@@ -1473,6 +1635,8 @@ def compare_inspects(
                     slide=left_num,
                     deck="lw",
                 ),
+                diag=diag,
+                pair_index=pair_i,
             )
         if left_png and right_png and not photo_findings and not region_hits:
             if video_pair:
@@ -1525,6 +1689,8 @@ def compare_inspects(
                             slide=left_num,
                             deck="lw",
                         ),
+                        diag=diag,
+                        pair_index=pair_i,
                     )
         pair["flags"] = pair_flags
         pairs.append(pair)
@@ -1560,6 +1726,8 @@ def compare_inspects(
             )
         )
         flags.extend(inspect_flags)
+        for flag in inspect_flags:
+            record_flag(diag, flag, None)
         attach_slide_flags(pairs, inspect_flags)
     return {
         "leftSlideCount": n_left,

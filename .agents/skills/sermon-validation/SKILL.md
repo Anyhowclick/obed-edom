@@ -122,6 +122,31 @@ Every `Flag` carries a stable `rule` id, plus `slide`, `deck` and an optional
 | `overflow.text` | Check i above |
 | `ocr.unavailable` | macOS Vision could not run, so baked-in text went unchecked |
 
+## Diagnostics
+
+Every check pass writes `diagnostics.jsonl` into the job's work dir
+(`diagnosticsPath` in the job result), written atomically at the end of the
+check — a re-check replaces it only once the whole pass succeeds, so a
+failed re-check leaves the previous file in place. It is a
+header line plus one record per pair (`text`) or non-`text.*` flag
+(`finding`), and it carries the full rendered text of both decks — the
+staff download button says so ("Export diagnostics"). Get it from the
+dashboard (Export diagnostics / Show in Finder in the diff playlist bar) or
+`GET /api/jobs/{id}/diagnostics`.
+
+Replay it offline with `python -m obed_edom diag-replay <file>` — re-derives
+source selection (`select_text_sources`) and the point-title strip, then
+re-runs `classify_text_diff` over the recorded attempt inputs, and reports
+`MATCH`/`MISMATCH` per pair, exit 1 on any mismatch. `--rule` matches the raw
+recorded rule, including one configured `off` (its published outcome is
+null, but replay still lets you inspect it); `--pair` and `--verbose` narrow
+it down further. A clean run before a tuning change and a mismatching run
+after is how a threshold change gets checked against real staff data without
+ever seeing the `.key` files. Add `--strict` to also fail on message-only
+mismatches (same rule and default, reworded message) — useful in CI where
+any drift from the recorded wording should be caught, not just a changed
+verdict. See `.agents/plans/checker_diagnostics.plan.md` for the format.
+
 ## Runtime
 
 Python loads `src/obed_edom/validation_rules.yaml`, whose `rules:` map sets each

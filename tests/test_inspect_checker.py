@@ -15,11 +15,11 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from conftest import _fake_osascript
 from obed_edom import inspect as inspect_mod
 from obed_edom.baseline import (
     CACHE_DIR_ENV,
@@ -349,7 +349,8 @@ def test_partial_preview_set_is_not_served_as_a_hit(deck, monkeypatch, tmp_path)
 def test_cache_hit_repair_osascript_failure_with_stale_png_reports_error(deck, monkeypatch, tmp_path):
     """BLOCKER 4: a partial/stale preview set present before a failed re-export must
     not be read back as success -- the real ``export_slide_images`` -> ``osascript``
-    path is exercised end to end (only ``subprocess.run`` is stubbed)."""
+    path is exercised end to end (only the runner's ``_execute``/``_launch_keynote``
+    seam is stubbed)."""
     _seed_cache(deck, {"reader": "offline", "slideCount": 2,
                        "slides": [{"index": 0, "number": 1, "items": [{"runs": []}]},
                                   {"index": 1, "number": 2, "items": []}],
@@ -361,18 +362,20 @@ def test_cache_hit_repair_osascript_failure_with_stale_png_reports_error(deck, m
     monkeypatch.setattr(inspect_mod, "_build_checker_offline",
                          lambda *a, **k: (_ for _ in ()).throw(AssertionError("rebuild must not run")))
 
-    def fake_run(args, **kwargs):
-        if args[0] == "open":
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        return SimpleNamespace(returncode=1, stdout="", stderr="export bound wrong document")
-
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(inspect_mod.time, "sleep", lambda s: None)
+    _fake_osascript(monkeypatch, returncode=1, stderr="export bound wrong document")
 
     out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=True)
 
     assert out["exported"] is False
     assert out["exportError"] == "Preview export failed: export bound wrong document"
+
+
+def test_export_slide_images_launch_is_caught_by_tripwire(deck, tmp_path):
+    """``export_slide_images`` must route its ``open -b`` through the runner's
+    launch path so an under-mocked test trips the autouse tripwire instead of
+    launching the owner's real Keynote."""
+    with pytest.raises(AssertionError, match="real Keynote launch in tests"):
+        inspect_mod.export_slide_images(deck, tmp_path / "job")
 
 
 def test_cache_written_payload_keeps_bulk_errors(deck, monkeypatch):

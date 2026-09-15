@@ -5,18 +5,30 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, withoutRevealed } from "./overlays";
-import { resizeFromCorner, type ObjectCorner } from "./objects";
+import { AdminSyncGate } from "./adminSync";
+import { addOverlays, applyAdmin1Highlights, applyHighlightColour, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLabelPillImage, ensureLandmarkImages, ensureLowZoomRaster, highlightedCountries, loadAdmin0, movieObjectsAt, selectedDragScale, syncAdmin1Source, withoutRevealed } from "./overlays";
+import { exportGpuCap } from "./captureExport";
+import { defaultObjectSize, effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
-import { applyBoundaryZoomOffset } from "./tonerBoundaries";
+import { applyAuthoredZoomGates } from "./tonerBoundaries";
+import { setBorderlandsInkContext, syncBorderlandsInk } from "./borderlandsInk";
 import { installPatternById, installPatterns, paperGrainCss, paperGrainUrl, stylePatterns } from "./watercolourStyle";
 import { mapsTransformRequest } from "./tileProxy";
+import { BandOverlays } from "./BandOverlays";
+import { admin1CodeFromHits, regionCountriesFromHits } from "./regionPick";
 import {
+  BASE_FOV_DEG,
+  cgDragDx,
+  clampMapZoom,
   clampZoom,
-  compensatedFov,
+  exportScale,
+  exportZoomDelta,
   minZoomForView,
-  previewHostRect,
+  ML_MAX_ZOOM,
+  ML_MIN_ZOOM,
+  previewLayout,
   snapCgShift,
+  surfaceWidthOf,
   wrapLon,
   worldCopyWarning,
   type MapsCamera,
@@ -28,32 +40,43 @@ import {
   type MapsLayerFilterId,
   type MapsRoutePoint,
   type MapsStyleId,
+  type PreviewLayout,
 } from "./types";
 
 const WALL_W = 7680;
-const FW_W = 1920;
 const CG_W = 1920;
 const CG_ORIGIN = 2880;
 const PIN_LAYERS = ["churches-dots", "churches-drops", "churches-landmarks", "churches-labels"];
 const COUNTRY_PICK_MAX_ZOOM = 7;
-const ML_MIN_ZOOM = -2;
-const ML_PREVIEW_MIN_ZOOM = -8;
-const ML_MAX_ZOOM = 22;
 
-function previewSurfaceRect(map: MapLibreMap, authoredWidth = WALL_W) {
-  const container = map.getContainer();
-  return previewHostRect(container.clientWidth, container.clientHeight, authoredWidth);
+/** Pinned preview: CSS-px-per-authored-px is fixed at 1/exportScale(authoredWidth) — the same
+ * density the export renders that slide's own capture surface at, so the captured region is
+ * always 1920 CSS px wide (EXPORT_REF_WIDTH) at that density. "Show side panels" can still widen
+ * the *visible* band beyond the capture (`surfaceWidth` > `authoredWidth`, framing context around
+ * a centre-only slide) — the inner element then grows wider at the SAME density rather than
+ * changing it, exactly like the old fov-widened full-frame host did. A CSS transform (k = band's
+ * on-screen width ÷ inner's own CSS width) then scales that fixed-density surface to fit the band. */
+function objectLayoutScale(authoredWidth: number): number {
+  return 1 / exportScale(authoredWidth);
 }
 
-function previewZoomDelta(map: MapLibreMap, authoredWidth = WALL_W): number {
-  const width = previewSurfaceRect(map, authoredWidth).width;
-  if (!width) return 0;
-  return Math.log2(width / authoredWidth);
+/** Converts a client-space pointer position into the map's own (untransformed) layout space,
+ * so `map.project`/`map.unproject`/`queryRenderedFeatures` see the same coordinates MapLibre's
+ * own internal event handling would (MapLibre's DOM.getScale already does this for native events;
+ * this mirrors it for our own manual `getBoundingClientRect()` math). */
+function toLayoutPoint(map: MapLibreMap, clientX: number, clientY: number): [number, number] {
+  const canvas = map.getCanvas();
+  const rect = canvas.getBoundingClientRect();
+  const k = canvas.clientWidth ? rect.width / canvas.clientWidth : 1;
+  return [(clientX - rect.left) / k, (clientY - rect.top) / k];
 }
 
-function objectPreviewScale(map: MapLibreMap, authoredWidth = WALL_W): number {
-  const width = previewSurfaceRect(map, authoredWidth).width;
-  return width > 0 ? width / authoredWidth : 1;
+/** Screen-px-per-authored-px, for interpreting a raw pointer drag delta (object resize handles). */
+function objectDragScale(map: MapLibreMap, authoredWidth: number): number {
+  const canvas = map.getCanvas();
+  const rect = canvas.getBoundingClientRect();
+  const k = canvas.clientWidth ? rect.width / canvas.clientWidth : 1;
+  return k * objectLayoutScale(authoredWidth);
 }
 
 function captureCanvas(canvas: HTMLCanvasElement, rect?: { x: number; y: number; width: number; height: number }) {
@@ -79,17 +102,6 @@ function captureCanvas(canvas: HTMLCanvasElement, rect?: { x: number; y: number;
     output.height
   );
   return new Promise<Blob | null>((resolve) => output.toBlob(resolve, "image/png"));
-}
-
-function applyFovCompensation(map: MapLibreMap, authoredWidth: number) {
-  const container = map.getContainer();
-  const band = previewHostRect(container.clientWidth, container.clientHeight, authoredWidth);
-  const setFov = (map as unknown as { setVerticalFieldOfView?: (deg: number) => void }).setVerticalFieldOfView;
-  if (typeof setFov === "function") setFov.call(map, compensatedFov(container.clientHeight, band.height));
-}
-
-function clampMapZoom(zoom: number): number {
-  return Math.max(ML_PREVIEW_MIN_ZOOM, Math.min(ML_MAX_ZOOM, zoom));
 }
 
 function authoredZoomOf(map: MapLibreMap, delta: number, minZoom: number, peggedAuthored?: number): number {
@@ -124,49 +136,55 @@ function cameraView(_map: MapLibreMap, camera: MapsCamera, delta: number, minZoo
   };
 }
 
-function applyPreviewZoomLimits(map: MapLibreMap, minZoom: number, delta = previewZoomDelta(map)): number {
-  if (!map.getContainer().clientWidth) return delta;
+function silentJump(map: MapLibreMap, suppress: { current: boolean }, view: Parameters<MapLibreMap["jumpTo"]>[0]): void {
+  suppress.current = true;
+  try {
+    map.jumpTo(view);
+  } finally {
+    suppress.current = false;
+  }
+}
+
+function silently(suppress: { current: boolean }, fn: () => void): void {
+  const prev = suppress.current;
+  suppress.current = true;
+  try {
+    fn();
+  } finally {
+    suppress.current = prev;
+  }
+}
+
+function applyPreviewZoomLimits(map: MapLibreMap, minZoom: number, delta: number): void {
   const minZ = clampMapZoom(minZoom + delta);
   const maxZ = Math.max(minZ, clampMapZoom(22 + delta));
   try {
-    if (map.getMinZoom() !== minZ) {
-      if (minZ < ML_MIN_ZOOM) {
-        (map as unknown as { transform: { setMinZoom: (zoom: number) => void } }).transform.setMinZoom(minZ);
-      }
-      else map.setMinZoom(minZ);
-    }
+    if (map.getMinZoom() !== minZ) map.setMinZoom(minZ);
     if (map.getMaxZoom() !== maxZ) map.setMaxZoom(maxZ);
   } catch (err) {
     console.warn("maplibre zoom limits", err);
   }
-  return delta;
 }
 
-function recastPreviewCamera(
+/** Re-derives the map's zoom/limits/relief gates for a (possibly new) authored surface width.
+ * Only needed when `authoredWidth` itself changes — window resizes only touch the CSS transform
+ * and pixelRatio, never the camera, since the authored↔map zoom delta is now a pure function of
+ * authoredWidth rather than the live container size. */
+function applyAuthoredWidth(
   map: MapLibreMap,
+  authoredWidth: number,
+  minZoom: number,
   deltaRef: { current: number },
   suppress: { current: boolean },
-  minZoom: number,
-  authoredHint?: number,
-  authoredWidth = WALL_W
+  authoredHint?: number
 ) {
-  if (!map.getContainer().clientWidth) return;
-  try {
-    const authored = readCamera(map, deltaRef.current, minZoom, authoredHint);
-    map.resize();
-    applyFovCompensation(map, authoredWidth);
-    const d = applyPreviewZoomLimits(map, minZoom, previewZoomDelta(map, authoredWidth));
-    deltaRef.current = d;
-    applyBoundaryZoomOffset(map, d);
-    suppress.current = true;
-    map.jumpTo(cameraView(map, authored, d, minZoom));
-    map.once("moveend", () => {
-      suppress.current = false;
-    });
-  } catch (err) {
-    suppress.current = false;
-    console.warn("maplibre recast", err);
-  }
+  const authored = readCamera(map, deltaRef.current, minZoom, authoredHint);
+  const delta = exportZoomDelta(authoredWidth);
+  applyPreviewZoomLimits(map, minZoom, delta);
+  deltaRef.current = delta;
+  applyAuthoredZoomGates(map, delta);
+  setBorderlandsInkContext(map, { authoredZoomDelta: delta });
+  silentJump(map, suppress, cameraView(map, authored, delta, minZoom));
 }
 
 export type MapViewHandle = {
@@ -197,6 +215,7 @@ export type MapViewHandle = {
   capturePreviewBlob: () => Promise<Blob | null>;
   waitUntilIdle: (styleId?: MapsStyleId, timeoutMs?: number) => Promise<void>;
   resize: () => void;
+  getRegionCountries: () => string[];
 };
 
 type Props = {
@@ -217,6 +236,8 @@ type Props = {
   selectedPinId: string | null;
   onCameraCommit: (camera: MapsCamera) => void;
   onToggleCountry: (adm0: string) => void;
+  onToggleRegion: (adm1: string) => void;
+  pickRegions: boolean;
   onAddPin: (lat: number, lon: number) => void;
   onSelectPin: (id: string | null) => void;
   onEditPin: (id: string) => void;
@@ -226,6 +247,8 @@ type Props = {
   onCgShift: (dx: number) => void;
   onPreviewAbort?: () => void;
   assetBaseUrl?: string;
+  highlightColour?: string;
+  highlightColours?: Record<string, string>;
 };
 
 function pinIdFromEvent(event: MapMouseEvent, map: MapLibreMap): string {
@@ -234,6 +257,8 @@ function pinIdFromEvent(event: MapMouseEvent, map: MapLibreMap): string {
   return String(hits[0]?.properties?.id || "");
 }
 
+export type MapViewProps = Props;
+
 export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   {
     camera,
@@ -241,7 +266,6 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     highlights,
     churches,
     numberPins = false,
-    crop,
     sidePanels,
     exportCg,
     hiddenLayers,
@@ -253,6 +277,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     selectedPinId,
     onCameraCommit,
     onToggleCountry,
+    onToggleRegion,
+    pickRegions,
     onAddPin,
     onSelectPin,
     onEditPin,
@@ -262,33 +288,94 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     onCgShift,
     onPreviewAbort,
     assetBaseUrl,
+    highlightColour,
+    highlightColours,
   },
   ref
 ) {
+  const frame = useRef<HTMLDivElement>(null);
+  const band = useRef<HTMLDivElement>(null);
+  const inner = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
+  const layoutRef = useRef<PreviewLayout>({ innerW: 0, innerH: 0, bandW: 0, bandH: 0, bandTop: 0, bandInnerH: 0, k: 1, fov: BASE_FOV_DEG });
+  const [view, setView] = useState<{ k: number; bandTop: number; bandInnerH: number }>({
+    k: layoutRef.current.k,
+    bandTop: layoutRef.current.bandTop,
+    bandInnerH: layoutRef.current.bandInnerH,
+  });
   const mapRef = useRef<MapLibreMap | null>(null);
   const suppress = useRef(false);
   const styleUrl = useRef(OPENFREEMAP_STYLES[styleId]);
   const styleIdentity = useRef(styleId);
   const styleReady = useRef(false);
-  const overlayGeneration = useRef(0);
+  const adminSync = useRef(new AdminSyncGate());
+  const styleToken = useRef<number | null>(null);
+  const [adminReplay, setAdminReplay] = useState(0);
   const previewingRef = useRef(previewing);
-  const callbacks = useRef({ onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort });
-  const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins });
-  const cgDrag = useRef<{ x: number; shift: number; width: number } | null>(null);
+  const callbacks = useRef({ onCameraCommit, onToggleCountry, onToggleRegion, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort });
+  const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins, highlightColour, highlightColours });
+  const [cgInteract, setCgInteract] = useState<"select" | "move">("select");
+  const cgDrag = useRef<{ x: number; shift: number; width: number; surfaceWidth: number } | null>(null);
   const objDrag = useRef<{ id: string; grabDx: number; grabDy: number; pointerId: number } | null>(null);
   const handleDrag = useRef<{ pointerId: number; startX: number; startY: number; startSize: number; corner: ObjectCorner; aspect: number } | null>(null);
   const [boxPos, setBoxPos] = useState<{ x: number; y: number; w: number; h: number; size: number } | null>(null);
-  const [grainPreviewWidth, setGrainPreviewWidth] = useState<number>(authoredWidth);
   const [cgSnapped, setCgSnapped] = useState(false);
   const hopAbort = useRef(false);
   const hopRaf = useRef(0);
   const hopResolve = useRef<(() => void) | null>(null);
+  const hopRestore = useRef<(() => void) | null>(null);
+  const hopSeq = useRef(0);
   const deltaRef = useRef(0);
   const cameraRef = useRef(camera);
   const minZoomRef = useRef(minZoomForView());
   const authoredWidthRef = useRef(authoredWidth);
+  // The live authoredWidth prop, synced every render — animateHop's restore reads this rather
+  // than a value closed over at call time, so it restores to whatever is current even if the
+  // prop changed mid-hop.
+  const propWidthRef = useRef(authoredWidth);
+  // While a movie hop is animating, the render surface is pinned to the hop's own (wider) export
+  // surface rather than the active slide's authoredWidth prop — see animateHop.
+  const hopWidthRef = useRef<number | null>(null);
+  const [hopWidth, setHopWidth] = useState<number | null>(null);
+  const sidePanelsRef = useRef(sidePanels);
+  const pickRegionsRef = useRef(pickRegions);
   const [texWarn, setTexWarn] = useState<string | null>(null);
+  const [gpuWarn, setGpuWarn] = useState<string | null>(null);
+
+  /** Countries intersecting the visible wall/CG band. The MapLibre canvas is the
+   * FOV-widened inner (nav context above/below); a full-canvas query at z5 pulls
+   * Oman–Japan and the prefetch cap then drops Malaysia. */
+  function visibleAdmin0Hits(map: MapLibreMap) {
+    if (!map.getLayer("admin0-fill")) return [];
+    const canvas = map.getCanvas();
+    const L = layoutRef.current;
+    const width = canvas.clientWidth;
+    const bottom = L.bandTop + L.bandInnerH;
+    if (width <= 0 || L.bandInnerH <= 0) return map.queryRenderedFeatures({ layers: ["admin0-fill"] });
+    return map.queryRenderedFeatures(
+      [[0, L.bandTop], [width, bottom]],
+      { layers: ["admin0-fill"] }
+    );
+  }
+
+  function regionCountries(map: MapLibreMap): string[] {
+    if (!pickRegionsRef.current || !map.getLayer("admin0-fill")) return [];
+    const centre = map.project(map.getCenter());
+    return regionCountriesFromHits(
+      visibleAdmin0Hits(map),
+      map.queryRenderedFeatures([centre.x, centre.y], { layers: ["admin0-fill"] })
+    );
+  }
+
+  function admin0At(map: MapLibreMap, point: MapMouseEvent["point"]): string {
+    if (!map.getLayer("admin0-fill")) return "";
+    return String(map.queryRenderedFeatures(point, { layers: ["admin0-fill"] })[0]?.properties?.ADM0_A3 || "");
+  }
+
+  function admin1At(map: MapLibreMap, point: MapMouseEvent["point"]): string {
+    if (!map.getLayer("admin1-fill")) return "";
+    return admin1CodeFromHits(map.queryRenderedFeatures(point, { layers: ["admin1-fill"] }));
+  }
 
   function finishHop() {
     if (hopRaf.current) {
@@ -296,6 +383,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       hopRaf.current = 0;
     }
     suppress.current = false;
+    hopSeq.current += 1;
+    const restore = hopRestore.current;
+    hopRestore.current = null;
+    restore?.();
     const resolve = hopResolve.current;
     hopResolve.current = null;
     resolve?.();
@@ -304,19 +395,73 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   previewingRef.current = previewing;
   cameraRef.current = camera;
   minZoomRef.current = minZoomForView();
-  authoredWidthRef.current = authoredWidth;
-  callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
-  overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins };
+  propWidthRef.current = authoredWidth;
+  authoredWidthRef.current = hopWidthRef.current ?? authoredWidth;
+  sidePanelsRef.current = sidePanels;
+  pickRegionsRef.current = pickRegions;
+  callbacks.current = { onCameraCommit, onToggleCountry, onToggleRegion, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
+  overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins, highlightColour, highlightColours };
+
+  /** Sizes/positions `.maps-map-inner` to fill the whole frame (not just the band) at the
+   * export-exact density and widens MapLibre's fov to match (`previewLayout`), so the margins
+   * above/below the band render live map instead of a dimmed void (regression: nav context). */
+  function applyTransform(authoredW = authoredWidthRef.current, sidePanelsOn = sidePanelsRef.current) {
+    const frameEl = frame.current;
+    const innerEl = inner.current;
+    const map = mapRef.current;
+    if (!frameEl || !innerEl) return;
+    const surfaceWidth = surfaceWidthOf(authoredW, sidePanelsOn);
+    const L = previewLayout(frameEl.clientWidth, frameEl.clientHeight, surfaceWidth, exportScale(authoredW));
+    if (L.innerW <= 0 || L.innerH <= 0) return;
+    innerEl.style.width = `${L.innerW}px`;
+    innerEl.style.height = `${L.innerH}px`;
+    innerEl.style.transform = `translateY(${-L.bandTop * L.k}px) scale(${L.k})`;
+    layoutRef.current = L;
+    setView((prev) =>
+      Math.abs(prev.k - L.k) < 1e-4 && Math.abs(prev.bandTop - L.bandTop) < 1e-4 && Math.abs(prev.bandInnerH - L.bandInnerH) < 1e-4
+        ? prev
+        : { k: L.k, bandTop: L.bandTop, bandInnerH: L.bandInnerH }
+    );
+    if (map) {
+      silently(suppress, () => {
+        try {
+          map.resize();
+        } catch (err) {
+          console.warn("maplibre resize", err);
+        }
+        map.setVerticalFieldOfView(L.fov);
+        const requested = L.k * (window.devicePixelRatio || 1);
+        try {
+          map.setPixelRatio(requested);
+        } catch (err) {
+          console.warn("maplibre setPixelRatio", err);
+        }
+        const canvas = map.getCanvas();
+        const honoured = canvas.clientWidth ? canvas.width / canvas.clientWidth : requested;
+        if (Math.abs(honoured - requested) > 0.01) {
+          const message = `Preview pixel ratio clamped to ${honoured.toFixed(2)} (wanted ${requested.toFixed(2)}); this band is not capture-exact.`;
+          console.warn(message);
+          setTexWarn(message);
+        } else {
+          setTexWarn(null);
+        }
+      });
+    }
+  }
+
+  function captureBand() {
+    const map = mapRef.current;
+    if (!map) return Promise.resolve(null);
+    const canvas = map.getCanvas();
+    const L = layoutRef.current;
+    return captureCanvas(canvas, { x: 0, y: L.bandTop, width: canvas.clientWidth, height: L.bandInnerH });
+  }
 
   useImperativeHandle(ref, () => ({
     jumpTo(next) {
       const map = mapRef.current;
       if (!map) return;
-      suppress.current = true;
-      map.jumpTo(cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current));
-      map.once("moveend", () => {
-        suppress.current = false;
-      });
+      silentJump(map, suppress, cameraView(map, next, deltaRef.current, minZoomRef.current));
     },
     easeTo(next, durationMs) {
       const map = mapRef.current;
@@ -324,7 +469,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       return new Promise((resolve) => {
         suppress.current = true;
         // MapsTab passes milliseconds (duration * 1000); MapLibre easeTo is ms.
-        map.easeTo({ ...cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current), duration: Math.max(0, durationMs) });
+        map.easeTo({ ...cameraView(map, next, deltaRef.current, minZoomRef.current), duration: Math.max(0, durationMs) });
         map.once("moveend", () => {
           suppress.current = false;
           resolve();
@@ -336,7 +481,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (!map) return Promise.resolve();
       return new Promise((resolve) => {
         suppress.current = true;
-        map.flyTo({ ...cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current), duration: Math.max(0, durationMs) });
+        map.flyTo({ ...cameraView(map, next, deltaRef.current, minZoomRef.current), duration: Math.max(0, durationMs) });
         map.once("moveend", () => {
           suppress.current = false;
           resolve();
@@ -348,52 +493,102 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (!map) return Promise.resolve();
       hopAbort.current = false;
       finishHop();
+      // Render the hop at its own export surface (mirrors captureFlyFrames), not the active
+      // slide's authoredWidth prop, so a mixed-surface hop previews at the export's density.
+      const priorWidth = authoredWidthRef.current;
+      const hopSurfaceW = width || priorWidth;
+      // Idempotent against the LIVE prop, not a value closed over at call time, so a restore
+      // that fires after the prop has since changed still lands on the current surface.
+      const applyHopWidth = (w: number) => {
+        const authored = readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom);
+        const next = w === propWidthRef.current ? null : w;
+        hopWidthRef.current = next;
+        setHopWidth(next);
+        authoredWidthRef.current = w;
+        const delta = exportZoomDelta(w);
+        deltaRef.current = delta;
+        applyPreviewZoomLimits(map, minZoomRef.current, delta);
+        applyAuthoredZoomGates(map, delta);
+        applyTransform(w, sidePanelsRef.current);
+        silentJump(map, suppress, cameraView(map, authored, delta, minZoomRef.current));
+      };
+      if (hopSurfaceW !== priorWidth) {
+        // Armed before applying the override so a synchronous throw inside applyHopWidth
+        // still leaves finishHop() something to restore.
+        hopRestore.current = () => applyHopWidth(propWidthRef.current);
+        applyHopWidth(hopSurfaceW);
+      }
       const toObjectsPainted = destinationPaintsReveal ? withoutRevealed(toObjects || []) : toObjects || [];
-      return Promise.all([ensureLandmarkImages(map, [...(fromObjects || []), ...toObjectsPainted], assetBaseUrl), Promise.resolve(ensureDropPinImages(map, [...(fromObjects || []), ...toObjectsPainted]))]).then(() => new Promise((resolve) => {
-        const apply = (t: number) => {
-          const cam = cameraAtHop(from, to, t, {
-            easing,
-            routePoints,
-            curve,
-            flyZoom,
-            easeIn,
-            easeOut,
-            flight,
-            duration: durationMs / 1000,
-            width,
-          });
-          if (fromObjects && map.getSource("churches")) {
-            const objects = toObjects ? movieObjectsAt(fromObjects, toObjects, t, objectTransition, destinationPaintsReveal) : fromObjects;
-            (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(objects, overlay.current.selectedPinId, overlay.current.numberPins, objectPreviewScale(map, authoredWidthRef.current)));
-          }
-          map.jumpTo({
-            center: [cam.lon, cam.lat],
-            zoom: mapZoomOf(cam.zoom, deltaRef.current, minZoomRef.current),
-            bearing: cam.bearing,
-            pitch: cam.pitch,
-          });
-        };
-        const duration = Math.max(0, durationMs);
-        hopResolve.current = resolve;
-        suppress.current = true;
-        if (duration === 0) {
-          apply(1);
-          finishHop();
-          return;
-        }
-        const start = performance.now();
-        const step = (now: number) => {
-          if (hopAbort.current) {
+      const seq = ++hopSeq.current;
+      return Promise.all([
+        ensureLandmarkImages(map, [...(fromObjects || []), ...toObjectsPainted], assetBaseUrl),
+        Promise.resolve().then(() => ensureDropPinImages(map, [...(fromObjects || []), ...toObjectsPainted])),
+      ])
+        .then(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              if (hopSeq.current !== seq) return resolve();
+              const apply = (t: number) => {
+                const cam = cameraAtHop(from, to, t, {
+                  easing,
+                  routePoints,
+                  curve,
+                  flyZoom,
+                  easeIn,
+                  easeOut,
+                  flight,
+                  duration: durationMs / 1000,
+                  width,
+                });
+                if (fromObjects && map.getSource("churches")) {
+                  const objects = toObjects ? movieObjectsAt(fromObjects, toObjects, t, objectTransition, destinationPaintsReveal) : fromObjects;
+                  (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(objects, overlay.current.selectedPinId, overlay.current.numberPins, objectLayoutScale(authoredWidthRef.current)));
+                }
+                map.jumpTo({
+                  center: [cam.lon, cam.lat],
+                  zoom: mapZoomOf(cam.zoom, deltaRef.current, minZoomRef.current),
+                  bearing: cam.bearing,
+                  pitch: cam.pitch,
+                });
+              };
+              const duration = Math.max(0, durationMs);
+              hopResolve.current = resolve;
+              suppress.current = true;
+              if (duration === 0) {
+                try {
+                  apply(1);
+                } catch (err) {
+                  reject(err);
+                  return;
+                }
+                finishHop();
+                return;
+              }
+              const start = performance.now();
+              const step = (now: number) => {
+                if (hopAbort.current) {
+                  finishHop();
+                  return;
+                }
+                const t = Math.min(1, (now - start) / duration);
+                try {
+                  apply(t);
+                } catch (err) {
+                  reject(err);
+                  return;
+                }
+                if (t < 1) hopRaf.current = requestAnimationFrame(step);
+                else finishHop();
+              };
+              hopRaf.current = requestAnimationFrame(step);
+            })
+        )
+        .catch((err) => {
+          if (hopSeq.current === seq) {
             finishHop();
-            return;
+            throw err;
           }
-          const t = Math.min(1, (now - start) / duration);
-          apply(t);
-          if (t < 1) hopRaf.current = requestAnimationFrame(step);
-          else finishHop();
-        };
-        hopRaf.current = requestAnimationFrame(step);
-      }));
+        });
     },
     stop() {
       hopAbort.current = true;
@@ -402,33 +597,24 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     },
     getCamera() {
       const map = mapRef.current;
-      return map ? readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom) : null;
+      return map ? readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom) : null;
     },
     getCgCamera(cgShiftX) {
       const map = mapRef.current;
       if (!map) return null;
-      const current = readCamera(
-        map,
-        previewZoomDelta(map, authoredWidthRef.current),
-        minZoomRef.current,
-        cameraRef.current.zoom
-      );
+      const current = readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom);
       const canvas = map.getCanvas();
-      const surface = previewSurfaceRect(map, authoredWidthRef.current);
       const shifted = map.unproject([
-        canvas.clientWidth / 2 + (cgShiftX * surface.width) / authoredWidthRef.current,
+        canvas.clientWidth / 2 + cgShiftX * objectLayoutScale(authoredWidthRef.current),
         canvas.clientHeight / 2,
       ]);
       return { ...current, lat: shifted.lat, lon: wrapLon(shifted.lng) };
     },
     captureBlob() {
-      const map = mapRef.current;
-      if (!map) return Promise.resolve(null);
-      return captureCanvas(map.getCanvas(), previewSurfaceRect(map, authoredWidthRef.current));
+      return captureBand();
     },
     capturePreviewBlob() {
-      const map = mapRef.current;
-      return map ? captureCanvas(map.getCanvas()) : Promise.resolve(null);
+      return captureBand();
     },
     waitUntilIdle(expectedStyleId, timeoutMs = 15000) {
       const map = mapRef.current;
@@ -454,9 +640,18 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           map.off("idle", check);
           reject(new Error(message));
         };
+        let settling = false;
+        const ready = () => styleReady.current && map.loaded() && map.areTilesLoaded();
         const check = () => {
           if (mapRef.current !== map || styleIdentity.current !== expected) return fail("Map style changed before capture was ready");
-          if (styleReady.current && map.loaded() && map.areTilesLoaded()) finish();
+          if (!ready() || settling) return;
+          settling = true;
+          void adminSync.current.settled().then(() => {
+            settling = false;
+            if (finished) return;
+            if (mapRef.current !== map || styleIdentity.current !== expected) return fail("Map style changed before capture was ready");
+            if (ready()) finish();
+          });
         };
         map.on("idle", check);
         poll = window.setInterval(check, 50);
@@ -467,43 +662,29 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     resize() {
       const map = mapRef.current;
       if (!map) return;
-      recastPreviewCamera(
-        map,
-        deltaRef,
-        suppress,
-        minZoomRef.current,
-        cameraRef.current.zoom,
-        authoredWidthRef.current
-      );
+      applyTransform();
       if (map.getSource("churches")) {
         (map.getSource("churches") as GeoJSONSource).setData(
-          churchesGeo(overlay.current.churches, overlay.current.selectedPinId, overlay.current.numberPins, objectPreviewScale(map, authoredWidthRef.current))
+          churchesGeo(overlay.current.churches, overlay.current.selectedPinId, overlay.current.numberPins, objectLayoutScale(authoredWidthRef.current))
         );
       }
+    },
+    getRegionCountries() {
+      const map = mapRef.current;
+      return map ? regionCountries(map) : [];
     },
   }));
 
   useEffect(() => {
-    if (!host.current) return;
+    if (!host.current || !band.current || !inner.current || !frame.current) return;
     const hostEl = host.current;
+    const innerEl = inner.current;
+    const frameEl = frame.current;
     let cancelled = false;
     let map: MapLibreMap | null = null;
-    const recast = () => {
-      if (!map) return;
-      recastPreviewCamera(
-        map,
-        deltaRef,
-        suppress,
-        minZoomRef.current,
-        cameraRef.current.zoom,
-        authoredWidthRef.current
-      );
-      setGrainPreviewWidth(previewSurfaceRect(map, authoredWidthRef.current).width || authoredWidthRef.current);
-    };
-    const ro = new ResizeObserver(() => recast());
     const onPointerUp = () => {
       if (!map || suppress.current || previewingRef.current) return;
-      callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
+      callbacks.current.onCameraCommit(readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom));
     };
 
     const onCanvasMouseMove = (event: MapMouseEvent) => {
@@ -517,13 +698,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       const hit = layers.length ? map.queryRenderedFeatures(event.point, { layers }) : [];
       const id = String(hit[0]?.properties?.id || "");
       const church = id ? overlay.current.churches.find((c) => c.id === id) : undefined;
-      map.getCanvas().style.cursor = church && church.id === selectedPinId && church.kind === "landmark" ? "move" : "";
+      map.getCanvas().style.cursor = church && church.id === selectedPinId ? "move" : "";
     };
 
     const onObjPointerDown = (event: PointerEvent) => {
       if (!map || previewingRef.current || event.shiftKey) return;
-      const rect = map.getCanvas().getBoundingClientRect();
-      const point: [number, number] = [event.clientX - rect.left, event.clientY - rect.top];
+      const point = toLayoutPoint(map, event.clientX, event.clientY);
       const layers = PIN_LAYERS.filter((id) => map!.getLayer(id));
       const id = String((layers.length ? map.queryRenderedFeatures(point, { layers }) : [])[0]?.properties?.id || "");
       const church = id ? overlay.current.churches.find((c) => c.id === id) : undefined;
@@ -531,14 +711,14 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       const anchor = map.project([church.lon, church.lat]);
       map.dragPan.disable();
       map.getCanvas().setPointerCapture(event.pointerId);
-      objDrag.current = { id, grabDx: point[0] - anchor.x, grabDy: point[1] - anchor.y, pointerId: event.pointerId };
+      objDrag.current = { id: church.id, grabDx: point[0] - anchor.x, grabDy: point[1] - anchor.y, pointerId: event.pointerId };
     };
 
     const onObjPointerMove = (event: PointerEvent) => {
       const drag = objDrag.current;
       if (!map || !drag || drag.pointerId !== event.pointerId) return;
-      const rect = map.getCanvas().getBoundingClientRect();
-      const lngLat = map.unproject([event.clientX - rect.left - drag.grabDx, event.clientY - rect.top - drag.grabDy]);
+      const point = toLayoutPoint(map, event.clientX, event.clientY);
+      const lngLat = map.unproject([point[0] - drag.grabDx, point[1] - drag.grabDy]);
       callbacks.current.onMoveObject(drag.id, lngLat.lat, lngLat.lng);
     };
 
@@ -552,35 +732,63 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     };
 
     const createMap = (wantedStyle: MapsStyleId) => {
-      const d0 = hostEl.clientWidth ? Math.log2(hostEl.clientWidth / authoredWidthRef.current) : 0;
+      const surfaceWidth0 = surfaceWidthOf(authoredWidthRef.current, sidePanelsRef.current);
+      const L0 = previewLayout(frameEl.clientWidth, frameEl.clientHeight, surfaceWidth0, exportScale(authoredWidthRef.current));
+      innerEl.style.width = `${L0.innerW}px`;
+      innerEl.style.height = `${L0.innerH}px`;
+      layoutRef.current = L0;
+      setView({ k: L0.k, bandTop: L0.bandTop, bandInnerH: L0.bandInnerH });
+      const d0 = exportZoomDelta(authoredWidthRef.current);
       void resolveOpenFreeMapStyle(wantedStyle, d0).then((style) => {
         if (cancelled) return;
         if (overlay.current.styleId !== wantedStyle) {
           createMap(overlay.current.styleId);
           return;
         }
+        const surfaceWidth = surfaceWidthOf(authoredWidthRef.current, sidePanelsRef.current);
+        const L = previewLayout(frameEl.clientWidth, frameEl.clientHeight, surfaceWidth, exportScale(authoredWidthRef.current));
+        const d = exportZoomDelta(authoredWidthRef.current);
+        if (L.innerW > 0 && L.innerH > 0) {
+          innerEl.style.width = `${L.innerW}px`;
+          innerEl.style.height = `${L.innerH}px`;
+        }
+        layoutRef.current = L;
+        setView({ k: L.k, bandTop: L.bandTop, bandInnerH: L.bandInnerH });
         const zMin = minZoomRef.current;
-        deltaRef.current = d0;
+        deltaRef.current = d;
+        const k0 = L.k;
+        let gpuCap = 4096;
+        try {
+          gpuCap = exportGpuCap();
+        } catch (err) {
+          console.warn("exportGpuCap", err);
+        }
         map = new MapLibreMap({
           container: hostEl,
           style,
           center: [camera.lon, camera.lat],
-          zoom: mapZoomOf(camera.zoom, d0, zMin),
+          zoom: mapZoomOf(camera.zoom, d, zMin),
           bearing: camera.bearing,
           pitch: camera.pitch,
           renderWorldCopies: true,
-          transformConstrain: (center, zoom) => ({ center, zoom: clampMapZoom(zoom) }),
           doubleClickZoom: false,
           boxZoom: false,
           minZoom: ML_MIN_ZOOM,
           maxZoom: ML_MAX_ZOOM,
+          pixelRatio: k0 * (window.devicePixelRatio || 1),
+          maxCanvasSize: [gpuCap, gpuCap],
           attributionControl: { compact: true },
           transformRequest: (url) => mapsTransformRequest(url),
           canvasContextAttributes: { preserveDrawingBuffer: true },
+          transformConstrain: (center, zoom) => ({ center, zoom: clampMapZoom(zoom) }),
         });
         mapRef.current = map;
+        styleReady.current = false;
+        styleToken.current = adminSync.current.beginStyleLoad();
         styleUrl.current = OPENFREEMAP_STYLES[wantedStyle];
         styleIdentity.current = wantedStyle;
+        innerEl.style.transform = `translateY(${-L.bandTop * L.k}px) scale(${L.k})`;
+        map.setVerticalFieldOfView(L.fov);
 
         function probeTex() {
           if (!map) return;
@@ -590,17 +798,28 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           if (typeof max === "number" && max < WALL_W) {
             const message = `GPU MAX_TEXTURE_SIZE is ${max}; 7680 plates will fail.`;
             console.warn(message);
-            setTexWarn(message);
+            setGpuWarn(message);
           }
         }
 
-        function paintOverlays() {
+        function takeStyleToken(): number {
+          const token = styleToken.current;
+          styleToken.current = null;
+          if (token !== null) return token;
+          styleReady.current = false;
+          return adminSync.current.beginStyleLoad();
+        }
+
+        /** `generation` is the style-load token acquired by whoever started this load, before
+         * `setStyle` so a sync arriving mid-load defers to the replay instead of touching the
+         * half-built style. */
+        function paintOverlays(generation: number) {
           if (!map) return;
           const currentMap = map;
-          const generation = ++overlayGeneration.current;
-          styleReady.current = false;
-          ensureLowZoomRaster(currentMap, overlay.current.styleId);
+          const isCurrent = () => mapRef.current === currentMap && adminSync.current.isCurrent(generation) && !!currentMap.getStyle();
+          ensureLowZoomRaster(currentMap, overlay.current.styleId, deltaRef.current);
           installPatterns(currentMap, stylePatterns(overlay.current.styleId));
+          syncBorderlandsInk(currentMap, overlay.current.styleId, { authoredZoomDelta: deltaRef.current });
           applyLayerFilters(currentMap, overlay.current.hiddenLayers);
           applyHillshade(currentMap, overlay.current.hillshade);
           void addOverlays(
@@ -611,19 +830,49 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             overlay.current.styleId,
             overlay.current.numberPins,
             assetBaseUrl,
-            objectPreviewScale(currentMap, authoredWidthRef.current),
-            overlay.current.isolate
+            objectLayoutScale(authoredWidthRef.current),
+            overlay.current.isolate,
+            regionCountries(currentMap),
+            isCurrent,
+            overlay.current.highlightColour,
+            overlay.current.highlightColours
           ).then(() => {
-            if (mapRef.current === currentMap && overlayGeneration.current === generation) {
+            if (isCurrent()) {
               styleReady.current = true;
               currentMap.triggerRepaint();
             }
+          }).catch((err) => console.warn("overlay paint", err)).finally(() => {
+            if (adminSync.current.endStyleLoad(generation)) setAdminReplay((n) => n + 1);
           });
         }
 
         function commitCamera() {
           if (!map || suppress.current || previewingRef.current) return;
-          callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
+          callbacks.current.onCameraCommit(readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom));
+        }
+
+        /** Regions mode's admin1-fill layer must stay pickable for whatever country is now under
+         * the camera, so a pan/zoom that changes it re-syncs the merged `admin1` source — the
+         * highlight effect only re-runs on highlight/isolate/pickRegions changes, never on camera
+         * moves alone. Shares one generation with overlay painting and the highlight effect, so
+         * whichever request starts last wins and a sync during a style load is deferred to it. */
+        function syncRegionCamera() {
+          if (!map || !pickRegionsRef.current) return;
+          const currentMap = map;
+          if (!currentMap.getSource("admin0")) return;
+          const codes = regionCountries(currentMap);
+          if (!codes.length) return;
+          const generation = adminSync.current.beginSync();
+          if (generation === null) return;
+          const isCurrent = () => mapRef.current === currentMap && adminSync.current.isCurrent(generation) && !!currentMap.getStyle();
+          const hasAdmin1Highlight = overlay.current.highlights.some((h) => h.startsWith("A1:"));
+          const needed = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(overlay.current.highlights) : []), ...codes])];
+          void adminSync.current.track(syncAdmin1Source(currentMap, needed, isCurrent).then(() => {
+            if (!isCurrent()) return;
+            applyHighlights(currentMap, overlay.current.highlights);
+            applyAdmin1Highlights(currentMap, overlay.current.highlights);
+            applyIsolate(currentMap, overlay.current.highlights, overlay.current.isolate);
+          }));
         }
 
         map.on("error", (event) => {
@@ -636,20 +885,15 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         map.on("load", () => {
           probeTex();
           try {
-            map?.resize();
+            if (map) silently(suppress, () => map!.resize());
             if (map) {
-              applyFovCompensation(map, authoredWidthRef.current);
               const zMin = minZoomRef.current;
-              const d = applyPreviewZoomLimits(map, zMin, previewZoomDelta(map, authoredWidthRef.current));
-              deltaRef.current = d;
-              applyBoundaryZoomOffset(map, d);
-              suppress.current = true;
-              map.jumpTo(cameraView(map, cameraRef.current, d, zMin));
-              map.once("moveend", () => {
-                suppress.current = false;
-              });
-              ensureLowZoomRaster(map, overlay.current.styleId);
+              applyPreviewZoomLimits(map, zMin, deltaRef.current);
+              applyAuthoredZoomGates(map, deltaRef.current);
+              silentJump(map, suppress, cameraView(map, cameraRef.current, deltaRef.current, zMin));
+              ensureLowZoomRaster(map, overlay.current.styleId, deltaRef.current);
               installPatterns(map, stylePatterns(overlay.current.styleId));
+              syncBorderlandsInk(map, overlay.current.styleId, { authoredZoomDelta: deltaRef.current });
               applyLayerFilters(map, overlay.current.hiddenLayers);
               applyHillshade(map, overlay.current.hillshade);
             }
@@ -657,24 +901,29 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             suppress.current = false;
             console.warn("maplibre load", err);
           }
+          const generation = takeStyleToken();
           void loadAdmin0().then(() => {
-            if (mapRef.current === map) paintOverlays();
+            if (mapRef.current === map) paintOverlays(generation);
+            else if (adminSync.current.endStyleLoad(generation)) adminSync.current.clearReplay();
           });
         });
         map.on("style.load", () => {
-          map?.resize();
+          if (map) silently(suppress, () => map!.resize());
           if (map) {
-            applyFovCompensation(map, authoredWidthRef.current);
-            ensureLowZoomRaster(map, overlay.current.styleId);
+            ensureLowZoomRaster(map, overlay.current.styleId, deltaRef.current);
             installPatterns(map, stylePatterns(overlay.current.styleId));
+            syncBorderlandsInk(map, overlay.current.styleId, { authoredZoomDelta: deltaRef.current });
             applyLayerFilters(map, overlay.current.hiddenLayers);
             applyHillshade(map, overlay.current.hillshade);
           }
+          const generation = takeStyleToken();
           void loadAdmin0().then(() => {
-            if (mapRef.current === map) paintOverlays();
+            if (mapRef.current === map) paintOverlays(generation);
+            else if (adminSync.current.endStyleLoad(generation)) adminSync.current.clearReplay();
           });
         });
         map.on("moveend", commitCamera);
+        map.on("moveend", syncRegionCamera);
         map.on("mousemove", onCanvasMouseMove);
         map.on("mouseout", () => {
           if (map) map.getCanvas().style.cursor = "";
@@ -695,7 +944,30 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             return;
           }
           callbacks.current.onSelectPin(null);
-          if (authoredZoomOf(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current) >= COUNTRY_PICK_MAX_ZOOM) return;
+          if (pickRegionsRef.current) {
+            const region = admin1At(map, event.point);
+            if (region) {
+              callbacks.current.onToggleRegion(region);
+              return;
+            }
+            const country = admin0At(map, event.point);
+            if (!country) return;
+            const currentMap = map;
+            const generation = adminSync.current.beginSync();
+            if (generation === null) return;
+            const isCurrent = () => mapRef.current === currentMap && adminSync.current.isCurrent(generation) && !!currentMap.getStyle();
+            const needed = [...new Set([...regionCountries(currentMap), country])];
+            void adminSync.current.track(syncAdmin1Source(currentMap, needed, isCurrent).then(() => {
+              if (!isCurrent()) return;
+              applyHighlights(currentMap, overlay.current.highlights);
+              applyAdmin1Highlights(currentMap, overlay.current.highlights);
+              applyIsolate(currentMap, overlay.current.highlights, overlay.current.isolate);
+              const retry = admin1At(currentMap, event.point);
+              if (retry) callbacks.current.onToggleRegion(retry);
+            }));
+            return;
+          }
+          if (authoredZoomOf(map, deltaRef.current, minZoomRef.current) >= COUNTRY_PICK_MAX_ZOOM) return;
           if (!map.getLayer("admin0-fill")) return;
           const hits = map.queryRenderedFeatures(event.point, { layers: ["admin0-fill"] });
           const code = String(hits[0]?.properties?.ADM0_A3 || "");
@@ -714,19 +986,36 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         map.getCanvas().addEventListener("pointermove", onObjPointerMove);
         map.getCanvas().addEventListener("pointerup", onObjPointerUp);
         map.getCanvas().addEventListener("pointercancel", onObjPointerUp);
-        ro.observe(hostEl);
       });
     };
     createMap(styleId);
+    const ro = new ResizeObserver(() => applyTransform());
+    ro.observe(frameEl);
+    /** The CG crop sits on top of the canvas. Clicks pierce `pointer-events: none`, but
+     *  wheel often targets the overlay (Safari / Move CG) and never reaches MapLibre. */
+    const onFrameWheel = (event: WheelEvent) => {
+      const current = mapRef.current;
+      if (!current || previewingRef.current) return;
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (current.getCanvasContainer().contains(target)) return;
+      if (target instanceof Element && target.closest(".maps-cg-mode")) return;
+      current.scrollZoom.wheel(event);
+    };
+    frameEl.addEventListener("wheel", onFrameWheel, { capture: true, passive: false });
 
     return () => {
       cancelled = true;
+      hopAbort.current = true;
+      finishHop();
       ro.disconnect();
+      frameEl.removeEventListener("wheel", onFrameWheel, true);
       map?.getCanvas().removeEventListener("pointerup", onPointerUp);
       map?.getCanvas().removeEventListener("pointerdown", onObjPointerDown);
       map?.getCanvas().removeEventListener("pointermove", onObjPointerMove);
       map?.getCanvas().removeEventListener("pointerup", onObjPointerUp);
       map?.getCanvas().removeEventListener("pointercancel", onObjPointerUp);
+      adminSync.current.dispose();
       map?.remove();
       mapRef.current = null;
     };
@@ -742,14 +1031,20 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     styleUrl.current = url;
     styleIdentity.current = styleId;
     styleReady.current = false;
-    void resolveOpenFreeMapStyle(styleId, previewZoomDelta(map, authoredWidthRef.current)).then((style) => {
+    void resolveOpenFreeMapStyle(styleId, deltaRef.current).then((style) => {
       if (mapRef.current !== map || styleIdentity.current !== styleId) return;
+      styleReady.current = false;
+      styleToken.current = adminSync.current.beginStyleLoad();
       map.setStyle(style, { diff: false });
       map.once("style.load", () => {
-        map.resize();
-        applyFovCompensation(map, authoredWidthRef.current);
-        applyBoundaryZoomOffset(map, previewZoomDelta(map, authoredWidthRef.current));
-        ensureLowZoomRaster(map, styleId);
+        silently(suppress, () => {
+          map.resize();
+          map.setVerticalFieldOfView(layoutRef.current.fov);
+        });
+        applyAuthoredZoomGates(map, deltaRef.current);
+        ensureLowZoomRaster(map, styleId, deltaRef.current);
+        installPatterns(map, stylePatterns(styleId));
+        syncBorderlandsInk(map, styleId, { authoredZoomDelta: deltaRef.current });
         applyLayerFilters(map, overlay.current.hiddenLayers);
         applyHillshade(map, overlay.current.hillshade);
       });
@@ -761,30 +1056,40 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (!map?.getSource("churches")) return;
     void ensureLandmarkImages(map, churches, assetBaseUrl).then(() => {
       ensureDropPinImages(map, churches);
-      (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(churches, selectedPinId, numberPins, objectPreviewScale(map, authoredWidthRef.current)));
-    });
+      ensureLabelPillImage(map);
+      (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(churches, selectedPinId, numberPins, objectLayoutScale(authoredWidthRef.current)));
+    }).catch((err) => console.warn("landmark images", err));
   }, [churches, selectedPinId, numberPins, assetBaseUrl]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map?.getSource("admin0")) return;
-    applyHighlights(map, highlights);
-    applyIsolate(map, highlights, isolate);
-  }, [highlights, isolate?.mode, isolate?.strength]);
+    if (!map?.getSource("admin0")) {
+      adminSync.current.clearReplay();
+      return;
+    }
+    const generation = adminSync.current.beginSync();
+    if (generation === null) return;
+    const isCurrent = () => mapRef.current === map && adminSync.current.isCurrent(generation) && !!map.getStyle();
+    const hasAdmin1Highlight = highlights.some((h) => h.startsWith("A1:"));
+    const needed = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(highlights) : []), ...regionCountries(map)])];
+    void adminSync.current.track(syncAdmin1Source(map, needed, isCurrent).then(() => {
+      if (!isCurrent()) return;
+      applyHighlights(map, highlights);
+      applyAdmin1Highlights(map, highlights);
+      applyIsolate(map, highlights, isolate);
+      if (overlay.current.highlightColour) applyHighlightColour(map, overlay.current.highlightColour, overlay.current.highlightColours);
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlights, isolate?.mode, isolate?.strength, pickRegions, adminReplay]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    recastPreviewCamera(
-      map,
-      deltaRef,
-      suppress,
-      minZoomRef.current,
-      cameraRef.current.zoom,
-      authoredWidthRef.current
-    );
-    setGrainPreviewWidth(previewSurfaceRect(map, authoredWidthRef.current).width || authoredWidthRef.current);
-  }, [crop, authoredWidth]);
+    if (hopWidthRef.current != null) return;
+    applyTransform(authoredWidth, sidePanels);
+    applyAuthoredWidth(map, authoredWidth, minZoomRef.current, deltaRef, suppress, cameraRef.current.zoom);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authoredWidth, sidePanels]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -800,23 +1105,39 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
 
   useEffect(() => {
     const map = mapRef.current;
+    if (!map || !highlightColour) return;
+    applyHighlightColour(map, highlightColour, highlightColours);
+  }, [highlightColour, highlightColours]);
+
+  useEffect(() => {
+    const map = mapRef.current;
     if (!map || !selectedPinId || previewing) {
       setBoxPos(null);
       return;
     }
     const recompute = () => {
       const church = overlay.current.churches.find((c) => c.id === selectedPinId);
-      if (!church || church.kind !== "landmark") {
+      if (!church) {
         setBoxPos(null);
         return;
       }
-      const scale = objectPreviewScale(map, authoredWidthRef.current);
-      const size = church.size || 120;
-      const w = size * scale;
-      const h = w * ((church.assetHeight || 1) / (church.assetWidth || 1));
+      const scale = objectLayoutScale(authoredWidthRef.current);
+      const size = church.size || defaultObjectSize(church.kind, church.assetWidth);
+      const eff = effectiveObjectSize(church, map.getZoom() - deltaRef.current);
+      const w = eff * scale;
       const anchor = map.project([church.lon, church.lat]);
-      // icon-anchor is "bottom", so the anchor point is the bottom-center of the rendered image.
-      setBoxPos({ x: anchor.x - w / 2, y: anchor.y - h, w, h, size });
+      if (church.kind === "dot") {
+        // circle layer is centre-anchored.
+        setBoxPos({ x: anchor.x - w / 2, y: anchor.y - w / 2, w, h: w, size });
+      } else if (church.kind === "dropPin") {
+        // icon-anchor is "bottom", so the anchor sits on the tail tip.
+        const box = dropPinSelectionBox(w);
+        setBoxPos({ x: anchor.x - box.w / 2, y: anchor.y - box.h, w: box.w, h: box.h, size });
+      } else {
+        const h = w * ((church.assetHeight || 1) / (church.assetWidth || 1));
+        // icon-anchor is "bottom", so the anchor point is the bottom-center of the rendered image.
+        setBoxPos({ x: anchor.x - w / 2, y: anchor.y - h, w, h, size });
+      }
     };
     recompute();
     map.on("move", recompute);
@@ -839,7 +1160,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       event.stopPropagation();
       if (!boxPos) return;
       const church = overlay.current.churches.find((c) => c.id === selectedPinId);
-      const aspect = (church?.assetHeight || 1) / (church?.assetWidth || 1);
+      const aspect = church?.kind === "landmark" ? (church?.assetHeight || 1) / (church?.assetWidth || 1) : church?.kind === "dropPin" ? DROP_PIN_TOTAL_PX / DROP_PIN_HEAD_PX : 1;
       event.currentTarget.setPointerCapture(event.pointerId);
       handleDrag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startSize: boxPos.size, corner, aspect };
     };
@@ -849,7 +1170,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const drag = handleDrag.current;
     const map = mapRef.current;
     if (!drag || !map || !selectedPinId) return;
-    const scale = objectPreviewScale(map, authoredWidthRef.current);
+    const church = overlay.current.churches.find((c) => c.id === selectedPinId);
+    const zoomFactor = church?.scaleWithMap && church.sizeZoom != null ? zoomSizeFactor(church.sizeZoom, map.getZoom() - deltaRef.current) : 1;
+    const scale = selectedDragScale(church?.kind || "", objectDragScale(map, authoredWidthRef.current) * zoomFactor);
     const size = resizeFromCorner(
       { x: drag.startX, y: drag.startY },
       { x: event.clientX, y: event.clientY },
@@ -870,16 +1193,15 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   function eventToLngLat(event: { clientX: number; clientY: number }): { lat: number; lon: number } | null {
     const map = mapRef.current;
     if (!map) return null;
-    const rect = map.getCanvas().getBoundingClientRect();
-    const lngLat = map.unproject([event.clientX - rect.left, event.clientY - rect.top]);
+    const point = toLayoutPoint(map, event.clientX, event.clientY);
+    const lngLat = map.unproject(point);
     return { lat: lngLat.lat, lon: lngLat.lng };
   }
 
   function onCgPointerDown(event: React.PointerEvent<HTMLElement>) {
     const map = mapRef.current;
     if (map && !event.shiftKey) {
-      const rect = map.getCanvas().getBoundingClientRect();
-      const point: [number, number] = [event.clientX - rect.left, event.clientY - rect.top];
+      const point = toLayoutPoint(map, event.clientX, event.clientY);
       const layers = PIN_LAYERS.filter((id) => map.getLayer(id));
       const hitId = String((layers.length ? map.queryRenderedFeatures(point, { layers }) : [])[0]?.properties?.id || "");
       const church = hitId ? overlay.current.churches.find((c) => c.id === hitId) : undefined;
@@ -898,16 +1220,16 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (at) callbacks.current.onAddPin(at.lat, at.lon);
       return;
     }
-    const band = event.currentTarget.closest(".maps-map-band");
-    const width = band?.clientWidth || 1;
+    const bandEl = event.currentTarget.closest(".maps-map-band");
+    const width = bandEl?.clientWidth || 1;
     event.currentTarget.setPointerCapture(event.pointerId);
-    cgDrag.current = { x: event.clientX, shift: cgShiftX, width };
+    cgDrag.current = { x: event.clientX, shift: cgShiftX, width, surfaceWidth: surfaceWidthOf(effectiveWidth, sidePanels) };
   }
 
   function onCgPointerMove(event: React.PointerEvent<HTMLElement>) {
     const drag = cgDrag.current;
     if (!drag) return;
-    const dx = ((event.clientX - drag.x) * authoredWidthRef.current) / drag.width;
+    const dx = cgDragDx(event.clientX - drag.x, drag.surfaceWidth, drag.width);
     const next = snapCgShift(drag.shift + dx);
     setCgSnapped(next === 0);
     callbacks.current.onCgShift(next);
@@ -921,10 +1243,14 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     setCgSnapped(false);
   }
 
+  // A movie hop overrides the render surface via refs only (see animateHop); mirror it into
+  // state so the band/grain/crop overlay re-render at the hop's own surface too, instead of
+  // staying pinned to the (possibly mismatched) authoredWidth prop for the hop's duration.
+  const effectiveWidth = hopWidth ?? authoredWidth;
   const wrapWarn = worldCopyWarning(camera.zoom);
-  const splitCg = authoredWidth <= CG_W;
-  const fullWall = sidePanels && !splitCg;
-  const surfaceWidth = splitCg ? CG_W : fullWall ? WALL_W : WALL_W - FW_W * 2;
+  const surfaceWidth = surfaceWidthOf(effectiveWidth, sidePanels);
+  const splitCg = surfaceWidth === CG_W;
+  const fullWall = surfaceWidth === WALL_W;
   const surfaceOrigin = fullWall ? 0 : CG_ORIGIN - CG_W / 2;
   const cgLeft = ((CG_ORIGIN + cgShiftX - surfaceOrigin) / surfaceWidth) * 100;
   const cgWidth = (CG_W / surfaceWidth) * 100;
@@ -934,59 +1260,67 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     <div
       className={`maps-map-frame ${surfaceClass}`}
       style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
+      ref={frame}
     >
-      <div className="maps-map-host" ref={host} />
-      {styleId === "watercolour" && (
-        <div
-          className="maps-paper-grain"
-          style={{ backgroundImage: `url(${paperGrainUrl()})`, ...paperGrainCss(grainPreviewWidth, surfaceWidth) }}
+      <div className="maps-map-band" ref={band}>
+        <div className="maps-map-inner" ref={inner}>
+          <div className="maps-map-host" ref={host} />
+          {styleId === "watercolour" && (
+            <div
+              className="maps-paper-grain"
+              style={{
+                top: view.bandTop,
+                height: view.bandInnerH,
+                backgroundImage: `url(${paperGrainUrl()})`,
+                ...paperGrainCss(surfaceWidth * objectLayoutScale(effectiveWidth), surfaceWidth),
+              }}
+            />
+          )}
+        </div>
+        <BandOverlays
+          splitCg={splitCg}
+          fullWall={fullWall}
+          exportCg={exportCg}
+          cgLeft={cgLeft}
+          cgWidth={cgWidth}
+          cgSnapped={cgSnapped}
+          cgInteract={cgInteract}
+          box={boxPos}
+          k={view.k}
+          bandTop={view.bandTop}
+          onCgPointerDown={onCgPointerDown}
+          onCgPointerMove={onCgPointerMove}
+          onCgPointerUp={onCgPointerUp}
+          onHandlePointerDown={onHandlePointerDown}
+          onHandlePointerMove={onHandlePointerMove}
+          onHandlePointerUp={onHandlePointerUp}
         />
+      </div>
+      {exportCg && !splitCg && (
+        <div className="maps-cg-mode" role="group" aria-label="CG viewport">
+          <button
+            type="button"
+            className={cgInteract === "select" ? "on" : ""}
+            aria-pressed={cgInteract === "select"}
+            onClick={() => setCgInteract("select")}
+          >
+            Select
+          </button>
+          <button
+            type="button"
+            className={cgInteract === "move" ? "on" : ""}
+            aria-pressed={cgInteract === "move"}
+            onClick={() => setCgInteract("move")}
+          >
+            Move CG
+          </button>
+        </div>
       )}
       <div className="maps-nav-margin top" />
       <div className="maps-nav-margin bottom" />
-      <div className="maps-map-band">
-        <div className="maps-crop-overlay">
-          {splitCg ? (
-            <div className="maps-crop-frame cg">
-              <span className="maps-crop-cg-label">CG</span>
-            </div>
-          ) : fullWall ? (
-            <div className="maps-crop-frame fw">
-              <span className="maps-crop-fw-label">FW</span>
-            </div>
-          ) : (
-            <div className="maps-crop-frame center" style={{ inset: 0 }} />
-          )}
-          {exportCg && !splitCg && (
-            <div
-              className={`maps-crop-cg${cgSnapped ? " snapped" : ""}`}
-              style={{ left: `${cgLeft}%`, width: `${cgWidth}%` }}
-              onPointerDown={onCgPointerDown}
-              onPointerMove={onCgPointerMove}
-              onPointerUp={onCgPointerUp}
-              onPointerCancel={onCgPointerUp}
-            >
-              <span className="maps-crop-cg-label">CG</span>
-            </div>
-          )}
-        </div>
-      </div>
-      {boxPos && (
-        <div className="maps-object-box" style={{ left: boxPos.x, top: boxPos.y, width: boxPos.w, height: boxPos.h }}>
-          {(["nw", "ne", "sw", "se"] as ObjectCorner[]).map((corner) => (
-            <div
-              key={corner}
-              className={`maps-object-handle ${corner}`}
-              onPointerDown={onHandlePointerDown(corner)}
-              onPointerMove={onHandlePointerMove}
-              onPointerUp={onHandlePointerUp}
-              onPointerCancel={onHandlePointerUp}
-            />
-          ))}
-        </div>
-      )}
       {wrapWarn && <p className="maps-wrap-warn">{wrapWarn}</p>}
       {texWarn && <p className="maps-tex-warn">{texWarn}</p>}
+      {gpuWarn && <p className="maps-tex-warn">{gpuWarn}</p>}
     </div>
   );
 });

@@ -1419,5 +1419,7 @@ if (typeof module !== "undefined" && module.exports) {
     applyGeom: applyGeom,
     applyGroupChildren: applyGroupChildren,
     applyReuse: applyReuse,
+    slidesInPlan: slidesInPlan,
+    keystroke: keystroke,
   };
 }

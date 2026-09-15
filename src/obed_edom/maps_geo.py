@@ -42,7 +42,7 @@ DEFAULT_POINT_ZOOM = 8
 
 SEA_OVERVIEW_BBOX = {"west": 70.0, "south": -42.0, "east": 155.0, "north": 28.0}
 
-DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows")
+DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows", "labels", "boundaries")
 
 
 def slide_hidden_layers(slide: dict[str, Any]) -> list[str]:
@@ -108,11 +108,11 @@ def clamp_lat(lat: float) -> float:
 
 def clamp_lon(lon: float) -> float:
     lon = float(lon)
-    while lon > 180:
-        lon -= 360
-    while lon < -180:
-        lon += 360
-    return lon
+    if not math.isfinite(lon):
+        raise ValueError(f"non-finite longitude: {lon!r}")
+    if lon == 180.0:
+        return 180.0
+    return ((lon + 180.0) % 360.0) - 180.0
 
 
 def min_zoom_for_width(width: float) -> float:
@@ -216,16 +216,56 @@ def toggle_adm0(highlights: list[str], adm0_a3: str) -> list[str]:
     return [*current, code]
 
 
+_HIGHLIGHT_CODE_RE = re.compile(r"^(?:[A-Z]{3}|A1:[A-Z0-9+?_-]{1,16})$")
+_HIGHLIGHT_COLOUR_RE = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+def highlight_colours_key(slide: dict[str, Any]) -> str:
+    """Order-independent fingerprint of per-highlight colour overrides.
+
+    Mirrors `highlightColoursKey` in dashboard/src/maps/highlight.ts so client and
+    server hop inference treat the same overrides as the same appearance.
+    """
+    raw = slide.get("highlightColours") or {}
+    if not isinstance(raw, dict):
+        return ""
+    items: list[str] = []
+    for key, value in raw.items():
+        text = str(key).strip()
+        code = text if ":" in text else text.upper()
+        if not _HIGHLIGHT_CODE_RE.fullmatch(code):
+            continue
+        match = _HIGHLIGHT_COLOUR_RE.fullmatch(str(value or "").strip())
+        if not match:
+            continue
+        hex_digits = match.group(1).lower()
+        if len(hex_digits) == 3:
+            hex_digits = "".join(ch * 2 for ch in hex_digits)
+        items.append(f"{code}:#{hex_digits}")
+    return ",".join(sorted(items))
+
+
+def coerce_maps_style(value: str) -> str:
+    """Retired picker id: OpenFreeMap Liberty is what `buildings3d` already loads."""
+    return "buildings3d" if value == "liberty" else value
+
+
+def is_extruded_style(value: str) -> bool:
+    return coerce_maps_style(value) in {"buildings3d", "borderlands"}
+
+
 def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
-    from_style = str(from_slide.get("style") or "")
-    to_style = str(to_slide.get("style") or "")
+    from_style = coerce_maps_style(str(from_slide.get("style") or ""))
+    to_style = coerce_maps_style(str(to_slide.get("style") or ""))
     from_hi = sorted(str(h).upper() for h in (from_slide.get("highlights") or []))
     to_hi = sorted(str(h).upper() for h in (to_slide.get("highlights") or []))
+    from_colours = highlight_colours_key(from_slide)
+    to_colours = highlight_colours_key(to_slide)
     from_layers = sorted(slide_hidden_layers(from_slide))
     to_layers = sorted(slide_hidden_layers(to_slide))
     from_hillshade = bool(from_slide.get("hillshade"))
     to_hillshade = bool(to_slide.get("hillshade"))
-    if from_style != to_style or from_hi != to_hi or from_layers != to_layers or from_hillshade != to_hillshade:
+    if from_style != to_style or from_hi != to_hi or from_colours != to_colours or from_layers != to_layers or from_hillshade != to_hillshade:
         return "cut"
     from_cam = from_slide.get("camera") or {}
     to_cam = to_slide.get("camera") or {}
@@ -234,7 +274,7 @@ def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     to_bearing = float(to_cam.get("bearing") or 0)
     d_bearing = abs((to_bearing - from_bearing + 180.0) % 360.0 - 180.0)
     d_zoom = abs(float(from_cam.get("zoom") or 0) - float(to_cam.get("zoom") or 0))
-    if from_style == "buildings3d" or to_style == "buildings3d" or pitch > 0.5 or d_bearing > 0.05 or d_zoom > 2:
+    if is_extruded_style(from_style) or is_extruded_style(to_style) or pitch > 0.5 or d_bearing > 0.05 or d_zoom > 2:
         return "movie"
     return "morph"
 
@@ -335,14 +375,18 @@ def parse_maps_query(raw: str) -> dict[str, Any] | None:
     if at:
         lat = float(at.group(1))
         lon = float(at.group(2))
-        zoom = float(at.group(3)) if at.group(3) is not None else DEFAULT_POINT_ZOOM
+        zoom_from_url = at.group(3) is not None
+        zoom = float(at.group(3)) if zoom_from_url else DEFAULT_POINT_ZOOM
         z_extra = _COMMA_ZOOM_RE.search(text[at.end() :])
         if z_extra and at.group(3) is None:
             zoom = float(z_extra.group(1))
+            zoom_from_url = True
         return {
             "source": "parse",
             "label": text,
             "camera": camera_from_point(lat, lon, zoom),
+            "placeType": None,
+            "zoomFromUrl": zoom_from_url,
         }
     parsed = urlparse(text)
     host = (parsed.netloc or "").lower()
@@ -359,6 +403,8 @@ def parse_maps_query(raw: str) -> dict[str, Any] | None:
                     "source": "parse",
                     "label": text,
                     "camera": camera_from_point(float(pair.group(1)), float(pair.group(2))),
+                    "placeType": None,
+                    "zoomFromUrl": False,
                 }
     pair = _LATLNG_RE.match(text)
     if pair:
@@ -366,6 +412,8 @@ def parse_maps_query(raw: str) -> dict[str, Any] | None:
             "source": "parse",
             "label": text,
             "camera": camera_from_point(float(pair.group(1)), float(pair.group(2))),
+            "placeType": None,
+            "zoomFromUrl": False,
         }
     return None
 
@@ -409,6 +457,7 @@ def search_places(query: str) -> dict[str, Any] | None:
                 "source": "places",
                 "label": name,
                 "camera": camera_from_point(float(coords[1]), float(coords[0])),
+                "placeType": "city",
             }
             if score == 0:
                 break
@@ -423,7 +472,7 @@ def geocode_cache_dir() -> Path:
 
 def _cache_key(query: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", query.strip().lower())[:80] or "q"
-    return safe
+    return f"v2-{safe}"
 
 
 def _read_geocode_cache(query: str) -> dict[str, Any] | None:
@@ -484,6 +533,7 @@ def nominatim_search(query: str, *, wait: bool = False) -> dict[str, Any]:
         "source": "nominatim",
         "label": str(hit.get("display_name") or query),
         "camera": camera,
+        "placeType": hit.get("addresstype") or hit.get("type"),
     }
     _write_geocode_cache(query, payload)
     return payload
@@ -504,5 +554,15 @@ def geocode(query: str, *, wait: bool = False) -> dict[str, Any]:
         bbox = geometry_bbox(country.get("geometry") or {})
         name = str((country.get("properties") or {}).get("NAME") or text)
         if bbox:
-            return {"source": "admin0", "label": name, "camera": camera_from_bbox(bbox)}
+            return {
+                "source": "admin0",
+                "label": name,
+                "camera": camera_from_bbox(bbox),
+                "placeType": "country",
+            }
     return nominatim_search(text, wait=wait)
+
+
+def default_landmark_size(asset_width: int) -> int:
+    """Spans roughly a third to two-thirds of the 1920 px CG; never upscales a tiny asset beyond native px."""
+    return int(max(240, min(1600, min(asset_width, 1920 // 3 * 2))))

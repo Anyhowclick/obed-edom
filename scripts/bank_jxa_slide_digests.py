@@ -11,11 +11,19 @@ ONLY thing in the repo allowed to open Keynote for `tests/fixtures/jxa-slide-dig
         --accept-input-drift
     .venv/bin/python scripts/bank_jxa_slide_digests.py --deck Gold_Wall_Input.key \\
         --payload /path/to/jxa-payload.json
+    .venv/bin/python scripts/bank_jxa_slide_digests.py --deck Gold_Wall_Input.key \\
+        --stamp-inspect-version
 
 `--payload` banks from an already-captured JXA payload JSON and opens no Keynote.
 It refuses a non-`jxa` reader or a mismatched deck name, and it is incompatible
 with `--accept-input-drift`: a payload load cannot itself refresh the bank's
 basis, so drift can only be accepted from a live Keynote read.
+
+`--stamp-inspect-version` rewrites only `inspectVersion` (and `capturedUTC`) on
+an existing bank after an `INSPECT_VERSION` bump. The digest values do not read
+that field, so this is Keynote-free and does not require `--payload`. It refuses
+a missing bank, a deck-digest drift (re-bank from `--payload` or a live read
+instead), and combination with `--payload` / `--accept-input-drift`.
 """
 
 from __future__ import annotations
@@ -58,6 +66,38 @@ def _build_bank(deck: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "slideCount": len(slides),
         "slides": slides,
     }
+
+
+def stamp_inspect_version(path: Path, *, inspect_version: int | None = None) -> dict[str, Any]:
+    """Rewrite ``inspectVersion`` (and ``capturedUTC``) on an existing bank. Keynote-free."""
+    bank = json.loads(path.read_text())
+    bank["inspectVersion"] = baseline.INSPECT_VERSION if inspect_version is None else inspect_version
+    bank["capturedUTC"] = datetime.now(timezone.utc).isoformat()
+    path.write_text(json.dumps(bank, sort_keys=True, indent=1) + "\n")
+    return bank
+
+
+def _do_stamp(args: argparse.Namespace) -> None:
+    if args.payload or args.accept_input_drift:
+        raise SystemExit(
+            "--stamp-inspect-version is Keynote-free metadata-only; do not combine "
+            "with --payload or --accept-input-drift"
+        )
+    path = bank_path(args.deck)
+    if not path.exists():
+        raise SystemExit(f"no bank to stamp: {path}")
+    old = json.loads(path.read_text())
+    deck = DECKS / args.deck
+    if deck.exists() and old.get("sourceDigest") != baseline.deck_digest(deck):
+        raise SystemExit(
+            "deck digest drift vs the committed bank; --stamp-inspect-version does not "
+            "refresh digest values. Re-bank from --payload or a live Keynote read."
+        )
+    bank = stamp_inspect_version(path)
+    print(
+        f"{args.deck} stamped inspectVersion={bank['inspectVersion']} "
+        f"(Keynote-free)\n  wrote {path}"
+    )
 
 
 def _do_bank(args: argparse.Namespace) -> None:
@@ -128,8 +168,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="allow re-banking when the deck digest differs from the committed bank",
     )
+    ap.add_argument(
+        "--stamp-inspect-version",
+        action="store_true",
+        help="rewrite inspectVersion on the existing bank; opens no Keynote",
+    )
     args = ap.parse_args(argv)
-    _do_bank(args)
+    if args.stamp_inspect_version:
+        _do_stamp(args)
+    else:
+        _do_bank(args)
     return 0
 
 

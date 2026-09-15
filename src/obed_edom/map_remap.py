@@ -26,6 +26,7 @@ MIN_PIN_PX = 28.0
 MAP_NAME_RE = re.compile(r"map\s*bg", re.I)
 PIN_NAME_RE = re.compile(r"pin\s*drop", re.I)
 CHURCH_LIST_RE = re.compile(r"\b(CHC|CHLI|CHEL)\b")
+ROSTER_NAME_RE = re.compile(r"^(CHC|CHLI|CHEL)\b")
 PIN_KIND_MAX = 180.0
 # Asia-Pacific wall/CG map art is pasted PDFs, not map BG.png.
 MAP_LAYER_MIN_W = 400.0
@@ -44,6 +45,7 @@ BODY_TEXT_MIN_CHARS = 60
 NAME_COLUMN_MIN_ROWS = 3
 NAME_COLUMN_X_TOL = 6.0
 NAME_COLUMN_PITCH = 2.0
+ROSTER_GROUP_MIN_NAMES = 8
 # Rejects full-height side columns; real plates are ~0.1 of canvas height.
 PLATE_MAX_H_FRACTION = 0.5
 # Map crop is often s≈1; unmatched wall text still needs to shrink for 16:9.
@@ -124,6 +126,11 @@ class ItemTransform:
     # and the resize freezes the child wrapped permanently. Source-deck rects; the targets
     # are derived in as_dict from this transform's final x/y, whatever moved it there.
     child_src: list[dict[str, Any]] | None = None
+    # Set when the group is known to hold an autosize text descendant (`groupAutosize`)
+    # but no per-child geometry is available to write instead. as_dict then emits no
+    # `w`/`h` at all — the source-sized group survives intact rather than collapsing.
+    size_refused: str | None = None
+    group_collapse_refused: str | None = None
 
     def _child_payload(self) -> list[dict[str, Any]] | None:
         if not self.child_src or self.src is None or self.src.w <= 0 or self.src.h <= 0:
@@ -162,8 +169,14 @@ class ItemTransform:
             "locked": self.locked,
             "role": self.role,
         }
+        children = self._child_payload()
+        refused = self.size_refused
+        if self.group_collapse_refused:
+            payload["groupCollapseRefused"] = self.group_collapse_refused
+        if refused:
+            payload["sizeRefused"] = refused
         # Size before position (Keynote resets position when size changes).
-        if self.role in {"map", "list", "pin", "title", "other"}:
+        elif self.role in {"map", "list", "pin", "title", "other"}:
             payload["w"] = round(self.w, 2)
             payload["h"] = round(self.h, 2)
         elif self.role == "line" and self.start is not None and self.end is not None:
@@ -172,7 +185,6 @@ class ItemTransform:
                 math.hypot(self.end[0] - self.start[0], self.end[1] - self.start[1]), 2
             )
             payload["h"] = 0.0
-        children = self._child_payload()
         if children:
             payload["children"] = children
         if self.font_size is not None:
@@ -209,6 +221,15 @@ def _f(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _item_aspect(item: dict) -> float | None:
+    a = item.get("aspect")
+    try:
+        a = float(a)
+    except (TypeError, ValueError):
+        return None
+    return a if a > 0 else None
 
 
 def item_rect(item: dict) -> Rect:
@@ -339,6 +360,31 @@ def is_list_item(item: dict) -> bool:
     return text.count("\n") >= 3
 
 
+def roster_lines(item: dict, group_child_text: dict[int, str] | None = None) -> list[str]:
+    """Roster name lines an item paints: a text box's own lines, or a group's child text."""
+    if (item.get("kind") or "") == "group":
+        sig = (group_child_text or {}).get(_item_kind_index(item, -1))
+        lines = [ln.strip() for ln in (sig or "").split("\n") if ln.strip()]
+        name_lines = [ln for ln in lines if ROSTER_NAME_RE.search(ln)]
+        if len(name_lines) < ROSTER_GROUP_MIN_NAMES:
+            return []
+        return name_lines
+    return [ln.strip() for ln in (item.get("text") or "").split("\n") if ln.strip()]
+
+
+def roster_group_rest(item: dict, group_child_text: dict[int, str] | None = None) -> list[str]:
+    """Non-name lines in a roster-carrier group's child text; [] for non-groups or non-carriers."""
+    if (item.get("kind") or "") != "group":
+        return []
+    roster = roster_lines(item, group_child_text)
+    if not roster:
+        return []
+    sig = (group_child_text or {}).get(_item_kind_index(item, -1)) or ""
+    all_lines = [ln.strip() for ln in sig.split("\n") if ln.strip()]
+    roster_set = set(roster)
+    return [ln for ln in all_lines if ln not in roster_set]
+
+
 def name_columns(items: Iterable[dict]) -> list[list[dict]]:
     """Church-name boxes that form a real roster column: one left edge, stacked down the page."""
     rows = [it for it in items if is_list_item(it) and (it.get("text") or "").count("\n") < 3]
@@ -362,10 +408,13 @@ def name_columns(items: Iterable[dict]) -> list[list[dict]]:
     return out
 
 
-def name_column_ids(items: Iterable[dict]) -> set[int]:
-    """id()s of list-classified boxes that are roster rows, not lone map labels."""
+def name_column_ids(items: Iterable[dict], group_child_text: dict[int, str] | None = None) -> set[int]:
+    """id()s of list-classified boxes that are roster rows, not lone map labels; a group whose
+    child text is a name list counts as one carrier."""
     items = list(items)
     ids = {id(it) for it in items if is_list_item(it) and (it.get("text") or "").count("\n") >= 3}
+    if group_child_text:
+        ids.update(id(it) for it in items if (it.get("kind") or "") == "group" and roster_lines(it, group_child_text))
     for column in name_columns(items):
         ids.update(id(it) for it in column)
     return ids
@@ -2330,6 +2379,7 @@ def plan_slide_transforms(
     body_item = body_for_body if body_dst is not None else None
     badge_dsts = dict(recipe.get("badgeSlots") or {})
     group_children: dict[int, list[dict[str, Any]]] = slide.get("groupChildren") or {}
+    group_autosize: dict[int, bool] = slide.get("groupAutosize") or {}
     styles_pre = list(recipe.get("characterStyles") or [])
     overlay_ids = sparkle_overlays(slide, body_for_body)
     body_final_size: float | None = None
@@ -2363,7 +2413,7 @@ def plan_slide_transforms(
 
     out: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
-    group_child_text: dict[int, str] = slide.get("groupChildText") or {}
+    group_child_text: dict[int, str] = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
     group_caption: dict[int, dict[str, Any]] = slide.get("groupCaption") or {}
     card_samples = [
         {"rect": _rect_from_dict(s["rect"]), "aspect": s["aspect"], "caption": s["caption"]}
@@ -2376,7 +2426,7 @@ def plan_slide_transforms(
     # path (remap_keynote.js) uses that field to ADDRESS the object by text.
     card_captions: dict[tuple[str, int], str] = {}
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
-    name_col_ids = name_column_ids(slide.get("items") or [])
+    name_col_ids = name_column_ids(slide.get("items") or [], group_child_text)
     coincident_dups = coincident_duplicate_ids(
         slide.get("items") or [],
         {(str(b.get("kind") or ""), int(b.get("kindIndex") or 0)) for b in (slide.get("builds") or [])},
@@ -2400,8 +2450,14 @@ def plan_slide_transforms(
             continue
         # Roster kept only on the church-list slide(s); a later slide hides every roster item regardless of position.
         if drop_roster and id(item) in name_col_ids:
-            out.append(_hide_item_transform(item, number, item_index, kind_index))
-            continue
+            rest = roster_group_rest(item, group_child_text)
+            if not rest:
+                out.append(_hide_item_transform(item, number, item_index, kind_index))
+                continue
+            warnings.warn(
+                f"slide {number} group kindIndex {kind_index} is a mixed roster carrier "
+                f"(non-roster lines {rest[:3]!r}); not hidden by the roster rule"
+            )
         if not keep_side_panels and is_side_panel_item(item, wall_w, wall_h):
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
@@ -2623,84 +2679,93 @@ def plan_slide_transforms(
                 {"x": mapped.x, "y": mapped.y, "w": mapped.w, "h": mapped.h}
             )
         child_src: list[dict[str, Any]] | None = None
-        if str(item.get("kind") or "") == "group" and role == "other":
-            _gct = slide.get("groupChildText") or {}
-            _sig = _gct.get(kind_index)
+        size_refused: str | None = None
+        pending_group_row: dict[str, Any] | None = None
+        group_src_rect: Rect | None = None
+        group_kind_index: int | None = None
+        group_pre_snap_s: float = 1.0
+        if str(item.get("kind") or "") == "group":
+            _sig = group_child_text.get(kind_index)
             _src_rect = item_rect(item)
+            group_src_rect = _src_rect
+            group_kind_index = kind_index
             caption_pt = 0.0
             caption_refusal: str | None = None
-            card = _card_sample_for(_src_rect, _sig, card_samples) if card_samples else None
-            if card is not None:
-                sample_w, sample_h = card["rect"].w, card["rect"].h
-                # Template card rect supplies size only; the grid pass (below) decides position.
-                mapped = Rect(mapped.x, mapped.y, sample_w, sample_h)
-                card_keys.add(("group", kind_index))
-                card_captions[("group", kind_index)] = _sig or ""
-                cached_sample = recipe.get("cardSample")
-                if (
-                    cached_sample is None
-                    or abs(cached_sample["w"] - sample_w) > 0.5
-                    or abs(cached_sample["h"] - sample_h) > 0.5
-                ):
-                    recipe["cardSample"] = {
-                        "w": sample_w,
-                        "h": sample_h,
-                        "caption": card["caption"],
-                        **_card_pitch(card_samples, sample_w, sample_h),
-                    }
-                swatch_pt = _f((card["caption"] or {}).get("size")) or 10.0
-                cap = group_caption.get(kind_index) if child_resize_report is not None else None
-                if cap and _f(cap.get("groupW")):
-                    box_w = _f(cap.get("boxW")) * sample_w / _f(cap["groupW"])
-                    caption_pt, caption_refusal = caption_point_size(
-                        _sig or "",
-                        box_w,
-                        _f(cap.get("inset")),
-                        swatch_pt,
-                        cap.get("font"),
-                        bold=bool(cap.get("bold")),
-                        italic=bool(cap.get("italic")),
-                        tracking=_f(cap.get("tracking")),
+            if role == "other":
+                card = _card_sample_for(_src_rect, _sig, card_samples) if card_samples else None
+                if card is not None:
+                    sample_w, sample_h = card["rect"].w, card["rect"].h
+                    # Template card rect supplies size only; the grid pass (below) decides position.
+                    mapped = Rect(mapped.x, mapped.y, sample_w, sample_h)
+                    card_keys.add(("group", kind_index))
+                    card_captions[("group", kind_index)] = _sig or ""
+                    cached_sample = recipe.get("cardSample")
+                    if (
+                        cached_sample is None
+                        or abs(cached_sample["w"] - sample_w) > 0.5
+                        or abs(cached_sample["h"] - sample_h) > 0.5
+                    ):
+                        recipe["cardSample"] = {
+                            "w": sample_w,
+                            "h": sample_h,
+                            "caption": card["caption"],
+                            **_card_pitch(card_samples, sample_w, sample_h),
+                        }
+                    swatch_pt = _f((card["caption"] or {}).get("size")) or 10.0
+                    cap = (
+                        group_caption.get(kind_index) if child_resize_report is not None else None
                     )
-                elif child_resize_report is not None:
-                    # No (or incomplete) groupCaption record for a card we DID detect and
-                    # resize — the two match sources (groupChildText vs attach_group_captions)
-                    # can disagree. Never fall silently through to leafPt=0 (`_c1 * s`,
-                    # ~9.09pt, today's bug): write the template swatch and refuse loudly so
-                    # remap_keynote's existing WARNING path reports it.
-                    caption_pt = swatch_pt
-                    caption_refusal = "caption-unread"
-            # The map affine can throw a left-column infographic off the CG's left edge
-            # (x≈-900); clamp it back on-canvas. Keep the affine-scaled w/h — the geometry
-            # pass scales grouped children (AS and JXA both do on Keynote 15.3.1), so the
-            # old source-w/h override is obsolete and only made the box oversized.
-            if mapped.x < 16:
-                mapped = Rect(16.0, mapped.y, mapped.w, mapped.h)
-            # A card is sized to a TEMPLATE rect and its caption is a fixed-frame shape
-            # (never an autosize box), so its live frame stays proportional and today's
-            # absolute group write is right — live-verified, 71/71. Badge-slot groups
-            # likewise take a slot rect. Everything else with an autosize text member
-            # takes the child-write path (fix3).
+                    if cap and _f(cap.get("groupW")):
+                        box_w = _f(cap.get("boxW")) * sample_w / _f(cap["groupW"])
+                        caption_pt, caption_refusal = caption_point_size(
+                            _sig or "",
+                            box_w,
+                            _f(cap.get("inset")),
+                            swatch_pt,
+                            cap.get("font"),
+                            bold=bool(cap.get("bold")),
+                            italic=bool(cap.get("italic")),
+                            tracking=_f(cap.get("tracking")),
+                        )
+                    elif child_resize_report is not None:
+                        # No (or incomplete) groupCaption record for a card we DID detect and
+                        # resize — the two match sources (groupChildText vs attach_group_captions)
+                        # can disagree. Never fall silently through to leafPt=0 (`_c1 * s`,
+                        # ~9.09pt, today's bug): write the template swatch and refuse loudly so
+                        # remap_keynote's existing WARNING path reports it.
+                        caption_pt = swatch_pt
+                        caption_refusal = "caption-unread"
+                # The map affine can throw a left-column infographic off the CG's left edge
+                # (x≈-900); clamp it back on-canvas. Keep the affine-scaled w/h — the geometry
+                # pass scales grouped children (AS and JXA both do on Keynote 15.3.1), so the
+                # old source-w/h override is obsolete and only made the box oversized.
+                if mapped.x < 16:
+                    mapped = Rect(16.0, mapped.y, mapped.w, mapped.h)
+                # A card is sized to a TEMPLATE rect and its caption is a fixed-frame shape
+                # (never an autosize box), so its live frame stays proportional and today's
+                # absolute group write is right — live-verified, 71/71. Badge-slot groups
+                # likewise take a slot rect. Everything else with an autosize text member
+                # takes the child-write path (fix3).
+            group_pre_snap_s = (mapped.w / _src_rect.w) if _src_rect.w else 1.0
             if ("group", kind_index) not in card_keys and badge_dst is None:
                 child_src = group_children.get(kind_index)
-            if child_resize_report is not None:
-                row: dict[str, Any] = {
+                if (
+                    child_src is None
+                    and group_autosize.get(kind_index)
+                    and slide.get("groupChildrenUnavailable")
+                ):
+                    size_refused = "group-children-unavailable"
+            if role == "other" and child_resize_report is not None:
+                pending_group_row = {
                     "slide": number,
                     "groupIndex": kind_index + 1,
                     "childSig": _sig,
-                    # The factor pass 1 scales this group by; Keynote does not scale a
-                    # group's child fonts on resize, so the font pass applies the same
-                    # factor. Since fix3 a group with an autosize text member is written
-                    # child-by-child with this same ratio, so plate and text stay
-                    # proportional by construction.
-                    "s": (mapped.w / _src_rect.w) if _src_rect.w else 1.0,
                     "captionPt": caption_pt,
                 }
                 if caption_refusal:
-                    row["captionRefusal"] = caption_refusal
+                    pending_group_row["captionRefusal"] = caption_refusal
                 if _sig is not None and _sig in twin_sigs:
-                    row["twin"] = True
-                child_resize_report.append(row)
+                    pending_group_row["twin"] = True
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
             if item.get("start"):
@@ -2740,6 +2805,16 @@ def plan_slide_transforms(
                 start = (_f(slot["start"][0]), _f(slot["start"][1]))
             if slot.get("end"):
                 end = (_f(slot["end"][0]), _f(slot["end"][1]))
+        _asp = _item_aspect(item)
+        if (
+            str(item.get("kind") or "") in {"image", "movie", "group"}
+            and _asp is not None
+            and not child_src
+            and badge_dst is None
+            and ("group", kind_index) not in card_keys
+        ):
+            _h = float(round(mapped.h))
+            mapped = Rect(float(round(mapped.x)), float(round(mapped.y)), _h * _asp, _h)
         out.append(
             ItemTransform(
                 slide_number=number,
@@ -2756,8 +2831,36 @@ def plan_slide_transforms(
                 kind_index=kind_index,
                 src=item_rect(item),
                 child_src=child_src,
+                size_refused=size_refused,
             )
         )
+        if group_kind_index is not None:
+            group_tf = out[-1]
+            src_w = group_src_rect.w if group_src_rect else 0.0
+            src_h = group_src_rect.h if group_src_rect else 0.0
+            collapse = bool(
+                ("group", group_kind_index) not in card_keys
+                and badge_dst is None
+                and group_autosize.get(group_kind_index)
+                and src_w > 0
+                and src_h > 0
+                and slide.get("groupChildrenUnavailable")
+                and (group_tf.w * 3.0 <= src_w or group_tf.h * 3.0 <= src_h)
+            )
+            refused = group_tf.size_refused
+            if collapse:
+                group_tf.group_collapse_refused = (
+                    f"groupCollapseRefused(s={number},idx={group_kind_index + 1})"
+                )
+            if pending_group_row is not None:
+                # The factor pass 1 scales this group by; Keynote does not scale a
+                # group's child fonts on resize, so the font pass applies the same
+                # factor. A refused group's geometry was not scaled, so pass 2 must
+                # not scale its fonts.
+                pending_group_row["s"] = 1.0 if refused else group_pre_snap_s
+                if refused:
+                    pending_group_row["sizeRefused"] = refused
+                child_resize_report.append(pending_group_row)
     if pack_lists:
         _pack_list_transforms(out, recipe)
     if card_keys:
@@ -3827,15 +3930,17 @@ def offframe_rows(
     }
     rows: list[dict[str, Any]] = []
     for spec in transforms:
-        if spec.role == "hide" or spec.w <= 0 or spec.h <= 0:
+        eff_w = spec.src.w if spec.size_refused and spec.src else spec.w
+        eff_h = spec.src.h if spec.size_refused and spec.src else spec.h
+        if spec.role == "hide" or eff_w <= 0 or eff_h <= 0:
             continue
         if _spec_key(spec) not in was_visible:
             continue
         x0 = max(0.0, spec.x)
         y0 = max(0.0, spec.y)
-        x1 = min(dest_w, spec.x + spec.w)
-        y1 = min(dest_h, spec.y + spec.h)
-        shown = 0.0 if x1 <= x0 or y1 <= y0 else ((x1 - x0) * (y1 - y0)) / (spec.w * spec.h)
+        x1 = min(dest_w, spec.x + eff_w)
+        y1 = min(dest_h, spec.y + eff_h)
+        shown = 0.0 if x1 <= x0 or y1 <= y0 else ((x1 - x0) * (y1 - y0)) / (eff_w * eff_h)
         if shown < min_visible:
             rows.append(
                 {
@@ -3931,12 +4036,17 @@ def roster_slides(slides: list[dict]) -> tuple[set[int], set[int]]:
     """
 
     def names_and_signature(slide: dict) -> tuple[set[str], list[tuple[Any, ...]]]:
-        roster_ids = name_column_ids(slide.get("items") or [])
+        gct = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
+        roster_ids = name_column_ids(slide.get("items") or [], gct)
         names: set[str] = set()
         signature: list[tuple[Any, ...]] = []
         for it in slide.get("items") or []:
             if id(it) in roster_ids:
-                names.update(line.strip() for line in (it.get("text") or "").split("\n") if line.strip())
+                roster = roster_lines(it, gct)
+                names.update(roster)
+                rest = roster_group_rest(it, gct)
+                if rest:
+                    signature.append(("groupRest", *rest))
             elif not is_placeholder_text(it):
                 # Excludes placeholder text but not is_duplicate_item; a coincident twin on
                 # one slide of a pair would tip this comparison (accepted for now).
@@ -4092,7 +4202,8 @@ def plan_payload_transforms(
             side_content_slides is not None and number in side_content_slides
         )
         drop_roster = number in roster_drop
-        roster_ids = name_column_ids(slide.get("items") or [])
+        gct = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
+        roster_ids = name_column_ids(slide.get("items") or [], gct)
         slide_keeps_centre_roster = number in roster_keep and any(
             not is_side_panel_item(it, wall_w, wall_h)
             for it in (slide.get("items") or [])

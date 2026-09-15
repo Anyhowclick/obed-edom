@@ -33,6 +33,7 @@ from scripts.golden_plan import (  # noqa: E402
 
 from obed_edom import baseline  # noqa: E402
 from obed_edom import framing  # noqa: E402
+from obed_edom import iwa_builds, remap_keynote  # noqa: E402
 from obed_edom.offline_inspect import offline_wall_payload  # noqa: E402
 
 DECKS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs")
@@ -170,6 +171,99 @@ def test_golden_apply_plan_full_report_card_wall(monkeypatch: pytest.MonkeyPatch
     _gate("Full_Report_Card_Wall.key", monkeypatch, tmp_path)
 
 
+_REUSE_CHAIN = frozenset(range(123, 129))
+
+
+def _pin_reuse_mode(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    for name, value in {**ENV_PINS, "OBED_SLIDE_REUSE": mode}.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+def _capture_full_with_framing(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    original_plan,
+) -> tuple[dict, list[dict]]:
+    rows: list[dict] = []
+
+    def wrapped(*args, **kwargs):
+        out = original_plan(*args, **kwargs)
+        report = kwargs.get("framing_report")
+        if report is not None:
+            rows[:] = [dict(r) for r in report if int(r.get("slide") or 0) in _REUSE_CHAIN]
+        return out
+
+    monkeypatch.setattr(remap_keynote, "plan_payload_transforms", wrapped)
+    _pin_reuse_mode(monkeypatch, mode)
+    _wall, _tmpl, plan, _env = capture_plan(DECKS / "Full_Report_Card_Wall.key", TEMPLATE)
+    return plan, list(rows)
+
+
+def _roles_on(plan: dict, slides: frozenset[int]) -> dict[int, set[str]]:
+    out: dict[int, set[str]] = {}
+    for t in plan.get("transforms") or []:
+        slide = int(t["slide"])
+        if slide in slides:
+            out.setdefault(slide, set()).add(str(t.get("role")))
+    return out
+
+
+def test_reuse_off_drops_jobs_and_keeps_framing_on_full_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keynote-free on/off capture of the RAISE10 full deck (plan Step A).
+
+    Independent of the committed golden digest: this locks the switch, not the
+    baseline hash. Skip only when the local Full deck or template is missing.
+    """
+    deck = DECKS / "Full_Report_Card_Wall.key"
+    if not deck.exists():
+        pytest.skip(f"deck missing: {deck}")
+    if not TEMPLATE.exists():
+        pytest.skip(f"template missing: {TEMPLATE}")
+    original_plan = remap_keynote.plan_payload_transforms
+    on_plan, on_framing = _capture_full_with_framing(monkeypatch, "on", original_plan)
+    off_plan, off_framing = _capture_full_with_framing(monkeypatch, "off", original_plan)
+
+    assert len(on_plan.get("reuses") or []) == 6
+    assert len(on_plan.get("groupRemoves") or []) == 206
+    assert (off_plan.get("reuses") or []) == []
+    assert (off_plan.get("groupRemoves") or []) == []
+
+    as_geom = off_plan.get("asGeom") or {}
+    for slide in _REUSE_CHAIN:
+        assert str(slide) in as_geom, slide
+
+    on_roles = _roles_on(on_plan, _REUSE_CHAIN)
+    off_roles = _roles_on(off_plan, _REUSE_CHAIN)
+    off_counts: dict[int, int] = {}
+    for t in off_plan.get("transforms") or []:
+        slide = int(t["slide"])
+        if slide in _REUSE_CHAIN:
+            off_counts[slide] = off_counts.get(slide, 0) + 1
+    for slide in _REUSE_CHAIN:
+        assert off_counts.get(slide, 0) > 0, slide
+        for role in ("map", "pin"):
+            if role in on_roles.get(slide, ()):
+                assert role in off_roles.get(slide, ()), (slide, role)
+
+    assert on_framing == off_framing
+
+    src_builds = iwa_builds.deck_builds(DECKS / "Full_Report_Card_Wall.key")
+    live: dict[int, set[tuple[str, int]]] = {}
+    for t in off_plan.get("transforms") or []:
+        if t.get("role") == "hide":
+            continue
+        slide = int(t["slide"])
+        if slide in _REUSE_CHAIN:
+            live.setdefault(slide, set()).add((str(t["kind"]), int(t["kindIndex"])))
+    for slide in _REUSE_CHAIN:
+        for build in (src_builds.get(slide) or {}).get("builds") or []:
+            key = (str(build["kind"]), int(build["kindIndex"]))
+            assert key in live.get(slide, set()), (slide, key)
+
+
 def test_validate_planner_env_rejects_malformed() -> None:
     cases: dict[str, tuple[dict, str]] = {
         "blank osBuild": ({"osBuild": "  ", "faces": FONT_ENV_UNAVAILABLE}, "osBuild"),
@@ -281,7 +375,10 @@ def _bank_skip_ladder(deck_name: str) -> dict:
     for field, expected in (
         ("bankVersion", BANK_VERSION),
         ("slideDigestVersion", baseline.SLIDE_DIGEST_VERSION),
-        ("inspectVersion", baseline.INSPECT_VERSION),
+        # inspectVersion is payload-cache partitioning, not a digest input — a bump
+        # must not force a Keynote re-stamp (digest-bank-version-decouple). Use
+        # scripts/bank_jxa_slide_digests.py --stamp-inspect-version to refresh the
+        # metadata field Keynote-free.
         ("deck", deck_name),
         ("reader", "jxa"),
     ):

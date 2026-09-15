@@ -39,6 +39,10 @@ cd dashboard && npm install && npm run build
 Then restart `python -m obed_edom dashboard`. `npm run dev` is only for hot
 reload; the Python dashboard serves `dashboard/dist`.
 
+Dashboard tests (from `dashboard/`, with the bundled Node on `PATH`):
+`npm run test:maps` (pure-module `tests/*.test.cjs`) and `npm run test:ui`
+(Vitest/jsdom React tests in `tests-ui/`).
+
 Staff-only parse:
 
 ```bash
@@ -239,10 +243,12 @@ whitelisted; content inside the band is a separate question. The owner's roster 
 slide it first appears on, plus an immediately following slide that is purely that
 roster's own re-layout — and there it is packed into the visible frame, not left at
 its wall extent. Every later slide that still carries the roster as a wall leftover
-hides it entirely, side band or centre band alike. Reuse must honour this on both the
-donor and the target: a persisted item invisible on one side and visible on the other
-needs an explicit add/remove job, not silent inheritance from whichever side reuse
-happened to copy.
+hides it entirely, side band or centre band alike. A roster carrier may be a persisted
+GROUP whose names live only in its child text, so the rule is evaluated from
+`groupChildText` and fires independently of `--keep-side-panels`. Reuse must honour
+this on both the donor and the target: a persisted item invisible on one side and
+visible on the other needs an explicit add/remove job, not silent inheritance from
+whichever side reuse happened to copy.
 
 ### Loose text
 
@@ -290,14 +296,22 @@ child-by-child (width only for the autosize child), never resized as a group.
 ### Offline-write A/B gate
 
 `scripts/write_gate_ab.py` is the older one-slide, id-stable Map probe.
-`scripts/offline_write_ab.py` is the active whole-deck W1 gate. For the Full
+`scripts/offline_write_ab.py` is the active whole-deck W1 gate. The plan
+oracle is aspect-aware: arm A (AppleScript) gates at 0.25px and arm B
+(offline writer) at 1.0px, reflecting Keynote's own x/y/h-integer,
+w-from-aspect write behaviour on image/movie/group; the planner's aspect
+snap keeps the two arms' target rects AR-consistent so this split does not
+mask a real placement defect. For the Full
 report, `Full_Report_Card_Wall.key` is `--source`, `Base_CG_Assets.key` is
 `--template`, and `Full_Report_Card_CG.key` is a reference output, not the
 template.
 
 Run the Full gate on copies with `--mode verify --no-validate`; use
 `--pass2-bar parity` only to expose and compare a known pre-existing pass-2
-problem. Require Accessibility, refuse any already-open Keynote document, run
+problem. The dead-raise cause was the not-ready Arrange menu, fixed by the
+readiness poll (`OBED_RAISE_SETTLE_MAX`, default 1.5s; `0` disables and
+reproduces the defect) — live-verified 2026-09-11. Require Accessibility,
+refuse any already-open Keynote document, run
 serially, and quit Keynote between A and B. This workflow is viable on the
 16GB host when guarded this way; the memory caution is not a blanket ban on
 full-deck work. Run it from an unlocked working copy of the deck — `ditto`
@@ -305,13 +319,51 @@ preserves Finder's `uchg` flag, and a locked copy breaks the gate's writes.
 After any planner/driver change, also run `scripts/golden_plan.py` — a
 Keynote-free apply-plan SHA-256 gate through the real `remap_keynote.remap_keynote`.
 
+Pass 2's GUI raise (`obedRaiseSlide`/`obedFront`) emits `raiseDead(s=,idx=)` and
+`raiseUnknown(s=,idx=)` on a failed Bring to Front, plus the tagged
+`frontErr` `[errNum@phase,s=,idx=]` (no entry may contain the literal
+` exported=` — both parsers cut there). `raiseBlind(s=,idx=,phase=)` is an
+observational click-time readiness token (still clicks); `raiseVacuous(s=,idx=)`
+fires when the target is already frontmost (`_mn is _top`) and is never
+retried. `raiseRetried` counts one retry on a verified non-vacuous dead
+raise. `raiseBlindCount`/`raiseVacuous`/`raiseRetried` are counters in the
+result dict and on `Stat raise detail:`, alongside `raiseMoved`/`raiseDead`/
+`raiseUnknown`. Two env knobs tune the readiness poll on `enabled of menu
+item "Bring to Front"`: `OBED_RAISE_SETTLE_MAX` (default 1.5, `0` disables,
+non-finite/negative fall back) bounds it above the existing 0.35s floor;
+`OBED_RAISE_SETTLE_MIN` only lengthens the floor. `-1719` is
+`errAEIllegalIndex`, not an Accessibility denial (`-1743`/`-25211` are) —
+measured 2026-09-10 with Accessibility probed granted. The strict pass-2 bar
+still aborts on any `frontErr`; the 2026-09-12 full gate returned empty
+`frontErr` in both arms, so strict is now the W1 bar.
+
+`obedFront` (shared by every raise phase, including badge) retries once on a
+click *error* (not just a dead landing): it re-polls readiness via
+`obedFrontReady` before the second click, bumps `raiseClickRetried` and emits
+`raiseClickRetry(s=,idx=,phase=,err=)` on the first failure, and only tags
+`frontErr` `[errNum@phase,s=,idx=,retry]` on a second failure. `offline_write_ab.py`
+logs a non-gating `WARN <label>: raiseClickRetried=<n> ...` line in both bar
+modes; `raiseClickRetried` is neither a `PASS2_PARITY_KEYS` nor a
+`PASS2_ZERO_KEYS` member. A twice-failed retry still latches `badgeFrontDead`
+deck-wide as before — that is by design, not a regression.
+
+`obedFrontReady` also records `lastFrontBlind` whenever its readiness poll
+never confirms, cleared by `obedFront` on entry so it always scopes to the
+raise that just happened (the two polls on the retry path OR-fold).
+`obedRaiseItem` re-probes badge landing on a blind poll as well as on a
+click retry, so a conclusive non-landing latches `badgeFrontDead` on the
+first occurrence instead of being credited blind; `badgeProbeBlind(s=,k=)`
+marks a probe that only the blind trigger ran and is observational — it
+gates nothing.
+
 The 2026-09-07 Full bank under
 `output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:
 both A/B decks and run records are present, so diagnose and re-run comparisons
 Keynote-free before paying for another live gate. The surgical writer's own
 consistency and live geometry verify passed at 0.00px, but pass-2 parity and 12
-slides' identity geometry failed. Offline write therefore remains opt-in with
-the default OFF.
+slides' identity geometry failed. Those defects were fixed (PRs #57/#59/#73/#78/#80/#94/
+#104/#115) and the strict full gate went GREEN 2026-09-12; the W1 default flipped to
+`OBED_OFFLINE_WRITE=on` on 2026-09-14 (`off` restores the scripted AppleScript path).
 
 A 2026-09-07 gate-integrity follow-up added a gating `group` bar (composed
 child-union vs the planned rect, 2.5px) to the offline verify — it is expected
@@ -394,6 +446,26 @@ For remap, use the **two-tier geometry read**:
 PPTX export is a useful complementary geometry source, especially for autosize
 text width, but lines and groups still need their specialised offline handling.
 
+A cached `reader: jxa` wall payload reports a JXA-live union frame, not the
+archive-composed frame the planner plans against; under `OBED_OFFLINE_READ=on` such
+a cache entry is now refused and forces an offline re-read, served as-is only if
+that re-read genuinely fails. `groupChildrenUnavailable` (slide flag, set whenever
+`attach_group_children` was skipped) and `groupAutosize` (reader-independent,
+derived from the IWA archive by `attach_group_autosize`) together gate whether a
+group's size is safe to write: on a `groupChildrenUnavailable` slide, an
+autosize-marked group refuses its size write (`sizeRefused=group-children-unavailable`,
+or `group-collapse-guard` on an unmarked ≥3× shrink) rather than take Keynote's
+aspect-locked group write, which scales about the group's LIVE frame and can
+collapse a word-wrapped badge ~12× (Gold slide 2, root-caused 2026-09-12 — see
+`badge-width-collapse-gold-slide-2`). Codex r2: a slide whose two-tier read fell back to
+per-slide live JXA (`_merge_legacy_slides`) is also stamped `groupChildrenUnavailable` and
+skipped by `attach_group_children`; a fresh two-tier read stamps a top-level
+`offlineFallbackTagged` cache marker, and `OBED_OFFLINE_READ=on` re-reads offline once
+(`stale_mixed`) if a cached `reader: offline` payload lacks it — no `INSPECT_VERSION` bump,
+so banked JXA/kind-count fixtures need no re-stamp. A spec with no `w`/`h` means position-only:
+every consumer must key off presence (`"w" in spec`), never infer it from role or
+kind — that crashed `framing.planned_rects` once already.
+
 Round geometry to whole points where matching Keynote values; sub-pixel noise can
 change affine fitting.
 
@@ -464,6 +536,20 @@ Load-bearing rules:
   guess. `buildChunks` is the render timeline and `builds` an unordered owning set
   Keynote permutes on save, so never read `builds` order as reveal order (measured:
   chain-coherent 45/45 under `buildChunks` vs 13/45 under `builds` — D8).
+
+#### Offline z-order (W2)
+
+`OBED_ZORDER_WRITE` = `off` (default) | `on` | `verify`; forced `off` without the `iwa`
+extra or when `offline_write_mode()` is `off`. The patch runs on the saved deck after
+pass 2 (`_run_stat_finalize`), before `restore_source_builds`. Eligible slides' raises
+are suppressed in pass 2 — no `obedRaiseSlide`/`obedBadgeSlide` emitted — so each slide's
+raise runs exactly once, offline or GUI, never both. Pass 2 reports whether it completed
+via the `closed=` AppleScript token; if it did not, the deck may still be open in Keynote
+and the z-order patch is skipped, raising `RuntimeError` for the suppressed slides rather
+than risk patching an open document. Progress surfaces on one `Stat zorder detail:` line.
+Export consequence: when the knob is on, pass 2 exports nothing, and
+`remap_and_inspect`'s existing fallback exports previews after the z-order patch —
+one extra Keynote open per knob-on run.
 
 ### External reference: KeynoteKit
 

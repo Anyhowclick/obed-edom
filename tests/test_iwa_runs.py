@@ -1287,3 +1287,146 @@ def test_attach_group_child_runs_exposes_dual_shape_text_badge_caption(monkeypat
     assert groups[0][0]["font"] == "AzoSans-Bold"
     assert groups[0][0]["size"] == pytest.approx(65.0)
     assert groups[0][1]["text"] == "15 the verse body"
+
+
+def test_attach_group_children_skips_a_slide_marked_group_children_unavailable(monkeypatch):
+    """A slide merged in from a scoped JXA-fallback read (remap_keynote._merge_legacy_slides)
+    carries live union group frames, not archive offsets — attach_group_children must not
+    attach them a groupChildren record despite qualifying otherwise."""
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _badge_deck())
+    payload = {
+        "slides": [
+            {"index": 0, "items": [], "groupChildrenUnavailable": True},
+            {"index": 1, "items": []},
+        ]
+    }
+    attach_group_children("ignored.key", payload)
+    assert "groupChildren" not in payload["slides"][0]
+    assert "groupChildren" not in payload["slides"][1]
+
+
+# --------------------------------------------------------------------------
+# attach_group_autosize — archive-fact marker, valid under any reader. Must mark
+# a group even when _group_child_records itself refuses it (nested group, etc):
+# those are exactly the cases that collapse without the fix.
+# --------------------------------------------------------------------------
+def test_attach_group_autosize_marks_the_badge_group_and_leaves_the_plain_one_unmarked(
+    monkeypatch,
+):
+    from obed_edom.iwa_runs import attach_group_autosize
+
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _badge_deck())
+    payload = {"slides": [{"index": 0, "items": []}, {"index": 1, "items": []}]}
+    attach_group_autosize("ignored.key", payload)
+    assert payload["slides"][0]["groupAutosize"] == {0: True}
+    assert "groupAutosize" not in payload["slides"][1]
+
+
+def test_attach_group_autosize_marks_a_group_group_child_records_itself_refuses(
+    monkeypatch,
+):
+    """A nested group with an autosize grandchild is refused by _group_child_records
+    (same aspect-lock problem one level down) but must still collapse-refuse at
+    write time, so attach_group_autosize marks it independently of that refusal."""
+    from obed_edom.iwa_runs import attach_group_autosize
+
+    def storage(text):
+        return {"_pbtype": "TSWP.StorageArchive", "text": [text]}
+
+    objects = {
+        "130": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "230"}},
+        "230": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "910"}]},
+        "910": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "911"}, {"identifier": "912"}],
+        },
+        "911": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 50.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "913"}],
+        },
+        "912": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 50.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "913": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "913-st"},
+            "super": {
+                "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 40.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 40.0, "height": 30.0}}},
+            },
+        },
+        "913-st": storage("Nested"),
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "130"}]}},
+    }
+    from obed_edom.iwa_runs import _group_child_records
+
+    assert _group_child_records(objects["910"], objects) is None
+
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: (objects, {}, {}))
+    payload = {"slides": [{"index": 0, "items": []}]}
+    attach_group_autosize("ignored.key", payload)
+    assert payload["slides"][0]["groupAutosize"] == {0: True}
+
+
+# --------------------------------------------------------------------------
+# _load_deck(skipped=...) — opt-in reporting of undecodable members (fix4).
+# --------------------------------------------------------------------------
+def test_load_deck_skipped_reports_a_corrupt_member_and_still_loads_the_rest():
+    pytest.importorskip("keynote_parser")
+    import io
+    import zipfile
+
+    from tests.test_iwa_write import _arch, _member
+
+    from obed_edom.iwa_runs import _load_deck
+
+    good = _member([_arch(1, "KN.SlideArchive", {"drawablesZOrder": []})])
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Good.iwa", good)
+        z.writestr("Index/Bad.iwa", b"not a valid iwa chunk")
+    path = io.BytesIO(buf.getvalue())
+
+    skipped: list[tuple[str, str]] = []
+    objects, _id_to_file, _file_ids = _load_deck(path, skipped=skipped)
+    assert objects["1"]["_pbtype"] == "KN.SlideArchive"
+    assert len(skipped) == 1
+    assert skipped[0][0] == "Index/Bad.iwa"
+
+    path.seek(0)
+    objects_default, _id_to_file, _file_ids = _load_deck(path)
+    assert objects_default == objects
+
+
+# --------------------------------------------------------------------------
+# _group_child_records inherits the six-kind _natural_size fix (fix1/fix3).
+# --------------------------------------------------------------------------
+def test_group_child_records_reads_non_bezier_natural_size():
+    """A scalar-path autosize child (e.g. a rounded-rect text box) must not be silently
+    read as (0, 0) naturalSize by the old one-hop bezier-only reader."""
+    objects = {
+        "990": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "991"}, {"identifier": "992"}],
+        },
+        "991": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "992": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "992-st"},
+            "super": {
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 120.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"scalarPathSource": {"naturalSize": {"width": 120.0, "height": 32.0}}},
+            },
+        },
+    }
+    records = _group_child_records(objects["990"], objects)
+    assert records is not None
+    _plate, text = records
+    assert text["autosize"] is True
+    assert text["w"] == pytest.approx(120.0)
+    assert text["h"] == pytest.approx(32.0)

@@ -1,3 +1,5 @@
+import pytest
+
 from obed_edom.maps_geo import (
     CG_MIN_ZOOM,
     CG_WIDTH,
@@ -13,6 +15,7 @@ from obed_edom.maps_geo import (
     clamp_zoom,
     geocode,
     geometry_bbox,
+    highlight_colours_key,
     infer_hop_kind,
     inherit_hidden_layers,
     mercator_y,
@@ -70,6 +73,22 @@ def test_lon_wraps_across_the_dateline():
     assert clamp_lon(-180) == -180
 
 
+def test_lon_wraps_large_multiples_without_looping():
+    assert clamp_lon(720 + 190) == -170
+    assert clamp_lon(-720 - 190) == 170
+
+
+def test_clamp_lon_rejects_non_finite():
+    with pytest.raises(ValueError):
+        clamp_lon(float("inf"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("-inf"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("nan"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("1e400"))
+
+
 def test_clamp_zoom_allows_below_wrap_thresholds():
     assert clamp_zoom(0) == 0
     assert clamp_zoom(1) == 1
@@ -98,6 +117,25 @@ def test_clamp_cg_shift():
     assert clamp_cg_shift(-300, 0) == (-300.0, 0.0)
 
 
+def test_infer_hop_kind_borderlands_is_movie():
+    cam = {"zoom": 4, "pitch": 0, "bearing": 0}
+    a = {"style": "borderlands", "highlights": [], "camera": cam}
+    b = {"style": "borderlands", "highlights": [], "camera": cam}
+    assert infer_hop_kind(a, b) == "movie"
+    c = {"style": "positron", "highlights": [], "camera": cam}
+    assert infer_hop_kind(a, c) == "cut"
+
+
+def test_infer_hop_kind_retired_liberty_matches_buildings3d():
+    cam = {"zoom": 4, "pitch": 0, "bearing": 0}
+    liberty = {"style": "liberty", "highlights": [], "camera": cam}
+    buildings = {"style": "buildings3d", "highlights": [], "camera": cam}
+    positron = {"style": "positron", "highlights": [], "camera": cam}
+    assert infer_hop_kind(liberty, liberty) == "movie"
+    assert infer_hop_kind(liberty, buildings) == "movie"
+    assert infer_hop_kind(liberty, positron) == "cut"
+
+
 def test_infer_hop_kind_cut_on_style_or_highlights():
     a = {"style": "positron", "highlights": ["MYS"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
     b = {"style": "dark", "highlights": ["MYS"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
@@ -106,8 +144,38 @@ def test_infer_hop_kind_cut_on_style_or_highlights():
     assert infer_hop_kind(a, c) == "cut"
 
 
+def test_highlight_colours_key_is_order_independent_and_normalises_hex():
+    # Mirrors dashboard/tests/highlight-colour.test.cjs highlightColoursKey.
+    assert highlight_colours_key({"highlightColours": {"SGP": "#0A84FF", "MYS": "#abc"}}) == "MYS:#aabbcc,SGP:#0a84ff"
+    assert highlight_colours_key({"highlightColours": {"MYS": "#AABBCC", "SGP": "0a84ff"}}) == "MYS:#aabbcc,SGP:#0a84ff"
+    assert highlight_colours_key({}) == ""
+    assert highlight_colours_key({"highlightColours": {}}) == ""
+    assert highlight_colours_key({"highlightColours": {"NOPE": "#00aaff"}}) == ""
+
+
+def test_infer_hop_kind_cut_on_highlight_colours():
+    # Parity with dashboard/tests/hop-kind.test.cjs.
+    cam = {"zoom": 4, "pitch": 0, "bearing": 0}
+    same = {"style": "positron", "highlights": ["SGP"], "camera": cam}
+    assert infer_hop_kind(same, {"style": "positron", "highlights": ["SGP"], "camera": cam}) == "morph"
+    assert infer_hop_kind(
+        {**same, "highlightColours": {"SGP": "#0a84ff"}},
+        {**same, "highlightColours": {"SGP": "#0A84FF"}},
+    ) == "morph"
+    assert infer_hop_kind(
+        {**same, "highlights": ["SGP", "MYS"], "highlightColours": {"SGP": "#abc", "MYS": "#0A84FF"}},
+        {**same, "highlights": ["SGP", "MYS"], "highlightColours": {"MYS": "0a84ff", "SGP": "#AABBCC"}},
+    ) == "morph"
+    assert infer_hop_kind(
+        {**same, "highlightColours": {"SGP": "#00aaff"}},
+        {**same, "highlightColours": {"SGP": "#ff0000"}},
+    ) == "cut"
+    assert infer_hop_kind(same, {**same, "highlightColours": {"SGP": "#00aaff"}}) == "cut"
+    assert infer_hop_kind(same, {**same, "highlightColours": {}}) == "morph"
+
+
 def test_infer_hop_kind_cut_on_hidden_layers():
-    a = {"style": "positron", "highlights": [], "hiddenLayers": ["roadnames", "arrows"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    a = {"style": "positron", "highlights": [], "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS), "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
     b = {"style": "positron", "highlights": [], "hiddenLayers": ["roadnames", "pois"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
     assert infer_hop_kind(a, b) == "cut"
     c = {"style": "positron", "highlights": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
@@ -139,6 +207,12 @@ def test_infer_hop_kind_allows_matching_rotation_and_zoom_delta_two():
     assert infer_hop_kind(a, b) == "movie"
     b["camera"] = {**b["camera"], "bearing": 22, "zoom": 6.1}
     assert infer_hop_kind(a, b) == "movie"
+
+
+def test_default_hidden_layers_hides_roadnames_arrows_labels_and_boundaries():
+    assert DEFAULT_HIDDEN_LAYERS == ("roadnames", "arrows", "labels", "boundaries")
+    no_deck = {"slides": [{"id": "s1", "hiddenLayers": None}]}
+    assert inherit_hidden_layers(no_deck)["slides"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
 
 
 def test_slide_hidden_layers():
@@ -193,6 +267,36 @@ def test_usa_is_not_lusaka(monkeypatch):
     assert hit["camera"]["lon"] < 0
     place = search_places("usa")
     assert place is None or "lusaka" not in str(place.get("label") or "").lower()
+
+
+def test_geocode_singapore_carries_place_type(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    hit = geocode("Singapore")
+    assert hit["source"] == "places"
+    assert hit["placeType"] == "city"
+
+
+def test_parse_maps_query_zoom_from_url():
+    at = parse_maps_query("@1.3,103.8,6.8z")
+    assert at["zoomFromUrl"] is True
+    comma_zoom = parse_maps_query("https://www.google.com/maps/@1.3,103.8/data=!3d1!4d1,6.8z")
+    assert comma_zoom["zoomFromUrl"] is True
+    no_zoom = parse_maps_query("https://www.google.com/maps/@1.3,103.8")
+    assert no_zoom["zoomFromUrl"] is False
+    bare_pair = parse_maps_query("1.3,103.8")
+    assert bare_pair["zoomFromUrl"] is False
+
+
+def test_country_via_admin0_has_place_type(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    hit = geocode("USA")
+    assert hit["placeType"] == "country"
 
 
 def test_geometry_bbox_antimeridian_not_lon_zero():

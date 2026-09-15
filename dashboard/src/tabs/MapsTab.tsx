@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from "react";
 import {
   bootstrapMapsCsv,
   bootstrapMapsPinsCsv,
+  bootstrapMapsRows,
   downloadMapsSession,
   exportMaps,
   cancelMapsExport,
@@ -12,6 +13,7 @@ import {
   planMapsTiles,
   pollJob,
   postMapsFrame,
+  MapsStaleThumbnailError,
   postMapsPng,
   prefetchMapsTiles,
   previewUrl,
@@ -21,34 +23,88 @@ import {
   MapsStateConflictError,
   addWatercolourToMap,
   watercolourImageUrl,
+  renameJob,
+  putSettings,
   type Job,
 } from "../api";
+import { ArtifactActions } from "../components/ArtifactActions";
 import { ErrorNotice } from "../components/ErrorNotice";
+import {
+  IconArrowLeft,
+  IconCaret,
+  IconChevron,
+  IconClose,
+  IconCopy,
+  IconCountry,
+  IconDot,
+  IconDropPin,
+  IconLabel,
+  IconLabelOff,
+  IconLandmark,
+  IconLayers,
+  IconPanelRight,
+  IconPaste,
+  IconPasteSlides,
+  IconPlay,
+  IconPlus,
+  IconRegion,
+  IconRelief,
+  IconTrash,
+} from "../components/icons";
+import { JobName } from "../components/JobName";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
 import { type Item as WcItem } from "../components/WatercolourResultView";
 import { useRunNav } from "../nav";
-import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
+import {
+  MAPS_INSPECTOR_KEY,
+  MAPS_PICK_MODE_KEY,
+  MAPS_SIDE_PANELS_KEY,
+  highlightColourReady,
+  refreshHighlightColour,
+  useDefaultExportDir,
+  useHighlightColour,
+  useSessionPath,
+  useSessionToggle,
+} from "../prefs";
+import {
+  DEFAULT_HIGHLIGHT_COLOUR,
+  highlightCssVars,
+  isHighlightHex,
+  normaliseHighlightColour,
+  pruneHighlightColours,
+  setHighlightColour,
+} from "../maps/highlight";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
+import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
+import { creditLines } from "../maps/credits";
 import { HopTimeline } from "../maps/HopTimeline";
+import { ManualEntriesForm } from "../maps/ManualEntriesForm";
+import type { ManualMode, MapsBootstrapRow } from "../maps/manualRows";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
-import { admin0Name, loadAdmin0 } from "../maps/overlays";
+import { OBJECT_SIZE_MAX, defaultObjectSize, pasteRebase, zoomSizeFactor } from "../maps/objects";
+import type { ObjectClipboard } from "../maps/objects";
+import { admin0Name, admin1Name, highlightedCountries, isAdmin1Loaded, loadAdmin0, loadAdmin1 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
+import { SlidingSeg } from "../maps/SlidingSeg";
 import { StylePicker } from "../maps/StylePicker";
-import { MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
+import { MapsSaveConflictError, MapsSaveQueue, type MapsSaveStatus } from "../maps/saveQueue";
 import {
   CG_SHIFT_MAX,
+  CG_W,
+  CENTRE_W,
   DEFAULT_ISOLATE_STRENGTH,
   HOP_LABELS,
   LAYER_FILTERS,
   MAX_LAT,
   appearanceMismatch,
   authoredSurfaceWidth,
-  captureWidth,
+  hopSurfaceWidth,
   showCgBand,
   shouldFocusAddedLandmark,
   slideForAudience,
@@ -56,9 +112,14 @@ import {
   clampZoom,
   coerceHopKinds,
   documentFromResult,
+  exportScale,
+  exportZoomDelta,
+  plateSurfaceWidth,
   hasOutgoingMovie,
+  isolateDissolveNeeded,
   minZoomForView,
   movieAppearanceMismatch,
+  plainIsolateTarget,
   worldCopyWarning,
   nextPinId,
   nextSlideId,
@@ -67,6 +128,7 @@ import {
   restitchWithMemory,
   slideHiddenLayers,
   suggestedHopKind,
+  surfaceWidthOf,
   type MapsCamera,
   type MapsAudience,
   type MapsChurch,
@@ -98,106 +160,100 @@ const INSPECTOR_TABS: { id: InspectorTab; label: string }[] = [
   { id: "export", label: "Export" },
 ];
 
-function IconPlay() {
+function pinKindClass(kind: MapsPinKind): string {
+  return kind === "dropPin" ? "droppin" : kind;
+}
+
+/** A collapsible inspector sub-section; open state persists per-session, keyed by `id`. */
+function InspSection({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  const [open, setOpen] = useSessionToggle(`obed-edom.maps.section.${id}`, true);
   return (
-    <svg className="maps-icon filled" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M8 5v14l11-7z" />
-    </svg>
+    <>
+      <button
+        type="button"
+        className="insp-sec-head"
+        aria-expanded={open}
+        aria-controls={`insp-sec-${id}`}
+        onClick={() => setOpen(!open)}
+      >
+        <IconChevron className="insp-sec-chev" />
+        {title}
+      </button>
+      <div id={`insp-sec-${id}`} className="insp-sec-body" hidden={!open}>
+        {children}
+      </div>
+    </>
   );
 }
 
-function IconTrash() {
+function PinKindIcon({ kind }: { kind: MapsPinKind }) {
+  if (kind === "dropPin") return <IconDropPin />;
+  if (kind === "landmark") return <IconLandmark />;
+  return <IconDot />;
+}
+
+function highlightClass(code: string): string {
+  return code.startsWith("A1:") ? "region" : "country";
+}
+
+function HighlightIcon({ code }: { code: string }) {
+  return code.startsWith("A1:") ? <IconRegion /> : <IconCountry />;
+}
+
+function highlightName(code: string): string {
+  return code.startsWith("A1:") ? admin1Name(code) : admin0Name(code);
+}
+
+const COLOUR_DEBOUNCE_MS = 250;
+
+type PendingHighlightOverride = {
+  slideId: string;
+  audience: MapsAudience;
+  code: string;
+  value: string;
+};
+
+function HighlightColourFields({
+  colour,
+  text,
+  disabled,
+  onColour,
+  onText,
+  onCommit,
+}: {
+  colour: string;
+  text: string;
+  disabled?: boolean;
+  onColour: (value: string) => void;
+  onText: (value: string) => void;
+  onCommit: () => void;
+}) {
   return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M7 7h10M9.5 7V6a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 6v1M8 7l.7 12.5h6.6L16 7"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
+    <label>
+      Colour
+      <input
+        type="text"
+        value={text}
+        disabled={disabled}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        aria-label="Highlight colour hex"
+        onChange={(event) => onText(event.target.value)}
+        onBlur={onCommit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") onCommit();
+        }}
       />
-    </svg>
-  );
-}
-
-function IconLibrary() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="4.5" width="17" height="15" rx="2" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M16.5 4.5v15" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconLayers() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 4.2 21 8.5 12 12.8 3 8.5 12 4.2z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M5.2 12.2 12 15.5l6.8-3.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M5.2 16.2 12 19.5l6.8-3.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconRelief() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M3 17 8.5 8l4 6.5L15 10l6 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconLabelOff() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M4 20 20 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconPlus() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconLabel() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconCopy() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="8.5" y="8.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconPaste() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="5.5" y="5.5" width="13" height="15" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <rect x="9" y="3.5" width="6" height="3.5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconPasteSlides() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="5.5" width="11" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <rect x="7" y="3.5" width="4" height="3" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M15.5 12h5M17.5 9.5 20.5 12l-3 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
+      <input
+        type="color"
+        value={normaliseHighlightColour(colour || text)}
+        disabled={disabled}
+        aria-label="Highlight colour"
+        onChange={(event) => onColour(event.target.value)}
+        onBlur={onCommit}
+      />
+    </label>
   );
 }
 
@@ -233,12 +289,21 @@ function formatEta(seconds: number): string {
   return `${Math.floor(total / 60)}m ${total % 60}s`;
 }
 
+const SAVE_STATUS_LABEL: Record<MapsSaveStatus, string> = {
+  saved: "Saved",
+  saving: "Saving…",
+  unsaved: "Unsaved",
+  paused: "Paused",
+  error: "Save failed",
+};
+
 export function MapsTab() {
   const { openRun, clearOpenRun } = useRunNav();
   const { job: opened, error: openError } = useCurrentJob("maps");
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveConflict, setSaveConflict] = useState<{ paths: string[] } | null>(null);
+  const [saveStatus, setSaveStatus] = useState<MapsSaveStatus>("saved");
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeAudience, setActiveAudience] = useState<MapsAudience>("lw");
@@ -246,7 +311,15 @@ export function MapsTab() {
   const [dropIndicator, setDropIndicator] = useState<{ id: string; position: "before" | "after" } | null>(null);
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [selectedPins, setSelectedPins] = useState<string[]>([]);
-  const [objectClipboard, setObjectClipboard] = useState<MapsChurch[]>([]);
+  const [selectedHighlight, setSelectedHighlight] = useState<string | null>(null);
+  const [colourText, setColourText] = useState("");
+  const [overrideText, setOverrideText] = useState("");
+  const colourDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingColourRef = useRef<string | null>(null);
+  const commitGlobalColourRef = useRef<(value: string) => void>(() => undefined);
+  const overrideDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingOverrideRef = useRef<PendingHighlightOverride | null>(null);
+  const [objectClipboard, setObjectClipboard] = useState<ObjectClipboard<MapsChurch>>({ churches: [], sourceZoom: 0 });
   const [pasteTargets, setPasteTargets] = useState<string[]>([]);
   const [renamingSlide, setRenamingSlide] = useState<{ id: string; title: string } | null>(null);
   const [inspTab, setInspTab] = useState<InspectorTab>("properties");
@@ -263,6 +336,7 @@ export function MapsTab() {
   const activeRef = useRef<string | null>(null);
   const activeAudienceRef = useRef<MapsAudience>("lw");
   const previewingRef = useRef(false);
+  const saveConflictRef = useRef<{ paths: string[] } | null>(null);
   const exportingRef = useRef(false);
   const previewAbort = useRef(false);
   const previewRun = useRef(0);
@@ -284,12 +358,21 @@ export function MapsTab() {
     return Number.isFinite(raw) && raw >= 160 ? Math.min(420, raw) : 220;
   });
   const navDrag = useRef<{ x: number; w: number } | null>(null);
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.maps.exportDir");
+  const defaultExportDir = useDefaultExportDir();
+  const highlightColour = useHighlightColour();
   const [sidePanels, setSidePanels] = useSessionToggle(MAPS_SIDE_PANELS_KEY, true);
   const [inspectorOpen, setInspectorOpen] = useSessionToggle(MAPS_INSPECTOR_KEY, true);
+  const [pickRegions, setPickRegions] = useSessionToggle(MAPS_PICK_MODE_KEY, false);
+  const [regionsLoading, setRegionsLoading] = useState(false);
+  const [regionCameraCountries, setRegionCameraCountries] = useState<string[]>([]);
   const [layersOpen, setLayersOpen] = useState(false);
   const layersRef = useRef<HTMLDivElement | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement | null>(null);
+  const addButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [manualMode, setManualMode] = useState<ManualMode | null>(null);
+  const [manualBusy, setManualBusy] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
   const [namesTick, setNamesTick] = useState(0);
@@ -297,24 +380,76 @@ export function MapsTab() {
   const [landmarkPicker, setLandmarkPicker] = useState(false);
   const [wcGridOpen, setWcGridOpen] = useState(false);
   const landmarkPickerRef = useRef<HTMLDivElement | null>(null);
+  const thumbnailGeometryRef = useRef<ThumbnailGeometry>({ authoredWidth: CENTRE_W, surfaceWidth: CENTRE_W, crop: undefined });
   const [wcJobs, setWcJobs] = useState<Job[]>([]);
 
   useEffect(() => {
     void loadAdmin0().then(() => setNamesTick((n) => n + 1));
   }, []);
 
+  useEffect(() => {
+    setHighlightColour(highlightColour);
+    setColourText(highlightColour);
+    const vars = highlightCssVars(highlightColour);
+    for (const [key, value] of Object.entries(vars)) document.documentElement.style.setProperty(key, value);
+  }, [highlightColour]);
+
   const doc = documentFromResult(job?.result as Record<string, unknown> | undefined);
+  const activeSlideRaw = (doc?.slides || []).find((s) => s.id === activeId);
+  const activeAudienceView = activeSlideRaw ? slideForAudience(activeSlideRaw, activeAudience) : null;
+  const activeCamera = activeAudienceView?.camera;
+  const cameraKey = activeCamera ? `${activeCamera.lat},${activeCamera.lon},${activeCamera.zoom}` : "";
+  const activeHighlights = activeAudienceView ? activeAudienceView.highlights : [];
+  const activeViewKey = `${activeId}:${activeAudience}:${activeHighlights.join(",")}`;
+  const activeViewGeneration = useRef(0);
+  useEffect(() => {
+    const codes = highlightedCountries(activeHighlights.filter((h) => h.startsWith("A1:")));
+    const missing = codes.filter((code) => !isAdmin1Loaded(code));
+    if (!missing.length) return;
+    const generation = ++activeViewGeneration.current;
+    void Promise.all(missing.map((code) => loadAdmin1(code))).then(() => {
+      if (activeViewGeneration.current !== generation) return;
+      setNamesTick((n) => n + 1);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeViewKey]);
+  useEffect(() => {
+    if (!pickRegions) {
+      setRegionsLoading(false);
+      setRegionCameraCountries([]);
+      return;
+    }
+    const codes = mapRef.current?.getRegionCountries() ?? [];
+    setRegionCameraCountries(codes);
+    const missing = codes.filter((code) => !isAdmin1Loaded(code));
+    if (!missing.length) {
+      setRegionsLoading(false);
+      return;
+    }
+    let ignore = false;
+    setRegionsLoading(true);
+    void Promise.all(missing.map((code) => loadAdmin1(code))).then(() => {
+      if (ignore) return;
+      setRegionsLoading(false);
+      setNamesTick((n) => n + 1);
+    });
+    return () => {
+      ignore = true;
+      setRegionsLoading(false);
+    };
+  }, [pickRegions, activeId, activeAudience, cameraKey]);
   jobRef.current = job;
   docRef.current = doc;
   activeRef.current = activeId;
   activeAudienceRef.current = activeAudience;
   previewingRef.current = previewing;
+  saveConflictRef.current = saveConflict;
 
   if (!saveQueue.current) {
     saveQueue.current = new MapsSaveQueue({
       document: () => docRef.current,
       publish: (next) => {
-        applyLocalDoc(next);
+        setLocalDoc(next);
         const acknowledged = saveAckJob.current;
         if (acknowledged) mergeServerMeta(acknowledged);
       },
@@ -336,25 +471,49 @@ export function MapsTab() {
           throw err;
         }
       },
-      onConflict: (conflict) => setSaveConflict({ paths: conflict.paths }),
+      onConflict: (conflict) => {
+        saveConflictRef.current = { paths: conflict.paths };
+        thumbnailToken.current += 1;
+        setSaveConflict({ paths: conflict.paths });
+      },
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+      onStatus: (status) => setSaveStatus(status),
     });
   }
 
   const slides = doc?.slides || [];
   const active = slides.find((s) => s.id === activeId) || slides[0] || null;
   const activeView = active ? slideForAudience(active, activeAudience) : null;
+
+  useEffect(() => {
+    if (!selectedHighlight) return;
+    setOverrideText(activeView?.highlightColours?.[selectedHighlight] ?? highlightColour);
+  }, [selectedHighlight, activeView?.highlightColours, highlightColour]);
+
+  useEffect(() => {
+    return () => {
+      if (colourDebounceRef.current) {
+        clearTimeout(colourDebounceRef.current);
+        colourDebounceRef.current = null;
+        if (pendingColourRef.current !== null) commitGlobalColourRef.current(pendingColourRef.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const activeHiddenLayers = slideHiddenLayers(activeView);
   const activeHillshade = activeView?.hillshade === true;
   const renderedView = previewView || activeView;
-  const renderedAuthoredWidth = previewView
-    ? authoredSurfaceWidth(previewView, activeAudience)
-    : activeAudience === "cg" && active?.cg
-      ? 1920
-      : sidePanels
-        ? 7680
-        : 3840;
+  // Density comes from the slide's own export surface (includeSidePanels / audience), never the
+  // display-only "Show side panels" toggle — that toggle only widens the visible band around the
+  // same density (see renderedSidePanels / MapView's surfaceWidthOf).
+  const renderedSurfaceSlide = previewView || active;
+  const renderedAuthoredWidth = renderedSurfaceSlide ? authoredSurfaceWidth(renderedSurfaceSlide, activeAudience) : CENTRE_W;
   const renderedSidePanels = previewView ? previewView.includeSidePanels === true : sidePanels;
+  thumbnailGeometryRef.current = {
+    authoredWidth: renderedAuthoredWidth,
+    surfaceWidth: surfaceWidthOf(renderedAuthoredWidth, renderedSidePanels),
+    crop: doc?.crop,
+  };
   const activeIndex = active ? slides.findIndex((s) => s.id === active.id) : -1;
   const stateRevision = Number(job?.result?.stateRevision);
   const outgoing = useMemo(() => {
@@ -409,28 +568,19 @@ export function MapsTab() {
     }
   }, [active, activeAudience]);
 
-  const thumbnailFingerprint = activeView ? JSON.stringify({
-    id: activeView.id,
-    audience: activeAudience,
-    style: activeView.style,
-    camera: activeView.camera,
-    highlights: activeView.highlights,
-    churches: activeView.churches,
-    hiddenLayers: activeView.hiddenLayers,
-    hillshade: activeView.hillshade,
-    isolate: activeView.isolate ? { mode: activeView.isolate.mode, strength: activeView.isolate.strength } : null,
-    authoredWidth: renderedAuthoredWidth,
-    crop: doc?.crop,
-  }) : "";
+  const activeThumbnailFingerprint = activeView
+    ? thumbnailFingerprint(activeView.id, activeAudience, activeView, thumbnailGeometryRef.current)
+    : "";
 
   useEffect(() => {
-    if (!active || job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || saveConflict || !thumbnailFingerprint) return;
+    if (!active || job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || saveConflict || !activeThumbnailFingerprint) return;
     const timer = window.setTimeout(() => void captureThumb(active.id).catch((err) => setError(err instanceof Error ? err.message : String(err))), 750);
     return () => window.clearTimeout(timer);
-  }, [active?.id, thumbnailFingerprint, job?.status, previewing, exporting, sessionBusy, saveConflict]);
+  }, [active?.id, activeThumbnailFingerprint, job?.status, previewing, exporting, sessionBusy, saveConflict]);
 
   useEffect(() => {
     setSelectedPins([]);
+    setSelectedHighlight(null);
   }, [activeId, activeAudience]);
 
   useEffect(() => {
@@ -500,6 +650,13 @@ export function MapsTab() {
 
   const locked = job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || !!saveConflict;
 
+  const exportResult = (job?.result || {}) as { destPath?: string; destPathCg?: string; destPathDsk?: string };
+  const exportArtifacts = [
+    exportResult.destPath ? { label: "LED wall", path: exportResult.destPath } : null,
+    exportResult.destPathCg ? { label: "CG", path: exportResult.destPathCg } : null,
+    exportResult.destPathDsk ? { label: "DSK", path: exportResult.destPathDsk } : null,
+  ].filter((artifact): artifact is { label: string; path: string } => artifact != null);
+
   function onNavResizeStart(event: React.PointerEvent<HTMLButtonElement>) {
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -523,13 +680,18 @@ export function MapsTab() {
     mapRef.current?.resize();
   }
 
-  function applyLocalDoc(next: MapsDocument) {
+  function setLocalDoc(next: MapsDocument) {
     const currentJob = jobRef.current;
     if (!currentJob) return;
     const coerced = coerceHopKinds(next);
     docRef.current = coerced;
     setJob({ ...currentJob, result: { ...(currentJob.result || {}), ...coerced } });
     return coerced;
+  }
+
+  function applyLocalDoc(next: MapsDocument) {
+    if (saveConflictRef.current) return;
+    return setLocalDoc(next);
   }
 
   function mergeServerMeta(updated: Job) {
@@ -546,6 +708,14 @@ export function MapsTab() {
     });
   }
 
+  async function renameCurrentJob(id: string, name: string): Promise<Job> {
+    await persistCurrentState();
+    const updated = await renameJob(id, name);
+    mergeServerMeta(updated);
+    saveAckJob.current = updated;
+    return updated;
+  }
+
   function reconcileServerJob(updated: Job) {
     const remote = documentFromResult(updated.result);
     const revision = Number(updated.result?.stateRevision);
@@ -553,7 +723,8 @@ export function MapsTab() {
       mergeServerMeta(updated);
       return;
     }
-    saveAckJob.current = updated;
+    const baseRevision = saveQueue.current?.revision;
+    if (baseRevision == null || revision >= baseRevision) saveAckJob.current = updated;
     saveQueue.current?.reconcile({ document: remote, revision });
   }
 
@@ -566,11 +737,11 @@ export function MapsTab() {
     const currentJob = jobRef.current;
     if (!currentJob) return;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveQueue.current?.markDirty();
     const scheduledId = currentJob.id;
     const run = () => {
       saveTimer.current = null;
       if (jobRef.current?.id !== scheduledId) return;
-      saveQueue.current?.markDirty();
       void saveQueue.current?.flush().catch(() => undefined);
     };
     if (immediate) run();
@@ -597,38 +768,66 @@ export function MapsTab() {
     if (!current) return null;
     const cam = mapRef.current?.getCamera();
     if (!cam) return current;
-    const slidesNext = current.slides.map((slide) => {
-      if (slide.id !== slideId) return slide;
-      return activeAudienceRef.current === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, camera: cam } } : { ...slide, camera: cam };
-    });
-    return applyLocalDoc({ ...current, slides: slidesNext }) ?? current;
+    return applyLocalDoc(withSlideCamera(current, slideId, activeAudienceRef.current, cam)) ?? current;
   }
 
-  async function captureThumb(slideId: string) {
+  async function captureThumb(slideId: string, retriesLeft = 1) {
+    if (saveConflictRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
     const audience = activeAudienceRef.current;
     const slide = docRef.current?.slides.find((s) => s.id === slideId);
     const view = slide ? slideForAudience(slide, audience) : null;
-    if (!view) return;
+    if (!slide || !view) return;
     const token = ++thumbnailToken.current;
-    const fingerprint = JSON.stringify({ slideId, audience, style: view.style, camera: view.camera, highlights: view.highlights, churches: view.churches, hiddenLayers: view.hiddenLayers, hillshade: view.hillshade, isolate: view.isolate });
+    const gate = () =>
+      shouldPublishThumb({
+        frozen: !!saveConflictRef.current,
+        tokenStillValid: token === thumbnailToken.current,
+        sameJob: jobRef.current?.id === currentJob.id,
+        sameView: activeRef.current === slideId && activeAudienceRef.current === audience,
+      });
+    const fingerprintOf = (s: MapsSlide) => thumbnailFingerprint(slideId, audience, slideForAudience(s, audience), thumbnailGeometryRef.current);
+    const fingerprint = fingerprintOf(slide);
+    const matchesFingerprint = () => {
+      const latest = docRef.current?.slides.find((item) => item.id === slideId);
+      return !!latest && fingerprintOf(latest) === fingerprint;
+    };
     await mapRef.current?.waitUntilIdle(view.style);
-    if (token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
+    if (!gate()) return;
     const blob = await mapRef.current?.captureBlob();
-    if (!blob || token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
-    const latest = docRef.current?.slides.find((item) => item.id === slideId);
-    if (!latest || JSON.stringify({ slideId, audience, style: slideForAudience(latest, audience).style, camera: slideForAudience(latest, audience).camera, highlights: slideForAudience(latest, audience).highlights, churches: slideForAudience(latest, audience).churches, hiddenLayers: slideForAudience(latest, audience).hiddenLayers, hillshade: slideForAudience(latest, audience).hillshade, isolate: slideForAudience(latest, audience).isolate }) !== fingerprint) return;
-    const hillshade = view?.hillshade === true;
-    const stamped = await stampOsm(blob, hillshade, view?.style);
-    if (token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
-    const updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience });
+    if (!blob || !gate() || !matchesFingerprint()) return;
+    const hillshade = view.hillshade === true;
+    const stamped = await stampOsm(blob, hillshade, view.style);
+    if (!gate() || !matchesFingerprint()) return;
+    let updated: Job;
+    try {
+      updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: saveQueue.current?.revision ?? undefined });
+    } catch (err) {
+      if (err instanceof MapsStaleThumbnailError && retriesLeft > 0) {
+        try {
+          await saveQueue.current?.flush();
+        } catch {
+          return;
+        }
+        const queueRevision = saveQueue.current?.revision;
+        if (typeof queueRevision === "number" && queueRevision >= err.stateRevision) {
+          await captureThumb(slideId, retriesLeft - 1).catch((retryErr) => {
+            if (retryErr instanceof MapsStaleThumbnailError) return;
+            setError(retryErr instanceof Error ? retryErr.message : String(retryErr));
+          });
+        }
+        return;
+      }
+      throw err;
+    }
+    if (!shouldReconcileThumb({ frozen: !!saveConflictRef.current, sameJob: jobRef.current?.id === currentJob.id })) return;
     reconcileServerJob(updated);
   }
 
   async function flushAndSave(immediate = true) {
     const id = activeRef.current;
-    if (!id || previewingRef.current) return;
+    if (!id || previewingRef.current || saveConflictRef.current) return;
     const next = writeCameraInto(id);
     const slide = next?.slides.find((item) => item.id === id);
     if (slide) await mapRef.current?.waitUntilIdle(slideForAudience(slide, activeAudienceRef.current).style);
@@ -646,6 +845,7 @@ export function MapsTab() {
     const requestedAudience = opts?.audience ?? activeAudienceRef.current;
     const nextAudience: MapsAudience = requestedAudience === "cg" && target?.cg ? "cg" : "lw";
     if (nextId === activeRef.current && nextAudience === activeAudienceRef.current) return;
+    flushPendingOverride();
     if (previewingRef.current) stopPreview(true);
     const prev = activeRef.current;
     if (prev && opts?.flush !== false) {
@@ -687,18 +887,33 @@ export function MapsTab() {
   function onCameraCommit(camera: MapsCamera) {
     const current = docRef.current;
     const id = activeRef.current;
-    if (!current || !id || previewingRef.current || saveConflict) return;
-    const slidesNext = current.slides.map((slide) => {
-      if (slide.id !== id) return slide;
-      return activeAudienceRef.current === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, camera } } : { ...slide, camera };
-    });
-    patchDoc({ ...current, slides: slidesNext });
+    if (!current || !id) return;
+    const next = commitCamera(current, id, activeAudienceRef.current, camera, { frozen: !!saveConflictRef.current, previewing: previewingRef.current });
+    if (next) patchDoc(next);
+  }
+
+  function revealMovieGuard(churches: MapsChurch[]): Partial<MapsSlide> {
+    if (!activeView?.revealMovie) return {};
+    return churches.some((c) => c.kind === "landmark" && c.reveal) ? {} : { revealMovie: undefined };
   }
 
   function updateActive(partial: Partial<MapsSlide>) {
     const current = docRef.current;
     const id = activeRef.current;
     if (!current || !id) return;
+    if (partial.highlights !== undefined) {
+      const highlights = partial.highlights;
+      const slide = current.slides.find((item) => item.id === id);
+      const view = activeAudienceRef.current === "cg" && slide?.cg ? slide.cg : slide;
+      const colours = partial.highlightColours !== undefined ? partial.highlightColours : view?.highlightColours;
+      partial = {
+        ...partial,
+        highlights,
+        highlightColours: pruneHighlightColours(highlights, colours),
+        ...(highlights.length === 0 ? { isolate: undefined } : {}),
+      };
+      if (selectedHighlight && !highlights.includes(selectedHighlight)) setSelectedHighlight(null);
+    }
     patchDoc({
       ...current,
       slides: current.slides.map((slide) => {
@@ -713,6 +928,7 @@ export function MapsTab() {
   }
 
   function splitCg() {
+    flushPendingOverride();
     if (!active) return;
     const source = slideForAudience(active, "lw");
     const camera = mapRef.current?.getCgCamera(active.cgShiftX) || { ...source.camera };
@@ -721,6 +937,7 @@ export function MapsTab() {
         camera,
         style: source.style,
         highlights: [...source.highlights],
+        highlightColours: source.highlightColours ? { ...source.highlightColours } : undefined,
         churches: source.churches.map((church) => ({ ...church })),
         isolate: source.isolate,
       },
@@ -731,6 +948,7 @@ export function MapsTab() {
   }
 
   function mergeCg() {
+    flushPendingOverride();
     if (!active) return;
     const current = docRef.current;
     if (!current) return;
@@ -763,6 +981,11 @@ export function MapsTab() {
     patchDoc({ ...current, cachedCountries: nextSelected });
     const adding = nextSelected.some((item) => item.toUpperCase() === code.toUpperCase());
     if (!adding) return;
+    void loadAdmin1(code).then((data) => {
+      if (!data) return;
+      setNamesTick((n) => n + 1);
+      setLogs((prev) => [...prev, `Regions ready for ${code}.`]);
+    });
     const prefetch: Promise<void> = prefetchMapsTiles({ countries: [code], maxzoom: 8 })
       .then((stats) => {
         setLogs((prev) => [...prev, `Cached ${code}: ${stats.cached + stats.fetched} tiles.`]);
@@ -853,6 +1076,7 @@ export function MapsTab() {
   }
 
   function removeSlide() {
+    flushPendingOverride();
     const current = docRef.current;
     if (!current || !active || current.slides.length < 2 || locked) return;
     if (!window.confirm(`Remove slide “${active.title}”?`)) return;
@@ -903,8 +1127,121 @@ export function MapsTab() {
   }
 
   function openPin(id: string) {
+    setSelectedHighlight(null);
     setSelectedPin(id);
     setInspTab("properties");
+  }
+
+  function openHighlight(code: string) {
+    if (code !== selectedHighlight) flushPendingOverride();
+    setSelectedPin(null);
+    setSelectedPins([]);
+    setSelectedHighlight(code);
+    setInspTab("properties");
+  }
+
+  function applyHighlightOverride(target: PendingHighlightOverride) {
+    if (!isHighlightHex(target.value)) return;
+    const colour = normaliseHighlightColour(target.value);
+    const current = docRef.current;
+    if (!current) return;
+    const slide = current.slides.find((item) => item.id === target.slideId);
+    if (!slide) return;
+    const view = target.audience === "cg" ? slide.cg : slide;
+    if (!view || !view.highlights.includes(target.code)) return;
+    if (view.highlightColours?.[target.code] === colour) return;
+    const highlightColours = pruneHighlightColours(view.highlights, { ...(view.highlightColours || {}), [target.code]: colour });
+    patchDoc({
+      ...current,
+      slides: current.slides.map((item) => {
+        if (item.id !== target.slideId) return item;
+        if (target.audience === "cg") {
+          if (!item.cg) return item;
+          return { ...item, cg: { ...item.cg, highlightColours } };
+        }
+        return { ...item, highlightColours };
+      }),
+    });
+  }
+
+  function flushPendingOverride() {
+    if (overrideDebounceRef.current) {
+      clearTimeout(overrideDebounceRef.current);
+      overrideDebounceRef.current = null;
+    }
+    const pending = pendingOverrideRef.current;
+    pendingOverrideRef.current = null;
+    if (pending) applyHighlightOverride(pending);
+  }
+
+  function commitGlobalColourValue(value: string) {
+    if (colourDebounceRef.current) {
+      clearTimeout(colourDebounceRef.current);
+      colourDebounceRef.current = null;
+    }
+    pendingColourRef.current = null;
+    const colour = isHighlightHex(value) ? normaliseHighlightColour(value) : DEFAULT_HIGHLIGHT_COLOUR;
+    setColourText(colour);
+    if (colour === highlightColour) return;
+    void putSettings({ highlightColour: colour })
+      .then(() => refreshHighlightColour())
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }
+  commitGlobalColourRef.current = commitGlobalColourValue;
+
+  function scheduleGlobalColour(value: string) {
+    setColourText(value);
+    if (colourDebounceRef.current) clearTimeout(colourDebounceRef.current);
+    pendingColourRef.current = value;
+    colourDebounceRef.current = setTimeout(() => {
+      colourDebounceRef.current = null;
+      commitGlobalColourValue(value);
+    }, COLOUR_DEBOUNCE_MS);
+  }
+
+  function writeHighlightOverride(code: string, value: string) {
+    const slideId = activeRef.current;
+    if (!slideId || !isHighlightHex(value)) return;
+    const colour = normaliseHighlightColour(value);
+    setOverrideText(colour);
+    applyHighlightOverride({ slideId, audience: activeAudienceRef.current, code, value });
+  }
+
+  function scheduleOverrideColour(value: string) {
+    const slideId = activeRef.current;
+    if (!slideId || !selectedHighlight) return;
+    setOverrideText(value);
+    if (overrideDebounceRef.current) clearTimeout(overrideDebounceRef.current);
+    pendingOverrideRef.current = { slideId, audience: activeAudienceRef.current, code: selectedHighlight, value };
+    overrideDebounceRef.current = setTimeout(() => {
+      overrideDebounceRef.current = null;
+      const pending = pendingOverrideRef.current;
+      pendingOverrideRef.current = null;
+      if (pending) applyHighlightOverride(pending);
+    }, COLOUR_DEBOUNCE_MS);
+  }
+
+  function commitOverrideColour() {
+    if (overrideDebounceRef.current) {
+      clearTimeout(overrideDebounceRef.current);
+      overrideDebounceRef.current = null;
+    }
+    const pending = pendingOverrideRef.current;
+    pendingOverrideRef.current = null;
+    if (pending) {
+      applyHighlightOverride(pending);
+      if (isHighlightHex(pending.value)) setOverrideText(normaliseHighlightColour(pending.value));
+      return;
+    }
+    if (selectedHighlight) writeHighlightOverride(selectedHighlight, overrideText);
+  }
+
+  function clearHighlightOverride(code: string) {
+    if (!activeView) return;
+    const next = { ...(activeView.highlightColours || {}) };
+    delete next[code];
+    updateActive({ highlightColours: pruneHighlightColours(activeView.highlights, next) });
+    setOverrideText(highlightColour);
   }
 
   function beginSlideRename(slide: MapsSlide) {
@@ -971,7 +1308,8 @@ export function MapsTab() {
     if (!activeView || selectedPins.length === 0 || locked) return;
     if (!window.confirm(`Remove ${selectedPins.length} selected object${selectedPins.length === 1 ? "" : "s"}?`)) return;
     const selected = new Set(selectedPins);
-    updateActive({ churches: activeView.churches.filter((church) => !selected.has(church.id)) });
+    const churches = activeView.churches.filter((church) => !selected.has(church.id));
+    updateActive({ churches, ...revealMovieGuard(churches) });
     if (selectedPin && selected.has(selectedPin)) setSelectedPin(null);
     setSelectedPins([]);
   }
@@ -979,16 +1317,23 @@ export function MapsTab() {
   function copySelectedPins() {
     if (!activeView || !selectedPins.length) return;
     const selected = new Set(selectedPins);
-    setObjectClipboard(activeView.churches.filter((church) => selected.has(church.id)).map((church) => ({ ...church })));
+    setObjectClipboard({
+      churches: activeView.churches.filter((church) => selected.has(church.id)).map((church) => ({ ...church })),
+      sourceZoom: activeView.camera.zoom,
+    });
   }
 
   function pasteObjects(toAllSlides = false) {
-    if (!objectClipboard.length || !doc || locked) return;
+    if (!objectClipboard.churches.length || !doc || locked) return;
     const targets = toAllSlides ? new Set(pasteTargets) : new Set([active?.id]);
     const slides = doc.slides.map((slide) => {
       if (!targets.has(slide.id)) return slide;
+      const targetView = activeAudience === "cg" && slide.cg ? slide.cg : slide;
+      const targetZoom = targetView.camera.zoom;
       const copies: MapsChurch[] = [];
-      for (const church of objectClipboard) copies.push({ ...church, id: nextPinId([...slide.churches, ...copies]) });
+      for (const rebased of pasteRebase(objectClipboard, targetZoom)) {
+        copies.push({ ...rebased, id: nextPinId([...slide.churches, ...copies]) });
+      }
       if (activeAudience === "cg" && slide.cg) return { ...slide, cg: { ...slide.cg, churches: [...slide.cg.churches, ...copies] } };
       return { ...slide, churches: [...slide.churches, ...copies] };
     });
@@ -1090,13 +1435,39 @@ export function MapsTab() {
     setPreviewView({
       ...view,
       camera,
-      cg: { camera, style: view.style, highlights: view.highlights, churches: view.churches },
+      cg: {
+        camera,
+        style: view.style,
+        highlights: view.highlights,
+        highlightColours: view.highlightColours,
+        churches: view.churches,
+        isolate: view.isolate,
+      },
     });
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     if (previewAbort.current || previewRun.current !== run) return;
     mapRef.current?.jumpTo(camera);
     await new Promise((resolve) => window.setTimeout(resolve, 75));
     if (!previewAbort.current && previewRun.current === run) await mapRef.current?.waitUntilIdle(view.style);
+  }
+
+  async function crossfadeTo(toView: MapsSlide, duration: number, run: number) {
+    const blob = await mapRef.current?.capturePreviewBlob();
+    if (!blob || previewAbort.current || previewRun.current !== run) return;
+    clearDissolveFrame();
+    const url = URL.createObjectURL(blob);
+    dissolveUrl.current = url;
+    try {
+      setDissolveFrame({ url, fading: false, duration });
+      await applyPreviewView(toView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      if (previewAbort.current || previewRun.current !== run) return;
+      setDissolveFrame({ url, fading: true, duration });
+      await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, duration * 1000)));
+    } finally {
+      clearDissolveFrame(url);
+    }
   }
 
   async function previewLink(link: MapsLink, from: MapsSlide, to: MapsSlide) {
@@ -1109,39 +1480,43 @@ export function MapsTab() {
       return;
     }
     if (link.kind === "dissolve") {
-      const blob = await mapRef.current?.capturePreviewBlob();
-      if (!blob || previewAbort.current || previewRun.current !== run) return;
-      clearDissolveFrame();
-      const url = URL.createObjectURL(blob);
-      dissolveUrl.current = url;
-      setDissolveFrame({ url, fading: false, duration: link.duration });
-      await applyPreviewView(toView, run);
-      if (previewAbort.current || previewRun.current !== run) return;
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      setDissolveFrame({ url, fading: true, duration: link.duration });
-      await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, link.duration * 1000)));
-      clearDissolveFrame(url);
+      await crossfadeTo(toView, link.duration, run);
       return;
     }
     if (link.kind === "movie") {
-      await mapRef.current?.animateHop({
-        from: fromView.camera,
-        to: toView.camera,
-        durationMs: link.duration * 1000,
-        easing: link.easing,
-        routePoints: link.route?.points,
-        curve: link.curve,
-        flyZoom: link.flyZoom,
-        easeIn: link.easeIn,
-        easeOut: link.easeOut,
-        flight: link.flight,
-        fromObjects: fromView.churches,
-        toObjects: toView.churches,
-        objectTransition: link.objectTransition,
-        destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
-        width: Math.max(authoredSurfaceWidth(from, audience), authoredSurfaceWidth(to, audience)),
-      });
-      if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
+      await applyPreviewView(fromView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
+      try {
+        await mapRef.current?.animateHop({
+          from: fromView.camera,
+          to: toView.camera,
+          durationMs: link.duration * 1000,
+          easing: link.easing,
+          routePoints: link.route?.points,
+          curve: link.curve,
+          flyZoom: link.flyZoom,
+          easeIn: link.easeIn,
+          easeOut: link.easeOut,
+          flight: link.flight,
+          fromObjects: fromView.churches,
+          toObjects: toView.churches,
+          objectTransition: link.objectTransition,
+          destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
+          width: hopSurfaceWidth(from, to, audience),
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        stopPreview(true);
+        return;
+      }
+      if (previewAbort.current || previewRun.current !== run) return;
+      if (isolateDissolveNeeded(fromView, toView)) {
+        await applyPreviewView(plainIsolateTarget(toView), run);
+        if (previewAbort.current || previewRun.current !== run) return;
+        await crossfadeTo(toView, link.duration || 1, run);
+      } else {
+        await applyPreviewView(toView, run);
+      }
       return;
     }
     await mapRef.current?.easeTo(toView.camera, link.duration * 1000);
@@ -1159,7 +1534,13 @@ export function MapsTab() {
     previewAbort.current = false;
     savedCamera.current = mapRef.current?.getCamera() || from.camera;
     setPreviewing(true);
-    await previewLink(link, from, to);
+    try {
+      await previewLink(link, from, to);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      stopPreview(true);
+      return;
+    }
     if (previewAbort.current) return;
     if (restore) stopPreview(true);
     else setPreviewing(false);
@@ -1189,7 +1570,13 @@ export function MapsTab() {
       const to = current.slides[i + 1];
       const link = linkBetween(current.links, from.id, to.id);
       if (!link) continue;
-      await previewLink(link, from, to);
+      try {
+        await previewLink(link, from, to);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        stopPreview(true);
+        return;
+      }
     }
     if (previewAbort.current) return;
     setPreviewing(false);
@@ -1197,6 +1584,49 @@ export function MapsTab() {
     const last = current.slides[current.slides.length - 1];
     setPreviewView(null);
     await selectSlide(last.id, { flush: false, audience: activeAudienceRef.current });
+  }
+
+  function closeManual() {
+    setManualMode(null);
+    addButtonRef.current?.focus();
+  }
+
+  async function onManualRows(rows: MapsBootstrapRow[], mode: ManualMode) {
+    if (!job || !rows.length || manualBusy) return;
+    const target = mode === "pins" ? active : null;
+    if (mode === "pins" && !target) {
+      setError("Select a slide first.");
+      return;
+    }
+    const targetJobId = job.id;
+    setError(null);
+    setManualBusy(true);
+    const beforeIds = new Set((docRef.current?.slides || []).map((slide) => slide.id));
+    try {
+      await persistCurrentState();
+      if (jobRef.current?.id !== targetJobId) return;
+      const started = await bootstrapMapsRows(
+        targetJobId,
+        target ? { rows, targetSlideId: target.id, audience: activeAudience } : { rows }
+      );
+      setJob(started);
+      const done = await pollJob(started.id, (tick) => {
+        setLogs(tick.logs);
+        setJob(tick);
+      });
+      if (jobRef.current?.id !== targetJobId) return;
+      if (done.status === "error") return;
+      reconcileServerJob(done);
+      closeManual();
+      if (mode === "slides") {
+        const created = (docRef.current?.slides || []).find((slide) => !beforeIds.has(slide.id));
+        if (created) void selectSlide(created.id, { flush: false });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setManualBusy(false);
+    }
   }
 
   async function onCsv(file: File, mode: "append" | "replace" | "pins") {
@@ -1264,6 +1694,7 @@ export function MapsTab() {
     setError(null);
     setSessionBusy(true);
     try {
+      flushPendingOverride();
       if (saveTimer.current) {
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;
@@ -1314,6 +1745,13 @@ export function MapsTab() {
       if (exportAbort.current) throw new Error("Export cancelled.");
     };
     try {
+      throwIfCancelled();
+      const readyColour = await Promise.race([
+        highlightColourReady(),
+        new Promise<string>((resolve) => setTimeout(() => resolve(highlightColour), 2000)),
+      ]);
+      throwIfCancelled();
+      setHighlightColour(readyColour);
       await flushAndSave(true);
       throwIfCancelled();
       const id = jobRef.current?.id;
@@ -1329,6 +1767,11 @@ export function MapsTab() {
       throwIfCancelled();
 
       const slidesById = new Map((docRef.current?.slides || []).map((slide) => [slide.id, slide]));
+      const coloursOf = (slideId: string, audience: MapsAudience = "lw") => {
+        const slide = slidesById.get(slideId.replace(/__landing$/, ""));
+        return slide ? slideForAudience(slide, audience).highlightColours : undefined;
+      };
+      const stamp = docRef.current?.attribution !== "credits";
       const linkHasSlides = (link: MapsLink) => slidesById.has(link.from) && slidesById.has(link.to);
       const lwMovieLinks = (docRef.current?.links || []).filter(
         (link) => link.kind === "movie" && linkHasSlides(link)
@@ -1361,10 +1804,12 @@ export function MapsTab() {
         terrain: boolean;
         phase: string;
       }): Promise<void> => {
+        const scale = exportScale(opts.width);
+        const delta = exportZoomDelta(opts.width);
         const tilePlan = await planMapsTiles({
-          cameras: opts.cameras,
-          width: opts.width,
-          height: opts.height,
+          cameras: opts.cameras.map((c) => ({ ...c, zoom: c.zoom + delta })),
+          width: opts.width / scale,
+          height: opts.height / scale,
           maxzoom: 14,
           terrain: opts.terrain,
         });
@@ -1406,6 +1851,23 @@ export function MapsTab() {
         setLogs((prev) => [...prev, `Cached ${cached + fetched} / ${total} tiles (${failed} failed).`]);
       };
 
+      const postIsolatePair = async (
+        pair: { base: Blob; pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] },
+        target: { kind: "still" | "plate"; slideId?: string; plateId?: string; audience?: "lw" | "cg" },
+        width: number,
+        height: number
+      ) => {
+        reconcileServerJob(await postMapsPng(id, pair.base, target));
+        for (const [k, piece] of pair.pieces.entries()) {
+          throwIfCancelled();
+          reconcileServerJob(await postMapsPng(id, piece.blob, { ...target, variant: "region", index: k }));
+        }
+        throwIfCancelled();
+        const manifest = { width, height, pieces: pair.pieces.map(({ blob: _blob, ...rest }) => rest) };
+        const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/json" });
+        reconcileServerJob(await postMapsPng(id, manifestBlob, { ...target, variant: "regions" }));
+      };
+
       const makeFrameTracker = (phase: string) => {
         const frameTimes: number[] = [];
         let lastFrameAt = performance.now();
@@ -1436,13 +1898,15 @@ export function MapsTab() {
           hillshade: (still.hillshade as boolean | undefined) === true,
           isolate: still.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
+          stamp,
+          highlightColour: readyColour,
+          highlightColours: coloursOf(still.slideId),
         };
-        if (still.isolate && still.highlights.length) {
+        if (still.highlights.length) {
           const pair = await captureIsolatePair(exportOpts);
           throwIfCancelled();
           if (pair) {
-            reconcileServerJob(await postMapsPng(id, pair.base, { kind: "still", slideId: still.slideId }));
-            reconcileServerJob(await postMapsPng(id, pair.country, { kind: "still", slideId: still.slideId, variant: "country" }));
+            await postIsolatePair(pair, { kind: "still", slideId: still.slideId }, exportOpts.width, exportOpts.height);
           }
         } else {
           const blob = await captureExportRaster(exportOpts);
@@ -1455,9 +1919,10 @@ export function MapsTab() {
       for (let i = 0; i < plan.plates.length; i++) {
         const plate = plan.plates[i];
         throwIfCancelled();
-        const blob = await captureExportRaster({
+        const plateOpts = {
           width: plate.plateW,
           height: plate.plateH,
+          surfaceWidth: plateSurfaceWidth(plate.slideIds, slidesById, plate.plateW),
           camera: plate.camera,
           styleId: plate.style as MapsSlide["style"],
           highlights: plate.highlights,
@@ -1465,9 +1930,21 @@ export function MapsTab() {
           hillshade: (plate.hillshade as boolean | undefined) === true,
           isolate: plate.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
-        });
-        throwIfCancelled();
-        reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId }));
+          stamp,
+          highlightColour: readyColour,
+          highlightColours: coloursOf(plate.slideIds[0] || ""),
+        };
+        if (plate.highlights.length) {
+          const pair = await captureIsolatePair(plateOpts);
+          throwIfCancelled();
+          if (pair) {
+            await postIsolatePair(pair, { kind: "plate", plateId: plate.plateId }, plateOpts.width, plateOpts.height);
+          }
+        } else {
+          const blob = await captureExportRaster(plateOpts);
+          throwIfCancelled();
+          reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId }));
+        }
         stepIndex += 1;
         setStepProgress("Rendering plates", i + 1, plan.plates.length);
       }
@@ -1485,13 +1962,20 @@ export function MapsTab() {
             hillshade: (still.hillshade as boolean | undefined) === true,
             isolate: still.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
+            stamp,
+            highlightColour: readyColour,
+            highlightColours: coloursOf(still.slideId, "cg"),
           };
-          if (still.isolate && still.highlights.length) {
+          if (still.highlights.length) {
             const pair = await captureIsolatePair(exportOpts);
             throwIfCancelled();
             if (pair) {
-              reconcileServerJob(await postMapsPng(id, pair.base, { kind: "still", slideId: still.slideId, audience: "cg" }));
-              reconcileServerJob(await postMapsPng(id, pair.country, { kind: "still", slideId: still.slideId, audience: "cg", variant: "country" }));
+              await postIsolatePair(
+                pair,
+                { kind: "still", slideId: still.slideId, audience: "cg" },
+                exportOpts.width,
+                exportOpts.height
+              );
             }
           } else {
             const blob = await captureExportRaster(exportOpts);
@@ -1504,9 +1988,10 @@ export function MapsTab() {
         for (let i = 0; i < plan.cg.plates.length; i++) {
           const plate = plan.cg.plates[i];
           throwIfCancelled();
-          const blob = await captureExportRaster({
+          const plateOpts = {
             width: plate.plateW,
             height: plate.plateH,
+            surfaceWidth: CG_W,
             camera: plate.camera,
             styleId: plate.style as MapsSlide["style"],
             highlights: plate.highlights,
@@ -1514,9 +1999,26 @@ export function MapsTab() {
             hillshade: (plate.hillshade as boolean | undefined) === true,
             isolate: plate.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
-          });
-          throwIfCancelled();
-          reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
+            stamp,
+            highlightColour: readyColour,
+            highlightColours: coloursOf(plate.slideIds[0] || "", "cg"),
+          };
+          if (plate.highlights.length) {
+            const pair = await captureIsolatePair(plateOpts);
+            throwIfCancelled();
+            if (pair) {
+              await postIsolatePair(
+                pair,
+                { kind: "plate", plateId: plate.plateId, audience: "cg" },
+                plateOpts.width,
+                plateOpts.height
+              );
+            }
+          } else {
+            const blob = await captureExportRaster(plateOpts);
+            throwIfCancelled();
+            reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
+          }
           stepIndex += 1;
           setStepProgress("Rendering CG plates", i + 1, plan.cg.plates.length);
         }
@@ -1526,7 +2028,7 @@ export function MapsTab() {
         const from = slidesById.get(link.from);
         const to = slidesById.get(link.to);
         if (!from || !to) continue;
-        const width = Math.max(captureWidth(from), captureWidth(to));
+        const width = hopSurfaceWidth(from, to, "lw");
         const height = 1080;
         const fps = 30;
         const count = Math.max(2, Math.round(link.duration * fps));
@@ -1588,6 +2090,9 @@ export function MapsTab() {
           easeOut: link.easeOut,
           flight: link.flight,
           isCancelled: () => exportAbort.current,
+          stamp,
+          highlightColour: readyColour,
+          highlightColours: from.highlightColours,
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
             await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 });
@@ -1603,10 +2108,7 @@ export function MapsTab() {
           if (!baseFrom || !baseTo) continue;
           const from = slideForAudience(baseFrom, "cg");
           const to = slideForAudience(baseTo, "cg");
-          const width = Math.max(
-            authoredSurfaceWidth(baseFrom, "cg"),
-            authoredSurfaceWidth(baseTo, "cg")
-          );
+          const width = hopSurfaceWidth(baseFrom, baseTo, "cg");
           const cropFromX = (width - 1920) / 2 + (baseFrom.cg ? 0 : baseFrom.cgShiftX);
           const cropToX = (width - 1920) / 2 + (baseTo.cg ? 0 : baseTo.cgShiftX);
           const fps = 30;
@@ -1674,6 +2176,9 @@ export function MapsTab() {
               toX: cropToX,
             },
             isCancelled: () => exportAbort.current,
+            stamp,
+            highlightColour: readyColour,
+            highlightColours: from.highlightColours,
             onFrame: async (blob, i, n) => {
               if (exportAbort.current) throw new Error("Export cancelled.");
               await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps, audience: "cg" });
@@ -1685,10 +2190,18 @@ export function MapsTab() {
       throwIfCancelled();
       setProgress(null);
       const latest = docRef.current;
+      const audiences: Array<"lw" | "cg"> = [];
+      if (latest?.exportLw || latest?.exportDsk) audiences.push("lw");
+      if (latest?.exportCg) audiences.push("cg");
+      const credits = stamp
+        ? undefined
+        : creditLines((latest?.slides || []).flatMap((s) => audiences.map((a) => slideForAudience(s, a))));
       const started = await exportMaps(id, {
         exportLw: latest?.exportLw,
         exportCg: latest?.exportCg,
         exportDsk: latest?.exportDsk,
+        exportDir,
+        credits,
       });
       setJob(started);
       const done = await pollJob(started.id, (tick) => {
@@ -1754,7 +2267,7 @@ export function MapsTab() {
       ? autoCruiseZoom(
           activeView.camera,
           nextView.camera,
-          Math.max(authoredSurfaceWidth(active!, activeAudience), authoredSurfaceWidth(nextSlide!, activeAudience))
+          hopSurfaceWidth(active!, nextSlide!, activeAudience)
         )
       : 0;
   const zoomFloor = minZoomForView();
@@ -1767,17 +2280,19 @@ export function MapsTab() {
         <h1>Maps</h1>
         <p className="lede">Author LED-wall cameras, then export Keynote stills. Nothing is created until you start a deck.</p>
         <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
-        <button className="btn" type="button" disabled={sessionBusy} onClick={() => void createDeck()}>
-          New map deck
-        </button>
-        <button
-          className="btn secondary"
-          type="button"
-          disabled={sessionBusy}
-          onClick={() => sessionInput.current?.click()}
-        >
-          Load map session + cache…
-        </button>
+        <div className="actions">
+          <button className="btn" type="button" disabled={sessionBusy} onClick={() => void createDeck()}>
+            New map deck
+          </button>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={sessionBusy}
+            onClick={() => sessionInput.current?.click()}
+          >
+            Load map session + cache…
+          </button>
+        </div>
         <input
           ref={sessionInput}
           type="file"
@@ -1800,6 +2315,7 @@ export function MapsTab() {
         <div className="maps-deck-actions" ref={addMenuRef}>
           <button
             className="btn secondary"
+            ref={addButtonRef}
             type="button"
             disabled={locked}
             aria-expanded={addMenuOpen}
@@ -1808,7 +2324,8 @@ export function MapsTab() {
             title="Add"
             onClick={() => setAddMenuOpen((open) => !open)}
           >
-            ＋
+            <IconPlus />
+            <IconCaret />
           </button>
           {addMenuOpen && (
             <div className="maps-deck-actions-menu" role="group" aria-label="Add">
@@ -1823,24 +2340,47 @@ export function MapsTab() {
               </button>
               <button
                 type="button"
+                title="Key in one entry per slide: a name, optionally a place, a Google Maps link with @lat,lng, or coordinates. Each slide is zoomed to fit what it is."
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  setManualMode("slides");
+                }}
+              >
+                Add slides
+              </button>
+              <button
+                type="button"
+                disabled={!active}
+                title="Key in one entry per pin on the current view: a name, optionally a place or coordinates. Pins keep this slide's zoom."
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  setManualMode("pins");
+                }}
+              >
+                Add pins
+              </button>
+              <button
+                type="button"
+                title="One place per line: Name, then optionally a Google Maps link, coordinates (24.58° N, 73.68° E) and a zoom (z=6.8). A name alone is geocoded. A header row (name,lat,lon,url,zoom,kind) also works."
                 onClick={() => {
                   setAddMenuOpen(false);
                   csvMode.current = "append";
                   csvInput.current?.click();
                 }}
               >
-                Add slides from CSV…
+                Add slides from CSV
               </button>
               <button
                 type="button"
                 disabled={!active}
+                title="One place per line: Name, then optionally a Google Maps link, coordinates (24.58° N, 73.68° E) and a zoom (z=6.8). A name alone is geocoded. A header row (name,lat,lon,url,zoom,kind) also works."
                 onClick={() => {
                   setAddMenuOpen(false);
                   csvMode.current = "pins";
                   csvInput.current?.click();
                 }}
               >
-                Add pins to this view from CSV…
+                Add pins from CSV
               </button>
               <button
                 type="button"
@@ -1851,7 +2391,7 @@ export function MapsTab() {
                   csvInput.current?.click();
                 }}
               >
-                Replace deck from CSV…
+                Replace deck from CSV
               </button>
             </div>
           )}
@@ -1865,7 +2405,8 @@ export function MapsTab() {
             aria-haspopup="true"
             onClick={() => setSessionMenuOpen((open) => !open)}
           >
-            Session ▾
+            Session
+            <IconCaret />
           </button>
           {sessionMenuOpen && (
             <div className="maps-deck-actions-menu" role="group" aria-label="Session">
@@ -1894,7 +2435,7 @@ export function MapsTab() {
         <input
           ref={csvInput}
           type="file"
-          accept=".csv,text/csv"
+          accept=".csv,.txt,text/csv,text/plain"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];
@@ -1947,9 +2488,10 @@ export function MapsTab() {
           aria-pressed={inspectorOpen}
           onClick={() => setInspectorOpen(!inspectorOpen)}
         >
-          <IconLibrary />
+          <IconPanelRight />
         </button>
-        <span className="note">{job.id}</span>
+        <span className={`maps-save-status maps-save-status-${saveStatus}`} aria-live="polite">{SAVE_STATUS_LABEL[saveStatus]}</span>
+        <JobName job={job} onRename={renameCurrentJob} className="note" />
       </div>
       <div className="maps-stylebar">
         <StylePicker
@@ -1969,6 +2511,7 @@ export function MapsTab() {
           >
             <IconLayers />
             {activeHiddenLayers.length ? <span className="maps-layers-count">{activeHiddenLayers.length}</span> : null}
+            <IconCaret />
           </button>
           {layersOpen && (
             <div className="maps-layers-menu" role="group" aria-label="Hide map layers">
@@ -2013,15 +2556,27 @@ export function MapsTab() {
         <div className="notice warning" role="alert">
           <p>This map was changed elsewhere. Your draft is paused until you choose which version to keep.</p>
           <p className="muted">{saveConflict.paths.join(", ")}</p>
-          <button className="btn secondary" type="button" onClick={() => {
-            saveQueue.current?.reloadLatest();
-            setSaveConflict(null);
-          }}>Reload latest</button>
-          <button className="btn" type="button" onClick={() => {
-            setSaveConflict(null);
-            void saveQueue.current?.keepMyChanges();
-          }}>Keep my changes</button>
+          <div className="actions">
+            <button className="btn secondary" type="button" onClick={() => {
+              saveQueue.current?.reloadLatest();
+              setSaveConflict(null);
+            }}>Reload latest</button>
+            <button className="btn" type="button" onClick={() => {
+              setSaveConflict(null);
+              void saveQueue.current?.keepMyChanges();
+            }}>Keep my changes</button>
+          </div>
         </div>
+      )}
+
+      {manualMode && (
+        <ManualEntriesForm
+          key={manualMode}
+          mode={manualMode}
+          busy={locked || manualBusy}
+          onCancel={closeManual}
+          onDone={(payload) => void onManualRows(payload, manualMode)}
+        />
       )}
 
       <div
@@ -2056,7 +2611,7 @@ export function MapsTab() {
                         onClick={() => void selectSlide(slide.id, { audience: "lw" })}
                       >
                         {src ? <img src={`${src}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">{sidePanels || slide.includeSidePanels ? "FW" : "LW"}</span>}
-                        <span className="maps-thumb-view-label">{sidePanels || slide.includeSidePanels ? "FW" : "LW"}</span>
+                        <span className={`maps-thumb-view-label ${sidePanels || slide.includeSidePanels ? "fw" : "lw"}`}>{sidePanels || slide.includeSidePanels ? "FW" : "LW"}</span>
                       </button>
                       <button
                         type="button"
@@ -2066,7 +2621,7 @@ export function MapsTab() {
                         onClick={() => void selectSlide(slide.id, { audience: "cg" })}
                       >
                         {cgSrc ? <img src={`${cgSrc}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">CG</span>}
-                        <span className="maps-thumb-view-label">CG</span>
+                        <span className="maps-thumb-view-label cg">CG</span>
                       </button>
                     </div>
                     {slideTitleControl(slide)}
@@ -2130,8 +2685,8 @@ export function MapsTab() {
             );
           })}
           <div className="maps-nav-actions">
-            <button className="btn secondary" type="button" onClick={addSlide} disabled={locked}>
-              +
+            <button className="btn secondary icon-btn" type="button" onClick={addSlide} disabled={locked} title="Add slide" aria-label="Add slide">
+              <IconPlus />
             </button>
             <button className="btn maps-delete" type="button" onClick={removeSlide} disabled={locked || slides.length < 2} title="Delete slide" aria-label="Delete slide">
               <IconTrash />
@@ -2155,7 +2710,7 @@ export function MapsTab() {
                 camera={renderedView?.camera || active.camera}
                 styleId={renderedView?.style || active.style}
                 highlights={renderedView?.highlights || active.highlights}
-                isolate={renderedView?.isolate || active.isolate}
+                isolate={renderedView ? renderedView.isolate : active.isolate}
                 churches={renderedView?.churches || active.churches}
                 numberPins={outgoing?.kind === "movie"}
                 crop={doc?.crop || "center+cg"}
@@ -2163,15 +2718,24 @@ export function MapsTab() {
                 exportCg={showCgBand(active)}
                 hiddenLayers={slideHiddenLayers(renderedView)}
                 hillshade={renderedView?.hillshade === true}
+                highlightColour={highlightColour}
+                highlightColours={renderedView?.highlightColours}
                 cgShiftX={activeAudience === "cg" ? 0 : active.cgShiftX}
                 authoredWidth={renderedAuthoredWidth}
                 previewing={previewing}
                 selectedPinId={selectedPin}
                 onCameraCommit={onCameraCommit}
+                pickRegions={pickRegions}
                 onToggleCountry={(adm0) => {
                   if (!activeView) return;
                   const has = activeView.highlights.includes(adm0);
                   updateActive({ highlights: has ? activeView.highlights.filter((h) => h !== adm0) : [...activeView.highlights, adm0] });
+                }}
+                onToggleRegion={(adm1) => {
+                  if (!activeView) return;
+                  const id = `A1:${adm1}`;
+                  const has = activeView.highlights.includes(id);
+                  updateActive({ highlights: has ? activeView.highlights.filter((h) => h !== id) : [...activeView.highlights, id] });
                 }}
                 onAddPin={(lat, lon) => {
                   if (!activeView) return;
@@ -2182,13 +2746,20 @@ export function MapsTab() {
                     lon,
                     kind: "dropPin",
                     color: "#c44a42",
+                    showLabel: false,
+                    size: defaultObjectSize("dropPin"),
+                    scaleWithMap: true,
+                    sizeZoom: activeView.camera.zoom,
                   };
                   updateActive({ churches: [...activeView.churches, church] });
                   openPin(church.id);
                 }}
                 onSelectPin={(id) => {
                   if (id) openPin(id);
-                  else setSelectedPin(null);
+                  else {
+                    setSelectedPin(null);
+                    setSelectedHighlight(null);
+                  }
                 }}
                 onEditPin={(id) => {
                   if (!activeView) return;
@@ -2257,18 +2828,30 @@ export function MapsTab() {
                 onClick={() => setInspTab(tab.id)}
               >
                 {tab.label}
-                {tab.id === "pins" && (activeView?.churches.length || 0) > 0 && (
-                  <span className="maps-insp-count">{activeView?.churches.length}</span>
+                {tab.id === "pins" && (activeView?.churches.length || 0) + (activeView?.highlights.length || 0) > 0 && (
+                  <span className="maps-insp-count">
+                    {(activeView?.churches.length || 0) + (activeView?.highlights.length || 0)}
+                  </span>
                 )}
               </button>
             ))}
+            <span
+              className="maps-insp-ind"
+              aria-hidden="true"
+              style={
+                {
+                  "--seg-i": INSPECTOR_TABS.findIndex((t) => t.id === inspTab),
+                  "--seg-n": INSPECTOR_TABS.length,
+                } as CSSProperties
+              }
+            />
           </div>
           {active && (
             <div className="maps-insp-body">
               {inspTab === "properties" && pin && (
                 <>
                   <button className="maps-insp-back" type="button" onClick={() => setSelectedPin(null)}>
-                    ← Camera
+                    <IconArrowLeft /> Camera
                   </button>
                   <div className="cap">Object</div>
                   <label>
@@ -2282,6 +2865,9 @@ export function MapsTab() {
                     />
                   </label>
                   <label>
+                    <span className={`maps-pin-kind kind-${pinKindClass(pin.kind)}`} aria-hidden="true">
+                      <PinKindIcon kind={pin.kind} />
+                    </span>
                     Kind:
                     <select
                       value={pin.kind}
@@ -2289,9 +2875,15 @@ export function MapsTab() {
                       onChange={(event) => {
                         const kind = event.target.value as MapsPinKind;
                         if (kind === "landmark" && !pin.assetId) return;
-                        updateActive({
-                          churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, kind } : c)),
-                        });
+                        const zoom = activeView?.camera.zoom ?? 0;
+                        const churches = (activeView?.churches || []).map((c) =>
+                          c.id === pin.id
+                            ? kind === "landmark"
+                              ? { ...c, kind, sizeZoom: c.sizeZoom ?? zoom }
+                              : { ...c, kind, sizeZoom: c.sizeZoom ?? zoom, reveal: undefined }
+                            : c
+                        );
+                        updateActive({ churches, ...revealMovieGuard(churches) });
                       }}
                     >
                       <option value="dot">Dot</option>
@@ -2301,8 +2893,28 @@ export function MapsTab() {
                       )}
                     </select>
                   </label>
-                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
+                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
+                  <label className="maps-check">
+                    <input
+                      type="checkbox"
+                      checked={!!pin.scaleWithMap}
+                      disabled={locked}
+                      onChange={(event) => {
+                        const zoom = activeView?.camera.zoom ?? 0;
+                        updateActive({
+                          churches: (activeView?.churches || []).map((c) => {
+                            if (c.id !== pin.id) return c;
+                            const defaultSize = defaultObjectSize(c.kind, c.assetWidth);
+                            if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
+                            const size = c.sizeZoom != null ? (c.size || defaultSize) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || defaultSize;
+                            return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, size))), sizeZoom: undefined };
+                          }),
+                        });
+                      }}
+                    />{" "}
+                    Scale with map
+                  </label>
                   {pin.kind === "landmark" && (
                     <>
                       <label className="maps-check">
@@ -2366,7 +2978,8 @@ export function MapsTab() {
                       )}
                     </>
                   )}
-                  <label className="maps-check"><input type="checkbox" checked={pin.showLabel !== false} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
+                  <label className="maps-check"><input type="checkbox" checked={pin.showLabel === true} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
+                  {pin.showLabel === true && <p className="note">Preview only: Keynote sets this label in Amplitude Bold on the red pill.</p>}
                   <label>
                     Colour:
                     <input
@@ -2383,7 +2996,8 @@ export function MapsTab() {
                     type="button"
                     disabled={locked}
                     onClick={() => {
-                      updateActive({ churches: (activeView?.churches || []).filter((c) => c.id !== pin.id) });
+                      const churches = (activeView?.churches || []).filter((c) => c.id !== pin.id);
+                      updateActive({ churches, ...revealMovieGuard(churches) });
                       setSelectedPin(null);
                       setSelectedPins((ids) => ids.filter((id) => id !== pin.id));
                     }}
@@ -2394,204 +3008,268 @@ export function MapsTab() {
               )}
               {inspTab === "properties" && !pin && (
                 <>
-                  <div className="cap">Viewport</div>
-                  {active.cg ? (
-                    <div className="seg">
-                      <button
-                        type="button"
-                        className={activeAudience === "lw" ? "on" : ""}
-                        disabled={locked}
-                        onClick={() => void selectSlide(active.id, { audience: "lw" })}
-                      >
-                        {sidePanels || active.includeSidePanels ? "FW" : "LW"}
-                      </button>
-                      <button
-                        type="button"
-                        className={activeAudience === "cg" ? "on" : ""}
-                        disabled={locked}
-                        onClick={() => void selectSlide(active.id, { audience: "cg" })}
-                      >
-                        CG
-                      </button>
-                      <button type="button" disabled={locked} onClick={mergeCg}>
-                        Merge CG
-                      </button>
-                    </div>
-                  ) : (
-                    <button className="btn secondary" type="button" disabled={locked} onClick={splitCg}>
-                      Split CG viewport
-                    </button>
-                  )}
-                  <div className="cap">Camera</div>
-                  <label>
-                    Title:
-                    <input value={active.title} disabled={locked} onChange={(event) => updateActive({ title: event.target.value })} />
-                  </label>
-                  <AeScrub
-                    label="Latitude"
-                    value={activeView?.camera.lat ?? 0}
-                    min={-MAX_LAT}
-                    max={MAX_LAT}
-                    step={0.01}
-                    digits={4}
-                    disabled={locked}
-                    onChange={(lat) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, lat };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  <AeScrub
-                    label="Longitude"
-                    value={activeView?.camera.lon ?? 0}
-                    min={-180}
-                    max={180}
-                    step={0.01}
-                    digits={4}
-                    disabled={locked}
-                    onChange={(lon) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, lon };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  <AeScrub
-                    label="Zoom"
-                    value={activeView?.camera.zoom ?? zoomFloor}
-                    min={zoomFloor}
-                    max={22}
-                    step={0.1}
-                    slider
-                    disabled={locked}
-                    onChange={(zoom) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, zoom: clampZoom(zoom, zoomFloor) };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  {wrapWarn && <p className="maps-wrap-note">{wrapWarn}</p>}
-                  <AeScrub
-                    label="Pitch"
-                    value={activeView?.camera.pitch ?? 0}
-                    min={0}
-                    max={60}
-                    step={1}
-                    digits={0}
-                    disabled={locked}
-                    onChange={(pitch) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, pitch };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  <AeScrub
-                    label="Bearing"
-                    value={activeView?.camera.bearing ?? 0}
-                    min={-180}
-                    max={180}
-                    step={1}
-                    digits={0}
-                    disabled={locked}
-                    onChange={(bearing) => {
-                      if (!activeView) return;
-                      const camera = { ...activeView.camera, bearing };
-                      updateActive({ camera });
-                      mapRef.current?.jumpTo(camera);
-                    }}
-                    onCommit={() => fireAndForgetSave()}
-                  />
-                  {activeAudience === "lw" && (
+                  {selectedHighlight ? (
                     <>
-                      <AeScrub
-                        label="CG shift X"
-                        value={active.cgShiftX}
-                        min={-CG_SHIFT_MAX}
-                        max={CG_SHIFT_MAX}
-                        step={1}
-                        digits={0}
-                        disabled={locked}
-                        onChange={(dx) => updateActive(clampCgShift(dx, 0))}
-                        onCommit={() => fireAndForgetSave()}
-                      />
-                      <label className="maps-check" title="Off (default) captures the 3840×1080 LED centre so Keynote side-panel art can show. On fills the 7680×1080 wall.">
-                        <input
-                          type="checkbox"
-                          checked={active.includeSidePanels === true}
-                          disabled={locked}
-                          onChange={(event) => updateActive({ includeSidePanels: event.target.checked })}
-                        />
-                        Include side panels for render
+                      <button className="maps-insp-back" type="button" onClick={() => setSelectedHighlight(null)}>
+                        <IconArrowLeft /> Camera
+                      </button>
+                      <div className="cap">Highlight</div>
+                      <label>
+                        Name
+                        <span>{highlightName(selectedHighlight)}</span>
                       </label>
+                      <HighlightColourFields
+                        colour={overrideText || highlightColour}
+                        text={overrideText}
+                        disabled={locked}
+                        onColour={scheduleOverrideColour}
+                        onText={setOverrideText}
+                        onCommit={commitOverrideColour}
+                      />
+                      {activeView?.highlightColours?.[selectedHighlight] && (
+                        <button className="btn secondary" type="button" disabled={locked} onClick={() => clearHighlightOverride(selectedHighlight)}>
+                          Use global colour
+                        </button>
+                      )}
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        disabled={locked}
+                        onClick={() => {
+                          updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== selectedHighlight) });
+                          setSelectedHighlight(null);
+                        }}
+                      >
+                        Remove highlight
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                  <InspSection id="viewport" title="Viewport">
+                    {active.cg ? (
+                      <div className="maps-aud-row">
+                        <SlidingSeg
+                          value={activeAudience}
+                          disabled={locked}
+                          ariaLabel="Viewport"
+                          options={[
+                            { id: "lw", label: sidePanels || active.includeSidePanels ? "FW" : "LW", className: "aud-lw" },
+                            { id: "cg", label: "CG", className: "aud-cg" },
+                          ]}
+                          onChange={(id) => void selectSlide(active.id, { audience: id as MapsAudience })}
+                        />
+                        <div className="seg">
+                          <button type="button" disabled={locked} onClick={mergeCg}>
+                            Merge CG
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button className="btn secondary" type="button" disabled={locked} onClick={splitCg}>
+                        Split CG viewport
+                      </button>
+                    )}
+                  </InspSection>
+                  <InspSection id="camera" title="Camera">
+                    <label>
+                      Title:
+                      <input value={active.title} disabled={locked} onChange={(event) => updateActive({ title: event.target.value })} />
+                    </label>
+                    <AeScrub
+                      label="Latitude"
+                      value={activeView?.camera.lat ?? 0}
+                      min={-MAX_LAT}
+                      max={MAX_LAT}
+                      step={0.01}
+                      digits={4}
+                      disabled={locked}
+                      onChange={(lat) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, lat };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    <AeScrub
+                      label="Longitude"
+                      value={activeView?.camera.lon ?? 0}
+                      min={-180}
+                      max={180}
+                      step={0.01}
+                      digits={4}
+                      disabled={locked}
+                      onChange={(lon) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, lon };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    <AeScrub
+                      label="Zoom"
+                      value={activeView?.camera.zoom ?? zoomFloor}
+                      min={zoomFloor}
+                      max={22}
+                      step={0.1}
+                      slider
+                      disabled={locked}
+                      onChange={(zoom) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, zoom: clampZoom(zoom, zoomFloor) };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    {wrapWarn && <p className="maps-wrap-note">{wrapWarn}</p>}
+                    <AeScrub
+                      label="Pitch"
+                      value={activeView?.camera.pitch ?? 0}
+                      min={0}
+                      max={60}
+                      step={1}
+                      digits={0}
+                      disabled={locked}
+                      onChange={(pitch) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, pitch };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    <AeScrub
+                      label="Bearing"
+                      value={activeView?.camera.bearing ?? 0}
+                      min={-180}
+                      max={180}
+                      step={1}
+                      digits={0}
+                      disabled={locked}
+                      onChange={(bearing) => {
+                        if (!activeView) return;
+                        const camera = { ...activeView.camera, bearing };
+                        updateActive({ camera });
+                        mapRef.current?.jumpTo(camera);
+                      }}
+                      onCommit={() => fireAndForgetSave()}
+                    />
+                    {activeAudience === "lw" && (
+                      <>
+                        <AeScrub
+                          label="CG shift X"
+                          value={active.cgShiftX}
+                          min={-CG_SHIFT_MAX}
+                          max={CG_SHIFT_MAX}
+                          step={1}
+                          digits={0}
+                          disabled={locked}
+                          onChange={(dx) => updateActive(clampCgShift(dx, 0))}
+                          onCommit={() => fireAndForgetSave()}
+                        />
+                        <label className="maps-check" title="Off (default) captures the 3840×1080 LED centre so Keynote side-panel art can show. On fills the 7680×1080 wall.">
+                          <input
+                            type="checkbox"
+                            checked={active.includeSidePanels === true}
+                            disabled={locked}
+                            onChange={(event) => updateActive({ includeSidePanels: event.target.checked })}
+                          />
+                          Include side panels for render
+                        </label>
+                      </>
+                    )}
+                  </InspSection>
                     </>
                   )}
+                  <div className="maps-hl">
+                    <InspSection id="regions" title="Selected regions">
+                      <SlidingSeg
+                        value={pickRegions ? "regions" : "countries"}
+                        disabled={locked}
+                        ariaLabel="Pick mode"
+                        options={[
+                          { id: "countries", label: "Countries" },
+                          { id: "regions", label: "Regions" },
+                        ]}
+                        onChange={(id) => setPickRegions(id === "regions")}
+                      />
+                      <div className="maps-pick-hint note">
+                        {pickRegions && regionsLoading
+                          ? "Loading regions…"
+                          : pickRegions && regionCameraCountries.length === 0
+                            ? "Pan a country into view to pick its regions."
+                            : null}
+                      </div>
+                      {!selectedHighlight && (
+                        <HighlightColourFields
+                          colour={colourText || highlightColour}
+                          text={colourText}
+                          disabled={locked}
+                          onColour={scheduleGlobalColour}
+                          onText={setColourText}
+                          onCommit={() => commitGlobalColourValue(colourText)}
+                        />
+                      )}
+                      {(activeView?.highlights.length || 0) > 0 && (
+                        <div className="maps-hl-list">
+                          {(activeView?.highlights || []).map((code) => (
+                            <div key={`${code}-${namesTick}`} className={`maps-hl-chip${selectedHighlight === code ? " on" : ""}`}>
+                              <button type="button" disabled={locked} onClick={() => openHighlight(code)}>
+                                {highlightName(code)}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={locked}
+                                title="Remove highlight"
+                                onClick={() =>
+                                  updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
+                                }
+                              >
+                                <IconClose />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </InspSection>
+                  </div>
                   {(activeView?.highlights.length || 0) > 0 && (
                     <div className="maps-hl">
-                      <div className="cap">Orange countries</div>
-                      <div className="maps-hl-list">
-                        {(activeView?.highlights || []).map((code) => (
-                          <button
-                            key={`${code}-${namesTick}`}
-                            className="maps-hl-chip"
-                            type="button"
-                            disabled={locked}
-                            title="Remove highlight"
-                            onClick={() =>
-                              updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
-                            }
-                          >
-                            {admin0Name(code)}
-                            <span aria-hidden="true">×</span>
-                          </button>
-                        ))}
-                      </div>
+                      <label className="maps-check">
+                        <input
+                          type="checkbox"
+                          checked={!!activeView?.isolate}
+                          disabled={locked}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            updateActive({
+                              isolate: checked
+                                ? { mode: "darken", strength: activeView?.isolate?.strength ?? DEFAULT_ISOLATE_STRENGTH }
+                                : undefined,
+                            });
+                          }}
+                        />{" "}
+                        Isolate <span className="muted">{activeView?.isolate ? "ON" : "OFF"}</span>
+                      </label>
+                      {activeView?.isolate && (
+                        <AeScrub
+                          label="Strength"
+                          value={activeView.isolate.strength}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          slider
+                          digits={2}
+                          disabled={locked}
+                          onChange={(strength) => updateActive({ isolate: { ...activeView.isolate!, strength } })}
+                          onCommit={() => fireAndForgetSave()}
+                        />
+                      )}
+                      <p className="note">Applies to the highlighted countries above.</p>
                     </div>
                   )}
-                  <div className="maps-hl">
-                    <div className="cap">Isolate country</div>
-                    <label className="maps-check">
-                      <input
-                        type="checkbox"
-                        checked={!!activeView?.isolate}
-                        disabled={locked}
-                        onChange={(event) => {
-                          const checked = event.target.checked;
-                          updateActive({
-                            isolate: checked
-                              ? { mode: "darken", strength: activeView?.isolate?.strength ?? DEFAULT_ISOLATE_STRENGTH }
-                              : undefined,
-                          });
-                        }}
-                      />{" "}
-                      Isolate country
-                    </label>
-                    {activeView?.isolate && (
-                      <AeScrub
-                        label="Strength"
-                        value={activeView.isolate.strength}
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        slider
-                        digits={2}
-                        disabled={locked}
-                        onChange={(strength) => updateActive({ isolate: { ...activeView.isolate!, strength } })}
-                        onCommit={() => fireAndForgetSave()}
-                      />
-                    )}
-                    <p className="note">
-                      {(activeView?.highlights.length || 0)
-                        ? "Applies to the orange countries above."
-                        : "Add an orange country first — isolate does nothing without one."}
-                    </p>
-                  </div>
                 </>
               )}
               {inspTab === "pins" && (
@@ -2627,6 +3305,7 @@ export function MapsTab() {
                       }}
                     >
                       <IconPlus />
+                      <IconCaret />
                     </button>
                     {landmarkPicker && (
                       <div className="style-picker-pop maps-landmark-pop">
@@ -2670,9 +3349,10 @@ export function MapsTab() {
                       </div>
                     )}
                   </div>
-                  {(activeView?.churches.length || 0) === 0 ? (
+                  {(activeView?.churches.length || 0) === 0 && (activeView?.highlights.length || 0) === 0 && (
                     <p className="note">Shift-click the map to add a pin, or add a transparent landmark.</p>
-                  ) : (
+                  )}
+                  {(activeView?.churches.length || 0) > 0 && (
                     <>
                       <div className="maps-pin-bulk" role="group" aria-label="Selected objects">
                         {selectedPins.length > 0 && <span className="note">{selectedPins.length} selected</span>}
@@ -2685,20 +3365,20 @@ export function MapsTab() {
                         <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={copySelectedPins} title="Copy" aria-label="Copy">
                           <IconCopy />
                         </button>
-                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(false)} title="Paste" aria-label="Paste">
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => pasteObjects(false)} title="Paste" aria-label="Paste">
                           <IconPaste />
                         </button>
-                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
                           <IconPasteSlides />
                         </button>
-                        <button className="btn maps-delete maps-pin-bulk-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
+                        <button className="btn maps-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>
-                      {objectClipboard.length > 0 && <div className="maps-pin-bulk" role="group" aria-label="Paste destinations">{slides.map((slide) => <label key={slide.id}><input type="checkbox" checked={pasteTargets.includes(slide.id)} onChange={(event) => setPasteTargets((targets) => event.target.checked ? [...new Set([...targets, slide.id])] : targets.filter((id) => id !== slide.id))} /> {slide.title}</label>)}<button className="btn secondary" type="button" disabled={locked || !pasteTargets.length} onClick={() => pasteObjects(true)}>Paste selected slides</button></div>}
+                      {objectClipboard.churches.length > 0 && <div className="maps-pin-bulk" role="group" aria-label="Paste destinations">{slides.map((slide) => <label key={slide.id}><input type="checkbox" checked={pasteTargets.includes(slide.id)} onChange={(event) => setPasteTargets((targets) => event.target.checked ? [...new Set([...targets, slide.id])] : targets.filter((id) => id !== slide.id))} /> {slide.title}</label>)}<button className="btn secondary" type="button" disabled={locked || !pasteTargets.length} onClick={() => pasteObjects(true)}>Paste selected slides</button></div>}
                       <div className="maps-pin-list">
                         {(activeView?.churches || []).map((church) => (
-                          <div key={church.id} className={`maps-pin-row${selectedPin === church.id ? " active" : ""}`}>
+                          <div key={church.id} className={`maps-pin-row kind-${pinKindClass(church.kind)}${selectedPin === church.id ? " active" : ""}`}>
                             <label className="maps-pin-select" aria-label={`Select ${church.name}`}>
                               <input
                                 type="checkbox"
@@ -2708,10 +3388,42 @@ export function MapsTab() {
                               />
                             </label>
                             <button type="button" className="maps-pin-open" disabled={locked} onClick={() => openPin(church.id)}>
+                              <span className={`maps-pin-kind kind-${pinKindClass(church.kind)}`} aria-hidden="true">
+                                <PinKindIcon kind={church.kind} />
+                              </span>
                               <span className="maps-pin-swatch" style={{ background: church.color }} />
                               <span className="maps-pin-name">{church.name}</span>
                               {church.reveal && <span className="maps-pin-hidden">Paint-on {church.reveal.duration}s</span>}
-                              {church.showLabel === false && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
+                              {church.showLabel !== true && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {(activeView?.highlights.length || 0) > 0 && (
+                    <>
+                      <div className="cap">Highlights</div>
+                      <div className="maps-pin-list">
+                        {(activeView?.highlights || []).map((code) => (
+                          <div key={`${code}-${namesTick}`} className={`maps-pin-row kind-${highlightClass(code)}${selectedHighlight === code ? " active" : ""}`}>
+                            <button type="button" className="maps-pin-open" disabled={locked} onClick={() => openHighlight(code)}>
+                              <span className={`maps-pin-kind kind-${highlightClass(code)}`} aria-hidden="true">
+                                <HighlightIcon code={code} />
+                              </span>
+                              <span className="maps-pin-name">{highlightName(code)}</span>
+                            </button>
+                            <button
+                              className="btn maps-delete icon-btn"
+                              type="button"
+                              disabled={locked}
+                              title="Remove highlight"
+                              aria-label={`Remove ${highlightName(code)}`}
+                              onClick={() =>
+                                updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
+                              }
+                            >
+                              <IconClose />
                             </button>
                           </div>
                         ))}
@@ -2948,14 +3660,38 @@ export function MapsTab() {
                     />
                     DSK lower third (1920×1080)
                   </label>
-                  <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
-                    Export
-                  </button>
-                  {exporting ? (
-                    <button className="btn secondary" type="button" onClick={() => { exportAbort.current = true; }}>
-                      Cancel
+                  <label className="maps-check" title="Removes the on-image attribution bar and appends one end slide with the map credits to every exported deck.">
+                    <input
+                      type="checkbox"
+                      checked={doc?.attribution === "credits"}
+                      disabled={locked}
+                      onChange={(event) => {
+                        if (!doc) return;
+                        patchDoc({ ...doc, attribution: event.target.checked ? "credits" : "stamp" });
+                      }}
+                    />
+                    Credits slide instead of stamped attribution
+                  </label>
+                  <div className="actions export-actions">
+                    <ExportDestinationRow
+                      value={exportDir}
+                      onChange={setExportDir}
+                      defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+                      onError={setError}
+                      inline
+                    />
+                    <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
+                      Export
                     </button>
-                  ) : null}
+                    {exporting ? (
+                      <button className="btn secondary" type="button" onClick={() => { exportAbort.current = true; }}>
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
+                  {job?.status === "done" && exportArtifacts.length > 0 && (
+                    <ArtifactActions artifacts={exportArtifacts} onError={setError} />
+                  )}
                 </div>
               )}
             </div>

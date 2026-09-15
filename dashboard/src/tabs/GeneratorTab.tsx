@@ -4,16 +4,11 @@ import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
-import {
-  DSK_TEMPLATE_KEY,
-  LW_TEMPLATE_KEY,
-  loadStoredFile,
-  saveStoredFile,
-} from "../prefs";
+import { DSK_TEMPLATE_KEY, LW_TEMPLATE_KEY, loadStoredFile, saveStoredFile } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 export function GeneratorTab() {
-  const { job, upsert, error: openError } = useCurrentJob("generate");
+  const { job, upsert, rename, error: openError } = useCurrentJob("generate");
   const [lwTemplate, setLwTemplate] = useState<ChosenFile | null>(() => loadStoredFile(LW_TEMPLATE_KEY));
   const [dskTemplate, setDskTemplate] = useState<ChosenFile | null>(() => loadStoredFile(DSK_TEMPLATE_KEY));
   const [busy, setBusy] = useState(false);
@@ -96,7 +91,7 @@ export function GeneratorTab() {
         <FileWell
           label="LW template (.key)"
           hint="Optional. Drop Sermon_GW.key or choose on this Mac"
-          tone="keynote"
+          tone="lw"
           file={lwTemplate}
           onChoose={() => pickTemplate("lw")}
           onPath={(path) => rememberLw({ path, name: path.split("/").pop() || path })}
@@ -109,7 +104,7 @@ export function GeneratorTab() {
         <FileWell
           label="DSK template (.key)"
           hint="Optional. Drop the lower-thirds .key or choose on this Mac"
-          tone="keynote"
+          tone="dsk"
           file={dskTemplate}
           onChoose={() => pickTemplate("dsk")}
           onPath={(path) => rememberDsk({ path, name: path.split("/").pop() || path })}
@@ -122,7 +117,14 @@ export function GeneratorTab() {
       </div>
       <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {(busy || running) && <LoadingOverlay title="Generating decks…" logs={logs} />}
-      {job && <GenerateResultView job={job} onOpen={setOpen} />}
+      {job && (
+        <GenerateResultView
+          job={job}
+          onOpen={setOpen}
+          onRename={rename}
+          onError={setError}
+        />
+      )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );

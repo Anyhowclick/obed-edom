@@ -1,5 +1,6 @@
 import json
 from io import BytesIO
+from pathlib import Path
 from PIL import Image
 import numpy as np
 from obed_edom import watercolour
@@ -62,6 +63,72 @@ def test_delete_purges_watercolour_output_dir():
     assert client.delete(f'/api/jobs/{job_id}').status_code == 200
     assert not Path(output_dir).exists()
     assert client.get(f'/api/jobs/{job_id}').status_code == 404
+
+def _run_batch_wait(client, job_id):
+    import time
+    for _ in range(80):
+        job = client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done', 'error'}:
+            return job
+        time.sleep(.03)
+    return job
+
+def test_batch_copies_done_results_to_export_dir(tmp_path):
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    export_dir = tmp_path / "exports"
+    response = client.post(
+        '/api/watercolour',
+        data={'export_dir': str(export_dir)},
+        files=[
+            ('files', ('good.png', png((90, 140, 210, 255)), 'image/png')),
+            ('files', ('bad.png', b'not-image', 'image/png')),
+        ],
+    )
+    assert response.status_code == 200, response.text
+    job = _run_batch_wait(client, response.json()['id'])
+    assert job['status'] == 'done', job.get('error')
+    items = job['result']['items']
+    exported = job['result']['exportedResults']
+    assert len(exported) == 1
+    assert items[0]['status'] == 'done' and items[1]['status'] == 'error'
+    exported_path = Path(exported[0])
+    assert exported_path.parent == export_dir.resolve()
+    assert exported_path.is_file()
+
+def test_batch_export_dir_collision_suffixes_the_name(tmp_path):
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    (export_dir / "00-good-watercolour.png").write_bytes(b"existing")
+    response = client.post(
+        '/api/watercolour',
+        data={'export_dir': str(export_dir)},
+        files=[('files', ('good.png', png((90, 140, 210, 255)), 'image/png'))],
+    )
+    assert response.status_code == 200, response.text
+    job = _run_batch_wait(client, response.json()['id'])
+    assert job['status'] == 'done', job.get('error')
+    exported = job['result']['exportedResults']
+    assert len(exported) == 1
+    exported_path = Path(exported[0])
+    assert exported_path.name == "00-good-watercolour-2.png"
+    assert (export_dir / "00-good-watercolour.png").read_bytes() == b"existing"
+
+def test_batch_rejects_private_root_export_dir():
+    from obed_edom.paths import output_root
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    response = client.post(
+        '/api/watercolour',
+        data={'export_dir': str(output_root() / ".watercolour")},
+        files=[('files', ('good.png', png((90, 140, 210, 255)), 'image/png'))],
+    )
+    assert response.status_code == 400
 
 def test_white_input_is_reserved_as_bare_paper():
     # Watercolour is subtractive: a white photo has no pigment, so the output must be the cream paper itself.
@@ -1119,3 +1186,131 @@ def test_cancel_immediately_after_result_replace_discards_the_committed_file():
         assert items[0]['status'] == 'cancelled'
         result_dir=Path(job['result']['resultDir'])
         assert not list(result_dir.glob('00-*'))
+
+def test_renamed_watercolour_job_still_serves_result_file_and_download():
+    from pathlib import Path
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    import time
+    client = TestClient(app)
+    response = client.post('/api/watercolour', files=[('files', ('good.png', png((90, 140, 210, 255)), 'image/png'))])
+    assert response.status_code == 200, response.text
+    job_id = response.json()['id']
+    for _ in range(80):
+        job = client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done', 'error'}:
+            break
+        time.sleep(.03)
+    old_output_dir = Path(job['result']['outputDir'])
+    item_id = job['result']['items'][0]['id']
+
+    target = f'quiet-jordan-{job_id}'
+    renamed = client.patch(f'/api/jobs/{job_id}/name', json={'name': target})
+    assert renamed.status_code == 200, renamed.text
+    new_output_dir = Path(renamed.json()['result']['outputDir'])
+    assert new_output_dir.name == target
+    assert not old_output_dir.exists()
+
+    assert client.get(f'/api/watercolour/{job_id}/items/{item_id}/result').status_code == 200
+    assert client.get(f'/api/watercolour/{job_id}/download').status_code == 200
+
+
+def test_copy_into_export_dir_never_overwrites_under_concurrency(tmp_path):
+    import threading
+
+    from obed_edom.web.watercolour import _copy_into_export_dir
+
+    dest_dir = tmp_path / "exports"
+    dest_dir.mkdir()
+    # Both threads race to export a same-named "shot.png" from two independent batches.
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"aaaa")
+
+    results: list[Path | None] = [None, None]
+
+    def worker(index):
+        dest, _error = _copy_into_export_dir(src, dest_dir)
+        results[index] = dest
+
+    t1 = threading.Thread(target=worker, args=(0,))
+    t2 = threading.Thread(target=worker, args=(1,))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    assert all(r is not None for r in results)
+    assert len(set(results)) == 2
+    for path in results:
+        assert path.is_file()
+        assert path.read_bytes() == b"aaaa"
+    assert not list(dest_dir.glob("*.tmp"))
+
+
+def test_copy_into_export_dir_leaves_no_partial_file_on_failure(tmp_path, monkeypatch):
+    from obed_edom.web import watercolour as watercolour_web
+
+    dest_dir = tmp_path / "exports"
+    dest_dir.mkdir()
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"data")
+
+    def boom(*args, **kwargs):
+        raise OSError("injected mid-copy failure")
+
+    monkeypatch.setattr(watercolour_web.shutil, "copy2", boom)
+    dest, error = watercolour_web._copy_into_export_dir(src, dest_dir)
+    assert dest is None
+    assert error is not None
+    assert list(dest_dir.iterdir()) == []
+
+
+def test_copy_into_export_dir_link_collision_falls_back_cleanly(tmp_path, monkeypatch):
+    from obed_edom.web import watercolour as watercolour_web
+
+    dest_dir = tmp_path / "exports"
+    dest_dir.mkdir()
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"data")
+
+    real_link = watercolour_web.os.link
+    state = {"raised": False}
+
+    def flaky_link(*args, **kwargs):
+        if not state["raised"]:
+            state["raised"] = True
+            raise FileExistsError("injected collision")
+        return real_link(*args, **kwargs)
+
+    monkeypatch.setattr(watercolour_web.os, "link", flaky_link)
+    dest, error = watercolour_web._copy_into_export_dir(src, dest_dir)
+    assert error is None
+    assert dest is not None
+    assert dest.name == "shot-2.png"
+    assert dest.read_bytes() == b"data"
+    assert not list(dest_dir.glob("*.tmp"))
+
+
+def test_copy_into_export_dir_partial_fallback_copy_leaves_no_partial_file(tmp_path, monkeypatch):
+    from obed_edom.web import watercolour as watercolour_web
+
+    dest_dir = tmp_path / "exports"
+    dest_dir.mkdir()
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"data")
+
+    def boom_link(*args, **kwargs):
+        raise OSError("os.link not supported")
+
+    call_count = {"copy2": 0}
+    real_copy2 = watercolour_web.shutil.copy2
+
+    def flaky_copy2(source, dest, *args, **kwargs):
+        call_count["copy2"] += 1
+        if call_count["copy2"] == 2:
+            raise OSError("injected mid-copy failure on fallback")
+        return real_copy2(source, dest, *args, **kwargs)
+
+    monkeypatch.setattr(watercolour_web.os, "link", boom_link)
+    monkeypatch.setattr(watercolour_web.shutil, "copy2", flaky_copy2)
+    dest, error = watercolour_web._copy_into_export_dir(src, dest_dir)
+    assert dest is None
+    assert error is not None
+    assert list(dest_dir.iterdir()) == []

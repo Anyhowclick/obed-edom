@@ -2,7 +2,16 @@ from pathlib import Path
 
 import pytest
 
-from obed_edom.paths import find_repo_root, resolve_keynote_template
+from obed_edom.paths import (
+    ensure_export_dir,
+    ensure_export_subdir,
+    export_destination,
+    find_repo_root,
+    output_root,
+    resolve_export_destination,
+    resolve_keynote_template,
+    validate_export_dir,
+)
 
 
 def test_find_repo_root_uses_pyproject():
@@ -61,3 +70,229 @@ def test_generate_both_requires_at_least_one_template():
             lw_template=None,
             dsk_template=None,
         )
+
+
+def test_validate_export_dir_rejects_relative():
+    with pytest.raises(ValueError, match="absolute"):
+        validate_export_dir("relative/dir")
+
+
+def test_validate_export_dir_expands_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    resolved = validate_export_dir("~/exports")
+    assert resolved == (tmp_path / "exports").resolve()
+    assert resolved.is_dir()
+
+
+def test_validate_export_dir_creates_missing_dir(tmp_path: Path):
+    target = tmp_path / "a" / "b" / "exports"
+    assert not target.exists()
+    resolved = validate_export_dir(target)
+    assert resolved.is_dir()
+
+
+def test_validate_export_dir_rejects_file(tmp_path: Path):
+    target = tmp_path / "not-a-dir"
+    target.write_text("x")
+    with pytest.raises(ValueError, match="not a directory"):
+        validate_export_dir(target)
+
+
+@pytest.mark.parametrize(
+    "root_name",
+    [".maps", ".watercolour", ".resize", ".diff", ".outline", ".inspect", ".uploads", ".sessions", ".geocode"],
+)
+def test_validate_export_dir_rejects_private_roots(root_name: str):
+    with pytest.raises(ValueError, match="cannot be inside"):
+        validate_export_dir(output_root() / root_name / "sub")
+
+
+def test_validate_export_dir_rejects_cache_root():
+    from obed_edom.baseline import cache_root
+
+    with pytest.raises(ValueError, match="cannot be inside"):
+        validate_export_dir(cache_root() / "sub")
+
+
+def test_validate_export_dir_accepts_sibling_of_output_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    target = tmp_path / "output" / "exports"
+    resolved = validate_export_dir(target)
+    assert resolved == target.resolve()
+
+
+def test_validate_export_dir_rejects_case_variant_private_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    with pytest.raises(ValueError, match="cannot be inside"):
+        validate_export_dir(tmp_path / "OUTPUT" / ".MAPS" / "sub")
+
+
+def test_ensure_export_dir_accepts_valid_dir(tmp_path: Path):
+    target = tmp_path / "exports"
+    target.mkdir()
+    assert ensure_export_dir(target) == target.resolve()
+
+
+def test_ensure_export_dir_rejects_symlink_swapped_into_private_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    private = tmp_path / "output" / ".maps" / "job1"
+    private.mkdir(parents=True)
+    target = tmp_path / "exports"
+    target.symlink_to(private, target_is_directory=True)
+    with pytest.raises(ValueError, match="cannot be inside"):
+        ensure_export_dir(target)
+
+
+def test_export_destination_job_override_wins(tmp_path: Path):
+    override = tmp_path / "override"
+    override.mkdir()
+
+    class FakeJob:
+        result = {"exportDir": str(override)}
+
+    assert export_destination(FakeJob()) == override
+
+
+def test_export_destination_job_override_removed_raises(tmp_path: Path):
+    override = tmp_path / "override"  # never created — removed between submit and run
+
+    class FakeJob:
+        result = {"exportDir": str(override)}
+
+    with pytest.raises(ValueError, match="no longer exists"):
+        export_destination(FakeJob())
+
+
+def test_export_destination_job_override_now_a_file_raises(tmp_path: Path):
+    override = tmp_path / "override"
+    override.write_text("now a file")
+
+    class FakeJob:
+        result = {"exportDir": str(override)}
+
+    with pytest.raises(ValueError, match="no longer exists"):
+        export_destination(FakeJob())
+
+
+def test_export_destination_setting_wins_over_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    class FakeJob:
+        result = {}
+
+    from obed_edom import settings as settings_mod
+
+    default_dir = tmp_path / "default"
+    default_dir.mkdir()
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(default_dir)}
+    )
+    assert export_destination(FakeJob()) == default_dir
+
+
+def test_export_destination_stale_setting_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    class FakeJob:
+        result = {}
+
+    from obed_edom import settings as settings_mod
+
+    stale_dir = tmp_path / "gone"
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(stale_dir)}
+    )
+    assert not stale_dir.exists()
+    with pytest.raises(ValueError, match="no longer exists"):
+        export_destination(FakeJob())
+
+
+def test_export_destination_falls_back_to_output_root(monkeypatch: pytest.MonkeyPatch):
+    class FakeJob:
+        result = {}
+
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": ""})
+    assert export_destination(FakeJob()) == output_root()
+
+
+def test_resolve_export_destination_matches_export_destination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": ""})
+    assert resolve_export_destination(None) == output_root()
+
+    default_dir = tmp_path / "default"
+    default_dir.mkdir()
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(default_dir)}
+    )
+    assert resolve_export_destination(None) == default_dir
+
+    override = tmp_path / "override"
+    override.mkdir()
+    assert resolve_export_destination(str(override)) == override
+
+
+def test_ensure_export_subdir_creates_child(tmp_path: Path):
+    parent = tmp_path / "root"
+    parent.mkdir()
+    child = ensure_export_subdir(parent, "My_Sermon")
+    assert child == parent / "My_Sermon"
+    assert child.is_dir()
+    # Idempotent: calling again on an already-created plain directory is fine.
+    assert ensure_export_subdir(parent, "My_Sermon") == child
+
+
+def test_ensure_export_subdir_refuses_preexisting_symlink(tmp_path: Path):
+    parent = tmp_path / "root"
+    parent.mkdir()
+    private_target = tmp_path / "private"
+    private_target.mkdir()
+    (parent / "My_Sermon").symlink_to(private_target, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        ensure_export_subdir(parent, "My_Sermon")
+    # Refused before any write landed in the symlink target.
+    assert list(private_target.iterdir()) == []
+
+
+def test_ensure_export_subdir_rejects_private_root_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    private = tmp_path / "output" / ".maps"
+    private.mkdir(parents=True)
+    parent = tmp_path / "root"
+    parent.mkdir()
+    (parent / "child").symlink_to(private, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        ensure_export_subdir(parent, "child")
+
+
+def test_generate_default_path_rejects_symlink_into_private_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """generate()'s default output-path selection must go through the same
+    symlink guard as ensure_export_subdir, even when no operator outline
+    fixtures are available. Parsing/mapping/validation are stubbed so this
+    stays unconditionally collected (unlike test_parse.py, which skips
+    without the gitignored Sermon Outlines fixtures)."""
+    from obed_edom import pipeline
+
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    monkeypatch.setattr(pipeline, "parse_outline", lambda docx: object())
+    monkeypatch.setattr(pipeline, "map_slides", lambda outline: ([], [], []))
+    monkeypatch.setattr(pipeline, "validate_outline", lambda outline: [])
+    monkeypatch.setattr(pipeline, "validate_slide_specs", lambda lw, dsk: [])
+    monkeypatch.setattr(pipeline, "annotate_outline", lambda outline, lw, dsk, dest: dest)
+    monkeypatch.setattr(pipeline, "write_review", lambda *args, **kwargs: None)
+
+    docx = tmp_path / "Sermon BC.docx"
+    stem = pipeline.stem_for(docx)
+    private = tmp_path / "output" / ".maps" / "x"
+    private.mkdir(parents=True)
+    (tmp_path / "output").mkdir(exist_ok=True)
+    (tmp_path / "output" / stem).symlink_to(private, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        pipeline.generate(docx, make_keynote=False, check_visuals=False)
+
+    assert list(private.iterdir()) == []

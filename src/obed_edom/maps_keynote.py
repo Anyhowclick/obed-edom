@@ -5,6 +5,7 @@ P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,6 +28,7 @@ from obed_edom.maps_geo import (
     camera_dict,
     clamp_cg_shift,
     clamp_lon,
+    default_landmark_size,
     infer_hop_kind,
     inherit_hidden_layers,
     inverse_mercator_y,
@@ -34,7 +37,8 @@ from obed_edom.maps_geo import (
     world_width,
 )
 from obed_edom.maps_movie import movie_path
-from obed_edom.paths import find_repo_root
+from obed_edom.maps_pins import LABEL_PILL_RGB, PIN_ASPECT, ensure_label_pill_png, ensure_pin_png
+from obed_edom.paths import ensure_export_dir, find_repo_root
 
 # P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
 
@@ -53,6 +57,18 @@ DOT_SIZE = 28
 DROP_SIZE = 64
 PHOTO_SIZE = 96
 NAME_HEIGHT = 32
+LABEL_BOLD_FONT = "Amplitude-Bold"
+LABEL_BOLD_FALLBACK = "HelveticaNeue-Bold"
+LABEL_FONT_PT = 24
+LABEL_GAP = 8
+LABEL_CHAR_W = 13
+PILL_PAD_X = 6
+PILL_PAD_Y = 2
+LABEL_SCALE_MIN = 0.5
+LABEL_SCALE_MAX = 8
+CREDITS_TITLE = "Map data"
+CREDITS_FONT = 28
+CREDITS_TITLE_FONT = 40
 MAP_BG_RE = re.compile(r"map\s*bg", re.I)
 PIN_WAVE_RE = re.compile(r"PIN\s*DROP\s*WAVE.*\.mov$", re.I)
 _SKIP_WALK = {
@@ -425,6 +441,13 @@ def assign_morph_plates(
     return plates, next_links
 
 
+def _first_plate_slide(slides: list[dict[str, Any]], slide_ids: list[str]) -> dict[str, Any] | None:
+    """The plate's own slide, in document order — the plate raster and its cutout gate must
+    agree on which slide's highlights/style/isolate represent the whole group."""
+    wanted = set(slide_ids)
+    return next((slide for slide in slides if str(slide.get("id") or "") in wanted), None)
+
+
 def maps_export_plan(
     slides: list[dict[str, Any]],
     links: list[dict[str, Any]],
@@ -468,8 +491,8 @@ def maps_export_plan(
             "height": cap_h,
             "revealMovie": bool(slide.get("revealMovie")),
         }
-        if slide.get("isolate") and highlights:
-            row["stillPngCountry"] = f"{sid}{'_CG' if audience == 'cg' else ''}-country.png"
+        if highlights:
+            row["stillPngRegions"] = f"{sid}{'_CG' if audience == 'cg' else ''}-regions.json"
         stills.append(row)
         if sid in landing_targets:
             stills.append(
@@ -489,7 +512,7 @@ def maps_export_plan(
             )
     plate_list: list[dict[str, Any]] = []
     for plate_id, geom in plates.items():
-        first = next((slide for slide in slides if str(slide.get("id") or "") in (geom.get("slideIds") or [])), None)
+        first = _first_plate_slide(slides, geom.get("slideIds") or [])
         output_id = f"{plate_id}-cg" if audience == "cg" else plate_id
         if audience == "cg":
             for link in links:
@@ -500,12 +523,18 @@ def maps_export_plan(
                 "plateId": output_id,
                 "plateW": int(math.ceil(float(geom["plateW"]))),
                 "plateH": int(math.ceil(float(geom["plateH"]))),
+                "slideIds": [str(sid) for sid in (geom.get("slideIds") or [])],
                 "camera": geom["captureCamera"],
                 "style": (first or {}).get("style") or "positron",
                 "highlights": list((first or {}).get("highlights") or []),
                 "hiddenLayers": slide_hidden_layers(first or {}),
                 "hillshade": bool((first or {}).get("hillshade")),
                 "isolate": (first or {}).get("isolate"),
+                **(
+                    {"platePngRegions": f"{output_id}-regions.json"}
+                    if (first or {}).get("highlights")
+                    else {}
+                ),
             }
         )
     if audience == "cg":
@@ -659,11 +688,81 @@ def _still_path(slide: dict[str, Any], output_dir: Path, preview_dir: Path | Non
     return path
 
 
-def _country_still_path(slide: dict[str, Any], output_dir: Path, audience: str = "lw") -> Path | None:
+def _region_manifest_scale(mapped_w: float, mapped_h: float, manifest: dict[str, Any]) -> float:
+    """Uniform width-derived scale for mapping manifest-space region pieces onto `mapped_w`x`mapped_h`."""
+    manifest_w = float(manifest["width"])
+    manifest_h = float(manifest["height"])
+    scale = mapped_w / manifest_w
+    expected_h = manifest_h * scale
+    if mapped_h > 0 and abs(expected_h - mapped_h) > max(1.0, mapped_h * 0.02):
+        warnings.warn(
+            f"region manifest aspect ratio mismatch: mapped {mapped_w:g}x{mapped_h:g} vs manifest {manifest_w:g}x{manifest_h:g}"
+        )
+    return scale
+
+
+REGION_MANIFEST_MAX_SIDE = 8192
+REGION_MANIFEST_MAX_PIECES = 512
+
+
+def region_manifest_dims_valid(width: Any, height: Any, *, max_side: int = REGION_MANIFEST_MAX_SIDE) -> bool:
+    return (
+        isinstance(width, int)
+        and not isinstance(width, bool)
+        and isinstance(height, int)
+        and not isinstance(height, bool)
+        and 1 <= width <= max_side
+        and 1 <= height <= max_side
+    )
+
+
+def region_piece_is_valid(piece: Any, width: int, height: int) -> bool:
+    if not isinstance(piece, dict):
+        return False
+    x, y, w, h = piece.get("x"), piece.get("y"), piece.get("w"), piece.get("h")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (x, y, w, h)):
+        return False
+    return w >= 1 and h >= 1 and x >= 0 and y >= 0 and x + w <= width and y + h <= height
+
+
+def _read_region_manifest(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    width, height = data.get("width"), data.get("height")
+    if not region_manifest_dims_valid(width, height):
+        return None
+    pieces = data.get("pieces")
+    if not isinstance(pieces, list) or len(pieces) > REGION_MANIFEST_MAX_PIECES:
+        pieces = []
+    return {
+        **data,
+        "pieces": [
+            {**piece, "index": k}
+            for k, piece in enumerate(pieces)
+            if region_piece_is_valid(piece, width, height)
+        ],
+    }
+
+
+def _still_region_manifest_path(slide: dict[str, Any], output_dir: Path, audience: str = "lw") -> Path:
     sid = str(slide.get("id") or "slide")
-    name = Path(f"{sid}{'_CG' if audience == 'cg' else ''}-country.png").name
-    path = Path(output_dir) / "stills" / name
-    return path if path.is_file() else None
+    name = Path(f"{sid}{'_CG' if audience == 'cg' else ''}-regions.json").name
+    return Path(output_dir) / "stills" / name
+
+
+def _still_region_manifest(slide: dict[str, Any], output_dir: Path, audience: str = "lw") -> dict[str, Any] | None:
+    return _read_region_manifest(_still_region_manifest_path(slide, output_dir, audience))
+
+
+def _plate_region_manifest(plate_id: str, output_dir: Path) -> dict[str, Any] | None:
+    name = plate_filename(plate_id)
+    return _read_region_manifest(Path(output_dir) / "plates" / f"{Path(name).stem}-regions.json")
 
 
 def _plate_path(plate_id: str, output_dir: Path) -> Path:
@@ -702,13 +801,97 @@ def dsk_ops(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{**op, "items": [dsk_item(item) for item in op["items"]]} for op in ops]
 
 
+def normalise_credit_line(line: str) -> str:
+    return re.sub(r"[\r\n\t]+", " ", str(line)).strip()
+
+
+CREDITS_WIDTH_FRAC = 0.6
+CREDITS_CHAR_WIDTH_FRAC = 0.55
+CREDITS_LINE_HEIGHT_FRAC = 1.6
+
+
+def _wrapped_row_count(text: str, box_w: float, font_size: float) -> int:
+    char_w = font_size * CREDITS_CHAR_WIDTH_FRAC
+    chars_per_line = max(1, int(box_w / char_w))
+    return max(1, math.ceil(len(text) / chars_per_line))
+
+
+def _centred_box(text: str, max_w: float, font_size: float, centre_x: float) -> tuple[float, float]:
+    line_w = min(max_w, len(text) * font_size * CREDITS_CHAR_WIDTH_FRAC)
+    return centre_x - line_w / 2.0, line_w
+
+
+def credits_op(lines: list[str], *, width: int, height: int) -> dict[str, Any]:
+    """One text item per line (no `\\n`): `_as_escape` doesn't handle literal newlines,
+    which would otherwise break `osacompile`. Keynote's `rich text`/`text item` classes
+    have no `alignment` property, so each line's own box is centred by its estimated
+    width instead of relying on AppleScript alignment. Box width is deck-relative so it
+    fits LW, DSK, and CG canvases alike; each item's height is estimated from wrapped
+    row count so the block centres correctly even when a line wraps."""
+    clean_lines = [normalise_credit_line(line) for line in lines]
+    clean_lines = [line for line in clean_lines if line]
+    max_w = width * CREDITS_WIDTH_FRAC
+    centre_x = width / 2.0
+    line_height = CREDITS_FONT * CREDITS_LINE_HEIGHT_FRAC
+    title_line_height = CREDITS_TITLE_FONT * CREDITS_LINE_HEIGHT_FRAC
+    title_h = _wrapped_row_count(CREDITS_TITLE, max_w, CREDITS_TITLE_FONT) * title_line_height
+    row_heights = [title_h]
+    for line in clean_lines:
+        row_heights.append(_wrapped_row_count(line, max_w, CREDITS_FONT) * line_height)
+    block_h = sum(row_heights)
+    y0 = (height - block_h) / 2.0
+    title_x, title_w = _centred_box(CREDITS_TITLE, max_w, CREDITS_TITLE_FONT, centre_x)
+    items = [
+        _item(
+            "text", title_x, y0, title_w, row_heights[0],
+            text=CREDITS_TITLE, fontSize=CREDITS_TITLE_FONT, bold=True,
+        )
+    ]
+    y = y0 + row_heights[0]
+    for line, h in zip(clean_lines, row_heights[1:]):
+        line_x, line_w = _centred_box(line, max_w, CREDITS_FONT, centre_x)
+        items.append(_item("text", line_x, y, line_w, h, text=line, fontSize=CREDITS_FONT))
+        y += h
+    return {"id": "_credits", "duplicate": False, "transition": None, "items": items}
+
+
 def _pin_size(church: dict[str, Any], movie: Path | None) -> int:
     kind = str(church.get("kind") or "dot")
     if kind == "dropPin" and movie is not None:
         return DROP_SIZE
     if kind == "dropPin":
         return min(PIN_MAX_PT, DROP_SIZE)
+    if kind == "landmark":
+        return _default_object_size(kind, church)
     return min(PIN_MAX_PT, DOT_SIZE)
+
+
+def _default_object_size(kind: str, church: dict[str, Any] | None = None) -> int:
+    """Mirrors `defaultObjectSize` in dashboard/src/maps/objects.ts; landmarks are
+    authored at `default_landmark_size(assetWidth)`, so that is their label baseline."""
+    if kind == "dropPin":
+        return DROP_SIZE
+    if kind == "landmark":
+        return default_landmark_size(int((church or {}).get("assetWidth") or 0))
+    return DOT_SIZE
+
+
+def _label_scale(church: dict[str, Any], size: float) -> float:
+    """`size` is the zoom-scaled marker size, so the clamp bounds the total scale."""
+    base = _default_object_size(str(church.get("kind") or "dot"), church)
+    scale = size / base if base else 1.0
+    return min(LABEL_SCALE_MAX, max(LABEL_SCALE_MIN, scale))
+
+
+EFFECTIVE_SIZE_MAX = 20000
+
+
+def _effective_size(church: dict[str, Any], zoom: float, movie: Path | None) -> float:
+    size = float(church.get("size") or _pin_size(church, movie))
+    size_zoom = church.get("sizeZoom")
+    if church.get("scaleWithMap") and size_zoom is not None:
+        size = size * 2 ** (zoom - float(size_zoom))
+    return min(EFFECTIVE_SIZE_MAX, size)
 
 
 def _place_churches(
@@ -721,6 +904,7 @@ def _place_churches(
     movie: Path | None,
     origin_x: float = 0,
     capture_w: float = WALL_WIDTH,
+    pin_root: Path,
     asset_root: Path | None = None,
     allow_reveal: bool = True,
     reveals: dict[tuple[str, str, str], str] | None = None,
@@ -728,6 +912,9 @@ def _place_churches(
     sid: str = "",
     skip_landmarks: bool = False,
 ) -> list[dict[str, Any]]:
+    """`pin_root` is required on purpose: dot and drop-pin rasters are written
+    there, so a caller that forgets it must fail rather than emit a markerless
+    deck. Production callers pass `output_dir / "pins"`."""
     items: list[dict[str, Any]] = []
     for church in churches:
         if skip_landmarks and str(church.get("kind") or "") == "landmark":
@@ -749,7 +936,11 @@ def _place_churches(
             theta = math.radians(float(camera.get("bearing") or 0))
             copy_dx = math.cos(theta) * copy_world
             copy_dy = -math.sin(theta) * copy_world
-        size = int(church.get("size") or _pin_size(church, movie))
+        zoom = float((camera or {}).get("zoom") or 0)
+        size = _effective_size(church, zoom, movie)
+        if size < 1:
+            continue
+        size = int(size)
         color = parse_color(str(church.get("color") or "#c44a42"))
         kind = str(church.get("kind") or "dot")
         asset_id = str(church.get("assetId") or "")
@@ -759,6 +950,9 @@ def _place_churches(
         static_drop = kind == "dropPin" and movie is None
         name = str(church.get("name") or "").strip()
         photo = None
+        if kind == "landmark":
+            with Image.open(landmark) as probe:
+                landmark_h = size * probe.height / max(1, probe.width)
         copy_span = max(1.0, math.hypot(copy_dx, copy_dy))
         copy_count = math.ceil((capture_w + WALL_HEIGHT) / copy_span) + 2
         for copy_index in range(-copy_count, copy_count + 1):
@@ -767,79 +961,98 @@ def _place_churches(
             if not (-size <= cx <= capture_w + size and -size <= cy <= WALL_HEIGHT + size):
                 continue
             x = cx + origin_x - size / 2.0
-            y = cy - size if kind == "landmark" else cy - size * 1.08 if static_drop else cy - size / 2.0
+            drop_h = whole(size * PIN_ASPECT)
+            if kind == "landmark":
+                y = cy - landmark_h
+            elif static_drop:
+                y = whole(cy) - drop_h
+            else:
+                y = cy - size / 2.0
             if wall:
                 x = avoid_straddle(x, size)
             if kind == "landmark":
-                with Image.open(landmark) as image:
-                    height = size * image.height / max(1, image.width)
-                    opacity = float(church.get("opacity") if church.get("opacity") is not None else 1)
-                    church_id = str(church.get("id") or "")
-                    reveal_mov = reveals.get((reveal_audience, sid, church_id)) if allow_reveal and reveals else None
-                    if opacity < 1:
-                        faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
-                        if not faded.exists():
+                height = landmark_h
+                opacity = float(church.get("opacity") if church.get("opacity") is not None else 1)
+                church_id = str(church.get("id") or "")
+                reveal_mov = reveals.get((reveal_audience, sid, church_id)) if allow_reveal and reveals else None
+                if opacity < 1:
+                    faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
+                    if not faded.exists():
+                        with Image.open(landmark) as image:
                             rgba = image.convert("RGBA")
                             rgba.putalpha(rgba.getchannel("A").point(lambda value: round(value * opacity)))
                             rgba.save(faded, "PNG")
-                        landmark = faded
-                    if reveal_mov:
-                        items.append(
-                            _item(
-                                "movie",
-                                x,
-                                cy - height,
-                                size,
-                                height,
-                                path=str(reveal_mov),
-                                fallback=str(landmark),
-                                landmark=True,
-                                revealKey=(reveal_audience, sid, church_id),
-                            )
+                    landmark = faded
+                if reveal_mov:
+                    items.append(
+                        _item(
+                            "movie",
+                            x,
+                            cy - height,
+                            size,
+                            height,
+                            path=str(reveal_mov),
+                            fallback=str(landmark),
+                            landmark=True,
+                            revealKey=(reveal_audience, sid, church_id),
                         )
-                    else:
-                        item = _item("image", x, cy - height, size, height, path=str(landmark), landmark=True)
-                        item["opacity"] = opacity
-                        items.append(item)
+                    )
+                else:
+                    item = _item("image", x, cy - height, size, height, path=str(landmark), landmark=True)
+                    item["opacity"] = opacity
+                    items.append(item)
             elif kind == "dropPin" and movie is not None:
                 items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
             else:
-                if kind == "dropPin":
-                    tail_w = round(size * 0.46)
-                    tail_h = round(size * 0.4)
-                    items.append(
-                        _item(
-                            "shape",
-                            x + (size - tail_w) / 2.0,
-                            y + size * 0.68,
-                            tail_w,
-                            tail_h,
-                            color=color,
-                            shape="triangle",
-                            rotation=180,
-                        )
+                pin_kind = "droppin" if static_drop else "dot"
+                height = drop_h if static_drop else size
+                items.append(
+                    _item(
+                        "image",
+                        x,
+                        y,
+                        size,
+                        height,
+                        path=str(ensure_pin_png(pin_root, pin_kind, color)),
+                        color=color,
                     )
-                items.append(_item("shape", x, y, size, size, color=color, shape="oval"))
-                if kind == "dropPin":
-                    inner = max(6, round(size * 0.36))
-                    items.append(
-                        _item(
-                            "shape",
-                            x + (size - inner) / 2.0,
-                            y + (size - inner) / 2.0,
-                            inner,
-                            inner,
-                            color=(65535, 65535, 65535),
-                            shape="oval",
-                        )
-                    )
-            if name and church.get("showLabel", True):
-                nw = max(48, min(420, 11 * len(name)))
-                nx = x + size + 8
-                ny = y + (size - NAME_HEIGHT) / 2.0
+                )
+            if name and church.get("showLabel", True) is True:
+                scale = _label_scale(church, size)
+                font = whole(LABEL_FONT_PT * scale)
+                nh = whole(NAME_HEIGHT * scale)
+                nh += nh % 2
+                nw = whole(max(48 * scale, min(420 * scale, LABEL_CHAR_W * scale * len(name))))
+                nw += nw % 2
+                # Even pads keep pill and text sharing one centre after `dsk_item` halves both.
+                pad_x = whole(PILL_PAD_X * scale)
+                pad_x += pad_x % 2
+                pad_y = whole(PILL_PAD_Y * scale)
+                pad_y += pad_y % 2
+                pw = nw + 2 * pad_x
+                ph = nh + 2 * pad_y
+                top = y if kind in ("dropPin", "landmark") else cy - size / 2.0
+                # Even origins as well as even extents: `dsk_item` halves each box on its own,
+                # and an odd coordinate would round the pill and its text apart.
+                nx = whole(x + size / 2.0 - nw / 2.0)
+                nx -= nx % 2
+                ny = whole(top - LABEL_GAP * scale) - nh - pad_y
+                ny -= ny % 2
                 if wall:
-                    nx = avoid_straddle(nx, nw)
-                items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name))
+                    px = nx - pad_x
+                    nx += avoid_straddle(px, pw) - px
+                items.append(
+                    _item(
+                        "image",
+                        nx - pad_x,
+                        ny - pad_y,
+                        pw,
+                        ph,
+                        path=str(ensure_label_pill_png(pin_root, LABEL_PILL_RGB, pw, ph)),
+                        labelPill=True,
+                    )
+                )
+                items.append(_item("text", nx, ny, nw, nh, text=name, bold=True, fontSize=font))
     return items
 
 
@@ -889,20 +1102,48 @@ def build_slide_items(
     wall: bool,
     bg_movie: Path | None = None,
     dest_slide: dict[str, Any] | None = None,
+    pin_root: Path,
     asset_root: Path | None = None,
-    country_still: Path | None = None,
+    region_manifest: dict[str, Any] | None = None,
     allow_reveal: bool = True,
     reveals: dict[tuple[str, str, str], str] | None = None,
     reveal_audience: str = "lw",
     sid: str = "",
     skip_landmarks: bool = False,
+    cutout_highlights: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    """`pin_root` is required (see `_place_churches`); pass `output_dir / "pins"`.
+
+    `cutout_highlights` gates the country-cutout item when set: for a morph plate
+    member it should be the plate's own highlights (the group's first slide), so
+    every member of the group shows what the plate raster was rendered with. Falls
+    back to `slide`'s own highlights when omitted.
+    """
     mapped, placement = _map_item(
         slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
     )
     items = [mapped]
-    if country_still is not None and still is not None and slide.get("isolate") and slide.get("highlights"):
-        items.append(_item("image", mapped["x"], mapped["y"], mapped["w"], mapped["h"], path=str(country_still), map=True))
+    cutout_gate = slide.get("highlights") if cutout_highlights is None else cutout_highlights
+    if region_manifest is not None and mapped.get("kind") == "image" and cutout_gate:
+        base_path = Path(mapped["path"])
+        scale = _region_manifest_scale(float(mapped["w"]), float(mapped["h"]), region_manifest)
+        for piece in region_manifest.get("pieces") or []:
+            k = piece["index"]
+            png = base_path.with_name(f"{base_path.stem}-region-{k}{base_path.suffix}")
+            if not png.is_file():
+                warnings.warn(f"missing region cutout {png}")
+                continue
+            items.append(
+                _item(
+                    "image",
+                    mapped["x"] + piece["x"] * scale,
+                    mapped["y"] + piece["y"] * scale,
+                    piece["w"] * scale,
+                    piece["h"] * scale,
+                    path=str(png),
+                    country=True,
+                )
+            )
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
     if bg_movie is None or skip_landmarks:
@@ -917,6 +1158,7 @@ def build_slide_items(
                 origin_x=origin_x,
                 capture_w=cap_w,
                 asset_root=asset_root,
+                pin_root=pin_root,
                 allow_reveal=allow_reveal,
                 reveals=reveals,
                 reveal_audience=reveal_audience,
@@ -969,12 +1211,16 @@ def plan_deck(
     reveal_movies: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, Any]]:
     slides, links = isolate_landing_slides(slides, links)
-    slide_plate: dict[str, str] = {}
-    for plate_id, geom in plates.items():
-        for sid in geom.get("slideIds") or []:
-            slide_plate[str(sid)] = plate_id
-    ops: list[dict[str, Any]] = []
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
+    slide_plate: dict[str, str] = {}
+    plate_highlights: dict[str, list[str]] = {}
+    for plate_id, geom in plates.items():
+        ids = [str(sid) for sid in (geom.get("slideIds") or [])]
+        for sid in ids:
+            slide_plate[sid] = plate_id
+        first = _first_plate_slide(slides, ids)
+        plate_highlights[plate_id] = list((first or {}).get("highlights") or [])
+    ops: list[dict[str, Any]] = []
     for index, slide in enumerate(slides):
         sid = str(slide.get("id") or "")
         cg_key = str(slide.get("_landingFor") or sid)
@@ -1029,11 +1275,16 @@ def plan_deck(
             and prev_link.get("plateId")
             and prev_link.get("plateId") == plate_id
         )
-        country_still = (
-            _country_still_path(slide, output_dir, asset_audience)
-            if not duplicate and bg_movie is None and plate_id is None
-            else None
-        )
+        region_manifest = None
+        if bg_movie is None:
+            region_manifest = (
+                _still_region_manifest(slide, output_dir, asset_audience)
+                if plate_id is None
+                else _plate_region_manifest(plate_id, output_dir)
+            )
+            cutout_expected = plate_highlights.get(plate_id) if plate_id else slide.get("highlights")
+            if cutout_expected and region_manifest is None:
+                warnings.warn(f"missing region manifest for slide {sid} (expected -regions.json)")
         items = build_slide_items(
             item_slide,
             plate=plate,
@@ -1044,12 +1295,14 @@ def plan_deck(
             bg_movie=bg_movie,
             dest_slide=item_dest,
             asset_root=output_dir / "assets",
-            country_still=country_still,
+            pin_root=output_dir / "pins",
+            region_manifest=region_manifest,
             allow_reveal=not duplicate,
             reveals=reveals,
             reveal_audience="cg" if item_slide.get("_splitCg") else "lw",
             sid=cg_key,
             skip_landmarks=reveal_bg,
+            cutout_highlights=plate_highlights.get(plate_id) if plate_id else None,
         )
         ops.append(
             {
@@ -1079,18 +1332,31 @@ def _emit_clear() -> list[str]:
     ]
 
 
-def _emit_adjust_map(item: dict[str, Any]) -> list[str]:
-    return [
+def _emit_adjust_map(item: dict[str, Any], cutouts: list[dict[str, Any]] | None = None) -> list[str]:
+    lines = [
         "        try",
         f"          set position of image 1 to {{{item['x']}, {item['y']}}}",
         f"          set width of image 1 to {item['w']}",
         f"          set height of image 1 to {item['h']}",
         "        end try",
+    ]
+    for i, cutout in enumerate(cutouts or [], start=2):
+        lines += [
+            "        try",
+            f"          set position of image {i} to {{{cutout['x']}, {cutout['y']}}}",
+            f"          set width of image {i} to {cutout['w']}",
+            f"          set height of image {i} to {cutout['h']}",
+            "        end try",
+        ]
+    last = len(cutouts or []) + 2
+    lines += [
         "        try",
-        "          repeat with i from (count of images) to 2 by -1",
+        f"          repeat with i from (count of images) to {last} by -1",
         "            delete image i",
         "          end repeat",
         "        end try",
+    ]
+    lines += [
         "        try",
         "          delete every shape",
         "        end try",
@@ -1101,6 +1367,7 @@ def _emit_adjust_map(item: dict[str, Any]) -> list[str]:
         "          delete every text item",
         "        end try",
     ]
+    return lines
 
 
 def _emit_item(item: dict[str, Any]) -> list[str]:
@@ -1149,29 +1416,9 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
             ]
         lines.append("        end try")
         return lines
-    if kind == "shape":
-        color = item.get("color") or (0xC4 * 257, 0x4A * 257, 0x42 * 257)
-        shape = item.get("shape") or "oval"
-        lines = [
-            "        set shp to make new shape with properties "
-            f"{{shape type:{shape}, position:{{{x}, {y}}}, width:{w}, height:{h}}}",
-            "        try",
-            "          set fill type of shp to color fill",
-            "        end try",
-            "        try",
-            f"          set fill color of shp to {{{color[0]}, {color[1]}, {color[2]}}}",
-            "        end try",
-        ]
-        if item.get("rotation") is not None:
-            lines += [
-                "        try",
-                f"          set rotation of shp to {float(item['rotation'])}",
-                "        end try",
-            ]
-        return lines
     text = _as_escape(str(item.get("text") or ""))
-    font_size = float(item.get("fontSize") or 24)
-    return [
+    font_size = whole(item.get("fontSize") or 24)
+    lines = [
         "        set txt to make new text item with properties "
         f'{{object text:"{text}", position:{{{x}, {y}}}, width:{w}, height:{h}}}',
         "        try",
@@ -1181,6 +1428,17 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
         "          set color of object text of txt to {65535, 65535, 65535}",
         "        end try",
     ]
+    if item.get("bold"):
+        lines += [
+            "        try",
+            f'          set font of object text of txt to "{LABEL_BOLD_FONT}"',
+            "        on error",
+            "          try",
+            f'            set font of object text of txt to "{LABEL_BOLD_FALLBACK}"',
+            "          end try",
+            "        end try",
+        ]
+    return lines
 
 
 def _emit_transition(slide_no: int, trans: dict[str, Any] | None) -> list[str]:
@@ -1215,9 +1473,10 @@ def _emit_slide_body(op: dict[str, Any], slide_no: int) -> list[str]:
     lines = [f"      tell slide {slide_no}"]
     if op.get("duplicate"):
         mapped = next((item for item in items if item.get("map")), items[0] if items else None)
+        cutouts = [item for item in items if item.get("country")]
         if mapped:
-            lines += _emit_adjust_map(mapped)
-        overlays = [item for item in items if not item.get("map")]
+            lines += _emit_adjust_map(mapped, cutouts)
+        overlays = [item for item in items if item is not mapped and item not in cutouts]
         for item in overlays:
             lines += _emit_item(item)
     else:
@@ -1246,10 +1505,16 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             ]
             slide_no += 1
         else:
+            new_no = slide_no + 1
             body += [
                 f"      make new slide at after slide {slide_no}",
+                "      try",
+                f'        set base slide of slide {new_no} of theDoc to master slide "Blank" of theDoc',
+                "      on error",
+                '        set masterStatus to "default"',
+                "      end try",
             ]
-            slide_no += 1
+            slide_no = new_no
         body += _emit_slide_body(op, slide_no)
     return "\n".join(
         [
@@ -1261,7 +1526,13 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             f'      close (every document whose name is "{name}" or name is "{stem}") saving no',
             "      delay 0.3",
             "    end try",
+            '    set themeStatus to "default"',
+            '    set masterStatus to "blank"',
             "    set theDoc to make new document",
+            "    try",
+            '      set document theme of theDoc to theme "Basic Black"',
+            '      set themeStatus to "basicblack"',
+            "    end try",
             f"    set width of theDoc to {int(width)}",
             f"    set height of theDoc to {int(height)}",
             f'    save theDoc in POSIX file "{dest_s}"',
@@ -1280,10 +1551,16 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             "    set theDoc to document 1",
             f'    if name of theDoc does not start with "{stem}" then error '
             '"maps export bound the wrong document: " & (name of theDoc)',
+            "    try",
+            '      set base slide of slide 1 of theDoc to master slide "Blank" of theDoc',
+            "    on error",
+            '      set masterStatus to "default"',
+            "    end try",
             "    tell theDoc",
             *body,
             "    end tell",
             "    save theDoc",
+            '    log "theme=" & themeStatus & " master=" & masterStatus',
             "    try",
             "      close theDoc saving yes",
             "    end try",
@@ -1455,11 +1732,25 @@ def _log(job: Any, message: str) -> None:
         log(message)
 
 
+_OFF_ALIASES = {"off", "0", "false", "no"}
+
+
 def maps_poster_frame_mode(explicit: str | None = None) -> str:
     """`off` (default), `on` (surgical offline posterTime patch), or `verify` (patch +
     read-back log). Env `OBED_MAPS_POSTER_FRAME`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_POSTER_FRAME", "")).strip().lower()
+    if raw in _OFF_ALIASES:
+        return "off"
     return raw if raw in {"on", "verify"} else "off"
+
+
+def maps_movie_autoplay_mode(explicit: str | None = None) -> str:
+    """`on` (default; surgical offline autoplay-after-transition patch), `off`, or
+    `verify` (patch + read-back log). Env `OBED_MAPS_MOVIE_AUTOPLAY`."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_MOVIE_AUTOPLAY", "")).strip().lower()
+    if raw in _OFF_ALIASES:
+        return "off"
+    return raw if raw == "verify" else "on"
 
 
 def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[str, str, str], float]) -> list[dict[str, Any]]:
@@ -1482,6 +1773,129 @@ def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[s
                 }
             )
     return targets
+
+
+def _autoplay_targets(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for op in ops:
+        for item in op.get("items") or []:
+            if item.get("landmark") and item.get("kind") == "movie":
+                targets.append(
+                    {"x": float(item["x"]), "y": float(item["y"]), "w": float(item["w"]), "h": float(item["h"]),
+                     "name": item.get("path")}
+                )
+    return targets
+
+
+def _apply_movie_autoplay(
+    dest: Path,
+    ops: list[dict[str, Any]],
+    job: Any,
+    deck_label: str,
+    *,
+    width: int,
+    height: int,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any] | None:
+    """Patch reveal movies in ``dest`` to start right after their slide's build-in
+    transition, no click needed (owner 2026-09-12 probe: Keynote's AppleScript movie
+    class exposes no autoplay-style property -- only file name/volume/reflection/
+    repetition method/rotation, see Keynote.sdef -- so this is patched offline the
+    same way Keynote itself saves "Start = After Transition"). Gated behind
+    `OBED_MAPS_MOVIE_AUTOPLAY` (default on); a refusal is never fatal to export, same
+    containment as `_apply_poster_frames`."""
+    mode = maps_movie_autoplay_mode()
+    from obed_edom.offline_write import probe_iwa_extra
+
+    mode = probe_iwa_extra(mode, lambda m: _log(job, m))
+    if mode == "off":
+        return None
+    targets = _autoplay_targets(ops)
+    if not targets:
+        return {"deck": deck_label, "mode": mode, "applied": 0, "refused": False, "reason": None, "regenerated": False}
+
+    from obed_edom.iwa_movies import movie_autoplay_state, patch_movie_autoplay, plan_movie_autoplay
+    from obed_edom.iwa_write import OfflineWriteCorrupted
+
+    try:
+        plan = plan_movie_autoplay(dest, targets)
+        if plan["refused"]:
+            _log(job, f"movieAutoplay {deck_label}: refused ({plan['reason']})")
+            return {
+                "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": plan["reason"],
+                "regenerated": False,
+            }
+
+        patched = patch_movie_autoplay(dest, plan["ids"])
+        if patched["refused"]:
+            _log(job, f"movieAutoplay {deck_label}: refused ({patched['reason']})")
+            return {
+                "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": patched["reason"],
+                "regenerated": False,
+            }
+
+        _log(job, f"movieAutoplay {deck_label}: patched {patched['applied']} reveal movie(s)")
+        if mode == "verify":
+            state = movie_autoplay_state(dest, patched["touched"])
+            bad: list[str] = []
+            for oid in patched["touched"]:
+                read = state.get(oid, {})
+                _log(
+                    job,
+                    f"movieAutoplay {deck_label}: {oid} playsAcrossSlides={read.get('playsAcrossSlides')} "
+                    f"automatic={read.get('automatic')}",
+                )
+                if read.get("playsAcrossSlides") is not False or read.get("automatic") is not True:
+                    bad.append(
+                        f"{oid} playsAcrossSlides={read.get('playsAcrossSlides')} automatic={read.get('automatic')}"
+                    )
+            if bad:
+                reason = "verify read-back mismatch: " + "; ".join(bad)
+                _log(job, f"movieAutoplay {deck_label}: refused ({reason})")
+                return {
+                    "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": reason,
+                    "regenerated": False,
+                }
+        return {
+            "deck": deck_label, "mode": mode, "applied": patched["applied"], "refused": False, "reason": None,
+            "regenerated": False,
+        }
+    except OfflineWriteCorrupted as exc:
+        _log(job, f"movieAutoplay {deck_label}: deck truncated during patch ({exc}); regenerating unpatched…")
+        _run_one_deck(
+            ops, dest, width=width, height=height, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
+        from obed_edom.iwa_write import recovery_tmp_path
+
+        recovery_tmp_path(dest).unlink(missing_ok=True)
+        return {
+            "deck": deck_label,
+            "mode": mode,
+            "applied": 0,
+            "refused": True,
+            "reason": f"deck truncated during patch, regenerated unpatched: {exc}",
+            "regenerated": True,
+        }
+    except Exception as exc:  # noqa: BLE001 — every optional-patch failure refuses, never fatal
+        _log(job, f"movieAutoplay {deck_label}: refused (unexpected error: {exc})")
+        return {
+            "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": f"unexpected error: {exc}",
+            "regenerated": False,
+        }
+
+
+def _invalidate_poster_on_regeneration(
+    poster_record: dict[str, Any] | None, autoplay_record: dict[str, Any] | None
+) -> None:
+    """If autoplay patching left the deck truncated, `_apply_movie_autoplay` regenerates
+    it unpatched -- which also wipes any poster-frame patch already applied to that same
+    deck. Mark the stale poster record refused so it doesn't survive into `result`."""
+    if autoplay_record is None or not autoplay_record.get("regenerated"):
+        return
+    if poster_record is not None and not poster_record["refused"]:
+        poster_record["applied"] = 0
+        poster_record["refused"] = True
+        poster_record["reason"] = "discarded by autoplay regeneration"
 
 
 def _apply_poster_frames(
@@ -1534,7 +1948,9 @@ def _apply_poster_frames(
         return {"deck": deck_label, "mode": mode, "applied": patched["applied"], "refused": False, "reason": None}
     except OfflineWriteCorrupted as exc:
         _log(job, f"posterFrame {deck_label}: deck truncated during patch ({exc}); regenerating unpatched…")
-        _run_one_deck(ops, dest, width=width, height=height, is_cancelled=is_cancelled)
+        _run_one_deck(
+            ops, dest, width=width, height=height, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
         from obed_edom.iwa_write import recovery_tmp_path
 
         recovery_tmp_path(dest).unlink(missing_ok=True)
@@ -1557,6 +1973,7 @@ def _run_one_deck(
     width: int,
     height: int,
     is_cancelled: Callable[[], bool] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> str:
     _raise_if_cancelled(is_cancelled)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1573,6 +1990,11 @@ def _run_one_deck(
             + (proc.stdout or "")
             + f"\nScript saved to {debug}"
         )
+    if log is not None:
+        for line in (proc.stdout or "").splitlines() + (proc.stderr or "").splitlines():
+            line = line.strip()
+            if line.startswith("theme=") or line.startswith("master="):
+                log(line)
     return script
 
 
@@ -1668,9 +2090,15 @@ def _render_reveals(
                 still = _still_path(item_slide, output_dir, audience=audience)
             except FileNotFoundError:
                 continue
-            country_still = _country_still_path(item_slide, output_dir, audience)
+            region_manifest = _still_region_manifest(item_slide, output_dir, audience)
             cap_w, cap_h = slide_capture_size(item_slide)
             origin_x = slide_map_origin_x(item_slide)
+            slide_zoom = float((item_slide.get("camera") or {}).get("zoom") or 0)
+            landmark_churches = [
+                church for church in landmark_churches if _effective_size(church, slide_zoom, None) >= 1
+            ]
+            if not landmark_churches:
+                continue
             geometry_items = _place_churches(
                 landmark_churches,
                 plate=None,
@@ -1681,6 +2109,7 @@ def _render_reveals(
                 origin_x=origin_x,
                 capture_w=cap_w,
                 asset_root=asset_root,
+                pin_root=output_dir / "pins",
                 allow_reveal=False,
                 sid=sid,
             )
@@ -1709,13 +2138,30 @@ def _render_reveals(
             if not landmarks:
                 continue
             movie_dest = reveal_movie_path(output_dir, sid, audience)
-            fingerprint = reveal_movie_fingerprint(still, landmarks)
+            manifest_path = _still_region_manifest_path(item_slide, output_dir, audience)
+            pieces = []
+            if region_manifest is not None:
+                pscale = _region_manifest_scale(float(cap_w), float(cap_h), region_manifest)
+                for piece in region_manifest.get("pieces") or []:
+                    k = piece["index"]
+                    piece_png = still.with_name(f"{still.stem}-region-{k}{still.suffix}")
+                    pieces.append(
+                        (
+                            piece_png,
+                            round(piece["x"] * pscale),
+                            round(piece["y"] * pscale),
+                            round(piece["w"] * pscale),
+                            round(piece["h"] * pscale),
+                        )
+                    )
+            piece_paths = [piece_path for piece_path, *_ in pieces]
+            fingerprint = reveal_movie_fingerprint(still, landmarks, manifest_path, piece_paths)
             if reveal_stale(movie_dest, fingerprint):
                 _raise_if_cancelled(is_cancelled)
                 log(f"Rendering reveal slide movie for {sid}…")
                 render_slide_reveal_movie(
                     still,
-                    country_still,
+                    pieces,
                     landmarks,
                     movie_dest,
                     output_dir=output_dir,
@@ -1729,13 +2175,26 @@ def _render_reveals(
     return reveals, reveal_movies, reveal_poster_times
 
 
-def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True, export_dsk: bool = False) -> dict[str, Any]:
+def export_maps_job(
+    job: Any,
+    *,
+    export_lw: bool = True,
+    export_cg: bool = True,
+    export_dsk: bool = False,
+    export_dir: Path | None = None,
+    credits: list[str] | None = None,
+) -> dict[str, Any]:
     if not export_lw and not export_cg and not export_dsk:
         raise ValueError("At least one export target must be on")
     is_cancelled = getattr(job, "cancelled", lambda: False)
     _raise_if_cancelled(is_cancelled)
     result = inherit_hidden_layers(dict(getattr(job, "result", None) or {}))
-    output_dir = Path(str(result.get("outputDir") or find_repo_root() / "output" / ".maps" / str(getattr(job, "id", "maps"))))
+    output_dir = Path(
+        str(
+            result.get("outputDir")
+            or find_repo_root() / "output" / ".maps" / str(getattr(job, "name", None) or getattr(job, "id", "maps"))
+        )
+    )
     preview_dir = Path(str(result.get("previewDir") or (output_dir / "previews")))
     output_dir.mkdir(parents=True, exist_ok=True)
     preview_dir.mkdir(parents=True, exist_ok=True)
@@ -1768,30 +2227,53 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
     plates = plan["plateGeoms"]
     links = plan["links"]
     result["links"] = links
+    credit_lines = (
+        [cleaned for x in (credits or []) if (cleaned := normalise_credit_line(x))]
+        if str(result.get("attribution") or "credits") != "stamp"
+        else []
+    )
     movie = find_pin_drop_wave()
-    stem = str(result.get("stem") or f"maps-{getattr(job, 'id', 'maps')}")
+    stem = str(result.get("stem") or getattr(job, "name", "") or f"maps-{getattr(job, 'id', 'maps')}")
     flags: list[Any] = []
     flags_cg: list[Any] = []
     poster_frame: list[dict[str, Any]] = []
+    movie_autoplay: list[dict[str, Any]] = []
+    if export_dir is not None:
+        export_dir = ensure_export_dir(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
     if export_lw:
-        dest = output_dir / f"{stem}.key"
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
+        dest = (export_dir or output_dir) / f"{stem}.key"
         _log(job, f"Exporting wall deck {dest.name} (7680×1080)…")
         ops = plan_deck(
             slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True,
             reveals=reveals, reveal_movies=reveal_movies,
         )
-        _run_one_deck(ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled)
+        if credit_lines:
+            ops.append(credits_op(credit_lines, width=WALL_WIDTH, height=WALL_HEIGHT))
+        _run_one_deck(
+            ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
         result["destPath"] = str(dest)
         _raise_if_cancelled(is_cancelled)
-        record = _apply_poster_frames(
+        record_lw = _apply_poster_frames(
             dest, ops, reveal_poster_times, job, "lw",
             width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_lw is not None:
+            poster_frame.append(record_lw)
+        autoplay_record = _apply_movie_autoplay(
+            dest, ops, job, "lw", width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled
+        )
+        if autoplay_record is not None:
+            movie_autoplay.append(autoplay_record)
+        _invalidate_poster_on_regeneration(record_lw, autoplay_record)
         flags = _inspect_dest(dest, job, is_cancelled=is_cancelled)
     if export_dsk:
-        dest_dsk = output_dir / f"{stem}_DSK.key"
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
+        dest_dsk = (export_dir or output_dir) / f"{stem}_DSK.key"
         _log(job, f"Exporting DSK deck {dest_dsk.name} (1920×1080)…")
         ops_dsk = dsk_ops(
             plan_deck(
@@ -1799,16 +2281,28 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
                 reveals=reveals, reveal_movies=reveal_movies,
             )
         )
-        _run_one_deck(ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled)
+        if credit_lines:
+            ops_dsk.append(credits_op(credit_lines, width=DSK_WIDTH, height=DSK_HEIGHT))
+        _run_one_deck(
+            ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
         result["destPathDsk"] = str(dest_dsk)
-        record = _apply_poster_frames(
+        record_dsk = _apply_poster_frames(
             dest_dsk, ops_dsk, reveal_poster_times, job, "dsk",
             width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_dsk is not None:
+            poster_frame.append(record_dsk)
+        autoplay_record = _apply_movie_autoplay(
+            dest_dsk, ops_dsk, job, "dsk", width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled
+        )
+        if autoplay_record is not None:
+            movie_autoplay.append(autoplay_record)
+        _invalidate_poster_on_regeneration(record_dsk, autoplay_record)
     if export_cg:
-        dest_cg = output_dir / f"{stem}_CG.key"
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
+        dest_cg = (export_dir or output_dir) / f"{stem}_CG.key"
         _log(job, f"Exporting CG deck {dest_cg.name} (1920×1080)…")
         split_cg = any(isinstance(slide.get("cg"), dict) for slide in slides)
         if split_cg:
@@ -1840,16 +2334,33 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
                 slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=False,
                 reveals=reveals, reveal_movies=reveal_movies,
             )
-        _run_one_deck(ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled)
+        if credit_lines:
+            ops_cg.append(credits_op(credit_lines, width=CG_WIDTH, height=CG_HEIGHT))
+        _run_one_deck(
+            ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
         result["destPathCg"] = str(dest_cg)
         _raise_if_cancelled(is_cancelled)
-        record = _apply_poster_frames(
+        record_cg = _apply_poster_frames(
             dest_cg, ops_cg, reveal_poster_times, job, "cg",
             width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_cg is not None:
+            poster_frame.append(record_cg)
+        autoplay_record = _apply_movie_autoplay(
+            dest_cg, ops_cg, job, "cg", width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled
+        )
+        if autoplay_record is not None:
+            movie_autoplay.append(autoplay_record)
+        _invalidate_poster_on_regeneration(record_cg, autoplay_record)
+
         flags_cg = _inspect_dest(dest_cg, job, is_cancelled=is_cancelled)
+    if not export_lw:
+        result.pop("destPath", None)
+    if not export_cg:
+        result.pop("destPathCg", None)
+    if not export_dsk:
+        result.pop("destPathDsk", None)
     result["exportLw"] = bool(export_lw)
     result["exportCg"] = bool(export_cg)
     result["exportDsk"] = bool(export_dsk)
@@ -1859,6 +2370,10 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         # Gate off (or no reveal movies to patch): never let a stale record from a
         # prior on/verify run survive in `result`, which starts as a copy of it.
         result.pop("posterFrame", None)
+    if movie_autoplay:
+        result["movieAutoplay"] = movie_autoplay
+    else:
+        result.pop("movieAutoplay", None)
     from obed_edom.validate import flag_dict
 
     if export_lw:

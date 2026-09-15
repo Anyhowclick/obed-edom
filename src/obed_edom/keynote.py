@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
 import shutil
-import subprocess
-import tempfile
-import time
 from pathlib import Path
 
 from obed_edom import keynote_app
 from obed_edom.models import SlideSpec
-from obed_edom.paths import output_root, select_deck_template
+from obed_edom.osascript_runner import run_applescript as _run_applescript
+from obed_edom.paths import ensure_export_subdir, output_root, select_deck_template
 
 
 def _keynote_tell() -> str:
@@ -30,12 +30,12 @@ def _keynote_process_tell() -> str:
     )
 
 
-def _stem(docx: Path) -> str:
+def stem_for(docx: Path) -> str:
     return docx.stem.replace(" ", "_")
 
 
 def output_dir_for(docx: Path, root: Path | None = None) -> Path:
-    out = (root / "output" if root else output_root()) / _stem(docx)
+    out = (root / "output" if root else output_root()) / stem_for(docx)
     out.mkdir(parents=True, exist_ok=True)
     return out
 
@@ -616,18 +616,7 @@ def _run_superscript_fix(
     script = _build_superscript_fix_script(key_path, jobs, export_dir)
     if not script:
         return {"ok": True, "skipped": True}
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        script_path.unlink(missing_ok=True)
+    proc = _run_applescript(script)
     size_report = (proc.stdout or "").strip()
     verdict = _read_superscript_report(size_report)
     ok = proc.returncode == 0 and verdict["allSuperscript"]
@@ -800,6 +789,11 @@ _STAT_ACCUMULATORS = (
     "raiseMoved",
     "raiseDead",
     "raiseUnknown",
+    "raiseBlindCount",
+    "raiseVacuous",
+    "raiseRetried",
+    "raiseClickRetried",
+    "lastFrontBlind",
 )
 
 # Position always matches; w/h only match where the live frame isn't Keynote's own
@@ -816,10 +810,35 @@ def _as_fixed(value: float) -> str:
     return f"{float(value):.3f}"
 
 
+def _raise_settle_bounds() -> tuple[float, float]:
+    """(settle_min, settle_max) for the bounded readiness poll in obedFront, seconds.
+
+    `settle_min` is the delay before the first `enabled` read and never shortens below
+    today's 0.35 s. `settle_max` is the poll ceiling on top of it; unlike settle_min it
+    may be set to 0 (``OBED_RAISE_SETTLE_MAX=0``) to disable polling entirely -- the
+    mandatory 0.2 s post-click delay stays hardcoded regardless of either env var."""
+    try:
+        settle_min = float(os.environ.get("OBED_RAISE_SETTLE_MIN", "0.35"))
+        if not math.isfinite(settle_min):
+            raise ValueError
+    except ValueError:
+        settle_min = 0.35
+    settle_min = max(0.35, settle_min)
+    try:
+        settle_max = float(os.environ.get("OBED_RAISE_SETTLE_MAX", "1.5"))
+        if not math.isfinite(settle_max) or settle_max < 0:
+            raise ValueError
+    except ValueError:
+        settle_max = 1.5
+    return settle_min, settle_max
+
+
 def _stat_job_handlers() -> list[str]:
     """Index verified by content; ascending raise, decrement gated on a verified landing.
     Depends on obedBadgeFind/obedKindCount/obedTopReal, defined later in this list --
     fine at runtime since AppleScript hoists handlers."""
+    settle_min, settle_max = _raise_settle_bounds()
+    retry_settle = max(1.0, settle_min * 3)
     lines = [
         "on obedSlideSigs(slideNo)",
         "  global theDoc",
@@ -938,7 +957,8 @@ def _stat_job_handlers() -> list[str]:
         # A slide is abandoned (unknown branch) rather than guessed once the arithmetic's
         # input (the liveness probe) stops confirming what happened.
         "on obedRaiseSlide(slideNo)",
-        "  global theDoc, raiseTargets, raiseMoved, raiseDead, raiseUnknown, report",
+        "  global theDoc, raiseTargets, raiseMoved, raiseDead, raiseUnknown, "
+        "raiseVacuous, raiseRetried, report",
         "  set _rem to {}",
         "  repeat with _e in raiseTargets",
         "    set _r to contents of _e",
@@ -951,6 +971,10 @@ def _stat_job_handlers() -> list[str]:
         "    repeat with _k from 2 to count of _rem",
         "      if (item _k of _rem) < _mn then set _mn to item _k of _rem",
         "    end repeat",
+        "    if _mn is _top then",
+        '      set report to report & " raiseVacuous(s=" & slideNo & ",idx=" & _mn & ")"',
+        "      set raiseVacuous to raiseVacuous + 1",
+        "    end if",
         "    set _f to my obedGroupFrame(slideNo, _mn)",
         "    set _found to false",
         "    if _f is not missing value then",
@@ -966,8 +990,13 @@ def _stat_job_handlers() -> list[str]:
         "      set raiseUnknown to raiseUnknown + (count of _rem)",
         "      return",
         "    end if",
-        "    my obedFront()",
+        "    my obedFront(\"raise\", slideNo, _mn)",
         "    set _at to my obedBadgeFind(slideNo, \"group\", _top, fx of _f, fy of _f, fw of _f, fh of _f, true, true, false)",
+        "    if (_mn is not _top) and (_at is _mn) then",
+        "      set _at2 to my obedRaiseRetry(slideNo, _mn, _top, _f)",
+        "      if _at2 is _top then set raiseRetried to raiseRetried + 1",
+        "      set _at to _at2",
+        "    end if",
         "    if _at is _top then",
         "      set raiseMoved to raiseMoved + 1",
         "      set _new to {}",
@@ -990,6 +1019,25 @@ def _stat_job_handlers() -> list[str]:
         "    end if",
         "  end repeat",
         "end obedRaiseSlide",
+        # One retry on a verified dead raise: re-assert the selection, wait a settle 3x
+        # today's floor (never below 1.0 s), front again, re-probe. Additive -- a failed
+        # reselect or a still-dead probe returns the same outcome the caller already had,
+        # so this can only turn a dead raise into a landed one, never invent a guess.
+        "on obedRaiseRetry(slideNo, _mn, _top, _f)",
+        "  global theDoc",
+        "  set _found to false",
+        "  " + _keynote_tell(),
+        "    try",
+        "      set selection of theDoc to {group _mn of slide slideNo of theDoc}",
+        "      set _found to true",
+        "    end try",
+        "  end tell",
+        "  if not _found then return _mn",
+        f"  delay {_as_fixed(retry_settle)}",
+        '  my obedFront("raise", slideNo, _mn)',
+        "  return my obedBadgeFind(slideNo, \"group\", _top, fx of _f, fy of _f, fw of _f, "
+        "fh of _f, true, true, false)",
+        "end obedRaiseRetry",
         "on obedWithinTol(a, b, tol)",
         "  set _d to a - b",
         "  if _d < 0 then set _d to -_d",
@@ -1149,7 +1197,7 @@ def _stat_job_handlers() -> list[str]:
         "  return _f",
         "end obedGroupFrame",
         "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH)",
-        "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, report",
+        "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, lastFrontBlind, report",
         "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, badgeFrontDead is 0)",
         "  if _hit is 0 then",
         "    set badgeUnresolved to badgeUnresolved + 1",
@@ -1178,21 +1226,29 @@ def _stat_job_handlers() -> list[str]:
         "    end try",
         "  end tell",
         "  if not _found then return",
-        "  my obedFront()",
-        "  if badgeMoved is 0 and badgeFrontDead is 0 then",
+        "  set _frontResult to my obedFront(\"badge\", slideNo, _hit)",
+        "  set _reprobe to _frontResult is not 0 or lastFrontBlind is not 0",
+        "  set _probeOnly to badgeMoved is not 0 and _reprobe",
+        "  if (badgeMoved is 0 or _reprobe) and badgeFrontDead is 0 then",
+        "    if _probeOnly and _frontResult is 0 then",
+        '      set report to report & " badgeProbeBlind(s=" & slideNo & ",k=" & theKind & ")"',
+        "    end if",
         "    set _kindCount to my obedKindCount(slideNo, theKind)",
         "    if _kindCount is 0 then",
         '      set report to report & " badgeCountErr(s=" & slideNo & ",k=" & theKind & ")"',
+        "      if _probeOnly then set badgeMoved to badgeMoved + 1",
         "    else",
         "      set _topReal to my obedTopReal(slideNo, theKind, _kindCount)",
         "      if _topReal < 2 or _hit is not less than _topReal then",
         '        set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
+        "        if _probeOnly then set badgeMoved to badgeMoved + 1",
         "      else",
         "        set _foundAt to my obedBadgeFind(slideNo, theKind, _topReal, fx, fy, fw, fh, matchW, matchH, false)",
         "        if _foundAt is _topReal then",
         "          set badgeMoved to badgeMoved + 1",
         "        else if _foundAt is 0 or _foundAt > _topReal then",
         '          set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
+        "          if _probeOnly then set badgeMoved to badgeMoved + 1",
         "        else",
         "          set badgeFrontDead to 1",
         '          set report to report & " badgeFrontDead(s=" & slideNo & ")"',
@@ -1225,18 +1281,78 @@ def _stat_job_handlers() -> list[str]:
         "    my obedRaiseItem(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mw of _r, mh of _r)",
         "  end repeat",
         "end obedBadgeSlide",
-        "on obedFront()",
-        "  global frontRaised, frontErr",
-        "  delay 0.35",
+        # Bounded readiness poll: wait the settle floor, then poll `enabled` every 0.1 s
+        # up to the ceiling, returning whatever it read (today's behaviour when polling
+        # never confirms readiness). `enabled` is probed in its own `try` so a read
+        # failure degrades to `missing value`, treated as not-ready. Also records
+        # lastFrontBlind for the caller when the poll never confirms readiness.
+        "on obedFrontReady(phase, slideNo, idx)",
+        "  global raiseBlindCount, lastFrontBlind, report",
+        f"  delay {_as_fixed(settle_min)}",
+        "  set _ready to false",
+        "  set _waited to 0.0",
+        "  repeat",
+        "    set _en to missing value",
+        "    try",
+        "      " + _keynote_process_tell(),
+        '        set _en to enabled of menu item "Bring to Front" of menu "Arrange" '
+        'of menu bar item "Arrange" of menu bar 1',
+        "      end tell",
+        "    end try",
+        "    if _en is true then",
+        "      set _ready to true",
+        "      exit repeat",
+        "    end if",
+        f"    if _waited >= {_as_fixed(settle_max)} then exit repeat",
+        "    delay 0.1",
+        "    set _waited to _waited + 0.1",
+        "  end repeat",
+        "  if not _ready then",
+        "    set raiseBlindCount to raiseBlindCount + 1",
+        '    set report to report & " raiseBlind(s=" & slideNo & ",idx=" & idx & ",phase=" & phase & ")"',
+        "    set lastFrontBlind to 1",
+        "  end if",
+        "  return _ready",
+        "end obedFrontReady",
+        # A click error re-runs the whole readiness sequence (settle floor + poll) once
+        # before giving up -- a bare re-click after the same failed resolution rescues
+        # nothing (raise-dead bank). frontRaised counts once per call, on whichever
+        # attempt lands; only a second failure reaches frontErr, tagged `,retry]`.
+        "on obedFront(phase, slideNo, idx)",
+        "  global frontRaised, frontErr, raiseClickRetried, lastFrontBlind, report",
+        "  set lastFrontBlind to 0",
+        "  my obedFrontReady(phase, slideNo, idx)",
+        "  set _clicked to false",
         "  try",
         "    " + _keynote_process_tell(),
         '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
         "    end tell",
+        "    set _clicked to true",
+        "  on error errMsg number errNum",
+        "    set raiseClickRetried to raiseClickRetried + 1",
+        '    set report to report & " raiseClickRetry(s=" & slideNo & ",idx=" & idx & ",phase=" & phase & ",err=" & errNum & ")"',
+        "  end try",
+        "  if _clicked then",
         "    set frontRaised to frontRaised + 1",
         "    delay 0.2",
+        "    return 0",
+        "  end if",
+        "  my obedFrontReady(phase, slideNo, idx)",
+        "  set _clicked to false",
+        "  try",
+        "    " + _keynote_process_tell(),
+        '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
+        "    end tell",
+        "    set _clicked to true",
         "  on error errMsg number errNum",
-        '    set frontErr to frontErr & " [" & errNum & "]"',
+        '    set frontErr to frontErr & " [" & errNum & "@" & phase & ",s=" & slideNo & ",idx=" & idx & ",retry]"',
         "  end try",
+        "  if _clicked then",
+        "    set frontRaised to frontRaised + 1",
+        "    delay 0.2",
+        "    return 1",
+        "  end if",
+        "  return 2",
         "end obedFront",
     ]
     return lines
@@ -1284,10 +1400,16 @@ def _build_stat_finalize_script(
     export_dir: Path | None = None,
     group_removes: list[dict] | None = None,
     badge_raises: list[dict] | None = None,
+    suppress_raises: set[int] | None = None,
 ) -> str:
-    """Post-JXA: template stat sizes, then Bring to Front (stat groups + badge). Optional PNG export before close."""
+    """Post-JXA: template stat sizes, then Bring to Front (stat groups + badge). Optional PNG export before close.
+
+    `suppress_raises` (W2 offline z-order): slides in this set get NO `obedRaiseSlide`
+    and NO `obedBadgeSlide` call — their raises already landed via the offline patch.
+    Font sizing, dedup, and `raiseTargets` accumulation are untouched."""
     group_removes = group_removes or []
     badge_raises = badge_raises or []
+    suppress_raises = suppress_raises or set()
     if not jobs and not group_removes and not badge_raises:
         return ""
     escaped = _as_escape(str(dest))
@@ -1347,6 +1469,11 @@ def _build_stat_finalize_script(
         "  set raiseMoved to 0",
         "  set raiseDead to 0",
         "  set raiseUnknown to 0",
+        "  set raiseBlindCount to 0",
+        "  set raiseVacuous to 0",
+        "  set raiseRetried to 0",
+        "  set raiseClickRetried to 0",
+        "  set lastFrontBlind to 0",
         '  set exported to "false"',
         '  set report to ""',
     ]
@@ -1408,8 +1535,12 @@ def _build_stat_finalize_script(
     # index arithmetic is applied to the rest.
     lines += ['  set frontRaised to 0', '  set frontErr to ""']
     for slide in sorted(font_by_slide):
+        if slide in suppress_raises:
+            continue
         lines += [f"  my obedRaiseSlide({slide})"]
     for slide in sorted(badge_by_slide):
+        if slide in suppress_raises:
+            continue
         rows = [r for r in badge_by_slide[slide] if {"x", "y", "w", "h"} <= r.keys()]
         if len(rows) != len(badge_by_slide[slide]):
             continue  # a frameless row: pre-counted at init
@@ -1441,8 +1572,12 @@ def _build_stat_finalize_script(
             "  end try",
         ]
     lines += [
+        "  set closedOK to 0",
         "  try",
         "    close theDoc saving yes",
+        "    set closedOK to 1",
+        "  on error",
+        "    set closedOK to 0",
         "  end try",
         "  end timeout",
         '  return "done=" & doneJobs & " skipped=" & skipJobs & " sized=" & sized '
@@ -1452,7 +1587,10 @@ def _build_stat_finalize_script(
         '& " unresolved=" & unresolved & " badgeFallback=" & badgeFallbacks '
         '& " badgeUnresolved=" & badgeUnresolved & " badgeMoved=" & badgeMoved '
         '& " badgeFrontDead=" & badgeFrontDead & " raiseMoved=" & raiseMoved '
-        '& " raiseDead=" & raiseDead & " raiseUnknown=" & raiseUnknown & " detail=" & report',
+        '& " raiseDead=" & raiseDead & " raiseUnknown=" & raiseUnknown '
+        '& " raiseBlindCount=" & raiseBlindCount & " raiseVacuous=" & raiseVacuous '
+        '& " raiseRetried=" & raiseRetried & " raiseClickRetried=" & raiseClickRetried '
+        '& " closed=" & closedOK & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
@@ -1466,6 +1604,7 @@ def _run_stat_finalize(
     export_dir: Path | None = None,
     group_removes: list[dict] | None = None,
     badge_raises: list[dict] | None = None,
+    suppress_raises: set[int] | None = None,
 ) -> dict:
     """Run stat-finalize (dedup + sizes + bring-to-front). No-op if all three job lists are empty."""
     export_dir = Path(export_dir) if export_dir else None
@@ -1478,23 +1617,11 @@ def _run_stat_finalize(
         export_dir,
         group_removes=group_removes,
         badge_raises=badge_raises,
+        suppress_raises=suppress_raises,
     )
     if not script:
-        return {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        script_path.unlink(missing_ok=True)
+        return {"ok": True, "skipped": True, "closed": True, "done": 0, "jobs": 0, "exported": False}
+    proc = _run_applescript(script, launch=True)
     raw = (proc.stdout or "").strip()
 
     def _num(key: str) -> int:
@@ -1535,6 +1662,11 @@ def _run_stat_finalize(
         "raiseMoved": _num("raiseMoved"),
         "raiseDead": _num("raiseDead"),
         "raiseUnknown": _num("raiseUnknown"),
+        "raiseBlindCount": _num("raiseBlindCount"),
+        "raiseVacuous": _num("raiseVacuous"),
+        "raiseRetried": _num("raiseRetried"),
+        "raiseClickRetried": _num("raiseClickRetried"),
+        "closed": bool(_num("closed")),
         "detail": detail,
         "tokens": _parse_detail_tokens(detail),
         "frontErr": front_err,
@@ -1631,17 +1763,11 @@ def _read_template_stat_sizes_via_keynote(template: Path) -> dict[str, float]:
         "end using terms from",
     ]
     script = "\n".join(lines)
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)], capture_output=True, text=True, check=False
+    proc = _run_applescript(script, launch=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Template stat-size read failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
         )
-    finally:
-        script_path.unlink(missing_ok=True)
     sizes: dict[str, float] = {}
     for line in (proc.stdout or "").splitlines():
         if "\t" not in line:
@@ -1937,29 +2063,15 @@ def _build_applescript(plan: dict) -> str:
 def run_applescript(plan: dict) -> dict:
     script = _build_applescript(plan)
     # File + LaunchServices, not stdin: uvicorn workers break osascript's HIServices and Keynote's dictionary never loads.
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        script_path.unlink(missing_ok=True)
+    debug = Path(plan["output"]).with_suffix(".applescript")
+    proc = _run_applescript(script, launch=True, dump_on_failure=debug)
     if proc.returncode != 0:
-        debug = Path(plan["output"]).with_suffix(".applescript")
-        debug.write_text(script, encoding="utf-8")
         raise RuntimeError(
             "Keynote AppleScript failed:\n"
             + (proc.stderr or "")
             + "\n"
             + (proc.stdout or "")
-            + f"\nScript saved to {debug}"
+            + f"\nScript saved to {proc.dump}"
         )
     raw = (proc.stdout or "").strip()
     parts = raw.split("\t")
@@ -2023,6 +2135,7 @@ def generate_both(
     *,
     lw_template: Path | str | None = None,
     dsk_template: Path | str | None = None,
+    output_dir: Path | None = None,
 ) -> tuple[Path, Path | None, Path | None, dict, dict]:
     lw_src = select_deck_template(lw_template)
     dsk_src = select_deck_template(dsk_template)
@@ -2030,8 +2143,9 @@ def generate_both(
         raise FileNotFoundError(
             "At least one Keynote template is required (LW, DSK, or both)."
         )
-    out_dir = output_dir_for(docx)
-    stem = _stem(docx)
+    parent = output_dir or output_root()
+    out_dir = ensure_export_subdir(parent, stem_for(docx))
+    stem = stem_for(docx)
     lw_path = out_dir / f"{stem}_LW.key"
     dsk_path = out_dir / f"{stem}_DSK.key"
     lw_export = out_dir / "previews" / "lw" if export and lw_src else None

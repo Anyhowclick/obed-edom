@@ -106,7 +106,9 @@ def executable_name(identifier: str | None = None) -> str | None:
 
 
 def clear_cache() -> None:
-    app_path.cache_clear()
-    bundle_id.cache_clear()
-    app_version.cache_clear()
-    executable_name.cache_clear()
+    """Clears each function's cache if still lru_cache-wrapped; a monkeypatched
+    replacement (e.g. in tests) is skipped rather than raising."""
+    for fn in (app_path, bundle_id, app_version, executable_name):
+        cache_clear = getattr(fn, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()

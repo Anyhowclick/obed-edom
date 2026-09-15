@@ -2973,6 +2973,88 @@ def test_name_column_ids_takes_a_multiline_name_box():
     assert name_column_ids(items) == {id(box)}
 
 
+def _group_carrier(kind_index, x=259, y=7, w=1389, h=1053):
+    return _item(kind="group", kindIndex=kind_index, x=x, y=y, w=w, h=h)
+
+
+def test_name_column_ids_counts_a_group_whose_child_text_is_a_roster():
+    from obed_edom.map_remap import roster_lines
+
+    g = _group_carrier(49)
+    gct = {49: "\n".join(f"CHC Place{i}" for i in range(20))}
+    assert name_column_ids([g], gct) == {id(g)}
+    assert name_column_ids([g]) == set()
+    assert roster_lines(g, gct)
+
+
+def test_a_stat_badge_group_with_one_church_line_is_not_a_roster_carrier():
+    """Gold's "183 CHC Churches" plate and "Total Churches 269 / CHC Churches" badge
+    each carry at most one CHURCH_LIST_RE line; neither is a roster carrier."""
+    from obed_edom.map_remap import roster_lines
+
+    plate = _group_carrier(1)
+    badge = _group_carrier(2)
+    gct = {1: "183 CHC Churches", 2: "Total Churches 269\nCHC Churches"}
+    assert name_column_ids([plate, badge], gct) == set()
+    assert roster_lines(plate, gct) == []
+    assert roster_lines(badge, gct) == []
+
+
+def test_roster_lines_excludes_a_non_anchored_stat_heading_from_a_group():
+    from obed_edom.map_remap import roster_lines
+
+    carrier = _group_carrier(49)
+    names = [f"CHC Place{i}" for i in range(8)]
+    gct = {49: "\n".join(names + ["183 CHC Churches"])}
+    assert roster_lines(carrier, gct) == names
+
+
+def test_roster_run_drops_later_slides_whose_roster_is_a_group():
+    from obed_edom.map_remap import roster_slides
+
+    slide1 = _roster_slide(1)
+    slide2 = _roster_slide(2)
+    sig = "\n".join(f"CHC Place{i}" for i in range(20))
+    slide3 = {"number": 3, "items": [_group_carrier(49)], "groupChildText": {49: sig}}
+    slide4 = {"number": 4, "items": [_group_carrier(49)], "groupChildText": {49: sig}}
+
+    keep, drop = roster_slides([slide1, slide2, slide3, slide4])
+    assert keep == {1, 2}
+    assert drop == {3, 4}
+
+
+def test_drop_roster_hides_a_group_carrier_even_with_keep_side_panels():
+    sig = "\n".join(f"CHC Place{i}" for i in range(20))
+    carrier = _group_carrier(49)
+    items = [carrier]
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+    slide = {"number": 1, "items": items, "groupChildText": {49: sig}}
+
+    out = plan_slide_transforms(
+        slide, recipe, keep_side_panels=True, drop_roster=True, wall_size=(7680, 1080)
+    )
+    by_kind_index = {t.kind_index: t for t in out}
+    assert by_kind_index[49].role == "hide"
+
+
+def test_drop_roster_hides_a_group_carrier_after_a_json_round_trip():
+    import json
+
+    sig = "\n".join(f"CHC Place{i}" for i in range(20))
+    carrier = _group_carrier(49)
+    items = [carrier]
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+    slide = json.loads(json.dumps({"number": 1, "items": items, "groupChildText": {49: sig}}))
+
+    out = plan_slide_transforms(
+        slide, recipe, keep_side_panels=True, drop_roster=True, wall_size=(7680, 1080)
+    )
+    by_kind_index = {t.kind_index: t for t in out}
+    assert by_kind_index[49].role == "hide"
+
+
 def test_lone_map_label_over_the_map_survives_the_list_drop():
     items = [
         _item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080),
@@ -3095,6 +3177,62 @@ def test_roster_second_slide_with_new_content_drops_the_roster():
 
     slide1 = _roster_slide(1)
     slide2 = _roster_slide(2, extra=_item(kind="group", kindIndex=99, x=100, y=100, w=50, h=50))
+
+    keep, drop = roster_slides([slide1, slide2])
+    assert keep == {1}
+    assert drop == {2}
+
+
+def test_drop_roster_keeps_a_mixed_carrier_group_and_reports_it():
+    """A group carrier whose child text is a roster plus other content (e.g. a
+    nested heading) must never be whole-group hidden — that would drop the
+    non-roster text too. It falls through drop_roster and a warning names it."""
+    sig = "\n".join(f"CHC Place{i}" for i in range(8)) + "\nNEW STAT"
+    carrier = _group_carrier(49)
+    items = [carrier]
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+    slide = {"number": 2, "items": items, "groupChildText": {49: sig}}
+
+    with pytest.warns(UserWarning, match="mixed roster carrier"):
+        out = plan_slide_transforms(
+            slide, recipe, keep_side_panels=True, drop_roster=True, wall_size=(7680, 1080)
+        )
+    by_kind_index = {t.kind_index: t for t in out}
+    assert by_kind_index[49].role != "hide"
+
+    with pytest.warns(UserWarning, match="mixed roster carrier"):
+        out_side_panel = plan_slide_transforms(
+            slide, recipe, keep_side_panels=False, drop_roster=True, wall_size=(7680, 1080)
+        )
+    by_kind_index_side_panel = {t.kind_index: t for t in out_side_panel}
+    assert by_kind_index_side_panel[49].role == "hide"
+
+
+def test_roster_second_slide_group_with_new_child_text_drops_the_roster():
+    """A group carrier's non-roster child text (e.g. a new heading nested in the
+    same group) must still count as new content on the second slide, even though
+    the group itself is excluded from the roster names."""
+    from obed_edom.map_remap import roster_slides
+
+    sig = "\n".join(f"CHC Place{i}" for i in range(20))
+    slide1 = {"number": 1, "items": [_group_carrier(49)], "groupChildText": {49: sig}}
+    slide2 = {"number": 2, "items": [_group_carrier(49)], "groupChildText": {49: sig + "\nNEW STAT"}}
+
+    keep, drop = roster_slides([slide1, slide2])
+    assert keep == {1}
+    assert drop == {2}
+
+
+def test_roster_second_slide_group_with_a_church_stat_heading_drops_the_roster():
+    """A stat heading that itself contains a CHURCH_LIST_RE match (e.g. "183 CHC
+    Churches") but does not start with the church prefix is new content, not a
+    roster name; it must still drop the second slide."""
+    from obed_edom.map_remap import roster_slides
+
+    sig = "\n".join(f"CHC Place{i}" for i in range(8))
+    slide1 = {"number": 1, "items": [_group_carrier(49)], "groupChildText": {49: sig}}
+    slide2 = {"number": 2, "items": [_group_carrier(49)], "groupChildText": {49: sig + "\n183 CHC Churches"}}
 
     keep, drop = roster_slides([slide1, slide2])
     assert keep == {1}
@@ -5819,6 +5957,31 @@ def test_offframe_report_is_empty_after_reflow():
     assert rows == []
 
 
+def test_offframe_rows_uses_refused_size_for_visible_area():
+    # A group whose size was refused (sizeRefused) keeps its source dims (1000x100) on
+    # the wall, not the collapsed target rect (100x100) offframe_rows was using — the
+    # latter made a barely-on-frame group look fully visible.
+    recipe = {"destWidth": 1920.0, "destHeight": 1080.0}
+    item = _item(kindIndex=0, kind="group", x=0.0, y=0.0, w=10.0, h=10.0)
+    slide = {"number": 4, "items": [item]}
+    spec = ItemTransform(
+        slide_number=4,
+        item_index=0,
+        kind="group",
+        kind_index=0,
+        x=1800.0,
+        y=0.0,
+        w=100.0,
+        h=100.0,
+        role="other",
+        src=Rect(0.0, 0.0, 1000.0, 100.0),
+        size_refused="group-children-unavailable",
+    )
+    rows = offframe_rows([spec], slide, recipe, 1920.0, 1080.0)
+    assert len(rows) == 1
+    assert rows[0]["visible"] == pytest.approx(0.12)
+
+
 def test_fit_to_frame_recipe_carries_card_samples():
     # A wall slide whose only template framing is degenerate (forces fit-to-frame,
     # like the existing "1280 wide against a 7680 wall" scenario) must still resize
@@ -5972,6 +6135,159 @@ def test_badge_group_reaches_the_child_write_path():
     assert d["children"][0]["w"] / 278.0 == pytest.approx(report[0]["s"])
 
 
+def test_autosize_marked_group_refuses_the_collapsing_write_without_groupchildren():
+    """Reproduces the Gold slide 2 badge collapse: a JXA-read wall never attaches
+    groupChildren (archive-space child offsets are incompatible with a JXA group's
+    live union frame), but groupAutosize is attached unconditionally. Without the
+    fix, plan_slide_transforms leaves child_src=None and ItemTransform.as_dict()
+    writes the bare group w/h, which Keynote's aspect-locked resize then collapses.
+    This must FAIL on pre-fix code (children absent, w/h present) and PASS after."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 1.0, "tx": -2464.3, "ty": 0.6, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupAutosize": {0: True},
+        "groupChildrenUnavailable": True,
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert "w" not in d and "h" not in d
+    assert "children" not in d
+    assert d["sizeRefused"] == "group-children-unavailable"
+    assert report[0]["sizeRefused"] == "group-children-unavailable"
+    assert report[0]["s"] == 1.0
+
+
+def test_autosize_marked_group_with_groupchildren_is_unaffected():
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 0.25, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupAutosize": {0: True},
+        "groupChildren": {0: _badge_child_src()},
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert "sizeRefused" not in d
+    assert len(d["children"]) == 2
+    assert "sizeRefused" not in report[0]
+
+
+def test_autosize_marked_pin_group_also_refuses_the_collapsing_write():
+    """A short-caption group (classify_item locks these to role=pin) must get the
+    same group-children-unavailable safety net as a role=other group: the bug was
+    that all group bookkeeping lived under `role == "other"`, so a pin-classified
+    autosize group with no groupChildren still got the bare, collapsing w/h write.
+
+    Pins never had pass-2 font scaling, so this must NOT gain a child_resize_report
+    row (that row is the font-scaling job list, gated on role=="other" exactly as
+    pre-fix) — only the size refusal and the collapse token, both carried on the
+    transform itself, apply regardless of role."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 1.0 / 3.0, "tx": 0.0, "ty": 0.0, "src": {"x": 3000.0, "y": 0.0, "w": 100.0, "h": 100.0}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=3000.0, y=0.0, w=100.0, h=100.0)],
+        "groupChildText": {0: "A"},
+        "groupAutosize": {0: True},
+        "groupChildrenUnavailable": True,
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    assert group_tf.role == "pin"
+    d = group_tf.as_dict()
+    assert "w" not in d and "h" not in d
+    assert d["sizeRefused"] == "group-children-unavailable"
+    assert d["groupCollapseRefused"] == "groupCollapseRefused(s=2,idx=1)"
+    assert report == []
+
+
+def test_group_collapse_guard_fires_on_an_exact_one_third_shrink():
+    """An autosize-marked group whose planned rect shrinks either axis by
+    exactly 3x relative to its source rect must still tag the transform dict
+    with groupCollapseRefused: the guard is boundary-inclusive (Codex r1),
+    alongside the primary missing-groupChildren refusal that covers the
+    size write itself."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 1.0 / 3.0, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupAutosize": {0: True},
+        "groupChildrenUnavailable": True,
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    assert group_tf.w * 3.0 == 278.0
+    d = group_tf.as_dict()
+    assert "w" not in d and "h" not in d
+    assert d["sizeRefused"] == "group-children-unavailable"
+    assert d["groupCollapseRefused"] == "groupCollapseRefused(s=2,idx=1)"
+    assert report[0]["sizeRefused"] == "group-children-unavailable"
+    assert "groupCollapseRefused" not in report[0]
+    assert report[0]["s"] == 1.0
+
+
+def test_group_collapse_guard_does_not_fire_below_the_shrink_threshold():
+    """A shrink milder than 3x on both axes must not tag the transform dict with
+    groupCollapseRefused, even though the primary missing-groupChildren
+    refusal still applies to the size write itself."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 0.5, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupAutosize": {0: True},
+        "groupChildrenUnavailable": True,
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    assert group_tf.w * 3.0 > 278.0
+    d = group_tf.as_dict()
+    assert "w" not in d and "h" not in d
+    assert d["sizeRefused"] == "group-children-unavailable"
+    assert report[0]["sizeRefused"] == "group-children-unavailable"
+    assert "groupCollapseRefused" not in report[0]
+
+
 def test_card_group_never_takes_the_child_write_path():
     # The test_roster_group_is_not_a_card cardSamples recipe, but with an aspect-matching
     # group AND a groupChildren entry present: a card's caption is a fixed-frame shape
@@ -6029,3 +6345,172 @@ def test_badge_slot_group_never_takes_the_child_write_path():
     d = group_tf.as_dict()
     assert "children" not in d
     assert (round(group_tf.w, 1), round(group_tf.h, 1)) == (90.0, 90.0)
+
+
+def _aspect_recipe(src: dict, s: float = 0.25) -> dict:
+    return {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [{"s": s, "tx": 0.0, "ty": 0.0, "src": src}],
+    }
+
+
+def test_aspect_locked_group_snaps_to_source_aspect():
+    src = {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}
+    slide = {
+        "number": 2,
+        "items": [
+            _item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6, aspect=278.0 / 87.6),
+        ],
+    }
+    out = plan_slide_transforms(slide, _aspect_recipe(src), wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert d["x"] == round(d["x"])
+    assert d["y"] == round(d["y"])
+    assert d["h"] == round(d["h"])
+    assert abs(d["w"] - round(d["h"]) * (278.0 / 87.6)) <= 0.01
+
+
+def test_aspect_snap_covers_image_and_movie():
+    src = {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}
+    aspect = 278.0 / 87.6
+    for kind in ("image", "movie"):
+        slide = {
+            "number": 2,
+            "items": [
+                _item(kindIndex=0, kind=kind, x=4164.3, y=39.4, w=278.0, h=87.6, aspect=aspect),
+            ],
+        }
+        out = plan_slide_transforms(slide, _aspect_recipe(src), wall_size=(7680, 1080))
+        tf = next(t for t in out if t.kind == kind)
+        d = tf.as_dict()
+        assert d["x"] == round(d["x"])
+        assert d["y"] == round(d["y"])
+        assert d["h"] == round(d["h"])
+        assert abs(d["w"] - round(d["h"]) * aspect) <= 0.01
+
+
+def test_card_sample_override_beats_the_aspect_snap():
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [
+            _item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5, aspect=131.8 / 109.5),
+        ],
+        "groupChildText": {0: "CHC Arao"},
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    card = next(t for t in out if t.kind == "group")
+    assert (round(card.w, 1), round(card.h, 1)) == (120.0, 100.0)
+
+
+def test_badge_slot_group_is_not_aspect_snapped():
+    title = _item(kind="text", text="Global Missions", x=2000.0, y=50.0, w=500.0, h=100.0)
+    badge_group = _item(kindIndex=0, kind="group", x=2150.0, y=0.0, w=200.0, h=200.0, aspect=1.0)
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        "titleDst": {"x": 800.0, "y": 40.0, "w": 300.0, "h": 60.0},
+        "badgeSlots": {"group:0": {"x": 700.0, "y": 20.0, "w": 90.0, "h": 90.0}},
+    }
+    slide = {
+        "number": 6,
+        "items": [title, badge_group],
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    assert (round(group_tf.w, 1), round(group_tf.h, 1)) == (90.0, 90.0)
+
+
+def test_group_with_autosize_children_is_not_aspect_snapped():
+    src = {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}
+    slide = {
+        "number": 2,
+        "items": [
+            _item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6, aspect=278.0 / 87.6),
+        ],
+        "groupChildText": {0: "Ps George"},
+        "groupChildren": {0: _badge_child_src()},
+    }
+    out = plan_slide_transforms(slide, _aspect_recipe(src), wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert len(d["children"]) == 2
+    assert d["w"] == pytest.approx(69.5, abs=0.1)
+    assert d["h"] == pytest.approx(21.9, abs=0.1)
+
+
+def test_item_without_aspect_is_unchanged():
+    src = {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}
+    slide = {
+        "number": 2,
+        "items": [
+            _item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6),
+        ],
+    }
+    out = plan_slide_transforms(slide, _aspect_recipe(src), wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert d["x"] == pytest.approx(1041.08, abs=0.001)
+    assert d["y"] == pytest.approx(9.85, abs=0.001)
+    assert d["w"] == pytest.approx(69.5, abs=0.001)
+    assert d["h"] == pytest.approx(21.9, abs=0.001)
+
+
+def test_backdrop_pin_survives_the_aspect_snap():
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kindIndex=0, kind="image", fileName="map BG-1.png", x=0, y=0, w=7680, h=1080, aspect=7680.0 / 1080.0),
+        ],
+    }
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [{"s": 0.25, "tx": 0.0, "ty": 0.0, "src": {"x": 0, "y": -50, "w": 7680, "h": 1080}}],
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    tf = next(t for t in out if t.kind == "image")
+    assert tf.y == 0.0
+
+
+@lru_cache(maxsize=1)
+def _gold_roster_payload():
+    from pathlib import Path
+
+    from obed_edom.iwa_runs import _load_deck, attach_group_child_text
+    from obed_edom.offline_inspect import offline_wall_payload
+
+    path = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Gold_Wall_Input.key")
+    if not path.exists():
+        return None
+    deck = _load_deck(path)
+    wall = offline_wall_payload(path, deck=deck)
+    attach_group_child_text(path, wall, deck=deck)
+    return wall
+
+
+def test_gold_roster_is_dropped_on_every_slide_after_the_church_list():
+    """Owner rule (2026-09-05): Gold keeps the roster on 11 and 12 only. On 14-17 it is two
+    persisted groups (113 and 84 church-name leaves), invisible to the text-only roster rule
+    before this fix, and hidden only incidentally by the side-panel branch."""
+    from obed_edom.map_remap import roster_slides
+
+    wall = _gold_roster_payload()
+    if wall is None:
+        pytest.skip("Gold wall deck not available; refuse to open Keynote")
+    assert roster_slides(wall["slides"]) == ({11, 12}, {13, 14, 15, 16, 17})
+    s14 = next(s for s in wall["slides"] if s.get("number") == 14)
+    gct = {int(k): v for k, v in (s14.get("groupChildText") or {}).items()}
+    assert len(name_column_ids(s14["items"], gct)) == 2

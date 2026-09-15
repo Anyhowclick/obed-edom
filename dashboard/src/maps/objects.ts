@@ -1,6 +1,65 @@
-/** Mirrors `_default_landmark_size` in src/obed_edom/web/watercolour.py. */
+import type { ExpressionSpecification } from "maplibre-gl";
+import { ML_MAX_ZOOM, ML_MIN_ZOOM } from "./types";
+
+/** Server bounds for `size` / `sizeZoom` (MapsChurch in src/obed_edom/web/maps.py). */
+export const OBJECT_SIZE_MIN = 1;
+export const OBJECT_SIZE_MAX = 4000;
+export const SIZE_ZOOM_MIN = 0;
+export const SIZE_ZOOM_MAX = 22;
+
+/** Mirrors `default_landmark_size` in src/obed_edom/maps_geo.py. */
 export function defaultLandmarkSize(assetWidth: number): number {
   return Math.trunc(Math.max(240, Math.min(1600, Math.min(assetWidth, Math.trunc(1920 / 3) * 2))));
+}
+
+/** Ratio between an object's ground size authored at `sizeZoom` and its size at `authoredZoom`. */
+export function zoomSizeFactor(sizeZoom: number, authoredZoom: number): number {
+  return Math.pow(2, authoredZoom - sizeZoom);
+}
+
+/** Default authored px per object kind when a church carries no `size`; a landmark is
+ * created at `defaultLandmarkSize(assetWidth)`, so that is also its label baseline. */
+export function defaultObjectSize(kind: string, assetWidth = 0): number {
+  if (kind === "dot") return 28;
+  if (kind === "dropPin") return 64;
+  return defaultLandmarkSize(assetWidth);
+}
+
+/** Authored px for `church` at `authoredZoom`, honouring "scale with map" when set. */
+export function effectiveObjectSize(church: { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string; assetWidth?: number }, authoredZoom: number): number {
+  const size = church.size ?? defaultObjectSize(church.kind || "landmark", church.assetWidth);
+  if (!church.scaleWithMap || church.sizeZoom == null) return size;
+  return size * zoomSizeFactor(church.sizeZoom, authoredZoom);
+}
+
+/**
+ * `size`-like stops for a top-level `["zoom"]` interpolate. `base` is the current
+ * (non-scaling) size expression; the stops fold in the geometric zoom growth for
+ * features with `scaleWithMap` via `sizeZoomRef` (see overlays.ts `churchesGeo`).
+ * `max`/`min` clamp each stop: a zoom expression may not be nested inside `min`/`max`,
+ * so a clamped ramp needs one stop per integer zoom.
+ */
+export function zoomScaledStops(base: unknown, max?: number, min?: number): ExpressionSpecification {
+  const swm = ["boolean", ["get", "scaleWithMap"], false];
+  const clamped = max != null || min != null;
+  const stopAt = (z: number): ExpressionSpecification => {
+    let value: unknown = ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base];
+    if (min != null) value = ["max", min, value];
+    if (max != null) value = ["min", max, value];
+    return value as ExpressionSpecification;
+  };
+  // A pair of interpolate stops reproduces an exact 2^z curve between them (algebraically, base-2
+  // interpolation of two true samples of A*2^z recovers A*2^z everywhere in between) but NOT when a
+  // stop is min()-clamped, so a clamped max needs one stop per integer zoom: a segment whose two
+  // endpoints are both below the clamp stays exact, a segment fully past the clamp is flat at max,
+  // and the one segment straddling the clamp is still base-2 interpolated between its two (unequal)
+  // endpoints, so it undershoots max in between (e.g. 949 vs 1024 at z14.5).
+  // The stops span the render map's full zoom range, not 0..22: wall exports render at authored
+  // zoom + exportZoomDelta(WALL_W) === -2, and below the first stop MapLibre clamps to it.
+  if (!clamped) return ["interpolate", ["exponential", 2], ["zoom"], ML_MIN_ZOOM, stopAt(ML_MIN_ZOOM), ML_MAX_ZOOM, stopAt(ML_MAX_ZOOM)];
+  const stops: unknown[] = ["interpolate", ["exponential", 2], ["zoom"]];
+  for (let z = ML_MIN_ZOOM; z <= ML_MAX_ZOOM; z++) stops.push(z, stopAt(z));
+  return stops as unknown as ExpressionSpecification;
 }
 
 export type ObjectCorner = "nw" | "ne" | "sw" | "se";
@@ -27,5 +86,36 @@ export function resizeFromCorner(
   const px = (2 * sx * dx) / scale;
   const py = (sy * dy) / (a * scale);
   const d = Math.abs(px) >= Math.abs(py) ? px : py;
-  return Math.round(Math.max(24, Math.min(4000, startSize + d)));
+  return Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, startSize + d)));
+}
+
+/**
+ * Clipboard rebase: materialise the object's on-screen size at `sourceZoom` into `size`
+ * and re-anchor `sizeZoom` to the target camera, so a paste keeps the same on-screen size.
+ * `size` is clamped to the server's range and `sizeZoom` shifted by log2(size'/eff) so the
+ * effective size at the target camera is unchanged; a `sizeZoom` clamp leaves a residual.
+ */
+export function rebaseForPaste<T extends { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string }>(
+  church: T,
+  sourceZoom: number,
+  targetZoom: number
+): T {
+  if (!church.scaleWithMap) return church;
+  const eff = effectiveObjectSize(church, sourceZoom);
+  const anchor = Math.max(SIZE_ZOOM_MIN, Math.min(SIZE_ZOOM_MAX, targetZoom));
+  if (!(eff > 0) || !Number.isFinite(eff)) return { ...church, size: OBJECT_SIZE_MIN, sizeZoom: anchor };
+  const size = Math.max(OBJECT_SIZE_MIN, Math.min(OBJECT_SIZE_MAX, Math.round(eff)));
+  const sizeZoom = Math.max(SIZE_ZOOM_MIN, Math.min(SIZE_ZOOM_MAX, targetZoom + Math.log2(size / eff)));
+  return { ...church, size, sizeZoom };
+}
+
+/** Objects copied from one slide, with the camera zoom they were copied at. */
+export type ObjectClipboard<T> = { churches: T[]; sourceZoom: number };
+
+/** Rebase a whole clipboard onto one target camera: exactly one materialisation per object. */
+export function pasteRebase<T extends { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string }>(
+  clipboard: ObjectClipboard<T>,
+  targetZoom: number
+): T[] {
+  return clipboard.churches.map((church) => rebaseForPaste(church, clipboard.sourceZoom, targetZoom));
 }

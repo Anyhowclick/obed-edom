@@ -25,7 +25,7 @@ import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from google.protobuf.json_format import MessageToDict, ParseDict
 from keynote_parser.codec import IWAFile, import_version
@@ -187,6 +187,24 @@ def bridge_specs_kindindex(specs: list[dict]) -> list[dict]:
         b["kindIndex"] = bridge_kind_index(str(s.get("kind") or ""), int(s["kindIndex"]), hide_specs)
         bridged.append(b)
     return bridged
+
+
+def read_slide_zorder(deck: Path, slide_number: int) -> tuple[list[str], list[str]]:
+    """(drawablesZOrder ids, ownedDrawables ids) as strings, via _load_deck + slide_order."""
+    try:
+        objects, _id_to_file, _file_ids = _load_deck(deck)
+    except Exception as exc:  # noqa: BLE001 — surfaced as a hint, not swallowed
+        raise RuntimeError(
+            f"_load_deck failed on {deck}: {exc} (keynote_parser may not decode a "
+            "15.3.1-authored member — check the installed keynote_parser version)"
+        ) from exc
+    order = slide_order(objects)
+    if not (1 <= slide_number <= len(order)):
+        raise ValueError(f"slide {slide_number} out of range (deck has {len(order)} slides)")
+    slide = objects[order[slide_number - 1][0]]
+    z = [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []]
+    owned = [str(r["identifier"]) for r in slide.get("ownedDrawables") or []]
+    return z, owned
 
 
 def expected_base_counts(source_counts: dict[str, int], specs: list[dict]) -> dict[str, int]:
@@ -639,23 +657,24 @@ def _slide_edits(
     return (target_member, edits, soft_fallbacks, missed_specs, None)
 
 
-def _patch_member(zf: zipfile.ZipFile, member: str, edits: dict[str, dict]) -> tuple[bytes, int, int, int]:
+def _decode_apply_reencode_diff(
+    zf: zipfile.ZipFile, member: str, apply_fn: Callable[[dict], int], expect: int | None = None,
+) -> tuple[bytes | None, int, int, int, dict | None, dict | None]:
     """Decode -> apply -> re-encode -> reparse -> diff ONE member, off an already-open
-    ``ZipFile`` (the caller hoists one handle across every member). (new_bytes, applied,
-    obj_diffs, header_diffs)."""
+    ``ZipFile`` (the caller hoists one handle across every member). ``apply_fn`` mutates
+    the decoded dict in place and returns the applied count. (new_bytes, applied,
+    obj_diffs, header_diffs, decoded, reparsed) -- the last two for callers that also
+    need ``_archive_diff``'s coarser archive-id-set check.
+
+    ``expect``, when given, refuses BEFORE re-encoding: if ``applied`` doesn't match,
+    ``new_bytes``/``decoded``/``reparsed`` come back ``None`` and the diffs ``0`` --
+    the caller's mismatch check must run on ``applied`` alone."""
     buf = zf.read(member)
     decoded = IWAFile.from_buffer(buf, member).to_dict()
     patched = copy.deepcopy(decoded)
-    applied = 0
-    for ch in patched["chunks"]:
-        for arch in ch["archives"]:
-            aid = str(arch["header"]["identifier"])
-            if aid not in edits:
-                continue
-            for o in arch.get("objects") or []:
-                _apply_geom_fields(o, edits[aid])
-                applied += 1
-                break
+    applied = apply_fn(patched)
+    if expect is not None and applied != expect:
+        return None, applied, 0, 0, None, None
 
     new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
     reparsed = IWAFile.from_buffer(new_member, member).to_dict()
@@ -667,6 +686,53 @@ def _patch_member(zf: zipfile.ZipFile, member: str, edits: dict[str, dict]) -> t
                 obj_diffs += 1
             if a0["header"] != a1["header"]:
                 header_diffs += 1
+    return new_member, applied, obj_diffs, header_diffs, decoded, reparsed
+
+
+def _patch_member(zf: zipfile.ZipFile, member: str, edits: dict[str, dict]) -> tuple[bytes, int, int, int]:
+    """Thin wrapper of ``_decode_apply_reencode_diff`` applying geometry ``edits`` keyed
+    by archive identifier. (new_bytes, applied, obj_diffs, header_diffs)."""
+    def apply_fn(patched: dict) -> int:
+        applied = 0
+        for ch in patched["chunks"]:
+            for arch in ch["archives"]:
+                aid = str(arch["header"]["identifier"])
+                if aid not in edits:
+                    continue
+                for o in arch.get("objects") or []:
+                    _apply_geom_fields(o, edits[aid])
+                    applied += 1
+                    break
+        return applied
+
+    new_member, applied, obj_diffs, header_diffs, _decoded, _reparsed = _decode_apply_reencode_diff(
+        zf, member, apply_fn)
+    return new_member, applied, obj_diffs, header_diffs
+
+
+def _patch_zorder_member(
+    zf: zipfile.ZipFile, member: str, slide_id: str, new_order: list[str],
+) -> tuple[bytes, int, int, int]:
+    """``w-zorder-patch`` sibling of ``_patch_member``: overwrites ONE slide archive's
+    ``drawablesZOrder`` AND ``ownedDrawables`` with identical id lists built from
+    ``new_order``. (new_bytes, applied, obj_diffs, header_diffs); ``applied`` is the
+    archive-object write count (1 expected — the caller refuses on anything else)."""
+    def apply_fn(patched: dict) -> int:
+        applied = 0
+        refs = [{"identifier": i} for i in new_order]
+        for ch in patched["chunks"]:
+            for arch in ch["archives"]:
+                if str(arch["header"]["identifier"]) != slide_id:
+                    continue
+                for o in arch.get("objects") or []:
+                    o["drawablesZOrder"] = [dict(r) for r in refs]
+                    o["ownedDrawables"] = [dict(r) for r in refs]
+                    applied += 1
+                    break
+        return applied
+
+    new_member, applied, obj_diffs, header_diffs, _decoded, _reparsed = _decode_apply_reencode_diff(
+        zf, member, apply_fn)
     return new_member, applied, obj_diffs, header_diffs
 
 
@@ -777,8 +843,9 @@ def patch_deck_geometry(
 
     Refusal is per slide (that slide's member left byte-identical). Two slides
     resolving to the same target member refuse the LATER slide number.
-    ``extra_member_edits`` (member -> raw new bytes, e.g. W2 stylesheet/z-order) merge in
+    ``extra_member_edits`` (member -> raw new bytes, e.g. a stylesheet edit) merge in
     AFTER slide edits; a member in both raises ``ValueError`` before anything is written.
+    Z-order is its own rewrite, not this hook — see ``iwa_zorder.patch_deck_zorder``.
     Returns one ``PatchResult`` per key of ``specs_by_slide``, plus key 0 for
     ``extra_member_edits`` when given.
     """
@@ -1117,38 +1184,29 @@ def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
                     "reason": f"style {sid} lives in {id_to_file.get(sid)!r}, not {target_member!r}"}
     widths = {sid: float(w) for sid, w in widths.items()}
 
+    def apply_fn(patched: dict) -> int:
+        applied = 0
+        for ch in patched["chunks"]:
+            for arch in ch["archives"]:
+                aid = str(arch["header"]["identifier"])
+                if aid not in widths:
+                    continue
+                for o in arch.get("objects") or []:
+                    o["mediaProperties"]["stroke"]["width"] = float(widths[aid])
+                    applied += 1
+                    break
+        return applied
+
     with zipfile.ZipFile(deck) as zf:
         if target_member not in zf.namelist():
             return {"refused": True, "reason": f"member {target_member} missing from deck"}
-        buf = zf.read(target_member)
-
-    decoded = IWAFile.from_buffer(buf, target_member).to_dict()
-    patched = copy.deepcopy(decoded)
-    applied = 0
-    for ch in patched["chunks"]:
-        for arch in ch["archives"]:
-            aid = str(arch["header"]["identifier"])
-            if aid not in widths:
-                continue
-            for o in arch.get("objects") or []:
-                o["mediaProperties"]["stroke"]["width"] = float(widths[aid])
-                applied += 1
-                break
+        new_member, applied, obj_diffs, header_diffs, _decoded, _reparsed = _decode_apply_reencode_diff(
+            zf, target_member, apply_fn, expect=len(widths))
 
     if applied != len(widths):
         return {"refused": True,
                 "reason": f"only {applied}/{len(widths)} styles matched an archive in {target_member}"}
 
-    new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
-    reparsed = IWAFile.from_buffer(new_member, target_member).to_dict()
-    obj_diffs = 0
-    header_diffs = 0
-    for c0, c1 in zip(decoded["chunks"], reparsed["chunks"]):
-        for a0, a1 in zip(c0["archives"], c1["archives"]):
-            if (a0.get("objects") or []) != (a1.get("objects") or []):
-                obj_diffs += 1
-            if a0["header"] != a1["header"]:
-                header_diffs += 1
     value_clean = obj_diffs <= len(widths) and header_diffs == 0
 
     try:
@@ -1890,23 +1948,26 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
     applied = 0
     with zipfile.ZipFile(deck) as zf:
         for member, slide_ids in by_member.items():
-            buf = zf.read(member)
-            decoded = IWAFile.from_buffer(buf, member).to_dict()
-            patched = copy.deepcopy(decoded)
-            touched = 0
             wanted = set(slide_ids)
-            for ch in patched["chunks"]:
-                for arch in ch["archives"]:
-                    aid = str(arch["header"]["identifier"])
-                    if aid not in wanted:
-                        continue
-                    plan = plans[aid]
-                    for o in arch.get("objects") or []:
-                        o["builds"] = [{"identifier": bid} for bid in plan["builds"]]
-                        o["buildChunks"] = [{"identifier": cid} for cid in plan["buildChunks"]]
-                        if plan.get("transition") is not None:
-                            o["transition"] = plan["transition"]
-                        touched += 1
+
+            def apply_fn(patched: dict, wanted: set[str] = wanted) -> int:
+                touched = 0
+                for ch in patched["chunks"]:
+                    for arch in ch["archives"]:
+                        aid = str(arch["header"]["identifier"])
+                        if aid not in wanted:
+                            continue
+                        plan = plans[aid]
+                        for o in arch.get("objects") or []:
+                            o["builds"] = [{"identifier": bid} for bid in plan["builds"]]
+                            o["buildChunks"] = [{"identifier": cid} for cid in plan["buildChunks"]]
+                            if plan.get("transition") is not None:
+                                o["transition"] = plan["transition"]
+                            touched += 1
+                return touched
+
+            new_member, touched, _obj_diffs, _header_diffs, decoded, reparsed = _decode_apply_reencode_diff(
+                zf, member, apply_fn, expect=len(wanted))
 
             if touched != len(wanted):
                 return {
@@ -1914,8 +1975,6 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
                     "reason": f"expected to touch {len(wanted)} slide(s) in {member}, touched {touched}",
                 }
 
-            new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
-            reparsed = IWAFile.from_buffer(new_member, member).to_dict()
             removed, added, changed = _archive_diff(decoded, reparsed)
             # A byte-identical no-op write for one of the wanted slides is fine --
             # `changed` need only be a SUBSET of `wanted`, not equal to it.

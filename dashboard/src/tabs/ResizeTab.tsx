@@ -3,17 +3,19 @@ import {
   applyResize,
   chooseKeynote,
   pollJob,
-  reveal,
   saveResizeFramings,
   startResize,
   type ChosenFile,
   type FramingDecision,
 } from "../api";
+import { ArtifactActions } from "../components/ArtifactActions";
 import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { FramingReview, type FramingProposal } from "../components/FramingReview";
 import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
+import { useDefaultExportDir, useSessionPath } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 function parseSlideSpec(raw: string): number[] | null {
@@ -45,6 +47,9 @@ type ResizeResult = FramingProposal & {
   path?: string;
   templatePath?: string;
   destPath?: string;
+  exportDir?: string;
+  resolvedExportDir?: string;
+  proposalExportDir?: string;
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -58,7 +63,7 @@ type ResizeResult = FramingProposal & {
 };
 
 export function ResizeTab() {
-  const { job, upsert, error: openError } = useCurrentJob("resize");
+  const { job, upsert, rename, error: openError } = useCurrentJob("resize");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [template, setTemplate] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
@@ -67,6 +72,8 @@ export function ResizeTab() {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.resize.exportDir");
+  const defaultExportDir = useDefaultExportDir();
   const result = (job?.result || undefined) as ResizeResult | undefined;
 
   useEffect(() => {
@@ -139,7 +146,7 @@ export function ResizeTab() {
     setBusy(true);
     setError(null);
     try {
-      await track(await applyResize(job.id, decisions));
+      await track(await applyResize(job.id, decisions, exportDir));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -167,6 +174,7 @@ export function ResizeTab() {
         <FileWell
           label="Finalised LW / FW .key"
           hint="Choose the source LED or full-wall deck"
+          tone="lw"
           file={lw}
           onChoose={async () => {
             try {
@@ -181,6 +189,7 @@ export function ResizeTab() {
         <FileWell
           label="CG_Template.key"
           hint="The 16:9 deck showing where things should end up"
+          tone="cg"
           file={template}
           onChoose={async () => {
             try {
@@ -250,13 +259,26 @@ export function ResizeTab() {
         </button>
       </div>
       {awaitingFramings && result && job && (
-        <FramingReview
-          proposal={result}
-          jobId={job.id}
-          busy={busy}
-          onSave={saveFramings}
-          onApply={applyFramings}
-        />
+        <>
+          <div className="actions export-actions">
+            <ExportDestinationRow
+              value={exportDir}
+              onChange={setExportDir}
+              defaultLabel={
+                result.proposalExportDir ??
+                (defaultExportDir ? `${defaultExportDir}/ (default)` : result.resolvedExportDir)
+              }
+              onError={setError}
+            />
+          </div>
+          <FramingReview
+            proposal={result}
+            jobId={job.id}
+            busy={busy}
+            onSave={saveFramings}
+            onApply={applyFramings}
+          />
+        </>
       )}
       {result?.destPath && overruled.length > 0 && (
         <p className="note">
@@ -281,23 +303,25 @@ export function ResizeTab() {
       {result?.destPath && (
         <>
           <p className="note path-note">
-            Wrote {result.destPath}
+            Wrote {result.destPath.split("/").pop()}
             {counts ? ` — ${counts.pin ?? 0} pins, ${counts.map ?? 0} map, ${counts.list ?? 0} list` : ""}
             {typeof result.applied === "number" ? ` (applied ${result.applied}` : ""}
             {typeof result.missed === "number" ? `, missed ${result.missed})` : result.applied != null ? ")" : ""}
             {score?.pinRmse != null ? `. Template pin RMSE ${score.pinRmse}px` : ""}
             {result.recipe?.source ? `. Recipe: ${result.recipe.source}` : ""}
           </p>
-          <div className="actions">
-            <button className="btn secondary" type="button" onClick={() => reveal(result.destPath!)}>
-              Show CG.key
-            </button>
-          </div>
+          <ArtifactActions artifacts={[{ label: "CG.key", path: result.destPath }]} onError={setError} />
         </>
       )}
       <ErrorNotice message={error || openError || rangeError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Remapping map and pins…" logs={logs} />}
-      {job && <InspectResultView job={job} onOpen={setOpen} />}
+      {job && (
+        <InspectResultView
+          job={job}
+          onOpen={setOpen}
+          onRename={rename}
+        />
+      )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );

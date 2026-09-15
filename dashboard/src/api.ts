@@ -1,3 +1,5 @@
+import type { MapsBootstrapRow } from "./maps/manualRows";
+
 export type Flag = {
   severity: "info" | "warning" | "error" | "success";
   category: string;
@@ -21,6 +23,7 @@ export type Job = {
   id: string;
   kind: string;
   feature?: string;
+  name?: string;
   status: "queued" | "running" | "done" | "error";
   logs: string[];
   error?: string | null;
@@ -32,10 +35,17 @@ export type Job = {
 
 export type ChosenFile = { path: string; name: string };
 
-async function readError(res: Response): Promise<string> {
+async function readError(res: Response, parsed?: unknown): Promise<string> {
   try {
-    const data = await res.json();
-    return data.detail || JSON.stringify(data);
+    const data = parsed !== undefined ? parsed : await res.json();
+    const detail = (data as { detail?: unknown })?.detail;
+    if (Array.isArray(detail)) {
+      const joined = detail
+        .map((item) => (typeof item === "string" ? item : (item as { msg?: string })?.msg ?? JSON.stringify(item)))
+        .join("\n");
+      return joined || JSON.stringify(data);
+    }
+    return (typeof detail === "string" && detail) || JSON.stringify(data);
   } catch {
     return res.statusText;
   }
@@ -69,7 +79,15 @@ export async function resolveDrop(name: string, size?: number): Promise<ChosenFi
 export async function reveal(path: string): Promise<void> {
   const body = new FormData();
   body.set("path", path);
-  await fetch("/api/reveal", { method: "POST", body });
+  const res = await fetch("/api/reveal", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function openPath(path: string): Promise<void> {
+  const body = new FormData();
+  body.set("path", path);
+  const res = await fetch("/api/open", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
 }
 
 export async function generateDocx(
@@ -105,6 +123,16 @@ export async function patchJob(id: string, result: Record<string, unknown>): Pro
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ result }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function renameJob(id: string, name: string): Promise<Job> {
+  const res = await fetch(`/api/jobs/${id}/name`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -152,6 +180,8 @@ export type Settings = {
   reuseThreshold: number;
   reusePairings: boolean;
   reusePreviews: boolean;
+  defaultExportDir: string;
+  highlightColour: string;
 };
 
 export async function getSettings(): Promise<Settings> {
@@ -192,9 +222,10 @@ export async function startDiff(
   return res.json();
 }
 
-export async function startOutline(path: string): Promise<Job> {
+export async function startOutline(path: string, exportDir?: string): Promise<Job> {
   const body = new FormData();
   body.set("path", path);
+  if (exportDir) body.set("export_dir", exportDir);
   const res = await fetch("/api/outline", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -383,11 +414,18 @@ export async function saveResizeFramings(jobId: string, decisions: FramingDecisi
   return res.json();
 }
 
-export async function applyResize(jobId: string, decisions?: FramingDecision[]): Promise<Job> {
+export async function applyResize(
+  jobId: string,
+  decisions?: FramingDecision[],
+  exportDir?: string
+): Promise<Job> {
+  const body: { decisions?: FramingDecision[]; exportDir?: string } = {};
+  if (decisions) body.decisions = decisions;
+  if (exportDir !== undefined) body.exportDir = exportDir;
   const res = await fetch(`/api/resize/${jobId}/apply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(decisions ? { decisions } : {}),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -403,6 +441,15 @@ export function diffImageUrl(jobId: string, side: "left" | "right" | "heat", fil
 
 export function evidenceUrl(jobId: string, filename: string): string {
   return `/api/jobs/${jobId}/evidence/${encodeURIComponent(filename)}`;
+}
+
+export function diagnosticsUrl(jobId: string): string {
+  return `/api/jobs/${jobId}/diagnostics`;
+}
+
+export async function revealDiagnostics(jobId: string): Promise<void> {
+  const res = await fetch(`/api/jobs/${jobId}/diagnostics/reveal`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
 }
 
 export async function pollJob(
@@ -513,6 +560,7 @@ export type MapsExportPlan = {
     plateId: string;
     plateW: number;
     plateH: number;
+    slideIds: string[];
     camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
     style: string;
     highlights: string[];
@@ -528,10 +576,27 @@ export type MapsExportPlan = {
   };
 };
 
+export class MapsStaleThumbnailError extends Error {
+  readonly stateRevision: number;
+
+  constructor(stateRevision: number) {
+    super("Thumbnail revision is stale.");
+    this.stateRevision = stateRevision;
+  }
+}
+
 export async function postMapsPng(
   id: string,
   blob: Blob,
-  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg"; variant?: "country" } = {}
+  opts: {
+    kind?: MapsPngKind;
+    slideId?: string;
+    plateId?: string;
+    audience?: "lw" | "cg";
+    variant?: "region" | "regions";
+    index?: number;
+    revision?: number;
+  } = {}
 ): Promise<Job> {
   const params = new URLSearchParams();
   if (opts.kind) params.set("kind", opts.kind);
@@ -539,10 +604,20 @@ export async function postMapsPng(
   if (opts.plateId) params.set("plateId", opts.plateId);
   if (opts.audience) params.set("audience", opts.audience);
   if (opts.variant) params.set("variant", opts.variant);
+  if (opts.index !== undefined) params.set("index", String(opts.index));
+  if (opts.revision !== undefined) params.set("revision", String(opts.revision));
   const res = await fetch(`/api/maps/${id}/png?${params.toString()}`, {
     method: "POST",
     body: blob,
   });
+  if (res.status === 409) {
+    const data = await res.json().catch(() => null);
+    const detail = data?.detail;
+    if (detail && typeof detail === "object" && detail.staleThumbnail && typeof detail.stateRevision === "number") {
+      throw new MapsStaleThumbnailError(detail.stateRevision);
+    }
+    throw new Error(await readError(res, data ?? undefined));
+  }
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -655,6 +730,19 @@ export async function bootstrapMapsPinsCsv(id: string, file: File, slideId: stri
   return res.json();
 }
 
+export async function bootstrapMapsRows(
+  id: string,
+  body: { rows: MapsBootstrapRow[]; replace?: boolean; targetSlideId?: string; audience?: "lw" | "cg" }
+): Promise<Job> {
+  const res = await fetch(`/api/maps/${id}/bootstrap-rows`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function addMapsLandmark(id: string, slideId: string, audience: "lw" | "cg", file: File): Promise<{ job: Job; churchId: string }> {
   const body = new FormData();
   body.append("file", file);
@@ -666,7 +754,7 @@ export async function addMapsLandmark(id: string, slideId: string, audience: "lw
   return { job: job as Job, churchId };
 }
 
-export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean }): Promise<Job> {
+export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean; exportDir?: string; credits?: string[] }): Promise<Job> {
   const res = await fetch(`/api/maps/${id}/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -684,13 +772,14 @@ export async function cancelMapsExport(id: string): Promise<Job> {
 
 export async function startWatercolour(
   files: File[],
-  opts: { washSoftness: number; inkAmount: number; masks: Record<string, unknown> }
+  opts: { washSoftness: number; inkAmount: number; masks: Record<string, unknown>; exportDir?: string }
 ): Promise<Job> {
   const body = new FormData();
   for (const file of files) body.append("files", file);
   body.set("wash_softness", String(opts.washSoftness));
   body.set("ink_amount", String(opts.inkAmount));
   body.set("masks", JSON.stringify(opts.masks));
+  if (opts.exportDir) body.set("export_dir", opts.exportDir);
   const res = await fetch("/api/watercolour", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

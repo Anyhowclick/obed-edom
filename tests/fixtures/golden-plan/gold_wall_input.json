@@ -12,12 +12,13 @@
   "OBED_GEOM_PROPS": null,
   "OBED_OFFLINE_READ": "on",
   "OBED_OFFLINE_WRITE": "off",
+  "OBED_SLIDE_REUSE": "off",
   "OBED_SUPPRESS_GEOMETRY": null,
   "OBED_WRITE_TIMING": null
  },
  "goldenVersion": 1,
- "inspectVersion": 4,
- "planSha256": "a0e805b7f678dd038daa4b593fbda81657cfb4cb17c2ffe190546249e24d5504",
+ "inspectVersion": 5,
+ "planSha256": "2829aa34be8a3388a3e656f2b0ff200d45927f0c13a4d08320184336e5ef1b7b",
  "plannerEnv": {
   "faces": {
    "Amplitude-Bold|True|False": "Amplitude-Bold|Amplitude",
@@ -26,68 +27,7 @@
   "osBuild": "25G83"
  },
  "previews": "none",
- "reuses": [
-  {
-   "add": 85,
-   "from": 11,
-   "groupRemove": 0,
-   "mutate": 0,
-   "persist": 161,
-   "remove": 6,
-   "slide": 12,
-   "strip": 275
-  },
-  {
-   "add": 9,
-   "from": 12,
-   "groupRemove": 0,
-   "mutate": 0,
-   "persist": 161,
-   "remove": 0,
-   "slide": 13,
-   "strip": 358
-  },
-  {
-   "add": 45,
-   "from": 13,
-   "groupRemove": 3,
-   "mutate": 0,
-   "persist": 167,
-   "remove": 0,
-   "slide": 14,
-   "strip": 169
-  },
-  {
-   "add": 29,
-   "from": 14,
-   "groupRemove": 47,
-   "mutate": 0,
-   "persist": 170,
-   "remove": 0,
-   "slide": 15,
-   "strip": 170
-  },
-  {
-   "add": 3,
-   "from": 15,
-   "groupRemove": 76,
-   "mutate": 0,
-   "persist": 170,
-   "remove": 0,
-   "slide": 16,
-   "strip": 171
-  },
-  {
-   "add": 3,
-   "from": 16,
-   "groupRemove": 80,
-   "mutate": 0,
-   "persist": 169,
-   "remove": 0,
-   "slide": 17,
-   "strip": 169
-  }
- ],
+ "reuses": [],
  "slides": [
   {
    "asGeomLines": 130,
@@ -117,7 +57,7 @@
   },
   {
    "asGeomLines": 337,
-   "asGeomSha": "e2938eaa367b",
+   "asGeomSha": "b3d005d12214",
    "badgeRaises": 7,
    "groupRemoves": 0,
    "n": 27,
@@ -133,7 +73,7 @@
   },
   {
    "asGeomLines": 369,
-   "asGeomSha": "36247d488981",
+   "asGeomSha": "68d2644468e0",
    "badgeRaises": 7,
    "groupRemoves": 0,
    "n": 28,
@@ -149,7 +89,7 @@
   },
   {
    "asGeomLines": 248,
-   "asGeomSha": "8488bde2b8a0",
+   "asGeomSha": "3cdbf682c9ea",
    "badgeRaises": 6,
    "groupRemoves": 0,
    "n": 14,
@@ -191,7 +131,7 @@
   },
   {
    "asGeomLines": 694,
-   "asGeomSha": "4e797413ed5d",
+   "asGeomSha": "bb4316e59c7d",
    "badgeRaises": 6,
    "groupRemoves": 0,
    "n": 36,
@@ -207,7 +147,7 @@
   },
   {
    "asGeomLines": 1471,
-   "asGeomSha": "f26316f0441b",
+   "asGeomSha": "b3182e3247c7",
    "badgeRaises": 6,
    "groupRemoves": 0,
    "n": 73,
@@ -223,7 +163,7 @@
   },
   {
    "asGeomLines": 25,
-   "asGeomSha": "bcc0d4c0f4c5",
+   "asGeomSha": "44abbcf775c4",
    "badgeRaises": 0,
    "groupRemoves": 0,
    "n": 4,
@@ -236,7 +176,7 @@
   },
   {
    "asGeomLines": 3511,
-   "asGeomSha": "f5531157886e",
+   "asGeomSha": "f51c125094e3",
    "badgeRaises": 3,
    "groupRemoves": 0,
    "n": 173,
@@ -253,7 +193,7 @@
   },
   {
    "asGeomLines": 5170,
-   "asGeomSha": "5f9092b3bfe4",
+   "asGeomSha": "5b0fc7c1cb03",
    "badgeRaises": 3,
    "groupRemoves": 0,
    "n": 360,
@@ -270,7 +210,7 @@
   },
   {
    "asGeomLines": 3646,
-   "asGeomSha": "b69a7dc96707",
+   "asGeomSha": "3f78dd337e95",
    "badgeRaises": 3,
    "groupRemoves": 0,
    "n": 367,
@@ -287,9 +227,9 @@
   },
   {
    "asGeomLines": 4512,
-   "asGeomSha": "1c3cd57bb577",
+   "asGeomSha": "102c5cbf0fef",
    "badgeRaises": 3,
-   "groupRemoves": 3,
+   "groupRemoves": 0,
    "n": 214,
    "roles": {
     "hide": 2,
@@ -304,9 +244,9 @@
   },
   {
    "asGeomLines": 4197,
-   "asGeomSha": "3f9214ca89a1",
+   "asGeomSha": "7ed497f5abd8",
    "badgeRaises": 3,
-   "groupRemoves": 47,
+   "groupRemoves": 0,
    "n": 199,
    "roles": {
     "hide": 2,
@@ -321,9 +261,9 @@
   },
   {
    "asGeomLines": 3651,
-   "asGeomSha": "99cdfd26a2b1",
+   "asGeomSha": "08b791786c75",
    "badgeRaises": 3,
-   "groupRemoves": 76,
+   "groupRemoves": 0,
    "n": 174,
    "roles": {
     "hide": 3,
@@ -338,9 +278,9 @@
   },
   {
    "asGeomLines": 3703,
-   "asGeomSha": "615f860cf4ce",
+   "asGeomSha": "18211afe5ebe",
    "badgeRaises": 3,
-   "groupRemoves": 80,
+   "groupRemoves": 0,
    "n": 172,
    "roles": {
     "hide": 2,
@@ -369,7 +309,7 @@
   },
   {
    "asGeomLines": 5197,
-   "asGeomSha": "8c804819b364",
+   "asGeomSha": "86b2b0ef69eb",
    "badgeRaises": 0,
    "groupRemoves": 0,
    "n": 259,
@@ -402,8 +342,8 @@
  "totals": {
   "asGeom": 19,
   "badgeRaises": 55,
-  "groupRemoves": 206,
-  "reuses": 6,
+  "groupRemoves": 0,
+  "reuses": 0,
   "statJobs": 182,
   "statSlides": 10,
   "suppressGeometry": 0,

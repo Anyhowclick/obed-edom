@@ -14,6 +14,7 @@ from obed_edom.maps_reveal import (
     render_slide_reveal_movie,
     reveal_fingerprint,
     reveal_frames,
+    reveal_movie_fingerprint,
     reveal_path,
     reveal_seed,
     reveal_stale,
@@ -143,6 +144,41 @@ def test_reveal_fingerprint_changes_with_duration_and_opacity(tmp_path: Path):
     assert base != reveal_fingerprint(asset, duration=1.0, opacity=1.0, seed=2, width=10, height=10)
 
 
+def test_reveal_movie_fingerprint_changes_with_geometry_from_size_zoom(tmp_path: Path):
+    base_png = tmp_path / "base.png"
+    Image.new("RGB", (10, 10), (1, 2, 3)).save(base_png)
+
+    def landmark(w: float, h: float) -> dict:
+        return {"asset": tmp_path / "a.png", "x": 0, "y": 0, "w": w, "h": h, "duration": 1.2, "seed": 1}
+
+    at_sizezoom_5 = reveal_movie_fingerprint(base_png, [landmark(100, 80)])
+    at_sizezoom_6 = reveal_movie_fingerprint(base_png, [landmark(200, 160)])
+    assert at_sizezoom_5 != at_sizezoom_6
+
+
+def test_reveal_movie_fingerprint_changes_when_a_piece_changes_content(tmp_path: Path):
+    base_png = tmp_path / "base.png"
+    Image.new("RGB", (10, 10), (1, 2, 3)).save(base_png)
+    piece = tmp_path / "base-region-0.png"
+    Image.new("RGBA", (4, 4), (10, 20, 30, 255)).save(piece)
+
+    fp1 = reveal_movie_fingerprint(base_png, [], piece_paths=[piece])
+    Image.new("RGBA", (4, 4), (99, 98, 97, 255)).save(piece)
+    fp2 = reveal_movie_fingerprint(base_png, [], piece_paths=[piece])
+    assert fp1 != fp2
+
+
+def test_reveal_movie_fingerprint_changes_when_a_piece_goes_missing_to_present(tmp_path: Path):
+    base_png = tmp_path / "base.png"
+    Image.new("RGB", (10, 10), (1, 2, 3)).save(base_png)
+    piece = tmp_path / "base-region-0.png"
+
+    fp_missing = reveal_movie_fingerprint(base_png, [], piece_paths=[piece])
+    Image.new("RGBA", (4, 4), (10, 20, 30, 255)).save(piece)
+    fp_present = reveal_movie_fingerprint(base_png, [], piece_paths=[piece])
+    assert fp_missing != fp_present
+
+
 def test_reveal_stale_true_without_dest_or_sidecar_true_on_mismatch_false_on_match(tmp_path: Path):
     dest = tmp_path / "out.mov"
     assert reveal_stale(dest, "fp-a") is True
@@ -251,6 +287,61 @@ def test_slide_reveal_movie_composites_landmark_at_frame(tmp_path: Path, monkeyp
     last = np.array(Image.open(captured["last"]).convert("RGB"))
     assert tuple(int(v) for v in last[35, 55]) == (200, 50, 50)
     assert tuple(int(v) for v in last[10, 10]) == (10, 20, 30)
+
+
+def test_slide_reveal_movie_composites_multiple_pieces(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+
+    def fake_encode(frames, dest, *, fps, log=None, is_cancelled=None):
+        captured["last"] = sorted(frames.glob("*.png"))[-1]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mov")
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.encode_fly_movie", fake_encode)
+    base = tmp_path / "base.png"
+    Image.new("RGBA", (200, 100), (10, 20, 30, 255)).save(base)
+    piece_a = tmp_path / "a.png"
+    Image.new("RGBA", (10, 10), (200, 50, 50, 255)).save(piece_a)
+    piece_b = tmp_path / "b.png"
+    Image.new("RGBA", (10, 10), (50, 200, 50, 255)).save(piece_b)
+    dest = tmp_path / "out" / "movies" / "Map BG_s1-reveal.mov"
+
+    render_slide_reveal_movie(
+        base, [(piece_a, 0, 0, 10, 10), (piece_b, 100, 50, 10, 10)], [], dest,
+        output_dir=tmp_path / "out", slide_id="s1", size=(200, 100), fps=10,
+    )
+
+    last = np.array(Image.open(captured["last"]).convert("RGB"))
+    assert tuple(int(v) for v in last[5, 5]) == (200, 50, 50)
+    assert tuple(int(v) for v in last[55, 105]) == (50, 200, 50)
+    assert tuple(int(v) for v in last[80, 180]) == (10, 20, 30)
+
+
+def test_slide_reveal_movie_resizes_piece_bitmap_to_scaled_extent(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+
+    def fake_encode(frames, dest, *, fps, log=None, is_cancelled=None):
+        captured["last"] = sorted(frames.glob("*.png"))[-1]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mov")
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.encode_fly_movie", fake_encode)
+    base = tmp_path / "base.png"
+    Image.new("RGBA", (200, 100), (10, 20, 30, 255)).save(base)
+    piece = tmp_path / "a.png"
+    Image.new("RGBA", (10, 10), (200, 50, 50, 255)).save(piece)
+    dest = tmp_path / "out" / "movies" / "Map BG_s1-reveal.mov"
+
+    render_slide_reveal_movie(
+        base, [(piece, 0, 0, 20, 20)], [], dest,
+        output_dir=tmp_path / "out", slide_id="s1", size=(200, 100), fps=10,
+    )
+
+    last = np.array(Image.open(captured["last"]).convert("RGB"))
+    assert tuple(int(v) for v in last[15, 15]) == (200, 50, 50)
+    assert tuple(int(v) for v in last[25, 25]) == (10, 20, 30)
 
 
 def test_render_reveal_encodes_real_movie(tmp_path: Path):

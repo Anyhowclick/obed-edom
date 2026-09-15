@@ -1,0 +1,276 @@
+import { vi } from "vitest";
+import type { Job, MapsExportPlan, MapsStateConflict, Settings } from "../../src/api";
+import { makeJob } from "./doc";
+
+const actual = await vi.importActual<typeof import("../../src/api")>("../../src/api");
+
+type SaveMapsStateArgs = Parameters<typeof actual.saveMapsState>;
+type PostMapsPngArgs = Parameters<typeof actual.postMapsPng>;
+type PostMapsPngOpts = PostMapsPngArgs[2];
+type RenameJobArgs = Parameters<typeof actual.renameJob>;
+type GetJobArgs = Parameters<typeof actual.getJob>;
+type BootstrapRowsArgs = Parameters<typeof actual.bootstrapMapsRows>;
+type PollJobArgs = Parameters<typeof actual.pollJob>;
+type ExportMapsArgs = Parameters<typeof actual.exportMaps>;
+
+let saveConflictOnce: { conflict: MapsStateConflict } | null = null;
+let saveCalls: Array<{ id: string; document: Record<string, unknown>; expectedRevision: number }> = [];
+
+let staleOnce: { stateRevision: number } | null = null;
+let postMapsPngCalls: PostMapsPngOpts[] = [];
+let lastSavedDocument: Record<string, unknown> | null = null;
+
+let renameFailOnce: Error | null = null;
+let renameCalls: Array<{ id: string; name: string }> = [];
+
+let getJobResolution: Job | null = null;
+
+let saveDeferOnce: Promise<Job> | null = null;
+
+let bootstrapRowsFailOnce: Error | null = null;
+let bootstrapRowsDeferOnce: Promise<Job> | null = null;
+let bootstrapRowsCalls: Array<{ id: string; body: BootstrapRowsArgs[1] }> = [];
+
+let pollJobResolution: Job | null = null;
+
+let exportPlanResolution: MapsExportPlan | null = null;
+let exportMapsCalls: Array<{ id: string; body: ExportMapsArgs[1] }> = [];
+let exportMapsResolution: Job | null = null;
+let cancelMapsExportCalls: string[] = [];
+let planMapsTilesResolution = { ok: true, rels: [] as string[], tiles: 0, cached: 0, capped: false, cameras: 0, camerasUsed: 0 };
+let prefetchMapsTilesResolution = { ok: true, tiles: 0, cached: 0, fetched: 0, failed: 0 };
+
+export const saveMapsState = vi.fn<typeof actual.saveMapsState>(async (id: SaveMapsStateArgs[0], document: SaveMapsStateArgs[1], expectedRevision: SaveMapsStateArgs[2]): Promise<Job> => {
+  saveCalls.push({ id, document, expectedRevision });
+  if (saveConflictOnce) {
+    const { conflict } = saveConflictOnce;
+    saveConflictOnce = null;
+    throw new actual.MapsStateConflictError(conflict);
+  }
+  if (saveDeferOnce) {
+    const deferred = saveDeferOnce;
+    saveDeferOnce = null;
+    return deferred;
+  }
+  lastSavedDocument = { ...document, stateRevision: expectedRevision + 1 };
+  return makeJob({ id, result: lastSavedDocument });
+});
+
+export const postMapsPng = vi.fn<typeof actual.postMapsPng>(async (id: PostMapsPngArgs[0], _blob: PostMapsPngArgs[1], opts: PostMapsPngOpts = {}): Promise<Job> => {
+  postMapsPngCalls.push(opts);
+  if (staleOnce) {
+    const { stateRevision } = staleOnce;
+    staleOnce = null;
+    throw new actual.MapsStaleThumbnailError(stateRevision);
+  }
+  const baseDocument = lastSavedDocument ?? getJobResolution?.result;
+  if (baseDocument) {
+    const stateRevision = Number(baseDocument.stateRevision ?? 0) + 1;
+    return makeJob({ id, result: { ...baseDocument, stateRevision } });
+  }
+  return makeJob({ id });
+});
+
+export const renameJob = vi.fn<typeof actual.renameJob>(async (id: RenameJobArgs[0], name: RenameJobArgs[1]): Promise<Job> => {
+  renameCalls.push({ id, name });
+  if (renameFailOnce) {
+    const err = renameFailOnce;
+    renameFailOnce = null;
+    throw err;
+  }
+  return makeJob({ id, name });
+});
+
+export const getJob = vi.fn<typeof actual.getJob>(async (id: GetJobArgs[0]): Promise<Job> => {
+  if (getJobResolution) return getJobResolution;
+  return makeJob({ id });
+});
+
+export const bootstrapMapsRows = vi.fn<typeof actual.bootstrapMapsRows>(async (id: BootstrapRowsArgs[0], body: BootstrapRowsArgs[1]): Promise<Job> => {
+  bootstrapRowsCalls.push({ id, body });
+  if (bootstrapRowsFailOnce) {
+    const err = bootstrapRowsFailOnce;
+    bootstrapRowsFailOnce = null;
+    throw err;
+  }
+  if (bootstrapRowsDeferOnce) {
+    const deferred = bootstrapRowsDeferOnce;
+    bootstrapRowsDeferOnce = null;
+    return deferred;
+  }
+  return makeJob({ id, status: "queued" });
+});
+
+export const pollJob = vi.fn<typeof actual.pollJob>(async (id: PollJobArgs[0], onTick: PollJobArgs[1]): Promise<Job> => {
+  const job = pollJobResolution ?? makeJob({ id });
+  onTick(job);
+  return job;
+});
+
+export const fetchMapsExportPlan = vi.fn<typeof actual.fetchMapsExportPlan>(async (_id: string): Promise<MapsExportPlan> => {
+  if (!exportPlanResolution) throw new Error("fetchMapsExportPlan not configured in test");
+  return exportPlanResolution;
+});
+
+export const exportMaps = vi.fn<typeof actual.exportMaps>(async (id: ExportMapsArgs[0], body?: ExportMapsArgs[1]): Promise<Job> => {
+  exportMapsCalls.push({ id, body });
+  return exportMapsResolution ?? makeJob({ id });
+});
+
+export const cancelMapsExport = vi.fn<typeof actual.cancelMapsExport>(async (id: string): Promise<Job> => {
+  cancelMapsExportCalls.push(id);
+  return makeJob({ id });
+});
+
+export const planMapsTiles = vi.fn<typeof actual.planMapsTiles>(async () => planMapsTilesResolution);
+
+export const prefetchMapsTiles = vi.fn<typeof actual.prefetchMapsTiles>(async () => prefetchMapsTilesResolution);
+
+let getSettingsDeferOnce: Promise<Settings> | null = null;
+
+const DEFAULT_SETTINGS: Settings = {
+  reuseThreshold: 0,
+  reusePairings: false,
+  reusePreviews: false,
+  defaultExportDir: "",
+  highlightColour: "#e8772a",
+};
+
+let settingsValue: Settings = { ...DEFAULT_SETTINGS };
+
+export const getSettings = vi.fn<typeof actual.getSettings>(
+  async (): Promise<Settings> => {
+    if (getSettingsDeferOnce) {
+      const deferred = getSettingsDeferOnce;
+      getSettingsDeferOnce = null;
+      return deferred;
+    }
+    return { ...settingsValue };
+  }
+);
+
+export const putSettings = vi.fn<typeof actual.putSettings>(async (next: Partial<Settings>): Promise<Settings> => {
+  settingsValue = { ...settingsValue, ...next };
+  return { ...settingsValue };
+});
+
+export function resetMapsApiScript() {
+  saveConflictOnce = null;
+  saveDeferOnce = null;
+  saveCalls = [];
+  staleOnce = null;
+  postMapsPngCalls = [];
+  lastSavedDocument = null;
+  renameFailOnce = null;
+  renameCalls = [];
+  getJobResolution = null;
+  bootstrapRowsFailOnce = null;
+  bootstrapRowsDeferOnce = null;
+  bootstrapRowsCalls = [];
+  pollJobResolution = null;
+  exportPlanResolution = null;
+  exportMapsCalls = [];
+  exportMapsResolution = null;
+  cancelMapsExportCalls = [];
+  planMapsTilesResolution = { ok: true, rels: [], tiles: 0, cached: 0, capped: false, cameras: 0, camerasUsed: 0 };
+  prefetchMapsTilesResolution = { ok: true, tiles: 0, cached: 0, fetched: 0, failed: 0 };
+  saveMapsState.mockClear();
+  postMapsPng.mockClear();
+  renameJob.mockClear();
+  getJob.mockClear();
+  bootstrapMapsRows.mockClear();
+  pollJob.mockClear();
+  fetchMapsExportPlan.mockClear();
+  exportMaps.mockClear();
+  cancelMapsExport.mockClear();
+  planMapsTiles.mockClear();
+  prefetchMapsTiles.mockClear();
+  getSettings.mockClear();
+  putSettings.mockClear();
+  getSettingsDeferOnce = null;
+  settingsValue = { ...DEFAULT_SETTINGS };
+}
+
+export const mapsApiScript = {
+  exportPlan: {
+    set(plan: Record<string, unknown>) {
+      exportPlanResolution = plan as unknown as MapsExportPlan;
+    },
+  },
+  saveMapsState: {
+    conflictOnce(conflict: { document: Record<string, unknown>; stateRevision: number }) {
+      saveConflictOnce = { conflict: { document: conflict.document, stateRevision: conflict.stateRevision } };
+    },
+    deferOnce(promise: Promise<Job>) {
+      saveDeferOnce = promise;
+    },
+    get calls() {
+      return saveCalls;
+    },
+  },
+  postMapsPng: {
+    staleOnce(opts: { stateRevision: number }) {
+      staleOnce = opts;
+    },
+    get calls() {
+      return postMapsPngCalls;
+    },
+  },
+  renameJob: {
+    failOnce(err: Error) {
+      renameFailOnce = err;
+    },
+    get calls() {
+      return renameCalls;
+    },
+  },
+  getJob: {
+    resolve(job: Job) {
+      getJobResolution = job;
+    },
+  },
+  bootstrapMapsRows: {
+    failOnce(err: Error) {
+      bootstrapRowsFailOnce = err;
+    },
+    deferOnce(promise: Promise<Job>) {
+      bootstrapRowsDeferOnce = promise;
+    },
+    get calls() {
+      return bootstrapRowsCalls;
+    },
+  },
+  pollJob: {
+    resolve(job: Job) {
+      pollJobResolution = job;
+    },
+  },
+  fetchMapsExportPlan: {
+    resolve(plan: MapsExportPlan) {
+      exportPlanResolution = plan;
+    },
+  },
+  exportMaps: {
+    resolve(job: Job) {
+      exportMapsResolution = job;
+    },
+    get calls() {
+      return exportMapsCalls;
+    },
+  },
+  cancelMapsExport: {
+    get calls() {
+      return cancelMapsExportCalls;
+    },
+  },
+  getSettings: {
+    deferOnce(promise: Promise<Settings>) {
+      getSettingsDeferOnce = promise;
+    },
+  },
+  putSettings: {
+    get calls() {
+      return putSettings.mock.calls;
+    },
+  },
+};

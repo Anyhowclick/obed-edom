@@ -447,3 +447,15 @@ def test_child_write_guard_counts_the_highest_kindindex_per_kind():
     # Needs 3 shapes (index 2 + 1) and 1 text item, not just "at least 1 of each".
     assert "(count of shapes of theObj) >= 3" in script
     assert "(count of text items of theObj) >= 1" in script
+
+
+def test_size_refused_group_gets_no_width_or_height_write():
+    # A groupChildrenUnavailable refusal (ItemTransform.as_dict) carries x/y but
+    # no w/h at all -- must never fall through to a group-collapsing size write.
+    spec = _spec(kind="group", kindIndex=0, x=1700, y=40)
+    del spec["w"]
+    del spec["h"]
+    script = _build_slide_geometry_script([spec], 4)
+    assert "set properties of theObj to {width:" not in script
+    assert "set width of theObj to" not in script
+    assert "set position of theObj to {1700, 40}" in script

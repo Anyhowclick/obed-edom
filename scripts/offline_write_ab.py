@@ -1,13 +1,45 @@
 #!/usr/bin/env python3
-"""Whole-deck A/B gate for the offline geometry-WRITE opt-in (``w-offline-write-optin``).
+"""Whole-deck A/B gate for the offline geometry-WRITE opt-in (``w-offline-write-optin``)
+and the W2 z-order write (``w-zorder-patch`` piece 4).
 
 Runs :func:`obed_edom.remap_keynote.remap_and_inspect` TWICE against the same
 source/template pair:
 
-    A = the scripted-AppleScript baseline, ``OBED_OFFLINE_WRITE=off`` set EXPLICITLY
-        (never relies on the ambient default, whatever it currently is).
-    B = the SAME plan with ``OBED_OFFLINE_WRITE={verify,on}`` (surgical offline IWA patch,
-        AppleScript fallback only for refused slides / individually missed specs).
+    A = ``OBED_ZORDER_WRITE=off``, ``OBED_OFFLINE_WRITE`` at this run's ``--mode``
+        (GUI raises; never relies on the ambient z-order default).
+    B = ``OBED_ZORDER_WRITE=on``, **the same** ``OBED_OFFLINE_WRITE`` mode (offline
+        z-order patch on eligible slides; AppleScript raise only for the GUI leftover).
+
+Both arms share ``--mode`` so the A/B delta is the z-order writer, not a second
+geometry-writer variable. W1's older split (A ``OBED_OFFLINE_WRITE=off``, B
+``--mode``) is no longer this script's arm configuration.
+
+Per-slide z-order verdicts reuse ``output/bank/2026-09-11/badge-retry/zorder_compare.py``'s
+method (full ``drawablesZOrder`` id-list equality) in two forms:
+
+    SAME_ORDER      — full id-list equality. The RAISE10 A-vs-A control uses this
+                      metric via ``--control-a`` (a second same-code A deck).
+                      A-vs-B SAME_ORDER is observational only (Gold scrambles).
+    FRONT_BLOCK_OK  — target ids occupy the final ``|T|`` slots in the same order
+                      in both arms. This is the A-vs-B gate line.
+
+RAISE10-vs-Gold control caveat (plan C8): on RAISE10 a same-code A-vs-A control
+**is** valid (six banked runs ``SAME_ORDER=yes`` on 7/7 ordinals,
+``output/bank/2026-09-11/badge-retry/results.md``) and must be run as a control.
+On Gold it is not — Keynote scrambles ``drawablesZOrder`` on save — and only
+same-run A-vs-B ``FRONT_BLOCK_OK`` is meaningful there. Do not generalise the
+Gold caveat to RAISE10, and do not treat a Gold ``SAME_ORDER=no`` as a W2 fail.
+
+Piece 3 emits ``OBED_ZORDER_WRITE`` and the ``Stat zorder detail:`` counters
+(``zorderSlides``, ``zorderStatRaised``, ``zorderBadgeRaised``, ``zorderNoop``,
+``zorderUnresolved(s=,k=,i=)``, ``zorderRefused(s=,reason=)``, ``zorderGui``,
+``zorderLost(s=,id=)``; no token may contain the literal `` exported=``). This
+gate surfaces those counters and REDs arm B when the piece-3
+``zorderWrite`` schema is missing (absent counters are not read as 0), when
+``zorderRefused`` / ``zorderUnresolved`` / ``zorderLost`` are non-zero, when
+``slides`` / ``zorderGui`` are not exactly the eligible vs reuse/ineligible
+raise-bearing sets, or when a suppressed slide's pass-2 log still carries
+``raiseDead`` / ``raiseUnknown`` / ``frontErr``.
 
 A and B are two INDEPENDENT Keynote runs, but the output deck's drawable ids are copied
 straight from the SOURCE (not regenerated per run) — so every object that survives both
@@ -64,10 +96,10 @@ check cannot abort B (already paid for) but folds into ``gate_ok`` so a
 damaged B can no longer report GREEN. Then A/B pass-2 parity and plan parity. Each fresh
 run (A and B) is followed by the SAME open-documents check, WARNing loudly and closing
 only that run's own deck if Keynote left it open (never anyone else's). Plan parity
-checks ``transforms``/``reuses`` for exact equality, but NOT ``suppressGeometry`` — that
-key differs from A to B BY CONSTRUCTION (A, the production path, never suppresses
-geometry; B suppresses exactly the compared-slide set) — instead A's must be empty and
-B's must equal the compared-slide set exactly. :func:`compare_units_multiset`
+checks ``transforms``/``reuses`` for exact equality, but NOT ``suppressGeometry`` as an
+A==B equality: W1 constructed A empty and B as the compared-slide set; W2 puts both
+arms on the same offline-write mode, so A may also equal that set. B must still equal
+the compared-slide set exactly. :func:`compare_units_multiset`
 (sorted-position, no id needed) and :func:`compare_units_by_addr` (kindIndex-matched) are
 kept as INFORMATIONAL cross-checks only -- the latter runs only when identity matching
 itself failed, as a permutation diagnostic (same population, different pairing).
@@ -108,8 +140,10 @@ TOL_SOFT = 1.0
 TOL_MASK = 2.0
 TOL_TEXT = 2.0
 TOL_CHILD = 2.0
+TOL_ASPECT = 0.25
 
 _HARD_KINDS = {"shape", "line"}
+_ASPECT_LOCKED = {"group", "image", "movie"}
 _TEXT_BUCKETS = {"text"}  # "child:text" is unreachable: `_child_kind` never yields "text"
 
 # D4 pass-2 (stat-finalize) health, from `keynote._run_stat_finalize`'s result dict.
@@ -119,6 +153,20 @@ PASS2_PARITY_KEYS = (
     "dedupShortfall", "sigFallback", "unresolved", "badgeFallback", "badgeUnresolved",
 )
 PASS2_WARN_KEYS = ("sigFallback", "badgeFallback")
+
+# Piece 3 result-dict counters that must be 0 on arm B (lists or ints).
+ZORDER_ZERO_KEYS = ("zorderRefused", "zorderUnresolved", "zorderLost")
+# Required on arm B when OBED_ZORDER_WRITE=on — missing is not "zero".
+ZORDER_SCHEMA_KEYS = (
+    "slides", "zorderSlides",
+    "zorderStatRaised", "zorderBadgeRaised", "zorderNoop",
+    "zorderRefused", "zorderUnresolved", "zorderLost", "zorderGui",
+)
+ZORDER_SURFACE_KEYS = (
+    "zorderSlides", "zorderStatRaised", "zorderBadgeRaised", "zorderNoop",
+    "zorderRefused", "zorderUnresolved", "zorderLost", "zorderGui",
+)
+_RAISE_SLIDE_RE = re.compile(r"s=(\d+)")
 
 _ACCESSIBILITY_ERR_CODES = ("-1743", "-25211")
 _FRONT_ERR_RE = re.compile(r"frontErr=(.*?) exported=")
@@ -349,30 +397,44 @@ def pass2_zero_warn(label: str, result: dict[str, Any] | None, *, tolerated: boo
             "(pass2-bar=parity: A != B, NOT tolerated — see the RED lines above).")
 
 
+def pass2_click_retry_warn(label: str, result: dict[str, Any] | None) -> str:
+    """`raiseClickRetried` WARN, observational only -- renders in both `--pass2-bar`
+    modes and only when non-zero; "" otherwise."""
+    n = int((result or {}).get("raiseClickRetried") or 0)
+    if not n:
+        return ""
+    return (f"WARN {label}: raiseClickRetried={n} (GUI Bring-to-Front click errors "
+            "rescued by a retry; does not gate).")
+
+
 def plan_parity(
     plan_a: dict[str, Any], plan_b: dict[str, Any], compared_slides: list[int]
 ) -> list[str]:
     """A and B must plan the SAME ``transforms``/``reuses`` (D5) — any drift makes the
     numbers meaningless (they are no longer comparing the same plan).
 
-    ``suppressGeometry`` is NOT compared for equality: it differs from A to B BY
-    CONSTRUCTION (A never suppresses geometry; B suppresses exactly the offline-write
-    set), so an equality check here could never go GREEN. Instead: A's
-    ``suppressGeometry`` must be empty (A is the production AppleScript-only path), and
-    B's must equal ``compared_slides`` exactly (the same non-reuse, non-donor slide set
-    the rest of this gate compares).
+    ``suppressGeometry`` is NOT compared for equality across A and B: W1 constructed
+    A as AppleScript-only (empty) and B as the compared-slide set, so an equality
+    check could never go GREEN. W2 puts both arms on the same ``OBED_OFFLINE_WRITE``
+    mode, so A may also equal the compared-slide set. Allowed:
+
+    * W1: A empty, B == ``compared_slides``
+    * W2: A == B == ``compared_slides``
+
+    Any other nonempty A list still fails with the W1 ``not empty`` wording so the
+    existing tests keep their assertion.
     """
     reasons: list[str] = []
     for key in ("transforms", "reuses"):
         if plan_a.get(key) != plan_b.get(key):
             reasons.append(f"plan {key} drift between A and B")
-    a_suppress = plan_a.get("suppressGeometry") or []
-    if a_suppress:
-        reasons.append(f"plan A suppressGeometry not empty: {sorted(a_suppress)}")
+    a_suppress = sorted(plan_a.get("suppressGeometry") or [])
     b_suppress = sorted(plan_b.get("suppressGeometry") or [])
     expected = sorted(compared_slides)
     if b_suppress != expected:
         reasons.append(f"plan B suppressGeometry {b_suppress} != compared slides {expected}")
+    if a_suppress and a_suppress != expected:
+        reasons.append(f"plan A suppressGeometry not empty: {sorted(plan_a.get('suppressGeometry') or [])}")
     return reasons
 
 
@@ -840,6 +902,8 @@ def plan_oracle_slide(
     id_by_addr: dict[tuple[str, int], str],
     recs_by_id: dict[str, dict[str, Any]],
     tols: Tolerances,
+    *,
+    aspects: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Compare every planned transform's target against the drawable it resolves to,
     id-addressed via the SOURCE deck's kind index (D3) -- raise-immune, hide-immune
@@ -870,6 +934,11 @@ def plan_oracle_slide(
     A spec with no ``kindIndex`` at all (should never happen -- ``ItemTransform.as_dict``
     always emits one) is a RED ``missing_ids`` entry too, reason ``"spec carries no
     kindIndex"`` — never silently dropped.
+
+    For arm A's aspect-locked childless image/movie/group specs, the predicted width is
+    compared against both the float aspect-lock ``h * ar`` and its integer rounding (Keynote
+    stores the integer when the frame aspect differs from the media aspect), at
+    ``TOL_ASPECT``.
 
     Returns ``{"pass": bool, "per_kind": {kind: {n, worst, pass, fails}}, "missing_ids":
     [...], "skipped": int, "compared": int, "approx": [...]}`` where ``compared`` is the
@@ -919,7 +988,18 @@ def plan_oracle_slide(
         entry = per_kind.setdefault(kind, {"n": 0, "worst": 0.0, "pass": True, "fails": []})
         tol = tols.hard if kind in _OFFLINE_EXACT_KINDS else tols.soft
         planned, actual = _spec_box(spec, rec)
-        worst = max(abs(a - b) for a, b in zip(planned, actual))
+        ar = (aspects or {}).get(obj_id) if (kind in _ASPECT_LOCKED and not spec.get("children")) else None
+        if ar:
+            h = round(planned[3])
+            w_pred = h * ar
+            planned = (round(planned[0]), round(planned[1]), w_pred, float(h))
+            tol = TOL_ASPECT
+            diffs = [abs(planned[0] - actual[0]), abs(planned[1] - actual[1]),
+                     min(abs(planned[2] - actual[2]), abs(round(planned[2]) - actual[2])),
+                     abs(planned[3] - actual[3])]
+            worst = max(diffs)
+        else:
+            worst = max(abs(a - b) for a, b in zip(planned, actual))
         entry["n"] += 1
         entry["worst"] = max(entry["worst"], worst)
         if worst > tol:
@@ -1019,6 +1099,8 @@ def run_record(
     *, commit: str, deck_digest: str, source_digest: str, plan: dict[str, Any],
     child_resize: Any, applied: int, missed: int, offline_write: dict[str, Any] | None,
     spec_id_map: dict[str, list[dict[str, Any]]],
+    zorder_write: dict[str, Any] | None = None,
+    expect_raises: bool | None = None,
 ) -> dict[str, Any]:
     """Everything a later ``--reuse-a``/``--reuse-b`` needs, with no Keynote (D13).
 
@@ -1029,21 +1111,30 @@ def run_record(
     ``plan`` a fresh run hands in (remap_keynote.py's ``plan_out`` block carries
     ``statJobs``/``badgeRaises`` job lists) and persisted alongside the trimmed plan, so
     a later ``--reuse-a``/``--reuse-b`` reads it back exactly rather than re-deriving it
-    from a plan already trimmed down to D13's three keys.
+    from a plan already trimmed down to D13's three keys. Pass ``expect_raises`` to
+    override when piece 3 suppressed every GUI raise (``front >= 1`` is then not owed).
+
+    ``statJobs`` / ``badgeRaises`` are persisted at the top level (the trimmed plan
+    drops them) so a reused record can still resolve the W2 front-block targets.
+    ``zorderWrite`` is the piece 3 result dict (counters + eligible ``slides``).
 
     Raises ``ValueError`` if ``plan`` has NEITHER key: that means ``plan`` is already a
     trimmed, PERSISTED plan (a loaded run record's ``plan``, not a fresh ``plan_out``) —
     computing ``expectRaises`` from it would silently read as "no jobs" instead of
-    failing loudly on the caller's mistake.
+    failing loudly on the caller's mistake. One key without the other is also a
+    refuse — do not persist the missing side as ``[]``.
     """
-    if "statJobs" not in plan and "badgeRaises" not in plan:
+    jobs = raise_job_pair(plan, label="run_record: plan")
+    if jobs is None:
         raise ValueError(
             "run_record: plan carries neither 'statJobs' nor 'badgeRaises' — this looks "
             "like an already-trimmed persisted plan, not a fresh plan_out dict; "
             "expectRaises cannot be derived from it."
         )
+    stat_jobs, badge_raises = jobs
     ow = dict(offline_write or {})
     ow.pop("specs", None)
+    computed = bool(stat_jobs) or bool(badge_raises)
     return {
         "gateVersion": GATE_VERSION,
         "commit": commit,
@@ -1054,11 +1145,14 @@ def run_record(
             "reuses": plan.get("reuses") or [],
             "suppressGeometry": plan.get("suppressGeometry"),
         },
-        "expectRaises": bool(plan.get("statJobs")) or bool(plan.get("badgeRaises")),
+        "expectRaises": computed if expect_raises is None else bool(expect_raises),
+        "statJobs": stat_jobs,
+        "badgeRaises": badge_raises,
         "childResize": child_resize,
         "applied": applied,
         "missed": missed,
         "offlineWrite": ow,
+        "zorderWrite": dict(zorder_write or {}),
         "specIdMap": spec_id_map,
     }
 
@@ -1126,6 +1220,21 @@ def spec_id_map(source_deck: Path | str) -> dict[str, list[dict[str, Any]]]:
     }
 
 
+def source_aspects(source_deck: Path | str) -> dict[str, float]:
+    from obed_edom.iwa_geometry import compose_geometry  # noqa: PLC0415
+    from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = _load_deck(source_deck)
+    out: dict[str, float] = {}
+    for slide_id, _skipped in slide_order(objects):
+        if slide_id not in objects:
+            continue
+        for r in compose_geometry(objects[slide_id], objects):
+            if r["h"] and r["w"] and r.get("geom_source") != "mask":
+                out[r["id"]] = r["w"] / r["h"]
+    return out
+
+
 def _id_by_addr_for_slide(id_map: dict[str, list[dict[str, Any]]], slide: int
                           ) -> dict[tuple[str, int], str]:
     return {(e["kind"], int(e["kindIndex"])): e["id"] for e in id_map.get(str(slide), [])}
@@ -1150,8 +1259,402 @@ def decode_deck(deck: Path | str) -> tuple[dict[str, dict], dict[int, dict[str, 
 
 
 # ==========================================================================
+# W2 z-order A/B verdicts — pure, Keynote-free (piece 4).
+# ==========================================================================
+def same_order(ids_a: list[str], ids_b: list[str]) -> bool:
+    """Full ``drawablesZOrder`` id-list equality — ``zorder_compare.py`` / P17."""
+    return list(ids_a) == list(ids_b)
+
+
+def front_block_ok(ids_a: list[str], ids_b: list[str], targets: list[str]) -> bool:
+    """Target ids occupy the final ``|T|`` slots in the same order in both arms."""
+    block = list(targets)
+    if not block:
+        return True
+    n = len(block)
+    return (
+        len(ids_a) >= n
+        and len(ids_b) >= n
+        and list(ids_a[-n:]) == block
+        and list(ids_b[-n:]) == block
+    )
+
+
+def zorder_slide_verdict(
+    ids_a: list[str] | None, ids_b: list[str] | None, targets: list[str],
+) -> dict[str, Any]:
+    """Per-slide ``SAME_ORDER`` / ``FRONT_BLOCK_OK`` pair. Missing orders fail both."""
+    if ids_a is None or ids_b is None:
+        return {"sameOrder": False, "frontBlockOk": False, "targets": list(targets)}
+    return {
+        "sameOrder": same_order(ids_a, ids_b),
+        "frontBlockOk": front_block_ok(ids_a, ids_b, targets),
+        "targets": list(targets),
+    }
+
+
+def _counter_nonzero(value: Any) -> int:
+    """How many failures a z-order counter represents. Missing / 0 / [] / "" = 0."""
+    if value is None:
+        return 0
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    if isinstance(value, str):
+        return 0 if not value.strip() else 1
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1 if value else 0
+
+
+def zorder_schema_reasons(
+    zorder_write: dict[str, Any] | None, *, label: str = "B",
+) -> list[str]:
+    """RED if arm B did not emit the piece-3 ``zorderWrite`` schema.
+
+    Absent counters must not be read as 0 — that would GREEN a B that never ran
+    the offline z-order writer (every raise stayed on GUI, suffixes still match).
+    """
+    if not zorder_write:
+        return [
+            f"{label}: zorderWrite missing — offline z-order writer unproven "
+            "(piece 3 result dict was not emitted)"
+        ]
+    missing = [key for key in ZORDER_SCHEMA_KEYS if key not in zorder_write]
+    if missing:
+        return [
+            f"{label}: zorderWrite missing {missing} — refuse to treat absent "
+            "counters as 0"
+        ]
+    return []
+
+
+def zorder_counter_reasons(
+    zorder_write: dict[str, Any] | None, *, label: str = "B",
+) -> list[str]:
+    """RED reasons when arm B's ``zorderRefused`` / ``Unresolved`` / ``Lost`` are non-zero.
+
+    Only inspects keys that are present; :func:`zorder_schema_reasons` is what
+    refuses a missing schema.
+    """
+    ow = zorder_write or {}
+    reasons: list[str] = []
+    for key in ZORDER_ZERO_KEYS:
+        if key not in ow:
+            continue
+        n = _counter_nonzero(ow.get(key))
+        if n:
+            reasons.append(f"{label}: {key}={ow.get(key)!r} (expected 0)")
+    return reasons
+
+
+def _as_slide_set(value: Any) -> set[int] | None:
+    """Slide id set from a ``list``. ``None`` for a count, tuple, set, or string."""
+    if not isinstance(value, list):
+        return None
+    try:
+        return {int(s) for s in value}
+    except (TypeError, ValueError):
+        return None
+
+
+def claimed_patched_slides(zorder_write: dict[str, Any] | None) -> set[int]:
+    """Patched-slide set from ``zorderWrite.slides``. Empty if missing or not a list.
+
+    A count must not be iterated (``{int(s) for s in 2}`` is ``TypeError``). The
+    schema/GUI gate REDs that shape; callers just must not crash first.
+    """
+    parsed = _as_slide_set((zorder_write or {}).get("slides"))
+    return parsed if parsed is not None else set()
+
+
+def raise_slides_from_jobs(
+    stat_jobs: list[dict[str, Any]] | None,
+    badge_rows: list[dict[str, Any]] | None,
+) -> set[int]:
+    """Raise-bearing slides (stat rows with a ``childSig``, plus every badge row)."""
+    slides: set[int] = set()
+    for job in stat_jobs or []:
+        if job.get("childSig"):
+            slides.add(int(job["slide"]))
+    for row in badge_rows or []:
+        slides.add(int(row["slide"]))
+    return slides
+
+
+def expected_zorder_sets(
+    raise_slides: set[int],
+    compared_slides: list[int] | set[int],
+    refused: list[int] | set[int] | None = None,
+) -> tuple[set[int], set[int]]:
+    """``(expected_patched, expected_gui)`` from plan/offline-write facts, not B's claim.
+
+    Eligible = raise-bearing ∩ compared (non-reuse, non-donor) − pass-1 refused.
+    Those must be in ``slides``. Every other raise-bearing slide is the reuse /
+    ineligible GUI leftover (plan gate line 3).
+    """
+    compared = {int(s) for s in compared_slides}
+    refused_set = {int(s) for s in (refused or [])}
+    patched = {s for s in raise_slides if s in compared and s not in refused_set}
+    return patched, set(raise_slides) - patched
+
+
+def zorder_gui_reasons(
+    zorder_write: dict[str, Any] | None,
+    raise_slides: set[int],
+    *,
+    compared_slides: list[int] | set[int],
+    refused: list[int] | set[int] | None = None,
+    label: str = "B",
+) -> list[str]:
+    """RED unless ``slides`` / ``zorderGui`` match the independent eligible vs leftover sets.
+
+    Trusting B's ``slides`` and only checking ``zorderGui == raise − slides`` would
+    still GREEN a B that left eligible raises on the GUI and listed them as ineligible.
+    FRONT_BLOCK_OK can match in that case because both arms used the GUI raise.
+    """
+    ow = zorder_write or {}
+    expected_patched, expected_gui = expected_zorder_sets(
+        raise_slides, compared_slides, refused,
+    )
+    reasons: list[str] = []
+    patched = _as_slide_set(ow.get("slides"))
+    actual_gui = _as_slide_set(ow.get("zorderGui"))
+    if patched is None:
+        reasons.append(
+            f"{label}: slides={ow.get('slides')!r} is not a slide list — "
+            "refuse to treat a count as the patched set"
+        )
+    elif patched != expected_patched:
+        reasons.append(
+            f"{label}: slides={sorted(patched)} != eligible raise slides "
+            f"{sorted(expected_patched)}"
+        )
+    if actual_gui is None:
+        reasons.append(
+            f"{label}: zorderGui={ow.get('zorderGui')!r} is not a slide list — "
+            "refuse to treat a count as the ineligible set"
+        )
+    elif actual_gui != expected_gui:
+        reasons.append(
+            f"{label}: zorderGui={sorted(actual_gui)} != ineligible raise slides "
+            f"{sorted(expected_gui)}"
+        )
+    return reasons
+
+
+def zorder_write_reasons(
+    zorder_write: dict[str, Any] | None,
+    raise_slides: set[int],
+    *,
+    compared_slides: list[int] | set[int],
+    refused: list[int] | set[int] | None = None,
+    label: str = "B",
+) -> list[str]:
+    """Arm-B z-order result gate: schema + zero-keys + patched/GUI set identity."""
+    reasons = zorder_schema_reasons(zorder_write, label=label)
+    if reasons:
+        return reasons
+    return (
+        zorder_counter_reasons(zorder_write, label=label)
+        + zorder_gui_reasons(
+            zorder_write, raise_slides,
+            compared_slides=compared_slides, refused=refused, label=label,
+        )
+    )
+
+
+def zorder_counter_summary(zorder_write: dict[str, Any] | None) -> str:
+    """``Stat zorder detail:``-shaped one-liner from a result dict (missing keys as 0)."""
+    ow = zorder_write or {}
+    parts = [f"{key}={_counter_nonzero(ow.get(key))}" for key in ZORDER_SURFACE_KEYS]
+    return "Stat zorder detail: " + " ".join(parts)
+
+
+def _raise_token_args(child_resize: dict[str, Any], name: str) -> list[str]:
+    tokens = child_resize.get("tokens") or {}
+    if isinstance(tokens, dict) and tokens.get(name):
+        return [str(a) for a in tokens[name]]
+    blob = (child_resize.get("detail") or "") + " " + (child_resize.get("raw") or "")
+    return re.findall(rf"{re.escape(name)}\(([^)]*)\)", blob)
+
+
+def suppressed_raise_reasons(
+    child_resize: dict[str, Any] | None,
+    suppressed: set[int] | list[int],
+    *,
+    label: str = "B",
+) -> list[str]:
+    """RED if pass-2 still emitted ``raiseDead`` / ``raiseUnknown`` / ``frontErr`` on a
+    slide the offline z-order writer claimed (those raises must not even be attempted)."""
+    if not child_resize or not suppressed:
+        return []
+    suppressed_set = {int(s) for s in suppressed}
+    reasons: list[str] = []
+    for name in ("raiseDead", "raiseUnknown"):
+        seen: set[int] = set()
+        for args in _raise_token_args(child_resize, name):
+            match = _RAISE_SLIDE_RE.search(args)
+            if not match:
+                continue
+            slide = int(match.group(1))
+            if slide in suppressed_set and slide not in seen:
+                seen.add(slide)
+                reasons.append(f"{label}: {name}(s={slide}) on suppressed slide")
+    front_err = child_resize.get("frontErr") or front_err_from_raw(child_resize.get("raw") or "")
+    if front_err:
+        seen_front: set[int] = set()
+        for match in _RAISE_SLIDE_RE.finditer(front_err):
+            slide = int(match.group(1))
+            if slide in suppressed_set and slide not in seen_front:
+                seen_front.add(slide)
+                reasons.append(f"{label}: frontErr s={slide} on suppressed slide")
+    return reasons
+
+
+def expect_gui_raises(
+    stat_jobs: list[dict[str, Any]] | None,
+    badge_raises: list[dict[str, Any]] | None,
+    zorder_write: dict[str, Any] | None,
+) -> bool:
+    """``front >= 1`` is only owed when at least one raise-bearing slide stayed on GUI."""
+    return bool(raise_slides_from_jobs(stat_jobs, badge_raises) - claimed_patched_slides(zorder_write))
+
+
+def slide_zorder_ids(objects: dict[str, Any], slide_number: int) -> list[str] | None:
+    """``drawablesZOrder`` ids for a 1-based output ordinal (``zorder_compare.py`` method)."""
+    from obed_edom.iwa_runs import slide_order  # noqa: PLC0415 — optional iwa extra
+
+    order = slide_order(objects)
+    if not (1 <= slide_number <= len(order)):
+        return None
+    slide = objects.get(order[slide_number - 1][0])
+    if not slide:
+        return None
+    return [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []]
+
+
+def front_targets_for_slide(
+    *,
+    id_by_addr: dict[tuple[str, int], str],
+    stat_jobs: list[dict[str, Any]],
+    badge_rows: list[dict[str, Any]],
+    hide_specs: list[dict[str, Any]],
+) -> list[str]:
+    """Front-block ids from the SOURCE/wall address space: stat (ascending
+    ``groupIndex``) then badges (planner row order).
+
+    ``id_by_addr`` is the SOURCE kind index (wall addressing). Stat ``groupIndex``
+    is 1-based hide-bridged, so the matching source row is the one whose bridged
+    wall index equals ``gi-1``. Badge ``index`` is 1-based WALL and is looked up
+    directly — never against a post-raise dest kind index (a GUI raise reorders
+    kindIndex and would pick the wrong id). Unresolved rows are omitted (the
+    counter gate, not this list, is what REDs an unresolved target).
+    """
+    from obed_edom.iwa_write import bridge_kind_index  # noqa: PLC0415 — optional iwa extra
+
+    def source_id_for_saved(kind: str, saved_ki: int) -> str | None:
+        hidden = {
+            (str(h.get("kind")), int(h.get("kindIndex", 0))) for h in hide_specs
+        }
+        for (k, wall_ki), oid in id_by_addr.items():
+            if (k, wall_ki) in hidden:
+                continue
+            if k == kind and bridge_kind_index(kind, wall_ki, hide_specs) == saved_ki:
+                return str(oid)
+        return None
+
+    stat_ids: list[str] = []
+    jobs = sorted(
+        (j for j in stat_jobs
+         if j.get("childSig") and int(j.get("groupIndex") or 0) > 0),
+        key=lambda j: int(j["groupIndex"]),
+    )
+    for job in jobs:
+        kid = source_id_for_saved("group", int(job["groupIndex"]) - 1)
+        if kid:
+            stat_ids.append(kid)
+
+    badge_ids: list[str] = []
+    for row in badge_rows:
+        kind = str(row.get("kind") or "")
+        raw_index = row.get("index")
+        if raw_index is None:
+            continue
+        kid = id_by_addr.get((kind, int(raw_index) - 1))
+        if kid:
+            badge_ids.append(str(kid))
+    return stat_ids + badge_ids
+
+
+def zorder_targets_from_plan(
+    plan: dict[str, Any], id_map: dict[str, list[dict[str, Any]]],
+) -> dict[int, list[str]]:
+    """``{slide: front-block ids}`` from a ``plan_out`` (or persisted job lists)
+    plus the SOURCE kind index. Never reads a dest deck's post-raise indexes."""
+    hide_specs = [t for t in (plan.get("transforms") or []) if t.get("role") == "hide"]
+    stat_by: dict[int, list[dict[str, Any]]] = {}
+    for job in plan.get("statJobs") or []:
+        stat_by.setdefault(int(job["slide"]), []).append(job)
+    badge_by: dict[int, list[dict[str, Any]]] = {}
+    for row in plan.get("badgeRaises") or []:
+        badge_by.setdefault(int(row["slide"]), []).append(row)
+    out: dict[int, list[str]] = {}
+    for n in sorted(set(stat_by) | set(badge_by)):
+        targets = front_targets_for_slide(
+            id_by_addr=_id_by_addr_for_slide(id_map, n),
+            stat_jobs=stat_by.get(n, []),
+            badge_rows=badge_by.get(n, []),
+            hide_specs=[h for h in hide_specs if int(h.get("slide", -1)) == n],
+        )
+        if targets:
+            out[n] = targets
+    return out
+
+
+def raise_job_pair(
+    src: dict[str, Any], *, label: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Both job lists from one dict, or ``None`` if neither key is present.
+
+    One key without the other is a refuse — do not infer ``[]`` for the missing
+    side, or a badge-only source would silently drop every stat target.
+    """
+    has_stat = "statJobs" in src
+    has_badge = "badgeRaises" in src
+    if has_stat != has_badge:
+        raise ValueError(
+            f"{label} carries only one of statJobs/badgeRaises; refuse to "
+            "treat the missing key as empty"
+        )
+    if not has_stat:
+        return None
+    return list(src.get("statJobs") or []), list(src.get("badgeRaises") or [])
+
+
+def persisted_raise_jobs(
+    plan: dict[str, Any], record: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Return ``(statJobs, badgeRaises)`` from a fresh plan or a persisted record.
+
+    ``None`` means a legacy record with neither key (W1 run records). Both keys
+    must come from the same source — do not fill a one-key plan from the record
+    (or the reverse), or ``run_record`` synthesizing ``[]`` would hide the gap.
+    """
+    if "statJobs" in plan or "badgeRaises" in plan:
+        return raise_job_pair(plan, label="plan")
+    return raise_job_pair(record, label="record")
+
+
+# ==========================================================================
 # main — the Keynote-touching orchestration.
 # ==========================================================================
+def slide_selection(raw: str | None) -> frozenset[int] | None:
+    from obed_edom.map_remap import parse_slide_spec  # noqa: PLC0415
+
+    return parse_slide_spec(raw)
+
+
 def main(argv: list[str] | None = None) -> int:
     # Imported here so the pure comparators above import without Keynote/iwa deps present.
     from obed_edom import offline_write  # noqa: PLC0415
@@ -1159,6 +1662,14 @@ def main(argv: list[str] | None = None) -> int:
     from obed_edom.map_remap import slides_for_plan  # noqa: PLC0415
     from obed_edom.remap_keynote import remap_and_inspect  # noqa: PLC0415
     from scripts.write_gate_ab import _remap_env, slide_units  # noqa: PLC0415
+
+    def _write_arm_env(*, offline_write: str, zorder_write: str) -> None:
+        _remap_env(suppress="", as_geometry="1", geom_props="1", offline_write=offline_write)
+        os.environ["OBED_ZORDER_WRITE"] = zorder_write
+
+    def _clear_write_env() -> None:
+        os.environ.pop("OBED_OFFLINE_WRITE", None)
+        os.environ.pop("OBED_ZORDER_WRITE", None)
 
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1169,15 +1680,21 @@ def main(argv: list[str] | None = None) -> int:
         "--out", type=Path, required=True,
         help="scratch dir for the A/B decks (Keynote-writable, not /tmp)",
     )
-    ap.add_argument("--slides", help="slide range A-B to remap (default: whole deck)")
+    ap.add_argument("--slides", help="slides to remap, e.g. 47 or 47,82,110-113 (default: whole deck)")
     ap.add_argument(
         "--mode", choices=("verify", "on"), default="verify",
-        help="run B's OBED_OFFLINE_WRITE (default verify: patch + live verify)",
+        help="both arms' OBED_OFFLINE_WRITE (default verify: patch + live verify); "
+             "A/B then differ only on OBED_ZORDER_WRITE off vs on",
     )
     ap.add_argument("--reuse-a", type=Path,
                     help="banked A .key (with its <deck>.run.json) — SKIP running A")
     ap.add_argument("--reuse-b", type=Path,
                     help="banked B .key (with its <deck>.run.json) — SKIP running B")
+    ap.add_argument(
+        "--control-a", type=Path,
+        help="second same-code A deck for the RAISE10 SAME_ORDER A-vs-A control "
+             "(Keynote-free compare; required on RAISE10, meaningless on Gold)",
+    )
     ap.add_argument("--validate", dest="validate", action="store_true", default=True,
                     help="live-verify readback after each run (default on)")
     ap.add_argument("--no-validate", dest="validate", action="store_false",
@@ -1213,13 +1730,15 @@ def main(argv: list[str] | None = None) -> int:
     for label, deck in (("source", args.source), ("template", args.template)):
         if not deck.exists():
             ap.error(f"{label} deck not found: {deck}")
+    if args.control_a is not None and not args.control_a.exists():
+        ap.error(f"--control-a not found: {args.control_a}")
 
     tols = Tolerances(args.tol_hard, args.tol_soft, args.tol_mask, args.tol_text, args.tol_child)
 
-    slide_range = None
-    if args.slides:
-        lo, _, hi = args.slides.partition("-")
-        slide_range = (int(lo), int(hi or lo))
+    try:
+        slide_range = slide_selection(args.slides)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
@@ -1258,30 +1777,37 @@ def main(argv: list[str] | None = None) -> int:
         applied_a = int(a_record["applied"] or 0)
         expect_raises_a = bool(a_record["expectRaises"])
         id_map = a_record["specIdMap"]
+        zorder_write_a = a_record.get("zorderWrite") or {}
         _log(f"REUSE A: {a_deck} (run record OK).")
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
     else:
-        _log(f"A: production remap {args.source.name} (OBED_OFFLINE_WRITE=off) -> {a_deck}")
-        _remap_env(suppress="", as_geometry="1", geom_props="1")
-        os.environ["OBED_OFFLINE_WRITE"] = "off"  # explicit: never rely on the ambient default
+        _log(f"A: {args.source.name} OBED_OFFLINE_WRITE={args.mode} "
+             f"OBED_ZORDER_WRITE=off -> {a_deck}")
+        _write_arm_env(offline_write=args.mode, zorder_write="off")
         plan_a: dict[str, Any] = {}
-        info_a = remap_and_inspect(
-            args.source, a_deck, template=args.template, slide_range=slide_range,
-            export_dir=None, plan_out=plan_a, log=_log, validate=args.validate,
-        )
+        try:
+            info_a = remap_and_inspect(
+                args.source, a_deck, template=args.template, slide_range=slide_range,
+                export_dir=None, plan_out=plan_a, log=_log, validate=args.validate,
+            )
+        finally:
+            _clear_write_env()
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
         child_resize_a = info_a.get("childResize")
         applied_a = int(info_a.get("applied") or 0)
         id_map = spec_id_map(args.source)
+        zorder_write_a = info_a.get("zorderWrite") or {}
+        expect_raises_a = expect_gui_raises(
+            plan_a.get("statJobs"), plan_a.get("badgeRaises"), zorder_write_a,
+        )
         a_record = run_record(
             commit=commit, deck_digest=deck_digest(a_deck), source_digest=deck_digest(args.source),
             plan=plan_a, child_resize=child_resize_a, applied=applied_a,
             missed=int(info_a.get("missed") or 0), offline_write=info_a.get("offlineWrite"),
-            spec_id_map=id_map,
+            spec_id_map=id_map, zorder_write=zorder_write_a, expect_raises=expect_raises_a,
         )
-        expect_raises_a = bool(a_record["expectRaises"])
         write_run_record(_run_record_path(a_deck), a_record)
         _log(f"Run record written -> {_run_record_path(a_deck)}")
         _warn_and_close_stray_documents("A", a_deck)
@@ -1341,15 +1867,23 @@ def main(argv: list[str] | None = None) -> int:
         plan_b = b_record["plan"]
         child_resize_b = b_record["childResize"]
         applied_b = int(b_record["applied"] or 0)
-        expect_raises_b = bool(b_record["expectRaises"])
         ow_b = b_record["offlineWrite"] or {}
+        zorder_write_b = b_record.get("zorderWrite") or {}
+        try:
+            jobs_b = persisted_raise_jobs(plan_b, b_record)
+        except ValueError as exc:
+            _log(f"ABORT: {exc}")
+            return 2
+        if jobs_b is None:
+            expect_raises_b = bool(b_record["expectRaises"])
+        else:
+            expect_raises_b = expect_gui_raises(jobs_b[0], jobs_b[1], zorder_write_b)
         _log(f"REUSE B: {b_deck} (run record OK).")
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
     else:
-        _log(f"B: same plan, OBED_OFFLINE_WRITE={args.mode} -> {b_deck}")
-        _remap_env(suppress="", as_geometry="1", geom_props="1")
-        os.environ["OBED_OFFLINE_WRITE"] = args.mode
+        _log(f"B: same plan, OBED_OFFLINE_WRITE={args.mode} OBED_ZORDER_WRITE=on -> {b_deck}")
+        _write_arm_env(offline_write=args.mode, zorder_write="on")
         plan_b: dict[str, Any] = {}
         try:
             info_b = remap_and_inspect(
@@ -1357,18 +1891,22 @@ def main(argv: list[str] | None = None) -> int:
                 export_dir=None, plan_out=plan_b, log=_log, validate=args.validate,
             )
         finally:
-            os.environ.pop("OBED_OFFLINE_WRITE", None)
+            _clear_write_env()
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
         child_resize_b = info_b.get("childResize")
         applied_b = int(info_b.get("applied") or 0)
         ow_b = info_b.get("offlineWrite") or {}
+        zorder_write_b = info_b.get("zorderWrite") or {}
+        expect_raises_b = expect_gui_raises(
+            plan_b.get("statJobs"), plan_b.get("badgeRaises"), zorder_write_b,
+        )
         b_record = run_record(
             commit=commit, deck_digest=deck_digest(b_deck), source_digest=deck_digest(args.source),
             plan=plan_b, child_resize=child_resize_b, applied=applied_b,
             missed=int(info_b.get("missed") or 0), offline_write=ow_b, spec_id_map=id_map,
+            zorder_write=zorder_write_b, expect_raises=expect_raises_b,
         )
-        expect_raises_b = bool(b_record["expectRaises"])
         write_run_record(_run_record_path(b_deck), b_record)
         _log(f"Run record written -> {_run_record_path(b_deck)}")
         _warn_and_close_stray_documents("B", b_deck)
@@ -1409,7 +1947,13 @@ def main(argv: list[str] | None = None) -> int:
     for r in damage_b:
         _log(f"RED: {r}")
 
-    parity = pass2_parity(child_resize_a, child_resize_b, front_hard=zero_keys_hard)
+    zorder_suppressed = bool(claimed_patched_slides(zorder_write_b))
+    # W2: B's eligible slides skip the GUI raise, so `front` A!=B is expected and
+    # must not RED the strict bar. Other PASS2_PARITY_KEYS still gate.
+    parity = pass2_parity(
+        child_resize_a, child_resize_b,
+        front_hard=zero_keys_hard and not zorder_suppressed,
+    )
     for r in parity:
         _log(f"RED: {r}")
 
@@ -1419,6 +1963,9 @@ def main(argv: list[str] | None = None) -> int:
         warns = [f"{key}={result.get(key)}" for key in PASS2_WARN_KEYS if int(result.get(key) or 0)]
         if warns:
             _log(f"WARN {label}: {', '.join(warns)} (non-zero fallback; investigate, does not gate).")
+        click_retry_warn = pass2_click_retry_warn(label, result)
+        if click_retry_warn:
+            _log(click_retry_warn)
 
     if not zero_keys_hard:
         for label, result in (("A", child_resize_a), ("B", child_resize_b)):
@@ -1436,12 +1983,16 @@ def main(argv: list[str] | None = None) -> int:
     for r in drift:
         _log(f"RED: {r}")
 
-    if not zero_keys_hard:
+    if not zero_keys_hard or zorder_suppressed:
         front_a = int((child_resize_a or {}).get("front") or 0)
         front_b = int((child_resize_b or {}).get("front") or 0)
         if front_a != front_b:
-            _log(f"WARN: pass-2 front A={front_a} B={front_b} "
-                 "(pass2-bar=parity: GUI Bring-to-Front raises are flaky, does not gate).")
+            why = (
+                "W2: B suppresses GUI raises on eligible slides, does not gate"
+                if zorder_suppressed
+                else "pass2-bar=parity: GUI Bring-to-Front raises are flaky, does not gate"
+            )
+            _log(f"WARN: pass-2 front A={front_a} B={front_b} ({why}).")
 
     ow_missed = int(ow_b.get("missedSpecs") or 0)
     ow_fallback = sum(int(v) for v in (ow_b.get("fallbackSpecs") or {}).values())
@@ -1454,17 +2005,57 @@ def main(argv: list[str] | None = None) -> int:
     for r in summary_reasons:
         _log(f"RED: {r}")
 
-    gate_ok = not (reasons_b or drift or parity or summary_reasons or damage_b)
+    try:
+        raise_jobs = persisted_raise_jobs(plan_a, a_record)
+    except ValueError as exc:
+        _log(f"ABORT: {exc}")
+        return 2
+    if raise_jobs is None:
+        stat_jobs_a, badge_rows_a = [], []
+    else:
+        stat_jobs_a, badge_rows_a = raise_jobs
+    raise_slides = raise_slides_from_jobs(stat_jobs_a, badge_rows_a)
+
+    suppressed_slides = claimed_patched_slides(zorder_write_b)
+    zorder_reasons = zorder_write_reasons(
+        zorder_write_b, raise_slides,
+        compared_slides=compared_slides, refused=ow_b.get("refused"),
+    )
+    suppress_reasons = suppressed_raise_reasons(child_resize_b, suppressed_slides)
+    for r in zorder_reasons + suppress_reasons:
+        _log(f"RED: {r}")
+    _log(f"A {zorder_counter_summary(zorder_write_a)}")
+    _log(f"B {zorder_counter_summary(zorder_write_b)}")
+
+    gate_ok = not (
+        reasons_b or drift or parity or summary_reasons or damage_b
+        or zorder_reasons or suppress_reasons
+    )
 
     # ============================ per-slide compare =================================
     # Decode A, extract every compared slide's units, then DROP A's raw archive map
     # before decoding B — two whole-deck decodes held live at once is the dominant
     # memory cost on the Full deck.
+    aspects = source_aspects(args.source)
     a_objects, a_by_slide = decode_deck(a_deck)
     a_units_by_slide = {n: slide_units(a_objects, n) for n in compared_slides}
+    a_z_by_slide = {n: slide_zorder_ids(a_objects, n) for n in compared_slides}
+    jobs_plan = {
+        "transforms": plan_a.get("transforms") or [],
+        "statJobs": stat_jobs_a, "badgeRaises": badge_rows_a,
+    }
+    targets_by_slide = zorder_targets_from_plan(jobs_plan, id_map)
     del a_objects
 
+    control_z_by_slide: dict[int, list[str] | None] | None = None
+    if args.control_a is not None:
+        control_objects, _control_by_slide = decode_deck(args.control_a)
+        control_z_by_slide = {n: slide_zorder_ids(control_objects, n) for n in compared_slides}
+        del control_objects
+        _log(f"CONTROL A: {args.control_a} (SAME_ORDER A-vs-A on RAISE10).")
+
     b_objects, b_by_slide = decode_deck(b_deck)
+    zw_slide_set = claimed_patched_slides(zorder_write_b) or None
 
     _log(
         f"Comparing {len(compared_slides)} planned non-reuse, non-donor slide(s): "
@@ -1472,11 +2063,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     vacuous_slides: list[int] = []
+    zorder_front_n = 0
+    zorder_front_ok = 0
+    zorder_same_n = 0
+    zorder_same_ok = 0
+    zorder_ctrl_n = 0
+    zorder_ctrl_ok = 0
     for n in compared_slides:
         specs_n = [t for t in (plan_a.get("transforms") or []) if int(t.get("slide", -1)) == n]
         id_by_addr = _id_by_addr_for_slide(id_map, n)
 
-        oracle_a = plan_oracle_slide(specs_n, id_by_addr, a_by_slide.get(n, {}), tols)
+        oracle_a = plan_oracle_slide(specs_n, id_by_addr, a_by_slide.get(n, {}), tols, aspects=aspects)
         oracle_b = plan_oracle_slide(specs_n, id_by_addr, b_by_slide.get(n, {}), tols)
         _log(f"  slide {n}:")
         _log_plan_oracle_report("A", oracle_a)
@@ -1491,30 +2088,65 @@ def main(argv: list[str] | None = None) -> int:
         a_units = a_units_by_slide[n]
         b_units = slide_units(b_objects, n)
 
+        identity = None
         try:
             identity = compare_units_identity(a_units, b_units, tols)
         except ValueError as exc:
             _log(f"RED: slide {n}: {exc}")
             gate_ok = False
-            continue
-        _log_identity_report(identity)
-        if not identity["pass"]:
-            gate_ok = False
-            _log("    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            _log(f"    !! slide {n}: IDENTITY COMPARE FAILED (id_rate={identity['id_rate']:.1%}) —")
-            _log("    !! the multiset/addr diagnostics below for this slide are UNTRUSTED.")
-            _log("    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        if identity is not None:
+            _log_identity_report(identity)
+            if not identity["pass"]:
+                gate_ok = False
+                _log("    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                _log(f"    !! slide {n}: IDENTITY COMPARE FAILED (id_rate={identity['id_rate']:.1%}) —")
+                _log("    !! the multiset/addr diagnostics below for this slide are UNTRUSTED.")
+                _log("    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
-        multiset = compare_units_multiset(a_units, b_units, args.tol_hard, args.tol_soft)
-        _log_multiset_report(multiset)  # informational cross-check only (D2)
-        # open: a count mismatch here isn't gated (e.g. a lost zero-width autosize shape
-        # identity doesn't carve) -- not decided whether it should be, not fixed here.
+            multiset = compare_units_multiset(a_units, b_units, args.tol_hard, args.tol_soft)
+            _log_multiset_report(multiset)  # informational cross-check only (D2)
+            # open: a count mismatch here isn't gated (e.g. a lost zero-width autosize shape
+            # identity doesn't carve) -- not decided whether it should be, not fixed here.
 
-        if not identity["pass"]:
-            _log(f"  slide {n}: identity compare FAILED — running the addr-matched permutation "
-                 "diagnostic:")
-            addr_report = compare_units_by_addr(a_units, b_units, args.tol_hard, args.tol_soft)
-            _log_addr_report(addr_report)
+            if not identity["pass"]:
+                _log(f"  slide {n}: identity compare FAILED — running the addr-matched permutation "
+                     "diagnostic:")
+                addr_report = compare_units_by_addr(a_units, b_units, args.tol_hard, args.tol_soft)
+                _log_addr_report(addr_report)
+
+        a_z = a_z_by_slide.get(n)
+        b_z = slide_zorder_ids(b_objects, n)
+        targets_n = targets_by_slide.get(n) or []
+        verdict = zorder_slide_verdict(a_z, b_z, targets_n)
+        eligible = (n in zw_slide_set) if zw_slide_set is not None else bool(targets_n)
+        zorder_same_n += 1
+        if verdict["sameOrder"]:
+            zorder_same_ok += 1
+        front_tag = "n/a"
+        if eligible:
+            zorder_front_n += 1
+            if targets_n and verdict["frontBlockOk"]:
+                zorder_front_ok += 1
+                front_tag = "yes"
+            else:
+                front_tag = "no"
+                gate_ok = False
+                _log(f"RED: slide {n}: FRONT_BLOCK_OK=no")
+        ctrl_tag = "n/a"
+        if control_z_by_slide is not None:
+            zorder_ctrl_n += 1
+            ctrl_same = same_order(a_z or [], control_z_by_slide.get(n) or [])
+            if a_z is not None and control_z_by_slide.get(n) is not None and ctrl_same:
+                zorder_ctrl_ok += 1
+                ctrl_tag = "yes"
+            else:
+                ctrl_tag = "no"
+                gate_ok = False
+                _log(f"RED: slide {n}: SAME_ORDER(A-vs-A)=no — A-vs-B z-order verdict is void")
+        _log(
+            f"    z-order SAME_ORDER(A-vs-B)={'yes' if verdict['sameOrder'] else 'no'} "
+            f"SAME_ORDER(A-vs-A)={ctrl_tag} FRONT_BLOCK_OK={front_tag}"
+        )
 
     if vacuous_slides:
         _log(f"NOTE: plan-oracle VACUOUS PASS on slide(s) {vacuous_slides} — 0 specs compared "
@@ -1522,6 +2154,18 @@ def main(argv: list[str] | None = None) -> int:
              "entirely on the identity compare above, not this oracle.")
     _log(pass2_bar_line(zero_keys_hard=zero_keys_hard, parity=parity,
                         a=child_resize_a, b=child_resize_b))
+    if control_z_by_slide is None:
+        ctrl_bar = (
+            "SAME_ORDER(A-vs-A) n/a (pass --control-a with a second A deck "
+            "for the RAISE10 control)"
+        )
+    else:
+        ctrl_bar = f"SAME_ORDER(A-vs-A) {zorder_ctrl_ok}/{zorder_ctrl_n}"
+    _log(
+        f"zorder bar: FRONT_BLOCK_OK {zorder_front_ok}/{zorder_front_n} "
+        f"SAME_ORDER(A-vs-B) {zorder_same_ok}/{zorder_same_n} observational "
+        f"{ctrl_bar}"
+    )
     _log("OFFLINE-WRITE GATE: GREEN" if gate_ok else "OFFLINE-WRITE GATE: RED (see above)")
     return 0 if gate_ok else 1
 

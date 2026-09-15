@@ -94,3 +94,53 @@ test("movieObjectsAt opacity ramps are unaffected for plain objects", () => {
   const toItem = atMid.find((o) => o.id === "to-to-1");
   assert.equal(toItem.opacity, 0.5);
 });
+
+for (const transition of ["fade", "hold"]) {
+  test(`movieObjectsAt (${transition}) strips labels from every hop object`, () => {
+    const from = [{ ...pin("from-1"), showLabel: true }];
+    const to = [{ ...pin("to-1"), showLabel: true }];
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      for (const item of movieObjectsAt(from, to, t, transition)) {
+        assert.equal(item.showLabel, false);
+      }
+    }
+  });
+}
+
+test("movieObjectsAt fade marker opacity is unchanged from before by stripping labels", () => {
+  const from = [pin("from-1")];
+  const to = [pin("to-1")];
+  for (const t of [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1]) {
+    const objects = movieObjectsAt(from, to, t, "fade");
+    const fromItem = objects.find((o) => o.id === "from-1");
+    const toItem = objects.find((o) => o.id === "to-to-1");
+    assert.equal(fromItem.opacity, Math.max(0, 1 - 2 * t));
+    assert.equal(toItem.opacity, Math.max(0, 2 * t - 1));
+  }
+});
+
+test("movieObjectsAt hold does not introduce destination objects until t=1", () => {
+  const from = [pin("from-1")];
+  const to = [pin("to-1")];
+  const mid = movieObjectsAt(from, to, 0.9, "hold");
+  assert.deepEqual(mid.map((o) => o.id), ["from-1"]);
+  assert.equal(mid[0].showLabel, false);
+  const atEnd = movieObjectsAt(from, to, 1, "hold");
+  assert.deepEqual(atEnd.map((o) => o.id), ["to-1"]);
+  assert.equal(atEnd[0].opacity, 1);
+  assert.equal(atEnd[0].showLabel, false);
+});
+
+test("movieObjectsAt hold marker opacity is unchanged from before by stripping labels", () => {
+  const from = [pin("from-1")];
+  const to = [pin("to-1")];
+  for (const t of [0, 0.1, 0.5, 0.9]) {
+    const objects = movieObjectsAt(from, to, t, "hold");
+    const fromItem = objects.find((o) => o.id === "from-1");
+    assert.equal(fromItem.opacity, 1);
+    assert.ok(!objects.some((o) => o.id === "to-1" || o.id === "to-to-1"));
+  }
+  const atEnd = movieObjectsAt(from, to, 1, "hold");
+  assert.deepEqual(atEnd.map((o) => o.id), ["to-1"]);
+  assert.equal(atEnd[0].opacity, 1);
+});

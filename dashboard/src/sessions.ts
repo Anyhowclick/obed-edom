@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { deleteAllJobs, deleteJob, getJob, listJobs, patchJob, type Job } from "./api";
+import { deleteAllJobs, deleteJob, getJob, listJobs, patchJob, renameJob, type Job } from "./api";
 import { useRunNav, type FeatureId } from "./nav";
 
 export function jobLabel(job: Job): string {
+  if (job.name) return job.name;
   const result = (job.result || {}) as Record<string, unknown>;
   const stem = typeof result.stem === "string" ? result.stem : "";
   if (stem) return stem;
@@ -21,6 +22,12 @@ export function jobLabel(job: Job): string {
     return items.length > 1 ? `${first} +${items.length - 1}` : first;
   }
   return job.id;
+}
+
+export async function renameAndApply(id: string, name: string, apply: (job: Job) => void): Promise<Job> {
+  const updated = await renameJob(id, name);
+  apply(updated);
+  return updated;
 }
 
 export function libraryJobs(jobs: Job[]): Job[] {
@@ -74,6 +81,10 @@ export function useJobSessions(feature?: string) {
     return updated;
   }
 
+  function rename(id: string, name: string) {
+    return renameAndApply(id, name, upsert);
+  }
+
   async function remove(id: string) {
     const job = jobs.find((item) => item.id === id);
     const name = job ? jobLabel(job) : id;
@@ -107,6 +118,7 @@ export function useJobSessions(feature?: string) {
     setActiveId,
     upsert,
     persistResult,
+    rename,
     remove,
     removeAll,
     reload,
@@ -135,5 +147,9 @@ export function useCurrentJob(feature: FeatureId) {
     setJob(next);
   }
 
-  return { job, upsert, error };
+  function rename(id: string, name: string) {
+    return renameAndApply(id, name, upsert);
+  }
+
+  return { job, upsert, rename, error };
 }

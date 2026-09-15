@@ -8,9 +8,10 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,7 +27,9 @@ from obed_edom.baseline import (
     slot_dict,
     wall_thumb_dir,
 )
+from obed_edom.diagnostics import DiagnosticsWriter
 from obed_edom.diff_keynotes import (
+    record_flag,
     compare_inspects,
     realign_gaps,
     slide_catalog,
@@ -83,7 +86,14 @@ from obed_edom.outline_check import (
     slots_from_cues,
 )
 from obed_edom.outline_check import visible as visible_slides
-from obed_edom.paths import find_repo_root
+from obed_edom.paths import (
+    ensure_export_dir,
+    export_destination,
+    find_repo_root,
+    output_root,
+    resolve_export_destination,
+    validate_export_dir,
+)
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.remap_keynote import (
@@ -111,6 +121,10 @@ class JobPatch(BaseModel):
     result: dict[str, Any]
 
 
+class RenameBody(BaseModel):
+    name: str
+
+
 class RelocateBody(BaseModel):
     folder: str | None = None
     path: str | None = None
@@ -130,6 +144,7 @@ class FramingsBody(BaseModel):
     """`{wallIndex, state, templateSlide}` per answered page. A group confirm is several entries."""
 
     decisions: list[dict[str, Any]] | None = None
+    exportDir: str | None = None
 
 
 class DskDecisionsBody(BaseModel):
@@ -142,6 +157,33 @@ class SettingsBody(BaseModel):
     reuseThreshold: float | None = None
     reusePairings: bool | None = None
     reusePreviews: bool | None = None
+    defaultExportDir: str | None = None
+    highlightColour: str | None = None
+
+
+OPENABLE_SUFFIXES = {".key", ".docx", ".pdf", ".png", ".jpg", ".jpeg", ".mov", ".mp4"}
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _require_local_origin(request: Request) -> None:
+    """Reject cross-origin calls to filesystem-touching endpoints; same-origin/no-origin requests pass."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    host = urlsplit(origin).hostname
+    if host not in _LOCAL_HOSTS:
+        raise HTTPException(403, "Forbidden origin")
+
+
+class SpaStaticFiles(StaticFiles):
+    """HTML must revalidate, or a browser keeps serving an index that names deleted hashed assets."""
+
+    def file_response(self, full_path, stat_result, scope, status_code: int = 200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if str(full_path).endswith(".html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def create_app() -> FastAPI:
@@ -170,7 +212,14 @@ def create_app() -> FastAPI:
             current["reusePairings"] = payload.reusePairings
         if payload.reusePreviews is not None:
             current["reusePreviews"] = payload.reusePreviews
-        return save_settings(current)
+        if payload.defaultExportDir is not None:
+            current["defaultExportDir"] = payload.defaultExportDir
+        if payload.highlightColour is not None:
+            current["highlightColour"] = payload.highlightColour
+        try:
+            return save_settings(current, validate_dir=payload.defaultExportDir is not None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/choose-file")
     def choose_file(prompt: str = Form("Select a Keynote file")) -> dict:
@@ -222,12 +271,23 @@ def create_app() -> FastAPI:
             )
         return {"path": str(found), "name": found.name}
 
-    @app.post("/api/reveal")
+    @app.post("/api/reveal", dependencies=[Depends(_require_local_origin)])
     def reveal(path: str = Form(...)) -> dict:
-        target = Path(path).expanduser()
+        target = Path(path).expanduser().resolve()
         if not target.exists():
             raise HTTPException(404, f"Not found: {path}")
         subprocess.run(["open", "-R", str(target)], check=False)
+        return {"ok": True}
+
+    @app.post("/api/open", dependencies=[Depends(_require_local_origin)])
+    def open_path(path: str = Form(...)) -> dict:
+        target = Path(path).expanduser().resolve()
+        if not target.exists():
+            raise HTTPException(404, f"Not found: {path}")
+        suffix = target.suffix.lower()
+        if suffix not in OPENABLE_SUFFIXES or (target.is_dir() and suffix != ".key"):
+            raise HTTPException(400, f"Not an openable artifact: {path}")
+        subprocess.run(["open", str(target)], check=False)
         return {"ok": True}
 
     @app.get("/api/jobs")
@@ -259,8 +319,31 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Unknown job")
         return RUNNER.public_dict(job)
 
+    @app.patch("/api/jobs/{job_id}/name")
+    def rename_job(job_id: str, payload: RenameBody) -> dict:
+        existing = RUNNER.get(job_id)
+        if not existing:
+            raise HTTPException(404, "Unknown job")
+        try:
+            if existing.feature == "maps":
+                from obed_edom.web.maps import rename_job_folder  # noqa: PLC0415
+
+                job = rename_job_folder(job_id, payload.name)
+            else:
+                job = RUNNER.rename(job_id, payload.name)
+        except KeyError:
+            raise HTTPException(404, "Unknown job") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except (RuntimeError, FileExistsError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RUNNER.public_dict(job)
+
     @app.post("/api/jobs/{job_id}/relocate")
     def relocate_job(job_id: str, payload: RelocateBody) -> dict:
+        existing = RUNNER.get(job_id)
+        if existing and existing.feature == "maps":
+            raise HTTPException(409, "Maps jobs use POST /api/maps/{id}/state")
         try:
             job = RUNNER.relocate(
                 job_id,
@@ -305,6 +388,31 @@ def create_app() -> FastAPI:
         path = _safe_file(Path(folder), filename)
         return FileResponse(path, media_type=preview_media_type(path))
 
+    @app.get("/api/jobs/{job_id}/diagnostics")
+    def job_diagnostics(job_id: str):
+        job = RUNNER.get(job_id)
+        path = _trusted_diagnostics_path(job, job_id)
+        if not job or path is None:
+            raise HTTPException(404, "No diagnostics")
+        date = time.strftime("%Y-%m-%d", time.localtime(job.created_at))
+        return FileResponse(
+            path,
+            media_type="application/x-ndjson",
+            filename=f"sermon-diagnostics-{date}-{job_id}.jsonl",
+        )
+
+    @app.post("/api/jobs/{job_id}/diagnostics/reveal")
+    def job_diagnostics_reveal(job_id: str) -> dict:
+        job = RUNNER.get(job_id)
+        path = _trusted_diagnostics_path(job, job_id)
+        if not job or path is None:
+            raise HTTPException(404, "No diagnostics")
+        try:
+            subprocess.run(["open", "-R", str(path)], check=False)
+        except OSError:
+            raise HTTPException(500, "Could not reveal the file")
+        return {"ok": True}
+
     @app.get("/api/jobs/{job_id}/file/{kind}")
     def job_file(job_id: str, kind: str):
         job = RUNNER.get(job_id)
@@ -326,9 +434,16 @@ def create_app() -> FastAPI:
         files: list[UploadFile] = File(...),
         lw_template: str = Form(""),
         dsk_template: str = Form(""),
+        export_dir: str = Form(""),
     ) -> dict:
         lw_path = Path(lw_template.strip()).expanduser() if lw_template.strip() else None
         dsk_path = Path(dsk_template.strip()).expanduser() if dsk_template.strip() else None
+        seed_result: dict[str, Any] = {}
+        if export_dir.strip():
+            try:
+                seed_result["exportDir"] = str(validate_export_dir(export_dir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         if lw_path is None and dsk_path is None:
             raise HTTPException(400, "At least one Keynote template is required (LW, DSK, or both).")
         if lw_path is not None and not lw_path.exists():
@@ -351,6 +466,7 @@ def create_app() -> FastAPI:
                 "generate",
                 lambda j, p=path, lw=lw_path, dsk=dsk_path: _run_generate(j, p, lw, dsk),
                 feature="generate",
+                result=dict(seed_result) if seed_result else None,
             )
             jobs.append(job.to_dict())
         return {"jobs": jobs}
@@ -399,14 +515,21 @@ def create_app() -> FastAPI:
         return job.to_dict()
 
     @app.post("/api/outline")
-    def outline_endpoint(path: str = Form(...)) -> dict:
+    def outline_endpoint(path: str = Form(...), export_dir: str = Form("")) -> dict:
         outline = _outline_arg(path)
         if outline is None:
             raise HTTPException(400, "An outline .docx or .pdf is required.")
+        seed_result: dict[str, Any] = {}
+        if export_dir.strip():
+            try:
+                seed_result["exportDir"] = str(validate_export_dir(export_dir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         job = RUNNER.submit(
             "outline",
             lambda j, p=outline: _run_outline(j, p),
             feature="check",
+            result=dict(seed_result) if seed_result else None,
         )
         return job.to_dict()
 
@@ -666,10 +789,17 @@ def create_app() -> FastAPI:
         include_lists: str = Form("false"),
         # Form field `validate` would shadow BaseModel.validate; alias keeps the wire name.
         run_validation: str = Form("true", alias="validate"),
+        export_dir: str = Form(""),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
             raise HTTPException(400, f"Not found: {path}")
+        resolved_export_dir = ""
+        if export_dir.strip():
+            try:
+                resolved_export_dir = str(validate_export_dir(export_dir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         raw_template = (template_path or gold_path).strip()
         if not raw_template:
             raise HTTPException(400, "CG template .key is required.")
@@ -689,8 +819,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "resize",
-            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, va=do_validate: (
-                _run_resize_propose(j, p, t, sl, ex, lists, va)
+            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, va=do_validate, ed=resolved_export_dir: (
+                _run_resize_propose(j, p, t, sl, ex, lists, va, export_dir=ed)
             ),
             feature="resize",
         )
@@ -750,16 +880,44 @@ def create_app() -> FastAPI:
         job = RUNNER.get(job_id)
         if not job or not job.result:
             raise HTTPException(404, "Unknown job")
-        if payload and payload.decisions is not None:
-            save_resize_framings(job_id, payload)
-        job = RUNNER.get(job_id)
-        result = dict((job.result if job else None) or {})
-        overrides = _overrides_from_result(result)
-        side_content = _side_content_slides_from_result(result)
+        result = dict(job.result)
         key = Path(str(result.get("path") or "")).expanduser()
         template = Path(str(result.get("templatePath") or "")).expanduser()
         if not key.exists() or not template.exists():
             raise HTTPException(400, "The wall deck or template has moved since proposing.")
+        export_dir: str | None = None
+        resolved_export_dir: str | None = None
+        if payload and payload.exportDir is not None:
+            if payload.exportDir:
+                try:
+                    resolved_export_dir = str(validate_export_dir(payload.exportDir))
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                export_dir = payload.exportDir
+            else:
+                proposal_export_dir = result.get("proposalExportDir")
+                if proposal_export_dir:
+                    resolved_export_dir = proposal_export_dir
+                else:
+                    try:
+                        resolved_export_dir = str(resolve_export_destination(None))
+                    except ValueError as exc:
+                        raise HTTPException(400, str(exc)) from exc
+        if payload and payload.decisions is not None:
+            save_resize_framings(job_id, payload)
+        if payload and payload.exportDir is not None:
+            job = RUNNER.get(job_id)
+            current = dict((job.result if job else None) or {})
+            if export_dir:
+                current["exportDir"] = export_dir
+            else:
+                current.pop("exportDir", None)
+            current["resolvedExportDir"] = resolved_export_dir
+            RUNNER.update_result(job_id, current)
+        job = RUNNER.get(job_id)
+        result = dict((job.result if job else None) or {})
+        overrides = _overrides_from_result(result)
+        side_content = _side_content_slides_from_result(result)
         raw_range = result.get("slideRange")
         sel = frozenset(int(n) for n in raw_range) if raw_range else None
         do_export = bool(result.get("export", True))
@@ -785,13 +943,37 @@ def create_app() -> FastAPI:
     app.include_router(watercolour_router)
 
     if DASHBOARD_DIST.is_dir():
-        app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")
+        app.mount("/", SpaStaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")
 
     return app
 
 
 def _as_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _diagnostics_path(job_id: str) -> Path:
+    """Canonical diagnostics file location — does not create any directories."""
+    return output_root() / ".diff" / job_id / "diagnostics.jsonl"
+
+
+def _trusted_diagnostics_path(job: Job | None, job_id: str) -> Path | None:
+    """The job's `diagnosticsPath`, only if it is the diagnostics file `_run_diff_check`
+    actually wrote — `result` is client-patchable via PATCH /api/jobs/{id}."""
+    raw = (job.result or {}).get("diagnosticsPath") if job else None
+    if not raw:
+        return None
+    expected = _diagnostics_path(job_id).resolve()
+    candidate = Path(raw)
+    if candidate.is_symlink():
+        return None
+    try:
+        resolved_parent = candidate.parent.resolve()
+    except OSError:
+        return None
+    if resolved_parent / candidate.name != expected or not expected.is_file():
+        return None
+    return expected
 
 
 def _safe_file(folder: Path, filename: str) -> Path:
@@ -823,6 +1005,7 @@ def _run_generate(
         docx,
         lw_template=lw_template,
         dsk_template=dsk_template,
+        output_dir=ensure_export_dir(export_destination(job)),
     )
     lw_prev = result.output_dir / "previews" / "lw"
     dsk_prev = result.output_dir / "previews" / "dsk"
@@ -850,7 +1033,29 @@ def _run_generate(
         "dskCount": len(result.dsk_slides) if result.dsk_key else 0,
         "lwTemplate": str(lw_template) if lw_template else None,
         "dskTemplate": str(dsk_template) if dsk_template else None,
+        **_carried_export_dir(job),
     }
+
+
+def _carried_export_dir(job: Job) -> dict[str, Any]:
+    """`{"exportDir": ..., "resolvedExportDir": ..., "proposalExportDir": ...}`
+    carried from `job.result`.
+
+    Keys are present only when they have a truthy value — never a `None`
+    `exportDir`, matching maps' `_run_export`.
+    """
+    current = job.result or {}
+    out: dict[str, Any] = {}
+    export_dir = current.get("exportDir")
+    if export_dir:
+        out["exportDir"] = export_dir
+    resolved_export_dir = current.get("resolvedExportDir")
+    if resolved_export_dir:
+        out["resolvedExportDir"] = resolved_export_dir
+    proposal_export_dir = current.get("proposalExportDir")
+    if proposal_export_dir:
+        out["proposalExportDir"] = proposal_export_dir
+    return out
 
 
 def _form_flag(value: str | None) -> bool:
@@ -925,7 +1130,7 @@ def _run_diff(
     lw_final: bool = True,
 ) -> dict[str, Any]:
     settings = load_settings()
-    work = diff_work_dir(job.id)
+    work = diff_work_dir(job.name)
     heat_dir = work / "heat"
     heat_dir.mkdir(parents=True, exist_ok=True)
     if fresh:
@@ -1059,6 +1264,7 @@ def _run_diff(
         "heatDir": str(heat_dir),
         "evidenceDir": str(work / "evidence"),
         "workDir": str(work),
+        "outputDir": str(work),
         "leftInspect": str(inspect_left),
         "rightInspect": str(inspect_right),
         "leftPngs": [p.name for p in preview_pngs(left_dir)],
@@ -1135,27 +1341,55 @@ def _run_diff_check(job: Job) -> dict[str, Any]:
     right_payload = json.loads(right_inspect.read_text(encoding="utf-8"))
     slots = slots_from_pairs(result.get("pairs") or [])
     job.log("Checking wording, photos, and house style…")
+    # Canonical, server-owned location — never derived from the (client-patchable)
+    # `result["workDir"]`.
+    diag_path = _diagnostics_path(job.id)
+    diag = None
+    try:
+        diag = DiagnosticsWriter(diag_path)
+    except OSError:
+        job.log("Could not open diagnostics file; continuing without it.")
     t_check = time.perf_counter()
-    compared = compare_inspects(
-        left_payload,
-        right_payload,
-        Path(result["leftPreviews"]),
-        Path(result["rightPreviews"]),
-        Path(result["heatDir"]),
-        left_label=str(result.get("leftLabel") or "LW"),
-        right_label=str(result.get("rightLabel") or "Other"),
-        slots=slots,
-        check=True,
-    )
-    job.log(f"Checked pairs in {time.perf_counter() - t_check:.1f}s.")
-    flags = compared.pop("flags")
-    pairs = compared["pairs"]
-    outline_flags = _apply_outline(job, result, compared, pairs)
+    diag_committed = False
+    try:
+        compared = compare_inspects(
+            left_payload,
+            right_payload,
+            Path(result["leftPreviews"]),
+            Path(result["rightPreviews"]),
+            Path(result["heatDir"]),
+            left_label=str(result.get("leftLabel") or "LW"),
+            right_label=str(result.get("rightLabel") or "Other"),
+            slots=slots,
+            check=True,
+            diag=diag,
+            diag_context={"jobId": job.id},
+        )
+        job.log(f"Checked pairs in {time.perf_counter() - t_check:.1f}s.")
+        flags = compared.pop("flags")
+        pairs = compared["pairs"]
+        outline_flags = _apply_outline(job, result, compared, pairs, diag=diag)
+        if diag is not None:
+            diag_committed = diag.commit()
+    finally:
+        if diag is not None and not diag_committed:
+            diag.close()
     for pair in pairs:
         pair["flags"] = serialize_flags(pair.get("flags") or [])
+    if diag is not None:
+        if diag_committed:
+            job.log(f"Wrote diagnostics for {len(pairs)} pair(s).")
+            if diag.error:
+                job.log(f"Some diagnostics records were dropped ({diag.error}).")
+        elif diag.error:
+            job.log(
+                f"Diagnostics were incomplete and have been discarded "
+                f"({diag.error}); the previous diagnostics file is unchanged."
+            )
     result.update(
         {
             "phase": "checked",
+            "diagnosticsPath": str(diag_path) if diag_committed else None,
             "sameType": compared.get("sameType"),
             "heatPngs": [p.name for p in preview_pngs(Path(result["heatDir"]))],
             "leftCatalog": compared.get("leftCatalog") or result.get("leftCatalog") or [],
@@ -1181,7 +1415,12 @@ def _attach_outline_rows(playlist, pairs: list[dict]) -> list:
 
 
 def _apply_outline(
-    job: Job, result: dict[str, Any], compared: dict[str, Any], pairs: list[dict]
+    job: Job,
+    result: dict[str, Any],
+    compared: dict[str, Any],
+    pairs: list[dict],
+    *,
+    diag: DiagnosticsWriter | None = None,
 ) -> list[Flag]:
     raw = result.get("outlinePath")
     if not raw or not Path(raw).is_file():
@@ -1202,6 +1441,8 @@ def _apply_outline(
 
     job.log("Checking the outline cues against the decks…")
     flags = correspondence(playlist, catalogs)
+    for flag in flags:
+        record_flag(diag, flag, None)
 
     rows = _attach_outline_rows(playlist, pairs)
     for pair, row in zip(pairs, rows):
@@ -1221,6 +1462,8 @@ def _apply_outline(
         )
         if found:
             pair.setdefault("flags", []).extend(found)
+            for flag in found:
+                record_flag(diag, flag, pair.get("index"))
     return flags
 
 
@@ -1232,16 +1475,24 @@ def _run_outline(job: Job, path: Path) -> dict[str, Any]:
         f"{len(report['rows'])} advance(s)."
     )
     job.log("Checking scripture references and house style…")
-    dest = default_output_root() / ".outline" / job.id / f"{path.stem}_findings.pdf"
+    dest_dir = default_output_root() / ".outline" / job.name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = export_destination(job) / f"{path.stem}_findings.pdf"
     written = _write_outline_pdf(job, dest, report)
-    return {**report, "kind": "outline", "outlineReport": str(written) if written else None}
+    return {
+        **report,
+        "kind": "outline",
+        "outputDir": str(dest_dir),
+        "outlineReport": str(written) if written else None,
+        **_carried_export_dir(job),
+    }
 
 
 def _write_outline_pdf(job: Job, dest: Path, report: dict[str, Any]) -> Path | None:
-    try:
-        from obed_edom.report import write_outline_findings  # noqa: PLC0415
+    from obed_edom.report import write_outline_findings  # noqa: PLC0415
 
-        dest.parent.mkdir(parents=True, exist_ok=True)
+    ensure_export_dir(dest.parent)
+    try:
         return write_outline_findings(dest, report)
     except Exception as exc:  # noqa: BLE001
         job.log(f"Could not write the findings PDF ({exc}).")
@@ -1257,7 +1508,7 @@ def _run_inspect(
     outline: Path | None = None,
     lw_final: bool = True,
 ) -> dict[str, Any]:
-    job_dir = default_output_root() / ".inspect" / job.id if export else None
+    job_dir = default_output_root() / ".inspect" / job.name if export else None
     job.log(f"Inspecting {path.name} (read-only, no save)…")
     payload = inspect_keynote(path, export_dir=job_dir, slide_range=slide_range)
     _log_inspect(job, path.name, payload)
@@ -1284,6 +1535,7 @@ def _run_inspect(
         "outlinePath": str(outline) if outline else None,
         "lwFinal": bool(lw_final),
         "deck": deck,
+        "outputDir": str(job_dir) if job_dir else None,
         "evidenceDir": str(evidence_dir) if evidence_dir else None,
         "slideWidth": payload.get("slideWidth"),
         "slideHeight": payload.get("slideHeight"),
@@ -1685,6 +1937,7 @@ def _run_resize_propose(
     export: bool,
     keep_side_panels: bool = False,
     validate: bool = True,
+    export_dir: str = "",
 ) -> dict[str, Any]:
     typed = slide_range
     label = format_slide_range(slide_range)
@@ -1760,6 +2013,7 @@ def _run_resize_propose(
             "templateSlide": None,
         }
         page["resurfaced"] = page["index"] in set(reuse.resurfaced)
+    resolved_export_dir = str(resolve_export_destination(export_dir or None))
     return {
         "phase": "framing",
         "path": str(path),
@@ -1767,6 +2021,9 @@ def _run_resize_propose(
         "includeLists": keep_side_panels,
         "validate": validate,
         "export": export,
+        **({"exportDir": export_dir} if export_dir else {}),
+        "resolvedExportDir": resolved_export_dir,
+        "proposalExportDir": resolved_export_dir,
         **proposal,
         "slideRange": sorted(slide_range) if slide_range else None,
         "slideRangeTyped": sorted(expand_slide_range(typed) or []) or None,
@@ -1787,8 +2044,10 @@ def _run_resize(
     side_content_slides: set[int] | None = None,
     validate: bool = True,
 ) -> dict[str, Any]:
-    dest_dir = default_output_root() / ".resize" / job.id
-    dest = dest_dir / f"{path.stem}_CG.key"
+    dest_dir = default_output_root() / ".resize" / job.name
+    resolved_export_dir = (job.result or {}).get("resolvedExportDir")
+    export_root = Path(resolved_export_dir) if resolved_export_dir else export_destination(job)
+    dest = export_root / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
     label = format_slide_range(slide_range)
     scope = f"slide {label}" if label else "every slide"
@@ -1796,6 +2055,7 @@ def _run_resize(
     job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
     if not keep_side_panels and not side_content_slides:
         job.log("Side-panel content dropped (whitelist a slide in the framing review to keep it).")
+    ensure_export_dir(dest.parent)
     info = remap_and_inspect(
         path,
         dest,
@@ -1829,7 +2089,9 @@ def _run_resize(
     return {
         "phase": "resized",
         "path": str(path),
+        "outputDir": str(dest_dir),
         "destPath": str(dest),
+        **_carried_export_dir(job),
         "templatePath": str(template),
         "slideWidth": inspect.get("slideWidth") or info.get("width"),
         "slideHeight": inspect.get("slideHeight") or info.get("height"),

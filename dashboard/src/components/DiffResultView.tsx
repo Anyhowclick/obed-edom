@@ -1,11 +1,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { diffImageUrl, type Flag, type Job } from "../api";
+import { diagnosticsUrl, diffImageUrl, revealDiagnostics, type Flag, type Job } from "../api";
 import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, shiftColumn, slotsEqual, type Slot } from "../playlist";
 import { useLayout } from "../nav";
 import type { OutlineRow } from "../outline";
 import { SHOW_INFO_KEY, SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
 import { OutlineStrip } from "./OutlineStrip";
 import { isPreviewVideo } from "./PreviewGrid";
+import { IconExpand } from "./icons";
+import { JobName } from "./JobName";
 import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
 import { ErrorNotice } from "./ErrorNotice";
@@ -55,6 +57,7 @@ export type DiffResult = {
   flags: Flag[];
   outlineFlags?: Flag[];
   rows?: OutlineRow[];
+  diagnosticsPath?: string | null;
   reuse?: { used?: boolean; carried: number; changed: number; added: number; removed: number; source?: string };
 };
 
@@ -181,30 +184,6 @@ function PairSplit({
   );
 }
 
-function ExpandIcon({ collapse }: { collapse?: boolean }) {
-  return (
-    <svg className="icon-expand" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-      {collapse ? (
-        <path
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6"
-        />
-      ) : (
-        <path
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"
-        />
-      )}
-    </svg>
-  );
-}
-
 function isWideDeck(label: string): boolean {
   return /\b(LW|GW|LED|FW)\b/i.test(label);
 }
@@ -276,6 +255,7 @@ export function DiffResultView({
   onSaveSlots,
   onStartFresh,
   checking,
+  onRename,
 }: {
   job: Job;
   onOpen: (src: string) => void;
@@ -283,6 +263,7 @@ export function DiffResultView({
   onSaveSlots?: (slots: Slot[]) => void | Promise<void>;
   onStartFresh?: () => void;
   checking?: boolean;
+  onRename?: (id: string, name: string) => Promise<Job>;
 }) {
   const result = (job.result || null) as DiffResult | null;
   const { focusMode, setFocusMode } = useLayout();
@@ -378,6 +359,7 @@ export function DiffResultView({
 
   return (
     <>
+        {onRename && <JobName job={job} onRename={onRename} className="note" />}
         {result.reuse?.used !== false && result.reuse && (result.reuse.carried > 0 || result.reuse.added > 0) && (
           <div className="reuse-banner">
             <span>
@@ -437,6 +419,25 @@ export function DiffResultView({
             >
               {showInfo ? "Hide info findings" : "Show info findings"}
             </button>
+            {result.diagnosticsPath && (
+              <>
+                <a
+                  className="btn secondary"
+                  href={diagnosticsUrl(job.id)}
+                  download
+                  title="Includes all slide text from both decks"
+                >
+                  Export diagnostics
+                </a>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  onClick={() => void revealDiagnostics(job.id)}
+                >
+                  Show in Finder
+                </button>
+              </>
+            )}
             <button
               className="btn secondary icon-btn"
               type="button"
@@ -444,7 +445,7 @@ export function DiffResultView({
               aria-label={focusMode ? "Exit maximise" : "Maximise"}
               onClick={() => setFocusMode(!focusMode)}
             >
-              <ExpandIcon collapse={focusMode} />
+              <IconExpand collapse={focusMode} />
             </button>
           </div>
         </div>

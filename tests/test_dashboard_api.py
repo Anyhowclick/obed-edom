@@ -1,4 +1,6 @@
 import copy
+import json
+import time
 from pathlib import Path
 
 import pytest
@@ -218,6 +220,131 @@ def test_health_and_stubs():
     assert missing_file.status_code == 400
 
 
+def test_spa_index_is_served_no_cache_but_hashed_assets_are_not():
+    from obed_edom.web.app import DASHBOARD_DIST
+
+    if not DASHBOARD_DIST.is_dir():
+        pytest.skip("dashboard/dist not built")
+    client = TestClient(app)
+    for path in ("/", "/index.html"):
+        res = client.get(path)
+        assert res.status_code == 200
+        assert res.headers["cache-control"] == "no-cache"
+    asset = next(iter(sorted((DASHBOARD_DIST / "assets").glob("*.js"))), None)
+    assert asset is not None
+    assert "no-cache" not in client.get(f"/assets/{asset.name}").headers.get("cache-control", "")
+
+
+def test_spa_index_conditional_request_returns_304_with_no_cache():
+    from obed_edom.web.app import DASHBOARD_DIST
+
+    if not DASHBOARD_DIST.is_dir():
+        pytest.skip("dashboard/dist not built")
+    client = TestClient(app)
+    first = client.get("/")
+    etag = first.headers["etag"]
+    res = client.get("/", headers={"If-None-Match": etag})
+    assert res.status_code == 304
+    assert res.headers["cache-control"] == "no-cache"
+
+
+def test_open_path_missing_is_404():
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": "/no/such/deck.key"})
+    assert res.status_code == 404
+    assert "Not found" in res.json()["detail"]
+
+
+def test_open_path_launches_open(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    calls = []
+    monkeypatch.setattr(
+        app_mod.subprocess, "run", lambda argv, **kw: calls.append(argv)
+    )
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert calls == [["open", str(target)]]
+
+
+def test_open_path_allows_package_format_key_dir(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.mkdir()
+    calls = []
+    monkeypatch.setattr(
+        app_mod.subprocess, "run", lambda argv, **kw: calls.append(argv)
+    )
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert calls == [["open", str(target)]]
+
+
+def test_open_path_rejects_app_bundle(tmp_path):
+    client = TestClient(app)
+    target = tmp_path / "Evil.app"
+    target.mkdir()
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
+def test_open_path_rejects_non_artifact_suffix(tmp_path):
+    client = TestClient(app)
+    target = tmp_path / "run.sh"
+    target.write_text("echo hi")
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
+def test_open_and_reveal_reject_foreign_origin(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    monkeypatch.setattr(app_mod.subprocess, "run", lambda argv, **kw: None)
+    client = TestClient(app)
+    headers = {"Origin": "https://evil.example.com"}
+    res_open = client.post("/api/open", data={"path": str(target)}, headers=headers)
+    assert res_open.status_code == 403
+    res_reveal = client.post("/api/reveal", data={"path": str(target)}, headers=headers)
+    assert res_reveal.status_code == 403
+
+
+@pytest.mark.parametrize("origin", [None, "http://localhost:5173", "http://127.0.0.1:5173"])
+def test_open_and_reveal_allow_local_or_missing_origin(tmp_path, monkeypatch, origin):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    monkeypatch.setattr(app_mod.subprocess, "run", lambda argv, **kw: None)
+    client = TestClient(app)
+    headers = {"Origin": origin} if origin else {}
+    res_open = client.post("/api/open", data={"path": str(target)}, headers=headers)
+    assert res_open.status_code == 200
+    res_reveal = client.post("/api/reveal", data={"path": str(target)}, headers=headers)
+    assert res_reveal.status_code == 200
+
+
+def test_open_path_rejects_key_symlink_to_app_bundle(tmp_path):
+    client = TestClient(app)
+    app_bundle = tmp_path / "Applications" / "Foo.app"
+    app_bundle.mkdir(parents=True)
+    evil = tmp_path / "evil.key"
+    evil.symlink_to(app_bundle)
+    res = client.post("/api/open", data={"path": str(evil)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
 def test_resize_requires_template(tmp_path):
     client = TestClient(app)
     wall = tmp_path / "wall.key"
@@ -332,6 +459,175 @@ def test_settings_roundtrip(tmp_path, monkeypatch):
     assert body["reusePairings"] is False
     assert body["reusePreviews"] is True
     assert client.get("/api/settings").json()["reuseThreshold"] == 0.8
+
+
+def test_settings_unrelated_change_does_not_revalidate_export_dir(monkeypatch, tmp_path):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "settings_path", lambda root=None: tmp_path / "settings.json")
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    client = TestClient(app)
+    put = client.put("/api/settings", json={"defaultExportDir": str(export_dir)})
+    assert put.status_code == 200
+
+    # The stored export dir is now a file — re-validating it on an unrelated change
+    # would 400 and would try to mkdir over it.
+    export_dir.rmdir()
+    export_dir.write_text("now a file")
+
+    res = client.put("/api/settings", json={"reusePreviews": False})
+    assert res.status_code == 200
+    assert res.json()["reusePreviews"] is False
+    assert export_dir.is_file()
+
+
+def test_settings_rejects_private_root_export_dir(monkeypatch, tmp_path):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "settings_path", lambda root=None: tmp_path / "settings.json")
+    client = TestClient(app)
+    from obed_edom.paths import output_root
+
+    res = client.put("/api/settings", json={"defaultExportDir": str(output_root() / ".maps")})
+    assert res.status_code == 400
+
+
+def test_outline_endpoint_writes_findings_pdf_to_export_dir(tmp_path):
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    export_dir = tmp_path / "exports"
+    client = TestClient(app)
+    started = client.post("/api/outline", data={"path": str(path), "export_dir": str(export_dir)})
+    assert started.status_code == 200
+    job = _wait(client, started.json()["id"])
+    assert job["status"] == "done", job.get("error")
+    outline_report = Path(job["result"]["outlineReport"])
+    assert outline_report.parent == export_dir.resolve()
+    assert outline_report.is_file()
+
+
+def test_outline_export_dir_removed_between_submit_and_run_fails_the_job(tmp_path):
+    from obed_edom.web.app import _run_outline
+    from obed_edom.web.jobs import Job
+
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    export_dir = tmp_path / "exports"  # never created — simulates removal before the job runs
+    job = Job(id="job-1", kind="outline", result={"exportDir": str(export_dir)})
+
+    with pytest.raises(ValueError, match="no longer exists"):
+        _run_outline(job, path)
+
+
+def test_resize_apply_unknown_job_is_404():
+    client = TestClient(app)
+    res = client.post("/api/resize/no-such-job/apply", json={})
+    assert res.status_code == 404
+
+
+def test_resize_apply_rejects_private_root_export_dir(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+    from obed_edom.paths import output_root
+    from obed_edom.web.jobs import Job
+
+    job = Job(id="job-1", kind="resize", feature="resize", name="job-1", result={"phase": "framing"})
+    monkeypatch.setattr(app_mod.RUNNER, "get", lambda job_id: job if job_id == "job-1" else None)
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/resize/job-1/apply", json={"exportDir": str(output_root() / ".resize")}
+    )
+    assert res.status_code == 400
+
+
+def test_resize_apply_writes_valid_export_dir_to_result(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+    from obed_edom.web.jobs import Job
+
+    job = Job(id="job-1", kind="resize", feature="resize", name="job-1", result={"phase": "framing"})
+    app_mod.RUNNER._jobs[job.id] = job
+    monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
+
+    export_dir = tmp_path / "exports"
+    client = TestClient(app)
+    res = client.post("/api/resize/job-1/apply", json={"exportDir": str(export_dir)})
+
+    assert res.status_code == 200
+    assert app_mod.RUNNER.get("job-1").result["resolvedExportDir"] == str(export_dir.resolve())
+
+
+def test_resize_apply_completion_preserves_resolved_export_dir(tmp_path, monkeypatch):
+    """A real propose -> apply -> completion round trip: the completed job's result
+    must still carry the `resolvedExportDir` chosen at apply time, not just `exportDir`.
+    Only the Keynote-driving `remap_and_inspect` is stubbed — `rerun` runs for real."""
+    app_mod, wall, template = _propose_stubs(monkeypatch, tmp_path)
+
+    def fake_remap_and_inspect(path, dest, *, export_dir=None, **_kwargs):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return {
+            "inspect": {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 0, "exported": False},
+            "payload": {"path": str(dest), "slideWidth": 1920, "slideHeight": 1080, "slides": []},
+            "counts": {},
+            "applied": 0,
+            "missed": 0,
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap_and_inspect)
+
+    client = TestClient(app)
+    started = client.post(
+        "/api/resize",
+        data={"path": str(wall), "template_path": str(template), "export": "false"},
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    proposed = _wait(client, job_id)
+    assert proposed["status"] == "done", proposed.get("error")
+
+    export_dir = tmp_path / "chosen-exports"
+    res = client.post(f"/api/resize/{job_id}/apply", json={"exportDir": str(export_dir)})
+    assert res.status_code == 200
+
+    completed = _wait(client, job_id)
+    assert completed["status"] == "done", completed.get("error")
+    assert completed["result"]["resolvedExportDir"] == str(export_dir.resolve())
+    assert completed["result"]["exportDir"] == str(export_dir)
+
+
+def test_resize_apply_explicit_empty_export_dir_resets_to_default(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+    from obed_edom.paths import output_root
+    from obed_edom.web.jobs import Job
+
+    export_dir = tmp_path / "exports"
+    job = Job(
+        id="job-1",
+        kind="resize",
+        feature="resize",
+        name="job-1",
+        result={"phase": "framing", "exportDir": str(export_dir), "resolvedExportDir": str(export_dir)},
+    )
+    app_mod.RUNNER._jobs[job.id] = job
+    monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
+
+    client = TestClient(app)
+    res = client.post("/api/resize/job-1/apply", json={"exportDir": ""})
+
+    assert res.status_code == 200
+    result = app_mod.RUNNER.get("job-1").result
+    assert "exportDir" not in result
+    assert result["resolvedExportDir"] == str(output_root())
+
+
+def test_outline_endpoint_rejects_private_root_export_dir(tmp_path):
+    from obed_edom.paths import output_root
+
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    client = TestClient(app)
+    res = client.post(
+        "/api/outline", data={"path": str(path), "export_dir": str(output_root() / ".outline")}
+    )
+    assert res.status_code == 400
 
 
 def _wait(client, job_id, tries=120):
@@ -539,6 +835,71 @@ def test_resize_asks_for_framings_before_remapping(tmp_path, monkeypatch):
     assert any("every slide" in line for line in job["logs"])
 
 
+def test_resize_apply_writes_cg_to_export_dir(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    seen = {}
+
+    def fake_remap(path, dest, **kwargs):
+        seen["dest"] = dest
+        dest.write_text("cg")
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    def fake_acquire(source, *, slide_range, mode, say):
+        return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
+
+    def fake_inspect(path, **kwargs):
+        return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
+
+    def fake_propose(wall, template, **kwargs):
+        return {
+            "wallPath": str(wall),
+            "templatePath": str(template),
+            "wallDigests": ["d0"],
+            "templateDigest": "t0",
+            "destWidth": 1920,
+            "destHeight": 1080,
+            "wallWidth": 7680,
+            "wallHeight": 1080,
+            "pages": [
+                {"slide": 1, "index": 0, "autoTemplateSlide": 2, "autoFellBack": False,
+                 "needsAttention": False, "noUsableFraming": False, "candidates": []}
+            ],
+            "needAttention": [],
+            "noUsableFraming": [],
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap)
+    monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
+    monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
+    client = TestClient(app)
+    deck = tmp_path / "Wall.key"
+    deck.write_text("placeholder")
+    template = tmp_path / "Base_CG_Assets.key"
+    template.write_text("placeholder")
+    export_dir = tmp_path / "exports"
+    started = client.post(
+        "/api/resize",
+        data={
+            "path": str(deck),
+            "template_path": str(template),
+            "export": "false",
+            "export_dir": str(export_dir),
+        },
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    _wait(client, job_id)
+
+    confirmed = client.post(f"/api/resize/{job_id}/apply")
+    assert confirmed.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert seen["dest"].parent == export_dir.resolve()
+    assert Path(job["result"]["destPath"]).parent == export_dir.resolve()
+
+
 def test_side_content_whitelist_and_undo_round_trip(tmp_path, monkeypatch):
     """Whitelisting a page keeps its side content on Apply, and un-whitelisting it
     (which drops it from the submitted set) actually reverts — the stale decision on
@@ -622,6 +983,249 @@ def test_side_content_slides_reads_whitelisted_pages():
     assert _side_content_slides_from_result(result) == {5, 9}
 
 
+def test_diagnostics_endpoint_404_without_a_diagnostics_path():
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    job = Job(id="diag-missing", kind="diff", result={})
+    RUNNER._jobs[job.id] = job
+    client = TestClient(app)
+    assert client.get(f"/api/jobs/{job.id}/diagnostics").status_code == 404
+    assert client.post(f"/api/jobs/{job.id}/diagnostics/reveal").status_code == 404
+
+
+def test_diagnostics_endpoint_serves_the_file_with_a_dated_filename():
+    from obed_edom.diagnostics import DiagnosticsWriter
+    from obed_edom.inspect import diff_work_dir
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    job_id = "diag-ready"
+    diag_path = diff_work_dir(job_id) / "diagnostics.jsonl"
+    with DiagnosticsWriter(diag_path) as diag:
+        diag.header(leftLabel="LW", rightLabel="DSK")
+
+    job = Job(id=job_id, kind="diff", result={"diagnosticsPath": str(diag_path)})
+    RUNNER._jobs[job.id] = job
+    client = TestClient(app)
+    res = client.get(f"/api/jobs/{job.id}/diagnostics")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/x-ndjson")
+    date = time.strftime("%Y-%m-%d", time.localtime(job.created_at))
+    assert f"sermon-diagnostics-{date}-{job.id}.jsonl" in res.headers["content-disposition"]
+    first_line = res.text.splitlines()[0]
+    assert json.loads(first_line)["kind"] == "header"
+
+
+def test_diagnostics_reveal_runs_open_dash_r_without_a_shell(monkeypatch):
+    from obed_edom.inspect import diff_work_dir
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    job_id = "diag-reveal"
+    diag_path = (diff_work_dir(job_id) / "diagnostics.jsonl").resolve()
+    diag_path.write_text('{"kind": "header", "schema": 1}\n', encoding="utf-8")
+    job = Job(id=job_id, kind="diff", result={"diagnosticsPath": str(diag_path)})
+    RUNNER._jobs[job.id] = job
+
+    calls = []
+    monkeypatch.setattr(
+        "obed_edom.web.app.subprocess.run",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    client = TestClient(app)
+    res = client.post(f"/api/jobs/{job.id}/diagnostics/reveal")
+    assert res.status_code == 200
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == (["open", "-R", str(diag_path)],)
+    assert kwargs == {"check": False}
+
+
+def test_diagnostics_endpoints_404_when_the_result_path_escapes_the_work_dir(tmp_path):
+    """`result` is client-patchable via PATCH /api/jobs/{id}; a diagnosticsPath pointing
+    outside the job's own work dir must never be served or revealed."""
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    outside = tmp_path / "not-diagnostics.jsonl"
+    outside.write_text('{"kind": "header", "schema": 1}\n', encoding="utf-8")
+
+    job = Job(id="diag-escaped", kind="diff", result={"diagnosticsPath": str(outside)})
+    RUNNER._jobs[job.id] = job
+    client = TestClient(app)
+    assert client.get(f"/api/jobs/{job.id}/diagnostics").status_code == 404
+    assert client.post(f"/api/jobs/{job.id}/diagnostics/reveal").status_code == 404
+
+
+def test_diagnostics_endpoints_404_when_the_canonical_file_is_a_symlink():
+    """Replacing the canonical `diagnostics.jsonl` with a symlink must not be served
+    or revealed, even though its resolved path matches the expected location."""
+    from obed_edom.inspect import diff_work_dir
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    job_id = "diag-symlinked"
+    work_dir = diff_work_dir(job_id)
+    secret = work_dir.parent / "secret.txt"
+    secret.write_text("do not touch", encoding="utf-8")
+    diag_path = work_dir / "diagnostics.jsonl"
+    diag_path.symlink_to(secret)
+
+    job = Job(id=job_id, kind="diff", result={"diagnosticsPath": str(diag_path)})
+    RUNNER._jobs[job.id] = job
+    client = TestClient(app)
+    assert client.get(f"/api/jobs/{job.id}/diagnostics").status_code == 404
+    assert client.post(f"/api/jobs/{job.id}/diagnostics/reveal").status_code == 404
+
+
+def test_run_diff_check_discards_diagnostics_when_the_writer_dies_mid_run(tmp_path, monkeypatch):
+    """A writer that fails partway through must not be published as though it succeeded:
+    the log line and the diagnosticsPath should both reflect the failure."""
+    import obed_edom.web.app as app_module
+    from obed_edom.web.jobs import Job
+
+    left_inspect = tmp_path / "left.json"
+    right_inspect = tmp_path / "right.json"
+    left_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+    right_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+
+    class DyingWriter:
+        def __init__(self, path):
+            self.path = Path(path)
+            self.error = None
+
+        def commit(self):
+            self.error = "I/O operation on closed file."
+            return False
+
+        def close(self):
+            self.error = self.error or "I/O operation on closed file."
+
+    def fake_compare_inspects(*args, **kwargs):
+        return {"flags": [], "pairs": [], "sameType": True, "leftCatalog": [], "rightCatalog": []}
+
+    monkeypatch.setattr(app_module, "DiagnosticsWriter", DyingWriter)
+    monkeypatch.setattr(app_module, "compare_inspects", fake_compare_inspects)
+
+    job = Job(
+        id="diag-dies",
+        kind="diff",
+        result={
+            "leftInspect": str(left_inspect),
+            "rightInspect": str(right_inspect),
+            "leftPreviews": str(tmp_path),
+            "rightPreviews": str(tmp_path),
+            "heatDir": str(tmp_path / "heat"),
+            "workDir": str(tmp_path),
+            "pairs": [],
+        },
+    )
+    result = app_module._run_diff_check(job)
+
+    assert result["diagnosticsPath"] is None
+    assert any("Diagnostics were incomplete" in msg for msg in job.logs)
+
+
+def test_run_diff_check_ignores_a_patched_external_work_dir(tmp_path, monkeypatch):
+    """`result["workDir"]` is client-patchable via PATCH /api/jobs/{id}; the diagnostics
+    file must always land under the server-owned `diff_work_dir(job.id)`, never wherever
+    a patched `workDir` points."""
+    import obed_edom.web.app as app_module
+    from obed_edom.inspect import diff_work_dir
+    from obed_edom.web.jobs import Job
+
+    left_inspect = tmp_path / "left.json"
+    right_inspect = tmp_path / "right.json"
+    left_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+    right_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+
+    outside_work_dir = tmp_path / "attacker-controlled"
+    outside_work_dir.mkdir()
+
+    def fake_compare_inspects(*args, **kwargs):
+        return {"flags": [], "pairs": [], "sameType": True, "leftCatalog": [], "rightCatalog": []}
+
+    monkeypatch.setattr(app_module, "compare_inspects", fake_compare_inspects)
+
+    job = Job(
+        id="diag-workdir-spoof",
+        kind="diff",
+        result={
+            "leftInspect": str(left_inspect),
+            "rightInspect": str(right_inspect),
+            "leftPreviews": str(tmp_path),
+            "rightPreviews": str(tmp_path),
+            "heatDir": str(tmp_path / "heat"),
+            "workDir": str(outside_work_dir),
+            "pairs": [],
+        },
+    )
+    result = app_module._run_diff_check(job)
+
+    canonical = diff_work_dir(job.id) / "diagnostics.jsonl"
+    assert result["diagnosticsPath"] == str(canonical)
+    assert canonical.is_file()
+    assert not any(outside_work_dir.iterdir())
+
+
+def test_diagnostics_writer_refuses_to_write_through_a_symlink(tmp_path):
+    """A pre-existing symlink at the canonical diagnostics path must be treated as a
+    writer failure — the target is never followed and truncated."""
+    from obed_edom.diagnostics import DiagnosticsWriter
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do not touch", encoding="utf-8")
+    diag_path = tmp_path / "diagnostics.jsonl"
+    diag_path.symlink_to(secret)
+
+    with pytest.raises(OSError):
+        DiagnosticsWriter(diag_path)
+
+    assert secret.read_text(encoding="utf-8") == "do not touch"
+
+
+def test_run_diff_check_discards_diagnostics_when_the_path_is_unwritable(tmp_path, monkeypatch):
+    """The diagnostics path is computed without creating any directories; if its
+    parent can't be created (e.g. a file sits where a directory is needed), the
+    check pass must still complete with diagnosticsPath=None, not raise."""
+    import obed_edom.web.app as app_module
+    from obed_edom.web.jobs import Job
+
+    left_inspect = tmp_path / "left.json"
+    right_inspect = tmp_path / "right.json"
+    left_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+    right_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    unusable = blocker / "job" / "diagnostics.jsonl"
+
+    def fake_compare_inspects(*args, **kwargs):
+        return {"flags": [], "pairs": [], "sameType": True, "leftCatalog": [], "rightCatalog": []}
+
+    monkeypatch.setattr(app_module, "_diagnostics_path", lambda job_id: unusable)
+    monkeypatch.setattr(app_module, "compare_inspects", fake_compare_inspects)
+
+    job = Job(
+        id="diag-unwritable",
+        kind="diff",
+        result={
+            "leftInspect": str(left_inspect),
+            "rightInspect": str(right_inspect),
+            "leftPreviews": str(tmp_path),
+            "rightPreviews": str(tmp_path),
+            "heatDir": str(tmp_path / "heat"),
+            "workDir": str(tmp_path),
+            "pairs": [],
+        },
+    )
+    result = app_module._run_diff_check(job)
+
+    assert result["diagnosticsPath"] is None
+    assert any("Could not open diagnostics file" in msg for msg in job.logs)
+
+
 def test_resize_form_still_takes_validate():
     """The parameter is aliased, because a form field literally named `validate`
     generates a Pydantic field that shadows BaseModel.validate and warns on
@@ -635,3 +1239,259 @@ def test_resize_form_still_takes_validate():
     body = schema["components"]["schemas"][ref.rsplit("/", 1)[-1]]
     assert "validate" in body["properties"]
     assert "run_validation" not in body["properties"]
+
+
+def test_relocate_maps_job_is_rejected():
+    """Maps jobs never relocate: their outputDir is stable and stateRevision-gated
+    writes go through POST /api/maps/{id}/state, not the generic relocate endpoint."""
+    client = TestClient(app)
+    job = client.post("/api/maps").json()
+    response = client.post(f"/api/jobs/{job['id']}/relocate", json={"folder": "/tmp"})
+    assert response.status_code == 409, response.text
+    assert "state" in response.json()["detail"]
+
+
+def test_patch_name_returns_public_dict_with_new_name(tmp_path):
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    client = TestClient(app)
+    started = client.post("/api/outline", data={"path": str(path)})
+    job = _wait(client, started.json()["id"])
+
+    target = f"quiet-jordan-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert body["name"] == target
+    assert body["id"] == job["id"]
+    assert "artifacts" in body
+
+
+def test_patch_name_rejects_invalid_name(tmp_path):
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    client = TestClient(app)
+    started = client.post("/api/outline", data={"path": str(path)})
+    job = _wait(client, started.json()["id"])
+
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": "../evil"})
+    assert res.status_code == 400
+
+
+def test_patch_name_404_on_unknown_job():
+    client = TestClient(app)
+    res = client.patch("/api/jobs/not-a-real-job/name", json={"name": "quiet-jordan"})
+    assert res.status_code == 404
+
+
+def _propose_stubs(monkeypatch, tmp_path):
+    import obed_edom.web.app as app_mod
+
+    wall = tmp_path / "Wall.key"
+    template = tmp_path / "Base_CG_Assets.key"
+    wall.write_text("wall")
+    template.write_text("template")
+    monkeypatch.setattr(
+        app_mod, "acquire_wall_payload", lambda source, *, slide_range, mode, say: _cached_wall()
+    )
+    monkeypatch.setattr(
+        app_mod, "inspect_keynote",
+        lambda path, *, export_dir=None, slide_range=None, use_cache=None, is_cancelled=None: {
+            "slideWidth": 1920, "slideHeight": 1080, "slides": []
+        },
+    )
+    monkeypatch.setattr(
+        app_mod, "propose_framings",
+        lambda *_args, **_kwargs: {"wallDigests": [], "templateDigest": "", "pages": []},
+    )
+    monkeypatch.setattr(app_mod, "load_settings", lambda: {"reusePairings": False})
+    return app_mod, wall, template
+
+
+def test_resize_propose_stores_resolved_export_dir_with_no_override(tmp_path, monkeypatch):
+    from obed_edom.paths import output_root
+
+    app_mod, wall, template = _propose_stubs(monkeypatch, tmp_path)
+    logs: list[str] = []
+    result = app_mod._run_resize_propose(
+        type("Job", (), {"log": logs.append})(), wall, template, None, False
+    )
+    assert "exportDir" not in result
+    assert result["resolvedExportDir"] == str(output_root())
+    assert result["proposalExportDir"] == str(output_root())
+
+
+def test_resize_propose_stores_resolved_export_dir_with_override(tmp_path, monkeypatch):
+    app_mod, wall, template = _propose_stubs(monkeypatch, tmp_path)
+    override = tmp_path / "chosen"
+    override.mkdir()
+    logs: list[str] = []
+    result = app_mod._run_resize_propose(
+        type("Job", (), {"log": logs.append})(),
+        wall, template, None, False, export_dir=str(override),
+    )
+    assert result["exportDir"] == str(override)
+    assert result["resolvedExportDir"] == str(override)
+    assert result["proposalExportDir"] == str(override)
+
+
+def test_resize_apply_empty_export_dir_uses_proposal_default_despite_settings_change(
+    tmp_path, monkeypatch
+):
+    """The default captured at propose time (`proposalExportDir`) must win over a
+    Settings default changed after propose, and must survive completion."""
+    app_mod, wall, template = _propose_stubs(monkeypatch, tmp_path)
+
+    def fake_remap_and_inspect(path, dest, *, export_dir=None, **_kwargs):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return {
+            "inspect": {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 0, "exported": False},
+            "payload": {"path": str(dest), "slideWidth": 1920, "slideHeight": 1080, "slides": []},
+            "counts": {},
+            "applied": 0,
+            "missed": 0,
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap_and_inspect)
+
+    client = TestClient(app)
+    started = client.post(
+        "/api/resize",
+        data={"path": str(wall), "template_path": str(template), "export": "false"},
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    proposed = _wait(client, job_id)
+    assert proposed["status"] == "done", proposed.get("error")
+    proposal_default = proposed["result"]["proposalExportDir"]
+
+    later_default = tmp_path / "later-default"
+    later_default.mkdir()
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(later_default)}
+    )
+
+    res = client.post(f"/api/resize/{job_id}/apply", json={"exportDir": ""})
+    assert res.status_code == 200
+    assert res.json()["result"]["resolvedExportDir"] == proposal_default
+
+    completed = _wait(client, job_id)
+    assert completed["status"] == "done", completed.get("error")
+    assert completed["result"]["resolvedExportDir"] == proposal_default
+    assert completed["result"]["resolvedExportDir"] != str(later_default)
+
+
+def test_resize_apply_failed_custom_export_dir_leaves_resolved_export_dir_untouched(
+    tmp_path, monkeypatch
+):
+    import obed_edom.web.app as app_mod
+    from obed_edom.paths import output_root
+    from obed_edom.web.jobs import Job
+
+    job = Job(
+        id="job-1",
+        kind="resize",
+        feature="resize",
+        name="job-1",
+        result={"phase": "framing", "resolvedExportDir": str(output_root())},
+    )
+    app_mod.RUNNER._jobs[job.id] = job
+    monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/resize/job-1/apply", json={"exportDir": str(output_root() / ".resize")}
+    )
+    assert res.status_code == 400
+    assert app_mod.RUNNER.get("job-1").result["resolvedExportDir"] == str(output_root())
+
+
+def test_resize_apply_valid_export_dir_with_missing_wall_deck_leaves_result_untouched(
+    tmp_path, monkeypatch
+):
+    import obed_edom.web.app as app_mod
+    from obed_edom.web.jobs import Job
+
+    template = tmp_path / "template.key"
+    template.mkdir()
+    job = Job(
+        id="job-1",
+        kind="resize",
+        feature="resize",
+        name="job-1",
+        result={
+            "phase": "framing",
+            "path": str(tmp_path / "missing-wall.key"),
+            "templatePath": str(template),
+            "resolvedExportDir": str(tmp_path / "old-exports"),
+            "framings": {"1": {"state": "pinned"}},
+        },
+    )
+    app_mod.RUNNER._jobs[job.id] = job
+    monkeypatch.setattr(app_mod.RUNNER, "rerun", lambda job_id, fn: app_mod.RUNNER.get(job_id))
+
+    export_dir = tmp_path / "new-exports"
+    client = TestClient(app)
+    res = client.post("/api/resize/job-1/apply", json={"exportDir": str(export_dir)})
+
+    assert res.status_code == 400
+    result = app_mod.RUNNER.get("job-1").result
+    assert result["resolvedExportDir"] == str(tmp_path / "old-exports")
+    assert "exportDir" not in result
+    assert result["framings"] == {"1": {"state": "pinned"}}
+
+
+def test_resize_apply_uses_the_resolved_export_dir_frozen_at_propose_time(
+    tmp_path, monkeypatch
+):
+    """A Settings default change between propose and apply must not silently redirect
+    the write — apply uses the effective destination captured on the proposal, not a
+    fresh `export_destination(job)` lookup."""
+    import obed_edom.web.app as app_mod
+
+    frozen_dest = tmp_path / "frozen"
+    frozen_dest.mkdir()
+    later_default = tmp_path / "later-default"
+    later_default.mkdir()
+
+    def fake_remap_and_inspect(path, dest, *, export_dir=None, **_kwargs):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return {
+            "inspect": {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 0, "exported": False},
+            "payload": {"path": str(dest), "slideWidth": 1920, "slideHeight": 1080, "slides": []},
+            "counts": {},
+            "applied": 0,
+            "missed": 0,
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap_and_inspect)
+    # If apply re-resolved the destination instead of using the frozen value, it would
+    # land here instead.
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(later_default)}
+    )
+
+    job = type(
+        "Job",
+        (),
+        {"log": lambda self, msg: None, "name": "job", "result": {"resolvedExportDir": str(frozen_dest)}},
+    )()
+    result = app_mod._run_resize(
+        job, tmp_path / "source.key", tmp_path / "template.key", None, False
+    )
+    assert Path(result["destPath"]).parent == frozen_dest
+
+
+def test_write_outline_pdf_propagates_a_vanished_destination_as_job_error(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    vanished = tmp_path / "gone"  # never created
+    logs: list[str] = []
+    job = type("Job", (), {"log": logs.append})()
+    with pytest.raises(ValueError, match="no longer a directory"):
+        app_mod._write_outline_pdf(job, vanished / "findings.pdf", {"rows": [], "outlineFlags": []})
+    assert not logs

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FramingDecision } from "../api";
+import { IconFilter } from "./icons";
 
 /**
  * Confirm which crop each map page uses before remap.
@@ -559,9 +560,7 @@ export function FramingReview({
 
       <div className="framing-filter">
         <span className="framing-filter-icon" aria-hidden="true">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M1.5 2h13a.5.5 0 0 1 .4.8L10 9.2V14a.5.5 0 0 1-.72.45l-3-1.5A.5.5 0 0 1 6 12.5V9.2L1.1 2.8A.5.5 0 0 1 1.5 2Z" />
-          </svg>
+          <IconFilter />
         </span>
         <span className="framing-filter-label">Filter</span>
         <button

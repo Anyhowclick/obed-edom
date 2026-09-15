@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from obed_edom.baseline import cache_root
@@ -11,7 +12,11 @@ DEFAULTS = {
     "reuseThreshold": 0.6,
     "reusePairings": True,
     "reusePreviews": True,
+    "defaultExportDir": "",
+    "highlightColour": "#e8772a",
 }
+
+_HEX_COLOUR_RE = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
 def settings_path(root: Path | None = None) -> Path:
@@ -30,6 +35,18 @@ def _clamp(data: dict) -> dict:
         out["reusePairings"] = bool(data["reusePairings"])
     if "reusePreviews" in data:
         out["reusePreviews"] = bool(data["reusePreviews"])
+    if "defaultExportDir" in data:
+        out["defaultExportDir"] = str(data["defaultExportDir"] or "").strip()
+    if "highlightColour" in data:
+        value = str(data["highlightColour"] or "").strip()
+        match = _HEX_COLOUR_RE.fullmatch(value)
+        if match:
+            hex_digits = match.group(1).lower()
+            if len(hex_digits) == 3:
+                hex_digits = "".join(ch * 2 for ch in hex_digits)
+            out["highlightColour"] = f"#{hex_digits}"
+        else:
+            out["highlightColour"] = DEFAULTS["highlightColour"]
     return out
 
 
@@ -46,8 +63,12 @@ def load_settings(root: Path | None = None) -> dict:
     return _clamp(data)
 
 
-def save_settings(data: dict, root: Path | None = None) -> dict:
+def save_settings(data: dict, root: Path | None = None, *, validate_dir: bool = True) -> dict:
     out = _clamp(data)
+    if validate_dir and out["defaultExportDir"]:
+        from obed_edom.paths import validate_export_dir  # noqa: PLC0415
+
+        out["defaultExportDir"] = str(validate_export_dir(out["defaultExportDir"]))
     path = settings_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2), encoding="utf-8")

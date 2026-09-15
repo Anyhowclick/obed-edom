@@ -201,8 +201,8 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
     const styles = require(path.join(out, "styles.js"));
     assert.deepEqual(styles.remapTonerFonts({ nested: ["Nunito Regular", "Nunito SemiBold", "Noto Sans Bold Italic"] }), { nested: ["Noto Sans Regular", "Noto Sans Bold", "Noto Sans Italic"] });
     const [full, background, lines] = await Promise.all([styles.resolveOpenFreeMapStyle("toner"), styles.resolveOpenFreeMapStyle("toner-background"), styles.resolveOpenFreeMapStyle("toner-lines")]);
-    assert.equal(full.layers.length, 39);
-    assert.equal(background.layers.length, 13);
+    assert.equal(full.layers.length, 38);
+    assert.equal(background.layers.length, 12);
     assert.equal(lines.layers.length, 15);
     for (const style of [full, background, lines]) {
       assert.equal(style.sprite, undefined);
@@ -210,6 +210,13 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
       assert.match(style.sources.openmaptiles.tiles[0], /openfreemap/);
       assert.match(style.glyphs, /openfreemap/);
     }
+    const idsOf = (style) => new Set(style.layers.map((layer) => layer.id));
+    for (const style of [background, full]) {
+      const ids = idsOf(style);
+      assert.ok(ids.has("building_pattern"), "expected the hatched building_pattern layer");
+      assert.ok(!ids.has("building_fill"), "expected the solid building_fill layer to be dropped");
+    }
+
     const boundaryIds = ["boundary_state", "boundary_state_z1-4", "boundary_country_z0-4", "boundary_country_z5-"];
     const lineIds = new Set(lines.layers.map((layer) => layer.id));
     const backgroundIds = new Set(background.layers.map((layer) => layer.id));
@@ -266,9 +273,10 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
   assert.equal(next.length, vendor.layers.length + 1);
 
   const low = byId(next, "boundary_state_z1-4");
-  assert.equal(low.minzoom, 4);
+  assert.equal(low.minzoom, 3);
   assert.equal(low.maxzoom, 5);
   assert.equal(low.paint["line-width"], 1.2);
+  assert.equal(low.paint["line-color"], "rgba(80, 80, 80, 1)");
   assert.equal(low.paint["line-dasharray"], undefined);
   assert.deepEqual(low.filter, vendorState.filter);
 
@@ -301,7 +309,7 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
   const statePreview = byId(preview, "boundary_state");
   const countryLowPreview = byId(preview, "boundary_country_z0-4");
   const countryHighPreview = byId(preview, "boundary_country_z5-");
-  assert.ok(Math.abs(lowPreview.minzoom - 1.06) < 1e-9);
+  assert.ok(Math.abs(lowPreview.minzoom - 0.06) < 1e-9);
   assert.ok(Math.abs(lowPreview.maxzoom - 2.06) < 1e-9);
   assert.ok(Math.abs(statePreview.minzoom - 2.06) < 1e-9);
   assert.equal(countryLowPreview.minzoom, 0);
@@ -314,4 +322,66 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
   assert.equal(byId(clamped, "boundary_country_z0-4").minzoom, 0);
   assert.equal(byId(clamped, "boundary_country_z0-4").maxzoom, 0);
   assert.equal(byId(clamped, "boundary_country_z5-").minzoom, 0);
+
+  // Honest-preview offsets (types.ts exportZoomDelta): CG 1920 → 0, LW 3840 → -1, FW 7680 → -2.
+  // Authored province min 3 must stay on at authored z3 on every surface.
+  const { exportZoomDelta } = require(path.join(out, "types.js"));
+  assert.equal(exportZoomDelta(1920), 0);
+  assert.equal(exportZoomDelta(3840), -1);
+  assert.equal(exportZoomDelta(7680), -2);
+  const cgExport = withLowZoomBoundaries(vendor.layers, 0);
+  const lwExport = withLowZoomBoundaries(vendor.layers, -1);
+  const fwExport = withLowZoomBoundaries(vendor.layers, -2);
+  assert.equal(byId(cgExport, "boundary_state_z1-4").minzoom, 3);
+  assert.equal(byId(cgExport, "boundary_state_z1-4").maxzoom, 5);
+  assert.equal(byId(lwExport, "boundary_state_z1-4").minzoom, 2);
+  assert.equal(byId(lwExport, "boundary_state_z1-4").maxzoom, 4);
+  assert.equal(byId(fwExport, "boundary_state_z1-4").minzoom, 1);
+  assert.equal(byId(fwExport, "boundary_state_z1-4").maxzoom, 3);
+  assert.equal(byId(fwExport, "boundary_state").minzoom, 3);
+  assert.equal(byId(fwExport, "boundary_country_z0-4").maxzoom, 3);
+  assert.equal(byId(fwExport, "boundary_country_z5-").minzoom, 3);
+
+  // The raised province layer's upper gate (authored maxzoom 14) must shift too, or FW loses
+  // provinces at authored zoom 16 instead of 14.
+  assert.equal(byId(next, "boundary_state").maxzoom, 14);
+  assert.equal(byId(preview, "boundary_state").maxzoom, 14 + previewOffset);
+  assert.equal(byId(fwExport, "boundary_state").maxzoom, 12);
+});
+
+test("applyAuthoredZoomGates re-gates the toner province upper bound and the relief layers by the same offset", () => {
+  const { applyAuthoredZoomGates } = require(path.join(out, "tonerBoundaries.js"));
+  const ranges = {};
+  const paint = { "ne2-shaded-fallback": ["interpolate", ["linear"], ["zoom"], 0, 1, 6, 0.7, 8, 0] };
+  const layers = new Set([
+    "boundary_state_z1-4",
+    "boundary_state",
+    "boundary_country_z0-4",
+    "boundary_country_z5-",
+    "hillshade",
+    "terrarium-ne2",
+    "ne2-shaded-fallback",
+  ]);
+  const map = {
+    getLayer: (id) => (layers.has(id) ? {} : undefined),
+    setLayerZoomRange: (id, min, max) => {
+      ranges[id] = [min, max];
+    },
+    getPaintProperty: (id) => paint[id],
+    setPaintProperty: (id, key, value) => {
+      paint[id] = value;
+    },
+  };
+
+  applyAuthoredZoomGates(map, 0);
+  assert.deepEqual(ranges["boundary_state_z1-4"], [3, 5]);
+  applyAuthoredZoomGates(map, -1);
+  assert.deepEqual(ranges["boundary_state_z1-4"], [2, 4]);
+  applyAuthoredZoomGates(map, -2);
+  assert.deepEqual(ranges["boundary_state_z1-4"], [1, 3]);
+  assert.deepEqual(ranges["boundary_state"], [3, 12]);
+  assert.deepEqual(ranges["hillshade"], [4, 24]);
+  assert.deepEqual(ranges["terrarium-ne2"], [0, 4]);
+  assert.deepEqual(ranges["ne2-shaded-fallback"], [0, 6]);
+  assert.deepEqual(paint["ne2-shaded-fallback"], ["interpolate", ["linear"], ["zoom"], 0, 1, 4, 0.7, 6, 0]);
 });
