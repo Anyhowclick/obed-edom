@@ -590,6 +590,40 @@ def test_run_stat_finalize_result_dict_exposes_raise_liveness_counters(monkeypat
     assert result["raiseUnknown"] == 2
 
 
+def test_run_stat_finalize_result_dict_maps_closed_token(monkeypatch, tmp_path):
+    """`closed=1`/`closed=0` in the raw AppleScript return maps to a bool; absent
+    defaults to False."""
+    import obed_edom.keynote as keynote_mod
+    from obed_edom import osascript_runner
+
+    state = {"raw": ""}
+
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
+
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+
+    state["raw"] = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= exported=false sigFallback=0 unresolved=0 badgeFallback=0 "
+        "badgeUnresolved=0 badgeMoved=0 badgeFrontDead=0 raiseMoved=0 raiseDead=0 "
+        "raiseUnknown=0 closed=1 detail="
+    )
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["closed"] is True
+
+    state["raw"] = state["raw"].replace("closed=1", "closed=0")
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["closed"] is False
+
+    state["raw"] = state["raw"].replace(" closed=0", "")
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["closed"] is False
+
+
 def _raise_ground_truth_and_formula(n, targets, dead=frozenset()):
     """Simulate obedRaiseSlide's addressing scheme two ways at once and cross-check them
     every step: `state` is a real list mutated by pop/append (the actual Bring-to-Front

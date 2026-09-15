@@ -187,6 +187,24 @@ def bridge_specs_kindindex(specs: list[dict]) -> list[dict]:
     return bridged
 
 
+def read_slide_zorder(deck: Path, slide_number: int) -> tuple[list[str], list[str]]:
+    """(drawablesZOrder ids, ownedDrawables ids) as strings, via _load_deck + slide_order."""
+    try:
+        objects, _id_to_file, _file_ids = _load_deck(deck)
+    except Exception as exc:  # noqa: BLE001 — surfaced as a hint, not swallowed
+        raise RuntimeError(
+            f"_load_deck failed on {deck}: {exc} (keynote_parser may not decode a "
+            "15.3.1-authored member — check the installed keynote_parser version)"
+        ) from exc
+    order = slide_order(objects)
+    if not (1 <= slide_number <= len(order)):
+        raise ValueError(f"slide {slide_number} out of range (deck has {len(order)} slides)")
+    slide = objects[order[slide_number - 1][0]]
+    z = [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []]
+    owned = [str(r["identifier"]) for r in slide.get("ownedDrawables") or []]
+    return z, owned
+
+
 def expected_base_counts(source_counts: dict[str, int], specs: list[dict]) -> dict[str, int]:
     """Saved-deck per-kind counts = source-derived minus role=hide. Mismatch refuses the slide."""
     hides: dict[str, int] = {}
@@ -690,6 +708,32 @@ def _patch_member(zf: zipfile.ZipFile, member: str, edits: dict[str, dict]) -> t
     return new_member, applied, obj_diffs, header_diffs
 
 
+def _patch_zorder_member(
+    zf: zipfile.ZipFile, member: str, slide_id: str, new_order: list[str],
+) -> tuple[bytes, int, int, int]:
+    """``w-zorder-patch`` sibling of ``_patch_member``: overwrites ONE slide archive's
+    ``drawablesZOrder`` AND ``ownedDrawables`` with identical id lists built from
+    ``new_order``. (new_bytes, applied, obj_diffs, header_diffs); ``applied`` is the
+    archive-object write count (1 expected — the caller refuses on anything else)."""
+    def apply_fn(patched: dict) -> int:
+        applied = 0
+        refs = [{"identifier": i} for i in new_order]
+        for ch in patched["chunks"]:
+            for arch in ch["archives"]:
+                if str(arch["header"]["identifier"]) != slide_id:
+                    continue
+                for o in arch.get("objects") or []:
+                    o["drawablesZOrder"] = [dict(r) for r in refs]
+                    o["ownedDrawables"] = [dict(r) for r in refs]
+                    applied += 1
+                    break
+        return applied
+
+    new_member, applied, obj_diffs, header_diffs, _decoded, _reparsed = _decode_apply_reencode_diff(
+        zf, member, apply_fn)
+    return new_member, applied, obj_diffs, header_diffs
+
+
 class _RawNameZipInfo(zipfile.ZipInfo):
     """ZipInfo whose central-directory/local-header filename bytes are frozen to
     ``_raw_name`` instead of re-encoded from ``self.filename``. ``ZipFile._open_to_write``
@@ -797,8 +841,9 @@ def patch_deck_geometry(
 
     Refusal is per slide (that slide's member left byte-identical). Two slides
     resolving to the same target member refuse the LATER slide number.
-    ``extra_member_edits`` (member -> raw new bytes, e.g. W2 stylesheet/z-order) merge in
+    ``extra_member_edits`` (member -> raw new bytes, e.g. a stylesheet edit) merge in
     AFTER slide edits; a member in both raises ``ValueError`` before anything is written.
+    Z-order is its own rewrite, not this hook — see ``iwa_zorder.patch_deck_zorder``.
     Returns one ``PatchResult`` per key of ``specs_by_slide``, plus key 0 for
     ``extra_member_edits`` when given.
     """

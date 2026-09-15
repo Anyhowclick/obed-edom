@@ -1,0 +1,316 @@
+"""Pure-logic tests for ``obed_edom.iwa_zorder`` (``w-zorder-patch`` piece 1).
+
+Keynote-free. Deck builders reuse ``_arch``/``_member``/``_shape_super`` from
+``tests/test_iwa_write.py``, the way ``tests/test_probe_zorder_patch.py`` does.
+"""
+from __future__ import annotations
+
+import io
+import zipfile
+
+import pytest
+
+pytest.importorskip("keynote_parser")
+
+from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
+from obed_edom.iwa_zorder import (  # noqa: E402
+    plan_slide_order,
+    raise_to_front,
+    resolve_raise_targets,
+)
+
+from test_iwa_write import _arch, _member, _shape_super  # noqa: E402
+
+
+# ==========================================================================
+# raise_to_front — pure list logic, no deck needed.
+# ==========================================================================
+def test_raise_to_front_noop_when_already_frontmost():
+    assert raise_to_front(["a", "b", "c"], ["c"]) == ["a", "b", "c"]
+    assert raise_to_front(["a", "b", "c"], ["b", "c"]) == ["a", "b", "c"]
+
+
+def test_raise_to_front_interleaved():
+    assert raise_to_front(["a", "b", "c", "d"], ["a", "c"]) == ["b", "d", "a", "c"]
+
+
+def test_raise_to_front_spans_whole_array():
+    assert raise_to_front(["a", "b", "c"], ["b", "a", "c"]) == ["b", "a", "c"]
+
+
+def test_raise_to_front_single_target():
+    assert raise_to_front(["a", "b", "c"], ["a"]) == ["b", "c", "a"]
+
+
+def test_raise_to_front_empty_targets():
+    assert raise_to_front(["a", "b", "c"], []) == ["a", "b", "c"]
+
+
+def test_raise_to_front_unknown_id_raises():
+    with pytest.raises(ValueError):
+        raise_to_front(["a", "b", "c"], ["z"])
+
+
+def test_raise_to_front_duplicate_target_raises():
+    with pytest.raises(ValueError, match="a"):
+        raise_to_front(["a", "b", "c"], ["a", "b", "a"])
+
+
+def test_raise_to_front_does_not_mutate_input():
+    order = ["a", "b", "c"]
+    raise_to_front(order, ["a"])
+    assert order == ["a", "b", "c"]
+
+
+# ==========================================================================
+# Deck builders.
+# ==========================================================================
+def _group(gid, child_id, text=None):
+    """`text=None` leaves the child textless (`_group_child_signature` == ""), fine for
+    any test that doesn't verify a stat job's `childSig` against it. A test resolving a
+    stat job that must succeed needs `text` set to that job's `childSig`, since
+    `resolve_raise_targets` now checks the two match."""
+    child = {"isTextBox": False, "super": _shape_super(0, 0, 30, 30)}
+    members = []
+    if text is not None:
+        storage_id = child_id * 100
+        child["ownedStorage"] = {"identifier": storage_id}
+        members.append(_arch(storage_id, "TSWP.StorageArchive", {"text": [text]}))
+    return [
+        _arch(child_id, "TSWP.ShapeInfoArchive", child),
+        *members,
+        _arch(gid, "TSD.GroupArchive", {"super": _shape_super(0, 0, 0, 0)["super"], "children": [{"identifier": child_id}]}),
+    ]
+
+
+def _write_deck(path, slide_member, zorder_ids):
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": i} for i in zorder_ids]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, *slide_member]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def _slide_and_objects(deck):
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    slide = objects[slide_order(objects)[0][0]]
+    return slide, objects
+
+
+# ==========================================================================
+# resolve_raise_targets.
+# ==========================================================================
+def test_resolve_stat_targets_ascending_by_z_regardless_of_job_order(tmp_path):
+    # Two groups: A (children 301) at z-slot 0, B (children 303) at z-slot 1.
+    members = [*_group(300, 301, "a"), *_group(302, 303, "b")]
+    deck = _write_deck(tmp_path / "stat.key", members, [300, 302])
+    slide, objects = _slide_and_objects(deck)
+
+    # 1-based, already hide-bridged groupIndex: A=1, B=2. Jobs given out of order.
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 2, "childSig": "b"},
+        {"slide": 1, "groupIndex": 1, "childSig": "a"},
+    ]
+    stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == ["300", "302"]
+    assert badge_ids == []
+    assert unresolved == []
+
+
+def test_resolve_stat_group_index_is_not_bridged_again_when_hides_exist(tmp_path):
+    # Three wall groups A, B, C (children 301, 303, 305). A (wall kindIndex 0) is hidden,
+    # so the saved deck's drawablesZOrder only contains B, C post-hide — B lands at
+    # kindIndex 0, C at kindIndex 1.
+    members = [*_group(300, 301), *_group(302, 303), *_group(304, 305, "c")]
+    deck = _write_deck(tmp_path / "stat_hide.key", members, [302, 304])
+    slide, objects = _slide_and_objects(deck)
+    hide_specs = [{"kind": "group", "kindIndex": 0}]  # A deleted
+
+    # Stat groupIndex values come from map_remap.adjust_child_resize_indexes, which has
+    # already hide-bridged them upstream: wall B/C (1-based, ignoring the hidden A) map to
+    # groupIndex 1/2. Unlike badge rows (wall-based, bridged in resolve_raise_targets via
+    # bridge_kind_index), a stat job's groupIndex must only be decremented to a 0-based
+    # kindIndex here — bridging it again would double-shift past the hidden group and hit
+    # the wrong drawable. groupIndex=2 should resolve to C, not B.
+    stat_jobs = [{"slide": 1, "groupIndex": 2, "childSig": "c"}]
+    stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], hide_specs)
+
+    assert unresolved == []
+    assert badge_ids == []
+    assert stat_ids == ["304"]
+
+
+def test_resolve_stat_targets_ambiguous_child_sig_refused(tmp_path):
+    members = [*_group(300, 301), *_group(302, 303)]
+    deck = _write_deck(tmp_path / "ambig.key", members, [300, 302])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 1, "childSig": "dup"},
+        {"slide": 1, "groupIndex": 2, "childSig": "dup"},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == []
+    assert len(unresolved) == 2
+    assert all("ambiguous" in u for u in unresolved)
+
+
+def test_resolve_badge_rows_of_each_kind(tmp_path):
+    members = [
+        _arch(210, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 140, 0, nw=140, nh=0, line=True)}),
+        _arch(221, "TSWP.StorageArchive", {"text": ["Hi"]}),
+        _arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(0, 0, 200, 60, nw=200, nh=60)}),
+        _arch(231, "TSD.MaskArchive", {"pathsource": {"bezierPathSource": {"naturalSize": {"width": 60, "height": 60}}}, "super": {"geometry": {"position": {"x": 0, "y": 0}, "size": {"width": 60, "height": 60}, "angle": 0.0}}}),
+        _arch(230, "TSD.ImageArchive", {"mask": {"identifier": 231}, "super": {"geometry": {"position": {"x": 0, "y": 0}, "size": {"width": 60, "height": 60}, "angle": 0.0}}, "originalSize": {"width": 60.0, "height": 60.0}}),
+        _arch(200, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 100, 50)}),
+        *_group(250, 251),
+    ]
+    deck = _write_deck(tmp_path / "kinds.key", members, [210, 220, 230, 200, 250])
+    slide, objects = _slide_and_objects(deck)
+
+    badge_rows = [
+        {"kind": "line", "index": 1},
+        {"kind": "text", "index": 1},
+        {"kind": "image", "index": 1},
+        {"kind": "shape", "index": 1},
+        {"kind": "group", "index": 1},
+    ]
+    stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, [], badge_rows, [])
+
+    assert unresolved == []
+    assert stat_ids == []
+    assert badge_ids == ["210", "220", "230", "200", "250"]
+
+
+def test_resolve_badge_row_bridged_below_target(tmp_path):
+    # Saved deck (post-hide): only groups B, C survive (wall indices 1, 2).
+    members = [*_group(300, 301), *_group(302, 303)]
+    deck = _write_deck(tmp_path / "hide_below.key", members, [300, 302])
+    slide, objects = _slide_and_objects(deck)
+    hide_specs = [{"kind": "group", "kindIndex": 0}]  # A (wall index 0) deleted
+
+    badge_rows = [{"kind": "group", "index": 2}, {"kind": "group", "index": 3}]  # wall B, C (1-based)
+    _stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, [], badge_rows, hide_specs)
+
+    assert unresolved == []
+    assert badge_ids == ["300", "302"]
+
+
+def test_resolve_badge_row_hide_above_target_is_unaffected(tmp_path):
+    # Saved deck (post-hide): only groups A, B survive; C (wall index 2) deleted.
+    members = [*_group(300, 301), *_group(302, 303)]
+    deck = _write_deck(tmp_path / "hide_above.key", members, [300, 302])
+    slide, objects = _slide_and_objects(deck)
+    hide_specs = [{"kind": "group", "kindIndex": 2}]  # C (wall index 2) deleted, above targets
+
+    badge_rows = [{"kind": "group", "index": 1}]  # wall A (1-based)
+    _stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, [], badge_rows, hide_specs)
+
+    assert unresolved == []
+    assert badge_ids == ["300"]
+
+
+def test_resolve_shape_text_dual(tmp_path):
+    # isTextBox + editable custom path: registers as BOTH "text" and "shape" (duplicateOf).
+    members = [
+        _arch(221, "TSWP.StorageArchive", {"text": ["Dual"]}),
+        _arch(220, "TSWP.ShapeInfoArchive",
+              {"isTextBox": True, "ownedStorage": {"identifier": 221},
+               "super": _shape_super(0, 0, 100, 50, kind="editable")}),
+    ]
+    deck = _write_deck(tmp_path / "dual.key", members, [220])
+    slide, objects = _slide_and_objects(deck)
+
+    badge_rows = [{"kind": "text", "index": 1}, {"kind": "shape", "index": 1}]
+    stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, [], badge_rows, [])
+
+    assert unresolved == []
+    assert badge_ids == ["220", "220"]
+
+    # A dual row resolving to the same id in both slots must be refused, not duplicated.
+    with pytest.raises(ValueError, match="220"):
+        plan_slide_order(slide, objects, stat_ids, badge_ids)
+
+
+def test_resolve_stat_job_with_falsy_child_sig_yields_no_target(tmp_path):
+    members = [*_group(300, 301)]
+    deck = _write_deck(tmp_path / "no_sig.key", members, [300])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [{"slide": 1, "groupIndex": 1, "childSig": None}]
+    stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == []
+    assert badge_ids == []
+    assert unresolved == []
+
+
+def test_resolve_unresolvable_badge_row(tmp_path):
+    members = [_arch(200, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 100, 50)})]
+    deck = _write_deck(tmp_path / "unresolvable.key", members, [200])
+    slide, objects = _slide_and_objects(deck)
+
+    badge_rows = [{"kind": "shape", "index": 5}]  # no shape at wall kindIndex 4
+    stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, [], badge_rows, [])
+
+    assert stat_ids == []
+    assert badge_ids == []
+    assert unresolved == ["badge:k=shape,i=5"]
+
+
+# ==========================================================================
+# plan_slide_order.
+# ==========================================================================
+def test_plan_slide_order_badge_block_ends_above_stat_block(tmp_path):
+    members = [
+        _arch(200, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 100, 50)}),
+        *_group(300, 301),
+        *_group(302, 303),
+    ]
+    deck = _write_deck(tmp_path / "order.key", members, [200, 300, 302])
+    slide, objects = _slide_and_objects(deck)
+
+    order = plan_slide_order(slide, objects, stat_ids=["300", "302"], badge_ids=["200"])
+    assert order == ["300", "302", "200"]
+
+
+def test_plan_slide_order_stat_block_ascending_by_z_regardless_of_job_order(tmp_path):
+    members = [*_group(300, 301, "a"), *_group(302, 303, "b"), *_group(304, 305, "c")]
+    deck = _write_deck(tmp_path / "order2.key", members, [300, 302, 304])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 3, "childSig": "c"},
+        {"slide": 1, "groupIndex": 1, "childSig": "a"},
+        {"slide": 1, "groupIndex": 2, "childSig": "b"},
+    ]
+    stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+    assert unresolved == []
+
+    order = plan_slide_order(slide, objects, stat_ids, badge_ids)
+    assert order == ["300", "302", "304"]
+
+
+def test_plan_slide_order_sorts_stat_ids_itself_given_reverse_z_order(tmp_path):
+    members = [*_group(300, 301), *_group(302, 303), *_group(304, 305)]
+    deck = _write_deck(tmp_path / "order3.key", members, [300, 302, 304])
+    slide, objects = _slide_and_objects(deck)
+
+    # stat_ids passed directly, in reverse z order, bypassing resolve_raise_targets.
+    order = plan_slide_order(slide, objects, stat_ids=["304", "302", "300"], badge_ids=[])
+    assert order == ["300", "302", "304"]
+
+
+def test_plan_slide_order_overlap_between_stat_and_badge_raises(tmp_path):
+    members = [*_group(300, 301), *_group(302, 303)]
+    deck = _write_deck(tmp_path / "overlap.key", members, [300, 302])
+    slide, objects = _slide_and_objects(deck)
+
+    with pytest.raises(ValueError, match="300"):
+        plan_slide_order(slide, objects, stat_ids=["300"], badge_ids=["300"])

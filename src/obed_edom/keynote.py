@@ -1400,10 +1400,16 @@ def _build_stat_finalize_script(
     export_dir: Path | None = None,
     group_removes: list[dict] | None = None,
     badge_raises: list[dict] | None = None,
+    suppress_raises: set[int] | None = None,
 ) -> str:
-    """Post-JXA: template stat sizes, then Bring to Front (stat groups + badge). Optional PNG export before close."""
+    """Post-JXA: template stat sizes, then Bring to Front (stat groups + badge). Optional PNG export before close.
+
+    `suppress_raises` (W2 offline z-order): slides in this set get NO `obedRaiseSlide`
+    and NO `obedBadgeSlide` call — their raises already landed via the offline patch.
+    Font sizing, dedup, and `raiseTargets` accumulation are untouched."""
     group_removes = group_removes or []
     badge_raises = badge_raises or []
+    suppress_raises = suppress_raises or set()
     if not jobs and not group_removes and not badge_raises:
         return ""
     escaped = _as_escape(str(dest))
@@ -1529,8 +1535,12 @@ def _build_stat_finalize_script(
     # index arithmetic is applied to the rest.
     lines += ['  set frontRaised to 0', '  set frontErr to ""']
     for slide in sorted(font_by_slide):
+        if slide in suppress_raises:
+            continue
         lines += [f"  my obedRaiseSlide({slide})"]
     for slide in sorted(badge_by_slide):
+        if slide in suppress_raises:
+            continue
         rows = [r for r in badge_by_slide[slide] if {"x", "y", "w", "h"} <= r.keys()]
         if len(rows) != len(badge_by_slide[slide]):
             continue  # a frameless row: pre-counted at init
@@ -1562,8 +1572,12 @@ def _build_stat_finalize_script(
             "  end try",
         ]
     lines += [
+        "  set closedOK to 0",
         "  try",
         "    close theDoc saving yes",
+        "    set closedOK to 1",
+        "  on error",
+        "    set closedOK to 0",
         "  end try",
         "  end timeout",
         '  return "done=" & doneJobs & " skipped=" & skipJobs & " sized=" & sized '
@@ -1576,7 +1590,7 @@ def _build_stat_finalize_script(
         '& " raiseDead=" & raiseDead & " raiseUnknown=" & raiseUnknown '
         '& " raiseBlindCount=" & raiseBlindCount & " raiseVacuous=" & raiseVacuous '
         '& " raiseRetried=" & raiseRetried & " raiseClickRetried=" & raiseClickRetried '
-        '& " detail=" & report',
+        '& " closed=" & closedOK & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
@@ -1590,6 +1604,7 @@ def _run_stat_finalize(
     export_dir: Path | None = None,
     group_removes: list[dict] | None = None,
     badge_raises: list[dict] | None = None,
+    suppress_raises: set[int] | None = None,
 ) -> dict:
     """Run stat-finalize (dedup + sizes + bring-to-front). No-op if all three job lists are empty."""
     export_dir = Path(export_dir) if export_dir else None
@@ -1602,9 +1617,10 @@ def _run_stat_finalize(
         export_dir,
         group_removes=group_removes,
         badge_raises=badge_raises,
+        suppress_raises=suppress_raises,
     )
     if not script:
-        return {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}
+        return {"ok": True, "skipped": True, "closed": True, "done": 0, "jobs": 0, "exported": False}
     proc = _run_applescript(script, launch=True)
     raw = (proc.stdout or "").strip()
 
@@ -1650,6 +1666,7 @@ def _run_stat_finalize(
         "raiseVacuous": _num("raiseVacuous"),
         "raiseRetried": _num("raiseRetried"),
         "raiseClickRetried": _num("raiseClickRetried"),
+        "closed": bool(_num("closed")),
         "detail": detail,
         "tokens": _parse_detail_tokens(detail),
         "frontErr": front_err,
