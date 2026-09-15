@@ -182,6 +182,10 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 - The 7680→1920 canvas width write scales all content ×0.25 — geometry lands within 1 pt, but
   STROKE WIDTH scales too (1.0 → 0.25). The stroke gate decides by PATTERN: `TSDEmptyPattern` →
   grant house white 5 pt; a real pattern → restore the pre-shrink width.
+- The same resize scales IMPORTED LAYOUT artwork ×0.25 about the final canvas centre (960, 540)
+  (x' = 0.25x + 720, y' = 0.25y + 405 — the mid-canvas "dark bar" of r13); slide content is
+  re-positioned by explicit writes, layout drawables are not → resize the canvas BEFORE
+  importing/assigning layouts (measured 2026-09-15, fixed).
 - Canvas groups must be processed WIDEST-FIRST (document width only shrinks between exports).
   Slide addressing after a deletion uses POST-DELETION ordinals.
 - `.mov` is REJECTED as an export destination (error `".mov" (6)`); export to `.m4v`, remux
