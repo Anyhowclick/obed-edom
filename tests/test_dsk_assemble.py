@@ -5844,7 +5844,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False,
+        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
     ):
         captured["decisions"] = decisions
         captured["clips"] = clips
@@ -5931,7 +5931,7 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False,
+        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
     ):
         captured["black_layout_names"] = black_layout_names
         return AssembleResult(
@@ -11338,7 +11338,7 @@ def test_cli_dsk_assemble_no_style_flag(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False,
+        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
     ):
         captured["no_style"] = no_style
         return AssembleResult(

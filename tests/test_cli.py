@@ -246,3 +246,136 @@ def test_dsk_assemble_split_slide_not_in_slides_rejected(tmp_path, capsys, monke
     )
     assert rc == 1
     assert "not in --slides" in capsys.readouterr().err
+
+
+def _dsk_assemble_deck(tmp_path, monkeypatch):
+    import obed_edom.offline_inspect as offline_inspect
+
+    source = tmp_path / "deck.key"
+    source.mkdir()
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload",
+        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 20},
+    )
+    return source
+
+
+def test_dsk_assemble_content_only_reaches_assemble_dsk_deck(tmp_path, monkeypatch):
+    import obed_edom.dsk_assemble as dsk_assemble
+
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+    captured = {}
+
+    def fake_assemble_dsk_deck(*_args, **kwargs):
+        captured["content_only"] = kwargs["content_only"]
+        return dsk_assemble.AssembleResult(
+            path=tmp_path / "out.key", slides_kept=(17,), ordinals={17: 1}, fits={},
+            clips_inserted={}, stroke={}, zorder={}, builds={}, size_bytes=0,
+            source_size_bytes=0, wall_s=0.0, warnings=(), movie_props={},
+            skipped=({"slide": 5, "reason": "text", "category": "static", "longTextIds": []},),
+        )
+
+    monkeypatch.setattr(dsk_assemble, "assemble_dsk_deck", fake_assemble_dsk_deck)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "5,17",
+            "--content-only",
+        ]
+    )
+    assert rc == 0
+    assert captured["content_only"] is True
+
+
+def test_dsk_assemble_content_only_reports_skipped(tmp_path, capsys, monkeypatch):
+    import obed_edom.dsk_assemble as dsk_assemble
+
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+
+    def fake_assemble_dsk_deck(*_args, **_kwargs):
+        return dsk_assemble.AssembleResult(
+            path=tmp_path / "out.key", slides_kept=(17,), ordinals={17: 1}, fits={},
+            clips_inserted={}, stroke={}, zorder={}, builds={}, size_bytes=0,
+            source_size_bytes=0, wall_s=0.0, warnings=(), movie_props={},
+            skipped=({"slide": 5, "reason": "text", "category": "static", "longTextIds": []},),
+        )
+
+    monkeypatch.setattr(dsk_assemble, "assemble_dsk_deck", fake_assemble_dsk_deck)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "5,17",
+            "--content-only",
+        ]
+    )
+    assert rc == 0
+    assert "Skipped (1):" in capsys.readouterr().out
+
+
+def test_dsk_assemble_content_only_refuses_split(tmp_path, capsys, monkeypatch):
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--content-only", "--split", "17=2",
+        ]
+    )
+    assert rc == 1
+    assert "--split has no meaning with --content-only" in capsys.readouterr().err
+
+
+def test_dsk_assemble_content_only_refuses_no_split(tmp_path, capsys, monkeypatch):
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--content-only", "--no-split",
+        ]
+    )
+    assert rc == 1
+    assert "--no-split has no meaning with --content-only" in capsys.readouterr().err
+
+
+def test_dsk_assemble_content_only_refuses_text_fit_shrink(tmp_path, capsys, monkeypatch):
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--content-only", "--text-fit", "shrink",
+        ]
+    )
+    assert rc == 1
+    assert "--text-fit shrink has no meaning with --content-only" in capsys.readouterr().err
+
+
+def test_dsk_assemble_content_only_refuses_min_text_pt(tmp_path, capsys, monkeypatch):
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--content-only", "--min-text-pt", "30",
+        ]
+    )
+    assert rc == 1
+    assert "--min-text-pt has no meaning with --content-only" in capsys.readouterr().err
+
+
+def test_dsk_assemble_content_only_layout_preserve_warns(tmp_path, capsys, monkeypatch):
+    import obed_edom.dsk_assemble as dsk_assemble
+
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+
+    def fake_assemble_dsk_deck(*_args, **_kwargs):
+        return dsk_assemble.AssembleResult(
+            path=tmp_path / "out.key", slides_kept=(17,), ordinals={17: 1}, fits={},
+            clips_inserted={}, stroke={}, zorder={}, builds={}, size_bytes=0,
+            source_size_bytes=0, wall_s=0.0, warnings=(), movie_props={},
+        )
+
+    monkeypatch.setattr(dsk_assemble, "assemble_dsk_deck", fake_assemble_dsk_deck)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--content-only", "--layout", "preserve",
+        ]
+    )
+    assert rc == 0
+    assert "layout preserved; stage PNGs may export opaque" in capsys.readouterr().err

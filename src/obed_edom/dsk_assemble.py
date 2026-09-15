@@ -3534,6 +3534,7 @@ class AssembleResult:
     overflows: tuple[dict, ...] = ()
     ordinal_to_number: dict[int, int] = field(default_factory=dict)
     hidden: tuple[dict, ...] = ()
+    skipped: tuple[dict, ...] = ()
 
 
 def _package_size(path: Path) -> int:
@@ -5082,6 +5083,7 @@ def assemble_dsk_deck(
     split_overrides: Mapping[int, int] | None = None,
     no_pills: bool = False,
     no_style: bool = False,
+    content_only: bool = False,
 ) -> AssembleResult:
     """Runs the live AppleScript batch end to end (plan -> LiveBatch -> script),
     then offline IWA post-passes: card-border stroke restore, build/transition
@@ -5100,10 +5102,22 @@ def assemble_dsk_deck(
     `layout_policy` -- see `build_assembly_script` -- defaults to "import". When "import",
     `check_layout_import_preconditions` refuses offline before Keynote launches, and
     `verify_staged_layouts_alpha_safe` refuses offline against the staged deck before it
-    is published to `out_path`."""
+    is published to `out_path`.
+
+    `content_only` drops every requested slide whose `SlideClass.is_text` is True (the
+    same predicate `plan_assembly` would use) before planning, reporting each on
+    `AssembleResult.skipped` and via one `log` line; refuses if none remain. It also
+    forces `no_pills`/`no_style` on and, when `layout_policy == "import"`, narrows
+    `import_layout_names` to `black_layout_names`."""
     fw_deck = Path(fw_deck)
     out_path = Path(out_path)
     dsk_live.guard_out_dir(out_path.parent, fw_deck)
+
+    if content_only:
+        no_pills = True
+        no_style = True
+        if layout_policy == "import":
+            import_layout_names = black_layout_names
 
     if layout_policy == "import":
         check_layout_import_preconditions(
@@ -5123,6 +5137,26 @@ def assemble_dsk_deck(
         fw_deck, include_side=include_side, text_slide_words=text_slide_words,
         no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
+
+    skipped: list[dict] = []
+    if content_only:
+        by_number = {c.number: c for c in classes}
+        for n in sorted(decisions):
+            cls = by_number.get(n)
+            if cls is not None and cls.is_text:
+                skipped.append({
+                    "slide": n, "reason": "text", "category": cls.category,
+                    "longTextIds": [list(i) for i in cls.long_text_ids],
+                })
+        skipped_numbers = {s["slide"] for s in skipped}
+        for n in sorted(skipped_numbers):
+            log(f"slide {n}: text slide skipped (content-only)")
+        decisions = {n: d for n, d in decisions.items() if n not in skipped_numbers}
+        if not decisions:
+            raise AssemblyRefusal(
+                "content-only: no content slides in the selection"
+            )
+
     builds_by_number = deck_builds(fw_deck, deck=deck)
     plan = plan_assembly(
         payload, classes, decisions=decisions, band=resolved_band, clips=clips, runs=runs, text_fit=text_fit,
@@ -5291,4 +5325,5 @@ def assemble_dsk_deck(
         overflows=tuple(overflows),
         ordinal_to_number=plan.ordinal_to_number,
         hidden=tuple(hidden),
+        skipped=tuple(skipped),
     )

@@ -490,6 +490,47 @@ def test_gw54_unchanged_single_column(gw_inputs):
 
 
 @pytest.mark.deck
+def test_content_only_gw_selection_drops_text_slides_plan_identical(gw_inputs):
+    """`--content-only` over 5,13,21,24,32,33,48 must keep exactly 21,24,32,33,48 (5/13
+    are text slides, plan §1.4) and the kept slides' plans must be byte-identical to a
+    direct (non-content-only) plan of the same five slides -- `assemble_dsk_deck` only
+    ever filters `decisions` before calling `plan_assembly`, never `classes`."""
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, by_number, runs = gw_inputs
+    selection = (5, 13, 21, 24, 32, 33, 48)
+
+    text_numbers = {n for n in selection if by_number[n].is_text}
+    assert text_numbers == {5, 13}
+    kept_numbers = tuple(n for n in selection if n not in text_numbers)
+    assert kept_numbers == (21, 24, 32, 33, 48)
+
+    clips = {32: Path("/tmp/gw-clip-32.mov"), 33: Path("/tmp/gw-clip-33.mov")}
+    all_classes = list(by_number.values())
+
+    requested_decisions = {
+        n: SlideDecision(n, "both" if n in clips else "in_deck", anchor="auto") for n in selection
+    }
+    content_only_decisions = {n: d for n, d in requested_decisions.items() if n not in text_numbers}
+
+    direct_decisions = {
+        n: SlideDecision(n, "both" if n in clips else "in_deck", anchor="auto") for n in kept_numbers
+    }
+
+    plan_content_only = plan_assembly(
+        payload, all_classes, decisions=content_only_decisions, band=DEFAULT_BAND, clips=clips,
+        runs=runs, all_classes=all_classes,
+    )
+    plan_direct = plan_assembly(
+        payload, all_classes, decisions=direct_decisions, band=DEFAULT_BAND, clips=clips,
+        runs=runs, all_classes=all_classes,
+    )
+
+    assert plan_content_only.kept == kept_numbers
+    assert plan_content_only == plan_direct
+
+
+@pytest.mark.deck
 def test_gw57_heading_only_unchanged(gw_inputs):
     _require_gw_deck()
     _require_font("AzoSans-Regular")

@@ -230,6 +230,13 @@ def main(argv: list[str] | None = None) -> int:
         "box, overriding the offline fit decision; refuses if N does not have exactly k "
         "long text boxes (k must be 2 or more). Repeatable.",
     )
+    dsk_assemble.add_argument(
+        "--content-only", action="store_true",
+        help="Ship the image/movie content only: drop every text-class slide before "
+        "planning (reported, not silently), force --no-pills/--no-style, and narrow the "
+        "imported layout to the alpha-safe black layout. Refuses --split, --no-split, "
+        "--text-fit shrink and an explicit --min-text-pt.",
+    )
     remap.add_argument(
         "--source-previews",
         help=(
@@ -494,6 +501,25 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
         print("Bad --split; conflicts with --no-split.", file=sys.stderr)
         return 1
 
+    if args.content_only:
+        if split_overrides:
+            print("--split has no meaning with --content-only (text slides are skipped).", file=sys.stderr)
+            return 1
+        if args.no_split:
+            print("--no-split has no meaning with --content-only (text slides are skipped).", file=sys.stderr)
+            return 1
+        if args.text_fit == "shrink":
+            print("--text-fit shrink has no meaning with --content-only (text slides are skipped).", file=sys.stderr)
+            return 1
+        if args.min_text_pt is not None:
+            print("--min-text-pt has no meaning with --content-only (text slides are skipped).", file=sys.stderr)
+            return 1
+        if args.layout == "preserve":
+            print(
+                "slide layout preserved; stage PNGs may export opaque (--content-only, --layout preserve).",
+                file=sys.stderr,
+            )
+
     clips: dict[int, Path] = {}
     for spec in args.clip:
         slide_text, sep, clip_text = spec.partition("=")
@@ -555,6 +581,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             rss_limit_bytes=int(args.rss_limit_gb * 1e9),
             no_pills=args.no_pills,
             no_style=args.no_style,
+            content_only=args.content_only,
         )
     except AssemblyRefusal as exc:
         print(f"Assembly refused: {exc}", file=sys.stderr)
@@ -579,6 +606,10 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
         print(f"Warnings ({len(result.warnings)}):")
         for w in result.warnings:
             print(f"  - {w}")
+    if result.skipped:
+        print(f"Skipped ({len(result.skipped)}):")
+        for s in result.skipped:
+            print(f"  - slide {s['slide']} ({s['reason']})")
     return 0
 
 
