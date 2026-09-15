@@ -26,6 +26,7 @@ MIN_PIN_PX = 28.0
 MAP_NAME_RE = re.compile(r"map\s*bg", re.I)
 PIN_NAME_RE = re.compile(r"pin\s*drop", re.I)
 CHURCH_LIST_RE = re.compile(r"\b(CHC|CHLI|CHEL)\b")
+ROSTER_NAME_RE = re.compile(r"^(CHC|CHLI|CHEL)\b")
 PIN_KIND_MAX = 180.0
 # Asia-Pacific wall/CG map art is pasted PDFs, not map BG.png.
 MAP_LAYER_MIN_W = 400.0
@@ -44,6 +45,7 @@ BODY_TEXT_MIN_CHARS = 60
 NAME_COLUMN_MIN_ROWS = 3
 NAME_COLUMN_X_TOL = 6.0
 NAME_COLUMN_PITCH = 2.0
+ROSTER_GROUP_MIN_NAMES = 8
 # Rejects full-height side columns; real plates are ~0.1 of canvas height.
 PLATE_MAX_H_FRACTION = 0.5
 # Map crop is often s≈1; unmatched wall text still needs to shrink for 16:9.
@@ -358,6 +360,31 @@ def is_list_item(item: dict) -> bool:
     return text.count("\n") >= 3
 
 
+def roster_lines(item: dict, group_child_text: dict[int, str] | None = None) -> list[str]:
+    """Roster name lines an item paints: a text box's own lines, or a group's child text."""
+    if (item.get("kind") or "") == "group":
+        sig = (group_child_text or {}).get(_item_kind_index(item, -1))
+        lines = [ln.strip() for ln in (sig or "").split("\n") if ln.strip()]
+        name_lines = [ln for ln in lines if ROSTER_NAME_RE.search(ln)]
+        if len(name_lines) < ROSTER_GROUP_MIN_NAMES:
+            return []
+        return name_lines
+    return [ln.strip() for ln in (item.get("text") or "").split("\n") if ln.strip()]
+
+
+def roster_group_rest(item: dict, group_child_text: dict[int, str] | None = None) -> list[str]:
+    """Non-name lines in a roster-carrier group's child text; [] for non-groups or non-carriers."""
+    if (item.get("kind") or "") != "group":
+        return []
+    roster = roster_lines(item, group_child_text)
+    if not roster:
+        return []
+    sig = (group_child_text or {}).get(_item_kind_index(item, -1)) or ""
+    all_lines = [ln.strip() for ln in sig.split("\n") if ln.strip()]
+    roster_set = set(roster)
+    return [ln for ln in all_lines if ln not in roster_set]
+
+
 def name_columns(items: Iterable[dict]) -> list[list[dict]]:
     """Church-name boxes that form a real roster column: one left edge, stacked down the page."""
     rows = [it for it in items if is_list_item(it) and (it.get("text") or "").count("\n") < 3]
@@ -381,10 +408,13 @@ def name_columns(items: Iterable[dict]) -> list[list[dict]]:
     return out
 
 
-def name_column_ids(items: Iterable[dict]) -> set[int]:
-    """id()s of list-classified boxes that are roster rows, not lone map labels."""
+def name_column_ids(items: Iterable[dict], group_child_text: dict[int, str] | None = None) -> set[int]:
+    """id()s of list-classified boxes that are roster rows, not lone map labels; a group whose
+    child text is a name list counts as one carrier."""
     items = list(items)
     ids = {id(it) for it in items if is_list_item(it) and (it.get("text") or "").count("\n") >= 3}
+    if group_child_text:
+        ids.update(id(it) for it in items if (it.get("kind") or "") == "group" and roster_lines(it, group_child_text))
     for column in name_columns(items):
         ids.update(id(it) for it in column)
     return ids
@@ -2383,7 +2413,7 @@ def plan_slide_transforms(
 
     out: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
-    group_child_text: dict[int, str] = slide.get("groupChildText") or {}
+    group_child_text: dict[int, str] = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
     group_caption: dict[int, dict[str, Any]] = slide.get("groupCaption") or {}
     card_samples = [
         {"rect": _rect_from_dict(s["rect"]), "aspect": s["aspect"], "caption": s["caption"]}
@@ -2396,7 +2426,7 @@ def plan_slide_transforms(
     # path (remap_keynote.js) uses that field to ADDRESS the object by text.
     card_captions: dict[tuple[str, int], str] = {}
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
-    name_col_ids = name_column_ids(slide.get("items") or [])
+    name_col_ids = name_column_ids(slide.get("items") or [], group_child_text)
     coincident_dups = coincident_duplicate_ids(
         slide.get("items") or [],
         {(str(b.get("kind") or ""), int(b.get("kindIndex") or 0)) for b in (slide.get("builds") or [])},
@@ -2420,8 +2450,14 @@ def plan_slide_transforms(
             continue
         # Roster kept only on the church-list slide(s); a later slide hides every roster item regardless of position.
         if drop_roster and id(item) in name_col_ids:
-            out.append(_hide_item_transform(item, number, item_index, kind_index))
-            continue
+            rest = roster_group_rest(item, group_child_text)
+            if not rest:
+                out.append(_hide_item_transform(item, number, item_index, kind_index))
+                continue
+            warnings.warn(
+                f"slide {number} group kindIndex {kind_index} is a mixed roster carrier "
+                f"(non-roster lines {rest[:3]!r}); not hidden by the roster rule"
+            )
         if not keep_side_panels and is_side_panel_item(item, wall_w, wall_h):
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
@@ -2649,8 +2685,7 @@ def plan_slide_transforms(
         group_kind_index: int | None = None
         group_pre_snap_s: float = 1.0
         if str(item.get("kind") or "") == "group":
-            _gct = slide.get("groupChildText") or {}
-            _sig = _gct.get(kind_index)
+            _sig = group_child_text.get(kind_index)
             _src_rect = item_rect(item)
             group_src_rect = _src_rect
             group_kind_index = kind_index
@@ -4001,12 +4036,17 @@ def roster_slides(slides: list[dict]) -> tuple[set[int], set[int]]:
     """
 
     def names_and_signature(slide: dict) -> tuple[set[str], list[tuple[Any, ...]]]:
-        roster_ids = name_column_ids(slide.get("items") or [])
+        gct = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
+        roster_ids = name_column_ids(slide.get("items") or [], gct)
         names: set[str] = set()
         signature: list[tuple[Any, ...]] = []
         for it in slide.get("items") or []:
             if id(it) in roster_ids:
-                names.update(line.strip() for line in (it.get("text") or "").split("\n") if line.strip())
+                roster = roster_lines(it, gct)
+                names.update(roster)
+                rest = roster_group_rest(it, gct)
+                if rest:
+                    signature.append(("groupRest", *rest))
             elif not is_placeholder_text(it):
                 # Excludes placeholder text but not is_duplicate_item; a coincident twin on
                 # one slide of a pair would tip this comparison (accepted for now).
@@ -4162,7 +4202,8 @@ def plan_payload_transforms(
             side_content_slides is not None and number in side_content_slides
         )
         drop_roster = number in roster_drop
-        roster_ids = name_column_ids(slide.get("items") or [])
+        gct = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
+        roster_ids = name_column_ids(slide.get("items") or [], gct)
         slide_keeps_centre_roster = number in roster_keep and any(
             not is_side_panel_item(it, wall_w, wall_h)
             for it in (slide.get("items") or [])
