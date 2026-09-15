@@ -1506,7 +1506,8 @@ def plan_assembly(
             if is_repeat_heading:
                 for cid in cluster_ids:
                     fit.pop(cid, None)
-                deletes[number] = _delete_order(list(base_deletes) + list(cluster_ids), id_by_item)
+                base_deletes = _delete_order(list(base_deletes) + list(cluster_ids), id_by_item)
+                deletes[number] = base_deletes
                 dropped_heading_ids = frozenset(cluster_ids)
                 cluster = None
                 cluster_ids = set()

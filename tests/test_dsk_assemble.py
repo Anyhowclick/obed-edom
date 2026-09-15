@@ -10560,6 +10560,64 @@ def test_gw52_repeat_heading_dropped_resolves_verse_standard():
         assert len(snapped) == 1
 
 
+def test_gw52_split_parts_each_get_the_dropped_heading_cluster_deletes():
+    # r13 attempt 5 refusal: GW 52's repeat-heading cluster (shape/number/heading text)
+    # was folded into `deletes[number]` but a stale pre-cluster `base_deletes` local was
+    # threaded into each `SplitPart`, so every split part kept the heading cluster's 2
+    # text items live (staged text count 2 != offline text count 4). Every part must
+    # carry the SAME deletes as the (would-be) non-split slide, in the same
+    # highest-index-first order, and identically across parts.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {52: SlideDecision(52, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[52]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    assert 52 in plan.splits
+    parts = plan.splits[52]
+    assert len(parts) == 2
+    expected = plan.deletes[52]
+    heading_ids = {("shape", 1), ("text", 3), ("text", 2)}
+    assert heading_ids <= set(expected)
+    for part in parts:
+        assert part.deletes == expected
+
+    ordinal0 = plan.ordinals[52]
+    for part_no, part in enumerate(parts):
+        lines = dsa._slide_lines(plan, 52, ordinal0 + part_no, part=part_no)
+        delete_object_count = sum(1 for line in lines if line.strip() == "delete theObj")
+        assert delete_object_count == len(part.deletes)
+
+
+def test_gw51_repeat_heading_non_split_deletes_unchanged():
+    # Regression pin: GW 51 (repeat heading, NOT split) must keep emitting the exact
+    # same delete set it did before the split-part fix -- the fix only threads the
+    # already-correct `deletes[number]` into split parts, it must not perturb the
+    # non-split path at all.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {51: SlideDecision(51, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[51]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    assert 51 not in plan.splits
+    assert plan.deletes[51] == (
+        ("group", 1), ("image", 1), ("image", 0), ("shape", 0), ("text", 1), ("text", 0),
+    )
+    ordinal = plan.ordinals[51]
+    lines = dsa._slide_lines(plan, 51, ordinal, part=0)
+    delete_object_count = sum(1 for line in lines if line.strip() == "delete theObj")
+    assert delete_object_count == len(plan.deletes[51])
+
+
 def test_gw44_50_unchanged_by_finding_1_role_resolver():
     # Finding 5 regression: the two-column path (GW 44/50, first occurrence of their
     # heading) must still resolve `Point 3 Lines` with D1b's hand geometry byte-
