@@ -3181,6 +3181,8 @@ def build_assembly_script(
         "      repeat with i from slideCount to 1 by -1",
         "        if keepList does not contain i then delete slide i of theDoc",
         "      end repeat",
+        f"      set width of theDoc to {plan.canvas[0]}",
+        f"      set height of theDoc to {plan.canvas[1]}",
     ]
 
     if layout_policy == "import":
@@ -3226,11 +3228,6 @@ def build_assembly_script(
                 ordinal = base_ordinals[number]
                 set_line = f"      set base layout of slide {ordinal} of theDoc to targetLayout"
                 lines += _layout_set_with_cleanup_lines(number, ordinal, set_line)
-
-    lines += [
-        f"      set width of theDoc to {plan.canvas[0]}",
-        f"      set height of theDoc to {plan.canvas[1]}",
-    ]
 
     for number in sorted(keep, key=lambda n: base_ordinals[n], reverse=True):
         extra = plan.parts.get(number, 1) - 1

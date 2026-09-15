@@ -1655,6 +1655,31 @@ def test_script_canvas_block_always_present():
     assert "set height of theDoc to 1080" in script
 
 
+def test_script_canvas_resize_precedes_layout_import_and_base_layout_set():
+    plan = _clip_plan()
+    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
+    resize_idx = script.index(f"set width of theDoc to {plan.canvas[0]}")
+    import_idx = script.index("set tmplDoc to open POSIX file")
+    base_layout_idx = script.index("set base layout of slide")
+    assert resize_idx < import_idx
+    assert resize_idx < base_layout_idx
+
+
+def test_script_canvas_resize_precedes_base_layout_set_without_slide_layout_names():
+    plan = _clip_plan()
+    script = build_assembly_script(
+        plan,
+        scratch_path=Path("/tmp/scratch.key"),
+        staging_path=Path("/tmp/staged.key"),
+        slide_layout_names=None,
+    )
+    resize_idx = script.index(f"set width of theDoc to {plan.canvas[0]}")
+    black_names_idx = script.index("set blackNames to")
+    base_layout_idx = script.index("set base layout of slide")
+    assert resize_idx < black_names_idx
+    assert resize_idx < base_layout_idx
+
+
 def test_script_layout_preserve_touches_nothing():
     plan = _clip_plan()
     script = build_assembly_script(
