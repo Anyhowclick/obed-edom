@@ -1058,6 +1058,47 @@ def test_diagnostics_endpoints_404_when_the_result_path_escapes_the_work_dir(tmp
     assert client.post(f"/api/jobs/{job.id}/diagnostics/reveal").status_code == 404
 
 
+def test_choose_save_script_includes_name_and_location():
+    from obed_edom.web.app import _choose_save_script
+
+    script = _choose_save_script("Export Keynote", "Sunday.key", "/Users/me/Desktop")
+    assert 'choose file name with prompt "Export Keynote"' in script
+    assert 'default name "Sunday.key"' in script
+    assert 'default location (POSIX file "/Users/me/Desktop")' in script
+    assert "POSIX path of theFile" in script
+
+
+def test_choose_save_returns_chosen_path(monkeypatch, tmp_path):
+    dest = tmp_path / "Sunday.key"
+
+    class FakeProc:
+        returncode = 0
+        stdout = str(dest)
+        stderr = ""
+
+    monkeypatch.setattr("obed_edom.web.app.subprocess.run", lambda *a, **k: FakeProc())
+    client = TestClient(app)
+    res = client.post(
+        "/api/choose-save",
+        data={"prompt": "Export Keynote", "default_name": "Sunday.key"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {"path": str(dest), "name": "Sunday.key", "cancelled": False}
+
+
+def test_choose_save_cancel_is_not_an_error(monkeypatch):
+    class FakeProc:
+        returncode = 1
+        stdout = ""
+        stderr = "execution error: User canceled. (-128)"
+
+    monkeypatch.setattr("obed_edom.web.app.subprocess.run", lambda *a, **k: FakeProc())
+    client = TestClient(app)
+    res = client.post("/api/choose-save", data={"prompt": "Export Keynote"})
+    assert res.status_code == 200
+    assert res.json() == {"cancelled": True}
+
+
 def test_diagnostics_endpoints_404_when_the_canonical_file_is_a_symlink():
     """Replacing the canonical `diagnostics.jsonl` with a symlink must not be served
     or revealed, even though its resolved path matches the expected location."""

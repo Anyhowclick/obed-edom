@@ -124,7 +124,7 @@ const overlaysCompile = spawnSync(runtime, [
   "--outDir", overlaysOut, path.join(root, "src/maps/overlays.ts"), path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(overlaysCompile.status, 0, overlaysCompile.stderr || overlaysCompile.stdout);
-const { churchesGeo, churchesLayers, labelPillBucket, LABEL_GAP_EMS, LABEL_PILL_BUCKETS, PILL_PAD_Y_PX, DROP_PIN_SELECTED_SCALE } = require(path.join(overlaysOut, "overlays.js"));
+const { churchesGeo, churchesLayers, labelPillBucket, LABEL_FONT_PX, LABEL_GAP_EMS, LABEL_PILL_BUCKETS, PILL_PAD_Y_PX, DROP_PIN_SELECTED_SCALE } = require(path.join(overlaysOut, "overlays.js"));
 const { defaultLandmarkSize } = require(path.join(overlaysOut, "objects.js"));
 
 test("churchesLayers (churches-dots/-drops/-landmarks) validates with the real maplibre style spec", () => {
@@ -250,7 +250,7 @@ test("labelOffset clears a non-scaling marker past the text-size clamp", () => {
   const props = geo.features[0].properties;
   assert.equal(props.labelScale, 16);
   // Rendered px = |offset em| * clamped text size; the marker's height must fit under it.
-  assert.ok(-props.labelOffset0[1] * 24 * 8 > size * 1.45);
+  assert.ok(-props.labelOffset0[1] * LABEL_FONT_PX * 8 > size * 1.45);
 });
 
 function labelTextOffset() {
@@ -316,17 +316,17 @@ function labelTextSize() {
 test("churches-labels text-size clamps the total scale to 0.5x..8x", () => {
   const evaluate = labelTextSize();
   const props = { labelScale: 1, objectScale: 1, scaleWithMap: true, sizeZoomRef: 8 };
-  assert.equal(evaluate(8, props), 24);
-  assert.equal(evaluate(9, props), 48);
+  assert.equal(evaluate(8, props), LABEL_FONT_PX);
+  assert.equal(evaluate(9, props), LABEL_FONT_PX * 2);
   // 0.25x and 16x of the authored size clamp to 0.5x and 8x.
-  assert.equal(evaluate(6, props), 24 * 0.5);
-  assert.equal(evaluate(12, props), 24 * 8);
+  assert.equal(evaluate(6, props), LABEL_FONT_PX * 0.5);
+  assert.equal(evaluate(12, props), LABEL_FONT_PX * 8);
 });
 
 test("churches-labels text-size clamps a non-scaling feature's authored size too", () => {
   const evaluate = labelTextSize();
-  assert.equal(evaluate(8, { labelScale: 0.25, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0 }), 24 * 0.5);
-  assert.equal(evaluate(8, { labelScale: 16, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0 }), 24 * 8);
+  assert.equal(evaluate(8, { labelScale: 0.25, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0 }), LABEL_FONT_PX * 0.5);
+  assert.equal(evaluate(8, { labelScale: 16, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0 }), LABEL_FONT_PX * 8);
 });
 
 test("labelPillBucket snaps to the nearest registered variant in log2, bounding the error at sqrt(2)", () => {

@@ -83,6 +83,24 @@ def validate_export_dir(raw: str | Path) -> Path:
     return resolved
 
 
+def validate_export_file(raw: str | Path) -> Path:
+    """Resolve an owner-chosen `.key` destination. Parent must be a valid export dir."""
+    resolved = Path(str(raw)).expanduser()
+    if not resolved.is_absolute():
+        raise ValueError(f"Export path must be an absolute path: {raw}")
+    name = resolved.name.strip()
+    if not name or name in {".", ".."}:
+        raise ValueError("Export file name is empty")
+    if resolved.exists() and resolved.is_dir():
+        raise ValueError(f"Export path is a directory: {resolved}")
+    parent = validate_export_dir(resolved.parent)
+    filename = name if name.lower().endswith(".key") else f"{name}.key"
+    dest = parent / filename
+    if not dest.stem.strip():
+        raise ValueError("Export file name is empty")
+    return dest
+
+
 def ensure_export_dir(path: str | Path) -> Path:
     """Re-resolve and re-validate an export directory immediately before a deliverable write.
 

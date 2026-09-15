@@ -21,7 +21,12 @@ const HIGHLIGHT_LAYERS: Array<[string, "fill-opacity" | "line-opacity"]> = [
 
 /** `value === null` restores each layer to its authored (feature-state/id-list driven) opacity
  * expression; any number pins every highlight layer present on `map` to that flat opacity. */
-export function setHighlightOpacity(map: CaptureMapLike, value: number | null, highlights: string[]): void {
+export function setHighlightOpacity(
+  map: CaptureMapLike,
+  value: number | null,
+  highlights: string[],
+  highlightColours?: Record<string, string>
+): void {
   for (const [id, property] of HIGHLIGHT_LAYERS) {
     if (!map.getLayer(id)) continue;
     if (value !== null) {
@@ -33,7 +38,9 @@ export function setHighlightOpacity(map: CaptureMapLike, value: number | null, h
     map.setPaintProperty(
       id,
       property,
-      id.startsWith("admin1") ? admin1PaintExpression(highlights, admin1On) : admin0PaintExpression(admin0On)
+      id.startsWith("admin1")
+        ? admin1PaintExpression(highlights, admin1On, highlightColours)
+        : admin0PaintExpression(admin0On)
     );
   }
 }
@@ -45,9 +52,13 @@ export function isolatePairBaseVisibility(map: CaptureMapLike, highlights: strin
 }
 
 /** The cutout capture's toggle. The isolate mask itself must never bake into either raster, so
- * it is hidden first, unconditionally; the highlight colour only returns for a non-isolated
- * slide (an isolated slide's highlight lives in neither raster, matching the base). */
-export function isolatePairCutoutVisibility(map: CaptureMapLike, highlights: string[], isolated: boolean): void {
+ * it is hidden first, unconditionally; highlight fill then returns so coloured regions land in
+ * the piece. No-fill (`none`) codes stay unpainted via the restored opacity expressions. */
+export function isolatePairCutoutVisibility(
+  map: CaptureMapLike,
+  highlights: string[],
+  highlightColours?: Record<string, string>
+): void {
   if (map.getLayer("isolate-fill")) map.setLayoutProperty("isolate-fill", "visibility", "none");
-  if (!isolated) setHighlightOpacity(map, null, highlights);
+  setHighlightOpacity(map, null, highlights, highlightColours);
 }
