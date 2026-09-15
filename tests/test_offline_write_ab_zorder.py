@@ -31,6 +31,7 @@ from scripts.offline_write_ab import (
 def _zorder_write(**overrides):
     record = {
         "slides": [],
+        "zorderSlides": 0,
         "zorderStatRaised": 0,
         "zorderBadgeRaised": 0,
         "zorderNoop": 0,
@@ -115,6 +116,9 @@ def test_zorder_schema_reasons_missing_or_empty_is_red():
     complete = _zorder_write(slides=[40])
     assert set(complete) >= set(ZORDER_SCHEMA_KEYS)
     assert zorder_schema_reasons(complete) == []
+    no_count = dict(complete)
+    del no_count["zorderSlides"]
+    assert zorder_schema_reasons(no_count)
 
 
 def test_expected_zorder_sets_splits_eligible_reuse_and_refused():
@@ -183,6 +187,22 @@ def test_zorder_write_reasons_red_on_count_not_list():
     )
     assert any("not a slide list" in r and "slides=" in r for r in reasons)
     assert any("not a slide list" in r and "zorderGui=" in r for r in reasons)
+
+
+def test_zorder_write_reasons_red_on_tuple_set_or_empty_string():
+    for slides, gui in (
+        ((40, 55), ()),
+        ({40, 55}, set()),
+        (frozenset({40}), frozenset()),
+        ("", ""),
+    ):
+        reasons = zorder_write_reasons(
+            _zorder_write(slides=slides, zorderGui=gui),
+            {40, 55} if slides != "" else set(),
+            compared_slides=[40, 55] if slides != "" else [],
+        )
+        assert any("not a slide list" in r and "slides=" in r for r in reasons)
+        assert any("not a slide list" in r and "zorderGui=" in r for r in reasons)
 
 
 def test_claimed_patched_slides_count_is_empty_not_crash():

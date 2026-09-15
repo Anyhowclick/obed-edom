@@ -158,7 +158,7 @@ PASS2_WARN_KEYS = ("sigFallback", "badgeFallback")
 ZORDER_ZERO_KEYS = ("zorderRefused", "zorderUnresolved", "zorderLost")
 # Required on arm B when OBED_ZORDER_WRITE=on — missing is not "zero".
 ZORDER_SCHEMA_KEYS = (
-    "slides",
+    "slides", "zorderSlides",
     "zorderStatRaised", "zorderBadgeRaised", "zorderNoop",
     "zorderRefused", "zorderUnresolved", "zorderLost", "zorderGui",
 )
@@ -1346,17 +1346,13 @@ def zorder_counter_reasons(
 
 
 def _as_slide_set(value: Any) -> set[int] | None:
-    """Slide id set from a list-shaped counter. ``None`` if ``value`` is a count."""
-    if value is None:
-        return set()
-    if isinstance(value, (list, tuple, set, frozenset)):
-        try:
-            return {int(s) for s in value}
-        except (TypeError, ValueError):
-            return None
-    if isinstance(value, str) and not value.strip():
-        return set()
-    return None
+    """Slide id set from a ``list``. ``None`` for a count, tuple, set, or string."""
+    if not isinstance(value, list):
+        return None
+    try:
+        return {int(s) for s in value}
+    except (TypeError, ValueError):
+        return None
 
 
 def claimed_patched_slides(zorder_write: dict[str, Any] | None) -> set[int]:
