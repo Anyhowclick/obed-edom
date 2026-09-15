@@ -230,71 +230,110 @@ export async function validateKeynote(
   return res.json();
 }
 
-export type DskSlide = {
-  number: number;
-  class: string;
-  skipped: boolean;
-  thumbnail?: string;
+/** `{slide, include, action, anchor, keepSide, clip}` — matches `DskDecisionsBody` in `web/app.py`. */
+export type DskDecision = {
+  slide: number;
+  include: boolean;
+  action: string;
+  anchor: string;
+  keepSide: boolean;
+  clip: string | null;
 };
 
-export type DskProposal = {
-  id: string;
-  slides: DskSlide[];
+/** One row of a DSK propose result's `pages[]`. */
+export type DskPage = {
+  slide: number;
+  thumb?: string | null;
+  category: string;
+  buildCount: number;
+  movieCount: number;
+  isText: boolean;
+  skipReason?: string | null;
+  needsClip: boolean;
+  decision: DskDecision;
 };
 
-export async function startDsk(keynotePath: string): Promise<DskProposal> {
-  const res = await fetch("/api/dsk", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ keynote: keynotePath }),
-  });
-  if (!res.ok) throw new Error(await readError(res));
-  return res.json();
-}
+export type DskSkip = { slide: number; reason: string };
 
-export async function saveDskDecisions(
-  id: string,
-  slides: Record<string, { include: boolean; clip?: string; anchor?: string; keepSide?: boolean }>
-): Promise<DskProposal> {
-  const res = await fetch(`/api/dsk/${id}/decisions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ slides }),
-  });
-  if (!res.ok) throw new Error(await readError(res));
-  return res.json();
-}
-
-export async function applyDsk(id: string, outDir?: string): Promise<Job> {
-  const res = await fetch(`/api/dsk/${id}/apply`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(outDir ? { outDir } : {}),
-  });
-  if (!res.ok) throw new Error(await readError(res));
-  return res.json();
-}
-
-export function dskThumbUrl(id: string, filename: string): string {
-  return `/api/dsk/${id}/thumb/${encodeURIComponent(filename)}`;
-}
-
-export type DskExportKind = "stages" | "clips";
-
-export async function startDskExport(
-  keynotePath: string,
-  kind: DskExportKind,
-  opts?: { slides?: number[]; outDir?: string }
+/** `POST /api/dsk` — a FORM post; propose is async, so this returns the queued job (poll it). */
+export async function startDsk(
+  path: string,
+  opts?: {
+    referenceDeck?: string;
+    rangeFrom?: number;
+    rangeTo?: number;
+    slides?: number[];
+    contentOnly?: boolean;
+    textSlideWords?: number;
+  }
 ): Promise<Job> {
-  const res = await fetch("/api/dsk/export", {
+  const body = new FormData();
+  body.set("path", path);
+  if (opts?.referenceDeck) body.set("reference_deck", opts.referenceDeck);
+  if (opts?.slides?.length) body.set("slides", opts.slides.join(","));
+  if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
+  if (opts?.rangeTo != null) body.set("range_to", String(opts.rangeTo));
+  body.set("content_only", opts?.contentOnly === false ? "false" : "true");
+  if (opts?.textSlideWords != null) body.set("text_slide_words", String(opts.textSlideWords));
+  const res = await fetch("/api/dsk", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function saveDskDecisions(jobId: string, decisions: DskDecision[]): Promise<Job> {
+  const res = await fetch(`/api/dsk/${jobId}/decisions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      keynote: keynotePath,
-      kind,
-      slides: opts?.slides?.length ? opts.slides : undefined,
-      outDir: opts?.outDir,
-    }),
+    body: JSON.stringify({ decisions }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function applyDsk(jobId: string, decisions?: DskDecision[]): Promise<Job> {
+  const res = await fetch(`/api/dsk/${jobId}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(decisions ? { decisions } : {}),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function dskThumbUrl(jobId: string, filename: string): string {
+  return `/api/dsk/${jobId}/thumb/${encodeURIComponent(filename)}`;
+}
+
+/** `POST /api/dsk/export` — propose; the exporter always stages PNGs (any 1920×1080 DSK deck). */
+export async function startDskExport(
+  path: string,
+  opts?: { rangeFrom?: number; rangeTo?: number; slides?: number[] }
+): Promise<Job> {
+  const body = new FormData();
+  body.set("path", path);
+  if (opts?.slides?.length) body.set("slides", opts.slides.join(","));
+  if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
+  if (opts?.rangeTo != null) body.set("range_to", String(opts.rangeTo));
+  const res = await fetch("/api/dsk/export", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function saveDskExportDecisions(jobId: string, decisions: DskDecision[]): Promise<Job> {
+  const res = await fetch(`/api/dsk/export/${jobId}/decisions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decisions }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function applyDskExport(jobId: string, decisions?: DskDecision[]): Promise<Job> {
+  const res = await fetch(`/api/dsk/export/${jobId}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(decisions ? { decisions } : {}),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

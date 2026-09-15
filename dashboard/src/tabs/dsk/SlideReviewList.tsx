@@ -1,4 +1,4 @@
-import { chooseKeynote, dskThumbUrl, type DskSlide } from "../../api";
+import { chooseKeynote, dskThumbUrl, type DskPage } from "../../api";
 import {
   bulkInclude,
   bulkKeepSide,
@@ -8,38 +8,38 @@ import {
   setInclude,
   setKeepSide,
   type DecisionsMap,
-  type SlideAnchor,
+  type DskAnchor,
 } from "../../dsk/decisions";
 import { FileWell } from "../../components/FileWell";
 
 export function SlideReviewList({
-  proposalId,
-  slides,
+  jobId,
+  pages,
   decisions,
   onChange,
   onOpen,
 }: {
-  proposalId: string;
-  slides: DskSlide[];
+  jobId: string;
+  pages: DskPage[];
   decisions: DecisionsMap;
   onChange: (next: DecisionsMap) => void;
   onOpen: (src: string) => void;
 }) {
-  const numbers = slides.map((s) => s.number);
+  const numbers = pages.map((p) => p.slide);
 
   return (
     <div className="dsk-review">
       <div className="actions">
-        <button className="btn secondary" type="button" onClick={() => onChange(bulkInclude(decisions, slides, numbers, true))}>
+        <button className="btn secondary" type="button" onClick={() => onChange(bulkInclude(decisions, pages, numbers, true))}>
           Include all
         </button>
-        <button className="btn secondary" type="button" onClick={() => onChange(bulkInclude(decisions, slides, numbers, false))}>
+        <button className="btn secondary" type="button" onClick={() => onChange(bulkInclude(decisions, pages, numbers, false))}>
           Include none
         </button>
-        <button className="btn secondary" type="button" onClick={() => onChange(bulkKeepSide(decisions, numbers, true))}>
+        <button className="btn secondary" type="button" onClick={() => onChange(bulkKeepSide(decisions, pages, numbers, true))}>
           Keep side: all
         </button>
-        <button className="btn secondary" type="button" onClick={() => onChange(bulkKeepSide(decisions, numbers, false))}>
+        <button className="btn secondary" type="button" onClick={() => onChange(bulkKeepSide(decisions, pages, numbers, false))}>
           Keep side: none
         </button>
       </div>
@@ -48,7 +48,7 @@ export function SlideReviewList({
           <tr>
             <th>Thumb</th>
             <th>Slide</th>
-            <th>Class</th>
+            <th>Category</th>
             <th>Include</th>
             <th>Action</th>
             <th>Anchor</th>
@@ -57,27 +57,27 @@ export function SlideReviewList({
           </tr>
         </thead>
         <tbody>
-          {slides.map((page) => {
-            const decision = decisions[page.number] || { include: !page.skipped };
-            const disabled = page.skipped;
+          {pages.map((page) => {
+            const decision = decisions[page.slide] || { include: !page.isText, action: "in_deck", anchor: "auto", keepSide: false, clip: null };
+            const disabled = page.isText;
             return (
-              <tr key={page.number} className={disabled ? "dsk-row-skipped" : undefined}>
+              <tr key={page.slide} className={disabled ? "dsk-row-skipped" : undefined}>
                 <td>
-                  {page.thumbnail ? (
+                  {page.thumb ? (
                     <button
                       type="button"
                       className="thumb-btn"
-                      onClick={() => onOpen(dskThumbUrl(proposalId, page.thumbnail!))}
+                      onClick={() => onOpen(dskThumbUrl(jobId, page.thumb!))}
                     >
-                      <img src={dskThumbUrl(proposalId, page.thumbnail)} alt={`Slide ${page.number}`} />
+                      <img src={dskThumbUrl(jobId, page.thumb)} alt={`Slide ${page.slide}`} />
                     </button>
                   ) : (
                     <span className="note">—</span>
                   )}
                 </td>
-                <td>{page.number}</td>
+                <td>{page.slide}</td>
                 <td>
-                  {page.class}
+                  {page.category}
                   {disabled && <span className="chip">text slide — benched</span>}
                 </td>
                 <td>
@@ -85,16 +85,17 @@ export function SlideReviewList({
                     type="checkbox"
                     checked={decision.include}
                     disabled={disabled}
-                    onChange={(e) => onChange(setInclude(decisions, slides, page.number, e.target.checked))}
+                    onChange={(e) => onChange(setInclude(decisions, pages, page.slide, e.target.checked))}
                   />
                 </td>
-                <td>{disabled ? "skip" : "in deck"}</td>
+                <td>{disabled ? "skip" : needsClip(page) ? "clip + deck" : "in deck"}</td>
                 <td>
                   <select
-                    value={decision.anchor || "centre"}
+                    value={decision.anchor || "auto"}
                     disabled={disabled}
-                    onChange={(e) => onChange(setAnchor(decisions, page.number, e.target.value as SlideAnchor))}
+                    onChange={(e) => onChange(setAnchor(decisions, pages, page.slide, e.target.value as DskAnchor))}
                   >
+                    <option value="auto">Auto</option>
                     <option value="centre">Centre</option>
                     <option value="left">Left</option>
                     <option value="right">Right</option>
@@ -105,7 +106,7 @@ export function SlideReviewList({
                     type="checkbox"
                     checked={!!decision.keepSide}
                     disabled={disabled}
-                    onChange={(e) => onChange(setKeepSide(decisions, page.number, e.target.checked))}
+                    onChange={(e) => onChange(setKeepSide(decisions, pages, page.slide, e.target.checked))}
                   />
                 </td>
                 <td>
@@ -115,11 +116,11 @@ export function SlideReviewList({
                       hint="Choose .mov clip"
                       file={decision.clip ? { path: decision.clip, name: decision.clip.split("/").pop() || decision.clip } : null}
                       onChoose={async () => {
-                        const chosen = await chooseKeynote(`Clip for slide ${page.number}`).catch(() => null);
-                        if (chosen) onChange(setClip(decisions, page.number, chosen.path));
+                        const chosen = await chooseKeynote(`Clip for slide ${page.slide}`).catch(() => null);
+                        if (chosen) onChange(setClip(decisions, pages, page.slide, chosen.path));
                       }}
-                      onPath={(path) => onChange(setClip(decisions, page.number, path))}
-                      onClear={() => onChange(setClip(decisions, page.number, undefined))}
+                      onPath={(path) => onChange(setClip(decisions, pages, page.slide, path))}
+                      onClear={() => onChange(setClip(decisions, pages, page.slide, null))}
                     />
                   ) : (
                     <span className="note">—</span>

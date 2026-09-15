@@ -1,44 +1,102 @@
-import { useState } from "react";
-import { applyDsk, chooseFolder, chooseKeynote, evidenceUrl, pollJob, reveal, saveDskDecisions, startDsk, type ChosenFile, type DskProposal, type Job } from "../../api";
+import { useEffect, useState } from "react";
+import {
+  applyDsk,
+  chooseKeynote,
+  pollJob,
+  reveal,
+  saveDskDecisions,
+  startDsk,
+  type ChosenFile,
+  type DskPage,
+  type DskSkip,
+} from "../../api";
 import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
-import { Lightbox, LoadingOverlay, PreviewGrid } from "../../components/PreviewGrid";
+import { LoadingOverlay, Lightbox } from "../../components/PreviewGrid";
 import { buildDecisionsMap, toDecisionsPayload, type DecisionsMap } from "../../dsk/decisions";
 import { SlideReviewList } from "./SlideReviewList";
+import { useCurrentJob } from "../../sessions";
 
-type ApplyResult = {
-  deck?: string;
-  assetsDir?: string;
-  previews?: string[];
-  skipped?: { slide: number; reason: string }[];
+function parseSlideSpec(raw: string): number[] | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const out = new Set<number>();
+  for (const chunk of trimmed.split(",")) {
+    const token = chunk.trim();
+    if (!token) continue;
+    const single = token.match(/^(\d+)$/);
+    if (single) {
+      out.add(Number(single[1]));
+      continue;
+    }
+    const m = token.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+    if (!m) continue;
+    for (let n = Number(m[1]); n <= Number(m[2]); n++) out.add(n);
+  }
+  return out.size ? [...out].sort((a, b) => a - b) : undefined;
+}
+
+type DskResult = {
+  phase?: "review" | "done";
+  path?: string;
+  pages?: DskPage[];
+  skipped?: DskSkip[];
+  deckPath?: string;
+  slidesKept?: number[];
   warnings?: string[];
+  overflows?: string[];
 };
 
 export function DskGenerator() {
+  const { job, upsert, error: openError } = useCurrentJob("dsk");
   const [keynote, setKeynote] = useState<ChosenFile | null>(null);
-  const [outDir, setOutDir] = useState<ChosenFile | null>(null);
-  const [proposal, setProposal] = useState<DskProposal | null>(null);
+  const [referenceDeck, setReferenceDeck] = useState<ChosenFile | null>(null);
+  const [range, setRange] = useState("");
   const [decisions, setDecisions] = useState<DecisionsMap>({});
-  const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
 
-  const applyResult = (job?.result || undefined) as ApplyResult | undefined;
+  const result = (job?.result || undefined) as DskResult | undefined;
+  const pages = result?.pages || [];
+  const skipped = result?.skipped || [];
+
+  useEffect(() => {
+    const path = result?.path;
+    if (path) setKeynote({ path, name: path.split("/").pop() || path });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.id, result?.path]);
+
+  useEffect(() => {
+    if (result?.phase === "review") setDecisions(buildDecisionsMap(pages));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.id]);
+
+  async function track(created: { id: string }) {
+    const done = await pollJob(created.id, (tick) => {
+      setLogs(tick.logs);
+      upsert(tick);
+    });
+    upsert(done);
+    if (done.status === "error") setError(done.error || "DSK job failed.");
+    return done;
+  }
 
   async function propose() {
     if (!keynote) {
-      setError("Choose the finalised FW/LW Keynote first.");
+      setError("Choose the finalised FW (7680×1080) Keynote first.");
       return;
     }
     setError(null);
     setBusy(true);
     try {
-      const result = await startDsk(keynote.path);
-      setProposal(result);
-      setDecisions(buildDecisionsMap(result.slides));
-      setJob(null);
+      const created = await startDsk(keynote.path, {
+        referenceDeck: referenceDeck?.path,
+        slides: parseSlideSpec(range),
+      });
+      upsert(created);
+      await track(created);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -48,36 +106,29 @@ export function DskGenerator() {
 
   async function saveDecisions(next: DecisionsMap) {
     setDecisions(next);
-    if (!proposal) return;
+    if (!job) return;
     try {
-      await saveDskDecisions(proposal.id, toDecisionsPayload(next).slides);
+      upsert(await saveDskDecisions(job.id, toDecisionsPayload(next)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function run() {
-    if (!proposal) return;
+    if (!job) return;
     setError(null);
     setBusy(true);
     try {
-      await saveDskDecisions(proposal.id, toDecisionsPayload(decisions).slides);
-      const created = await applyDsk(proposal.id, outDir?.path);
-      setJob(created);
-      const done = await pollJob(created.id, (tick) => {
-        setLogs(tick.logs);
-        setJob(tick);
-      });
-      setJob(done);
-      if (done.status === "error") setError(done.error || "DSK generation failed.");
+      await saveDskDecisions(job.id, toDecisionsPayload(decisions));
+      const created = await applyDsk(job.id, toDecisionsPayload(decisions));
+      upsert(created);
+      await track(created);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
   }
-
-  const previewUrls = (applyResult?.previews || []).map((src) => ({ src }));
 
   return (
     <div>
@@ -87,12 +138,12 @@ export function DskGenerator() {
       </p>
       <div className="row">
         <FileWell
-          label="Finalised FW / LW .key"
-          hint="The source wall deck"
+          label="Finalised FW .key"
+          hint="The source 7680×1080 wall deck"
           file={keynote}
           onChoose={async () => {
             try {
-              setKeynote(await chooseKeynote("Finalised FW or LW Keynote"));
+              setKeynote(await chooseKeynote("Finalised FW Keynote"));
             } catch (e) {
               setError(e instanceof Error ? e.message : String(e));
             }
@@ -101,35 +152,47 @@ export function DskGenerator() {
           onError={setError}
         />
         <FileWell
-          label="Output folder (optional)"
-          hint="Defaults to output/<stem>/dsk"
-          file={outDir}
+          label="Reference deck (optional)"
+          hint="Layout import source; leave blank for the built-in DSK layouts"
+          file={referenceDeck}
           onChoose={async () => {
             try {
-              setOutDir(await chooseFolder("Output folder for the DSK deck"));
+              setReferenceDeck(await chooseKeynote("Reference Keynote for layout import"));
             } catch (e) {
               setError(e instanceof Error ? e.message : String(e));
             }
           }}
-          onPath={(path) => setOutDir({ path, name: path.split("/").pop() || path })}
-          onClear={() => setOutDir(null)}
+          onPath={(path) => setReferenceDeck({ path, name: path.split("/").pop() || path })}
+          onClear={() => setReferenceDeck(null)}
           onError={setError}
         />
       </div>
+      <label className="field">
+        Slides — leave blank for the whole deck
+        <input
+          type="text"
+          value={range}
+          onChange={(e) => setRange(e.target.value)}
+          placeholder="All slides (or 2, or 2, 4-6)"
+        />
+      </label>
       <div className="actions">
         <button className="btn" type="button" disabled={!keynote || busy} onClick={propose}>
           Propose
         </button>
       </div>
-      {proposal && (
+      {result?.phase === "review" && job && (
         <>
           <SlideReviewList
-            proposalId={proposal.id}
-            slides={proposal.slides}
+            jobId={job.id}
+            pages={pages}
             decisions={decisions}
             onChange={saveDecisions}
             onOpen={setOpen}
           />
+          {skipped.length > 0 && (
+            <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
+          )}
           <div className="actions">
             <button className="btn" type="button" disabled={busy} onClick={run}>
               Run
@@ -137,29 +200,26 @@ export function DskGenerator() {
           </div>
         </>
       )}
-      <ErrorNotice message={error} onDismiss={() => setError(null)} />
+      <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Building the DSK deck…" logs={logs} />}
-      {applyResult?.deck && (
+      {result?.phase === "done" && result.deckPath && (
         <>
-          <p className="note path-note">Wrote {applyResult.deck}</p>
-          {applyResult.assetsDir && <p className="note path-note">Assets in {applyResult.assetsDir}</p>}
+          <p className="note path-note">
+            Wrote {result.deckPath}
+            {result.slidesKept ? ` — ${result.slidesKept.length} slide(s)` : ""}
+          </p>
           <div className="actions">
-            <button className="btn secondary" type="button" onClick={() => reveal(applyResult.deck!)}>
+            <button className="btn secondary" type="button" onClick={() => reveal(result.deckPath!)}>
               Show in Finder
             </button>
           </div>
-          {(applyResult.skipped || []).length > 0 && (
-            <p className="note">
-              Skipped: {applyResult.skipped!.map((s) => `${s.slide} (${s.reason})`).join(", ")}
-            </p>
+          {skipped.length > 0 && (
+            <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
           )}
-          {(applyResult.warnings || []).length > 0 && (
-            <p className="note">{applyResult.warnings!.join(" · ")}</p>
+          {(result.warnings || []).length > 0 && <p className="note">{result.warnings!.join(" · ")}</p>}
+          {(result.overflows || []).length > 0 && (
+            <p className="note">Overflow on slide(s): {result.overflows!.join(", ")}</p>
           )}
-          <PreviewGrid
-            urls={job ? previewUrls.map((u) => ({ src: u.src.startsWith("/") || u.src.startsWith("http") ? u.src : evidenceUrl(job.id, u.src) })) : previewUrls}
-            onOpen={setOpen}
-          />
         </>
       )}
       <Lightbox src={open} onClose={() => setOpen(null)} />

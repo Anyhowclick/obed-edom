@@ -25,72 +25,90 @@ const {
   toDecisionsPayload,
 } = require(path.join(out, "decisions.js"));
 
-const SLIDES = [
-  { number: 3, class: "static", skipped: false },
-  { number: 7, class: "movie", skipped: false },
-  { number: 9, class: "mixed", skipped: false },
-  { number: 13, class: "verse", skipped: true },
+// Shape matches `pages[]` from `_run_dsk_propose` in `web/app.py`.
+const PAGES = [
+  { slide: 3, category: "static", isText: false, needsClip: false },
+  { slide: 7, category: "movie", isText: false, needsClip: true },
+  { slide: 9, category: "mixed", isText: false, needsClip: true },
+  { slide: 13, category: "static", isText: true, needsClip: false },
 ];
 
-test("default decisions include everything except skipped text slides", () => {
-  const map = buildDecisionsMap(SLIDES);
+test("default decisions include everything except text slides", () => {
+  const map = buildDecisionsMap(PAGES);
   assert.equal(map[3].include, true);
   assert.equal(map[7].include, true);
   assert.equal(map[9].include, true);
   assert.equal(map[13].include, false);
 });
 
-test("needsClip is true only for movie/mixed classes", () => {
-  assert.equal(needsClip(SLIDES[0]), false);
-  assert.equal(needsClip(SLIDES[1]), true);
-  assert.equal(needsClip(SLIDES[2]), true);
-  assert.equal(needsClip(SLIDES[3]), false);
+test("default action is 'both' only for clip-bearing categories", () => {
+  const map = buildDecisionsMap(PAGES);
+  assert.equal(map[3].action, "in_deck");
+  assert.equal(map[7].action, "both");
+  assert.equal(map[9].action, "both");
 });
 
-test("a skipped slide can never be included, even if asked to", () => {
-  let map = buildDecisionsMap(SLIDES);
-  map = setInclude(map, SLIDES, 13, true);
+test("needsClip mirrors the page's own needsClip flag from the API", () => {
+  assert.equal(needsClip(PAGES[0]), false);
+  assert.equal(needsClip(PAGES[1]), true);
+  assert.equal(needsClip(PAGES[2]), true);
+  assert.equal(needsClip(PAGES[3]), false);
+});
+
+test("a page already carrying a server decision seeds the map from it verbatim", () => {
+  const withDecision = [
+    { slide: 3, category: "static", isText: false, needsClip: false, decision: { slide: 3, include: false, action: "in_deck", anchor: "left", keepSide: true, clip: null } },
+  ];
+  const map = buildDecisionsMap(withDecision);
+  assert.equal(map[3].include, false);
+  assert.equal(map[3].anchor, "left");
+  assert.equal(map[3].keepSide, true);
+});
+
+test("a text slide can never be included, even if asked to", () => {
+  let map = buildDecisionsMap(PAGES);
+  map = setInclude(map, PAGES, 13, true);
   assert.equal(map[13].include, false);
 });
 
-test("bulkInclude respects the skipped invariant across the set", () => {
-  let map = buildDecisionsMap(SLIDES);
-  map = bulkInclude(map, SLIDES, [3, 7, 9, 13], true);
+test("bulkInclude respects the text-slide invariant across the set", () => {
+  let map = buildDecisionsMap(PAGES);
+  map = bulkInclude(map, PAGES, [3, 7, 9, 13], true);
   assert.equal(map[3].include, true);
   assert.equal(map[13].include, false);
-  map = bulkInclude(map, SLIDES, [3, 7, 9, 13], false);
+  map = bulkInclude(map, PAGES, [3, 7, 9, 13], false);
   assert.equal(map[3].include, false);
   assert.equal(map[7].include, false);
 });
 
 test("bulkKeepSide toggles keepSide for every listed slide", () => {
-  let map = buildDecisionsMap(SLIDES);
-  map = bulkKeepSide(map, [3, 7], true);
+  let map = buildDecisionsMap(PAGES);
+  map = bulkKeepSide(map, PAGES, [3, 7], true);
   assert.equal(map[3].keepSide, true);
   assert.equal(map[7].keepSide, true);
-  assert.equal(map[9].keepSide, undefined);
+  assert.equal(map[9].keepSide, false);
 });
 
 test("setClip and setAnchor update only the targeted slide", () => {
-  let map = buildDecisionsMap(SLIDES);
-  map = setClip(map, 7, "/tmp/clip.mov");
-  map = setAnchor(map, 9, "left");
+  let map = buildDecisionsMap(PAGES);
+  map = setClip(map, PAGES, 7, "/tmp/clip.mov");
+  map = setAnchor(map, PAGES, 9, "left");
   assert.equal(map[7].clip, "/tmp/clip.mov");
   assert.equal(map[9].anchor, "left");
-  assert.equal(map[3].clip, undefined);
+  assert.equal(map[3].clip, null);
 });
 
 test("setKeepSide flips the flag for one slide", () => {
-  let map = buildDecisionsMap(SLIDES);
-  map = setKeepSide(map, 3, true);
+  let map = buildDecisionsMap(PAGES);
+  map = setKeepSide(map, PAGES, 3, true);
   assert.equal(map[3].keepSide, true);
-  assert.equal(map[7].keepSide, undefined);
+  assert.equal(map[7].keepSide, false);
 });
 
-test("toDecisionsPayload maps slide numbers to string keys, matching the API contract", () => {
-  const map = buildDecisionsMap(SLIDES);
+test("toDecisionsPayload flattens the map to a slide-sorted LIST, matching the API contract", () => {
+  const map = buildDecisionsMap(PAGES);
   const payload = toDecisionsPayload(map);
-  assert.deepEqual(Object.keys(payload.slides).sort(), ["13", "3", "7", "9"]);
-  assert.equal(payload.slides["3"].include, true);
-  assert.equal(payload.slides["13"].include, false);
+  assert.deepEqual(payload.map((d) => d.slide), [3, 7, 9, 13]);
+  assert.equal(payload.find((d) => d.slide === 3).include, true);
+  assert.equal(payload.find((d) => d.slide === 13).include, false);
 });
