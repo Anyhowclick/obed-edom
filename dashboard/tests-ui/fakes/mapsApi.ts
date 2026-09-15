@@ -12,6 +12,7 @@ type GetJobArgs = Parameters<typeof actual.getJob>;
 type BootstrapRowsArgs = Parameters<typeof actual.bootstrapMapsRows>;
 type PollJobArgs = Parameters<typeof actual.pollJob>;
 type ExportMapsArgs = Parameters<typeof actual.exportMaps>;
+type ChooseSaveArgs = Parameters<typeof actual.chooseSave>;
 
 let saveConflictOnce: { conflict: MapsStateConflict } | null = null;
 let saveCalls: Array<{ id: string; document: Record<string, unknown>; expectedRevision: number }> = [];
@@ -36,6 +37,8 @@ let pollJobResolution: Job | null = null;
 let exportPlanResolution: MapsExportPlan | null = null;
 let exportMapsCalls: Array<{ id: string; body: ExportMapsArgs[1] }> = [];
 let exportMapsResolution: Job | null = null;
+let chooseSaveResolution: Awaited<ReturnType<typeof actual.chooseSave>> = { path: "/tmp/exports/maps.key", name: "maps.key" };
+let chooseSaveCalls: ChooseSaveArgs[] = [];
 let cancelMapsExportCalls: string[] = [];
 let planMapsTilesResolution = { ok: true, rels: [] as string[], tiles: 0, cached: 0, capped: false, cameras: 0, camerasUsed: 0 };
 let prefetchMapsTilesResolution = { ok: true, tiles: 0, cached: 0, fetched: 0, failed: 0 };
@@ -117,6 +120,11 @@ export const exportMaps = vi.fn<typeof actual.exportMaps>(async (id: ExportMapsA
   return exportMapsResolution ?? makeJob({ id });
 });
 
+export const chooseSave = vi.fn<typeof actual.chooseSave>(async (...args: ChooseSaveArgs) => {
+  chooseSaveCalls.push(args);
+  return chooseSaveResolution;
+});
+
 export const cancelMapsExport = vi.fn<typeof actual.cancelMapsExport>(async (id: string): Promise<Job> => {
   cancelMapsExportCalls.push(id);
   return makeJob({ id });
@@ -171,6 +179,8 @@ export function resetMapsApiScript() {
   exportPlanResolution = null;
   exportMapsCalls = [];
   exportMapsResolution = null;
+  chooseSaveCalls = [];
+  chooseSaveResolution = { path: "/tmp/exports/maps.key", name: "maps.key" };
   cancelMapsExportCalls = [];
   planMapsTilesResolution = { ok: true, rels: [], tiles: 0, cached: 0, capped: false, cameras: 0, camerasUsed: 0 };
   prefetchMapsTilesResolution = { ok: true, tiles: 0, cached: 0, fetched: 0, failed: 0 };
@@ -182,6 +192,7 @@ export function resetMapsApiScript() {
   pollJob.mockClear();
   fetchMapsExportPlan.mockClear();
   exportMaps.mockClear();
+  chooseSave.mockClear();
   cancelMapsExport.mockClear();
   planMapsTiles.mockClear();
   prefetchMapsTiles.mockClear();
@@ -256,6 +267,14 @@ export const mapsApiScript = {
     },
     get calls() {
       return exportMapsCalls;
+    },
+  },
+  chooseSave: {
+    resolve(value: Awaited<ReturnType<typeof actual.chooseSave>>) {
+      chooseSaveResolution = value;
+    },
+    get calls() {
+      return chooseSaveCalls;
     },
   },
   cancelMapsExport: {

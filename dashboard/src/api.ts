@@ -67,6 +67,22 @@ export async function chooseFolder(prompt: string): Promise<ChosenFile> {
   return res.json();
 }
 
+export async function chooseSave(opts: {
+  prompt: string;
+  defaultName: string;
+  defaultLocation?: string;
+}): Promise<ChosenFile | null> {
+  const body = new FormData();
+  body.set("prompt", opts.prompt);
+  body.set("default_name", opts.defaultName);
+  if (opts.defaultLocation) body.set("default_location", opts.defaultLocation);
+  const res = await fetch("/api/choose-save", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json()) as ChosenFile & { cancelled?: boolean };
+  if (data.cancelled) return null;
+  return { path: data.path, name: data.name };
+}
+
 export async function resolveDrop(name: string, size?: number): Promise<ChosenFile> {
   const body = new FormData();
   body.set("name", name);
@@ -754,7 +770,7 @@ export async function addMapsLandmark(id: string, slideId: string, audience: "lw
   return { job: job as Job, churchId };
 }
 
-export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean; exportDir?: string; credits?: string[] }): Promise<Job> {
+export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean; exportDir?: string; exportPath?: string; credits?: string[] }): Promise<Job> {
   const res = await fetch(`/api/maps/${id}/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

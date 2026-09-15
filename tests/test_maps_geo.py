@@ -151,6 +151,7 @@ def test_highlight_colours_key_is_order_independent_and_normalises_hex():
     assert highlight_colours_key({}) == ""
     assert highlight_colours_key({"highlightColours": {}}) == ""
     assert highlight_colours_key({"highlightColours": {"NOPE": "#00aaff"}}) == ""
+    assert highlight_colours_key({"highlightColours": {"MYS": "none", "SGP": "#0A84FF"}}) == "MYS:none,SGP:#0a84ff"
 
 
 def test_infer_hop_kind_cut_on_highlight_colours():
@@ -171,6 +172,10 @@ def test_infer_hop_kind_cut_on_highlight_colours():
         {**same, "highlightColours": {"SGP": "#ff0000"}},
     ) == "cut"
     assert infer_hop_kind(same, {**same, "highlightColours": {"SGP": "#00aaff"}}) == "cut"
+    assert infer_hop_kind(
+        {**same, "highlightColours": {"SGP": "none"}},
+        {**same, "highlightColours": {"SGP": "#00aaff"}},
+    ) == "cut"
     assert infer_hop_kind(same, {**same, "highlightColours": {}}) == "morph"
 
 
@@ -210,7 +215,7 @@ def test_infer_hop_kind_allows_matching_rotation_and_zoom_delta_two():
 
 
 def test_default_hidden_layers_hides_roadnames_arrows_labels_and_boundaries():
-    assert DEFAULT_HIDDEN_LAYERS == ("roadnames", "arrows", "labels", "boundaries")
+    assert DEFAULT_HIDDEN_LAYERS == ("roadnames", "arrows", "labels", "waternames", "boundaries")
     no_deck = {"slides": [{"id": "s1", "hiddenLayers": None}]}
     assert inherit_hidden_layers(no_deck)["slides"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
 

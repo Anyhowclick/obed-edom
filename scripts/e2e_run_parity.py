@@ -20,7 +20,7 @@ ONE benign divergence — LW slide 21's masked/flipped photo reads `photo.rotate
 (offline, composed 354°) vs `photo.differs` (JXA), same slide + severity. That is
 the documented angle-composition edge (why rotation is out of the digest), not a
 regression. A DIFFERENT or ADDITIONAL divergence is the thing to investigate.
-See .agents/plans/checker_offline_geometry.plan.md → "Probe results".
+See .agents/plans/checker.plan.md → "Probe results".
 """
 
 from __future__ import annotations

@@ -261,6 +261,35 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "No folder selected")
         return {"path": path, "name": Path(path).name}
 
+    @app.post("/api/choose-save")
+    def choose_save(
+        prompt: str = Form("Export Keynote"),
+        default_name: str = Form("untitled.key"),
+        default_location: str = Form(""),
+    ) -> dict:
+        loc = default_location.strip()
+        if loc:
+            candidate = Path(loc).expanduser()
+            if not candidate.is_dir():
+                loc = ""
+        script = _choose_save_script(prompt, default_name, loc)
+        proc = subprocess.run(
+            ["osascript", "-"],
+            input=script,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            msg = (proc.stderr or proc.stdout or "Cancelled").strip()
+            if "cancel" in msg.lower():
+                return {"cancelled": True}
+            raise HTTPException(400, msg)
+        path = (proc.stdout or "").strip()
+        if not path:
+            raise HTTPException(400, "No file selected")
+        return {"path": path, "name": Path(path).name, "cancelled": False}
+
     @app.post("/api/resolve-drop")
     def resolve_drop(name: str = Form(...), size: int | None = Form(None)) -> dict:
         found = resolve_dropped_keynote(name, size)
@@ -950,6 +979,21 @@ def create_app() -> FastAPI:
 
 def _as_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _choose_save_script(prompt: str, default_name: str, default_location: str = "") -> str:
+    """AppleScript for the standard Finder save panel (`choose file name`)."""
+    name = Path(default_name).name or "untitled.key"
+    cmd = (
+        f'set theFile to choose file name with prompt "{_as_escape(prompt)}" '
+        f'default name "{_as_escape(name)}"'
+    )
+    loc = (default_location or "").strip()
+    if loc:
+        resolved = Path(loc).expanduser()
+        if resolved.is_absolute():
+            cmd += f' default location (POSIX file "{_as_escape(str(resolved))}")'
+    return f"{cmd}\nPOSIX path of theFile"
 
 
 def _diagnostics_path(job_id: str) -> Path:
