@@ -43,17 +43,19 @@ Templates are always dropped (there is no bundled template folder), so
 thumbnails cannot be pre-baked. Keynote's `export` works on documents, not layouts:
 
 1. Copy the dropped template to a scratch path (never touch the original).
-2. Enumerate layouts — `remap_keynote.js` has the pattern (`doc.slideLayouts()`,
-   `layoutNames()`, ~lines 543-567).
-3. Append one empty slide per layout with `{base slide: theMaster}`, as
-   `keynote.py` ~line 792 does.
+2. Enumerate layouts — `remap_keynote.js` `layoutNames(doc)` (`doc.slideLayouts()`); the
+   offline reader has the same list via `dsk_live._theme_layout_slides`.
+3. Append one empty slide per layout with `make new slide with properties {base slide:theMaster}`,
+   the idiom `keynote.py`'s deck builder already emits.
 4. Export slide images, keep one PNG per layout name, discard the scratch deck.
 5. Cache under `<cache root>/layouts/{template_digest}/`, reusing `deck_digest()` and
    the `INSPECT_VERSION` discipline in `baseline.py`. Cache root is `.cache/` at the
    repo root now, not under `output/`.
 
-New endpoint `GET /api/template-layouts` taking a template path, returning layout
-names, thumbnail URLs, and the cues each layout is reachable from. Layouts no cue
+Thumbnail generation is a Keynote job, so it is a job-backed `POST /api/template-layouts`
+(template path in the form body; queued on the single job worker, refused while Keynote is
+open, like `/api/dsk`) whose result carries layout names, thumbnail URLs, and the cues each
+layout is reachable from; a plain `GET` only serves an already-cached result by digest. Layouts no cue
 reaches are returned as unmapped — that list is the honest answer to "what can the
 template do that the tool cannot ask for". Both capabilities were probed on 15.3.1
 and are present (`doc.slideLayouts()` works; `doc.masterSlides()` raises in JXA but
