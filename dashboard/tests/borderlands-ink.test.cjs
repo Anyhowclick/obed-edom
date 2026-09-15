@@ -299,16 +299,20 @@ test("antimeridian-adjacent contours stay local", () => {
   }
 });
 
-test("Suntec hall keeps an outer contour and no panel grid", () => {
+test("Suntec hall keeps an outer contour; roof panels ink as a grid with no posts", () => {
   const hall = suntec.features[0];
   const segs = planBuildingFacade(hall);
   assert.ok(roofs(segs).length >= 3);
   const panels = [];
-  for (let i = 0; i < 71; i++) {
-    panels.push(rect(103.857 + (i % 10) * 0.00005, 1.2934 + Math.floor(i / 10) * 0.00005, 0, 0, 4, 4));
+  for (let i = 0; i < 16; i++) {
+    const x = (i % 4) * 8;
+    const y = Math.floor(i / 4) * 8;
+    panels.push(rect(SG.lng, SG.lat, x, y, x + 8, y + 8));
   }
-  const grid = planBuildingFacade(feature(panels, { render_height: 33, render_min_height: 28 }, { type: "MultiPolygon", id: "3930904030" }));
-  assert.equal(grid.length, 0);
+  const grid = planBuildingsInk([feature(panels, { render_height: 33, render_min_height: 28 }, { type: "MultiPolygon", id: "3930904030" })]);
+  assert.ok(roofs(grid.segs).length >= 16);
+  assert.equal(posts(grid.segs).length, 0);
+  assert.ok(grid.diagnostics.sharedEdgesRemoved >= 1);
 });
 
 test("substantial elevated volumes stay eligible", () => {
@@ -351,15 +355,29 @@ test("sampled first/middle/last collision still keeps distinct rings", () => {
   assert.notEqual(inkFragmentKey(7, [a]), inkFragmentKey(7, [b]));
 });
 
-test("shared coincident edges drop only the interior seam", () => {
+test("shared coincident edges keep the interior seam on the roof only", () => {
   const left = feature(rect(SG.lng, SG.lat, 0, 0, 20, 20), { render_height: 16, render_min_height: 0 }, { id: "L" });
   const right = feature(rect(SG.lng, SG.lat, 20, 0, 40, 20), { render_height: 16, render_min_height: 0 }, { id: "R" });
   const planned = planBuildingsInk([left, right]);
   assert.equal(planned.diagnostics.sharedEdgesRemoved >= 1, true);
-  assert.ok(roofs(planned.segs).length >= 6);
+  assert.ok(roofs(planned.segs).length >= 7);
+  const cos = Math.cos(SG.lat * Math.PI / 180);
+  const seam = roofs(planned.segs).filter((seg) => {
+    const e0 = (seg.a[0] - SG.lng) * M * cos;
+    const e1 = (seg.b[0] - SG.lng) * M * cos;
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    return Math.abs((e0 + e1) / 2 - 20) < 1 && Math.min(n0, n1) < 5 && Math.max(n0, n1) > 15;
+  });
+  assert.equal(seam.length, 1);
+  assert.equal(posts(planned.segs).filter((seg) => {
+    const e = (seg.a[0] - SG.lng) * M * cos;
+    const n = (seg.a[1] - SG.lat) * M;
+    return Math.abs(e - 20) < 0.5 && n > 4 && n < 16;
+  }).length, 0);
 });
 
-test("T-junction shared spans are omitted from the planned roof mesh", () => {
+test("T-junction shared spans stay on the roof without a 60 m leftover contour", () => {
   const long = feature(rect(SG.lng, SG.lat, 0, 0, 60, 10), { render_height: 16, render_min_height: 0 }, { id: "LONG" });
   const stub = feature(rect(SG.lng, SG.lat, 20, 10, 30, 20), { render_height: 16, render_min_height: 0 }, { id: "STUB" });
   const { components } = geo.normalizeBuildings([long, stub]);
@@ -373,7 +391,7 @@ test("T-junction shared spans are omitted from the planned roof mesh", () => {
   const planned = planBuildingsInk([long, stub]);
   assert.ok(planned.diagnostics.sharedEdgesRemoved >= 1);
   const cos = Math.cos(SG.lat * Math.PI / 180);
-  const seam = roofs(planned.segs).filter((seg) => {
+  const alongSeam = roofs(planned.segs).filter((seg) => {
     const e0 = (seg.a[0] - SG.lng) * M * cos;
     const e1 = (seg.b[0] - SG.lng) * M * cos;
     const n0 = (seg.a[1] - SG.lat) * M;
@@ -381,7 +399,16 @@ test("T-junction shared spans are omitted from the planned roof mesh", () => {
     if (Math.abs(n0 - 10) > 1 || Math.abs(n1 - 10) > 1) return false;
     return Math.min(e0, e1) < 24 && Math.max(e0, e1) > 26;
   });
-  assert.equal(seam.length, 0);
+  assert.ok(alongSeam.some((seg) => {
+    const e0 = (seg.a[0] - SG.lng) * M * cos;
+    const e1 = (seg.b[0] - SG.lng) * M * cos;
+    return Math.max(e0, e1) - Math.min(e0, e1) < 15;
+  }));
+  assert.equal(alongSeam.filter((seg) => {
+    const e0 = (seg.a[0] - SG.lng) * M * cos;
+    const e1 = (seg.b[0] - SG.lng) * M * cos;
+    return Math.min(e0, e1) < 5 && Math.max(e0, e1) > 55;
+  }).length, 0);
 });
 
 function touchingGrid(count, cols) {
@@ -393,6 +420,124 @@ function touchingGrid(count, cols) {
   }
   return features;
 }
+
+test("axis-aligned clip rails that line up through many buildings are not inked", () => {
+  const line = 40;
+  const north = [0, 50, 100].map((x) =>
+    feature(rect(SG.lng, SG.lat, x, line, x + 20, line + 20), { render_height: 20, render_min_height: 0 }, { id: `n${x}` }),
+  );
+  const south = [0, 50, 100].map((x) =>
+    feature(rect(SG.lng, SG.lat, x, line - 20, x + 20, line), { render_height: 20, render_min_height: 0 }, { id: `s${x}` }),
+  );
+  const planned = planBuildingsInk([...north, ...south]);
+  const cos = Math.cos(SG.lat * Math.PI / 180);
+  const onLine = roofs(planned.segs).filter((seg) => {
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    return Math.abs(n0 - line) < 1 && Math.abs(n1 - line) < 1;
+  });
+  assert.equal(onLine.length, 0);
+  assert.ok(roofs(planned.segs).length >= 18);
+  const two = planBuildingsInk([north[0], south[0]]);
+  const seam = roofs(two.segs).filter((seg) => {
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    const e0 = (seg.a[0] - SG.lng) * M * cos;
+    const e1 = (seg.b[0] - SG.lng) * M * cos;
+    return Math.abs(n0 - line) < 1 && Math.abs(n1 - line) < 1 && Math.min(e0, e1) < 5 && Math.max(e0, e1) > 15;
+  });
+  assert.equal(seam.length, 1);
+});
+
+test("buffer-pair clip rails on opposite sides are not inked", () => {
+  const south = 0;
+  const north = 19.06;
+  const upper = [0, 50, 100].map((x) =>
+    feature(rect(SG.lng, SG.lat, x, north, x + 25, north + 40), { render_height: 16, render_min_height: 0 }, { id: `u${x}` }),
+  );
+  const lower = [0, 50, 100].map((x) =>
+    feature(rect(SG.lng, SG.lat, x, south - 40, x + 25, south), { render_height: 16, render_min_height: 0 }, { id: `d${x}` }),
+  );
+  const planned = planBuildingsInk([...upper, ...lower]);
+  const onRails = roofs(planned.segs).filter((seg) => {
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    return (Math.abs(n0 - south) < 1 && Math.abs(n1 - south) < 1) || (Math.abs(n0 - north) < 1 && Math.abs(n1 - north) < 1);
+  });
+  assert.equal(onRails.length, 0);
+  assert.ok(roofs(planned.segs).length >= 18);
+});
+
+test("continuous different-id clip rails are not inked", () => {
+  const line = 40;
+  const widths = [13, 15, 22, 12, 18, 16];
+  let x = 0;
+  const features = [];
+  widths.forEach((width, index) => {
+    features.push(feature(rect(SG.lng, SG.lat, x, line, x + width, line + 20), { render_height: 16, render_min_height: 0 }, { id: `cn${index}` }));
+    features.push(feature(rect(SG.lng, SG.lat, x, line - 20, x + width, line), { render_height: 16, render_min_height: 0 }, { id: `cs${index}` }));
+    x += width;
+  });
+  const { components } = geo.normalizeBuildings(features);
+  const rails = geo.findClipRails(components);
+  assert.ok(rails.size >= 1, [...rails].join(","));
+  const planned = planBuildingsInk(features);
+  const onLine = roofs(planned.segs).filter((seg) => {
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    return Math.abs(n0 - line) < 1 && Math.abs(n1 - line) < 1;
+  });
+  assert.equal(onLine.length, 0);
+  assert.ok(roofs(planned.segs).length >= 24);
+});
+
+test("shared seams a few decimetres off a clip rail are not inked", () => {
+  const line = 40;
+  const jitter = 0.4;
+  const north = [0, 50, 100].map((x) =>
+    feature(rect(SG.lng, SG.lat, x, line, x + 20, line + 20), { render_height: 20, render_min_height: 0 }, { id: `n${x}` }),
+  );
+  const south = [0, 50, 100].map((x) =>
+    feature(rect(SG.lng, SG.lat, x, line - 20, x + 20, line), { render_height: 20, render_min_height: 0 }, { id: `s${x}` }),
+  );
+  const remnantNorth = feature(rect(SG.lng, SG.lat, 20, line + jitter, 40, line + jitter + 16), { render_height: 18, render_min_height: 0 }, { id: "rn" });
+  const remnantSouth = feature(rect(SG.lng, SG.lat, 20, line + jitter - 16, 40, line + jitter), { render_height: 18, render_min_height: 0 }, { id: "rs" });
+  const pair = planBuildingsInk([remnantNorth, remnantSouth]);
+  const pairSeam = roofs(pair.segs).filter((seg) => {
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    return Math.abs(n0 - (line + jitter)) < 0.15 && Math.abs(n1 - (line + jitter)) < 0.15;
+  });
+  assert.equal(pairSeam.length, 1);
+  const planned = planBuildingsInk([...north, ...south, remnantNorth, remnantSouth]);
+  const onSplinter = roofs(planned.segs).filter((seg) => {
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    return Math.abs(n0 - (line + jitter)) < 0.15 && Math.abs(n1 - (line + jitter)) < 0.15;
+  });
+  assert.equal(onSplinter.length, 0);
+  const onRail = roofs(planned.segs).filter((seg) => {
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    return Math.abs(n0 - line) < 1 && Math.abs(n1 - line) < 1;
+  });
+  assert.equal(onRail.length, 0);
+});
+
+test("regular axis-aligned roof tessellation keeps interior seams", () => {
+  const planned = planBuildingsInk(touchingGrid(16, 4));
+  const cos = Math.cos(SG.lat * Math.PI / 180);
+  const interior = roofs(planned.segs).filter((seg) => {
+    const e0 = (seg.a[0] - SG.lng) * M * cos;
+    const e1 = (seg.b[0] - SG.lng) * M * cos;
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    const onCol = Math.abs(e0 - 8) < 1 && Math.abs(e1 - 8) < 1 && Math.min(n0, n1) < 4 && Math.max(n0, n1) > 4;
+    const onRow = Math.abs(n0 - 8) < 1 && Math.abs(n1 - 8) < 1 && Math.min(e0, e1) < 4 && Math.max(e0, e1) > 4;
+    return onCol || onRow;
+  });
+  assert.ok(interior.length >= 2, interior.length);
+});
 
 test("shared-edge suppression stays near-linear on a touching grid", () => {
   const started = Date.now();

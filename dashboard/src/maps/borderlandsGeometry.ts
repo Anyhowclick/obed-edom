@@ -23,6 +23,7 @@ export type NormalizedComponent = {
   identity: string;
   areaM2: number;
   perimeterM: number;
+  roofOnly: boolean;
 };
 
 export type GeometryDiagnostics = {
@@ -44,6 +45,7 @@ export const MIN_HEIGHT_M = 1.5;
 export const SLAB_BASE_M = 1.2;
 export const SLAB_RISE_M = 6;
 export const ROOF_LIFT_M = 0.35;
+export const ROOF_SEAM_LIFT_M = 1.5;
 export const WALL_OUTSET_M = 0.18;
 export const MIN_CORNER_TURN_DEG = 40;
 export const MIN_CORNER_SUPPORT_M = 2;
@@ -64,15 +66,14 @@ export function renderedNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-export function buildingExtents(feature: WireFeature): { base: number; top: number } | null {
+export function buildingExtents(feature: WireFeature): { base: number; top: number; roofOnly: boolean } | null {
   const props = feature.properties || {};
   const top = renderedNumber(props.render_height);
   if (top == null || top < MIN_HEIGHT_M) return null;
   const rawBase = renderedNumber(props.render_min_height);
   const base = Math.max(0, rawBase ?? 0);
   if (top <= base + 0.4) return null;
-  if (base > SLAB_BASE_M && top - base < SLAB_RISE_M) return null;
-  return { base, top };
+  return { base, top, roofOnly: isShallowElevatedSlab(base, top) };
 }
 
 export function isShallowElevatedSlab(base: number, top: number): boolean {
@@ -379,7 +380,7 @@ export function normalizeFeature(feature: WireFeature, originLng?: number): Norm
     }
     const areaM2 = Math.abs(ringArea(oriented, origin));
     const perimeterM = ringPerimeter(oriented, origin);
-    if (!significantVolume(areaM2, extents.top - extents.base, perimeterM)) continue;
+    if (!extents.roofOnly && !significantVolume(areaM2, extents.top - extents.base, perimeterM)) continue;
     const component: NormalizedComponent = {
       sourceId: feature.id == null || String(feature.id) === "" ? null : String(feature.id),
       source: feature.source || "",
@@ -391,6 +392,7 @@ export function normalizeFeature(feature: WireFeature, originLng?: number): Norm
       identity: "",
       areaM2,
       perimeterM,
+      roofOnly: extents.roofOnly,
     };
     component.identity = fragmentIdentity(component);
     out.push(component);
@@ -418,10 +420,6 @@ export function normalizeBuildings(
   const seen = new Set<string>();
   const components: NormalizedComponent[] = [];
   for (const feature of features) {
-    const props = feature.properties || {};
-    const top = renderedNumber(props.render_height);
-    const rawBase = Math.max(0, renderedNumber(props.render_min_height) ?? 0);
-    if (top != null && isShallowElevatedSlab(rawBase, top)) diagnostics.slabsOmitted += 1;
     const next = normalizeFeature(feature);
     if (!next.length && polygonMembers(feature.geometry).length) diagnostics.invalidRings += 1;
     for (const component of next) {
@@ -772,7 +770,303 @@ function pieceCoveredBySeam(
   return false;
 }
 
-export function planComponent(component: NormalizedComponent, shared: SharedSeams, diagnostics: GeometryDiagnostics): FacadeSeg[] {
+const CLIP_AXIS_DEG = 1e-6;
+const CLIP_EDGE_MIN_M = 12;
+const CLIP_LONG_M = 18;
+const CLIP_RUN_GAP_M = 3;
+const CLIP_RAIL_SPAN_M = 80;
+const CLIP_BUFFER_GAPS_M = [9.53, 19.06];
+const CLIP_BUFFER_GAP_TOL_M = 0.8;
+
+function quantizeAxis(value: number): string {
+  return value.toFixed(6);
+}
+
+function parseRailKey(key: string): { kind: "lng" | "lat"; value: number } | null {
+  const split = key.indexOf(":");
+  if (split < 0) return null;
+  const kind = key.slice(0, split);
+  const value = Number(key.slice(split + 1));
+  if ((kind !== "lng" && kind !== "lat") || !Number.isFinite(value)) return null;
+  return { kind, value };
+}
+
+function isBufferPairM(distanceM: number): boolean {
+  return CLIP_BUFFER_GAPS_M.some((gap) => Math.abs(distanceM - gap) <= CLIP_BUFFER_GAP_TOL_M);
+}
+
+function clipRailKey(kind: "lng" | "lat", value: number): string {
+  return `${kind}:${quantizeAxis(value)}`;
+}
+
+function ringCentroid(ring: LngLat[]): LngLat {
+  const origin = metricOrigin(ring[0][0], ring[0][1]);
+  let e = 0;
+  let n = 0;
+  for (const point of ring) {
+    const en = toEn(point, origin);
+    e += en.e;
+    n += en.n;
+  }
+  const count = Math.max(ring.length, 1);
+  return fromEn({ e: e / count, n: n / count }, origin);
+}
+
+function mergeRunSpanM(intervals: Array<[number, number]>, gapM: number): { runs: number; spanM: number } {
+  if (!intervals.length) return { runs: 0, spanM: 0 };
+  const sorted = intervals
+    .map(([a, b]) => (a < b ? [a, b] : [b, a]) as [number, number])
+    .sort((a, b) => a[0] - b[0]);
+  const runs: Array<[number, number]> = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = runs[runs.length - 1];
+    const next = sorted[i];
+    if (next[0] <= prev[1] + gapM) prev[1] = Math.max(prev[1], next[1]);
+    else runs.push(next);
+  }
+  return { runs: runs.length, spanM: runs[runs.length - 1][1] - runs[0][0] };
+}
+
+function intervalOverlapM(a0: number, a1: number, b0: number, b1: number): number {
+  const aLo = Math.min(a0, a1);
+  const aHi = Math.max(a0, a1);
+  const bLo = Math.min(b0, b1);
+  const bHi = Math.max(b0, b1);
+  return Math.max(0, Math.min(aHi, bHi) - Math.max(aLo, bLo));
+}
+
+function opposingPairCount(hits: Array<{ along0: number; along1: number; side: number }>): number {
+  const plus = hits.filter((hit) => hit.side > 0);
+  const minus = hits.filter((hit) => hit.side < 0);
+  let pairs = 0;
+  for (const a of plus) {
+    for (const b of minus) {
+      if (intervalOverlapM(a.along0, a.along1, b.along0, b.along1) >= CLIP_EDGE_MIN_M) pairs += 1;
+    }
+  }
+  return pairs;
+}
+
+function isRegularPanelPitch(hits: Array<{ along0: number; along1: number }>): boolean {
+  if (hits.length < 6) return false;
+  const lens = hits.map((hit) => Math.abs(hit.along1 - hit.along0)).sort((a, b) => a - b);
+  const median = lens[lens.length >> 1];
+  if (median < 4 || median > 24) return false;
+  const within = lens.filter((len) => Math.abs(len - median) <= 2).length;
+  return within / lens.length >= 0.75;
+}
+
+function mercatorX(lng: number): number {
+  return (lng + 180) / 360;
+}
+
+function mercatorY(lat: number): number {
+  const s = Math.sin((lat * Math.PI) / 180);
+  return (1 - Math.log((1 + s) / (1 - s)) / (2 * Math.PI)) / 2;
+}
+
+const CLIP_TILE_ZOOMS = [14, 15, 16];
+const CLIP_TILE_FRACS = [0, 64 / 4096, -64 / 4096, 128 / 4096, -128 / 4096];
+const CLIP_TILE_EPS_M = 1.25;
+/** Vertex jitter on the same clip line, well below 8 m panel pitch. */
+const CLIP_RAIL_MATCH_M = 0.75;
+const WORLD_M = 40075016.686;
+
+function axisSeparationM(kind: "lng" | "lat", a: number, b: number, cos: number): number {
+  return kind === "lat"
+    ? Math.abs(a - b) * METERS_PER_DEG
+    : Math.abs(a - b) * METERS_PER_DEG * cos;
+}
+
+function isMercatorClipValue(kind: "lng" | "lat", value: number, cos: number): boolean {
+  const frac = kind === "lng" ? mercatorX(value) : mercatorY(value);
+  for (const zoom of CLIP_TILE_ZOOMS) {
+    const metersPerTile = (WORLD_M / 2 ** zoom) * (kind === "lng" ? 1 : cos);
+    for (const offset of CLIP_TILE_FRACS) {
+      const scaled = frac * 2 ** zoom - offset;
+      const distM = Math.abs(scaled - Math.round(scaled)) * metersPerTile;
+      if (distM <= CLIP_TILE_EPS_M) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Vector tiles clip polygons on a constant-lng / constant-lat grid. Those seams
+ * line up through every building they cut, unlike architectural tessellation.
+ */
+export function findClipRails(components: NormalizedComponent[]): Set<string> {
+  type Hit = { id: string; along0: number; along1: number; side: number; base: number; top: number };
+  const buckets = new Map<string, Hit[]>();
+  const origin = components[0]
+    ? metricOrigin(components[0].outer[0][0], components[0].outer[0][1])
+    : metricOrigin(0, 0);
+  for (const component of components) {
+    if (component.outer.length < 3) continue;
+    const centroid = ringCentroid(component.outer);
+    const id = component.sourceId ?? component.identity;
+    const ring = component.outer;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i];
+      const b = ring[(i + 1) % ring.length];
+      const ae = toEn(a, origin);
+      const be = toEn(b, origin);
+      const len = Math.hypot(be.e - ae.e, be.n - ae.n);
+      if (len < CLIP_EDGE_MIN_M) continue;
+      if (Math.abs(a[0] - b[0]) < CLIP_AXIS_DEG) {
+        const key = clipRailKey("lng", (a[0] + b[0]) / 2);
+        const side = Math.sign(centroid[0] - a[0]) || 1;
+        const hit = { id, along0: ae.n, along1: be.n, side, base: component.base, top: component.top };
+        const list = buckets.get(key);
+        if (list) list.push(hit);
+        else buckets.set(key, [hit]);
+      } else if (Math.abs(a[1] - b[1]) < CLIP_AXIS_DEG) {
+        const key = clipRailKey("lat", (a[1] + b[1]) / 2);
+        const side = Math.sign(centroid[1] - a[1]) || 1;
+        const hit = { id, along0: ae.e, along1: be.e, side, base: component.base, top: component.top };
+        const list = buckets.get(key);
+        if (list) list.push(hit);
+        else buckets.set(key, [hit]);
+      }
+    }
+  }
+  type Candidate = {
+    keys: string[];
+    kind: "lng" | "lat";
+    value: number;
+    ids: number;
+    sides: Set<number>;
+    runs: number;
+    spanM: number;
+    longCount: number;
+    splitSameId: boolean;
+    pairs: number;
+    regular: boolean;
+    heights: number;
+    mercator: boolean;
+  };
+
+  const clustered = clusterRailBuckets(buckets, origin.cos);
+  const candidates: Candidate[] = clustered.map((cluster) => {
+    const hits = cluster.hits;
+    const ids = new Set(hits.map((hit) => hit.id));
+    const sides = new Set(hits.map((hit) => hit.side));
+    const { runs, spanM } = mergeRunSpanM(
+      hits.map((hit) => [hit.along0, hit.along1]),
+      CLIP_RUN_GAP_M,
+    );
+    return {
+      keys: cluster.keys,
+      kind: cluster.kind,
+      value: cluster.value,
+      ids: ids.size,
+      sides,
+      runs,
+      spanM,
+      longCount: hits.filter((hit) => Math.abs(hit.along1 - hit.along0) >= CLIP_LONG_M).length,
+      splitSameId: [...ids].some((id) => hits.filter((hit) => hit.id === id).length >= 2),
+      pairs: opposingPairCount(hits),
+      regular: isRegularPanelPitch(hits),
+      heights: new Set(hits.map((hit) => `${hit.base.toFixed(2)}|${hit.top.toFixed(2)}`)).size,
+      mercator: isMercatorClipValue(cluster.kind, cluster.value, origin.cos),
+    };
+  });
+
+  const rails = new Set<string>();
+  const addCandidate = (info: Candidate) => {
+    for (const key of info.keys) rails.add(key);
+  };
+  for (const info of candidates) {
+    if (info.splitSameId && info.sides.size >= 2 && info.spanM >= CLIP_EDGE_MIN_M) addCandidate(info);
+    else if (info.longCount >= 2 && info.spanM >= CLIP_RAIL_SPAN_M && info.sides.size >= 2 && (info.runs >= 2 || info.ids >= 3)) addCandidate(info);
+    else if (info.pairs >= 3 && info.spanM >= CLIP_RAIL_SPAN_M && !info.regular) addCandidate(info);
+    else if (info.pairs >= 2 && info.heights >= 2 && info.spanM >= CLIP_RAIL_SPAN_M) addCandidate(info);
+    else if (info.mercator && info.spanM >= 40 && (info.ids >= 2 || info.pairs >= 1 || info.longCount >= 1)) addCandidate(info);
+  }
+  for (let i = 0; i < candidates.length; i++) {
+    const infoI = candidates[i];
+    if (infoI.spanM < CLIP_RAIL_SPAN_M || infoI.ids < 3) continue;
+    for (let j = i + 1; j < candidates.length; j++) {
+      const infoJ = candidates[j];
+      if (infoJ.kind !== infoI.kind) continue;
+      if (infoJ.spanM < CLIP_RAIL_SPAN_M || infoJ.ids < 3) continue;
+      if (!isBufferPairM(axisSeparationM(infoI.kind, infoI.value, infoJ.value, origin.cos))) continue;
+      const opposite = [...infoI.sides].some((side) => infoJ.sides.has(-side));
+      if (!opposite) continue;
+      addCandidate(infoI);
+      addCandidate(infoJ);
+    }
+  }
+  return rails;
+}
+
+function clusterRailBuckets(
+  buckets: Map<string, Array<{ id: string; along0: number; along1: number; side: number; base: number; top: number }>>,
+  cos: number,
+): Array<{
+  keys: string[];
+  kind: "lng" | "lat";
+  value: number;
+  hits: Array<{ id: string; along0: number; along1: number; side: number; base: number; top: number }>;
+}> {
+  const byKind: Record<"lng" | "lat", Array<{ key: string; value: number }>> = { lng: [], lat: [] };
+  for (const key of buckets.keys()) {
+    const parsed = parseRailKey(key);
+    if (parsed) byKind[parsed.kind].push({ key, value: parsed.value });
+  }
+  const clusters: Array<{
+    keys: string[];
+    kind: "lng" | "lat";
+    value: number;
+    hits: Array<{ id: string; along0: number; along1: number; side: number; base: number; top: number }>;
+  }> = [];
+  for (const kind of ["lng", "lat"] as const) {
+    const items = byKind[kind].sort((a, b) => a.value - b.value);
+    let keys: string[] = [];
+    let lastValue = NaN;
+    const flush = () => {
+      if (!keys.length) return;
+      const hits = keys.flatMap((key) => buckets.get(key) ?? []);
+      const value = keys.reduce((sum, key) => sum + (parseRailKey(key)?.value ?? 0), 0) / keys.length;
+      clusters.push({ keys, kind, value, hits });
+      keys = [];
+    };
+    for (const item of items) {
+      if (keys.length && axisSeparationM(kind, item.value, lastValue, cos) > CLIP_RAIL_MATCH_M) flush();
+      keys.push(item.key);
+      lastValue = item.value;
+    }
+    flush();
+  }
+  return clusters;
+}
+
+export function isClipRailEdge(a: LngLat, b: LngLat, rails: Set<string>): boolean {
+  if (!rails.size) return false;
+  const cos = Math.max(Math.cos((a[1] * Math.PI) / 180), 0.2);
+  let kind: "lng" | "lat" | null = null;
+  let value = 0;
+  if (Math.abs(a[0] - b[0]) < CLIP_AXIS_DEG) {
+    kind = "lng";
+    value = (a[0] + b[0]) / 2;
+  } else if (Math.abs(a[1] - b[1]) < CLIP_AXIS_DEG) {
+    kind = "lat";
+    value = (a[1] + b[1]) / 2;
+  }
+  if (!kind) return false;
+  for (const key of rails) {
+    const parsed = parseRailKey(key);
+    if (parsed?.kind === kind && axisSeparationM(kind, parsed.value, value, cos) <= CLIP_RAIL_MATCH_M) return true;
+  }
+  return false;
+}
+
+export function planComponent(
+  component: NormalizedComponent,
+  shared: SharedSeams,
+  diagnostics: GeometryDiagnostics,
+  rails: Set<string> = new Set(),
+): FacadeSeg[] {
   const roofZ = component.top + ROOF_LIFT_M;
   const origin = metricOrigin(component.outer[0][0], component.outer[0][1]);
   const drawing = simplifyClosed(component.outer, origin);
@@ -789,6 +1083,7 @@ export function planComponent(component: NormalizedComponent, shared: SharedSeam
       const cuts = cutsForDrawingEdge(a, b, shared, component.base, component.top);
       for (const [p0, p1] of splitAtPoints(a, b, cuts, origin)) {
         if (pieceCoveredBySeam(p0, p1, shared, component.base, component.top)) continue;
+        if (isClipRailEdge(p0, p1, rails)) continue;
         const t0 = paramOnEdge(p0, a, b, origin);
         const t1 = paramOnEdge(p1, a, b, origin);
         const o0 = lerpLngLat(oa, ob, t0);
@@ -798,7 +1093,7 @@ export function planComponent(component: NormalizedComponent, shared: SharedSeam
       }
     }
   }
-  const posts = selectSignificantCorners(component.outer);
+  const posts = component.roofOnly ? [] : selectSignificantCorners(component.outer);
   const originalOffset = offsetRing(component.outer, WALL_OUTSET_M);
   for (const index of posts) {
     const prev = component.outer[(index - 1 + component.outer.length) % component.outer.length];
@@ -807,6 +1102,7 @@ export function planComponent(component: NormalizedComponent, shared: SharedSeam
     const leftShared = shared.keys.has(edgeIdentity(prev, curr, component.base, component.top));
     const rightShared = shared.keys.has(edgeIdentity(curr, next, component.base, component.top));
     if (leftShared && rightShared) continue;
+    if (isClipRailEdge(prev, curr, rails) && isClipRailEdge(curr, next, rails)) continue;
     const p = originalOffset[index] || curr;
     segs.push({ a: [p[0], p[1], component.base], b: [p[0], p[1], roofZ] });
     diagnostics.selectedPosts += 1;
@@ -830,15 +1126,26 @@ export function planNormalizedInk(components: NormalizedComponent[]): { segs: Fa
     budgetDropped: Math.max(0, components.length - selected.length),
   };
   const shared = suppressSharedEdges(selected);
+  const rails = findClipRails(selected);
   diagnostics.sharedEdgesRemoved = shared.keys.size;
   const segs: FacadeSeg[] = [];
   for (const component of selected) {
-    const next = planComponent(component, shared, diagnostics);
+    const next = planComponent(component, shared, diagnostics, rails);
     if (segs.length + next.length > MAX_SEGMENTS) {
       diagnostics.budgetDropped += 1;
       continue;
     }
     segs.push(...next);
+  }
+  for (const span of shared.spans) {
+    if (segs.length >= MAX_SEGMENTS) {
+      diagnostics.budgetDropped += 1;
+      break;
+    }
+    if (isClipRailEdge(span.a, span.b, rails)) continue;
+    const z = span.top + ROOF_SEAM_LIFT_M;
+    segs.push({ a: [span.a[0], span.a[1], z], b: [span.b[0], span.b[1], z] });
+    diagnostics.roofSegments += 1;
   }
   diagnostics.totalSegments = segs.length;
   return { segs, diagnostics };

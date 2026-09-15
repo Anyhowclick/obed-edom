@@ -15,7 +15,7 @@ import {
 export type { FacadeSeg, WireFeature } from "./borderlandsGeometry";
 export { ROOF_LIFT_M as ROOF_BIAS_M, WALL_OUTSET_M } from "./borderlandsGeometry";
 
-export function buildingExtents(feature: WireFeature): { base: number; top: number } | null {
+export function buildingExtents(feature: WireFeature): { base: number; top: number; roofOnly: boolean } | null {
   return extentsFromFeature(feature);
 }
 
