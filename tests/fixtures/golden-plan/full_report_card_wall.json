@@ -14,7 +14,8 @@
   "OBED_OFFLINE_WRITE": "off",
   "OBED_SLIDE_REUSE": "off",
   "OBED_SUPPRESS_GEOMETRY": null,
-  "OBED_WRITE_TIMING": null
+  "OBED_WRITE_TIMING": null,
+  "OBED_ZORDER_WRITE": "off"
  },
  "goldenVersion": 1,
  "inspectVersion": 5,

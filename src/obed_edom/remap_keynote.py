@@ -142,13 +142,13 @@ def zorder_write_mode(
     explicit: str | None = None, *, offline_mode: str | None = None,
     say: Callable[[str], None] | None = None,
 ) -> str:
-    """`off` (default, tranche 1), `on` (offline z-order patch), or `verify` (patch + a
-    second read-back decode). Env `OBED_ZORDER_WRITE`; unknown tokens fall back to `off`.
-    Forced `off` without the `iwa` extra (mirrors `probe_iwa_extra`), and forced `off`
-    when `offline_mode` (the caller's already-resolved `offline_write_mode()`) is `off`
-    — there are no offline slides to raise against."""
+    """`on` (default, offline z-order patch), `off` (GUI Bring-to-Front raise path), or
+    `verify` (patch + a second read-back decode). Env `OBED_ZORDER_WRITE`; unknown tokens
+    fall back to `on`. Forced `off` without the `iwa` extra (mirrors `probe_iwa_extra`),
+    and forced `off` when `offline_mode` (the caller's already-resolved
+    `offline_write_mode()`) is `off` — there are no offline slides to raise against."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_ZORDER_WRITE", "")).strip().lower()
-    mode = raw if raw in {"on", "verify"} else "off"
+    mode = raw if raw in {"off", "verify"} else "on"
     if mode == "off":
         return mode
     if offline_mode == "off":
