@@ -708,6 +708,32 @@ def _patch_member(zf: zipfile.ZipFile, member: str, edits: dict[str, dict]) -> t
     return new_member, applied, obj_diffs, header_diffs
 
 
+def _patch_zorder_member(
+    zf: zipfile.ZipFile, member: str, slide_id: str, new_order: list[str],
+) -> tuple[bytes, int, int, int]:
+    """``w-zorder-patch`` sibling of ``_patch_member``: overwrites ONE slide archive's
+    ``drawablesZOrder`` AND ``ownedDrawables`` with identical id lists built from
+    ``new_order``. (new_bytes, applied, obj_diffs, header_diffs); ``applied`` is the
+    archive-object write count (1 expected — the caller refuses on anything else)."""
+    def apply_fn(patched: dict) -> int:
+        applied = 0
+        refs = [{"identifier": i} for i in new_order]
+        for ch in patched["chunks"]:
+            for arch in ch["archives"]:
+                if str(arch["header"]["identifier"]) != slide_id:
+                    continue
+                for o in arch.get("objects") or []:
+                    o["drawablesZOrder"] = [dict(r) for r in refs]
+                    o["ownedDrawables"] = [dict(r) for r in refs]
+                    applied += 1
+                    break
+        return applied
+
+    new_member, applied, obj_diffs, header_diffs, _decoded, _reparsed = _decode_apply_reencode_diff(
+        zf, member, apply_fn)
+    return new_member, applied, obj_diffs, header_diffs
+
+
 class _RawNameZipInfo(zipfile.ZipInfo):
     """ZipInfo whose central-directory/local-header filename bytes are frozen to
     ``_raw_name`` instead of re-encoded from ``self.filename``. ``ZipFile._open_to_write``
@@ -815,8 +841,9 @@ def patch_deck_geometry(
 
     Refusal is per slide (that slide's member left byte-identical). Two slides
     resolving to the same target member refuse the LATER slide number.
-    ``extra_member_edits`` (member -> raw new bytes, e.g. W2 stylesheet/z-order) merge in
+    ``extra_member_edits`` (member -> raw new bytes, e.g. a stylesheet edit) merge in
     AFTER slide edits; a member in both raises ``ValueError`` before anything is written.
+    Z-order is its own rewrite, not this hook — see ``iwa_zorder.patch_deck_zorder``.
     Returns one ``PatchResult`` per key of ``specs_by_slide``, plus key 0 for
     ``extra_member_edits`` when given.
     """
