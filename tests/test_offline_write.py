@@ -2143,6 +2143,21 @@ def test_pass2_parity_excludes_front_when_not_hard():
     assert any("unresolved" in r for r in reasons)
 
 
+def test_pass2_parity_badge_fallback_hard_by_default():
+    reasons = pass2_parity(_pass2(), _pass2(badgeFallback=99))
+    assert any("badgeFallback" in r for r in reasons)
+
+
+def test_pass2_parity_excludes_badge_fallback_when_not_hard():
+    # W2: B raises badges offline on suppressed slides, so its AppleScript badge
+    # fallback counter legitimately differs from A's; a genuinely differing OTHER
+    # key must still be caught.
+    reasons = pass2_parity(_pass2(), _pass2(badgeFallback=99, unresolved=5),
+                           badge_fallback_hard=False)
+    assert not any("badgeFallback" in r for r in reasons)
+    assert any("unresolved" in r for r in reasons)
+
+
 def test_pass2_parity_ignores_raise_click_retried():
     # Retries are timing-dependent per arm -- a rescue in one arm and not the other
     # must not manufacture a RED; everything else stays equal.

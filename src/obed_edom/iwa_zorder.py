@@ -20,6 +20,21 @@ from obed_edom.iwa_write import (
     bridge_kind_index,
     read_slide_zorder,
 )
+from obed_edom.map_remap import COINCIDENT_DUP_TOL
+
+
+def _coincident_group_rects(rects: list[tuple]) -> bool:
+    """True if every rect in `rects` (x, y, w, h) is pairwise within
+    ``COINCIDENT_DUP_TOL`` of every other — same tolerance as
+    ``map_remap.coincident_duplicate_ids`` uses for magic-move twins."""
+    return all(
+        abs(xa - xb) <= COINCIDENT_DUP_TOL
+        and abs(ya - yb) <= COINCIDENT_DUP_TOL
+        and abs(wa - wb) <= COINCIDENT_DUP_TOL
+        and abs(ha - hb) <= COINCIDENT_DUP_TOL
+        for i, (xa, ya, wa, ha) in enumerate(rects)
+        for xb, yb, wb, hb in rects[i + 1:]
+    )
 
 
 def raise_to_front(order: list[str], targets: list[str]) -> list[str]:
@@ -50,18 +65,45 @@ def resolve_raise_targets(
     verified: the saved-deck group's own child signature (computed offline via
     `_group_child_signature`, the same normalisation the planner used to mint
     `childSig`) must equal the job's `childSig` — a hint pointing at the wrong group
-    (stale `groupIndex`) is caught here rather than silently raising the wrong object."""
+    (stale `groupIndex`) is caught here rather than silently raising the wrong object.
+
+    An ambiguous `childSig` is still resolved, not refused, when every job carrying that
+    signature is flagged `twin` (planner's build-twin proof, `map_remap.py:2768`, mirroring
+    the GUI's own gate at `keynote.py:1496-1519` — `allow_fallback` is only 2, sigTwin, when
+    `sig_twin_counts[key] == sig_counts[key]`, i.e. ALL jobs sharing the sig are `twin`) AND
+    every saved-deck group carrying that signature is a coincident twin (same rect within
+    `map_remap`'s `COINCIDENT_DUP_TOL`, the tolerance `coincident_duplicate_ids` uses) and
+    their count equals the number of jobs carrying the signature — this is the same set the
+    GUI's `obedResolveGroup` `allowFallback == 2` ("sigTwin") path claims, one hit per job
+    call, so the offline and live raises land the same front block. Any other ambiguity (a
+    job not flagged `twin`, non-coincident candidates, or a count mismatch) stays unresolved
+    exactly as today."""
     z = [str(ref["identifier"]) for ref in slide.get("drawablesZOrder") or []]
     records = derive_kind_index(slide, objects)
     by_key = {(r["kind"], r["kindIndex"]): r["id"] for r in records}
+    group_rects = {r["id"]: (r["x"], r["y"], r["w"], r["h"]) for r in records if r["kind"] == "group"}
     sig_cache: dict = {}
 
     unresolved: list[str] = []
-    ambiguous_sigs = {
-        sig for sig, count in Counter(
-            j.get("childSig") for j in stat_jobs if j.get("childSig")
-        ).items() if count > 1
+    sig_counts = Counter(j.get("childSig") for j in stat_jobs if j.get("childSig"))
+    ambiguous_sigs = {sig for sig, count in sig_counts.items() if count > 1}
+    twin_counts = Counter(
+        j.get("childSig") for j in stat_jobs if j.get("childSig") and j.get("twin")
+    )
+    proven_twin_sigs = {
+        sig for sig in ambiguous_sigs if twin_counts.get(sig, 0) == sig_counts[sig]
     }
+
+    twin_sigs: dict[str, list[str]] = {}
+    for sig in proven_twin_sigs:
+        candidates = [
+            gid for gid in group_rects
+            if _group_child_signature(gid, objects, sig_cache) == sig
+        ]
+        if len(candidates) != sig_counts[sig] or len(candidates) < 2:
+            continue
+        if _coincident_group_rects([group_rects[gid] for gid in candidates]):
+            twin_sigs[sig] = candidates
 
     stat_ids: list[str] = []
     for job in stat_jobs:
@@ -72,7 +114,12 @@ def resolve_raise_targets(
             # so the row is neither a target nor unresolved.
             continue
         if sig in ambiguous_sigs:
-            unresolved.append(f"stat:s={job.get('slide')},sig={sig}(ambiguous)")
+            if sig in twin_sigs:
+                for gid in twin_sigs[sig]:
+                    if gid not in stat_ids:
+                        stat_ids.append(gid)
+            else:
+                unresolved.append(f"stat:s={job.get('slide')},sig={sig}(ambiguous)")
             continue
         wall_gi = int(job["groupIndex"])
         ki = wall_gi - 1

@@ -344,20 +344,34 @@ def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bo
 
 
 def pass2_parity(a: dict[str, Any] | None, b: dict[str, Any] | None, *,
-                 front_hard: bool = True) -> list[str]:
+                 front_hard: bool = True, badge_fallback_hard: bool = True) -> list[str]:
     """A/B parity on ``PASS2_PARITY_KEYS`` — ``raw`` is deliberately ignored.
 
     ``front_hard=False`` (``--pass2-bar parity``) excludes ``front`` from this HARD
     check -- GUI Bring-to-Front raises are flaky and don't move geometry, so the
-    caller WARNs an A/B ``front`` mismatch separately instead of gating on it. Every
-    other key (``jobs``/``done``/``skipped``/``sized``/``sizeSkips``/``dedupDeleted``/
-    ``dedupShortfall``/``sigFallback``/``unresolved``/``badgeFallback``/
-    ``badgeUnresolved``) stays HARD in both modes.
+    caller WARNs an A/B ``front`` mismatch separately instead of gating on it.
+
+    ``badge_fallback_hard=False`` (W2: B suppressed raises on a badge-bearing eligible
+    slide) excludes ``badgeFallback`` -- B raises its badges offline on that slide, so
+    its AppleScript badge-fallback counter is legitimately lower there while A's is
+    not; the caller WARNs that mismatch separately instead of gating on it. This
+    counter is deck-level, not per-slide, so the caller must key the exemption to
+    ``claimed_patched_slides(zorder_write_b)`` intersecting the badge-bearing slide
+    set (B's own ``badgeRaises`` rows) -- a run where B only patched stat-only slides
+    must keep this key HARD.
+
+    Every other key (``jobs``/``done``/``skipped``/``sized``/``sizeSkips``/
+    ``dedupDeleted``/``dedupShortfall``/``sigFallback``/``unresolved``/
+    ``badgeUnresolved``) stays HARD in every mode.
     """
     a = a or {}
     b = b or {}
     reasons: list[str] = []
-    keys = PASS2_PARITY_KEYS if front_hard else tuple(k for k in PASS2_PARITY_KEYS if k != "front")
+    keys = PASS2_PARITY_KEYS
+    if not front_hard:
+        keys = tuple(k for k in keys if k != "front")
+    if not badge_fallback_hard:
+        keys = tuple(k for k in keys if k != "badgeFallback")
     for key in keys:
         va = int(a.get(key) or 0)
         vb = int(b.get(key) or 0)
@@ -1368,6 +1382,21 @@ def claimed_patched_slides(zorder_write: dict[str, Any] | None) -> set[int]:
     return parsed if parsed is not None else set()
 
 
+def badge_fallback_exempt(
+    zorder_write: dict[str, Any] | None,
+    badge_raises: list[dict[str, Any]] | None,
+) -> bool:
+    """True iff B patched offline at least one badge-bearing slide (a slide with a
+    ``badgeRaises`` row), the condition ``badgeFallback`` parity must be keyed to —
+    not merely "any slide was patched", which would exempt a run where B only patched
+    stat-only slides while every badge-bearing slide stayed on the GUI."""
+    ow = zorder_write or {}
+    if _counter_nonzero(ow.get("zorderSlides")) <= 0:
+        return False
+    badge_bearing = {int(row["slide"]) for row in badge_raises or []}
+    return bool(claimed_patched_slides(zorder_write) & badge_bearing)
+
+
 def raise_slides_from_jobs(
     stat_jobs: list[dict[str, Any]] | None,
     badge_rows: list[dict[str, Any]] | None,
@@ -1443,6 +1472,24 @@ def zorder_gui_reasons(
     return reasons
 
 
+def zorder_slides_count_reasons(
+    zorder_write: dict[str, Any] | None, *, label: str = "B",
+) -> list[str]:
+    """RED if ``zorderSlides`` disagrees with ``len(slides)`` — a self-inconsistent
+    B record (e.g. ``slides=[56], zorderSlides=0``) must not read as clean."""
+    ow = zorder_write or {}
+    patched = _as_slide_set(ow.get("slides"))
+    if patched is None:
+        return []
+    n = _counter_nonzero(ow.get("zorderSlides"))
+    if n != len(patched):
+        return [
+            f"{label}: zorderSlides={ow.get('zorderSlides')!r} != len(slides)="
+            f"{len(patched)}"
+        ]
+    return []
+
+
 def zorder_write_reasons(
     zorder_write: dict[str, Any] | None,
     raise_slides: set[int],
@@ -1457,6 +1504,7 @@ def zorder_write_reasons(
         return reasons
     return (
         zorder_counter_reasons(zorder_write, label=label)
+        + zorder_slides_count_reasons(zorder_write, label=label)
         + zorder_gui_reasons(
             zorder_write, raise_slides,
             compared_slides=compared_slides, refused=refused, label=label,
@@ -1948,11 +1996,13 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"RED: {r}")
 
     zorder_suppressed = bool(claimed_patched_slides(zorder_write_b))
+    badge_slides_suppressed = badge_fallback_exempt(zorder_write_b, plan_b.get("badgeRaises"))
     # W2: B's eligible slides skip the GUI raise, so `front` A!=B is expected and
     # must not RED the strict bar. Other PASS2_PARITY_KEYS still gate.
     parity = pass2_parity(
         child_resize_a, child_resize_b,
         front_hard=zero_keys_hard and not zorder_suppressed,
+        badge_fallback_hard=not badge_slides_suppressed,
     )
     for r in parity:
         _log(f"RED: {r}")
@@ -1993,6 +2043,14 @@ def main(argv: list[str] | None = None) -> int:
                 else "pass2-bar=parity: GUI Bring-to-Front raises are flaky, does not gate"
             )
             _log(f"WARN: pass-2 front A={front_a} B={front_b} ({why}).")
+
+    if badge_slides_suppressed:
+        bf_a = int((child_resize_a or {}).get("badgeFallback") or 0)
+        bf_b = int((child_resize_b or {}).get("badgeFallback") or 0)
+        if bf_a != bf_b:
+            _log(f"WARN: pass-2 badgeFallback A={bf_a} B={bf_b} "
+                 "(W2: B raises badges offline on suppressed badge-bearing slides, "
+                 "does not gate).")
 
     ow_missed = int(ow_b.get("missedSpecs") or 0)
     ow_fallback = sum(int(v) for v in (ow_b.get("fallbackSpecs") or {}).values())
