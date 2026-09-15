@@ -3284,6 +3284,9 @@ input.maps-thumb-title-input:focus {
   font-size: 16px;
   cursor: ew-resize;
 }
+.ae-scrub input:not([type="range"]):focus {
+  cursor: text;
+}
 .ae-scrub.has-slider {
   flex-wrap: wrap;
   row-gap: 4px;

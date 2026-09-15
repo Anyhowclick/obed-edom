@@ -210,7 +210,7 @@ def test_infer_hop_kind_allows_matching_rotation_and_zoom_delta_two():
 
 
 def test_default_hidden_layers_hides_roadnames_arrows_labels_and_boundaries():
-    assert DEFAULT_HIDDEN_LAYERS == ("roadnames", "arrows", "labels", "boundaries")
+    assert DEFAULT_HIDDEN_LAYERS == ("roadnames", "arrows", "labels", "waternames", "boundaries")
     no_deck = {"slides": [{"id": "s1", "hiddenLayers": None}]}
     assert inherit_hidden_layers(no_deck)["slides"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
 

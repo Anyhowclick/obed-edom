@@ -24,7 +24,7 @@ assert.equal(typesCompile.status, 0, typesCompile.stderr || typesCompile.stdout)
 const { DEFAULT_HIDDEN_LAYERS } = require(path.join(typesOut, "types.js"));
 
 test("DEFAULT_HIDDEN_LAYERS mirrors maps_geo.DEFAULT_HIDDEN_LAYERS", () => {
-  assert.deepEqual(DEFAULT_HIDDEN_LAYERS, ["roadnames", "arrows", "labels", "boundaries"]);
+  assert.deepEqual(DEFAULT_HIDDEN_LAYERS, ["roadnames", "arrows", "labels", "waternames", "boundaries"]);
 });
 
 test("defaultObjectSize matches DOT_SIZE/DROP_SIZE (maps_keynote.py) and defaultLandmarkSize", () => {

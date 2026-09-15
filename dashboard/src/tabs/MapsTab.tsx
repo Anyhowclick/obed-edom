@@ -76,7 +76,7 @@ import {
 } from "../maps/highlight";
 import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { jobLabel, useCurrentJob } from "../sessions";
-import { AeScrub } from "../maps/AeScrub";
+import { AeScrub, DraftNumberInput } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
 import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
@@ -2893,7 +2893,7 @@ export function MapsTab() {
                       )}
                     </select>
                   </label>
-                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
+                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><DraftNumberInput min={24} max={4000} digits={0} value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} aria-label="Size" onChange={(size) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size } : c) })} onCommit={() => fireAndForgetSave()} /></label>
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
                   <label className="maps-check">
                     <input
@@ -2936,42 +2936,44 @@ export function MapsTab() {
                         <>
                           <label>
                             Reveal duration (s)
-                            <input
-                              type="number"
-                              min="0.3"
-                              max="5"
-                              step="0.1"
+                            <DraftNumberInput
+                              min={0.3}
+                              max={5}
+                              digits={2}
                               value={pin.reveal.duration}
                               disabled={locked}
-                              onChange={(event) =>
+                              aria-label="Reveal duration (s)"
+                              onChange={(duration) =>
                                 updateActive({
                                   churches: (activeView?.churches || []).map((c) =>
                                     c.id === pin.id
-                                      ? { ...c, reveal: { ...c.reveal!, kind: "brush", duration: Number(event.target.value) } }
+                                      ? { ...c, reveal: { ...c.reveal!, kind: "brush", duration } }
                                       : c
                                   ),
                                 })
                               }
+                              onCommit={() => fireAndForgetSave()}
                             />
                           </label>
                           <label>
                             Strokes
-                            <input
-                              type="number"
-                              min="2"
-                              max="24"
-                              step="1"
+                            <DraftNumberInput
+                              min={2}
+                              max={24}
+                              digits={0}
                               value={pin.reveal.strokes ?? 4}
                               disabled={locked}
-                              onChange={(event) =>
+                              aria-label="Strokes"
+                              onChange={(strokes) =>
                                 updateActive({
                                   churches: (activeView?.churches || []).map((c) =>
                                     c.id === pin.id
-                                      ? { ...c, reveal: { ...c.reveal!, kind: "brush", strokes: Number(event.target.value) } }
+                                      ? { ...c, reveal: { ...c.reveal!, kind: "brush", strokes } }
                                       : c
                                   ),
                                 })
                               }
+                              onCommit={() => fireAndForgetSave()}
                             />
                           </label>
                         </>

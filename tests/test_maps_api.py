@@ -15,7 +15,7 @@ from PIL import Image
 import pytest
 
 from obed_edom import maps_admin1
-from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM, camera_dict
+from obed_edom.maps_geo import CG_MIN_ZOOM, DEFAULT_HIDDEN_LAYERS, WORLD_MIN_ZOOM, camera_dict
 from obed_edom.maps_keynote import export_maps_job, maps_export_plan
 from obed_edom.web.app import RUNNER, app
 
@@ -67,8 +67,8 @@ def test_post_maps_seeds_under_output_root_without_dest():
     assert "destPath" not in result
     assert result["exportLw"] is True
     assert result["exportCg"] is True
-    assert result["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
-    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
+    assert result["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
+    assert result["slides"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
     assert result["slides"][0]["id"] == "s1"
     assert result["previewDir"].endswith("/previews")
     assert "/.maps/" in result["outputDir"].replace("\\", "/")
@@ -355,7 +355,7 @@ def test_per_slide_hidden_layers_roundtrip_and_demotes_morph():
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
-    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
+    assert result["slides"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
     assert result["slides"][1]["hiddenLayers"] == ["pois"]
     assert result["links"][0]["kind"] == "cut"
 

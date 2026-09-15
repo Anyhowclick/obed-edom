@@ -12,7 +12,7 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
-from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, clamp_cg_shift, default_landmark_size, world_width
+from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, DEFAULT_HIDDEN_LAYERS, clamp_cg_shift, default_landmark_size, world_width
 from obed_edom.maps_keynote import (
     CG_HEIGHT,
     CG_WIDTH,
@@ -1331,11 +1331,11 @@ def test_export_plan_hidden_layers_default_when_unset():
     b = _slide("s2", cam_b)
     plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
     assert plan["stills"] == []
-    assert plan["plates"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
+    assert plan["plates"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
     plan_cut = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.2}])
     assert {row["slideId"]: row["hiddenLayers"] for row in plan_cut["stills"]} == {
-        "s1": ["roadnames", "arrows", "labels", "boundaries"],
-        "s2": ["roadnames", "arrows", "labels", "boundaries"],
+        "s1": list(DEFAULT_HIDDEN_LAYERS),
+        "s2": list(DEFAULT_HIDDEN_LAYERS),
     }
 
 
@@ -1365,7 +1365,7 @@ def test_export_plan_stills_and_plates_carry_hillshade():
 def test_export_plan_still_defaults_hidden_layers_when_missing():
     a = _slide("s1", _camera(3.0, 101.0, 8))
     plan = maps_export_plan([a], [])
-    assert plan["stills"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
+    assert plan["stills"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
 
 
 def test_export_plan_still_preserves_explicit_empty_hidden_layers():

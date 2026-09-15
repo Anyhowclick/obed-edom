@@ -228,7 +228,7 @@ def _coerce_maps_style(value: object) -> object:
     return coerce_maps_style(value) if isinstance(value, str) else value
 MapsCropId = Literal["wall", "center+cg"]
 MapsLayerFilterId = Literal[
-    "roads", "roadnames", "shields", "arrows", "pois", "rail", "buildings", "labels", "boundaries"
+    "roads", "roadnames", "shields", "arrows", "pois", "rail", "buildings", "labels", "waternames", "boundaries"
 ]
 MapsHopKind = Literal["morph", "movie", "dissolve", "cut"]
 MapsPinKind = Literal["dot", "dropPin", "landmark"]

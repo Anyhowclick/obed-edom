@@ -17,3 +17,4 @@ output/*
 Sermon Outlines/*
 !Sermon Outlines/.gitkeep
 dashboard/node_modules/
+dashboard/package-lock.json

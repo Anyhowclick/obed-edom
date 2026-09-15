@@ -42,7 +42,7 @@ DEFAULT_POINT_ZOOM = 8
 
 SEA_OVERVIEW_BBOX = {"west": 70.0, "south": -42.0, "east": 155.0, "north": 28.0}
 
-DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows", "labels", "boundaries")
+DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows", "labels", "waternames", "boundaries")
 
 
 def slide_hidden_layers(slide: dict[str, Any]) -> list[str]:
