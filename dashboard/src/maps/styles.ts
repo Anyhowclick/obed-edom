@@ -3,7 +3,6 @@ import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type M
 import { proxyOpenFreeMapUrl } from "./tileProxy";
 import { TERRAIN_ATTRIBUTION } from "./credits";
 import { withBrighterDarkLines } from "./darkContrast";
-import { withoutMaritimeBoundaries } from "./maritimeBoundaries";
 import { shift, withLowZoomBoundaries } from "./tonerBoundaries";
 import { withoutSolidBuildings } from "./tonerBuildings";
 import { thinLineWidths } from "./tonerLines";
@@ -91,7 +90,7 @@ async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-
     if (styleId === "toner-lines") return layer.type === "background" || layer.type === "line";
     return true;
   });
-  return withoutMaritimeBoundaries(withHillshade(next, styleId, zoomOffset));
+  return withHillshade(next, styleId, zoomOffset);
 }
 
 /** Top-down relief only: no `setTerrain()`, no draping, no pitch. Both layers are spliced in
@@ -198,6 +197,6 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId, zoomOffset = 0): P
     if (styleId === "watercolour") next = buildWatercolourStyle(next).style as StyleSpecification;
     if (styleId === "borderlands") next = buildBorderlandsStyle(next).style as StyleSpecification;
     if (styleId === "dark") next = withBrighterDarkLines(next);
-    return withoutMaritimeBoundaries(withHillshade(next, styleId, zoomOffset));
+    return withHillshade(next, styleId, zoomOffset);
   });
 }

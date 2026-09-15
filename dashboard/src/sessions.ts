@@ -38,15 +38,15 @@ export function libraryJobs(jobs: Job[]): Job[] {
   });
 }
 
-export function useJobSessions(feature?: string, enabled = true) {
+export function useJobSessions(feature?: string) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (enabled) reload();
+    reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [feature, enabled]);
+  }, [feature]);
 
   function reload() {
     listJobs(feature)

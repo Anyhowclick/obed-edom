@@ -21,7 +21,7 @@ from obed_edom.watercolour import _blur, _noise
 MAX_LONG_SIDE = 1600
 REVEAL_DIR = "reveal"
 REVEAL_ALGO_VERSION = 3
-REVEAL_FPS = 60
+REVEAL_FPS = 30
 DEFAULT_STROKES = 4
 STROKE_SPAN = 0.18
 STROKE_EDGE = 0.06
@@ -66,7 +66,6 @@ def reveal_fingerprint(
             width,
             height,
             strokes,
-            REVEAL_FPS,
             REVEAL_ALGO_VERSION,
         )
     )
@@ -375,7 +374,7 @@ def reveal_movie_fingerprint(
     pieces_part = tuple(_piece_part(piece_path) for piece_path in piece_paths or [])
     payload = "|".join(
         str(part)
-        for part in (stat.st_mtime_ns, stat.st_size, geometry, REVEAL_FPS, REVEAL_ALGO_VERSION, manifest_part, pieces_part)
+        for part in (stat.st_mtime_ns, stat.st_size, geometry, REVEAL_ALGO_VERSION, manifest_part, pieces_part)
     )
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -395,7 +394,7 @@ def render_slide_reveal_movie(
     slide_id: str,
     audience: str = "lw",
     size: tuple[int, int],
-    fps: int = REVEAL_FPS,
+    fps: int = 30,
     fingerprint: str | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> Path:

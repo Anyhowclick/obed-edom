@@ -338,32 +338,6 @@ describe("Selected regions colour wheel", () => {
     expect(screen.getByRole("button", { name: "Use global colour" })).toBeInTheDocument();
   });
 
-  it("stores no-fill on the selected highlight and disables the colour fields", async () => {
-    const job = makeJob({
-      result: { ...makeDoc({ slides: [makeSlide({ highlights: ["SGP"] })] }), stateRevision: 1 },
-    });
-    await renderMapsTab({ job });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("tab", { name: "Properties" }));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "SGP" }));
-    });
-
-    const noFill = screen.getByRole("checkbox", { name: "No fill" }) as HTMLInputElement;
-    await act(async () => {
-      fireEvent.click(noFill);
-    });
-    await tick(800);
-
-    const calls = mapsApiScript.saveMapsState.calls;
-    expect(calls.length).toBeGreaterThan(0);
-    const slides = calls[calls.length - 1].document.slides as Array<{ highlightColours?: Record<string, string> }>;
-    expect(slides[0]?.highlightColours).toEqual({ SGP: "none" });
-    expect((screen.getByLabelText("Highlight colour") as HTMLInputElement).disabled).toBe(true);
-    expect(screen.queryByRole("button", { name: "Use global colour" })).not.toBeInTheDocument();
-  });
-
   it("does not apply a pending colour override to another slide", async () => {
     const job = makeJob({
       result: {

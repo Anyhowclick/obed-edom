@@ -1162,6 +1162,22 @@ label.check input[type="checkbox"]:disabled,
   font-weight: 600;
 }
 .seg button.on { background: var(--bg-surface-solid); color: var(--ink-inverse); border-color: transparent; }
+.dsk-review { margin: 12px 0; overflow-x: auto; }
+.dsk-review-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.dsk-review-table th, .dsk-review-table td { padding: 6px 8px; border-bottom: var(--border-glass); text-align: left; vertical-align: middle; }
+.dsk-row-skipped { opacity: 0.55; }
+.dsk-review-table img { width: 96px; height: auto; border-radius: 4px; display: block; }
+.thumb-btn { border: none; background: none; padding: 0; cursor: pointer; }
+.chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface-glass);
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
 .seg.seg-slide {
   --tabs-dur: 250ms;
   --tabs-ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -1226,7 +1242,7 @@ label.check input[type="checkbox"]:disabled,
   .seg-slide-ind { transition: none !important; }
 }
 .maps-pick-hint {
-  min-height: 2.7em;
+  min-height: 1.35em;
   margin-top: 6px;
 }
 .maps-aud-row {
@@ -2740,7 +2756,6 @@ input.maps-thumb-title-input:focus {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -3284,9 +3299,6 @@ input.maps-thumb-title-input:focus {
   font-family: var(--font-sans);
   font-size: 16px;
   cursor: ew-resize;
-}
-.ae-scrub input:not([type="range"]):focus {
-  cursor: text;
 }
 .ae-scrub.has-slider {
   flex-wrap: wrap;
