@@ -306,3 +306,9 @@ Keynote document open, generous `with timeout`, never force-quit while the owner
 | 11 | point-column ref badge | still cyan `[0,253,255]`, `kNoCaps` (pending Q2) |
 | 12 | isolation | exactly one ZIP member (`Index/DocumentStylesheet.iwa`) changed by the style pass; member list identical |
 | 13 | builds | build count and reveal order unchanged vs the pre-style staging deck (`_verify_builds` already gates this) |
+
+## Probe results (2026-09-15 11:35, orchestrator)
+- p2 round 1 (fontColor-only patch, as planned): FAILED — after open+save every badge/verse-number run reverted to cyan. Post-mortem: each target archive carries the colour TWICE in `charProperties` (`fontColor` and `tsdFill.color`); Keynote treats `tsdFill.color` as authoritative and resyncs `fontColor` from it on save; anonymous paragraph-style variations are regenerated with new ids on save (17646732 → 17654928); `capitalization: kNoCaps` DID survive (Keynote dropped the now-redundant override because the parent "Title Small" is kNoCaps). The reader (`resolve_style`) only reads `fontColor`, which is why the dry run looked green.
+- p2 round 2 (`p1_patch_styles.py` also writes `tsdFill.color` = the new colour when `tsdFill` is present): PASSED — run tables byte-identical before and after the save (`~/Desktop/style-probe/roles.diff` empty): badges white AzoSans-Bold 40 title-case, verse numbers [255,251,0] superscript. Mechanism D stands with the dual-field rule. Reader must learn `tsdFill.color` (verification must read the authoritative field).
+- p3 (per-range live writes) not run: no longer needed.
+- Owner defaults adopted pending answers: Q1 follow GOLD (yellow ArgentCF-Bold emphasis — no emphasis work); Q2 point-column badge keeps cyan, caps cleared; Q3 badge string verbatim.
