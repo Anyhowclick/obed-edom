@@ -491,6 +491,116 @@ def test_mint_path_reproduces_gold_after_stripping_the_own_pill(tmp_path: Path) 
     assert P._mask_law_ok(objects[mask_id]["super"]["geometry"], 301.8292)
 
 
+@needs_gold
+def test_mint_path_places_the_pill_directly_below_the_badge_in_z_order(tmp_path: Path) -> None:
+    """Slide 3's own pill (15156374) stripped, then re-minted with `badge_id` set to
+    gold's own badge shape (15156393, tag `Text-1`, painted ABOVE the pill in gold's
+    `drawablesZOrder`): the minted pill must land directly below that badge, not
+    appended at the end (the r13 defect this fix addresses)."""
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+
+    out_path = tmp_path / "out.key"
+    result = P.write_pills(
+        deck, slides={3: P.PillSpec(301.8292, "standard", "15156393")}, out_path=out_path,
+    )
+    assert result.minted == 1
+
+    objects, _i2f, _fi = _load_deck_full(out_path)[:3]
+    order = slide_order(objects)
+    slide = objects[order[2][0]]
+    owned = [str(r["identifier"]) for r in slide["ownedDrawables"]]
+    z_order = [str(r["identifier"]) for r in slide["drawablesZOrder"]]
+    assert owned == z_order
+    pill_id = result.edited_ids[3]
+    assert z_order.index(pill_id) + 1 == z_order.index("15156393")
+
+
+@needs_gold
+def test_reuse_path_places_the_pill_directly_below_the_badge_in_z_order(tmp_path: Path) -> None:
+    """Gold's own round trip (reuse path) with `badge_id` set: the reused pill (already
+    directly below the badge in gold) must still satisfy the z-order law after write."""
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    out_path = tmp_path / "out.key"
+    result = P.write_pills(
+        deck, slides={3: P.PillSpec(301.8292, "standard", "15156393")}, out_path=out_path,
+    )
+    assert result.reused == 1
+
+    objects, _i2f, _fi = _load_deck_full(out_path)[:3]
+    order = slide_order(objects)
+    slide = objects[order[2][0]]
+    owned = [str(r["identifier"]) for r in slide["ownedDrawables"]]
+    z_order = [str(r["identifier"]) for r in slide["drawablesZOrder"]]
+    assert owned == z_order
+    pill_id = result.edited_ids[3]
+    assert z_order.index(pill_id) + 1 == z_order.index("15156393")
+
+
+@needs_gold
+def test_mint_path_refuses_an_unresolved_badge_id(tmp_path: Path) -> None:
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    _strip_own_pill(deck, "Index/Slide-15156371.iwa", "15156371", "15156374")
+    with pytest.raises(P.OfflineWriteRefused, match="badge 999999999 unresolved"):
+        P.write_pills(
+            deck, slides={3: P.PillSpec(301.8292, "standard", "999999999")},
+            out_path=tmp_path / "out.key",
+        )
+
+
+@needs_gold
+def test_reuse_refuses_a_badge_id_with_no_z_order_anchor_on_the_slide(tmp_path: Path) -> None:
+    """A `badge_id` that resolves to a real object but is not owned (directly or via a
+    group ancestor) by the target slide's own `ownedDrawables` refuses by name."""
+    deck = _copy_deck(GOLD, tmp_path, "gold.key")
+    with pytest.raises(P.OfflineWriteRefused, match="has no z-order anchor"):
+        P.write_pills(
+            # 15165678 resolves (it is slide 5's own badge shape) but is not owned,
+            # directly or via a group ancestor, by slide 3.
+            deck, slides={3: P.PillSpec(301.8292, "standard", "15165678")},
+            out_path=tmp_path / "out.key",
+        )
+
+
+def test_z_order_anchor_resolves_through_a_group_ancestor() -> None:
+    """Unit-level coverage of the group-child case (GW 5-shaped): a badge nested inside a
+    `TSD.GroupArchive` resolves to the group's own id, which IS in the slide's
+    `ownedDrawables` -- matching the r13 probe (group at z-order index 0, pill appended
+    above the WHOLE group, hiding the group-child badge)."""
+    objects = {
+        "group1": {"_pbtype": "TSD.GroupArchive"},
+        "badge1": {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"parent": {"identifier": "group1"}}},
+    }
+    slide = {"ownedDrawables": [{"identifier": "group1"}, {"identifier": "pill1"}]}
+    assert P._z_order_anchor(objects, slide, "badge1") == "group1"
+
+
+def test_z_order_anchor_returns_none_when_the_chain_does_not_resolve() -> None:
+    objects = {"badge1": {"super": {"parent": {"identifier": "orphan"}}}}
+    slide = {"ownedDrawables": [{"identifier": "pill1"}]}
+    assert P._z_order_anchor(objects, slide, "badge1") is None
+
+
+def test_insert_pill_before_anchor_places_the_pill_directly_below_the_badge() -> None:
+    slide_obj = {
+        "ownedDrawables": [{"identifier": "text1"}, {"identifier": "badge1"}],
+        "drawablesZOrder": [{"identifier": "text1"}, {"identifier": "badge1"}],
+    }
+    P._insert_pill_before_anchor(slide_obj, "pill1", "badge1")
+    owned = [r["identifier"] for r in slide_obj["ownedDrawables"]]
+    z_order = [r["identifier"] for r in slide_obj["drawablesZOrder"]]
+    assert owned == z_order == ["text1", "pill1", "badge1"]
+
+
+def test_insert_pill_before_anchor_refuses_when_owned_and_z_order_diverge() -> None:
+    slide_obj = {
+        "ownedDrawables": [{"identifier": "badge1"}, {"identifier": "text1"}],
+        "drawablesZOrder": [{"identifier": "text1"}, {"identifier": "badge1"}],
+    }
+    with pytest.raises(P.OfflineWriteRefused, match="differs from drawablesZOrder"):
+        P._insert_pill_before_anchor(slide_obj, "pill1", "badge1")
+
+
 # ------------------------------------------------------------- minter / metadata registration
 
 

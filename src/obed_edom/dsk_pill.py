@@ -9,6 +9,19 @@ mask does. Mask height 75.52111 and y 50.9344 are constant; mask x + width == 18
 Composed frame x is 50.4 constant; frame width == mask width; frame y is a property of
 the resolved layout (789.1 "Verse Standard (Variation 2)", 879.1 "Verse 1 Line
 (Variation 2)"), not written directly -- it falls out of the (constant) image geometry.
+
+Gold measurement (slide 3, "Matthew 18"): `drawablesZOrder` is [verse text, pill, badge]
+-- the badge paints AFTER (i.e. above) the pill. A mint that appends the new pill id at
+the end of `drawablesZOrder`/`ownedDrawables` (as the r13 deck's minted pills did) puts
+the pill on top of the badge instead, hiding the badge text; the group-child case (badge
+nested in a `TSD.GroupArchive`) showed the same defect one level up: the pill painted
+above the whole group. `write_pills` therefore places the pill directly BELOW the badge's
+own top-level z-order entry (the badge itself, or its owning group when it is a group
+child) -- as the LAST patch on the slide, per the z-order/kindIndex rule in
+`.agents/skills/obed-edom/SKILL.md`. Reordering a slide's z-order renumbers every
+`kindIndex` on it, so `write_pills` must be the last offline pass touching a slide's
+images by index (`dsk_assemble.assemble_dsk_deck` runs the pill pass last, after the
+staged layout verifier).
 """
 from __future__ import annotations
 
@@ -56,6 +69,7 @@ class OfflineWriteRefused(Exception):
 class PillSpec:
     width: float
     layout: str  # "standard" | "one_line" -- cross-checked against the slide's resolved layout
+    badge_id: str | None = None  # real archive id of the verse badge; refused by name if unresolved
 
 
 @dataclass
@@ -81,6 +95,8 @@ class _Expected:
     width: float
     layout: str
     pill_id: str
+    badge_id: str | None = None
+    anchor_id: str | None = None
     fingerprint: dict | None = None
     minted_ids: list[str] | None = None  # [image, mask, title, caption] iff the mint path ran
     minted_types: list[str] | None = None  # _pbtype per minted_ids entry
@@ -371,6 +387,43 @@ def _mask_exclusively_owned(
     return True
 
 
+def _z_order_anchor(objects: dict[str, dict], slide: dict, badge_id: str) -> str | None:
+    """The slide's own top-level `ownedDrawables` entry that carries `badge_id` -- the
+    badge itself when it is top-level, or its owning group when it is a group child.
+    `None` when the chain does not resolve (unowned, cyclic, or not on this slide)."""
+    owned_ids = {str(r["identifier"]) for r in (slide.get("ownedDrawables") or [])}
+    current = str(badge_id)
+    seen: set[str] = set()
+    while current not in owned_ids:
+        if current in seen:
+            return None
+        seen.add(current)
+        obj = objects.get(current)
+        if obj is None:
+            return None
+        parent_id = ((obj.get("super") or {}).get("parent") or {}).get("identifier")
+        if parent_id is None:
+            return None
+        current = str(parent_id)
+    return current
+
+
+def _insert_pill_before_anchor(slide_obj: dict, image_id: str, anchor_id: str) -> None:
+    """Place `image_id` directly below `anchor_id` in `drawablesZOrder`, mirrored
+    identically into `ownedDrawables` -- the last patch on the slide (§1.4 z-order)."""
+    owned_ids = [str(r["identifier"]) for r in (slide_obj.get("ownedDrawables") or [])]
+    z_ids = [str(r["identifier"]) for r in (slide_obj.get("drawablesZOrder") or [])]
+    if owned_ids != z_ids:
+        raise OfflineWriteRefused("ownedDrawables order differs from drawablesZOrder, refusing to insert the pill")
+    if image_id in owned_ids:
+        owned_ids.remove(image_id)
+    if anchor_id not in owned_ids:
+        raise OfflineWriteRefused(f"z-order anchor {anchor_id} not found, refusing to insert the pill")
+    owned_ids.insert(owned_ids.index(anchor_id), image_id)
+    slide_obj["ownedDrawables"] = [{"identifier": oid} for oid in owned_ids]
+    slide_obj["drawablesZOrder"] = [{"identifier": oid} for oid in owned_ids]
+
+
 def _register_new_ids(component: dict, minter: _Minter, new_ids: list[str]) -> None:
     entries = component.setdefault("objectUuidMapEntries", [])
     for nid in new_ids:
@@ -504,12 +557,37 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
             _apply_mask_fields(mask_obj, width)
             touched.add(mask_member)
 
+            anchor_id = None
+            if spec.badge_id is not None:
+                badge_id = str(spec.badge_id)
+                if objects.get(badge_id) is None:
+                    raise OfflineWriteRefused(f"slide {ordinal}: badge {badge_id} unresolved")
+                anchor_id = _z_order_anchor(objects, slide, badge_id)
+                if anchor_id is None:
+                    raise OfflineWriteRefused(f"slide {ordinal}: badge {badge_id} has no z-order anchor")
+                if anchor_id == image_id:
+                    raise OfflineWriteRefused(f"slide {ordinal}: badge {badge_id} z-order anchor is the pill itself")
+                slide_arch = _find_archive(get_decoded(slide_member), slide_id)
+                _insert_pill_before_anchor(slide_arch["objects"][0], image_id, anchor_id)
+                touched.add(slide_member)
+
             result.reused += 1
             result.edited_ids[ordinal] = image_id
-            expected[ordinal] = _Expected(width, spec.layout, image_id, fingerprint=fingerprint)
+            expected[ordinal] = _Expected(
+                width, spec.layout, image_id, badge_id=spec.badge_id, anchor_id=anchor_id, fingerprint=fingerprint
+            )
             continue
 
         # Copy path: mint image/mask/title/caption archives from the layout's own pill.
+        mint_anchor_id = None
+        if spec.badge_id is not None:
+            badge_id = str(spec.badge_id)
+            if objects.get(badge_id) is None:
+                raise OfflineWriteRefused(f"slide {ordinal}: badge {badge_id} unresolved")
+            mint_anchor_id = _z_order_anchor(objects, slide, badge_id)
+            if mint_anchor_id is None:
+                raise OfflineWriteRefused(f"slide {ordinal}: badge {badge_id} has no z-order anchor")
+
         layout_decoded = get_decoded(layout_member)
         src_image_arch = _find_archive(layout_decoded, layout_pill_id)
         mask_src_id = str((layout_pill.get("mask") or {}).get("identifier") or "")
@@ -566,8 +644,11 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
         ])
         slide_arch = _find_archive(slide_decoded, slide_id)
         slide_obj = slide_arch["objects"][0]
-        slide_obj.setdefault("ownedDrawables", []).append({"identifier": new_image_id})
-        slide_obj.setdefault("drawablesZOrder", []).append({"identifier": new_image_id})
+        if mint_anchor_id is not None:
+            _insert_pill_before_anchor(slide_obj, new_image_id, mint_anchor_id)
+        else:
+            slide_obj.setdefault("ownedDrawables", []).append({"identifier": new_image_id})
+            slide_obj.setdefault("drawablesZOrder", []).append({"identifier": new_image_id})
 
         slide_component = component_for_member(slide_member)
         _register_new_ids(slide_component, minter, [new_image_id, new_mask_id, new_title_id, new_caption_id])
@@ -592,6 +673,7 @@ def write_pills(key_path: str | Path, *, slides: Mapping[int, PillSpec], out_pat
         result.edited_ids[ordinal] = new_image_id
         expected[ordinal] = _Expected(
             width, spec.layout, new_image_id,
+            badge_id=spec.badge_id, anchor_id=mint_anchor_id,
             fingerprint=_image_fingerprint(new_image_obj),
             minted_ids=[new_image_id, new_mask_id, new_title_id, new_caption_id],
             minted_types=[
@@ -692,6 +774,23 @@ def _verify(out_path: Path, expected: Mapping[int, "_Expected"]) -> None:
             raise OfflineWriteRefused(
                 f"slide {ordinal}: layout mask {layout_mask_id} pathsource type is not {_MASK_PATH_TYPE!r}"
             )
+
+        if exp.badge_id is not None:
+            owned = [str(r["identifier"]) for r in (slide.get("ownedDrawables") or [])]
+            z_order = [str(r["identifier"]) for r in (slide.get("drawablesZOrder") or [])]
+            if owned != z_order:
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: re-read ownedDrawables order differs from drawablesZOrder"
+                )
+            if pill_id not in z_order or exp.anchor_id not in z_order:
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: re-read z-order is missing the pill or its badge anchor"
+                )
+            if z_order.index(pill_id) + 1 != z_order.index(exp.anchor_id):
+                raise OfflineWriteRefused(
+                    f"slide {ordinal}: re-read pill {pill_id} is not directly below badge anchor "
+                    f"{exp.anchor_id} in drawablesZOrder"
+                )
 
         if exp.minted_ids is None:
             continue

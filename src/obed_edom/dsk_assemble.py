@@ -4265,7 +4265,7 @@ def _pill_specs(
             if obj is None:
                 raise AssemblyRefusal(f"slide {number} (ordinal {ordinal}): verse badge object unresolved")
             width = _pill_width_for_badge(child.get("text") or "", obj, objects, cache)
-            specs[ordinal] = PillSpec(width, pill_layout)
+            specs[ordinal] = PillSpec(width, pill_layout, str(child.get("id")))
             continue
         staged_addr = _staged_id_for(number, plan, badge_id, part=part, hidden=slide_hidden)
         if staged_addr is None:
@@ -4282,7 +4282,7 @@ def _pill_specs(
         if obj is None:
             raise AssemblyRefusal(f"slide {number} (ordinal {ordinal}): verse badge object unresolved")
         width = _pill_width_for_badge(rec.get("text") or "", obj, objects, cache)
-        specs[ordinal] = PillSpec(width, pill_layout)
+        specs[ordinal] = PillSpec(width, pill_layout, str(rec["id"]))
     return specs
 
 
