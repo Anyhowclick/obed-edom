@@ -11129,6 +11129,43 @@ def test_verify_staged_layouts_gw17_real_deck_pins_stacked_rects():
     )
 
 
+R13_REFUSED_DECK = Path("/Users/anyhowclick/Desktop/dsk-d4-work/out-r13/attempt10.refused.key")
+R13_CLIPS_DIR = Path("/Users/anyhowclick/Desktop/dsk-d4-work/clips-r8")
+R13_SLIDES = (5, 13, 17, 21, 24, 28, 32, 33, 38, 44, 46, 48, 50, 51, 52, 53, 54)
+
+
+def test_verify_staged_layouts_gw17_real_refused_deck_now_passes():
+    """Live r13 attempt 10 refused slide 17 (ordinal 5) because the old stacked-box
+    check chained each later box's expected top off the PREVIOUS box's ACTUAL
+    (autosize-rendered) height/gap -- Keynote rendered GW 17's first box a few points
+    shorter than the plan predicted, so the chained expected top drifted from the
+    second box's actual position even though every box sat right where the plan
+    put it. The fixed rule checks each box against its OWN ``plan.fits`` rect instead;
+    this reproduces the exact refused deck and plan and confirms it now passes."""
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    if not R13_REFUSED_DECK.is_file():
+        pytest.skip(f"refused deck not present (local operator file): {R13_REFUSED_DECK}")
+    clips = {
+        32: R13_CLIPS_DIR / "Sermon_PK (GW).032.mov",
+        33: R13_CLIPS_DIR / "Sermon_PK (GW).033.mov",
+    }
+    if not all(p.is_file() for p in clips.values()):
+        pytest.skip(f"movie clips not present (local operator files): {R13_CLIPS_DIR}")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    builds_by_number = iwa_builds.deck_builds(GW_DECK, deck=deck)
+    decisions = {n: SlideDecision(n, "in_deck") for n in R13_SLIDES}
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+        builds=builds_by_number,
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[17] == "Verse Standard (Variation 2)"
+    dsa.verify_staged_layouts_alpha_safe(R13_REFUSED_DECK, plan, expected_layout_names=names)
+
+
 # --------------------------------------------------------------------------- L5 D1b point layout
 
 

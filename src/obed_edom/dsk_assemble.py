@@ -2685,12 +2685,15 @@ def verify_staged_layouts_alpha_safe(
     ``kindIndex`` -- and a ``groupchild`` id's rect is composed from the staged group
     object via ``_staged_group_child_rect`` rather than skipped.
 
-    An ordinal whose ``stacked_ids`` holds more than one box (a joint fit, e.g. GW 17)
-    is checked as a STACK, ordered by ``plan.fits``' own y: the first box's top must
-    equal the slot top, every box's x/w must equal the slot's, each later box's top
-    must equal the previous box's bottom plus ``plan.fits``' own recorded gap (or at
-    least not overlap it) within 2.0pt, and the union bottom must not exceed the slot
-    bottom by more than 2.0pt -- a single-box ordinal keeps the exact per-box rule.
+    An ordinal whose ``stacked_ids`` holds more than one box (joint-fit or fallback-
+    stacked, e.g. GW 17) is checked as a STACK, ordered by ``plan.fits``' own y: every
+    box is checked against its OWN ``plan.fits`` rect (x/w/y within tolerance, saved
+    height at most the planned height + 2.0pt) rather than chained off a neighbour's
+    rendered height, since Keynote's own autosize can render a box shorter than
+    planned without moving it; the first box's top must also equal the slot top, every
+    box's x/w must equal the slot's, later boxes must not overlap the one before, and
+    the union bottom must not exceed the slot bottom by more than 2.0pt -- a single-box
+    ordinal keeps the exact per-box rule.
 
     An ordinal whose resolved layout is a POINT layout (``slot.text``) AND is one of
     D1b's two-column slides (``plan.two_column``) is verified against the plan's OWN
@@ -2807,6 +2810,15 @@ def verify_staged_layouts_alpha_safe(
                             "not found on the staged slide"
                         )
                     x, y, w, h = got
+                    planned = plan_fits.get(item_id)
+                    if (
+                        planned is None
+                        or abs(x - planned.x) > _SLOT_RECT_TOL_PT
+                        or abs(w - planned.w) > _SLOT_RECT_TOL_PT
+                        or abs(y - planned.y) > _SLOT_RECT_TOL_PT
+                        or h > planned.h + 2.0
+                    ):
+                        _refuse_rect(item_id, x, y, w, h, "verse/point text")
                     rects.append((item_id, x, y, w, h))
                 first_id, fx, fy, fw, fh = rects[0]
                 if abs(fy - slot_rect.y) > _SLOT_RECT_TOL_PT:
@@ -2815,12 +2827,8 @@ def verify_staged_layouts_alpha_safe(
                     if abs(x - slot_rect.x) > _SLOT_RECT_TOL_PT or abs(w - slot_rect.w) > _SLOT_RECT_TOL_PT:
                         _refuse_rect(item_id, x, y, w, h, "verse/point text")
                     if idx > 0:
-                        prev_id, px, py, pw, ph = rects[idx - 1]
-                        gap = 0.0
-                        if item_id in plan_fits and prev_id in plan_fits:
-                            gap = plan_fits[item_id].y - (plan_fits[prev_id].y + plan_fits[prev_id].h)
-                        expected_top = py + ph + gap
-                        if abs(y - expected_top) > 2.0:
+                        _prev_id, _px, py, _pw, ph = rects[idx - 1]
+                        if y < py + ph - 2.0:
                             _refuse_rect(item_id, x, y, w, h, "verse/point text")
                 last_id, lx, ly, lw, lh = rects[-1]
                 if ly + lh > slot_rect.y + slot_rect.h + 2.0:
@@ -5084,7 +5092,10 @@ def assemble_dsk_deck(
     dir, never in place and never straight to `out_path` -- both post-passes run against
     that staging copy, and only once they pass (`_verify_builds` raises on a surplus) is
     it copied to `out_path`. A refusal after a failed post-pass therefore never leaves a
-    corrupt or unverified deck sitting at `out_path`.
+    corrupt or unverified deck sitting at `out_path`. A non-refusal exception from a
+    post-pass is likewise never left to silently drop the staged deck: it is kept as
+    `*.failed.key` with its traceback logged, then re-raised as an `AssemblyRefusal` so
+    the caller's normal refusal handling applies.
 
     `layout_policy` -- see `build_assembly_script` -- defaults to "import". When "import",
     `check_layout_import_preconditions` refuses offline before Keynote launches, and
@@ -5248,9 +5259,6 @@ def assemble_dsk_deck(
                     log(f"staged deck kept at {refused_path}")
             raise
         except Exception as exc:  # noqa: BLE001
-            # A bug in a post-pass (not a refusal) must not silently drop the staged
-            # deck either -- keep it as `*.failed.key`, log the traceback, then
-            # surface it as a refusal so the caller's normal handling applies.
             log(traceback.format_exc())
             if staging_path.exists():
                 failed_path = out_path.parent / f"{out_path.stem}.failed.key"
