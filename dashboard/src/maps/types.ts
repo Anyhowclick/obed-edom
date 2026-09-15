@@ -40,7 +40,6 @@ export type MapsLayerFilterId =
   | "rail"
   | "buildings"
   | "labels"
-  | "waternames"
   | "boundaries";
 export type MapsHopKind = "morph" | "movie" | "dissolve" | "cut";
 export type MapsPinKind = "dot" | "dropPin" | "landmark";
@@ -196,13 +195,12 @@ export const LAYER_FILTERS: { id: MapsLayerFilterId; label: string }[] = [
   { id: "rail", label: "Rail" },
   { id: "buildings", label: "Buildings" },
   { id: "labels", label: "Place labels" },
-  { id: "waternames", label: "Water names" },
   { id: "boundaries", label: "Boundaries" },
 ];
 
 const LAYER_FILTER_IDS = new Set(LAYER_FILTERS.map((item) => item.id));
 
-export const DEFAULT_HIDDEN_LAYERS: MapsLayerFilterId[] = ["roadnames", "arrows", "labels", "waternames", "boundaries"];
+export const DEFAULT_HIDDEN_LAYERS: MapsLayerFilterId[] = ["roadnames", "arrows", "labels", "boundaries"];
 
 export function parseHiddenLayers(raw: unknown): MapsLayerFilterId[] {
   if (raw == null) return [...DEFAULT_HIDDEN_LAYERS];

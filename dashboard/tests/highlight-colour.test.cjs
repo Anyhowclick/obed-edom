@@ -15,13 +15,8 @@ const compile = spawnSync(runtime, [
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 const {
   DEFAULT_HIGHLIGHT_COLOUR,
-  HIGHLIGHT_NO_FILL,
-  filledHighlights,
   highlightColourExpression,
-  isHighlightNone,
   normaliseHighlightColour,
-  parseHighlightColours,
-  parseHighlightColourValue,
   pruneHighlightColours,
   highlightColoursKey,
   setHighlightColour,
@@ -116,22 +111,6 @@ test("highlightColourExpression strips the A1: prefix for admin-1", () => {
     highlightColourExpression("adm1_code", "#e8772a", { MYS: "#00aaff", "A1:MYS-1186": "#112233" }),
     ["match", ["get", "adm1_code"], "MYS-1186", "#112233", "#e8772a"]
   );
-});
-
-test("parseHighlightColours accepts none and skips it in colour expressions", () => {
-  assert.equal(isHighlightNone("none"), true);
-  assert.equal(isHighlightNone("NONE"), true);
-  assert.equal(parseHighlightColourValue("none"), HIGHLIGHT_NO_FILL);
-  assert.deepEqual(parseHighlightColours({ MYS: "none", SGP: "#00AAFF" }), { MYS: "none", SGP: "#00aaff" });
-  assert.deepEqual(filledHighlights(["MYS", "SGP"], { MYS: "none" }), ["SGP"]);
-  assert.deepEqual(highlightColourExpression("ADM0_A3", "#e8772a", { MYS: "none", SGP: "#00aaff" }), [
-    "match",
-    ["get", "ADM0_A3"],
-    "SGP",
-    "#00aaff",
-    "#e8772a",
-  ]);
-  assert.equal(highlightColoursKey({ MYS: "none", SGP: "#0A84FF" }), "MYS:none,SGP:#0a84ff");
 });
 
 test("pruneHighlightColours drops colours whose highlight was removed", () => {

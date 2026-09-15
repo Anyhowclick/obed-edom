@@ -1,160 +1,1124 @@
 ---
-name: CG resizer — active work and retained engineering record
-overview: >-
-  Consolidated 2026-09-15. W1 offline geometry is shipped and default-on. W2 offline z-order is
-  implemented and default-off pending its final live gate. This file is the single resizer plan;
-  the standalone W2 plan was folded into it. Completed feature diaries live in git and the
-  Obed-Edom skill, not here.
+name: CG resizer — optimizations (read + write tracks), bug backlog, features
+overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET); the pass-2 half is now ALSO MET as of the 2026-09-12 full W1 strict gate (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate bar. `kindindex-guard-test-vacuous` is on PR #77; `badge-width-collapse-gold-slide-2` is DONE (PR #94 @ 1ad51ed, owner merges; live acceptance PASSED 2026-09-12 18:07, `output/bank/2026-09-12/badge-width-live/results.md`); main is `9ef859b` and the shared osascript runner (PR #104) is merged and live-verified (ranged live gate 47/113/82 GREEN, `output/bank/2026-09-12/runner-ranged/results.md`); IWA natural-size/sentinel unification is now IMPLEMENTED on `refactor/iwa-unification` (PR #115 open, owner merges; live gate GREEN 09-14) — next = the W1 default flip, then W2; new bug-backlog item `badge-probe-on-blind` (2026-09-12 W1 gate run 1: a global-`badgeMoved`-guard blind spot let 232 badge raises silently not land on a GREEN-looking report; arm-A re-run clean, gate itself unaffected). Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
-  - id: w2-final-live-gate
-    content: >-
-      Re-run the W2 RAISE10 and Gold live gate after PRs #128 and #131. If every eligibility,
-      front-block, pixel, counter, and build-order bar is green, flip OBED_ZORDER_WRITE to on.
+  - id: output-bugs-batch1
+    content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
+    status: completed
+  - id: card-template-size-reflow
+    content: "DONE 2026-09-03. Batch 2: photo cards take the template card rect, captions take the template swatch with a JOB-SCOPED whole-point step-down, and each card grid re-pitches to the template's own gutters (the 3-card L on slide 12) and reflows to 6 columns. Shipped `0ad68b0`, `0cdcd2b`, `753acef`. Live-verified on the Map remap: 71 cards matched, exactly the 5 predicted 9pt step-downs, 0 off-canvas cards, off-frame 29 -> 2, gold agreement 70/71; the accepted residual is 10 cards overlapping stat blocks (see `stat-group-template-sample`). The durable lessons (job-scoped sizes, pitch needs two template neighbours, inset is the shape's own padding) are in `Insights worth keeping`; verify deck deleted."
+    status: completed
+  - id: w-offline-write-stabilise
+    content: "TRANCHE 1 (W1). SHIPPED ec20f4b/a8b27ac/5577e27 (OBED_OFFLINE_WRITE off|on|verify, default OFF = byte-identical production; deck-level patcher, streaming in-place rewrite, reconcile_counts refuse gate, AS fallback, read-back verify, scripts/offline_write_ab.py). The 'pass-2 0.48× group shrink' was an ORACLE ARTIFACT (banked specs_slide9.json + A_prime predate 8a8ef7a); the offline write itself is correct and survives pass 2. 2026-09-04 evening: GOLD BASELINE A/B KIT built and run — `remap` on main 869a28f vs this branch f083a67, PRODUCTION DEFAULT PATH (offline write OFF) — NO regression: geometry 0.00px on all 19 Gold slides, styles identical; the only diff between runs is Keynote's own drawablesZOrder scrambling (see w-zorder-patch). So the branch is safe to sit on at default OFF. Separately, opt-in mode (`on`) has a SEVERE REGRESSION, now root-caused: the IWA patcher writes correct frames but leaves Keynote's render-derived fields stale — shape pathsource naturalSize for non-bezier sources (`_find_bezier` only knows bezierPathSource), masked images (originalSize + mask naturalSize never written, displacement parked in the mask), text naturalSize never written, group children inheriting all of it. Content renders ÷4 inside otherwise-correct frames: 587 stale objects on the 12 offline Gold slides, 0 on the AppleScript ones. `verify_offline_frames` is structurally blind to this (compares the bytes it just wrote; skips masked/groups/text) — this also explains badgeUnresolved (10 Gold / 84 Full: stale-naturalSize plates + globes with a 467px anchor drift); the badge probe is correct and must stay as-is. So 'Map deck gate GREEN' in the tranche-1 handover was luck of object classes, not a clean gate. FIX SCOPE (2/1/2 planning, feature branch, in progress): universal path-natural writer (scalar corner constant, editable-bezier nodes rescaled per production); hard-miss on any unwritable field → AppleScript fallback for that object; masked media REFUSE for now; groups refuse on any unwritable descendant; text width naturalSize written (height stays informational); a spec-independent consistency audit (naturalSize==size, mask naturalSize==mask size, originalSize==size, mask offset within frame, 2% tol) that fails the run. TO CLEAR: (1) SUPERSEDED — see below, the whole-deck gate replaced the single-slide re-bank plan; (2) re-run offline_write_ab.py with a HEALTHY A (Accessibility granted; gate must hard-fail on an unhealthy A: pass-2 done/skipped counts, dedup counts), plan-as-oracle for exact classes, identity matching, group children bucketed separately, groups compared as a SET; (3) default-flip bar = gate GREEN on both gold decks with real patches AND one end-to-end `on` run placement-identical to a scripted run, now including the consistency audit. FLIP STAYS ON HOLD. The Full-deck A/B bank under output/offline-write-ab-full/ was deleted with output/ (owner); on 2026-09-07 the owner restored Full_Report_Card_Wall.key and the Full_Report_Card_CG.key reference, while Base_CG_Assets.key remains available, so a fresh ~1h-plus whole-deck bank is runnable. Design points that stand: deleteHides stays in pass 1 and the patcher bridges kindIndex (never both); reuse slides stay fully in Keynote; the JXA attrs pass stays in pass 1; mapReadback assertion moves to the verify. Payoff: replaces the ~100ms/command AS geometry phase (~100–155s Map, multi-minute Full) with seconds. UPDATE 2026-09-04 (fe44f6b) — the gate was hardened and earned its keep: 49cbc7e whole-deck gate (Accessibility pre-flight, clean-pass-2 bars, identity matching by drawable id — output ids == source ids on every non-reuse slide — plan-as-oracle for the exact classes via _spec_box, run records with digests, --mode on|verify, --no-validate); 36e2d81 REAL patcher defect found by the gate and fixed (iwa_write._text_fields wrote size_h onto an autosize text box whose stored h==0.0 is the sentinel; B's slide-8 text became a fixed 43pt frame); 6ac80d8 every bucket gates at doubled per-side budgets (measured Map: line 0.95 group 1.43 child:image 1.83); 3ca6385 refuses open Keynote docs + closes own stray decks; 08d2e2b --pass2-bar parity; 94df47f bulk-tier errors loud+durable (bulkErrors rides the cache) + gate quits Keynote between runs. MAP DECK GREEN in verify AND on modes (output/offline-write-ab-v2, -on; identity 100%, plan oracle B exact 0.00px, A ≤0.49 = AppleScript integer rounding). FULL DECK NOT GREEN, undebugged (output/offline-write-ab-full, A_unflagged + B_flagged banked with run records): offline-write verify FAIL image Δ2687px (n=174) line Δ88 shape Δ11 (keyed by bridged saved kindIndex — Full has hides mid-collection, so possibly mis-pairing); pass-2 badgeUnresolved 0→84 A vs B (badge raise scans the PLANNED frame — independent off-plan evidence); 30 specs on 26 slides missed the patch (AppleScript fallback ran); gate crashed at write_run_record(B) on int fallbackSpecs keys so the id-based compare never ran. Timing win is real: pass 1 20:12 (A) vs 10:40 (B) on 154 slides. NEXT: fix the round-trip, run the compare Keynote-free with --reuse-a --reuse-b --pass2-bar parity, then debug from the per-slide lines (bridge, masked/group scaling, the 30 misses, badge plates); missedSpecs with a healthy fallback should likely be WARN. DEFAULT FLIP still ON HOLD: patch at output/offline-write-ab-full/piece2-default-flip.patch, apply only on Full GREEN. The old plan's item (1) re-bank of the single-slide write_gate_ab kit was dropped by decision (the whole-deck gate supersedes it; stale sidecars are now refused by commit stamp). UPDATE 2026-09-07/08, branch `fix/w1-gate-integrity` off `9fa457c` (HEAD `b50f75b`, 4 commits: 31625d1, f76e8d3, e987a46, b50f75b), merged to main as PR #57 (`cd67e2e`) — the 2026-09-07 W1 RED gate (`output/bank/2026-09-07/write-gate-full/`) had THREE unrelated causes, and the first diagnosis was wrong. D1's headline verdict ('arm A was damaged by a stolen GUI focus/clipboard interaction, re-run, do not debug the code first') is DISPROVEN: a second live run on a verified-untouched machine (`write-gate-full-r2/A_unflagged.key`) reproduced arm A EXACTLY — 43 card-border refs vs source's 83 (`{94:12,126:27,127:2,128:2}` both runs), slide 125 = 0 of 44 cards both runs, pass-2 stat-finalize counters `312/323/630/57/78/41/135/319` character-identical between the two runs (`D6-arm-a-card-loss.md`). Random events do not reproduce to identical integers, so the seven `pass-2 A != B` RED lines are REAL systematic path differences, not stolen-interaction artifacts, and 31625d1's card-border-ref-count damage check is a TRUE POSITIVE on detection but a MIS-ATTRIBUTION on cause+remedy (see that commit's note below) — it would abort a healthy production arm. 31625d1 (gate integrity): `verify_offline_frames` group bar now gates at 2.5px (composed child-union vs planned rect); `needs_keynote`-flagged records route to a reported-not-gated `approx` list instead of silently vanishing, so a PASS with no group line is now structurally impossible; `group` stays in `oracle_kinds` with only the self-flagged tail skipped (union-vs-plan distribution is bimodal, empty gap between 7.41px and 91.45px, 9 of 13 outliers self-flagged); the false 'tolerated because A==B' summary text is fixed at both call sites; the SAME commit also added the pre-comparison card-border damage check described above — ITS STATED CAUSE AND REMEDY ARE WRONG per D1/D6 above and it has now been RE-ATTRIBUTED: the check keeps its detection and its exit-6 abort, but reports the ref shortfall as an observation, names D6's paste no-op as a hypothesis with the log tokens to check ('FATAL reuse slide', 'WARNING reuse slide'), and no longer tells the operator to re-run on an untouched machine or to skip debugging; the helper is renamed card_border_damage_reasons. `GATE_VERSION` deliberately NOT bumped so `A_unflagged.run.json`/`B_flagged.run.json` stay loadable. f76e8d3 (applyReuse paste fix, PRODUCTION DEFECT, root cause D6): reuse job 125's Cmd-V pasted the PREVIOUS job's clipboard because the Cmd-A/Cmd-C half silently no-oped under load, then `delete slide to+1` destroyed `orig` with all 44 report cards; NOT an A-vs-B property — slides 122-128 run identical JXA in both arms, arm B escaped only by reaching the paste ~5min into pass 1 vs arm A's ~17min on the same 5.3GB deck. The delete is now conditional on a measured per-kind collection-count delta matching `job.add`'s histogram; a deficit halts the deck with `orig` intact and nothing saved, never retried on a deficient-but-non-zero delta; `applied` no longer counted on the slide about to be deleted. Two further data-loss paths were found DURING REVIEW by executing probes: a summed retry rule that double-pasted, and the discovery that the `-1` 'unmeasured' sentinel was unreachable in production (a JXA property read builds an element specifier locally and never throws), which let a misread `beforeAdd` baseline measure a failed paste as pure surplus and delete anyway. KNOWN OPEN HOLE: a stale paste whose histogram DOMINATES the expectation is not caught; needs the deferred geometry post-condition. e987a46 (sparkle coincident-twin fix): the on-sparkle effect was missing from the '183 CHC Churches' and 'Total Churches 269' stat groups; cause = the plan-time geometric hide `coincident_duplicate_ids` (`map_remap.py`, matching kind + rect within 4pt + a group signature that is only `childCount`), running in `plan_transforms` — orthogonal to the W1 flip, so both write paths lost the twins identically. This exemption shipped once (`4cadd15`) and was reverted (`4654602`); the revert was correct, the one-line version is a net regression (12 unresolved, 8 dedup shortfalls, reproduced offline at the historical numbers). All three parts land together in e987a46. Measured on the real deck: hides 982→980, statJobs 390→392, groupRemoves 198→206, sigless 8→0, slide 124's add list gaining kindIndexes 5 and 7; Gold parity verified (slide 13, same two twins); no build-creation capability needed (a reuse `add` carries the drawable's build); `sigFallback` moves with four new `sigTwin(s=124,…)` entries — expected, not a regression. 2026-09-08 CONFIRMING LIVE RUN (directory since deleted; only the JSON censuses under output/bank/2026-09-08/{build-order,twin-zorder}/ survive; EXIT 0, plain production `remap`, `OBED_OFFLINE_WRITE=off`, deliberately NOT the A/B gate because the mis-attributed damage check would abort a healthy arm): card census of the produced deck 83 refs `{94:12,125:44,126:27}` identical to source (both prior production runs: 43, `125:0`); live log `Card-border stroke: … (269 refs)`, the healthy number; `Applied 3346, missed 0`; slide 124 carries 9 builds including both `KLNSparkle In` keys, identical to source; the `slide 125 lost 44 apple:dissolve` / `slide 124 lost 2 KLNSparkle` warnings are GONE; stat-finalize `381 done / 206 deduped / 11 skipped / 110 sig-fallback`, dedupShortfall 0, unresolved 0, `Builds follow source: 86 kept`; OWNER VISUALLY CONFIRMED the on-sparkle plays — original report CLOSED. Two honest caveats: sig-fallback landed at 110 against a predicted 112 (the prediction assumed arm B's baseline carries to the production path; this is the first healthy production-path run, so it stays unresolved — `childResize.detail` `sigTwin` tokens are not persisted by a plain CLI remap); no job needed a retry, so the new paste guard was never observed firing-and-recovering — the new polls may have PREVENTED the failure rather than caught it, and distinguishing the two needs the per-attempt `gates` data in `addReports`, which the CLI does not write. Rebase note: branch rebased onto `9fa457c` (PR #51, maps tab); overlap only `map_remap.py` (one line, `is_backdrop` gains `\"movie\"`) and `test_map_remap.py`; sparkle acceptance numbers re-measured post-rebase match exactly, forcing `is_backdrop` back to its pre-merge form also gives `hides 980` — the maps change is inert for this deck. Suite 1461 passed / 24 skipped, all 8 node harnesses green. NEW BACKLOG ITEM opened from this round's live-run comparison: `w1-build-order-nondeterminism` (build sequence, not membership, wrong on ~30 slides, pre-existing and non-deterministic run-to-run, not caused by these three fixes — see that item). STATUS: three defects fixed and live-verified on the real production deck, and the branch merged to main as PR #57 (`cd67e2e`); 31625d1's damage check re-attribution (detection and abort kept, cause/remedy replaced with a falsifiable diagnose-first message) did NOT land in this branch; it shipped as `917b00f` + `eab0cec` on follow-up branch `fix/w1-damage-check-reattribution`, MERGED to main in PR #59 (`2d6ae55`, 2026-09-09 morning); default flip stays ON HOLD. PATH NOTE 2026-09-09: every `output/offline-write-ab*` bank cited above is deleted (the Map `-v2`/`-on` banks, the Full `A_unflagged`/`B_flagged` pair and `piece2-default-flip.patch`, which must be re-derived); the surviving W1 artefacts are `output/bank/2026-09-07/write-gate-full{,-r2}/` (run records and `gate.log` only, both 5+ GB decks deleted) and the 2026-09-08 censuses under `output/bank/2026-09-08/{build-order,twin-zorder}/`. UPDATE 2026-09-14 — W1 DEFAULT FLIP DONE: branch `feat/w1-default-flip` commit `6e3ae3c` flips `offline_write_mode`'s default to `on` (`off` selects the scripted AppleScript path; an unknown token still resolves to `on`); tests re-pinned; full suite 2299 passed / 85 skipped (3 pre-existing maps failures, unrelated). Full RAISE10 gate `--mode on --pass2-bar strict` ran 12:34-13:43 = GREEN bar slide 36 (owner-accepted D10 #4, both arms 139.17/139.18px), counters identical to the 2026-09-12 strict gate (missedSpecs=693 all fallback-covered, badgeFallback=135, sigFallback=110, damage 83/83, identity 100%), one non-gating `raiseClickRetried=1` on B. A gold build on the new default (env unset → on) vs a same-commit `off` null control: stat counters identical, Keynote-free identity compare PASS on all 19 slides. Record: `output/bank/2026-09-14/w1-flip/results.md`. The banked `output/bank/gold-baseline/*` dirs (Sep 5-7 code) are no longer a fair Gold control; the 2026-09-14 `gold-off` run is now the same-code control. FLIP NO LONGER ON HOLD. W2 (`w-zorder-patch`) is unblocked. Separately, a NEW bug-backlog item `roster-leak-reuse-14-17` was opened from this round (owner-raised, NOT caused by the flip — reproduced identically under `OBED_OFFLINE_WRITE=off` on the same commit) — see that todo."
+    status: done
+  - id: roster-leak-reuse-14-17
+    content: "BUG BACKLOG (B), opened 2026-09-14 from the owner's Gold-output review, DIAGNOSED 2026-09-14 (read-only opus diagnosis banked at `output/bank/2026-09-14/w1-flip/roster-leak-diag.md`). Symptom: with `--keep-side-panels` (bare = every slide), Gold output slides 14-17 render the church roster; 13 does not. Rule (owner 09-05): roster kept only on the church-list slides 11/12, hidden on every later slide, side band or centre band alike. Cause: on source slides 14-17 the roster is two persisted top-level GROUPS per slide — left panel rect (259,7,1389,1053) with 113 text children and right panel (5760,0,1920,1080) with 85 children (same rects on 15/16/17). The roster rule cannot see them: `map_remap.is_list_item` requires kind == \"text\", and neither the offline reader nor the JXA payload lifts group-child text onto the item (`text` stays \"\"), so `roster_slides(payload)` returns keep {11,12} / drop {13} and `drop_roster` never fires on 14-17. In the 09-06/07 banked Gold runs these groups were hidden ONLY by the side-panel branch (`is_side_panel_item`, those runs had no `--keep-side-panels`: log `91 list, 377 hidden` vs today's `234 list, 247 hidden`). NOT a regression: `git log -S` shows no change to `is_side_panel_item`, `roster_slides`, `name_column_ids`, `is_list_item` since 09-06; NOT the W1 flip (reproduced under `off`); NOT reuse (the groups are the slide's own source objects, not pasted from donor 13). Fix direction: lift group-child text onto the payload (or a `childTexts` list; `iwa_runs._group_child_records` already walks the children), make `name_column_ids`/`is_list_item` roster-aware for groups whose children form church-name columns, so `roster_slides` puts 14-17 in the run and the `drop_roster` branch (which precedes the side-panel branch) hides them regardless of `keep_side_panels`. Keep the side-panel branch as-is. Keynote-free regression test: `roster_slides(gold payload) == ({11,12}, {13,14,15,16,17})` and `name_column_ids(slide 14 items)` non-empty — fails today. Status: diagnosed, fix round not started; owner decides priority vs W2. FIX on branch `fix/roster-leak-group-carriers` off `8bd6197` (code + tests + docs), PR pending owner merge: new `roster_lines(item, group_child_text)` (a text box's own lines, or — for a group — its `groupChildText` signature split into lines, counted only when it has >= `ROSTER_GROUP_MIN_NAMES = 8` CHURCH_LIST_RE matches; the margin against the loudest non-roster group on either deck, which has <=1 match, vs the 84/113-line carriers); `name_column_ids(items, group_child_text=None)` gains the optional map and folds in any group whose `roster_lines` is non-empty; `roster_slides.names_and_signature` now reads `slide['groupChildText']` (int-cast) and calls `roster_lines` instead of splitting `item['text']` directly; `roster_lines` on a group returns only lines matching the new anchored `ROSTER_NAME_RE = ^(CHC|CHLI|CHEL)\\b` (still gated on >= `ROSTER_GROUP_MIN_NAMES`), not the unanchored `CHURCH_LIST_RE`: a real-world stat heading such as `183 CHC Churches` contains the token mid-line and must NOT count as a name, so a name line must start with the church prefix; measured on the real Gold deck, both slide-14 carrier groups (kindIndex 49/50, 113/84 lines) match the anchored regex exactly as often as the unanchored one (113/113, 84/84 — no roster row lost). Residual ambiguity accepted as-is: a heading that itself starts with the prefix (e.g. `CHC Churches`) still counts as a name, but one extra name never breaks the 0.6 overlap bar and such headings live in their own, separate groups on both real decks. `names_and_signature` folds a carrier's remaining, non-roster child-text lines into the second-slide signature as a `(\"groupRest\", ...)` entry, so a new heading nested in the same roster group still counts as new content and defeats the second-slide-relayout keep. `plan_slide_transforms` and `plan_payload_transforms` each int-cast `slide['groupChildText']` at their own call site (an R1-review REVISE: `plan_slide_transforms`'s local was not cast, so a JSON-round-tripped payload with string kindIndex keys made `name_column_ids` miss the group while `roster_slides` still marked the slide for dropping, leaking the roster under `--keep-side-panels`); the redundant uncast copy at the group-caption branch was deduped onto the same int-keyed local. The side-panel branch at `map_remap.py` (:2440 post-fix) is untouched. Before/after sweep (`offline_wall_payload` + `attach_group_child_text`, both real decks): Gold keep {11,12} drop {13} -> keep {11,12} drop {13,14,15,16,17}; Full keep {57,122,123} drop {124} -> keep {57,122,123} drop {124,125,126,127,128} (125-128 are the same embedded Gold section as 14-17, both carriers already `is_side_panel_item`, previously hidden only incidentally at default `keep_side_panels=False`). Golden plan (`tests/test_golden_plan.py`, `capture_plan` runs `keep_side_panels=False` by default) hash UNCHANGED — no diff to re-baseline. Tests added to `tests/test_map_remap.py`: `test_name_column_ids_counts_a_group_whose_child_text_is_a_roster`, `test_a_stat_badge_group_with_one_church_line_is_not_a_roster_carrier`, `test_roster_run_drops_later_slides_whose_roster_is_a_group`, `test_drop_roster_hides_a_group_carrier_even_with_keep_side_panels`, `test_drop_roster_hides_a_group_carrier_after_a_json_round_trip`, `test_roster_second_slide_group_with_new_child_text_drops_the_roster`, `test_roster_second_slide_group_with_a_church_stat_heading_drops_the_roster`, `test_roster_lines_excludes_a_non_anchored_stat_heading_from_a_group`, `test_gold_roster_is_dropped_on_every_slide_after_the_church_list` (Keynote-free, skips cleanly if the Gold deck is absent). `tests/test_map_remap.py -k \"roster or name_column\"` 24 passed; `test_map_remap.py tests/test_golden_plan.py tests/test_iwa_runs.py tests/test_offline_inspect.py` 320 passed / 19 skipped. R3-review REVISE (Medium): a mixed carrier group (roster child text plus other lines, i.e. non-empty `groupRest`) was still being whole-group-hidden by `drop_roster`, deleting the non-roster text; fixed by factoring `roster_group_rest(item, group_child_text)` out of `names_and_signature` and having the `drop_roster` branch in `plan_slide_transforms` hide a carrier only when its rest is empty — a mixed group instead falls through to the ordinary branches and `warnings.warn` reports it once, naming the slide, kindIndex, and first rest lines; child-level removal is not implemented; measured: no mixed carrier on Gold or Full, so this is a guard, not a behaviour change on either real deck. New test: `test_drop_roster_keeps_a_mixed_carrier_group_and_reports_it`."
+    status: completed
+  - id: r-nested-bulk-probe
+    content: "TRANCHE 1 (R1) - DONE 2026-09-04, PROBE ANSWER = NO. `scripts/probe_nested_bulk.py` (`d4663ed`, `99b2e09`) ran live on APFS clones of the GW and Map decks: nested `<prop> of every <kind> of every slide` is CORRECT and safe on all four criteria, but not faster (GW 1.37x, Map 0.73x = slower). The load-bearing measurement is per-read seconds: the cost is per object-property inside Keynote (~70/33/9 ms), not per Apple Event, which refutes the overhead-dominated hypothesis and closed `r-bulk-counts-plan` with it. Findings sidecars `output/nested-bulk-probe/` were deleted; the failure semantics and the verdict survive in `Insights worth keeping` (Speed) and SKILL."
+    status: completed
+  - id: r-readback-two-tier
+    content: "TRANCHE 2 (R2) - DONE 2026-09-07 on `fix/resizer-backlog-r2`, shipped `b50d22b` + fix round `7bb0f52`. The validated-resize readback now goes through a `_readback_payload` ladder (offline-write verify forces legacy, then the `OBED_OFFLINE_READ` kill switch, then two-tier ranged, with a fail-safe to ONE legacy read); `inspect_keynote_checker` gained `slide_range` and ranged reads never cache. Verified twice: a ranged A/B (identical scalars/flags, no cache write, only the documented zero-rect placeholder-tail difference) and a whole-deck field-parity A/B on all four Gold banks - childCount gate 0, zero blocking item differences, exact validate flags, and 2.4-2.6x timings (130.7 -> 52.5s on main). Evidence: `output/bank/2026-09-07/ranged-ab/` and `output/bank/2026-09-07/full-ab/`. Unblocked `r-propose-two-tier`."
+    status: completed
+  - id: r-propose-two-tier
+    content: "TRANCHE 2 (R2b) - DONE 2026-09-09, PR #65 `feat/r2b-propose-two-tier` (`4627497`, 16 commits, Codex 4 passes). UTF-8 decode of CP437-mangled Data/ member names in `offline_inspect._build_data_index` (deck_slide_digests churn 3→0 slides on the Full wall); `remap_keynote.prepare_wall_payload` (enrichment extracted; called INSIDE `framing.propose_framings`); checker refuses a cache entry unless every eligible text item carries runs (`_payload_has_runs` coverage predicate) and a rejected entry never reaches the legacy reader (`use_cache=False`); `inspect.store_inspect_payload` caches the two-tier payload under the digest with reader=offline; propose reads through `acquire_wall_payload` (full deck then slice; navigator numbering always); `framing._transform_of` uses `map_remap.frame_affine`; `map_remap.carry_fit_context` shared by planner and propose; `planned_rects` rounds the serialised 2-dp apply coordinates; `tests/test_propose_two_tier.py` hard parity 0/155 (Counter multiset). LIVE-VERIFIED 2026-09-09 on Gold_Wall_Input.key (`output/bank/2026-09-09/nap-run/r2b/results.md`): cold propose 96s two-tier (vs 269s legacy), cache entry reader=offline, apply read `from cached offline payload` (Applied 832/0, 269 refs, 181 raises landed, no raiseDead), re-propose 4s cache hit; counter deltas vs r2-round all the sparkle-twin fix. OPEN R2b RESIDUAL: the apply→propose plan hand-off (survey obs. 9) is still not passed through."
+    status: completed
+  - id: w-zorder-patch
+    content: "TRANCHE 2 (W2). Offline drawablesZOrder+ownedDrawables reorder (patch BOTH identically) at the W1 hook, LAST per slide, replacing pass 2's GUI Bring-to-Front raises (obedRaiseSlide + the badge raise) and the resizer's Accessibility dependency. PROBE LIVE PASS 99771bf (2026-09-02): Keynote 15.3.1 honours a patched order on open, a re-save keeps it, the render changes; permute within the target ids' slots (a fresh deck carries 3 placeholder drawables). Correctness is already handled by the index-guarded descending raise (23de0d2) — this is purely the optimisation: ~0.55s/raise × N GUI clicks + Accessibility + run-to-run group-index churn. 2026-09-04 evidence this is now COSTING content, not just speed: the gold-baseline A/B kit (w-offline-write-stabilise) ran the identical `remap` twice (main vs branch, same default path) and got two different renders purely from Keynote's own drawablesZOrder scrambling on save/open — banner text hidden on Gold slides 3/4/5/8/9 in one run, 'Global Missions' clipped to 'Glob' on slides 11-17 in the other. Same deck, same code, different z-order outcome each Keynote pass. Raises the priority of this item independent of the read-speed payoff. Must run after pass 2's font sizing (or recompute stat indices), and the read-back compares reordered kinds AS A SET. Gated on W1 stable. Risk MEDIUM. 2026-09-05, offline z-order reads of the banked gold decks: the pass-2 GUI raise arranged 0 of 227 reported objects on the `main` run (all 19 slides byte-identical to the source order) and 91 on the `branch-verify2` run, with identical 'front=' counters. frontRaised counts System-Events clicks, not arrangements. W2 also removes an unverifiable counter. D7 (2026-09-08, offline) measured build order and z-order as DISSOCIABLE arrays sharing only one upstream trigger (Keynote's non-deterministic slide-archive re-serialisation on save): 7 slides scramble builds with z-order perfectly intact, 3 scramble z-order with builds perfectly intact, and build-position/z-index Kendall tau is -0.016 output vs +0.058 source null control — so W2's own plan must NOT assume its z-order write also fixes build order (see w1-build-order-nondeterminism), and the build-order patch (`restore_source_builds`) must keep running LAST, after any future W2 z-order write, for the same reason it works today. D8 narrowed the build-order defect to our own patch (`plan_build_patch` writing `builds` order instead of `buildChunks` order on 3 reuse slides) — see w1-build-order-nondeterminism — so W2 inherits no build-order obligation of its own. D9 (2026-09-08, offline + owner playback) DISPROVES this item's own earlier claim that 'Correctness is already handled by the index-guarded descending raise (23de0d2) — this is purely the optimisation': `obedRaiseSlide` drains its per-slide raise targets highest-index-first, and because Bring to Front appends, every raised set with ≥2 members came out EXACTLY reversed — 16 slides deck-wide, 13 of them non-reuse, byte-deterministic across two separate production runs days apart (not Keynote's z-order churn). Fixed in `8a7b4bb`, MERGED PR #59 (`2d6ae55`): ascending raise gated on a verified per-target landing (new `obedGroupFrame` + the existing `obedTopReal`/`obedBadgeFind`), with `raiseMoved`/`raiseDead`/`raiseUnknown` counters replacing the unverifiable `front=` click count. CONFIRMED ON SCREEN 2026-09-09 (`raiseDead=0`, 11/15 subset slides preserved including the sparkle twins). Residual reversals on constellation slides 131/133/134/144 are owner-DEFERRED to the framing workstream, attribution not yet measured — tracked under `r-reuse-photo-placement`, not as an open z-order bug here. With the raise-order bug fixed, W2 remains PURELY the speed/Accessibility-removal optimisation it was always scoped as (replacing 699 GUI clicks + the Accessibility dependency with an offline `drawablesZOrder`/`ownedDrawables` write); it still gates on W1 stable, and the build-order patch (`restore_source_builds`, see `w1-build-order-nondeterminism`) must still run LAST after any future W2 z-order write — unchanged from D7's finding that the two arrays are dissociable. The 2026-09-09 parity run shows the ascending raise (`8a7b4bb`) at raiseDead=4/381 deck-wide, with the two located misses on non-reuse slides 106/110 (`stat-raise-dead-4`) — record here, do not re-plan W2 on it. UPDATE 2026-09-15 — pieces 1-3 SHIPPED on `feat/w2-zorder` (`6c7c10e` piece 1: pure `iwa_zorder.raise_to_front`/`resolve_raise_targets`/`plan_slide_order` + `iwa_write.read_slide_zorder` promoted from the probe; `a4ad76c` piece 2: `iwa_zorder.patch_deck_zorder`, one zip rewrite, mandatory read-back verify; `1adb4e4` piece 3: `OBED_ZORDER_WRITE` knob, offline wiring, raise suppression, export moved after the patch), each with a Codex review verdict. Piece 4 (`scripts/offline_write_ab.py` z-order A/B extension) shipped separately as PR #126. Pipeline slot: eligibility (`offline_write.zorder_eligible_slides`) runs right after `run_offline_write`, on the post-pass-1 saved deck; `_run_stat_finalize` (pass 2) receives `suppress_raises` = the eligible slide set, so `_build_stat_finalize_script` emits no `obedRaiseSlide`/`obedBadgeSlide` for those slides and, when the knob is on, gets `export_dir=None` instead of exporting inside pass 2; `offline_write.run_offline_zorder` patches the post-pass-2 saved deck before `restore_source_builds` (`remap_keynote.py` ~1504-1673, `restore_source_builds` still last); `remap_and_inspect`'s existing `export_dir and not info.get("exported")` fallback then exports previews after the z-order patch — one extra Keynote open, owner-accepted. Eligibility rule: a slide qualifies only if every stat/badge raise target on it resolves to exactly one archive id with no ambiguous `childSig`, and its candidate order would not be refused by `patch_deck_zorder` itself (member resolution, `ownedDrawables` permutation, id-set permutation, member collision) — `zorder_eligible_slides` runs that same check (`validate_slide_order`) so a slide that would refuse post-pass-2 is never suppressed in the first place; a slide failing any check stays on the GUI raise (Accessibility still required for that run). Close gate: if pass 2 does not report `ok` and `closed` (the `closed=` AppleScript token, "the deck may still be open in Keynote"), `remap_keynote` raises `RuntimeError` naming the suppressed slides rather than patch a possibly-open document; if `run_offline_zorder` itself hits a lost/refused id on a slide post-pass-2 (should-never-happen, since eligibility already validated it pre-pass-2), it finishes patching every other slide and raises `RuntimeError` naming the failures. Counters (`Stat zorder detail:` line, one line, parallel to `_say_stat_finalize_detail`): `zorderSlides`, `zorderStatRaised`, `zorderBadgeRaised`, `zorderNoop`, `zorderRefused`, `zorderUnresolved`, `zorderLost`, `zorderGui`. Default is `OBED_ZORDER_WRITE=off` (tranche 1) until the live gate is green; `scripts/golden_plan.py`'s SHA-256 is unchanged at default (piece 3's headline assertion). Slide-reuse eligibility was dropped from scope by owner decision (#124): since reuse slides are never addressable at plan time regardless, every remaining (non-reuse) slide is now addressable for W2, simplifying eligibility to the checks above with no separate reuse carve-out. The live gate (plan-of-record "Gates") still needs to show, on RAISE10 slides `40,55,56,109,110` + `123-128` and on Gold: `FRONT_BLOCK_OK` on every eligible slide, zero A-vs-B pixel diff on slides A raised correctly, arm B `zorderRefused`/`zorderUnresolved`/`zorderLost` all 0 with `zorderGui` matching the ineligible set exactly, no `raiseDead`/`raiseUnknown`/`frontErr` on any suppressed slide, an A-vs-A `SAME_ORDER=yes` control on RAISE10, and `restore_source_builds` unchanged between arms — not yet run."
     status: pending
-  - id: reuse-photo-placement
-    content: >-
-      Diagnose the remaining reuse-slide photo/constellation placement and z-order residuals;
-      do not attribute them to W2 without measuring the saved deck.
+  - id: w1-build-order-nondeterminism
+    content: "BUG (B) - CLOSED 2026-09-09. Reveal order on reuse slides 124/125/126 was wrong because `plan_build_patch` ordered survivors by the source's `builds` index and wrote that order into BOTH `builds` and `buildChunks`; D8 established that `buildChunks`, not `builds`, is Keynote's render timeline, which collapsed D7's 34-slide `builds`-array census to 3 slides on the render metric. FIXED in `59111fc` (merged PR #59, `2d6ae55`): survivors are ordered by the matched source build's `buildChunks` position, with a chunk-order read-back check and `chainHeadless`/`ambiguousPairs` WARNs; suite 1492/20, restricted chunk-key divergence vs source went [124,125,126] -> []. Verified twice on ground truth: owner playback confirmed the reveal order on screen 2026-09-08, and the 2026-09-09 parity remap (first FRESH production run at >= `59111fc`) passed V3 (order/surplus/transitions empty) and V4 (first chunk `referent` on all three patched slides). STANDING CONSTRAINTS: do NOT widen `slides` at `remap_keynote.py:1439` from `reuse_slides` to the whole deck (it would take a 3-slide defect to 66), and `restore_source_builds` must keep running LAST, after any future W2 z-order write - the two arrays are measurably dissociable (Kendall tau -0.016 output vs +0.058 source null control), so this never folds into W2. Full detail: `output/bank/2026-09-08/build-order/D8-build-chunks.md` and `plan-build-order-fix-v2.md` (whose line cite `remap_keynote.py:1396` is stale), plus `output/bank/2026-09-09/parity-run/`."
+    status: completed
+  - id: r-cache-quick-wins
+    content: "R0 leftovers - ALL FOUR DONE. (1) `r-propose-from-cache`, (2) `r-acquire-cache-read`, (3) `r-digest-sidecar` landed 2026-09-07 under 1/1/1 with independent APPROVE each; (4) `r-misc-cleanups` (R0.4) shipped 2026-09-09 as `a89b9b3`, `006f68b`, `db3109d`, `bdc3ee4`, `bb04d91`, merged `b981eb0`. Load-bearing measurements: on the 6,771,226,182-byte Full deck a cold digest is 3.97205s against a 0.1197ms warm median (so ~3.97s saved per avoided hash, not the old speculative 30-60s claim); and the R0.4 live gate on the 9-slide Sermon_GW clone gave identical payloads, 0 differing pixels on 9/9 previews, one Keynote open instead of two, export 6.56 -> 4.38s and 0 documents left open. R0.4 was reviewed by Codex gpt-5.6-sol over three REQUEST-CHANGES rounds -> APPROVE-WITH-NITS (kept-open leaks, wrong-document export, stale-PNG-masked failures, a reset before the lock); suite 1535/20 on the merged round branch. BEHAVIOUR CHANGES to remember: a partial preview set is no longer served as a warm hit, and a module `_KEYNOTE_LOCK` now serializes every live JXA/AppleScript transaction. Full detail: the `R0.1-R0.4 outcomes` section below and `output/bank/2026-09-09/cp0/results.md`."
+    status: completed
+  - id: r-reuse-photo-placement
+    content: "BUG BACKLOG (B). Reuse is KEPT (measured +39% on contiguous map series). Part (A) DONE in bf0fbe7 on branch fix/reuse-builds-side-panels: no (0,0) yank ever occurs (`ItemTransform.as_dict` always emits x/y; `applySpec` returns before any write when spec.x is null) — the real defect was a spec-less reuse add being silently skipped (not even counted as missed) and riding the paste at its wall coordinate; fixed by giving such adds a canvas-scaled rect and counting them as misses if still absent. Part (B) FRAMING COVER-FALLBACK OFF-FRAME on dense infographic slides (124/125-class, pairQuality=0) still open — reuse-INDEPENDENT (identical off-frame counts on/off); a framing item touching all slides, own workstream. Once W1 removes the AS-geometry bottleneck, dropping reuse becomes cheap — revisit then. Z-ORDER RESIDUAL (D9, 2026-09-08/09): after `8a7b4bb`'s ascending-raise fix (see `w-zorder-patch`), 4 constellation-band slides (131, 133, 134, 144 — 67/68/68-group reversals) still show relative z-order divergence from source; mechanism not yet attributed. Owner-DEFERRED to the framing workstream rather than tracked as an open z-order bug — group it with this item's Part B off-frame/cover-fallback work, since it lands on the same dense slide class. 2026-09-09 parity run (`output/bank/2026-09-09/parity-run/raise-order.txt`) reproduced the same OTHER-not-REVERSED pattern D9 first saw: 5 of 19 non-reuse id-matched slides diverge — 131 (tau+0.20), 132 (tau+0.20), 133 (tau+0.94), 134 (tau+0.94), 144 (tau+0.94) — 14/19 preserved overall, slide 124's twin still preserved. Slide 132 is NEW to this list versus the 4 slides (131/133/134/144) the owner named on 2026-09-08 — not yet reconciled with the owner; add it to the framing-deferred set pending that review."
+    status: pending
+  - id: full-deck-stat-finalize-unresolved
+    content: "BUG (B) - CLOSED 2026-09-09. On the Full report deck, pass 2 left 134 stat groups unresolved (wall font size, buried) with 6 dedup shortfalls and 145 skips; the driver turned out to be the reuse-chain paste no-op fixed in `f76e8d3` (D6), not stat-finalize addressing. The 2026-09-09 parity remap measured the full counter table against THIS item's own 2026-09-04 originals: done 245 -> 381, skipped 145 -> 11, unresolved 134 -> 0, dedupShortfall 6 -> 0, jobs 390 -> 392, sigFallback 108 -> 110 (also recorded: sized 413, badgeMoved 319, dedupDeleted 206, raiseMoved 377). Two things did NOT close with it: `-1719`/`frontErr` stays unverifiable by CLI (`keynote.py:1421`/`:1508` keep it only in `result[\"raw\"]`, see `surface-raise-tokens`), and the run raised a new anomaly tracked as `stat-raise-dead-4`. Evidence: `output/bank/2026-09-09/parity-run/run.log`."
+    status: completed
+  - id: stat-raise-dead-4
+    content: "BUG BACKLOG (B) — FIXED on PR #75, live-verified 2026-09-11 (×3 + ×3 controls). NEW 2026-09-09, found in the parity remap (`output/bank/2026-09-09/parity-run/run.log`): `WARNING stat-finalize: 4 stat group(s) did not move on Bring to Front (0 abandoned mid-slide)` — raiseMoved 377 / raiseDead 4 / raiseUnknown 0 of 381 done groups, deck-wide, on `8a7b4bb`'s ascending gated raise. Offline localisation this round (`probes/find_raise_dead.py`, same run) found 2 of 4 by non-contiguous-group-block analysis: slide 106 group `18386827` ('Keiko', z=15, buried while siblings 'Daniel'/'Grace' raised to 18/19) and slide 110 group `19010920` ('Sunday Service', z=2, buried while siblings 'Children's Church'/'Bible Study' raised to 6/7) — both non-reuse, and both were CONTIGUOUS in the banked 2026-09-08 healthy run (`output/bank/2026-09-08/twin-zorder/PREFIX2.json`), so both are regressions against that baseline, not pre-existing. The other 2 raiseDead are unlocatable offline: a lone stat group on its slide leaves no z-order contiguity signal to test against. The reuse band 123-128 is internally contiguous on every slide with groups (self-consistency check, not a source comparison). Slide 42's own 2-group gap was checked and ruled out — identical in this run and the 2026-09-08 healthy run, pre-existing and unrelated. Facts only, no cause yet: the machine was hands-off by the owner's own timestamped ack (`ENV.txt`: 'I'm already hands off, out for breakfast. start!', 09:40:44) so the stolen-GUI-interaction story that explained the 2026-09-07 arm-A card loss does not apply by default here — but per 'measure before attributing', this is still n=1 on a single run and needs a second measurement before ruling it out formally. Precondition / first step: `surface-raise-tokens` below — the per-slide `raiseDead(s=,idx=)`/`raiseUnknown(s=,idx=)` tokens are not currently logged, so this round's localisation needed an offline z-order probe instead of reading the log directly; the next run should localise all 4 by log alone. UPDATE 2026-09-10 gate: `output/bank/2026-09-10/w1-gate/gate.log` (lines 33 and 238) localised the dead raises BY LOG ALONE for the first time — `raiseDead(s=40,idx=1) raiseDead(s=106,idx=1)`, 2 dead not 4, IDENTICAL in arm A and arm B, with arm A additionally carrying `frontErr='[-1719]'` and arm B none, so `-1719` and `raiseDead` are dissociable; `-1719` is `errAEIllegalIndex`, NOT an Accessibility denial (Accessibility was probed granted before launch; `-1743`/`-25211` are the denial codes). Slide 106 has now reproduced in four runs; slide 40 in two. Every dead raise is idx=1 = the FIRST raise processed on its slide (ascending order). Operational rule: `--pass2-bar parity` is mandatory for W1 gating until this is fixed, because the strict bar aborts on any `frontErr`. Next step unchanged: thread (s=,idx=,phase) into `obedFront`'s `frontErr`, add a `raiseBlind(s=)` token, then pass 2 ×3 on a 10-slide copy — now with a deterministic target. OFFLINE DIAGNOSIS 2026-09-11 (opus planner, Keynote-free, measured on `output/bank/2026-09-10/w1-gate/A_unflagged.key`/`B_flagged.key`, both still on disk, 2.8s offline load each): Accounting: 381 stat + 319 badge raises = 700 clicks; arm A 699 fronts + ONE `-1719`, arm B 700 + none, both the same 2 dead → the dominant mode is a SILENT no-op click; `-1719` is a separate rarer event that may have landed on a badge raise (badge liveness probed once only). Slide 106 (20 drawables, 3 stat groups): output z-order `14 shape3, 15 group 'Keiko', 16 shape4, 17 shape5, 18 'Daniel', 19 'Grace'` — identical RELATIVE order to source. Had Keiko's Bring to Front landed it would sit above shape4/shape5; it does not → the raise genuinely did not happen and `obedBadgeFind` read correctly (hypothesis 'probe mis-read' refuted on 106). Slide 106 is the heaviest stat slide in the deck (12207x9115 image, 3909x2561 photo, 1309x1350 image, a `.mov`), reproduced 4/4 runs. Slide 40: groups at z=8/9 of 17 with the badge set above them is NORMAL (badge raise runs after the stat phase; slide 56 shows the same shape); in source Vara has only Dave above it, so a dead first raise there is invisible in the saved file — structurally uninformative offline. Neither dead raise produced any z-order divergence from source in the 09-10 run: current visual cost on 40/106 is zero. CORRECTION: this todo's earlier claim that 106/110 were 'regressions against the 2026-09-08 baseline' is WRONG — that baseline (`PREFIX2.json`, Keiko at top) was produced by the descending-raise REVERSAL bug fixed in `8a7b4bb`; the 09-10 order is the correct one. `locked` is False for every group on all 51 group-bearing slides → 'locked object disables the menu item' refuted; group collections on 40/106 are contiguous with no 1x1-at-origin trailing member, so `obedTopReal` = 3 and 2 and the selection index equals the probed index → addressing-mismatch has no offline support. BLIND SPOT: the landing probe `obedBadgeFind(..., _top, ...)` is VACUOUS for the top-most target on a slide (the group is already at `_top`), so `raiseMoved` systematically over-counts; ~24 single-group slides per Full run [20,28,38,49,52,53,54,55,60,64,77,78,80,82,92,94,107,108,113,118,119,146,148,149] are structurally blind, and multi-group slides [11,17,26,35,36,40,42,43,47,51,56,61,75,81,106,109,110,124-128,131-134,144] are the only ones where a first-raise failure is detectable — it fired on exactly 2. This is why every observed dead raise is `idx=1` on a multi-group slide. Hypotheses ranked: (a) FIRST — the first raise on a slide clicks 'Bring to Front' before the canvas/Arrange menu has caught up with the slide switch that `set selection` triggers (`obedFront`'s only settle is `delay 0.35`); supports: 0 dead raises ever at idx>1, dose-response across runs (09-09: 5/4 dead, 09-10: 2/2), `-1719 = errAEIllegalIndex` is what a not-yet-populated menu yields; sub-variant (a2): the click lands on the previous slide's last-raised object, already front-most, hence harmless. Refuted by: `enabled of menu item 'Bring to Front'` reading true before every dead click AND a bounded readiness poll leaving the dead set unchanged. (b) menu disabled with focus in the navigator — same `enabled` log discriminates. (c) selection/frame addressing mismatch — unsupported; refuted by reading the selected object's frame back from the selection. (d) refuted on 106. ROUND IN FLIGHT (branch `fix/stat-raise-dead-4`): instrumentation `obedFront(phase, slideNo, idx)` tagging `frontErr` entries `[errNum@phase,s=,idx=]` (no entry may contain the literal ` exported=` — both parsers cut there), `enabled` probe + `raiseBlind(s=,idx=,phase=)` (click-time readiness token, still clicks), `raiseVacuous(s=,idx=)` when `_mn is _top`, bounded readiness poll with `OBED_RAISE_SETTLE_MIN`/`OBED_RAISE_SETTLE_MAX` (floor never below today's 0.35/0.2; cost +15-35s over 700 raises vs today's ~385s of fixed delays), one retry on a verified dead raise counted as `raiseRetried`. `frontErr` is not in `PASS2_PARITY_KEYS`, so no new parity RED; `--pass2-bar parity` stays mandatory until a full-deck run confirms `frontErr=''` with the poll on. LIVE PROTOCOL (owner ack required): `Full_Report_Card_Wall_WORKING.key` no longer exists (verified 2026-09-11); use `Full_Report_Card_Wall.key` (6,771,226,390 bytes, mtime 2026-09-09 17:31, in `/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/`) instead — it is NOT `uchg`-locked (only `Full_Report_Card_CG.key` is), so `cp -c` works directly; re-confirm its digest against `2992d8c0` from `output/bank/2026-09-10/w1-gate/ENV.txt` before the ×3 runs. APFS-clone `cp -c` of `Full_Report_Card_Wall.key` → `RAISE10_Wall.key` in the decks folder (never /private/tmp), `pgrep -x Keynote` empty, then 3 runs of `remap --slides 38,40,55,56,80,81,94,106,108,109,110 --keep-side-panels` via nohup to `output/bank/2026-09-11/raise-dead/run{1,2,3}.log`, plus 3 control runs with `OBED_RAISE_SETTLE_MAX=0`; ~3-5 min/run, ~20-30 min total. Decision rule: `raiseBlind` on the dead raises ⇒ (a)/(b) confirmed and the poll is the fix; dead with enabled=true at 1.5s ⇒ escalate to (c) with a selection-frame readback; non-reproduction on the small deck is itself evidence for (a) (render cost is the dose) → repeat on the Full deck under the next gate. IMPLEMENTED 2026-09-11 `e20b3a9`, PR #75 (Codex gpt-5.6-sol 2 rounds: R1 REQUEST-CHANGES found the retry firing on the vacuous `_mn is _top` case, the badge tag passing the planned `idx` instead of the resolved `_hit`, `inf` reaching the AppleScript delay literal, and tests codifying those; R2 APPROVE, no new findings). Suite 1797/16, golden gate green no regeneration, osacompile test green. Shipped: `obedFront(phase, slideNo, idx)` tagging `frontErr` `[errNum@phase,s=,idx=]`; readiness poll on `enabled of menu item \"Bring to Front\"` after the 0.35 s floor up to `OBED_RAISE_SETTLE_MAX` (default 1.5, `0` disables, non-finite/negative fall back), `OBED_RAISE_SETTLE_MIN` only lengthens; `raiseBlind(s=,idx=,phase=)` (still clicks — observational this run), `raiseVacuous(s=,idx=)`, one retry on a verified non-vacuous dead raise counted as `raiseRetried`; three new counters in the result dict and on `Stat raise detail:`. NOT LIVE-VERIFIED: the protocol above is the owner's next step. LIVE-VERIFIED 2026-09-11 (`output/bank/2026-09-11/raise-dead/results.md`, plus `ENV.txt`/`run_x3.sh`/six `*.log`): owner ack 09:41, `Full_Report_Card_Wall.key` digest re-confirmed against 09-10's `2992d8c0`, 6 serial `remap --slides 38,40,55,56,80,81,94,106,108,109,110 --keep-side-panels` runs (19 stat + 28 badge raises each). 3 treatment runs (poll, max=1.5s): raiseDead 0/0/0, 19/19 landed every run, no frontErr, character-identical across runs (blind only on single-group slides 38/94/108 idx=1, where the landing probe is vacuous). 3 controls (`OBED_RAISE_SETTLE_MAX=0`, fixed 0.35s): ctrl1 lost 5 raises (106 idx=1, 106 idx=2, 109 idx=1, 110 idx=1, 110 idx=2), ctrl2/ctrl3 0 dead but all three controls fired `raiseBlind` on 40/56/106/109 idx=1 — every dead raise in ctrl1 AND its retry carries a `raiseBlind` token (menu disabled at click time). Decision rule from this todo: `raiseBlind` on the dead raises ⇒ hypothesis (a) confirmed, the readiness poll is the fix. `-1719 errAEIllegalIndex` appeared in ALL THREE controls (`s=56` raise idx=1; `s=55`/`s=56` badge idx=1) and in NONE of the three poll runs — same not-ready window, so the strict pass-2 bar is expected to pass with the poll on. Retry residual: `raiseRetried=0` in every run (poll never needed it; under max=0 the retry re-fires blind after the same 0.35s and does not rescue — ctrl1's 5 losses stayed dead through their retries). PR #75 ready to merge (owner merges). Full-deck confirmation 2026-09-11: raiseDead 0/381 on BOTH arms, arm A frontErr NONE for the first time."
+    status: pending
+  - id: as-geometry-rounding
+    content: "BUG BACKLOG (B), NEW 2026-09-10, opened from the 2026-09-10 W1 whole-deck gate
+      (`output/bank/2026-09-10/w1-gate/`, full write-up in its `results.md`). Gate came back RED,
+      but after the W1 group-union fixes landed, **arm A — the PRODUCTION AppleScript path — is now
+      the LARGER source of RED**, not the offline writer: arm A fails the plan oracle on 14 slides
+      [20, 36, 42, 43, 47, 56, 82, 87, 113, 119, 134, 138, 144, 150], worst values 1.19-1.92px — the
+      IDENTICAL slide set as the 2026-09-09 run, so stable and pre-existing, not a regression. By
+      contrast arm B (offline writer) now fails the plan oracle on 1 slide (36, the owner-accepted
+      D10 fix #4 AppleScript group-width miss), down from 18, and the A-vs-B identity compare went
+      12 failures -> 0. Cause understood in outline: Keynote's AppleScript/JXA geometry writes land
+      on integer or near-integer values, so arm A carries ~0.5-1.9px of rounding against the planned
+      rect. D10 measured exactly this on slide 144: arm A's values are integers (`109.921`, `142.0`,
+      `16.0`) with median |Delta| 0.46px, max 1.51px, versus arm B now exact at 0.00px. Slide 144 is
+      the sharpest illustration: after the fix, plan-oracle B is 0.00px PASS while plan-oracle A
+      stays 1.51px FAIL on the same 68 groups; the identity compare's residual (group 1.51 /
+      child:child 1.06 / child:image 1.31, all PASS) is arm A's rounding alone, because B is exact.
+      OPEN QUESTION this item exists to settle: whether the plan-oracle bar should be WIDENED for
+      the AppleScript arm (rounding is inherent to that write path and arguably not a defect), or
+      whether the AppleScript geometry writer should be made to LAND ON the planned value (e.g. by
+      compensating for Keynote's rounding), or whether these 14 slides hide a real placement defect
+      distinct from rounding. Measure before deciding — do not assume all 14 are pure rounding just
+      because the range looks like rounding; the range 1.19-1.92px is wider than pure integer
+      rounding of a sub-pixel value would explain, and slide 36 is in the set for a known DIFFERENT
+      reason (the group-width miss). Dependency: this matters for the W1 default flip, because while
+      arm A is the RED source, a gate GREEN cannot be reached by improving the offline writer alone.
+
+      RESOLVED 2026-09-11 on PR #78 (`b0dfa43`). Measurement
+      (`output/bank/2026-09-11/as-geometry-rounding/measurement.md`): NOT rounding — Keynote's
+      aspect lock: AppleScript geometry writes on image/movie/group are aspect-locked, storing x, y,
+      h as integers and computing w = round(h) × the object's source aspect (image/movie/group);
+      model residual ≤0.001px on 1034/1039 oracle rows, the rest = the known slide 36. The planner's
+      aspect error (≤0.79%) was traced to reader rounding (`offline_inspect` rounds source rects
+      before the affine), so arm A was writing the correct geometry and arm B's exact write was the
+      one introducing a small distortion. Owner chose the HYBRID after a Fable peer review: planner
+      snap (x, y, h → int, w = h × the unrounded composed aspect, for childless non-card non-badge
+      image/movie/group; `aspect` added to the wall payload, `INSPECT_VERSION` 5, `None` for masked)
+      plus a permanent aspect-aware arm-A oracle at 0.25px (arm B stays 1.0px, `GATE_VERSION`
+      unchanged); offline-write mode now refuses aspect-less caches and re-reads two-tier; the legacy
+      merge keeps image/movie aspect only and counts an aspect-less item as WARN; the oracle keeps
+      its soft bar for child-written groups. Golden re-bank is value-only (max |Δw| 1.92px). The
+      Keynote-free falsifier pins the Full deck at 1440 rows = 6 slide-36 + 56 child + 674 masked +
+      71 card + 633 asserted exact. The JXA digest bank was re-stamped v5 via `--payload`. Review: 3
+      opus rounds, Codex R1 REQUEST-CHANGES (the aspect-less cache hole was HIGH severity) → R2
+      APPROVE. Suite 1760/81. NOT YET LIVE-VERIFIED: needs the ranged live gate (47/113/82) then a
+      full W1 gate to confirm arm A ≤0.25px — owner hands-off ack required; the Full gate's
+      plan-oracle A should then go GREEN bar slide 36. Deferred open question carried inside this
+      todo: whether Keynote locks the MASK FRAME aspect or the NATURAL image/movie aspect for masked
+      media — masked items get `aspect=None` until that is measured. Follow-up backlog item opened
+      from this round: `digest-bank-version-decouple` (see that todo).
+
+      LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (bank
+      `output/bank/2026-09-11/w1-gate/`, 62 min, owner ack 12:27): the 14 old arm-A slides GREEN, arm
+      B 0.00 bar slide 36, identity 100%. A new finding: Keynote stores image width as the float
+      aspect-lock when frame AR == media naturalSize AR (161 rows) but as an INTEGER when the wall
+      stretched the image (34 rows, 0/34 float) — fixed in the oracle (arm-A width accepted against
+      either candidate at 0.25px, follow-up commit on PR #78). Keynote-free re-compare
+      (`gate-recompare.log`, `--reuse-a/--reuse-b`): only slide 36 fails, arm-A image worst 0.01px."
+    status: pending
+  - id: badge-raise-readiness-poll
+    content: "DONE 2026-09-12 (PR #80 merged b390466; live ×3/×3 + full W1 strict gate 2026-09-12
+      GREEN bar slide 36, bank output/bank/2026-09-12/w1-gate/results.md). BUG BACKLOG (B), medium
+      priority, NEW 2026-09-11 from the full W1 gate (`output/bank/2026-09-11/w1-gate/`), CORRECTED
+      2026-09-11 by opus read-only diagnosis (`.../scratchpad/badge-poll-plan.md`). Root cause: the
+      09-11 gate's poll read `enabled = true` and the `click menu item \"Bring to Front\"` itself
+      threw `-1719@badge,s=8,idx=1` (System Events element-resolution failure); the slide-8 badge
+      plate verifiably did not land while `badgeMoved` reported an upper bound, not a measurement,
+      because the landing probe (B1) only ran once per run while `badgeMoved is 0` and (B2) was
+      per-kind, vacuous on slide 8's single shape. FIX (PR #80, `fix/badge-raise-readiness-poll`):
+      `obedFront` retries once on a click *error* (not a landing failure) by re-running the whole
+      readiness sequence before the second click; a first failure bumps `raiseClickRetried` and
+      emits `raiseClickRetry(...)`; only a second failure lands in `frontErr` tagged `[...,retry]`.
+      `obedRaiseItem` re-runs the badge landing probe after a retried click regardless of
+      `badgeMoved`. DESIGN RISK (KEPT AS DESIGNED): a twice-failed click still latches
+      `badgeFrontDead` deck-wide via the existing entry-guard contract, and `obedBadgeSlide` skips
+      all later-slide badge raises — correct, already-designed behaviour, not a regression.
+      LIVE ×3/×3 DONE 2026-09-11 23:17 (`output/bank/2026-09-11/badge-retry/results.md`): 3
+      treatment runs identical/0 retries, 2 of 3 controls reproduced `-1719@badge,s=55,idx=1` and
+      the retry landed it both times -> FIX CONFIRMED.
+      FULL W1 GATE 2026-09-12: run 1 (08:13-09:25) surfaced a SEPARATE, deck-wide-cumulative-state
+      defect unrelated to PR #80 — see the new `badge-probe-on-blind` item for the full incident and
+      the recommended follow-up fix; PR #80's retry branch never executed on that run
+      (`raiseClickRetried=0` throughout) and is exonerated by offline diagnosis
+      (`.../scratchpad/armA-blind-diag.md`). Re-run arm A (09:25-09:57, `--reuse-b`) was clean: 0
+      badge blind, 12 raise blind (the usual set), no retries, no frontErr, z-order identical to the
+      09-11 clean A on all 21 checked slides. FINAL ACCEPTANCE MET: the full W1 A/B gate on the Full
+      deck with `--pass2-bar strict` returned `frontErr=''` in both arms and `front` A==B, RED only
+      from the owner-accepted slide-36 D10 #4 group residual -> GREEN bar slide 36. PARKED, not in
+      this PR: a `badgeProbeVacuous(s=,k=)` token for blind spot (B2), and resolving the System
+      Events process once per script instead of per tell (H1)."
+    status: completed
+  - id: badge-probe-on-blind
+    content: "IMPLEMENTED 2026-09-12 on branch fix/badge-probe-on-blind (PR #84 open): `lastFrontBlind`
+      global set in obedFrontReady's not-ready arm, cleared at the top of obedFront; obedRaiseItem
+      `_reprobe = _frontResult is not 0 or lastFrontBlind is not 0`, `_probeOnly` crediting; token
+      `badgeProbeBlind(s=,k=)`; return string/result dict/_RAISE_TOKEN_KINDS/PASS2 keys unchanged;
+      8 new tests, suite 1799/84; opus r1 APPROVE-WITH-NITS + Codex APPROVE. Replay: run-1 arm A
+      would have latched badgeFrontDead(s=42) → RED at run time. Status stays pending until the
+      next full gate confirms no behaviour change on a blind-free run.
+
+      BUG BACKLOG (B), medium priority, NEW 2026-09-12 from the 2026-09-12 full W1 gate run 1
+      (`output/bank/2026-09-12/w1-gate/{gate-run1.log,ENV.txt,A_unflagged.run.json}`), diagnosed
+      read-only offline (`output/bank/2026-09-12/w1-gate/armA-blind-diag.md`). On the FIRST 2026-09-12 arm-A run,
+      232 `raiseBlind(phase=badge)` fired on exactly the 45 badge slides ≥42 (of 63 badge slides,
+      318 planned members) — a perfect suffix of the badge pass, no interleaving, no recovery over
+      ~24 min. `raiseClickRetried=0` and `frontErr=''` throughout, so PR #80's new retry branch
+      never executed and is not the cause. Offline z-order (09-11 A vs 09-12 A, full 155-ordinal
+      deck) shows every one of those 45 blind slides differs (44/45; slide 74's raise was vacuous
+      and left no trace) and no non-blind slide differs: blind ⇔ badge raise did not land, 1:1,
+      confidence high. Content/ordinal trigger falsified (slide 43 is byte-identical in
+      kind/index/geometry to slide 41, and 41 landed while 43 did not; the same badge slides raised
+      cleanly in the 09-11 ranged ×3/×3 on this same PR #80 code). Runtime arithmetic (Δ582s over
+      232 extra blind polls = 2.51s each = exactly the poll floor+ceiling) proves Keynote stayed
+      responsive throughout and the AppleEvent `set selection` kept succeeding — this is the
+      ineffective-selection signature: the model-level selection stopped being reflected in the
+      window that owns the Arrange menu, most likely cumulative Keynote state during a long GUI pass
+      (H1, ~0.55 confidence; modal sheet H2 ~0.15; one-off environment event H3 ~0.15; locked
+      objects, wrong process, hang/timeout, and the badge-fallback-count delta are all falsified).
+      GATE-STRUCTURE DEFECT (the actionable finding, root-cause-independent): `obedRaiseItem`
+      verifies badge landing only while the GLOBAL `badgeMoved` counter is still 0 — once the first
+      badge slide verifies, nothing is checked again for the rest of the deck, so the run reported
+      `badgeMoved=319`/`badgeFrontDead=0` (a GREEN-looking pass) while 232 raises silently did
+      nothing; the readiness poll's `raiseBlind` token is a symptom counter, not a verifier, and is
+      the only reason this run was caught at all. RECOMMENDED FIX: verify landing whenever
+      `obedFrontReady` returned false (cheap — only fires on already-blind polls), not only while
+      `badgeMoved is 0`, mirroring the retry-path check `badge-raise-readiness-poll` already added
+      for click errors. Two probe protocols are banked in `armA-blind-diag.md` §3b to distinguish
+      H1/H2/H3 if a live investigation is warranted: Probe A (zero-code, ranged arm-A re-run over
+      badge slides 36-56 only) and Probe B (one-line instrumentation in `obedFrontReady`'s
+      `if not _ready` arm capturing `selection`/`sheets`/`AXMain` before emitting the token, run only
+      if A is clean). NEITHER PROBE WAS RUN — the 2026-09-12 re-run (`--reuse-b`) came back clean
+      (0 badge blind) before either was needed, so H1/H2/H3 remain undistinguished; run them only if
+      this recurs. The FIRST 2026-09-12 arm-A run (`A_tainted.key`/`A_tainted.run.json`) must NEVER
+      be used as a W1 reference — every badge raise from slide 42 on is unlanded despite a clean
+      report."
+    status: pending
+  - id: surface-raise-tokens
+    content: "DONE 2026-09-09, PR #61 `fix/surface-raise-tokens` (`c5e9c34`, Codex 3 passes), precondition for `stat-raise-dead-4`'s diagnosis. `keynote._run_stat_finalize` now returns `tokens` {name: [args]} and `frontErr`; `obedRaiseSlide` emits a `raiseDead(s=,idx=)` token for EVERY dead raise (the `is 0` guards removed); `remap_keynote._say_stat_finalize_detail` logs `Stat raise detail: ` (chunks of ≤40, marker `(i/n)` after the prefix), `WARNING stat-finalize: GUI Bring to Front returned error(s) `, `Badge raise detail: ` (unchanged), `Stat resolve detail: ` (rare kinds uncapped, sigFallback capped at 40). Unblocks `stat-raise-dead-4` localising all 4 `raiseDead` occurrences by log alone on the next production run."
+    status: completed
+  - id: resizer-dead-code
+    content: "DONE 2026-09-09, PR #62 `chore/resizer-dead-code` (`7e0d517`). Deleted `enforce_min_size`, `pair_maps`/`_basename`, `repack_free_text`, `fit_similarity`, `residual_rmse`, the dead `parked_left`/`_pack_left_groups`/`pack_columns_from_left` path (dead since `9bca221`; overlap now owned by `stat-group-template-sample`), dead locals, inlined `_groups_for_slide`, deleted `subset_keynote.py`/`.js`. No behaviour change."
+    status: completed
+  - id: golden-plan-gate
+    content: "DONE 2026-09-09, PR #64 `chore/golden-plan-gate` (`4651b7b`, Codex 4 passes). `scripts/golden_plan.py` + `tests/test_golden_plan.py` + `tests/fixtures/golden-plan/{gold_wall_input,full_report_card_wall}.json` — a Keynote-free apply-plan SHA-256 gate through the real `remap_keynote.remap_keynote` with `_run_jxa` sentinel-stubbed; goldens keyed on deck/template digests, INSPECT_VERSION, env pins, plannerEnv {osBuild via `sw_vers`, caption faces via `_ns_font`}; `update --accept-input-drift`. Run this after any planner/driver change; see also `chore/golden-gate-hard-parity` (`20feac0`), which makes propose/apply parity a hard gate on top."
+    status: completed
+  - id: resizer-refactor-assessment
+    content: "DONE 2026-09-09. Owner asked whether to refactor; verdict NO REWRITE. Six read-only surveys banked at `output/bank/2026-09-09/refactor-survey/`. Defects found (not style): `_KEYNOTE_LOCK` covers reads only (pass 1/2, fallback, template stat read unlocked); NO timeout on any JXA subprocess; `_read_template_stat_sizes_via_keynote` ignores rc → `{}`; stat-finalize and template-stat scripts bind `document 1` unverified then save; `_build_slide_geometry_script` itemIndex fallback addresses a typed collection; `deleteHides` failure → opacity-0 ghost; `layouts.error`/`sizeProp`/`saved` produced never read; `iwa_geometry._natural_size` (bezier-only) vs `_path_source` (6 kinds) disagree — editable-bezier text composes (0,0); autosize sentinel height-only on read vs either-axis on write; `_group_child_records` hard-codes the centre anchor; `_load_deck` silently drops undecodable members and is decoded ≥6x per verify run; `iwa_text_shape` anchor model (`compose_text_geometry`, `TextGeometry`, `geometry_flags`, `TEXT_INSET`) has no production caller; `slide_fingerprint.py` unwired; 12 osascript runners, 3 decode→re-encode→diff copies in `iwa_write`. Sequence ruled: shared osascript runner (timeout/lock/name-verified bind) before the W1 flip; IWA natural-size/sentinel unification + one decode→re-encode→diff before W2; planner split only when the next role lands."
+    status: completed
+  - id: stat-group-template-sample
+    content: "BUG BACKLOG (B), follow-up from batch 2 (owner accepted the overlap for now). The re-pitched card grids overlap the affine-sized stat blocks (slide 4: date banner + '44 / Total Church Buildings' 109×265; slide 5: '110 / Full-Time Workers') — 4 + 6 cards, reported per card by caption in the say() line. Gold hand-reshaped those blocks (44 block → 509×88 bar above the grid). Fix = a stat-block sample in the template so those groups take a template size/shape (sibling of the constellation cluster affine: role-named group + template anchor). Until then the operator drags them; the grid origin already descends below stat blocks when the rows still fit (slide 5 y0=392)."
     status: pending
   - id: constellation-cluster-affine
-    content: >-
-      Replace the constellation's one-slide affine with per-cluster sizing and template anchors
-      if the owner confirms the content changes often enough to justify automation.
-    status: pending-owner-decision
-  - id: residual-correctness
-    content: >-
-      Resolve the remaining card-border ref floor, stat-group/template sample, parked reuse-chain
-      snapshot, uncompared framing fallback, off-slide map-label deletion, and stat bind-name
-      verification items independently.
+    content: "BUG BACKLOG (B) / recipe work, after batch 2. Per-CLUSTER affine with template anchors (section below). Today one uniform fit-to-width (0.48×) leaves the top half empty; gold scales each CHC cluster ~0.82× as a unit and pushes clusters outward to fill the frame. Cluster discovery offline from line incidence; per-object size from the template circle swatches; placement by pairing clusters to template ANCHOR circles at gold positions (angular order around the building); hub lines rewritten by identity; radial frame-fit fallback when anchor count ≠ cluster count. Template needs one anchor circle per cluster + building/people rows/SOT at gold positions. Score offline against gold before any Keynote run."
     status: pending
-  - id: cache-and-bank-hygiene
-    content: >-
-      Decouple durable evidence from inspect-version churn and retain small censuses/run records
-      before deleting multi-gigabyte gate decks.
+  - id: builds-follow-source
+    content: "DONE 2026-09-06 on `fix/reuse-builds-side-panels` (`69ede81` ... `80cb442`). Reuse targets lost the source slide's animations; the fix is the offline IWA patch `restore_source_builds`, run after stat-finalize, which computes a KEEP multiset keyed (effect, animationType, geometry-free target identity), emits kept builds in source order, copies transitions verbatim in the same SlideArchive rewrite, and raises on any surplus. Gold-verified at `output/bank/gold-baseline/reuse-builds2/` (`80cb442`): reuse slides 12-17 carry 0/9/44/29/1/3 builds in source order with the right six transitions and zero surplus deck-wide. Two known residuals: 2 KLNSparkle builds on slide 13 are reported as a loud shortfall WARNING (full-fidelity routes still a follow-up), and D8 later refined what `source order` means - it is the source slide's `buildChunks` order, not its `builds` order (see `w1-build-order-nondeterminism`). Full detail: `output/bank/2026-09-06/review-B/review.md` (the round-2 plan dir `output/handover-2026-09-05/` was deleted)."
+    status: completed
+  - id: side-panels-positional
+    content: "DONE 2026-09-06, same branch and commits as `builds-follow-source`. The deck-wide list-hide arm was deleted and `--keep-side-panels [SLIDES]` became POSITIONAL and per-slide, keying off `is_side_panel_item` (content outside the centre wall band x in [1920,5760]); reuse reconcile became role-aware for persisted pairs including groups, and a phantom-remove filter drops `remove` refs for already-deleted donor objects. Round 2 refined the same gate with the owner's roster rule (roster kept only on the church-list slide(s), packed into frame, hidden everywhere else regardless of position). Gold-verified in the same `output/bank/gold-baseline/reuse-builds2/` build. Full detail: `output/bank/2026-09-06/review-B/review.md`."
+    status: completed
+  - id: autosize-rect-alignment-fix
+    content: "DONE 2026-09-06 - read-side only, offline unit tests. `_autosize_rect` (`src/obed_edom/iwa_geometry.py`) assumed an autosize text box's stored y is always the visual CENTRE, which is true only for a `kFrameAlignMiddle` box; it now resolves `shapeProperties.verticalAlignment` up the style parent chain and branches Top -> `y`, Bottom -> `y - nh`, else `y - nh/2`. Measured on the Gold CG deck: 168 middle / 11 top of 179 autosize boxes, 0 unresolved, and the frame-containment oracle stopped false-failing the packed slide-11 columns at y ~ -140. NEVER re-add write-side `+-h/2` compensation for this (the bug reverted in `80cb442`); `iwa_text_shape.compose_text_geometry`'s independent `geometry.flags` anchor model is deliberately untouched and is worth its own item. Full detail: `output/bank/2026-09-06/anchor-diagnosis/diagnosis.md`."
+    status: completed
+  - id: pack-lists-gate-widen
+    content: "DONE 2026-09-07 - `dcae6a7` + review-blocker fix `b6039ef` on `fix/resizer-backlog-r2`. The measured list packer only fired on whitelisted slides; it now targets role==list only, erases from the occupancy raster exactly the boxes it moves, and both gates widened from `slide_lists` to `slide_lists or slide_keeps_centre_roster`, with preview resolution decoupled from the whitelist (`preview_wanted_slides()`). Measured on the banked Full-wall payload: a flagless run goes 0 -> 93 placements, all role=list, overlap 0.0, where the naive widen would have moved and erased 120 hidden boxes; whitelisted runs are deliberately NOT byte-identical to parent because the parent moved 198 non-list boxes. Three residuals worth their own items: a LATENT Gold flip once a preview cache exists, bare `--keep-side-panels` still decoding all 155 previews, and 94/311 list boxes on whitelisted runs getting neither packer. Full detail: `output/bank/2026-09-07/review-pack-lists/`."
+    status: completed
+  - id: reuse-chain-preadd-duplicate
+    content: "DONE 2026-09-06 - `08a5130`, stacked on `d31fedc`. The reuse chain pasted a slide's delta and deleted it again one slide later (Gold: 85 names pasted onto 12, deleted one AppleEvent at a time off 13's copy); `applyReuse` now duplicates the donor into the next target's slot BEFORE pasting its own adds, behind a four-part planner gate (donor immediately previous, every donor-pasted item dies on the target, no pasted GROUP, no donor mutate) with a `removeFallback`. Timed production Gold build `output/bank/gold-baseline/preadd/` (910s cold, EXIT 0): reuse deletes 91 -> 6, all 11 deferred acceptance items passed, `count_deck` exact, and the offline A/B vs `reuse-builds2` was 0.00px on all 19 slides with 19/19 previews byte-identical - the first trusted use of the alignment-aware containment oracle. The non-adjacent case was spun off as `reuse-chain-parked-snapshot`. Full detail: `output/bank/2026-09-06/plan/preadd-duplicate-plan.md`."
+    status: completed
+  - id: reuse-chain-parked-snapshot
+    content: "OPTIMIZATION (W) backlog, spun off from `reuse-chain-preadd-duplicate`. Let a pre-add
+      snapshot serve a NON-adjacent later target: on the Full wall slide 125 deletes 197 names that were
+      pasted at 123 and re-texted at 124, so 125 wants 123's pre-add state (cost ≈ +9 pastes for −197
+      deletes). Needs the snapshot parked across several `run()` iterations — park it at the END of the
+      deck so `applyTransforms`'s `slides[n-1]` addressing stays valid, delete it after its last
+      consumer and before `skipOutsideRange`/save — plus a donor search over snapshot states and
+      `donor_out`/`group_out` bookkeeping for a base that is not any wall slide. Needs a Full-wall build
+      to validate; do not attempt without one."
     status: pending
-  - id: product-backlog
-    content: >-
-      Still-unstarted ideas: propose pins flag, portable recipe library, adjacent-slide stat drift,
-      outline editor, image cues, and surgical IWA writes for the generator.
+  - id: map-label-classification-fix
+    content: "DONE 2026-09-04 - `cbde0a7`. `is_list_item` called any CHC/CHLI/CHEL text a roster list and the unticked-list gate (`loose` is True whenever there are no previews) deleted 23 single-line map labels on Gold slides 3/4/8/9. Fix: `name_columns()`/`name_column_ids()` - a name column is >= 3 same-left-edge rows (x tol 6, pitch 2.0xh) or a multi-line box, and a lone label demotes to role=other before the hide gate. Measured: Gold hide 491 -> 468 with everything else byte-identical, Full-deck sweep 0 roster rows demoted and 134 labels newly kept across 58 slides, live-verified within 1px of the human ideal on slide 9. `name_columns()` is the reusable primitive the side-panel work builds on; the `labelfix` Gold bank was deleted, the commit and the Full-deck sweep numbers are the record."
+    status: completed
+  - id: map-label-text-sizing
+    content: "DONE 2026-09-07 - `e74e5fa`. Demoted map labels came out at 35pt instead of 40pt: the template palette holds TWO white Amplitude-Bold swatches (40pt Malaysia tile, 35pt China tile) and `match_character_style`'s colour tie broke on `predicted = wall x 0.5 = 20pt`, so 35 always won by penalty - `40 x 0.875 ~ 35` was pure coincidence, and slides 8/9 were right only by luck. Fix: unpaired list/other text predicts with the affine it rides (`size_ratio=aff.s`, 0.5 with no affine), so a translate-only map at s=1.0 predicts 40. LIVE-CONFIRMED on the r2-round Gold build: font census vs preadd differs ONLY on 'CHC Sitiawan' slides 3/4, previews diff only on 003/004, geometry 0.00px. Full detail: `output/bank/2026-09-07/label-sizing/diagnosis.md`."
+    status: completed
+  - id: map-label-offslide-parked-delete
+    content: "BUG BACKLOG (B), residual from map-label-classification-fix (ii), needs its own audit. The off-slide branch (map_remap.py:2350-2354) DELETES parked off-canvas objects (e.g. 'CHC Kuching' parked at wall (4681,1678)) instead of keeping them parked like the human does (parked at (1813,1678) in the ideal). 14 parked objects on the Gold deck, mostly one parked card group."
     status: pending
+  - id: card-border-source-ref-floor-fix
+    content: "BUG (code fixed and merged), commit 94d2969. `restore_card_stroke_widths` applied the card classifier (white+solid, ≥10 refs) to the OUTPUT side only; the Full wall's stray 3-ref 5pt white style 17682825 (two big images, slides 26/57) shared the colour+pattern key with the real 83-ref card style, tripping a '1 output / 2 source' refusal and leaving the Full deck with no white card borders at all. Fix: `iwa_write.match_card_stroke_styles()` now applies a per-key SOURCE floor `max(2, out_refs // 8)` (output refs run ~3.2× inflated by donor copies at patch time, e.g. 83→269, so a flat floor of 10 would wrongly refuse small decks); refusals dump every candidate, successes note what the floor set aside. Residual: output card refs 10-31 still refuse on the Full wall (floor caps at ≤3) and need a follow-up. No final Full-deck live-verification result was recorded; do not describe it as still running."
+    status: pending
+  - id: propose-pins-flag
+    content: "FEATURE. Surface pins-paired (pairQuality) per template tile in the propose UI so a '0-pin' slide is flagged, not trusted. Image-similarity scores can invert the geometric fit on bespoke slides (Map slide 9: template 4 scored 0.69 but paired 0 → vetoed at remap; template 13 scored 0.06 but paired 34 at the right 0.483 scale)."
+    status: pending
+  - id: recipe-library
+    content: "FEATURE. Recipes as browsable artefacts. Built then reverted: a page needing a borrowed transform usually needs two affines (map + badge). Revisit now badge-affine names groups by role — section below; the cluster affine is a third role."
+    status: pending
+  - id: stat-drift
+    content: "FEATURE. Validation rule slide.stat_drift: a figure that changes between adjacent slides then holds. Ships at warning. Independent; stubbed in validation_rules.yaml."
+    status: pending
+  - id: outline-editor
+    content: "FEATURE. Editable outline view extending OutlineResultView, LibreOffice page-view toggle, in-place surgical writes to the source .docx with timestamped backups. Design below."
+    status: pending
+  - id: image-cues
+    content: "FEATURE. Image cues as an asset slot count + shape per cue. Both capabilities (image place, movie via file-name reassign) probed and present. Taxonomy below."
+    status: pending
+  - id: iwa-surgical-write-generator
+    content: "FEATURE (generator). Use the offline IWA writer (ec20f4b) to set cyan superscript verse numbers offline and retire generate's GUI Copy/Paste-Style pass 2 (Accessibility, silent-fail). Style-table patch = a harder byte class than geometry floats; own spike + per-deck openability test."
+    status: pending
+  - id: framing-pin-continuity
+    content: "DONE 2026-09-10, merged main in PR #74 (`fcf6c15` merge commit). BUG — DONE, 2026-09-10 on branch `fix/framing-pin-continuity`
+      @ `02e16c5`. Codex review ran 3 rounds; round-3's finding is banked as
+      `rotation-provenance-rounded` (owner-accepted). The sibling-reuse gate in `plan_payload_transforms` (`map_remap.py`) tracked
+      `prev_pin` — the OPERATOR'S requested template slide on the previous page — as the condition
+      for reusing that page's affine when the current page's own pin collapses to a sliver. That
+      meant an UNPINNED predecessor that still landed on the wanted template by pairing could never
+      seed a reuse chain, only a slide the operator pinned by hand could. Renamed to `prev_template`,
+      read from `slide_recipe.get(\"templateSlide\")` AFTER the fit fallback (not the pre-fit
+      `framing_report[-1]`, which would be stale) — the rule is now \"reuse the adjacent previous
+      slide's affine when it landed on the same template, by pin or by pairing.\" A letterboxed
+      predecessor still can never seed reuse (`fit_to_frame_recipe`/`carry_fit_context` emit no
+      `templateSlide`). Nested under `wanted is not None`, so both golden-plan decks stay byte-neutral
+      (`golden_plan.py:capture_plan` never passes `framing_overrides`) — `tests/test_golden_plan.py`
+      passed with NO regeneration. OWNER DECISION (2026-09-10): reusing the predecessor's affine
+      verbatim can carry translation from a differently-cropped page — on the Gold deck, slide 5's
+      affine (map inset, ty=+130) reused unclamped on slides 6/7 (full-bleed panel) would leave a
+      130px bare band at the top and cut 130px off the bottom (12% of frame height) against a ~28px
+      alignment gain. Owner chose a cover-clamp instead: in `_recipe_reusing_affine` only, if the
+      reused affine maps the panel at least as wide/tall as the destination frame on an axis, that
+      axis's translation is clamped so it covers with no gap (accounting for the panel's own x/y
+      offset, not just its translation — an early draft of the clamp ignored that offset and
+      corrupted slide 6's tx before this was caught by re-measuring against the Gold deck); an axis
+      the panel doesn't cover is left untouched. `on_canvas_fraction`'s returned fraction is
+      unchanged (proved, not asserted — see `framing-coverage-report`'s T7). Gold-measured (offline,
+      Keynote-free, pinning 6/7 to template slide 4 as the operator would): slide 5 unpinned reaches
+      template 4 by pairing (`templateSlide 4/source template-layout/pairQuality 1`, own affine
+      `s=1.0 tx=-2932.0 ty=130.0`); slides 6 and 7 both take `source sibling-affine/reusedSibling
+      True`, and the `China Adjusted.png` transform on both is `x=-1111.0 y=0.0` (post-clamp:
+      `1821-2932` unchanged on x since width already covers; `ty` clamped 130→0 since height covers
+      exactly) — never `-544.0`, which was `Wilderness.png`'s hand crop, the bug's literal signature;
+      slides 8/9's own affine stays `tx=-3032.0`, 100px off slide 5's, proving they were not dragged
+      onto it; `fitted_slides == [10]`, unchanged. RISK measured and holding: slide 7's own
+      `on_canvas_fraction` sits at exactly 0.5 against `MIN_ON_CANVAS_FRACTION`'s strict `<`, and
+      stays exactly 0.5 after the ty clamp (re-measured, did not assume) — any future change to that
+      comparison, `CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION`, or `_replaced_item_ids` flips slide 7 to
+      `fitted` and silently undoes this fix there. Tests: `tests/test_map_remap.py` — renamed
+      `test_a_degenerate_pin_reuses_an_adjacent_sibling_on_the_same_template` (was
+      `..._same_pin_siblings_affine`); extended `test_a_non_adjacent_or_differently_pinned_slide_does_not_reuse`
+      with the differently-pinned half it never exercised; new
+      `test_an_unpinned_predecessor_seeds_reuse_when_it_lands_on_the_same_template`,
+      `test_a_letterboxed_predecessor_never_seeds_reuse`,
+      `test_reused_affine_clamps_to_cover_the_frame_only_where_the_panel_is_big_enough`,
+      `test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped` (skip-if-missing, offline via
+      `offline_wall_payload`)."
+    status: completed
+  - id: framing-coverage-report
+    content: "DONE 2026-09-10, merged main in PR #74 (`fcf6c15` merge commit). FEATURE (report-only) — DONE, 2026-09-10, same branch as
+      `framing-pin-continuity`. Owner ruled slide 7's thumbnail-overlay stranding ACCEPTED (see
+      `framing-pin-continuity`'s R2), so this is measurement honesty only — it does NOT gate or touch
+      `_framing_unusable`. `on_canvas_fraction` gained a 5th optional out-param
+      `excluded_report: dict[str,int]|None = None` (matching the module's existing `*_report` optional
+      convention): the two early-continue exclusion arms (`_replaced_item_ids` overlays and the
+      cover's `crop_footprint` side-panel skip) now set a `skipped` flag and branch AFTER the mapped
+      on/off-canvas position is computed, so an excluded item is still mapped before being counted —
+      filling `excluded`/`excludedOffCanvas` without changing which items increment `seen`/`inside`,
+      so the RETURNED FRACTION IS ARITHMETICALLY UNCHANGED (proved on every Gold slide, not asserted:
+      `test_gold_on_canvas_fraction_out_param_does_not_change_anything`, plus a synthetic
+      `test_on_canvas_fraction_reports_excluded_counts_without_moving_the_bar`). `map BG.png` chrome
+      tiles are genuinely hidden (`_hide_item_transform`) and correctly excluded from BOTH the
+      fraction and the new counts — they must never surface as \"excluded\". `plan_payload_transforms`
+      patches `framing_report[-1]` with `onCanvas`/`excluded`/`excludedOffCanvas` AFTER the fit
+      fallback (mirroring the existing `fitted` patch), inside the same `if template and (...)` block.
+      `remap_keynote.py` logs a `say()` line (list, `[:8]` truncation) naming slides with
+      `excludedOffCanvas > 0`, explaining they are \"scored on the framed artwork only; those overlays
+      are placed, not dropped.\" Gold-measured slide 7: `onCanvas 0.5, excluded 13, excludedOffCanvas
+      11` — of the 13 excluded items, 12 are the `_replaced_item_ids` overlay set (11 `pasted-movie.png`
+      + 1 `UPG.png`) and 1 is a side-panel shape (index 16) outside the panel's `crop_footprint`
+      x-range whose mapped centre also lands off-canvas; NOTE this excluded/excludedOffCanvas pair is
+      NOT the number this item's own originating plan predicted (12/10) — the plan's manual estimate
+      missed that side-panel shape; re-measured against the real Gold deck and reported here rather
+      than banked unchecked. `plan_out`/`golden_plan.py:capture_plan` never reaches `framingReport`
+      (it lives on `result`, not the 8-key `plan_out`), so this is also golden-neutral —
+      `tests/test_golden_plan.py` passed with NO regeneration. Dashboard/TS
+      (`dashboard/src/tabs/ResizeTab.tsx`) intentionally NOT touched (would drag in `npm install &&
+      npm run build`); the extra report keys are additive."
+    status: completed
+  - id: framing-auto-fallback-uncompared
+    content: "BUG BACKLOG (B), NEW 2026-09-10, deferred out of `framing-pin-continuity` on purpose.
+      `plan_payload_transforms`'s unconstrained fallback (`map_remap.py` ~:3993-3997, inside the
+      pinned-degenerate block) ranks candidate auto framings by \"fewer items off-canvas\" with no
+      floor on how degenerate the winning scale is. On the Gold deck's slide 7 this metric RANKS THE
+      DEGENERATE SLIVER FIRST: the pin-forced recipe strands 0 of 15 items precisely because it
+      collapses to `s=0.1776`, while every real candidate strands 10-12 and the CORRECT framing scores
+      WORST (12 of 15 stranded). A metric that prefers the collapse and rejects the fix is not a fix —
+      the project's own `SKILL.md` forbids exactly this pattern (rewarding a frame merely for keeping
+      content inside the canvas). `framing-pin-continuity` removes the one measured LIVE instance of
+      this on the Gold deck as a side effect (slide 6 now takes the reuse branch before this code path
+      is ever reached, and slide 7 reuses too, once pinned per the operator's real workflow) — but the
+      fallback itself is unfixed and will misrank again on any page without an adjacent same-template
+      sibling to reuse from. Needs its own metric (e.g. a floor on scale, or judging candidates by
+      on-canvas fraction of the ORIGINAL framing's own content rather than raw off-canvas count) before
+      it can be trusted; do not re-derive this reasoning from scratch if rediscovered."
+    status: pending
+  - id: rotation-provenance-rounded
+    content: "BUG BACKLOG (B), NEW 2026-09-10, OWNER-ACCEPTED (owner, 2026-09-10: \"seems like an
+      edge case, if it bites me in the future then so be it\") — banked deliberately, not
+      fixed, deferred out of `framing-pin-continuity` on purpose. `_recipe_reusing_affine`'s
+      cover clamp (`map_remap.py:3894-3896`) fires only when the centre-panel item's
+      rotation is \"known and zero\", but independent review (Codex gpt-5.6-sol, round 3)
+      showed `rotation == 0` does not prove unrotated. Two provenance holes feed that field
+      a rounded or defaulted zero, both verified: `offline_inspect.py:214` stamps
+      `\"rotation\": _round_pt(angle) % 360` — whole-degree rounding, deliberate per its own
+      comment (\"fractional rotation churns the reuse fingerprint\"), so a real 0.4-degree
+      panel is emitted as `rotation=0`; `inspect_keynote.js:121` separately prefills
+      `rotation: 0` in the record literal, so that zero survives if `obj.rotation()` throws.
+      Measured impact: a 3840x1080 panel rotated 0.4 degrees has a true AABB height of
+      1106.8px (0.5 degrees -> 1113.5px) against the reported 1080, so the clamp can shift a
+      valid crop by up to ~33.5px. It bites only on the sibling-reuse path, which requires a
+      slide that was explicitly pinned AND whose own pinned recipe collapsed, AND a
+      sub-0.5-degree rotated source that wins `_centre_panel_item`. Fix if it ever bites: do
+      NOT un-round `rotation` (load-bearing for the reuse fingerprint); add a separate
+      positive fact instead — e.g. the reader stamping `angle % 360 == 0` computed BEFORE
+      rounding, omitted where the read failed — and have the guard at `map_remap.py:3895`
+      consult that; contained to `offline_inspect.py`, `inspect_keynote.js` and the one
+      guard. Pattern worth recording, since it recurred three times in one session on this
+      branch: a field that looks like proof but is not. `prev_pin` looked like provenance
+      for which template the previous slide used (it was the pin, not the result — see
+      `framing-pin-continuity`). `templateSlide` looked like lineage on a `cover-fallback`
+      recipe (the number recorded which slide was matched by name; none of its geometry
+      entered the affine). `rotation == 0` looks like \"unrotated\" (it is a rounded or
+      defaulted value). Each was found by independent review after the previous one was
+      closed. When a guard turns on a value meaning what its name suggests, verify that at
+      the point the value is PRODUCED, not where it is consumed."
+    status: pending
+  - id: badge-width-collapse-gold-slide-2
+    content: "DONE 2026-09-12 — PR #94 (fix/badge-width-collapse @ 1ad51ed, owner merges); live
+      acceptance PASSED 18:07 (bank `output/bank/2026-09-12/badge-width-live/results.md`: badges
+      278.0×88.0 exact, strings intact; caveat: cached-jxa refusal not exercised live, v4 cache
+      version-stale, covered by the real-payload test). Root
+      cause measured offline: the 2026-09-10 16:31 run consumed a cached `reader: jxa` payload
+      with no `groupChildren`, so the planner fell back to a bare group-level
+      `set properties {width:278,height:88}` write; Keynote 15.3.1 aspect-locks a group size
+      write about its LIVE frame, which after `setSlideSize` was the wrapped-autosize union
+      69x261, not the planned 278x88 — deriving width from height gives 88 x 69/261 = 23.3,
+      matching the observed 23x88 (and the autosize text child's 268.2 -> 22.6) exactly.
+      Gold slides 13-17 have similarly-shrinking groups that never collapsed because on the
+      OFFLINE path the planned rect IS the live archive-composed frame the group was planned
+      against (sx approx sy, ~0.85 both axes) — the aspect lock is a near no-op there. The
+      discriminator is the reader's coordinate space (JXA union frame vs offline archive frame),
+      not child availability.
+      Fix: (a) mode `on` now refuses a cached `jxa` payload and forces an offline re-read; the
+      cache is served as-is only when the offline re-read genuinely fails. (b) a
+      `groupChildrenUnavailable` slide flag plus a reader-independent `groupAutosize` marker
+      derived from the IWA archive (`attach_group_autosize`, sharing the `_is_autosize_text_child`
+      predicate with `_group_child_records` so the two callers cannot drift). (c) for an
+      autosize-marked group on a `groupChildrenUnavailable` slide, `ItemTransform` refuses the
+      size write: the spec carries position only, `sizeRefused=group-children-unavailable`,
+      no `w`/`h` at all — the group keeps its source size, wrong-positioned-size but intact and
+      hand-fixable, instead of destroyed with no repair path; a >=3x shrink on either axis
+      additionally emits a `groupCollapseRefused(s=,idx=)` report token (boundary inclusive,
+      Codex r1); `child_resize_report` records `s=1.0` on a refused group so pass 2 never scales
+      its fonts; a deck-wide `WARNING remap:` summary lists every refusal.
+      (d) `framing.py`'s plan consumer (`planned_rects`) now keys off actual `w`/`h` presence in
+      the spec instead of inferring it from role, which had crashed with `KeyError: 'w'` on a
+      refused group of role `other` — fixed structurally (`\"w\" in applied`, `role != \"line\"`
+      excluded, falls back to the source rect for a refused group). No legacy handling.
+      Golden `planSha256` is unchanged on the offline path (`groupAutosize`/`sizeRefused` never
+      appear there) — no re-bank needed. Tests: a real-payload fixture
+      `tests/fixtures/jxa-wall/gold_slide2_badges.json` (sliced from the run's own cached jxa
+      payload, slide 2's items byte-identical) plus `tests/test_jxa_wall_regression.py`, which
+      drives the real `remap_keynote()` entry point over it — fails on `b390466` (w=278,h=88
+      present) and passes on this branch (no w/h, `sizeRefused=group-children-unavailable`,
+      `s=1.0`); re-slice the fixture from a fresh inspect payload only if the payload schema
+      drifts, and it is separately gated to skip (not fail) if the Gold deck's own digest drifts.
+      Suite 1800 passed / 84 skipped. Review: opus r1 REVISE (over-broad refusal rule, inert
+      guard, unrelated golden-sha moves) -> r2 REVISE (BLOCKER: the `framing.py` `KeyError: 'w'`
+      above, plus the guard not excluded from card/badge-slot groups) -> r3 APPROVE-WITH-NITS
+      (N1 applied: deleted the unreachable `group-collapse-guard is None` assignment as dead-by-
+      construction, per repo's no-dead-machinery rule; kept the `groupCollapseRefused` report
+      token, which is not dead) -> Codex r1 REVISE (guard boundary `<` -> `<=`) -> fixed
+      -> Codex r2 REVISE (partial-fallback slides got archive-space groupChildren) -> fixed
+      (opus r5 pending). Codex r2 finding: slides replaced by the per-slide live-JXA fallback
+      inside an otherwise offline two-tier read (`_merge_legacy_slides`) are now stamped
+      `groupChildrenUnavailable` and `attach_group_children` skips them; a fresh two-tier read
+      stamps a top-level cache marker `offlineFallbackTagged`, and in `on` mode a cached
+      `reader: offline` payload without it is re-read offline once (`stale_mixed`, mirrors the
+      cached-jxa refusal) — chosen over an `INSPECT_VERSION` bump so the banked JXA digest /
+      kind-count fixtures need no re-stamp. 4 tests; suite 1808 passed / 84 skipped.
+      -> opus r5 REVISE (stale_mixed except-branch; wording) -> fixed -> opus r6 APPROVE
+      -> Codex r3 REVISE (offframe_rows used the rejected w/h for a refused group) -> fixed
+      (effective size = src rect, test visible==0.12) -> opus r7 APPROVE -> Codex r4 REVISE
+      (HIGH: autosize groups classified `pin` bypassed the refusal — all group safety
+      bookkeeping sat under role==other) -> fixed (`group_src_rect`/`group_kind_index` +
+      refusal + s=1.0 + >=3x token now for every group; card/caption logic nested under
+      role==other; test `test_autosize_marked_pin_group_also_refuses_the_collapsing_write`)
+      -> opus r8 APPROVE (note: pins must not gain pass-2 font rows) -> orchestrator ruling:
+      no behaviour widening, statJob row stays role==other -> opus r9 REVISE (token asymmetry:
+      pin tokens reached neither run record nor log) -> fixed (groupCollapseRefused emitted
+      unconditionally on the transform dict for all roles, dropped from the statJob row, both
+      remap_keynote collection sites + the sizeRefused WARNING read transform_dicts) -> opus r10
+      APPROVE -> Codex r5 APPROVE-WITH-NITS (docstrings, applied) → PR #94 OPEN (1ad51ed).
+      Note on the stale_mixed except-branch: it is reached only when the offline re-read
+      genuinely fails (not merely stale), in which case the cached payload is served as-is
+      with every slide flagged `groupChildrenUnavailable` rather than partially trusted.
+      Separately, `inspect_keynote_checker` payloads are deliberately left untagged: the
+      checker splices per-item JXA geometry onto an otherwise-offline payload, so a blanket
+      `groupChildrenUnavailable` rejection whenever `on` mode sees one is intended, not a gap.
+      Suite now 1809 passed / 84 skipped.
+      Residual, not fixed here: F4 (a refused rect carries no
+      `sizeRefused` token through to the framing UI, so it can't tell 'kept at source size' from
+      'planned at source size') and F12 (a live-JXA path with a raised IWA decode error has no
+      guard). DONE 2026-09-12 — PR #94 (fix/badge-width-collapse @ 1ad51ed, owner merges); live
+      acceptance PASSED 18:07 (bank `output/bank/2026-09-12/badge-width-live/results.md`: badges
+      278.0×88.0 exact (source 277.97×87.57), strings intact; caveat: cached-jxa refusal not
+      exercised live (v4 cache version-stale vs INSPECT_VERSION 5), covered instead by
+      `tests/test_jxa_wall_regression.py`)."
+    status: completed
+  - id: refused-group-score-centre
+    content: "BUG BACKLOG (C), low priority, NEW 2026-09-12. `score_against_gold`
+      (map_remap.py ~4419) builds the match centre from the rejected w/h for a `size_refused`
+      group, off by (src.w-w)/2 (and the analogous term on height). Only reachable via
+      role=pin groups on `groupChildrenUnavailable` slides, and `templateScore` gates
+      nothing today (cli.py / web/app.py readout only), so no gate currently regresses.
+      Fix needs its own reasoning, not a reflex patch: `gold_aff.apply_rect(item_rect(source))`
+      already scales the source rect, so simply swapping in the source w/h there may be a
+      no-op rather than a fix — check what `item_rect` actually returns for a refused group
+      before touching the centre math. Golden sha must not move."
+    status: pending
+  - id: kindindex-guard-test-vacuous
+    content: "HOUSEKEEPING, small, can ride any branch. VERIFIED 2026-09-11 (orchestrator
+      re-ran: fails in 7.7s, `flagged == []` where `[73]` expected) that
+      `tests/test_iwa_kindindex.py::test_integration_full_deck_guard_trips_on_dual_slide` is
+      NOT tripped by deck drift. The test reads its oracle via `_cached_exact_payload`, the
+      shared inspect-cache slot for the current deck digest
+      (`.cache/inspect/2992d8c0….v4.k15.3.1.json`); since R2b that slot is stamped
+      `reader: offline`, so IWA-derived kind counts are compared against an offline-reader
+      payload and agree by construction — the JXA-only dual listing on slide 73 (a
+      filled/variation text box JXA reports as both text and shape) can never trip the guard.
+      Same equal-by-construction vacuity the JXA digest bank (PR #73,
+      `tests/fixtures/jxa-slide-digests/`) fixed for `deck_slide_digests`. Sibling
+      `test_integration_map_deck_reconstructs_addressing` (same file, `MAP_DECK`) reads the
+      same oracle source and needs the same guard. Fix options: (1) skip unless
+      `payload.get(\"reader\") == \"jxa\"` — honest short-term fix, since Full is deliberately
+      unbanked in the digest bank (see that reasoning in the jxa-digest-bank work); (2) bank a
+      JXA per-slide kind-count fixture next to the digest bank."
+    status: done
+    resolution: "FIXED 2026-09-11 on branch fix/kindindex-guard-test-vacuous. Shipped both
+      options: (1) `_cached_exact_payload` gates on `payload.get('reader') == 'jxa'`, closing
+      the vacuity for both integration tests, skip reasons reworded to name the reader
+      condition and regeneration command; (2) new banker scripts/bank_jxa_kind_counts.py
+      (modelled on bank_jxa_slide_digests.py) banked Gold_Wall_Input.key's 19-slide JXA kind
+      counts Keynote-free into tests/fixtures/jxa-kind-counts/gold_wall_input.json; new test
+      test_integration_gold_deck_kind_counts_match_banked_jxa cross-checks
+      derive_deck_kind_index against that bank on every run — 19/19 slides clean; synthetic
+      test_guard_trips_on_jxa_only_dual_listing pins the trip direction with no deck/Keynote.
+      tests/test_iwa_kindindex.py: 20 passed/2 skipped -> 22 passed/2 skipped (skips: MAP_DECK
+      absent; Full deliberately unbanked). Residual: slide 73's trip is unexercised against
+      real ground truth until a legacy Keynote read of Full_Report_Card_Wall.key. Correction:
+      tests/fixtures/jxa-slide-digests/gold_wall_input.json is committed on main (fa80746) and
+      test_golden_plan.py's Gold bank test runs green today (1 passed, 1 skipped, only Full
+      skips) — the earlier claim that those bank tests were fully skipped was wrong."
+  - id: digest-bank-version-decouple
+    content: "BUG BACKLOG (B), low priority, opened 2026-09-11 from the `as-geometry-rounding`
+      round. `tests/test_golden_plan.py` asserts the JXA digest bank's `inspectVersion` field
+      equals the current `INSPECT_VERSION`, but the digests themselves ignore that field — so
+      every payload-shape bump (e.g. the v5 aspect-field bump on PR #78) forces a re-stamp of the
+      whole bank even when no digest value actually changed. Decouple the assertion from
+      `INSPECT_VERSION`, or stamp/compare only the fields the digest actually reads."
+    status: pending
+  - id: shared-osascript-runner
+    content: "REFACTOR (from `resizer-refactor-assessment`, Open sequence 3) — before the W1 default flip. New `src/obed_edom/osascript_runner.py` owning every Keynote osascript call in the driver layer: temp-script-FILE policy (never stdin, per SKILL), per-site `open -b <bundle id>` pre-launch copied unchanged (`_close_document_by_name` still never launches Keynote), the `_KEYNOTE_LOCK` (moved from `inspect.py:22`, still an in-process `RLock`, re-exported so `inspect_mod._KEYNOTE_LOCK` keeps working) now held for WRITES as well as reads — strictly serial, no queuing/coalescing/reordering — a wall-clock timeout (`DEFAULT_TIMEOUT` 3900s > every in-script `with timeout of 3600`, `OBED_OSASCRIPT_TIMEOUT` override, per-call override; on expiry terminate->wait(1)->kill the OSASCRIPT child only, never Keynote, and raise `OsascriptTimeout`), and one Popen+poll `_execute` so run-to-completion and cancellable calls (`inspect_keynote`'s `is_cancelled`, whose `_run_jxa_inspect` is deleted) share a path. 11 sites adopted: `remap_keynote._run_jxa`; `keynote._run_stat_finalize` / `_read_template_stat_sizes_via_keynote` / `_run_superscript_fix` / `run_applescript`; `offline_write._run_fallback_scripts`; `inspect._close_document_by_name` (best-effort swallow, opt-in, also swallows the timeout) / `_run_applescript_export` / `inspect_keynote` / `bulk_geometry` / `inspect_items`. Dump-on-failure paths preserved byte-for-byte (`.stat-finalize.applescript`, `.superscript.applescript`, `.offline-fallback[-N].applescript`, generate's `.applescript`). Behaviour fixes shipped: defect 3 (no timeout on any JXA subprocess) and defect 4 (`_read_template_stat_sizes_via_keynote` ignored rc and returned `{}` — now raises, and `read_template_stat_sizes` no longer caches on failure). NO emitted script byte changes, no `.js` changes, no Apple-Event reordering — the 2026-09-12 W1 strict GREEN stays valid. The name-verified bind (`set theDoc to document 1` at `keynote.py:1462`/`:1736`) is DEFERRED to `stat-bind-name-verified` (see below) because it edits the pass-2 script the W1 gate certified. `maps_keynote.run_osascript` and `web/app.py`'s two `osascript -` dialogs are OUT of scope (separate subsystem; the dialogs must not take the Keynote lock or a 65-min timeout). Tests: `tests/test_osascript_runner.py` (file-not-stdin, argv/plan round-trip, launch on/off, PATH-stub sleeper proving the timeout KILLS the child, cancellation message `Export cancelled.` preserved, RLock serialisation + re-entrancy, dump only on rc!=0, JSON error shapes, env override) plus `tests/test_keynote_template_stat_rc.py`; existing `subprocess`-patching tests re-pointed at the runner seam with their assertions intact (including `test_maps_keynote.py::test_inspect_keynote_terminates_blocked_jxa_when_cancelled`, an under-mocked site the plan's per-file list missed), and a NEW autouse conftest tripwire (`tests/conftest.py::_no_real_osascript`, patches `osascript_runner._execute`/`_launch_keynote`) that fails any test reaching real `osascript` or `open -b`. DONE: full suite green with the SAME skip count as the pre-change baseline (85 skipped) plus the new tests; golden-plan gate green with no regeneration. Diff landed ~790 lines (over the ~600 target) because the mandatory test re-pointing across `test_bulk_read.py`/`test_group_resize.py`/`test_inspect_items.py`/`test_inspect_checker.py`/`test_keynote_app.py`/`test_offline_write.py`/`test_maps_keynote.py` was kept honest rather than trimmed. STILL OWED: the owner-run ranged live gate (`remap --slides 47,113,82 --keep-side-panels` on an APFS clone of `Full_Report_Card_Wall.key`) with unchanged pass-2 counters and no timeout, before the W1 default flip proceeds. DEFERRED FOLLOW-UP (review r1 finding 8, not a defect): `keynote_timeout(override)` short-circuits `OBED_OSASCRIPT_TIMEOUT`, so the env var cannot relax the two hard-coded per-site limits (`timeout=600` at the template stat read, `timeout=60` at `_close_document_by_name`) — worth a follow-up decision, no behaviour change made here." UPDATE 2026-09-13: PR #104 merged; the ranged live gate ran
+      47/113/82 GREEN on all three (bank path, 16 min, 0 `OsascriptTimeout`, z-order SAME_ORDER A
+      vs B, the vacuous idx=1 raise tokens on 113/82 deterministic across arms, arm-A residuals
+      ≤0.27px shape / 1.55px A/B image inside bars). `offline_write_ab.py --slides` takes only a
+      contiguous range, so the gate ran as three single-slide runs.
+    status: done
+  - id: stat-bind-name-verified
+    content: "FOLLOW-UP (deferred out of `shared-osascript-runner` 7b) — at `keynote.py:1462` (stat-finalize) and `keynote.py:1736` (template-stat), keep `set theDoc to document 1` and append the assertion already proven on the fallback path (`offline_write.py:229-231`): `if name of theDoc does not start with \"<stem>\" then error \"stat-finalize bound the wrong document: \" & (name of theDoc)`, with `<stem>` = `_as_escape(dest.stem)` (extensionless, per SKILL). Deferred because it edits the contents of the pass-2 script the 2026-09-12 W1 strict gate certified GREEN; it also cannot be proven offline beyond \"the string is present\", so it buys a live gate of its own. Offline-testable as a string assertion plus the `osacompile` gate; live-verifiable only by a pass-2 run."
+    status: pending
+  - id: iwa-natural-sentinel-unify
+    content: "DONE, pending owner-run live gate. Branch `refactor/iwa-unification`, 5
+      commits rebased on main `f1b7a72`; implemented exactly as planned with owner
+      answers Q1 keep either-axis flip (synthetic test only), Q2 `_load_deck`
+      report-only `skipped` kwarg, Q4/Q6 `scripts/parity_iwa_compose.py` committed,
+      argv deck paths. One deviation: the shared helper
+      `_decode_apply_reencode_diff` returns 6 values (+decoded, +reparsed) so
+      `patch_slide_builds` still calls `_archive_diff` separately, and takes
+      `expect=` so mismatch refusals return before re-encoding (Codex r1 finding).
+      Codex rounds: r1 REVISE (untested WARN line, refusal-after-re-encode), r2
+      REVISE (stale base after PR #114), r3 APPROVE. Tier-1 compose parity
+      IDENTICAL on Gold (2146 records) and RAISE10 (4679), sanity control red at
+      465 rows; tier-2 82 writer hashes identical; suite `3 failed, 2299 passed,
+      85 skipped` (the 3 = pre-existing maps tests). Open sequence item 4 of
+      resizer-refactor-assessment, gating W2. Scope is a REFACTOR with a measured
+      zero delta on production content, not a behaviour change: (1)
+      iwa_geometry._natural_size:136-139 (one hop, bezierPathSource only)
+      re-implemented on _path_source:263-277 (six kinds, six-hop super walk), the
+      same reader iwa_write._natural_writable/_write_natural_size/
+      _drawable_natural_issues already use on write (survey-iwa 2026-09-09 sec 2b);
+      BOTH its callers inherit -- _autosize_rect:192 and iwa_runs._group_child_records:573,
+      the second of which the sonnet draft missed. (2) the autosize read sentinel at
+      iwa_geometry.py:371 (`th == 0.0`) widened to either-axis to match the write-side
+      refuse at iwa_write.py:600 (`stored[2] == 0.0 or stored[3] == 0.0`); MEASURED on
+      Gold_Wall_Input.key there are ZERO w==0/h!=0 text shapes (112 h-only, 1301
+      both-zero already covered), so this is a make-read-match-write change tested on a
+      synthetic member only, and the draft's proposed new width-axis branch in
+      _autosize_rect is DROPPED as speculative (_autosize_rect already returns nw for
+      width; Keynote has no horizontal-alignment analogue). (3) the three writer
+      decode->apply->re-encode->reparse->diff copies (_patch_member:640-662,
+      patch_stroke_widths:1092-1147, patch_slide_builds:1189-1268) collapse to one
+      helper; _archive_diff:1176-1188 stays SEPARATE and still runs for
+      patch_slide_builds; the fourth copy in scripts/probe_zorder_patch.py:107-130 is
+      deliberately left alone. (4) iwa_runs._load_deck:203-226's silent `except
+      Exception: continue` (:216-217) gains a keyword-only `skipped` out-list -- no
+      raise, no return-arity change, all ~19 call sites untouched. (5)
+      offline_write._composed_frames:377 and _natural_audit:396 take an optional
+      pre-loaded deck; run_offline_write loads once between :688 and :704 (2 decodes ->
+      1 of the >=6 per verify run). GATE (Keynote-free): new
+      scripts/parity_iwa_compose.py dumps compose_deck_geometry over every drawable of
+      Gold_Wall_Input.key and RAISE10_Wall.key before and after and requires an EXACTLY
+      empty diff -- offline _load_deck on those decks is 1.5s/3.5s, so a full
+      before/after cycle is ~12s; the expected-empty result is already measured (0 of
+      1413 Gold and 0 of 2037 RAISE10 autosize text records change). Plus a tier-2
+      SHA-256 snapshot of _patch_member / patch_stroke_widths / patch_slide_builds
+      emitted bytes across the existing test_iwa_write.py suite, diffed to empty --
+      that is where 'emitted bytes for currently-handled cases must not change' is
+      actually proven. NOT usable as oracles and checked: output/bank/gold-baseline/*
+      (logs + previews only, no decks or payloads);
+      output/bank/2026-09-11/as-geometry-rounding/ is a real but 28-object composed
+      dump, spot-check only. OUT: width-axis autosize logic, _group_child_records'
+      hard-coded centre anchor (iwa_runs.py:584), the other four duplicated models in
+      survey-iwa sec 2 (style chain x5, mask x6, group DFS x7), iwa_text_shape.py, the
+      dead _text_fields:257,260 guards, the 12 osascript runners (preceding item), the
+      planner split, and everything owned by w-offline-write-stabilise (masked-media
+      natural size, group-descendant refuse, the default flip). LIVE GATE PASSED
+      2026-09-14 09:23-09:31: one owner-run `offline_write_ab.py --slides 47,82,113
+      --mode verify --no-validate --pass2-bar strict` on RAISE10 -> OFFLINE-WRITE GATE
+      GREEN, 0 autosize-soft entries, consistency audit PASS, skipped-member WARN
+      empty, counters identical to the 09-12 runner-ranged record (missedSpecs=3 all
+      fallback-covered, badgeFallback=1 both arms, applied=41, damage check 83/83,
+      identity 100%). Record: `output/bank/2026-09-14/iwa-gate/results.md`. Item
+      CLOSED; W1 default flip unblocked on this axis."
+    status: done
 isProject: false
 ---
 
-# CG resizer — active plan
+# CG resizer — optimizations, bug backlog, features
 
-## Current status
+**Read `.agents/skills/obed-edom/SKILL.md` first.** Every durable Keynote/IWA finding —
+bundle-id targeting, the verified scripting limits, cache versioning, the template contract,
+offline read/write facts — lives there. This plan is the executable delta plus the reasoning
+a new agent would otherwise rediscover. Cue palette + DSK generator: their own plan.
 
-W1 is complete. `OBED_OFFLINE_WRITE` defaults to `on`; `off` restores the scripted AppleScript
-geometry path. The 2026-09-14 Full RAISE10 strict gate was green, and Gold on/off outputs matched
-by identity on all 19 slides. Do not reopen W1 from the older failed-bank narratives.
+## Discipline (applies to every item)
 
-W2 replaces eligible pass-2 GUI Bring-to-Front work with a surgical offline permutation of both
-`drawablesZOrder` and `ownedDrawables`. Pieces 1–3 shipped in PR #127; the A/B gate shipped in
-PR #126. Eligible slides suppress their GUI raises, patch after pass 2 closes the deck, export on
-the later fallback open, then run `restore_source_builds` last. `OBED_ZORDER_WRITE` remains
-default `off` until the final live gate is green.
+- **Measure first.** Every payoff figure is measured (cited) or marked estimate; never ship on
+  an estimate. Say what a change ACTUALLY does (native-res crops, not downscaled previews).
+- **Probe before trusting.** Any "Keynote can't do X" is probed in AppleScript first; verify a
+  batch-op probe by COUNTING affected objects, never by timing a try-wrapped call. Don't
+  inherit "can't" comments (the "JXA cannot scale a group" lore cost a session).
+- **1/1/1 workflow** for this continuation, selected by the owner on 2026-09-07: one planner →
+  one fresh implementer → one independent reviewer. The implementer does not review their own
+  work. Historical 2/1/2 citations below describe completed work and stay unchanged.
+- **Never run Keynote concurrently.** One deck warm at a time; agents offline during a live
+  read/write. Keynote here is "Keynote Creator Studio.app" = Keynote 15.3.1. Close-by-name →
+  open → `document 1`; `with timeout of 3600`. Fast probe: APFS-clone (`cp -c`), mutate, read,
+  close saving no. Never `/private/tmp` for `.key` files. Accessibility must be granted or the
+  reuse pastes and GUI raises fail silently.
+- **After ANY read-path change** re-run `scripts/e2e_run_parity.py` (baseline in its docstring).
+- Commits at verified checkpoints, at real wall-clock time (forward-dating to ~10:00 UTC retired
+  2026-09-04), never re-date cited SHAs; no PRs unless asked. Housekeeping at every landing:
+  todo status here, SKILL, memory.
 
-### W2 evidence through PR #131
+### Memory safety: what the "16GB rule" actually means
 
-- Live gate run 1 passed the core writer bars: `FRONT_BLOCK_OK` 10/10, A/B same order 11/11,
-  identity 100%, zero-pixel difference, and zero refused/lost slides.
-- PR #128 made coincident sparkle-twin stat groups resolvable only under the planner's existing
-  twin proof: every matching job is marked twin, candidate/job counts agree, and every candidate
-  is pairwise coincident. It also narrowed the `badgeFallback` parity exemption to genuinely
-  offline-patched badge slides.
-- PR #131 is merged. Its 2026-09-15 update is retained: reuse-mode records store `statJobs` and
-  `badgeRaises` at the record top level, so the gate now reads them through
-  `persisted_raise_jobs`; and both W2 arms use the offline geometry tolerance because they differ
-  only in `OBED_ZORDER_WRITE`, not geometry mode.
-- Keynote-free recompare after PR #131: RAISE10 green with only expected warnings; Gold red only
-  on slide 19's by-design legend fallback (`zorderUnresolved=66`, `zorderGui=[19]`). The final
-  live gate must verify the post-fix behavior before the default flips.
+This is not a blanket ban on Keynote work and not a Codex permission. It is a narrow caution born
+from one observed failure: a legacy full-JXA inspection of a multi-gigabyte report deck drove
+Keynote to roughly 80GB of memory on this 16GB Mac and destabilised the following read. Safe work
+already performed on this machine includes offline IWA reads, scoped/ranged Keynote reads, ordinary
+Gold remaps, preview exports, and the two-tier bulk reader. Only a **full-deck legacy JXA inspect of
+a multi-gigabyte deck** gets the high-memory treatment: explicit owner acknowledgement, a copy of
+the banked deck, one clean Keynote process, no concurrent automation, one deck at a time, and active
+memory-pressure monitoring. Stop if pressure climbs or Keynote stops responding. A larger-memory
+Mac is preferred, not mandatory policy. Historical reviews retain their original stronger wording.
 
-## W2 final gate
+## Current state (2026-09-11 morning, main `86c41f5`)
 
-Run serially, on copies, with Accessibility available for genuine GUI fallbacks and with no
-already-open Keynote documents.
+- `main` is `86c41f5`, a merge of PR #70 (maps-ux-round) on top of PR #74. Merged 2026-09-10, in
+  order: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes, six commits
+  including the golden re-bank, the JXA digest bank, and deletion of the multiset comparator), and
+  PR #74 (`fix/framing-pin-continuity`, commits `6cd2088`/`6f2a7ce`/`0b11586`/`2093594`) at
+  `fcf6c15` merge commit 14:15Z. The `chore/golden-gate-hard-parity` propose/apply hard-parity gate
+  is on main via PR #73's lineage (no separate `20feac0`/`a555f24` branch state remains — that
+  wording is stale and is corrected here).
+- `surface-raise-tokens` and R2b `r-propose-two-tier` are both DONE (see their todos);
+  `stat-raise-dead-4` is FIXED and live-verified 2026-09-11 (×3 + ×3 controls — see that todo),
+  PR #75 ready to merge (owner merges).
+- Working branch `fix/stat-raise-dead-4` @ `e20b3a9` = PR #75 (3 commits: `3ceb1f6` plan
+  housekeeping, `ae22594` diagnosis, `e20b3a9` code) — `stat-raise-dead-4`'s fix, live-verified
+  2026-09-11 (×3 + ×3 controls), PR #75 ready to merge (owner merges).
+- `framing-pin-continuity` and `framing-coverage-report` are DONE, merged in PR #74; the round-3
+  Codex finding is banked as `rotation-provenance-rounded` (owner-accepted, still open as backlog).
+  New bug-backlog item `badge-width-collapse-gold-slide-2` opened from the owner's 2026-09-10 16:31
+  Gold CG run.
+- `resizer-refactor-assessment` is DONE: no rewrite, six read-only surveys banked, and the defects
+  found reorder the sequence ahead of W1/W2 — see that todo and "Order of work" below.
+- **Open housekeeping item:** PR #74 reported one pre-existing failure on main,
+  `tests/test_iwa_kindindex.py::test_integration_full_deck_guard_trips_on_dual_slide`; suite at
+  merge was 1693 passed / 16 skipped plus this one failure. Re-verified 2026-09-11 (fails in
+  7.7s, `flagged == []` where `[73]` expected) — NOT deck drift: the test's oracle
+  (`_cached_exact_payload`, the shared inspect-cache slot for the current deck digest) is
+  stamped `reader: offline` since R2b, so IWA-derived kind counts agree with it by construction
+  and the JXA-only dual listing on slide 73 can never trip the guard. FIXED 2026-09-11 on branch
+  `fix/kindindex-guard-test-vacuous` — see `kindindex-guard-test-vacuous`'s resolution.
+- **W1 default flip is DONE** (`w-offline-write-stabilise`: universal naturalSize writer +
+  a healthy whole-deck gate are its bar). The 2026-09-10 nap-window whole-deck gate ran
+  (`output/bank/2026-09-10/w1-gate/`) and came back RED: arm B (offline writer) is now clean bar
+  the owner-accepted slide 36, but arm A (production AppleScript path) fails the plan oracle on 14
+  slides at 1.19-1.92px — see the `as-geometry-rounding` item. `as-geometry-rounding` is now
+  RESOLVED on PR #78 (`b0dfa43`): the cause was Keynote's aspect lock on AppleScript image/movie/
+  group writes, not rounding, fixed by a hybrid planner aspect-snap plus a permanent aspect-aware
+  arm-A oracle at 0.25px — LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f`: the
+  geometry half of the flip bar is now MET (plan-oracle A green bar slide 36, B exact); the
+  pass-2 half is now ALSO MET (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, full W1
+  strict gate 2026-09-12 GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict
+  is now the W1 gate bar. `badge-width-collapse-gold-slide-2` and the shared osascript runner are
+  both DONE and live-verified. IWA natural-size/sentinel unification is now IMPLEMENTED on
+  `refactor/iwa-unification` (PR #115 open, owner merges; live gate GREEN 09-14). UPDATE 2026-09-14:
+  the W1 default flip itself is DONE — branch `feat/w1-default-flip` commit `6e3ae3c` flips
+  `offline_write_mode`'s default to `on`; full RAISE10 gate `--mode on --pass2-bar strict` GREEN
+  bar slide 36, counters identical to the 2026-09-12 strict gate; gold build on the new default vs
+  a same-commit `off` control identity-matched on all 19 slides
+  (`output/bank/2026-09-14/w1-flip/results.md`). W2 is now unblocked. A NEW bug-backlog item,
+  `roster-leak-reuse-14-17` (Gold slides 14-17 render the church roster that should be hidden
+  after slide 13; diagnosed 2026-09-14 as a payload/roster-rule blind spot on group-child text,
+  not caused by the flip or by reuse), was opened from this round; FIXED 2026-09-15, see item.
+  **W2 `w-zorder-patch` is in progress on `feat/w2-zorder`, live gate pending** and is
+  purely speed/Accessibility removal, since `8a7b4bb` fixed the raise-order correctness bug W2's
+  own plan had assumed was already handled.
+- **Deck facts:** `Map_Extracted_Wall_1st.key` is gone from the decks folder (58 oracle tests
+  skip); `Full_Report_Card_Wall.key` was re-saved by autosave 2026-09-09 10:34 (content identical,
+  digest `291b0322`, old cache stale) and is NOT `uchg`-locked (only `Full_Report_Card_CG.key` is),
+  so `cp -c` works directly on it. Owner soft deadline: W2
+  within ~1.5 weeks of 2026-09-09.
+- `scripts/e2e_run_parity.py` has NOT been run since R0.4 landed, and R0.4 changed the
+  read/export path — Discipline requires it. It opens Keynote, so it needs an owner-acked window.
+- **Artefacts:** the 5.4 GB parity output deck was DELETED by the owner on 2026-09-09; the B-side
+  evidence that survives is the JSON censuses + `run.log` under
+  `output/bank/2026-09-09/parity-run/`. The R0.4 checkpoint-0 bank
+  (`output/bank/2026-09-09/cp0/`) and the R2b nap-run results
+  (`output/bank/2026-09-09/nap-run/r2b/results.md`) are still on disk. No output `.key` deck
+  survives anywhere under `output/` — `output/bank/gold-baseline/*` holds logs and previews only.
 
-Gate RAISE10 slides `40,55,56,109,110,123-128` and Gold. Require:
+### R0.1–R0.4 outcomes (all complete)
 
-- `FRONT_BLOCK_OK` on every eligible slide and the expected GUI set only;
-- zero A/B pixel difference where arm A raised correctly;
-- arm B `zorderRefused`, `zorderUnresolved`, and `zorderLost` all zero for eligible slides;
-- no `raiseDead`, `raiseUnknown`, or `frontErr` on a suppressed slide;
-- an A-vs-A `SAME_ORDER=yes` control on RAISE10;
-- identical `restore_source_builds` behavior between arms.
+**R0.1 `r-propose-from-cache`** — a ranged proposal now reuses a complete digest-current
+`reader: jxa`/`offline` cache instead of a full wall JXA read; the subset plans while the full
+payload keeps digests, decisions, numbering, skips and thumbnails, and any malformed cache falls
+back. Review caught skip-aware navigator overflow and permissive numeric coercion. Keynote-free
+gate: 1,223 Python passed / 20 skipped, all JS harnesses green, no Keynote opened. Live
+cached-vs-fresh A/B is still owed (it opens Keynote).
 
-Do not weaken eligibility to make the gate green. A slide that cannot prove a unique safe archive
-order stays on the GUI path.
+**R0.2 `r-acquire-cache-read`** — `acquire_wall_payload` serves complete digest-current caches
+(`on`: jxa+offline, `off`: jxa only), always returns the full deck even for a ranged Apply, stamps
+fresh two-tier payloads `reader: offline`, refuses to leak a rejected cache through the legacy
+fallback (`use_cache=False` after a rejected hit), and keys group-child attachment to
+`wall["reader"]` rather than the requested mode. Gate: 1,233 passed / 20 skipped, no Keynote opened.
 
-## Active correctness backlog
+**R0.3 `r-digest-sidecar`** — regular-file deck digests now use a strict, path-keyed, atomically
+written sidecar guarded on device/inode/size/mtime_ns/ctime_ns; package decks keep the content
+walk. Measured on the 6,771,226,182-byte Full deck in an isolated cache: cold 3.97205s, warm median
+0.1197ms, identical SHA-256 all four calls — so ~3.97s saved per avoided hash, not the old
+speculative 30–60s whole-cycle claim. Combined R0.1–R0.3 gate: 1,248 passed / 20 skipped.
 
-### Reuse photos and constellation
+**R0.4 `r-misc-cleanups`** (DONE 2026-09-09, merged `b981eb0`) — Checkpoint 0 measured both JXA
+export forms throwing `Can't convert types.` in ~20ms with 0 PNGs, so deleting them was a
+correctness fix, not a speed win. Shipped: canonical `export_applescript` bind, checker export
+folded into the bulk session behind `keep_open`, the exact-count export-only cache hit ported to
+legacy, and a module `_KEYNOTE_LOCK`. Live gate (9-slide Sermon_GW clone): payload identical, 0
+differing pixels 9/9, one Keynote open not two, export 6.56→4.38s. `output/bank/2026-09-09/cp0/`.
 
-Residual reversals/placements on Full constellation slides `131,133,134,144` belong to the reuse
-framing workstream until saved-deck evidence says otherwise. Reuse slides mint fresh drawable ids,
-so pair by stable structure/content, never id.
+### W1 fresh full-deck gate — RED 2026-09-07, fully diagnosed
 
-The constellation is not one affine. Each CHC cluster should scale as a unit, then land on a
-template anchor while preserving angular order around the central building. Discover membership
-from connector-line incidence, not proximity. Pair clusters to anchors by angle; if counts differ,
-fall back to an angle-preserving radial fit rather than guessing identities. Confirm with the owner
-that yearly content churn justifies this automation before building it.
+**Outcome:** the whole-deck `offline_write_ab.py` gate on the restored Full wall went RED — the
+writer itself was strong (147 slides patched, consistency PASS, live verify 0.00px) but 689 of 3,200
+specs fell back to AppleScript, pass 2 diverged A→B, and identity geometry failed on 12 slides
+(max 6.12px). D1–D6 found **three unrelated causes**, all since fixed and merged: `f76e8d3` (paste
+no-op), `e987a46` (coincident-twin hide), `31625d1` + `917b00f`/`eab0cec` (gate integrity and the
+mis-attributed damage check; D1's "stolen GUI interaction" verdict is DISPROVEN). Artefacts:
+`output/bank/2026-09-07/w1-diagnosis/` and `write-gate-full{,-r2}/` (run records + `gate.log`
+only; both 5+ GB decks deleted). W1 stays default OFF, W2 stays gated.
 
-### Smaller residuals
+## Historical state log
 
-- Card-border source-reference floor: output refs 10–31 on the Full wall still refuse in the
-  residual case. Keep the source-ref census as a damage alarm.
-- Stat-group/template sample and stat bind-name verification remain independent correctness work.
-- The reuse-chain parked snapshot needs a concrete reproducer before implementation.
-- Uncompared framing fallback must report rather than silently claim parity.
-- Off-slide map-label deletion stays parked until a current output reproduces it.
+Durable, not narrative:
 
-## Retained design rules
+- **Pipeline:** two-tier offline source read (`OBED_OFFLINE_READ` default ON: IWA for everything +
+  one bulk Keynote read of group/image/text frames) → pass 1 in Keynote (canvas set, layout
+  import/apply, JXA attrs pass, AS geometry with `set properties`, reuse duplication, deleteHides,
+  save) → optional offline IWA geometry patch (`OBED_OFFLINE_WRITE`, default OFF) → pass 2
+  stat-finalize (dedup, index-guarded font pass, recorded raises, badge raise, export).
+- **Owner's contract (2026-09-03):** the template `Base_CG_Assets.key` dictates SIZE (and position
+  where appropriate) for matched objects, **including text point sizes**; colour, font
+  family/style, run formatting and each slide's builds/animations always come from the SOURCE
+  (memory `template-size-source-style`, SKILL "Text styling").
 
-### Placement and text
+One line per round (full detail lives in the completed todos and in git history):
 
-- Use one affine per role—map, badge, card grid, constellation cluster—not one per slide.
-- The template supplies final geometry and text size; the source supplies font, colour, runs,
-  builds, and authored copy.
-- A template object supplies size, not pitch. Grid spacing needs two adjacent template examples.
-- Text-bearing content is not a pin. A caption's inset is its own shape padding, not a subsystem
-  constant.
-- Never rewrite verse text to force reflow; doing so can destroy superscript, small caps, mixed
-  runs, and authored line breaks.
-- Autosize text is moved by visual top-left. Do not reintroduce stored-frame `±h/2` compensation.
+- **2026-09-02/03 — W0 probes + output bugs.** W0 DONE (`2ac04db` tmp-path, `695199d` skipped-slide
+  bulk skip, `99771bf` z-order, `c4dc5e5` stroke); batch 1 (`171fc65`…`8e5d3b2`) and batch 2
+  (`0ad68b0`/`0cdcd2b`/`753acef`) shipped and live-verified on the Map deck. Verify decks deleted.
+- **2026-09-04 — gold-baseline A/B kit.** Production default path clean (0.00px on 19 Gold slides;
+  the only run-to-run difference was Keynote's own z-order scrambling). W1 opt-in root-caused to
+  stale render-derived fields; whole-deck gate hardened; `cbde0a7` map-label classification and
+  `94d2969` card-border floor fixed off main. All `output/offline-write-ab*` banks since deleted.
+- **2026-09-05/06 — `fix/reuse-builds-side-panels`.** Rounds 1–2 (`3296ef3`, `80cb442`) Gold-verified
+  at `output/bank/gold-baseline/reuse-builds2/`; alignment-aware `_autosize_rect`; reuse pre-add duplicate
+  `08a5130` with the timed cold Gold build `output/bank/gold-baseline/preadd/` (910s, all 11 acceptance
+  items). Round docs `output/bank/2026-09-06/` (the 09-05 plan dir is deleted).
+- **2026-09-07 — `fix/resizer-backlog-r2`.** `dcae6a7`+`b6039ef` pack-lists gate, `e74e5fa` label
+  sizing, `b50d22b`+`7bb0f52` R2 two-tier readback; Gold build `output/bank/gold-baseline/r2-round/`;
+  ranged + four whole-deck R2 A/Bs passed. The fresh whole-deck W1 gate on the restored Full wall
+  completed RED. Docs `output/bank/2026-09-07/`.
+- **2026-09-08 — PR #57 (`cd67e2e`).** `31625d1` gate integrity, `f76e8d3` reuse-paste card loss,
+  `e987a46` sparkle-twin hide, live-verified on a production remap (that directory is deleted;
+  censuses survive at `output/bank/2026-09-08/{build-order,twin-zorder}/`). D7→D8 settled
+  `buildChunks` as the render timeline; D9 found the descending-raise exact reversal.
+- **2026-09-09 — PR #59 (`2d6ae55`) + parity round + PRs #60-65.** PR #59 landed the damage-check
+  re-attribution (`917b00f`, `eab0cec`), the build-order fix (`c1d916a` probe + `59111fc`) and the
+  raise-order fix (`8a7b4bb`). The round branch ran the parity remap
+  (`output/bank/2026-09-09/parity-run/`) and merged as PR #60 with R0.4. Same day: PR #61
+  `surface-raise-tokens`, PR #62 dead-code removal, PR #64 the golden plan gate, PR #65 R2b
+  two-tier propose (live-verified in `output/bank/2026-09-09/nap-run/r2b/`), the
+  refactor assessment (six surveys, no rewrite), and `chore/golden-gate-hard-parity` (`20feac0`).
+  See "Current state".
 
-### Offline read/write
+## Order of work
 
-- Whole-deck IWA decode/re-encode is unsafe. Patch only resolved owning members and preserve every
-  untouched ZIP member byte-for-byte.
-- Update stored size and `naturalSize` together where required; a zero text dimension is an
-  autosize sentinel and must remain zero.
-- Soft geometry classes seed from a live bulk read of the saved deck. Refuse a slide when counts
-  or addressing do not reconcile.
-- Compare groups as sets. Kind indexes change after reordering and are not stable identities.
-- Z-order and build order are independent. `buildChunks` is the render timeline; `builds` is an
-  owning set that Keynote may reorder. `restore_source_builds` remains last after W2.
+**Done** (see the completed todos): W0 probes; output-bugs batches 1–2; the reuse/builds/side-panel
+rounds and the pre-add duplicate; R0.1–R0.4; R1 (probe answer NO); R2 readback; R2b two-tier
+propose; PR #57 and PR #59 fixes; the 2026-09-09 parity remap; `surface-raise-tokens`; the dead-code
+cleanup and golden-plan gate; the refactor assessment.
 
-### Gates and evidence
+**Open sequence** (reordered 2026-09-09 evening per the refactor assessment):
 
-- Re-derive plans from the current planner before comparison; stale sidecars once manufactured a
-  false 0.48× shrink diagnosis.
-- A healthy baseline is a gate precondition. Counters must prove both arms completed the expected
-  passes before their geometry or pixels are compared.
-- Preview exports cannot prove build order; animation findings require build-chunk inspection or
-  owner playback.
-- Bank JSON censuses, run records, and logs before large `.key` outputs are removed.
-- After planner/driver changes run `scripts/golden_plan.py`; after shared read-path changes run
-  `scripts/e2e_run_parity.py` and keep the resizer gold-deck gate green.
+1. **W1 whole-deck gate on the Full wall**, nap window 2026-09-09
+   (`output/bank/2026-09-09/nap-run/`) — run from an unlocked working copy (deck facts above). RE-RUN
+   2026-09-10 (`output/bank/2026-09-10/w1-gate/`): RED, arm B now clean bar slide 36, arm A now the
+   larger RED source — see `as-geometry-rounding`.
+2. **`stat-raise-dead-4`** — FIXED, live-verified 2026-09-11 (×3 + ×3 controls, see the todo):
+   0 dead raises with the readiness poll on vs. 5 lost under the fixed 0.35s delay — PR #75
+   ready to merge (owner merges)
+2b. **`as-geometry-rounding`** — RESOLVED on PR #78 (`b0dfa43`): the cause was Keynote's aspect
+   lock on AppleScript image/movie/group geometry writes, not rounding; fix is a hybrid planner
+   aspect-snap plus a permanent aspect-aware arm-A oracle at 0.25px. NOT yet live-verified — needs
+   the ranged live gate (47/113/82) then a full W1 gate confirming arm A ≤0.25px before it can be
+   treated as closing the W1 default-flip dependency.
+3. **Shared osascript runner** (timeout/lock; name-verified bind deferred) — DONE and
+   live-verified: PR #104 merged, ranged live gate 47/113/82 GREEN on all three
+   (`output/bank/2026-09-12/runner-ranged/results.md`), see `shared-osascript-runner`. The
+   follow-up bind is `stat-bind-name-verified`.
+4. **IWA natural-size/sentinel unification** + one decode→re-encode→diff — DONE and
+   live-verified: Codex-approved on `refactor/iwa-unification` (5 commits rebased on main
+   `f1b7a72`; PR #115 open, owner merges), live gate GREEN 09-14
+   (`scripts/offline_write_ab.py --slides 47,82,113 --mode verify --pass2-bar strict`,
+   `output/bank/2026-09-14/iwa-gate/results.md`); see `iwa-natural-sentinel-unify`. Before W2.
+5. **W1 default flip** (`w-offline-write-stabilise`) — bar is the universal naturalSize writer plus
+   a healthy whole-deck gate (green on both gold decks, with the consistency audit). The geometry
+   half of the flip bar is now MET (`as-geometry-rounding` LIVE-CONFIRMED 2026-09-11, full W1 gate
+   on `bb69e3f`: plan-oracle A green bar slide 36, B exact); the pass-2 half is now ALSO MET
+   (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, full W1 strict gate 2026-09-12
+   GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate
+   bar. `badge-width-collapse-gold-slide-2` and the shared osascript runner are both DONE and
+   live-verified. IWA natural-size/sentinel unification is now IMPLEMENTED on
+   `refactor/iwa-unification` (PR #115 open, owner merges; live gate GREEN 09-14). DONE 2026-09-14:
+   branch `feat/w1-default-flip` commit `6e3ae3c` flips the default to `on`; full RAISE10 gate
+   `--mode on --pass2-bar strict` GREEN bar slide 36 (`output/bank/2026-09-14/w1-flip/results.md`);
+   gold build on the new default identity-matched against a same-commit `off` control on all 19
+   slides. Default flip is no longer ON HOLD.
+6. **W2 `w-zorder-patch`** — in progress on `feat/w2-zorder`, live gate pending; purely speed +
+   Accessibility removal now. `restore_source_builds` must still run LAST, after any future
+   z-order write.
+7. **Bug backlog:** `map-label-offslide-parked-delete`, `card-border-source-ref-floor-fix`
+   (residual: output card refs 10-31 still refuse on the Full wall), `r-reuse-photo-placement`
+   part B including the constellation z-order residual, `stat-group-template-sample`,
+   `constellation-cluster-affine`, `reuse-chain-parked-snapshot`. `roster-leak-reuse-14-17`
+   (Gold slides 14-17 render the church roster that should be hidden after slide 13; opened
+   2026-09-14, diagnosed same day as a payload/roster-rule blind spot on group-child text on
+   the source slides themselves, not the flip or reuse) is FIXED as of 2026-09-15, dropped from
+   the open list.
+8. **Features:** `propose-pins-flag`, `recipe-library`, `stat-drift`, `outline-editor`,
+   `image-cues`, `iwa-surgical-write-generator`.
 
-## Product backlog
+Standing: re-run `scripts/e2e_run_parity.py` after R0.4 (needs an owner-acked Keynote window).
 
-- Propose pins flag: expose pin-role uncertainty during framing rather than burying it in logs.
-- Portable recipes: store role-specific affines in small tracked JSON, resolving each role on the
-  current slide and fitting only orphaned roles.
-- Stat drift: compare adjacent slides after removing digits and warn when a number disagrees with
-  the run around it.
-- Outline editor: surgical paragraph operations with timestamped backups; never flatten Word runs.
-- Image cues: cue plus asset-slot count/shape, with background distinct from content media.
-- Generator IWA writes: reuse only the proven surgical-member machinery and explicit gates.
+### Tranche map
+
+| Tranche | Item | Keynote | Status |
+|---|---|---|---|
+| W0 | tmp-path, skipped-slide bulk skip, z-order + stroke probes | probes only | DONE (`2ac04db`, `695199d`, `99771bf`, `c4dc5e5`) |
+| Fixes | output-bugs batches 1–2, `map-label-classification-fix`, `map-label-text-sizing`, `card-border-source-ref-floor-fix` | one live remap each | DONE + live-verified, except the card-border residual (refs 10-31) still open |
+| **W1** | `w-offline-write-stabilise` | gate on both gold decks | DONE 2026-09-14 — default flip on `feat/w1-default-flip` `6e3ae3c`, RAISE10 strict gate GREEN, gold identity-matched vs `off` control |
+| **W2** | `w-zorder-patch` | yes | OPEN — unblocked by the 2026-09-14 W1 flip; purely speed/Accessibility removal since `8a7b4bb` |
+| **R0** | `r-cache-quick-wins` (R0.1–R0.4) | no | DONE — parts (1)-(3) 2026-09-07, R0.4 merged `b981eb0` 2026-09-09 |
+| **R1** | `r-nested-bulk-probe` | yes | DONE — correct+safe but NOT faster (object-bound); closed with `r-bulk-counts-plan` |
+| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | both DONE — readback 2.4–2.6x; R2b PR #65 (`4627497`), cold propose 96s vs 269s legacy |
+| B (merged) | `w1-build-order-nondeterminism`, z-order raise-order fix | owner playback + parity remap | both DONE and CLOSED — `59111fc` and `8a7b4bb`, PR #59 |
+| B (merged) | `surface-raise-tokens` | none (log surfacing) | DONE — PR #61 (`c5e9c34`); precondition for `stat-raise-dead-4` |
+| B (new) | `stat-raise-dead-4` | a second production run | live-verified 2026-09-11 (×3 + ×3 controls); PR #75 ready to merge (owner merges) |
+| B (branch) | `builds-follow-source`, `side-panels-positional`, `autosize-rect-alignment-fix`, `pack-lists-gate-widen`, `reuse-chain-preadd-duplicate` | Gold builds | all DONE + Gold-verified; backlog spin-off `reuse-chain-parked-snapshot` open |
+| B / features | reuse framing fallback, cluster affine, stat/photo/label residuals | mixed | open, independent — see "Order of work" 6–7 |
+| drop | `w-hides-offline`, skipped-slide option (2), Stage B / batch z-order / batch delete | | closed with reasons (see Insights) |
+
+R1/R2 touch `inspect.py` / `bulk_geometry.js` / `remap_and_inspect`; W1 edits `remap_keynote.py` —
+sequence, don't interleave. The checker's edit-loop cache wraps `bulk_geometry_fn` at the inspect.py
+call site and depends on the `plan.slides` subset path: any nested-bulk rewrite must preserve it.
+
+## Write track — what still stands
+
+- Dominant cost is the AS geometry phase (~70% of a heavy-slide run, ~100ms/command redraw even
+  off-screen, no cross-object bulk write); surgical IWA float patches are the missing bulk write.
+  Byte-risk ladder: float patches < list reorder < object removal.
+- Proven mechanics: object-level patching of ONE stored member; locality (every slide's drawables
+  in exactly one member, derived from `id_to_file`, never from the slide id); Keynote opens patched
+  decks clean and re-saves them first-class; size lives in `bezierPathSource.naturalSize` (patch
+  size AND naturalSize; a line's length is `naturalSize.width`); write patched bytes IN PLACE
+  (`com.apple.macl`); group-child scaling (`s = spec / REPORTED union`, origin = spec +
+  (stored − reported)·s, descendants ×s, masks too); NBSP zip member names preserved raw.
+- Group move = DELTA on the stored origin (stored ≠ reported on stale-frame groups); soft classes
+  (group/text/masked image) seed from a bulk read of the SAVED deck, never from the offline
+  composition alone; refuse a slide whose reconcile counts disagree. Reuse slides stay fully in Keynote.
+- Known cosmetic: AS geometry `set properties {width,height}` renders as two origin snaps; gone on
+  offline slides.
+- **Gold-baseline A/B kit:** one `remap` per branch, then offline IWA reads (~1–3s per 2.5GB deck)
+  plus preview PNG diffs — Keynote is only needed for the two remaps and one preview export. It is
+  what caught the z-order nondeterminism. A run that lost a paste reads `Card-border stroke: …
+  (12 refs)` instead of 269 — root-caused 2026-09-08 as the `applyReuse` paste no-op and fixed in
+  `f76e8d3`, so that signature is now a regression alarm, not an operator-error tell.
+
+## Read track — what still stands
+
+- Bulk-read inspect (227s → 57s, byte-identical) and the two-tier read (Map 51.8s / Full 283.7s vs
+  ~12.6 min JXA) are shipped and gate GREEN on both decks; the bulk tier is Apple-Event-overhead
+  dominated, which R1 measured and closed.
+- Correctness guards that exist: `reconcile_counts` wired into the splice (text slack [0,2]
+  trailing-only, placeholder tail check); array-length guards per bulk array; granular
+  per-slide/per-class legacy fallback. Only `role="hide"` geometry is write-dead — lines and group
+  w/h ARE written; verify "is this field written?" against `remap_keynote.js`.
+- Compare output groups as a SET, never by index; the canvas shrink jitters the map ~8px/run — read
+  pixel diffs against that floor.
+- Cache facts: `deck_slide_digests` hashes no geometry; ranged reads never cache; cross-serve
+  (checker-written payloads served to propose) is consumer-compatible but carries a `reader`
+  provenance guard — keep it. Since R0.4, a partial preview set is a miss, not a warm hit.
+
+## Constellation slide — per-cluster affine with template anchors
+
+The constellation (Map slide 9 = 67 groups / 68 lines; Full 134→127) is not one affine. Gold
+scales each CHC cluster (hub circle + UPG satellites + church/book icons + white connector
+lines) **~0.82× as a unit**, then pushes clusters outward, keeping their angular order around
+the building, until the frame is filled; the yellow hub lines re-anchor to the moved CHC
+circles. Today's planner applies one uniform fit-to-width (**0.48×**) and leaves the top half
+empty. (The earlier "two-knob" reading — scale nodes in place ~0.85 + pull centres toward the
+centroid ~0.5 — was the same observation from the other side.)
+
+1. **Cluster discovery, offline, automatic.** Every circle is a group. Membership comes from
+   line incidence: a yellow line from the building to a CHC circle marks a cluster root; white
+   lines from that CHC circle to UPG circles and icons mark members. Edges match nodes by
+   **identity** (recorded incidence), never proximity; a deleted node's edges are dropped.
+2. **Size from the template.** The template's sample CHC/UPG circles give the per-object scale
+   (~0.82×), applied uniformly within each cluster; circle text follows the pass-2 font rule.
+3. **Placement from template anchors.** The template slide carries one plain CHC-sized circle
+   per cluster at its gold position (13 on the Map deck) plus the building, the two people
+   rows and the SOT mark at gold positions. Pair wall clusters to anchors by angular order
+   around the building; translate each cluster so its CHC circle lands on its anchor; rewrite
+   hub lines to the new CHC centres.
+4. **Fallback** when anchor count ≠ cluster count: keep each cluster's angle from the building
+   and scale its radius anisotropically to fill the frame — never overlapping the building,
+   never off-frame.
+
+Template needs: the size swatches it already has, plus the anchor circles and bottom-band
+objects at gold positions (thirteen circles placed by hand once). Score offline against gold
+(predicted cluster centres/sizes) before any Keynote run. Ask first whether the slide's
+content changes yearly — that gates how much automation is worth.
+
+## Recipes as browsable artefacts (revisit)
+
+A template slide only helps if something *pairs*; what transfers instead is the **recipe** —
+a portable subset of the learned transform. Built and reverted: a page that cannot learn its
+own framing is usually a map-and-badge page that wants **two affines, not one** (report card
+slide 94: the badge rode the map's affine off-frame). Now `badge-affine` names groups by role:
+`portable_recipe` carries `[{role, s, tx, ty}]`, `apply_portable_recipe` resolves each role on
+the page in hand; an orphaned role fits to its own footprint (`visible_content_union` over
+the orphan subset, keeping position relative to the frame — fit-to-frame centres today, and
+the union is measured against the full 7680). Storage: a tracked `recipes/` folder of small
+labelled JSON files; plumbing `recipe_overrides: dict[int, dict]` beside `framing_overrides`.
+
+## Outline editor in the dashboard
+
+Editing surface: HTML rendered from the .docx (`load_paragraphs` returns per-run
+bold/highlight/superscript/color; `ListNumberResolver` resolves auto-numbering;
+`OutlineResultView` renders cue chips at exact offsets via `segments()` — make it editable).
+Page view: LibreOffice `soffice --headless --convert-to pdf`, read-only, cached until the next
+save, disabled when absent. Writes go to the source .docx in place (scoped reversal of
+SKILL's never-overwrite rule; Sermon Checker stays read-only): timestamped backup per save
+under `output/.outline-backups/{stem}/` (deleted), **surgical edits only** (operation list against
+touched paragraphs, as `_apply_ops`/`_make_run` in `annotate.py`). Semantic cues in, operator
+cues out (`annotate_outline` converts at generate time). Validate as you type with what the
+parser knows.
+
+## Image cues: design for these, build later
+
+An image places from AppleScript with `position` and `width`; a movie is placed by creating
+an image and assigning the video to its `file name` (converts the object, keeps geometry) — no
+GUI automation, a template needs only a small image placeholder. Taxonomy: centre-panel photo
+set, mirrored single set, full-centre media, design-authored collage (not operator-buildable),
+grid cases (count + grid spec). So an image cue is a cue plus an **asset slot count and
+shape**, with an optional background asset distinct from the content ones.
+
+## Stat drift across adjacent slides
+
+"11 Renovated Church Buildings" on one page, "44" on every page after. Compare text objects
+across adjacent slides, matching on position and on wording with digits removed; flag a page
+whose number disagrees with the run either side of it. Ships at `warning`.
+
+## Operator / source-deck items (no code fix) and parked notes
+
+- Slide-124: ~130×11px overlap between two right-side groups; slide-125: church list = 46
+  opaque groups (source-deck ungroup); a verse's wall-authored hard line breaks (stripping by
+  script destroys superscripts and small-caps LORD); sparkle-overlay placement; a caption in
+  the "as it will look" preview.
+- AppleEvent -1712 seen while the source deck is still opening is Keynote's post-open busy-phase
+  retry, not a code bug (observed 2026-09-06 during the reuse-builds2 Gold build) — no fix needed.
+- UNCONFIRMED production reports from the 2026-09-01 full Map run (bank `output/write-gate/A_png` (deleted)), never localised: (b) the yellow "269 churches" text deleted on several slides yet
+  present + mis-positioned in the slide-7 PNG; (d) right-side photo z-order wrong on slides 4 & 5
+  (may be subsumed by the badge/z-order work — re-check on the next live run before opening an item).
+- Never dedupe images (stacked map layers are coincident on purpose). The first ranged propose
+  on a never-read deck cannot translate the range into Keynote's numbering and says so.
+  Composite preview text is scaled wall pixels (close, not right). The JXA export never worked and
+  was DELETED in R0.4 after Checkpoint 0 measured both forms throwing `Can't convert types.` in
+  ~20ms with 0 PNGs; `exported`/`exportError` survive as hardcoded false/"" for payload shape.
+  PNG export fidelity differs 117px @ ≤2/255 between Keynote versions — keep watching.
+
+## Shipped record (compact)
+
+| Item | Commit(s) | One line |
+|---|---|---|
+| Keynote 15.x migration, framing confirmation, badge-affine, structural title, off-frame hiding + delete-hides, side-panel whitelist, number-block packing, operator notes, navigator numbering | (git log) | pre-Aug-28 feature work; findings in SKILL |
+| AS geometry default, `set properties`, validate=False default, Stage A export fold | 56c104c, d1234e2, 9c32084 | speed banked (slide 8: 9:58 → 4:58) |
+| bulk-read inspect | d218350 | 227s → 57s, byte-identical |
+| IWA per-run style / grouped text | feat/iwa-per-run-style | offline runs on finalized decks |
+| two-tier offline read, default ON | 9ad2ba3 + Session 15 | Map 51.8s / Full 283.7s vs 12.6 min; gate GREEN |
+| r-count-guard, r-cache-hit-export-only, r-readback-nocache-fix (f3f19b1), r-reuse-side-content-strip (9f465ba) | — | read-side defects closed |
+| w-spike0 (b8c7d68), w-spike1 core (5624eee), iwa_write patcher (5707d4d), write gate + A′ oracle (210b1c6, 233f388), group-child scaling (fe3cd87) | — | write mechanics proven |
+| W0: tmp-path (2ac04db), skipped-slide bulk skip (695199d), z-order probe (99771bf), stroke probe (c4dc5e5) | — | Tranche 0 |
+| W1 offline write opt-in | ec20f4b, a8b27ac, 5577e27 | default OFF; stabilise = tranche 1 |
+| reuse group dedup (292802c), role=other group-child scaling + font pass (8a8ef7a) | — | reuse doubles fixed; group text scales |
+| stat-finalize parity audit (7781de8), descending raise (aff1470), index-guarded addressing (23de0d2), nits (90aaa4e) | — | pass-2 addressing correct |
+| output-bugs batch 1 (171fc65 … 8e5d3b2) | — | backdrop y=0, badge raise, stroke restore, caption groups never pins |
+| output-bugs batch 2 (0ad68b0, 0cdcd2b, 753acef) | — | template card size, job-scoped caption step-down, template-pitch grid reflow |
+| reuse round 1: builds/transitions follow source, side-panels positional (69ede81 … 3296ef3) | — | Gold build 3296ef3 PASSES part F exactly |
+| reuse round 2: D1 remove-by-content, D2 hidden-target donor-remove, D3 twin revert, D5 roster rule, D4 frame-packing + write-anchor fix | 7722439, 501af25, 4654602, 37dbb90, 80cb442 | Gold build reuse-builds2/ PASSES plan2 §6 exactly |
+| `autosize-rect-alignment-fix` | d31fedc | `_autosize_rect` resolves `verticalAlignment` up the style parent chain; composed autosize tops are visual truth for every anchor |
+| reuse pre-add duplicate | 08a5130 | reuse deletes 91→6; timed cold Gold build 910s, 0.00px vs reuse-builds2 |
+| pack-lists gate widen, map-label text sizing, R2 two-tier readback | dcae6a7+b6039ef, e74e5fa, b50d22b+7bb0f52 | 2026-09-07 round; R2 readback 2.4–2.6× |
+| PR #57: gate integrity, reuse-paste card loss, sparkle-twin hide | cd67e2e (31625d1, f76e8d3, e987a46, b50f75b) | three unrelated W1-RED causes fixed, live-verified, owner confirmed the sparkle |
+| card-border damage-check re-attribution | 917b00f, eab0cec | detection + exit-6 abort kept; cause/remedy rewritten diagnose-first |
+| build-order probe + fix | c1d916a, 59111fc | `buildChunks`, not `builds`, is the render timeline; survivors ordered by source chunk position; confirmed on screen |
+| z-order raise-order fix | 8a7b4bb | ascending raise gated on a verified landing; fixes the descending Bring-to-Front exact reversal |
+| PR #59 merge | 2d6ae55 | `917b00f`/`eab0cec`/`c1d916a`/`59111fc`/`8a7b4bb`/`7c200a4` on main, 2026-09-09 |
+| R0.4 misc cleanups + three Codex fix rounds + merge | a89b9b3, 006f68b, db3109d, bdc3ee4, bb04d91, b981eb0 | closes all four R0 leftovers; suite 1535/20; live gate PASS |
+| PR #60: parity round + R0.4 merge | (see above) | round branch folded into main |
+| PR #61: surface-raise-tokens | c5e9c34 | `tokens`/`frontErr` result keys; `raiseDead`/`raiseUnknown` always emitted; new say() detail lines |
+| PR #62: resizer dead-code removal | 7e0d517 | deleted unused functions, dead left-pack path, `subset_keynote.py`/`.js`; no behaviour change |
+| PR #64: golden plan gate | 4651b7b | Keynote-free apply-plan SHA-256 gate through the real planner; run after any planner/driver change |
+| PR #65: R2b propose two-tier | 4627497 | propose reads through `acquire_wall_payload`; cold propose 96s vs 269s legacy; hard parity 0/155 |
+| golden-gate-hard-parity | 20feac0 | propose/apply parity promoted to a hard gate now that R2b is merged |
+
+## Insights worth keeping
+
+**Placement model**
+- One affine per **role**, not per slide (badge, map, cluster); structural title detection
+  beats wording; fill-don't-letterbox (`FILL_MAX_CROP_FRACTION=0.47`) was the one code-side
+  gold-closeness win — the rest of the gold distance is editorial crop choice.
+- The template is a size/position oracle, not a styling oracle. Content that carries text is
+  not a pin (proximity classification skipped the font pass on 5 cards and 27 circles).
+
+**Groups and text in Keynote**
+- Setting a group's w/h scales its children (AS and JXA) but NOT their font size — the pass-2
+  font pass scales child text by the group's affine; stat numbers take the template size.
+- Group children are addressable in place via AppleScript; every JXA "limit" (group children,
+  line endpoints, per-char styling, z-order read, masters, export) was JXA-only.
+- Content-signature addressing collides; address by index verified against content and skip
+  rather than guess. Keynote's clipped-text "+" is editor chrome; wrap-off text spills
+  horizontally instead. Never re-assert a verse box's text.
+- Exact-text lookups leak across groups: 38/44 card captions are also roster-list leaves, so a
+  per-leaf size must travel with its job (captionPt → leafPt), never in a deck-wide text map.
+- A single template object carries size but no spacing; a relationship (pitch) needs two
+  adjacent template objects. Card size came 1:1 from the template; the pitch only became
+  template-derived once the owner pasted two neighbours (the 3-card L).
+- A caption's real inset is the shape's own `padding` (4.0pt here), not a subsystem constant;
+  the inset sweep (3→69, 4→70, 12→64 of 71 gold captions) is what settled it.
+- remap_keynote's say() path has no offline gate: a shadowed local (`source` reused for a
+  label string) crashed the first live run after every reviewer had passed the diff.
+- The first GUI click after a slide switch can land before Keynote's Arrange menu is populated;
+  a fixed 0.35s delay is not enough on heavy slides. Poll `enabled of menu item "Bring to Front"`
+  up to 1.5s instead; `-1719 errAEIllegalIndex` is the same not-ready window (`stat-raise-dead-4`,
+  live-verified 2026-09-11).
+
+**Speed (closed — do not rebuild)**
+- JXA and AppleScript READ at the same speed (~11ms/property); wins come from doing less work.
+  Each AS command on a heavy slide redraws (~100ms) even off-screen.
+- Nested `<prop> of every <kind> of every slide` is correct and safe but NOT faster (GW 1.37×,
+  Map 0.73×): the cost is per object-property inside Keynote (~70/33/9 ms), not per Apple Event.
+  Failure semantics are worth remembering — a per-element failure SUBSTITUTES `missing value` in
+  position, an invalid property raises for the whole event, and `count of characters …` collapses
+  to one integer.
+- Abandoned with load-bearing reasons: Stage B reopen-fold (a cold open of the 6.8 GB deck is
+  ~3–4 s; the "17%" was a broken run), batch z-order (multi-select Bring-to-Front does not
+  reliably raise above the map), batch delete (`delete {list}` throws -1700; the "315×" was a
+  try-hidden failure).
+- Keynote 15 doc-bind: `POSIX path of (file of d as alias)`; `name of document` drops the
+  extension; close-by-name → open → `document 1` → verify name.
+
+**Offline read/write facts**
+- Keynote returns INTEGER geometry; line endpoints needed a mirror-flip fix; masked near-zero
+  rotation collapses to the axis-aligned box; the group residual IS the autosize defect one
+  level down. A no-op Keynote save rewrites the globals (stylesheet compaction, renumbering) —
+  byte-level per-slide fingerprints are dead; a saved patch is laundered through Keynote's writer.
+- Concurrent Keynote access corrupts warms; verify a fresh payload has no empty slides.
+- Banked oracles go stale (the write-gate sidecar + A′ predated the group-scaling change and
+  mis-read as a "0.48× shrink"): re-derive the plan from the current planner before comparing
+  a deck against "the plan"; any A/B gate must hard-fail on an unhealthy baseline.
+- An autosize text box's stored y is the visual TOP for `kFrameAlignTop` and the visual CENTRE
+  only for `kFrameAlignMiddle`; Keynote's AppleScript/JXA `position` (read and write) is always
+  the visual top-left. Never re-add write-side `±h/2` compensation for a read-side anchor bug.
+- AppleScript geometry writes on image/movie/group are aspect-locked: Keynote keeps x, y, h
+  (integers) and recomputes w from the object's own aspect. Plan rects for those kinds must be
+  AR-consistent or the writer silently changes w (`as-geometry-rounding`, PR #78).
+- Stretched images (frame AR != media naturalSize AR) get an INTEGER width from AppleScript
+  writes; aspect-locked ones (frame AR == media AR) get the float h·AR — the oracle must accept
+  both (`as-geometry-rounding`, live-confirmed 2026-09-11).
+- KeynoteKit (Swift, same 14.4 schemas) is a reference only — it does not unblock W2 (evaluated
+  2026-09-09).
+
+**The operator loop**
+- Confirmation only bites where the template has a framing worth picking; pages with no
+  candidate are the prompt to add template slides. Fit-to-frame still overrules overrides on
+  pages the template does not describe — tell the operator per page, never in a footnote.
+- **The metric-that-misleads pattern:** framing selection went through five rewrites in one
+  session, each fixing a real case and creating the next — a metric asked to infer something
+  the data does not contain. When selection needs a sixth exception, *ask* (the Sermon
+  Checker's propose/correct/remember-by-digest pattern is the template).
+
+**What the 2026-09-07…09 rounds settled** (appended 2026-09-09)
+- **`buildChunks`, not `builds`, is Keynote's render timeline.** `builds` is an unordered owning
+  set Keynote re-serialises freely on save, so a `builds`-array diff is not a render diff. Chain
+  coherence (a `referent` chunk heads a chain) is 45/45 under `buildChunks` and 13/45 under
+  `builds`. D7's "34 reordered slides" collapsed to 3 on the render metric.
+- **A positive control that shares its model with the fix proves nothing.** D7's "19/19
+  order-exact" compared the output's `builds` against the source's `builds` — the array the patch
+  had just copied. At least one check must reach ground truth by a path your model never touches;
+  here the owner played the slide and settled it in two minutes.
+- **Bring to Front APPENDS**, so draining raise targets highest-index-first reverses every
+  ≥2-member set exactly — 16 slides deck-wide, byte-deterministic across runs days apart. Raise
+  ascending and gate each target on a verified landing.
+- **The exporter cannot capture build stages** (Keynote's export `Kxpa` is a print key), so preview
+  A/B is structurally blind to build defects — a build-order or animation bug needs owner playback.
+- **Reuse slides mint fresh drawable ids**, so never pair objects by id inside the reuse band
+  (123–128 on the Full deck); identity matching only holds on non-reuse slides.
+- **Bank censuses, not decks.** Every output `.key` this project has produced has since been
+  deleted, including the 5.4 GB parity deck the owner removed on 2026-09-09. JSON censuses, run
+  records and logs are what survive a round — write them before you need them.
+- **A second model family in review found lifetime bugs a same-family review missed.** Codex on
+  R0.4 caught `document 1` binding whatever deck was frontmost, kept-open leaks across exception
+  and early-return paths, a stale PNG that turned a failed export into `exported: true`, and an
+  ownership reset that ran before the lock was acquired.
+- **Keynote-free tests must stub the exporter**, or they launch Keynote for real — an implementer
+  did exactly that on 2026-09-09 by leaving the export path live in a "Keynote-free" test.
+- **A counter you will need to diagnose must reach the log.** The AppleScript
+  `raiseDead(s=,idx=)`/`raiseUnknown(s=,idx=)` tokens exist but are dropped, and `frontErr` only
+  reaches `result["raw"]`, so the 2026-09-09 `raiseDead=4` localisation needed an offline z-order
+  probe instead of the log — that is what `surface-raise-tokens` fixes.

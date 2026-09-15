@@ -22,7 +22,7 @@ const MapsTab = lazy(() => import("./tabs/MapsTab").then((m) => ({ default: m.Ma
 const TABS: { id: TabId; label: string }[] = [
   { id: "generate", label: "Sermon Base Generator" },
   { id: "check", label: "Sermon Checker" },
-  { id: "dsk", label: "DSK Generator" },
+  { id: "dsk", label: "DSK" },
   { id: "resize", label: "CG resizer" },
   { id: "maps", label: "Maps" },
   { id: "watercolour", label: "Watercolour" },

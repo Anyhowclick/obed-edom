@@ -59,7 +59,7 @@ PHOTO_SIZE = 96
 NAME_HEIGHT = 32
 LABEL_BOLD_FONT = "Amplitude-Bold"
 LABEL_BOLD_FALLBACK = "HelveticaNeue-Bold"
-LABEL_FONT_PT = 23
+LABEL_FONT_PT = 24
 LABEL_GAP = 8
 LABEL_CHAR_W = 13
 PILL_PAD_X = 6
@@ -90,60 +90,6 @@ def _as_escape(text: str) -> str:
 
 def whole(value: float) -> int:
     return int(round(float(value)))
-
-
-_EXPORT_NAME_SUFFIXES = ("_CG", "_DSK", "_LW")
-
-
-def maps_export_stem(name: str) -> str:
-    """Strip a trailing `_CG` / `_DSK` / `_LW` so a save-panel name can be the stem."""
-    stem = Path(name).stem
-    for suffix in _EXPORT_NAME_SUFFIXES:
-        if stem.endswith(suffix):
-            stripped = stem[: -len(suffix)]
-            return stripped or stem
-    return stem
-
-
-def maps_export_dests(
-    *,
-    export_lw: bool,
-    export_cg: bool,
-    export_dsk: bool,
-    output_dir: Path,
-    stem: str,
-    export_dir: Path | None = None,
-    export_path: Path | None = None,
-) -> tuple[Path | None, Path | None, Path | None]:
-    """Return `(dest_lw, dest_cg, dest_dsk)` for the selected targets.
-
-    With one target, `export_path` is that file. With several, it is the stem:
-    `Sunday.key`, `Sunday_CG.key`, `Sunday_DSK.key`.
-    """
-    if export_path is not None:
-        chosen = Path(export_path)
-        if chosen.suffix.lower() != ".key":
-            chosen = chosen.with_name(f"{chosen.name}.key")
-        parent = chosen.parent
-        n = int(export_lw) + int(export_cg) + int(export_dsk)
-        if n == 1:
-            return (
-                chosen if export_lw else None,
-                chosen if export_cg else None,
-                chosen if export_dsk else None,
-            )
-        base = maps_export_stem(chosen.name)
-        return (
-            parent / f"{base}.key" if export_lw else None,
-            parent / f"{base}_CG.key" if export_cg else None,
-            parent / f"{base}_DSK.key" if export_dsk else None,
-        )
-    root = export_dir or output_dir
-    return (
-        root / f"{stem}.key" if export_lw else None,
-        root / f"{stem}_CG.key" if export_cg else None,
-        root / f"{stem}_DSK.key" if export_dsk else None,
-    )
 
 
 def plate_filename(plate_id: str) -> str:
@@ -2236,7 +2182,6 @@ def export_maps_job(
     export_cg: bool = True,
     export_dsk: bool = False,
     export_dir: Path | None = None,
-    export_path: Path | None = None,
     credits: list[str] | None = None,
 ) -> dict[str, Any]:
     if not export_lw and not export_cg and not export_dsk:
@@ -2293,26 +2238,13 @@ def export_maps_job(
     flags_cg: list[Any] = []
     poster_frame: list[dict[str, Any]] = []
     movie_autoplay: list[dict[str, Any]] = []
-    if export_path is not None:
-        export_dir = Path(export_path).parent
     if export_dir is not None:
         export_dir = ensure_export_dir(export_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
-    dest_lw, dest_cg, dest_dsk = maps_export_dests(
-        export_lw=export_lw,
-        export_cg=export_cg,
-        export_dsk=export_dsk,
-        output_dir=output_dir,
-        stem=stem,
-        export_dir=export_dir,
-        export_path=export_path,
-    )
     if export_lw:
-        dest = dest_lw
-        if dest is None:
-            raise ValueError("LED wall export path is missing")
         if export_dir is not None:
             export_dir = ensure_export_dir(export_dir)
+        dest = (export_dir or output_dir) / f"{stem}.key"
         _log(job, f"Exporting wall deck {dest.name} (7680×1080)…")
         ops = plan_deck(
             slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True,
@@ -2339,10 +2271,9 @@ def export_maps_job(
         _invalidate_poster_on_regeneration(record_lw, autoplay_record)
         flags = _inspect_dest(dest, job, is_cancelled=is_cancelled)
     if export_dsk:
-        if dest_dsk is None:
-            raise ValueError("DSK export path is missing")
         if export_dir is not None:
             export_dir = ensure_export_dir(export_dir)
+        dest_dsk = (export_dir or output_dir) / f"{stem}_DSK.key"
         _log(job, f"Exporting DSK deck {dest_dsk.name} (1920×1080)…")
         ops_dsk = dsk_ops(
             plan_deck(
@@ -2369,10 +2300,9 @@ def export_maps_job(
             movie_autoplay.append(autoplay_record)
         _invalidate_poster_on_regeneration(record_dsk, autoplay_record)
     if export_cg:
-        if dest_cg is None:
-            raise ValueError("CG export path is missing")
         if export_dir is not None:
             export_dir = ensure_export_dir(export_dir)
+        dest_cg = (export_dir or output_dir) / f"{stem}_CG.key"
         _log(job, f"Exporting CG deck {dest_cg.name} (1920×1080)…")
         split_cg = any(isinstance(slide.get("cg"), dict) for slide in slides)
         if split_cg:

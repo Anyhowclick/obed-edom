@@ -75,7 +75,7 @@ from obed_edom.maps_tiles import (
     rels_for_cameras,
     rels_for_countries,
 )
-from obed_edom.paths import ensure_export_dir, export_destination, output_root, validate_export_dir, validate_export_file
+from obed_edom.paths import ensure_export_dir, export_destination, output_root, validate_export_dir
 from obed_edom.web.job_names import normalise_job_name
 from obed_edom.web.jobs import rewrite_result_paths
 
@@ -228,7 +228,7 @@ def _coerce_maps_style(value: object) -> object:
     return coerce_maps_style(value) if isinstance(value, str) else value
 MapsCropId = Literal["wall", "center+cg"]
 MapsLayerFilterId = Literal[
-    "roads", "roadnames", "shields", "arrows", "pois", "rail", "buildings", "labels", "waternames", "boundaries"
+    "roads", "roadnames", "shields", "arrows", "pois", "rail", "buildings", "labels", "boundaries"
 ]
 MapsHopKind = Literal["morph", "movie", "dissolve", "cut"]
 MapsPinKind = Literal["dot", "dropPin", "landmark"]
@@ -335,11 +335,7 @@ def _validate_highlight_colours(value: object) -> object:
         candidate = text if ":" in text else text.upper()
         if not _HIGHLIGHT_RE.match(candidate):
             raise ValueError(f"Invalid highlight colour key: {raw_key!r}")
-        raw = str(raw_colour or "").strip()
-        if raw.lower() == "none":
-            out[candidate] = "none"
-            continue
-        match = _HEX_COLOUR_RE.fullmatch(raw)
+        match = _HEX_COLOUR_RE.fullmatch(str(raw_colour or "").strip())
         if not match:
             raise ValueError(f"Invalid highlight colour: {raw_colour!r}")
         hex_digits = match.group(1).lower()
@@ -566,18 +562,7 @@ class ExportBody(BaseModel):
     exportCg: bool | None = None
     exportDsk: bool | None = None
     exportDir: str | None = None
-    exportPath: str | None = None
     credits: list[str] | None = None
-
-    @field_validator("exportPath", mode="before")
-    @classmethod
-    def _export_path(cls, value: object) -> object:
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            return None
-        cleaned = value.strip()
-        return cleaned or None
 
     @field_validator("credits", mode="before")
     @classmethod
@@ -1454,20 +1439,10 @@ def _run_export(
     export_dir: Path | None = None,
     persist_export_dir: bool = True,
     credits: list[str] | None = None,
-    export_path: Path | None = None,
 ) -> dict[str, Any]:
     from obed_edom.maps_keynote import export_maps_job
 
-    kwargs: dict[str, Any] = {
-        "export_lw": export_lw,
-        "export_cg": export_cg,
-        "export_dsk": export_dsk,
-        "export_dir": export_dir,
-        "credits": credits,
-    }
-    if export_path is not None:
-        kwargs["export_path"] = export_path
-    result = export_maps_job(job, **kwargs)
+    result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk, export_dir=export_dir, credits=credits)
     if persist_export_dir and export_dir is not None:
         result["exportDir"] = str(export_dir)
     else:
@@ -1816,7 +1791,7 @@ async def post_frame(
     slideId: str | None = Query(None),
     index: int = Query(...),
     count: int = Query(...),
-    fps: int = Query(60),
+    fps: int = Query(30),
     audience: Literal["lw", "cg"] = Query("lw"),
 ) -> dict:
     job = _job_or_404(job_id)
@@ -1988,53 +1963,32 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
             export_dsk = result.get("exportDsk", False) if payload is None or payload.exportDsk is None else payload.exportDsk
             if not export_lw and not export_cg and not export_dsk:
                 raise HTTPException(400, "At least one export target must be on")
-            raw_export_path = None if payload is None else payload.exportPath
-            export_path: Path | None = None
-            if raw_export_path:
+            raw_export_dir = result.get("exportDir") if payload is None or payload.exportDir is None else payload.exportDir
+            is_override = bool(raw_export_dir)
+            if raw_export_dir:
                 try:
-                    export_path = validate_export_file(raw_export_path)
+                    export_dir = validate_export_dir(raw_export_dir)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
-                export_dir = export_path.parent
-                is_override = True
             else:
-                raw_export_dir = result.get("exportDir") if payload is None or payload.exportDir is None else payload.exportDir
-                is_override = bool(raw_export_dir)
-                if raw_export_dir:
-                    try:
-                        export_dir = validate_export_dir(raw_export_dir)
-                    except ValueError as exc:
-                        raise HTTPException(400, str(exc)) from exc
-                else:
-                    # No active override (never set, or explicitly cleared by an empty
-                    # `exportDir`): resolve the operator default rather than letting
-                    # `_run_export` fall back to the job's private `.maps` directory. This
-                    # resolved default is NOT persisted as a per-job override below — a
-                    # default equal to `output_root()` is passed through as-is so the
-                    # export lands flat under it, rather than in the private `.maps` dir.
-                    default_source = SimpleNamespace(result={**result, "exportDir": None})
-                    try:
-                        export_dir = export_destination(default_source)
-                    except ValueError as exc:
-                        raise HTTPException(400, str(exc)) from exc
+                # No active override (never set, or explicitly cleared by an empty
+                # `exportDir`): resolve the operator default rather than letting
+                # `_run_export` fall back to the job's private `.maps` directory. This
+                # resolved default is NOT persisted as a per-job override below — a
+                # default equal to `output_root()` is passed through as-is so the
+                # export lands flat under it, rather than in the private `.maps` dir.
+                default_source = SimpleNamespace(result={**result, "exportDir": None})
+                try:
+                    export_dir = export_destination(default_source)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
             credits = None if payload is None else payload.credits
-            def _export_job(
-                j,
-                lw=export_lw,
-                cg=export_cg,
-                dsk=export_dsk,
-                ed=export_dir,
-                ep=export_path,
-                persist=is_override,
-                cr=credits,
-            ):
-                if ep is None:
-                    return _run_export(j, lw, cg, dsk, ed, persist_export_dir=persist, credits=cr)
-                return _run_export(
-                    j, lw, cg, dsk, ed, persist_export_dir=persist, credits=cr, export_path=ep
-                )
-
-            updated = _runner().rerun(job_id, _export_job)
+            updated = _runner().rerun(
+                job_id,
+                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir, persist=is_override, cr=credits: _run_export(
+                    j, lw, cg, dsk, ed, persist_export_dir=persist, credits=cr
+                ),
+            )
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if not updated:

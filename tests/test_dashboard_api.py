@@ -213,7 +213,7 @@ def test_ranged_propose_rejects_navigator_range_past_visible_slides(tmp_path, mo
 def test_health_and_stubs():
     client = TestClient(app)
     assert client.get("/api/health").json()["ok"] is True
-    assert client.post("/api/dsk").status_code == 501
+    assert client.post("/api/dsk").status_code == 422
     missing = client.post("/api/resize")
     assert missing.status_code == 422
     missing_file = client.post("/api/resize", data={"path": "/no/such/deck.key"})
@@ -1056,47 +1056,6 @@ def test_diagnostics_endpoints_404_when_the_result_path_escapes_the_work_dir(tmp
     client = TestClient(app)
     assert client.get(f"/api/jobs/{job.id}/diagnostics").status_code == 404
     assert client.post(f"/api/jobs/{job.id}/diagnostics/reveal").status_code == 404
-
-
-def test_choose_save_script_includes_name_and_location():
-    from obed_edom.web.app import _choose_save_script
-
-    script = _choose_save_script("Export Keynote", "Sunday.key", "/Users/me/Desktop")
-    assert 'choose file name with prompt "Export Keynote"' in script
-    assert 'default name "Sunday.key"' in script
-    assert 'default location (POSIX file "/Users/me/Desktop")' in script
-    assert "POSIX path of theFile" in script
-
-
-def test_choose_save_returns_chosen_path(monkeypatch, tmp_path):
-    dest = tmp_path / "Sunday.key"
-
-    class FakeProc:
-        returncode = 0
-        stdout = str(dest)
-        stderr = ""
-
-    monkeypatch.setattr("obed_edom.web.app.subprocess.run", lambda *a, **k: FakeProc())
-    client = TestClient(app)
-    res = client.post(
-        "/api/choose-save",
-        data={"prompt": "Export Keynote", "default_name": "Sunday.key"},
-    )
-    assert res.status_code == 200
-    assert res.json() == {"path": str(dest), "name": "Sunday.key", "cancelled": False}
-
-
-def test_choose_save_cancel_is_not_an_error(monkeypatch):
-    class FakeProc:
-        returncode = 1
-        stdout = ""
-        stderr = "execution error: User canceled. (-128)"
-
-    monkeypatch.setattr("obed_edom.web.app.subprocess.run", lambda *a, **k: FakeProc())
-    client = TestClient(app)
-    res = client.post("/api/choose-save", data={"prompt": "Export Keynote"})
-    assert res.status_code == 200
-    assert res.json() == {"cancelled": True}
 
 
 def test_diagnostics_endpoints_404_when_the_canonical_file_is_a_symlink():

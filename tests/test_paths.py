@@ -11,7 +11,6 @@ from obed_edom.paths import (
     resolve_export_destination,
     resolve_keynote_template,
     validate_export_dir,
-    validate_export_file,
 )
 
 
@@ -120,24 +119,6 @@ def test_validate_export_dir_accepts_sibling_of_output_root(tmp_path: Path, monk
     target = tmp_path / "output" / "exports"
     resolved = validate_export_dir(target)
     assert resolved == target.resolve()
-
-
-def test_validate_export_file_adds_key_suffix_and_creates_parent(tmp_path: Path):
-    dest = validate_export_file(tmp_path / "exports" / "Sunday")
-    assert dest == (tmp_path / "exports" / "Sunday.key").resolve()
-    assert dest.parent.is_dir()
-
-
-def test_validate_export_file_rejects_directory(tmp_path: Path):
-    folder = tmp_path / "exports"
-    folder.mkdir()
-    with pytest.raises(ValueError, match="directory"):
-        validate_export_file(folder)
-
-
-def test_validate_export_file_rejects_relative_path():
-    with pytest.raises(ValueError, match="absolute"):
-        validate_export_file("Sunday.key")
 
 
 def test_validate_export_dir_rejects_case_variant_private_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

@@ -1,70 +1,156 @@
 ---
-name: Dashboard React/DOM test harness — remaining coverage
-overview: >-
-  The Vitest/jsdom/Testing Library harness shipped in PR #99 and is established. This plan now
-  tracks only missing regression coverage and the few conventions that keep the harness honest.
+name: Dashboard React/DOM test harness
+overview: "Owner approved 2026-09-12. Decisions: Vitest + jsdom + Testing Library; tests live in `dashboard/tests-ui/`; tests-only PRs do not rebuild `dist`; no MapsTab refactor in PR 1. Three PRs: PR 1 builds the harness plus three seed regression tests (conflict-freeze, thumb-token, rename-unsaved), each of which must be shown red when its guard is reverted; PR 2 adds thumbnail + save-status coverage; PR 3 adds component + preview-sequence coverage. PR #112 (2026-09-13 overnight round, open) adds the first coverage from outside this plan: 14 manual-entry form tests, taking test:ui to 9 files / 32 tests; the PR 2 / PR 3 lists are unchanged."
 todos:
-  - id: thumbnail-regressions
-    content: >-
-      Add stale retry, reconcile-to-the-correct-view, sameView invalidation, and a mutation test
-      that specifically pins the frozen gate after capture has started.
+  - id: pr1-harness
+    content: "Done: shipped as PR #99 (merged, Codex APPROVE). Harness + 3 seed tests: conflict-freeze, thumb-token, rename-unsaved; each proven red with its guard reverted. Deferred to PR 2: the captureThumb `frozen` input is not yet mutation-pinned, and the `sameView` case."
+    status: done
+  - id: pr2-thumb-status
+    content: "Partly covered by PR #100 (save-status pill test exists). Remaining: thumb stale-retry, thumb reconcile, and the deferred frozen-gate pin + sameView case from PR 1."
     status: pending
-  - id: component-regressions
-    content: >-
-      Cover JobName Enter+blur double submission and rejection, plus ExportDestinationRow's
-      disabled/frozen state.
+  - id: pr3-components-preview
+    content: "Partly covered by PR #100 (artifact-actions and result-view tests). Remaining: JobName double-submit, export-destination freeze, isolate hop preview viewLog ordering."
     status: pending
-  - id: preview-sequence
-    content: >-
-      Drive a movie isolate hop through the MapView fake and assert source → animation → plain
-      landing → crossfade order, including an aborted run with no trailing view application.
-    status: pending
+isProject: false
 ---
 
-# Dashboard React/DOM test harness — remaining coverage
+# Dashboard React test harness — plan
 
-## Shipped foundation
+## 1. Stack choice
 
-PR #99 established Vitest 2, jsdom, Testing Library, `dashboard/tests-ui/`, typed MapView and API
-fakes, and `npm run test:ui`. The seed conflict-freeze, thumbnail-token, and rename-unsaved tests
-were each proven red when their relevant guard was reverted. Later work added save-status,
-artifact/result views, manual entries, Maps controls, and other feature coverage.
+**Chosen: Vitest 2 + jsdom + @testing-library/react + @testing-library/user-event + @testing-library/jest-dom.**
 
-Do not redesign or replace the harness. Pure logic continues to use `dashboard/tests/*.test.cjs`;
-React/DOM wiring belongs in `dashboard/tests-ui/*.ui.test.tsx`.
+Justification against the repo's "don't reinvent existing tools" rule:
 
-## Remaining tests
+- The dashboard is already Vite 5 + `@vitejs/plugin-react` + TS 5.6. Vitest consumes `vite.config.ts` verbatim — JSX transform, path handling and ESM (`"type": "module"`) all work with zero extra config. Jest would need babel/ts-jest + ESM interop + a second module pipeline: strictly more machinery.
+- `vi.mock` with hoisting and `vi.useFakeTimers()` (which patches `window.setTimeout` — exactly what MapsTab's 500 ms save and 750 ms thumb debounces use) come in-box. Under `node --test` we'd hand-roll both.
+- jsdom over happy-dom: MapsTab leans on `pointer` events, `ResizeObserver`, `URL.createObjectURL`, `sessionStorage`/`localStorage` and `aria-live`. jsdom's coverage is the more boring, better-documented one; happy-dom's speed edge is irrelevant at this suite size. (Both need a `URL.createObjectURL` stub; jsdom also needs `ResizeObserver` — two lines in setup.)
+- Rejected: Playwright component testing (a browser download and a second runner for something that is really unit-level), and extending `node --test` with jsdom by hand (we'd reimplement module mocking, fake timers and act() batching — the anti-pattern the rules warn about).
 
-### Thumbnail lifecycle
+Coexistence: Vitest only picks up `tests-ui/**/*.test.tsx`; `test:maps` keeps globbing `tests/*.test.cjs`. The two never see each other's files. The existing `CODEX_NODE`/`tsc --module commonjs` idiom stays untouched for pure-module tests — new pure-logic tests (e.g. `commit.ts`) should still go there; only DOM/React tests go to Vitest.
 
-- A `MapsStaleThumbnailError` retries exactly once, after a successful save flush and only when
-  the queue revision has reached the rejected revision. A failed flush or lagging queue does not
-  retry.
-- A successful thumbnail response reconciles only into the same job/view that initiated it.
-- Switching audience during capture invalidates `sameView` and prevents the stale publish.
-- Add a mutation-resistant case that reaches the capture gate after a conflict begins, without
-  relying on the independent token bump or document-freeze guard.
+New devDependencies (5): `vitest`, `jsdom`, `@testing-library/react`, `@testing-library/user-event`, `@testing-library/jest-dom`.
 
-### Components
+## 2. File layout
 
-- JobName Enter followed by blur invokes rename once. A rejected rename keeps editing open and
-  shows the error.
-- A disabled ExportDestinationRow renders locked copy and no chooser action.
+```
+dashboard/vitest.config.ts          # test: { environment: 'jsdom', setupFiles, include: ['tests-ui/**/*.test.tsx'] }
+dashboard/tests-ui/setup.ts         # jest-dom, ResizeObserver/createObjectURL/matchMedia stubs, sessionStorage reset
+dashboard/tests-ui/fakes/mapView.tsx    # MapView mock + handle spy registry
+dashboard/tests-ui/fakes/mapsApi.ts     # scriptable api.ts mock
+dashboard/tests-ui/fakes/doc.ts         # MapsDocument / Job builders
+dashboard/tests-ui/renderMapsTab.tsx    # render helper: RunNavContext provider + seeded job + timers
+dashboard/tests-ui/*.test.tsx
+```
 
-### Preview sequencing
+`tests-ui/` (sibling of `tests/`) beats `src/**/__tests__`: it keeps test-only code out of the `tsc --noEmit && vite build` surface with a single `tsconfig` exclude, and mirrors the existing top-level `tests/` convention.
 
-Use the existing ordered `viewLog` in the MapView fake. For a movie isolate hop, assert source
-view, `animateHop`, plain isolate landing, then crossfade. Bumping the preview run during the hop
-must leave no later view applied.
+Test files use a `.ui.test.tsx` suffix (e.g. `conflict-freeze.ui.test.tsx`) — several basenames collide with existing `tests/*.test.cjs` files; the CJS suite tests predicates, the `tests-ui` suite tests wiring.
 
-## Harness rules
+## 3. Fakes
 
-- Use role/label queries for operator-visible behavior; add test ids only when no stable accessible
-  query exists.
-- Install fake timers before rendering and use async timer advancement for the save/thumbnail
-  debounce chains.
-- Keep MapLibre, canvas work, and preference singletons behind the existing fakes. Do not refactor
-  product code merely to make these tests injectable.
-- Each regression test must have an independently reversible guard or behavior that makes it fail;
-  avoid positive controls that share the implementation model being tested.
-- Test-only changes do not rebuild `dashboard/dist`. Any `dashboard/src/**` change does.
+**MapView** (`vi.mock("../src/maps/MapView")`). A `forwardRef` component that renders `<div data-testid="mapview" />`, records the props it was given (`previewing`, `isolate`, `camera`, `styleId`, `crop` — these are what the preview-sequence tests assert on), publishes every render's props into an ordered `viewLog` array, and installs a handle via `useImperativeHandle`:
+
+- `jumpTo`, `easeTo`, `flyTo`, `animateHop`, `stop` — `vi.fn()` returning resolved promises, each appending to `viewLog` so a test can assert the *sequence* (source view during fly → plain landing → crossfade).
+- `getCamera` / `getCgCamera` — return a settable fake camera; `commitCamera(...)` from the fake is how a test simulates a gesture.
+- `captureBlob` / `capturePreviewBlob` — return a stub `Blob` (jsdom has `Blob`), counted.
+- `waitUntilIdle` — a *controllable* deferred: default auto-resolve, but `mapFake.holdIdle()` lets a test park `captureThumb` mid-flight and assert the token/gate behaviour.
+- `resize` — `vi.fn()`.
+- Callback triggers: `mapFake.emit.cameraCommit(cam)`, `.objectMove(id, lat, lon)`, `.objectCommit()`, `.cgShift(dx)`, `.previewAbort()` — each calls the latest prop callback inside `act()`.
+
+Mocking the module (rather than adding an injectable-MapView prop) also keeps `maplibre-gl` from ever loading in jsdom, which is the real blocker.
+
+**stampOsm** (`vi.mock("../src/maps/stampOsm")`) — identity passthrough. It is canvas-based and jsdom has no canvas; this is unavoidable and harmless (its logic is separately testable).
+
+**api.ts** — `vi.mock("../src/api")` with a scriptable module rather than a fetch mock. Reason: `api.ts` is a thin fetch wrapper already covered by the Python API tests; mocking fetch would force us to re-encode its URL/JSON contract in the harness. The fake exports real `MapsStateConflictError` / `MapsStaleThumbnailError` / `MapsSaveConflictError` classes (re-exported from the real modules via `importActual`, so `instanceof` still works — this matters, `captureThumb` branches on both), plus a controller:
+
+```
+api.script.saveMapsState.conflictOnce({ document, stateRevision })
+api.script.postMapsPng.staleOnce({ stateRevision })  // throws MapsStaleThumbnailError
+api.script.postMapsPng.calls                          // kind/slideId/audience/revision log
+api.script.renameJob.failOnce(err) / .calls
+api.script.getJob.resolve(job)
+```
+
+`saveMapsState` by default bumps `stateRevision` and echoes the doc, so the happy path needs no scripting.
+
+**Storage** — `setup.ts` installs a fresh in-memory `sessionStorage`/`localStorage` per test (jsdom's are shared across a file). Tests that care about `useSessionToggle`/`useSessionPath` seed keys before render (`obed-edom.maps.exportDir`, `MAPS_SIDE_PANELS_KEY`, `MAPS_INSPECTOR_KEY`).
+
+**Timers** — `vi.useFakeTimers()` in each test file's `beforeEach` (not the render helper: fake timers must be installed before any module-scope code runs, which the helper can't guarantee), with helpers `await tick(500)` (save debounce) and `await tick(750)` (thumb debounce) that wrap `vi.advanceTimersByTimeAsync` in `act()`. Async/timer interleaving is the main authoring hazard here: `captureThumb` awaits `waitUntilIdle` then `captureBlob` then `postMapsPng`, so `advanceTimersByTimeAsync` (not the sync variant) plus explicit `await flushMicrotasks()` is mandatory.
+
+**Render helper** — `renderMapsTab({ doc, job })` wraps `<MapsTab />` in `RunNavContext.Provider` with `openRun = { feature: "maps", jobId }` and pre-scripts `getJob`. This is why no MapsTab refactor is required.
+
+## 4. Refactors needed — deliberately none in the first PR
+
+Everything MapsTab needs is already injectable-by-mock:
+- job source: context + `getJob` — controllable;
+- save queue: `useRef(new MapsSaveQueue(...))`, per instance — no cross-test leak;
+- MapView, stampOsm, api: module imports — `vi.mock`.
+
+Two module-level caches *do* leak between tests and are handled via `vi.mock` in `renderMapsTab.tsx` rather than refactored: `loadAdmin0()` in `dashboard/src/maps/overlays.ts` (stubbed to resolve immediately) and `defaultExportDirRequest`/`defaultExportDirVersion` in `dashboard/src/prefs.ts` (the module is partially mocked with `importOriginal`, replacing only `useDefaultExportDir` with a stable stub so the singleton is never touched). If a third such singleton turns up, prefer the same partial-mock approach, or `vi.resetModules()`, over touching product code.
+
+The only product change I'd consider later, and only if tests get ugly: add `data-testid` to the save-status pill and the conflict banner. Prefer querying by the existing `aria-live` text and button labels ("Reload latest", "Keep my changes") first — free, and it tests what the operator sees.
+
+## 5. First regression tests, each tied to a past finding
+
+**PR 1 — harness + 3 seed tests** (the three with the widest blast radius and the simplest fakes):
+
+1. `conflict-freeze.test.tsx` — *conflict freeze does not edit the doc*. Script `saveMapsState` to conflict; assert the banner appears, then `mapFake.emit.cameraCommit(newCam)` and an object move leave `docRef`'s rendered camera unchanged (assert via the `camera` prop the MapView fake received), that `postMapsPng` is never called while frozen, and that "Reload latest" / "Keep my changes" each clear the banner and restore editing. Covers `applyLocalDoc`'s early return; the zero-POST assertion is not pinned to `captureThumb`'s own `frozen` guard in `shouldPublishThumb` — reverting `frozen: !!saveConflictRef.current` to `frozen: false` there still leaves the test green, because the token bump and the frozen `applyLocalDoc`/doc-unchanged path independently stop the capture. Pinning that specific guard is PR 2 work (see below).
+2. `thumb-token.test.tsx` — *token bump on conflict*. Hold `waitUntilIdle`, fire a conflict mid-capture, release; assert no `postMapsPng`. Second case: token invalidation — `selectSlide` awaits the in-flight `captureThumb(prev)` before moving `activeRef`, so both captures target the same slide; hold idle, select the same slide again, release, assert only the newer capture's token publishes. PR 2 adds a `sameView` case: flip audience via `selectSlide(id, { audience: "cg" })` mid-capture and assert no POST for the stale view.
+3. `rename-unsaved.test.tsx` — *rename persists first and preserves the doc*. Make an edit, click the JobName pencil, submit; assert `saveMapsState` is called **before** `renameJob`, and that after `mergeServerMeta` the local slides survive (the server echo must not clobber them).
+
+Each of these three must be verified red when its corresponding guard is reverted (the freeze early-return, the `sameView`/token gate, the save-before-rename ordering), per owner instruction.
+
+**PR 2 — thumbnail + save-status**
+
+4. `thumb-stale-retry.test.tsx` — `postMapsPng` throws `MapsStaleThumbnailError`; assert exactly one retry, only after a successful `flush()`, and only when `saveQueue.revision >= err.stateRevision`; a second case where the flush rejects asserts zero retries; a third where the queue is behind asserts zero retries.
+5. `thumb-reconcile.test.tsx` — after a successful thumb POST, `reconcileServerJob` runs; assert navigating slides mid-flight does not reconcile into the wrong slide (`shouldReconcileThumb` `sameJob` gate).
+6. `save-status-pill.test.tsx` — assert the label sequence `Saved → Unsaved → Saving… → Saved` across a debounced edit, and `→ Paused` on conflict, read through the `aria-live` node.
+7. Add a case (or extend `conflict-freeze.test.tsx`) that pins `captureThumb`'s own `frozen: !!saveConflictRef.current` input to `shouldPublishThumb` — a conflict that starts *after* a capture is already past its own freeze checks but before `gate()` runs, isolated from the token bump and from `applyLocalDoc`'s doc-unchanged effect.
+
+**PR 3 — components + preview**
+
+7. `job-name-double-submit.test.tsx` — Enter then blur on the JobName input fires `onRename` once (`savingRef` guard in `dashboard/src/components/JobName.tsx`); plus a rejecting `onRename` keeps the editor open and shows the error.
+8. `export-destination-freeze.test.tsx` — `disabled` renders the locked copy and no "Export to…" button (ResizeTab finding); mount within ResizeTab if cheap, else component-level.
+9. `isolate-hop-preview.test.tsx` — drive a `movie` link and assert the exact `viewLog` order: source view applied before `animateHop`, `plainIsolateTarget` landing next, crossfade last; plus an abort mid-hop (`previewRun` bump) leaves no trailing view applied.
+
+## 6. Scripts & CI
+
+- `"typecheck:ui": "tsc -p tests-ui --noEmit"`, `"test:ui": "npm run typecheck:ui && vitest run"`, and `"test:ui:watch": "vitest"` in `dashboard/package.json`. Shipped on #99, with `test:ui` running `typecheck:ui` before vitest.
+- There is **no `.github/workflows`** in this repo — `test:maps` is invoked only from the agent plans and `.agents/skills/obed-edom/SKILL.md`. So "CI wiring" here means: add `npm run test:ui` next to `npm run test:maps` in SKILL.md's dashboard command block and in the plan files' command notes, with the same bundled-Node PATH prefix (`PATH=/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH`). If a workflow is added later, both scripts go in one `npm test` aggregate.
+
+## 7. Owner decision needed
+
+The repo commits `dashboard/dist`. Adding five devDependencies changes `package-lock.json` but not `dist`; confirmed the first PR should **not** rebuild/commit `dist` (test-only change). Also confirmed `tests-ui/` over `src/**/__tests__` — keeps the build surface clean.
+
+## Decisions 2026-09-12
+
+Owner: harness approved. Orchestrator: tests-only PR, no dist rebuild; tests in dashboard/tests-ui/.
+
+## Decisions
+
+PR 1 shipped: test files use a `.ui.test.tsx` suffix (basename collisions with `tests/*.test.cjs`); `vi.useFakeTimers()` lives in each file's `beforeEach`, not the render helper; `sameView` token-invalidation coverage deferred to PR 2.
+
+## Status 2026-09-12 (late round)
+
+**PR 1 shipped as PR #99** (`feat/dashboard-ui-harness`, **merged** into `main`, Codex APPROVE after opus ×4). As built: `npm run test:ui` runs `typecheck:ui` then vitest; `test:maps` untouched; no `dist` rebuild. The MapView fake is typed against `MapViewHandle`/`MapViewProps` (the one product change is the type-only `export type MapViewProps = Props;`) with a controllable `waitUntilIdle`; the `api` mock is scriptable and re-exports the real error classes; stampOsm, `loadAdmin0` and prefs are stubbed. All three seed tests were proven red with their guard reverted: `conflict-freeze` (the `applyLocalDoc` early return), `thumb-token` (the `tokenStillValid` gate), `rename-unsaved` (save before rename, and `mergeServerMeta` keeping the local slides while applying the new name).
+
+Two items in §5's PR 1 description turned out not to hold and moved to PR 2: the `captureThumb` **`frozen` input is not yet mutation-pinned**, and the **`sameView` abort case** from `thumb-token.test.tsx`.
+
+**PR #100** (the dashboard polish stack, based on #99; both now merged) added UI tests of its own, so parts of PR 2 and PR 3 are already covered:
+
+- covered by #100 — the **save-status pill** label/appearance test (item 6), plus **artifact-actions** tests (Open / Show in enclosing folder, including the absence of printed paths) and **result-view** tests.
+- still to write —
+  - thumbnail **stale-retry** (item 4) and **reconcile** (item 5);
+  - the deferred **`frozen`-gate mutation pin** and the **`sameView`** abort case from PR 1;
+  - **JobName double-submit** (item 7);
+  - **export-destination freeze** (item 8);
+  - **isolate hop preview `viewLog` ordering** (item 9).
+
+## Status 2026-09-13 (overnight round)
+
+**PR #112** (`feat/dashboard-2026-09-13-round`, base `main`, open) adds the first `tests-ui` coverage written outside this plan: `dashboard/tests-ui/manual-entries.ui.test.tsx` (14 tests) driving the Maps manual-entry forms end to end through the harness — the ＋ menu, per-row validation and error clearing, "+" / remove with focus handling, the batch cap, the in-flight "Done" lock, and the posted payload — plus `dashboard/tests-ui/fakes/mapsApi.ts` for `bootstrapMapsRows`. Queries are role/label based throughout (each input is named `… row N`), so none of it is pinned to markup. `npm run test:ui` is now **9 files / 32 tests** (was 8 / 18).
+
+The round also adds `dashboard/tests/ui-consistency.test.cjs` on the `node --test` side — a pure-text parse of `styles.css` and three `.tsx` files, so it belongs with the `.cjs` suite, not here. It guards the control-tier contract and one-caret-per-`aria-haspopup`; 2 of its 3 cases are proven red on `main`.
+
+None of the PR 2 / PR 3 items above are discharged by this round; the remaining list is unchanged.

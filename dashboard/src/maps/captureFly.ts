@@ -16,7 +16,6 @@ import {
 } from "./types";
 
 const TILE = 512;
-export const FLY_EXPORT_FPS = 60;
 
 function easeLinear(t: number): number {
   return t;
@@ -411,7 +410,7 @@ export async function captureFlyFrames(opts: {
     assetBaseUrl,
     numberPins = false,
     duration,
-    fps = FLY_EXPORT_FPS,
+    fps = 30,
     easing,
     routePoints,
     curve,

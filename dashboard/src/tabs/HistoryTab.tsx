@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { chooseFolder, chooseKeynote, relocateJob } from "../api";
 import { ArtifactActions } from "../components/ArtifactActions";
 import { CheckResultView } from "../components/CheckResultView";
@@ -14,13 +14,18 @@ import { OPEN_IN_LABELS, asFeature, useRunNav } from "../nav";
 import { useJobSessions } from "../sessions";
 
 export function HistoryTab({ active: visible }: { active: boolean }) {
-  const { jobs, active, activeId, setActiveId, upsert, rename, remove, removeAll, sessionError } = useJobSessions(undefined, visible);
+  const { jobs, active, activeId, setActiveId, upsert, rename, remove, removeAll, reload, sessionError } = useJobSessions();
   const { openInFeature } = useRunNav();
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const rawFeature = active?.feature || active?.kind || "";
   const feature = asFeature(rawFeature);
   const isLeftoverVisual = rawFeature === "visual";
+
+  useEffect(() => {
+    if (visible) reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
 
   async function relocate() {
     if (!active || !feature) return;

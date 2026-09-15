@@ -22,17 +22,6 @@ function sourceLayer(layer: LayerBits): string {
   return layer["source-layer"] || "";
 }
 
-function isWaterName(layer: LayerBits): boolean {
-  const sl = sourceLayer(layer);
-  const id = layer.id.toLowerCase();
-  if (sl === "water_name") return true;
-  if (id.replace(/[_-]/g, "").includes("watername")) return true;
-  // OFM Positron paints river/canal names as waterway symbols; they are not `water_name`
-  // and do not start with `label_`, so they used to leak past the Place labels toggle.
-  if ((sl === "waterway" || sl === "water") && (layer.type === "symbol" || id.includes("label"))) return true;
-  return false;
-}
-
 export function filterForLayer(layer: LayerBits): MapsLayerFilterId | null {
   const sl = sourceLayer(layer);
   const id = layer.id.toLowerCase();
@@ -44,8 +33,7 @@ export function filterForLayer(layer: LayerBits): MapsLayerFilterId | null {
   if (norm.includes("oneway") || id.includes("arrow")) return "arrows";
   if (sl === "transportation" || sl === "aeroway") return "roads";
   if (id === BORDERLANDS_INK_LAYER_ID || sl === "building" || id.includes("building")) return "buildings";
-  if (isWaterName(layer)) return "waternames";
-  if (sl === "place" || id.startsWith("label_")) return "labels";
+  if (sl === "place" || sl === "water_name" || id.startsWith("label_")) return "labels";
   if (sl === "boundary" || id.startsWith("boundary_")) return "boundaries";
   return null;
 }

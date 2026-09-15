@@ -215,7 +215,7 @@ export type MapViewHandle = {
   capturePreviewBlob: () => Promise<Blob | null>;
   waitUntilIdle: (styleId?: MapsStyleId, timeoutMs?: number) => Promise<void>;
   resize: () => void;
-  getRegionCountries: () => string[] | null;
+  getRegionCountries: () => string[];
 };
 
 type Props = {
@@ -237,7 +237,6 @@ type Props = {
   onCameraCommit: (camera: MapsCamera) => void;
   onToggleCountry: (adm0: string) => void;
   onToggleRegion: (adm1: string) => void;
-  onRegionCountries?: (codes: string[]) => void;
   pickRegions: boolean;
   onAddPin: (lat: number, lon: number) => void;
   onSelectPin: (id: string | null) => void;
@@ -279,7 +278,6 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     onCameraCommit,
     onToggleCountry,
     onToggleRegion,
-    onRegionCountries,
     pickRegions,
     onAddPin,
     onSelectPin,
@@ -314,7 +312,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const styleToken = useRef<number | null>(null);
   const [adminReplay, setAdminReplay] = useState(0);
   const previewingRef = useRef(previewing);
-  const callbacks = useRef({ onCameraCommit, onToggleCountry, onToggleRegion, onRegionCountries, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort });
+  const callbacks = useRef({ onCameraCommit, onToggleCountry, onToggleRegion, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort });
   const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins, highlightColour, highlightColours });
   const [cgInteract, setCgInteract] = useState<"select" | "move">("select");
   const cgDrag = useRef<{ x: number; shift: number; width: number; surfaceWidth: number } | null>(null);
@@ -360,29 +358,13 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     );
   }
 
-  function regionQueryReady(map: MapLibreMap): boolean {
-    return Boolean(map.getLayer("admin0-fill") && (!map.areTilesLoaded || map.areTilesLoaded()));
-  }
-
-  function queryRegionCountries(map: MapLibreMap): string[] {
-    if (!map.getLayer("admin0-fill")) return [];
+  function regionCountries(map: MapLibreMap): string[] {
+    if (!pickRegionsRef.current || !map.getLayer("admin0-fill")) return [];
     const centre = map.project(map.getCenter());
     return regionCountriesFromHits(
       visibleAdmin0Hits(map),
       map.queryRenderedFeatures([centre.x, centre.y], { layers: ["admin0-fill"] })
     );
-  }
-
-  function publishRegionCountries(map: MapLibreMap) {
-    if (!pickRegionsRef.current || !regionQueryReady(map)) return;
-    callbacks.current.onRegionCountries?.(queryRegionCountries(map));
-  }
-
-  /** Prefetch path: stay quiet until Regions mode is on so a Countries-mode
-   * paint does not ingest admin-1 for every visible country. */
-  function regionCountries(map: MapLibreMap): string[] {
-    if (!pickRegionsRef.current) return [];
-    return queryRegionCountries(map);
   }
 
   function admin0At(map: MapLibreMap, point: MapMouseEvent["point"]): string {
@@ -417,7 +399,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   authoredWidthRef.current = hopWidthRef.current ?? authoredWidth;
   sidePanelsRef.current = sidePanels;
   pickRegionsRef.current = pickRegions;
-  callbacks.current = { onCameraCommit, onToggleCountry, onToggleRegion, onRegionCountries, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
+  callbacks.current = { onCameraCommit, onToggleCountry, onToggleRegion, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
   overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins, highlightColour, highlightColours };
 
   /** Sizes/positions `.maps-map-inner` to fill the whole frame (not just the band) at the
@@ -689,8 +671,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     },
     getRegionCountries() {
       const map = mapRef.current;
-      if (!map || !regionQueryReady(map)) return null;
-      return queryRegionCountries(map);
+      return map ? regionCountries(map) : [];
     },
   }));
 
@@ -859,7 +840,6 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             if (isCurrent()) {
               styleReady.current = true;
               currentMap.triggerRepaint();
-              publishRegionCountries(currentMap);
             }
           }).catch((err) => console.warn("overlay paint", err)).finally(() => {
             if (adminSync.current.endStyleLoad(generation)) setAdminReplay((n) => n + 1);
@@ -880,8 +860,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           if (!map || !pickRegionsRef.current) return;
           const currentMap = map;
           if (!currentMap.getSource("admin0")) return;
-          const codes = queryRegionCountries(currentMap);
-          publishRegionCountries(currentMap);
+          const codes = regionCountries(currentMap);
           if (!codes.length) return;
           const generation = adminSync.current.beginSync();
           if (generation === null) return;
@@ -890,8 +869,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           const needed = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(overlay.current.highlights) : []), ...codes])];
           void adminSync.current.track(syncAdmin1Source(currentMap, needed, isCurrent).then(() => {
             if (!isCurrent()) return;
-            applyHighlights(currentMap, overlay.current.highlights, overlay.current.highlightColours);
-            applyAdmin1Highlights(currentMap, overlay.current.highlights, overlay.current.highlightColours);
+            applyHighlights(currentMap, overlay.current.highlights);
+            applyAdmin1Highlights(currentMap, overlay.current.highlights);
             applyIsolate(currentMap, overlay.current.highlights, overlay.current.isolate);
           }));
         }
@@ -945,9 +924,6 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         });
         map.on("moveend", commitCamera);
         map.on("moveend", syncRegionCamera);
-        map.on("idle", () => {
-          if (map) publishRegionCountries(map);
-        });
         map.on("mousemove", onCanvasMouseMove);
         map.on("mouseout", () => {
           if (map) map.getCanvas().style.cursor = "";
@@ -983,8 +959,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             const needed = [...new Set([...regionCountries(currentMap), country])];
             void adminSync.current.track(syncAdmin1Source(currentMap, needed, isCurrent).then(() => {
               if (!isCurrent()) return;
-              applyHighlights(currentMap, overlay.current.highlights, overlay.current.highlightColours);
-              applyAdmin1Highlights(currentMap, overlay.current.highlights, overlay.current.highlightColours);
+              applyHighlights(currentMap, overlay.current.highlights);
+              applyAdmin1Highlights(currentMap, overlay.current.highlights);
               applyIsolate(currentMap, overlay.current.highlights, overlay.current.isolate);
               const retry = admin1At(currentMap, event.point);
               if (retry) callbacks.current.onToggleRegion(retry);
@@ -1095,12 +1071,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (generation === null) return;
     const isCurrent = () => mapRef.current === map && adminSync.current.isCurrent(generation) && !!map.getStyle();
     const hasAdmin1Highlight = highlights.some((h) => h.startsWith("A1:"));
-    publishRegionCountries(map);
     const needed = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(highlights) : []), ...regionCountries(map)])];
     void adminSync.current.track(syncAdmin1Source(map, needed, isCurrent).then(() => {
       if (!isCurrent()) return;
-      applyHighlights(map, highlights, overlay.current.highlightColours);
-      applyAdmin1Highlights(map, highlights, overlay.current.highlightColours);
+      applyHighlights(map, highlights);
+      applyAdmin1Highlights(map, highlights);
       applyIsolate(map, highlights, isolate);
       if (overlay.current.highlightColour) applyHighlightColour(map, overlay.current.highlightColour, overlay.current.highlightColours);
     }));
@@ -1132,9 +1107,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const map = mapRef.current;
     if (!map || !highlightColour) return;
     applyHighlightColour(map, highlightColour, highlightColours);
-    applyHighlights(map, highlights, highlightColours);
-    applyAdmin1Highlights(map, highlights, highlightColours);
-  }, [highlightColour, highlightColours, highlights]);
+  }, [highlightColour, highlightColours]);
 
   useEffect(() => {
     const map = mapRef.current;

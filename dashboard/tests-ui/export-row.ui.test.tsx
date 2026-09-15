@@ -20,64 +20,23 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("MapsTab export is a single save-panel button", () => {
-  it("shows Export without a separate Export to… row", async () => {
+describe("MapsTab export row sits in the Export button's row", () => {
+  it("shares an .actions ancestor with the Export button and renders Export to… as a collab button", async () => {
     await renderMapsTab();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("tab", { name: "Export" }));
     });
 
-    expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Export to…" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/output\/ \(default\)|\(default\)/)).not.toBeInTheDocument();
-  });
+    const exportTo = screen.getByRole("button", { name: "Export to…" });
+    const exportBtn = screen.getByRole("button", { name: "Export" });
 
-  it("opens the save panel then posts the chosen path", async () => {
-    await renderMapsTab();
-    mapsApiScript.exportPlan.set({
-      links: [],
-      stills: [],
-      plates: [],
-    });
+    expect(exportTo).toHaveClass("collab");
+    expect(exportTo.closest(".actions")).not.toBeNull();
+    expect(exportTo.closest(".actions")).toBe(exportBtn.closest(".actions"));
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole("tab", { name: "Export" }));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Export" }));
-    });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
-    });
-
-    expect(mapsApiScript.chooseSave.calls.length).toBe(1);
-    expect(mapsApiScript.chooseSave.calls[0][0]).toEqual(
-      expect.objectContaining({ prompt: "Export Keynote", defaultName: "maps.key" })
-    );
-    expect(mapsApiScript.exportMaps.calls.length).toBeGreaterThan(0);
-    const exportCall = mapsApiScript.exportMaps.calls[mapsApiScript.exportMaps.calls.length - 1];
-    expect(exportCall.body).toEqual(
-      expect.objectContaining({ exportPath: "/tmp/exports/maps.key" })
-    );
-  });
-
-  it("does not start export when the save panel is cancelled", async () => {
-    await renderMapsTab();
-    mapsApiScript.chooseSave.resolve(null);
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("tab", { name: "Export" }));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Export" }));
-    });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
-    });
-
-    expect(mapsApiScript.chooseSave.calls.length).toBe(1);
-    expect(mapsApiScript.exportMaps.calls.length).toBe(0);
+    const path = screen.getByText(/output\/ \(default\)|\(default\)/);
+    expect(exportTo.compareDocumentPosition(path) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

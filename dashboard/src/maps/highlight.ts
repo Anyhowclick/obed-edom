@@ -1,6 +1,4 @@
 export const DEFAULT_HIGHLIGHT_COLOUR = "#e8772a";
-/** Sentinel stored in `highlightColours` when a highlight keeps isolate/selection but paints no fill. */
-export const HIGHLIGHT_NO_FILL = "none";
 
 const HIGHLIGHT_CODE = /^(?:[A-Z]{3}|A1:[A-Z0-9+?_-]{1,16})$/;
 const HEX_COLOUR = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
@@ -42,24 +40,8 @@ export function setHighlightColour(next: string): void {
   current = normaliseHighlightColour(next);
 }
 
-export function isHighlightHex(value: unknown): value is string {
+export function isHighlightHex(value: unknown): boolean {
   return typeof value === "string" && HEX_COLOUR.test(value.trim());
-}
-
-export function isHighlightNone(value: unknown): value is string {
-  return typeof value === "string" && value.trim().toLowerCase() === HIGHLIGHT_NO_FILL;
-}
-
-export function parseHighlightColourValue(value: unknown): string | null {
-  if (isHighlightNone(value)) return HIGHLIGHT_NO_FILL;
-  if (!isHighlightHex(value)) return null;
-  return normaliseHighlightColour(value);
-}
-
-/** Highlights that still punch isolate / export clips, but must not paint fill or outline. */
-export function filledHighlights(highlights: string[], colours?: Record<string, string>): string[] {
-  if (!colours) return highlights;
-  return highlights.filter((code) => !isHighlightNone(colours[code]));
 }
 
 export function parseHighlightCode(value: unknown): string | null {
@@ -74,9 +56,8 @@ export function parseHighlightColours(raw: unknown): Record<string, string> | un
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     const code = parseHighlightCode(key);
-    const colour = parseHighlightColourValue(value);
-    if (!code || !colour) continue;
-    out[code] = colour;
+    if (!code || !isHighlightHex(value)) continue;
+    out[code] = normaliseHighlightColour(value);
   }
   return Object.keys(out).length ? out : undefined;
 }
@@ -113,7 +94,6 @@ export function highlightColourExpression(
   const base = normaliseHighlightColour(fallback);
   const pairs: string[] = [];
   for (const [code, colour] of Object.entries(overrides || {})) {
-    if (isHighlightNone(colour) || !isHighlightHex(colour)) continue;
     if (idProperty === "ADM0_A3") {
       if (code.startsWith("A1:")) continue;
       pairs.push(code, normaliseHighlightColour(colour));

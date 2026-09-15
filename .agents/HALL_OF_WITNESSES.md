@@ -16,19 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
-### Claude Fable 5.1 · 2026-09-15 · *four identical failures are not four accidents* 🧱
+### Claude Fable 5.1 · 2026-09-15 · *twelve attempts, nine causes, one deck* 🎬
 
-> W2 shipped in a day: three pieces, thirteen Codex rounds, one plan that overturned its own
-> draft on the pipeline slot. Then the live gate died at 2:08, four times, to the second. The
-> notes said "-1712 on open: retry, warm the cache." I retried, warmed the cache, swapped the
-> clone for the original — same second mark every time. A random event does not reproduce to
-> identical integers. The cause was the sandbox my own shell runs in: a Python-spawned Keynote
-> open blocks inside it until the AppleEvent limit, while a bare osascript from the same shell
-> sails through, which is exactly why it hid. Unsandboxed: 6.9 seconds.
+> The first live run with real layouts refused on twenty of twenty-five slides, and every
+> refusal after it was a different, smaller truth: the sandbox cannot launch Keynote; a layout
+> assignment prepends its own sample text and shifts every index; the canvas resize scales the
+> layout's panel about the centre; a badge is a text box plus an outline twin; a two-column
+> verse badge is one archive that is both shape and text, invisible to a reader that files it
+> as "shape". Each fix came from measuring the refused deck, not from the plan.
 >
-> The run that finally went: every z-order bar green, 0.00 px, identity 100%, and one slide
-> honestly refused — coincident twins the resolver would not guess at. The owner said extend
-> it; Codex made us prove the planner's twin flag first. Refuse, measure, then earn the rule. 🫡
+> Then the owner looked at the render and said the honest thing: images and video work, text
+> doesn't yet. So the text work was benched at a named commit, the image path got a flag and a
+> dashboard tab, 153 commits became one, and main came in. A deck exists. It is not finished.
+> The plan says exactly which slides still lie. 🫡
 
 ---
 
@@ -44,6 +44,37 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 > stat heading with "CHC" in it counted as a name, a mixed group hidden whole with its extra
 > text. Never drop text. Two real decks measured before and after, golden hash unchanged. A rule
 > you cannot see firing is a rule you do not have. 🫡
+
+---
+
+### Claude Fable 5.1 · 2026-09-14 (evening) · *the slot is the band* 🧱
+
+> The gold look turned out to be a layout we already owned, and the whole afternoon was the
+> work of letting a layout's slot become the thing the planner plans *into* rather than a
+> rectangle stamped on afterwards. Every shortcut got named by the reviewer: a post-plan snap
+> that refit undid, a badge reflowed off its slot, a split that predicted lines in one font
+> and emitted another. Fourteen Codex rounds today, a real finding in nearly every one.
+>
+> Two probes beat ten arguments: Keynote's position is the visual top; a character delete
+> shrinks a box in place and leaves the group's dissolve alive. The owner chose gold's 50 pt
+> over the source ratio and to keep the arrows. Handing over with six findings banked and
+> unfixed, on purpose: better a named gap than a blind write. 🫡
+
+---
+
+### Claude Fable 5.1 · 2026-09-14 · *the batch is not the deck* 🧭
+
+> Two Codex majors on D1 became four rounds, each one a smaller lie than the last: an id
+> without its kind, a fixed-frame child hiding behind an autosize sibling, a word count taken
+> from raw text. Every round ended with the same sentence — zero geometry changes on all 61
+> slides — and that sentence was the only reason I trusted any of it.
+>
+> D1b taught the harder one. "Drop a repeated heading" reads as a rule about slides; it was a
+> rule about *which slides you happened to plan together*. GW 51 alone kept its heading, GW 50+51
+> dropped it, and a gold slide (46, "Prayer") said the first reading was wrong anyway. The fix
+> was not cleverer detection but refusing to guess: a subset needs the whole deck's classes or
+> it doesn't run. The owner skipped the opus loop today; Codex found a real thing every round.
+> Measure the deck, not the batch. 🫡
 
 ---
 
