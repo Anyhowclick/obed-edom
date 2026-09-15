@@ -754,3 +754,6 @@ against GW untouched by design (edits confined to `build_assembly_script` and
 hunk inspection rather than a live rerun (the banked `ab_plan_gw.py` head-side dump in
 the scratchpad predates this session's L2/L3 landing and isn't a valid baseline for
 this diff).
+
+## L5 note (2026-09-15, temporary): two-column point-layout ordinals are verified against the D1b plan rects
+GW 44/46/50 are planned with the gold-measured D1b two-column rects (heading 43×450, number circle 245, verse-ref 501/719.4, verse 501/821.4 ×1391), which are not the `Point 3 Lines` slot table rects (§1.2). Until L5 reconciles the two, `verify_staged_layouts_alpha_safe` checks such ordinals (point layout AND `plan.two_column`) against `plan.fits` + band containment, logging "point layout verified against the plan rects (D1b), not the slot table". Verse layouts keep the exact-slot rule.

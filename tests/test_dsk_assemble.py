@@ -11026,6 +11026,204 @@ def test_verify_staged_layouts_post_delete_staged_index(monkeypatch, tmp_path):
     )
 
 
+# --------------------------------------------------------------------------- GW 17 joint stack fit
+
+
+def _gw17_joint_plan(box1_h: float = 66.6, box2_h: float = 43.33):
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    box1 = Rect(slot.verse.x, slot.verse.y, slot.verse.w, box1_h)
+    box2 = Rect(slot.verse.x, slot.verse.y + box1_h, slot.verse.w, box2_h)
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 1},
+        fits={17: {("text", 1): box1, ("text", 2): box2}}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={17: frozenset({("text", 1), ("text", 2)})}, short_fit={},
+    )
+    return slot, box1, box2, plan
+
+
+def _patch_gw17_verify(monkeypatch, recs):
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (7680.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        dsa, "_base_layout_slide_for_ordinal",
+        lambda objects, ordinal: {"name": "Verse Standard (Variation 2)"},
+    )
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+    monkeypatch.setattr(dsa, "compose_geometry", lambda slide, objects: recs)
+
+
+def test_verify_staged_layouts_gw17_joint_stack_contained_passes(monkeypatch, tmp_path):
+    """GW 17: two long verse boxes jointly fitted into ONE slot -- box 1 sits at the
+    slot top, box 2 is stacked directly below it, and the union stays inside the slot.
+    The old per-box "y == slot.y" rule refused box 2 outright; the stack rule must
+    accept it."""
+    _slot, box1, box2, plan = _gw17_joint_plan()
+    recs = [
+        {"kind": "text", "kindIndex": 0, "x": box1.x, "y": box1.y, "w": box1.w, "h": box1.h},
+        {"kind": "text", "kindIndex": 1, "x": box2.x, "y": box2.y, "w": box2.w, "h": box2.h},
+    ]
+    _patch_gw17_verify(monkeypatch, recs)
+    dsa.verify_staged_layouts_alpha_safe(
+        tmp_path / "staged.key", plan, expected_layout_names={17: "Verse Standard (Variation 2)"}
+    )
+
+
+def test_verify_staged_layouts_gw17_joint_stack_overlap_refuses(monkeypatch, tmp_path):
+    """The second box overlapping the first (its top short of the previous box's
+    bottom by more than 2.0pt) must refuse."""
+    _slot, box1, box2, plan = _gw17_joint_plan()
+    recs = [
+        {"kind": "text", "kindIndex": 0, "x": box1.x, "y": box1.y, "w": box1.w, "h": box1.h},
+        {"kind": "text", "kindIndex": 1, "x": box2.x, "y": box2.y - 20.0, "w": box2.w, "h": box2.h},
+    ]
+    _patch_gw17_verify(monkeypatch, recs)
+    with pytest.raises(AssemblyRefusal, match="does not match"):
+        dsa.verify_staged_layouts_alpha_safe(
+            tmp_path / "staged.key", plan, expected_layout_names={17: "Verse Standard (Variation 2)"}
+        )
+
+
+def test_verify_staged_layouts_gw17_joint_stack_union_past_bottom_refuses(monkeypatch, tmp_path):
+    """The union of the stacked boxes running past the slot's own bottom by more than
+    2.0pt must refuse even though each box individually fits its own rect."""
+    _slot, box1, box2, plan = _gw17_joint_plan(box1_h=100.0, box2_h=100.0)
+    recs = [
+        {"kind": "text", "kindIndex": 0, "x": box1.x, "y": box1.y, "w": box1.w, "h": box1.h},
+        {"kind": "text", "kindIndex": 1, "x": box2.x, "y": box2.y, "w": box2.w, "h": box2.h},
+    ]
+    _patch_gw17_verify(monkeypatch, recs)
+    with pytest.raises(AssemblyRefusal, match="does not match"):
+        dsa.verify_staged_layouts_alpha_safe(
+            tmp_path / "staged.key", plan, expected_layout_names={17: "Verse Standard (Variation 2)"}
+        )
+
+
+@pytest.mark.deck
+def test_verify_staged_layouts_gw17_real_deck_pins_stacked_rects():
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[17]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    names = dsa.resolve_slide_layouts(payload, classes, plan)
+    assert names[17] == "Verse Standard (Variation 2)"
+    stacked = sorted(plan.stacked_ids.get(17, frozenset()))
+    assert len(stacked) == 2
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    fits = plan.fits[17]
+    ordered = sorted(stacked, key=lambda iid: fits[iid].y)
+    assert ordered[0] == ("text", 1)
+    assert fits[ordered[0]].y == pytest.approx(slot.verse.y, abs=1.0)
+    assert fits[ordered[1]].y == pytest.approx(
+        fits[ordered[0]].y + fits[ordered[0]].h + dsa._TEXT_STACK_GAP, abs=2.0
+    )
+
+
+# --------------------------------------------------------------------------- L5 D1b point layout
+
+
+def test_verify_staged_layouts_d1b_point_layout_uses_plan_rects(monkeypatch, tmp_path):
+    """A D1b two-column slide (``plan.two_column``) resolving to ``Point 3 Lines`` is
+    checked against the PLAN's own D1b rects, not the ``Point 3 Lines`` slot table --
+    the two are known to diverge (L5, deferred design item)."""
+    d1b_verse = Rect(501.0, 821.0, 1391.0, 209.81)
+    plan = AssemblyPlan(
+        kept=(44,), ordinals={44: 1},
+        fits={44: {("text", 1): d1b_verse}}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={44: frozenset({("text", 1)})}, short_fit={},
+        two_column={44: dsa.DEFAULT_BAND},
+    )
+
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    rec = {"kind": "text", "kindIndex": 0, "x": d1b_verse.x, "y": d1b_verse.y, "w": d1b_verse.w, "h": d1b_verse.h}
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (7680.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(dsa, "_base_layout_slide_for_ordinal", lambda objects, ordinal: {"name": "Point 3 Lines"})
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+    monkeypatch.setattr(dsa, "compose_geometry", lambda slide, objects: [rec])
+
+    logs: list[str] = []
+    dsa.verify_staged_layouts_alpha_safe(
+        tmp_path / "staged.key", plan, expected_layout_names={44: "Point 3 Lines"}, log=logs.append,
+    )
+    assert any("point layout verified against the plan rects" in l for l in logs)
+
+
+def test_verify_staged_layouts_d1b_point_layout_refuses_outside_band(monkeypatch, tmp_path):
+    """A D1b two-column point box whose saved rect matches the plan's own fit but has
+    drifted outside the shared stack band (704-1054) must still refuse."""
+    d1b_verse = Rect(501.0, 821.0, 1391.0, 209.81)
+    plan = AssemblyPlan(
+        kept=(44,), ordinals={44: 1},
+        fits={44: {("text", 1): d1b_verse}}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={44: frozenset({("text", 1)})}, short_fit={},
+        two_column={44: dsa.DEFAULT_BAND},
+    )
+
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    # matches the plan's own rect x/w/y/h, but sits above the 704pt band top.
+    rec = {"kind": "text", "kindIndex": 0, "x": d1b_verse.x, "y": 500.0, "w": d1b_verse.w, "h": d1b_verse.h}
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (7680.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(dsa, "_base_layout_slide_for_ordinal", lambda objects, ordinal: {"name": "Point 3 Lines"})
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+    monkeypatch.setattr(dsa, "compose_geometry", lambda slide, objects: [rec])
+
+    with pytest.raises(AssemblyRefusal, match="does not match"):
+        dsa.verify_staged_layouts_alpha_safe(
+            tmp_path / "staged.key", plan, expected_layout_names={44: "Point 3 Lines"}
+        )
+
+
+def test_verify_staged_layouts_non_two_column_point_layout_keeps_slot_rule(monkeypatch, tmp_path):
+    """A verse-layout ordinal (not a D1b two-column slide) still enforces the exact
+    slot rect -- the plan-rect exception is scoped to ``plan.two_column`` point
+    layouts only."""
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1},
+        fits={1: {("text", 1): slot.verse}}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        stacked_ids={1: frozenset({("text", 1)})}, short_fit={},
+    )
+
+    def fake_load_deck(_path):
+        return ({}, {}, {})
+
+    wrong_rec = {"kind": "text", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 100.0, "h": 50.0}
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_canvas_size", lambda objects: (1920.0, 1080.0))
+    monkeypatch.setattr(dsa, "layout_alpha_safe", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        dsa, "_base_layout_slide_for_ordinal", lambda objects, ordinal: {"name": "Verse Standard (Variation 2)"},
+    )
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda objects, ordinal: {"id": "slide1"})
+    monkeypatch.setattr(dsa, "compose_geometry", lambda slide, objects: [wrong_rec])
+
+    with pytest.raises(AssemblyRefusal, match="does not match"):
+        dsa.verify_staged_layouts_alpha_safe(
+            tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
+        )
+
+
 # --------------------------------------------------------------------------- S2 style wiring
 
 
@@ -11187,6 +11385,63 @@ def test_pill_specs_no_verse_layouts_is_empty(tmp_path):
     assert dsa._pill_specs(tmp_path / "staged.key", plan, None) == {}
 
 
+def test_pill_specs_group_child_badge_yields_pill_spec(monkeypatch, tmp_path):
+    """GW 5/54-shaped: the slot badge is a group-child id (a 4-tuple), not a plain
+    (kind, kindIndex) pair -- `_staged_id_for` unpacking it raised "too many values to
+    unpack (expected 2)". `_pill_specs` must resolve it via
+    `_staged_group_child_record` instead, reading the child's own caption text/object."""
+    badge_id = ("groupchild", 0, "shape", 0)
+    plan = AssemblyPlan(
+        kept=(5,), ordinals={5: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        ordinal_to_number={1: 5},
+        slot_badge_ids={5: badge_id},
+        layout_names={5: "Verse Standard (Variation 2)"},
+    )
+
+    objects = {"child-obj": {"_id": "child-obj"}}
+
+    def fake_load_deck(_path):
+        return (objects, {}, {})
+
+    def fake_slide_for_ordinal(_objects, ordinal):
+        return {"ordinal": ordinal}
+
+    child_record = {"kind": "shape", "kindIndex": 0, "id": "child-obj", "text": "Genesis 1", "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+
+    def fake_staged_group_child_record(_objects, _slide, number, _plan, item_id, *, part=0, hidden=frozenset()):
+        assert number == 5
+        assert item_id == badge_id
+        return child_record
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", fake_slide_for_ordinal)
+    monkeypatch.setattr(dsa, "_staged_group_child_record", fake_staged_group_child_record)
+    monkeypatch.setattr(dsa, "shape_style", lambda obj, objects, cache: obj)
+    monkeypatch.setattr(dsa, "shaped_width", lambda text, style: float(len(text)) * 10.0)
+
+    specs = dsa._pill_specs(tmp_path / "staged.key", plan, plan.layout_names)
+
+    assert set(specs) == {1}
+    assert specs[1].layout == "standard"
+    assert specs[1].width == pytest.approx(len("Genesis 1") * 10.0 + dsa.VERSE_BADGE_PAD_PT)
+
+
+def test_pill_specs_group_child_badge_unresolved_refuses(monkeypatch, tmp_path):
+    badge_id = ("groupchild", 0, "shape", 0)
+    plan = AssemblyPlan(
+        kept=(5,), ordinals={5: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        ordinal_to_number={1: 5},
+        slot_badge_ids={5: badge_id},
+        layout_names={5: "Verse Standard (Variation 2)"},
+    )
+    monkeypatch.setattr(dsa, "_load_deck", lambda _path: ({}, {}, {}))
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", lambda _objects, ordinal: {"ordinal": ordinal})
+    monkeypatch.setattr(dsa, "_staged_group_child_record", lambda *_a, **_k: None)
+
+    with pytest.raises(AssemblyRefusal, match="not staged"):
+        dsa._pill_specs(tmp_path / "staged.key", plan, plan.layout_names)
+
+
 def test_assemble_dsk_deck_calls_pill_pass(tmp_path, monkeypatch):
     fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
     _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
@@ -11232,6 +11487,54 @@ def test_pill_write_refusal_becomes_assembly_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(dsa, "write_pills", fake_write_pills)
     with pytest.raises(AssemblyRefusal, match="pill write refused"):
         assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
+
+
+def test_generic_post_pass_exception_keeps_staging_deck_as_failed_key(tmp_path, monkeypatch):
+    """A bug in a post-pass (not an `AssemblyRefusal`, e.g. the group-child badge
+    unpacking crash) must not silently drop the staging deck the way an uncaught
+    exception used to -- it is kept as `*.failed.key`, its traceback is logged, and the
+    exception surfaces as an `AssemblyRefusal` naming the failing pass."""
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    class _StagingSavingBatch:
+        def __init__(self, deck, out_dir, *, rss_limit_bytes=0, log=print):
+            self.deck = Path(deck)
+            self.out_dir = Path(out_dir)
+            self.work = self.out_dir / "fake-work"
+            self.scratch = self.work / self.deck.name
+
+        def __enter__(self):
+            self.work.mkdir(parents=True, exist_ok=True)
+            self.scratch.mkdir(parents=True, exist_ok=True)
+            (self.scratch / "marker").write_bytes(b"scratch")
+            return self
+
+        def run(self, script_path, *, on_progress=None, retry_on_1712=True):
+            staging_path = self.work / f"staged-{out_path.name}"
+            staging_path.write_bytes(b"staged-deck-bytes")
+            return subprocess.CompletedProcess([], 0, "", "OBED\t13\tdone\nOBED\t32\tdone")
+
+        def __exit__(self, exc_type, exc, _tb):
+            return False
+
+    monkeypatch.setattr(dsa, "LiveBatch", _StagingSavingBatch)
+
+    def fake_write_pill_pass(*_args, **_kwargs):
+        badge_id = ("groupchild", 0, "shape", 0)
+        kind, idx = badge_id  # noqa: F841 -- reproduces the "too many values to unpack" crash
+
+    monkeypatch.setattr(dsa, "_write_pill_pass", fake_write_pill_pass)
+    logs: list[str] = []
+    with pytest.raises(AssemblyRefusal, match=r"pill: ValueError"):
+        assemble_dsk_deck(
+            fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve", log=logs.append,
+        )
+    failed_path = out_path.parent / f"{out_path.stem}.failed.key"
+    assert failed_path.exists()
+    assert not out_path.exists()
+    assert any(str(failed_path) in l for l in logs)
+    assert any("Traceback" in l for l in logs)
 
 
 _GOLD_DECK = Path.home() / "Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key"

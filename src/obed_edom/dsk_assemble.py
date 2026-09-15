@@ -10,6 +10,7 @@ import math
 import os
 import re
 import time
+import traceback
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -2344,8 +2345,9 @@ def _all_group_child_records(
             out.append({
                 "kind": "text", "kindIndex": assigned["text"], "autosize": True,
                 "has_text": True, "words": _child_word_count(child, objects),
+                "text": _child_text(child, objects),
                 "x": abs_gx + cx, "cy": abs_gy + cy, "y": top, "w": nw, "h": nh,
-                "group_path": group_path,
+                "group_path": group_path, "id": str(cid),
             })
             continue
         kind = "shape" if "shape" in assigned else kinds[0]
@@ -2361,29 +2363,39 @@ def _all_group_child_records(
             out.append({
                 "kind": kind, "kindIndex": assigned[kind], "autosize": False,
                 "has_text": has_text, "words": words,
+                "text": _child_text(child, objects) if has_text else None,
                 "x": abs_gx + fx, "y": abs_gy + fy, "w": fw, "h": fh, "angle": ca,
-                "group_path": group_path,
+                "group_path": group_path, "id": str(cid),
             })
             continue
         x0, y0, x1, y1 = _leaf_bbox(child, abs_gx, abs_gy, objects)
         out.append({
             "kind": kind, "kindIndex": assigned[kind], "autosize": False,
             "has_text": has_text, "words": words,
+            "text": _child_text(child, objects) if has_text else None,
             "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0,
-            "group_path": group_path,
+            "group_path": group_path, "id": str(cid),
         })
     return out
 
 
-def _child_word_count(child: dict, objects: dict[str, dict]) -> int | None:
-    """Word count of a fixed-frame text child's storage text, the same ``ownedStorage``
-    -> ``TSWP.StorageArchive`` resolution ``iwa_runs._group_child_runs`` uses. ``None``
+def _child_text(child: dict, objects: dict[str, dict]) -> str | None:
+    """A fixed-frame text child's own storage text, the same ``ownedStorage`` ->
+    ``TSWP.StorageArchive`` resolution ``iwa_runs._group_child_runs`` uses. ``None``
     when the text cannot be resolved."""
     stor_id = (child.get("ownedStorage") or {}).get("identifier")
     storage = objects.get(str(stor_id)) if stor_id is not None else None
     if not storage or storage.get("_pbtype") != "TSWP.StorageArchive":
         return None
-    text = "".join(storage.get("text") or [])
+    return "".join(storage.get("text") or [])
+
+
+def _child_word_count(child: dict, objects: dict[str, dict]) -> int | None:
+    """Word count of a fixed-frame text child's storage text. ``None`` when the text
+    cannot be resolved."""
+    text = _child_text(child, objects)
+    if text is None:
+        return None
     return _word_count(_normalize_text(text))
 
 
@@ -2586,7 +2598,7 @@ def _staged_group_rank(
     return sorted(retained_ranks).index(group_ki)
 
 
-def _staged_group_child_rect(
+def _staged_group_child_record(
     objects: dict,
     slide: dict,
     number: int,
@@ -2595,12 +2607,14 @@ def _staged_group_child_rect(
     *,
     part: int = 0,
     hidden: frozenset[ItemId] = frozenset(),
-) -> Rect | None:
-    """A group-child's absolute rect composed from the STAGED deck: the top-level
-    group's own kindIndex is translated through ``_staged_group_rank`` (deletions can
-    shift it), then ``_all_group_child_records`` -- the same source-geometry composer
-    planning uses -- reads the staged group object directly; a kept group's own children
-    are never individually deleted, so the child's kind/kindIndex stay source-stable."""
+) -> dict | None:
+    """A group-child's own composed record from the STAGED deck (rect, archive ``id``,
+    caption ``text``): the top-level group's own kindIndex is translated through
+    ``_staged_group_rank`` (deletions can shift it), then ``_all_group_child_records``
+    -- the same source-geometry composer planning uses -- reads the staged group object
+    directly; a kept group's own children are never individually deleted, so the
+    child's kind/kindIndex stay source-stable. Shared by ``_staged_group_child_rect``
+    (verifier) and ``_pill_specs`` (a group-child verse badge's caption + object)."""
     _tag, group_ki, child_kind, child_ki = item_id
     staged_rank = _staged_group_rank(number, plan, group_ki, part=part, hidden=hidden)
     if staged_rank is None:
@@ -2620,8 +2634,24 @@ def _staged_group_child_rect(
         return None
     for child in children:
         if child["kind"] == child_kind and child["kindIndex"] == child_ki:
-            return Rect(child["x"], child["y"], child["w"], child["h"])
+            return child
     return None
+
+
+def _staged_group_child_rect(
+    objects: dict,
+    slide: dict,
+    number: int,
+    plan: AssemblyPlan,
+    item_id: ItemId,
+    *,
+    part: int = 0,
+    hidden: frozenset[ItemId] = frozenset(),
+) -> Rect | None:
+    """A group-child's absolute rect composed from the STAGED deck -- see
+    ``_staged_group_child_record``."""
+    child = _staged_group_child_record(objects, slide, number, plan, item_id, part=part, hidden=hidden)
+    return Rect(child["x"], child["y"], child["w"], child["h"]) if child is not None else None
 
 
 def verify_staged_layouts_alpha_safe(
@@ -2630,6 +2660,7 @@ def verify_staged_layouts_alpha_safe(
     *,
     expected_layout_names: Mapping[int, str] | None = None,
     hidden: Mapping[int, frozenset[ItemId]] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> None:
     """Offline post-check for ``layout_policy="import"``, run against the assembled
     STAGING deck before it is published to ``out_path``: every kept slide's base layout
@@ -2652,7 +2683,21 @@ def verify_staged_layouts_alpha_safe(
     (`plan.slot_badge_ids`). A source id (finding 5) is translated through
     ``_staged_id_for``/``hidden`` before lookup -- deletions shift the staged
     ``kindIndex`` -- and a ``groupchild`` id's rect is composed from the staged group
-    object via ``_staged_group_child_rect`` rather than skipped."""
+    object via ``_staged_group_child_rect`` rather than skipped.
+
+    An ordinal whose ``stacked_ids`` holds more than one box (a joint fit, e.g. GW 17)
+    is checked as a STACK, ordered by ``plan.fits``' own y: the first box's top must
+    equal the slot top, every box's x/w must equal the slot's, each later box's top
+    must equal the previous box's bottom plus ``plan.fits``' own recorded gap (or at
+    least not overlap it) within 2.0pt, and the union bottom must not exceed the slot
+    bottom by more than 2.0pt -- a single-box ordinal keeps the exact per-box rule.
+
+    An ordinal whose resolved layout is a POINT layout (``slot.text``) AND is one of
+    D1b's two-column slides (``plan.two_column``) is verified against the plan's OWN
+    recorded rects (``plan.fits``) instead of the slot table (L5, temporary -- see
+    ``.agents/plans/dsk_layout_milestone.plan.md``): x/w/top within tolerance of the
+    planned rect, saved height at most the planned height + 2.0pt, and the box inside
+    the ``DEFAULT_BAND`` band."""
     objects, _id_to_file, _file_ids = _load_deck(staging_path)
     canvas = _canvas_size(objects)
     ordinal_to_number = plan.ordinal_to_number or {
@@ -2726,21 +2771,76 @@ def verify_staged_layouts_alpha_safe(
                 plan.splits[number][part].stacked_ids if number in plan.splits
                 else plan.stacked_ids.get(number, frozenset())
             )
-            for item_id in sorted(stacked):
-                got = _rect_for(item_id)
-                if got is None:
-                    raise AssemblyRefusal(
-                        f"slide {number} (ordinal {ordinal}): verse/point text {_item_label(item_id)} "
-                        "not found on the staged slide"
-                    )
-                x, y, w, h = got
-                if (
-                    abs(x - slot_rect.x) > _SLOT_RECT_TOL_PT
-                    or abs(w - slot_rect.w) > _SLOT_RECT_TOL_PT
-                    or abs(y - slot_rect.y) > _SLOT_RECT_TOL_PT
-                    or h > slot_rect.h + 2.0
-                ):
-                    _refuse_rect(item_id, x, y, w, h, "verse/point text")
+            plan_fits = plan.fits.get(number, {})
+            point_two_column = slot.text is not None and number in plan.two_column
+            if point_two_column:
+                band_top = DEFAULT_BAND.bottom - DEFAULT_BAND.height
+                for item_id in sorted(stacked):
+                    got = _rect_for(item_id)
+                    if got is None:
+                        raise AssemblyRefusal(
+                            f"slide {number} (ordinal {ordinal}): verse/point text {_item_label(item_id)} "
+                            "not found on the staged slide"
+                        )
+                    x, y, w, h = got
+                    planned = plan_fits.get(item_id)
+                    if (
+                        planned is None
+                        or abs(x - planned.x) > _SLOT_RECT_TOL_PT
+                        or abs(w - planned.w) > _SLOT_RECT_TOL_PT
+                        or abs(y - planned.y) > _SLOT_RECT_TOL_PT
+                        or h > planned.h + 2.0
+                        or y < band_top
+                        or y + h > DEFAULT_BAND.bottom
+                    ):
+                        _refuse_rect(item_id, x, y, w, h, "verse/point text")
+                if log is not None:
+                    log(f"slide {number}: point layout verified against the plan rects (D1b), not the slot table")
+            elif len(stacked) > 1:
+                ordered = sorted(stacked, key=lambda iid: plan_fits[iid].y if iid in plan_fits else 0.0)
+                rects: list[tuple[ItemId, float, float, float, float]] = []
+                for item_id in ordered:
+                    got = _rect_for(item_id)
+                    if got is None:
+                        raise AssemblyRefusal(
+                            f"slide {number} (ordinal {ordinal}): verse/point text {_item_label(item_id)} "
+                            "not found on the staged slide"
+                        )
+                    x, y, w, h = got
+                    rects.append((item_id, x, y, w, h))
+                first_id, fx, fy, fw, fh = rects[0]
+                if abs(fy - slot_rect.y) > _SLOT_RECT_TOL_PT:
+                    _refuse_rect(first_id, fx, fy, fw, fh, "verse/point text")
+                for idx, (item_id, x, y, w, h) in enumerate(rects):
+                    if abs(x - slot_rect.x) > _SLOT_RECT_TOL_PT or abs(w - slot_rect.w) > _SLOT_RECT_TOL_PT:
+                        _refuse_rect(item_id, x, y, w, h, "verse/point text")
+                    if idx > 0:
+                        prev_id, px, py, pw, ph = rects[idx - 1]
+                        gap = 0.0
+                        if item_id in plan_fits and prev_id in plan_fits:
+                            gap = plan_fits[item_id].y - (plan_fits[prev_id].y + plan_fits[prev_id].h)
+                        expected_top = py + ph + gap
+                        if abs(y - expected_top) > 2.0:
+                            _refuse_rect(item_id, x, y, w, h, "verse/point text")
+                last_id, lx, ly, lw, lh = rects[-1]
+                if ly + lh > slot_rect.y + slot_rect.h + 2.0:
+                    _refuse_rect(last_id, lx, ly, lw, lh, "verse/point text")
+            else:
+                for item_id in sorted(stacked):
+                    got = _rect_for(item_id)
+                    if got is None:
+                        raise AssemblyRefusal(
+                            f"slide {number} (ordinal {ordinal}): verse/point text {_item_label(item_id)} "
+                            "not found on the staged slide"
+                        )
+                    x, y, w, h = got
+                    if (
+                        abs(x - slot_rect.x) > _SLOT_RECT_TOL_PT
+                        or abs(w - slot_rect.w) > _SLOT_RECT_TOL_PT
+                        or abs(y - slot_rect.y) > _SLOT_RECT_TOL_PT
+                        or h > slot_rect.h + 2.0
+                    ):
+                        _refuse_rect(item_id, x, y, w, h, "verse/point text")
 
         if slot.badge is not None:
             badge_id = plan.slot_badge_ids.get(number)
@@ -4114,7 +4214,10 @@ def _pill_specs(
     §2.2/§3 L3, the same ``slide_layout_names`` the staged verifier checks) is one of
     the two verse layouts -- split parts included, each part's own physical slide gets
     its own pill built from that part's own staged badge id (``_staged_id_for``, part-
-    aware, mirrors ``verify_staged_layouts_alpha_safe``)."""
+    aware, mirrors ``verify_staged_layouts_alpha_safe``). A group-child badge id (a
+    4-tuple ``("groupchild", g, kind, k)``) is resolved via
+    ``_staged_group_child_record`` instead -- ``_staged_id_for`` only unpacks a plain
+    ``(kind, kindIndex)`` pair."""
     if not slide_layout_names:
         return {}
     ordinal_to_number = plan.ordinal_to_number or {
@@ -4141,7 +4244,22 @@ def _pill_specs(
         if slide is None:
             raise AssemblyRefusal(f"slide {number} (ordinal {ordinal}): slide not resolvable offline")
         part = ordinal - plan.ordinals.get(number, ordinal)
-        staged_addr = _staged_id_for(number, plan, badge_id, part=part, hidden=hidden.get(number, frozenset()))
+        slide_hidden = hidden.get(number, frozenset())
+        if badge_id[0] == "groupchild":
+            child = _staged_group_child_record(
+                objects, slide, number, plan, badge_id, part=part, hidden=slide_hidden
+            )
+            if child is None:
+                raise AssemblyRefusal(
+                    f"slide {number} (ordinal {ordinal}): verse badge {_item_label(badge_id)} not staged"
+                )
+            obj = objects.get(child.get("id"))
+            if obj is None:
+                raise AssemblyRefusal(f"slide {number} (ordinal {ordinal}): verse badge object unresolved")
+            width = _pill_width_for_badge(child.get("text") or "", obj, objects, cache)
+            specs[ordinal] = PillSpec(width, pill_layout)
+            continue
+        staged_addr = _staged_id_for(number, plan, badge_id, part=part, hidden=slide_hidden)
         if staged_addr is None:
             raise AssemblyRefusal(
                 f"slide {number} (ordinal {ordinal}): verse badge {_item_label(badge_id)} not staged"
@@ -5070,6 +5188,7 @@ def assemble_dsk_deck(
             if miss_m:
                 warnings.append(f"slide {miss_m.group(1)}: write failed for {miss_m.group(2)}: {miss_m.group(3)}")
 
+        current_pass = "keynote assembly"
         try:
             if proc.returncode != 0:
                 if last_error is not None:
@@ -5081,6 +5200,7 @@ def assemble_dsk_deck(
 
             hidden_map = {n: frozenset(ids) for n, ids in hidden_ids.items()}
             slides_by_number = {s["number"]: s for s in payload.get("slides") or []}
+            current_pass = "refit"
             _run_refit_and_finalize(
                 plan, batch, slides_by_number,
                 band=resolved_band, min_text_pt=min_text_pt, allow_split=allow_split, text_fit=text_fit,
@@ -5089,20 +5209,26 @@ def assemble_dsk_deck(
             )
 
             if layout_policy == "import":
+                current_pass = "verify"
                 verify_staged_layouts_alpha_safe(
-                    staging_path, plan, expected_layout_names=slide_layout_names, hidden=hidden_map,
+                    staging_path, plan, expected_layout_names=slide_layout_names, hidden=hidden_map, log=log,
                 )
 
+            current_pass = "stroke"
             stroke = _restore_stroke(
                 fw_deck, staging_path, plan, payload, stroke_min_refs, warnings, log, hidden=hidden_map,
             )
+            current_pass = "zorder"
             zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
+            current_pass = "builds"
             builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
 
             if not no_style:
+                current_pass = "style"
                 staging_path = _write_style_pass(staging_path, slide_layout_names, warnings, log)
 
             if not no_pills:
+                current_pass = "pill"
                 staging_path = _write_pill_pass(
                     staging_path, plan, slide_layout_names, warnings, log, hidden=hidden_map,
                 )
@@ -5121,6 +5247,20 @@ def assemble_dsk_deck(
                 else:
                     log(f"staged deck kept at {refused_path}")
             raise
+        except Exception as exc:  # noqa: BLE001
+            # A bug in a post-pass (not a refusal) must not silently drop the staged
+            # deck either -- keep it as `*.failed.key`, log the traceback, then
+            # surface it as a refusal so the caller's normal handling applies.
+            log(traceback.format_exc())
+            if staging_path.exists():
+                failed_path = out_path.parent / f"{out_path.stem}.failed.key"
+                try:
+                    copy_keynote(staging_path, failed_path)
+                except Exception as copy_exc:  # noqa: BLE001
+                    log(f"could not keep the staged deck: {copy_exc}")
+                else:
+                    log(f"staged deck kept at {failed_path}")
+            raise AssemblyRefusal(f"{current_pass}: {type(exc).__name__}: {exc}") from exc
 
         copy_keynote(staging_path, out_path)
 
