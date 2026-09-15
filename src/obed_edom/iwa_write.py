@@ -187,6 +187,24 @@ def bridge_specs_kindindex(specs: list[dict]) -> list[dict]:
     return bridged
 
 
+def read_slide_zorder(deck: Path, slide_number: int) -> tuple[list[str], list[str]]:
+    """(drawablesZOrder ids, ownedDrawables ids) as strings, via _load_deck + slide_order."""
+    try:
+        objects, _id_to_file, _file_ids = _load_deck(deck)
+    except Exception as exc:  # noqa: BLE001 — surfaced as a hint, not swallowed
+        raise RuntimeError(
+            f"_load_deck failed on {deck}: {exc} (keynote_parser may not decode a "
+            "15.3.1-authored member — check the installed keynote_parser version)"
+        ) from exc
+    order = slide_order(objects)
+    if not (1 <= slide_number <= len(order)):
+        raise ValueError(f"slide {slide_number} out of range (deck has {len(order)} slides)")
+    slide = objects[order[slide_number - 1][0]]
+    z = [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []]
+    owned = [str(r["identifier"]) for r in slide.get("ownedDrawables") or []]
+    return z, owned
+
+
 def expected_base_counts(source_counts: dict[str, int], specs: list[dict]) -> dict[str, int]:
     """Saved-deck per-kind counts = source-derived minus role=hide. Mismatch refuses the slide."""
     hides: dict[str, int] = {}

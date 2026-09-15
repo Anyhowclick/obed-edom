@@ -22,16 +22,20 @@ import time
 import zipfile
 from pathlib import Path
 
-from keynote_parser.codec import IWAFile
-
-from obed_edom import keynote_app
-from obed_edom.iwa_runs import _load_deck, slide_order
-
 # Direct execution (`python scripts/probe_zorder_patch.py`) puts scripts/ itself, not the
 # repo root, on sys.path[0]; pytest and `python -c "import scripts…"` already have the
-# root. Idempotent to add twice.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# root. An editable install's .pth entry also puts a (possibly different checkout's) `src`
+# on sys.path, so `src` must be inserted ahead of it for `obed_edom` to resolve to THIS
+# worktree. Idempotent to add twice. Must precede every `obed_edom`/`scripts` import below.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+sys.path.insert(0, str(_REPO_ROOT))
 
+from keynote_parser.codec import IWAFile  # noqa: E402
+
+from obed_edom import keynote_app  # noqa: E402
+from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
+from obed_edom.iwa_write import read_slide_zorder as read_zorder  # noqa: E402
 from scripts.write_gate_ab import target_member_for_slide  # noqa: E402
 
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "output" / "zorder-probe"
@@ -42,13 +46,19 @@ DOC_NAME = "zprobe.key"
 # Pure.
 # ==========================================================================
 def permute_front(ids: list[str]) -> list[str]:
-    """Rotate the back-most (index 0) id to the front-most (last) slot. [] and [x] unchanged."""
+    """Rotate the back-most (index 0) id to the front-most (last) slot. [] and [x] unchanged.
+
+    Probe-only rotation for exercising a live canary's render change — NOT the production
+    raise primitive (see ``obed_edom.iwa_zorder.raise_to_front``)."""
     return ids[1:] + ids[:1] if len(ids) > 1 else list(ids)
 
 
 def permute_front_within(order: list[str], subset: list[str]) -> list[str]:
     """``permute_front``, restricted to the slots ``subset`` occupies in ``order``; every
-    other id (e.g. the default theme's placeholder drawables) stays in place."""
+    other id (e.g. the default theme's placeholder drawables) stays in place.
+
+    Probe-only rotation — NOT the production raise primitive (see
+    ``obed_edom.iwa_zorder.raise_to_front``)."""
     subset_ids = set(subset)
     positions = [i for i, x in enumerate(order) if x in subset_ids]
     rotated = permute_front([order[i] for i in positions])
@@ -56,24 +66,6 @@ def permute_front_within(order: list[str], subset: list[str]) -> list[str]:
     for pos, val in zip(positions, rotated):
         result[pos] = val
     return result
-
-
-def read_zorder(deck: Path, slide_number: int) -> tuple[list[str], list[str]]:
-    """(drawablesZOrder ids, ownedDrawables ids) as strings, via _load_deck + slide_order."""
-    try:
-        objects, _id_to_file, _file_ids = _load_deck(deck)
-    except Exception as exc:  # noqa: BLE001 — surfaced as a hint, not swallowed
-        raise RuntimeError(
-            f"_load_deck failed on {deck}: {exc} (keynote_parser may not decode a "
-            "15.3.1-authored member — check the installed keynote_parser version)"
-        ) from exc
-    order = slide_order(objects)
-    if not (1 <= slide_number <= len(order)):
-        raise ValueError(f"slide {slide_number} out of range (deck has {len(order)} slides)")
-    slide = objects[order[slide_number - 1][0]]
-    z = [str(r["identifier"]) for r in slide.get("drawablesZOrder") or []]
-    owned = [str(r["identifier"]) for r in slide.get("ownedDrawables") or []]
-    return z, owned
 
 
 def reorder_slide_zorder(deck: Path, slide_number: int, new_order: list[str]) -> dict:
