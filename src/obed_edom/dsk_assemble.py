@@ -205,7 +205,7 @@ def _find_verse_badge_id(
     *,
     exclude: frozenset[ItemId] = frozenset(),
     short_fit: Mapping[ItemId, Rect] | None = None,
-) -> ItemId | None:
+) -> tuple[ItemId | None, ItemId | None]:
     """The verse reference/badge id, resolved with the SAME predicate D1b's
     ``_heading_cluster`` uses for its own badge (finding 1): a kept top-level ``text``
     item, other than a long (verse) text or an ``exclude``d id (e.g. a repeat-heading
@@ -213,9 +213,17 @@ def _find_verse_badge_id(
     one kept top-level ``shape``'s rect and text (GW13/46/52-shaped) -- never any lone
     extra text. When no top-level text matches, falls back to the single retained
     ``groupchild`` short item already placed in ``short_fit`` (GW5/44/50/51/53/54-shaped,
-    where the badge is a group child and no top-level text is left behind). ``None`` when
-    there is no match or more than one (ambiguous, so the slide is treated as ``point``
-    rather than guessed at)."""
+    where the badge is a group child and no top-level text is left behind). Returns
+    ``(None, None)`` when there is no match or more than one (ambiguous, so the slide is
+    treated as ``point`` rather than guessed at).
+
+    The GW13/46/52-shaped match is a duplicate PAIR -- a real, independent shape object
+    (not the same live Keynote object queried twice) drawn as an outline twin over the
+    plain text badge, same rect/text in the source. Both write independently; leaving
+    the shape unpinned lets it keep its own affine-fitted rect while the text moves to
+    the slot, splitting the badge in two. The second element of the return is that
+    twin's id (``None`` for the group-child case, which has no top-level twin) so the
+    caller can pin both to the slot rect."""
     long_ids = set(cls.long_text_ids)
     texts = [
         (item_id, items_by_id[item_id]) for item_id in cls.kept
@@ -226,7 +234,7 @@ def _find_verse_badge_id(
         (item_id, items_by_id[item_id]) for item_id in cls.kept
         if item_id[0] == "shape" and item_id not in exclude and item_id in items_by_id
     ]
-    candidates: list[ItemId] = []
+    candidates: list[tuple[ItemId, ItemId]] = []
     for text_id, text_item in texts:
         badge_text = _normalise_ws(text_item.get("text") or "")
         if not badge_text:
@@ -238,19 +246,19 @@ def _find_verse_badge_id(
             and _normalise_ws(shape_item.get("text") or "") == badge_text
         ]
         if len(matches) == 1:
-            candidates.append(text_id)
+            candidates.append((text_id, matches[0]))
     if len(candidates) == 1:
         return candidates[0]
     if candidates:
-        return None
+        return None, None
     if short_fit:
         group_badges = [
             item_id for item_id in short_fit
             if item_id[0] == "groupchild" and item_id not in long_ids
         ]
         if len(group_badges) == 1:
-            return group_badges[0]
-    return None
+            return group_badges[0], None
+    return None, None
 
 
 def _slot_band(rect: Rect, *, sample_count: int = DEFAULT_BAND.sample_count) -> Band:
@@ -365,6 +373,7 @@ class AssemblyPlan:
     short_fit: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
     short_row_h: dict[int, float] = field(default_factory=dict)
     slot_badge_ids: dict[int, ItemId] = field(default_factory=dict)
+    slot_badge_twin_ids: dict[int, ItemId] = field(default_factory=dict)
     crops: dict[int, dict[ItemId, CropSpec]] = field(default_factory=dict)
     anchors: dict[int, str] = field(default_factory=dict)
     two_column: dict[int, Band] = field(default_factory=dict)
@@ -1308,6 +1317,7 @@ def plan_assembly(
     short_fit_map: dict[int, dict[ItemId, Rect]] = {}
     short_row_h_map: dict[int, float] = {}
     slot_badge_ids_map: dict[int, ItemId] = {}
+    slot_badge_twin_ids_map: dict[int, ItemId] = {}
     crops_out: dict[int, dict[ItemId, CropSpec]] = {}
     anchors_out: dict[int, str] = {}
     two_column_map: dict[int, Band] = {}
@@ -1650,7 +1660,7 @@ def plan_assembly(
                         and all(iid[0] in ("text", "groupchild") for iid in long_ids)
                     )
                     if slot_eligible:
-                        slot_badge_id = _find_verse_badge_id(
+                        slot_badge_id, slot_badge_twin_id = _find_verse_badge_id(
                             cls, items_by_id, exclude=dropped_heading_ids, short_fit=short_fit,
                         )
                         slot_category = "verse" if slot_badge_id is not None else "point"
@@ -1679,12 +1689,16 @@ def plan_assembly(
                             layout_for_slide(category=slot_category, two_column=False, line_count=slot_lines)
                             if slot_lines is not None else None
                         )
+                        slot_badge_twin_orig_rect: Rect | None = None
                         if slot_layout_name is not None and slot_category == "verse" and slot_badge_id is not None:
                             badge_slot = LAYOUT_SLOTS[slot_layout_name]
                             if badge_slot.badge is not None and slot_badge_id in short_fit:
                                 slot_badge_orig_rect = short_fit[slot_badge_id]
                                 short_fit[slot_badge_id] = badge_slot.badge
                                 slot_badge_pt = badge_slot.badge_pt
+                                if slot_badge_twin_id is not None and slot_badge_twin_id in short_fit:
+                                    slot_badge_twin_orig_rect = short_fit[slot_badge_twin_id]
+                                    short_fit[slot_badge_twin_id] = badge_slot.badge
 
                     stack_band = col_band
                     short_row_h = 0.0
@@ -1754,6 +1768,8 @@ def plan_assembly(
                             slot_layout_name = None
                             if slot_badge_id is not None and slot_badge_pt is not None:
                                 short_fit[slot_badge_id] = slot_badge_orig_rect
+                                if slot_badge_twin_id is not None and slot_badge_twin_orig_rect is not None:
+                                    short_fit[slot_badge_twin_id] = slot_badge_twin_orig_rect
                                 slot_badge_pt = None
                             stack_band = col_band
                             short_row_h = 0.0
@@ -1788,7 +1804,10 @@ def plan_assembly(
                         if short_fit:
                             stack_top = min(rect.y for rect in long_rects.values())
                             slot_pinned = (
-                                frozenset({slot_badge_id})
+                                frozenset(
+                                    iid for iid in (slot_badge_id, slot_badge_twin_id)
+                                    if iid is not None and iid in short_fit
+                                )
                                 if slot_layout_name is not None and slot_badge_id is not None
                                 and slot_badge_id in short_fit
                                 else None
@@ -1894,8 +1913,16 @@ def plan_assembly(
                         )
                         if split_slot_badge_pinned:
                             short_fit[slot_badge_id] = split_slot.badge
+                            if slot_badge_twin_id is not None and slot_badge_twin_id in short_fit:
+                                short_fit[slot_badge_twin_id] = split_slot.badge
                             slot_badge_pt = split_slot.badge_pt
-                        split_badge_pinned_ids = frozenset({slot_badge_id}) if split_slot_badge_pinned else None
+                        split_badge_pinned_ids = (
+                            frozenset(
+                                iid for iid in (slot_badge_id, slot_badge_twin_id)
+                                if iid is not None and iid in short_fit
+                            )
+                            if split_slot_badge_pinned else None
+                        )
                         stack_band = _slot_band(split_rect)
                         split_t = split_pt / split_box.size if split_box.size else 1.0
                         stack_t_map[number] = split_t
@@ -2019,7 +2046,10 @@ def plan_assembly(
                                 multi_slot.verse if slot_category == "verse" else multi_slot.text
                             )
                             split_slot_pinned_ids = (
-                                frozenset({slot_badge_id})
+                                frozenset(
+                                    iid for iid in (slot_badge_id, slot_badge_twin_id)
+                                    if iid is not None and iid in short_fit
+                                )
                                 if slot_badge_id is not None and slot_badge_id in short_fit
                                 else None
                             )
@@ -2169,6 +2199,8 @@ def plan_assembly(
                 short_row_h_map[number] = short_row_h
                 if used_slot_layout_name is not None and slot_badge_id is not None and slot_badge_id in short_fit:
                     slot_badge_ids_map[number] = slot_badge_id
+                    if slot_badge_twin_id is not None and slot_badge_twin_id in short_fit:
+                        slot_badge_twin_ids_map[number] = slot_badge_twin_id
         except Exception:
             _discard_pending_crop_writes(pending_crop_writes)
             raise
@@ -2214,6 +2246,7 @@ def plan_assembly(
         short_fit=short_fit_map,
         short_row_h=short_row_h_map,
         slot_badge_ids=slot_badge_ids_map,
+        slot_badge_twin_ids=slot_badge_twin_ids_map,
         crops=crops_out,
         anchors=anchors_out,
         two_column=two_column_map,
@@ -2699,11 +2732,14 @@ def verify_staged_layouts_alpha_safe(
 
         if slot.badge is not None:
             badge_id = plan.slot_badge_ids.get(number)
-            if badge_id is not None:
-                got = _rect_for(badge_id)
+            badge_twin_id = plan.slot_badge_twin_ids.get(number)
+            for check_id in (badge_id, badge_twin_id):
+                if check_id is None:
+                    continue
+                got = _rect_for(check_id)
                 if got is None:
                     raise AssemblyRefusal(
-                        f"slide {number} (ordinal {ordinal}): verse badge {_item_label(badge_id)} "
+                        f"slide {number} (ordinal {ordinal}): verse badge {_item_label(check_id)} "
                         "not found on the staged slide"
                     )
                 x, y, w, h = got
@@ -2713,7 +2749,7 @@ def verify_staged_layouts_alpha_safe(
                     or abs(w - slot.badge.w) > _SLOT_RECT_TOL_PT
                     or abs(h - slot.badge.h) > _SLOT_RECT_TOL_PT
                 ):
-                    _refuse_rect(badge_id, x, y, w, h, "verse badge")
+                    _refuse_rect(check_id, x, y, w, h, "verse badge")
 
 
 def _locked_write_block(
@@ -4496,7 +4532,14 @@ def _build_refit_round(
             stack_top = min(rect.y for rect in rects.values())
             short_row_h = plan.short_row_h.get(slide_no, 0.0)
             slot_badge_id = plan.slot_badge_ids.get(slide_no)
-            slot_pinned = frozenset({slot_badge_id}) if slot_badge_id in short_fit else None
+            slot_badge_twin_id = plan.slot_badge_twin_ids.get(slide_no)
+            slot_pinned = (
+                frozenset(
+                    iid for iid in (slot_badge_id, slot_badge_twin_id)
+                    if iid is not None and iid in short_fit
+                )
+                if slot_badge_id in short_fit else None
+            )
             short_rects = _short_row_rects(short_fit, short_row_h, stack_top, pinned_ids=slot_pinned)
             for iid, short_rect in short_rects.items():
                 slide_refits[iid] = TextRefit(short_rect, None)

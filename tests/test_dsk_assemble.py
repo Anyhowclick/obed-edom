@@ -9833,7 +9833,7 @@ def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):
     assert verse_rect.w == slot.verse.w
     assert verse_rect.y == pytest.approx(slot.verse.y)
     assert verse_rect.h <= slot.verse.h
-    badge_id = dsa._find_verse_badge_id(by_number[13], {
+    badge_id, badge_twin_id = dsa._find_verse_badge_id(by_number[13], {
         (item["kind"], item["kindIndex"]): item for item in payload["slides"][12]["items"]
     })
     assert badge_id is not None
@@ -9841,6 +9841,13 @@ def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):
     # Finding 4: the badge is snapped to the EXACT slot rect, not reflowed from the
     # verse content top (previously 774.3 instead of 785.8 for a full Standard slot).
     assert plan.fits[13][badge_id].y == 785.8
+    # Badge twin (finding: GW13's badge is a text item WITH a duplicate outline shape
+    # sharing its source rect/text) -- both must land on the exact same slot rect, not
+    # just the text half, else the shape twin keeps its own independently-fitted rect
+    # and the visible glyphs split away from the slot.
+    assert badge_twin_id is not None and badge_twin_id[0] == "shape"
+    assert plan.slot_badge_twin_ids[13] == badge_twin_id
+    assert plan.fits[13][badge_twin_id] == plan.fits[13][badge_id] == slot.badge
 
     # Finding 2: `stack_bands`/`run_sizes` derive from the SAME slot as `fits`, not a
     # post-plan override left behind -- GW 13's verse keeps a mixed-emphasis run (its
@@ -9871,6 +9878,20 @@ def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):
     )
     ordinal = plan.ordinals[13]
     assert f'set base layout of slide {ordinal} of theDoc to resolvedLayout' in script
+
+    # Both the text item and its shape twin get the slot's exact width/height/position
+    # written -- neither is left to its own independently-fitted rect.
+    text_addr = f"text item {badge_id[1] + 1} of slide {ordinal}"
+    shape_addr = f"shape {badge_twin_id[1] + 1} of slide {ordinal}"
+    for addr in (text_addr, shape_addr):
+        idx = script.index(f"set theObj to {addr}")
+        block = script[idx : idx + 400]
+        assert f"set width of theObj to {dsa._as_num(slot.badge.w)}" in block
+        assert f"set height of theObj to {dsa._as_num(slot.badge.h)}" in block
+        assert (
+            f"set position of theObj to {{{dsa._as_num(slot.badge.x)}, {dsa._as_num(slot.badge.y)}}}"
+            in block
+        )
 
 
 def test_build_refit_round_keeps_slot_rect_as_refit_authority(tmp_path):
@@ -9920,7 +9941,7 @@ def test_gw38_verse_over_three_lines_splits_at_the_standard_slot():
     items = {(it["kind"], it["kindIndex"]): it for it in payload["slides"][37]["items"]}
     full_text = items[verse_id]["text"]
     slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
-    assert dsa._find_verse_badge_id(cls38, items) is not None
+    assert dsa._find_verse_badge_id(cls38, items)[0] is not None
     assert line_count(full_text, items[verse_id]["font"], 45.0, slot.verse.w) > 3
 
     decisions = {38: SlideDecision(38, "in_deck")}
@@ -10400,7 +10421,7 @@ def test_find_verse_badge_id_requires_matched_text_shape_not_any_lone_text():
         kept=(("text", 1), ("text", 0)), dropped_side=(), dropped_backdrop=(),
         transition=None, is_text=True, long_text_ids=(("text", 1),),
     )
-    assert dsa._find_verse_badge_id(cls, items_by_id) is None
+    assert dsa._find_verse_badge_id(cls, items_by_id) == (None, None)
 
     badge_shape = {"kind": "shape", "kindIndex": 0, "x": 44.0, "y": 719.0, "w": 651.0, "h": 81.0}
     badge_shape["text"] = "unmatched caption"
@@ -10409,7 +10430,10 @@ def test_find_verse_badge_id_requires_matched_text_shape_not_any_lone_text():
     cls_with_shape = dsk_plan.SlideClass(
         **{**cls.__dict__, "kept": (("text", 1), ("text", 0), ("shape", 0))}
     )
-    assert dsa._find_verse_badge_id(cls_with_shape, items_by_id_with_shape) == ("text", 0)
+    # Finding 1 (badge twin): the matched shape is a real, independent duplicate object
+    # (an outline twin drawn over the plain text badge), returned alongside the text id
+    # so both can be pinned to the slot rect.
+    assert dsa._find_verse_badge_id(cls_with_shape, items_by_id_with_shape) == (("text", 0), ("shape", 0))
 
 
 def test_find_verse_badge_id_falls_back_to_retained_group_child_short_fit():
@@ -10424,11 +10448,11 @@ def test_find_verse_badge_id_falls_back_to_retained_group_child_short_fit():
         transition=None, is_text=True, long_text_ids=(("groupchild", 0, "text", 1),),
     )
     short_fit = {("groupchild", 0, "shape", 0): Rect(63.1, 0.0, 645.0, 92.0)}
-    assert dsa._find_verse_badge_id(cls, {}, short_fit=short_fit) == ("groupchild", 0, "shape", 0)
+    assert dsa._find_verse_badge_id(cls, {}, short_fit=short_fit) == (("groupchild", 0, "shape", 0), None)
     # Ambiguous with two group-child short items: refuse to guess.
     short_fit_ambiguous = dict(short_fit)
     short_fit_ambiguous[("groupchild", 0, "shape", 1)] = Rect(63.1, 0.0, 200.0, 92.0)
-    assert dsa._find_verse_badge_id(cls, {}, short_fit=short_fit_ambiguous) is None
+    assert dsa._find_verse_badge_id(cls, {}, short_fit=short_fit_ambiguous) == (None, None)
 
 
 def test_gw51_group_child_verse_resolves_verse_standard_and_slot_rects():
@@ -10626,16 +10650,17 @@ def test_gw52_repeat_heading_dropped_resolves_verse_standard():
     for part in plan.splits[52]:
         verse_id = by_number[52].long_text_ids[0]
         assert part.fits[verse_id] == slot.verse
-        # Exactly one retained short item (the badge `_find_verse_badge_id` matched to
-        # its shape) is snapped to the badge slot -- any sibling item sharing the same
-        # source text/rect (e.g. the shape half of a text/shape badge pair) keeps its
-        # own natural short-row position, unmoved.
+        # Badge twin fix: BOTH the text half `_find_verse_badge_id` matched and its
+        # duplicate outline shape twin are snapped to the badge slot -- the shape twin is
+        # a real, independent object (not the same live item queried twice), and leaving
+        # it unpinned split the visible badge away from the slot (GW 13/38/52).
         snapped = [
             iid for iid, rect in part.fits.items()
             if iid != verse_id and rect.x == slot.badge.x and rect.w == slot.badge.w
             and rect.h == slot.badge.h
         ]
-        assert len(snapped) == 1
+        assert len(snapped) == 2
+        assert set(iid[0] for iid in snapped) == {"text", "shape"}
 
 
 def test_gw52_split_parts_each_get_the_dropped_heading_cluster_deletes():
