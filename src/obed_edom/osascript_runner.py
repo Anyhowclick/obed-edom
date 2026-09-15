@@ -57,19 +57,25 @@ class OsaResult:
 
 
 def keynote_timeout(override: float | None = None) -> float:
-    """``override`` -> ``OBED_OSASCRIPT_TIMEOUT`` -> ``DEFAULT_TIMEOUT``; 0/negative/
-    non-finite disables the limit (a non-numeric env value falls back to
-    ``DEFAULT_TIMEOUT``)."""
+    """``OBED_OSASCRIPT_TIMEOUT`` -> ``override`` -> ``DEFAULT_TIMEOUT``.
+
+    0/negative/non-finite (``nan``, ``inf``) disable the limit — ``_execute`` treats
+    those as "no deadline". A non-numeric env value is ignored so a per-call
+    ``override`` (or ``DEFAULT_TIMEOUT``) still applies.
+
+    The env var wins so an operator can relax the hard-coded per-site limits
+    (template-stat ``timeout=600``, close-by-name ``timeout=60``) without a code
+    change; ``nan``/``inf``/``0``/negative mean no wall-clock kill.
+    """
+    raw = os.environ.get(_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
     if override is not None:
         return override
-    raw = os.environ.get(_TIMEOUT_ENV, "").strip()
-    if not raw:
-        return DEFAULT_TIMEOUT
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_TIMEOUT
-    return value
+    return DEFAULT_TIMEOUT
 
 
 def _launch_keynote() -> None:
