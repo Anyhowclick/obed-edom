@@ -97,6 +97,7 @@ from obed_edom.iwa_runs import (
 from obed_edom.iwa_text_shape import shape_style, shaped_width
 from obed_edom.iwa_write import OfflineWriteCorrupted, reorder_drawables
 from obed_edom.dsk_pill import OfflineWriteRefused, PillResult, PillSpec, write_pills
+from obed_edom.dsk_style import OfflineWriteRefused as StyleWriteRefused, StyleResult, write_styles
 from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
 from obed_edom.offline_inspect import (
     _build_data_index,
@@ -4176,6 +4177,49 @@ def _write_pill_pass(
     return next_path
 
 
+_STYLE_LAYOUT_NAMES: frozenset[str] = frozenset(
+    name for name in LAYOUT_SLOTS if name != "Blank Black"
+)
+
+
+def _has_style_target(slide_layout_names: Mapping[int, str] | None) -> bool:
+    """Same predicate the pill pass uses to decide "nothing to do" (an ordinal must
+    resolve to a slot-bearing layout), widened to verse AND point layouts: the style
+    patch also clears the point-column reference badge's caps (plan Q2), so it is
+    worth running whenever either family is present, not just the verse layouts the
+    pill pass cares about."""
+    if not slide_layout_names:
+        return False
+    return any(name in _STYLE_LAYOUT_NAMES for name in slide_layout_names.values())
+
+
+def _write_style_pass(
+    staging_path: Path,
+    slide_layout_names: Mapping[int, str] | None,
+    warnings: list[str],
+    log: Callable[[str], None],
+) -> Path:
+    """Plan §3 S2 wiring: offline stylesheet patch write against the STAGING deck,
+    before the pill pass. Returns the (possibly new) staging path -- unchanged when no
+    ordinal resolves to a verse/point layout. Raises `AssemblyRefusal` on
+    `StyleWriteRefused`, same refusal pattern as the other offline post-passes (the
+    pre-style staging deck is kept by the caller's existing `*.refused.key` handling).
+    Unlike the pill pass the patch is deck-wide (a single stylesheet member), so there
+    is no per-ordinal spec builder -- just the skip predicate."""
+    if not _has_style_target(slide_layout_names):
+        log("style: no verse/point-layout ordinals, skipped")
+        return staging_path
+    next_path = staging_path.with_name(f"{staging_path.stem}-style{staging_path.suffix}")
+    try:
+        result = write_styles(staging_path, out_path=next_path)
+    except StyleWriteRefused as exc:
+        raise AssemblyRefusal(f"style write refused: {exc}") from exc
+    badge = sum(1 for role in result.edited_ids.values() if role in ("verse_badge", "point_column_badge"))
+    superscript = sum(1 for role in result.edited_ids.values() if role == "superscript")
+    log(f"style: applied {result.applied} (badge {badge}, superscript {superscript})")
+    return next_path
+
+
 def _verify_builds(
     fw_deck: Path,
     out_path: Path,
@@ -4900,10 +4944,12 @@ def assemble_dsk_deck(
     no_drop_panel_backdrop: bool = False,
     split_overrides: Mapping[int, int] | None = None,
     no_pills: bool = False,
+    no_style: bool = False,
 ) -> AssembleResult:
     """Runs the live AppleScript batch end to end (plan -> LiveBatch -> script),
     then offline IWA post-passes: card-border stroke restore, build/transition
-    verification, and (unless `no_pills`) the verse-pill mask write (plan §3 L4). The
+    verification, (unless `no_style`) the template-style stylesheet patch (plan §3 S2),
+    and (unless `no_pills`) the verse-pill mask write (plan §3 L4). The
     batch script saves-as (Keynote's sdef does document a `save ... in`
     verb, per `maps_keynote.py`) to a staging path inside the batch's own disposable work
     dir, never in place and never straight to `out_path` -- both post-passes run against
@@ -5041,6 +5087,9 @@ def assemble_dsk_deck(
             )
             zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
             builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
+
+            if not no_style:
+                staging_path = _write_style_pass(staging_path, slide_layout_names, warnings, log)
 
             if not no_pills:
                 staging_path = _write_pill_pass(

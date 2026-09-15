@@ -204,6 +204,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the offline verse-pill mask write (plan §3 L4).",
     )
     dsk_assemble.add_argument(
+        "--no-style", action="store_true",
+        help="Skip the offline template-style stylesheet patch (plan §3 S2).",
+    )
+    dsk_assemble.add_argument(
         "--rss-limit-gb", type=float, default=DEFAULT_RSS_LIMIT_BYTES / 1e9,
         help="Keynote RSS watchdog limit in GB; the run aborts above it.",
     )
@@ -490,6 +494,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             split_overrides=split_overrides,
             rss_limit_bytes=int(args.rss_limit_gb * 1e9),
             no_pills=args.no_pills,
+            no_style=args.no_style,
         )
     except AssemblyRefusal as exc:
         print(f"Assembly refused: {exc}", file=sys.stderr)

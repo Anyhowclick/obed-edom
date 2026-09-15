@@ -312,3 +312,15 @@ Keynote document open, generous `with timeout`, never force-quit while the owner
 - p2 round 2 (`p1_patch_styles.py` also writes `tsdFill.color` = the new colour when `tsdFill` is present): PASSED — run tables byte-identical before and after the save (`~/Desktop/style-probe/roles.diff` empty): badges white AzoSans-Bold 40 title-case, verse numbers [255,251,0] superscript. Mechanism D stands with the dual-field rule. Reader must learn `tsdFill.color` (verification must read the authoritative field).
 - p3 (per-range live writes) not run: no longer needed.
 - Owner defaults adopted pending answers: Q1 follow GOLD (yellow ArgentCF-Bold emphasis — no emphasis work); Q2 point-column badge keeps cyan, caps cleared; Q3 badge string verbatim.
+
+## S2 wired (2026-09-15)
+`_write_style_pass`/`_has_style_target` added in `dsk_assemble.py`, mirroring
+`_write_pill_pass`'s structure: runs against the staging deck after `_verify_builds`
+and BEFORE the pill pass; skips with `"style: no verse/point-layout ordinals,
+skipped"` when no ordinal resolves to a slot-bearing layout (predicate widened to
+verse+point since the style patch also clears the point-column badge's caps); logs
+`"style: applied N (badge M, superscript K)"`; `OfflineWriteRefused` from
+`write_styles` (aliased `StyleWriteRefused` to avoid the `dsk_pill` name collision)
+becomes `AssemblyRefusal`, staging deck kept via the existing `*.refused.key` path.
+`no_style: bool = False` kwarg on `assemble_dsk_deck`, `--no-style` CLI flag threaded
+through `cli.py`. Targeted suite green (462 passed); full suite pending.

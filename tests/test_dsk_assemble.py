@@ -5816,7 +5816,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None, no_pills=False,
+        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False,
     ):
         captured["decisions"] = decisions
         captured["clips"] = clips
@@ -5903,7 +5903,7 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None, no_pills=False,
+        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False,
     ):
         captured["black_layout_names"] = black_layout_names
         return AssembleResult(
@@ -10996,6 +10996,101 @@ def test_verify_staged_layouts_post_delete_staged_index(monkeypatch, tmp_path):
     dsa.verify_staged_layouts_alpha_safe(
         tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
     )
+
+
+# --------------------------------------------------------------------------- S2 style wiring
+
+
+def test_has_style_target_verse_and_point_layouts():
+    assert dsa._has_style_target({1: "Verse Standard (Variation 2)"})
+    assert dsa._has_style_target({1: "Point (2 Lines)"})
+    assert not dsa._has_style_target({1: "Blank Black"})
+    assert not dsa._has_style_target({})
+    assert not dsa._has_style_target(None)
+
+
+def test_assemble_dsk_deck_calls_style_pass_after_pill_pass(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    order: list[str] = []
+
+    def fake_write_style_pass(staging_path, slide_layout_names, warnings, log):
+        order.append("style")
+        return staging_path
+
+    def fake_write_pill_pass(staging_path, plan, slide_layout_names, warnings, log, *, hidden={}):
+        order.append("pill")
+        return staging_path
+
+    monkeypatch.setattr(dsa, "_write_style_pass", fake_write_style_pass)
+    monkeypatch.setattr(dsa, "_write_pill_pass", fake_write_pill_pass)
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
+    assert order == ["style", "pill"]
+    assert result.path == out_path
+
+
+def test_assemble_dsk_deck_no_style_skips_pass(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    def fake_write_style_pass(*_args, **_kwargs):
+        raise AssertionError("must not be called with no_style=True")
+
+    monkeypatch.setattr(dsa, "_write_style_pass", fake_write_style_pass)
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve", no_style=True,
+    )
+    assert result.path == out_path
+
+
+def test_style_write_refusal_becomes_assembly_refusal(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    def fake_has_style_target(_names):
+        return True
+
+    def fake_write_styles(_key_path, *, out_path, spec=None):
+        raise dsa.StyleWriteRefused("boom")
+
+    monkeypatch.setattr(dsa, "_has_style_target", fake_has_style_target)
+    monkeypatch.setattr(dsa, "write_styles", fake_write_styles)
+    with pytest.raises(AssemblyRefusal, match="style write refused"):
+        assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
+
+
+def test_cli_dsk_assemble_no_style_flag(tmp_path, monkeypatch):
+    from obed_edom import cli
+
+    source = tmp_path / "src.key"
+    source.mkdir()
+    monkeypatch.setattr(
+        "obed_edom.offline_inspect.offline_wall_payload",
+        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 100, "slides": []},
+    )
+    captured: dict = {}
+
+    def fake_assemble_dsk_deck(
+        src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
+        text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
+        no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
+        split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False,
+    ):
+        captured["no_style"] = no_style
+        return AssembleResult(
+            path=out, slides_kept=(13,), ordinals={13: 1}, fits={}, clips_inserted={}, stroke={}, zorder={},
+            builds={}, size_bytes=1, source_size_bytes=1, wall_s=0.1, warnings=(), movie_props={},
+        )
+
+    monkeypatch.setattr("obed_edom.dsk_assemble.assemble_dsk_deck", fake_assemble_dsk_deck)
+
+    rc = cli.main(
+        ["dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "13", "--no-style"]
+    )
+
+    assert rc == 0
+    assert captured["no_style"] is True
 
 
 # --------------------------------------------------------------------------- L4 pill wiring
