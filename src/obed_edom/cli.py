@@ -200,6 +200,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Never drop a textless full-frame shape (the verse-slide scrim) as a panel backdrop.",
     )
     dsk_assemble.add_argument(
+        "--no-pills", action="store_true",
+        help="Skip the offline verse-pill mask write (plan §3 L4).",
+    )
+    dsk_assemble.add_argument(
         "--rss-limit-gb", type=float, default=DEFAULT_RSS_LIMIT_BYTES / 1e9,
         help="Keynote RSS watchdog limit in GB; the run aborts above it.",
     )
@@ -485,6 +489,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             no_drop_panel_backdrop=args.no_drop_panel_backdrop,
             split_overrides=split_overrides,
             rss_limit_bytes=int(args.rss_limit_gb * 1e9),
+            no_pills=args.no_pills,
         )
     except AssemblyRefusal as exc:
         print(f"Assembly refused: {exc}", file=sys.stderr)

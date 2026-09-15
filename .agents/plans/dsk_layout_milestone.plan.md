@@ -462,6 +462,29 @@ UUID entry, duplicate `dataReferences` entry, correct+conflicting style referenc
 monkeypatching the `_register_*` helpers to append an extra entry after the real one.
 `tests/test_dsk_pill.py`: 49 -> 58, all passing.
 
+**L4 wired (2026-09-15).** `dsk_assemble.assemble_dsk_deck` now calls `write_pills` as an
+offline post-pass against the STAGING deck, after the refit/staged-layout-verify/stroke/
+zorder/builds passes and before publish to `out_path` -- same `*.refused.key` refusal
+pattern as the other passes. `_pill_specs` maps every output ordinal whose
+`slide_layout_names` entry (source slide number keyed, `resolve_slide_layouts`'s own
+result) is `"Verse Standard (Variation 2)"` / `"Verse 1 Line (Variation 2)"` to a
+`PillSpec("standard"/"one_line")`, split parts included (`_staged_id_for` translates
+`plan.slot_badge_ids[number]` per-part, so each part's own physical slide gets its own
+pill from its own badge). `--no-pills` (default off, i.e. pills on) skips the pass.
+
+Width law (step 0 measurement, gold slides 3/5/9/20/23/35/38): the badge box is
+per-slide fixed-width (`geometry.flags == 3`, no `naturalSize`), not the layout slot's
+933.1/945.9 -- so the width is estimated from the badge string via
+`iwa_text_shape.shaped_width` (AppKit TextKit, AzoSans-Bold 40pt -- not ArgentCF; the
+plan's font family list above was never load-bearing for the badge). `mask width -
+shaped_width` is a near-constant pad across 5 of the 7 gold points (3/5/9/35/38: mean
+54.850pt, stdev 1.06pt) -- pinned as `VERSE_BADGE_PAD_PT = 54.85`. Slide 20 ("Samuel 10")
+is excluded from the fit: its badge text is itself a content defect (the verse body is 1
+Samuel 10:10; the correct badge would be ~57-60pt off, not ~90). Slide 23 ("2 Chronicles
+5") has a genuine ~11pt residual with its own correct badge text and is kept in the fit
+(pinned in `tests/test_dsk_assemble.py::test_pill_width_law_pinned_to_gold_table`) rather
+than tightened away by guessing at a second law.
+
 **L5 — heading-only and point classes (Q2, Q3).** Heading-only: 60 pt flat, badge 46 pt,
 pair centred on x=960, badge above for 2 lines / inline-left for 1 line, on
 `Point 3 Lines` / `Point (2 Lines)` per line count. Drop the Q3 0.75 badge scale — the verse

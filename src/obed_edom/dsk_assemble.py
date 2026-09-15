@@ -91,7 +91,9 @@ from obed_edom.iwa_runs import (
     attach_runs,
     slide_order,
 )
+from obed_edom.iwa_text_shape import shape_style, shaped_width
 from obed_edom.iwa_write import OfflineWriteCorrupted, reorder_drawables
+from obed_edom.dsk_pill import OfflineWriteRefused, PillResult, PillSpec, write_pills
 from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
 from obed_edom.offline_inspect import (
     _build_data_index,
@@ -3987,6 +3989,112 @@ def _merge_split_part_builds(
     return long_builds + [short_reps[key] for key, n in merged_counts.items() for _ in range(n)]
 
 
+# Plan §1.4/step-0 width law, gold slides 3/5/9/35/38 (mean 54.850, stdev 1.06pt): the
+# badge box is per-slide fixed-width (flags both set, no naturalSize), so the badge's
+# rendered width is estimated via `iwa_text_shape.shaped_width` (AzoSans-Bold 40pt,
+# AppKit TextKit) and the mask width is that estimate plus a constant pad. Gold slide 20
+# ("Samuel 10", a known injected content defect -- the source says "1 Samuel 10:10")
+# is excluded from the fit; gold slide 23 ("2 Chronicles 5") is a ~11pt outlier kept in
+# the fit -- see the report for the full table.
+VERSE_BADGE_PAD_PT = 54.85
+
+_PILL_LAYOUT_BY_NAME: dict[str, str] = {
+    "Verse Standard (Variation 2)": "standard",
+    "Verse 1 Line (Variation 2)": "one_line",
+}
+
+
+def _pill_width_for_badge(text: str, obj: dict, objects: dict[str, dict], cache: dict) -> float:
+    """Plan §1.4 width law: rendered badge width (AppKit, style-aware) + the pinned pad."""
+    style = shape_style(obj, objects, cache)
+    return shaped_width(text, style) + VERSE_BADGE_PAD_PT
+
+
+def _pill_specs(
+    staging_path: Path,
+    plan: AssemblyPlan,
+    slide_layout_names: Mapping[int, str] | None,
+    *,
+    hidden: Mapping[int, frozenset[ItemId]] = {},
+) -> dict[int, PillSpec]:
+    """``{output ordinal: PillSpec}`` for every ordinal whose resolved layout (plan
+    §2.2/§3 L3, the same ``slide_layout_names`` the staged verifier checks) is one of
+    the two verse layouts -- split parts included, each part's own physical slide gets
+    its own pill built from that part's own staged badge id (``_staged_id_for``, part-
+    aware, mirrors ``verify_staged_layouts_alpha_safe``)."""
+    if not slide_layout_names:
+        return {}
+    ordinal_to_number = plan.ordinal_to_number or {
+        ordinal: number for number, ordinal in plan.ordinals.items()
+    }
+    candidates: list[tuple[int, int, str]] = []
+    for ordinal, number in sorted(ordinal_to_number.items()):
+        layout_name = slide_layout_names.get(number)
+        pill_layout = _PILL_LAYOUT_BY_NAME.get(layout_name or "")
+        if pill_layout is None:
+            continue
+        if plan.slot_badge_ids.get(number) is None:
+            continue
+        candidates.append((ordinal, number, pill_layout))
+    if not candidates:
+        return {}
+
+    objects, _id_to_file, _file_ids = _load_deck(staging_path)
+    cache: dict = {}
+    specs: dict[int, PillSpec] = {}
+    for ordinal, number, pill_layout in candidates:
+        badge_id = plan.slot_badge_ids[number]
+        slide = _slide_archive_for_ordinal(objects, ordinal)
+        if slide is None:
+            raise AssemblyRefusal(f"slide {number} (ordinal {ordinal}): slide not resolvable offline")
+        part = ordinal - plan.ordinals.get(number, ordinal)
+        staged_addr = _staged_id_for(number, plan, badge_id, part=part, hidden=hidden.get(number, frozenset()))
+        if staged_addr is None:
+            raise AssemblyRefusal(
+                f"slide {number} (ordinal {ordinal}): verse badge {_item_label(badge_id)} not staged"
+            )
+        records = {(rec["kind"], rec["kindIndex"]): rec for rec in compose_geometry(slide, objects)}
+        rec = records.get(staged_addr)
+        if rec is None:
+            raise AssemblyRefusal(
+                f"slide {number} (ordinal {ordinal}): verse badge {_item_label(badge_id)} not found on the staged slide"
+            )
+        obj = objects.get(rec["id"])
+        if obj is None:
+            raise AssemblyRefusal(f"slide {number} (ordinal {ordinal}): verse badge object unresolved")
+        width = _pill_width_for_badge(rec.get("text") or "", obj, objects, cache)
+        specs[ordinal] = PillSpec(width, pill_layout)
+    return specs
+
+
+def _write_pill_pass(
+    staging_path: Path,
+    plan: AssemblyPlan,
+    slide_layout_names: Mapping[int, str] | None,
+    warnings: list[str],
+    log: Callable[[str], None],
+    *,
+    hidden: Mapping[int, frozenset[ItemId]] = {},
+) -> Path:
+    """Plan §3 L4 wiring: offline verse-pill mask write against the STAGING deck,
+    before publish. Returns the (possibly new) staging path -- unchanged when there is
+    nothing to pill. Raises ``AssemblyRefusal`` on ``OfflineWriteRefused``, same
+    refusal pattern as the other offline post-passes (the pre-pill staging deck is kept
+    by the caller's existing ``*.refused.key`` handling)."""
+    specs = _pill_specs(staging_path, plan, slide_layout_names, hidden=hidden)
+    if not specs:
+        log("pill: no verse-layout ordinals, skipped")
+        return staging_path
+    next_path = staging_path.with_name(f"{staging_path.stem}-pill{staging_path.suffix}")
+    try:
+        result = write_pills(staging_path, slides=specs, out_path=next_path)
+    except OfflineWriteRefused as exc:
+        raise AssemblyRefusal(f"pill write refused: {exc}") from exc
+    warnings_note = f"pill: applied {result.applied} reused {result.reused} minted {result.minted}"
+    log(warnings_note)
+    return next_path
+
+
 def _verify_builds(
     fw_deck: Path,
     out_path: Path,
@@ -4697,10 +4805,12 @@ def assemble_dsk_deck(
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
     split_overrides: Mapping[int, int] | None = None,
+    no_pills: bool = False,
 ) -> AssembleResult:
     """Runs the live AppleScript batch end to end (plan -> LiveBatch -> script),
-    then two offline IWA post-passes: card-border stroke restore and build/transition
-    verification. The batch script saves-as (Keynote's sdef does document a `save ... in`
+    then offline IWA post-passes: card-border stroke restore, build/transition
+    verification, and (unless `no_pills`) the verse-pill mask write (plan §3 L4). The
+    batch script saves-as (Keynote's sdef does document a `save ... in`
     verb, per `maps_keynote.py`) to a staging path inside the batch's own disposable work
     dir, never in place and never straight to `out_path` -- both post-passes run against
     that staging copy, and only once they pass (`_verify_builds` raises on a surplus) is
@@ -4837,6 +4947,11 @@ def assemble_dsk_deck(
             )
             zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
             builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
+
+            if not no_pills:
+                staging_path = _write_pill_pass(
+                    staging_path, plan, slide_layout_names, warnings, log, hidden=hidden_map,
+                )
         except AssemblyRefusal:
             # Pass 1 may already have saved to `staging_path` before failing (a
             # post-save script failure, or a refusal in the refit/verify steps below)

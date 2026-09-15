@@ -5738,7 +5738,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None,
+        split_overrides=None, rss_limit_bytes=None, no_pills=False,
     ):
         captured["decisions"] = decisions
         captured["clips"] = clips
@@ -5825,7 +5825,7 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None, rss_limit_bytes=None,
+        split_overrides=None, rss_limit_bytes=None, no_pills=False,
     ):
         captured["black_layout_names"] = black_layout_names
         return AssembleResult(
@@ -10743,3 +10743,150 @@ def test_verify_staged_layouts_post_delete_staged_index(monkeypatch, tmp_path):
     dsa.verify_staged_layouts_alpha_safe(
         tmp_path / "staged.key", plan, expected_layout_names={1: "Verse Standard (Variation 2)"}
     )
+
+
+# --------------------------------------------------------------------------- L4 pill wiring
+
+
+def test_pill_specs_builder_standard_one_line_skip_and_split_parts(monkeypatch, tmp_path):
+    """`_pill_specs`: verse layouts (standard/one_line) each get a `PillSpec`, a
+    non-verse layout is skipped, and a split slide's each part gets its OWN pill built
+    from that part's own staged badge id (finding: `_staged_id_for` is part-aware)."""
+    plan = AssemblyPlan(
+        kept=(10, 20, 30, 40), ordinals={10: 1, 20: 2, 30: 3, 40: 4},
+        fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        ordinal_to_number={1: 10, 2: 20, 3: 30, 4: 40, 5: 40},
+        slot_badge_ids={10: ("text", 1), 20: ("text", 1), 40: ("text", 1)},
+        layout_names={
+            10: "Verse Standard (Variation 2)",
+            20: "Verse 1 Line (Variation 2)",
+            30: "Point 3 Lines",
+            40: "Verse Standard (Variation 2)",
+        },
+        splits={40: (SplitPart(fits={}, deletes=(), text_sizes={}), SplitPart(fits={}, deletes=(), text_sizes={}))},
+    )
+
+    objects = {f"obj{ordinal}": {"_id": f"obj{ordinal}"} for ordinal in (1, 2, 4, 5)}
+
+    def fake_load_deck(_path):
+        return (objects, {}, {})
+
+    def fake_slide_for_ordinal(_objects, ordinal):
+        return {"ordinal": ordinal}
+
+    def fake_staged_id_for(_number, _plan, badge_id, *, part=0, hidden=frozenset()):
+        assert badge_id == ("text", 1)
+        return ("text", 0)
+
+    def fake_compose_geometry(slide, _objects):
+        ordinal = slide["ordinal"]
+        return [{"kind": "text", "kindIndex": 0, "id": f"obj{ordinal}", "text": f"Badge{ordinal}"}]
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "_slide_archive_for_ordinal", fake_slide_for_ordinal)
+    monkeypatch.setattr(dsa, "_staged_id_for", fake_staged_id_for)
+    monkeypatch.setattr(dsa, "compose_geometry", fake_compose_geometry)
+    monkeypatch.setattr(dsa, "shape_style", lambda obj, objects, cache: obj)
+    monkeypatch.setattr(dsa, "shaped_width", lambda text, style: float(len(text)) * 10.0)
+
+    specs = dsa._pill_specs(tmp_path / "staged.key", plan, plan.layout_names)
+
+    assert set(specs) == {1, 2, 4, 5}
+    assert specs[1].layout == "standard"
+    assert specs[2].layout == "one_line"
+    assert specs[1].width == pytest.approx(len("Badge1") * 10.0 + dsa.VERSE_BADGE_PAD_PT)
+    assert specs[2].width == pytest.approx(len("Badge2") * 10.0 + dsa.VERSE_BADGE_PAD_PT)
+    # split parts (ordinals 4 and 5, both slide 40): each part's own pill, same layout.
+    assert specs[4].layout == specs[5].layout == "standard"
+    assert specs[4].width == pytest.approx(len("Badge4") * 10.0 + dsa.VERSE_BADGE_PAD_PT)
+    assert specs[5].width == pytest.approx(len("Badge5") * 10.0 + dsa.VERSE_BADGE_PAD_PT)
+
+
+def test_pill_specs_no_verse_layouts_is_empty(tmp_path):
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        ordinal_to_number={1: 1}, layout_names={1: "Point 3 Lines"},
+    )
+    assert dsa._pill_specs(tmp_path / "staged.key", plan, plan.layout_names) == {}
+    assert dsa._pill_specs(tmp_path / "staged.key", plan, None) == {}
+
+
+def test_assemble_dsk_deck_calls_pill_pass(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    captured: dict = {}
+
+    def fake_write_pill_pass(staging_path, plan, slide_layout_names, warnings, log, *, hidden={}):
+        captured["staging_path"] = staging_path
+        captured["plan"] = plan
+        return staging_path
+
+    monkeypatch.setattr(dsa, "_write_pill_pass", fake_write_pill_pass)
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
+    assert captured["plan"] is not None
+    assert result.path == out_path
+
+
+def test_assemble_dsk_deck_no_pills_skips_pass(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    def fake_write_pill_pass(*_args, **_kwargs):
+        raise AssertionError("must not be called with no_pills=True")
+
+    monkeypatch.setattr(dsa, "_write_pill_pass", fake_write_pill_pass)
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve", no_pills=True,
+    )
+    assert result.path == out_path
+
+
+def test_pill_write_refusal_becomes_assembly_refusal(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    def fake_pill_specs(_staging_path, _plan, _names, *, hidden={}):
+        return {1: dsa.PillSpec(300.0, "standard")}
+
+    def fake_write_pills(_key_path, *, slides, out_path):
+        raise dsa.OfflineWriteRefused("boom")
+
+    monkeypatch.setattr(dsa, "_pill_specs", fake_pill_specs)
+    monkeypatch.setattr(dsa, "write_pills", fake_write_pills)
+    with pytest.raises(AssemblyRefusal, match="pill write refused"):
+        assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
+
+
+_GOLD_DECK = Path.home() / "Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key"
+_needs_gold_deck = pytest.mark.skipif(not _GOLD_DECK.exists(), reason="local gold deck only")
+
+# Step 0 measurement table (plan §1.4/report): source badge text, pinned mask width, and
+# the width law's residual (mask - shaped_width - VERSE_BADGE_PAD_PT) for each gold slide.
+# Slide 20 is excluded from the fit (its badge text, "Samuel 10", is a known content
+# defect -- the verse body itself is 1 Samuel 10:10); slide 23 is a real ~11pt outlier,
+# kept in the fit and pinned here rather than silently tightened away.
+_GOLD_PILL_WIDTH_LAW_TABLE: dict[int, tuple[str, float, float]] = {
+    3: ("Matthew 18", 301.8292, 2.0),
+    5: ("Genesis 1", 258.04858, 2.0),
+    9: ("Genesis 11", 279.41565, 2.0),
+    23: ("2 Chronicles 5", 355.3282, 11.5),
+    35: ("Luke 5", 202.55704, 2.0),
+    38: ("2 Corinthians 2", 362.11707, 2.0),
+}
+
+
+@_needs_gold_deck
+def test_pill_width_law_pinned_to_gold_table():
+    from obed_edom.iwa_runs import _load_deck_full, slide_order
+
+    objects, _id_to_file, _file_ids, _hor = _load_deck_full(_GOLD_DECK, strict=True)
+    order = slide_order(objects)
+    for ordinal, (badge_text, mask_width, tol) in _GOLD_PILL_WIDTH_LAW_TABLE.items():
+        slide_id, _skipped = order[ordinal - 1]
+        slide = objects[slide_id]
+        id_by_item = dsk_plan._item_object_ids(slide, objects)
+        obj_id = id_by_item[("text", 1)]
+        obj = objects[obj_id]
+        law_width = dsa._pill_width_for_badge(badge_text, obj, objects, {})
+        assert law_width == pytest.approx(mask_width, abs=tol), (ordinal, badge_text)
