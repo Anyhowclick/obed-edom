@@ -7,9 +7,11 @@ from __future__ import annotations
 import pytest
 
 from scripts.offline_write_ab import (
+    ZORDER_SCHEMA_KEYS,
     ZORDER_SURFACE_KEYS,
     ZORDER_ZERO_KEYS,
     expect_gui_raises,
+    expected_zorder_sets,
     front_block_ok,
     front_targets_for_slide,
     persisted_raise_jobs,
@@ -19,8 +21,25 @@ from scripts.offline_write_ab import (
     suppressed_raise_reasons,
     zorder_counter_reasons,
     zorder_counter_summary,
+    zorder_schema_reasons,
     zorder_slide_verdict,
+    zorder_write_reasons,
 )
+
+
+def _zorder_write(**overrides):
+    record = {
+        "slides": [],
+        "zorderStatRaised": 0,
+        "zorderBadgeRaised": 0,
+        "zorderNoop": 0,
+        "zorderRefused": 0,
+        "zorderUnresolved": 0,
+        "zorderLost": 0,
+        "zorderGui": [],
+    }
+    record.update(overrides)
+    return record
 
 
 def test_same_order_yes_and_no():
@@ -68,6 +87,8 @@ def test_zorder_slide_verdict_missing_orders_fail_both():
 
 
 def test_zorder_counter_reasons_zero_or_missing_is_green():
+    # Zero-key helper only inspects present keys. The gate itself is
+    # zorder_write_reasons, which REDs a missing schema instead of reading 0.
     assert zorder_counter_reasons(None) == []
     assert zorder_counter_reasons({}) == []
     assert zorder_counter_reasons({
@@ -84,6 +105,92 @@ def test_zorder_counter_reasons_flags_each_nonzero_key():
     assert len(reasons) == 3
     assert all(key in " ".join(reasons) for key in ZORDER_ZERO_KEYS)
     assert all(" exported=" not in r for r in reasons)
+
+
+def test_zorder_schema_reasons_missing_or_empty_is_red():
+    assert zorder_schema_reasons(None)
+    assert zorder_schema_reasons({})
+    assert zorder_schema_reasons({"slides": [40], "zorderGui": []})
+    complete = _zorder_write(slides=[40])
+    assert set(complete) >= set(ZORDER_SCHEMA_KEYS)
+    assert zorder_schema_reasons(complete) == []
+
+
+def test_expected_zorder_sets_splits_eligible_reuse_and_refused():
+    raise_slides = {40, 55, 123, 99}
+    patched, gui = expected_zorder_sets(
+        raise_slides, compared_slides=[40, 55, 99], refused=[99],
+    )
+    assert patched == {40, 55}
+    assert gui == {123, 99}
+
+
+def test_zorder_write_reasons_missing_schema_is_red():
+    reasons = zorder_write_reasons(
+        None, {40, 55}, compared_slides=[40, 55],
+    )
+    assert reasons
+    assert "missing" in reasons[0]
+    assert zorder_write_reasons(
+        {}, {40}, compared_slides=[40],
+    )
+
+
+def test_zorder_write_reasons_green_when_sets_match():
+    assert zorder_write_reasons(
+        _zorder_write(slides=[40, 55], zorderGui=[123]),
+        {40, 55, 123},
+        compared_slides=[40, 55],
+    ) == []
+
+
+def test_zorder_write_reasons_red_when_eligible_left_on_gui():
+    # B never patched; suffixes can still match if the GUI raise ran.
+    # expected_gui is empty (both slides are compared/eligible), so the RED is slides.
+    reasons = zorder_write_reasons(
+        _zorder_write(slides=[], zorderGui=[]),
+        {40, 55},
+        compared_slides=[40, 55],
+    )
+    assert any("slides=[] != eligible raise slides [40, 55]" in r for r in reasons)
+
+
+def test_zorder_write_reasons_red_when_gui_omits_reuse():
+    reasons = zorder_write_reasons(
+        _zorder_write(slides=[40, 55], zorderGui=[]),
+        {40, 55, 123},
+        compared_slides=[40, 55],
+    )
+    assert any("zorderGui=[] != ineligible raise slides [123]" in r for r in reasons)
+
+
+def test_zorder_write_reasons_red_when_eligible_listed_as_gui():
+    reasons = zorder_write_reasons(
+        _zorder_write(slides=[], zorderGui=[40, 55]),
+        {40, 55},
+        compared_slides=[40, 55],
+    )
+    assert any("slides=[] != eligible raise slides [40, 55]" in r for r in reasons)
+    assert any("zorderGui=[40, 55] != ineligible raise slides []" in r for r in reasons)
+
+
+def test_zorder_write_reasons_red_on_count_not_list():
+    reasons = zorder_write_reasons(
+        _zorder_write(slides=2, zorderGui=0),
+        {40, 55},
+        compared_slides=[40, 55],
+    )
+    assert any("not a slide list" in r and "slides=" in r for r in reasons)
+    assert any("not a slide list" in r and "zorderGui=" in r for r in reasons)
+
+
+def test_zorder_write_reasons_refused_belongs_on_gui():
+    assert zorder_write_reasons(
+        _zorder_write(slides=[40], zorderGui=[99]),
+        {40, 99},
+        compared_slides=[40, 99],
+        refused=[99],
+    ) == []
 
 
 def test_zorder_counter_summary_surfaces_piece3_names():

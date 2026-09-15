@@ -34,9 +34,12 @@ Piece 3 emits ``OBED_ZORDER_WRITE`` and the ``Stat zorder detail:`` counters
 (``zorderSlides``, ``zorderStatRaised``, ``zorderBadgeRaised``, ``zorderNoop``,
 ``zorderUnresolved(s=,k=,i=)``, ``zorderRefused(s=,reason=)``, ``zorderGui``,
 ``zorderLost(s=,id=)``; no token may contain the literal `` exported=``). This
-gate surfaces those counters and REDs arm B when ``zorderRefused`` /
-``zorderUnresolved`` / ``zorderLost`` are non-zero, or when a suppressed
-slide's pass-2 log still carries ``raiseDead`` / ``raiseUnknown`` / ``frontErr``.
+gate surfaces those counters and REDs arm B when the piece-3
+``zorderWrite`` schema is missing (absent counters are not read as 0), when
+``zorderRefused`` / ``zorderUnresolved`` / ``zorderLost`` are non-zero, when
+``slides`` / ``zorderGui`` are not exactly the eligible vs reuse/ineligible
+raise-bearing sets, or when a suppressed slide's pass-2 log still carries
+``raiseDead`` / ``raiseUnknown`` / ``frontErr``.
 
 A and B are two INDEPENDENT Keynote runs, but the output deck's drawable ids are copied
 straight from the SOURCE (not regenerated per run) — so every object that survives both
@@ -153,6 +156,12 @@ PASS2_WARN_KEYS = ("sigFallback", "badgeFallback")
 
 # Piece 3 result-dict counters that must be 0 on arm B (lists or ints).
 ZORDER_ZERO_KEYS = ("zorderRefused", "zorderUnresolved", "zorderLost")
+# Required on arm B when OBED_ZORDER_WRITE=on — missing is not "zero".
+ZORDER_SCHEMA_KEYS = (
+    "slides",
+    "zorderStatRaised", "zorderBadgeRaised", "zorderNoop",
+    "zorderRefused", "zorderUnresolved", "zorderLost", "zorderGui",
+)
 ZORDER_SURFACE_KEYS = (
     "zorderSlides", "zorderStatRaised", "zorderBadgeRaised", "zorderNoop",
     "zorderRefused", "zorderUnresolved", "zorderLost", "zorderGui",
@@ -1295,17 +1304,155 @@ def _counter_nonzero(value: Any) -> int:
         return 1 if value else 0
 
 
+def zorder_schema_reasons(
+    zorder_write: dict[str, Any] | None, *, label: str = "B",
+) -> list[str]:
+    """RED if arm B did not emit the piece-3 ``zorderWrite`` schema.
+
+    Absent counters must not be read as 0 — that would GREEN a B that never ran
+    the offline z-order writer (every raise stayed on GUI, suffixes still match).
+    """
+    if not zorder_write:
+        return [
+            f"{label}: zorderWrite missing — offline z-order writer unproven "
+            "(piece 3 result dict was not emitted)"
+        ]
+    missing = [key for key in ZORDER_SCHEMA_KEYS if key not in zorder_write]
+    if missing:
+        return [
+            f"{label}: zorderWrite missing {missing} — refuse to treat absent "
+            "counters as 0"
+        ]
+    return []
+
+
 def zorder_counter_reasons(
     zorder_write: dict[str, Any] | None, *, label: str = "B",
 ) -> list[str]:
-    """RED reasons when arm B's ``zorderRefused`` / ``Unresolved`` / ``Lost`` are non-zero."""
+    """RED reasons when arm B's ``zorderRefused`` / ``Unresolved`` / ``Lost`` are non-zero.
+
+    Only inspects keys that are present; :func:`zorder_schema_reasons` is what
+    refuses a missing schema.
+    """
     ow = zorder_write or {}
     reasons: list[str] = []
     for key in ZORDER_ZERO_KEYS:
+        if key not in ow:
+            continue
         n = _counter_nonzero(ow.get(key))
         if n:
             reasons.append(f"{label}: {key}={ow.get(key)!r} (expected 0)")
     return reasons
+
+
+def _as_slide_set(value: Any) -> set[int] | None:
+    """Slide id set from a list-shaped counter. ``None`` if ``value`` is a count."""
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        try:
+            return {int(s) for s in value}
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, str) and not value.strip():
+        return set()
+    return None
+
+
+def raise_slides_from_jobs(
+    stat_jobs: list[dict[str, Any]] | None,
+    badge_rows: list[dict[str, Any]] | None,
+) -> set[int]:
+    """Raise-bearing slides (stat rows with a ``childSig``, plus every badge row)."""
+    slides: set[int] = set()
+    for job in stat_jobs or []:
+        if job.get("childSig"):
+            slides.add(int(job["slide"]))
+    for row in badge_rows or []:
+        slides.add(int(row["slide"]))
+    return slides
+
+
+def expected_zorder_sets(
+    raise_slides: set[int],
+    compared_slides: list[int] | set[int],
+    refused: list[int] | set[int] | None = None,
+) -> tuple[set[int], set[int]]:
+    """``(expected_patched, expected_gui)`` from plan/offline-write facts, not B's claim.
+
+    Eligible = raise-bearing ∩ compared (non-reuse, non-donor) − pass-1 refused.
+    Those must be in ``slides``. Every other raise-bearing slide is the reuse /
+    ineligible GUI leftover (plan gate line 3).
+    """
+    compared = {int(s) for s in compared_slides}
+    refused_set = {int(s) for s in (refused or [])}
+    patched = {s for s in raise_slides if s in compared and s not in refused_set}
+    return patched, set(raise_slides) - patched
+
+
+def zorder_gui_reasons(
+    zorder_write: dict[str, Any] | None,
+    raise_slides: set[int],
+    *,
+    compared_slides: list[int] | set[int],
+    refused: list[int] | set[int] | None = None,
+    label: str = "B",
+) -> list[str]:
+    """RED unless ``slides`` / ``zorderGui`` match the independent eligible vs leftover sets.
+
+    Trusting B's ``slides`` and only checking ``zorderGui == raise − slides`` would
+    still GREEN a B that left eligible raises on the GUI and listed them as ineligible.
+    FRONT_BLOCK_OK can match in that case because both arms used the GUI raise.
+    """
+    ow = zorder_write or {}
+    expected_patched, expected_gui = expected_zorder_sets(
+        raise_slides, compared_slides, refused,
+    )
+    reasons: list[str] = []
+    patched = _as_slide_set(ow.get("slides"))
+    actual_gui = _as_slide_set(ow.get("zorderGui"))
+    if patched is None:
+        reasons.append(
+            f"{label}: slides={ow.get('slides')!r} is not a slide list — "
+            "refuse to treat a count as the patched set"
+        )
+    elif patched != expected_patched:
+        reasons.append(
+            f"{label}: slides={sorted(patched)} != eligible raise slides "
+            f"{sorted(expected_patched)}"
+        )
+    if actual_gui is None:
+        reasons.append(
+            f"{label}: zorderGui={ow.get('zorderGui')!r} is not a slide list — "
+            "refuse to treat a count as the ineligible set"
+        )
+    elif actual_gui != expected_gui:
+        reasons.append(
+            f"{label}: zorderGui={sorted(actual_gui)} != ineligible raise slides "
+            f"{sorted(expected_gui)}"
+        )
+    return reasons
+
+
+def zorder_write_reasons(
+    zorder_write: dict[str, Any] | None,
+    raise_slides: set[int],
+    *,
+    compared_slides: list[int] | set[int],
+    refused: list[int] | set[int] | None = None,
+    label: str = "B",
+) -> list[str]:
+    """Arm-B z-order result gate: schema + zero-keys + patched/GUI set identity."""
+    reasons = zorder_schema_reasons(zorder_write, label=label)
+    if reasons:
+        return reasons
+    return (
+        zorder_counter_reasons(zorder_write, label=label)
+        + zorder_gui_reasons(
+            zorder_write, raise_slides,
+            compared_slides=compared_slides, refused=refused, label=label,
+        )
+    )
 
 
 def zorder_counter_summary(zorder_write: dict[str, Any] | None) -> str:
@@ -1363,13 +1510,7 @@ def expect_gui_raises(
 ) -> bool:
     """``front >= 1`` is only owed when at least one raise-bearing slide stayed on GUI."""
     suppressed = {int(s) for s in (zorder_write or {}).get("slides") or []}
-    slides: set[int] = set()
-    for job in stat_jobs or []:
-        if job.get("childSig"):
-            slides.add(int(job["slide"]))
-    for row in badge_raises or []:
-        slides.add(int(row["slide"]))
-    return bool(slides - suppressed)
+    return bool(raise_slides_from_jobs(stat_jobs, badge_raises) - suppressed)
 
 
 def slide_zorder_ids(objects: dict[str, Any], slide_number: int) -> list[str] | None:
@@ -1850,8 +1991,22 @@ def main(argv: list[str] | None = None) -> int:
     for r in summary_reasons:
         _log(f"RED: {r}")
 
+    try:
+        raise_jobs = persisted_raise_jobs(plan_a, a_record)
+    except ValueError as exc:
+        _log(f"ABORT: {exc}")
+        return 2
+    if raise_jobs is None:
+        stat_jobs_a, badge_rows_a = [], []
+    else:
+        stat_jobs_a, badge_rows_a = raise_jobs
+    raise_slides = raise_slides_from_jobs(stat_jobs_a, badge_rows_a)
+
     suppressed_slides = {int(s) for s in (zorder_write_b.get("slides") or [])}
-    zorder_reasons = zorder_counter_reasons(zorder_write_b)
+    zorder_reasons = zorder_write_reasons(
+        zorder_write_b, raise_slides,
+        compared_slides=compared_slides, refused=ow_b.get("refused"),
+    )
     suppress_reasons = suppressed_raise_reasons(child_resize_b, suppressed_slides)
     for r in zorder_reasons + suppress_reasons:
         _log(f"RED: {r}")
@@ -1871,21 +2026,10 @@ def main(argv: list[str] | None = None) -> int:
     a_objects, a_by_slide = decode_deck(a_deck)
     a_units_by_slide = {n: slide_units(a_objects, n) for n in compared_slides}
     a_z_by_slide = {n: slide_zorder_ids(a_objects, n) for n in compared_slides}
-    try:
-        raise_jobs = persisted_raise_jobs(plan_a, a_record)
-    except ValueError as exc:
-        _log(f"ABORT: {exc}")
-        return 2
-    if raise_jobs is None:
-        jobs_plan = {
-            "transforms": plan_a.get("transforms") or [],
-            "statJobs": [], "badgeRaises": [],
-        }
-    else:
-        jobs_plan = {
-            "transforms": plan_a.get("transforms") or [],
-            "statJobs": raise_jobs[0], "badgeRaises": raise_jobs[1],
-        }
+    jobs_plan = {
+        "transforms": plan_a.get("transforms") or [],
+        "statJobs": stat_jobs_a, "badgeRaises": badge_rows_a,
+    }
     targets_by_slide = zorder_targets_from_plan(jobs_plan, id_map)
     del a_objects
 
