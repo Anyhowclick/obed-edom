@@ -135,6 +135,19 @@ def test_reveal_path_separates_lw_and_cg():
     assert cg.name.endswith("-cg.mov")
 
 
+def test_reveal_fingerprints_include_fps(tmp_path: Path, monkeypatch):
+    asset = tmp_path / "a.png"
+    Image.new("RGBA", (10, 10), (1, 2, 3, 255)).save(asset)
+    base_png = tmp_path / "base.png"
+    Image.new("RGB", (10, 10), (1, 2, 3)).save(base_png)
+    landmark = {"asset": asset, "x": 0, "y": 0, "w": 10, "h": 10, "duration": 1.2, "seed": 1}
+    per_asset = reveal_fingerprint(asset, duration=1.0, opacity=1.0, seed=1, width=10, height=10)
+    per_slide = reveal_movie_fingerprint(base_png, [landmark])
+    monkeypatch.setattr("obed_edom.maps_reveal.REVEAL_FPS", REVEAL_FPS + 1)
+    assert per_asset != reveal_fingerprint(asset, duration=1.0, opacity=1.0, seed=1, width=10, height=10)
+    assert per_slide != reveal_movie_fingerprint(base_png, [landmark])
+
+
 def test_reveal_fingerprint_changes_with_duration_and_opacity(tmp_path: Path):
     asset = tmp_path / "a.png"
     Image.new("RGBA", (10, 10), (1, 2, 3, 255)).save(asset)
@@ -416,8 +429,8 @@ def test_reveal_frames_timing_smoke(tmp_path: Path):
     assert time.time() - t0 < 5.0
 
 
-def test_reveal_fps_is_30():
-    assert REVEAL_FPS == 30
+def test_reveal_fps_is_60():
+    assert REVEAL_FPS == 60
 
 
 @pytest.mark.parametrize("duration", [0.5, 1.2, 3.0])

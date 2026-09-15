@@ -59,6 +59,7 @@ from scripts.offline_write_ab import (
     pass2_parity,
     pass2_zero_warn,
     plan_oracle_slide,
+    w2_oracle_kwargs,
     plan_parity,
     run_record,
     source_aspects,
@@ -2143,6 +2144,21 @@ def test_pass2_parity_excludes_front_when_not_hard():
     assert any("unresolved" in r for r in reasons)
 
 
+def test_pass2_parity_badge_fallback_hard_by_default():
+    reasons = pass2_parity(_pass2(), _pass2(badgeFallback=99))
+    assert any("badgeFallback" in r for r in reasons)
+
+
+def test_pass2_parity_excludes_badge_fallback_when_not_hard():
+    # W2: B raises badges offline on suppressed slides, so its AppleScript badge
+    # fallback counter legitimately differs from A's; a genuinely differing OTHER
+    # key must still be caught.
+    reasons = pass2_parity(_pass2(), _pass2(badgeFallback=99, unresolved=5),
+                           badge_fallback_hard=False)
+    assert not any("badgeFallback" in r for r in reasons)
+    assert any("unresolved" in r for r in reasons)
+
+
 def test_pass2_parity_ignores_raise_click_retried():
     # Retries are timing-dependent per arm -- a rescue in one arm and not the other
     # must not manufacture a RED; everything else stays equal.
@@ -2731,7 +2747,59 @@ def test_plan_oracle_slide_skips_group_with_needs_keynote():
     assert report["compared"] == 0
     assert len(report["approx"]) == 1
     assert report["approx"][0]["worst"] == pytest.approx(1784.61, abs=0.01)
-    assert report["approx"][0]["needs"] == "group-residual"
+    assert report["approx"][0]["needs"] == ["output:group-residual"]
+
+
+def test_plan_oracle_slide_group_flagged_on_source_only_routes_to_approx():
+    # The writer refuses this spec from the SOURCE record (iwa_write._slide_edits),
+    # and the write itself erases the flag -- the OUTPUT record composes clean. The
+    # oracle must still treat it as not comparable, from the source side.
+    specs = [{"slide": 124, "kind": "group", "kindIndex": 0,
+              "x": 16.0, "y": 175.0, "w": 332.47, "h": 232.0}]
+    id_by_addr = {("group", 0): "g124"}
+    recs_by_id = {"g124": {"id": "g124", "kind": "group", "kindIndex": 0,
+                           "x": 16.0, "y": 175.0, "w": 565.91, "h": 232.0,
+                           "geom_source": "group-union"}}
+    src_recs_by_id = {"g124": {"id": "g124", "kind": "group", "kindIndex": 0,
+                               "x": 16.0, "y": 175.0, "w": 200.0, "h": 232.0,
+                               "geom_source": "group-union", "needs_keynote": "group-residual"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(),
+                                src_recs_by_id=src_recs_by_id)
+    assert report["per_kind"] == {}
+    assert report["pass"] is True
+    assert report["skipped"] == 1
+    assert report["compared"] == 0
+    assert len(report["approx"]) == 1
+    assert report["approx"][0]["needs"] == ["source:group-residual"]
+
+
+def test_plan_oracle_slide_group_flagged_on_both_sides_tags_both():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0,
+              "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union",
+                        "needs_keynote": "rotated-group"}}
+    src_recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                             "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union",
+                             "needs_keynote": "group-residual"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(),
+                                src_recs_by_id=src_recs_by_id)
+    assert report["approx"][0]["needs"] == ["source:group-residual", "output:rotated-group"]
+
+
+def test_plan_oracle_slide_group_flagged_on_neither_side_still_gates():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 5.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union"}}
+    src_recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                             "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union",
+                             "needs_keynote": None}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0),
+                                src_recs_by_id=src_recs_by_id)
+    assert report["pass"] is False
+    assert report["approx"] == []
 
 
 def test_plan_oracle_slide_group_without_needs_flag_still_gates():
@@ -2744,6 +2812,42 @@ def test_plan_oracle_slide_group_without_needs_flag_still_gates():
     report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0))
     assert report["pass"] is False
     assert report["approx"] == []
+
+
+def test_plan_oracle_slide_group_missing_from_source_map_is_red_not_pass():
+    # src_recs_by_id supplied but the id is absent -- a decode-skipped source slide/
+    # member must never fall back to an ordinary compare.
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union",
+                        "needs_keynote": None}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(),
+                                src_recs_by_id={})
+    assert report["pass"] is False
+    assert report["missing_ids"] == [{"addr": ("group", 0), "id": "g1",
+                                       "reason": "source record missing for (group, 0)"}]
+    assert report["compared"] == 0
+    assert report["approx"] == []
+
+
+def test_w2_oracle_kwargs_neither_arm_gets_aspects():
+    kwargs_a, kwargs_b = w2_oracle_kwargs({"g1": {"id": "g1"}})
+    assert "aspects" not in kwargs_a
+    assert "aspects" not in kwargs_b
+    assert kwargs_a == kwargs_b == {"src_recs_by_id": {"g1": {"id": "g1"}}}
+
+
+def test_plan_oracle_slide_group_missing_from_source_map_unaffected_when_map_none():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union",
+                        "needs_keynote": None}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["pass"] is True
+    assert report["missing_ids"] == []
+    assert report["compared"] == 1
 
 
 def test_plan_oracle_slide_approx_is_not_counted_as_compared():

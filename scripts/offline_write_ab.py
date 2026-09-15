@@ -344,20 +344,34 @@ def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bo
 
 
 def pass2_parity(a: dict[str, Any] | None, b: dict[str, Any] | None, *,
-                 front_hard: bool = True) -> list[str]:
+                 front_hard: bool = True, badge_fallback_hard: bool = True) -> list[str]:
     """A/B parity on ``PASS2_PARITY_KEYS`` — ``raw`` is deliberately ignored.
 
     ``front_hard=False`` (``--pass2-bar parity``) excludes ``front`` from this HARD
     check -- GUI Bring-to-Front raises are flaky and don't move geometry, so the
-    caller WARNs an A/B ``front`` mismatch separately instead of gating on it. Every
-    other key (``jobs``/``done``/``skipped``/``sized``/``sizeSkips``/``dedupDeleted``/
-    ``dedupShortfall``/``sigFallback``/``unresolved``/``badgeFallback``/
-    ``badgeUnresolved``) stays HARD in both modes.
+    caller WARNs an A/B ``front`` mismatch separately instead of gating on it.
+
+    ``badge_fallback_hard=False`` (W2: B suppressed raises on a badge-bearing eligible
+    slide) excludes ``badgeFallback`` -- B raises its badges offline on that slide, so
+    its AppleScript badge-fallback counter is legitimately lower there while A's is
+    not; the caller WARNs that mismatch separately instead of gating on it. This
+    counter is deck-level, not per-slide, so the caller must key the exemption to
+    ``claimed_patched_slides(zorder_write_b)`` intersecting the badge-bearing slide
+    set (B's own ``badgeRaises`` rows) -- a run where B only patched stat-only slides
+    must keep this key HARD.
+
+    Every other key (``jobs``/``done``/``skipped``/``sized``/``sizeSkips``/
+    ``dedupDeleted``/``dedupShortfall``/``sigFallback``/``unresolved``/
+    ``badgeUnresolved``) stays HARD in every mode.
     """
     a = a or {}
     b = b or {}
     reasons: list[str] = []
-    keys = PASS2_PARITY_KEYS if front_hard else tuple(k for k in PASS2_PARITY_KEYS if k != "front")
+    keys = PASS2_PARITY_KEYS
+    if not front_hard:
+        keys = tuple(k for k in keys if k != "front")
+    if not badge_fallback_hard:
+        keys = tuple(k for k in keys if k != "badgeFallback")
     for key in keys:
         va = int(a.get(key) or 0)
         vb = int(b.get(key) or 0)
@@ -904,6 +918,7 @@ def plan_oracle_slide(
     tols: Tolerances,
     *,
     aspects: dict[str, float] | None = None,
+    src_recs_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Compare every planned transform's target against the drawable it resolves to,
     id-addressed via the SOURCE deck's kind index (D3) -- raise-immune, hide-immune
@@ -917,7 +932,12 @@ def plan_oracle_slide(
     specs. A record the reader itself flags approximate (``needs_keynote`` set, e.g.
     ``rotated-group``/``group-residual``) is NOT comparable -- it is counted in
     ``skipped`` and listed in ``approx`` (magnitude included) rather than gated on or
-    silently dropped. Text (autosize ``y``/``w``/``h`` are not offline-recoverable)
+    silently dropped. For ``group`` this is checked on EITHER side: the writer itself
+    refuses a group spec to the AppleScript fallback when the SOURCE deck's own record
+    is ``needs_keynote`` (``iwa_write._slide_edits``), and that flag does not survive
+    the write -- so the oracle must honor it too, via ``src_recs_by_id`` (keyed the
+    same as ``recs_by_id``, by id in the SOURCE deck's own kind-index space), not only
+    the OUTPUT record's flag. Text (autosize ``y``/``w``/``h`` are not offline-recoverable)
     is NOT exactly recoverable from raw IWA and would spuriously RED a text-heavy deck, so
     it is skipped here and left entirely to the A-vs-B identity compare instead. A masked
     image/movie (``geom_source == "mask"``) is skipped too -- its crop is covered by the
@@ -935,10 +955,13 @@ def plan_oracle_slide(
     always emits one) is a RED ``missing_ids`` entry too, reason ``"spec carries no
     kindIndex"`` — never silently dropped.
 
-    For arm A's aspect-locked childless image/movie/group specs, the predicted width is
-    compared against both the float aspect-lock ``h * ar`` and its integer rounding (Keynote
+    When the caller passes ``aspects`` (a genuinely AppleScript-written arm's
+    aspect-locked childless image/movie/group specs), the predicted width is compared
+    against both the float aspect-lock ``h * ar`` and its integer rounding (Keynote
     stores the integer when the frame aspect differs from the media aspect), at
-    ``TOL_ASPECT``.
+    ``TOL_ASPECT``. Neither W2 arm is AppleScript-written (both write geometry offline
+    at the same mode), so ``main`` no longer passes ``aspects`` to either oracle call —
+    both gate at ``tols.hard``/``tols.soft`` like any other exact/media spec.
 
     Returns ``{"pass": bool, "per_kind": {kind: {n, worst, pass, fails}}, "missing_ids":
     [...], "skipped": int, "compared": int, "approx": [...]}`` where ``compared`` is the
@@ -980,11 +1003,22 @@ def plan_oracle_slide(
         if kind in _OFFLINE_MEDIA_KINDS and rec.get("geom_source") != "iwa":
             skipped += 1
             continue
-        if kind == "group" and rec.get("needs_keynote"):
-            skipped += 1
-            approx.append({"addr": addr, "id": obj_id, "needs": rec["needs_keynote"],
-                           "worst": max(abs(a - b) for a, b in zip(*_spec_box(spec, rec)))})
-            continue
+        if kind == "group":
+            if src_recs_by_id is not None and obj_id not in src_recs_by_id:
+                missing_ids.append({"addr": addr, "id": obj_id,
+                                    "reason": f"source record missing for ({kind}, {kind_index})"})
+                continue
+            src_rec = (src_recs_by_id or {}).get(obj_id)
+            src_needs = src_rec.get("needs_keynote") if src_rec else None
+            out_needs = rec.get("needs_keynote")
+            if src_needs or out_needs:
+                needs = [f"source:{src_needs}"] if src_needs else []
+                if out_needs:
+                    needs.append(f"output:{out_needs}")
+                skipped += 1
+                approx.append({"addr": addr, "id": obj_id, "needs": needs,
+                               "worst": max(abs(a - b) for a, b in zip(*_spec_box(spec, rec)))})
+                continue
         entry = per_kind.setdefault(kind, {"n": 0, "worst": 0.0, "pass": True, "fails": []})
         tol = tols.hard if kind in _OFFLINE_EXACT_KINDS else tols.soft
         planned, actual = _spec_box(spec, rec)
@@ -1368,6 +1402,21 @@ def claimed_patched_slides(zorder_write: dict[str, Any] | None) -> set[int]:
     return parsed if parsed is not None else set()
 
 
+def badge_fallback_exempt(
+    zorder_write: dict[str, Any] | None,
+    badge_raises: list[dict[str, Any]] | None,
+) -> bool:
+    """True iff B patched offline at least one badge-bearing slide (a slide with a
+    ``badgeRaises`` row), the condition ``badgeFallback`` parity must be keyed to —
+    not merely "any slide was patched", which would exempt a run where B only patched
+    stat-only slides while every badge-bearing slide stayed on the GUI."""
+    ow = zorder_write or {}
+    if _counter_nonzero(ow.get("zorderSlides")) <= 0:
+        return False
+    badge_bearing = {int(row["slide"]) for row in badge_raises or []}
+    return bool(claimed_patched_slides(zorder_write) & badge_bearing)
+
+
 def raise_slides_from_jobs(
     stat_jobs: list[dict[str, Any]] | None,
     badge_rows: list[dict[str, Any]] | None,
@@ -1443,6 +1492,24 @@ def zorder_gui_reasons(
     return reasons
 
 
+def zorder_slides_count_reasons(
+    zorder_write: dict[str, Any] | None, *, label: str = "B",
+) -> list[str]:
+    """RED if ``zorderSlides`` disagrees with ``len(slides)`` — a self-inconsistent
+    B record (e.g. ``slides=[56], zorderSlides=0``) must not read as clean."""
+    ow = zorder_write or {}
+    patched = _as_slide_set(ow.get("slides"))
+    if patched is None:
+        return []
+    n = _counter_nonzero(ow.get("zorderSlides"))
+    if n != len(patched):
+        return [
+            f"{label}: zorderSlides={ow.get('zorderSlides')!r} != len(slides)="
+            f"{len(patched)}"
+        ]
+    return []
+
+
 def zorder_write_reasons(
     zorder_write: dict[str, Any] | None,
     raise_slides: set[int],
@@ -1457,6 +1524,7 @@ def zorder_write_reasons(
         return reasons
     return (
         zorder_counter_reasons(zorder_write, label=label)
+        + zorder_slides_count_reasons(zorder_write, label=label)
         + zorder_gui_reasons(
             zorder_write, raise_slides,
             compared_slides=compared_slides, refused=refused, label=label,
@@ -1644,6 +1712,29 @@ def persisted_raise_jobs(
     if "statJobs" in plan or "badgeRaises" in plan:
         return raise_job_pair(plan, label="plan")
     return raise_job_pair(record, label="record")
+
+
+def w2_oracle_kwargs(
+    src_recs_n: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Keyword args for arm A's and arm B's ``plan_oracle_slide`` calls under the W2
+    gate config: both arms write geometry offline at the same mode, so neither is
+    AppleScript-written and neither passes ``aspects`` — both gate at the ordinary
+    ``tols.hard``/``tols.soft`` budget rather than arm A narrowing to ``TOL_ASPECT``.
+    """
+    kwargs = {"src_recs_by_id": src_recs_n}
+    return dict(kwargs), dict(kwargs)
+
+
+def badge_fallback_hard_for(
+    plan_b: dict[str, Any], b_record: dict[str, Any], zorder_write_b: dict[str, Any] | None,
+) -> bool:
+    """True iff ``badgeFallback`` parity must gate hard — B did not offline-patch any
+    badge-bearing slide, per :func:`persisted_raise_jobs` / :func:`badge_fallback_exempt`.
+    Raises ``ValueError`` per ``persisted_raise_jobs``'s one-key-without-the-other contract.
+    """
+    badge_raises_b = (persisted_raise_jobs(plan_b, b_record) or ([], []))[1]
+    return not badge_fallback_exempt(zorder_write_b, badge_raises_b)
 
 
 # ==========================================================================
@@ -1917,6 +2008,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _log(f"WARN: Keynote still running after {elapsed:.0f} s")
 
+    try:
+        badge_fallback_hard = badge_fallback_hard_for(plan_b, b_record, zorder_write_b)
+    except ValueError as exc:
+        _log(f"ABORT: {exc}")
+        return 2
+
     if not (ow_b.get("slides") or []):
         _log("ABORT: run B took no slide offline (OBED_AS_GEOMETRY off, or no slide "
              "qualified — check the log above).")
@@ -1948,11 +2045,13 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"RED: {r}")
 
     zorder_suppressed = bool(claimed_patched_slides(zorder_write_b))
+    badge_slides_suppressed = not badge_fallback_hard
     # W2: B's eligible slides skip the GUI raise, so `front` A!=B is expected and
     # must not RED the strict bar. Other PASS2_PARITY_KEYS still gate.
     parity = pass2_parity(
         child_resize_a, child_resize_b,
         front_hard=zero_keys_hard and not zorder_suppressed,
+        badge_fallback_hard=badge_fallback_hard,
     )
     for r in parity:
         _log(f"RED: {r}")
@@ -1993,6 +2092,14 @@ def main(argv: list[str] | None = None) -> int:
                 else "pass2-bar=parity: GUI Bring-to-Front raises are flaky, does not gate"
             )
             _log(f"WARN: pass-2 front A={front_a} B={front_b} ({why}).")
+
+    if badge_slides_suppressed:
+        bf_a = int((child_resize_a or {}).get("badgeFallback") or 0)
+        bf_b = int((child_resize_b or {}).get("badgeFallback") or 0)
+        if bf_a != bf_b:
+            _log(f"WARN: pass-2 badgeFallback A={bf_a} B={bf_b} "
+                 "(W2: B raises badges offline on suppressed badge-bearing slides, "
+                 "does not gate).")
 
     ow_missed = int(ow_b.get("missedSpecs") or 0)
     ow_fallback = sum(int(v) for v in (ow_b.get("fallbackSpecs") or {}).values())
@@ -2036,7 +2143,8 @@ def main(argv: list[str] | None = None) -> int:
     # Decode A, extract every compared slide's units, then DROP A's raw archive map
     # before decoding B — two whole-deck decodes held live at once is the dominant
     # memory cost on the Full deck.
-    aspects = source_aspects(args.source)
+    src_objects, src_by_slide = decode_deck(args.source)
+    del src_objects
     a_objects, a_by_slide = decode_deck(a_deck)
     a_units_by_slide = {n: slide_units(a_objects, n) for n in compared_slides}
     a_z_by_slide = {n: slide_zorder_ids(a_objects, n) for n in compared_slides}
@@ -2073,8 +2181,10 @@ def main(argv: list[str] | None = None) -> int:
         specs_n = [t for t in (plan_a.get("transforms") or []) if int(t.get("slide", -1)) == n]
         id_by_addr = _id_by_addr_for_slide(id_map, n)
 
-        oracle_a = plan_oracle_slide(specs_n, id_by_addr, a_by_slide.get(n, {}), tols, aspects=aspects)
-        oracle_b = plan_oracle_slide(specs_n, id_by_addr, b_by_slide.get(n, {}), tols)
+        src_recs_n = src_by_slide.get(n, {})
+        kwargs_a, kwargs_b = w2_oracle_kwargs(src_recs_n)
+        oracle_a = plan_oracle_slide(specs_n, id_by_addr, a_by_slide.get(n, {}), tols, **kwargs_a)
+        oracle_b = plan_oracle_slide(specs_n, id_by_addr, b_by_slide.get(n, {}), tols, **kwargs_b)
         _log(f"  slide {n}:")
         _log_plan_oracle_report("A", oracle_a)
         _log_plan_oracle_report("B", oracle_b)

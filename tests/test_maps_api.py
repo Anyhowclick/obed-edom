@@ -15,7 +15,7 @@ from PIL import Image
 import pytest
 
 from obed_edom import maps_admin1
-from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM, camera_dict
+from obed_edom.maps_geo import CG_MIN_ZOOM, DEFAULT_HIDDEN_LAYERS, WORLD_MIN_ZOOM, camera_dict
 from obed_edom.maps_keynote import export_maps_job, maps_export_plan
 from obed_edom.web.app import RUNNER, app
 
@@ -67,8 +67,8 @@ def test_post_maps_seeds_under_output_root_without_dest():
     assert "destPath" not in result
     assert result["exportLw"] is True
     assert result["exportCg"] is True
-    assert result["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
-    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
+    assert result["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
+    assert result["slides"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
     assert result["slides"][0]["id"] == "s1"
     assert result["previewDir"].endswith("/previews")
     assert "/.maps/" in result["outputDir"].replace("\\", "/")
@@ -355,7 +355,7 @@ def test_per_slide_hidden_layers_roundtrip_and_demotes_morph():
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
-    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows", "labels", "boundaries"]
+    assert result["slides"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
     assert result["slides"][1]["hiddenLayers"] == ["pois"]
     assert result["links"][0]["kind"] == "cut"
 
@@ -2934,6 +2934,35 @@ def test_export_body_rejects_unknown_field_other_than_export_dir():
     assert response.status_code == 422
 
 
+def test_export_forwards_export_path(monkeypatch, tmp_path):
+    job = _seed()
+    captured = {}
+
+    def spy(j, **kwargs):
+        captured.update(kwargs)
+        return {**(getattr(j, "result", None) or {}), "destPath": str(kwargs["export_path"])}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", spy)
+    dest = tmp_path / "exports" / "Sunday.key"
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportPath": str(dest)})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert captured["export_path"] == dest.resolve()
+    assert done["result"]["exportDir"] == str(dest.parent.resolve())
+
+
+def test_export_rejects_export_path_inside_private_root():
+    from obed_edom.paths import output_root
+
+    job = _seed()
+    response = client.post(
+        f"/api/maps/{job['id']}/export",
+        json={"exportPath": str(output_root() / ".maps" / "Sunday.key")},
+    )
+    assert response.status_code == 400
+
+
 def test_bootstrap_csv_bumps_state_revision(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     job = _seed()
@@ -3132,7 +3161,16 @@ def test_export_enqueue_waits_for_admitted_commit(monkeypatch):
 
     captured = {}
 
-    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None, persist_export_dir=True, credits=None):
+    def fake_run_export(
+        job,
+        export_lw,
+        export_cg,
+        export_dsk=False,
+        export_dir=None,
+        persist_export_dir=True,
+        credits=None,
+        export_path=None,
+    ):
         captured["export_lw"] = export_lw
         captured["export_cg"] = export_cg
         captured["export_dsk"] = export_dsk
@@ -4176,6 +4214,16 @@ def test_maps_slide_accepts_highlight_colours():
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     assert saved.json()["result"]["slides"][0]["highlightColours"] == {"MYS": "#00aaff"}
+
+
+def test_maps_slide_accepts_highlight_no_fill():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["highlights"] = ["MYS"]
+    doc["slides"][0]["highlightColours"] = {"MYS": "NONE"}
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["highlightColours"] == {"MYS": "none"}
 
 
 def test_maps_slide_rejects_bad_highlight_colours():

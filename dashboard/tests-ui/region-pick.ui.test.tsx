@@ -83,6 +83,39 @@ describe("Pick: Countries | Regions", () => {
     expect(mapFake.getLatestProps().pickRegions).toBe(true);
   });
 
+  it("does not flash the pan-hint when switching to Regions over a country", async () => {
+    const { mapFake } = await renderMapsTab();
+    mapFake.setRegionCountries(["MYS"]);
+    await openProperties();
+
+    const panHint = "Pan a country into view to pick its regions.";
+    let sawPanHint = false;
+    const observer = new MutationObserver(() => {
+      if (document.body.textContent?.includes(panHint)) sawPanHint = true;
+    });
+    observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Regions" }));
+    });
+    observer.disconnect();
+
+    expect(sawPanHint).toBe(false);
+    expect(screen.queryByText(panHint)).not.toBeInTheDocument();
+  });
+
+  it("shows the pan-hint after a probe finds no country in view", async () => {
+    const { mapFake } = await renderMapsTab();
+    mapFake.setRegionCountries([]);
+    await openProperties();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Regions" }));
+    });
+
+    expect(screen.getByText("Pan a country into view to pick its regions.")).toBeInTheDocument();
+  });
+
   it("checking a country in the cache picker asks the server for its regions", async () => {
     loadAdmin0Stub.mockResolvedValue({
       features: [{ properties: { ADM0_A3: "MYS", NAME: "Malaysia" } }],

@@ -296,12 +296,12 @@ child-by-child (width only for the autosize child), never resized as a group.
 ### Offline-write A/B gate
 
 `scripts/write_gate_ab.py` is the older one-slide, id-stable Map probe.
-`scripts/offline_write_ab.py` is the active whole-deck W1 gate. The plan
-oracle is aspect-aware: arm A (AppleScript) gates at 0.25px and arm B
-(offline writer) at 1.0px, reflecting Keynote's own x/y/h-integer,
-w-from-aspect write behaviour on image/movie/group; the planner's aspect
-snap keeps the two arms' target rects AR-consistent so this split does not
-mask a real placement defect. For the Full
+`scripts/offline_write_ab.py` is the active whole-deck W2 gate: both arms
+write geometry offline at the same `OBED_OFFLINE_WRITE` mode and differ only
+in `OBED_ZORDER_WRITE`, so neither is AppleScript-written and both gate the
+plan oracle at the ordinary offline (soft) budget — `aspects` is not passed
+to either arm. The 0.25px AppleScript-arm budget is historical (W1) and must
+not be restored for arm A. For the Full
 report, `Full_Report_Card_Wall.key` is `--source`, `Base_CG_Assets.key` is
 `--template`, and `Full_Report_Card_CG.key` is a reference output, not the
 template.

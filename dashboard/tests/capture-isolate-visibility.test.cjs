@@ -59,15 +59,9 @@ test("isolatePairBaseVisibility always hides the highlight layers, isolate on or
   assert.ok(map.calls.every((c) => c[3] === 0));
 });
 
-test("isolate-on cutout: isolate-fill is hidden, highlight opacity is left untouched", () => {
+test("cutout: isolate-fill is hidden first, then highlights restore to authored expressions", () => {
   const map = fakeMap(ALL_LAYERS);
-  isolatePairCutoutVisibility(map, ["USA"], true);
-  assert.deepEqual(map.calls, [["setLayoutProperty", "isolate-fill", "visibility", "none"]]);
-});
-
-test("isolate-off cutout: isolate-fill is hidden first, then highlights restore to authored expressions", () => {
-  const map = fakeMap(ALL_LAYERS);
-  isolatePairCutoutVisibility(map, ["A1:MYS-1186"], false);
+  isolatePairCutoutVisibility(map, ["A1:MYS-1186"]);
   assert.equal(map.calls[0][0], "setLayoutProperty");
   assert.equal(map.calls[0][1], "isolate-fill");
   assert.deepEqual(
@@ -78,7 +72,7 @@ test("isolate-off cutout: isolate-fill is hidden first, then highlights restore 
 
 test("cutout visibility is a no-op for isolate-fill when no isolate layer exists (bare admin0/admin1 slide)", () => {
   const map = fakeMap(["admin0-fill", "admin0-line"]);
-  isolatePairCutoutVisibility(map, ["USA"], false);
+  isolatePairCutoutVisibility(map, ["USA"]);
   assert.ok(!map.calls.some((c) => c[1] === "isolate-fill"));
   assert.deepEqual(
     map.calls.map((c) => c[1]),
@@ -90,7 +84,14 @@ test("full pair call order: base hide happens entirely before the cutout's isola
   const map = fakeMap(ALL_LAYERS);
   isolatePairBaseVisibility(map, ["USA"]);
   const baseCalls = map.calls.length;
-  isolatePairCutoutVisibility(map, ["USA"], true);
+  isolatePairCutoutVisibility(map, ["USA"]);
   assert.equal(map.calls[baseCalls][0], "setLayoutProperty");
   assert.equal(map.calls[baseCalls][1], "isolate-fill");
+});
+
+test("cutout restore drops no-fill admin1 ids from the authored opacity expression", () => {
+  const map = fakeMap(ALL_LAYERS);
+  isolatePairCutoutVisibility(map, ["A1:MYS-1186", "A1:MYS-1187"], { "A1:MYS-1186": "none" });
+  const admin1Fill = map.calls.find((c) => c[1] === "admin1-fill");
+  assert.deepEqual(admin1Fill[3][1][2], ["literal", ["MYS-1187"]]);
 });

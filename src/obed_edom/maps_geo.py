@@ -42,7 +42,7 @@ DEFAULT_POINT_ZOOM = 8
 
 SEA_OVERVIEW_BBOX = {"west": 70.0, "south": -42.0, "east": 155.0, "north": 28.0}
 
-DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows", "labels", "boundaries")
+DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows", "labels", "waternames", "boundaries")
 
 
 def slide_hidden_layers(slide: dict[str, Any]) -> list[str]:
@@ -235,7 +235,11 @@ def highlight_colours_key(slide: dict[str, Any]) -> str:
         code = text if ":" in text else text.upper()
         if not _HIGHLIGHT_CODE_RE.fullmatch(code):
             continue
-        match = _HIGHLIGHT_COLOUR_RE.fullmatch(str(value or "").strip())
+        raw_colour = str(value or "").strip()
+        if raw_colour.lower() == "none":
+            items.append(f"{code}:none")
+            continue
+        match = _HIGHLIGHT_COLOUR_RE.fullmatch(raw_colour)
         if not match:
             continue
         hex_digits = match.group(1).lower()
