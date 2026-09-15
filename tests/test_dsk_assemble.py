@@ -7019,6 +7019,80 @@ def test_verify_builds_groupchild_char_window_split_clones_the_group_build(monke
     assert any("cloned build on split part" in w for w in warnings)
 
 
+def test_verify_builds_groupchild_char_window_split_truncated_badge_refuses(monkeypatch):
+    # Finding 2 (review 4): each part's badge child is truncated ("Matthew" instead of
+    # "Matthew 18") while the verse child (the actual split target, index 1) narrows
+    # legitimately -- the badge is not the designated split child, so the clone must be
+    # refused and the resulting identity mismatch surfaces as a real build refusal.
+    from obed_edom import iwa_builds
+
+    full_verse = "In whole box text here completely more"
+    src_dissolve = {
+        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "group", "kindIndex": 0, "effect": "apple:dissolve", "animationType": "In",
+        "identity": ("group", f"Matthew 18\n{full_verse}"),
+    }
+    src_builds = {17: {"slideId": "s", "builds": [src_dissolve], "transition": None}}
+    part_texts = ["In whole box", "text here completely", "more"]
+    out_builds = {
+        2 + i: {
+            "slideId": f"o{i}",
+            "builds": [dict(src_dissolve, identity=("group", f"Matthew\n{t}"))],
+            "transition": None,
+        }
+        for i, t in enumerate(part_texts)
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 3}, ordinal_to_number={2: 17, 3: 17, 4: 17},
+        splits={17: tuple(_char_window_groupchild_split_part(1, (1, 10)) for _ in range(3))},
+    )
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+def test_merge_split_part_builds_selects_source_by_owner_not_effect_type_alone():
+    # Finding 2 (review 4): two groups share (kind, effect, animationType) but have
+    # different kindIndex/identity -- listing the OTHER group's build first in
+    # ``src_builds`` must not steal the clone: the split group's own build (kindIndex 0,
+    # the split's owner) is the only legitimate source, keyed by owner not merely
+    # (kind, effect, animationType).
+    full_verse = "In whole box text here completely more"
+    split_dissolve = {
+        "buildId": "b0", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "group", "kindIndex": 0, "effect": "apple:dissolve", "animationType": "In",
+        "identity": ("group", f"Matthew 18\n{full_verse}"),
+    }
+    other_group_dissolve = {
+        "buildId": "b1", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "group", "kindIndex": 1, "effect": "apple:dissolve", "animationType": "In",
+        "identity": ("group", "Luke 5\nsome other unrelated verse entirely"),
+    }
+    src_builds = [other_group_dissolve, split_dissolve]
+    part_texts = ["In whole box", "text here completely", "more"]
+    ordinal_recs = [
+        (2 + i, {"builds": [dict(split_dissolve, identity=("group", f"Matthew 18\n{t}"))]})
+        for i, t in enumerate(part_texts)
+    ]
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 3}, ordinal_to_number={2: 17, 3: 17, 4: 17},
+        splits={17: tuple(_char_window_groupchild_split_part(1, (1, 10)) for _ in range(3))},
+    )
+    warnings: list[str] = []
+    merged = dsa._merge_split_part_builds(
+        ordinal_recs, plan, 17, src_builds=src_builds, warnings=warnings,
+    )
+    assert len(merged) == 3
+    assert all(b["identity"] == split_dissolve["identity"] for b in merged)
+    assert any("cloned build on split part" in w for w in warnings)
+
+
 def test_identity_is_narrowed_slice_gw5_54_shaped_group_identity_child_wise():
     # Finding 4: a literal GW 5/54-shaped identity ("group", "Matthew 18\n<verse>") --
     # the unchanged badge child ("Matthew 18") must match exactly and only the verse
@@ -7029,20 +7103,30 @@ def test_identity_is_narrowed_slice_gw5_54_shaped_group_identity_child_wise():
     middle = ("group", "Matthew 18\nthe Word was with")
     final = ("group", "Matthew 18\nwas with God")
     for part in (first, middle, final):
-        assert dsa._identity_is_narrowed_slice(part, src_identity)
+        assert dsa._identity_is_narrowed_slice(part, src_identity, split_child_index=1)
 
     # A changed badge child must refuse even if the verse child is a valid slice.
     wrong_badge = ("group", "Luke 5\nIn the beginning was the Word")
-    assert not dsa._identity_is_narrowed_slice(wrong_badge, src_identity)
+    assert not dsa._identity_is_narrowed_slice(wrong_badge, src_identity, split_child_index=1)
 
     # A verse "slice" that is not actually contained in the source verse must refuse.
     not_a_slice = ("group", "Matthew 18\nsomething not in the verse at all")
-    assert not dsa._identity_is_narrowed_slice(not_a_slice, src_identity)
+    assert not dsa._identity_is_narrowed_slice(not_a_slice, src_identity, split_child_index=1)
 
     # A different child count (badge dropped) must refuse rather than fall back to the
     # whole-string substring check.
     dropped_child = ("group", "In the beginning was the Word")
-    assert not dsa._identity_is_narrowed_slice(dropped_child, src_identity)
+    assert not dsa._identity_is_narrowed_slice(dropped_child, src_identity, split_child_index=1)
+
+    # Finding 2 (review 4): a truncated badge ("Matthew" vs "Matthew 18") alongside an
+    # UNCHANGED verse child must refuse -- the badge (index 0) is not the designated
+    # split child (index 1), so it may not narrow even though it is a substring.
+    truncated_badge = ("group", f"Matthew\n{full_verse}")
+    assert not dsa._identity_is_narrowed_slice(truncated_badge, src_identity, split_child_index=1)
+
+    # Without a resolved split-child index, no group child may narrow at all -- an
+    # unknown owner must never be treated as a safe slice.
+    assert not dsa._identity_is_narrowed_slice(first, src_identity)
 
 
 def test_refuse_split_box_char_word_builds_group_child_checks_the_groups_own_build():
@@ -9934,6 +10018,55 @@ def test_gw38_split_part_rects_pinned_to_the_standard_slot():
         assert (round(badge_rect.x, 1), round(badge_rect.y, 1)) == (63.1, 785.8)
 
 
+def test_gw38_split_literal_band_badge_keys_deletes_and_zero_build_multiplicity():
+    # Review 4 finding 3: pins the band/badge as LITERAL numbers (not recomputed via
+    # `_slot_band`), the offline measurement keys, all four per-part delete sequences
+    # (tail then head, literal character ranges), and that GW 38's source slide carries
+    # zero builds -- so a real assembled deck's split parts clone zero builds, never a
+    # surplus/missing multiset mismatch.
+    from obed_edom.iwa_builds import deck_builds
+
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {38: SlideDecision(38, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[38]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    assert plan.stack_bands[38] == Band(1043.4, 177.0, 53.6, 1852.6, 4)
+    badge_id = plan.slot_badge_ids[38]
+    verse_id = next(iter(plan.splits[38][0].stacked_ids))
+    assert verse_id == ("text", 1)
+    for part in plan.splits[38]:
+        assert part.fits[badge_id] == Rect(63.1, 785.8, 933.1, 82.1)
+
+    ordinal0 = plan.ordinals[38]
+    assert dsa._eligible_refit_items(plan, 38) == frozenset(
+        (ordinal0 + i, verse_id) for i in range(4)
+    )
+    expected_deletes = [
+        ["delete characters 92 thru 296 of object text of theObj"],
+        [
+            "delete characters 186 thru 296 of object text of theObj",
+            "delete characters 1 thru 92 of object text of theObj",
+        ],
+        [
+            "delete characters 272 thru 296 of object text of theObj",
+            "delete characters 1 thru 186 of object text of theObj",
+        ],
+        ["delete characters 1 thru 272 of object text of theObj"],
+    ]
+    for part_no, expected in enumerate(expected_deletes):
+        lines = dsa._slide_lines(plan, 38, ordinal0 + part_no, part=part_no)
+        got = [line.strip() for line in lines if "delete characters" in line]
+        assert got == expected
+
+    assert deck_builds(GW_DECK)[38]["builds"] == []
+
+
 R12B = Path.home() / "Desktop/dsk-d4-work/out-r12b/Sermon_PK_DSK.key"
 
 
@@ -10226,6 +10359,78 @@ def test_gw17_two_top_level_boxes_stack_inside_the_verse_slot():
     bottoms = sorted(plan.fits[17][iid].y + plan.fits[17][iid].h for iid in long_ids)
     assert tops[0] == pytest.approx(slot.verse.y)
     assert bottoms[-1] <= slot.verse.y + slot.verse.h + 0.01
+
+
+def test_gw17_forced_split_routes_the_generic_multi_box_branch_through_the_slot():
+    # Finding 1 (review 4): GW 17's two top-level boxes fit jointly (the case above),
+    # so a forced ``--split`` is the only way to exercise the generic per-box split
+    # branch while a slot layout is still in effect (the same branch a GW17-shaped
+    # slide would fall through to if it did NOT fit jointly). Every part must be
+    # top-anchored to the slot's own band, the badge pinned exactly to the slot badge,
+    # and `slot_badge_ids`/`stack_bands` recorded -- not the legacy bottom-stacked,
+    # badge-unchecked placement review 4 flagged.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[17]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+        split_overrides={17: 2},
+    )
+    assert plan.layout_names[17] == "Verse Standard (Variation 2)"
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    assert plan.stack_bands[17] == dsa._slot_band(slot.verse)
+    badge_id = plan.slot_badge_ids.get(17)
+    assert badge_id is not None
+    long_ids = by_number[17].long_text_ids
+    assert plan.parts[17] == 2
+    assert len(plan.splits[17]) == 2
+    for part in plan.splits[17]:
+        assert part.fits[badge_id] == slot.badge
+        verse_id = next(iid for iid in long_ids if iid in part.fits)
+        verse_rect = part.fits[verse_id]
+        assert verse_rect.x == slot.verse.x
+        assert verse_rect.w == slot.verse.w
+        assert verse_rect.y == pytest.approx(slot.verse.y)
+
+
+def test_gw38_one_part_fallback_matches_the_direct_slot_fit_geometry(monkeypatch):
+    # Review 4 finding 3: no end-to-end `plan_assembly` fixture previously reached the
+    # one-part fallback (`len(chunks) == 1`, S2/§2.2 -- the height-budget pack fits in
+    # one part after all). Forcing `_pack_split_lines` to always report a single chunk
+    # (GW 38's own real box otherwise always needs 4 parts) exercises that exact branch;
+    # its geometry/badge/band/run size/split_t must equal the direct (non-split) slot
+    # fit's own literal numbers -- the one-part fallback is a no-op split, not a
+    # different placement.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    cls38 = by_number[38]
+    verse_id = cls38.long_text_ids[0]
+    items = {(it["kind"], it["kindIndex"]): it for it in payload["slides"][37]["items"]}
+    full_len = len(items[verse_id]["text"])
+    monkeypatch.setattr(dsa, "_pack_split_lines", lambda *a, **k: [[(0, full_len)]])
+
+    decisions = {38: SlideDecision(38, "in_deck")}
+    plan = plan_assembly(
+        payload, [cls38], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+    )
+    assert plan.layout_names[38] == "Verse Standard (Variation 2)"
+    assert 38 not in plan.splits
+    slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
+    assert plan.fits[38][verse_id] == slot.verse
+    assert plan.stack_bands[38] == dsa._slot_band(slot.verse)
+    badge_id = plan.slot_badge_ids[38]
+    assert plan.fits[38][badge_id] == slot.badge
+    assert plan.stack_t[38] == pytest.approx(slot.verse_pt / items[verse_id]["size"])
+    sizes = {round(sz, 2) for _lo, _hi, sz in plan.run_sizes[38][verse_id]}
+    assert 50.0 in sizes  # the same 50pt emphasis cap as the split path (S1/S2)
 
 
 def test_gw52_repeat_heading_dropped_resolves_verse_standard():

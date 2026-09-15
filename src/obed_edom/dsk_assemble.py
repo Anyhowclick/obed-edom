@@ -437,15 +437,19 @@ def _refuse_split_box_char_word_builds(
             )
 
 
-def _identity_is_narrowed_slice(part_identity: tuple, src_identity: tuple) -> bool:
+def _identity_is_narrowed_slice(
+    part_identity: tuple, src_identity: tuple, *, split_child_index: int | None = None
+) -> bool:
     """True if a split part's build identity is the source's identity narrowed to a
     contiguous slice of its text (probe H3) -- the only legitimate way a cloned build's
     identity may differ from its source. A group identity's text (``iwa_runs._SIG_JOIN``
     = ``"\\n"``-joined per-child signatures, finding 4) is compared CHILD-WISE: every
-    unchanged child (badge or otherwise) must match its source child exactly, and at
-    most one child -- the one the split actually narrowed -- may instead be a contiguous
-    slice of its own source child's text. A bare (non-group) identity keeps the older
-    whole-string substring check."""
+    child other than ``split_child_index`` -- the one the caller knows the split actually
+    narrowed -- must match its source child exactly; only that one child may instead be a
+    contiguous slice of its own source child's text. A group identity with
+    ``split_child_index`` unresolved (``None``) tolerates no narrowing at all -- a changed
+    child at an unknown position (e.g. a truncated badge) is a corruption, not a probe H3
+    slice. A bare (non-group) identity keeps the older whole-string substring check."""
     if part_identity == src_identity:
         return True
     if len(part_identity) != 2 or len(src_identity) != 2 or part_identity[0] != src_identity[0]:
@@ -459,14 +463,12 @@ def _identity_is_narrowed_slice(part_identity: tuple, src_identity: tuple) -> bo
     src_children = src_text.split(_SIG_JOIN)
     if len(part_children) != len(src_children):
         return False
-    narrowed_count = 0
-    for part_child, src_child in zip(part_children, src_children):
+    for idx, (part_child, src_child) in enumerate(zip(part_children, src_children)):
         if part_child == src_child:
             continue
-        if not part_child or part_child not in src_child:
+        if idx != split_child_index or not part_child or part_child not in src_child:
             return False
-        narrowed_count += 1
-    return narrowed_count <= 1
+    return True
 
 
 def _refuse_on_short_row_overlap(number: int, short_fit: dict[ItemId, Rect]) -> None:
@@ -504,6 +506,21 @@ def _short_row_rects(
         else _dc_replace(rect, y=row_top + (row_h - rect.h))
         for iid, rect in short_fit.items()
     }
+
+
+def _slot_part_fit(
+    box_id: ItemId, rect: Rect, short_fit: dict[ItemId, Rect], short_row_h: float,
+    pinned_ids: frozenset[ItemId] | None,
+) -> dict[ItemId, Rect]:
+    """One split part's fits: the split box's own ``rect`` plus any short-row items
+    (badge kept at ``pinned_ids`` when a slot layout is in effect), matching the joint
+    slot-fit placement -- shared by the one-part fallback, the char-window split and the
+    generic multi-box split (finding 1)."""
+    part_fit = dict(short_fit)
+    if short_fit:
+        part_fit.update(_short_row_rects(short_fit, short_row_h, rect.y, pinned_ids=pinned_ids))
+    part_fit[box_id] = rect
+    return part_fit
 
 
 def _run_size_ranges(
@@ -1873,10 +1890,6 @@ def plan_assembly(
                             short_fit[slot_badge_id] = split_slot.badge
                             slot_badge_pt = split_slot.badge_pt
                         split_badge_pinned_ids = frozenset({slot_badge_id}) if split_slot_badge_pinned else None
-                        # Finding 3: entering the split branch re-anchors measurement/refit
-                        # state (stack_band, stack_t_map) to the Standard slot's own band --
-                        # never the reduced pre-split band -- so per-ordinal measurement and
-                        # the refit round check the same bounds as a non-split slot fit.
                         stack_band = _slot_band(split_rect)
                         split_t = split_pt / split_box.size if split_box.size else 1.0
                         stack_t_map[number] = split_t
@@ -1942,13 +1955,12 @@ def plan_assembly(
                             # fits the slot after all (often thanks to the 50pt emphasis
                             # cap); fall back to the normal slot-fit path rather than
                             # emitting a no-op split that deletes nothing.
-                            fit[split_box.item_id] = split_rect
-                            if short_fit:
-                                fit.update(
-                                    _short_row_rects(
-                                        short_fit, short_row_h, split_rect.y, pinned_ids=split_badge_pinned_ids,
-                                    )
+                            fit.update(
+                                _slot_part_fit(
+                                    split_box.item_id, split_rect, short_fit, short_row_h,
+                                    split_badge_pinned_ids,
                                 )
+                            )
                             ranges = _windowed_run_ranges(run_table, 0, full_len, split_pt)
                             if isinstance(ranges, tuple):
                                 stacked_run_sizes[split_box.item_id] = ranges
@@ -1958,14 +1970,10 @@ def plan_assembly(
                             part_list = []
                             for chunk in chunks:
                                 start0, end0 = chunk[0][0], chunk[-1][1]
-                                part_fit = dict(short_fit)
-                                if short_fit:
-                                    part_fit.update(
-                                        _short_row_rects(
-                                            short_fit, short_row_h, split_rect.y, pinned_ids=split_badge_pinned_ids,
-                                        )
-                                    )
-                                part_fit[split_box.item_id] = split_rect
+                                part_fit = _slot_part_fit(
+                                    split_box.item_id, split_rect, short_fit, short_row_h,
+                                    split_badge_pinned_ids,
+                                )
                                 ranges = _windowed_run_ranges(run_table, start0, end0, split_pt)
                                 part_text_sizes: dict[ItemId, float] = {}
                                 part_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
@@ -1996,6 +2004,19 @@ def plan_assembly(
                                 f"slide {number}: text split and image crop both apply -- unsupported"
                             )
                         stacked_ids = set(long_ids)
+                        split_slot_top_anchor = slot_layout_name is not None
+                        split_slot_pinned_ids = None
+                        if slot_layout_name is not None:
+                            used_slot_layout_name = slot_layout_name
+                            multi_slot = LAYOUT_SLOTS[slot_layout_name]
+                            stack_band = _slot_band(
+                                multi_slot.verse if slot_category == "verse" else multi_slot.text
+                            )
+                            split_slot_pinned_ids = (
+                                frozenset({slot_badge_id})
+                                if slot_badge_id is not None and slot_badge_id in short_fit
+                                else None
+                            )
                         part_list: list[SplitPart] = []
                         for box in boxes:
                             _refuse_split_box_char_word_builds(number, box.item_id, builds)
@@ -2005,11 +2026,14 @@ def plan_assembly(
                                     f"slide {number} box {_item_label(box.item_id)} does not fit the band even alone at --min-text-pt {min_text_pt}"
                                 )
                             t1, sizes1, heights1 = single
-                            rect = _stacked_text_rects([box], heights1, stack_band)[box.item_id]
-                            part_fit = dict(short_fit)
-                            if short_fit:
-                                part_fit.update(_short_row_rects(short_fit, short_row_h, rect.y))
-                            part_fit[box.item_id] = rect
+                            if split_slot_top_anchor and box is boxes[0]:
+                                stack_t_map[number] = t1
+                            rect = _stacked_text_rects(
+                                [box], heights1, stack_band, top_anchor=split_slot_top_anchor,
+                            )[box.item_id]
+                            part_fit = _slot_part_fit(
+                                box.item_id, rect, short_fit, short_row_h, split_slot_pinned_ids,
+                            )
                             other_long = [b.item_id for b in boxes if b.item_id != box.item_id]
                             part_deletes = _delete_order(list(base_deletes) + other_long, id_by_item)
                             part_ranges, part_unresolved = _run_size_ranges(
@@ -3900,10 +3924,12 @@ def _merge_split_part_builds(
     alone -- a genuine mismatch, not silently absorbed."""
     split_parts = plan.splits.get(number, ())
     is_char_window = any(p.char_window is not None for p in split_parts)
-    src_by_effect_type: dict[tuple, dict] = {}
+    src_by_owner: dict[tuple, dict] = {}
     if is_char_window:
         for sb in src_builds:
-            src_by_effect_type.setdefault((sb["kind"], sb["effect"], sb["animationType"]), sb)
+            src_by_owner.setdefault(
+                (sb["kind"], sb["kindIndex"], sb["effect"], sb["animationType"]), sb
+            )
     part_fits = [p.fits for p in split_parts]
     long_builds: list[dict] = []
     short_counts: list[Counter] = []
@@ -3912,20 +3938,27 @@ def _merge_split_part_builds(
     for ordinal, rec in ordinal_recs:
         part = ordinal - plan.ordinals[number]
         source_long_id = next(iter(split_parts[part].stacked_ids), None) if part < len(split_parts) else None
+        split_child_index: int | None = None
         if source_long_id is not None and source_long_id[0] == "groupchild":
             # S5: a group-child split's clonable build lives on the GROUP object
             # itself (``apple:dissolve``), not the child -- ``_staged_id_for`` expects a
             # plain ``(kind, kindIndex)`` source id and would misparse the 4-tuple.
             staged_rank = _staged_group_rank(number, plan, source_long_id[1], part=part, hidden=hidden)
             long_id = ("group", staged_rank) if staged_rank is not None else None
+            _tag, _g_ki, c_kind, c_ki = source_long_id
+            if c_kind == "text":
+                split_child_index = c_ki
         else:
             long_id = _staged_id_for(number, plan, source_long_id, part=part, hidden=hidden)
+        owner_kindIndex = source_long_id[1] if source_long_id is not None else None
         staged_idxs = _staged_kind_ranks(number, plan, part=part, hidden=hidden)
         counts: Counter = Counter()
         for b in rec["builds"]:
             if (b["kind"], b["kindIndex"]) == long_id:
-                src_b = src_by_effect_type.get((b["kind"], b["effect"], b["animationType"]))
-                if src_b is not None and _identity_is_narrowed_slice(b["identity"], src_b["identity"]):
+                src_b = src_by_owner.get((b["kind"], owner_kindIndex, b["effect"], b["animationType"]))
+                if src_b is not None and _identity_is_narrowed_slice(
+                    b["identity"], src_b["identity"], split_child_index=split_child_index,
+                ):
                     clone = dict(b, identity=src_b["identity"])
                     long_builds.append(clone)
                     if warnings is not None and b["identity"] != src_b["identity"]:
