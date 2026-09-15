@@ -375,7 +375,10 @@ def _bank_skip_ladder(deck_name: str) -> dict:
     for field, expected in (
         ("bankVersion", BANK_VERSION),
         ("slideDigestVersion", baseline.SLIDE_DIGEST_VERSION),
-        ("inspectVersion", baseline.INSPECT_VERSION),
+        # inspectVersion is payload-cache partitioning, not a digest input — a bump
+        # must not force a Keynote re-stamp (digest-bank-version-decouple). Use
+        # scripts/bank_jxa_slide_digests.py --stamp-inspect-version to refresh the
+        # metadata field Keynote-free.
         ("deck", deck_name),
         ("reader", "jxa"),
     ):
