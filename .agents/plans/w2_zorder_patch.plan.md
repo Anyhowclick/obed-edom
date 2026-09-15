@@ -3,8 +3,8 @@
 Pieces 1-3 of this plan landed on `feat/w2-zorder` (commits `6c7c10e`, `a4ad76c`,
 `1adb4e4`), each with a Codex review verdict. Piece 4 (`scripts/offline_write_ab.py`
 A/B extension for z-order, plus two isolated follow-ups) shipped separately as
-PR #126 by another agent. `OBED_ZORDER_WRITE` defaults to `off` until the live gate
-(see "Gates" below) goes green. Owner decisions taken 2026-09-15: the extra Keynote
+PR #126 by another agent. `OBED_ZORDER_WRITE` defaults to `on` since 2026-09-15, after
+the live gate (see "Gates" below) went green. Owner decisions taken 2026-09-15: the extra Keynote
 open for post-patch export (R2) is accepted; badges stay in tranche 1 (C6); slide
 reuse eligibility is dropped from scope (#124) — since reuse slides are never
 addressable, every remaining slide is addressable; the live gate deck/slide set is
@@ -199,7 +199,7 @@ def run_offline_zorder(dest, mode, targets_by_slide, say) -> dict[str, Any] | No
     # re-reads the POST-pass-2 order, rebuilds each slide's order by id, patches, read-back verifies
 ```
 
-**Env knob.** `OBED_ZORDER_WRITE` = `off` (**default, tranche 1**) | `on` | `verify`, mirroring `offline_write_mode`'s shape (`remap_keynote.py:85-96`), including `probe_iwa_extra` forcing `off` without `keynote_parser`. Additionally forced `off` when `offline_write_mode()` is `off` (no eligible slides by construction). `verify` = `on` + a second deck decode asserting the read-back.
+**Env knob.** `OBED_ZORDER_WRITE` = `on` (**default since 2026-09-15**) | `off` | `verify`, mirroring `offline_write_mode`'s shape (`remap_keynote.py:85-96`), including `probe_iwa_extra` forcing `off` without `keynote_parser`. Additionally forced `off` when `offline_write_mode()` is `off` (no eligible slides by construction). `verify` = `on` + a second deck decode asserting the read-back.
 
 **Read-back verify** (always, not just `verify`): after the patch, re-read each patched slide and assert (a) the id multiset is unchanged, (b) `ownedDrawables == drawablesZOrder`, (c) the target ids occupy the final `|T|` slots in the intended order. Per the plan's "compares reordered kinds AS A SET", the *kind-level* assertion is set-equality per kind; the id-level assertion above is strictly stronger and is what we actually check. A failed read-back raises (the deck is already written; a silent pass is the worse outcome).
 
