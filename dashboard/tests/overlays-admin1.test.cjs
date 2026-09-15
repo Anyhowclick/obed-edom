@@ -56,6 +56,13 @@ test("no-fill admin1 ids are omitted from the paint list", () => {
   );
 });
 
+test("a no-fill country does not suppress its filled child regions", () => {
+  assert.deepEqual(
+    admin1PaintExpression(["MYS", "A1:MYS-1186"], 0.4, { MYS: "none" })[1][2],
+    ["literal", ["MYS-1186"]]
+  );
+});
+
 test("admin1Countries derives the country from the adm1_code prefix", () => {
   assert.deepEqual(admin1Countries(["A1:MYS-1186"]), ["MYS"]);
   assert.deepEqual(admin1Countries(["MYS", "IDN"]), []);

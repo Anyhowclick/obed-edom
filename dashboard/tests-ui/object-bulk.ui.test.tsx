@@ -36,7 +36,7 @@ async function selectNamed(name: string) {
 }
 
 describe("object bulk actions", () => {
-  it("hides paste destinations after paste to slides, delete, or clearing the selection", async () => {
+  it("hides paste destinations after paste to slides or delete", async () => {
     const job = makeJob({
       result: {
         ...makeDoc({
@@ -73,16 +73,49 @@ describe("object bulk actions", () => {
     expect(screen.getByRole("group", { name: "Paste destinations" })).toBeInTheDocument();
 
     await selectNamed("Alpha");
+    expect(screen.getByRole("group", { name: "Paste destinations" })).toBeInTheDocument();
+
+    await selectNamed("Alpha");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete selected objects" }));
+    });
     expect(screen.queryByRole("group", { name: "Paste destinations" })).not.toBeInTheDocument();
+  });
+
+  it("opens paste destinations from the clipboard after the selection is cleared", async () => {
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [
+            makeSlide({ id: "s1", title: "SEA", churches: [pin("c1", "Alpha")] }),
+            makeSlide({ id: "s2", title: "Indo", churches: [pin("c2", "Beta")] }),
+          ],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
 
     await selectNamed("Alpha");
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Delete selected objects" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: /Indo/ }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Paste selected slides" }));
     });
     expect(screen.queryByRole("group", { name: "Paste destinations" })).not.toBeInTheDocument();
+
+    await selectNamed("Alpha");
+    expect(screen.queryByRole("checkbox", { name: "Select Alpha" })).not.toBeChecked();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Paste to slides" }));
+    });
+    expect(screen.getByRole("group", { name: "Paste destinations" })).toBeInTheDocument();
   });
 
   it("applies the same size, colour, and scale-with-map to selected pins", async () => {

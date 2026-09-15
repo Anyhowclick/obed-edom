@@ -6,6 +6,11 @@ function formatValue(value: number, places: number): string {
   return Number.isFinite(value) ? value.toFixed(places) : "";
 }
 
+function quantize(value: number, places: number): number {
+  const factor = 10 ** places;
+  return Math.round(value * factor) / factor;
+}
+
 function parseDraft(raw: string): number | null {
   const trimmed = raw.trim();
   if (trimmed === "" || trimmed === "-" || trimmed === "+" || trimmed === "." || trimmed === "-." || trimmed === "+.") {
@@ -75,7 +80,7 @@ function useNumberDraft({
   const typedValue = useRef<number | null>(null);
 
   function clamp(n: number) {
-    return Math.min(max, Math.max(min, n));
+    return Math.min(max, Math.max(min, quantize(n, places)));
   }
 
   function writeDraft(next: string | null) {

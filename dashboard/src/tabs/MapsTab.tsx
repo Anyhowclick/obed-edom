@@ -3482,7 +3482,7 @@ export function MapsTab() {
                           <IconTrash />
                         </button>
                       </div>
-                      {pastePickerOpen && objectClipboard.churches.length > 0 && selectedPins.length > 0 && (
+                      {pastePickerOpen && objectClipboard.churches.length > 0 && (
                         <div className="maps-pin-bulk" role="group" aria-label="Paste destinations">
                           {slides.map((slide) => (
                             <label key={slide.id}>

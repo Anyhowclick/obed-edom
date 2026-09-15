@@ -3161,7 +3161,16 @@ def test_export_enqueue_waits_for_admitted_commit(monkeypatch):
 
     captured = {}
 
-    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None, persist_export_dir=True, credits=None):
+    def fake_run_export(
+        job,
+        export_lw,
+        export_cg,
+        export_dsk=False,
+        export_dir=None,
+        persist_export_dir=True,
+        credits=None,
+        export_path=None,
+    ):
         captured["export_lw"] = export_lw
         captured["export_cg"] = export_cg
         captured["export_dsk"] = export_dsk

@@ -2018,12 +2018,23 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
                     except ValueError as exc:
                         raise HTTPException(400, str(exc)) from exc
             credits = None if payload is None else payload.credits
-            updated = _runner().rerun(
-                job_id,
-                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir, ep=export_path, persist=is_override, cr=credits: _run_export(
+            def _export_job(
+                j,
+                lw=export_lw,
+                cg=export_cg,
+                dsk=export_dsk,
+                ed=export_dir,
+                ep=export_path,
+                persist=is_override,
+                cr=credits,
+            ):
+                if ep is None:
+                    return _run_export(j, lw, cg, dsk, ed, persist_export_dir=persist, credits=cr)
+                return _run_export(
                     j, lw, cg, dsk, ed, persist_export_dir=persist, credits=cr, export_path=ep
-                ),
-            )
+                )
+
+            updated = _runner().rerun(job_id, _export_job)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if not updated:

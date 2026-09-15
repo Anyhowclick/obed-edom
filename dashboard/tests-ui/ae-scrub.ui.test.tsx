@@ -75,4 +75,32 @@ describe("DraftNumberInput", () => {
     fireEvent.blur(input);
     expect(input).toHaveValue("240");
   });
+
+  it("rounds a fractional stroke count to an integer before emitting", () => {
+    const onChange = vi.fn();
+    function StrokesField() {
+      const [value, setValue] = useState(4);
+      return (
+        <DraftNumberInput
+          aria-label="Strokes"
+          value={value}
+          min={2}
+          max={24}
+          digits={0}
+          onChange={(strokes) => {
+            onChange(strokes);
+            setValue(strokes);
+          }}
+        />
+      );
+    }
+    render(<StrokesField />);
+    const input = screen.getByLabelText("Strokes");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "3.5" } });
+    expect(onChange).toHaveBeenCalledWith(4);
+    expect(onChange.mock.calls.every(([value]) => Number.isInteger(value))).toBe(true);
+    fireEvent.blur(input);
+    expect(input).toHaveValue("4");
+  });
 });

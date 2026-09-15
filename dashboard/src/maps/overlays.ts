@@ -226,10 +226,11 @@ export function admin1PaintExpression(
   on: number,
   highlightColours?: Record<string, string>
 ): DataDrivenPropertyValueSpecification<number> {
-  const bare = new Set(highlights.filter((h) => !h.startsWith("A1:")).map((h) => h.toUpperCase()));
+  const filled = filledHighlights(highlights, highlightColours);
+  const bare = new Set(filled.filter((h) => !h.startsWith("A1:")).map((h) => h.toUpperCase()));
   const ids = [
     ...new Set(
-      filledHighlights(highlights, highlightColours)
+      filled
         .filter((h) => h.startsWith("A1:"))
         .map((h) => h.slice(3))
         .filter((id) => !bare.has(id.slice(0, 3).toUpperCase()))

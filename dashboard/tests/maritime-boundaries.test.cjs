@@ -23,7 +23,40 @@ test("filterExcludesMaritime recognises expression and legacy maritime checks", 
     true
   );
   assert.equal(filterExcludesMaritime(["==", ["get", "admin_level"], 2]), false);
+  assert.equal(filterExcludesMaritime(["!=", ["get", "maritime"], 0]), false);
+  assert.equal(filterExcludesMaritime(["!=", "maritime", 0]), false);
   assert.equal(filterExcludesMaritime(undefined), false);
+});
+
+test("withoutMaritimeBoundaries wraps maritime != 0 instead of treating it as already excluded", () => {
+  const style = {
+    version: 8,
+    sources: {},
+    layers: [
+      {
+        id: "boundary_country",
+        type: "line",
+        "source-layer": "boundary",
+        filter: ["all", ["==", ["get", "admin_level"], 2], ["!=", ["get", "maritime"], 0]],
+        paint: {},
+      },
+      {
+        id: "boundary_legacy",
+        type: "line",
+        "source-layer": "boundary",
+        filter: ["!=", "maritime", 0],
+        paint: {},
+      },
+    ],
+  };
+  const next = withoutMaritimeBoundaries(style);
+  assert.deepEqual(next.layers[0].filter, [
+    "all",
+    ["==", ["get", "admin_level"], 2],
+    ["!=", ["get", "maritime"], 0],
+    NO_MARITIME,
+  ]);
+  assert.deepEqual(next.layers[1].filter, ["all", ["!=", "maritime", 0], NO_MARITIME_LEGACY]);
 });
 
 test("withoutMaritimeBoundaries wraps Dark/Fiord country filters and leaves Positron alone", () => {

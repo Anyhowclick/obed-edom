@@ -27,7 +27,8 @@ export function isLegacyFilter(filter: unknown): boolean {
 export function filterExcludesMaritime(filter: unknown): boolean {
   if (!Array.isArray(filter) || filter.length < 2) return false;
   if (filter[0] === "!=") {
-    return isGetMaritime(filter[1]) || filter[1] === "maritime";
+    const comparesMaritime = isGetMaritime(filter[1]) || filter[1] === "maritime";
+    return comparesMaritime && filter[2] === 1;
   }
   if (filter[0] === "all") return filter.slice(1).some(filterExcludesMaritime);
   return false;
