@@ -59,6 +59,7 @@ from scripts.offline_write_ab import (
     pass2_parity,
     pass2_zero_warn,
     plan_oracle_slide,
+    w2_oracle_kwargs,
     plan_parity,
     run_record,
     source_aspects,
@@ -2828,6 +2829,13 @@ def test_plan_oracle_slide_group_missing_from_source_map_is_red_not_pass():
                                        "reason": "source record missing for (group, 0)"}]
     assert report["compared"] == 0
     assert report["approx"] == []
+
+
+def test_w2_oracle_kwargs_neither_arm_gets_aspects():
+    kwargs_a, kwargs_b = w2_oracle_kwargs({"g1": {"id": "g1"}})
+    assert "aspects" not in kwargs_a
+    assert "aspects" not in kwargs_b
+    assert kwargs_a == kwargs_b == {"src_recs_by_id": {"g1": {"id": "g1"}}}
 
 
 def test_plan_oracle_slide_group_missing_from_source_map_unaffected_when_map_none():
