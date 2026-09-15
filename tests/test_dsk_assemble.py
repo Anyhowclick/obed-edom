@@ -9120,108 +9120,18 @@ def test_offline_measure_hidden_placeholder_retains_staged_id(monkeypatch):
     assert any("staged text count 2 != offline text count 3" in w for w in unlogged_measure_warnings)
 
 
-def _text_shape_obj(storage_id, text):
-    return {
-        "_pbtype": "TSWP.ShapeInfoArchive",
-        "isTextBox": True,
-        "ownedStorage": {"identifier": storage_id},
-    }, {"text": [text]}
-
-
-def _layout_import_deck(*, layout_texts, slide_texts):
-    """A minimal offline-reader object graph for one slide whose base layout is
-    ``layout1``: ``layout1`` owns ``layout_texts`` (its own slot sample content,
-    ``derive_kind_index`` order) and ``slide1`` owns ``slide_texts`` (also
-    ``derive_kind_index`` order) -- shaped exactly like r13's refused deck (a base
-    layout's own tagged ``Text``/``Text-1`` slots materialize onto the slide, ahead of
-    the slide's real content, whenever the slide does not already fill them)."""
-    objects: dict[str, dict] = {
-        "show1": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
-        "node1": {"slide": {"identifier": "slide1"}},
-        "slide1": {
-            "_pbtype": "KN.SlideArchive",
-            "templateSlide": {"identifier": "layout1"},
-            "drawablesZOrder": [],
-        },
-        "layout1": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": []},
-    }
-    for i, text in enumerate(layout_texts):
-        obj_id = f"layout_item{i}"
-        storage_id = f"layout_storage{i}"
-        obj, storage = _text_shape_obj(storage_id, text)
-        objects[obj_id] = obj
-        objects[storage_id] = storage
-        objects["layout1"]["drawablesZOrder"].append({"identifier": obj_id})
-    for i, text in enumerate(slide_texts):
-        obj_id = f"slide_item{i}"
-        storage_id = f"slide_storage{i}"
-        obj, storage = _text_shape_obj(storage_id, text)
-        objects[obj_id] = obj
-        objects[storage_id] = storage
-        objects["slide1"]["drawablesZOrder"].append({"identifier": obj_id})
-    return objects, {}, {}
-
-
 # --------------------------------------------------------------------------
-# r13 finding -- ``set base layout`` materializes a layout's own unfilled Text/Text-1
-# slots onto the slide as new, content-identical drawables ahead of the slide's real
-# content; the offline text-count cross-check must exclude those instances (matched by
-# content against the resolved base layout's own text) rather than refuse the round,
-# while a genuinely missing staged box must still refuse.
+# r13 root cause fix landed in the live pass (script-side placeholder cleanup, not the
+# offline reader): a genuinely missing staged box must still refuse.
 # --------------------------------------------------------------------------
-def test_offline_measure_excludes_materialized_layout_placeholder_instances(monkeypatch):
-    plan, _slides_by_number = _badge_and_stack_plan()
-    deck = _layout_import_deck(
-        layout_texts=["35 I tell you the truth...", "John 1 (NIV) - Jesus loves you"],
-        slide_texts=[
-            "35 I tell you the truth...",
-            "John 1 (NIV) - Jesus loves you",
-            "Genesis 11",
-            "6 The Lord said, If as one people speaking",
-        ],
-    )
-    monkeypatch.setattr(dsa, "_load_deck", lambda path: deck)
-    rects = {
-        1: {
-            ("text", 0): (63.0, 786.0, 933.0, 262.4),
-            ("text", 1): (45.0, 775.0, 651.0, 82.0),
-            ("text", 2): (906.2, 408.8, 183.7, 23.0),
-            ("text", 3): (905.7, 427.6, 521.8, 46.0),
-        },
-    }
-    monkeypatch.setattr(dsa, "offline_text_rects", lambda key_path, *, deck=None: (rects, set()))
-
-    warnings: list[str] = []
-    measured, bands, measure_warnings = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
-
-    assert measured[(13, "text:0")] == 23.0
-    assert measured[(13, "text:1")] == 46.0
-    assert bands[(13, "text:1")] == (427.6, 473.6)
-    assert not warnings
-    assert not measure_warnings
-
-
 def test_offline_measure_still_refuses_when_a_staged_box_is_genuinely_missing(monkeypatch):
     plan, _slides_by_number = _badge_and_stack_plan()
-    # Same materialized placeholders, but only one of the two planned real items is
-    # actually on the slide -- a true content loss, not a placeholder-instance artifact.
-    deck = _layout_import_deck(
-        layout_texts=["35 I tell you the truth...", "John 1 (NIV) - Jesus loves you"],
-        slide_texts=[
-            "35 I tell you the truth...",
-            "John 1 (NIV) - Jesus loves you",
-            "Genesis 11",
-        ],
-    )
-    monkeypatch.setattr(dsa, "_load_deck", lambda path: deck)
     rects = {
         1: {
             ("text", 0): (63.0, 786.0, 933.0, 262.4),
-            ("text", 1): (45.0, 775.0, 651.0, 82.0),
-            ("text", 2): (906.2, 408.8, 183.7, 23.0),
         },
     }
-    monkeypatch.setattr(dsa, "offline_text_rects", lambda key_path, *, deck=None: (rects, set()))
+    monkeypatch.setattr(dsa, "offline_text_rects", lambda key_path: (rects, set()))
 
     warnings: list[str] = []
     measured, _bands, measure_warnings = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
@@ -9748,6 +9658,77 @@ def test_build_assembly_script_per_slide_layout_names():
     assert "resolvedLayout" in script
     assert "set base layout of slide" in script
     assert "blackNames" not in script
+
+
+# --------------------------------------------------------------------------
+# r13 root cause -- `set base layout` materializes the layout's own unfilled tagged
+# slots (verse/badge text, pill image) onto the slide as new, slide-owned drawables
+# PREPENDED ahead of the slide's real content, shifting every downstream index-addressed
+# write/delete. The live pass must delete those materialized instances immediately after
+# each `set base layout`, before any other per-slide statement.
+# --------------------------------------------------------------------------
+def test_build_assembly_script_emits_layout_placeholder_cleanup_for_verse_slide():
+    plan = _clip_plan()
+    names = {8: "Verse Standard (Variation 2)", 32: "Blank Black"}
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        slide_layout_names=names,
+    )
+    lines = script.splitlines()
+    ordinal = plan.ordinals[8]
+    set_line = next(
+        ln for ln in lines
+        if ln.startswith(f"      set base layout of slide {ordinal} of theDoc to resolvedLayout")
+    )
+    set_idx = lines.index(set_line)
+
+    expected = [
+        f"      set textBefore to count of text items of slide {ordinal} of theDoc",
+        f"      set imagesBefore to count of images of slide {ordinal} of theDoc",
+        f"      set moviesBefore to count of movies of slide {ordinal} of theDoc",
+        f"      set groupsBefore to count of groups of slide {ordinal} of theDoc",
+        set_line,
+        f"      set textAfter to count of text items of slide {ordinal} of theDoc",
+        f"      set imagesAfter to count of images of slide {ordinal} of theDoc",
+        f"      set moviesAfter to count of movies of slide {ordinal} of theDoc",
+        f"      set groupsAfter to count of groups of slide {ordinal} of theDoc",
+        '      if moviesAfter is not moviesBefore then error "layout placeholders: '
+        'slide 8 movies changed after set base layout"',
+        '      if groupsAfter is not groupsBefore then error "layout placeholders: '
+        'slide 8 groups changed after set base layout"',
+        "      repeat (textAfter - textBefore) times",
+        f"        delete text item 1 of slide {ordinal} of theDoc",
+        "      end repeat",
+        "      repeat (imagesAfter - imagesBefore) times",
+        f"        delete image 1 of slide {ordinal} of theDoc",
+        "      end repeat",
+        f"      set textFinal to count of text items of slide {ordinal} of theDoc",
+        f"      set imagesFinal to count of images of slide {ordinal} of theDoc",
+        '      if textFinal is not textBefore then error "layout placeholders: slide 8 '
+        'text " & textFinal & " != " & textBefore & " after cleanup"',
+        '      if imagesFinal is not imagesBefore then error "layout placeholders: slide 8 '
+        'images " & imagesFinal & " != " & imagesBefore & " after cleanup"',
+    ]
+    start = set_idx - 4
+    assert lines[start : start + len(expected)] == expected
+
+    # The cleanup (and every other slide's `set base layout`) precedes ALL `_slide_lines`
+    # per-slide statements -- every base-layout line comes before the first per-slide
+    # `on error` marker `_slide_lines` emits.
+    first_slide_body_idx = next(i for i, ln in enumerate(lines) if 'log ("OBED"' in ln)
+    assert start < first_slide_body_idx
+    assert all("set base layout of slide" not in ln for ln in lines[first_slide_body_idx:])
+
+
+def test_build_assembly_script_preserve_emits_no_layout_cleanup():
+    plan = _clip_plan()
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        layout_policy="preserve",
+    )
+    assert "set base layout of slide" not in script
+    assert "textBefore" not in script
+    assert "layout placeholders" not in script
 
 
 def test_gw13_resolves_verse_standard_and_slot_rects(tmp_path):

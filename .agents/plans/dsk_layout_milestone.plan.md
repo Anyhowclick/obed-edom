@@ -713,3 +713,44 @@ deck) proving it refuses a wrong layout name, refuses a wrong verse rect, and ac
 matching one. Targeted suite (`test_dsk_assemble.py test_dsk_plan.py
 test_dsk_content_rules_acceptance.py`) 518 passed / 1 xfailed (was 509/1); full suite
 2516 passed / 84 skipped / 1 xfailed, no regressions.
+
+### r13 root-cause fix landed (2026-09-15): live-pass layout placeholder cleanup
+
+`build_assembly_script` (`dsk_assemble.py`) now deletes the layout's materialized
+slot placeholders (verse/badge text, pill image -- `set base layout` prepends them as
+new slide-owned drawables ahead of the slide's real content, live-probed and banked at
+`.agents/reviews/dsk-layout/probe-layout-placeholders-2026-09-15.log`) immediately
+after EACH `set base layout of slide N` and before any other per-slide statement, via
+new helper `_layout_set_with_cleanup_lines`: counts text/image/movie/group items before
+and after the set, deletes the text/image delta from the front (`text item 1`/`image
+1`, repeated), then errors by name (`"layout placeholders: slide N text 5 != 3 after
+cleanup"`) if a text/image count doesn't return to its pre-set value or a movie/group
+count moved at all. Layout-agnostic, no content-string matching. `--layout preserve`
+never emits this (only the `layout_policy == "import"` branches call it).
+
+The content-match workaround from 59245a5 (`_layout_slot_texts`,
+`_kept_ordinal_text_idxs`, the deck-load in `_offline_measure`) is reverted --
+`_offline_measure`'s staged/offline text-count cross-check is strict again (extras
+refuse). `test_offline_measure_excludes_materialized_layout_placeholder_instances`
+deleted; `test_offline_measure_still_refuses_when_a_staged_box_is_genuinely_missing`
+kept, simplified to a plain offline-read-short-by-one-box case (no layout-deck fixture
+needed once the workaround is gone).
+
+Pill mint (`dsk_pill.write_pills`) confirmed independent of the deletion: its copy/mint
+path (`layout_decoded`/`src_image_arch` off the LAYOUT's own pill archive) runs whenever
+`_resolve_slide_media_candidates` finds no image owned by the slide, so deleting the
+materialized pill image is the intended precondition for the L4 mint path, not a
+regression -- read directly from `dsk_pill.py:471-528`.
+
+New tests: `test_build_assembly_script_emits_layout_placeholder_cleanup_for_verse_slide`
+pins the exact emitted block for one Verse-Standard slide and that it precedes every
+`_slide_lines` statement; `test_build_assembly_script_preserve_emits_no_layout_cleanup`
+confirms `--layout preserve` stays a no-op. No `+2 text`/`+1 image` placeholder-offset
+assumptions found elsewhere in the file. Targeted (`test_dsk_assemble.py
+test_dsk_content_rules_acceptance.py test_dsk_pill.py`) 517 passed (was 515); full suite
+2644 passed / 84 skipped / 1 xfailed (was 2643/84/1). Offline `plan_assembly` A/B
+against GW untouched by design (edits confined to `build_assembly_script` and
+`_offline_measure`, nowhere near `plan_assembly` at line 1241) -- confirmed by diff
+hunk inspection rather than a live rerun (the banked `ab_plan_gw.py` head-side dump in
+the scratchpad predates this session's L2/L3 landing and isn't a valid baseline for
+this diff).
