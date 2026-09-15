@@ -11,6 +11,7 @@ import { exportGpuCap } from "./captureExport";
 import { defaultObjectSize, effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { applyAuthoredZoomGates } from "./tonerBoundaries";
+import { setBorderlandsInkContext, syncBorderlandsInk } from "./borderlandsInk";
 import { installPatternById, installPatterns, paperGrainCss, paperGrainUrl, stylePatterns } from "./watercolourStyle";
 import { mapsTransformRequest } from "./tileProxy";
 import { BandOverlays } from "./BandOverlays";
@@ -182,6 +183,7 @@ function applyAuthoredWidth(
   applyPreviewZoomLimits(map, minZoom, delta);
   deltaRef.current = delta;
   applyAuthoredZoomGates(map, delta);
+  setBorderlandsInkContext(map, { authoredZoomDelta: delta });
   silentJump(map, suppress, cameraView(map, authored, delta, minZoom));
 }
 
@@ -817,6 +819,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           const isCurrent = () => mapRef.current === currentMap && adminSync.current.isCurrent(generation) && !!currentMap.getStyle();
           ensureLowZoomRaster(currentMap, overlay.current.styleId, deltaRef.current);
           installPatterns(currentMap, stylePatterns(overlay.current.styleId));
+          syncBorderlandsInk(currentMap, overlay.current.styleId, { authoredZoomDelta: deltaRef.current });
           applyLayerFilters(currentMap, overlay.current.hiddenLayers);
           applyHillshade(currentMap, overlay.current.hillshade);
           void addOverlays(
@@ -890,6 +893,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
               silentJump(map, suppress, cameraView(map, cameraRef.current, deltaRef.current, zMin));
               ensureLowZoomRaster(map, overlay.current.styleId, deltaRef.current);
               installPatterns(map, stylePatterns(overlay.current.styleId));
+              syncBorderlandsInk(map, overlay.current.styleId, { authoredZoomDelta: deltaRef.current });
               applyLayerFilters(map, overlay.current.hiddenLayers);
               applyHillshade(map, overlay.current.hillshade);
             }
@@ -908,6 +912,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           if (map) {
             ensureLowZoomRaster(map, overlay.current.styleId, deltaRef.current);
             installPatterns(map, stylePatterns(overlay.current.styleId));
+            syncBorderlandsInk(map, overlay.current.styleId, { authoredZoomDelta: deltaRef.current });
             applyLayerFilters(map, overlay.current.hiddenLayers);
             applyHillshade(map, overlay.current.hillshade);
           }
@@ -1038,6 +1043,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         });
         applyAuthoredZoomGates(map, deltaRef.current);
         ensureLowZoomRaster(map, styleId, deltaRef.current);
+        installPatterns(map, stylePatterns(styleId));
+        syncBorderlandsInk(map, styleId, { authoredZoomDelta: deltaRef.current });
         applyLayerFilters(map, overlay.current.hiddenLayers);
         applyHillshade(map, overlay.current.hillshade);
       });

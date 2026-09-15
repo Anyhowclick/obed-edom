@@ -19,10 +19,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const BEFORE_SHA = "7074a15";
 const AFTER_SHA = "71c600d";
-const STYLE_IDS = ["positron", "liberty", "bright", "dark", "fiord", "buildings3d"];
+const STYLE_IDS = ["positron", "bright", "dark", "fiord", "buildings3d"];
 const NE2_ID = "terrarium-ne2";
 const HILLSHADE_ID = "hillshade";
-const EXPECTED_NE2_STYLES = new Set(["liberty", "buildings3d"]);
+const EXPECTED_NE2_STYLES = new Set(["buildings3d"]);
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPT_DIR, "..");
@@ -216,7 +216,7 @@ async function main() {
     }
 
     console.log(
-      "STYLE-EQUIV: PASS — 6 style ids / 5 distinct documents (buildings3d reuses liberty's cached style); relief-off visible layer lists identical; deltas confined to hidden 'terrarium-ne2' (liberty, buildings3d) and hidden 'hillshade' paint.hillshade-exaggeration"
+      "STYLE-EQUIV: PASS — 5 style ids / 5 distinct documents; relief-off visible layer lists identical; deltas confined to hidden 'terrarium-ne2' (buildings3d) and hidden 'hillshade' paint.hillshade-exaggeration"
     );
     process.exit(0);
   } finally {

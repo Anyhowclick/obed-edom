@@ -6,16 +6,20 @@ import { withBrighterDarkLines } from "./darkContrast";
 import { shift, withLowZoomBoundaries } from "./tonerBoundaries";
 import { withoutSolidBuildings } from "./tonerBuildings";
 import { thinLineWidths } from "./tonerLines";
+import { buildBorderlandsStyle } from "./borderlandsStyle";
 import { buildWatercolourStyle } from "./watercolourStyle";
 import tonerStyleUrl from "./vendor/maptiler-toner-8688fbd.json?url";
 
+/** OpenFreeMap has no `/styles/3d`; this is the document that ships `building-3d` extrusions. */
+const OPENFREEMAP_3D_URL = "https://tiles.openfreemap.org/styles/liberty";
+
 export const OPENFREEMAP_STYLES: Record<MapsStyleId, string> = {
   positron: "https://tiles.openfreemap.org/styles/positron",
-  liberty: "https://tiles.openfreemap.org/styles/liberty",
   bright: "https://tiles.openfreemap.org/styles/bright",
   dark: "https://tiles.openfreemap.org/styles/dark",
   fiord: "https://tiles.openfreemap.org/styles/fiord",
-  buildings3d: "https://tiles.openfreemap.org/styles/liberty",
+  buildings3d: OPENFREEMAP_3D_URL,
+  borderlands: OPENFREEMAP_3D_URL,
   toner: "https://tiles.openfreemap.org/styles/positron",
   "toner-background": "https://tiles.openfreemap.org/styles/positron",
   "toner-lines": "https://tiles.openfreemap.org/styles/positron",
@@ -24,11 +28,11 @@ export const OPENFREEMAP_STYLES: Record<MapsStyleId, string> = {
 
 export const MAP_STYLE_REGISTRY: { id: MapsStyleId; label: string; attribution: string }[] = [
   { id: "positron", label: "Positron", attribution: "© OpenStreetMap contributors" },
-  { id: "liberty", label: "Liberty", attribution: "© OpenStreetMap contributors" },
   { id: "bright", label: "Bright", attribution: "© OpenStreetMap contributors" },
   { id: "dark", label: "Dark", attribution: "© OpenStreetMap contributors" },
   { id: "fiord", label: "Fiord", attribution: "© OpenStreetMap contributors" },
   { id: "buildings3d", label: "3D", attribution: "© OpenStreetMap contributors" },
+  { id: "borderlands", label: "Borderlands", attribution: "© OpenStreetMap contributors" },
   { id: "toner", label: "Toner", attribution: "© OpenStreetMap contributors · © MapTiler" },
   { id: "toner-background", label: "Toner background", attribution: "© OpenStreetMap contributors · © MapTiler" },
   { id: "toner-lines", label: "Toner lines", attribution: "© OpenStreetMap contributors · © MapTiler" },
@@ -37,11 +41,11 @@ export const MAP_STYLE_REGISTRY: { id: MapsStyleId; label: string; attribution: 
 
 export const STYLE_SWATCHES: { id: MapsStyleId; label: string; color: string }[] = [
   { id: "positron", label: "Positron", color: "#e8eef4" },
-  { id: "liberty", label: "Liberty", color: "#d5e4c5" },
   { id: "bright", label: "Bright", color: "#f4e4b8" },
   { id: "dark", label: "Dark", color: "#2b3340" },
   { id: "fiord", label: "Fiord", color: "#3d4c5e" },
   { id: "buildings3d", label: "3D", color: "#c9b48a" },
+  { id: "borderlands", label: "Borderlands", color: "#D5D0C6" },
   { id: "toner", label: "Toner", color: "#f4f2ea" },
   { id: "toner-background", label: "Toner background", color: "#ece9e2" },
   { id: "toner-lines", label: "Toner lines", color: "#2f3130" },
@@ -191,6 +195,7 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId, zoomOffset = 0): P
   return pending.then((s) => {
     let next = structuredClone(s);
     if (styleId === "watercolour") next = buildWatercolourStyle(next).style as StyleSpecification;
+    if (styleId === "borderlands") next = buildBorderlandsStyle(next).style as StyleSpecification;
     if (styleId === "dark") next = withBrighterDarkLines(next);
     return withHillshade(next, styleId, zoomOffset);
   });

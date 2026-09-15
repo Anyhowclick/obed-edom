@@ -51,7 +51,7 @@ test("source-isolated: isolate/highlights are soft", () => {
 
 test("style mismatch stays hard (not soft)", () => {
   const from = slide({ style: "positron" });
-  const to = slide({ style: "liberty" });
+  const to = slide({ style: "bright" });
   const mismatch = new Set(appearanceMismatch(from, to));
   assert.ok(mismatch.has("style"));
   const soft = softMovieFields(from, to);

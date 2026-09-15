@@ -245,9 +245,18 @@ def highlight_colours_key(slide: dict[str, Any]) -> str:
     return ",".join(sorted(items))
 
 
+def coerce_maps_style(value: str) -> str:
+    """Retired picker id: OpenFreeMap Liberty is what `buildings3d` already loads."""
+    return "buildings3d" if value == "liberty" else value
+
+
+def is_extruded_style(value: str) -> bool:
+    return coerce_maps_style(value) in {"buildings3d", "borderlands"}
+
+
 def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
-    from_style = str(from_slide.get("style") or "")
-    to_style = str(to_slide.get("style") or "")
+    from_style = coerce_maps_style(str(from_slide.get("style") or ""))
+    to_style = coerce_maps_style(str(to_slide.get("style") or ""))
     from_hi = sorted(str(h).upper() for h in (from_slide.get("highlights") or []))
     to_hi = sorted(str(h).upper() for h in (to_slide.get("highlights") or []))
     from_colours = highlight_colours_key(from_slide)
@@ -265,7 +274,7 @@ def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     to_bearing = float(to_cam.get("bearing") or 0)
     d_bearing = abs((to_bearing - from_bearing + 180.0) % 360.0 - 180.0)
     d_zoom = abs(float(from_cam.get("zoom") or 0) - float(to_cam.get("zoom") or 0))
-    if from_style == "buildings3d" or to_style == "buildings3d" or pitch > 0.5 or d_bearing > 0.05 or d_zoom > 2:
+    if is_extruded_style(from_style) or is_extruded_style(to_style) or pitch > 0.5 or d_bearing > 0.05 or d_zoom > 2:
         return "movie"
     return "morph"
 
