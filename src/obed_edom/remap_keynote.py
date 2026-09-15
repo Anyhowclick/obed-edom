@@ -98,6 +98,12 @@ def offline_write_mode(explicit: str | None = None, *, say: Callable[[str], None
     return mode
 
 
+def slide_reuse_mode(explicit: str | None = None) -> str:
+    """`off` (default) or `on`. Env `OBED_SLIDE_REUSE`; unknown tokens fall back to `off`."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_SLIDE_REUSE", "")).strip().lower()
+    return raw if raw in {"on", "off"} else "off"
+
+
 def _spec_addr(spec: dict[str, Any]) -> tuple:
     return (int(spec.get("slide", -1)), str(spec.get("kind")), int(spec.get("kindIndex", -1)))
 
@@ -734,13 +740,14 @@ def _surplus_slide_note(slide_no: int, patched_slides: set[int]) -> str:
 def restore_source_builds(
     dest: Path, source: Path, slides: set[int], say: Callable[[str], None]
 ) -> dict[str, Any]:
-    """Patch each reuse-target slide's builds/buildChunks/transition to match its
-    own source slide, never the donor's — Keynote cannot script builds at all.
-    Offline IWA write, unconditional (like restore_card_stroke_widths), after
-    stat-finalize. Only `slides` are rewritten; every slide is verified, and a
-    surplus anywhere raises. The reveal order on a reuse target is restored from
-    the source slide's own `buildChunks` (Keynote's render timeline, not `builds`
-    — D8); a wrong reveal order on a patched slide raises."""
+    """Verify every slide's builds/buildChunks/transition against the source deck.
+
+    Only `slides` are rewritten (patch-none when that set is empty); every slide
+    is still verified, and a surplus anywhere raises. Offline IWA write,
+    unconditional (like restore_card_stroke_widths), after stat-finalize. The
+    reveal order on a patched slide is restored from the source slide's own
+    `buildChunks` (Keynote's render timeline, not `builds` — D8); a wrong reveal
+    order on a patched slide raises."""
     try:
         from obed_edom import iwa_builds  # noqa: PLC0415
         from obed_edom.iwa_write import patch_slide_builds  # noqa: PLC0415
@@ -819,7 +826,7 @@ def restore_source_builds(
     retimed = sum(1 for r in plan["report"] if r.get("retimed"))
     say(
         f"Builds follow source: {kept} kept, {dropped} dropped, {retimed} transition(s) restored "
-        f"on {len(slides)} reuse slide(s); reveal order follows the source's buildChunks."
+        f"on {len(slides)} slide(s); reveal order follows the source's buildChunks."
     )
 
     if verify["surplus"]:
@@ -1215,12 +1222,16 @@ def remap_keynote(
             + ("…" if len(hidden) > 10 else "")
             + ". Un-skip in Keynote and re-run to include them."
         )
-    reuses = plan_slide_reuses(
-        wall,
-        transforms,
-        slide_range=slide_range,
-        canvas=(float(recipe.get("destWidth") or CG_WIDTH), float(recipe.get("destHeight") or CG_HEIGHT)),
-    )
+    if slide_reuse_mode() == "on":
+        reuses = plan_slide_reuses(
+            wall,
+            transforms,
+            slide_range=slide_range,
+            canvas=(float(recipe.get("destWidth") or CG_WIDTH), float(recipe.get("destHeight") or CG_HEIGHT)),
+        )
+    else:
+        reuses = []
+    say(f"OBED_SLIDE_REUSE={slide_reuse_mode()}: {len(reuses)} reuse slide(s).")
     reuse_slides = {int(r["slide"]) for r in reuses}
     # Group removes skip JXA deleteRefs (duplicate re-derives the frame). Dedup by child-text in stat-finalize.
     group_removes: list[dict[str, Any]] = []
@@ -1603,8 +1614,8 @@ def remap_keynote(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
                 "placement/size. See the .stat-finalize.applescript dump."
             )
-    # Builds/transitions follow the source, never the reuse donor. Unconditional and
-    # runs whether or not stat-finalize did — reuse targets are AppleScript slides.
+    # Builds/transitions follow the source. Unconditional and runs last — verify-all,
+    # patch-none when the slide set is empty.
     build_result = restore_source_builds(dest, source, reuse_slides, say)
     result: dict[str, Any] = {
         "source": str(source),
