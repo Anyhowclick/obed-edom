@@ -525,3 +525,8 @@ and UI agree with the CLI.
    gallery; the owner eyeballs framing against `evidence-r13/png`.
 8. The dashboard path produces a byte-comparable deck (same slide count, same ordinals,
    same skipped report) as the CLI path for the same selection.
+
+## Owner decisions (2026-09-15 13:50)
+- **Q1:** text slides are SKIPPED, no report artefact needed (a log line per skipped slide is fine; no `report.json` section, no UI list required beyond the log).
+- **Q2:** the deck goes to `output/<FW stem>/dsk/<stem>_DSK.key`. Clips, crops and stage PNGs all go in ONE flat folder next to it — the PP7 asset set — equivalent to Keynote's "Export → Images, all slides, create an image for each build stage" PLUS the `.mov` clips where a slide carries a movie. No separate `clips/`, `crops/`, `stages/` subfolders; file names must sort in slide/stage order the way Keynote's export does.
+- **Q3:** yes — the Exporter runs stage PNGs on ANY 1920×1080 DSK deck (hand-built included); clip export stays FW-deck only and the UI says so.
