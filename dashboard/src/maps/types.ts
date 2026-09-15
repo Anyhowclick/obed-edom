@@ -4,7 +4,32 @@ export const HILLSHADE_LAYER_ID = "hillshade";
 export const HILLSHADE_SOURCE_ID = "terrarium";
 export const HILLSHADE_NE2_LAYER_ID = "terrarium-ne2";
 
-export type MapsStyleId = "positron" | "liberty" | "bright" | "dark" | "fiord" | "buildings3d" | "toner" | "toner-background" | "toner-lines" | "watercolour";
+export type MapsStyleId = "positron" | "bright" | "dark" | "fiord" | "buildings3d" | "borderlands" | "toner" | "toner-background" | "toner-lines" | "watercolour";
+
+/** Retired picker id; OpenFreeMap Liberty is what `buildings3d` already loads. */
+export function coerceMapsStyleId(value: unknown, fallback: MapsStyleId = "positron"): MapsStyleId {
+  if (value === "liberty") return "buildings3d";
+  if (
+    value === "positron" ||
+    value === "bright" ||
+    value === "dark" ||
+    value === "fiord" ||
+    value === "buildings3d" ||
+    value === "borderlands" ||
+    value === "toner" ||
+    value === "toner-background" ||
+    value === "toner-lines" ||
+    value === "watercolour"
+  ) {
+    return value;
+  }
+  return fallback;
+}
+
+export function isExtrudedStyle(value: unknown): boolean {
+  const id = coerceMapsStyleId(value);
+  return id === "buildings3d" || id === "borderlands";
+}
 export type MapsCropId = "wall" | "center+cg";
 export type MapsLayerFilterId =
   | "roads"
@@ -387,7 +412,7 @@ export type MapsAppearanceField = "style" | "highlights" | "highlightColours" | 
 
 export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearanceField[] {
   const out: MapsAppearanceField[] = [];
-  if (from.style !== to.style) out.push("style");
+  if (coerceMapsStyleId(from.style) !== coerceMapsStyleId(to.style)) out.push("style");
   const hi = (s: MapsSlide) => [...s.highlights].map((h) => h.toUpperCase()).sort().join(",");
   if (hi(from) !== hi(to)) out.push("highlights");
   if (highlightColoursKey(from.highlightColours) !== highlightColoursKey(to.highlightColours)) out.push("highlightColours");
@@ -428,7 +453,7 @@ export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
-  if (from.style === "buildings3d" || to.style === "buildings3d" || pitch > MORPH_MAX_PITCH || dBearing > MORPH_MAX_DBEARING || dZoom > MORPH_MAX_DZOOM) {
+  if (isExtrudedStyle(from.style) || isExtrudedStyle(to.style) || pitch > MORPH_MAX_PITCH || dBearing > MORPH_MAX_DBEARING || dZoom > MORPH_MAX_DZOOM) {
     return "movie";
   }
   return "morph";
@@ -746,6 +771,7 @@ function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefine
   const iso = parseIsolate(isolate);
   return {
     ...rest,
+    style: coerceMapsStyleId(cg.style),
     highlights: cg.highlights || [],
     highlightColours: parseHighlightColours(cg.highlightColours),
     churches: churchesFromResult(cg.churches),
@@ -761,6 +787,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
   const deckHidden = parseHiddenLayers(result.hiddenLayers);
   const slides = (result.slides as MapsSlide[]).map((slide) => ({
     ...slide,
+    style: coerceMapsStyleId(slide.style),
     cgShiftX: slide.cgShiftX ?? 0,
     cgShiftY: slide.cgShiftY ?? 0,
     includeSidePanels: slide.includeSidePanels === true,
@@ -796,7 +823,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     .map(normaliseLink)
     .filter((link) => slideIds.has(link.from) && slideIds.has(link.to));
   const coerced = coerceHopKinds({
-    defaultStyle: (result.defaultStyle as MapsStyleId) || "positron",
+    defaultStyle: coerceMapsStyleId(result.defaultStyle),
     crop: (result.crop as MapsCropId) || "center+cg",
     exportLw: result.exportLw !== false,
     exportCg: result.exportCg !== false,

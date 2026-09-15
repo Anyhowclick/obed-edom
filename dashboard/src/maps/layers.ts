@@ -1,4 +1,5 @@
 import type { Map as MapLibreMap } from "maplibre-gl";
+import { BORDERLANDS_INK_LAYER_ID, setBorderlandsInkEnabled } from "./borderlandsInk";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsLayerFilterId } from "./types";
 
 type LayerBits = { id: string; type?: string; "source-layer"?: string };
@@ -10,6 +11,7 @@ const SKIP = new Set([
   "admin0-line",
   HILLSHADE_LAYER_ID,
   HILLSHADE_NE2_LAYER_ID,
+  BORDERLANDS_INK_LAYER_ID,
 ]);
 
 function bits(layer: { id: string; type?: string; "source-layer"?: string }): LayerBits {
@@ -30,7 +32,7 @@ export function filterForLayer(layer: LayerBits): MapsLayerFilterId | null {
   const norm = id.replace(/_/g, "");
   if (norm.includes("oneway") || id.includes("arrow")) return "arrows";
   if (sl === "transportation" || sl === "aeroway") return "roads";
-  if (sl === "building" || id.includes("building")) return "buildings";
+  if (id === BORDERLANDS_INK_LAYER_ID || sl === "building" || id.includes("building")) return "buildings";
   if (sl === "place" || sl === "water_name" || id.startsWith("label_")) return "labels";
   if (sl === "boundary" || id.startsWith("boundary_")) return "boundaries";
   return null;
@@ -39,11 +41,14 @@ export function filterForLayer(layer: LayerBits): MapsLayerFilterId | null {
 export function applyLayerFilters(map: MapLibreMap, hidden: readonly MapsLayerFilterId[]): void {
   const hide = new Set(hidden);
   const style = map.getStyle();
-  if (!style) return;
-  for (const layer of style.layers || []) {
-    if (SKIP.has(layer.id) || layer.id.startsWith("churches-")) continue;
-    const match = filterForLayer(bits(layer));
-    if (!match) continue;
-    map.setLayoutProperty(layer.id, "visibility", hide.has(match) ? "none" : "visible");
+  if (style) {
+    for (const layer of style.layers || []) {
+      if (SKIP.has(layer.id) || layer.id.startsWith("churches-")) continue;
+      const match = filterForLayer(bits(layer));
+      if (!match) continue;
+      map.setLayoutProperty(layer.id, "visibility", hide.has(match) ? "none" : "visible");
+    }
   }
+  // Custom layers are omitted from getStyle().layers, so the loop never sees the ink.
+  setBorderlandsInkEnabled(map, !hide.has("buildings"));
 }

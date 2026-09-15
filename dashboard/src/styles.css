@@ -2057,7 +2057,8 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
 .style-picker-tile[aria-selected="true"] { outline: 2px solid var(--accent-primary); outline-offset: 1px; }
 .style-picker-tile:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 1px; }
 .style-picker-attrib { margin: 8px 2px 0; font-size: 11px; color: var(--muted); }
-.style-picker-tile[data-id="buildings3d"]::after {
+.style-picker-tile[data-id="buildings3d"]::after,
+.style-picker-tile[data-id="borderlands"]::after {
   content: "3D";
   position: absolute;
   bottom: 4px;

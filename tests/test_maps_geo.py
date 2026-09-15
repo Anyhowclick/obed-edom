@@ -117,6 +117,25 @@ def test_clamp_cg_shift():
     assert clamp_cg_shift(-300, 0) == (-300.0, 0.0)
 
 
+def test_infer_hop_kind_borderlands_is_movie():
+    cam = {"zoom": 4, "pitch": 0, "bearing": 0}
+    a = {"style": "borderlands", "highlights": [], "camera": cam}
+    b = {"style": "borderlands", "highlights": [], "camera": cam}
+    assert infer_hop_kind(a, b) == "movie"
+    c = {"style": "positron", "highlights": [], "camera": cam}
+    assert infer_hop_kind(a, c) == "cut"
+
+
+def test_infer_hop_kind_retired_liberty_matches_buildings3d():
+    cam = {"zoom": 4, "pitch": 0, "bearing": 0}
+    liberty = {"style": "liberty", "highlights": [], "camera": cam}
+    buildings = {"style": "buildings3d", "highlights": [], "camera": cam}
+    positron = {"style": "positron", "highlights": [], "camera": cam}
+    assert infer_hop_kind(liberty, liberty) == "movie"
+    assert infer_hop_kind(liberty, buildings) == "movie"
+    assert infer_hop_kind(liberty, positron) == "cut"
+
+
 def test_infer_hop_kind_cut_on_style_or_highlights():
     a = {"style": "positron", "highlights": ["MYS"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
     b = {"style": "dark", "highlights": ["MYS"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}

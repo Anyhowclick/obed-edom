@@ -1080,6 +1080,26 @@ def test_state_allows_dsk_as_the_only_export_target():
     assert saved.json()["result"]["exportDsk"] is True
 
 
+def test_state_coerces_liberty_style_to_buildings3d():
+    job = _seed()
+    doc = _doc(job)
+    slide = doc["slides"][0]
+    doc["defaultStyle"] = "liberty"
+    slide["style"] = "liberty"
+    slide["cg"] = {
+        "camera": slide["camera"],
+        "style": "liberty",
+        "highlights": [],
+        "churches": [],
+    }
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["defaultStyle"] == "buildings3d"
+    assert result["slides"][0]["style"] == "buildings3d"
+    assert result["slides"][0]["cg"]["style"] == "buildings3d"
+
+
 def test_first_state_save_of_a_fresh_deck_starts_at_revision_zero():
     job = _seed()
     assert job["result"]["stateRevision"] == 0

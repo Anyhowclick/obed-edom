@@ -7,6 +7,7 @@ import {
   MORPH_MAX_PITCH,
   MORPH_MAX_PLATE_PX,
   appearanceMismatch,
+  isExtrudedStyle,
   morphPlatePx,
   bearingDelta,
   captureWidth,
@@ -65,11 +66,11 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
-  const threeD = from.style === "buildings3d" || to.style === "buildings3d" || pitch > MORPH_MAX_PITCH;
+  const threeD = isExtrudedStyle(from.style) || isExtrudedStyle(to.style) || pitch > MORPH_MAX_PITCH;
   const plate = morphPlatePx(from.camera, to.camera, captureWidth(from), captureWidth(to));
   const plateOk = plate != null && plate.w <= MORPH_MAX_PLATE_PX && plate.h <= MORPH_MAX_PLATE_PX;
   let threeDDetail = "flat";
-  if (from.style === "buildings3d" || to.style === "buildings3d") threeDDetail = "3D buildings";
+  if (isExtrudedStyle(from.style) || isExtrudedStyle(to.style)) threeDDetail = "3D buildings";
   else if (pitch > MORPH_MAX_PITCH) threeDDetail = `pitch ${fmtDeg(pitch)}`;
   const layersSame = !mismatch.has("hiddenLayers") && !mismatch.has("hillshade");
   const highlightsSame = !mismatch.has("highlights") && !mismatch.has("highlightColours");
