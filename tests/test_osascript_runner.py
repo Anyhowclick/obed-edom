@@ -232,12 +232,13 @@ def test_parse_json_stdout_error_messages():
 
 
 def test_timeout_env_override(monkeypatch):
+    import math
+
     monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "0")
     assert runner.keynote_timeout() == 0
     monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "-1")
     assert runner.keynote_timeout() == -1
     monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "nan")
-    import math
     assert math.isnan(runner.keynote_timeout())
     monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "inf")
     assert runner.keynote_timeout() == float("inf")
@@ -246,6 +247,25 @@ def test_timeout_env_override(monkeypatch):
     monkeypatch.delenv("OBED_OSASCRIPT_TIMEOUT", raising=False)
     assert runner.keynote_timeout() == runner.DEFAULT_TIMEOUT
     assert runner.DEFAULT_TIMEOUT > 3600
+
+
+def test_timeout_env_wins_over_per_call_override(monkeypatch):
+    """Hard-coded site limits (600 / 60) must not hide OBED_OSASCRIPT_TIMEOUT."""
+    import math
+
+    monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "inf")
+    assert runner.keynote_timeout(600) == float("inf")
+    monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "nan")
+    assert math.isnan(runner.keynote_timeout(60))
+    monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "0")
+    assert runner.keynote_timeout(600) == 0
+    monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "-1")
+    assert runner.keynote_timeout(60) == -1
+    monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "garbage")
+    assert runner.keynote_timeout(600) == 600
+    monkeypatch.delenv("OBED_OSASCRIPT_TIMEOUT", raising=False)
+    assert runner.keynote_timeout(600) == 600
+    assert runner.keynote_timeout() == runner.DEFAULT_TIMEOUT
 
 
 def test_run_applescript_unlinks_on_write_failure(monkeypatch):
