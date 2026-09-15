@@ -10,6 +10,19 @@ reuse eligibility is dropped from scope (#124) — since reuse slides are never
 addressable, every remaining slide is addressable; the live gate deck/slide set is
 RAISE10 slides `40,55,56,109,110` plus `123-128`, and Gold.
 
+Live gate run 1 (2026-09-15, RAISE10, `output/bank/2026-09-15/w2-gate/results.md`): the
+z-order writer itself PASSED every bar (FRONT_BLOCK_OK 10/10, SAME_ORDER 11/11, identity
+100%, geometry worst 0.00px, 0 refused/lost/failures); gate exit RED on 4 lines, both
+explained as gate-rule/scope questions, not writer defects — slide 124's coincident
+sparkle-twin stat groups refused as ambiguous and stayed on GUI (design-by-choice at the
+time), and arm B's `badgeFallback` counter is legitimately 0 on suppressed slides
+against arm A's AppleScript fallback count, which strict pass-2 parity did not yet
+exempt. Follow-up (this session): `resolve_raise_targets` extended to resolve coincident
+twin signatures, requiring `twin` truthy on every job sharing the ambiguous signature
+(mirroring `keynote.py`'s `allow_fallback == 2` rule) (see Design below), and
+`offline_write_ab.py`'s pass-2 parity extended to exempt `badgeFallback`, narrowed to
+suppressed slides that carry a badge row, not the same condition as `front`.
+
 ---
 
 I have enough evidence. Here is the plan of record.
@@ -199,6 +212,8 @@ No token may contain the literal `" exported="` (SKILL.md:309-320 — both parse
 **Fallback.** All-or-nothing per slide, matching `obedBadgeSlide`'s existing shape (P6): if any target on a slide fails to resolve, or the slide's member refuses, that slide is **not** added to `suppress_raises` and its full GUI raise runs unchanged. Because eligibility is computed before pass 2, there is no post-hoc unwind. The only residual hole is `zorderLost` (an id present pre-pass-2 and gone post-pass-2); on non-reuse slides nothing deletes objects, so this is a WARN + slide-level refuse, not a design case.
 
 Eligibility (`zorder_eligible_slides`) does not stop at id resolution: on the post-pass-1 saved deck it also runs the exact validation `patch_deck_zorder` would run on each candidate slide's order — member resolution, `ownedDrawables` permutation, requested-order id-set permutation, and member collision across the candidate set (`validate_slide_order`/`_zorder_slide_edit`, shared with `patch_deck_zorder` so there is only one code path for "would this slide refuse"). A slide failing any of these checks is never added to `suppress_raises` in the first place — it stays on GUI, exactly like an unresolved id. This makes the post-pass-2 refusal path in `run_offline_zorder` a should-never-happen: every slide it is asked to patch has already passed the same checks once. If pass 2 nonetheless changes something eligibility could not see (an id in `targets_by_slide` refused or lost post-pass-2), `run_offline_zorder` finishes patching every other slide, emits the `Stat zorder detail:`/`zorderLost` tokens, and then raises `RuntimeError` naming the affected slide(s) — never a silent unraised slide, because their GUI raise was already suppressed and there is no post-hoc GUI fallback once pass 2 has run. `remap_keynote` applies the same rule one step earlier: if pass 2 (`_run_stat_finalize`) itself does not report `ok`, the deck may still be open in Keynote, so the offline z-order patch is skipped entirely and the same `RuntimeError` is raised for the suppressed slides rather than attempting a patch against a possibly-open document.
+
+**Twin rule (2026-09-15, follow-up from live gate run 1).** `resolve_raise_targets`'s ambiguity refusal (`>1` stat job sharing a `childSig`) is too strict for coincident duplicate stat groups — RAISE10 slide 124's sparkle twins ("183 CHC Churches" x2, "Total Churches 269" x2, `map_remap.coincident_duplicate_ids`-style pairs at the same rect). An ambiguous `childSig` is now resolved rather than refused when **every job sharing that signature is flagged `twin`** (the planner's build-twin proof, mirroring `keynote.py`'s `allow_fallback == 2` rule that requires all jobs sharing the sig to be twins, not just some) and every saved-deck group carrying that signature is coincident (same rect within `map_remap.COINCIDENT_DUP_TOL`, reused rather than a new tolerance) and their count equals the number of jobs carrying the signature — each candidate id becomes a stat target, in current z order, once each. This mirrors the GUI's `obedResolveGroup` `allowFallback == 2` ("sigTwin") path, which claims one candidate hit per job call from the same coincident set, so the final front block matches. Any other ambiguity (a job not flagged `twin`, non-coincident candidates, or a job/candidate count mismatch) stays unresolved exactly as before.
 
 ---
 

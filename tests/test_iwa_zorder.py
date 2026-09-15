@@ -14,6 +14,7 @@ pytest.importorskip("keynote_parser")
 
 from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
 from obed_edom.iwa_zorder import (  # noqa: E402
+    _coincident_group_rects,
     plan_slide_order,
     raise_to_front,
     resolve_raise_targets,
@@ -65,11 +66,13 @@ def test_raise_to_front_does_not_mutate_input():
 # ==========================================================================
 # Deck builders.
 # ==========================================================================
-def _group(gid, child_id, text=None):
+def _group(gid, child_id, text=None, rect=(0, 0, 0, 0)):
     """`text=None` leaves the child textless (`_group_child_signature` == ""), fine for
     any test that doesn't verify a stat job's `childSig` against it. A test resolving a
     stat job that must succeed needs `text` set to that job's `childSig`, since
-    `resolve_raise_targets` now checks the two match."""
+    `resolve_raise_targets` now checks the two match. `rect` is the group's own (x, y, w,
+    h) — defaults to all-zero, which makes every default-built group coincident with every
+    other; pass distinct rects to build non-coincident twins."""
     child = {"isTextBox": False, "super": _shape_super(0, 0, 30, 30)}
     members = []
     if text is not None:
@@ -79,7 +82,7 @@ def _group(gid, child_id, text=None):
     return [
         _arch(child_id, "TSWP.ShapeInfoArchive", child),
         *members,
-        _arch(gid, "TSD.GroupArchive", {"super": _shape_super(0, 0, 0, 0)["super"], "children": [{"identifier": child_id}]}),
+        _arch(gid, "TSD.GroupArchive", {"super": _shape_super(*rect)["super"], "children": [{"identifier": child_id}]}),
     ]
 
 
@@ -146,12 +149,120 @@ def test_resolve_stat_group_index_is_not_bridged_again_when_hides_exist(tmp_path
 
 
 def test_resolve_stat_targets_ambiguous_child_sig_refused(tmp_path):
-    members = [*_group(300, 301), *_group(302, 303)]
+    # Both candidates carry the same saved signature "dup" and both jobs are flagged
+    # `twin` (count-matched, 2 jobs / 2 candidates) — the twin rule's geometry check is
+    # what must refuse this: B sits at a different rect from A, non-coincident, so this
+    # stays unresolved even with a proven twin count.
+    members = [*_group(300, 301, "dup", rect=(0, 0, 10, 10)), *_group(302, 303, "dup", rect=(200, 0, 10, 10))]
     deck = _write_deck(tmp_path / "ambig.key", members, [300, 302])
     slide, objects = _slide_and_objects(deck)
 
     stat_jobs = [
+        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "groupIndex": 2, "childSig": "dup", "twin": True},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == []
+    assert len(unresolved) == 2
+    assert all("ambiguous" in u for u in unresolved)
+
+
+def test_coincident_group_rects_all_pairs_not_just_first():
+    # x=0, -4, +4 with tol=4: 0 vs -4 and 0 vs +4 are each within tolerance, but -4 vs
+    # +4 are 8 apart — comparing only against the first rect would wrongly pass this.
+    assert not _coincident_group_rects([(0, 0, 0, 0), (-4, 0, 0, 0), (4, 0, 0, 0)])
+    assert _coincident_group_rects([(0, 0, 0, 0), (1, 0, 0, 0), (2, 0, 0, 0)])
+
+
+def test_resolve_stat_targets_coincident_twin_sig_resolves_both_in_z_order(tmp_path):
+    # A and B share childSig "dup" and the same rect (both default to (0,0,0,0)) — a
+    # coincident twin pair, count 2 == 2 jobs, and BOTH jobs carry the planner's `twin`
+    # proof, so both resolve instead of refusing.
+    members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
+    deck = _write_deck(tmp_path / "twin.key", members, [302, 300])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "groupIndex": 2, "childSig": "dup", "twin": True},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert unresolved == []
+    assert stat_ids == ["302", "300"]  # ascending by z-position (302 is z-slot 0)
+
+
+def test_resolve_stat_targets_coincident_twin_sig_with_third_noncoincident_candidate_unresolved(tmp_path):
+    # A third group C also carries "dup" but sits elsewhere — the candidate set is no
+    # longer purely coincident, so the whole sig stays ambiguous even with `twin` proof.
+    members = [
+        *_group(300, 301, "dup"),
+        *_group(302, 303, "dup"),
+        *_group(304, 305, "dup", rect=(500, 500, 10, 10)),
+    ]
+    deck = _write_deck(tmp_path / "twin3.key", members, [300, 302, 304])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "groupIndex": 2, "childSig": "dup", "twin": True},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == []
+    assert len(unresolved) == 2
+    assert all("ambiguous" in u for u in unresolved)
+
+
+def test_resolve_stat_targets_twin_sig_job_count_mismatch_unresolved(tmp_path):
+    # Two jobs claim sig "dup" (ambiguous by job count), both flagged `twin`, but only
+    # ONE saved-deck group actually carries it (B's real signature is "other") —
+    # candidate count (1) != job count (2), so the twin rule does not apply and the sig
+    # stays unresolved.
+    members = [*_group(300, 301, "dup"), *_group(302, 303, "other")]
+    deck = _write_deck(tmp_path / "twin_mismatch.key", members, [300, 302])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "groupIndex": 2, "childSig": "dup", "twin": True},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == []
+    assert len(unresolved) == 2
+    assert all("ambiguous" in u for u in unresolved)
+
+
+def test_resolve_stat_targets_coincident_sigs_neither_flagged_twin_unresolved(tmp_path):
+    # Same coincident twin geometry as the positive case, but the planner never proved
+    # a twin (`twin` absent on both jobs) — must stay unresolved like plain ambiguity.
+    members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
+    deck = _write_deck(tmp_path / "twin_noflag.key", members, [302, 300])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
         {"slide": 1, "groupIndex": 1, "childSig": "dup"},
+        {"slide": 1, "groupIndex": 2, "childSig": "dup"},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == []
+    assert len(unresolved) == 2
+    assert all("ambiguous" in u for u in unresolved)
+
+
+def test_resolve_stat_targets_coincident_sigs_one_flagged_twin_unresolved(tmp_path):
+    # Same coincident twin geometry, but only ONE of the two jobs sharing the sig is
+    # flagged `twin` — mirrors keynote.py's `allow_fallback = 2 only if ALL jobs sharing
+    # the sig are twin`; a partial flag must not resolve.
+    members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
+    deck = _write_deck(tmp_path / "twin_partial.key", members, [302, 300])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
         {"slide": 1, "groupIndex": 2, "childSig": "dup"},
     ]
     stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])

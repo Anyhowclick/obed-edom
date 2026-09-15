@@ -10,6 +10,7 @@ from scripts.offline_write_ab import (
     ZORDER_SCHEMA_KEYS,
     ZORDER_SURFACE_KEYS,
     ZORDER_ZERO_KEYS,
+    badge_fallback_exempt,
     claimed_patched_slides,
     expect_gui_raises,
     expected_zorder_sets,
@@ -41,6 +42,8 @@ def _zorder_write(**overrides):
         "zorderGui": [],
     }
     record.update(overrides)
+    if "zorderSlides" not in overrides and isinstance(record["slides"], list):
+        record["zorderSlides"] = len(record["slides"])
     return record
 
 
@@ -211,6 +214,34 @@ def test_claimed_patched_slides_count_is_empty_not_crash():
     assert claimed_patched_slides({"slides": [40, 55]}) == {40, 55}
     assert claimed_patched_slides({"slides": []}) == set()
     assert claimed_patched_slides(None) == set()
+
+
+def test_badge_fallback_exempt_false_when_only_stat_only_slide_patched():
+    # B patched slide 109 (no badgeRaises row) while every badge-bearing slide (56)
+    # stayed on the GUI — a genuine badgeFallback regression on 56 must still gate.
+    zw = _zorder_write(slides=[109])
+    assert badge_fallback_exempt(zw, [{"slide": 56}]) is False
+
+
+def test_badge_fallback_exempt_true_when_badge_bearing_slide_patched():
+    zw = _zorder_write(slides=[56, 109])
+    assert badge_fallback_exempt(zw, [{"slide": 56}]) is True
+
+
+def test_badge_fallback_exempt_false_on_no_badge_raises():
+    zw = _zorder_write(slides=[109])
+    assert badge_fallback_exempt(zw, []) is False
+    assert badge_fallback_exempt(zw, None) is False
+
+
+def test_inconsistent_zorder_slides_exemption_off_and_gate_red():
+    # slides=[56], zorderSlides=0 — B's own counters disagree about whether it
+    # actually patched anything. The exemption must stay off, and the z-order
+    # gate must report a RED reason for the inconsistency.
+    zw = _zorder_write(slides=[56], zorderSlides=0)
+    assert badge_fallback_exempt(zw, [{"slide": 56}]) is False
+    reasons = zorder_write_reasons(zw, {56}, compared_slides=[56])
+    assert any("zorderSlides" in r for r in reasons)
 
 
 def test_malformed_slides_count_does_not_crash_orchestration():
