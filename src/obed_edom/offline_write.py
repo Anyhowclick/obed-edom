@@ -77,11 +77,12 @@ def _offline_write_slides(
     reuse_slides: set[int],
     wanted: list[int] | None,
 ) -> set[int]:
-    """Non-reuse, non-donor, AS-addressable slides eligible for the offline pass-1 write.
+    """AS-addressable slides eligible for the offline pass-1 write.
 
-    Donors stay on the AS path: `plan_slide_reuses` records the donor's PLANNED output rect
-    for JXA `deleteRefs`, and `applyReuse` duplicates the donor at target time — a
-    suppressed donor would strand every removal and copy wall geometry into the target.
+    Reuse targets and donors stay on the AppleScript path when `reuses` /
+    `reuse_slides` are non-empty (a suppressed donor would strand every
+    removal). With both empty this is `planned & wanted` — every addressable
+    slide, including the former reuse chain (123–128 on the RAISE10 deck).
     """
     from obed_edom.remap_keynote import _build_as_geometry  # noqa: PLC0415 (avoid a module cycle)
 

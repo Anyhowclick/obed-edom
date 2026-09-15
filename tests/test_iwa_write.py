@@ -2085,9 +2085,36 @@ def test_restore_source_builds_with_no_reuse_slides_is_a_noop_that_still_verifie
     objects, _id_to_file, _file_ids = _load_deck(dest)
     assert objects["100"]["builds"] == [{"identifier": "900"}, {"identifier": "901"}, {"identifier": "902"}]
     assert any("Builds follow source: 0 kept, 0 dropped, 0 transition(s)" in m for m in messages)
+    assert any("on 0 slide(s)" in m for m in messages)
     # No reuse slides -> `plans` is empty -> out_after reuses out_by_number instead of
     # paying an unconditional second dest decode (G3).
     assert len(calls) == 2
+
+
+def test_restore_source_builds_empty_slides_still_raises_on_injected_surplus(tmp_path, monkeypatch):
+    source = _build_builds_deck(tmp_path / "source.key")
+    dest = _build_builds_deck(tmp_path / "dest.key")
+
+    def fake_verify_builds(src_by_number, out_by_number, slides=None):
+        return {
+            "surplus": [{"slide": 1, "effect": "apple:dissolve", "count": 1}],
+            "missing": [],
+            "transitions": [],
+            "order": [
+                {
+                    "slide": 1,
+                    "at": 0,
+                    "source": ("apple:dissolve", "In", ("text", "A")),
+                    "output": ("apple:wipe-iris", "In", ("image", "B")),
+                }
+            ],
+        }
+
+    monkeypatch.setattr(iwa_builds, "verify_builds", fake_verify_builds)
+    messages = []
+    with pytest.raises(RuntimeError, match="surplus"):
+        restore_source_builds(dest, source, set(), messages.append)
+    assert any("0 kept" in m for m in messages)
 
 
 def test_restore_source_builds_excludes_a_skipped_transition_from_the_raise(tmp_path, monkeypatch):
