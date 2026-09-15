@@ -21,7 +21,7 @@ assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 const geo = require(path.join(out, "borderlandsGeometry.js"));
 const proj = require(path.join(out, "borderlandsProjection.js"));
 const { buildingExtents, planBuildingFacade, planBuildingsInk } = require(path.join(out, "borderlandsFacade.js"));
-const { inkFragmentKey, inkRebuildKey, shouldReplaceInkMesh, inkWidthCssPx, buildingLayerActive } = require(path.join(out, "borderlandsInkPolicy.js"));
+const { expandBoundsToPlanZoom, inkFragmentKey, inkLayerMode, inkPlanZoom, inkRebuildKey, shouldReplaceInkMesh, inkWidthCssPx, buildingLayerActive } = require(path.join(out, "borderlandsInkPolicy.js"));
 
 const M = 111320;
 const suntec = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/borderlands-suntec.json"), "utf8"));
@@ -539,6 +539,33 @@ test("regular axis-aligned roof tessellation keeps interior seams", () => {
   assert.ok(interior.length >= 2, interior.length);
 });
 
+test("seams-only planning keeps interior joins and drops posts and outer roofs", () => {
+  const left = feature(rect(SG.lng, SG.lat, 0, 0, 20, 20), { render_height: 16, render_min_height: 0 }, { id: "L" });
+  const right = feature(rect(SG.lng, SG.lat, 20, 0, 40, 20), { render_height: 16, render_min_height: 0 }, { id: "R" });
+  const pair = planBuildingsInk([left, right], { seamsOnly: true });
+  assert.equal(posts(pair.segs).length, 0);
+  assert.equal(roofs(pair.segs).length, 1);
+  const alone = planBuildingsInk([left], { seamsOnly: true });
+  assert.equal(alone.segs.length, 0);
+  const grid = planBuildingsInk(touchingGrid(16, 4), { seamsOnly: true });
+  assert.equal(posts(grid.segs).length, 0);
+  assert.ok(roofs(grid.segs).length >= 2);
+  const line = 40;
+  const north = [0, 50, 100].map((x) =>
+    feature(rect(SG.lng, SG.lat, x, line, x + 20, line + 20), { render_height: 20, render_min_height: 0 }, { id: `n${x}` }),
+  );
+  const south = [0, 50, 100].map((x) =>
+    feature(rect(SG.lng, SG.lat, x, line - 20, x + 20, line), { render_height: 20, render_min_height: 0 }, { id: `s${x}` }),
+  );
+  const rails = planBuildingsInk([...north, ...south], { seamsOnly: true });
+  const onLine = roofs(rails.segs).filter((seg) => {
+    const n0 = (seg.a[1] - SG.lat) * M;
+    const n1 = (seg.b[1] - SG.lat) * M;
+    return Math.abs(n0 - line) < 1 && Math.abs(n1 - line) < 1;
+  });
+  assert.equal(onLine.length, 0);
+});
+
 test("shared-edge suppression stays near-linear on a touching grid", () => {
   const started = Date.now();
   const planned = planBuildingsInk(touchingGrid(400, 20));
@@ -594,11 +621,52 @@ test("query order does not change the selected signature", () => {
   assert.equal(planBuildingsInk([a, b]).signature, planBuildingsInk([b, a]).signature);
 });
 
-test("rebuild key includes pitch, coverage, and uncapped zoom", () => {
+test("rebuild key freezes planning past the ink detail zoom", () => {
   const base = { styleGeneration: 1, sourceRevision: 1, sourceReady: true, zoom: 16.8, lng: 103.841, lat: 1.276, bearing: 0, pitch: 0, viewportW: 800, viewportH: 400, buildingsVisible: true };
-  assert.notEqual(inkRebuildKey(base), inkRebuildKey({ ...base, zoom: 18.2 }));
+  assert.equal(inkPlanZoom(15.4), 15.4);
+  assert.equal(inkPlanZoom(18.2), 16);
+  assert.equal(inkRebuildKey(base), inkRebuildKey({ ...base, zoom: 18.2 }));
+  assert.notEqual(inkRebuildKey(base), inkRebuildKey({ ...base, zoom: 15.4 }));
   assert.notEqual(inkRebuildKey(base), inkRebuildKey({ ...base, pitch: 60 }));
   assert.notEqual(inkRebuildKey(base), inkRebuildKey({ ...base, lng: 103.842 }));
+  assert.notEqual(inkRebuildKey(base), inkRebuildKey({ ...base, seamsOnly: true }));
+});
+
+test("high-zoom collect bounds expand back to the plan zoom window", () => {
+  const tight = { west: 103.858, south: 1.292, east: 103.859, north: 1.293 };
+  const expanded = expandBoundsToPlanZoom(tight, 18, 16);
+  assert.ok(Math.abs(expanded.east - expanded.west - (tight.east - tight.west) * 4) < 1e-9);
+  assert.ok(Math.abs(expanded.north - expanded.south - (tight.north - tight.south) * 4) < 1e-9);
+  assert.deepEqual(expandBoundsToPlanZoom(tight, 16, 16), tight);
+  const cos = Math.cos(SG.lat * Math.PI / 180);
+  const wide = {
+    west: SG.lng - 4 / (M * cos),
+    south: SG.lat - 4 / M,
+    east: SG.lng + 36 / (M * cos),
+    north: SG.lat + 36 / M,
+  };
+  const crop = {
+    west: SG.lng + 12 / (M * cos),
+    south: SG.lat + 12 / M,
+    east: SG.lng + 20 / (M * cos),
+    north: SG.lat + 20 / M,
+  };
+  const cells = touchingGrid(16, 4);
+  const cropped = planBuildingsInk(cells, { bounds: crop, padDeg: 0, seamsOnly: true });
+  const held = planBuildingsInk(cells, { bounds: expandBoundsToPlanZoom(crop, 18, 16), padDeg: 0, seamsOnly: true });
+  assert.ok(held.diagnostics.sharedEdgesRemoved > cropped.diagnostics.sharedEdgesRemoved);
+  const base = { styleGeneration: 1, sourceRevision: 1, sourceReady: true, lng: 103.8585, lat: 1.2925, bearing: 0, pitch: 0, viewportW: 800, viewportH: 400, buildingsVisible: true };
+  assert.equal(
+    inkRebuildKey({ ...base, zoom: 16, ...wide }),
+    inkRebuildKey({ ...base, zoom: 18, west: (wide.west + wide.east) / 2 - (wide.east - wide.west) / 8, south: (wide.south + wide.north) / 2 - (wide.north - wide.south) / 8, east: (wide.west + wide.east) / 2 + (wide.east - wide.west) / 8, north: (wide.south + wide.north) / 2 + (wide.north - wide.south) / 8 }),
+  );
+});
+
+test("default 3D and Borderlands both use full ink", () => {
+  assert.equal(inkLayerMode("borderlands"), "full");
+  assert.equal(inkLayerMode("buildings3d"), "full");
+  assert.equal(inkLayerMode("positron"), null);
+  assert.equal(inkLayerMode("watercolour"), null);
 });
 
 test("authoritative empty snapshots replace; loading does not", () => {
