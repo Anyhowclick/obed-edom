@@ -216,16 +216,47 @@ def toggle_adm0(highlights: list[str], adm0_a3: str) -> list[str]:
     return [*current, code]
 
 
+_HIGHLIGHT_CODE_RE = re.compile(r"^(?:[A-Z]{3}|A1:[A-Z0-9+?_-]{1,16})$")
+_HIGHLIGHT_COLOUR_RE = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+def highlight_colours_key(slide: dict[str, Any]) -> str:
+    """Order-independent fingerprint of per-highlight colour overrides.
+
+    Mirrors `highlightColoursKey` in dashboard/src/maps/highlight.ts so client and
+    server hop inference treat the same overrides as the same appearance.
+    """
+    raw = slide.get("highlightColours") or {}
+    if not isinstance(raw, dict):
+        return ""
+    items: list[str] = []
+    for key, value in raw.items():
+        text = str(key).strip()
+        code = text if ":" in text else text.upper()
+        if not _HIGHLIGHT_CODE_RE.fullmatch(code):
+            continue
+        match = _HIGHLIGHT_COLOUR_RE.fullmatch(str(value or "").strip())
+        if not match:
+            continue
+        hex_digits = match.group(1).lower()
+        if len(hex_digits) == 3:
+            hex_digits = "".join(ch * 2 for ch in hex_digits)
+        items.append(f"{code}:#{hex_digits}")
+    return ",".join(sorted(items))
+
+
 def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     from_style = str(from_slide.get("style") or "")
     to_style = str(to_slide.get("style") or "")
     from_hi = sorted(str(h).upper() for h in (from_slide.get("highlights") or []))
     to_hi = sorted(str(h).upper() for h in (to_slide.get("highlights") or []))
+    from_colours = highlight_colours_key(from_slide)
+    to_colours = highlight_colours_key(to_slide)
     from_layers = sorted(slide_hidden_layers(from_slide))
     to_layers = sorted(slide_hidden_layers(to_slide))
     from_hillshade = bool(from_slide.get("hillshade"))
     to_hillshade = bool(to_slide.get("hillshade"))
-    if from_style != to_style or from_hi != to_hi or from_layers != to_layers or from_hillshade != to_hillshade:
+    if from_style != to_style or from_hi != to_hi or from_colours != to_colours or from_layers != to_layers or from_hillshade != to_hillshade:
         return "cut"
     from_cam = from_slide.get("camera") or {}
     to_cam = to_slide.get("camera") or {}

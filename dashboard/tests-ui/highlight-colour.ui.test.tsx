@@ -337,6 +337,87 @@ describe("Selected regions colour wheel", () => {
     expect(slides[0]?.highlightColours).toEqual({ SGP: "#00aaff" });
     expect(screen.getByRole("button", { name: "Use global colour" })).toBeInTheDocument();
   });
+
+  it("does not apply a pending colour override to another slide", async () => {
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [
+            makeSlide({ id: "s1", title: "Slide 1", highlights: ["SGP"] }),
+            makeSlide({ id: "s2", title: "Slide 2", highlights: ["SGP"] }),
+          ],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Properties" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "SGP" }));
+    });
+
+    const picker = screen.getByLabelText("Highlight colour") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(picker, { target: { value: "#00aaff" } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Select slide Slide 2/ }));
+    });
+    await tick(800);
+
+    const calls = mapsApiScript.saveMapsState.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const slides = calls[calls.length - 1].document.slides as Array<{ id: string; highlightColours?: Record<string, string> }>;
+    expect(slides.find((slide) => slide.id === "s1")?.highlightColours).toEqual({ SGP: "#00aaff" });
+    expect(slides.find((slide) => slide.id === "s2")?.highlightColours).toBeUndefined();
+  });
+
+  it("does not apply a pending colour override to the other audience", async () => {
+    const cam = makeCamera();
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [
+            makeSlide({
+              id: "s1",
+              title: "Slide 1",
+              highlights: ["SGP"],
+              cg: { camera: cam, style: "positron", highlights: ["SGP"], churches: [] },
+            }),
+          ],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Properties" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "SGP" }));
+    });
+
+    const picker = screen.getByLabelText("Highlight colour") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(picker, { target: { value: "#00aaff" } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Independent CG"));
+    });
+    await tick(800);
+
+    const calls = mapsApiScript.saveMapsState.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const slides = calls[calls.length - 1].document.slides as Array<{
+      highlightColours?: Record<string, string>;
+      cg?: { highlightColours?: Record<string, string> };
+    }>;
+    const slide = slides[0];
+    expect(slide.highlightColours).toEqual({ SGP: "#00aaff" });
+    expect(slide.cg?.highlightColours).toBeUndefined();
+  });
 });
 
 describe("live paint", () => {

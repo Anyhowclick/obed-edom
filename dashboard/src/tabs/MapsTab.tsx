@@ -206,6 +206,13 @@ function highlightName(code: string): string {
 
 const COLOUR_DEBOUNCE_MS = 250;
 
+type PendingHighlightOverride = {
+  slideId: string;
+  audience: MapsAudience;
+  code: string;
+  value: string;
+};
+
 function HighlightColourFields({
   colour,
   text,
@@ -311,7 +318,7 @@ export function MapsTab() {
   const pendingColourRef = useRef<string | null>(null);
   const commitGlobalColourRef = useRef<(value: string) => void>(() => undefined);
   const overrideDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingOverrideRef = useRef<string | null>(null);
+  const pendingOverrideRef = useRef<PendingHighlightOverride | null>(null);
   const [objectClipboard, setObjectClipboard] = useState<ObjectClipboard<MapsChurch>>({ churches: [], sourceZoom: 0 });
   const [pasteTargets, setPasteTargets] = useState<string[]>([]);
   const [renamingSlide, setRenamingSlide] = useState<{ id: string; title: string } | null>(null);
@@ -838,6 +845,7 @@ export function MapsTab() {
     const requestedAudience = opts?.audience ?? activeAudienceRef.current;
     const nextAudience: MapsAudience = requestedAudience === "cg" && target?.cg ? "cg" : "lw";
     if (nextId === activeRef.current && nextAudience === activeAudienceRef.current) return;
+    flushPendingOverride();
     if (previewingRef.current) stopPreview(true);
     const prev = activeRef.current;
     if (prev && opts?.flush !== false) {
@@ -920,6 +928,7 @@ export function MapsTab() {
   }
 
   function splitCg() {
+    flushPendingOverride();
     if (!active) return;
     const source = slideForAudience(active, "lw");
     const camera = mapRef.current?.getCgCamera(active.cgShiftX) || { ...source.camera };
@@ -939,6 +948,7 @@ export function MapsTab() {
   }
 
   function mergeCg() {
+    flushPendingOverride();
     if (!active) return;
     const current = docRef.current;
     if (!current) return;
@@ -1066,6 +1076,7 @@ export function MapsTab() {
   }
 
   function removeSlide() {
+    flushPendingOverride();
     const current = docRef.current;
     if (!current || !active || current.slides.length < 2 || locked) return;
     if (!window.confirm(`Remove slide “${active.title}”?`)) return;
@@ -1122,10 +1133,45 @@ export function MapsTab() {
   }
 
   function openHighlight(code: string) {
+    if (code !== selectedHighlight) flushPendingOverride();
     setSelectedPin(null);
     setSelectedPins([]);
     setSelectedHighlight(code);
     setInspTab("properties");
+  }
+
+  function applyHighlightOverride(target: PendingHighlightOverride) {
+    if (!isHighlightHex(target.value)) return;
+    const colour = normaliseHighlightColour(target.value);
+    const current = docRef.current;
+    if (!current) return;
+    const slide = current.slides.find((item) => item.id === target.slideId);
+    if (!slide) return;
+    const view = target.audience === "cg" ? slide.cg : slide;
+    if (!view || !view.highlights.includes(target.code)) return;
+    if (view.highlightColours?.[target.code] === colour) return;
+    const highlightColours = pruneHighlightColours(view.highlights, { ...(view.highlightColours || {}), [target.code]: colour });
+    patchDoc({
+      ...current,
+      slides: current.slides.map((item) => {
+        if (item.id !== target.slideId) return item;
+        if (target.audience === "cg") {
+          if (!item.cg) return item;
+          return { ...item, cg: { ...item.cg, highlightColours } };
+        }
+        return { ...item, highlightColours };
+      }),
+    });
+  }
+
+  function flushPendingOverride() {
+    if (overrideDebounceRef.current) {
+      clearTimeout(overrideDebounceRef.current);
+      overrideDebounceRef.current = null;
+    }
+    const pending = pendingOverrideRef.current;
+    pendingOverrideRef.current = null;
+    if (pending) applyHighlightOverride(pending);
   }
 
   function commitGlobalColourValue(value: string) {
@@ -1154,23 +1200,24 @@ export function MapsTab() {
   }
 
   function writeHighlightOverride(code: string, value: string) {
-    if (!activeView || !isHighlightHex(value)) return;
+    const slideId = activeRef.current;
+    if (!slideId || !isHighlightHex(value)) return;
     const colour = normaliseHighlightColour(value);
     setOverrideText(colour);
-    if (activeView.highlightColours?.[code] === colour) return;
-    updateActive({
-      highlightColours: pruneHighlightColours(activeView.highlights, { ...(activeView.highlightColours || {}), [code]: colour }),
-    });
+    applyHighlightOverride({ slideId, audience: activeAudienceRef.current, code, value });
   }
 
   function scheduleOverrideColour(value: string) {
+    const slideId = activeRef.current;
+    if (!slideId || !selectedHighlight) return;
     setOverrideText(value);
     if (overrideDebounceRef.current) clearTimeout(overrideDebounceRef.current);
-    pendingOverrideRef.current = value;
+    pendingOverrideRef.current = { slideId, audience: activeAudienceRef.current, code: selectedHighlight, value };
     overrideDebounceRef.current = setTimeout(() => {
       overrideDebounceRef.current = null;
+      const pending = pendingOverrideRef.current;
       pendingOverrideRef.current = null;
-      if (selectedHighlight) writeHighlightOverride(selectedHighlight, value);
+      if (pending) applyHighlightOverride(pending);
     }, COLOUR_DEBOUNCE_MS);
   }
 
@@ -1179,9 +1226,14 @@ export function MapsTab() {
       clearTimeout(overrideDebounceRef.current);
       overrideDebounceRef.current = null;
     }
-    const pending = pendingOverrideRef.current ?? overrideText;
+    const pending = pendingOverrideRef.current;
     pendingOverrideRef.current = null;
-    if (selectedHighlight) writeHighlightOverride(selectedHighlight, pending);
+    if (pending) {
+      applyHighlightOverride(pending);
+      if (isHighlightHex(pending.value)) setOverrideText(normaliseHighlightColour(pending.value));
+      return;
+    }
+    if (selectedHighlight) writeHighlightOverride(selectedHighlight, overrideText);
   }
 
   function clearHighlightOverride(code: string) {
@@ -1642,6 +1694,7 @@ export function MapsTab() {
     setError(null);
     setSessionBusy(true);
     try {
+      flushPendingOverride();
       if (saveTimer.current) {
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;

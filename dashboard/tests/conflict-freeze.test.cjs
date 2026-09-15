@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/commit.ts"), path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { commitCamera, shouldPublishThumb, shouldReconcileThumb } = require(path.join(out, "commit.js"));
+const { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint } = require(path.join(out, "commit.js"));
 
 const camera = { lat: 1, lon: 2, zoom: 8, bearing: 0, pitch: 0 };
 const doc = (cg) => ({
@@ -68,4 +68,30 @@ test("shouldReconcileThumb rejects reconciling once the save conflict freezes th
 
 test("shouldReconcileThumb rejects reconciling a job that is no longer current", () => {
   assert.equal(shouldReconcileThumb({ frozen: false, sameJob: false }), false);
+});
+
+const geometry = { authoredWidth: 3840, surfaceWidth: 1920, crop: "center+cg" };
+const fingerView = (overrides) => ({
+  id: "s1",
+  title: "s",
+  style: "positron",
+  camera: { lat: 0, lon: 0, zoom: 5, bearing: 0, pitch: 0 },
+  highlights: ["SGP", "MYS"],
+  churches: [],
+  cgShiftX: 0,
+  cgShiftY: 0,
+  includeSidePanels: false,
+  ...overrides,
+});
+
+test("thumbnailFingerprint changes when only highlightColours change", () => {
+  const plain = thumbnailFingerprint("s1", "lw", fingerView({}), geometry);
+  const tinted = thumbnailFingerprint("s1", "lw", fingerView({ highlightColours: { SGP: "#00aaff" } }), geometry);
+  assert.notEqual(plain, tinted);
+});
+
+test("thumbnailFingerprint is stable across colour key order and hex form", () => {
+  const a = thumbnailFingerprint("s1", "lw", fingerView({ highlightColours: { SGP: "#0A84FF", MYS: "#abc" } }), geometry);
+  const b = thumbnailFingerprint("s1", "lw", fingerView({ highlightColours: { MYS: "#AABBCC", SGP: "0a84ff" } }), geometry);
+  assert.equal(a, b);
 });

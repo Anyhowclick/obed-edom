@@ -18,6 +18,7 @@ const {
   highlightColourExpression,
   normaliseHighlightColour,
   pruneHighlightColours,
+  highlightColoursKey,
   setHighlightColour,
 } = require(path.join(out, "highlight.js"));
 const { ensureAdmin0Highlights, applyHighlightColour } = require(path.join(out, "overlays.js"));
@@ -115,6 +116,13 @@ test("highlightColourExpression strips the A1: prefix for admin-1", () => {
 test("pruneHighlightColours drops colours whose highlight was removed", () => {
   assert.deepEqual(pruneHighlightColours(["MYS"], { MYS: "#00aaff", SGP: "#112233" }), { MYS: "#00aaff" });
   assert.equal(pruneHighlightColours([], { MYS: "#00aaff" }), undefined);
+});
+
+test("highlightColoursKey is order-independent and normalises hex", () => {
+  assert.equal(highlightColoursKey({ SGP: "#0A84FF", MYS: "#abc" }), "MYS:#aabbcc,SGP:#0a84ff");
+  assert.equal(highlightColoursKey({ MYS: "#AABBCC", SGP: "0a84ff" }), "MYS:#aabbcc,SGP:#0a84ff");
+  assert.equal(highlightColoursKey(undefined), "");
+  assert.equal(highlightColoursKey({}), "");
 });
 
 test("applyHighlightColour paints match expressions when overrides are present", () => {

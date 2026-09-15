@@ -62,6 +62,16 @@ export function parseHighlightColours(raw: unknown): Record<string, string> | un
   return Object.keys(out).length ? out : undefined;
 }
 
+/** Stable, order-independent fingerprint of per-highlight overrides. */
+export function highlightColoursKey(colours: Record<string, string> | undefined): string {
+  const parsed = parseHighlightColours(colours);
+  if (!parsed) return "";
+  return Object.keys(parsed)
+    .sort()
+    .map((code) => `${code}:${parsed[code]}`)
+    .join(",");
+}
+
 export function pruneHighlightColours(
   highlights: string[],
   colours: Record<string, string> | undefined

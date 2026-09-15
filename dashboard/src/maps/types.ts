@@ -1,4 +1,4 @@
-import { parseHighlightColours } from "./highlight";
+import { highlightColoursKey, parseHighlightColours } from "./highlight";
 
 export const HILLSHADE_LAYER_ID = "hillshade";
 export const HILLSHADE_SOURCE_ID = "terrarium";
@@ -383,13 +383,14 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
   };
 }
 
-export type MapsAppearanceField = "style" | "highlights" | "hiddenLayers" | "hillshade" | "isolate";
+export type MapsAppearanceField = "style" | "highlights" | "highlightColours" | "hiddenLayers" | "hillshade" | "isolate";
 
 export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearanceField[] {
   const out: MapsAppearanceField[] = [];
   if (from.style !== to.style) out.push("style");
   const hi = (s: MapsSlide) => [...s.highlights].map((h) => h.toUpperCase()).sort().join(",");
   if (hi(from) !== hi(to)) out.push("highlights");
+  if (highlightColoursKey(from.highlightColours) !== highlightColoursKey(to.highlightColours)) out.push("highlightColours");
   const layers = (s: MapsSlide) => slideHiddenLayers(s).sort().join(",");
   if (layers(from) !== layers(to)) out.push("hiddenLayers");
   if ((from.hillshade === true) !== (to.hillshade === true)) out.push("hillshade");
@@ -398,9 +399,13 @@ export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearan
   return out;
 }
 
-/** Isolate/highlight mismatches on a Movie hop are expected (landing slide or darkened fly + cut) — never style/layers. */
-export function softMovieFields(_from: MapsSlide, _to: MapsSlide): Set<MapsAppearanceField> {
-  return new Set<MapsAppearanceField>(["highlights", "isolate"]);
+/** Isolate/highlight mismatches on a Movie hop are expected (landing slide or darkened fly + cut) — never style/layers.
+ *  Colour overrides ride with the highlight set: hard only when the IDs themselves match. */
+export function softMovieFields(from: MapsSlide, to: MapsSlide): Set<MapsAppearanceField> {
+  const fields = new Set<MapsAppearanceField>(["highlights", "isolate"]);
+  const hi = (s: MapsSlide) => [...s.highlights].map((h) => h.toUpperCase()).sort().join(",");
+  if (hi(from) !== hi(to)) fields.add("highlightColours");
+  return fields;
 }
 
 export function isolateDissolveNeeded(_from: MapsSlide, to: MapsSlide): boolean {
@@ -408,7 +413,7 @@ export function isolateDissolveNeeded(_from: MapsSlide, to: MapsSlide): boolean 
 }
 
 export function plainIsolateTarget(slide: MapsSlide): MapsSlide {
-  return { ...slide, highlights: [], isolate: undefined };
+  return { ...slide, highlights: [], isolate: undefined, highlightColours: undefined };
 }
 
 export function movieAppearanceMismatch(from: MapsSlide, to: MapsSlide): boolean {
