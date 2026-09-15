@@ -211,7 +211,7 @@ def test_ranged_propose_rejects_navigator_range_past_visible_slides(tmp_path, mo
 def test_health_and_stubs():
     client = TestClient(app)
     assert client.get("/api/health").json()["ok"] is True
-    assert client.post("/api/dsk").status_code == 501
+    assert client.post("/api/dsk").status_code == 422
     missing = client.post("/api/resize")
     assert missing.status_code == 422
     missing_file = client.post("/api/resize", data={"path": "/no/such/deck.key"})
