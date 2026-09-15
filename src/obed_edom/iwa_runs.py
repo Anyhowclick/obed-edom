@@ -59,7 +59,14 @@ _INHERITED_PROPS = (
 
 
 def resolve_style(style_id: str, objects: dict[str, dict], cache: dict) -> dict:
-    """Effective CharacterStyleArchive style; first value up parent chain wins. styleName is first named ancestor."""
+    """Effective CharacterStyleArchive style; first value up parent chain wins. styleName is first named ancestor.
+
+    Colour prefers ``charProperties.tsdFill.color`` over ``fontColor`` at whichever
+    ancestor first carries either: Keynote treats ``tsdFill.color`` as authoritative and
+    resyncs ``fontColor`` from it on save (dsk_style postmortem, 2026-09-15) -- a
+    fontColor-only offline write reverts silently, so the reader must see the same field
+    a live save would.
+    """
     key = str(style_id)
     if key in cache:
         return cache[key]
@@ -73,7 +80,14 @@ def resolve_style(style_id: str, objects: dict[str, dict], cache: dict) -> dict:
         if not obj:
             break
         char_props = obj.get("charProperties") or {}
+        if "fontColor" not in props:
+            tsd_color = (char_props.get("tsdFill") or {}).get("color")
+            color_val = tsd_color if tsd_color is not None else char_props.get("fontColor")
+            if color_val is not None:
+                props["fontColor"] = color_val
         for prop in _INHERITED_PROPS:
+            if prop == "fontColor":
+                continue
             if prop not in props and prop in char_props:
                 props[prop] = char_props[prop]
         sup = obj.get("super") or {}
