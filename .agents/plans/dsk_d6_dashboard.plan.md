@@ -530,3 +530,8 @@ and UI agree with the CLI.
 - **Q1:** text slides are SKIPPED, no report artefact needed (a log line per skipped slide is fine; no `report.json` section, no UI list required beyond the log).
 - **Q2:** the deck goes to `output/<FW stem>/dsk/<stem>_DSK.key`. Clips, crops and stage PNGs all go in ONE flat folder next to it — the PP7 asset set — equivalent to Keynote's "Export → Images, all slides, create an image for each build stage" PLUS the `.mov` clips where a slide carries a movie. No separate `clips/`, `crops/`, `stages/` subfolders; file names must sort in slide/stage order the way Keynote's export does.
 - **Q3:** yes — the Exporter runs stage PNGs on ANY 1920×1080 DSK deck (hand-built included); clip export stays FW-deck only and the UI says so.
+
+## Landed (2026-09-15 15:15) — P1–P6 offline, P7 pending
+- P2 `dsk-export-stages` CLI; P3/P4 API in `src/obed_edom/web/app.py` (`/api/dsk` propose/decisions/apply with the Keynote-open 409 + auto clip export; `/api/dsk/export` propose/decisions/apply for stage PNGs on any 1920×1080 deck); P5/P6 UI (`dashboard/src/tabs/dsk/*`, `dashboard/src/dsk/decisions.ts`, DSK section of `api.ts`), dashboard dist rebuilt; P1 `content_only` / `--content-only` (skip table above). Suite 2715/86/1 at c749cb9. Branch squashed to b519f58 + these commits (history at tag `backup/feat-dsk-gen-pre-squash-2026-09-15`).
+- P7 (live acceptance: `--content-only` on GW 21,24,32,33,48 + a pure-image slide via the dashboard, PNGs/stages into the flat asset folder; Exporter on a hand-built DSK deck) is GATED on the owner's Keynote go-ahead. Known offline-only gaps: the two-batch job (clip export then assemble) and the Exporter's `isStageDeck` gate.
+- Still owed before PR #72 merges: merge/rebase onto main (294 commits behind).
