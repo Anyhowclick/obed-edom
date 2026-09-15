@@ -1,5 +1,0 @@
-APPROVE
-
-1. No findings. The prior MINOR is closed: `_autosize_text_ids` now owns detection at [dsk_assemble.py:669](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/src/obed_edom/dsk_assemble.py:669), including the cluster path at [dsk_assemble.py:1299](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/src/obed_edom/dsk_assemble.py:1299), split parts at line 1347, general text at line 1413, and the GW helper at [test_dsk_assemble.py:8573](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/tests/test_dsk_assemble.py:8573). No obsolete detector references remain. Concrete fix: none.
-
-The earlier geometry-write ordering and graph-backed classification fixes remain intact across the three-round diff. Static review only; tests were not rerun, and the known `test_dsk_deck_builds` fixture drift was excluded as instructed.

@@ -1,5 +1,0 @@
-REVISE
-
-1. `src/obed_edom/dsk_movie_export.py:715` — **High** — The movie exporter passes `DEFAULT_BLACK_LAYOUT_NAMES`—a list of alternative aliases—to a checker that treats every entry as a required import (`src/obed_edom/dsk_live.py:383`). With the shipped template present, the standard GW deck’s valid, alpha-safe `BLACK BLANK` layout is rejected because the template lacks `BLACK BLANK`, producing `LayoutImportRefusal` before Keynote starts. Resolve and validate an existing approved FW layout first; only when none exists, choose and validate one matching template donor and pass that single name to `layout_import_lines`. Add a non-stubbed happy-path regression for an alpha-safe FW-owned alias with no corresponding template layout.
-
-The round-3 MEDIUM is closed: assembly, live, and stage export now share the identical `DEFAULT_TRANSPARENT_LAYOUT_NAMES` object. Earlier stage-export, donor-cleanup, and base-layout-resolution findings remain closed. Static review only; tests were not run.

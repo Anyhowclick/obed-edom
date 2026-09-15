@@ -1,5 +1,0 @@
-REVISE
-
-1. **MINOR** — [dsk_assemble.py:1234](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/src/obed_edom/dsk_assemble.py:1234), [iwa_runs.py:421](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/dsk-gen/src/obed_edom/iwa_runs.py:421): `_child_word_count` counts raw storage text, while the aggregate threshold counts `_normalize_text` output. A standalone object-replacement character (`\uFFFC`) is therefore counted as a word per child but removed from `groupChildText`; e.g. ten words plus the placeholder and a one-word autosize sibling can trigger an erroneous fixed-frame refusal. Normalize storage text with the same shared `_normalize_text` routine before calling `_word_count`, and add a boundary regression test.
-
-The prior MAJOR’s ordinary long-child and unresolved-storage paths are closed. Nested leaves receive `words` recursively and remain covered by the existing nested-child refusal.

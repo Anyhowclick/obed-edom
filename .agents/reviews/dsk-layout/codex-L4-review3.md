@@ -1,9 +1,0 @@
-REVISE
-
-1. **High — layout-side mask validity is still optional.** `src/obed_edom/dsk_pill.py:452` allows `layout_mask` to be unresolved, while a tagged same-data candidate remains reusable; `src/obed_edom/dsk_pill.py:657` then skips the required layout mask type check entirely. This can authorize mutation without a valid rounded-rectangle layout source. Fix: before candidate selection, require the layout mask to resolve, belong to the layout member, have `parent == layout_pill_id`, and use `_MASK_PATH_TYPE`; make verification unconditional.
-
-2. **Medium — mint verification does not validate the minted object graph.** `src/obed_edom/dsk_pill.py:692` only confirms that the four IDs appear in metadata. Missing title/caption archives, miswired image title/caption references, a substituted mask, wrong member ownership, or a mask whose parent is not the minted image can still pass. Fix: verify all four archives exist in the target slide member with expected protobuf types, and verify exact image→mask/title/caption plus mask→image relationships. Re-run exclusive-mask ownership on the reread output.
-
-3. **Medium — “exact” metadata verification remains containment-based.** `src/obed_edom/dsk_pill.py:692` collapses UUID entries into a set, `:702` collapses duplicate data-reference entries into a dictionary, and `:719` accepts any matching style reference. Duplicate UUID registrations, duplicate/conflicting data registrations, or simultaneous correct and conflicting style references can pass. Fix: count across the raw lists and require exactly one UUID entry per minted ID, exactly one `{objectIdentifier, count: 1}` occurrence per expected data ID, and exactly one non-conflicting style/component pair.
-
-The round-2 exclusive-ownership gate and immutable image fingerprint are otherwise correctly implemented. Static review only; tests were not run because the sandbox has no writable temporary directory.
