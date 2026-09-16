@@ -335,10 +335,10 @@ describe("Selected regions colour wheel", () => {
     expect(calls.length).toBeGreaterThan(0);
     const slides = calls[calls.length - 1].document.slides as Array<{ highlightColours?: Record<string, string> }>;
     expect(slides[0]?.highlightColours).toEqual({ SGP: "#00aaff" });
-    expect(screen.getByRole("button", { name: "Use global colour" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Default" })).toBeInTheDocument();
   });
 
-  it("stores no-fill on the selected highlight and disables the colour fields", async () => {
+  it("stores no-fill on the selected highlight and still lets the operator pick a colour", async () => {
     const job = makeJob({
       result: { ...makeDoc({ slides: [makeSlide({ highlights: ["SGP"] })] }), stateRevision: 1 },
     });
@@ -350,7 +350,7 @@ describe("Selected regions colour wheel", () => {
       fireEvent.click(screen.getByRole("button", { name: "SGP" }));
     });
 
-    const noFill = screen.getByRole("checkbox", { name: "No fill" }) as HTMLInputElement;
+    const noFill = screen.getByRole("button", { name: "No fill" });
     await act(async () => {
       fireEvent.click(noFill);
     });
@@ -360,8 +360,43 @@ describe("Selected regions colour wheel", () => {
     expect(calls.length).toBeGreaterThan(0);
     const slides = calls[calls.length - 1].document.slides as Array<{ highlightColours?: Record<string, string> }>;
     expect(slides[0]?.highlightColours).toEqual({ SGP: "none" });
-    expect((screen.getByLabelText("Highlight colour") as HTMLInputElement).disabled).toBe(true);
-    expect(screen.queryByRole("button", { name: "Use global colour" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Highlight colour")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Default" })).toBeInTheDocument();
+
+    const picker = screen.getByLabelText("Highlight colour") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(picker, { target: { value: "#112233" } });
+    });
+    await tick(800);
+    const after = mapsApiScript.saveMapsState.calls[mapsApiScript.saveMapsState.calls.length - 1].document
+      .slides as Array<{ highlightColours?: Record<string, string> }>;
+    expect(after[0]?.highlightColours).toEqual({ SGP: "#112233" });
+  });
+
+  it("tints each Properties chip from that highlight's fill", async () => {
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [
+            makeSlide({
+              highlights: ["SGP", "IDN"],
+              highlightColours: { SGP: "none", IDN: "#00aaff" },
+            }),
+          ],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Properties" }));
+    });
+
+    const empty = screen.getByRole("button", { name: "SGP" }).closest(".maps-hl-chip");
+    const filled = screen.getByRole("button", { name: "IDN" }).closest(".maps-hl-chip");
+    expect(empty).toHaveClass("none");
+    expect(filled).not.toHaveClass("none");
+    expect((filled as HTMLElement).style.getPropertyValue("--maps-highlight")).toBe("#00aaff");
   });
 
   it("does not apply a pending colour override to another slide", async () => {
@@ -443,6 +478,35 @@ describe("Selected regions colour wheel", () => {
     const slide = slides[0];
     expect(slide.highlightColours).toEqual({ SGP: "#00aaff" });
     expect(slide.cg?.highlightColours).toBeUndefined();
+  });
+});
+
+describe("bulk highlight colour", () => {
+  it("applies one colour to every selected region", async () => {
+    const job = makeJob({
+      result: { ...makeDoc({ slides: [makeSlide({ highlights: ["SGP", "MYS"] })] }), stateRevision: 1 },
+    });
+    await renderMapsTab({ job });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: /Objects/ }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: "Select SGP" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: "Select MYS" }));
+    });
+
+    const picker = screen.getByLabelText("Highlight colour") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(picker, { target: { value: "#112233" } });
+    });
+    await tick(800);
+
+    const calls = mapsApiScript.saveMapsState.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const slides = calls[calls.length - 1].document.slides as Array<{ highlightColours?: Record<string, string> }>;
+    expect(slides[0]?.highlightColours).toEqual({ SGP: "#112233", MYS: "#112233" });
   });
 });
 

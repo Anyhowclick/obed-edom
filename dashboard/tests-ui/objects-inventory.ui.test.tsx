@@ -115,6 +115,32 @@ describe("Objects tab: pins and highlights", () => {
     expect(screen.getByText("Highlight")).toBeInTheDocument();
   });
 
+  it("tints object and highlight rows from their fill", async () => {
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [
+            makeSlide({
+              highlights: ["MYS"],
+              highlightColours: { MYS: "#00aaff" },
+              churches: [{ id: "c1", name: "Church One", lat: 1, lon: 103, kind: "dot", color: "#e9cf2b" }],
+            }),
+          ],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+
+    const pin = screen.getByText("Church One").closest(".maps-pin-row") as HTMLElement;
+    const highlight = screen.getByText("MYS").closest(".maps-pin-row") as HTMLElement;
+    expect(pin).toHaveClass("has-fill");
+    expect(pin.style.getPropertyValue("--maps-highlight")).toBe("#e9cf2b");
+    expect(highlight).toHaveClass("has-fill");
+    expect(highlight.style.getPropertyValue("--maps-highlight")).toBe("#00aaff");
+  });
+
   it("hides the empty-state note when only highlights exist", async () => {
     const job = makeJob({
       result: { ...makeDoc({ slides: [makeSlide({ highlights: ["MYS"] })] }), stateRevision: 1 },

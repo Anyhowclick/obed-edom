@@ -29,7 +29,22 @@ export function highlightCssVars(hex: string): Record<string, string> {
     "--maps-highlight": normalised,
     "--maps-highlight-soft": `rgba(${r},${g},${b},0.16)`,
     "--maps-highlight-edge": `rgba(${r},${g},${b},0.45)`,
+    "--maps-highlight-ink": contrastInk(normalised),
   };
+}
+
+/** Ink that stays readable on a filled colour pill (WCAG relative luminance). */
+export function contrastInk(hex: string): string {
+  const normalised = normaliseHighlightColour(hex);
+  const r = parseInt(normalised.slice(1, 3), 16);
+  const g = parseInt(normalised.slice(3, 5), 16);
+  const b = parseInt(normalised.slice(5, 7), 16);
+  const linear = (channel: number) => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+  };
+  const luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+  return luminance > 0.179 ? "#0D1402" : "#FFFFFF";
 }
 
 let current = DEFAULT_HIGHLIGHT_COLOUR;

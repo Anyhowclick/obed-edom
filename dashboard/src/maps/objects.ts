@@ -6,6 +6,11 @@ export const OBJECT_SIZE_MIN = 1;
 export const OBJECT_SIZE_MAX = 4000;
 export const SIZE_ZOOM_MIN = 0;
 export const SIZE_ZOOM_MAX = 22;
+/** MapLibre packs composite `icon-size` as `round(size * 128)` and clamps that to 255.
+ * An unclamped 2-stop −2..22 interpolate bakes the z=22 sample into that ceiling, so a
+ * scaleWithMap pin/landmark slider looks dead. Passing this as `zoomScaledStops` max
+ * forces one stop per integer zoom and keeps adjacent samples below the pack limit. */
+export const ICON_SIZE_PACK_MAX = 255;
 
 /** Mirrors `default_landmark_size` in src/obed_edom/maps_geo.py. */
 export function defaultLandmarkSize(assetWidth: number): number {
@@ -39,13 +44,14 @@ export function effectiveObjectSize(church: { size?: number; scaleWithMap?: bool
  * `max`/`min` clamp each stop: a zoom expression may not be nested inside `min`/`max`,
  * so a clamped ramp needs one stop per integer zoom.
  */
-export function zoomScaledStops(base: unknown, max?: number, min?: number): ExpressionSpecification {
+export function zoomScaledStops(base: unknown, max?: number, min?: number, divideBy?: unknown): ExpressionSpecification {
   const swm = ["boolean", ["get", "scaleWithMap"], false];
   const clamped = max != null || min != null;
   const stopAt = (z: number): ExpressionSpecification => {
     let value: unknown = ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base];
     if (min != null) value = ["max", min, value];
     if (max != null) value = ["min", max, value];
+    if (divideBy != null) value = ["/", value, divideBy];
     return value as ExpressionSpecification;
   };
   // A pair of interpolate stops reproduces an exact 2^z curve between them (algebraically, base-2

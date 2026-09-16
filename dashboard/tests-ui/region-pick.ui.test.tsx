@@ -62,10 +62,10 @@ describe("Pick: Countries | Regions", () => {
     });
 
     expect(mapFake.getLatestProps().highlights).toEqual(["A1:MYS-1186"]);
-    expect(chip.closest(".maps-hl-chip")).toHaveClass("on");
+    expect(screen.getByText("Sabah").closest(".maps-name-pill")).toBeTruthy();
 
     await act(async () => {
-      fireEvent.click(screen.getByTitle("Remove highlight"));
+      fireEvent.click(screen.getByRole("button", { name: "Remove highlight" }));
     });
 
     expect(mapFake.getLatestProps().highlights).toEqual([]);
@@ -219,20 +219,23 @@ describe("Pick: Countries | Regions", () => {
 });
 
 describe("Isolate toggle label", () => {
-  it("reads Isolate OFF by default and Isolate ON after toggling", async () => {
+  it("toggles Isolate without spelling ON or OFF", async () => {
     await renderMapsTab({
       job: makeJob({ result: { ...makeDoc({ slides: [makeSlide({ highlights: ["SGP"] })] }), stateRevision: 1 } }),
     });
     await openProperties();
 
-    const checkbox = screen.getByRole("checkbox", { name: /Isolate/ });
-    expect(screen.getByText("OFF")).toBeInTheDocument();
+    const checkbox = screen.getByRole("checkbox", { name: "Isolate" });
+    expect(checkbox).not.toBeChecked();
+    expect(screen.queryByText("OFF")).not.toBeInTheDocument();
+    expect(screen.queryByText("ON")).not.toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(checkbox);
     });
 
-    expect(screen.getByText("ON")).toBeInTheDocument();
+    expect(checkbox).toBeChecked();
+    expect(screen.queryByText("ON")).not.toBeInTheDocument();
   });
 
   it("is absent when the slide has no highlights", async () => {

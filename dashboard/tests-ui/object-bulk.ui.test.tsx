@@ -1,4 +1,5 @@
 import { act, fireEvent, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeDoc, makeJob, makeSlide } from "./fakes/doc";
@@ -160,6 +161,80 @@ describe("object bulk actions", () => {
     const churches = document.slides[0].churches;
     expect(churches.find((c) => c.id === "c1")).toMatchObject({ size: 120, color: "#112233", scaleWithMap: true });
     expect(churches.find((c) => c.id === "c2")).toMatchObject({ size: 120, color: "#112233", scaleWithMap: true });
+  });
+
+  it("re-anchors sizeZoom so a grouped pin and dot share the same on-screen size", async () => {
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [
+            makeSlide({
+              churches: [
+                pin("c1", "Alpha", { size: 24, scaleWithMap: true, sizeZoom: 11.2 }),
+                pin("c2", "Beta", { size: 24, color: "#415bc3", kind: "dropPin", scaleWithMap: true, sizeZoom: 13 }),
+              ],
+            }),
+          ],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+    await selectNamed("Alpha");
+    await selectNamed("Beta");
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Pin size"), { target: { value: "40" } });
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 550));
+    });
+
+    const calls = mapsApiScript.saveMapsState.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const document = calls[calls.length - 1].document as {
+      slides: Array<{ churches: Array<{ id: string; size?: number; sizeZoom?: number }> }>;
+    };
+    const churches = document.slides[0].churches;
+    expect(churches.find((c) => c.id === "c1")).toMatchObject({ size: 40, sizeZoom: 12 });
+    expect(churches.find((c) => c.id === "c2")).toMatchObject({ size: 40, sizeZoom: 12 });
+  });
+
+  it("lets the pin hex field be typed character by character", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({
+      result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha", { color: "#c44a42" })] })] }), stateRevision: 1 },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Alpha/ }));
+    });
+
+    const hex = screen.getByLabelText("Colour hex");
+    expect(hex).toHaveValue("#c44a42");
+    await user.clear(hex);
+    expect(hex).toHaveValue("");
+    await user.type(hex, "#112233");
+    expect(hex).toHaveValue("#112233");
+  });
+
+  it("lets the bulk hex field be typed character by character", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({
+      result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha"), pin("c2", "Beta")] })] }), stateRevision: 1 },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+    await selectNamed("Alpha");
+    await selectNamed("Beta");
+
+    const hex = screen.getByLabelText("Colour hex");
+    await user.clear(hex);
+    expect(hex).toHaveValue("");
+    await user.type(hex, "#112233");
+    expect(hex).toHaveValue("#112233");
   });
 
   it("does not show opacity on a selected object", async () => {
