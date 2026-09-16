@@ -10286,6 +10286,7 @@ def test_gw38_split_literal_band_badge_keys_deletes_and_zero_build_multiplicity(
     assert deck_builds(GW_DECK)[38]["builds"] == []
 
 
+# Local operator deck; removed in the 2026-09-16 dsk-d4-work cleanup, so this skips unless regenerated.
 R12B = Path.home() / "Desktop/dsk-d4-work/out-r12b/Sermon_PK_DSK.key"
 
 
@@ -11129,6 +11130,7 @@ def test_verify_staged_layouts_gw17_real_deck_pins_stacked_rects():
     )
 
 
+# Local operator deck; removed in the 2026-09-16 dsk-d4-work cleanup, so this skips unless regenerated.
 R13_REFUSED_DECK = Path("/Users/anyhowclick/Desktop/dsk-d4-work/out-r13/attempt10.refused.key")
 R13_CLIPS_DIR = Path("/Users/anyhowclick/Desktop/dsk-d4-work/clips-r8")
 R13_SLIDES = (5, 13, 17, 21, 24, 28, 32, 33, 38, 44, 46, 48, 50, 51, 52, 53, 54)
