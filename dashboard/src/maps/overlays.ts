@@ -7,7 +7,7 @@ import {
 import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, ML_MAX_ZOOM, ML_MIN_ZOOM, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
-import { defaultObjectSize, zoomScaledStops } from "./objects";
+import { defaultObjectSize, ICON_SIZE_PACK_MAX, zoomScaledStops } from "./objects";
 import { filledHighlights, highlightColour, highlightColourExpression, setHighlightColour } from "./highlight";
 
 export type Admin0 = {
@@ -227,15 +227,7 @@ export function admin1PaintExpression(
   highlightColours?: Record<string, string>
 ): DataDrivenPropertyValueSpecification<number> {
   const filled = filledHighlights(highlights, highlightColours);
-  const bare = new Set(filled.filter((h) => !h.startsWith("A1:")).map((h) => h.toUpperCase()));
-  const ids = [
-    ...new Set(
-      filled
-        .filter((h) => h.startsWith("A1:"))
-        .map((h) => h.slice(3))
-        .filter((id) => !bare.has(id.slice(0, 3).toUpperCase()))
-    ),
-  ];
+  const ids = [...new Set(filled.filter((h) => h.startsWith("A1:")).map((h) => h.slice(3)))];
   return ["case", ["in", ["get", "adm1_code"], ["literal", ids]], on, 0] as DataDrivenPropertyValueSpecification<number>;
 }
 
@@ -397,6 +389,7 @@ function ensureAdmin1Layers(
   const source = map.getSource("admin1") as GeoJSONSource | undefined;
   if (source) {
     source.setData(data);
+    stackAdmin1AboveAdmin0(map);
     return;
   }
   map.addSource("admin1", { type: "geojson", data });
@@ -423,19 +416,35 @@ function ensureAdmin1Layers(
     },
     before
   );
+  stackAdmin1AboveAdmin0(map);
+}
+
+/** Region fills sit above the country wash so a blue province stays visible on yellow Indonesia. */
+function stackAdmin1AboveAdmin0(map: MapLibreMap): void {
+  if (!map.getLayer("admin1-fill") || !map.getLayer("admin0-fill")) return;
+  const before = map.getLayer("isolate-fill") ? "isolate-fill" : firstSymbolId(map);
+  map.moveLayer("admin1-fill", before);
+  if (map.getLayer("admin1-line")) map.moveLayer("admin1-line", before);
 }
 
 const LABEL_SCALE_MIN = 0.5;
 const LABEL_SCALE_MAX = 8;
 /** Mirrors `maps_keynote.LABEL_FONT_PT`. */
 export const LABEL_FONT_PX = 23;
+/** Mirrors `maps_keynote.LABEL_CHAR_W` / `NAME_HEIGHT` / pill width clamp. */
+export const LABEL_CHAR_W_PX = 13;
+export const LABEL_NAME_HEIGHT_PX = 32;
+export const LABEL_PILL_MIN_PX = 48;
+export const LABEL_PILL_MAX_PX = 420;
+/** Kept for Keynote-parity tests; preview pills no longer wrap MapLibre text. */
+export const LABEL_MAX_WIDTH_EMS = 40;
 export const LABEL_GAP_EMS = 0.35;
 /** Mirrors `maps_keynote.PILL_PAD_X` / `PILL_PAD_Y`. */
 const PILL_PAD_X_PX = 6;
 export const PILL_PAD_Y_PX = 2;
 
 /** Mirrors `maps_keynote._label_scale`: authored size over the kind's default, every kind alike.
- * The zoom-driven half of the total scale lives in the `text-size` stops, which carry the clamp. */
+ * The zoom-driven half of the total scale lives in the `icon-size` stops, which carry the clamp. */
 function labelScale(kind: string, size: number, assetWidth = 0): number {
   const base = defaultObjectSize(kind, assetWidth);
   return base ? size / base : 1;
@@ -444,7 +453,7 @@ function labelScale(kind: string, size: number, assetWidth = 0): number {
 /** `icon-text-fit-padding` and an image's corner radius are layout constants, so the pill's
  * padding and radius can only follow the label through a data-driven `icon-image`: one baked
  * variant per bucket of `scale * objectScale`, which is the non-zoom half of the rendered text
- * size (`LABEL_FONT_PX * labelScale * objectScale`, see `text-size` below). The buckets are an octave apart
+ * size (`LABEL_FONT_PX * labelScale * objectScale`, see `icon-size` below). The buckets are an octave apart
  * and the geometry is geometric, so snapping to the nearest in log2 bounds that half's
  * padding/radius error at sqrt(2) — the zoom-driven half of the total scale (`scaleWithMap`
  * features only) cannot feed a data property and is not covered by this bound. */
@@ -463,59 +472,86 @@ function labelOffsetProperty(zoom: number): string {
   return `labelOffset${zoom}`;
 }
 
-/** LABEL: the pill's bottom sits `LABEL_GAP_EMS` of the rendered text size above the marker's
- * rendered top, as the export's `top - LABEL_GAP * scale` pill bottom does. `text-offset` is in
- * ems of the rendered — i.e. clamped — text size, so past the 0.5x..8x clamp a fixed ratio stops
- * tracking a `scaleWithMap` marker, which keeps growing with zoom. Expressions cannot build an
- * array, so the zoom-dependent ratio ships as one offset property per integer zoom and
- * `text-offset` interpolates between them (see `labelOffsetExpression`). A selected drop pin's
- * `icon-size` carries `DROP_PIN_SELECTED_SCALE` (see below): selection is known per-feature at
- * GeoJSON build time (`sel`, from `selectedPinId`), so `markerHeightPx` folds that scale into the
- * marker height feeding these offsets instead of needing `text-offset` to read the icon's state. */
+function labelNameKey(name: string): string {
+  let hash = 2166136261;
+  for (const char of name) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return String(hash >>> 0);
+}
+
+/** Keynote `_place_churches` box: `nw = clamp(48, 420, 13 * len) * scale`, plus pads. */
+export function labelPillCssSize(name: string, scale: number): { w: number; h: number } {
+  const s = Math.max(scale, Number.MIN_VALUE);
+  const nw = Math.max(LABEL_PILL_MIN_PX * s, Math.min(LABEL_PILL_MAX_PX * s, measureNamePx(name, s)));
+  const nh = LABEL_NAME_HEIGHT_PX * s;
+  return { w: Math.round(nw + 2 * PILL_PAD_X_PX * s), h: Math.round(nh + 2 * PILL_PAD_Y_PX * s) };
+}
+
+function measureNamePx(name: string, scale: number): number {
+  try {
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (ctx && typeof ctx.measureText === "function") {
+      ctx.font = `700 ${LABEL_FONT_PX * scale}px "Noto Sans", sans-serif`;
+      const width = ctx.measureText(name).width;
+      if (width > 0) return width;
+    }
+  } catch {
+    /* node tests stub a canvas without measureText */
+  }
+  return LABEL_CHAR_W_PX * scale * [...name].length;
+}
+
+/** LABEL: the name is baked into the pill so it cannot drift. The pill's bottom sits
+ * `LABEL_GAP_EMS` of the rendered (clamped) text size above the marker top, matching
+ * Keynote's `top - LABEL_GAP * scale`. `icon-offset` is in the image's CSS pixels and
+ * MapLibre then multiplies it by `icon-size`, so each integer zoom stores
+ * `-needScreen / iconSize`. A selected drop pin's height already includes
+ * `DROP_PIN_SELECTED_SCALE` via `markerHeightPx`. */
 function labelOffsets(markerPx: number, totalScale: number, bucket: number, scaleWithMap: boolean, sizeZoomRef: number): Record<string, [number, number]> {
+  const bake = Math.max(bucket, Number.MIN_VALUE);
   const factorAt = (zoom: number) => (scaleWithMap ? Math.pow(2, zoom - sizeZoomRef) : 1);
-  const textAt = (zoom: number) => Math.min(LABEL_FONT_PX * LABEL_SCALE_MAX, Math.max(LABEL_FONT_PX * LABEL_SCALE_MIN, LABEL_FONT_PX * totalScale * factorAt(zoom)));
-  const needAt = (zoom: number, textPx: number) => (markerPx * factorAt(zoom) + PILL_PAD_Y_PX * bucket) / textPx + LABEL_GAP_EMS;
+  const textScaleAt = (zoom: number) => Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, totalScale * factorAt(zoom)));
+  const iconSizeAt = (zoom: number) => textScaleAt(zoom) / bake;
+  const needAt = (zoom: number) => markerPx * factorAt(zoom) + LABEL_GAP_EMS * LABEL_FONT_PX * textScaleAt(zoom);
   const zooms = Array.from({ length: ML_MAX_ZOOM - ML_MIN_ZOOM + 1 }, (_, index) => ML_MIN_ZOOM + index);
-  const text = zooms.map(textAt);
-  const need = zooms.map((zoom, index) => needAt(zoom, text[index]));
-  // Between two stops MapLibre interpolates the offset and the text size independently, and the
-  // product of those two chords dips below what the (still geometric) marker needs. Substituting
-  // u = 2^(z - z0), u in [1, 2] — base-2 interpolation is affine in u — the size chord is
-  // S(u) = a + b*u, the offset chord is N(u) = c + d*u, and a scaleWithMap marker is exactly K*u,
-  // so the shortfall in ems is h(u) = (K*u + P)/S(u) + LABEL_GAP_EMS - N(u), with P the pill
-  // padding. h'(u) = (K*a - b*P)/S(u)^2 - d is monotone in u (S > 0 across the segment), so h has
-  // at most one interior extremum and h(1) = h(2) = 0 by construction: the exact dip is h at the
-  // closed-form root of h'. Lifting both stops of the segment by it lifts the whole chord clear.
+  const iconSize = zooms.map(iconSizeAt);
+  const need = zooms.map(needAt);
+  const offset = zooms.map((_, index) => -need[index] / iconSize[index]);
+  // Between stops MapLibre interpolates icon-offset and icon-size independently; their
+  // product (screen px) dips on a segment that straddles the 0.5x..8x clamp. Sample the
+  // shortfall and lift both end offsets so the chord stays above the marker.
   const slack = zooms.map(() => 0);
-  const padPx = PILL_PAD_Y_PX * bucket;
   for (let index = 0; index + 1 < zooms.length; index++) {
-    const b = text[index + 1] - text[index];
-    const a = text[index] - b;
-    const d = need[index + 1] - need[index];
-    const c = need[index] - d;
-    if (!scaleWithMap || b === 0 || d === 0) continue;
-    const marker = markerPx * factorAt(zooms[index]);
-    const square = (marker * a - b * padPx) / d;
-    if (!(square > 0)) continue;
-    const root = (Math.sqrt(square) - a) / b;
-    if (!(root > 1 && root < 2)) continue;
-    const dip = (marker * root + padPx) / (a + b * root) + LABEL_GAP_EMS - (c + d * root);
+    if (!scaleWithMap) continue;
+    const b = iconSize[index + 1] - iconSize[index];
+    const a = iconSize[index] - b;
+    const d = offset[index + 1] - offset[index];
+    const c = offset[index] - d;
+    if (b === 0 && d === 0) continue;
+    let dip = 0;
+    for (let step = 1; step < 100; step++) {
+      const u = 1 + step / 100;
+      const zoom = zooms[index] + Math.log2(u);
+      const screen = -(c + d * u) * (a + b * u);
+      dip = Math.max(dip, needAt(zoom) - screen);
+    }
     if (!(dip > 0)) continue;
-    slack[index] = Math.max(slack[index], dip);
-    slack[index + 1] = Math.max(slack[index + 1], dip);
+    slack[index] += dip / iconSize[index];
+    slack[index + 1] += dip / iconSize[index + 1];
   }
   const offsets: Record<string, [number, number]> = {};
   zooms.forEach((zoom, index) => {
-    offsets[labelOffsetProperty(zoom)] = [0, -(need[index] + slack[index])];
+    offsets[labelOffsetProperty(zoom)] = [0, offset[index] - slack[index]];
   });
   return offsets;
 }
 
-/** Base-2 interpolation between the per-zoom offsets, the same ramp shape `text-size` uses. */
-function labelOffsetExpression(): DataDrivenPropertyValueSpecification<[number, number]> {
+/** Base-2 interpolation between the per-zoom offsets, the same ramp shape `icon-size` uses. */
+function labelOffsetExpression(property = labelOffsetProperty): DataDrivenPropertyValueSpecification<[number, number]> {
   const stops: unknown[] = ["interpolate", ["exponential", 2], ["zoom"]];
-  for (let zoom = ML_MIN_ZOOM; zoom <= ML_MAX_ZOOM; zoom++) stops.push(zoom, ["array", "number", 2, ["get", labelOffsetProperty(zoom)]]);
+  for (let zoom = ML_MIN_ZOOM; zoom <= ML_MAX_ZOOM; zoom++) stops.push(zoom, ["array", "number", 2, ["get", property(zoom)]]);
   return stops as unknown as DataDrivenPropertyValueSpecification<[number, number]>;
 }
 
@@ -539,11 +575,12 @@ export function churchesGeo(
       const size = church.size || defaultObjectSize(church.kind, church.assetWidth);
       const scale = labelScale(church.kind, size, church.assetWidth);
       const bucket = labelPillBucket(Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, scale * objectScale)));
+      const name = numberPins ? `${index + 1}. ${church.name}` : church.name;
       return {
         type: "Feature",
         properties: {
           id: church.id,
-          name: numberPins ? `${index + 1}. ${church.name}` : church.name,
+          name,
           showLabel: church.showLabel === true,
           color: church.color,
           kind: church.kind,
@@ -562,6 +599,7 @@ export function churchesGeo(
           sizeZoomRef: (church.sizeZoom ?? 0) + Math.log2(objectScale),
           labelScale: scale,
           labelBucket: String(bucket),
+          labelPill: labelPillImageId(bucket, labelPillCssSize(name, bucket).w, labelNameKey(name)),
           ...labelOffsets(
             markerHeightPx(church, size, church.id === selectedPinId) * objectScale,
             scale * objectScale,
@@ -690,8 +728,9 @@ export const LABEL_PILL_ID = "church-label-pill";
 const LABEL_PILL_TEMPLATE_W = 64;
 const LABEL_PILL_TEMPLATE_H = 32;
 
-export function labelPillImageId(bucket: number): string {
-  return `${LABEL_PILL_ID}-${bucket}`;
+export function labelPillImageId(bucket: number, widthPx?: number, nameKey?: string): string {
+  if (widthPx != null && nameKey != null) return `${LABEL_PILL_ID}-${bucket}-${widthPx}-${nameKey}`;
+  return widthPx != null ? `${LABEL_PILL_ID}-${bucket}-${widthPx}` : `${LABEL_PILL_ID}-${bucket}`;
 }
 
 function labelPillBox(bucket: number): { w: number; h: number; cornerPx: number; padX: number; padY: number } {
@@ -708,6 +747,17 @@ function labelPillBox(bucket: number): { w: number; h: number; cornerPx: number;
 
 function labelPillImage(bucket: number): ImageData {
   const { w, h, cornerPx } = labelPillBox(bucket);
+  return drawLabelPill(w, h, cornerPx);
+}
+
+function labelPillImageSized(cssW: number, cssH: number, name: string, scale: number): ImageData {
+  const ratio = DROP_PIN_PIXEL_RATIO;
+  const w = Math.max(1, Math.round(cssW * ratio));
+  const h = Math.max(1, Math.round(cssH * ratio));
+  return drawLabelPill(w, h, LABEL_RADIUS_FRAC * h, name, LABEL_FONT_PX * scale * ratio);
+}
+
+function drawLabelPill(w: number, h: number, cornerPx: number, name?: string, fontPx?: number): ImageData {
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
@@ -717,11 +767,18 @@ function labelPillImage(bucket: number): ImageData {
   ctx.roundRect(0, 0, w, h, cornerPx);
   ctx.fillStyle = "#EE220C";
   ctx.fill();
+  if (name && fontPx) {
+    ctx.font = `700 ${fontPx}px "Noto Sans", sans-serif`;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(name, w / 2, h / 2);
+  }
   return ctx.getImageData(0, 0, w, h);
 }
 
 /** Re-runnable: a style reload drops every image, so `addOverlays` calls this again. */
-export function ensureLabelPillImage(map: MapLibreMap) {
+export function ensureLabelPillImage(map: MapLibreMap, churches: MapsChurch[] = [], objectScale = 1, numberPins = false) {
   for (const bucket of LABEL_PILL_BUCKETS) {
     const id = labelPillImageId(bucket);
     if (map.hasImage(id)) continue;
@@ -735,6 +792,17 @@ export function ensureLabelPillImage(map: MapLibreMap) {
       content: [padX, padY, w - padX, h - padY],
     });
   }
+  churches.forEach((church, index) => {
+    if (church.showLabel !== true) return;
+    const size = church.size || defaultObjectSize(church.kind, church.assetWidth);
+    const scale = labelScale(church.kind, size, church.assetWidth);
+    const bucket = labelPillBucket(Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, scale * objectScale)));
+    const name = numberPins ? `${index + 1}. ${church.name}` : church.name;
+    const box = labelPillCssSize(name, bucket);
+    const id = labelPillImageId(bucket, box.w, labelNameKey(name));
+    if (map.hasImage(id)) return;
+    map.addImage(id, labelPillImageSized(box.w, box.h, name, bucket), { pixelRatio: DROP_PIN_PIXEL_RATIO });
+  });
 }
 
 export async function ensureLandmarkImages(map: MapLibreMap, churches: MapsChurch[], assetBaseUrl?: string): Promise<void> {
@@ -753,6 +821,28 @@ export async function ensureLandmarkImages(map: MapLibreMap, churches: MapsChurc
     canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
     landmarkRenderWidths.set(id, canvas.width);
     if (!map.hasImage(id)) map.addImage(id, canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height), { pixelRatio: 1 });
+  }
+}
+
+/** Re-applies `churchesLayers()` onto an already-installed source so HMR / spec tweaks
+ * take effect without recreating the map. No-op when the source is missing. */
+export function syncChurchesLayerSpecs(map: MapLibreMap): void {
+  if (!map.getSource("churches")) return;
+  for (const layer of churchesLayers()) {
+    if (!map.getLayer(layer.id)) {
+      map.addLayer(layer);
+      continue;
+    }
+    if ("layout" in layer && layer.layout) {
+      for (const [key, value] of Object.entries(layer.layout)) {
+        map.setLayoutProperty(layer.id, key as never, value as never);
+      }
+    }
+    if ("paint" in layer && layer.paint) {
+      for (const [key, value] of Object.entries(layer.paint)) {
+        map.setPaintProperty(layer.id, key as never, value as never);
+      }
+    }
   }
 }
 
@@ -784,7 +874,7 @@ export function churchesLayers(): LayerSpecification[] {
         "icon-anchor": "bottom",
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
-        "icon-size": zoomScaledStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]]),
+        "icon-size": zoomScaledStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]], ICON_SIZE_PACK_MAX),
         "icon-rotation-alignment": "viewport",
         "icon-pitch-alignment": "viewport",
       },
@@ -801,7 +891,7 @@ export function churchesLayers(): LayerSpecification[] {
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
         // Dividing by the raster's head diameter renders church.size px head-to-head, like Keynote's drop pin.
-        "icon-size": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], DROP_PIN_SELECTED_SCALE, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]),
+        "icon-size": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], DROP_PIN_SELECTED_SCALE, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX], ICON_SIZE_PACK_MAX),
       },
       paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
     },
@@ -811,18 +901,24 @@ export function churchesLayers(): LayerSpecification[] {
       source: "churches",
       filter: ["==", ["get", "showLabel"], true],
       layout: {
-        "text-field": ["get", "name"],
-        "text-size": zoomScaledStops(["*", LABEL_FONT_PX, ["get", "labelScale"], ["get", "objectScale"]], LABEL_FONT_PX * LABEL_SCALE_MAX, LABEL_FONT_PX * LABEL_SCALE_MIN),
-        "text-offset": labelOffsetExpression(),
-        "text-anchor": "bottom",
-        "text-allow-overlap": true,
-        "text-ignore-placement": true,
-        "icon-image": ["concat", `${LABEL_PILL_ID}-`, ["get", "labelBucket"]],
-        "icon-text-fit": "both",
+        // Name is painted into the pill PNG. A separate text-field used em offsets while
+        // icon-offset is in image pixels, so "CHC Medan" drifted off its bar; icon-text-fit
+        // stretched to the wrap box and left empty red bars. Baking keeps them glued.
+        "text-field": "",
+        "icon-image": ["get", "labelPill"],
+        "icon-anchor": "bottom",
+        "icon-offset": labelOffsetExpression(),
+        "icon-size": zoomScaledStops(
+          ["*", ["get", "labelScale"], ["get", "objectScale"]],
+          LABEL_SCALE_MAX,
+          LABEL_SCALE_MIN,
+          ["max", 0.5, ["to-number", ["get", "labelBucket"]]]
+        ),
+        "icon-text-fit": "none",
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
       },
-      paint: { "text-color": "#FFFFFF", "text-opacity": ["coalesce", ["get", "labelOpacity"], 1], "icon-opacity": ["coalesce", ["get", "labelOpacity"], 1] },
+      paint: { "icon-opacity": ["coalesce", ["get", "labelOpacity"], 1] },
     },
   ] as LayerSpecification[];
 }
@@ -845,7 +941,7 @@ export async function addOverlays(
   await ensureAdmin0Highlights(map, highlights, styleId, isolate, 0, extraAdmin1, isCurrent, highlightColourOverride, highlightColours);
   if (!isCurrent()) return;
   ensureDropPinImages(map, churches);
-  ensureLabelPillImage(map);
+  ensureLabelPillImage(map, churches, objectScale, numberPins);
   await ensureLandmarkImages(map, churches, assetBaseUrl);
   if (!isCurrent()) return;
   const pins = churchesGeo(churches, selectedPinId, numberPins, objectScale);

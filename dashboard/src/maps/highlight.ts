@@ -29,7 +29,18 @@ export function highlightCssVars(hex: string): Record<string, string> {
     "--maps-highlight": normalised,
     "--maps-highlight-soft": `rgba(${r},${g},${b},0.16)`,
     "--maps-highlight-edge": `rgba(${r},${g},${b},0.45)`,
+    "--maps-highlight-ink": contrastInk(normalised),
   };
+}
+
+/** Ink that stays readable on a filled colour pill. */
+export function contrastInk(hex: string): string {
+  const normalised = normaliseHighlightColour(hex);
+  const r = parseInt(normalised.slice(1, 3), 16);
+  const g = parseInt(normalised.slice(3, 5), 16);
+  const b = parseInt(normalised.slice(5, 7), 16);
+  const luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return luma > 0.62 ? "#0D1402" : "#FFFFFF";
 }
 
 let current = DEFAULT_HIGHLIGHT_COLOUR;

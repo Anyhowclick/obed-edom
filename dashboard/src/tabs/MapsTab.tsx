@@ -67,9 +67,11 @@ import {
   useSessionPath,
   useSessionToggle,
 } from "../prefs";
+import { ColourPicker } from "../maps/ColourPicker";
 import {
   DEFAULT_HIGHLIGHT_COLOUR,
   HIGHLIGHT_NO_FILL,
+  contrastInk,
   highlightCssVars,
   isHighlightHex,
   isHighlightNone,
@@ -90,7 +92,7 @@ import { ManualEntriesForm } from "../maps/ManualEntriesForm";
 import type { ManualMode, MapsBootstrapRow } from "../maps/manualRows";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
-import { OBJECT_SIZE_MAX, defaultObjectSize, pasteRebase, zoomSizeFactor } from "../maps/objects";
+import { OBJECT_SIZE_MAX, defaultObjectSize, effectiveObjectSize, pasteRebase, zoomSizeFactor } from "../maps/objects";
 import type { ObjectClipboard } from "../maps/objects";
 import { admin0Name, admin1Name, highlightedCountries, isAdmin1Loaded, loadAdmin0, loadAdmin1 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
@@ -239,48 +241,15 @@ type PendingHighlightOverride = {
   value: string;
 };
 
-function HighlightColourFields({
-  colour,
-  text,
-  disabled,
-  onColour,
-  onText,
-  onCommit,
-}: {
-  colour: string;
-  text: string;
-  disabled?: boolean;
-  onColour: (value: string) => void;
-  onText: (value: string) => void;
-  onCommit: () => void;
-}) {
-  return (
-    <label>
-      Colour
-      <input
-        type="text"
-        value={text}
-        disabled={disabled}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
-        aria-label="Highlight colour hex"
-        onChange={(event) => onText(event.target.value)}
-        onBlur={onCommit}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") onCommit();
-        }}
-      />
-      <input
-        type="color"
-        value={normaliseHighlightColour(colour || text)}
-        disabled={disabled}
-        aria-label="Highlight colour"
-        onChange={(event) => onColour(event.target.value)}
-        onBlur={onCommit}
-      />
-    </label>
-  );
+function resolvedHighlightColour(
+  code: string,
+  colours: Record<string, string> | undefined,
+  fallback: string
+): { none: boolean; hex: string } {
+  const raw = colours?.[code];
+  if (isHighlightNone(raw)) return { none: true, hex: fallback };
+  if (isHighlightHex(raw)) return { none: false, hex: raw };
+  return { none: false, hex: fallback };
 }
 
 function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
@@ -338,6 +307,7 @@ export function MapsTab() {
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [selectedPins, setSelectedPins] = useState<string[]>([]);
   const [selectedHighlight, setSelectedHighlight] = useState<string | null>(null);
+  const [selectedHighlights, setSelectedHighlights] = useState<string[]>([]);
   const [colourText, setColourText] = useState("");
   const [overrideText, setOverrideText] = useState("");
   const colourDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -355,6 +325,7 @@ export function MapsTab() {
   const [dissolveFrame, setDissolveFrame] = useState<{ url: string; fading: boolean; duration: number } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [sessionBusy, setSessionBusy] = useState(false);
+  const [sessionBusyKind, setSessionBusyKind] = useState<"save" | "load" | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState<OverlayProgress | null>(null);
   const mapRef = useRef<MapViewHandle | null>(null);
@@ -612,6 +583,7 @@ export function MapsTab() {
 
   useEffect(() => {
     setSelectedPins([]);
+    setSelectedHighlights([]);
     setSelectedHighlight(null);
   }, [activeId, activeAudience]);
 
@@ -891,6 +863,7 @@ export function MapsTab() {
     setActiveAudience(nextAudience);
     setSelectedPin(null);
     setSelectedPins([]);
+    setSelectedHighlights([]);
     if (target) mapRef.current?.jumpTo(slideForAudience(target, nextAudience).camera);
   }
 
@@ -901,6 +874,7 @@ export function MapsTab() {
       clearOpenRun();
       setSelectedPin(null);
       setSelectedPins([]);
+      setSelectedHighlights([]);
       setRenamingSlide(null);
       const created = await startMaps();
       setJob(created);
@@ -945,6 +919,7 @@ export function MapsTab() {
         ...(highlights.length === 0 ? { isolate: undefined } : {}),
       };
       if (selectedHighlight && !highlights.includes(selectedHighlight)) setSelectedHighlight(null);
+      setSelectedHighlights((codes) => codes.filter((code) => highlights.includes(code)));
     }
     patchDoc({
       ...current,
@@ -1126,6 +1101,7 @@ export function MapsTab() {
     setActiveAudience(audience);
     setSelectedPin(null);
     setSelectedPins([]);
+    setSelectedHighlights([]);
     mapRef.current?.jumpTo(slideForAudience(fallback, audience).camera);
   }
 
@@ -1172,28 +1148,46 @@ export function MapsTab() {
     setInspTab("properties");
   }
 
-  function applyHighlightOverride(target: PendingHighlightOverride) {
-    const colour = parseHighlightColourValue(target.value);
-    if (!colour) return;
+  function applyHighlightColoursOn(slideId: string, audience: MapsAudience, codes: string[], value: string) {
+    const colour = parseHighlightColourValue(value);
+    if (!colour || !codes.length) return;
     const current = docRef.current;
     if (!current) return;
-    const slide = current.slides.find((item) => item.id === target.slideId);
+    const slide = current.slides.find((item) => item.id === slideId);
     if (!slide) return;
-    const view = target.audience === "cg" ? slide.cg : slide;
-    if (!view || !view.highlights.includes(target.code)) return;
-    if (view.highlightColours?.[target.code] === colour) return;
-    const highlightColours = pruneHighlightColours(view.highlights, { ...(view.highlightColours || {}), [target.code]: colour });
+    const view = audience === "cg" ? slide.cg : slide;
+    if (!view) return;
+    const next = { ...(view.highlightColours || {}) };
+    let changed = false;
+    for (const code of codes) {
+      if (!view.highlights.includes(code)) continue;
+      if (next[code] === colour) continue;
+      next[code] = colour;
+      changed = true;
+    }
+    if (!changed) return;
+    const highlightColours = pruneHighlightColours(view.highlights, next);
     patchDoc({
       ...current,
       slides: current.slides.map((item) => {
-        if (item.id !== target.slideId) return item;
-        if (target.audience === "cg") {
+        if (item.id !== slideId) return item;
+        if (audience === "cg") {
           if (!item.cg) return item;
           return { ...item, cg: { ...item.cg, highlightColours } };
         }
         return { ...item, highlightColours };
       }),
     });
+  }
+
+  function applyHighlightOverride(target: PendingHighlightOverride) {
+    applyHighlightColoursOn(target.slideId, target.audience, [target.code], target.value);
+  }
+
+  function applyHighlightColours(codes: string[], value: string) {
+    const slideId = activeRef.current;
+    if (!slideId) return;
+    applyHighlightColoursOn(slideId, activeAudienceRef.current, codes, value);
   }
 
   function flushPendingOverride() {
@@ -1268,12 +1262,22 @@ export function MapsTab() {
     if (selectedHighlight) writeHighlightOverride(selectedHighlight, overrideText);
   }
 
-  function clearHighlightOverride(code: string) {
-    if (!activeView) return;
+  function clearHighlightOverrides(codes: string[]) {
+    if (!activeView || !codes.length) return;
     const next = { ...(activeView.highlightColours || {}) };
-    delete next[code];
+    let changed = false;
+    for (const code of codes) {
+      if (!(code in next)) continue;
+      delete next[code];
+      changed = true;
+    }
+    if (!changed) return;
     updateActive({ highlightColours: pruneHighlightColours(activeView.highlights, next) });
-    setOverrideText(highlightColour);
+    if (selectedHighlight && codes.includes(selectedHighlight)) setOverrideText(highlightColour);
+  }
+
+  function clearHighlightOverride(code: string) {
+    clearHighlightOverrides([code]);
   }
 
   function setHighlightNoFill(code: string, noFill: boolean) {
@@ -1346,6 +1350,28 @@ export function MapsTab() {
     setSelectedPins((ids) => (checked ? [...new Set([...ids, id])] : ids.filter((item) => item !== id)));
   }
 
+  function toggleHighlightSelection(code: string, checked: boolean) {
+    setSelectedHighlights((codes) => (checked ? [...new Set([...codes, code])] : codes.filter((item) => item !== code)));
+  }
+
+  function colourSelectedObjects(value: string) {
+    if (!activeView) return;
+    const colour = parseHighlightColourValue(value);
+    if (!colour) return;
+    const pinIds = new Set(selectedPins);
+    const hlCodes = selectedHighlights.filter((code) => activeView.highlights.includes(code));
+    const churches =
+      colour === HIGHLIGHT_NO_FILL
+        ? undefined
+        : activeView.churches.map((church) => (pinIds.has(church.id) && isPinOrDot(church) ? { ...church, color: colour } : church));
+    const partial: Partial<MapsSlide> = {};
+    if (churches && selectedPins.some((id) => activeView.churches.some((church) => church.id === id && isPinOrDot(church)))) {
+      partial.churches = churches;
+    }
+    if (hlCodes.length) applyHighlightColours(hlCodes, colour);
+    if (partial.churches) updateActive(partial);
+  }
+
   function updateSelectedPins(partial: Partial<MapsChurch>) {
     if (!activeView || selectedPins.length === 0) return;
     const selected = new Set(selectedPins);
@@ -1361,6 +1387,14 @@ export function MapsTab() {
     if (enabled) return { ...church, scaleWithMap: true, sizeZoom: zoom };
     const size = church.sizeZoom != null ? (church.size || defaultSize) * zoomSizeFactor(church.sizeZoom, zoom) : church.size || defaultSize;
     return { ...church, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, size))), sizeZoom: undefined };
+  }
+
+  /** Slider value is on-screen px at `zoom`. Re-anchoring `sizeZoom` makes a grouped pin and
+   * dot that share a size actually match; leaving each object's old `sizeZoom` kept them apart. */
+  function withSizeAtCamera(church: MapsChurch, size: number, zoom: number): MapsChurch {
+    const next = Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, size)));
+    if (!church.scaleWithMap) return { ...church, size: next };
+    return { ...church, size: next, sizeZoom: zoom };
   }
 
   function updateSelectedMarkers(mutate: (church: MapsChurch) => MapsChurch) {
@@ -1705,6 +1739,7 @@ export function MapsTab() {
     if (mode !== "append") {
       setSelectedPin(null);
       setSelectedPins([]);
+      setSelectedHighlights([]);
       setRenamingSlide(null);
     }
     try {
@@ -1727,6 +1762,8 @@ export function MapsTab() {
     const currentJob = jobRef.current;
     if (!currentJob || sessionBusy) return;
     setError(null);
+    setLogs(["Packing the current deck and tile cache…"]);
+    setSessionBusyKind("save");
     setSessionBusy(true);
     try {
       await Promise.all([...cachePrefetches.current]);
@@ -1756,12 +1793,15 @@ export function MapsTab() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSessionBusy(false);
+      setSessionBusyKind(null);
     }
   }
 
   async function loadSession(file: File) {
     if (sessionBusy) return;
     setError(null);
+    setLogs(["Restoring the deck and tile cache…"]);
+    setSessionBusyKind("load");
     setSessionBusy(true);
     try {
       flushPendingOverride();
@@ -1790,6 +1830,7 @@ export function MapsTab() {
       setActiveAudience("lw");
       setSelectedPin(null);
       setSelectedPins([]);
+      setSelectedHighlights([]);
       setRenamingSlide(null);
       setPreviewView(null);
       if (firstId && next) requestAnimationFrame(() => mapRef.current?.jumpTo(next.slides[0].camera));
@@ -1797,6 +1838,7 @@ export function MapsTab() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSessionBusy(false);
+      setSessionBusyKind(null);
     }
   }
 
@@ -2336,7 +2378,17 @@ export function MapsTab() {
 
   const pin = activeView?.churches.find((c) => c.id === selectedPin) || null;
   const selectedMarkers = (activeView?.churches || []).filter((church) => selectedPins.includes(church.id) && isPinOrDot(church));
-  const selectedMarkerSize = selectedMarkers[0] ? selectedMarkers[0].size || defaultObjectSize(selectedMarkers[0].kind, selectedMarkers[0].assetWidth) : 28;
+  const selectedMarkerSize = selectedMarkers[0]
+    ? Math.round(effectiveObjectSize(selectedMarkers[0], activeView?.camera.zoom ?? 0))
+    : 28;
+  const selectedHighlightCodes = (activeView?.highlights || []).filter((code) => selectedHighlights.includes(code));
+  const selectedObjectCount = selectedPins.length + selectedHighlightCodes.length;
+  const firstSelectedHighlight = selectedHighlightCodes[0];
+  const bulkHighlight = firstSelectedHighlight
+    ? resolvedHighlightColour(firstSelectedHighlight, activeView?.highlightColours, highlightColour)
+    : { none: false, hex: highlightColour };
+  const bulkObjectColour = selectedMarkers[0]?.color || bulkHighlight.hex;
+  const bulkObjectNone = selectedMarkers.length === 0 && selectedHighlightCodes.length > 0 && selectedHighlightCodes.every((code) => isHighlightNone(activeView?.highlightColours?.[code]));
   const nextSlide = outgoing && activeIndex >= 0 ? slides[activeIndex + 1] : null;
   const nextView = nextSlide ? slideForAudience(nextSlide, activeAudience) : null;
   const otherAudience: MapsAudience = activeAudience === "lw" ? "cg" : "lw";
@@ -2389,6 +2441,12 @@ export function MapsTab() {
             if (file) void loadSession(file);
           }}
         />
+        {sessionBusy ? (
+          <LoadingOverlay
+            title={sessionBusyKind === "save" ? "Saving session + cache…" : "Loading session + cache…"}
+            logs={logs}
+          />
+        ) : null}
       </div>
     );
   }
@@ -2984,7 +3042,11 @@ export function MapsTab() {
                       )}
                     </select>
                   </label>
-                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><DraftNumberInput min={24} max={4000} digits={0} value={pin.size || defaultObjectSize(pin.kind, pin.assetWidth)} disabled={locked} aria-label="Size" onChange={(size) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size } : c) })} onCommit={() => fireAndForgetSave()} /></label>
+                  <label className="maps-slider-field">
+                    <span>Size</span>
+                    <input type="range" min="24" max="4000" step="10" value={Math.round(effectiveObjectSize(pin, activeView?.camera.zoom ?? 0))} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? withSizeAtCamera(c, Number(event.target.value), activeView?.camera.zoom ?? 0) : c)) })} />
+                    <DraftNumberInput min={24} max={4000} digits={0} value={Math.round(effectiveObjectSize(pin, activeView?.camera.zoom ?? 0))} disabled={locked} aria-label="Size" onChange={(size) => updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? withSizeAtCamera(c, size, activeView?.camera.zoom ?? 0) : c)) })} onCommit={() => fireAndForgetSave()} />
+                  </label>
                   <label className="maps-check">
                     <input
                       type="checkbox"
@@ -3066,17 +3128,26 @@ export function MapsTab() {
                   )}
                   <label className="maps-check"><input type="checkbox" checked={pin.showLabel === true} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
                   {pin.showLabel === true && <p className="note">Preview only: Keynote sets this label in Amplitude Bold on the red pill.</p>}
-                  <label>
-                    Colour:
-                    <input
-                      type="color"
-                      value={pin.color}
-                      disabled={locked}
-                      onChange={(event) =>
-                        updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, color: event.target.value } : c)) })
+                  <ColourPicker
+                    colour={pin.color}
+                    text={pin.color}
+                    disabled={locked}
+                    colourLabel="Colour"
+                    hexLabel="Colour hex"
+                    onColour={(color) =>
+                      updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, color } : c)) })
+                    }
+                    onText={(color) => {
+                      if (isHighlightHex(color)) {
+                        updateActive({
+                          churches: (activeView?.churches || []).map((c) =>
+                            c.id === pin.id ? { ...c, color: normaliseHighlightColour(color) } : c
+                          ),
+                        });
                       }
-                    />
-                  </label>
+                    }}
+                    onCommit={() => fireAndForgetSave()}
+                  />
                   <button
                     className="btn secondary"
                     type="button"
@@ -3100,43 +3171,53 @@ export function MapsTab() {
                         <IconArrowLeft /> Camera
                       </button>
                       <div className="cap">Highlight</div>
-                      <label>
-                        Name
+                      <div
+                        className={`maps-name-pill kind-${highlightClass(selectedHighlight)}${isHighlightNone(activeView?.highlightColours?.[selectedHighlight]) ? " none" : ""}`}
+                        style={
+                          isHighlightNone(activeView?.highlightColours?.[selectedHighlight])
+                            ? undefined
+                            : highlightCssVars(resolvedHighlightColour(selectedHighlight, activeView?.highlightColours, highlightColour).hex)
+                        }
+                      >
+                        <span className={`maps-pin-kind kind-${highlightClass(selectedHighlight)}`} aria-hidden="true">
+                          <HighlightIcon code={selectedHighlight} />
+                        </span>
                         <span>{highlightName(selectedHighlight)}</span>
-                      </label>
-                      <label className="maps-check">
-                        <input
-                          type="checkbox"
-                          checked={isHighlightNone(activeView?.highlightColours?.[selectedHighlight])}
-                          disabled={locked}
-                          onChange={(event) => setHighlightNoFill(selectedHighlight, event.target.checked)}
-                        />{" "}
-                        No fill
-                      </label>
-                      <HighlightColourFields
+                      </div>
+                      <ColourPicker
                         colour={overrideText || highlightColour}
                         text={overrideText}
-                        disabled={locked || isHighlightNone(activeView?.highlightColours?.[selectedHighlight])}
+                        none={isHighlightNone(activeView?.highlightColours?.[selectedHighlight])}
+                        allowNone
+                        disabled={locked}
                         onColour={scheduleOverrideColour}
                         onText={setOverrideText}
+                        onNone={() => setHighlightNoFill(selectedHighlight, true)}
                         onCommit={commitOverrideColour}
                       />
-                      {isHighlightHex(activeView?.highlightColours?.[selectedHighlight]) && (
-                        <button className="btn secondary" type="button" disabled={locked} onClick={() => clearHighlightOverride(selectedHighlight)}>
-                          Use global colour
+                      <div className="maps-hl-actions">
+                        <button
+                          type="button"
+                          className="maps-colour-pill"
+                          disabled={locked}
+                          style={{ background: highlightColour, color: contrastInk(highlightColour) }}
+                          onClick={() => clearHighlightOverride(selectedHighlight)}
+                        >
+                          Default
                         </button>
-                      )}
-                      <button
-                        className="btn secondary"
-                        type="button"
-                        disabled={locked}
-                        onClick={() => {
-                          updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== selectedHighlight) });
-                          setSelectedHighlight(null);
-                        }}
-                      >
-                        Remove highlight
-                      </button>
+                        <button
+                          className="btn maps-delete icon-btn"
+                          type="button"
+                          disabled={locked}
+                          aria-label="Remove highlight"
+                          onClick={() => {
+                            updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== selectedHighlight) });
+                            setSelectedHighlight(null);
+                          }}
+                        >
+                          <IconTrash />
+                        </button>
+                      </div>
                     </>
                   ) : (
                     <>
@@ -3278,6 +3359,7 @@ export function MapsTab() {
                   </InspSection>
                     </>
                   )}
+                  {!selectedHighlight && (
                   <div className="maps-hl">
                     <InspSection id="regions" title="Selected regions">
                       <SlidingSeg
@@ -3302,27 +3384,33 @@ export function MapsTab() {
                           setPickRegions(next);
                         }}
                       />
-                      <div className="maps-pick-hint note">
-                        {pickRegions && regionHintReady && regionsLoading
-                          ? "Loading regions…"
-                          : pickRegions && regionHintReady && regionCameraCountries.length === 0
-                            ? "Pan a country into view to pick its regions."
-                            : null}
-                      </div>
+                      {pickRegions && regionHintReady && (regionsLoading || regionCameraCountries.length === 0) && (
+                        <div className="maps-pick-hint note">
+                          {regionsLoading
+                            ? "Loading regions…"
+                            : "Pan a country into view to pick its regions."}
+                        </div>
+                      )}
                       {!selectedHighlight && (
-                        <HighlightColourFields
+                        <ColourPicker
                           colour={colourText || highlightColour}
                           text={colourText}
                           disabled={locked}
                           onColour={scheduleGlobalColour}
                           onText={setColourText}
-                          onCommit={() => commitGlobalColourValue(colourText)}
+                          onCommit={() => commitGlobalColourValue(pendingColourRef.current || colourText)}
                         />
                       )}
                       {(activeView?.highlights.length || 0) > 0 && (
                         <div className="maps-hl-list">
-                          {(activeView?.highlights || []).map((code) => (
-                            <div key={`${code}-${namesTick}`} className={`maps-hl-chip${selectedHighlight === code ? " on" : ""}`}>
+                          {(activeView?.highlights || []).map((code) => {
+                            const fill = resolvedHighlightColour(code, activeView?.highlightColours, highlightColour);
+                            return (
+                            <div
+                              key={`${code}-${namesTick}`}
+                              className={`maps-hl-chip${selectedHighlight === code ? " on" : ""}${fill.none ? " none" : ""}`}
+                              style={fill.none ? undefined : highlightCssVars(fill.hex)}
+                            >
                               <button type="button" disabled={locked} onClick={() => openHighlight(code)}>
                                 {highlightName(code)}
                               </button>
@@ -3337,12 +3425,14 @@ export function MapsTab() {
                                 <IconClose />
                               </button>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </InspSection>
                   </div>
-                  {(activeView?.highlights.length || 0) > 0 && (
+                  )}
+                  {!selectedHighlight && (activeView?.highlights.length || 0) > 0 && (
                     <div className="maps-hl">
                       <label className="maps-check">
                         <input
@@ -3358,7 +3448,7 @@ export function MapsTab() {
                             });
                           }}
                         />{" "}
-                        Isolate <span className="muted">{activeView?.isolate ? "ON" : "OFF"}</span>
+                        Isolate
                       </label>
                       {activeView?.isolate && (
                         <AeScrub
@@ -3462,7 +3552,7 @@ export function MapsTab() {
                   {(activeView?.churches.length || 0) > 0 && (
                     <>
                       <div className="maps-pin-bulk" role="group" aria-label="Selected objects">
-                        {selectedPins.length > 0 && <span className="note">{selectedPins.length} selected</span>}
+                        {selectedObjectCount > 0 && <span className="note">{selectedObjectCount} selected</span>}
                         <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: true })} title="Show labels" aria-label="Show labels">
                           <IconLabel />
                         </button>
@@ -3505,8 +3595,8 @@ export function MapsTab() {
                       )}
                       {selectedMarkers.length > 0 && (
                         <div className="maps-pin-bulk" role="group" aria-label="Selected pin style">
-                          <label>
-                            Size
+                          <label className="maps-slider-field">
+                            <span>Size</span>
                             <input
                               type="range"
                               min="24"
@@ -3514,7 +3604,7 @@ export function MapsTab() {
                               step="10"
                               value={selectedMarkerSize}
                               disabled={locked}
-                              onChange={(event) => updateSelectedMarkers((church) => ({ ...church, size: Number(event.target.value) }))}
+                              onChange={(event) => updateSelectedMarkers((church) => withSizeAtCamera(church, Number(event.target.value), activeView?.camera.zoom ?? 0))}
                             />
                             <DraftNumberInput
                               min={24}
@@ -3523,7 +3613,7 @@ export function MapsTab() {
                               value={selectedMarkerSize}
                               disabled={locked}
                               aria-label="Pin size"
-                              onChange={(size) => updateSelectedMarkers((church) => ({ ...church, size }))}
+                              onChange={(size) => updateSelectedMarkers((church) => withSizeAtCamera(church, size, activeView?.camera.zoom ?? 0))}
                               onCommit={() => fireAndForgetSave()}
                             />
                           </label>
@@ -3539,21 +3629,30 @@ export function MapsTab() {
                             />{" "}
                             Scale with map
                           </label>
-                          <label>
-                            Colour
-                            <input
-                              type="color"
-                              aria-label="Colour"
-                              value={selectedMarkers[0].color}
-                              disabled={locked}
-                              onChange={(event) => updateSelectedMarkers((church) => ({ ...church, color: event.target.value }))}
-                            />
-                          </label>
+                          <ColourPicker
+                            colour={bulkObjectColour}
+                            text={bulkObjectColour}
+                            none={bulkObjectNone}
+                            allowNone={selectedHighlightCodes.length > 0}
+                            disabled={locked}
+                            colourLabel="Colour"
+                            hexLabel="Colour hex"
+                            onColour={colourSelectedObjects}
+                            onText={(value) => {
+                              if (isHighlightHex(value)) colourSelectedObjects(value);
+                            }}
+                            onNone={() => applyHighlightColours(selectedHighlightCodes, HIGHLIGHT_NO_FILL)}
+                            onCommit={() => fireAndForgetSave()}
+                          />
                         </div>
                       )}
                       <div className="maps-pin-list">
                         {(activeView?.churches || []).map((church) => (
-                          <div key={church.id} className={`maps-pin-row kind-${pinKindClass(church.kind)}${selectedPin === church.id ? " active" : ""}`}>
+                          <div
+                            key={church.id}
+                            className={`maps-pin-row kind-${pinKindClass(church.kind)} has-fill${selectedPin === church.id ? " active" : ""}`}
+                            style={isHighlightHex(church.color) ? highlightCssVars(church.color) : undefined}
+                          >
                             <label className="maps-pin-select" aria-label={`Select ${church.name}`}>
                               <input
                                 type="checkbox"
@@ -3579,13 +3678,48 @@ export function MapsTab() {
                   {(activeView?.highlights.length || 0) > 0 && (
                     <>
                       <div className="cap">Highlights</div>
+                      {selectedHighlightCodes.length > 0 && selectedMarkers.length === 0 && (
+                        <div className="maps-pin-bulk" role="group" aria-label="Selected highlight colour">
+                          <ColourPicker
+                            colour={bulkHighlight.hex}
+                            text={bulkHighlight.hex}
+                            none={bulkObjectNone}
+                            allowNone
+                            disabled={locked}
+                            onColour={(value) => applyHighlightColours(selectedHighlightCodes, value)}
+                            onText={(value) => {
+                              if (isHighlightHex(value)) applyHighlightColours(selectedHighlightCodes, value);
+                            }}
+                            onNone={() => applyHighlightColours(selectedHighlightCodes, HIGHLIGHT_NO_FILL)}
+                            onCommit={() => fireAndForgetSave()}
+                          />
+                        </div>
+                      )}
                       <div className="maps-pin-list">
-                        {(activeView?.highlights || []).map((code) => (
-                          <div key={`${code}-${namesTick}`} className={`maps-pin-row kind-${highlightClass(code)}${selectedHighlight === code ? " active" : ""}`}>
+                        {(activeView?.highlights || []).map((code) => {
+                          const fill = resolvedHighlightColour(code, activeView?.highlightColours, highlightColour);
+                          return (
+                          <div
+                            key={`${code}-${namesTick}`}
+                            className={`maps-pin-row kind-${highlightClass(code)}${fill.none ? " none" : " has-fill"}${selectedHighlight === code ? " active" : ""}`}
+                            style={fill.none ? undefined : highlightCssVars(fill.hex)}
+                          >
+                            <label className="maps-pin-select" aria-label={`Select ${highlightName(code)}`}>
+                              <input
+                                type="checkbox"
+                                checked={selectedHighlights.includes(code)}
+                                disabled={locked}
+                                onChange={(event) => toggleHighlightSelection(code, event.target.checked)}
+                              />
+                            </label>
                             <button type="button" className="maps-pin-open" disabled={locked} onClick={() => openHighlight(code)}>
                               <span className={`maps-pin-kind kind-${highlightClass(code)}`} aria-hidden="true">
                                 <HighlightIcon code={code} />
                               </span>
+                              <span
+                                className={`maps-pin-swatch${fill.none ? " none" : ""}`}
+                                style={fill.none ? undefined : { background: fill.hex }}
+                              />
                               <span className="maps-pin-name">{highlightName(code)}</span>
                             </button>
                             <button
@@ -3601,7 +3735,8 @@ export function MapsTab() {
                               <IconClose />
                             </button>
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </>
                   )}
@@ -3867,12 +4002,12 @@ export function MapsTab() {
         </div>
         )}
       </div>
-      {(exporting || job?.status === "queued" || job?.status === "running") && (
+      {(exporting || sessionBusy || job?.status === "queued" || job?.status === "running") && (
         <LoadingOverlay
-          title="Working…"
+          title={sessionBusyKind === "save" ? "Saving session + cache…" : sessionBusyKind === "load" ? "Loading session + cache…" : "Working…"}
           logs={logs}
-          progress={progress}
-          onCancel={exporting ? () => { exportAbort.current = true; } : undefined}
+          progress={sessionBusy ? null : progress}
+          onCancel={exporting && !sessionBusy ? () => { exportAbort.current = true; } : undefined}
         />
       )}
     </div>

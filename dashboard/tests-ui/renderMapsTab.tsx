@@ -26,6 +26,8 @@ vi.mock("../src/api", async (importOriginal) => {
     cancelMapsExport: apiFake.cancelMapsExport,
     planMapsTiles: apiFake.planMapsTiles,
     prefetchMapsTiles: apiFake.prefetchMapsTiles,
+    downloadMapsSession: apiFake.downloadMapsSession,
+    loadMapsSession: apiFake.loadMapsSession,
   };
 });
 

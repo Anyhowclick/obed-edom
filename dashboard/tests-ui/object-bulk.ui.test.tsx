@@ -162,6 +162,44 @@ describe("object bulk actions", () => {
     expect(churches.find((c) => c.id === "c2")).toMatchObject({ size: 120, color: "#112233", scaleWithMap: true });
   });
 
+  it("re-anchors sizeZoom so a grouped pin and dot share the same on-screen size", async () => {
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [
+            makeSlide({
+              churches: [
+                pin("c1", "Alpha", { size: 24, scaleWithMap: true, sizeZoom: 11.2 }),
+                pin("c2", "Beta", { size: 24, color: "#415bc3", kind: "dropPin", scaleWithMap: true, sizeZoom: 13 }),
+              ],
+            }),
+          ],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+    await selectNamed("Alpha");
+    await selectNamed("Beta");
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Pin size"), { target: { value: "40" } });
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 550));
+    });
+
+    const calls = mapsApiScript.saveMapsState.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const document = calls[calls.length - 1].document as {
+      slides: Array<{ churches: Array<{ id: string; size?: number; sizeZoom?: number }> }>;
+    };
+    const churches = document.slides[0].churches;
+    expect(churches.find((c) => c.id === "c1")).toMatchObject({ size: 40, sizeZoom: 12 });
+    expect(churches.find((c) => c.id === "c2")).toMatchObject({ size: 40, sizeZoom: 12 });
+  });
+
   it("does not show opacity on a selected object", async () => {
     const job = makeJob({
       result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha")] })] }), stateRevision: 1 },

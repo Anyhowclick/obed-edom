@@ -31,9 +31,9 @@ test("the admin1 fill expression is an `in` over a literal id list, never featur
   assert.ok(!JSON.stringify(expression).includes("feature-state"));
 });
 
-test("a region already covered by its highlighted country contributes no id (no double paint)", () => {
+test("a region still paints when its parent country is highlighted, so it can sit on top", () => {
   const expression = admin1PaintExpression(["MYS", "A1:MYS-1186", "A1:IDN-1"], 0.4);
-  assert.deepEqual(expression[1][2], ["literal", ["IDN-1"]]);
+  assert.deepEqual(expression[1][2], ["literal", ["MYS-1186", "IDN-1"]]);
 });
 
 test("the admin1 line expression carries the same ids at the line opacity", () => {

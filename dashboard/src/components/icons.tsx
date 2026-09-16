@@ -274,6 +274,15 @@ export function IconCountry({ className }: IconProps) {
   );
 }
 
+export function IconNoFill({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls(className)}>
+      <rect x="4.5" y="4.5" width="15" height="15" rx="3" />
+      <path d="M7 17 17 7" />
+    </svg>
+  );
+}
+
 /* The watercolour toolbar keeps its 16 grid; 1.2 is the same optical weight
    as 1.8 on the 24 grid. */
 export const TOOL_ICONS: Record<string, JSX.Element> = {

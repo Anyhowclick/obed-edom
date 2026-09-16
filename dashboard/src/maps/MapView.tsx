@@ -6,7 +6,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
 import { AdminSyncGate } from "./adminSync";
-import { addOverlays, applyAdmin1Highlights, applyHighlightColour, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLabelPillImage, ensureLandmarkImages, ensureLowZoomRaster, highlightedCountries, loadAdmin0, movieObjectsAt, selectedDragScale, syncAdmin1Source, withoutRevealed } from "./overlays";
+import { addOverlays, applyAdmin1Highlights, applyHighlightColour, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLabelPillImage, ensureLandmarkImages, ensureLowZoomRaster, highlightedCountries, loadAdmin0, movieObjectsAt, selectedDragScale, syncAdmin1Source, syncChurchesLayerSpecs, withoutRevealed } from "./overlays";
 import { exportGpuCap } from "./captureExport";
 import { defaultObjectSize, effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
@@ -1080,7 +1080,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (!map?.getSource("churches")) return;
     void ensureLandmarkImages(map, churches, assetBaseUrl).then(() => {
       ensureDropPinImages(map, churches);
-      ensureLabelPillImage(map);
+      ensureLabelPillImage(map, churches, objectLayoutScale(authoredWidthRef.current), numberPins);
+      syncChurchesLayerSpecs(map);
       (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(churches, selectedPinId, numberPins, objectLayoutScale(authoredWidthRef.current)));
     }).catch((err) => console.warn("landmark images", err));
   }, [churches, selectedPinId, numberPins, assetBaseUrl]);

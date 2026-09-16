@@ -42,6 +42,8 @@ let chooseSaveCalls: ChooseSaveArgs[] = [];
 let cancelMapsExportCalls: string[] = [];
 let planMapsTilesResolution = { ok: true, rels: [] as string[], tiles: 0, cached: 0, capped: false, cameras: 0, camerasUsed: 0 };
 let prefetchMapsTilesResolution = { ok: true, tiles: 0, cached: 0, fetched: 0, failed: 0 };
+let downloadSessionDeferOnce: Promise<{ blob: Blob; filename: string }> | null = null;
+let loadSessionDeferOnce: Promise<Job> | null = null;
 
 export const saveMapsState = vi.fn<typeof actual.saveMapsState>(async (id: SaveMapsStateArgs[0], document: SaveMapsStateArgs[1], expectedRevision: SaveMapsStateArgs[2]): Promise<Job> => {
   saveCalls.push({ id, document, expectedRevision });
@@ -162,6 +164,24 @@ export const putSettings = vi.fn<typeof actual.putSettings>(async (next: Partial
   return { ...settingsValue };
 });
 
+export const downloadMapsSession = vi.fn<typeof actual.downloadMapsSession>(async () => {
+  if (downloadSessionDeferOnce) {
+    const pending = downloadSessionDeferOnce;
+    downloadSessionDeferOnce = null;
+    return pending;
+  }
+  return { blob: new Blob(["session"]), filename: "maps-job-1.obedmaps" };
+});
+
+export const loadMapsSession = vi.fn<typeof actual.loadMapsSession>(async () => {
+  if (loadSessionDeferOnce) {
+    const pending = loadSessionDeferOnce;
+    loadSessionDeferOnce = null;
+    return pending;
+  }
+  return makeJob();
+});
+
 export function resetMapsApiScript() {
   saveConflictOnce = null;
   saveDeferOnce = null;
@@ -198,6 +218,10 @@ export function resetMapsApiScript() {
   prefetchMapsTiles.mockClear();
   getSettings.mockClear();
   putSettings.mockClear();
+  downloadMapsSession.mockClear();
+  loadMapsSession.mockClear();
+  downloadSessionDeferOnce = null;
+  loadSessionDeferOnce = null;
   getSettingsDeferOnce = null;
   settingsValue = { ...DEFAULT_SETTINGS };
 }
@@ -290,6 +314,16 @@ export const mapsApiScript = {
   putSettings: {
     get calls() {
       return putSettings.mock.calls;
+    },
+  },
+  downloadMapsSession: {
+    deferOnce(promise: Promise<{ blob: Blob; filename: string }>) {
+      downloadSessionDeferOnce = promise;
+    },
+  },
+  loadMapsSession: {
+    deferOnce(promise: Promise<Job>) {
+      loadSessionDeferOnce = promise;
     },
   },
 };

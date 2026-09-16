@@ -67,12 +67,16 @@ export function SlidingSeg({
     }, TABS_MS);
   }, [place]);
 
+  const optionKey = options.map((option) => option.id).join("\0");
   useLayoutEffect(() => {
     if (valueRef.current === value && readyRef.current) return;
     const animate = readyRef.current && valueRef.current !== value;
     valueRef.current = value;
     if (place(animate)) readyRef.current = true;
   }, [place, value]);
+  useLayoutEffect(() => {
+    if (place(false)) readyRef.current = true;
+  }, [place, optionKey]);
 
   useLayoutEffect(() => {
     const bar = barRef.current;
