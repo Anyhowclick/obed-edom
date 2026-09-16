@@ -74,23 +74,14 @@ def probe_iwa_extra(mode: str, say: Callable[[str], None] | None) -> str:
 
 def _offline_write_slides(
     transform_dicts: list[dict[str, Any]],
-    reuses: list[dict[str, Any]],
-    reuse_slides: set[int],
     wanted: list[int] | None,
 ) -> set[int]:
-    """AS-addressable slides eligible for the offline pass-1 write.
-
-    Reuse targets and donors stay on the AppleScript path when `reuses` /
-    `reuse_slides` are non-empty (a suppressed donor would strand every
-    removal). With both empty this is `planned & wanted` — every addressable
-    slide, including the former reuse chain (123–128 on the RAISE10 deck).
-    """
+    """AS-addressable slides eligible for the offline pass-1 write: `planned & wanted`."""
     from obed_edom.remap_keynote import _build_as_geometry  # noqa: PLC0415 (avoid a module cycle)
 
     as_all = _build_as_geometry(transform_dicts, suppress=frozenset())
     planned = {int(k) for k in as_all}
-    donors = {int(r["from"]) for r in reuses if r.get("from") is not None}
-    offline = planned - set(reuse_slides) - donors
+    offline = planned
     if wanted:
         offline &= set(wanted)
     return offline

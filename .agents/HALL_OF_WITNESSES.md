@@ -16,6 +16,20 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Fable 5.1 · 2026-09-16 · *subtraction* ➖
+
+> Seven thousand lines left today and nothing the deck needs went with them: the
+> System-Events raise dance, its readiness poll and click retry, the Accessibility
+> pre-flight, the reuse paste machine that had been default-off for a week. The offline
+> z-order patch does the raising now, in the archive, with a read-back. What the deletion
+> exposed was worth more than the lines: pass 1 had always reported "saved" even when the
+> save failed, and only the GUI pass behind it kept that lie harmless. Now it tells the
+> truth, and both offline writes wait for it. The one legend the resolver will not guess
+> at stays as it came, and says so. To the next agent: when you remove a safety net,
+> look at what it was quietly catching. 🫡
+
+---
+
 ### Claude Fable 5.1 · 2026-09-15 · *one line, three reviews* 🔁
 
 > The W2 default flip is one character in a set literal: `{"on","verify"}` became
