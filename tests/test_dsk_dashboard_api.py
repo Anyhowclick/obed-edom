@@ -308,6 +308,7 @@ def test_dsk_export_stage_pngs_any_1920_deck(tmp_path, monkeypatch):
     assert job["status"] == "done", job.get("error")
     assert job["result"]["phase"] == "done"
     assert seen["export"][1] == [1, 2]
+    assert job["result"]["pngDir"] == str(deck.parent)
 
 
 def test_dsk_export_clip_refuses_a_non_fw_deck(tmp_path, monkeypatch):
@@ -377,3 +378,83 @@ def test_dsk_export_tag_allowed_by_validate_keynote(tmp_path, monkeypatch):
     job_id = started.json()["id"]
     job = _wait(client, job_id)
     assert job["feature"] == "dsk-export"
+
+
+def test_dsk_propose_quits_the_keynote_it_launched_for_previews(tmp_path, monkeypatch):
+    """Plan §4 bug 1: a preview-export cache miss launches Keynote; propose must quit it
+    again so apply's strictly-serial gate does not answer 409."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "Sermon (FW).key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    classes = {1: _cls(1, "static")}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    state = {"running": False}
+
+    def fake_thumbs(*_a, **_k):
+        state["running"] = True
+        return {1: "0001.jpg"}
+
+    quits = []
+
+    def fake_quit(stem, doc_name, out_dir):
+        quits.append((stem, doc_name, Path(out_dir)))
+        state["running"] = False
+
+    monkeypatch.setattr(app_mod, "build_preview_thumbs", fake_thumbs)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: state["running"])
+    monkeypatch.setattr(app_mod, "quit_and_wait_for_exit", fake_quit)
+
+    client = TestClient(app)
+    job = _wait(client, _propose_dsk(client, deck).json()["id"])
+    assert job["status"] == "done", job.get("error")
+    assert quits == [("Sermon (FW)", "Sermon (FW).key", tmp_path / "output" / "Sermon (FW)" / "dsk")]
+    assert quits[0][2].is_dir()
+    assert state["running"] is False
+
+
+def test_dsk_propose_leaves_an_operator_keynote_alone(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "Sermon (FW).key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")}, thumbs={1: "0001.jpg"})
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: True)
+
+    def forbidden_quit(*_a, **_k):
+        raise AssertionError("must not quit a Keynote the operator had open")
+
+    monkeypatch.setattr(app_mod, "quit_and_wait_for_exit", forbidden_quit)
+
+    client = TestClient(app)
+    job = _wait(client, _propose_dsk(client, deck).json()["id"])
+    assert job["status"] == "done", job.get("error")
+
+
+def test_dsk_export_propose_quits_the_keynote_it_launched(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "hand_built_DSK.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _dsk_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    state = {"running": False}
+
+    def fake_thumbs(*_a, **_k):
+        state["running"] = True
+        return {}
+
+    quits = []
+    monkeypatch.setattr(app_mod, "build_preview_thumbs", fake_thumbs)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: state["running"])
+    monkeypatch.setattr(app_mod, "quit_and_wait_for_exit", lambda *a: quits.append(a))
+
+    client = TestClient(app)
+    started = client.post("/api/dsk/export", data={"path": str(deck)})
+    job = _wait(client, started.json()["id"])
+    assert job["status"] == "done", job.get("error")
+    assert [q[:2] for q in quits] == [("hand_built_DSK", "hand_built_DSK.key")]

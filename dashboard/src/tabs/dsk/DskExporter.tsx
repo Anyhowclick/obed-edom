@@ -12,6 +12,8 @@ import {
 import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
 import { LoadingOverlay } from "../../components/PreviewGrid";
+import { JobName } from "../../components/JobName";
+import { renameAndApply } from "../../sessions";
 
 function parseSlideSpec(raw: string): number[] | undefined {
   const trimmed = raw.trim();
@@ -105,6 +107,7 @@ export function DskExporter() {
       <div className="row">
         <FileWell
           label="DSK .key"
+          tone="dsk"
           hint="A 1920×1080 DSK deck"
           file={keynote}
           onChoose={async () => {
@@ -158,6 +161,7 @@ export function DskExporter() {
       {busy && <LoadingOverlay title="Exporting…" logs={logs} />}
       {result?.phase === "done" && result.pngDir && (
         <>
+          <JobName job={job!} onRename={(id, name) => renameAndApply(id, name, setJob)} className="path-note" />
           <p className="note path-note">
             Wrote {result.pngDir} — {(result.pngs || []).length} PNG(s)
           </p>

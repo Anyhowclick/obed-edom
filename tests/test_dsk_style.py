@@ -211,6 +211,7 @@ def test_refuses_undecodable_stylesheet_member(tmp_path):
     assert not out.exists()
 
 
+# Local operator deck; removed in the 2026-09-16 dsk-d4-work cleanup, so this skips unless regenerated.
 _R13_DECK = Path("~/Desktop/dsk-d4-work/out-r13/Sermon_PK_DSK.refused.key").expanduser()
 _R13_TMP_DIR = Path("~/Desktop/dsk-d4-work/tmp-style").expanduser()
 

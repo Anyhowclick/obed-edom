@@ -41,7 +41,7 @@ from obed_edom.dsk_assemble import (
     SlideDecision,
     assemble_dsk_deck,
 )
-from obed_edom.dsk_live import keynote_running
+from obed_edom.dsk_live import keynote_running, quit_and_wait_for_exit
 from obed_edom.dsk_movie_export import export_slide_clips
 from obed_edom.dsk_plan import classify_deck
 from obed_edom.dsk_stage_export import export_stage_pngs, stage_counts
@@ -1706,6 +1706,20 @@ def _dsk_output_dir(fw_deck: Path) -> Path:
     return default_output_root() / fw_deck.stem / "dsk"
 
 
+def _dsk_preview_thumbs(job: Job, path: Path, payload: dict[str, Any]) -> dict[int, str]:
+    """Preview thumbnails for a DSK propose. A cache miss launches Keynote to export
+    previews; that launch is quit again here so the following apply's strictly-serial
+    Keynote gate does not 409. A Keynote the operator already had open is left alone."""
+    was_running = keynote_running()
+    thumbs = build_preview_thumbs(path, payload, log=job.log)
+    if not was_running and keynote_running():
+        job.log("Quitting the Keynote launched for preview export…")
+        out_dir = _dsk_output_dir(path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        quit_and_wait_for_exit(path.stem, path.name, out_dir)
+    return thumbs
+
+
 def _dsk_decision_defaults(page: dict[str, Any], content_only: bool) -> dict[str, Any]:
     include = page.get("category") != "empty" and not (content_only and page.get("isText"))
     return {
@@ -1767,7 +1781,7 @@ def _run_dsk_propose(
     all_numbers = [int(s["number"]) for s in payload["slides"]]
     numbers = sorted(expand_slide_range(slide_range) or set(all_numbers))
     classes = {c.number: c for c in classify_deck(path, payload=payload, text_slide_words=words)}
-    thumbs = build_preview_thumbs(path, payload, log=job.log)
+    thumbs = _dsk_preview_thumbs(job, path, payload)
     thumb_dir = wall_thumb_dir(deck_digest(path))
     pages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -1896,7 +1910,7 @@ def _run_dsk_export_propose(
     is_stage_deck = wall in {(1920.0, 1080.0), (1920, 1080)}
     is_fw_deck = is_lw_wall(float(wall[0] or 0), float(wall[1] or 0))
     classes = {c.number: c for c in classify_deck(path, payload=payload)}
-    thumbs = build_preview_thumbs(path, payload, log=job.log)
+    thumbs = _dsk_preview_thumbs(job, path, payload)
     thumb_dir = wall_thumb_dir(deck_digest(path))
     pages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -1948,8 +1962,7 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"{path.name} is not a 1920x1080 DSK deck; stage PNG export needs a DSK-sized deck."
         )
-    out_dir = _dsk_output_dir(path)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = path.parent
     categories = {
         c.number: c.category for c in classify_deck(path, text_slide_words=DEFAULT_TEXT_SLIDE_WORDS)
     }

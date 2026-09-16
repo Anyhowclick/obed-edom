@@ -240,3 +240,26 @@ def test_content_only_narrows_import_layout_names(tmp_path, monkeypatch):
     )
 
     assert captured["layout_names"] == dsa.DEFAULT_TRANSPARENT_LAYOUT_NAMES
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"text_fit": "shrink"},
+        {"min_text_pt": 30.0},
+        {"allow_split": False},
+        {"split_overrides": {3: 2}},
+    ],
+)
+def test_content_only_refuses_text_only_kwargs(tmp_path, kwargs):
+    """Library callers get the same refusal the CLI gives for --split/--no-split/
+    --text-fit shrink/--min-text-pt under --content-only, instead of a silent no-op.
+    The refusal fires before any deck is read, so no fixture is needed."""
+    with pytest.raises(ValueError, match="no meaning with content_only=True"):
+        assemble_dsk_deck(
+            tmp_path / "missing (FW).key",
+            tmp_path / "out" / "x_DSK.key",
+            decisions={1: SlideDecision(slide=1, action="in_deck", anchor="auto", keep_side=False)},
+            content_only=True,
+            **kwargs,
+        )
