@@ -297,7 +297,6 @@ export type DskPage = {
   isText: boolean;
   skipReason?: string | null;
   needsClip: boolean;
-  existingClip?: string | null;
   decision: DskDecision;
 };
 

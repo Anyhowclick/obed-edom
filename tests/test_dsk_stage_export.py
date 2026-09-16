@@ -416,7 +416,7 @@ def test_manifest_is_deterministic_sort_keys(tmp_path):
     assert list(json.loads(text1).keys()) == sorted(json.loads(text1).keys())
 
 
-# --- read_manifest / published_clips ----------------------------------------------
+# --- read_manifest ------------------------------------------------------------------
 
 
 def test_read_manifest_absent(tmp_path):
@@ -458,66 +458,6 @@ def test_read_manifest_deck_match_returned(tmp_path):
 def test_read_manifest_no_deck_field_ignored_when_deck_requested(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({"slides": {}}))
     assert dse.read_manifest(tmp_path, deck=tmp_path / "Deck.key") is None
-
-
-def test_published_clips_skips_missing_file(tmp_path):
-    (tmp_path / "Deck.001.mov").write_bytes(b"mov")
-    manifest = {
-        "slides": {
-            "1": {"clip": "Deck.001.mov"},
-            "2": {"clip": "Deck.002.mov"},
-        }
-    }
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {1: tmp_path / "Deck.001.mov"}
-
-
-def test_published_clips_skips_non_int_keys(tmp_path):
-    (tmp_path / "Deck.001.mov").write_bytes(b"mov")
-    (tmp_path / "Deck.x.mov").write_bytes(b"mov")
-    manifest = {
-        "slides": {
-            "1": {"clip": "Deck.001.mov"},
-            "x": {"clip": "Deck.x.mov"},
-        }
-    }
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {1: tmp_path / "Deck.001.mov"}
-
-
-def test_published_clips_reads_manifest_from_disk_when_omitted(tmp_path):
-    (tmp_path / "Deck.001.mov").write_bytes(b"mov")
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"slides": {"1": {"clip": "Deck.001.mov"}}})
-    )
-    assert dse.published_clips(tmp_path, "Deck") == {1: tmp_path / "Deck.001.mov"}
-
-
-def test_published_clips_rejects_absolute_path(tmp_path):
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    other = elsewhere / "evil.mov"
-    other.write_bytes(b"mov")
-    manifest = {"slides": {"1": {"clip": str(other)}}}
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {}
-
-
-def test_published_clips_rejects_traversal(tmp_path):
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    (tmp_path / "Deck.001.mov").write_bytes(b"mov")
-    manifest = {"slides": {"1": {"clip": "../Deck.001.mov"}}}
-    assert dse.published_clips(out_dir, "Deck", manifest) == {}
-
-
-def test_published_clips_rejects_other_stem(tmp_path):
-    (tmp_path / "Other.001.mov").write_bytes(b"mov")
-    manifest = {"slides": {"1": {"clip": "Other.001.mov"}}}
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {}
-
-
-def test_published_clips_rejects_wrong_name_format(tmp_path):
-    (tmp_path / "Deck.weird.mov").write_bytes(b"mov")
-    manifest = {"slides": {"1": {"clip": "Deck.weird.mov"}}}
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {}
 
 
 # --- write_manifest existing/source_slides merge ------------------------------------
@@ -643,6 +583,34 @@ def test_manifest_source_slides_added_for_new_entry(tmp_path):
     )
     manifest = json.loads(path.read_text())
     assert manifest["slides"]["4"]["source_slide"] == 44
+
+
+def test_manifest_src_clips_written_for_generator_entry(tmp_path):
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "movie"},
+        source_slides={4: 44}, src_clips={4: ["src/Deck.004.01.src.mov", "src/Deck.004.02.src.mov"]},
+    )
+    manifest = json.loads(path.read_text())
+    assert manifest["slides"]["4"]["srcClips"] == ["src/Deck.004.01.src.mov", "src/Deck.004.02.src.mov"]
+    assert "clip" not in manifest["slides"]["4"]
+
+
+def test_manifest_drop_src_removes_src_clips_from_every_slide(tmp_path):
+    existing = {
+        "slides": {
+            "4": {"category": "movie", "source_slide": 44, "srcClips": ["src/Deck.004.01.src.mov"]},
+            "5": {"category": "static", "source_slide": 45, "srcClips": ["src/Deck.005.01.src.mov"]},
+        },
+    }
+    clip = tmp_path / "Deck.004.mov"
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "movie"},
+        clips={4: clip}, existing=existing, drop_src=True,
+    )
+    manifest = json.loads(path.read_text())
+    assert "srcClips" not in manifest["slides"]["4"]
+    assert "srcClips" not in manifest["slides"]["5"]
+    assert manifest["slides"]["4"]["clip"] == "Deck.004.mov"
 
 
 def test_manifest_geometry_falls_back_to_existing_when_no_assets(tmp_path):

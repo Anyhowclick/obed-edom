@@ -1645,8 +1645,8 @@ def test_script_repetition_volume_read_not_swallowed():
     script = build_assembly_script(
         plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"), layout_policy="preserve"
     )
-    assert "set repMethod to (repetition method of" in script
-    assert "set movVol to (movie volume of" in script
+    assert "set repMethod0 to (repetition method of" in script
+    assert "set movVol0 to (movie volume of" in script
     assert "is not missing value" not in script
 
 
@@ -2011,13 +2011,13 @@ def test_script_clip_insert_and_mov_extension():
     assert "set movie volume of newMov to movVol" in script
 
 
-def test_script_transition_none_only_on_clip_slides():
+def test_script_transition_dissolve_only_on_clip_slides():
     plan = _clip_plan()
     script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
     movie_ordinal = plan.ordinals[32]
     static_ordinal = plan.ordinals[8]
     assert f"set transition properties of slide {movie_ordinal} to " in script
-    assert "{transition effect:no transition effect}" in script
+    assert "{transition effect:dissolve, transition duration:0.5}" in script
     assert f"set transition properties of slide {static_ordinal} to " not in script
 
 
@@ -3169,6 +3169,7 @@ def _patch_common(monkeypatch, payload, classes, stderr_text, returncode=0):
     monkeypatch.setattr(dsa, "copy_keynote", _fake_copy_keynote)
     monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
     monkeypatch.setattr(dsa, "deck_builds", lambda path, *, deck=None: {})
+    monkeypatch.setattr(dsa, "_restore_clip_zorder", lambda out_path, plan, warnings: {})
     monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
     monkeypatch.setattr(
         iwa_write,
@@ -3236,7 +3237,7 @@ def test_assemble_parses_movie_props_ordinal_rekey_and_size(tmp_path, monkeypatc
         32: {"slideId": "o2", "builds": [], "transition": None},
     }
     assert captured["src"][13]["slideId"] == "s13"
-    assert result.clips_inserted == {32: Path("/tmp/clip.mov")}
+    assert result.clips_inserted == {32: {("movie", 0): Path("/tmp/clip.mov")}}
     assert result.size_bytes > 0
     assert result.source_size_bytes > 0
     assert out_path.exists()
@@ -3313,6 +3314,7 @@ def _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls):
     monkeypatch.setattr(dsa, "copy_keynote", _fake_copy_keynote)
     monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
     monkeypatch.setattr(dsa, "deck_builds", lambda path, *, deck=None: {})
+    monkeypatch.setattr(dsa, "_restore_clip_zorder", lambda out_path, plan, warnings: {})
     monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
     monkeypatch.setattr(
         iwa_write, "match_card_stroke_styles",
@@ -3930,7 +3932,7 @@ def test_assemble_clip_slide_transition_mismatch_alone_is_tolerated(tmp_path, mo
         },
     )
     result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
-    assert any("transition changed on clip slide 32" in w for w in result.warnings)
+    assert not any("transition changed on clip slide 32" in w for w in result.warnings)
 
 
 def test_assemble_reveal_order_mismatch_raises(tmp_path, monkeypatch):
@@ -5420,7 +5422,7 @@ def test_merge_split_part_builds_dedupes_repeated_item_after_hidden_placeholder(
 def test_staged_retained_ids_places_inserted_clip_after_kept_movies():
     plan = AssemblyPlan(
         kept=(32,), ordinals={32: 1}, fits={32: {}},
-        deletes={32: (("movie", 0),)}, clips={32: (Path("/tmp/clip.mov"), ("movie", 0))},
+        deletes={32: (("movie", 0),)}, clips={32: {("movie", 0): Path("/tmp/clip.mov")}},
         text_sizes={}, autosize={}, warnings=(),
     )
     assert dsa._staged_retained_ids(32, plan) == {("movie", 0)}
@@ -5429,7 +5431,7 @@ def test_staged_retained_ids_places_inserted_clip_after_kept_movies():
 def test_staged_retained_ids_inserted_clip_after_a_kept_movie():
     plan = AssemblyPlan(
         kept=(5,), ordinals={5: 1}, fits={5: {("movie", 1): Rect(0, 0, 1, 1)}},
-        deletes={}, clips={5: (Path("/tmp/clip.mov"), ("movie", 0))},
+        deletes={}, clips={5: {("movie", 0): Path("/tmp/clip.mov")}},
         text_sizes={}, autosize={}, warnings=(),
     )
     assert dsa._staged_retained_ids(5, plan) == {("movie", 0), ("movie", 1)}
@@ -5442,7 +5444,7 @@ def test_staged_retained_ids_excludes_the_deleted_movie_before_ranking():
     plan = AssemblyPlan(
         kept=(32,), ordinals={32: 1},
         fits={32: {("movie", 0): Rect(0, 0, 1, 1), ("image", 3): Rect(0, 0, 1, 1)}},
-        deletes={32: (("movie", 0),)}, clips={32: (Path("/tmp/clip.mov"), ("movie", 0))},
+        deletes={32: (("movie", 0),)}, clips={32: {("movie", 0): Path("/tmp/clip.mov")}},
         text_sizes={}, autosize={}, warnings=(),
     )
     assert dsa._staged_retained_ids(32, plan) == {("image", 0), ("movie", 0)}
@@ -5505,7 +5507,7 @@ def test_verify_builds_tolerates_clip_auto_attached_movie_start(monkeypatch):
 
     plan = AssemblyPlan(
         kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: (Path("/tmp/clip.mov"), ("movie", 0))}, text_sizes={}, autosize={}, warnings=(),
+        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
     )
     monkeypatch.setattr(
         iwa_builds, "deck_builds",
@@ -5547,7 +5549,7 @@ def test_verify_builds_refuses_surplus_movie_start_with_no_paired_source_build(m
 
     plan = AssemblyPlan(
         kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: (Path("/tmp/clip.mov"), ("movie", 0))}, text_sizes={}, autosize={}, warnings=(),
+        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
     )
     monkeypatch.setattr(
         iwa_builds, "deck_builds",
@@ -5574,7 +5576,7 @@ def test_verify_builds_refuses_surplus_movie_start_count_exceeding_source(monkey
 
     plan = AssemblyPlan(
         kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: (Path("/tmp/clip.mov"), ("movie", 0))}, text_sizes={}, autosize={}, warnings=(),
+        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
     )
     monkeypatch.setattr(
         iwa_builds, "deck_builds",
@@ -5609,7 +5611,7 @@ def _movie_start_plan_and_src(monkeypatch, *, missing_count, surplus_count):
 
     plan = AssemblyPlan(
         kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: (Path("/tmp/clip.mov"), ("movie", 0))}, text_sizes={}, autosize={}, warnings=(),
+        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
     )
     monkeypatch.setattr(
         iwa_builds, "deck_builds",
@@ -5672,7 +5674,7 @@ def test_verify_builds_refuses_surplus_not_matching_the_clip_filename(monkeypatc
 
     plan = AssemblyPlan(
         kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
-        clips={32: (Path("/tmp/clip.mov"), ("movie", 0))}, text_sizes={}, autosize={}, warnings=(),
+        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
     )
     monkeypatch.setattr(
         iwa_builds, "deck_builds",

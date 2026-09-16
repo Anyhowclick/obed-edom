@@ -1,7 +1,8 @@
 """DSK deck assembly: pure planning over the offline payload/classifier, plus the
 AppleScript emitter that carries out the plan live -- copy-and-transform, not build-from-template.
-Clip slides are force-set to `no transition effect` since the clip owns timing; the verify
-report's transition note on clip slides is expected, not a defect.
+Clip slides are force-set to a dissolve transition (matching the source's own dissolve
+duration when it has one, else 0.5s) since the source magic-move cannot yet be kept; the
+verify report treats that transition change on a clip slide as expected, not a warning.
 """
 from __future__ import annotations
 
@@ -69,7 +70,7 @@ from obed_edom.dsk_plan import (
     _BOX_PADDING_PT,
     _LINE_HEIGHT_FACTOR,
 )
-from obed_edom.iwa_builds import deck_builds
+from obed_edom.iwa_builds import _transition_effect_duration, deck_builds
 from obed_edom.iwa_geometry import (
     _ALIGN_BOTTOM,
     _ALIGN_TOP,
@@ -355,7 +356,7 @@ class AssemblyPlan:
     ordinals: dict[int, int]
     fits: dict[int, dict[ItemId, Rect]]
     deletes: dict[int, tuple[ItemId, ...]]
-    clips: dict[int, tuple[Path, ItemId]]
+    clips: dict[int, dict[ItemId, Path]]
     text_sizes: dict[int, dict[ItemId, float]]
     autosize: dict[int, frozenset[ItemId]]
     warnings: tuple[str, ...]
@@ -381,6 +382,8 @@ class AssemblyPlan:
     two_column: dict[int, Band] = field(default_factory=dict)
     two_column_cluster: dict[int, HeadingCluster] = field(default_factory=dict)
     layout_names: dict[int, str] = field(default_factory=dict)
+    clip_dissolve: dict[int, float] = field(default_factory=dict)
+    chain_head: dict[int, int] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -1261,7 +1264,8 @@ def plan_assembly(
     *,
     decisions: Mapping[int, SlideDecision],
     band: Band,
-    clips: Mapping[int, Path],
+    clips: Mapping[int, Path | Mapping[ItemId, Path]],
+    clip_sizes: Mapping[str, tuple[float, float]] = {},
     runs: Mapping[int, Mapping[ItemId, Sequence[float]]] | None = None,
     min_text_pt: float = DEFAULT_MIN_TEXT_PT,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
@@ -1289,7 +1293,13 @@ def plan_assembly(
     `_full_classes_by_number`) -- used only for the repeat-heading predecessor check,
     so a `--slides` batch drops a repeated heading exactly like a full-deck run.
     Planning a subset of a deck-backed payload (`classes` narrower than `payload`'s
-    slides) requires `all_classes`; omitting it then raises `ValueError`."""
+    slides) requires `all_classes`; omitting it then raises `ValueError`.
+    `clips[number]` is either a single `Path` (legacy: applied to the lowest-`kindIndex`
+    kept movie item only) or a `Mapping[ItemId, Path]` giving one pure clip per movie
+    item; either shape is normalised into `AssemblyPlan.clips[number]: dict[ItemId, Path]`.
+    `clip_sizes`, keyed by `str(path)` -> `(width, height)` media pixel size, offline-guards
+    (`AssemblyRefusal`) a clip whose media aspect differs from its target fitted rect's
+    aspect by more than 0.5%; a path missing from `clip_sizes` skips the guard."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -1303,9 +1313,21 @@ def plan_assembly(
     full_classes_by_number = _full_classes_by_number(payload, classes, all_classes)
     repeat_heading_by_number = _repeat_heading_state(slides_by_number, full_classes_by_number)
 
+    chain_head_map: dict[int, int] = {}
+    if not no_auto_anchor:
+        kept_set = set(kept_numbers)
+        for n in kept_numbers:
+            rec = (builds or {}).get(n) or {}
+            eff_dur = _transition_effect_duration(rec.get("transition"))
+            effect = str(eff_dur[0]) if eff_dur and eff_dur[0] is not None else ""
+            nxt = n + 1
+            if effect.startswith("apple:magic-move") and nxt in kept_set:
+                chain_head_map[nxt] = chain_head_map.get(n, n)
+
     fits: dict[int, dict[ItemId, Rect]] = {}
     deletes: dict[int, tuple[ItemId, ...]] = {}
-    clips_out: dict[int, tuple[Path, ItemId]] = {}
+    clips_out: dict[int, dict[ItemId, Path]] = {}
+    clip_dissolve_out: dict[int, float] = {}
     text_sizes: dict[int, dict[ItemId, float]] = {}
     autosize: dict[int, frozenset[ItemId]] = {}
     group_scale: dict[int, float] = {}
@@ -1325,6 +1347,8 @@ def plan_assembly(
     slot_badge_twin_ids_map: dict[int, ItemId] = {}
     crops_out: dict[int, dict[ItemId, CropSpec]] = {}
     anchors_out: dict[int, str] = {}
+    chain_auto_anchor: dict[int, str] = {}
+    chain_head_applied: dict[int, int] = {}
     two_column_map: dict[int, Band] = {}
     two_column_cluster_map: dict[int, HeadingCluster] = {}
     layout_names: dict[int, str] = {}
@@ -1386,12 +1410,24 @@ def plan_assembly(
                             "(piece D1 handles autosize group text only)"
                         )
 
+            own_content_anchor = None if no_auto_anchor else _content_anchor(
+                cls, items, wall=wall,
+                group_signature=slide.get("groupChildSignature"),
+                exclude_group_kis=text_group_kis,
+            )
+            if own_content_anchor is not None:
+                chain_auto_anchor[number] = own_content_anchor
+
             if decision.anchor in (None, "auto"):
-                anchor = "centre" if no_auto_anchor else _content_anchor(
-                    cls, items, wall=wall,
-                    group_signature=slide.get("groupChildSignature"),
-                    exclude_group_kis=text_group_kis,
-                )
+                if no_auto_anchor:
+                    anchor = "centre"
+                else:
+                    head = chain_head_map.get(number)
+                    if head is not None and head != number and head in chain_auto_anchor:
+                        anchor = chain_auto_anchor[head]
+                        chain_head_applied[number] = head
+                    else:
+                        anchor = own_content_anchor
             else:
                 anchor = decision.anchor
             anchors_out[number] = anchor
@@ -2142,13 +2178,47 @@ def plan_assembly(
                     )
 
             if cls.category in ("movie", "mixed"):
-                clip_path = clips.get(number)
-                if clip_path is None:
+                raw_clip = clips.get(number)
+                if raw_clip is None:
                     raise AssemblyRefusal(f"no clip provided for movie slide {number}")
                 if not movie_ids:
                     raise AssemblyRefusal(f"slide {number} classified {cls.category} with no kept movie")
-                first_movie = min(movie_ids, key=lambda iid: iid[1])
-                clips_out[number] = (clip_path, first_movie)
+                if isinstance(raw_clip, (str, Path)):
+                    first_movie = min(movie_ids, key=lambda iid: iid[1])
+                    item_clips = {first_movie: Path(raw_clip)}
+                else:
+                    item_clips = {iid: Path(p) for iid, p in raw_clip.items()}
+                    unknown = set(item_clips) - set(movie_ids)
+                    if unknown:
+                        raise AssemblyRefusal(
+                            f"slide {number}: clip(s) given for unknown movie item(s) {sorted(unknown)}"
+                        )
+                    if not item_clips:
+                        raise AssemblyRefusal(f"slide {number}: empty clip mapping")
+                for movie_id, clip_path in item_clips.items():
+                    size = clip_sizes.get(str(clip_path))
+                    if size is None:
+                        continue
+                    clip_w, clip_h = size
+                    rect = fit.get(movie_id)
+                    if rect is None or rect.w <= 0 or rect.h <= 0:
+                        raise AssemblyRefusal(f"slide {number} movie {movie_id[1]}: no fitted rect for clip")
+                    if clip_w <= 0 or clip_h <= 0:
+                        raise AssemblyRefusal(f"slide {number} movie {movie_id[1]}: clip {clip_path} has non-positive size")
+                    rect_aspect = rect.w / rect.h
+                    clip_aspect = clip_w / clip_h
+                    if abs(clip_aspect - rect_aspect) / rect_aspect > 0.005:
+                        raise AssemblyRefusal(
+                            f"slide {number} movie {movie_id[1]}: clip aspect {clip_aspect:.4f} does not match "
+                            f"fitted rect aspect {rect_aspect:.4f} ({rect.w:.2f}x{rect.h:.2f}) by more than 0.5%"
+                        )
+                clips_out[number] = item_clips
+                transition = ((builds or {}).get(number) or {}).get("transition")
+                eff_dur = _transition_effect_duration(transition)
+                if eff_dur and str(eff_dur[0]) == "apple:dissolve" and eff_dur[1]:
+                    clip_dissolve_out[number] = float(eff_dur[1])
+                else:
+                    clip_dissolve_out[number] = 0.5
 
             wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if decision.keep_side else CENTRE_PANEL_RECT
             slide_text_sizes: dict[ItemId, float] = {}
@@ -2265,6 +2335,8 @@ def plan_assembly(
         two_column=two_column_map,
         two_column_cluster=two_column_cluster_map,
         layout_names=layout_names,
+        clip_dissolve=clip_dissolve_out,
+        chain_head=chain_head_applied,
     )
 
 
@@ -3096,14 +3168,15 @@ def _parse_measure_lines(stderr: str) -> dict[tuple[int, str], float]:
 def _slide_lines(
     plan: AssemblyPlan, number: int, ordinal: int, *, part: int = 0, text_fit: Literal["warn", "shrink"] = "warn"
 ) -> list[str]:
-    is_clip = number in plan.clips
+    clip_map = plan.clips.get(number, {})
+    is_clip = bool(clip_map)
+    clip_items = sorted(clip_map.items(), key=lambda kv: kv[0][1])
     lines: list[str] = ["      try"]
-    if is_clip:
-        clip_path, movie_id = plan.clips[number]
+    for idx, (movie_id, _clip_path) in enumerate(clip_items):
         movie_addr = f"movie {movie_id[1] + 1} of slide {ordinal}"
         lines += [
-            f"        set repMethod to (repetition method of {movie_addr})",
-            f"        set movVol to (movie volume of {movie_addr})",
+            f"        set repMethod{idx} to (repetition method of {movie_addr})",
+            f"        set movVol{idx} to (movie volume of {movie_addr})",
         ]
 
     split_parts = plan.splits.get(number)
@@ -3254,25 +3327,28 @@ def _slide_lines(
         ]
 
     if is_clip:
-        clip_path, movie_id = plan.clips[number]
-        clip_rect = plan.fits[number][movie_id]
+        for idx, (movie_id, clip_path) in enumerate(clip_items):
+            clip_rect = plan.fits[number][movie_id]
+            lines += [
+                f"        set mBefore to (count of movies of slide {ordinal})",
+                f"        tell slide {ordinal}",
+                "          set newMov to make new image with properties "
+                f'{{file:(POSIX file "{_as_escape(str(clip_path))}") as alias}}',
+                "        end tell",
+                f"        set width of newMov to {_as_num(clip_rect.w)}",
+                f"        set height of newMov to {_as_num(clip_rect.h)}",
+                f"        set position of newMov to {{{_as_num(clip_rect.x)}, {_as_num(clip_rect.y)}}}",
+                f'        if (count of movies of slide {ordinal}) is not (mBefore + 1) then '
+                'error "clip did not import as a movie"',
+                f"        set repetition method of newMov to repMethod{idx}",
+                f"        set movie volume of newMov to movVol{idx}",
+                f'        log ("OBED" & tab & "{number}" & tab & "repetitionMethod" & tab & (repMethod{idx} as string))',
+                f'        log ("OBED" & tab & "{number}" & tab & "movieVolume" & tab & (movVol{idx} as string))',
+            ]
+        clip_dur = plan.clip_dissolve.get(number, 0.5)
         lines += [
-            f"        set mBefore to (count of movies of slide {ordinal})",
-            f"        tell slide {ordinal}",
-            "          set newMov to make new image with properties "
-            f'{{file:(POSIX file "{_as_escape(str(clip_path))}") as alias}}',
-            "        end tell",
-            f"        set position of newMov to {{{_as_num(clip_rect.x)}, {_as_num(clip_rect.y)}}}",
-            f"        set width of newMov to {_as_num(clip_rect.w)}",
-            f"        set height of newMov to {_as_num(clip_rect.h)}",
-            f'        if (count of movies of slide {ordinal}) is not (mBefore + 1) then '
-            'error "clip did not import as a movie"',
-            "        set repetition method of newMov to repMethod",
-            "        set movie volume of newMov to movVol",
-            f'        log ("OBED" & tab & "{number}" & tab & "repetitionMethod" & tab & (repMethod as string))',
-            f'        log ("OBED" & tab & "{number}" & tab & "movieVolume" & tab & (movVol as string))',
             f"        set transition properties of slide {ordinal} to "
-            "{transition effect:no transition effect}",
+            f"{{transition effect:dissolve, transition duration:{_as_num(clip_dur)}}}",
         ]
 
     lines += [
@@ -3522,7 +3598,7 @@ class AssembleResult:
     slides_kept: tuple[int, ...]
     ordinals: dict[int, int]
     fits: dict
-    clips_inserted: dict[int, Path]
+    clips_inserted: dict[int, dict[ItemId, Path]]
     stroke: dict
     zorder: dict
     builds: dict
@@ -3532,6 +3608,7 @@ class AssembleResult:
     warnings: tuple[str, ...]
     movie_props: dict[int, dict[str, str]]
     overflows: tuple[dict, ...] = ()
+    clip_zorder: dict[int, dict] = field(default_factory=dict)
     ordinal_to_number: dict[int, int] = field(default_factory=dict)
     hidden: tuple[dict, ...] = ()
     skipped: tuple[dict, ...] = ()
@@ -4042,6 +4119,73 @@ def _restore_crop_zorder(
     return result
 
 
+def _restore_clip_zorder(out_path: Path, plan: AssemblyPlan, warnings: list[str]) -> dict[int, dict]:
+    """Move every inserted clip movie to the back of its slide's ``drawablesZOrder``,
+    behind every copied content object -- ``make new image`` on a movie file appends it
+    to the front, same as a cropped image insert. Multiple clips on one slide keep their
+    own ``kindIndex`` order at the very back (index 0 first)."""
+    result: dict[int, dict] = {}
+    if not plan.clips:
+        return result
+
+    out_objects, _out_i2f, _out_fi = _load_deck(out_path)
+    with zipfile.ZipFile(out_path) as zf:
+        out_data_index = _build_data_index(zf.namelist())
+    out_order = slide_order(out_objects)
+
+    for number, item_clips in plan.clips.items():
+        if not item_clips:
+            continue
+        ordinal = plan.ordinals.get(number)
+        if ordinal is None or ordinal > len(out_order):
+            continue
+        out_slide_id, _skipped = out_order[ordinal - 1]
+        out_slide = out_objects.get(out_slide_id)
+        if out_slide is None:
+            warnings.append(f"slide {number}: clip z-order restore skipped, slide archive missing")
+            continue
+
+        out_z = [
+            str(ref["identifier"]) for ref in (out_slide.get("drawablesZOrder") or []) if ref.get("identifier") is not None
+        ]
+        moves: dict[str, int] = {}
+        used_out_ids: set[str] = set()
+        for target_index, (movie_id, clip_path) in enumerate(sorted(item_clips.items(), key=lambda kv: kv[0][1])):
+            out_id = None
+            for zid in reversed(out_z):
+                if zid in used_out_ids:
+                    continue
+                out_obj = out_objects.get(zid)
+                if out_obj is None or out_obj.get("_pbtype") != "TSD.MovieArchive":
+                    continue
+                data_id = _data_identifier(out_obj)
+                if data_id is not None and out_data_index.get(data_id) == Path(clip_path).name:
+                    out_id = zid
+                    break
+            if out_id is None:
+                warnings.append(
+                    f"slide {number} movie {movie_id[1]}: inserted clip not found by fileName, "
+                    "z-order not restored"
+                )
+                continue
+            used_out_ids.add(out_id)
+            moves[out_id] = target_index
+
+        if not moves:
+            continue
+        try:
+            move_result = reorder_drawables(out_path, out_slide_id, moves)
+        except OfflineWriteCorrupted:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            move_result = {"refused": True, "reason": f"reorder_drawables raised: {exc}"}
+        result[number] = move_result
+        if move_result.get("refused"):
+            warnings.append(f"slide {number}: clip z-order restore refused: {move_result.get('reason')}")
+
+    return result
+
+
 def _staged_kind_ranks(
     number: int, plan: AssemblyPlan, *, part: int = 0, hidden: frozenset[ItemId] = frozenset()
 ) -> dict[str, list[int]]:
@@ -4072,12 +4216,13 @@ def _staged_retained_ids(
     number: int, plan: AssemblyPlan, *, part: int = 0, hidden: frozenset[ItemId] = frozenset()
 ) -> set[tuple[str, int]]:
     """Staged (post-delete/insert) `(kind, kindIndex)` for the items this slide keeps;
-    an inserted clip becomes the last staged movie. ``hidden`` (keyed by source slide
-    number, same map as the refit loop's) keeps a delete-refused placeholder retained."""
+    each inserted clip becomes one of the last staged movies. ``hidden`` (keyed by source
+    slide number, same map as the refit loop's) keeps a delete-refused placeholder retained."""
     by_kind = _staged_kind_ranks(number, plan, part=part, hidden=hidden)
     retained = {(kind, rank) for kind, idxs in by_kind.items() for rank in range(len(idxs))}
-    if number in plan.clips:
-        retained.add(("movie", len(by_kind.get("movie", []))))
+    item_clips = plan.clips.get(number, {})
+    for i in range(len(item_clips)):
+        retained.add(("movie", len(by_kind.get("movie", [])) + i))
     if plan.splits.get(number) is None:
         for i, _iid in enumerate(sorted(plan.crops.get(number, {}))):
             retained.add(("image", len(by_kind.get("image", [])) + i))
@@ -4426,18 +4571,21 @@ def _verify_builds(
     real_surplus: list[dict] = []
     avail_movie_start: dict[int, int] = {}
     for s in report["surplus"]:
-        clip = plan.clips.get(s["slide"])
+        item_clips = plan.clips.get(s["slide"])
+        clip_names = {p.name for p in item_clips.values()} if item_clips else set()
         is_clip_movie_start = (
-            clip is not None
+            item_clips
             and s["effect"] == "apple:movie-start"
             and s["animationType"] == "In"
-            and s["identity"] == ("movie", clip[0].name)
+            and s["identity"][0] == "movie"
+            and s["identity"][1] in clip_names
         )
         paired = False
         if is_clip_movie_start:
+            clip_kind_indexes = {iid[1] for iid in item_clips}
             matching_src = [
                 b for b in src_by_number.get(s["slide"], {}).get("builds", [])
-                if b["kind"] == "movie" and b["kindIndex"] == clip[1][1]
+                if b["kind"] == "movie" and b["kindIndex"] in clip_kind_indexes
                 and b["effect"] == "apple:movie-start" and b["animationType"] == "In"
             ]
             if s["slide"] not in avail_movie_start:
@@ -4495,9 +4643,6 @@ def _verify_builds(
 
     clip_slides = set(plan.clips)
     unexplained_transitions = [t for t in report["transitions"] if t["slide"] not in clip_slides]
-    for t in report["transitions"]:
-        if t["slide"] in clip_slides:
-            warnings.append(f"transition changed on clip slide {t['slide']}: {t}")
     if unexplained_transitions:
         raise AssemblyRefusal(f"builds verify unexplained transition change(s): {unexplained_transitions}")
 
@@ -5086,7 +5231,8 @@ def assemble_dsk_deck(
     decisions: Mapping[int, SlideDecision],
     band: Band | None = None,
     reference_deck: Path | None = None,
-    clips: Mapping[int, Path] = {},
+    clips: Mapping[int, Path | Mapping[ItemId, Path]] = {},
+    clip_sizes: Mapping[str, tuple[float, float]] = {},
     log: Callable[[str], None] = print,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     layout_policy: LayoutPolicy = "import",
@@ -5186,7 +5332,8 @@ def assemble_dsk_deck(
 
     builds_by_number = deck_builds(fw_deck, deck=deck)
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=resolved_band, clips=clips, runs=runs, text_fit=text_fit,
+        payload, classes, decisions=decisions, band=resolved_band, clips=clips, clip_sizes=clip_sizes,
+        runs=runs, text_fit=text_fit,
         min_text_pt=min_text_pt, text_slide_words=text_slide_words, allow_split=allow_split,
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
@@ -5194,7 +5341,11 @@ def assemble_dsk_deck(
         all_classes=classes, layout_policy=layout_policy,
     )
     for number in sorted(plan.anchors):
-        log(f"slide {number}: anchor {plan.anchors[number]}")
+        head = plan.chain_head.get(number)
+        if head is not None:
+            log(f"slide {number}: anchor {plan.anchors[number]} (magic-move chain from slide {head})")
+        else:
+            log(f"slide {number}: anchor {plan.anchors[number]}")
 
     warnings: list[str] = list(plan.warnings)
     movie_props: dict[int, dict[str, str]] = {}
@@ -5292,6 +5443,7 @@ def assemble_dsk_deck(
             )
             current_pass = "zorder"
             zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
+            clip_zorder = _restore_clip_zorder(staging_path, plan, warnings)
             current_pass = "builds"
             builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
 
@@ -5340,7 +5492,8 @@ def assemble_dsk_deck(
         slides_kept=plan.kept,
         ordinals=plan.ordinals,
         fits=plan.fits,
-        clips_inserted={number: clip_path for number, (clip_path, _iid) in plan.clips.items()},
+        clips_inserted=dict(plan.clips),
+        clip_zorder=clip_zorder,
         stroke=stroke,
         zorder=zorder,
         builds=builds,

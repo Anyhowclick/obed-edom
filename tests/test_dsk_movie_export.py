@@ -1999,3 +1999,152 @@ def test_export_dsk_slide_clips_preflights_ffmpeg_before_live_batch(monkeypatch,
 
     with pytest.raises(RuntimeError, match="ffmpeg executable not found"):
         dme.export_dsk_slide_clips(deck, [1], out_dir, log=lambda *_: None)
+
+
+# --- per-movie pure-video mode ----------------------------------------------
+
+
+def test_rect_intersect_clips_offcanvas_movie_to_centre_panel():
+    # FW 11-shaped: a 3840x2160 movie parked at y -667 so it bleeds off both edges of the
+    # wall; the pure clip must crop to what the centre panel actually shows.
+    offcanvas = Rect(1920.0, -667.0, 3840.0, 2160.0)
+    result = dme._rect_intersect(offcanvas, dme.CENTRE_PANEL_RECT)
+    assert result == Rect(1920.0, 0.0, 3840.0, 1080.0)
+
+
+def test_rect_intersect_degenerate_raises():
+    with pytest.raises(ValueError, match="Degenerate"):
+        dme._rect_intersect(Rect(0, 0, 10, 10), Rect(100, 100, 10, 10))
+
+
+def test_derive_pure_video_delete_ids_keeps_only_target_movie():
+    items = [
+        {"kind": "movie", "kindIndex": 0},
+        {"kind": "movie", "kindIndex": 1},
+        {"kind": "text", "kindIndex": 0},
+        {"kind": "shape", "kindIndex": 0},
+        {"kind": "group", "kindIndex": 0},
+        {"kind": "line", "kindIndex": 0},
+        {"kind": "image", "kindIndex": 0},
+    ]
+    target = ("movie", 1)
+
+    deleted = dme._derive_pure_video_delete_ids(items, target)
+
+    assert target not in deleted
+    expected = {("movie", 0), ("text", 0), ("shape", 0), ("group", 0), ("line", 0), ("image", 0)}
+    assert set(deleted) == expected
+    assert deleted == dme._delete_order(list(expected))
+
+
+def _mixed_slide_two_movies():
+    return {
+        "number": 12,
+        "items": [
+            {"kind": "movie", "kindIndex": 0, "x": 1920.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
+            {"kind": "movie", "kindIndex": 1, "x": 3840.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
+            {"kind": "text", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 200.0, "h": 100.0},
+            {"kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 200.0, "h": 100.0},
+        ],
+    }
+
+
+def test_export_slide_clips_per_movie_produces_one_clip_per_movie_item(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert len(results) == 2
+    names = sorted(r.path.name for r in results)
+    assert names == ["Sermon.012.01.mov", "Sermon.012.02.mov"]
+    by_movie_index = {r.movie_id[1]: r for r in results}
+    assert by_movie_index[0].movie_id == ("movie", 0)
+    assert by_movie_index[1].movie_id == ("movie", 1)
+    assert by_movie_index[0].crop_rect == Rect(1920.0, 0.0, 1920.0, 1080.0)
+    assert by_movie_index[1].crop_rect == Rect(3840.0, 0.0, 1920.0, 1080.0)
+
+
+def test_export_slide_clips_per_movie_offcanvas_movie_crops_to_panel(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    slide = {
+        "number": 11,
+        "items": [
+            {"kind": "movie", "kindIndex": 0, "x": 1920.0, "y": -667.0, "w": 3840.0, "h": 2160.0},
+        ],
+    }
+    _stub_live(monkeypatch, tmp_path, payload_slides=[slide])
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(fw, [11], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert len(results) == 1
+    assert results[0].crop_rect == Rect(1920.0, 0.0, 3840.0, 1080.0)
+
+
+def test_export_slide_clips_per_movie_rejects_delete_ids(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    with pytest.raises(ValueError, match="per_movie"):
+        dme.export_slide_clips(fw, [12], out_dir, per_movie=True, delete_ids={12: (("image", 0),)})
+
+
+def _per_movie_jobs():
+    return [
+        dme._SlideJob(
+            12,
+            1,
+            Rect(1920.0, 0.0, 1920.0, 1080.0),
+            Path("/out/Sermon.012.01.mov"),
+            Path("/work/tmp.0012.01.m4v"),
+            delete_ids=(("movie", 1), ("image", 0)),
+            movie_id=("movie", 0),
+        ),
+        dme._SlideJob(
+            12,
+            1,
+            Rect(3840.0, 0.0, 1920.0, 1080.0),
+            Path("/out/Sermon.012.02.mov"),
+            Path("/work/tmp.0012.02.m4v"),
+            delete_ids=(("movie", 0), ("image", 0)),
+            movie_id=("movie", 1),
+        ),
+    ]
+
+
+def _per_movie_script():
+    return dme._build_export_script(
+        scratch_path=Path("/Users/x/Desktop/dsk-d3-work/.dsk-export-Sermon/Sermon.key"),
+        stem="Sermon",
+        layout_template=None,
+        per_slide=_per_movie_jobs(),
+        codec="AppleProRes422LT",
+        fps=30,
+    )
+
+
+def test_script_has_one_export_clause_per_movie_item():
+    script = _per_movie_script()
+    assert script.count("export theDoc to POSIX file") == 2
+    for job in _per_movie_jobs():
+        assert str(job.tmp) in script
+
+
+def test_script_per_movie_duplicates_and_deletes_scratch_slide():
+    script = _per_movie_script()
+    assert script.count("duplicate slide 1 to after slide 1 of theDoc") == 2
+    assert script.count("delete slide 2 of theDoc") == 2
+    assert "movie 2 of slide 2" in script  # deletes the OTHER movie (kindIndex 1) for job 1
+    assert "movie 1 of slide 2" in script  # deletes the OTHER movie (kindIndex 0) for job 2

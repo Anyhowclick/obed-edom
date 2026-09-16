@@ -40,7 +40,6 @@ type ExportResult = {
   path?: string;
   isStageDeck?: boolean;
   isFwDeck?: boolean;
-  hasManifest?: boolean;
   pages?: DskPage[];
   skipped?: DskSkip[];
   pngDir?: string;
@@ -48,7 +47,6 @@ type ExportResult = {
   clips?: Record<string, string>;
   sequence?: string[];
   exportedClips?: number[];
-  reusedClips?: number[];
 };
 
 export function DskExporter() {
@@ -106,9 +104,10 @@ export function DskExporter() {
   return (
     <div>
       <p className="lede">
-        Exports a DSK deck (1920×1080) as one flat asset sequence in slide order. Image and built
-        slides become stage PNGs (one per build step); movie and mixed slides become one .mov clip
-        each. Clips the Generator already published beside the deck are reused, not re-exported.
+        Renders a DSK deck (1920×1080) as one flat asset sequence in slide order. Image and built
+        slides become stage PNGs (one per build step); movie and mixed slides become one .mov each,
+        always re-rendered so the current live overlays are baked in. The Generator's pure-video
+        intermediates under src/ are removed after a successful export.
       </p>
       <div className="row">
         <FileWell
@@ -162,13 +161,7 @@ export function DskExporter() {
                 <tr key={page.slide}>
                   <td>{page.slide}</td>
                   <td>{page.category}</td>
-                  <td>
-                    {page.needsClip
-                      ? page.existingClip
-                        ? `clip — already published: ${page.existingClip}`
-                        : "clip (.mov)"
-                      : "stage PNG(s)"}
-                  </td>
+                  <td>{page.needsClip ? "clip (.mov)" : "stage PNG(s)"}</td>
                 </tr>
               ))}
             </tbody>
@@ -192,8 +185,7 @@ export function DskExporter() {
           <JobName job={job!} onRename={(id, name) => renameAndApply(id, name, setJob)} className="path-note" />
           <p className="note path-note">
             Wrote {result.pngDir} — {(result.pngs || []).length} PNG(s),{" "}
-            {(result.exportedClips || []).length} clip(s) exported, {(result.reusedClips || []).length}{" "}
-            reused
+            {(result.exportedClips || []).length} clip(s)
           </p>
           {(result.sequence || []).length > 0 && (
             <ol className="mono-list">
