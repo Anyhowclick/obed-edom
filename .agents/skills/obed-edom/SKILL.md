@@ -513,14 +513,18 @@ patch runs — a pass-1 deck that did not save and close cleanly aborts with a
 `RuntimeError` rather than risk writing to a document that may still be open in
 Keynote. Progress surfaces on one `Stat zorder detail:` line.
 
-When `zorder_mode != "off"`, any slide the offline resolver could not raise (an
-ambiguous shared-signature group, e.g. a legend) is named on `zorderGui` and logged
-as a loud, non-gating `WARNING zorder: ... left in source stacking — stack by hand in
-Keynote (todo w2-ambiguous-sig-positional)` — not a silent un-raise. This is the only
-path to a raised Gold slide 19 today; `w2-ambiguous-sig-positional` (a positional
-resolver for shared-signature groups) is the fix. Export consequence: when the knob
-is on, pass 2 exports nothing, and `remap_and_inspect`'s existing fallback exports
-previews after the z-order patch — one extra Keynote open per knob-on run.
+`resolve_raise_targets` (`iwa_zorder.py`) has three arms per stat job `childSig`: (1)
+unique sig — `groupIndex` hint, verified against the saved group's own child
+signature; (2) shared sig, every job proven `twin` and every same-sig group a
+coincident rect — claimed as one set; (3) any other shared, non-twin sig (e.g. a
+legend) — `groupIndex` is *not* read, since Keynote's save path can scramble group
+order within a kind; instead every same-sig group is claimed as one
+cardinality-matched set (`len(groups) == len(jobs)`, none already claimed). A slide no
+arm clears is named on `zorderGui` and logged as a loud, non-gating `WARNING zorder:
+... left in source stacking — the resolver could not prove a unique target set` — not
+a silent un-raise. Export consequence: when the knob is on, pass 2 exports nothing,
+and `remap_and_inspect`'s existing fallback exports previews after the z-order patch —
+one extra Keynote open per knob-on run.
 
 ### External reference: KeynoteKit
 
