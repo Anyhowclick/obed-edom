@@ -2,7 +2,7 @@
 name: CG resizer — active work and retained engineering record
 overview: >-
   Consolidated 2026-09-15. W1 offline geometry is shipped and default-on. W2 offline z-order is
-  implemented and default-off pending its final live gate. This file is the single resizer plan;
+  implemented and default-on since 2026-09-15 (PR #133). This file is the single resizer plan;
   the standalone W2 plan was folded into it. Completed feature diaries live in git and the
   Obed-Edom skill, not here.
 todos:
@@ -10,6 +10,20 @@ todos:
     content: >-
       Re-run the W2 RAISE10 and Gold live gate after PRs #128 and #131. If every eligibility,
       front-block, pixel, counter, and build-order bar is green, flip OBED_ZORDER_WRITE to on.
+      DONE 2026-09-15: RAISE10 GREEN; Gold RED only slide 19 (owner-deferred); default flipped
+      on (PR #133).
+    status: completed
+  - id: w2-deletions
+    content: >-
+      Remove the GUI raise path (`obedRaiseSlide`/`obedBadgeSlide` emission), the Accessibility
+      pre-flight, and reuse step B now that the offline z-order write is the default; keeping
+      `off` working until then is NOT required — owner decides scope.
+    status: pending
+  - id: w2-ambiguous-sig-positional
+    content: >-
+      Resolve shared, non-twin signatures positionally (groupIndex-1) with a signature verify and
+      no two jobs on one id, mirroring the GUI's `obedResolveGroup` path (Gold slide 19 legend,
+      66 jobs).
     status: pending
   - id: reuse-photo-placement
     content: >-
@@ -51,8 +65,9 @@ by identity on all 19 slides. Do not reopen W1 from the older failed-bank narrat
 W2 replaces eligible pass-2 GUI Bring-to-Front work with a surgical offline permutation of both
 `drawablesZOrder` and `ownedDrawables`. Pieces 1–3 shipped in PR #127; the A/B gate shipped in
 PR #126. Eligible slides suppress their GUI raises, patch after pass 2 closes the deck, export on
-the later fallback open, then run `restore_source_builds` last. `OBED_ZORDER_WRITE` remains
-default `off` until the final live gate is green.
+the later fallback open, then run `restore_source_builds` last. `OBED_ZORDER_WRITE` default
+flipped to `on` since 2026-09-15 (PR #133); `off` restores the GUI raise path and its
+Accessibility dependency.
 
 ### W2 evidence through PR #131
 
@@ -68,9 +83,14 @@ default `off` until the final live gate is green.
   only in `OBED_ZORDER_WRITE`, not geometry mode.
 - Keynote-free recompare after PR #131: RAISE10 green with only expected warnings; Gold red only
   on slide 19's by-design legend fallback (`zorderUnresolved=66`, `zorderGui=[19]`). The final
-  live gate must verify the post-fix behavior before the default flips.
+  live gate ran 2026-09-15 — RAISE10 re-gate + A-vs-A control GREEN; final Gold re-compare at
+  main 50cb592 (`output/bank/2026-09-15/w2-gate/gold-recompare-flip.log`): every geometry bar
+  0.00px, FRONT_BLOCK_OK 16/16, identity 100%, RED only on slide 19's by-design legend fallback
+  (`zorderUnresolved=66`, `zorderGui=[19]`), owner-deferred to follow-up
+  `w2-ambiguous-sig-positional` and accepted as non-blocking. `OBED_ZORDER_WRITE` default flipped
+  to `on` 2026-09-15 (PR #133).
 
-## W2 final gate
+## W2 final gate (run 2026-09-15, passed except Gold slide 19)
 
 Run serially, on copies, with Accessibility available for genuine GUI fallbacks and with no
 already-open Keynote documents.

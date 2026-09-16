@@ -539,8 +539,10 @@ Load-bearing rules:
 
 #### Offline z-order (W2)
 
-`OBED_ZORDER_WRITE` = `off` (default) | `on` | `verify`; forced `off` without the `iwa`
-extra or when `offline_write_mode()` is `off`. The patch runs on the saved deck after
+`OBED_ZORDER_WRITE` = `on` (default) | `off` | `verify`; forced `off` without the `iwa`
+extra or when `offline_write_mode()` is `off`. The W2 default flipped to `on` on
+2026-09-15 after the live gate (RAISE10 re-gate + control + Gold, `results.md`); `off`
+restores the GUI Bring-to-Front raise path and its Accessibility dependency. The patch runs on the saved deck after
 pass 2 (`_run_stat_finalize`), before `restore_source_builds`. Eligible slides' raises
 are suppressed in pass 2 — no `obedRaiseSlide`/`obedBadgeSlide` emitted — so each slide's
 raise runs exactly once, offline or GUI, never both. Pass 2 reports whether it completed

@@ -12,8 +12,9 @@ from obed_edom.keynote import _build_stat_finalize_script
 from test_remap_keynote import _payloads, _touch_paths
 
 
-def test_zorder_write_mode_default_off():
-    assert rk.zorder_write_mode("", offline_mode="on") == "off"
+def test_zorder_write_mode_default_on():
+    assert rk.zorder_write_mode("", offline_mode="on") == "on"
+    assert rk.zorder_write_mode("off", offline_mode="on") == "off"
 
 
 def test_zorder_write_mode_on():
@@ -24,8 +25,8 @@ def test_zorder_write_mode_verify():
     assert rk.zorder_write_mode("verify", offline_mode="on") == "verify"
 
 
-def test_zorder_write_mode_garbage_falls_back_off():
-    assert rk.zorder_write_mode("bogus", offline_mode="on") == "off"
+def test_zorder_write_mode_garbage_falls_back_on():
+    assert rk.zorder_write_mode("bogus", offline_mode="on") == "on"
 
 
 def test_zorder_write_mode_forced_off_without_iwa_extra(monkeypatch):
