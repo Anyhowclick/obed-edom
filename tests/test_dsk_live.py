@@ -194,6 +194,51 @@ def test_live_batch_quits_keynote_on_exit_when_still_running(monkeypatch, tmp_pa
     assert calls.index("run_quit_script") > calls.index("run_osascript")
 
 
+def test_live_batch_enter_cleans_up_on_fingerprint_failure(monkeypatch, tmp_path):
+    calls, state = _stub_batch(monkeypatch)
+
+    def _boom(path):
+        calls.append("fingerprint")
+        raise OSError("cannot stat")
+
+    monkeypatch.setattr(dl, "_fingerprint_source", _boom)
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    with pytest.raises(OSError, match="cannot stat"):
+        with dl.LiveBatch(fw, out_dir):
+            pass
+
+    assert "acquire_lock" in calls
+    assert "release_lock:99" in calls
+    assert not any(p.name.startswith(".dsk-export-") for p in out_dir.iterdir())
+
+
+def test_live_batch_enter_cleans_up_on_copy_keynote_failure(monkeypatch, tmp_path):
+    calls, state = _stub_batch(monkeypatch)
+
+    def _boom(src, dest):
+        calls.append("copy_keynote")
+        raise RuntimeError("copy failed")
+
+    monkeypatch.setattr(dl, "copy_keynote", _boom)
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    with pytest.raises(RuntimeError, match="copy failed"):
+        with dl.LiveBatch(fw, out_dir):
+            pass
+
+    assert "acquire_lock" in calls
+    assert "release_lock:99" in calls
+    assert "poke_stop" in calls
+    assert not any(p.name.startswith(".dsk-export-") for p in out_dir.iterdir())
+
+
 def test_live_batch_source_changed_raises_when_no_primary_exception(monkeypatch, tmp_path):
     _stub_batch(monkeypatch, fingerprints=[("before",), ("after",)])
     out_dir = tmp_path / "clips"
