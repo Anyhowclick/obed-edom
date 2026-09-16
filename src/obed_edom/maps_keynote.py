@@ -264,7 +264,7 @@ def morph_plate_geom(
     height: float = WALL_HEIGHT,
     widths: list[float] | None = None,
 ) -> dict[str, Any] | None:
-    """Union mercator viewports; one raster at the deeper zoom. None if too large."""
+    """Union mercator viewports; one raster at the deeper zoom. None if the union is degenerate."""
     if not cameras:
         return None
     canvas = list(widths) if widths is not None else [width] * len(cameras)
@@ -297,6 +297,35 @@ def morph_plate_geom(
         "height": float(height),
         "captureCamera": capture,
     }
+
+
+def fit_morph_plate(geom: dict[str, Any], max_side: float = MAX_TEXTURE_SIZE) -> dict[str, Any]:
+    """Lower capture zoom so the union raster fits in `max_side`.
+
+    Keynote still places that PNG larger than the slide when zooming in — overflow is the
+    Magic Move, not a reason to fall back to Movie.
+    """
+    plate_w = float(geom["plateW"])
+    plate_h = float(geom["plateH"])
+    longest = max(plate_w, plate_h)
+    if longest <= max_side:
+        return geom
+    z_plate = float(geom["zPlate"]) + math.log2(max_side / longest)
+    union = geom["union"]
+    world = world_width(z_plate)
+    plate_w = (union[2] - union[0]) * world
+    plate_h = (union[3] - union[1]) * world
+    snap = max(plate_w, plate_h)
+    if snap > max_side:
+        scale = max_side / snap
+        plate_w *= scale
+        plate_h *= scale
+    bearing = float((geom.get("captureCamera") or {}).get("bearing") or 0)
+    nx = (union[0] + union[2]) / 2.0
+    ny = (union[1] + union[3]) / 2.0
+    nx, ny = unrotated_mercator(nx, ny, bearing)
+    capture = camera_dict(inverse_mercator_y(ny), nx * 360.0 - 180.0, z_plate, bearing, 0.0)
+    return {**geom, "zPlate": z_plate, "plateW": plate_w, "plateH": plate_h, "captureCamera": capture}
 
 
 def plate_placement(
@@ -461,7 +490,7 @@ def assign_morph_plates(
     width: float = WALL_WIDTH,
     height: float = WALL_HEIGHT,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    """Return {plateId: geom} and links with plateId, or coerce oversized morph to movie."""
+    """Return {plateId: geom} and links with plateId. Degenerate unions fall back to movie."""
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
     plates: dict[str, dict[str, Any]] = {}
     pair_plate: dict[tuple[str, str], str] = {}
@@ -471,10 +500,10 @@ def assign_morph_plates(
         widths = [float(slide_capture_size(by_id[sid])[0]) for sid in run if sid in by_id]
         geom = morph_plate_geom(cameras, width=width, height=height, widths=widths)
         hops = [(run[index], run[index + 1]) for index in range(len(run) - 1)]
-        too_big = geom is None or max(float(geom["plateW"]), float(geom["plateH"])) > MAX_TEXTURE_SIZE
-        if too_big:
+        if geom is None:
             movie_pairs.update(hops)
             continue
+        geom = fit_morph_plate(geom)
         plate_id = plate_id_for(run)
         plates[plate_id] = {**geom, "slideIds": run, "plateId": plate_id}
         for hop in hops:

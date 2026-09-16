@@ -214,6 +214,11 @@ export function slideHiddenLayers(source: { hiddenLayers?: unknown } | null | un
   return parseHiddenLayers(source?.hiddenLayers);
 }
 
+/** 3D extrusions / Borderlands ink only exist while the Buildings layer is visible. */
+export function buildingsLayerOn(source: { hiddenLayers?: unknown } | null | undefined): boolean {
+  return !slideHiddenLayers(source).includes("buildings");
+}
+
 export const HOP_LABELS: Record<MapsHopKind, string> = {
   morph: "Magic Move",
   movie: "Movie",
@@ -222,8 +227,8 @@ export const HOP_LABELS: Record<MapsHopKind, string> = {
 };
 
 export const HOP_TIPS: Record<MapsHopKind, string> = {
-  morph: "Keynote Magic Move on one oversized map plate — pan/zoom only.",
-  movie: "Keynote movie. Used for pitch, bearing changes, 3D, or a shared plate that is too large. Fly phases are optional.",
+  morph: "Keynote Magic Move on one shared map plate — pan/zoom, including overflow off-canvas.",
+  movie: "Keynote movie. Used for pitch, bearing changes, or 3D buildings. Fly phases are optional.",
   dissolve: "Keynote Dissolve. Crossfade stills over the hop duration.",
   cut: "Instant cut. Used when the map style or region highlights change.",
 };
@@ -333,7 +338,6 @@ export function exportCamera(camera: MapsCamera, surfaceWidth: number): MapsCame
 
 export const MORPH_MAX_PITCH = 0.5;
 export const MORPH_MAX_DBEARING = 0.05;
-export const MORPH_MAX_DZOOM = 2;
 export const MORPH_MAX_PLATE_PX = 8192;
 const TILE_SIZE = 512;
 export const WALL_W = 7680;
@@ -454,8 +458,10 @@ export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   if (appearanceMismatch(from, to).length) return "cut";
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
-  const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
-  if (isExtrudedStyle(from.style) || isExtrudedStyle(to.style) || pitch > MORPH_MAX_PITCH || dBearing > MORPH_MAX_DBEARING || dZoom > MORPH_MAX_DZOOM) {
+  const extruded = isExtrudedStyle(from.style) || isExtrudedStyle(to.style);
+  const buildingsOn = buildingsLayerOn(from) || buildingsLayerOn(to);
+  // Zoom delta is not a Movie trigger: one shared plate may overflow the frame (zoom-in).
+  if ((extruded && buildingsOn) || pitch > MORPH_MAX_PITCH || dBearing > MORPH_MAX_DBEARING) {
     return "movie";
   }
   return "morph";
@@ -466,11 +472,10 @@ export function bearingDelta(from: number, to: number): number {
 }
 
 export function plateFitsMorph(from: MapsSlide, to: MapsSlide): boolean {
-  const plate = morphPlatePx(from.camera, to.camera, captureWidth(from), captureWidth(to));
-  return plate != null && plate.w <= MORPH_MAX_PLATE_PX && plate.h <= MORPH_MAX_PLATE_PX;
+  return morphPlatePx(from.camera, to.camera, captureWidth(from), captureWidth(to)) != null;
 }
 
-/** Authoring suggestion: hop rules, then plate size (oversized morph becomes Movie). */
+/** Authoring suggestion: hop rules, then a usable shared plate (degenerate union becomes Movie). */
 export function suggestedHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const kind = inferHopKind(from, to);
   if (kind === "morph" && !plateFitsMorph(from, to)) return "movie";
@@ -624,7 +629,8 @@ function wallViewport(camera: MapsCamera, width = WALL_W, height = WALL_H, beari
   return { x0: rotated.x - nw / 2, y0: rotated.y - nh / 2, x1: rotated.x + nw / 2, y1: rotated.y + nh / 2 };
 }
 
-/** Union plate at the deeper zoom, same math as Keynote `morph_plate_geom`. */
+/** Union plate at the deeper zoom, same math as Keynote `morph_plate_geom`, then fitted to 8192.
+ * Overflow on the slide is fine — the cap is the capture raster, not the FW frame. */
 export function morphPlatePx(
   from: MapsCamera,
   to: MapsCamera,
@@ -635,9 +641,15 @@ export function morphPlatePx(
   const a = wallViewport(from, fromW, WALL_H, sharedBearing);
   const b = wallViewport(to, toW, WALL_H, sharedBearing);
   const world = TILE_SIZE * 2 ** Math.max(from.zoom, to.zoom);
-  const w = (Math.max(a.x1, b.x1) - Math.min(a.x0, b.x0)) * world;
-  const h = (Math.max(a.y1, b.y1) - Math.min(a.y0, b.y0)) * world;
+  let w = (Math.max(a.x1, b.x1) - Math.min(a.x0, b.x0)) * world;
+  let h = (Math.max(a.y1, b.y1) - Math.min(a.y0, b.y0)) * world;
   if (w <= 1 || h <= 1) return null;
+  const longest = Math.max(w, h);
+  if (longest > MORPH_MAX_PLATE_PX) {
+    const scale = MORPH_MAX_PLATE_PX / longest;
+    w *= scale;
+    h *= scale;
+  }
   return { w, h };
 }
 
