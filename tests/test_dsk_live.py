@@ -389,3 +389,62 @@ def test_layout_import_lines_error_handler_deletes_pending_donor_before_closing_
     assert script.count("set pendingDonor to madeSlide") == 2
     assert script.count("set pendingDonor to donorSlide") == 2
     assert script.count("set pendingDonor to missing value") == 3  # 1 init + 2 clears
+
+
+def test_progress_re_matches_whole_slide_marker():
+    match = dl._PROGRESS_RE.match("OBED\t17\t2026-09-10 00:00:00")
+    assert match is not None
+    assert match.group(1) == "17"
+    assert match.group(2) is None
+
+
+def test_progress_re_matches_per_movie_marker():
+    match = dl._PROGRESS_RE.match("OBED\t12\t1\t2026-09-10 00:00:00")
+    assert match is not None
+    assert match.group(1) == "12"
+    assert match.group(2) == "1"
+
+
+def test_error_re_matches_whole_slide_marker():
+    match = dl._ERROR_RE.match("ERR\t17\t-1728\tCan't get slide 1.")
+    assert match is not None
+    assert match.group(1) == "17"
+    assert match.group(2) is None
+    assert match.group(3) == "-1728"
+    assert match.group(4) == "Can't get slide 1."
+
+
+def test_error_re_matches_per_movie_marker():
+    match = dl._ERROR_RE.match("ERR\t12\t1\t-1728\tCan't get slide 1.")
+    assert match is not None
+    assert match.group(1) == "12"
+    assert match.group(2) == "1"
+    assert match.group(3) == "-1728"
+    assert match.group(4) == "Can't get slide 1."
+
+
+def test_run_osascript_fires_on_progress_per_movie(monkeypatch, tmp_path):
+    class _FakePopen:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.stdout = iter(["done\n"])
+            self.stderr = iter(["OBED\t12\t1\tx\n", "OBED\t12\t2\tx\n"])
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(dl.subprocess, "Popen", lambda *a, **k: _FakePopen())
+    script_path = tmp_path / "x.applescript"
+    script_path.write_text("noop")
+
+    seen: list[tuple[int, int | None]] = []
+
+    def on_progress(slide, movie_index=None):
+        seen.append((slide, movie_index))
+
+    dl._run_osascript(script_path, on_progress=on_progress)
+    assert seen == [(12, 1), (12, 2)]

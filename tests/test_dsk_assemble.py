@@ -270,6 +270,75 @@ def test_clip_aspect_guard_derives_insert_rect_from_real_clip_size():
     assert inserted.w / inserted.h == pytest.approx(clip_w / clip_h)
 
 
+def test_clip_crops_places_insert_at_affine_transformed_normalized_rect():
+    # An odd-origin source crop (x=1921, w=101) is published even-normalized (x=1920,
+    # w=102) by the movie exporter as `ClipResult.crop_rect`, in the same wall-space
+    # coordinates as the source items. Assembly must carry that rect through the exact
+    # same per-slide affine (scale + anchor offset) `fit_slide` used for the movie's own
+    # placeholder box, honouring the origin shift from normalization.
+    movie = _movie_item(0, x=1920, y=0, w=3840, h=1080)
+    slide = _slide(1, [movie])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clip_path = Path("/tmp/clip.mov")
+
+    baseline = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={1: clip_path})
+    fit_rect = baseline.fits[1][("movie", 0)]
+    scale = fit_rect.w / movie["w"]
+    tx = fit_rect.x - movie["x"] * scale
+    ty = fit_rect.y - movie["y"] * scale
+
+    crop = Rect(1920.0, 0.0, 102.0, 1080.0)
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={1: clip_path},
+        clip_crops={1: {("movie", 0): crop}},
+    )
+    inserted = plan.clip_rects[1][("movie", 0)]
+    assert inserted.x == pytest.approx(crop.x * scale + tx)
+    assert inserted.y == pytest.approx(crop.y * scale + ty)
+    assert inserted.w == pytest.approx(crop.w * scale)
+    assert inserted.h == pytest.approx(crop.h * scale)
+
+
+def test_operator_clip_16x10_against_16x9_fit_refused():
+    # Operator clips (legacy path, no clip_crops) stay on a strict aspect threshold: a
+    # 16x10 clip against a 16:9 fitted rect is a ~13% mismatch, well past 0.5%.
+    movie = _movie_item(0, x=1920, y=0, w=3840, h=2160)  # 16:9
+    slide = _slide(1, [movie])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clip_path = Path("/tmp/clip.mov")
+
+    with pytest.raises(AssemblyRefusal, match="clip aspect"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={1: clip_path},
+            clip_sizes={str(clip_path): (1600.0, 1000.0)},
+        )
+
+
+def test_clip_crops_narrow_2x1080_crop_passes():
+    # A 1x1080 crop normalized to 2x1080 changes aspect by 100% -- far past any legacy
+    # tolerance -- but with `clip_crops` given, the exact geometry is used directly and
+    # no aspect-vs-fit-rect guard applies.
+    movie = _movie_item(0, x=1920, y=0, w=3840, h=1080)
+    slide = _slide(1, [movie])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clip_path = Path("/tmp/clip.mov")
+
+    crop = Rect(1920.0, 0.0, 2.0, 1080.0)
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={1: clip_path},
+        clip_crops={1: {("movie", 0): crop}},
+    )
+    inserted = plan.clip_rects[1][("movie", 0)]
+    assert inserted.w > 0
+    assert inserted.h > 0
+
+
 def test_dropped_side_included_in_deletes_unless_kept():
     side = _image_item(1, x=200, y=0, w=200, h=200)
     slide = _slide(1, [_image_item(0, x=1920, y=0, w=3840, h=1080), side])
@@ -5973,11 +6042,14 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
     )
     captured: dict = {}
 
+    monkeypatch.setattr("obed_edom.dsk_movie_export._ffprobe", lambda _path: (1920, 1080, 24.0, 2.0))
+
     def fake_assemble_dsk_deck(
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, import_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
         split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
+        **_kwargs,
     ):
         captured["decisions"] = decisions
         captured["clips"] = clips
@@ -5985,6 +6057,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
         captured["layout_policy"] = layout_policy
         captured["black_layout_names"] = black_layout_names
         captured["stroke_min_refs"] = stroke_min_refs
+        captured["clip_sizes"] = _kwargs.get("clip_sizes")
         return AssembleResult(
             path=out,
             slides_kept=(13, 32),
@@ -6040,6 +6113,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
     assert captured["black_layout_names"] == dsa.DEFAULT_TRANSPARENT_LAYOUT_NAMES
     assert captured["stroke_min_refs"] == 2
     assert captured["reference_deck"] is None
+    assert captured["clip_sizes"] == {str(clip_path): (1920, 1080)}
 
 
 def test_default_transparent_layout_names_aliases_dsk_live():
@@ -6065,6 +6139,7 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
         split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
+        **_kwargs,
     ):
         captured["black_layout_names"] = black_layout_names
         return AssembleResult(
@@ -11636,6 +11711,7 @@ def test_cli_dsk_assemble_no_style_flag(tmp_path, monkeypatch):
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
         split_overrides=None, rss_limit_bytes=None, no_pills=False, no_style=False, content_only=False,
+        **_kwargs,
     ):
         captured["no_style"] = no_style
         return AssembleResult(

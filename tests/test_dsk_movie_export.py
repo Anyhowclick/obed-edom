@@ -2090,6 +2090,70 @@ def test_export_slide_clips_per_movie_produces_one_clip_per_movie_item(monkeypat
     assert by_movie_index[1].crop_rect == Rect(3840.0, 0.0, 1920.0, 1080.0)
 
 
+def test_export_slide_clips_per_movie_fires_on_progress_per_clip_with_distinct_wall_s(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    calls = _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    seen: list[tuple[int, int | None]] = []
+    ticks = {"n": 0}
+
+    def _fake_monotonic():
+        ticks["n"] += 1
+        return float(ticks["n"])
+
+    monkeypatch.setattr(dme.time, "monotonic", _fake_monotonic)
+
+    def fake_run_osascript(script_path, *, timeout=3600, register_proc=None, on_progress=None):
+        calls["osascript"] += 1
+        text = script_path.read_text()
+        if "using terms from" not in text:
+            return _FakeCompleted(returncode=0)
+        lines = []
+        for job in _current_jobs[0]:
+            job.tmp.parent.mkdir(parents=True, exist_ok=True)
+            job.tmp.write_bytes(b"movie-bytes")
+            on_progress(job.slide, job.movie_id[1])
+            seen.append((job.slide, job.movie_id[1]))
+            lines.append(f"OBED\t{job.slide}\t{job.movie_id[1]}\tstamp")
+        return _FakeCompleted(returncode=0, stderr="\n".join(lines))
+
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
+
+    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert seen == [(12, 0), (12, 1)]
+    wall_s_by_index = {r.movie_id[1]: r.wall_s for r in results}
+    assert wall_s_by_index[0] != wall_s_by_index[1]
+
+
+def test_export_slide_clips_per_movie_error_surfaces_structured_message(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    def fake_run_osascript(script_path, *, timeout=3600, register_proc=None, on_progress=None):
+        text = script_path.read_text()
+        if "export theDoc" in text:
+            return _FakeCompleted(
+                returncode=1, stderr="ERR\t12\t2\t-1728\tCan't export movie item 2."
+            )
+        return _FakeCompleted(returncode=0)
+
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
+
+    with pytest.raises(RuntimeError, match=r"-1728.*Can't export movie item 2\."):
+        dme.export_slide_clips(fw, [12], out_dir, per_movie=True)
+
+
 def test_export_slide_clips_per_movie_offcanvas_movie_crops_to_panel(monkeypatch, tmp_path):
     out_dir = tmp_path / "clips"
     out_dir.mkdir()
@@ -2298,7 +2362,9 @@ def test_script_per_movie_export_error_deletes_scratch_slide_before_reraising():
     leaves a stray slide behind in the scratch deck."""
     script = _per_movie_script()
     for job in _per_movie_jobs():
-        marker = f'log ("ERR" & tab & "{job.slide}.{job.movie_id[1]}" & tab & errNum & tab & errMsg)'
+        marker = (
+            f'log ("ERR" & tab & "{job.slide}" & tab & "{job.movie_id[1]}" & tab & errNum & tab & errMsg)'
+        )
         idx = script.index(marker)
         following = script[idx : idx + 400]
         assert following.index("try") < following.index("delete slide 2 of theDoc") < following.index(

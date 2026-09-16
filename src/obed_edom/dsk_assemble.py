@@ -101,7 +101,7 @@ from obed_edom.iwa_text_shape import shape_style, shaped_width
 from obed_edom.iwa_write import OfflineWriteCorrupted, reorder_drawables
 from obed_edom.dsk_pill import OfflineWriteRefused, PillResult, PillSpec, write_pills
 from obed_edom.dsk_style import OfflineWriteRefused as StyleWriteRefused, StyleResult, write_styles
-from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
+from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Affine, Rect, item_rect
 from obed_edom.offline_inspect import (
     _build_data_index,
     _canvas_size,
@@ -1268,6 +1268,7 @@ def plan_assembly(
     band: Band,
     clips: Mapping[int, Path | Mapping[ItemId, Path]],
     clip_sizes: Mapping[str, tuple[float, float]] = {},
+    clip_crops: Mapping[int, Mapping[ItemId, Rect]] | None = None,
     runs: Mapping[int, Mapping[ItemId, Sequence[float]]] | None = None,
     min_text_pt: float = DEFAULT_MIN_TEXT_PT,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
@@ -1299,7 +1300,14 @@ def plan_assembly(
     `clips[number]` is either a single `Path` (legacy: applied to the lowest-`kindIndex`
     kept movie item only) or a `Mapping[ItemId, Path]` giving one pure clip per movie
     item; either shape is normalised into `AssemblyPlan.clips[number]: dict[ItemId, Path]`.
-    `clip_sizes`, keyed by `str(path)` -> `(width, height)` media pixel size, offline-guards
+    `clip_crops[number][movie_id]`, when given, is the wall-space, even-normalised crop
+    rect actually exported for that clip (`ClipResult.crop_rect`); the inserted movie's
+    rect is that crop rect carried through the SAME per-slide affine (scale + anchor
+    offset) `fit_slide` used for every other object on the slide, so origin offsets from
+    even-normalisation are honoured and the aspect matches the media by construction.
+    `clip_sizes` then only guards media vs crop aspect with a strict 0.5% tolerance.
+    When a movie has no `clip_crops` entry (legacy path / operator clips), `clip_sizes`,
+    keyed by `str(path)` -> `(width, height)` media pixel size, offline-guards
     (`AssemblyRefusal`) a clip whose media aspect differs from its target fitted rect's
     aspect by more than 0.5%; a path missing from `clip_sizes` skips the guard."""
     classes_by_number = {c.number: c for c in classes}
@@ -2222,28 +2230,69 @@ def plan_assembly(
                             f"slide {number}: clip mapping missing kept movie item(s) {sorted(missing)}"
                         )
                 slide_clip_rects: dict[ItemId, Rect] = {}
+                slide_clip_crops = (clip_crops or {}).get(number, {})
                 for movie_id, clip_path in item_clips.items():
-                    size = clip_sizes.get(str(clip_path))
-                    if size is None:
-                        continue
-                    clip_w, clip_h = size
                     rect = fit.get(movie_id)
                     if rect is None or rect.w <= 0 or rect.h <= 0:
                         raise AssemblyRefusal(f"slide {number} movie {movie_id[1]}: no fitted rect for clip")
+                    size = clip_sizes.get(str(clip_path))
+                    crop = slide_clip_crops.get(movie_id)
+                    if crop is not None:
+                        if crop.w <= 0 or crop.h <= 0:
+                            raise AssemblyRefusal(
+                                f"slide {number} movie {movie_id[1]}: clip crop rect has non-positive size"
+                            )
+                        if size is not None:
+                            clip_w, clip_h = size
+                            if clip_w <= 0 or clip_h <= 0:
+                                raise AssemblyRefusal(
+                                    f"slide {number} movie {movie_id[1]}: clip {clip_path} has non-positive size"
+                                )
+                            crop_aspect = crop.w / crop.h
+                            media_aspect = clip_w / clip_h
+                            if abs(media_aspect - crop_aspect) / crop_aspect > 0.005:
+                                raise AssemblyRefusal(
+                                    f"slide {number} movie {movie_id[1]}: clip media aspect {media_aspect:.4f} "
+                                    f"does not match exported crop aspect {crop_aspect:.4f} by more than 0.50%"
+                                )
+                        item = items_by_id.get(movie_id)
+                        if item is None:
+                            raise AssemblyRefusal(f"slide {number} movie {movie_id[1]}: source item not found")
+                        src_rect = item_rect(item)
+                        if src_rect.w <= 0 or src_rect.h <= 0:
+                            raise AssemblyRefusal(
+                                f"slide {number} movie {movie_id[1]}: source item has non-positive size"
+                            )
+                        slide_affine = Affine(
+                            rect.w / src_rect.w, rect.x - src_rect.x * (rect.w / src_rect.w),
+                            rect.y - src_rect.y * (rect.w / src_rect.w),
+                        )
+                        slide_clip_rects[movie_id] = slide_affine.apply_rect(crop)
+                        continue
+                    if size is None:
+                        continue
+                    clip_w, clip_h = size
                     if clip_w <= 0 or clip_h <= 0:
                         raise AssemblyRefusal(f"slide {number} movie {movie_id[1]}: clip {clip_path} has non-positive size")
                     rect_aspect = rect.w / rect.h
                     clip_aspect = clip_w / clip_h
-                    # Even-dimension export rounding can nudge either axis by ~1px; widen the
-                    # gross-mismatch guard by that much so it only catches wrong media.
-                    tolerance = max(0.005, 1.0 / clip_w + 1.0 / clip_h)
-                    if abs(clip_aspect - rect_aspect) / rect_aspect > tolerance:
+                    if abs(clip_aspect - rect_aspect) / rect_aspect > 0.005:
                         raise AssemblyRefusal(
                             f"slide {number} movie {movie_id[1]}: clip aspect {clip_aspect:.4f} does not match "
-                            f"fitted rect aspect {rect_aspect:.4f} ({rect.w:.2f}x{rect.h:.2f}) by more than "
-                            f"{tolerance * 100:.2f}%"
+                            f"fitted rect aspect {rect_aspect:.4f} ({rect.w:.2f}x{rect.h:.2f}) by more than 0.50%"
                         )
-                    width_bound = abs(rect.w - wall_rect.w) <= abs(rect.h - wall_rect.h)
+                    item = items_by_id.get(movie_id)
+                    src_rect = item_rect(item) if item is not None else None
+                    if src_rect is not None and src_rect.w > 0 and src_rect.h > 0:
+                        item_scale = rect.w / src_rect.w
+                        transformed_wall = Rect(
+                            wall_rect.x * item_scale + (rect.x - src_rect.x * item_scale),
+                            wall_rect.y * item_scale + (rect.y - src_rect.y * item_scale),
+                            wall_rect.w * item_scale, wall_rect.h * item_scale,
+                        )
+                    else:
+                        transformed_wall = wall_rect
+                    width_bound = abs(rect.w - transformed_wall.w) <= abs(rect.h - transformed_wall.h)
                     if width_bound:
                         slide_clip_rects[movie_id] = Rect(rect.x, rect.y, rect.w, rect.w * (clip_h / clip_w))
                     else:
@@ -5314,6 +5363,7 @@ def assemble_dsk_deck(
     reference_deck: Path | None = None,
     clips: Mapping[int, Path | Mapping[ItemId, Path]] = {},
     clip_sizes: Mapping[str, tuple[float, float]] = {},
+    clip_crops: Mapping[int, Mapping[ItemId, Rect]] | None = None,
     log: Callable[[str], None] = print,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     layout_policy: LayoutPolicy = "import",
@@ -5414,7 +5464,7 @@ def assemble_dsk_deck(
     builds_by_number = deck_builds(fw_deck, deck=deck)
     plan = plan_assembly(
         payload, classes, decisions=decisions, band=resolved_band, clips=clips, clip_sizes=clip_sizes,
-        runs=runs, text_fit=text_fit,
+        clip_crops=clip_crops, runs=runs, text_fit=text_fit,
         min_text_pt=min_text_pt, text_slide_words=text_slide_words, allow_split=allow_split,
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
@@ -5465,7 +5515,7 @@ def assemble_dsk_deck(
         for line in (proc.stderr or "").splitlines():
             error_m = _ERROR_RE.match(line)
             if error_m:
-                last_error = (int(error_m.group(1)), int(error_m.group(2)), error_m.group(3))
+                last_error = (int(error_m.group(1)), int(error_m.group(3)), error_m.group(4))
                 continue
             hidden_m = _HIDDEN_RE.match(line)
             if hidden_m:

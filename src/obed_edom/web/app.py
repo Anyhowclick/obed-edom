@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -47,6 +47,7 @@ from obed_edom.dsk_assemble import (
 from obed_edom.dsk_live import keynote_running, quit_and_wait_for_exit
 from obed_edom.dsk_movie_export import _ffprobe, export_dsk_slide_clips, export_slide_clips
 from obed_edom.dsk_plan import ItemId, classify_deck
+from obed_edom.map_remap import Rect
 from obed_edom.dsk_stage_export import (
     export_stage_pngs,
     read_manifest,
@@ -1868,6 +1869,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
 
     nested_clips: dict[int, dict[ItemId, Path]] = {}
     clip_sizes: dict[str, tuple[int, int]] = {}
+    clip_crops: dict[int, dict[ItemId, Rect]] = {}
     if operator_clips:
         classes = {c.number: c for c in classify_deck(path, payload=offline_wall_payload(path))}
         for number, clip_path in operator_clips.items():
@@ -1901,6 +1903,8 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         for clip in clip_results:
             nested_clips.setdefault(clip.slide, {})[clip.movie_id] = clip.path
             clip_sizes[str(clip.path)] = (clip.width, clip.height)
+            if clip.crop_rect is not None:
+                clip_crops.setdefault(clip.slide, {})[clip.movie_id] = clip.crop_rect
 
     job.log(f"Assembling {out_path.name} (content-only={content_only})…")
     result = assemble_dsk_deck(
@@ -1910,11 +1914,16 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         reference_deck=reference_deck,
         clips=nested_clips,
         clip_sizes=clip_sizes,
+        clip_crops=clip_crops,
         text_slide_words=words,
         content_only=content_only,
         log=job.log,
     )
     job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
+    existing_manifest = read_manifest(out_dir, deck=result.path)
+    previous_src_clips: set[str] = set()
+    for entry in ((existing_manifest or {}).get("slides") or {}).values():
+        previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
     published = _publish_generator_clips(result.path, src_dir, nested_clips, result.ordinals)
     categories = {
         result.ordinals[n]: str(p.get("category") or "")
@@ -1922,7 +1931,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         for n in [int(p["slide"])]
         if n in result.ordinals
     }
-    write_manifest(
+    new_manifest_path = write_manifest(
         out_dir,
         result.path,
         [],
@@ -1930,8 +1939,15 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         source_slides={o: n for n, o in result.ordinals.items()},
         src_clips=published,
         generator=True,
-        existing=read_manifest(out_dir, deck=result.path),
+        existing=existing_manifest,
     )
+    new_manifest = json.loads(new_manifest_path.read_text())
+    current_src_clips: set[str] = set()
+    for entry in (new_manifest.get("slides") or {}).values():
+        current_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
+    stale_src_clips = previous_src_clips - current_src_clips
+    if stale_src_clips:
+        _delete_managed_src_clips(job, out_dir, src_dir, stale_src_clips)
     return {
         "phase": "done",
         "path": str(path),
@@ -1979,6 +1995,47 @@ def _publish_generator_clips(
             names.append(f"src/{name}")
         published[ordinal] = names
     return published
+
+
+def _delete_managed_src_clips(
+    job: Job, out_dir: Path, src_dir: Path, stale_rel_paths: Iterable[str]
+) -> None:
+    """Deletes `src/<name>` files under `src_dir` named by `stale_rel_paths` (a
+    `srcClips` value collected before an overwrite) that are no longer referenced.
+    Rejects any entry that is not a bare two-part `src/<name>` path, resolves
+    outside `out_dir`, or passes through a symlink, matching the Exporter's
+    `src/` cleanup safety rules."""
+    out_dir_real = out_dir.resolve()
+    if src_dir.is_symlink():
+        job.log(f"Skipping src/ cleanup: {src_dir} is a symlink")
+        return
+    to_delete: list[Path] = []
+    seen: set[Path] = set()
+    for rel in stale_rel_paths:
+        rel_path = Path(str(rel))
+        if len(rel_path.parts) != 2 or rel_path.parts[0] != "src" or ".." in rel_path.parts:
+            job.log(f"Skipping suspicious srcClips entry {rel!r}")
+            continue
+        candidate = src_dir / rel_path.parts[1]
+        if candidate.is_symlink():
+            job.log(f"Skipping symlinked path component for {rel!r}")
+            continue
+        try:
+            candidate_real = candidate.resolve()
+            candidate_real.relative_to(out_dir_real)
+        except ValueError:
+            job.log(f"Skipping {rel!r}: resolves outside the output directory")
+            continue
+        if candidate.is_file() and candidate_real not in seen:
+            seen.add(candidate_real)
+            to_delete.append(candidate)
+    if to_delete:
+        for f in to_delete:
+            f.unlink()
+        job.log(
+            f"Deleted {len(to_delete)} orphaned Generator clip(s): "
+            + ", ".join(f.name for f in to_delete)
+        )
 
 
 def _dsk_export_action(category: str) -> str:

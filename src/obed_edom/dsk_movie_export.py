@@ -410,13 +410,13 @@ def _build_export_script(
                 f'        export theDoc to POSIX file "{_as_escape(str(j.tmp))}" as QuickTime movie with properties '
                 f"{{movie format:native size, movie codec:{codec}, movie framerate:{fps_name}, skipped slides:false}}",
                 "      on error errMsg number errNum",
-                f'        log ("ERR" & tab & "{j.slide}.{j.movie_id[1]}" & tab & errNum & tab & errMsg)',
+                f'        log ("ERR" & tab & "{j.slide}" & tab & "{j.movie_id[1]}" & tab & errNum & tab & errMsg)',
                 "        try",
                 f"          delete slide {dup_ordinal} of theDoc",
                 "        end try",
                 "        error errMsg number errNum",
                 "      end try",
-                f'      log ("OBED" & tab & "{j.slide}.{j.movie_id[1]}" & tab & ((current date) as string))',
+                f'      log ("OBED" & tab & "{j.slide}" & tab & "{j.movie_id[1]}" & tab & ((current date) as string))',
                 f"      set skipped of slide {dup_ordinal} of theDoc to true",
                 f"      delete slide {dup_ordinal} of theDoc",
             ]
@@ -555,7 +555,7 @@ def export_dsk_slide_clips(
         for line in (proc.stderr or "").splitlines():
             error_m = _ERROR_RE.match(line)
             if error_m:
-                last_error = (int(error_m.group(2)), error_m.group(3))
+                last_error = (int(error_m.group(3)), error_m.group(4))
         if proc.returncode != 0:
             if last_error is not None:
                 errnum, errmsg = last_error
@@ -1064,10 +1064,10 @@ def export_slide_clips(
         watchdog = _RssWatchdog(_keynote_pid, rss_limit_bytes, on_breach)
         watchdog.start()
 
-        elapsed_by_slide: dict[int, float] = {}
+        elapsed_by_job: dict[tuple[int, int | None], float] = {}
 
-        def on_progress(slide: int) -> None:
-            elapsed_by_slide[slide] = time.monotonic() - t0
+        def on_progress(slide: int, movie_index: int | None = None) -> None:
+            elapsed_by_job[(slide, movie_index)] = time.monotonic() - t0
 
         attempts = 0
         proc = None
@@ -1085,7 +1085,7 @@ def export_slide_clips(
         for line in (proc.stderr or "").splitlines():
             error_m = _ERROR_RE.match(line)
             if error_m:
-                last_error = (int(error_m.group(2)), error_m.group(3))
+                last_error = (int(error_m.group(3)), error_m.group(4))
             delete_fail_m = _DELETEFAIL_RE.match(line)
             if delete_fail_m and delete_fail is None:
                 delete_fail = (
@@ -1145,7 +1145,10 @@ def export_slide_clips(
                     width=width,
                     height=height,
                     duration_s=duration,
-                    wall_s=elapsed_by_slide.get(job.slide, time.monotonic() - t0),
+                    wall_s=elapsed_by_job.get(
+                        (job.slide, job.movie_id[1] if job.movie_id is not None else None),
+                        time.monotonic() - t0,
+                    ),
                     crop_width=crop_w,
                     movie_id=job.movie_id,
                     crop_rect=Rect(crop_x, crop_y, crop_w, crop_h),
