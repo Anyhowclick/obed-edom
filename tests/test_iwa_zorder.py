@@ -480,6 +480,7 @@ def test_resolve_mixed_slide_order_independent(tmp_path):
 def test_resolve_badge_and_shared_stat_collision_refused(tmp_path):
     # A badge row and a bijection-resolved stat job land on the same id — must refuse,
     # not silently drop one (which raise_to_front would otherwise explode on later).
+    # badge_rows wall index 1 below resolves to id 300, which the stat block claims first.
     members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
     deck = _write_deck(tmp_path / "badge_stat_collision.key", members, [300, 302])
     slide, objects = _slide_and_objects(deck)
@@ -488,7 +489,7 @@ def test_resolve_badge_and_shared_stat_collision_refused(tmp_path):
         {"slide": 1, "childSig": "dup"},
         {"slide": 1, "childSig": "dup"},
     ]
-    badge_rows = [{"kind": "group", "index": 1}]  # wall index 1 -> id 300, claimed by the stat block
+    badge_rows = [{"kind": "group", "index": 1}]
     stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, badge_rows, [])
 
     assert stat_ids == ["300", "302"]

@@ -61,8 +61,8 @@ def resolve_raise_targets(
     """-> (stat_ids ascending by z-position, badge_ids in row order, unresolved tokens).
 
     A stat job with a falsy `childSig` is skipped (neither a target nor unresolved),
-    matching the live raise path's filter at keynote.py:1411. A resolved job is also
-    verified: the saved-deck group's own child signature (computed offline via
+    matching the live raise path's filter at keynote.py:1411. A unique-signature job
+    resolved through `groupIndex` is also verified: the saved-deck group's own child signature (computed offline via
     `_group_child_signature`, the same normalisation the planner used to mint
     `childSig`) must equal the job's `childSig` — a hint pointing at the wrong group
     (stale `groupIndex`) is caught here rather than silently raising the wrong object.
@@ -87,7 +87,12 @@ def resolve_raise_targets(
     positional hint is not stable across saves and cannot safely pick one candidate out of
     a same-signature run — an off-by-one inside the run would select a neighbour and still
     "verify" clean. Membership plus cardinality is the safety property instead: when
-    `len(G(S)) == len(J(S))` and none of `G(S)` is already claimed, every id in `G(S)` is
+    `len(G(S)) == len(J(S))` and none of `G(S)` is already claimed by a proven twin set
+    (checked against `twin_claimed`, not the full `claimed` set — each shared-sig `G(S)` is
+    built and checked before any stat arm writes to `claimed`, which is safe only because
+    `_group_child_signature` is deterministic: `G(S)` for one signature and `G(S')` for a
+    distinct signature are disjoint by construction, so a different signature's arm can never
+    already own a member of this `G(S)`), every id in `G(S)` is
     claimed for `J(S)` (assigned ascending saved z order to jobs in job order — that
     assignment is bookkeeping only, since every job in an indistinguishable run is raised
     together and WHICH job claims WHICH id is observationally irrelevant to the resulting
