@@ -96,7 +96,7 @@ export function ColourPicker({
             setDraft(value);
             // 3-digit hex is valid but expands (#112 → #111122) and steals the caret.
             // Apply while typing only once the user has a full 6 digits.
-            if (/^#?[0-9a-fA-F]{6}$/.test(value.trim())) onText(normaliseHighlightColour(value));
+            if (!none && /^#?[0-9a-fA-F]{6}$/.test(value.trim())) onText(normaliseHighlightColour(value));
           }}
           onBlur={() => {
             if (none && !hexDirty) return;

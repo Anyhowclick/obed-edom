@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ColourPicker } from "../src/maps/ColourPicker";
+import { isHighlightHex, normaliseHighlightColour } from "../src/maps/highlight";
 import { DEFAULT_SAVED_COLOUR, loadSavedColours, writeSavedColours } from "../src/maps/savedColours";
 
 beforeEach(() => {
@@ -95,6 +97,47 @@ describe("ColourPicker", () => {
     await user.type(hex, "233");
     expect(hex).toHaveValue("#112233");
     expect(onText).toHaveBeenCalledWith("#112233");
+  });
+
+  it("applies a typed hex while no-fill is selected on a controlled parent", async () => {
+    const user = userEvent.setup();
+    const applied: string[] = [];
+    function Parent() {
+      const [colour, setColour] = useState("#e8772a");
+      const [text, setText] = useState("#e8772a");
+      const [none, setNone] = useState(true);
+      return (
+        <ColourPicker
+          colour={colour}
+          text={text}
+          none={none}
+          allowNone
+          onColour={(value) => {
+            setColour(value);
+            setText(value);
+            setNone(false);
+            applied.push(value);
+          }}
+          onText={(value) => {
+            setText(value);
+            if (isHighlightHex(value)) setColour(normaliseHighlightColour(value));
+          }}
+          onNone={() => setNone(true)}
+          onCommit={() => undefined}
+        />
+      );
+    }
+
+    render(<Parent />);
+    const hex = screen.getByLabelText("Highlight colour hex");
+    expect(hex).toHaveValue("");
+    await user.type(hex, "#112233");
+    expect(hex).toHaveValue("#112233");
+    expect(applied).toEqual([]);
+    await user.tab();
+    expect(applied).toEqual(["#112233"]);
+    expect(hex).toHaveValue("#112233");
+    expect(screen.getByRole("button", { name: "No fill" })).toHaveAttribute("aria-pressed", "false");
   });
 });
 
