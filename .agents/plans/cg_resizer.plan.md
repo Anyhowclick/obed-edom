@@ -126,6 +126,15 @@ that same unraised arm-A bank rather than RED — settle it with a direct read o
 slide-19 tail (last 66 `drawablesZOrder` ids == the 66 resolved ids, ascending pre-raise z), or
 gate a fresh A/A pair instead of reusing the 2026-09-15 A.
 
+Live verify excludes z-order-patched slides until the kindIndex bridge covers permutations
+(todo id `live-verify-zorder-bridge`, pending). Gate arms must share preview-cache provenance:
+the banked 2026-09-15 Gold arms were planned WITHOUT the preview cache and are an invalid
+baseline for slides 11/12 list placement — the 2026-09-16 build is the correct one.
+
+2026-09-16 post-deletions gate outcome: RAISE10 deck geometry-identical to the 09-15 bank,
+`FRONT_BLOCK_OK` 11/11; Gold identical except the roster rows. Both live-verify REDs are this
+addressing gap (root cause B below), not the deletions.
+
 ## Active correctness backlog
 
 ### Constellation

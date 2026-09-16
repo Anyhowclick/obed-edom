@@ -549,7 +549,10 @@ def verify_live_frames(
     `exclude_slides` drops the WHOLE slide, every kind — not just group: Bring to Front
     moves the raised item to the END of its per-kind collection, so on a stat-finalize
     slide EVERY kind's kindIndex may be wrong post-raise, not only the group's, and even a
-    bridged index is then meaningless. The reported payload is keyed by SAVED kindIndex,
+    bridged index is then meaningless. The offline z-order patch (`OBED_ZORDER_WRITE`)
+    permutes per-kind order the same way on every slide it targets, so callers must also
+    exclude `zorderWrite["slides"]`; `bridge_specs_kindindex` bridges wall→saved deletions
+    only, not this reordering. The reported payload is keyed by SAVED kindIndex,
     so each slide's specs are bridged (wall → saved) before the lookup, same as
     `verify_offline_frames`.
 

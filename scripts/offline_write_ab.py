@@ -1072,6 +1072,7 @@ def run_record(
     child_resize: Any, applied: int, missed: int, offline_write: dict[str, Any] | None,
     spec_id_map: dict[str, list[dict[str, Any]]],
     zorder_write: dict[str, Any] | None = None,
+    previews: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Everything a later ``--reuse-a``/``--reuse-b`` needs, with no Keynote (D13).
 
@@ -1081,6 +1082,9 @@ def run_record(
     ``statJobs`` / ``badgeRaises`` are persisted at the top level (the trimmed plan
     drops them) so a reused record can still resolve the W2 front-block targets.
     ``zorderWrite`` is the piece 3 result dict (counters + eligible ``slides``).
+    ``previews`` is the planner's preview-cache provenance (``info["previews"]`` from
+    ``remap_and_inspect``: ``{"source": <dir or None>, "placements": n}``) — a record
+    written before this field existed has no ``"previews"`` key.
 
     Raises ``ValueError`` if ``plan`` has NEITHER key: that means ``plan`` is already a
     trimmed, PERSISTED plan (a loaded run record's ``plan``, not a fresh ``plan_out``) —
@@ -1114,7 +1118,29 @@ def run_record(
         "offlineWrite": ow,
         "zorderWrite": dict(zorder_write or {}),
         "specIdMap": spec_id_map,
+        "previews": dict(previews) if previews is not None else None,
     }
+
+
+def preview_provenance_warning(a_record: dict[str, Any], b_record: dict[str, Any]) -> str | None:
+    """The roster-keep placer is preview-cache-dependent (root cause A, 2026-09-16 gate
+    diagnosis): a reused arm planned against a different (or absent) preview source than
+    its counterpart is not a valid A-vs-B baseline for list placement. Returns a WARN
+    line (never a RED reason -- a stale reuse is an operator input problem, not a code
+    regression) or None when both sides agree."""
+    a_previews = a_record.get("previews")
+    b_previews = b_record.get("previews")
+    if "previews" not in a_record or "previews" not in b_record:
+        return "provenance unknown (older run record predates preview-cache provenance)."
+    a_source = (a_previews or {}).get("source")
+    b_source = (b_previews or {}).get("source")
+    if a_source != b_source:
+        return (
+            f"arm A planned with preview source {a_source!r}, arm B with {b_source!r} -- "
+            "if either is None, that arm planned without the preview cache and is an "
+            "invalid baseline for list placement; re-run the mismatched arm."
+        )
+    return None
 
 
 def write_run_record(path: Path | str, record: dict[str, Any]) -> Path:
@@ -1681,6 +1707,16 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         ap.error(str(exc))
 
+    from obed_edom.baseline import cache_root, preview_cache_dir  # noqa: PLC0415
+
+    resolved_cache_root = cache_root()
+    source_preview_dir = preview_cache_dir(deck_digest(args.source))
+    _log(
+        f"Preview cache: root={resolved_cache_root} "
+        f"source preview dir={source_preview_dir} "
+        f"exists={source_preview_dir.is_dir()}"
+    )
+
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
     a_deck = args.reuse_a if args.reuse_a is not None else out / "A_unflagged.key"
@@ -1736,7 +1772,7 @@ def main(argv: list[str] | None = None) -> int:
             commit=commit, deck_digest=deck_digest(a_deck), source_digest=deck_digest(args.source),
             plan=plan_a, child_resize=child_resize_a, applied=applied_a,
             missed=int(info_a.get("missed") or 0), offline_write=info_a.get("offlineWrite"),
-            spec_id_map=id_map, zorder_write=zorder_write_a,
+            spec_id_map=id_map, zorder_write=zorder_write_a, previews=info_a.get("previews"),
         )
         write_run_record(_run_record_path(a_deck), a_record)
         _log(f"Run record written -> {_run_record_path(a_deck)}")
@@ -1820,7 +1856,7 @@ def main(argv: list[str] | None = None) -> int:
             commit=commit, deck_digest=deck_digest(b_deck), source_digest=deck_digest(args.source),
             plan=plan_b, child_resize=child_resize_b, applied=applied_b,
             missed=int(info_b.get("missed") or 0), offline_write=ow_b, spec_id_map=id_map,
-            zorder_write=zorder_write_b,
+            zorder_write=zorder_write_b, previews=info_b.get("previews"),
         )
         write_run_record(_run_record_path(b_deck), b_record)
         _log(f"Run record written -> {_run_record_path(b_deck)}")
@@ -1831,6 +1867,11 @@ def main(argv: list[str] | None = None) -> int:
                 _log(f"Keynote quit between runs ({elapsed:.0f} s)")
             else:
                 _log(f"WARN: Keynote still running after {elapsed:.0f} s")
+
+    if args.reuse_a is not None or args.reuse_b is not None:
+        provenance_warning = preview_provenance_warning(a_record, b_record)
+        if provenance_warning:
+            _log(f"WARN: preview-cache provenance: {provenance_warning}")
 
     if not (ow_b.get("slides") or []):
         _log("ABORT: run B took no slide offline (OBED_AS_GEOMETRY off, or no slide "
