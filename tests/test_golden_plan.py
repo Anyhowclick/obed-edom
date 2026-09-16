@@ -33,7 +33,8 @@ from scripts.golden_plan import (  # noqa: E402
 
 from obed_edom import baseline  # noqa: E402
 from obed_edom import framing  # noqa: E402
-from obed_edom import iwa_builds, remap_keynote  # noqa: E402
+from obed_edom import iwa_builds  # noqa: E402
+from obed_edom import remap_keynote  # noqa: E402
 from obed_edom.offline_inspect import offline_wall_payload  # noqa: E402
 
 DECKS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs")
@@ -171,94 +172,66 @@ def test_golden_apply_plan_full_report_card_wall(monkeypatch: pytest.MonkeyPatch
     _gate("Full_Report_Card_Wall.key", monkeypatch, tmp_path)
 
 
-_REUSE_CHAIN = frozenset(range(123, 129))
+_FORMER_REUSE_CHAIN = frozenset(range(123, 129))
 
 
-def _pin_reuse_mode(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    for name, value in {**ENV_PINS, "OBED_SLIDE_REUSE": mode}.items():
-        if value is None:
-            monkeypatch.delenv(name, raising=False)
-        else:
-            monkeypatch.setenv(name, value)
+def test_drops_reuse_jobs_and_keeps_framing_on_full_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keynote-free capture of the RAISE10 full deck (plan Step A).
 
-
-def _capture_full_with_framing(
-    monkeypatch: pytest.MonkeyPatch,
-    mode: str,
-    original_plan,
-) -> tuple[dict, list[dict]]:
-    rows: list[dict] = []
-
-    def wrapped(*args, **kwargs):
-        out = original_plan(*args, **kwargs)
-        report = kwargs.get("framing_report")
-        if report is not None:
-            rows[:] = [dict(r) for r in report if int(r.get("slide") or 0) in _REUSE_CHAIN]
-        return out
-
-    monkeypatch.setattr(remap_keynote, "plan_payload_transforms", wrapped)
-    _pin_reuse_mode(monkeypatch, mode)
-    _wall, _tmpl, plan, _env = capture_plan(DECKS / "Full_Report_Card_Wall.key", TEMPLATE)
-    return plan, list(rows)
-
-
-def _roles_on(plan: dict, slides: frozenset[int]) -> dict[int, set[str]]:
-    out: dict[int, set[str]] = {}
-    for t in plan.get("transforms") or []:
-        slide = int(t["slide"])
-        if slide in slides:
-            out.setdefault(slide, set()).add(str(t.get("role")))
-    return out
-
-
-def test_reuse_off_drops_jobs_and_keeps_framing_on_full_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keynote-free on/off capture of the RAISE10 full deck (plan Step A).
-
-    Independent of the committed golden digest: this locks the switch, not the
-    baseline hash. Skip only when the local Full deck or template is missing.
+    Reuse-mode planning was removed; this locks the surviving non-reuse
+    path for the slides that used to be reuse-only. Skip only when the
+    local Full deck or template is missing.
     """
     deck = DECKS / "Full_Report_Card_Wall.key"
     if not deck.exists():
         pytest.skip(f"deck missing: {deck}")
     if not TEMPLATE.exists():
         pytest.skip(f"template missing: {TEMPLATE}")
+    framing_rows: list[dict] = []
     original_plan = remap_keynote.plan_payload_transforms
-    on_plan, on_framing = _capture_full_with_framing(monkeypatch, "on", original_plan)
-    off_plan, off_framing = _capture_full_with_framing(monkeypatch, "off", original_plan)
 
-    assert len(on_plan.get("reuses") or []) == 6
-    assert len(on_plan.get("groupRemoves") or []) == 206
-    assert (off_plan.get("reuses") or []) == []
-    assert (off_plan.get("groupRemoves") or []) == []
+    def wrapped(*args, **kwargs):
+        out = original_plan(*args, **kwargs)
+        report = kwargs.get("framing_report")
+        if report is not None:
+            framing_rows[:] = [
+                dict(r) for r in report if int(r.get("slide") or 0) in _FORMER_REUSE_CHAIN
+            ]
+        return out
 
-    as_geom = off_plan.get("asGeom") or {}
-    for slide in _REUSE_CHAIN:
+    monkeypatch.setattr(remap_keynote, "plan_payload_transforms", wrapped)
+    _wall, _tmpl, plan, _env = capture_plan(deck, TEMPLATE)
+
+    assert (plan.get("reuses") or []) == []
+    assert (plan.get("groupRemoves") or []) == []
+
+    as_geom = plan.get("asGeom") or {}
+    for slide in _FORMER_REUSE_CHAIN:
         assert str(slide) in as_geom, slide
 
-    on_roles = _roles_on(on_plan, _REUSE_CHAIN)
-    off_roles = _roles_on(off_plan, _REUSE_CHAIN)
-    off_counts: dict[int, int] = {}
-    for t in off_plan.get("transforms") or []:
+    roles: dict[int, set[str]] = {}
+    counts: dict[int, int] = {}
+    for t in plan.get("transforms") or []:
         slide = int(t["slide"])
-        if slide in _REUSE_CHAIN:
-            off_counts[slide] = off_counts.get(slide, 0) + 1
-    for slide in _REUSE_CHAIN:
-        assert off_counts.get(slide, 0) > 0, slide
+        if slide in _FORMER_REUSE_CHAIN:
+            counts[slide] = counts.get(slide, 0) + 1
+            roles.setdefault(slide, set()).add(str(t.get("role")))
+    for slide in _FORMER_REUSE_CHAIN:
+        assert counts.get(slide, 0) > 0, slide
         for role in ("map", "pin"):
-            if role in on_roles.get(slide, ()):
-                assert role in off_roles.get(slide, ()), (slide, role)
+            assert role in roles.get(slide, ()), (slide, role)
 
-    assert on_framing == off_framing
+    assert framing_rows, "expected framing decisions for the former reuse chain"
 
-    src_builds = iwa_builds.deck_builds(DECKS / "Full_Report_Card_Wall.key")
+    src_builds = iwa_builds.deck_builds(deck)
     live: dict[int, set[tuple[str, int]]] = {}
-    for t in off_plan.get("transforms") or []:
+    for t in plan.get("transforms") or []:
         if t.get("role") == "hide":
             continue
         slide = int(t["slide"])
-        if slide in _REUSE_CHAIN:
+        if slide in _FORMER_REUSE_CHAIN:
             live.setdefault(slide, set()).add((str(t["kind"]), int(t["kindIndex"])))
-    for slide in _REUSE_CHAIN:
+    for slide in _FORMER_REUSE_CHAIN:
         for build in (src_builds.get(slide) or {}).get("builds") or []:
             key = (str(build["kind"]), int(build["kindIndex"]))
             assert key in live.get(slide, set()), (slide, key)

@@ -2,7 +2,7 @@
 name: CG resizer — active work and retained engineering record
 overview: >-
   Consolidated 2026-09-15. W1 offline geometry is shipped and default-on. W2 offline z-order is
-  implemented and default-off pending its final live gate. This file is the single resizer plan;
+  implemented and default-on since 2026-09-15 (PR #133). This file is the single resizer plan;
   the standalone W2 plan was folded into it. Completed feature diaries live in git and the
   Obed-Edom skill, not here.
 todos:
@@ -10,22 +10,41 @@ todos:
     content: >-
       Re-run the W2 RAISE10 and Gold live gate after PRs #128 and #131. If every eligibility,
       front-block, pixel, counter, and build-order bar is green, flip OBED_ZORDER_WRITE to on.
+      DONE 2026-09-15: RAISE10 GREEN; Gold RED only slide 19 (owner-deferred); default flipped
+      on (PR #133).
+    status: completed
+  - id: w2-deletions
+    content: >-
+      Remove the GUI raise path (`obedRaiseSlide`/`obedBadgeSlide` emission), the Accessibility
+      pre-flight, and reuse step B now that the offline z-order write is the default; keeping
+      `off` working until then is NOT required — owner decides scope. Piece 1 (GUI raise path
+      out of `keynote.py`/`remap_keynote.py`), piece 2 (A/B gate + SKILL.md docs), and piece 3
+      (reuse step B) DONE 2026-09-16, integrated on one PR.
+    status: completed
+  - id: w2-ambiguous-sig-positional
+    content: >-
+      Resolve shared, non-twin signatures positionally (groupIndex-1) with a signature verify and
+      no two jobs on one id, mirroring the GUI's `obedResolveGroup` path (Gold slide 19 legend,
+      66 jobs). Now the ONLY path to a raised Gold slide 19: the GUI raise fallback is gone
+      (w2-deletions piece 1), so an unresolved shared signature stays on `zorderGui` (WARNING,
+      stack by hand) until this lands.
     status: pending
   - id: reuse-photo-placement
     content: >-
-      Diagnose the remaining reuse-slide photo/constellation placement and z-order residuals;
-      do not attribute them to W2 without measuring the saved deck.
-    status: pending
+      Closed by construction: slide reuse removed 2026-09-16 (w2-deletions piece 3). The
+      constellation residuals on Full `131,133,134,144` that used to be attributed to this
+      workstream now live under `constellation-cluster-affine`.
+    status: completed
   - id: constellation-cluster-affine
     content: >-
       Replace the constellation's one-slide affine with per-cluster sizing and template anchors
-      if the owner confirms the content changes often enough to justify automation.
+      if the owner confirms the content changes often enough to justify automation. Residual
+      reversals/placements on Full constellation slides `131,133,134,144` belong here.
     status: pending-owner-decision
   - id: residual-correctness
     content: >-
-      Resolve the remaining card-border ref floor, stat-group/template sample, parked reuse-chain
-      snapshot, uncompared framing fallback, off-slide map-label deletion, and stat bind-name
-      verification items independently.
+      Resolve the remaining card-border ref floor, stat-group/template sample, uncompared framing
+      fallback, off-slide map-label deletion, and stat bind-name verification items independently.
     status: pending
   - id: cache-and-bank-hygiene
     content: >-
@@ -48,11 +67,13 @@ W1 is complete. `OBED_OFFLINE_WRITE` defaults to `on`; `off` restores the script
 geometry path. The 2026-09-14 Full RAISE10 strict gate was green, and Gold on/off outputs matched
 by identity on all 19 slides. Do not reopen W1 from the older failed-bank narratives.
 
-W2 replaces eligible pass-2 GUI Bring-to-Front work with a surgical offline permutation of both
+W2 replaces pass-2 GUI Bring-to-Front work with a surgical offline permutation of both
 `drawablesZOrder` and `ownedDrawables`. Pieces 1–3 shipped in PR #127; the A/B gate shipped in
-PR #126. Eligible slides suppress their GUI raises, patch after pass 2 closes the deck, export on
-the later fallback open, then run `restore_source_builds` last. `OBED_ZORDER_WRITE` remains
-default `off` until the final live gate is green.
+PR #126. Pass 2 no longer raises at all (W2 piece 1): eligible slides are patched offline after
+pass 2 closes the deck, export on the later fallback open, then `restore_source_builds` runs
+last. Unresolved targets stay on source stacking (`zorderGui`), not a GUI raise. `OBED_ZORDER_WRITE`
+default flipped to `on` since 2026-09-15 (PR #133); `off` disables the offline z-order write —
+there is no GUI/Accessibility fallback path left to restore.
 
 ### W2 evidence through PR #131
 
@@ -68,32 +89,40 @@ default `off` until the final live gate is green.
   only in `OBED_ZORDER_WRITE`, not geometry mode.
 - Keynote-free recompare after PR #131: RAISE10 green with only expected warnings; Gold red only
   on slide 19's by-design legend fallback (`zorderUnresolved=66`, `zorderGui=[19]`). The final
-  live gate must verify the post-fix behavior before the default flips.
+  live gate ran 2026-09-15 — RAISE10 re-gate + A-vs-A control GREEN; final Gold re-compare at
+  main 50cb592 (`output/bank/2026-09-15/w2-gate/gold-recompare-flip.log`): every geometry bar
+  0.00px, FRONT_BLOCK_OK 16/16, identity 100%, RED only on slide 19's by-design legend fallback
+  (`zorderUnresolved=66`, `zorderGui=[19]`), owner-deferred to follow-up
+  `w2-ambiguous-sig-positional` and accepted as non-blocking. `OBED_ZORDER_WRITE` default flipped
+  to `on` 2026-09-15 (PR #133).
 
-## W2 final gate
+## W2 final gate (run 2026-09-15, passed except Gold slide 19)
 
-Run serially, on copies, with Accessibility available for genuine GUI fallbacks and with no
-already-open Keynote documents.
+Run serially, on copies, with no already-open Keynote documents. Accessibility is no longer
+required: pass 2 never raises on either arm.
 
-Gate RAISE10 slides `40,55,56,109,110,123-128` and Gold. Require:
+Gate RAISE10 slides `40,55,56,109,110,123-128` and Gold, piece-2 contract: arm A is unraised
+(pre-raise order, `zorderGui` everywhere), arm B is offline-patched. Require:
 
-- `FRONT_BLOCK_OK` on every eligible slide and the expected GUI set only;
-- zero A/B pixel difference where arm A raised correctly;
+- `FRONT_BLOCK_OK` on arm B for every eligible slide and the expected `zorderGui` set only;
+- zero A/B pixel difference on eligible slides;
 - arm B `zorderRefused`, `zorderUnresolved`, and `zorderLost` all zero for eligible slides;
-- no `raiseDead`, `raiseUnknown`, or `frontErr` on a suppressed slide;
-- an A-vs-A `SAME_ORDER=yes` control on RAISE10;
+- A-vs-B `SAME_ORDER` is observational only (A is unraised, B is patched — expected to differ);
+- an A-vs-A `SAME_ORDER=yes` control on RAISE10 (this one DOES gate);
 - identical `restore_source_builds` behavior between arms.
 
 Do not weaken eligibility to make the gate green. A slide that cannot prove a unique safe archive
 order stays on the GUI path.
 
+The owner-run live gate after the w2-deletions PR is one default-env build of RAISE10
+(`40,55,56,109,110,123-128`) + Gold, re-compared Keynote-free against the banked 2026-09-15
+`B_flagged` arms via `--reuse-a`/`--reuse-b` (v2 records load). Bars: identity 100%,
+`FRONT_BLOCK_OK` all eligible, 0.00px, `zorderGui=[19]` on Gold / `[]` on RAISE10,
+`restore_source_builds` identical.
+
 ## Active correctness backlog
 
-### Reuse photos and constellation
-
-Residual reversals/placements on Full constellation slides `131,133,134,144` belong to the reuse
-framing workstream until saved-deck evidence says otherwise. Reuse slides mint fresh drawable ids,
-so pair by stable structure/content, never id.
+### Constellation
 
 The constellation is not one affine. Each CHC cluster should scale as a unit, then land on a
 template anchor while preserving angular order around the central building. Discover membership
@@ -106,7 +135,6 @@ that yearly content churn justifies this automation before building it.
 - Card-border source-reference floor: output refs 10–31 on the Full wall still refuse in the
   residual case. Keep the source-ref census as a damage alarm.
 - Stat-group/template sample and stat bind-name verification remain independent correctness work.
-- The reuse-chain parked snapshot needs a concrete reproducer before implementation.
 - Uncompared framing fallback must report rather than silently claim parity.
 - Off-slide map-label deletion stays parked until a current output reproduces it.
 

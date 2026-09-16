@@ -10,10 +10,7 @@ from scripts.offline_write_ab import (
     ZORDER_SCHEMA_KEYS,
     ZORDER_SURFACE_KEYS,
     ZORDER_ZERO_KEYS,
-    badge_fallback_exempt,
-    badge_fallback_hard_for,
     claimed_patched_slides,
-    expect_gui_raises,
     expected_zorder_sets,
     front_block_ok,
     front_targets_for_slide,
@@ -21,7 +18,6 @@ from scripts.offline_write_ab import (
     plan_parity,
     run_record,
     same_order,
-    suppressed_raise_reasons,
     zorder_counter_reasons,
     zorder_counter_summary,
     zorder_schema_reasons,
@@ -217,30 +213,11 @@ def test_claimed_patched_slides_count_is_empty_not_crash():
     assert claimed_patched_slides(None) == set()
 
 
-def test_badge_fallback_exempt_false_when_only_stat_only_slide_patched():
-    # B patched slide 109 (no badgeRaises row) while every badge-bearing slide (56)
-    # stayed on the GUI — a genuine badgeFallback regression on 56 must still gate.
-    zw = _zorder_write(slides=[109])
-    assert badge_fallback_exempt(zw, [{"slide": 56}]) is False
-
-
-def test_badge_fallback_exempt_true_when_badge_bearing_slide_patched():
-    zw = _zorder_write(slides=[56, 109])
-    assert badge_fallback_exempt(zw, [{"slide": 56}]) is True
-
-
-def test_badge_fallback_exempt_false_on_no_badge_raises():
-    zw = _zorder_write(slides=[109])
-    assert badge_fallback_exempt(zw, []) is False
-    assert badge_fallback_exempt(zw, None) is False
-
-
 def test_inconsistent_zorder_slides_exemption_off_and_gate_red():
     # slides=[56], zorderSlides=0 — B's own counters disagree about whether it
-    # actually patched anything. The exemption must stay off, and the z-order
-    # gate must report a RED reason for the inconsistency.
+    # actually patched anything. The z-order gate must report a RED reason for
+    # the inconsistency.
     zw = _zorder_write(slides=[56], zorderSlides=0)
-    assert badge_fallback_exempt(zw, [{"slide": 56}]) is False
     reasons = zorder_write_reasons(zw, {56}, compared_slides=[56])
     assert any("zorderSlides" in r for r in reasons)
 
@@ -252,12 +229,6 @@ def test_malformed_slides_count_does_not_crash_orchestration():
     reasons = zorder_write_reasons(zw, {40, 55}, compared_slides=[40, 55])
     assert suppressed == set()
     assert any("not a slide list" in r for r in reasons)
-    assert expect_gui_raises(
-        [{"slide": 40, "childSig": "n=1"}], [{"slide": 55}], zw,
-    ) is True
-    assert suppressed_raise_reasons(
-        {"tokens": {"raiseDead": ["s=40,idx=1"]}}, suppressed,
-    ) == []
 
 
 def test_zorder_write_reasons_refused_belongs_on_gui():
@@ -275,40 +246,6 @@ def test_zorder_counter_summary_surfaces_piece3_names():
     for key in ZORDER_SURFACE_KEYS:
         assert f"{key}=" in line
     assert " exported=" not in line
-
-
-def test_suppressed_raise_reasons_from_tokens_and_front_err():
-    result = {
-        "tokens": {"raiseDead": ["s=40,idx=1"], "raiseUnknown": ["s=55,idx=2"]},
-        "frontErr": "[-1719@raise,s=56,idx=1]",
-        "raw": "frontErr=[-1719@raise,s=56,idx=1] exported=false",
-    }
-    reasons = suppressed_raise_reasons(result, {40, 55, 56})
-    assert len(reasons) == 3
-    assert any("raiseDead(s=40)" in r for r in reasons)
-    assert any("raiseUnknown(s=55)" in r for r in reasons)
-    assert any("frontErr s=56" in r for r in reasons)
-    assert all(" exported=" not in r for r in reasons)
-
-
-def test_suppressed_raise_reasons_ignores_non_suppressed_slides():
-    result = {
-        "tokens": {"raiseDead": ["s=40,idx=1"]},
-        "frontErr": "[-1719@raise,s=99,idx=1]",
-        "raw": "",
-    }
-    assert suppressed_raise_reasons(result, {55}) == []
-    assert suppressed_raise_reasons(result, []) == []
-    assert suppressed_raise_reasons(None, {40}) == []
-
-
-def test_expect_gui_raises_false_when_every_raise_slide_is_suppressed():
-    jobs = [{"slide": 40, "childSig": "n=1"}, {"slide": 55, "childSig": "n=2"}]
-    badges = [{"slide": 56}]
-    assert expect_gui_raises(jobs, badges, {"slides": [40, 55, 56]}) is False
-    assert expect_gui_raises(jobs, badges, {"slides": [40]}) is True
-    assert expect_gui_raises(jobs, badges, None) is True
-    assert expect_gui_raises([], [], {"slides": [40]}) is False
 
 
 def test_front_targets_stat_then_badge_order():
@@ -397,48 +334,6 @@ def test_persisted_raise_jobs_reads_both_from_record():
     ) == ([{"slide": 1}], [{"slide": 2}])
 
 
-def test_badge_fallback_exempt_from_record_shaped_plan_via_persisted_raise_jobs():
-    # A trimmed, reused run record's ``plan`` sub-dict has neither key — the rows live
-    # at the record's top level (run_record). Reading `plan.get("badgeRaises")` directly
-    # (the old bug) sees None and the exemption never fires; routing through
-    # persisted_raise_jobs finds the top-level rows.
-    plan = {"transforms": [], "reuses": [], "suppressGeometry": None}
-    record = {"plan": plan, "statJobs": [], "badgeRaises": [{"slide": 56}]}
-    jobs = persisted_raise_jobs(plan, record)
-    zw = _zorder_write(slides=[56, 109])
-    assert badge_fallback_exempt(zw, jobs[1]) is True
-
-
-def test_badge_fallback_exempt_from_live_shaped_plan_via_persisted_raise_jobs():
-    # A fresh plan_out dict (live run, no reuse) carries both keys directly.
-    plan = {"transforms": [], "statJobs": [], "badgeRaises": [{"slide": 56}]}
-    jobs = persisted_raise_jobs(plan, {})
-    zw = _zorder_write(slides=[56, 109])
-    assert badge_fallback_exempt(zw, jobs[1]) is True
-
-
-def test_badge_fallback_hard_for_exempt_on_reused_record_shape():
-    # Reused-record shape: rows live at the record's top level, plan carries neither
-    # key. The old bug (`plan_b.get("badgeRaises")`) would see None here and stay hard.
-    plan = {"transforms": [], "reuses": [], "suppressGeometry": None}
-    record = {"plan": plan, "statJobs": [], "badgeRaises": [{"slide": 56}]}
-    zw = _zorder_write(slides=[56, 109])
-    assert badge_fallback_hard_for(plan, record, zw) is False
-
-
-def test_badge_fallback_hard_for_exempt_on_live_plan_shape():
-    plan = {"transforms": [], "statJobs": [], "badgeRaises": [{"slide": 56}]}
-    zw = _zorder_write(slides=[56, 109])
-    assert badge_fallback_hard_for(plan, {}, zw) is False
-
-
-def test_badge_fallback_hard_for_hard_when_rows_in_neither_place():
-    plan = {"transforms": [], "reuses": [], "suppressGeometry": None}
-    record = {"plan": plan}
-    zw = _zorder_write(slides=[56, 109])
-    assert badge_fallback_hard_for(plan, record, zw) is True
-
-
 def test_plan_parity_w2_both_arms_suppress_compared_set():
     plan = {"transforms": [{"slide": 1}], "reuses": [], "suppressGeometry": [5, 6]}
     assert plan_parity(plan, plan, compared_slides=[5, 6]) == []
@@ -454,10 +349,23 @@ def test_run_record_persists_zorder_write_and_job_lists():
         offline_write={"slides": [1], "specs": {1: []}},
         spec_id_map={},
         zorder_write={"zorderSlides": 1, "slides": [3], "zorderRefused": 0},
-        expect_raises=False,
     )
     assert record["zorderWrite"]["zorderSlides"] == 1
     assert record["statJobs"] == [{"slide": 3, "childSig": "n=1"}]
     assert record["badgeRaises"] == [{"slide": 8}]
-    assert record["expectRaises"] is False
     assert "specs" not in record["offlineWrite"]
+
+
+def test_same_order_no_and_front_block_ok_yes_is_green():
+    # W2: A never raises (OBED_ZORDER_WRITE=off), so a scrambled A-vs-B
+    # drawablesZOrder is expected on every slide -- SAME_ORDER(A-vs-B)=no must
+    # not by itself make the z-order verdict RED. FRONT_BLOCK_OK is the real bar.
+    targets = ["t1", "t2"]
+    ids_a = ["x", "y", "t1", "t2"]  # A: unraised, targets happen to already trail
+    ids_b = ["y", "x", "t1", "t2"]  # B: offline-patched, non-target order differs
+    assert same_order(ids_a, ids_b) is False
+    verdict = zorder_slide_verdict(ids_a, ids_b, targets)
+    assert verdict["sameOrder"] is False
+    assert verdict["frontBlockOk"] is True
+    zw = _zorder_write(slides=[1], zorderGui=[])
+    assert zorder_write_reasons(zw, {1}, compared_slides=[1]) == []

@@ -12,8 +12,9 @@ from obed_edom.keynote import _build_stat_finalize_script
 from test_remap_keynote import _payloads, _touch_paths
 
 
-def test_zorder_write_mode_default_off():
-    assert rk.zorder_write_mode("", offline_mode="on") == "off"
+def test_zorder_write_mode_default_on():
+    assert rk.zorder_write_mode("", offline_mode="on") == "on"
+    assert rk.zorder_write_mode("off", offline_mode="on") == "off"
 
 
 def test_zorder_write_mode_on():
@@ -24,8 +25,8 @@ def test_zorder_write_mode_verify():
     assert rk.zorder_write_mode("verify", offline_mode="on") == "verify"
 
 
-def test_zorder_write_mode_garbage_falls_back_off():
-    assert rk.zorder_write_mode("bogus", offline_mode="on") == "off"
+def test_zorder_write_mode_garbage_falls_back_on():
+    assert rk.zorder_write_mode("bogus", offline_mode="on") == "on"
 
 
 def test_zorder_write_mode_forced_off_without_iwa_extra(monkeypatch):
@@ -50,47 +51,19 @@ def _jobs():
     return [{"slide": 1, "childSig": "s1", "groupIndex": 1, "captionPt": 10.0}]
 
 
-def _badges():
-    return [{"slide": 2, "kind": "shape", "index": 1, "x": 0, "y": 0, "w": 10, "h": 10}]
-
-
-def test_suppress_raises_drops_obed_raise_and_badge_lines(tmp_path):
+def test_no_raise_or_badge_handlers_or_calls_emitted(tmp_path):
     dest = tmp_path / "out.key"
-    baseline = _build_stat_finalize_script(dest, _jobs(), {}, badge_raises=_badges())
-    suppressed = _build_stat_finalize_script(
-        dest, _jobs(), {}, badge_raises=_badges(), suppress_raises={1, 2},
-    )
-    assert "my obedRaiseSlide(1)" in baseline
-    assert "my obedBadgeSlide(2," in baseline
-    assert "my obedRaiseSlide(1)" not in suppressed
-    assert "my obedBadgeSlide(2," not in suppressed
+    script = _build_stat_finalize_script(dest, _jobs(), {})
+    for token in ("obedRaiseSlide", "obedBadgeSlide", "obedFront", "obedRaiseItem", "obedBadgeFind"):
+        assert token not in script
 
 
-def test_suppress_raises_empty_is_character_identical(tmp_path):
+def test_resolve_group_and_stat_job_still_emitted(tmp_path):
     dest = tmp_path / "out.key"
-    a = _build_stat_finalize_script(dest, _jobs(), {}, badge_raises=_badges())
-    b = _build_stat_finalize_script(dest, _jobs(), {}, badge_raises=_badges(), suppress_raises=set())
-    assert a == b
-
-
-def test_suppress_raises_partial_leaves_other_slide_lines(tmp_path):
-    dest = tmp_path / "out.key"
-    jobs = [
-        {"slide": 1, "childSig": "s1", "groupIndex": 1, "captionPt": 10.0},
-        {"slide": 3, "childSig": "s3", "groupIndex": 1, "captionPt": 10.0},
-    ]
-    script = _build_stat_finalize_script(dest, jobs, {}, suppress_raises={1})
-    assert "my obedRaiseSlide(1)" not in script
-    assert "my obedRaiseSlide(3)" in script
-
-
-def test_suppress_raises_does_not_touch_font_or_dedup_lines(tmp_path):
-    dest = tmp_path / "out.key"
-    a = _build_stat_finalize_script(dest, _jobs(), {})
-    b = _build_stat_finalize_script(dest, _jobs(), {}, suppress_raises={1})
-    stat_job_lines_a = [l for l in a.splitlines() if "obedStatJob(" in l]
-    stat_job_lines_b = [l for l in b.splitlines() if "obedStatJob(" in l]
-    assert stat_job_lines_a == stat_job_lines_b
+    script = _build_stat_finalize_script(dest, _jobs(), {})
+    assert "on obedResolveGroup(" in script
+    assert "on obedStatJob(" in script
+    assert "my obedStatJob(" in script
 
 
 def test_close_emits_closed_token_after_close_statement():
@@ -341,7 +314,9 @@ def _wire_zorder_remap(
     monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
     monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
     monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(
+        rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True}
+    )
     monkeypatch.setattr(rk, "read_template_stat_sizes", lambda *a, **k: {})
     monkeypatch.setattr(rk.offline_write, "_offline_write_slides", lambda *a, **k: {1})
     monkeypatch.setattr(rk.offline_write, "run_offline_write", lambda *a, **k: {"refused": []})
@@ -371,11 +346,8 @@ def _wire_zorder_remap(
 
     stat_finalize_calls = []
 
-    def fake_stat_finalize(dest, jobs, size_map, export_dir=None, group_removes=None,
-                            badge_raises=None, suppress_raises=None):
-        stat_finalize_calls.append(
-            {"export_dir": export_dir, "suppress_raises": suppress_raises}
-        )
+    def fake_stat_finalize(dest, jobs, size_map, export_dir=None, group_removes=None):
+        stat_finalize_calls.append({"export_dir": export_dir})
         return {
             "ok": stat_finalize_ok, "closed": stat_finalize_closed,
             "done": 0, "jobs": 0, "exported": False,
@@ -385,7 +357,7 @@ def _wire_zorder_remap(
     return stat_finalize_calls
 
 
-def test_orchestration_suppress_raises_equals_slides_patched(monkeypatch, tmp_path):
+def test_orchestration_patched_slide_set(monkeypatch, tmp_path):
     import obed_edom.remap_keynote as rk
 
     monkeypatch.setenv("OBED_ZORDER_WRITE", "on")
@@ -399,7 +371,7 @@ def test_orchestration_suppress_raises_equals_slides_patched(monkeypatch, tmp_pa
         wall_payload=wall_payload, template_payload=template_payload, log=lambda m: None,
     )
 
-    assert stat_finalize_calls[0]["suppress_raises"] == set(info["zorderWrite"]["slides"])
+    assert info["zorderWrite"]["slides"] == [1]
     assert stat_finalize_calls[0]["export_dir"] is None
 
 
@@ -407,9 +379,8 @@ def test_orchestration_export_dir_threaded_iff_knob_on(monkeypatch, tmp_path):
     import obed_edom.remap_keynote as rk
 
     monkeypatch.setenv("OBED_ZORDER_WRITE", "off")
-    stat_finalize_calls = _wire_zorder_remap(monkeypatch, rk, child_resize=[], badge_raises=[{
-        "slide": 1, "kind": "shape", "index": 1, "x": 0, "y": 0, "w": 1, "h": 1,
-    }])
+    child_resize = [{"slide": 1, "groupIndex": 1, "childSig": "a"}]
+    stat_finalize_calls = _wire_zorder_remap(monkeypatch, rk, child_resize=child_resize, badge_raises=[])
     source, template, dest = _touch_paths(tmp_path)
     wall_payload, template_payload = _payloads()
 
@@ -440,6 +411,120 @@ def test_orchestration_export_dir_folded_to_none_when_knob_on(monkeypatch, tmp_p
     assert stat_finalize_calls[0]["export_dir"] is None
 
 
+def test_orchestration_badge_only_skips_pass2_and_patches_via_fallback(monkeypatch, tmp_path):
+    """A badge-only deck (no stat groups, no dedup) has no pass-2 work: the stat-finalize
+    session must not run (badge_raises alone no longer forces it open), the z-order patch
+    must still run on the badge target, and `exported` stays False (see
+    test_orchestration_badge_only_falls_back_to_exporter_via_remap_and_inspect for the
+    `remap_and_inspect` fallback-export claim)."""
+    import obed_edom.remap_keynote as rk
+
+    monkeypatch.setenv("OBED_ZORDER_WRITE", "on")
+    badge_raises = [
+        {"slide": 1, "kind": "shape", "index": 1, "x": 0, "y": 0, "w": 10, "h": 10},
+    ]
+    stat_finalize_calls = _wire_zorder_remap(
+        monkeypatch, rk, child_resize=[], badge_raises=badge_raises,
+    )
+    source, template, dest = _touch_paths(tmp_path)
+    wall_payload, template_payload = _payloads()
+
+    info = rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload, log=lambda m: None,
+    )
+
+    assert stat_finalize_calls == []
+    assert info["childResize"] is None
+    assert info["exported"] is False
+    assert info["zorderWrite"]["slides"] == [1]
+
+
+def test_orchestration_badge_only_falls_back_to_exporter_via_remap_and_inspect(
+    monkeypatch, tmp_path,
+):
+    """When pass 2 never runs (badge-only) `exported` stays False, so
+    `remap_and_inspect(validate=False)` must call the standalone exporter itself
+    to produce previews."""
+    import obed_edom.remap_keynote as rk
+
+    monkeypatch.setenv("OBED_ZORDER_WRITE", "on")
+    badge_raises = [
+        {"slide": 1, "kind": "shape", "index": 1, "x": 0, "y": 0, "w": 10, "h": 10},
+    ]
+    _wire_zorder_remap(monkeypatch, rk, child_resize=[], badge_raises=badge_raises)
+    source, template, dest = _touch_paths(tmp_path)
+    wall_payload, template_payload = _payloads()
+
+    export_calls = []
+    monkeypatch.setattr(
+        rk, "export_slide_images",
+        lambda dest, export_dir: export_calls.append((dest, export_dir)) or "",
+    )
+    monkeypatch.setattr(rk, "preview_pngs", lambda export_dir: [])
+
+    export_dir = tmp_path / "previews"
+    info = rk.remap_and_inspect(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload,
+        export_dir=export_dir, validate=False, log=lambda m: None,
+    )
+
+    assert info["exported"] is False
+    assert export_calls == [(dest, export_dir)]
+
+
+def test_orchestration_non_empty_zorder_gui_warns_with_counts_and_patches_the_rest(
+    monkeypatch, tmp_path,
+):
+    """A slide the offline resolver leaves un-raised (`zorderGui`) must not abort the
+    run or need any env escape hatch: the resolvable slide still gets patched, the
+    WARNING names the exact per-slide target count, and `zorderGui` survives into the
+    result untouched."""
+    import obed_edom.remap_keynote as rk
+
+    monkeypatch.setenv("OBED_ZORDER_WRITE", "on")
+    child_resize = [
+        {"slide": 1, "groupIndex": 1, "childSig": "a"},
+        {"slide": 2, "groupIndex": 1, "childSig": "b"},
+    ]
+    _wire_zorder_remap(monkeypatch, rk, child_resize=child_resize, badge_raises=[])
+    monkeypatch.setattr(
+        rk.offline_write, "zorder_eligible_slides",
+        lambda *a, **k: (
+            {1: {"stat": ["statX"], "badge": []}},
+            {"zorderUnresolved": 0, "zorderRefused": 0, "zorderGui": [2]},
+        ),
+    )
+    zorder_calls = []
+
+    def fake_run_offline_zorder(dest, mode, targets_by_slide, say):
+        zorder_calls.append(targets_by_slide)
+        return {
+            "mode": "on", "slides": [1], "zorderSlides": 1, "zorderStatRaised": 1,
+            "zorderBadgeRaised": 0, "zorderNoop": 0, "zorderRefused": 0, "zorderLost": 0,
+        }
+
+    monkeypatch.setattr(rk.offline_write, "run_offline_zorder", fake_run_offline_zorder)
+    source, template, dest = _touch_paths(tmp_path)
+    wall_payload, template_payload = _payloads()
+    said = []
+
+    info = rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload, log=said.append,
+    )
+
+    assert info["zorderWrite"]["slides"] == [1]
+    assert info["zorderWrite"]["zorderGui"] == [2]
+    warnings = [s for s in said if s.startswith("WARNING zorder:")]
+    assert len(warnings) == 1
+    assert "slide 2 (1 target(s))" in warnings[0]
+    assert "OBED_ZORDER_GUI_ALLOW" not in " ".join(said)
+    assert len(zorder_calls) == 1
+    assert set(zorder_calls[0]) == {1}
+
+
 def test_orchestration_post_pass2_refusal_raises(monkeypatch, tmp_path):
     import obed_edom.remap_keynote as rk
 
@@ -465,7 +550,7 @@ def test_orchestration_post_pass2_refusal_raises(monkeypatch, tmp_path):
     wall_payload, template_payload = _payloads()
     said = []
 
-    with pytest.raises(RuntimeError, match="suppressed slide"):
+    with pytest.raises(RuntimeError, match="target slide"):
         rk.remap_keynote(
             source, dest, template=template,
             wall_payload=wall_payload, template_payload=template_payload, log=said.append,
@@ -499,7 +584,7 @@ def test_orchestration_two_lost_ids_emits_detail_then_raises(monkeypatch, tmp_pa
     wall_payload, template_payload = _payloads()
     said = []
 
-    with pytest.raises(RuntimeError, match="suppressed slide"):
+    with pytest.raises(RuntimeError, match="target slide"):
         rk.remap_keynote(
             source, dest, template=template,
             wall_payload=wall_payload, template_payload=template_payload, log=said.append,

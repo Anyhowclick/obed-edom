@@ -50,6 +50,7 @@ from obed_edom.maps_keynote import (
     dsk_item,
     dsk_ops,
     export_maps_job,
+    fit_morph_plate,
     maps_export_dests,
     maps_export_stem,
     hop_capture_size,
@@ -1303,7 +1304,8 @@ def test_coerce_keeps_dissolve_on_style_mismatch():
 def test_coerce_uses_strictest_cg_transition_requirement():
     a = _slide("s1", _camera(3.0, 101.0, 8))
     b = _slide("s2", _camera(3.0, 102.0, 8))
-    b["cg"] = {"camera": _camera(3.0, 102.0, 10.1), "style": "positron", "highlights": [], "churches": []}
+    pitched = {**_camera(3.0, 102.0, 8), "pitch": 20.0}
+    b["cg"] = {"camera": pitched, "style": "positron", "highlights": [], "churches": []}
     movie = coerce_link_kinds([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7}])[0]
     assert movie["kind"] == "movie"
     assert movie["duration"] == 1.7
@@ -1489,22 +1491,45 @@ def test_split_cg_movie_is_direct_1920_in_both_directions(tmp_path: Path):
     assert (legacy_to_split["x"], legacy_to_split["w"]) == (0, 1920)
 
 
-def test_oversized_morph_becomes_movie():
+def test_oversized_morph_is_fitted_not_movie():
     cam_a, cam_b = _pan_camera(8, 800)
     a = _slide("s1", cam_a, includeSidePanels=True)
     b = _slide("s2", cam_b, includeSidePanels=True)
     links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
-    geom = morph_plate_geom([a["camera"], b["camera"]])
-    assert geom is not None
-    assert max(geom["plateW"], geom["plateH"]) > 8192
+    native = morph_plate_geom([a["camera"], b["camera"]])
+    assert native is not None
+    assert max(native["plateW"], native["plateH"]) > 8192
+    fitted = fit_morph_plate(native)
+    assert max(fitted["plateW"], fitted["plateH"]) <= 8192
     plates, next_links = assign_morph_plates([a, b], links)
-    assert plates == {}
-    assert next_links[0]["kind"] == "movie"
-    assert "plateId" not in next_links[0]
+    assert next_links[0]["kind"] == "morph"
+    plate_id = next_links[0]["plateId"]
+    assert plate_id in plates
+    assert max(float(plates[plate_id]["plateW"]), float(plates[plate_id]["plateH"])) <= 8192
+    place_a = plate_placement(a["camera"], plates[plate_id], width=WALL_WIDTH)
+    place_b = plate_placement(b["camera"], plates[plate_id], width=WALL_WIDTH)
+    assert place_a["w"] == place_b["w"]
+    assert place_a["w"] > WALL_WIDTH
     plan = maps_export_plan([a, b], links)
-    assert plan["links"][0]["kind"] == "movie"
-    assert {row["slideId"] for row in plan["stills"]} == {"s1", "s2"}
-    assert plan["plates"] == []
+    assert plan["links"][0]["kind"] == "morph"
+    assert plan["stills"] == []
+    assert len(plan["plates"]) == 1
+    assert max(plan["plates"][0]["plateW"], plan["plates"][0]["plateH"]) <= 8192
+
+
+def test_zoom_in_morph_plate_overflows_the_frame():
+    a = _slide("s1", _camera(3.0, 101.0, 10), includeSidePanels=False)
+    b = _slide("s2", _camera(3.0, 101.0, 12), includeSidePanels=False)
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
+    native = morph_plate_geom([a["camera"], b["camera"]], widths=[3840.0, 3840.0])
+    assert native is not None
+    assert max(native["plateW"], native["plateH"]) > 8192
+    plates, next_links = assign_morph_plates([a, b], links)
+    assert next_links[0]["kind"] == "morph"
+    geom = plates[next_links[0]["plateId"]]
+    assert max(float(geom["plateW"]), float(geom["plateH"])) <= 8192
+    place_close = plate_placement(b["camera"], geom, width=3840)
+    assert place_close["w"] > 3840
 
 
 def test_missing_export_rasters_raise(tmp_path: Path):

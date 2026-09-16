@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
-import os
 import re
 import shutil
 from pathlib import Path
@@ -775,70 +773,14 @@ _STAT_ACCUMULATORS = (
     "sizeSkips",
     "dedupDeleted",
     "dedupShortfall",
-    "frontRaised",
-    "frontErr",
     "report",
-    "raiseTargets",
     "claimed",
     "sigFallbacks",
     "unresolved",
-    "badgeFallbacks",
-    "badgeUnresolved",
-    "badgeMoved",
-    "badgeFrontDead",
-    "raiseMoved",
-    "raiseDead",
-    "raiseUnknown",
-    "raiseBlindCount",
-    "raiseVacuous",
-    "raiseRetried",
-    "raiseClickRetried",
-    "lastFrontBlind",
 )
-
-# Position always matches; w/h only match where the live frame isn't Keynote's own
-# render cache. kind -> (matchW, matchH).
-_BADGE_MATCH = {
-    "shape": (True, True), "image": (True, True), "group": (True, True), "movie": (True, True),
-    "line": (True, False), "text": (False, False),
-}
-
-
-def _as_fixed(value: float) -> str:
-    """Fixed-point AppleScript numeric literal -- Python's default float repr can emit
-    scientific notation (e.g. ``1e-05``), which osacompile does not parse as a number."""
-    return f"{float(value):.3f}"
-
-
-def _raise_settle_bounds() -> tuple[float, float]:
-    """(settle_min, settle_max) for the bounded readiness poll in obedFront, seconds.
-
-    `settle_min` is the delay before the first `enabled` read and never shortens below
-    today's 0.35 s. `settle_max` is the poll ceiling on top of it; unlike settle_min it
-    may be set to 0 (``OBED_RAISE_SETTLE_MAX=0``) to disable polling entirely -- the
-    mandatory 0.2 s post-click delay stays hardcoded regardless of either env var."""
-    try:
-        settle_min = float(os.environ.get("OBED_RAISE_SETTLE_MIN", "0.35"))
-        if not math.isfinite(settle_min):
-            raise ValueError
-    except ValueError:
-        settle_min = 0.35
-    settle_min = max(0.35, settle_min)
-    try:
-        settle_max = float(os.environ.get("OBED_RAISE_SETTLE_MAX", "1.5"))
-        if not math.isfinite(settle_max) or settle_max < 0:
-            raise ValueError
-    except ValueError:
-        settle_max = 1.5
-    return settle_min, settle_max
 
 
 def _stat_job_handlers() -> list[str]:
-    """Index verified by content; ascending raise, decrement gated on a verified landing.
-    Depends on obedBadgeFind/obedKindCount/obedTopReal, defined later in this list --
-    fine at runtime since AppleScript hoists handlers."""
-    settle_min, settle_max = _raise_settle_bounds()
-    retry_settle = max(1.0, settle_min * 3)
     lines = [
         "on obedSlideSigs(slideNo)",
         "  global theDoc",
@@ -928,10 +870,9 @@ def _stat_job_handlers() -> list[str]:
         "  end if",
         "end obedResolveGroup",
         "on obedStatJob(slideNo, sigs, gi, targetSig, s, allowFallback, leafPt)",
-        "  global theDoc, doneJobs, skipJobs, sized, sizeSkips, report, raiseTargets",
+        "  global theDoc, doneJobs, skipJobs, sized, sizeSkips, report",
         "  set _gi to my obedResolveGroup(slideNo, sigs, gi, targetSig, allowFallback)",
         "  if _gi is 0 then return",
-        "  set end of raiseTargets to {sl:slideNo, idx:_gi}",
         "  " + _keynote_tell(),
         "    try",
         "      set g to group _gi of slide slideNo of theDoc",
@@ -951,409 +892,6 @@ def _stat_job_handlers() -> list[str]:
         "    end try",
         "  end tell",
         "end obedStatJob",
-        # Ascending raise order (Bring to Front appends, so final stacking equals raise
-        # sequence). Addressing is by decrement arithmetic gated on a verified landing --
-        # duplicate signatures on this deck rule out re-resolving each target instead.
-        # A slide is abandoned (unknown branch) rather than guessed once the arithmetic's
-        # input (the liveness probe) stops confirming what happened.
-        "on obedRaiseSlide(slideNo)",
-        "  global theDoc, raiseTargets, raiseMoved, raiseDead, raiseUnknown, "
-        "raiseVacuous, raiseRetried, report",
-        "  set _rem to {}",
-        "  repeat with _e in raiseTargets",
-        "    set _r to contents of _e",
-        "    if (sl of _r) is slideNo then set end of _rem to (idx of _r)",
-        "  end repeat",
-        "  if (count of _rem) is 0 then return",
-        "  set _top to my obedTopReal(slideNo, \"group\", my obedKindCount(slideNo, \"group\"))",
-        "  repeat while (count of _rem) > 0",
-        "    set _mn to item 1 of _rem",
-        "    repeat with _k from 2 to count of _rem",
-        "      if (item _k of _rem) < _mn then set _mn to item _k of _rem",
-        "    end repeat",
-        "    if _mn is _top then",
-        '      set report to report & " raiseVacuous(s=" & slideNo & ",idx=" & _mn & ")"',
-        "      set raiseVacuous to raiseVacuous + 1",
-        "    end if",
-        "    set _f to my obedGroupFrame(slideNo, _mn)",
-        "    set _found to false",
-        "    if _f is not missing value then",
-        "      " + _keynote_tell(),
-        "        try",
-        "          set selection of theDoc to {group _mn of slide slideNo of theDoc}",
-        "          set _found to true",
-        "        end try",
-        "      end tell",
-        "    end if",
-        "    if not _found then",
-        '      set report to report & " raiseUnknown(s=" & slideNo & ",idx=" & _mn & ")"',
-        "      set raiseUnknown to raiseUnknown + (count of _rem)",
-        "      return",
-        "    end if",
-        "    my obedFront(\"raise\", slideNo, _mn)",
-        "    set _at to my obedBadgeFind(slideNo, \"group\", _top, fx of _f, fy of _f, fw of _f, fh of _f, true, true, false)",
-        "    if (_mn is not _top) and (_at is _mn) then",
-        "      set _at2 to my obedRaiseRetry(slideNo, _mn, _top, _f)",
-        "      if _at2 is _top then set raiseRetried to raiseRetried + 1",
-        "      set _at to _at2",
-        "    end if",
-        "    if _at is _top then",
-        "      set raiseMoved to raiseMoved + 1",
-        "      set _new to {}",
-        "      repeat with _k from 1 to count of _rem",
-        "        if (item _k of _rem) is not _mn then set end of _new to (item _k of _rem) - 1",
-        "      end repeat",
-        "      set _rem to _new",
-        "    else if _at is _mn then",
-        '      set report to report & " raiseDead(s=" & slideNo & ",idx=" & _mn & ")"',
-        "      set raiseDead to raiseDead + 1",
-        "      set _new to {}",
-        "      repeat with _k from 1 to count of _rem",
-        "        if (item _k of _rem) is not _mn then set end of _new to (item _k of _rem)",
-        "      end repeat",
-        "      set _rem to _new",
-        "    else",
-        '      set report to report & " raiseUnknown(s=" & slideNo & ",idx=" & _mn & ")"',
-        "      set raiseUnknown to raiseUnknown + (count of _rem)",
-        "      return",
-        "    end if",
-        "  end repeat",
-        "end obedRaiseSlide",
-        # One retry on a verified dead raise: re-assert the selection, wait a settle 3x
-        # today's floor (never below 1.0 s), front again, re-probe. Additive -- a failed
-        # reselect or a still-dead probe returns the same outcome the caller already had,
-        # so this can only turn a dead raise into a landed one, never invent a guess.
-        "on obedRaiseRetry(slideNo, _mn, _top, _f)",
-        "  global theDoc",
-        "  set _found to false",
-        "  " + _keynote_tell(),
-        "    try",
-        "      set selection of theDoc to {group _mn of slide slideNo of theDoc}",
-        "      set _found to true",
-        "    end try",
-        "  end tell",
-        "  if not _found then return _mn",
-        f"  delay {_as_fixed(retry_settle)}",
-        '  my obedFront("raise", slideNo, _mn)',
-        "  return my obedBadgeFind(slideNo, \"group\", _top, fx of _f, fy of _f, fw of _f, "
-        "fh of _f, true, true, false)",
-        "end obedRaiseRetry",
-        "on obedWithinTol(a, b, tol)",
-        "  set _d to a - b",
-        "  if _d < 0 then set _d to -_d",
-        "  return _d <= tol",
-        "end obedWithinTol",
-        "on obedFrameMatches(px, py, pw, ph, fx, fy, fw, fh, tol, matchW, matchH)",
-        "  if not (my obedWithinTol(px, fx, tol) and my obedWithinTol(py, fy, tol)) then",
-        "    return false",
-        "  end if",
-        "  if matchW and not (my obedWithinTol(pw, fw, tol)) then",
-        "    return false",
-        "  end if",
-        "  if matchH and not (my obedWithinTol(ph, fh, tol)) then",
-        "    return false",
-        "  end if",
-        "  return true",
-        "end obedFrameMatches",
-        # Every kind resolves by frame (direct-index guard, then a unique bulk-scan hit),
-        # never a blind index. countFallback: only phase 2's actual raise counts against
-        # badgeFallbacks, not the resolve/liveness checks.
-        "on obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, countFallback)",
-        "  global theDoc, badgeFallbacks",
-        "  set _tol to 3",
-        "  set _hit to 0",
-        "  " + _keynote_tell(),
-        "    try",
-        "      tell slide slideNo of theDoc",
-        "        set _match to false",
-        "        try",
-        '          if theKind is "shape" then',
-        "            set _p to position of shape idx",
-        "            set _w to width of shape idx",
-        "            set _h to height of shape idx",
-        '          else if theKind is "image" then',
-        "            set _p to position of image idx",
-        "            set _w to width of image idx",
-        "            set _h to height of image idx",
-        '          else if theKind is "text" then',
-        "            set _p to position of text item idx",
-        "            set _w to width of text item idx",
-        "            set _h to height of text item idx",
-        '          else if theKind is "line" then',
-        "            set _p to position of line idx",
-        "            set _w to width of line idx",
-        "            set _h to height of line idx",
-        '          else if theKind is "group" then',
-        "            set _p to position of group idx",
-        "            set _w to width of group idx",
-        "            set _h to height of group idx",
-        '          else if theKind is "movie" then',
-        "            set _p to position of movie idx",
-        "            set _w to width of movie idx",
-        "            set _h to height of movie idx",
-        "          end if",
-        "          set _match to my obedFrameMatches(item 1 of _p, item 2 of _p, _w, _h, fx, fy, fw, fh, _tol, matchW, matchH)",
-        "        end try",
-        "        if _match then",
-        "          set _hit to idx",
-        "        else",
-        "          set _positions to missing value",
-        "          try",
-        '            if theKind is "shape" then',
-        "              set _positions to position of every shape",
-        "              set _widths to width of every shape",
-        "              set _heights to height of every shape",
-        '            else if theKind is "image" then',
-        "              set _positions to position of every image",
-        "              set _widths to width of every image",
-        "              set _heights to height of every image",
-        '            else if theKind is "text" then',
-        "              set _positions to position of every text item",
-        "              set _widths to width of every text item",
-        "              set _heights to height of every text item",
-        '            else if theKind is "line" then',
-        "              set _positions to position of every line",
-        "              set _widths to width of every line",
-        "              set _heights to height of every line",
-        '            else if theKind is "group" then',
-        "              set _positions to position of every group",
-        "              set _widths to width of every group",
-        "              set _heights to height of every group",
-        '            else if theKind is "movie" then',
-        "              set _positions to position of every movie",
-        "              set _widths to width of every movie",
-        "              set _heights to height of every movie",
-        "            end if",
-        "          end try",
-        "          if _positions is not missing value then",
-        "            set _hitCount to 0",
-        "            set _hitIdx to 0",
-        "            repeat with _k from 1 to count of _positions",
-        "              set _pk to item _k of _positions",
-        "              if my obedFrameMatches(item 1 of _pk, item 2 of _pk, item _k of _widths, "
-        "item _k of _heights, fx, fy, fw, fh, _tol, matchW, matchH) then",
-        "                set _hitCount to _hitCount + 1",
-        "                set _hitIdx to _k",
-        "              end if",
-        "            end repeat",
-        "            if _hitCount is 1 then",
-        "              set _hit to _hitIdx",
-        "              if countFallback then set badgeFallbacks to badgeFallbacks + 1",
-        "            end if",
-        "          end if",
-        "        end if",
-        "      end tell",
-        "    end try",
-        "  end tell",
-        "  return _hit",
-        "end obedBadgeFind",
-        "on obedKindCount(slideNo, theKind)",
-        "  global theDoc",
-        "  set _n to 0",
-        "  " + _keynote_tell(),
-        "    try",
-        "      tell slide slideNo of theDoc",
-        '        if theKind is "shape" then',
-        "          set _n to count of shapes",
-        '        else if theKind is "image" then',
-        "          set _n to count of images",
-        '        else if theKind is "text" then',
-        "          set _n to count of text items",
-        '        else if theKind is "line" then',
-        "          set _n to count of lines",
-        '        else if theKind is "group" then',
-        "          set _n to count of groups",
-        '        else if theKind is "movie" then',
-        "          set _n to count of movies",
-        "        end if",
-        "      end tell",
-        "    end try",
-        "  end tell",
-        "  return _n",
-        "end obedKindCount",
-        "on obedTopReal(slideNo, theKind, kindCount)",
-        # Keynote appends the layout's empty placeholders after the real objects and they are not
-        # in the slide's z-order, so Bring-to-Front can never reach `count`. Walk down past any
-        # trailing member sitting at the origin at ~1x1 (both w and h within tol=3; narrower than
-        # offline_inspect._is_placeholder_row's origin-and-either-dimension rule, deliberately so).
-        "  set _top to kindCount",
-        "  repeat while _top > 0",
-        "    if my obedBadgeFind(slideNo, theKind, _top, 0, 0, 1, 1, true, true, false) is not _top then exit repeat",
-        "    set _top to _top - 1",
-        "  end repeat",
-        "  return _top",
-        "end obedTopReal",
-        "on obedGroupFrame(slideNo, idx)",
-        "  global theDoc",
-        "  set _f to missing value",
-        "  " + _keynote_tell(),
-        "    try",
-        "      tell slide slideNo of theDoc",
-        "        set _p to position of group idx",
-        "        set _f to {fx:(item 1 of _p), fy:(item 2 of _p), fw:(width of group idx), fh:(height of group idx)}",
-        "      end tell",
-        "    end try",
-        "  end tell",
-        "  return _f",
-        "end obedGroupFrame",
-        "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH)",
-        "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, lastFrontBlind, report",
-        "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, badgeFrontDead is 0)",
-        "  if _hit is 0 then",
-        "    set badgeUnresolved to badgeUnresolved + 1",
-        '    set report to report & " badgePhase2Miss(s=" & slideNo & ",k=" & theKind & ")"',
-        "    return",
-        "  end if",
-        "  set _found to false",
-        "  " + _keynote_tell(),
-        "    try",
-        "      tell slide slideNo of theDoc",
-        '        if theKind is "shape" then',
-        "          set selection of theDoc to {shape _hit}",
-        '        else if theKind is "image" then',
-        "          set selection of theDoc to {image _hit}",
-        '        else if theKind is "text" then',
-        "          set selection of theDoc to {text item _hit}",
-        '        else if theKind is "line" then',
-        "          set selection of theDoc to {line _hit}",
-        '        else if theKind is "group" then',
-        "          set selection of theDoc to {group _hit}",
-        '        else if theKind is "movie" then',
-        "          set selection of theDoc to {movie _hit}",
-        "        end if",
-        "        set _found to true",
-        "      end tell",
-        "    end try",
-        "  end tell",
-        "  if not _found then return",
-        "  set _frontResult to my obedFront(\"badge\", slideNo, _hit)",
-        "  set _reprobe to _frontResult is not 0 or lastFrontBlind is not 0",
-        "  set _probeOnly to badgeMoved is not 0 and _reprobe",
-        "  if (badgeMoved is 0 or _reprobe) and badgeFrontDead is 0 then",
-        "    if _probeOnly and _frontResult is 0 then",
-        '      set report to report & " badgeProbeBlind(s=" & slideNo & ",k=" & theKind & ")"',
-        "    end if",
-        "    set _kindCount to my obedKindCount(slideNo, theKind)",
-        "    if _kindCount is 0 then",
-        '      set report to report & " badgeCountErr(s=" & slideNo & ",k=" & theKind & ")"',
-        "      if _probeOnly then set badgeMoved to badgeMoved + 1",
-        "    else",
-        "      set _topReal to my obedTopReal(slideNo, theKind, _kindCount)",
-        "      if _topReal < 2 or _hit is not less than _topReal then",
-        '        set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
-        "        if _probeOnly then set badgeMoved to badgeMoved + 1",
-        "      else",
-        "        set _foundAt to my obedBadgeFind(slideNo, theKind, _topReal, fx, fy, fw, fh, matchW, matchH, false)",
-        "        if _foundAt is _topReal then",
-        "          set badgeMoved to badgeMoved + 1",
-        "        else if _foundAt is 0 or _foundAt > _topReal then",
-        '          set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
-        "          if _probeOnly then set badgeMoved to badgeMoved + 1",
-        "        else",
-        "          set badgeFrontDead to 1",
-        '          set report to report & " badgeFrontDead(s=" & slideNo & ")"',
-        "        end if",
-        "      end if",
-        "    end if",
-        "  else if badgeFrontDead is 0 then",
-        "    set badgeMoved to badgeMoved + 1",
-        "  end if",
-        "end obedRaiseItem",
-        # All-or-nothing per slide: every member must resolve before anything is raised,
-        # so a partial raise (which buries the un-raised members under the plate) never
-        # happens. members[1] is the plate (largest area), so it lands at the bottom.
-        # Once badgeFrontDead trips mid-slide the plate has already moved, so phase 2
-        # keeps raising the rest of THIS slide (the safe outcome); only the entry guard
-        # above skips every LATER slide.
-        "on obedBadgeSlide(slideNo, members)",
-        "  global badgeUnresolved, badgeFrontDead, report",
-        "  if badgeFrontDead is 1 then return",
-        "  repeat with _e in members",
-        "    set _r to contents of _e",
-        "    if my obedBadgeFind(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mw of _r, mh of _r, false) is 0 then",
-        "      set badgeUnresolved to badgeUnresolved + (count of members)",
-        '      set report to report & " badgeSkip(s=" & slideNo & ",k=" & (k of _r) & ")"',
-        "      return",
-        "    end if",
-        "  end repeat",
-        "  repeat with _e in members",
-        "    set _r to contents of _e",
-        "    my obedRaiseItem(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mw of _r, mh of _r)",
-        "  end repeat",
-        "end obedBadgeSlide",
-        # Bounded readiness poll: wait the settle floor, then poll `enabled` every 0.1 s
-        # up to the ceiling, returning whatever it read (today's behaviour when polling
-        # never confirms readiness). `enabled` is probed in its own `try` so a read
-        # failure degrades to `missing value`, treated as not-ready. Also records
-        # lastFrontBlind for the caller when the poll never confirms readiness.
-        "on obedFrontReady(phase, slideNo, idx)",
-        "  global raiseBlindCount, lastFrontBlind, report",
-        f"  delay {_as_fixed(settle_min)}",
-        "  set _ready to false",
-        "  set _waited to 0.0",
-        "  repeat",
-        "    set _en to missing value",
-        "    try",
-        "      " + _keynote_process_tell(),
-        '        set _en to enabled of menu item "Bring to Front" of menu "Arrange" '
-        'of menu bar item "Arrange" of menu bar 1',
-        "      end tell",
-        "    end try",
-        "    if _en is true then",
-        "      set _ready to true",
-        "      exit repeat",
-        "    end if",
-        f"    if _waited >= {_as_fixed(settle_max)} then exit repeat",
-        "    delay 0.1",
-        "    set _waited to _waited + 0.1",
-        "  end repeat",
-        "  if not _ready then",
-        "    set raiseBlindCount to raiseBlindCount + 1",
-        '    set report to report & " raiseBlind(s=" & slideNo & ",idx=" & idx & ",phase=" & phase & ")"',
-        "    set lastFrontBlind to 1",
-        "  end if",
-        "  return _ready",
-        "end obedFrontReady",
-        # A click error re-runs the whole readiness sequence (settle floor + poll) once
-        # before giving up -- a bare re-click after the same failed resolution rescues
-        # nothing (raise-dead bank). frontRaised counts once per call, on whichever
-        # attempt lands; only a second failure reaches frontErr, tagged `,retry]`.
-        "on obedFront(phase, slideNo, idx)",
-        "  global frontRaised, frontErr, raiseClickRetried, lastFrontBlind, report",
-        "  set lastFrontBlind to 0",
-        "  my obedFrontReady(phase, slideNo, idx)",
-        "  set _clicked to false",
-        "  try",
-        "    " + _keynote_process_tell(),
-        '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
-        "    end tell",
-        "    set _clicked to true",
-        "  on error errMsg number errNum",
-        "    set raiseClickRetried to raiseClickRetried + 1",
-        '    set report to report & " raiseClickRetry(s=" & slideNo & ",idx=" & idx & ",phase=" & phase & ",err=" & errNum & ")"',
-        "  end try",
-        "  if _clicked then",
-        "    set frontRaised to frontRaised + 1",
-        "    delay 0.2",
-        "    return 0",
-        "  end if",
-        "  my obedFrontReady(phase, slideNo, idx)",
-        "  set _clicked to false",
-        "  try",
-        "    " + _keynote_process_tell(),
-        '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
-        "    end tell",
-        "    set _clicked to true",
-        "  on error errMsg number errNum",
-        '    set frontErr to frontErr & " [" & errNum & "@" & phase & ",s=" & slideNo & ",idx=" & idx & ",retry]"',
-        "  end try",
-        "  if _clicked then",
-        "    set frontRaised to frontRaised + 1",
-        "    delay 0.2",
-        "    return 1",
-        "  end if",
-        "  return 2",
-        "end obedFront",
     ]
     return lines
 
@@ -1399,18 +937,10 @@ def _build_stat_finalize_script(
     size_map: dict,
     export_dir: Path | None = None,
     group_removes: list[dict] | None = None,
-    badge_raises: list[dict] | None = None,
-    suppress_raises: set[int] | None = None,
 ) -> str:
-    """Post-JXA: template stat sizes, then Bring to Front (stat groups + badge). Optional PNG export before close.
-
-    `suppress_raises` (W2 offline z-order): slides in this set get NO `obedRaiseSlide`
-    and NO `obedBadgeSlide` call — their raises already landed via the offline patch.
-    Font sizing, dedup, and `raiseTargets` accumulation are untouched."""
+    """Post-JXA: template stat sizes and font writes. Optional PNG export before close."""
     group_removes = group_removes or []
-    badge_raises = badge_raises or []
-    suppress_raises = suppress_raises or set()
-    if not jobs and not group_removes and not badge_raises:
+    if not jobs and not group_removes:
         return ""
     escaped = _as_escape(str(dest))
     doc_name = _as_escape(Path(dest).name)
@@ -1426,16 +956,6 @@ def _build_stat_finalize_script(
         key = (int(gr["slide"]), sig)
         d = dedup.setdefault(key, {"count": 0, "expectedKeep": int(gr.get("expectedKeep") or 0)})
         d["count"] += 1
-    badge_by_slide: dict[int, list[dict]] = {}
-    for br in badge_raises:
-        badge_by_slide.setdefault(int(br["slide"]), []).append(br)
-    # A frameless row on a slide voids that slide's whole obedBadgeSlide call (all-or-
-    # nothing): every member on it is unresolved, not just the frameless one.
-    badge_missing_frame = sum(
-        len(rows)
-        for rows in badge_by_slide.values()
-        if not all({"x", "y", "w", "h"} <= r.keys() for r in rows)
-    )
     lines: list[str] = ["global " + ", ".join(_STAT_ACCUMULATORS)]
     lines += _stat_size_handler(size_map)
     lines += _sig_handlers()
@@ -1459,21 +979,8 @@ def _build_stat_finalize_script(
         "  set sizeSkips to 0",
         "  set dedupDeleted to 0",
         f"  set dedupShortfall to {no_sig_removes}",
-        "  set raiseTargets to {}",
         "  set sigFallbacks to 0",
         "  set unresolved to 0",
-        "  set badgeFallbacks to 0",
-        f"  set badgeUnresolved to {badge_missing_frame}",
-        "  set badgeMoved to 0",
-        "  set badgeFrontDead to 0",
-        "  set raiseMoved to 0",
-        "  set raiseDead to 0",
-        "  set raiseUnknown to 0",
-        "  set raiseBlindCount to 0",
-        "  set raiseVacuous to 0",
-        "  set raiseRetried to 0",
-        "  set raiseClickRetried to 0",
-        "  set lastFrontBlind to 0",
         '  set exported to "false"',
         '  set report to ""',
     ]
@@ -1530,33 +1037,6 @@ def _build_stat_finalize_script(
                 f"  my obedStatJob({slide}, _sigs, {gi}, {sig_lit}, {float(s)}, {allow_fallback}, {pt})"
             ]
     lines += ["  save theDoc"]
-    # Z-order: raise recorded targets per slide, lowest index first (Bring to Front appends,
-    # so ascending raise order reproduces source stacking); each raise is verified before its
-    # index arithmetic is applied to the rest.
-    lines += ['  set frontRaised to 0', '  set frontErr to ""']
-    for slide in sorted(font_by_slide):
-        if slide in suppress_raises:
-            continue
-        lines += [f"  my obedRaiseSlide({slide})"]
-    for slide in sorted(badge_by_slide):
-        if slide in suppress_raises:
-            continue
-        rows = [r for r in badge_by_slide[slide] if {"x", "y", "w", "h"} <= r.keys()]
-        if len(rows) != len(badge_by_slide[slide]):
-            continue  # a frameless row: pre-counted at init
-        members = []
-        for r in rows:
-            _kind = str(r.get("kind") or "shape")
-            _mw, _mh = _BADGE_MATCH.get(_kind, (False, False))
-            members.append(
-                '{{k:"{k}", i:{i}, x:{x}, y:{y}, w:{w}, h:{h}, mw:{mw}, mh:{mh}}}'.format(
-                    k=_as_escape(_kind), i=int(r.get("index") or 0),
-                    x=_as_fixed(r["x"]), y=_as_fixed(r["y"]), w=_as_fixed(r["w"]), h=_as_fixed(r["h"]),
-                    mw="true" if _mw else "false", mh="true" if _mh else "false",
-                )
-            )
-        members = ", ".join(members)
-        lines += [f"  my obedBadgeSlide({slide}, {{{members}}})"]
     lines += [
         "  try",
         "    save theDoc",
@@ -1581,15 +1061,9 @@ def _build_stat_finalize_script(
         "  end try",
         "  end timeout",
         '  return "done=" & doneJobs & " skipped=" & skipJobs & " sized=" & sized '
-        '& " sizeSkips=" & sizeSkips & " front=" & frontRaised & " dedupDeleted=" '
-        '& dedupDeleted & " dedupShortfall=" & dedupShortfall & " frontErr=" '
-        '& frontErr & " exported=" & exported & " sigFallback=" & sigFallbacks '
-        '& " unresolved=" & unresolved & " badgeFallback=" & badgeFallbacks '
-        '& " badgeUnresolved=" & badgeUnresolved & " badgeMoved=" & badgeMoved '
-        '& " badgeFrontDead=" & badgeFrontDead & " raiseMoved=" & raiseMoved '
-        '& " raiseDead=" & raiseDead & " raiseUnknown=" & raiseUnknown '
-        '& " raiseBlindCount=" & raiseBlindCount & " raiseVacuous=" & raiseVacuous '
-        '& " raiseRetried=" & raiseRetried & " raiseClickRetried=" & raiseClickRetried '
+        '& " sizeSkips=" & sizeSkips & " dedupDeleted=" & dedupDeleted '
+        '& " dedupShortfall=" & dedupShortfall & " exported=" & exported '
+        '& " sigFallback=" & sigFallbacks & " unresolved=" & unresolved '
         '& " closed=" & closedOK & " detail=" & report',
         "end tell",
         "end using terms from",
@@ -1603,10 +1077,8 @@ def _run_stat_finalize(
     size_map: dict,
     export_dir: Path | None = None,
     group_removes: list[dict] | None = None,
-    badge_raises: list[dict] | None = None,
-    suppress_raises: set[int] | None = None,
 ) -> dict:
-    """Run stat-finalize (dedup + sizes + bring-to-front). No-op if all three job lists are empty."""
+    """Run stat-finalize (dedup + sizes). No-op if both job lists are empty."""
     export_dir = Path(export_dir) if export_dir else None
     if export_dir is not None:
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -1616,8 +1088,6 @@ def _run_stat_finalize(
         size_map or {},
         export_dir,
         group_removes=group_removes,
-        badge_raises=badge_raises,
-        suppress_raises=suppress_raises,
     )
     if not script:
         return {"ok": True, "skipped": True, "closed": True, "done": 0, "jobs": 0, "exported": False}
@@ -1641,8 +1111,6 @@ def _run_stat_finalize(
         preview_files = [p.name for p in pngs]
         exported = bool(pngs)
     detail = raw.split("detail=", 1)[1].strip() if "detail=" in raw else ""
-    front_err_match = re.search(r"frontErr=(.*?)(?= exported=|$)", raw)
-    front_err = (front_err_match.group(1) if front_err_match else "").strip()
     return {
         "ok": ok,
         "jobs": len(jobs),
@@ -1650,26 +1118,13 @@ def _run_stat_finalize(
         "skipped": _num("skipped"),
         "sized": _num("sized"),
         "sizeSkips": _num("sizeSkips"),
-        "front": _num("front"),
         "dedupDeleted": _num("dedupDeleted"),
         "dedupShortfall": _num("dedupShortfall"),
         "sigFallback": _num("sigFallback"),
         "unresolved": _num("unresolved"),
-        "badgeFallback": _num("badgeFallback"),
-        "badgeUnresolved": _num("badgeUnresolved"),
-        "badgeMoved": _num("badgeMoved"),
-        "badgeFrontDead": _num("badgeFrontDead"),
-        "raiseMoved": _num("raiseMoved"),
-        "raiseDead": _num("raiseDead"),
-        "raiseUnknown": _num("raiseUnknown"),
-        "raiseBlindCount": _num("raiseBlindCount"),
-        "raiseVacuous": _num("raiseVacuous"),
-        "raiseRetried": _num("raiseRetried"),
-        "raiseClickRetried": _num("raiseClickRetried"),
         "closed": bool(_num("closed")),
         "detail": detail,
         "tokens": _parse_detail_tokens(detail),
-        "frontErr": front_err,
         "exported": exported,
         "previewFiles": preview_files,
         "raw": raw,
