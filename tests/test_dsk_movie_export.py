@@ -342,7 +342,27 @@ def test_script_black_layout_uses_explicit_approved_name_list():
         assert f'set wantLayoutName to "{name}"' in script
     assert "words of" not in script
     assert "begins with" not in script
-    assert "blankName" not in script
+
+
+def test_resolve_black_layout_name_accepts_blank_black_alias(monkeypatch, tmp_path):
+    """"Blank Black" is a 2025-template-family alias for the alpha-safe black layout;
+    an FW deck owning it exactly must resolve without any template donor/import."""
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    fw_objects = _layout_objects_multi(entries=[("Blank Black", [])])
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", lambda _path: (fw_objects, {}, {}))
+
+    assert _REAL_RESOLVE_BLACK_LAYOUT_NAME(fw, dme.DEFAULT_BLACK_LAYOUT_NAMES) == "Blank Black"
+
+
+def test_resolve_black_layout_name_rejects_non_alias_black_copy(monkeypatch, tmp_path):
+    """"BLACK copy" is not one of the approved aliases; owning it alone must not resolve."""
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    fw_objects = _layout_objects_multi(entries=[("BLACK copy", [])])
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", lambda _path: (fw_objects, {}, {}))
+
+    assert _REAL_RESOLVE_BLACK_LAYOUT_NAME(fw, dme.DEFAULT_BLACK_LAYOUT_NAMES) is None
 
 
 def test_script_black_layout_approved_list_refuses_substring_match():
