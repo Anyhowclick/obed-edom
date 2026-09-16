@@ -273,19 +273,24 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 ## 4. Open bugs / TODOs
 
 ### Shipped path (blocking polish)
-1. FIXED 2026-09-16 (offline, live-unverified): propose quits the Keynote it launched for
-   preview export (`_dsk_preview_thumbs`, both Generator and Exporter); a Keynote the
-   operator already had open is left alone. Evidence of the bug:
-   `~/Desktop/dsk-d4-work/evidence-p7/` (job 45757e4f, export job cb17ff41 → HTTP 409).
-2. FIXED 2026-09-16 (offline, live-unverified): the Exporter writes stage PNGs beside the
-   deck it exports (`path.parent`). For a generated deck that is the flat asset folder
-   `output/<FW stem>/dsk/` next to the `.mov` clips (owner Q2); for a hand-built deck it
-   is the deck's own folder, so run Q3 on a copy in a scratch folder.
-3. **Exporter never run on a hand-built DSK deck** (owner Q3). Run next session on a copy of
-   `~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`; the gold copy was prepared and
-   deleted unused.
-4. **UI never clicked through** — P7 drove the API directly on port 8891.
-5. FIXED 2026-09-16: both DSK sub-tabs render `JobName` with rename wiring.
+1. FIXED + LIVE-VERIFIED 2026-09-16 (r14): propose quits the Keynote it launched for preview
+   export (`_dsk_preview_thumbs`, both Generator and Exporter); a Keynote the operator already
+   had open is left alone. Exporter propose → `pgrep -x Keynote` empty → apply 200 (no 409);
+   Generator propose on GW 21,24 likewise. Evidence `~/Desktop/dsk-d4-work/evidence-r14/`
+   (server.out, manifest.json; export job f6106641, generator job bc071de3).
+2. FIXED + LIVE-VERIFIED 2026-09-16 (r14): the Exporter writes stage PNGs beside the deck it
+   exports (`path.parent`). For a generated deck that is the flat asset folder
+   `output/<FW stem>/dsk/` next to the `.mov` clips (owner Q2); for a hand-built deck it is
+   the deck's own folder, so run it on a copy in a scratch folder.
+3. DONE 2026-09-16 (r14, owner Q3): Exporter run on a copy of
+   `Sermon_PK (DSK)_with mistakes.key` (slides 1–3 → 1 and 3 exported, 2 empty). Both PNGs
+   1920×1080 RGBA, `alpha_ok`, `bg_alpha_max` 0, peak RSS 0.82 GB. Source fingerprint unchanged.
+4. DONE 2026-09-16 (r14): UI clicked through in the in-app browser — Exporter propose → Export
+   → JobName rename, and Generator propose review table. Not clicked: Generator apply (P7
+   covered it via the API). Observation: the JobName edit committed on blur, not on the
+   automated Enter keypress; unconfirmed whether a real keyboard Enter commits (shared
+   component, not DSK-specific).
+5. FIXED 2026-09-16: both DSK sub-tabs render `JobName` with rename wiring (live-verified r14).
 6. FIXED 2026-09-16: `assemble_dsk_deck(content_only=True, …)` refuses `text_fit="shrink"`,
    a non-default `min_text_pt`, `allow_split=False` and `split_overrides`, matching the CLI.
 7. Offline-only so far: the two-batch job (clip export then assemble) and the Exporter's
