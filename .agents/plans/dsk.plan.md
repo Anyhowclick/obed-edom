@@ -300,8 +300,11 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 5. FIXED 2026-09-16: both DSK sub-tabs render `JobName` with rename wiring (live-verified r14).
 6. FIXED 2026-09-16: `assemble_dsk_deck(content_only=True, …)` refuses `text_fit="shrink"`,
    a non-default `min_text_pt`, `allow_split=False` and `split_overrides`, matching the CLI.
-7. Offline-only so far: the two-batch job (clip export then assemble) and the Exporter's
-   `isStageDeck` gate.
+7. LIVE-VERIFIED 2026-09-16 (r15, PR #138 + #140): the two-batch Generator job (clip export
+   then assemble) on `DSK_Gen_Export_Input.key` 11–13 with the "Blank Black" alias; the
+   Exporter's `isStageDeck` gate, its `.mov` path on the hand-built deck (slide 13 → 53 s
+   ProRes), and Generator-clip reuse (3 reused, 0 exported, manifest byte-identical).
+   Evidence `~/Desktop/dsk-d4-work/evidence-r15/`.
 
 ### Benched path (before the verse/text work resumes)
 8. **Pill z-order fix is live-unverified.**
