@@ -81,6 +81,13 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   PNGs go in ONE FLAT folder beside it, named to sort in slide/stage order.
 - 2026-09-15 (d6 Q3): the Exporter runs stage PNGs on ANY 1920×1080 DSK deck (hand-built
   included); clip export stays FW-deck-only and the UI must say so.
+- 2026-09-16 (owner, after viewing the real output of `DSK_Gen_Export_Input.key` slides 11–13,
+  mixed movie + overlay + magic-move slides): a mixed slide stays ONE self-contained opaque
+  clip with overlays and builds baked in and the magic move dropped; PP7 dissolves between
+  clips. "Overlays live in the DSK deck over a bare clip, Keynote does the transitions" is
+  the target only once Keynote alpha output exists (§4 item 21, `.agents/research/
+  kpf_renderer_probe_2026-09-12.md`). `SlideDecision.overlay_bake` stays an unused field
+  until then.
 - Keynote hands-off rule: work on a copy under `~/Desktop` or repo `output/` (never
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
 - Owner's open design item besides the band placeholder: the "editing phase" (d6b) — per-slide
