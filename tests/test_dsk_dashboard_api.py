@@ -624,16 +624,29 @@ def test_dsk_apply_publish_failure_on_later_destination_leaves_no_new_file(tmp_p
     monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
     monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
 
+    # Freshly exported intermediates are moved via os.replace; count both write
+    # mechanisms so the second destination write is the one that fails regardless
+    # of which one the publisher picks for a given source.
     real_copy2 = shutil.copy2
+    real_replace = app_mod.os.replace
     calls: list[Path] = []
 
     def flaky_copy2(src, dst, *a, **k):
-        calls.append(Path(dst))
-        if len(calls) >= 2:
-            raise OSError("disk full")
+        if Path(dst).name.startswith("GW_DSK."):
+            calls.append(Path(dst))
+            if len(calls) >= 2:
+                raise OSError("disk full")
         return real_copy2(src, dst, *a, **k)
 
+    def flaky_replace(src, dst, *a, **k):
+        if Path(dst).name.startswith("GW_DSK."):
+            calls.append(Path(dst))
+            if len(calls) >= 2:
+                raise OSError("disk full")
+        return real_replace(src, dst, *a, **k)
+
     monkeypatch.setattr(app_mod.shutil, "copy2", flaky_copy2)
+    monkeypatch.setattr(app_mod.os, "replace", flaky_replace)
 
     client = TestClient(app)
     job_id = _propose_dsk(client, deck).json()["id"]
@@ -985,6 +998,178 @@ def test_dsk_apply_operator_clip_probe_failure_surfaces_error(tmp_path, monkeypa
     job = _wait(client, job_id)
     assert job["status"] == "error"
     assert "could not probe" in job["error"]
+
+
+def test_dsk_apply_stale_cleanup_failure_still_succeeds(tmp_path, monkeypatch):
+    """A rerun that drops a movie slide must still succeed, with the new clip and
+    manifest committed, even if deleting the now-orphaned intermediate fails --
+    stale cleanup runs after commit and must be best-effort."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    def fake_export_clips(fw, slides, out_dir, **_kwargs):
+        from obed_edom.dsk_movie_export import ClipResult
+
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        results = []
+        for n in slides:
+            dest = Path(out_dir) / f"clip.{n:03d}.mov"
+            dest.write_text("movie")
+            results.append(
+                ClipResult(
+                    slide=n, movie_id=("movie", 0), path=dest, crop_rect=None,
+                    width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+                )
+            )
+        return results
+
+    def make_fake_assemble(ordinals):
+        def fake_assemble(fw, out_path, *, decisions, clips, content_only, **_kwargs):
+            from obed_edom.dsk_assemble import AssembleResult
+
+            return AssembleResult(
+                path=out_path,
+                slides_kept=tuple(sorted(ordinals)),
+                ordinals=dict(ordinals),
+                fits={}, stroke={}, zorder={}, builds={},
+                clips_inserted={n: next(iter(clips[n].values())) for n in clips},
+                size_bytes=10, source_size_bytes=20, wall_s=1.0,
+                warnings=(), movie_props={},
+            )
+
+        return fake_assemble
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+
+    client = TestClient(app)
+
+    # Run 1: slides 2 and 3 both need clips.
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(3))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1), 3: _cls(3, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", make_fake_assemble({1: 1, 2: 2, 3: 3}))
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+
+    out_dir = tmp_path / "output" / "GW" / "dsk"
+    src_dir = out_dir / "src"
+    clip_2 = src_dir / "GW_DSK.002.01.src.mov"
+    clip_3 = src_dir / "GW_DSK.003.01.src.mov"
+    assert clip_2.is_file()
+    assert clip_3.is_file()
+
+    # Run 2: slide 3 is gone, so clip_3 becomes stale; deleting it fails.
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self, *a, **k):
+        if self == clip_3:
+            raise OSError("permission denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes2 = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes2)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", make_fake_assemble({1: 1, 2: 2}))
+    job_id2 = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id2)
+    applied2 = client.post(f"/api/dsk/{job_id2}/apply")
+    assert applied2.status_code == 200
+    job2 = _wait(client, job_id2)
+    assert job2["status"] == "done", job2.get("error")
+
+    assert clip_2.is_file(), "the new run's published clip is intact"
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert "3" not in manifest["slides"], "the new manifest is committed regardless of cleanup failure"
+
+
+def test_dsk_apply_operator_clip_inside_src_dir_survives_later_rollback(tmp_path, monkeypatch):
+    """An operator-supplied clip that happens to live inside `out_dir/src` must be
+    copied, never moved: if a later destination in the same run fails and rollback
+    undoes this run's publications, the operator's original file must still exist
+    at its original path."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(3))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1), 3: _cls(3, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "_ffprobe", lambda _p: (1920, 1080, 30.0, 1.0))
+
+    out_dir = tmp_path / "output" / "GW" / "dsk"
+    src_dir = out_dir / "src"
+    src_dir.mkdir(parents=True)
+    operator_clip = src_dir / "operator-owned.mov"
+    operator_clip.write_text("operator's own clip")
+
+    def fake_export_clips(fw, slides, out_dir_, **_kwargs):
+        from obed_edom.dsk_movie_export import ClipResult
+
+        Path(out_dir_).mkdir(parents=True, exist_ok=True)
+        results = []
+        for n in slides:
+            dest = Path(out_dir_) / f"clip.{n:03d}.mov"
+            dest.write_text(f"movie-{n}")
+            results.append(
+                ClipResult(
+                    slide=n, movie_id=("movie", 0), path=dest, crop_rect=None,
+                    width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+                )
+            )
+        return results
+
+    def fake_assemble(fw, out_path, *, decisions, clips, content_only, **_kwargs):
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path, slides_kept=(1, 2, 3), ordinals={1: 1, 2: 2, 3: 3}, fits={},
+            clips_inserted={n: next(iter(clips[n].values())) for n in clips}, stroke={}, zorder={},
+            builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
+            movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    # The operator's clip (slide 2) is copied and succeeds; slide 3's freshly
+    # exported intermediate is moved via os.replace and fails, forcing rollback.
+    real_replace = app_mod.os.replace
+
+    def flaky_replace(src, dst, *a, **k):
+        if Path(dst).name.startswith("GW_DSK.003."):
+            raise OSError("disk full")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(app_mod.os, "replace", flaky_replace)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    client.post(
+        f"/api/dsk/{job_id}/decisions",
+        json={"decisions": [{"slide": 2, "clip": str(operator_clip)}]},
+    )
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "error"
+
+    assert operator_clip.is_file(), "the operator's own file must survive at its original path"
+    assert operator_clip.read_text() == "operator's own clip"
+    assert not (src_dir / "GW_DSK.002.01.src.mov").is_file(), "the rolled-back new destination leaves no file"
+    assert not (src_dir / "GW_DSK.003.01.src.mov").is_file(), "the failed write leaves no file"
 
 
 def test_dsk_apply_manifest_clips_keyed_by_dsk_ordinal_not_fw_slide(tmp_path, monkeypatch):

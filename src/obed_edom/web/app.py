@@ -1892,6 +1892,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
 
     tmp_src_dir: Path | None = None
     publish_journal: list[_PublishedClip] = []
+    stale_src_clips: set[str] = set()
     try:
         if missing_clip_slides:
             tmp_src_dir = out_dir / f".src-{uuid4().hex}"
@@ -1930,7 +1931,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         for entry in ((existing_manifest or {}).get("slides") or {}).values():
             previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
         published = _publish_generator_clips(
-            job, result.path, src_dir, nested_clips, result.ordinals, publish_journal
+            job, result.path, src_dir, nested_clips, result.ordinals, publish_journal, tmp_src_dir
         )
         categories = {
             result.ordinals[n]: str(p.get("category") or "")
@@ -1953,8 +1954,6 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         for entry in (new_manifest.get("slides") or {}).values():
             current_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
         stale_src_clips = previous_src_clips - current_src_clips
-        if stale_src_clips:
-            _delete_managed_src_clips(job, out_dir, src_dir, stale_src_clips)
         _discard_publish_backups(publish_journal)
     except Exception:
         _rollback_published_clips(job, publish_journal)
@@ -1963,6 +1962,8 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         if tmp_src_dir is not None and tmp_src_dir.is_dir():
             shutil.rmtree(tmp_src_dir, ignore_errors=True)
             job.log(f"Removed clip export dir {tmp_src_dir}")
+    if stale_src_clips:
+        _delete_managed_src_clips(job, out_dir, src_dir, stale_src_clips)
     return {
         "phase": "done",
         "path": str(path),
@@ -1997,24 +1998,29 @@ def _publish_generator_clips(
     clips: Mapping[int, Mapping[ItemId, Path]],
     ordinals: Mapping[int, int],
     journal: list[_PublishedClip],
+    movable_root: Path | None,
 ) -> dict[int, list[str]]:
     """Renames/moves each inserted movie's clip into `src_dir` as
     `<DSK stem>.NNN.MM.src.mov` (NNN = DSK ordinal, MM = 1-based movie order within
-    the slide, by ascending item id). A clip already inside `src_dir` is moved; a
-    clip elsewhere (an operator-supplied one) is copied. `src_dir` is created only
-    if absent; a symlinked `src_dir` or destination, or a destination whose resolved
-    parent is not `src_dir` itself, is refused, and every destination is preflighted
-    before any file is written. A pre-existing managed destination is renamed to a
-    `.prev-<uuid>` sibling before being overwritten, so a mid-run failure can restore
-    it; each write (and its backup, if any) is appended to `journal` as soon as it
-    lands, so the caller can roll back a partial run. Returns DSK ordinal -> the
-    ordered `src/<name>` relative paths for `manifest.json`'s `srcClips`."""
+    the slide, by ascending item id). Only a clip whose parent resolves to
+    `movable_root` (this run's freshly exported intermediates) is moved; every other
+    source, including an operator-supplied clip that happens to sit inside `src_dir`,
+    is copied so the caller's original file is never touched. `src_dir` is created
+    only if absent; a symlinked `src_dir` or destination, or a destination whose
+    resolved parent is not `src_dir` itself, is refused, and every destination is
+    preflighted before any file is written. A pre-existing managed destination is
+    renamed to a `.prev-<uuid>` sibling before being overwritten, so a mid-run
+    failure can restore it; each write (and its backup, if any) is appended to
+    `journal` as soon as it lands, so the caller can roll back a partial run.
+    Returns DSK ordinal -> the ordered `src/<name>` relative paths for
+    `manifest.json`'s `srcClips`."""
     if src_dir.is_symlink():
         job.log(f"Refusing to publish clips: {src_dir} is a symlink")
         raise ValueError(f"Refusing to publish through symlinked directory: {src_dir}")
     if not src_dir.is_dir():
         src_dir.mkdir(parents=True)
     src_dir_real = src_dir.resolve()
+    movable_root_real = movable_root.resolve() if movable_root is not None else None
     published: dict[int, list[str]] = {}
     plan: list[tuple[Path, Path]] = []
     for fw_slide, movies in clips.items():
@@ -2042,7 +2048,7 @@ def _publish_generator_clips(
             backup = dest.with_name(f"{dest.name}.prev-{uuid4().hex}")
             os.replace(dest, backup)
         try:
-            if src.parent.resolve() == src_dir_real:
+            if movable_root_real is not None and src.resolve().parent == movable_root_real:
                 os.replace(src, dest)
             else:
                 shutil.copy2(src, dest)
@@ -2090,7 +2096,8 @@ def _delete_managed_src_clips(
     `srcClips` value collected before an overwrite) that are no longer referenced.
     Rejects any entry that is not a bare two-part `src/<name>` path, resolves
     outside `out_dir`, or passes through a symlink, matching the Exporter's
-    `src/` cleanup safety rules."""
+    `src/` cleanup safety rules. Best-effort: called only after the new manifest
+    has committed, so a per-file failure is logged and skipped, never raised."""
     out_dir_real = out_dir.resolve()
     if src_dir.is_symlink():
         job.log(f"Skipping src/ cleanup: {src_dir} is a symlink")
@@ -2115,12 +2122,17 @@ def _delete_managed_src_clips(
         if candidate.is_file() and candidate_real not in seen:
             seen.add(candidate_real)
             to_delete.append(candidate)
-    if to_delete:
-        for f in to_delete:
+    deleted: list[Path] = []
+    for f in to_delete:
+        try:
             f.unlink()
+            deleted.append(f)
+        except OSError as exc:
+            job.log(f"Failed to delete stale Generator clip {f}: {exc}")
+    if deleted:
         job.log(
-            f"Deleted {len(to_delete)} orphaned Generator clip(s): "
-            + ", ".join(f.name for f in to_delete)
+            f"Deleted {len(deleted)} orphaned Generator clip(s): "
+            + ", ".join(f.name for f in deleted)
         )
 
 
