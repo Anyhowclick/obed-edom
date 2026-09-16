@@ -43,18 +43,15 @@ from scripts.offline_write_ab import (
     CARD_REF_FLOOR,
     Tolerances,
     _id_by_addr_for_slide,
-    accessibility_ok,
     card_border_damage_reasons,
     card_border_refs,
     compare_units_by_addr,
     compare_units_identity,
     compare_units_multiset,
     damage_check_line,
-    front_err_from_raw,
     keynote_open_documents,
     load_run_record,
     pass2_bar_line,
-    pass2_click_retry_warn,
     pass2_health,
     pass2_parity,
     pass2_zero_warn,
@@ -1632,44 +1629,6 @@ def test_summary_gate_reasons_missed_specs_absent_fallback_keys_still_red():
     assert any("missed the offline patch" in r for r in reasons)
 
 
-# --- accessibility_ok (D5 pre-flight) ---------------------------------------------
-
-
-def test_accessibility_ok_true(monkeypatch):
-    from scripts import offline_write_ab as owab
-
-    monkeypatch.setattr(
-        owab.subprocess, "run",
-        lambda *a, **k: SimpleNamespace(returncode=0, stdout="true\n", stderr=""),
-    )
-    ok, detail = accessibility_ok()
-    assert ok is True
-    assert detail == "true"
-
-
-def test_accessibility_ok_false_on_false_output(monkeypatch):
-    from scripts import offline_write_ab as owab
-
-    monkeypatch.setattr(
-        owab.subprocess, "run",
-        lambda *a, **k: SimpleNamespace(returncode=0, stdout="false\n", stderr=""),
-    )
-    ok, _detail = accessibility_ok()
-    assert ok is False
-
-
-def test_accessibility_ok_false_on_osascript_failure(monkeypatch):
-    from scripts import offline_write_ab as owab
-
-    monkeypatch.setattr(
-        owab.subprocess, "run",
-        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="not authorized"),
-    )
-    ok, detail = accessibility_ok()
-    assert ok is False
-    assert "not authorized" in detail
-
-
 # --- keynote_open_documents / stray-document guard (Full-deck-gate memory blowup) --
 
 
@@ -1708,7 +1667,6 @@ def test_keynote_open_documents_single_name_no_comma(monkeypatch):
 def test_main_aborts_when_keynote_already_has_documents_open(monkeypatch, tmp_path, capsys):
     from scripts import offline_write_ab as owab
 
-    monkeypatch.setattr(owab, "accessibility_ok", lambda: (True, "true"))
     monkeypatch.setattr(owab, "keynote_open_documents", lambda: ["Stray.key"])
 
     source = tmp_path / "wall.key"
@@ -1862,43 +1820,23 @@ def test_quit_keynote_and_wait_nonzero_returncode_never_counts_as_gone(monkeypat
     assert elapsed >= 5.0
 
 
-# --- front_err_from_raw (D4) -------------------------------------------------------
-
-
-def test_front_err_from_raw_extracts_field():
-    raw = ("done=1 skipped=0 sized=0 sizeSkips=0 front=2 dedupDeleted=0 dedupShortfall=0 "
-           "frontErr= [-1743] exported=true sigFallback=0 unresolved=0 badgeFallback=0 "
-           "badgeUnresolved=0 detail=")
-    assert front_err_from_raw(raw) == "[-1743]"
-
-
-def test_front_err_from_raw_empty_when_clean():
-    raw = "done=1 skipped=0 front=2 dedupDeleted=0 dedupShortfall=0 frontErr= exported=true"
-    assert front_err_from_raw(raw) == ""
-
-
-def test_front_err_from_raw_no_match_returns_empty():
-    assert front_err_from_raw("garbage, no fields here") == ""
-
-
 # --- pass2_health (D4) --------------------------------------------------------------
 
 
 def _pass2(**over):
-    base = dict(ok=True, jobs=2, done=2, skipped=0, sized=2, sizeSkips=0, front=1,
-                dedupDeleted=0, dedupShortfall=0, sigFallback=0, unresolved=0,
-                badgeFallback=0, badgeUnresolved=0, raw="")
+    base = dict(ok=True, jobs=2, done=2, skipped=0, sized=2, sizeSkips=0,
+                dedupDeleted=0, dedupShortfall=0, sigFallback=0, unresolved=0, raw="")
     base.update(over)
     return base
 
 
 def test_pass2_health_green():
-    assert pass2_health(_pass2(), label="A", expect_raises=True) == []
+    assert pass2_health(_pass2(), label="A") == []
 
 
 def test_pass2_health_none_result_is_healthy():
     # `childResize is None` (no stat/badge jobs planned) is healthy (D4).
-    assert pass2_health(None, label="A", expect_raises=True) == []
+    assert pass2_health(None, label="A") == []
 
 
 def test_pass2_health_noop_skipped_bool_form_is_healthy():
@@ -1906,42 +1844,27 @@ def test_pass2_health_noop_skipped_bool_form_is_healthy():
     # per-job skip COUNT the rest of this function reads as an int -- must short-circuit
     # before the count checks would otherwise misread `True` as `1`.
     noop = {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}
-    assert pass2_health(noop, label="A", expect_raises=True) == []
+    assert pass2_health(noop, label="A") == []
 
 
 def test_pass2_health_not_ok():
-    reasons = pass2_health(_pass2(ok=False), label="A", expect_raises=False)
+    reasons = pass2_health(_pass2(ok=False), label="A")
     assert any("ok=False" in r for r in reasons)
 
 
 def test_pass2_health_zero_keys():
-    reasons = pass2_health(
-        _pass2(unresolved=1, dedupShortfall=2, badgeUnresolved=3), label="A", expect_raises=False
-    )
-    assert len(reasons) == 3
-
-
-def test_pass2_health_front_when_raises():
-    reasons = pass2_health(_pass2(front=0), label="A", expect_raises=True)
-    assert any("front=0" in r for r in reasons)
-    # front is NOT required when the plan carried no stat jobs / badge raises.
-    assert pass2_health(_pass2(front=0), label="A", expect_raises=False) == []
-
-
-def test_pass2_health_frontErr_flags_accessibility_denied():
-    raw = "done=1 skipped=0 front=0 dedupDeleted=0 dedupShortfall=0 frontErr= [-1743] exported=true"
-    reasons = pass2_health(_pass2(raw=raw, front=0), label="A", expect_raises=False)
-    assert any("Accessibility denied" in r for r in reasons)
+    reasons = pass2_health(_pass2(unresolved=1, dedupShortfall=2), label="A")
+    assert len(reasons) == 2
 
 
 def test_pass2_health_fallback_keys_are_warn_only():
-    # sigFallback/badgeFallback non-zero must NOT gate (D4: WARN only).
-    reasons = pass2_health(_pass2(sigFallback=3, badgeFallback=2), label="A", expect_raises=False)
+    # sigFallback non-zero must NOT gate (D4: WARN only).
+    reasons = pass2_health(_pass2(sigFallback=3), label="A")
     assert reasons == []
 
 
 def test_pass2_health_done_plus_skipped_must_equal_jobs():
-    reasons = pass2_health(_pass2(jobs=5, done=2, skipped=2), label="A", expect_raises=False)
+    reasons = pass2_health(_pass2(jobs=5, done=2, skipped=2), label="A")
     assert any("!= jobs" in r for r in reasons)
 
 
@@ -1951,69 +1874,23 @@ def test_pass2_health_done_plus_skipped_must_equal_jobs():
 def test_pass2_health_strict_flags_zero_keys():
     # zero_keys_hard defaults True -- unchanged behavior, matches --pass2-bar strict.
     reasons = pass2_health(
-        _pass2(unresolved=1, dedupShortfall=2, badgeUnresolved=3), label="A",
-        expect_raises=False, zero_keys_hard=True,
+        _pass2(unresolved=1, dedupShortfall=2), label="A", zero_keys_hard=True,
     )
-    assert len(reasons) == 3
+    assert len(reasons) == 2
 
 
 def test_pass2_health_parity_does_not_flag_zero_keys():
     reasons = pass2_health(
-        _pass2(unresolved=134, dedupShortfall=6, badgeUnresolved=3), label="A",
-        expect_raises=False, zero_keys_hard=False,
+        _pass2(unresolved=134, dedupShortfall=6), label="A", zero_keys_hard=False,
     )
     assert reasons == []
 
 
-def test_pass2_health_parity_still_flags_ok_front_done_skipped():
+def test_pass2_health_parity_still_flags_ok_and_done_skipped():
     assert any("ok=False" in r for r in
-               pass2_health(_pass2(ok=False), label="A", expect_raises=False, zero_keys_hard=False))
-    assert any("front=0" in r for r in
-               pass2_health(_pass2(front=0), label="A", expect_raises=True, zero_keys_hard=False))
+               pass2_health(_pass2(ok=False), label="A", zero_keys_hard=False))
     assert any("!= jobs" in r for r in
-               pass2_health(_pass2(jobs=5, done=2, skipped=2), label="A", expect_raises=False,
-                            zero_keys_hard=False))
-
-
-def test_pass2_health_strict_flags_any_frontErr_even_without_accessibility_code():
-    # -1719 is "invalid index" (a stray GUI raise miss), not an Accessibility code --
-    # strict still gates on it (unchanged from before --pass2-bar existed).
-    raw = "done=1 skipped=0 front=674 dedupDeleted=0 dedupShortfall=0 frontErr= [-1719] exported=true"
-    reasons = pass2_health(_pass2(raw=raw), label="A", expect_raises=False, zero_keys_hard=True)
-    assert any("frontErr" in r for r in reasons)
-    assert not any("Accessibility denied" in r for r in reasons)
-
-
-def test_pass2_health_parity_frontErr_without_accessibility_code_is_not_hard():
-    raw = "done=1 skipped=0 front=674 dedupDeleted=0 dedupShortfall=0 frontErr= [-1719] exported=true"
-    reasons = pass2_health(_pass2(raw=raw), label="A", expect_raises=False, zero_keys_hard=False)
-    assert reasons == []
-
-
-def test_pass2_health_parity_frontErr_with_accessibility_code_stays_hard():
-    raw = "done=1 skipped=0 front=0 dedupDeleted=0 dedupShortfall=0 frontErr= [-1743] exported=true"
-    reasons = pass2_health(_pass2(raw=raw, front=0), label="A", expect_raises=False, zero_keys_hard=False)
-    assert any("Accessibility denied" in r for r in reasons)
-
-
-def test_pass2_health_strict_green_when_a_click_was_retried_and_landed():
-    # A rescued click leaves frontErr empty -- strict must stay green, and the
-    # observational raiseClickRetried counter must not itself be a zero key.
-    raw = "done=1 skipped=0 front=700 dedupDeleted=0 dedupShortfall=0 frontErr= exported=true"
-    reasons = pass2_health(_pass2(raw=raw, front=700, raiseClickRetried=1), label="A",
-                           expect_raises=True, zero_keys_hard=True)
-    assert reasons == []
-
-
-def test_pass2_health_strict_still_red_on_a_post_retry_front_err():
-    raw = "done=1 skipped=0 front=699 dedupDeleted=0 dedupShortfall=0 frontErr= [-1719@badge,s=8,idx=1,retry] exported=true"
-    reasons = pass2_health(_pass2(raw=raw, front=699, raiseClickRetried=1), label="A",
-                           expect_raises=True, zero_keys_hard=True)
-    assert any("frontErr" in r for r in reasons)
-    assert not any("Accessibility denied" in r for r in reasons)
-    parity_reasons = pass2_health(_pass2(raw=raw, front=699, raiseClickRetried=1), label="A",
-                                  expect_raises=True, zero_keys_hard=False)
-    assert parity_reasons == []
+               pass2_health(_pass2(jobs=5, done=2, skipped=2), label="A", zero_keys_hard=False))
 
 
 # --- pass2_parity (D4) --------------------------------------------------------------
@@ -2024,8 +1901,8 @@ def test_pass2_parity_green():
 
 
 def test_pass2_parity_flags_each_key():
-    for key in ("jobs", "done", "skipped", "sized", "sizeSkips", "front", "dedupDeleted",
-                "dedupShortfall", "sigFallback", "unresolved", "badgeFallback", "badgeUnresolved"):
+    for key in ("jobs", "done", "skipped", "sized", "sizeSkips", "dedupDeleted",
+                "dedupShortfall", "sigFallback", "unresolved"):
         b = _pass2(**{key: 99})
         reasons = pass2_parity(_pass2(), b)
         assert any(key in r for r in reasons), key
@@ -2039,41 +1916,6 @@ def test_pass2_parity_ignores_raw():
 
 def test_pass2_parity_handles_none():
     assert pass2_parity(None, None) == []
-
-
-def test_pass2_parity_front_hard_by_default():
-    reasons = pass2_parity(_pass2(), _pass2(front=99))
-    assert any("front" in r for r in reasons)
-
-
-def test_pass2_parity_excludes_front_when_not_hard():
-    # front differs but is excluded under --pass2-bar parity (GUI raises are flaky);
-    # a genuinely differing OTHER key must still be caught.
-    reasons = pass2_parity(_pass2(), _pass2(front=99, unresolved=5), front_hard=False)
-    assert not any("front" in r for r in reasons)
-    assert any("unresolved" in r for r in reasons)
-
-
-def test_pass2_parity_badge_fallback_hard_by_default():
-    reasons = pass2_parity(_pass2(), _pass2(badgeFallback=99))
-    assert any("badgeFallback" in r for r in reasons)
-
-
-def test_pass2_parity_excludes_badge_fallback_when_not_hard():
-    # W2: B raises badges offline on suppressed slides, so its AppleScript badge
-    # fallback counter legitimately differs from A's; a genuinely differing OTHER
-    # key must still be caught.
-    reasons = pass2_parity(_pass2(), _pass2(badgeFallback=99, unresolved=5),
-                           badge_fallback_hard=False)
-    assert not any("badgeFallback" in r for r in reasons)
-    assert any("unresolved" in r for r in reasons)
-
-
-def test_pass2_parity_ignores_raise_click_retried():
-    # Retries are timing-dependent per arm -- a rescue in one arm and not the other
-    # must not manufacture a RED; everything else stays equal.
-    reasons = pass2_parity(_pass2(raiseClickRetried=1), _pass2(raiseClickRetried=0))
-    assert reasons == []
 
 
 # --- pass2_bar_line / pass2_zero_warn (item 3: false "tolerated because A==B") -------
@@ -2122,33 +1964,6 @@ def test_pass2_zero_warn_not_tolerated_when_parity_nonempty():
 def test_pass2_zero_warn_empty_when_all_zero():
     assert pass2_zero_warn("A", _pass2(), tolerated=True) == ""
     assert pass2_zero_warn("A", _pass2(), tolerated=False) == ""
-
-
-def test_pass2_click_retry_warn_line():
-    # Non-zero -> rendered; zero/None -> absent. Bar-mode rendering is locked
-    # separately below (the formatter itself takes no mode argument).
-    warn = pass2_click_retry_warn("B", _pass2(raiseClickRetried=1))
-    assert warn == ("WARN B: raiseClickRetried=1 (GUI Bring-to-Front click errors "
-                    "rescued by a retry; does not gate).")
-    assert pass2_click_retry_warn("B", _pass2()) == ""
-    assert pass2_click_retry_warn("B", None) == ""
-
-
-def test_pass2_click_retry_warn_call_site_renders_in_both_bar_modes():
-    """The `pass2_click_retry_warn` call site must sit above the
-    `if not zero_keys_hard:` block that gates the parity-only WARNs, so it fires under
-    both `--pass2-bar strict` and `--pass2-bar parity` -- not just because the
-    formatter itself takes no mode argument. A regression that drifts the call site
-    into that block would still pass the formatter-level test above, so this locks
-    the call site's position in the source directly."""
-    import inspect
-
-    import scripts.offline_write_ab as offline_write_ab
-
-    src = inspect.getsource(offline_write_ab)
-    call_at = src.index("click_retry_warn = pass2_click_retry_warn(label, result)")
-    gate_at = src.index("if not zero_keys_hard:", call_at)
-    assert call_at < gate_at
 
 
 # --- plan_parity (D5) ----------------------------------------------------------------
@@ -3029,22 +2844,11 @@ def test_run_record_trims_plan_to_three_keys():
     assert set(record["plan"]) == {"transforms", "reuses", "suppressGeometry"}
 
 
-def test_run_record_computes_expect_raises_from_stat_jobs():
+def test_run_record_persists_stat_and_badge_job_lists():
     record = run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": [],
-                                        "statJobs": [{"slide": 3}], "badgeRaises": []}))
-    assert record["expectRaises"] is True
-
-
-def test_run_record_computes_expect_raises_from_badge_raises():
-    record = run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": [],
-                                        "statJobs": [], "badgeRaises": [{"slide": 5}]}))
-    assert record["expectRaises"] is True
-
-
-def test_run_record_expect_raises_false_when_both_job_lists_empty():
-    record = run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": [],
-                                        "statJobs": [], "badgeRaises": []}))
-    assert record["expectRaises"] is False
+                                        "statJobs": [{"slide": 3}], "badgeRaises": [{"slide": 5}]}))
+    assert record["statJobs"] == [{"slide": 3}]
+    assert record["badgeRaises"] == [{"slide": 5}]
 
 
 def test_run_record_raises_when_plan_carries_neither_key():
@@ -3115,6 +2919,32 @@ def test_load_run_record_warns_but_does_not_refuse_commit_mismatch(tmp_path, mon
     assert loaded == record  # NOT refused
     out = capsys.readouterr().out
     assert "WARN" in out and "commit" in out
+
+
+def test_load_run_record_accepts_compatible_v2_record(tmp_path, monkeypatch):
+    deck = tmp_path / "d.key"
+    deck.write_bytes(b"x")
+    source = tmp_path / "s.key"
+    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
+    record = run_record(**_record(deck_digest="digestX", source_digest="digestX"))
+    record["gateVersion"] = 2
+    path = tmp_path / "d.run.json"
+    path.write_text(json.dumps(record))
+    loaded = load_run_record(path, deck=deck, source=source)
+    assert loaded == record
+
+
+def test_load_run_record_refuses_unknown_gate_version(tmp_path, monkeypatch):
+    deck = tmp_path / "d.key"
+    deck.write_bytes(b"x")
+    source = tmp_path / "s.key"
+    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
+    record = run_record(**_record(deck_digest="digestX"))
+    record["gateVersion"] = 1
+    path = tmp_path / "d.run.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="gateVersion"):
+        load_run_record(path, deck=deck, source=source)
 
 
 def test_load_run_record_accepts_matching_record(tmp_path, monkeypatch):

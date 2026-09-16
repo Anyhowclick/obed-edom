@@ -308,10 +308,7 @@ template.
 
 Run the Full gate on copies with `--mode verify --no-validate`; use
 `--pass2-bar parity` only to expose and compare a known pre-existing pass-2
-problem. The dead-raise cause was the not-ready Arrange menu, fixed by the
-readiness poll (`OBED_RAISE_SETTLE_MAX`, default 1.5s; `0` disables and
-reproduces the defect) — live-verified 2026-09-11. Require Accessibility,
-refuse any already-open Keynote document, run
+problem. Refuse any already-open Keynote document, run
 serially, and quit Keynote between A and B. This workflow is viable on the
 16GB host when guarded this way; the memory caution is not a blanket ban on
 full-deck work. Run it from an unlocked working copy of the deck — `ditto`
@@ -319,42 +316,9 @@ preserves Finder's `uchg` flag, and a locked copy breaks the gate's writes.
 After any planner/driver change, also run `scripts/golden_plan.py` — a
 Keynote-free apply-plan SHA-256 gate through the real `remap_keynote.remap_keynote`.
 
-Pass 2's GUI raise (`obedRaiseSlide`/`obedFront`) emits `raiseDead(s=,idx=)` and
-`raiseUnknown(s=,idx=)` on a failed Bring to Front, plus the tagged
-`frontErr` `[errNum@phase,s=,idx=]` (no entry may contain the literal
-` exported=` — both parsers cut there). `raiseBlind(s=,idx=,phase=)` is an
-observational click-time readiness token (still clicks); `raiseVacuous(s=,idx=)`
-fires when the target is already frontmost (`_mn is _top`) and is never
-retried. `raiseRetried` counts one retry on a verified non-vacuous dead
-raise. `raiseBlindCount`/`raiseVacuous`/`raiseRetried` are counters in the
-result dict and on `Stat raise detail:`, alongside `raiseMoved`/`raiseDead`/
-`raiseUnknown`. Two env knobs tune the readiness poll on `enabled of menu
-item "Bring to Front"`: `OBED_RAISE_SETTLE_MAX` (default 1.5, `0` disables,
-non-finite/negative fall back) bounds it above the existing 0.35s floor;
-`OBED_RAISE_SETTLE_MIN` only lengthens the floor. `-1719` is
-`errAEIllegalIndex`, not an Accessibility denial (`-1743`/`-25211` are) —
-measured 2026-09-10 with Accessibility probed granted. The strict pass-2 bar
-still aborts on any `frontErr`; the 2026-09-12 full gate returned empty
-`frontErr` in both arms, so strict is now the W1 bar.
-
-`obedFront` (shared by every raise phase, including badge) retries once on a
-click *error* (not just a dead landing): it re-polls readiness via
-`obedFrontReady` before the second click, bumps `raiseClickRetried` and emits
-`raiseClickRetry(s=,idx=,phase=,err=)` on the first failure, and only tags
-`frontErr` `[errNum@phase,s=,idx=,retry]` on a second failure. `offline_write_ab.py`
-logs a non-gating `WARN <label>: raiseClickRetried=<n> ...` line in both bar
-modes; `raiseClickRetried` is neither a `PASS2_PARITY_KEYS` nor a
-`PASS2_ZERO_KEYS` member. A twice-failed retry still latches `badgeFrontDead`
-deck-wide as before — that is by design, not a regression.
-
-`obedFrontReady` also records `lastFrontBlind` whenever its readiness poll
-never confirms, cleared by `obedFront` on entry so it always scopes to the
-raise that just happened (the two polls on the retry path OR-fold).
-`obedRaiseItem` re-probes badge landing on a blind poll as well as on a
-click retry, so a conclusive non-landing latches `badgeFrontDead` on the
-first occurrence instead of being credited blind; `badgeProbeBlind(s=,k=)`
-marks a probe that only the blind trigger ran and is observational — it
-gates nothing.
+Pass 2 (stat-finalize) no longer raises at all (W2 piece 1) — every raise goes
+through the offline z-order patch (see "Offline z-order (W2)" below); there is
+no GUI raise token or Accessibility dependency left to read here.
 
 The 2026-09-07 Full bank under
 `output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:
@@ -541,17 +505,25 @@ Load-bearing rules:
 
 `OBED_ZORDER_WRITE` = `on` (default) | `off` | `verify`; forced `off` without the `iwa`
 extra or when `offline_write_mode()` is `off`. The W2 default flipped to `on` on
-2026-09-15 after the live gate (RAISE10 re-gate + control + Gold, `results.md`); `off`
-restores the GUI Bring-to-Front raise path and its Accessibility dependency. The patch runs on the saved deck after
-pass 2 (`_run_stat_finalize`), before `restore_source_builds`. Eligible slides' raises
-are suppressed in pass 2 — no `obedRaiseSlide`/`obedBadgeSlide` emitted — so each slide's
-raise runs exactly once, offline or GUI, never both. Pass 2 reports whether it completed
-via the `closed=` AppleScript token; if it did not, the deck may still be open in Keynote
-and the z-order patch is skipped, raising `RuntimeError` for the suppressed slides rather
-than risk patching an open document. Progress surfaces on one `Stat zorder detail:` line.
-Export consequence: when the knob is on, pass 2 exports nothing, and
-`remap_and_inspect`'s existing fallback exports previews after the z-order patch —
-one extra Keynote open per knob-on run.
+2026-09-15 after the live gate (RAISE10 re-gate + control + Gold, `results.md`).
+Pass 2 (stat-finalize) never raises any more (W2 piece 1) — `off` now means "no
+z-order write at all": every raise-bearing slide is reported un-raised, in source
+stacking, on the `zorderGui` list, not a GUI Bring-to-Front fallback. The patch runs
+on the saved deck after pass 2 (`_run_stat_finalize`), before `restore_source_builds`.
+Pass 1's own success gate (`_require_pass1_saved_closed`) checks the `saved=`/
+`closed=` AppleScript tokens before either the offline geometry write or the z-order
+patch runs — a pass-1 deck that did not save and close cleanly aborts with a
+`RuntimeError` rather than risk writing to a document that may still be open in
+Keynote. Progress surfaces on one `Stat zorder detail:` line.
+
+When `zorder_mode != "off"`, any slide the offline resolver could not raise (an
+ambiguous shared-signature group, e.g. a legend) is named on `zorderGui` and logged
+as a loud, non-gating `WARNING zorder: ... left in source stacking — stack by hand in
+Keynote (todo w2-ambiguous-sig-positional)` — not a silent un-raise. This is the only
+path to a raised Gold slide 19 today; `w2-ambiguous-sig-positional` (a positional
+resolver for shared-signature groups) is the fix. Export consequence: when the knob
+is on, pass 2 exports nothing, and `remap_and_inspect`'s existing fallback exports
+previews after the z-order patch — one extra Keynote open per knob-on run.
 
 ### External reference: KeynoteKit
 

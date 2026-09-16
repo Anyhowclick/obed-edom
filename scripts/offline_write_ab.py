@@ -5,10 +5,12 @@ and the W2 z-order write (``w-zorder-patch`` piece 4).
 Runs :func:`obed_edom.remap_keynote.remap_and_inspect` TWICE against the same
 source/template pair:
 
-    A = ``OBED_ZORDER_WRITE=off``, ``OBED_OFFLINE_WRITE`` at this run's ``--mode``
-        (GUI raises; never relies on the ambient z-order default).
-    B = ``OBED_ZORDER_WRITE=on``, **the same** ``OBED_OFFLINE_WRITE`` mode (offline
-        z-order patch on eligible slides; AppleScript raise only for the GUI leftover).
+    A = ``OBED_ZORDER_WRITE=off`` — no z-order write at all: pass 2 raises nothing,
+        every raise-bearing slide is reported un-raised (``zorderGui``). A measures
+        the deck's PRE-RAISE order, never the ambient z-order default.
+    B = ``OBED_ZORDER_WRITE=on``, **the same** ``OBED_OFFLINE_WRITE`` mode as A
+        (offline z-order patch on every eligible slide; nothing left for a GUI
+        raise to do).
 
 Both arms share ``--mode`` so the A/B delta is the z-order writer, not a second
 geometry-writer variable. W1's older split (A ``OBED_OFFLINE_WRITE=off``, B
@@ -18,17 +20,21 @@ Per-slide z-order verdicts reuse ``output/bank/2026-09-11/badge-retry/zorder_com
 method (full ``drawablesZOrder`` id-list equality) in two forms:
 
     SAME_ORDER      — full id-list equality. The RAISE10 A-vs-A control uses this
-                      metric via ``--control-a`` (a second same-code A deck).
-                      A-vs-B SAME_ORDER is observational only (Gold scrambles).
+                      metric via ``--control-a`` (a second same-code A deck) and
+                      DOES gate there. A-vs-B SAME_ORDER is OBSERVATIONAL ONLY,
+                      by design: A is unraised and B is patched, so the two orders
+                      are expected to differ everywhere. A ``SAME_ORDER(A-vs-B)=no``
+                      line is not a regression signal — do not read it as one.
     FRONT_BLOCK_OK  — target ids occupy the final ``|T|`` slots in the same order
-                      in both arms. This is the A-vs-B gate line.
+                      in both arms. This is the real A-vs-B gate line.
 
 RAISE10-vs-Gold control caveat (plan C8): on RAISE10 a same-code A-vs-A control
 **is** valid (six banked runs ``SAME_ORDER=yes`` on 7/7 ordinals,
 ``output/bank/2026-09-11/badge-retry/results.md``) and must be run as a control.
 On Gold it is not — Keynote scrambles ``drawablesZOrder`` on save — and only
 same-run A-vs-B ``FRONT_BLOCK_OK`` is meaningful there. Do not generalise the
-Gold caveat to RAISE10, and do not treat a Gold ``SAME_ORDER=no`` as a W2 fail.
+Gold caveat to RAISE10, and do not treat a Gold ``SAME_ORDER(A-vs-B)=no`` as a
+W2 fail — on Gold it is expected on every slide, control or not.
 
 Piece 3 emits ``OBED_ZORDER_WRITE`` and the ``Stat zorder detail:`` counters
 (``zorderSlides``, ``zorderStatRaised``, ``zorderBadgeRaised``, ``zorderNoop``,
@@ -36,10 +42,10 @@ Piece 3 emits ``OBED_ZORDER_WRITE`` and the ``Stat zorder detail:`` counters
 ``zorderLost(s=,id=)``; no token may contain the literal `` exported=``). This
 gate surfaces those counters and REDs arm B when the piece-3
 ``zorderWrite`` schema is missing (absent counters are not read as 0), when
-``zorderRefused`` / ``zorderUnresolved`` / ``zorderLost`` are non-zero, when
+``zorderRefused`` / ``zorderUnresolved`` / ``zorderLost`` are non-zero, or when
 ``slides`` / ``zorderGui`` are not exactly the eligible vs reuse/ineligible
-raise-bearing sets, or when a suppressed slide's pass-2 log still carries
-``raiseDead`` / ``raiseUnknown`` / ``frontErr``.
+raise-bearing sets. Pass 2 (stat-finalize) never raises any more — there is no
+GUI raise health to check on either arm.
 
 A and B are two INDEPENDENT Keynote runs, but the output deck's drawable ids are copied
 straight from the SOURCE (not regenerated per run) — so every object that survives both
@@ -78,8 +84,7 @@ mismatch a matched pair's render signature reports — TYPE (e.g. ``autosize`` v
 ``mask_angle`` — always fails its pair regardless of the tolerance used, since
 ``write_gate_ab.compare_signature`` reports those independently of the geometry delta.
 
-Health gates run BEFORE any geometry compare: an Accessibility pre-flight (``front``
-z-order raises silently no-op without it), a Keynote-open-documents pre-flight
+Health gates run BEFORE any geometry compare: a Keynote-open-documents pre-flight
 (:func:`keynote_open_documents` -- ABORTS if anything is already open; a stray document
 left by a swallowed close is what made a real run inherit the previous run's B_flagged
 and blow memory on the two-tier read), pass-2 (stat-finalize) health on run A --
@@ -123,7 +128,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -133,7 +137,8 @@ from typing import Any, NamedTuple
 # `python scripts/x.py` puts scripts/ (not the repo root) on sys.path[0].
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-GATE_VERSION = 2
+GATE_VERSION = 3
+COMPATIBLE_GATE_VERSIONS = {2, GATE_VERSION}
 
 TOL_HARD = 0.5
 TOL_SOFT = 1.0
@@ -147,12 +152,12 @@ _ASPECT_LOCKED = {"group", "image", "movie"}
 _TEXT_BUCKETS = {"text"}  # "child:text" is unreachable: `_child_kind` never yields "text"
 
 # D4 pass-2 (stat-finalize) health, from `keynote._run_stat_finalize`'s result dict.
-PASS2_ZERO_KEYS = ("unresolved", "dedupShortfall", "badgeUnresolved")
+PASS2_ZERO_KEYS = ("unresolved", "dedupShortfall")
 PASS2_PARITY_KEYS = (
-    "jobs", "done", "skipped", "sized", "sizeSkips", "front", "dedupDeleted",
-    "dedupShortfall", "sigFallback", "unresolved", "badgeFallback", "badgeUnresolved",
+    "jobs", "done", "skipped", "sized", "sizeSkips", "dedupDeleted",
+    "dedupShortfall", "sigFallback", "unresolved",
 )
-PASS2_WARN_KEYS = ("sigFallback", "badgeFallback")
+PASS2_WARN_KEYS = ("sigFallback",)
 
 # Piece 3 result-dict counters that must be 0 on arm B (lists or ints).
 ZORDER_ZERO_KEYS = ("zorderRefused", "zorderUnresolved", "zorderLost")
@@ -166,12 +171,6 @@ ZORDER_SURFACE_KEYS = (
     "zorderSlides", "zorderStatRaised", "zorderBadgeRaised", "zorderNoop",
     "zorderRefused", "zorderUnresolved", "zorderLost", "zorderGui",
 )
-_RAISE_SLIDE_RE = re.compile(r"s=(\d+)")
-
-_ACCESSIBILITY_ERR_CODES = ("-1743", "-25211")
-_FRONT_ERR_RE = re.compile(r"frontErr=(.*?) exported=")
-
-
 class Tolerances(NamedTuple):
     hard: float = TOL_HARD
     soft: float = TOL_SOFT
@@ -185,23 +184,8 @@ def _log(msg: str) -> None:
 
 
 # ==========================================================================
-# Pre-flight + pass-2 health (D4/D5) — pure, unit-tested via monkeypatched subprocess.
+# Pre-flight + pass-2 health (D5) — pure, unit-tested via monkeypatched subprocess.
 # ==========================================================================
-def accessibility_ok() -> tuple[bool, str]:
-    """``(True, "true")`` when the Accessibility API is enabled for this process's host
-    app, else ``(False, detail)``. z-order raises (``front``) silently no-op without it."""
-    proc = subprocess.run(
-        ["osascript", "-e", 'tell application "System Events" to UI elements enabled'],
-        capture_output=True, text=True, check=False,
-    )
-    out = (proc.stdout or "").strip()
-    if proc.returncode != 0:
-        return False, (proc.stderr or out or "osascript failed").strip()
-    if out.lower() != "true":
-        return False, out or "Accessibility not enabled"
-    return True, out
-
-
 def keynote_open_documents() -> list[str]:
     """Every open Keynote document's name — empty when Keynote isn't running, or is
     running with no documents open. ``if it is running`` short-circuits so this never
@@ -286,13 +270,7 @@ def quit_keynote_and_wait(timeout: float = 90.0) -> tuple[bool, float]:
     return False, time.monotonic() - start
 
 
-def front_err_from_raw(raw: str) -> str:
-    """The ``frontErr=`` field out of ``_run_stat_finalize``'s raw AppleScript return."""
-    match = _FRONT_ERR_RE.search(raw or "")
-    return match.group(1).strip() if match else ""
-
-
-def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bool,
+def pass2_health(result: dict[str, Any] | None, *, label: str,
                  zero_keys_hard: bool = True) -> list[str]:
     """RED reasons for one run's pass-2 (stat-finalize) result — empty == healthy.
 
@@ -307,12 +285,9 @@ def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bo
     ``zero_keys_hard`` is the ``--pass2-bar`` switch (``strict`` -> ``True``, the
     default; ``parity`` -> ``False``): under ``parity`` a nonzero ``PASS2_ZERO_KEYS``
     value is tolerated here (the caller WARNs it separately, gated on A==B by
-    :func:`pass2_parity`), and a ``frontErr`` WITHOUT an Accessibility code
-    (``_ACCESSIBILITY_ERR_CODES`` — a stray GUI raise miss like ``"[-1719]"`` "invalid
-    index", not a permissions problem) is tolerated too. An Accessibility-coded
-    ``frontErr`` stays HARD in BOTH modes -- it means z-order raises are silently
-    no-op'ing, never a benign miss. ``ok``, ``done+skipped==jobs``, and
-    ``front >= 1`` when ``expect_raises`` stay HARD in both modes.
+    :func:`pass2_parity`). ``ok`` and ``done+skipped==jobs`` stay HARD in both modes.
+    Pass 2 never raises any more (W2 piece 1) — there is no ``front``/``frontErr``
+    to check here.
     """
     if result is None:
         return []
@@ -326,53 +301,26 @@ def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bo
             val = int(result.get(key) or 0)
             if val:
                 reasons.append(f"{label}: {key}={val} (expected 0)")
-    front_err = front_err_from_raw(result.get("raw") or "")
-    if front_err:
-        is_accessibility = any(code in front_err for code in _ACCESSIBILITY_ERR_CODES)
-        if is_accessibility or zero_keys_hard:
-            tag = " (Accessibility denied)" if is_accessibility else ""
-            reasons.append(f"{label}: frontErr={front_err!r}{tag}")
     jobs = int(result.get("jobs") or 0)
     done = int(result.get("done") or 0)
     skipped = int(result.get("skipped") or 0)
     if done + skipped != jobs:
         reasons.append(f"{label}: done({done})+skipped({skipped}) != jobs({jobs})")
-    front = int(result.get("front") or 0)
-    if expect_raises and front < 1:
-        reasons.append(f"{label}: front={front} but the plan carried stat jobs or badge raises")
     return reasons
 
 
-def pass2_parity(a: dict[str, Any] | None, b: dict[str, Any] | None, *,
-                 front_hard: bool = True, badge_fallback_hard: bool = True) -> list[str]:
+def pass2_parity(a: dict[str, Any] | None, b: dict[str, Any] | None) -> list[str]:
     """A/B parity on ``PASS2_PARITY_KEYS`` — ``raw`` is deliberately ignored.
 
-    ``front_hard=False`` (``--pass2-bar parity``) excludes ``front`` from this HARD
-    check -- GUI Bring-to-Front raises are flaky and don't move geometry, so the
-    caller WARNs an A/B ``front`` mismatch separately instead of gating on it.
-
-    ``badge_fallback_hard=False`` (W2: B suppressed raises on a badge-bearing eligible
-    slide) excludes ``badgeFallback`` -- B raises its badges offline on that slide, so
-    its AppleScript badge-fallback counter is legitimately lower there while A's is
-    not; the caller WARNs that mismatch separately instead of gating on it. This
-    counter is deck-level, not per-slide, so the caller must key the exemption to
-    ``claimed_patched_slides(zorder_write_b)`` intersecting the badge-bearing slide
-    set (B's own ``badgeRaises`` rows) -- a run where B only patched stat-only slides
-    must keep this key HARD.
-
-    Every other key (``jobs``/``done``/``skipped``/``sized``/``sizeSkips``/
-    ``dedupDeleted``/``dedupShortfall``/``sigFallback``/``unresolved``/
-    ``badgeUnresolved``) stays HARD in every mode.
+    Every key (``jobs``/``done``/``skipped``/``sized``/``sizeSkips``/``dedupDeleted``/
+    ``dedupShortfall``/``sigFallback``/``unresolved``) stays HARD in every mode. Pass 2
+    never raises any more (W2 piece 1) — there is no ``front``/``badgeFallback`` key to
+    exempt from parity.
     """
     a = a or {}
     b = b or {}
     reasons: list[str] = []
-    keys = PASS2_PARITY_KEYS
-    if not front_hard:
-        keys = tuple(k for k in keys if k != "front")
-    if not badge_fallback_hard:
-        keys = tuple(k for k in keys if k != "badgeFallback")
-    for key in keys:
+    for key in PASS2_PARITY_KEYS:
         va = int(a.get(key) or 0)
         vb = int(b.get(key) or 0)
         if va != vb:
@@ -409,16 +357,6 @@ def pass2_zero_warn(label: str, result: dict[str, Any] | None, *, tolerated: boo
                 "(pass2-bar=parity: tolerated because A==B, does not gate).")
     return (f"WARN {label}: {', '.join(zero_warns)} "
             "(pass2-bar=parity: A != B, NOT tolerated — see the RED lines above).")
-
-
-def pass2_click_retry_warn(label: str, result: dict[str, Any] | None) -> str:
-    """`raiseClickRetried` WARN, observational only -- renders in both `--pass2-bar`
-    modes and only when non-zero; "" otherwise."""
-    n = int((result or {}).get("raiseClickRetried") or 0)
-    if not n:
-        return ""
-    return (f"WARN {label}: raiseClickRetried={n} (GUI Bring-to-Front click errors "
-            "rescued by a retry; does not gate).")
 
 
 def plan_parity(
@@ -1134,19 +1072,11 @@ def run_record(
     child_resize: Any, applied: int, missed: int, offline_write: dict[str, Any] | None,
     spec_id_map: dict[str, list[dict[str, Any]]],
     zorder_write: dict[str, Any] | None = None,
-    expect_raises: bool | None = None,
 ) -> dict[str, Any]:
     """Everything a later ``--reuse-a``/``--reuse-b`` needs, with no Keynote (D13).
 
     ``offline_write`` is stored MINUS its ``specs`` key (the full per-slide spec dicts
     are already in ``plan["transforms"]``; duplicating them bloats the record).
-
-    ``expectRaises`` (D4's ``front >= 1`` bar) is computed HERE, once, from the FULL
-    ``plan`` a fresh run hands in (remap_keynote.py's ``plan_out`` block carries
-    ``statJobs``/``badgeRaises`` job lists) and persisted alongside the trimmed plan, so
-    a later ``--reuse-a``/``--reuse-b`` reads it back exactly rather than re-deriving it
-    from a plan already trimmed down to D13's three keys. Pass ``expect_raises`` to
-    override when piece 3 suppressed every GUI raise (``front >= 1`` is then not owed).
 
     ``statJobs`` / ``badgeRaises`` are persisted at the top level (the trimmed plan
     drops them) so a reused record can still resolve the W2 front-block targets.
@@ -1154,21 +1084,18 @@ def run_record(
 
     Raises ``ValueError`` if ``plan`` has NEITHER key: that means ``plan`` is already a
     trimmed, PERSISTED plan (a loaded run record's ``plan``, not a fresh ``plan_out``) —
-    computing ``expectRaises`` from it would silently read as "no jobs" instead of
-    failing loudly on the caller's mistake. One key without the other is also a
-    refuse — do not persist the missing side as ``[]``.
+    silently reading it as "no jobs planned" would hide the caller's mistake. One key
+    without the other is also a refuse — do not persist the missing side as ``[]``.
     """
     jobs = raise_job_pair(plan, label="run_record: plan")
     if jobs is None:
         raise ValueError(
             "run_record: plan carries neither 'statJobs' nor 'badgeRaises' — this looks "
-            "like an already-trimmed persisted plan, not a fresh plan_out dict; "
-            "expectRaises cannot be derived from it."
+            "like an already-trimmed persisted plan, not a fresh plan_out dict."
         )
     stat_jobs, badge_raises = jobs
     ow = dict(offline_write or {})
     ow.pop("specs", None)
-    computed = bool(stat_jobs) or bool(badge_raises)
     return {
         "gateVersion": GATE_VERSION,
         "commit": commit,
@@ -1179,7 +1106,6 @@ def run_record(
             "reuses": plan.get("reuses") or [],
             "suppressGeometry": plan.get("suppressGeometry"),
         },
-        "expectRaises": computed if expect_raises is None else bool(expect_raises),
         "statJobs": stat_jobs,
         "badgeRaises": badge_raises,
         "childResize": child_resize,
@@ -1203,8 +1129,8 @@ def write_run_record(path: Path | str, record: dict[str, Any]) -> Path:
 
 
 def load_run_record(path: Path | str, *, deck: Path | str, source: Path | str,
-                    gate_version: int = GATE_VERSION) -> dict[str, Any]:
-    """Load + validate a run record against the CURRENT gate version and both the
+                    compatible_versions: set[int] = COMPATIBLE_GATE_VERSIONS) -> dict[str, Any]:
+    """Load + validate a run record against the compatible gate versions and both the
     deck's and the SOURCE wall's OWN digest — refuses (``ValueError``) a stale record
     rather than trusting it.
 
@@ -1213,9 +1139,10 @@ def load_run_record(path: Path | str, *, deck: Path | str, source: Path | str,
     changing anything this gate reads).
     """
     record = json.loads(Path(path).read_text())
-    if int(record.get("gateVersion", -1)) != int(gate_version):
+    if int(record.get("gateVersion", -1)) not in compatible_versions:
         raise ValueError(
-            f"{path}: gateVersion {record.get('gateVersion')} != {gate_version} (stale run record)"
+            f"{path}: gateVersion {record.get('gateVersion')} not in {sorted(compatible_versions)} "
+            "(stale run record)"
         )
     from obed_edom.baseline import deck_digest  # noqa: PLC0415
 
@@ -1402,21 +1329,6 @@ def claimed_patched_slides(zorder_write: dict[str, Any] | None) -> set[int]:
     return parsed if parsed is not None else set()
 
 
-def badge_fallback_exempt(
-    zorder_write: dict[str, Any] | None,
-    badge_raises: list[dict[str, Any]] | None,
-) -> bool:
-    """True iff B patched offline at least one badge-bearing slide (a slide with a
-    ``badgeRaises`` row), the condition ``badgeFallback`` parity must be keyed to —
-    not merely "any slide was patched", which would exempt a run where B only patched
-    stat-only slides while every badge-bearing slide stayed on the GUI."""
-    ow = zorder_write or {}
-    if _counter_nonzero(ow.get("zorderSlides")) <= 0:
-        return False
-    badge_bearing = {int(row["slide"]) for row in badge_raises or []}
-    return bool(claimed_patched_slides(zorder_write) & badge_bearing)
-
-
 def raise_slides_from_jobs(
     stat_jobs: list[dict[str, Any]] | None,
     badge_rows: list[dict[str, Any]] | None,
@@ -1459,8 +1371,7 @@ def zorder_gui_reasons(
     """RED unless ``slides`` / ``zorderGui`` match the independent eligible vs leftover sets.
 
     Trusting B's ``slides`` and only checking ``zorderGui == raise − slides`` would
-    still GREEN a B that left eligible raises on the GUI and listed them as ineligible.
-    FRONT_BLOCK_OK can match in that case because both arms used the GUI raise.
+    still GREEN a B that left an eligible slide unraised and listed it as ineligible.
     """
     ow = zorder_write or {}
     expected_patched, expected_gui = expected_zorder_sets(
@@ -1537,56 +1448,6 @@ def zorder_counter_summary(zorder_write: dict[str, Any] | None) -> str:
     ow = zorder_write or {}
     parts = [f"{key}={_counter_nonzero(ow.get(key))}" for key in ZORDER_SURFACE_KEYS]
     return "Stat zorder detail: " + " ".join(parts)
-
-
-def _raise_token_args(child_resize: dict[str, Any], name: str) -> list[str]:
-    tokens = child_resize.get("tokens") or {}
-    if isinstance(tokens, dict) and tokens.get(name):
-        return [str(a) for a in tokens[name]]
-    blob = (child_resize.get("detail") or "") + " " + (child_resize.get("raw") or "")
-    return re.findall(rf"{re.escape(name)}\(([^)]*)\)", blob)
-
-
-def suppressed_raise_reasons(
-    child_resize: dict[str, Any] | None,
-    suppressed: set[int] | list[int],
-    *,
-    label: str = "B",
-) -> list[str]:
-    """RED if pass-2 still emitted ``raiseDead`` / ``raiseUnknown`` / ``frontErr`` on a
-    slide the offline z-order writer claimed (those raises must not even be attempted)."""
-    if not child_resize or not suppressed:
-        return []
-    suppressed_set = {int(s) for s in suppressed}
-    reasons: list[str] = []
-    for name in ("raiseDead", "raiseUnknown"):
-        seen: set[int] = set()
-        for args in _raise_token_args(child_resize, name):
-            match = _RAISE_SLIDE_RE.search(args)
-            if not match:
-                continue
-            slide = int(match.group(1))
-            if slide in suppressed_set and slide not in seen:
-                seen.add(slide)
-                reasons.append(f"{label}: {name}(s={slide}) on suppressed slide")
-    front_err = child_resize.get("frontErr") or front_err_from_raw(child_resize.get("raw") or "")
-    if front_err:
-        seen_front: set[int] = set()
-        for match in _RAISE_SLIDE_RE.finditer(front_err):
-            slide = int(match.group(1))
-            if slide in suppressed_set and slide not in seen_front:
-                seen_front.add(slide)
-                reasons.append(f"{label}: frontErr s={slide} on suppressed slide")
-    return reasons
-
-
-def expect_gui_raises(
-    stat_jobs: list[dict[str, Any]] | None,
-    badge_raises: list[dict[str, Any]] | None,
-    zorder_write: dict[str, Any] | None,
-) -> bool:
-    """``front >= 1`` is only owed when at least one raise-bearing slide stayed on GUI."""
-    return bool(raise_slides_from_jobs(stat_jobs, badge_raises) - claimed_patched_slides(zorder_write))
 
 
 def slide_zorder_ids(objects: dict[str, Any], slide_number: int) -> list[str] | None:
@@ -1726,17 +1587,6 @@ def w2_oracle_kwargs(
     return dict(kwargs), dict(kwargs)
 
 
-def badge_fallback_hard_for(
-    plan_b: dict[str, Any], b_record: dict[str, Any], zorder_write_b: dict[str, Any] | None,
-) -> bool:
-    """True iff ``badgeFallback`` parity must gate hard — B did not offline-patch any
-    badge-bearing slide, per :func:`persisted_raise_jobs` / :func:`badge_fallback_exempt`.
-    Raises ``ValueError`` per ``persisted_raise_jobs``'s one-key-without-the-other contract.
-    """
-    badge_raises_b = (persisted_raise_jobs(plan_b, b_record) or ([], []))[1]
-    return not badge_fallback_exempt(zorder_write_b, badge_raises_b)
-
-
 # ==========================================================================
 # main — the Keynote-touching orchestration.
 # ==========================================================================
@@ -1805,7 +1655,7 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"group-child px tolerance, A-vs-B (default {TOL_CHILD})")
     ap.add_argument(
         "--pass2-bar", choices=("strict", "parity"), default="strict",
-        help="strict (default): every PASS2_ZERO_KEYS/frontErr/front A-vs-B parity is "
+        help="strict (default): every PASS2_ZERO_KEYS/PASS2_PARITY_KEYS A-vs-B parity is "
              "HARD. parity: tolerate a pre-existing pass-2 problem that is IDENTICAL on "
              "A and B (WARN, never abort/RED) so an unrelated deck defect doesn't block "
              "the write-equivalence question.",
@@ -1836,13 +1686,6 @@ def main(argv: list[str] | None = None) -> int:
     a_deck = args.reuse_a if args.reuse_a is not None else out / "A_unflagged.key"
     b_deck = args.reuse_b if args.reuse_b is not None else out / "B_flagged.key"
 
-    ok, detail = accessibility_ok()
-    if not ok:
-        _log(f"ABORT: Accessibility is not enabled for this host ({detail}). Enable it under "
-             "System Settings › Privacy & Security › Accessibility (z-order raises silently "
-             "no-op without it).")
-        return 4
-
     open_docs = keynote_open_documents()
     if open_docs:
         _log(f"ABORT: Keynote already has {len(open_docs)} document(s) open: {open_docs}. "
@@ -1866,7 +1709,6 @@ def main(argv: list[str] | None = None) -> int:
         plan_a = a_record["plan"]
         child_resize_a = a_record["childResize"]
         applied_a = int(a_record["applied"] or 0)
-        expect_raises_a = bool(a_record["expectRaises"])
         id_map = a_record["specIdMap"]
         zorder_write_a = a_record.get("zorderWrite") or {}
         _log(f"REUSE A: {a_deck} (run record OK).")
@@ -1890,14 +1732,11 @@ def main(argv: list[str] | None = None) -> int:
         applied_a = int(info_a.get("applied") or 0)
         id_map = spec_id_map(args.source)
         zorder_write_a = info_a.get("zorderWrite") or {}
-        expect_raises_a = expect_gui_raises(
-            plan_a.get("statJobs"), plan_a.get("badgeRaises"), zorder_write_a,
-        )
         a_record = run_record(
             commit=commit, deck_digest=deck_digest(a_deck), source_digest=deck_digest(args.source),
             plan=plan_a, child_resize=child_resize_a, applied=applied_a,
             missed=int(info_a.get("missed") or 0), offline_write=info_a.get("offlineWrite"),
-            spec_id_map=id_map, zorder_write=zorder_write_a, expect_raises=expect_raises_a,
+            spec_id_map=id_map, zorder_write=zorder_write_a,
         )
         write_run_record(_run_record_path(a_deck), a_record)
         _log(f"Run record written -> {_run_record_path(a_deck)}")
@@ -1910,8 +1749,7 @@ def main(argv: list[str] | None = None) -> int:
                 _log(f"WARN: Keynote still running after {elapsed:.0f} s")
 
     zero_keys_hard = args.pass2_bar == "strict"
-    reasons_a = pass2_health(child_resize_a, label="A", expect_raises=expect_raises_a,
-                             zero_keys_hard=zero_keys_hard)
+    reasons_a = pass2_health(child_resize_a, label="A", zero_keys_hard=zero_keys_hard)
     for r in reasons_a:
         _log(f"RED: {r}")
     if reasons_a:
@@ -1960,15 +1798,6 @@ def main(argv: list[str] | None = None) -> int:
         applied_b = int(b_record["applied"] or 0)
         ow_b = b_record["offlineWrite"] or {}
         zorder_write_b = b_record.get("zorderWrite") or {}
-        try:
-            jobs_b = persisted_raise_jobs(plan_b, b_record)
-        except ValueError as exc:
-            _log(f"ABORT: {exc}")
-            return 2
-        if jobs_b is None:
-            expect_raises_b = bool(b_record["expectRaises"])
-        else:
-            expect_raises_b = expect_gui_raises(jobs_b[0], jobs_b[1], zorder_write_b)
         _log(f"REUSE B: {b_deck} (run record OK).")
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
@@ -1989,14 +1818,11 @@ def main(argv: list[str] | None = None) -> int:
         applied_b = int(info_b.get("applied") or 0)
         ow_b = info_b.get("offlineWrite") or {}
         zorder_write_b = info_b.get("zorderWrite") or {}
-        expect_raises_b = expect_gui_raises(
-            plan_b.get("statJobs"), plan_b.get("badgeRaises"), zorder_write_b,
-        )
         b_record = run_record(
             commit=commit, deck_digest=deck_digest(b_deck), source_digest=deck_digest(args.source),
             plan=plan_b, child_resize=child_resize_b, applied=applied_b,
             missed=int(info_b.get("missed") or 0), offline_write=ow_b, spec_id_map=id_map,
-            zorder_write=zorder_write_b, expect_raises=expect_raises_b,
+            zorder_write=zorder_write_b,
         )
         write_run_record(_run_record_path(b_deck), b_record)
         _log(f"Run record written -> {_run_record_path(b_deck)}")
@@ -2007,12 +1833,6 @@ def main(argv: list[str] | None = None) -> int:
                 _log(f"Keynote quit between runs ({elapsed:.0f} s)")
             else:
                 _log(f"WARN: Keynote still running after {elapsed:.0f} s")
-
-    try:
-        badge_fallback_hard = badge_fallback_hard_for(plan_b, b_record, zorder_write_b)
-    except ValueError as exc:
-        _log(f"ABORT: {exc}")
-        return 2
 
     if not (ow_b.get("slides") or []):
         _log("ABORT: run B took no slide offline (OBED_AS_GEOMETRY off, or no slide "
@@ -2027,8 +1847,7 @@ def main(argv: list[str] | None = None) -> int:
         f"applied={ow_b.get('applied')}."
     )
 
-    reasons_b = pass2_health(child_resize_b, label="B", expect_raises=expect_raises_b,
-                             zero_keys_hard=zero_keys_hard)
+    reasons_b = pass2_health(child_resize_b, label="B", zero_keys_hard=zero_keys_hard)
     for r in reasons_b:
         _log(f"RED: {r}")
 
@@ -2044,15 +1863,7 @@ def main(argv: list[str] | None = None) -> int:
     for r in damage_b:
         _log(f"RED: {r}")
 
-    zorder_suppressed = bool(claimed_patched_slides(zorder_write_b))
-    badge_slides_suppressed = not badge_fallback_hard
-    # W2: B's eligible slides skip the GUI raise, so `front` A!=B is expected and
-    # must not RED the strict bar. Other PASS2_PARITY_KEYS still gate.
-    parity = pass2_parity(
-        child_resize_a, child_resize_b,
-        front_hard=zero_keys_hard and not zorder_suppressed,
-        badge_fallback_hard=badge_fallback_hard,
-    )
+    parity = pass2_parity(child_resize_a, child_resize_b)
     for r in parity:
         _log(f"RED: {r}")
 
@@ -2062,9 +1873,6 @@ def main(argv: list[str] | None = None) -> int:
         warns = [f"{key}={result.get(key)}" for key in PASS2_WARN_KEYS if int(result.get(key) or 0)]
         if warns:
             _log(f"WARN {label}: {', '.join(warns)} (non-zero fallback; investigate, does not gate).")
-        click_retry_warn = pass2_click_retry_warn(label, result)
-        if click_retry_warn:
-            _log(click_retry_warn)
 
     if not zero_keys_hard:
         for label, result in (("A", child_resize_a), ("B", child_resize_b)):
@@ -2073,33 +1881,10 @@ def main(argv: list[str] | None = None) -> int:
             warn = pass2_zero_warn(label, result, tolerated=not parity)
             if warn:
                 _log(warn)
-            front_err = front_err_from_raw((result.get("raw") or ""))
-            if front_err and not any(code in front_err for code in _ACCESSIBILITY_ERR_CODES):
-                _log(f"WARN {label}: frontErr={front_err!r} "
-                     "(pass2-bar=parity: no Accessibility code, does not gate).")
 
     drift = plan_parity(plan_a, plan_b, compared_slides)
     for r in drift:
         _log(f"RED: {r}")
-
-    if not zero_keys_hard or zorder_suppressed:
-        front_a = int((child_resize_a or {}).get("front") or 0)
-        front_b = int((child_resize_b or {}).get("front") or 0)
-        if front_a != front_b:
-            why = (
-                "W2: B suppresses GUI raises on eligible slides, does not gate"
-                if zorder_suppressed
-                else "pass2-bar=parity: GUI Bring-to-Front raises are flaky, does not gate"
-            )
-            _log(f"WARN: pass-2 front A={front_a} B={front_b} ({why}).")
-
-    if badge_slides_suppressed:
-        bf_a = int((child_resize_a or {}).get("badgeFallback") or 0)
-        bf_b = int((child_resize_b or {}).get("badgeFallback") or 0)
-        if bf_a != bf_b:
-            _log(f"WARN: pass-2 badgeFallback A={bf_a} B={bf_b} "
-                 "(W2: B raises badges offline on suppressed badge-bearing slides, "
-                 "does not gate).")
 
     ow_missed = int(ow_b.get("missedSpecs") or 0)
     ow_fallback = sum(int(v) for v in (ow_b.get("fallbackSpecs") or {}).values())
@@ -2123,20 +1908,17 @@ def main(argv: list[str] | None = None) -> int:
         stat_jobs_a, badge_rows_a = raise_jobs
     raise_slides = raise_slides_from_jobs(stat_jobs_a, badge_rows_a)
 
-    suppressed_slides = claimed_patched_slides(zorder_write_b)
     zorder_reasons = zorder_write_reasons(
         zorder_write_b, raise_slides,
         compared_slides=compared_slides, refused=ow_b.get("refused"),
     )
-    suppress_reasons = suppressed_raise_reasons(child_resize_b, suppressed_slides)
-    for r in zorder_reasons + suppress_reasons:
+    for r in zorder_reasons:
         _log(f"RED: {r}")
     _log(f"A {zorder_counter_summary(zorder_write_a)}")
     _log(f"B {zorder_counter_summary(zorder_write_b)}")
 
     gate_ok = not (
-        reasons_b or drift or parity or summary_reasons or damage_b
-        or zorder_reasons or suppress_reasons
+        reasons_b or drift or parity or summary_reasons or damage_b or zorder_reasons
     )
 
     # ============================ per-slide compare =================================
@@ -2254,7 +2036,7 @@ def main(argv: list[str] | None = None) -> int:
                 gate_ok = False
                 _log(f"RED: slide {n}: SAME_ORDER(A-vs-A)=no — A-vs-B z-order verdict is void")
         _log(
-            f"    z-order SAME_ORDER(A-vs-B)={'yes' if verdict['sameOrder'] else 'no'} "
+            f"    z-order SAME_ORDER(A-vs-B)={'yes' if verdict['sameOrder'] else 'no'} (observational) "
             f"SAME_ORDER(A-vs-A)={ctrl_tag} FRONT_BLOCK_OK={front_tag}"
         )
 
