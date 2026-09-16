@@ -13,7 +13,13 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { appearanceMismatch, inferHopKind } = require(path.join(out, "types.js"));
+const {
+  appearanceMismatch,
+  inferHopKind,
+  morphPlatePx,
+  plateFitsMorph,
+  suggestedHopKind,
+} = require(path.join(out, "types.js"));
 
 const camera = { lat: 0, lon: 0, zoom: 4, bearing: 0, pitch: 0 };
 function slide(overrides) {
@@ -79,4 +85,58 @@ test("missing colours vs an empty map stay a Morph", () => {
   const to = slide({ id: "t", highlightColours: {} });
   assert.deepEqual(appearanceMismatch(from, to), []);
   assert.equal(inferHopKind(from, to), "morph");
+});
+
+test("3D style is a Movie only while the Buildings layer is on", () => {
+  const hidden = ["roadnames", "arrows", "labels", "waternames", "boundaries", "buildings"];
+  const on = slide({ style: "buildings3d" });
+  const off = slide({ style: "buildings3d", hiddenLayers: hidden });
+  assert.equal(inferHopKind(on, slide({ id: "t", style: "buildings3d" })), "movie");
+  assert.equal(inferHopKind(off, slide({ id: "t", style: "buildings3d", hiddenLayers: hidden })), "morph");
+  assert.equal(
+    inferHopKind(
+      slide({ style: "borderlands", hiddenLayers: hidden }),
+      slide({ id: "t", style: "borderlands", hiddenLayers: hidden })
+    ),
+    "morph"
+  );
+});
+
+test("pitch still forces Movie when buildings are hidden", () => {
+  const hidden = ["roadnames", "arrows", "labels", "waternames", "boundaries", "buildings"];
+  const from = slide({ style: "buildings3d", hiddenLayers: hidden });
+  const to = slide({
+    id: "t",
+    style: "buildings3d",
+    hiddenLayers: hidden,
+    camera: { ...camera, pitch: 20 },
+  });
+  assert.equal(inferHopKind(from, to), "movie");
+});
+
+test("zoom delta above 2 stays a Morph", () => {
+  const from = slide({ camera: { ...camera, zoom: 4 } });
+  const to = slide({ id: "t", camera: { ...camera, zoom: 8 } });
+  assert.equal(inferHopKind(from, to), "morph");
+  assert.equal(suggestedHopKind(from, to), "morph");
+});
+
+test("a wide-wall pan that used to exceed 8192 still morphs on a fitted plate", () => {
+  const world = 512 * 2 ** 8;
+  const from = slide({
+    includeSidePanels: true,
+    camera: { lat: 3, lon: 101, zoom: 8, bearing: 0, pitch: 0 },
+  });
+  const to = slide({
+    id: "t",
+    includeSidePanels: true,
+    camera: { lat: 3, lon: 101 + (800 * 360) / world, zoom: 8, bearing: 0, pitch: 0 },
+  });
+  assert.equal(inferHopKind(from, to), "morph");
+  assert.equal(suggestedHopKind(from, to), "morph");
+  assert.equal(plateFitsMorph(from, to), true);
+  const plate = morphPlatePx(from.camera, to.camera, 7680, 7680);
+  assert.ok(plate);
+  assert.ok(plate.w <= 8192 + 1e-6);
+  assert.ok(plate.h <= 8192 + 1e-6);
 });

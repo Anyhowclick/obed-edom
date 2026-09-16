@@ -95,16 +95,13 @@ def slide_has_resized_image(specs: list[dict]) -> bool:
     )
 
 
-def check_preconditions(specs: list[dict], reuse_slides: set[int], slide_number: int) -> list[str]:
+def check_preconditions(specs: list[dict], slide_number: int) -> list[str]:
     """Reasons slide N cannot be gated — empty list == good to go.
 
-    The gate needs a NON-reuse slide (a reuse slide is duplicated post-transform, so it
-    has no fresh geometry write to reproduce) that actually resizes a masked image (the
-    unproven SIZE class the gate exists to prove).
+    The gate needs a slide that actually resizes a masked image (the unproven SIZE
+    class the gate exists to prove).
     """
     errors: list[str] = []
-    if slide_number in reuse_slides:
-        errors.append(f"slide {slide_number} is a REUSE slide; the gate needs a non-reuse slide")
     if not specs:
         errors.append(f"slide {slide_number} has no planned transforms")
     elif not slide_has_resized_image(specs):
@@ -113,11 +110,6 @@ def check_preconditions(specs: list[dict], reuse_slides: set[int], slide_number:
             "pick a slide that resizes a masked image"
         )
     return errors
-
-
-def reuse_slide_numbers(reuses: list[dict]) -> set[int]:
-    """Slide numbers a reuse job duplicates (from ``plan_out['reuses']``)."""
-    return {int(r["slide"]) for r in (reuses or []) if r.get("slide") is not None}
 
 
 def source_kind_counts(source_deck: Path | str, slide_number: int) -> dict[str, int]:
@@ -886,7 +878,7 @@ def main(argv: list[str] | None = None) -> int:
         shutil.copyfile(args.reuse_bpre, bpre_deck)  # never mutate the bank
         _log(f"REUSE: banked B-pre {args.reuse_bpre} + specs {args.reuse_specs} "
              f"({len(specs_N)} spec(s) for slide {N}).")
-        errors = check_preconditions(specs_N, set(), N)  # reuse already validated at bank time
+        errors = check_preconditions(specs_N, N)
     else:
         if args.source is None or args.template is None:
             ap.error("--source and --template are required for a fresh B-pre "
@@ -902,8 +894,7 @@ def main(argv: list[str] | None = None) -> int:
             slide_range=None, export_dir=None, plan_out=plan_out, log=_log,
         )
         specs_N = slide_specs(plan_out.get("transforms") or [], N)
-        reuses = plan_out.get("reuses") or []
-        errors = check_preconditions(specs_N, reuse_slide_numbers(reuses), N)
+        errors = check_preconditions(specs_N, N)
         src_counts = source_kind_counts(args.source, N)
         # Bank the sidecar so later runs can --reuse-bpre + --reuse-specs (no Keynote).
         if not errors:

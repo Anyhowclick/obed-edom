@@ -50,12 +50,12 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "
 # the golden's own "env" record, so the three cannot drift apart.
 ENV_PINS: dict[str, str | None] = {
     "OBED_OFFLINE_WRITE": "off",
+    "OBED_ZORDER_WRITE": "off",
     "OBED_OFFLINE_READ": "on",
     "OBED_AS_GEOMETRY": "1",
     "OBED_SUPPRESS_GEOMETRY": None,
     "OBED_WRITE_TIMING": None,
     "OBED_GEOM_PROPS": None,
-    "OBED_SLIDE_REUSE": "off",
 }
 
 ROLE_SET = {"map", "list", "pin", "title", "other"}
