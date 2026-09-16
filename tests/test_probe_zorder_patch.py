@@ -21,10 +21,12 @@ from scripts.probe_zorder_patch import (  # noqa: E402
     permute_front_within,
     read_zorder,
     reorder_slide_zorder,
+    resolve_probe_report,
 )
 from scripts.write_gate_ab import changed_members  # noqa: E402
 
 from test_iwa_write import _arch, _member, _shape_super  # noqa: E402
+from test_iwa_zorder import _group  # noqa: E402
 
 SHAPE_IDS = (200, 201, 202)
 
@@ -156,3 +158,98 @@ def test_reorder_refuses_on_spanning_member(tmp_path):
 
     assert result["refused"] is True
     assert deck.read_bytes() == before
+
+
+# ==========================================================================
+# resolve_probe_report — the --resolve mode's report, driven by the production
+# `offline_write.zorder_eligible_slides`, not a reimplementation.
+# ==========================================================================
+def _write_owned_deck(path, slide_member, zorder_ids):
+    """`test_iwa_zorder._write_deck`, plus `ownedDrawables` set equal to
+    `drawablesZOrder` — required here because `resolve_probe_report` goes through
+    `zorder_eligible_slides` -> `validate_slide_order`, which (unlike bare
+    `resolve_raise_targets`) refuses a slide whose `ownedDrawables` is not a
+    permutation of `drawablesZOrder`."""
+    zorder = [{"identifier": i} for i in zorder_ids]
+    slide = _arch(100, "KN.SlideArchive",
+                  {"drawablesZOrder": list(zorder), "ownedDrawables": list(zorder)})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, *slide_member]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_resolve_probe_report_shared_sig_resolves_with_front_block(tmp_path):
+    # Two non-twin groups sharing childSig "dup" — the cardinality-matched-set arm.
+    members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
+    deck = _write_owned_deck(tmp_path / "probe_shared.key", members, [300, 302])
+
+    stat_jobs = [
+        {"slide": 1, "childSig": "dup"},
+        {"slide": 1, "childSig": "dup"},
+    ]
+    report = resolve_probe_report(deck, stat_jobs, [], {1}, set(), [])
+
+    assert set(report) == {1}
+    entry = report[1]
+    assert entry["jobs"] == 2
+    assert entry["stat_ids"] == ["300", "302"]
+    assert entry["badge_ids"] == []
+    assert entry["unresolved"] == []
+    assert entry["front_block"] == ["300", "302"]
+
+
+def test_resolve_probe_report_unresolved_has_no_front_block(tmp_path):
+    # Three saved groups carry "dup" but only two jobs -> ambiguous-cardinality refusal;
+    # the whole slide stays off `targets`, so the report falls back to the parsed
+    # `zorderUnresolved` say-lines rather than the (empty) eligibility result.
+    members = [*_group(300, 301, "dup"), *_group(302, 303, "dup"), *_group(304, 305, "dup")]
+    deck = _write_owned_deck(tmp_path / "probe_ambiguous.key", members, [300, 302, 304])
+
+    stat_jobs = [
+        {"slide": 1, "childSig": "dup"},
+        {"slide": 1, "childSig": "dup"},
+    ]
+    report = resolve_probe_report(deck, stat_jobs, [], {1}, set(), [])
+
+    entry = report[1]
+    assert entry["stat_ids"] == []
+    assert len(entry["unresolved"]) == 2
+    assert all("ambiguous-cardinality" in token for token in entry["unresolved"])
+    assert "front_block" not in entry
+
+
+def test_resolve_probe_report_restricts_to_requested_slide(tmp_path):
+    members = [*_group(300, 301, "a")]
+    deck = _write_owned_deck(tmp_path / "probe_slide.key", members, [300])
+
+    stat_jobs = [{"slide": 1, "groupIndex": 1, "childSig": "a"}]
+    report = resolve_probe_report(deck, stat_jobs, [], {1}, set(), [], slides=[5])
+
+    assert report == {5: {"refused": "no stat job or badge row for this slide"}}
+
+
+def test_resolve_probe_report_bridges_badge_index_through_a_hide(tmp_path):
+    # This is exactly what the naive `resolve_raise_targets(..., hide_specs=[])` call
+    # got wrong: without the run record's hide-bearing `transform_dicts` threaded through
+    # `zorder_eligible_slides`, a badge row past a hidden group resolves to the wrong
+    # (or no) saved-deck id. Saved deck (post-hide): only groups B, C survive at wall
+    # indices 1, 2 — matching tests/test_iwa_zorder.py's
+    # test_resolve_badge_row_bridged_below_target.
+    members = [*_group(300, 301), *_group(302, 303)]
+    deck = _write_owned_deck(tmp_path / "probe_badge_hide.key", members, [300, 302])
+    transform_dicts = [{"role": "hide", "slide": 1, "kind": "group", "kindIndex": 0}]
+
+    badge_rows = [{"kind": "group", "index": 2, "slide": 1},
+                  {"kind": "group", "index": 3, "slide": 1}]
+    report_with_hide = resolve_probe_report(deck, [], badge_rows, {1}, set(), transform_dicts)
+    assert report_with_hide[1]["unresolved"] == []
+    assert report_with_hide[1]["badge_ids"] == ["300", "302"]
+
+    # Without the hide spec the same wall indices land on the wrong/missing ids.
+    report_without_hide = resolve_probe_report(deck, [], badge_rows, {1}, set(), [])
+    assert report_without_hide[1]["badge_ids"] != ["300", "302"]

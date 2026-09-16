@@ -16,6 +16,7 @@ import { LoadingOverlay, Lightbox } from "../../components/PreviewGrid";
 import { buildDecisionsMap, toDecisionsPayload, type DecisionsMap } from "../../dsk/decisions";
 import { SlideReviewList } from "./SlideReviewList";
 import { useCurrentJob } from "../../sessions";
+import { JobName } from "../../components/JobName";
 
 function parseSlideSpec(raw: string): number[] | undefined {
   const trimmed = raw.trim();
@@ -48,7 +49,7 @@ type DskResult = {
 };
 
 export function DskGenerator() {
-  const { job, upsert, error: openError } = useCurrentJob("dsk");
+  const { job, upsert, rename, error: openError } = useCurrentJob("dsk");
   const [keynote, setKeynote] = useState<ChosenFile | null>(null);
   const [referenceDeck, setReferenceDeck] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
@@ -139,6 +140,7 @@ export function DskGenerator() {
       <div className="row">
         <FileWell
           label="Finalised FW .key"
+          tone="lw"
           hint="The source 7680×1080 wall deck"
           file={keynote}
           onChoose={async () => {
@@ -153,6 +155,7 @@ export function DskGenerator() {
         />
         <FileWell
           label="Reference deck (optional)"
+          tone="dsk"
           hint="Layout import source; leave blank for the built-in DSK layouts"
           file={referenceDeck}
           onChoose={async () => {
@@ -204,6 +207,7 @@ export function DskGenerator() {
       {busy && <LoadingOverlay title="Building the DSK deck…" logs={logs} />}
       {result?.phase === "done" && result.deckPath && (
         <>
+          <JobName job={job!} onRename={rename} className="path-note" />
           <p className="note path-note">
             Wrote {result.deckPath}
             {result.slidesKept ? ` — ${result.slidesKept.length} slide(s)` : ""}

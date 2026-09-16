@@ -7,8 +7,8 @@ fileName clean-vs-dirty, the childCount rule, and the structural guard.
 A local-only integration test builds the real Map deck offline and checks
 field parity against its cached exact-bytes JXA payload.
 
-NOTE ON THE PLAN GATE: full remap-plan equivalence (offline vs JXA transforms +
-reuses within 2px) is NOT achieved on the two gold decks — see
+NOTE ON THE PLAN GATE: full remap-plan equivalence (offline vs JXA transforms
+within 2px) is NOT achieved on the two gold decks — see
 ``test_gate_is_not_green_pending_a_geometry_model`` and
 ``scratchpad/validate_remap_plan.py``. Autosize/shrink-to-fit text (stale
 ``naturalSize`` vs Keynote's laid-out box) and group geometry (JXA's stored group
@@ -717,19 +717,6 @@ def _wa_fields_equal(a: dict, b: dict, tol: float = 2.0) -> bool:
     return True
 
 
-def _addr(ref: dict) -> tuple:
-    return (str(ref.get("kind")), int(ref.get("kindIndex", -1)))
-
-
-def _present_addresses(payload: dict) -> dict[int, set]:
-    """``{slide_number: {(kind, kindIndex), …}}`` the offline payload actually emits."""
-    out: dict[int, set] = {}
-    for s in payload.get("slides") or []:
-        number = int(s.get("number") or (int(s.get("index") or 0) + 1))
-        out[number] = {(it["kind"], it["kindIndex"]) for it in s.get("items") or []}
-    return out
-
-
 def _transform_wa_diffs(off_specs: list[dict], jxa_specs: list[dict]) -> list[tuple]:
     om = {(int(s["slide"]), s["kind"], int(s["kindIndex"])): s for s in off_specs}
     jm = {(int(s["slide"]), s["kind"], int(s["kindIndex"])): s for s in jxa_specs}
@@ -739,39 +726,6 @@ def _transform_wa_diffs(off_specs: list[dict], jxa_specs: list[dict]) -> list[tu
     for k in set(om) & set(jm):
         if not _wa_fields_equal(om[k], jm[k]):
             diffs.append((k, om[k], jm[k]))
-    return diffs
-
-
-def _reuse_wa_diffs(off_jobs: list[dict], jxa_jobs: list[dict], present: dict[int, set]) -> list[tuple]:
-    om = {int(j["slide"]): j for j in off_jobs}
-    jm = {int(j["slide"]): j for j in jxa_jobs}
-    diffs: list[tuple] = []
-    if set(om) != set(jm):
-        diffs.append(("reuse-slide-set", set(om) ^ set(jm)))
-    for slide in set(om) & set(jm):
-        jo, jj = om[slide], jm[slide]
-        if jo.get("from") != jj.get("from") or jo.get("persist") != jj.get("persist"):
-            diffs.append((slide, "from/persist"))
-        # `strip` addresses the CURRENT slide's items; the offline read can only
-        # strip what it emitted, so JXA's strip is compared over the addresses the
-        # offline payload actually carries. (The only residual is JXA surfacing a
-        # couple of trailing EMPTY (0,0) text boxes the offline addressing omits —
-        # placement-neutral, so not a write divergence.)
-        so = {_addr(r) for r in jo.get("strip") or []}
-        sj = {_addr(r) for r in jj.get("strip") or []} & present.get(slide, set())
-        if so != sj:
-            diffs.append((slide, "strip", so ^ sj))
-        # `remove` addresses the DONOR slide's items — compared directly.
-        for name in ("remove",):
-            ao = {_addr(r) for r in jo.get(name) or []}
-            aj = {_addr(r) for r in jj.get(name) or []}
-            if ao != aj:
-                diffs.append((slide, name, ao ^ aj))
-        for name in ("add", "mutate"):
-            a = {_addr(s): s for s in jo.get(name) or []}
-            b = {_addr(s): s for s in jj.get(name) or []}
-            if set(a) != set(b) or not all(_wa_fields_equal(a[k], b[k]) for k in a):
-                diffs.append((slide, name))
     return diffs
 
 
@@ -1170,7 +1124,7 @@ def test_two_tier_none_fn_is_pure_offline_with_soft_fallback():
 
 def _assert_two_tier_gate_green(deck: Path):
     """THE RESIZER GOLD-DECK GATE. Splicing the JXA group/image/movie/text x/y/w/h
-    into the offline payload must make the remap PLAN (transforms + reuses) write-
+    into the offline payload must make the remap PLAN (transforms) write-
     affecting-identical to the JXA plan — the gate goes GREEN behind the bulk fn. Font
     size (autoshrink, re-derived on write) and colour are the only fields that still
     differ; both are non-write-affecting (see _ATTR_ONLY_SPEC_FIELDS). Skips when the
@@ -1184,7 +1138,7 @@ def _assert_two_tier_gate_green(deck: Path):
         pytest.skip("no CG template deck available for the plan gate")
     template = offline_wall_payload(tmpl_deck)
 
-    from obed_edom.map_remap import plan_payload_transforms, plan_slide_reuses
+    from obed_edom.map_remap import plan_payload_transforms
     from obed_edom.remap_keynote import recipe_for
 
     off = two_tier_wall_payload(deck, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
@@ -1202,16 +1156,12 @@ def _assert_two_tier_gate_green(deck: Path):
     def plan(wall):
         rc = recipe_for(wall, template)
         transforms = plan_payload_transforms(wall, rc, template=template)
-        return ([t.as_dict() for t in transforms],
-                plan_slide_reuses(wall, transforms))
+        return [t.as_dict() for t in transforms]
 
-    off_t, off_r = plan(off)
-    jxa_t, jxa_r = plan(jxa)
-    present = _present_addresses(off)
+    off_t = plan(off)
+    jxa_t = plan(jxa)
     tdiffs = _transform_wa_diffs(off_t, jxa_t)
-    rdiffs = _reuse_wa_diffs(off_r, jxa_r, present)
     assert tdiffs == [], f"transform write-affecting diffs: {tdiffs[:5]}"
-    assert rdiffs == [], f"reuse write-affecting diffs: {rdiffs[:5]}"
 
 
 @pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")

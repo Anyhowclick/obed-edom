@@ -369,6 +369,169 @@ def _build_export_script(
     return "\n".join(lines)
 
 
+DSK_GEOMETRY = (1920, 1080)
+
+
+def _build_dsk_export_script(
+    *,
+    scratch_path: Path,
+    per_slide: Sequence[tuple[int, int, Path]],
+    codec: str,
+    fps: float,
+) -> str:
+    """The DSK-deck form of `_build_export_script`: same open/keep-list/skip/export/close
+    shape, but no layout switch and no drawable deletes -- a DSK slide is exported as it
+    plays, opaque, overlays and builds baked (plan §2, 2026-09-16). `per_slide` is
+    `(slide, ordinal, tmp_m4v)`."""
+    keep = sorted({slide for slide, _o, _t in per_slide})
+    stem_name = _as_escape(scratch_path.stem)
+    doc_name = _as_escape(scratch_path.name)
+    fps_name = fps_enum_name(fps)
+    lines = [
+        _keynote_terms(),
+        _keynote_tell(),
+        "  with timeout of 3600 seconds",
+        "    activate",
+        "    try",
+        f'      close (every document whose name is "{stem_name}" or name is "{doc_name}") saving no',
+        "      delay 0.3",
+        "    end try",
+        f'    set theFile to POSIX file "{_as_escape(str(scratch_path))}"',
+        "    set theDoc to open theFile",
+        "    delay 8",
+        f'    if (name of theDoc) is not "{stem_name}" and (name of theDoc) is not "{doc_name}" then',
+        '      error "scratch document name mismatch"',
+        "    end if",
+        "    tell theDoc",
+        "      set slideCount to count of slides",
+        f"      set keepList to {{{', '.join(str(n) for n in keep)}}}",
+        "      repeat with i from slideCount to 1 by -1",
+        "        if keepList does not contain i then delete slide i of theDoc",
+        "      end repeat",
+        "      repeat with s in slides of theDoc",
+        "        set skipped of s to true",
+        "      end repeat",
+    ]
+    for slide, ordinal, tmp in sorted(per_slide, key=lambda j: j[1]):
+        lines += [
+            f"      set skipped of slide {ordinal} of theDoc to false",
+            "      try",
+            f'        export theDoc to POSIX file "{_as_escape(str(tmp))}" as QuickTime movie with properties '
+            f"{{movie format:native size, movie codec:{codec}, movie framerate:{fps_name}, skipped slides:false}}",
+            "      on error errMsg number errNum",
+            f'        log ("ERR" & tab & "{slide}" & tab & errNum & tab & errMsg)',
+            "        error errMsg number errNum",
+            "      end try",
+            f'      log ("OBED" & tab & "{slide}" & tab & ((current date) as string))',
+            f"      set skipped of slide {ordinal} of theDoc to true",
+        ]
+    lines += [
+        "    end tell",
+        "    try",
+        "      close theDoc saving no",
+        "    end try",
+        "  end timeout",
+        "end tell",
+        "end using terms from",
+    ]
+    return "\n".join(lines)
+
+
+def export_dsk_slide_clips(
+    deck: Path,
+    slides: Sequence[int],
+    out_dir: Path,
+    *,
+    codec: str = "AppleProRes422LT",
+    fps: float = 30,
+    log: Callable[[str], None] = print,
+    rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
+) -> list[ClipResult]:
+    """Exports each of `slides` of a 1920x1080 DSK deck as one opaque `.mov` named
+    `clip_name(deck.stem, slide)` in `out_dir` (beside the deck's stage PNGs). Full
+    frame, so ffmpeg only remuxes; no crop, no deletes, no layout switch. Runs under
+    `dsk_live.LiveBatch` (refuse-if-running, lock, watchdog, quit, fingerprint)."""
+    deck = Path(deck)
+    out_dir = Path(out_dir).resolve()
+    if codec not in CODECS:
+        raise ValueError(f"Unsupported codec {codec!r}; expected one of {sorted(CODECS)}")
+    fps_enum_name(fps)
+    expected_fps = fps_rational(fps)
+    if ffmpeg_exe() is None:
+        raise RuntimeError("ffmpeg executable not found")
+    payload = offline_wall_payload(deck)
+    size = (int(payload["slideWidth"]), int(payload["slideHeight"]))
+    if size != DSK_GEOMETRY:
+        raise ValueError(f"{deck} is {size[0]}x{size[1]}, not a 1920x1080 DSK deck.")
+    known = {s["number"] for s in payload["slides"]}
+    missing = sorted(set(slides) - known)
+    if missing:
+        raise ValueError(f"Slide(s) {missing} not found in {deck}")
+    if not slides:
+        return []
+
+    keep = sorted(set(slides))
+    ordinals = ordinal_map(keep)
+    dests = {n: out_dir / clip_name(deck.stem, n) for n in keep}
+    t0 = time.monotonic()
+    elapsed_by_slide: dict[int, float] = {}
+
+    def on_progress(slide: int) -> None:
+        elapsed_by_slide[slide] = time.monotonic() - t0
+
+    with dsk_live.LiveBatch(deck, out_dir, rss_limit_bytes=rss_limit_bytes, log=log) as batch:
+        assert batch.scratch is not None and batch.work is not None
+        per_slide = [(n, ordinals[n], require_m4v(batch.work / f"tmp.{n:04d}.m4v")) for n in keep]
+        script = _build_dsk_export_script(
+            scratch_path=batch.scratch, per_slide=per_slide, codec=codec, fps=fps
+        )
+        script_path = _osascript_path(script, batch.work)
+        proc = batch.run(script_path, on_progress=on_progress)
+
+        last_error: tuple[int, str] | None = None
+        for line in (proc.stderr or "").splitlines():
+            error_m = _ERROR_RE.match(line)
+            if error_m:
+                last_error = (int(error_m.group(2)), error_m.group(3))
+        if proc.returncode != 0:
+            if last_error is not None:
+                errnum, errmsg = last_error
+                raise RuntimeError(f"Keynote export failed (errNum {errnum}): {errmsg}")
+            raise RuntimeError(f"Keynote export AppleScript failed:\n{proc.stderr}")
+
+        results: list[ClipResult] = []
+        wall_w, wall_h = DSK_GEOMETRY
+        for n, _ordinal, tmp in per_slide:
+            if not tmp.exists():
+                raise RuntimeError(f"Expected export missing for slide {n}: {tmp}")
+            publish_tmp = batch.work / f"pub.{n:04d}.mov"
+            expected_w, expected_h = _ffmpeg_process(
+                tmp, publish_tmp, crop_rect=None, wall_w=wall_w, wall_h=wall_h, codec=codec
+            )
+            width, height, fps_out, duration = _ffprobe(publish_tmp)
+            if (width, height) != (expected_w, expected_h):
+                raise RuntimeError(
+                    f"Slide {n}: exported {width}x{height} does not match expected "
+                    f"{expected_w}x{expected_h}"
+                )
+            if abs(fps_out - expected_fps) > _FPS_TOLERANCE:
+                raise RuntimeError(f"Slide {n}: exported fps {fps_out} does not match requested {fps}")
+            dests[n].parent.mkdir(parents=True, exist_ok=True)
+            os.replace(publish_tmp, dests[n])
+            results.append(
+                ClipResult(
+                    slide=n,
+                    path=dests[n],
+                    width=width,
+                    height=height,
+                    duration_s=duration,
+                    wall_s=elapsed_by_slide.get(n, time.monotonic() - t0),
+                    crop_width=width,
+                )
+            )
+    return results
+
+
 def _ffprobe(path: Path) -> tuple[int, int, float, float]:
     """`(width, height, fps, duration_s)` via ffprobe, falling back to `ffmpeg -i`
     stderr parsing; rejects zero dimensions/fps/duration."""

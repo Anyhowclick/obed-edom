@@ -6,12 +6,15 @@ import {
   reveal,
   startDskExport,
   type ChosenFile,
+  type DskPage,
   type DskSkip,
   type Job,
 } from "../../api";
 import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
 import { LoadingOverlay } from "../../components/PreviewGrid";
+import { JobName } from "../../components/JobName";
+import { renameAndApply } from "../../sessions";
 
 function parseSlideSpec(raw: string): number[] | undefined {
   const trimmed = raw.trim();
@@ -37,10 +40,15 @@ type ExportResult = {
   path?: string;
   isStageDeck?: boolean;
   isFwDeck?: boolean;
-  pages?: { slide: number }[];
+  hasManifest?: boolean;
+  pages?: DskPage[];
   skipped?: DskSkip[];
   pngDir?: string;
   pngs?: string[];
+  clips?: Record<string, string>;
+  sequence?: string[];
+  exportedClips?: number[];
+  reusedClips?: number[];
 };
 
 export function DskExporter() {
@@ -98,13 +106,14 @@ export function DskExporter() {
   return (
     <div>
       <p className="lede">
-        Exports still images from a DSK-shaped deck. Stage PNGs work on any 1920×1080 DSK deck —
-        hand-built ones included. Clip export only works on the FW deck (7680×1080); it isn&apos;t
-        wired up here yet.
+        Exports a DSK deck (1920×1080) as one flat asset sequence in slide order. Image and built
+        slides become stage PNGs (one per build step); movie and mixed slides become one .mov clip
+        each. Clips the Generator already published beside the deck are reused, not re-exported.
       </p>
       <div className="row">
         <FileWell
           label="DSK .key"
+          tone="dsk"
           hint="A 1920×1080 DSK deck"
           file={keynote}
           onChoose={async () => {
@@ -140,13 +149,35 @@ export function DskExporter() {
               export needs a DSK-sized deck.
             </p>
           )}
-          <p className="note">
-            {(result.pages || []).length} slide(s) ready to export
-            {(result.skipped || []).length > 0
-              ? `; skipped: ${result.skipped!.map((s) => `${s.slide} (${s.reason})`).join(", ")}`
-              : ""}
-            .
-          </p>
+          <table className="dsk-review-table">
+            <thead>
+              <tr>
+                <th>Slide</th>
+                <th>Category</th>
+                <th>Output</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(result.pages || []).map((page) => (
+                <tr key={page.slide}>
+                  <td>{page.slide}</td>
+                  <td>{page.category}</td>
+                  <td>
+                    {page.needsClip
+                      ? page.existingClip
+                        ? `clip — already published: ${page.existingClip}`
+                        : "clip (.mov)"
+                      : "stage PNG(s)"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {(result.skipped || []).length > 0 && (
+            <p className="note">
+              skipped: {result.skipped!.map((s) => `${s.slide} (${s.reason})`).join(", ")}
+            </p>
+          )}
           <div className="actions">
             <button className="btn" type="button" disabled={busy || !result.isStageDeck} onClick={apply}>
               Export
@@ -158,9 +189,19 @@ export function DskExporter() {
       {busy && <LoadingOverlay title="Exporting…" logs={logs} />}
       {result?.phase === "done" && result.pngDir && (
         <>
+          <JobName job={job!} onRename={(id, name) => renameAndApply(id, name, setJob)} className="path-note" />
           <p className="note path-note">
-            Wrote {result.pngDir} — {(result.pngs || []).length} PNG(s)
+            Wrote {result.pngDir} — {(result.pngs || []).length} PNG(s),{" "}
+            {(result.exportedClips || []).length} clip(s) exported, {(result.reusedClips || []).length}{" "}
+            reused
           </p>
+          {(result.sequence || []).length > 0 && (
+            <ol className="mono-list">
+              {result.sequence!.map((name) => (
+                <li key={name}>{name}</li>
+              ))}
+            </ol>
+          )}
           <div className="actions">
             <button className="btn secondary" type="button" onClick={() => reveal(result.pngDir!)}>
               Open folder

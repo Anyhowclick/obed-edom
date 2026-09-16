@@ -32,7 +32,6 @@ from obed_edom.map_remap import (
     format_slide_range,
     learn_recipe,
     plan_payload_transforms,
-    plan_slide_reuses,
     roster_slides,
     score_against_gold,
     slides_for_plan,
@@ -142,13 +141,13 @@ def zorder_write_mode(
     explicit: str | None = None, *, offline_mode: str | None = None,
     say: Callable[[str], None] | None = None,
 ) -> str:
-    """`off` (default, tranche 1), `on` (offline z-order patch), or `verify` (patch + a
-    second read-back decode). Env `OBED_ZORDER_WRITE`; unknown tokens fall back to `off`.
-    Forced `off` without the `iwa` extra (mirrors `probe_iwa_extra`), and forced `off`
-    when `offline_mode` (the caller's already-resolved `offline_write_mode()`) is `off`
-    — there are no offline slides to raise against."""
+    """`on` (default, offline z-order patch), `off` (GUI Bring-to-Front raise path), or
+    `verify` (patch + a second read-back decode). Env `OBED_ZORDER_WRITE`; unknown tokens
+    fall back to `on`. Forced `off` without the `iwa` extra (mirrors `probe_iwa_extra`),
+    and forced `off` when `offline_mode` (the caller's already-resolved
+    `offline_write_mode()`) is `off` — there are no offline slides to raise against."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_ZORDER_WRITE", "")).strip().lower()
-    mode = raw if raw in {"on", "verify"} else "off"
+    mode = raw if raw in {"off", "verify"} else "on"
     if mode == "off":
         return mode
     if offline_mode == "off":
@@ -164,12 +163,6 @@ def zorder_write_mode(
                 "forcing z-order write off.")
         return "off"
     return mode
-
-
-def slide_reuse_mode(explicit: str | None = None) -> str:
-    """`off` (default) or `on`. Env `OBED_SLIDE_REUSE`; unknown tokens fall back to `off`."""
-    raw = (explicit if explicit is not None else os.environ.get("OBED_SLIDE_REUSE", "")).strip().lower()
-    return raw if raw in {"on", "off"} else "off"
 
 
 def _spec_addr(spec: dict[str, Any]) -> tuple:
@@ -706,8 +699,10 @@ def resolve_source_previews(
     *,
     folder: Path | str | None = None,
     wanted: list[int] | None = None,
-) -> tuple[dict[int, Any], str]:
-    """Rendered wall slides keyed by number, for measuring empty space for loose text."""
+) -> tuple[dict[int, Any], str, Path | None]:
+    """Rendered wall slides keyed by number, for measuring empty space for loose text.
+    The third return value is the resolved candidate directory (None when no candidate
+    yielded any usable image), for run-record provenance."""
     from PIL import Image  # noqa: PLC0415
 
     from obed_edom.baseline import deck_digest, preview_cache_dir  # noqa: PLC0415
@@ -747,8 +742,8 @@ def resolve_source_previews(
             detail = f"{label} ({len(images)} image(s) for {len(slides)} slide(s))"
             if len(images) != len(slides):
                 detail += " — count differs, check the export is current"
-            return out, detail
-    return {}, ""
+            return out, detail, path
+    return {}, "", None
 
 
 def restore_card_stroke_widths(
@@ -920,7 +915,6 @@ def restore_source_builds(
 
 
 _DETAIL_LOG_CAP = 40
-_RAISE_TOKEN_KINDS = ("raiseDead", "raiseUnknown", "raiseBlind", "raiseVacuous", "raiseClickRetry")
 _RESOLVE_RARE_KINDS = ("sigTwin", "unresolved", "dedupMiss", "skip")
 
 
@@ -951,24 +945,9 @@ def _resolve_detail_parts(tokens: dict[str, list[str]]) -> tuple[list[str], str]
 
 def _say_stat_finalize_detail(
     child_resize_result: dict[str, Any],
-    badge_raises: list[dict] | None,
     say: Callable[[str], None],
 ) -> None:
     tokens = child_resize_result.get("tokens") or {}
-    raise_parts = [f"{k}({a})" for k in _RAISE_TOKEN_KINDS for a in tokens.get(k) or ()]
-    _say_chunked_detail("Stat raise detail", raise_parts, say)
-    front_err = child_resize_result.get("frontErr") or ""
-    if front_err:
-        say(
-            f"WARNING stat-finalize: GUI Bring to Front returned error(s) {front_err} — "
-            "-1743/-25211 mean Accessibility is denied to the launching process and every "
-            "GUI raise on this run is unreliable."
-        )
-    if badge_raises:
-        detail = child_resize_result.get("detail") or ""
-        badge_detail = " ".join(t for t in detail.split() if t.startswith("badge"))
-        if badge_detail:
-            say(f"Badge raise detail: {badge_detail}")
     resolve_parts, resolve_note = _resolve_detail_parts(tokens)
     _say_chunked_detail("Stat resolve detail", resolve_parts, say, resolve_note)
 
@@ -1062,6 +1041,18 @@ def prepare_wall_payload(
     return card_stroke
 
 
+def _require_pass1_saved_closed(jxa: dict[str, Any]) -> None:
+    """Guard offline writes against a pass-1 deck that may still be open in Keynote."""
+    if jxa.get("saved") is True and jxa.get("closed") is True:
+        return
+    raise RuntimeError(
+        "pass 1 (remap) did not save and close cleanly "
+        f"(saved={jxa.get('saved')}, closed={jxa.get('closed')}, "
+        f"saveError={jxa.get('saveError')}, closeError={jxa.get('closeError')}): "
+        "the deck may still be open in Keynote; resolve the failure and re-run."
+    )
+
+
 def remap_keynote(
     source: Path | str,
     dest: Path | str,
@@ -1129,6 +1120,7 @@ def remap_keynote(
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
     preview_note = ""
+    preview_source_dir: Path | None = None
     preview_wanted = preview_wanted_slides(
         wall,
         slide_range,
@@ -1136,7 +1128,7 @@ def remap_keynote(
         side_content_slides=side_content_slides,
     )
     if preview_wanted is None or preview_wanted:
-        previews, preview_note = resolve_source_previews(
+        previews, preview_note, preview_source_dir = resolve_source_previews(
             source, wall, folder=source_previews, wanted=preview_wanted
         )
     placements: list[dict[str, Any]] = []
@@ -1290,33 +1282,11 @@ def remap_keynote(
             + ("…" if len(hidden) > 10 else "")
             + ". Un-skip in Keynote and re-run to include them."
         )
-    if slide_reuse_mode() == "on":
-        reuses = plan_slide_reuses(
-            wall,
-            transforms,
-            slide_range=slide_range,
-            canvas=(float(recipe.get("destWidth") or CG_WIDTH), float(recipe.get("destHeight") or CG_HEIGHT)),
-        )
-    else:
-        reuses = []
-    say(f"OBED_SLIDE_REUSE={slide_reuse_mode()}: {len(reuses)} reuse slide(s).")
-    reuse_slides = {int(r["slide"]) for r in reuses}
-    # Group removes skip JXA deleteRefs (duplicate re-derives the frame). Dedup by child-text in stat-finalize.
-    group_removes: list[dict[str, Any]] = []
-    for r in reuses:
-        for gr in r.get("groupRemove") or []:
-            group_removes.append(
-                {
-                    "slide": int(r["slide"]),
-                    "childSig": gr.get("childSig"),
-                    "expectedKeep": gr.get("expectedKeep"),
-                }
-            )
-    stat_adjustments = adjust_child_resize_indexes(child_resize, transforms, reuse_slides)
+    reuses: list[dict[str, Any]] = []
+    stat_adjustments = adjust_child_resize_indexes(child_resize, transforms)
     if stat_adjustments:
         say(
-            f"Adjusted {len(stat_adjustments)} stat-group index(es) for deleted group hides or "
-            "voided on reuse slide(s): "
+            f"Adjusted {len(stat_adjustments)} stat-group index(es) for deleted group hides: "
             + ", ".join(f"slide {a['slide']} {a['from']}→{a['to']}" for a in stat_adjustments[:8])
             + "."
         )
@@ -1361,23 +1331,6 @@ def remap_keynote(
                 bit += f" rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})"
             bits.append(bit)
         say("Unpaired text picks the closest CG character style: " + "; ".join(bits) + ".")
-    if reuses:
-        bits = []
-        for job in reuses:
-            extra = []
-            if job.get("basePreAdd"):
-                extra.append("pre-add")
-            if job.get("remove"):
-                extra.append(f"drop {len(job['remove'])}")
-            if job.get("add"):
-                extra.append(f"add {len(job['add'])}")
-            if job.get("mutate"):
-                extra.append(f"tweak {len(job['mutate'])}")
-            bits.append(
-                f"slide {job['slide']}←{job['from']}"
-                + (f" ({', '.join(extra)})" if extra else " (identical map/dots)")
-            )
-        say("Duplicating remapped slides for unchanged map/dots: " + "; ".join(bits) + ".")
     origin_pins = [
         t for t in transforms if t.role == "pin" and abs(t.x) < 2 and abs(t.y) < 2
     ]
@@ -1410,14 +1363,10 @@ def remap_keynote(
         offline_mode = offline_write.probe_iwa_extra(offline_mode, say)
         offline_slides: set[int] = set()
         if offline_mode != "off":
-            offline_slides = offline_write._offline_write_slides(
-                transform_dicts, reuses, reuse_slides, wanted
-            )
-            donors = {int(r["from"]) for r in reuses if r.get("from") is not None}
+            offline_slides = offline_write._offline_write_slides(transform_dicts, wanted)
             say(
                 f"OBED_OFFLINE_WRITE={offline_mode}: {len(offline_slides)} slide(s) go "
-                f"offline (surgical IWA patch); {len(reuse_slides)} reuse-target + "
-                f"{len(donors)} donor slide(s) stay on the AppleScript path."
+                "offline (surgical IWA patch)."
             )
         suppressed = env_suppressed | offline_slides
         plan: dict[str, Any] = {
@@ -1431,15 +1380,15 @@ def remap_keynote(
         }
         if env_suppressed:
             say(
-                "OBED_SUPPRESS_GEOMETRY on: attrs-only (no geometry) for non-reuse "
+                "OBED_SUPPRESS_GEOMETRY on: attrs-only (no geometry) for "
                 f"slide(s) {sorted(env_suppressed)}."
             )
         if as_geometry_enabled():
             plan["asGeometry"] = True
             plan["asGeom"] = _build_as_geometry(transform_dicts, suppress=suppressed)
             say(
-                "OBED_AS_GEOMETRY on: non-reuse geometry via batched AppleScript "
-                f"for {len(plan['asGeom'])} slide(s); reuse slides stay on JXA."
+                "OBED_AS_GEOMETRY on: geometry via batched AppleScript "
+                f"for {len(plan['asGeom'])} slide(s)."
             )
         if wanted:
             plan["slides"] = wanted
@@ -1452,7 +1401,7 @@ def remap_keynote(
             plan_out["reuses"] = reuses
             plan_out["suppressGeometry"] = plan.get("suppressGeometry")
             plan_out["asGeom"] = plan.get("asGeom")
-            plan_out["groupRemoves"] = list(group_removes)
+            plan_out["groupRemoves"] = []
             plan_out["badgeRaises"] = list(badge_raises)
             # "statJobs" (not "childResize") — the run record's pass-2 RESULT dict already
             # uses "childResize" for `_run_stat_finalize`'s return; this is the JOB LIST.
@@ -1474,20 +1423,6 @@ def remap_keynote(
     missed = int(jxa.get("missed") or 0)
     if jxa.get("collections"):
         say(f"Keynote collections: {jxa.get('collections')}")
-    add_fail = jxa.get("addFailure")
-    if add_fail:
-        say(
-            f"FATAL reuse slide {add_fail.get('slide')}: the add-delta paste was not verified — "
-            f"expected {add_fail.get('expected')}, pasted {add_fail.get('pasted')}, "
-            f"shortfall {add_fail.get('shortfall')} after {add_fail.get('attempts')} attempt(s); "
-            f"gates={add_fail.get('gates')}; original slide after strip={add_fail.get('origAfterStrip')}."
-        )
-        raise RuntimeError(
-            f"Keynote reuse slide {add_fail.get('slide')} could not verify its pasted add-delta "
-            f"(expected {add_fail.get('expected')}, pasted {add_fail.get('pasted')}). The original "
-            "wall slide was left intact and the remapped copy was NOT saved — re-run. "
-            f"Detail: {add_fail}"
-        )
     if applied == 0:
         detail = ""
         if jxa.get("collections"):
@@ -1501,33 +1436,6 @@ def remap_keynote(
     say(f"Applied {applied}, missed {missed}.")
     for reason in jxa.get("missReasons") or []:
         say(f"WARNING remap: {reason}")
-    for entry in jxa.get("removeShortfalls") or []:
-        slide_no = entry.get("slide")
-        short = {
-            kind: rec
-            for kind, rec in (entry.get("byKind") or {}).items()
-            if int((rec or {}).get("shortfall") or 0) > 0
-        }
-        if short:
-            detail = ", ".join(
-                f"{rec['removed']} of {rec['expected']} {kind}"
-                for kind, rec in sorted(short.items())
-            )
-            say(
-                f"WARNING reuse slide {slide_no}: only removed {detail} on the donor "
-                "copy — a stranded donor object survived (doubling) until it is deduped."
-            )
-    for entry in jxa.get("addReports") or []:
-        rep = entry.get("report") or {}
-        if int(rep.get("attempts") or 1) > 1 or rep.get("surplus") or rep.get("unmeasured") or rep.get("shortfall"):
-            say(
-                f"WARNING reuse slide {entry.get('slide')}: add-delta paste took "
-                f"{rep.get('attempts')} attempt(s); expected {rep.get('expected')}, "
-                f"pasted {rep.get('pasted')}, surplus {rep.get('surplus')}, "
-                f"unmeasured {rep.get('unmeasured')}."
-            )
-    if jxa.get("cloned"):
-        say(f"Duplicated {jxa.get('cloned')} remapped slide(s) instead of re-placing the map and dots.")
     layouts = jxa.get("layouts") or {}
     if layouts.get("imported"):
         say(f"Imported 16:9 layouts: {', '.join(str(n) for n in layouts['imported'])}.")
@@ -1538,6 +1446,7 @@ def remap_keynote(
             f"Applied {sample.get('to') or 'CG layout'} to "
             f"{len(applied_layouts)} slide(s)."
         )
+    _require_pass1_saved_closed(jxa)
     offline_write_info = offline_write.run_offline_write(
         dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say
     )
@@ -1551,9 +1460,36 @@ def remap_keynote(
         gui_slides = zorder_eligibility["zorderGui"]
         say(
             f"OBED_ZORDER_WRITE={zorder_mode}: {len(zorder_targets)} slide(s) go offline "
-            f"(surgical z-order patch); {len(gui_slides)} slide(s) stay on the GUI raise "
-            f"(Accessibility still required{': ' + str(gui_slides) if gui_slides else ''})."
+            f"(surgical z-order patch); {len(gui_slides)} slide(s) left un-raised"
+            f"{': ' + str(gui_slides) if gui_slides else ''}."
         )
+        if gui_slides:
+            gui_target_counts: dict[int, int] = {}
+            for job in child_resize:
+                if job.get("childSig") and int(job["slide"]) in gui_slides:
+                    gui_target_counts[int(job["slide"])] = gui_target_counts.get(int(job["slide"]), 0) + 1
+            for row in badge_raises:
+                if int(row["slide"]) in gui_slides:
+                    gui_target_counts[int(row["slide"])] = gui_target_counts.get(int(row["slide"]), 0) + 1
+            detail = ", ".join(
+                f"slide {s} ({gui_target_counts.get(s, 0)} target(s))" for s in sorted(gui_slides)
+            )
+            say(
+                f"WARNING zorder: {len(gui_slides)} slide(s) the offline resolver left "
+                f"un-raised ({detail}) — left in source stacking — the resolver could not "
+                "prove a unique target set; see the unresolved tokens."
+            )
+    else:
+        off_target_slides = sorted(
+            {int(job["slide"]) for job in child_resize if job.get("childSig")}
+            | {int(row["slide"]) for row in badge_raises}
+        )
+        if off_target_slides:
+            say(
+                f"OBED_ZORDER_WRITE=off: z-order raises skipped for "
+                f"{len(off_target_slides)} slide(s) (left in source stacking): "
+                f"{off_target_slides}."
+            )
     # Card border stroke widths shrink with the canvas; restore them before the stat-finalize
     # pass. Always runs — not gated by OBED_OFFLINE_WRITE.
     card_stroke_result = restore_card_stroke_widths(dest, source, wall, say)
@@ -1602,25 +1538,16 @@ def remap_keynote(
     ]
     if group_collapse_tokens:
         say("WARNING remap: " + " ".join(group_collapse_tokens))
-    # JXA cannot size grouped stat numbers or restack them; AppleScript sets template point size and Bring to Front.
+    # JXA cannot size grouped stat numbers or restack them; AppleScript sets template point size,
+    # the offline z-order patch (below) restacks eligible slides.
     export_path = Path(export_dir).expanduser().resolve() if export_dir else None
-    suppress_raises = set(zorder_targets)
     pass2_export_path = None if zorder_mode != "off" else export_path
     child_resize_result: dict[str, Any] | None = None
-    if child_resize or group_removes or badge_raises:
+    if child_resize:
         stat_sizes = read_template_stat_sizes(template_path) if child_resize else {}
         say(
             f"Finalizing {len(child_resize)} stat group(s): template sizes "
-            f"({', '.join(f'{k}→{int(v)}pt' for k, v in sorted(stat_sizes.items())) or 'none found'}) "
-            "+ bring to front"
-            + (
-                f"; deduping {len(group_removes)} stranded donor-copy group(s)"
-                if group_removes
-                else ""
-            )
-            + (f"; raising {len(badge_raises)} badge object(s)" if badge_raises else "")
-            + (f"; suppressing GUI raise on {len(suppress_raises)} offline-raised slide(s)"
-               if suppress_raises else "")
+            f"({', '.join(f'{k}→{int(v)}pt' for k, v in sorted(stat_sizes.items())) or 'none found'})"
             + "."
             + (" Exporting previews in the same session." if pass2_export_path else "")
             + (" Preview export moved after the z-order patch (extra Keynote open)."
@@ -1631,35 +1558,19 @@ def remap_keynote(
             child_resize,
             stat_sizes,
             export_dir=pass2_export_path,
-            group_removes=group_removes,
-            badge_raises=badge_raises,
-            suppress_raises=suppress_raises,
         )
         done = child_resize_result.get("done") or 0
         skipped = child_resize_result.get("skipped") or 0
         sized = child_resize_result.get("sized") or 0
-        front = child_resize_result.get("front") or 0
-        dedup_deleted = child_resize_result.get("dedupDeleted") or 0
         dedup_shortfall = child_resize_result.get("dedupShortfall") or 0
         sig_fallback = child_resize_result.get("sigFallback") or 0
         unresolved = child_resize_result.get("unresolved") or 0
-        badge_fallback = child_resize_result.get("badgeFallback") or 0
-        badge_unresolved = child_resize_result.get("badgeUnresolved") or 0
-        badge_moved = child_resize_result.get("badgeMoved") or 0
-        badge_front_dead = child_resize_result.get("badgeFrontDead") or 0
-        raise_moved = child_resize_result.get("raiseMoved") or 0
-        raise_dead = child_resize_result.get("raiseDead") or 0
-        raise_unknown = child_resize_result.get("raiseUnknown") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
-                f"the template, {front} object(s) brought to front"
-                f", {raise_moved} stat raise(s) landed"
-                + (f", {dedup_deleted} donor-copy group(s) deduped" if group_removes else "")
+                "the template"
                 + (f", {skipped} skipped" if skipped else "")
                 + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
-                + (f", {badge_fallback} badge-fallback(s)" if badge_fallback else "")
-                + (f", {badge_moved} badge object(s) moved" if badge_moved else "")
                 + "."
             )
             if dedup_shortfall:
@@ -1675,45 +1586,26 @@ def remap_keynote(
                     "unambiguously resolved — kept, not guessed — those stat groups keep "
                     "their wall font size and stay buried."
                 )
-            if badge_unresolved:
-                say(
-                    f"WARNING stat-finalize: {badge_unresolved} badge object(s) could NOT be "
-                    "unambiguously resolved — kept, not guessed — those badge objects stay "
-                    "buried under the map."
-                )
-            if badge_front_dead:
-                say(
-                    "WARNING stat-finalize: the GUI Bring-to-Front had NO effect on a badge "
-                    "raise (selection/Accessibility) — whether the triggering slide's badge "
-                    "was raised in full or not at all is NOT guaranteed, but later slides keep "
-                    "their source stacking. Grant Accessibility to the launching process and "
-                    "re-run if a badge is buried."
-                )
-            if raise_dead or raise_unknown:
-                say(
-                    f"WARNING stat-finalize: {raise_dead} stat group(s) did not move on "
-                    f"Bring to Front ({raise_unknown} abandoned mid-slide) — those groups "
-                    "stay buried; the remaining raises on the affected slide(s) were "
-                    "skipped rather than guessed."
-                )
-            _say_stat_finalize_detail(child_resize_result, badge_raises, say)
+            _say_stat_finalize_detail(child_resize_result, say)
         else:
             say(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
                 "placement/size. See the .stat-finalize.applescript dump."
             )
-    if suppress_raises and child_resize_result is not None and not (
+    if zorder_targets and child_resize_result is not None and not (
         child_resize_result.get("ok") and child_resize_result.get("closed")
     ):
         raise RuntimeError(
-            f"zorder patch skipped on suppressed slide(s) {sorted(suppress_raises)}: "
+            f"zorder patch skipped on target slide(s) {sorted(zorder_targets)}: "
             "pass 2 (stat-finalize) did not complete, so the deck may still be open in "
-            "Keynote; its GUI raise was suppressed; re-run with OBED_ZORDER_WRITE=off"
+            "Keynote; resolve the failure and re-run with OBED_ZORDER_WRITE=on. "
+            "OBED_ZORDER_WRITE=off knowingly skips every z-order raise."
         )
+    _require_pass1_saved_closed(jxa)
     zorder_write_info = offline_write.run_offline_zorder(dest, zorder_mode, zorder_targets, say)
     # Builds/transitions follow the source. Unconditional and runs last — verify-all,
     # patch-none when the slide set is empty; must keep running LAST, after the z-order write.
-    build_result = restore_source_builds(dest, source, reuse_slides, say)
+    build_result = restore_source_builds(dest, source, set(), say)
     result: dict[str, Any] = {
         "source": str(source),
         "dest": str(dest),
@@ -1725,14 +1617,16 @@ def remap_keynote(
         "width": jxa.get("width"),
         "height": jxa.get("height"),
         "collections": jxa.get("collections"),
-        "removeShortfalls": jxa.get("removeShortfalls") or [],
-        "addReports": jxa.get("addReports") or [],
         "slideRange": slides_for_plan(slide_range),
         "skippedSlides": jxa.get("skippedSlides"),
         "layouts": jxa.get("layouts"),
         "templateScore": score_against_gold(transforms, template_data, wall=wall),
         "placements": placements,
         "placementSource": preview_note,
+        "previews": {
+            "source": str(preview_source_dir) if preview_source_dir else None,
+            "placements": len(placements),
+        },
         "skippedSlidesLeftAlone": hidden,
         "fittedSlides": fitted,
         "offFrame": offframe,
@@ -1769,8 +1663,9 @@ def remap_keynote(
         failures = merged_zorder.get("failures") or []
         if failures:
             raise RuntimeError(
-                f"zorder patch failed on suppressed slide(s) {sorted(n for n, _ in failures)}: "
-                "its GUI raise was suppressed; deck saved; re-run with OBED_ZORDER_WRITE=off"
+                f"zorder patch failed on target slide(s) {sorted(n for n, _ in failures)}: "
+                "deck saved; resolve the failure and re-run with OBED_ZORDER_WRITE=on. "
+                "OBED_ZORDER_WRITE=off knowingly skips every z-order raise."
             )
     result["cardStroke"] = card_stroke_result
     result["builds"] = build_result
@@ -1884,9 +1779,18 @@ def remap_and_inspect(
     if ow and ow.get("mode") == "verify":
         planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
         stat_slides = frozenset(ow.get("statSlides") or [])
+        zorder_slides = frozenset((info.get("zorderWrite") or {}).get("slides") or [])
+        exclude_slides = stat_slides | zorder_slides
         live_report = offline_write.verify_live_frames(
-            planned, payload, exclude_slides=stat_slides
+            planned, payload, exclude_slides=exclude_slides
         )
+        if log:
+            log(
+                f"offline-write live verify: excluded {len(exclude_slides)} of "
+                f"{len(planned)} slide(s) ({len(stat_slides)} stat-finalize, "
+                f"{len(zorder_slides)} z-order-patched); covers only "
+                f"{max(len(planned) - len(exclude_slides), 0)} slide(s)."
+            )
         ow["liveVerifyPass"] = offline_write._say_verify_report(
             "offline-write live verify", live_report, offline_write.LIVE_VERIFY_TOL, log
         )

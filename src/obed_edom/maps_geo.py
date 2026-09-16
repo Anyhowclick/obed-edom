@@ -258,6 +258,11 @@ def is_extruded_style(value: str) -> bool:
     return coerce_maps_style(value) in {"buildings3d", "borderlands"}
 
 
+def buildings_layer_on(slide: dict[str, Any]) -> bool:
+    """3D extrusions / Borderlands ink only exist while the Buildings layer is visible."""
+    return "buildings" not in slide_hidden_layers(slide)
+
+
 def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     from_style = coerce_maps_style(str(from_slide.get("style") or ""))
     to_style = coerce_maps_style(str(to_slide.get("style") or ""))
@@ -277,8 +282,10 @@ def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     from_bearing = float(from_cam.get("bearing") or 0)
     to_bearing = float(to_cam.get("bearing") or 0)
     d_bearing = abs((to_bearing - from_bearing + 180.0) % 360.0 - 180.0)
-    d_zoom = abs(float(from_cam.get("zoom") or 0) - float(to_cam.get("zoom") or 0))
-    if is_extruded_style(from_style) or is_extruded_style(to_style) or pitch > 0.5 or d_bearing > 0.05 or d_zoom > 2:
+    extruded = is_extruded_style(from_style) or is_extruded_style(to_style)
+    buildings_on = buildings_layer_on(from_slide) or buildings_layer_on(to_slide)
+    # Zoom delta is not a Movie trigger: one shared plate may overflow the frame (zoom-in).
+    if (extruded and buildings_on) or pitch > 0.5 or d_bearing > 0.05:
         return "movie"
     return "morph"
 

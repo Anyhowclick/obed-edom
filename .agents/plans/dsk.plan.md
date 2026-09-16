@@ -81,6 +81,13 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   PNGs go in ONE FLAT folder beside it, named to sort in slide/stage order.
 - 2026-09-15 (d6 Q3): the Exporter runs stage PNGs on ANY 1920×1080 DSK deck (hand-built
   included); clip export stays FW-deck-only and the UI must say so.
+- 2026-09-16 (owner, after viewing the real output of `DSK_Gen_Export_Input.key` slides 11–13,
+  mixed movie + overlay + magic-move slides): a mixed slide stays ONE self-contained opaque
+  clip with overlays and builds baked in and the magic move dropped; PP7 dissolves between
+  clips. "Overlays live in the DSK deck over a bare clip, Keynote does the transitions" is
+  the target only once Keynote alpha output exists (§4 item 21, `.agents/research/
+  kpf_renderer_probe_2026-09-12.md`). `SlideDecision.overlay_bake` stays an unused field
+  until then.
 - Keynote hands-off rule: work on a copy under `~/Desktop` or repo `output/` (never
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
 - Owner's open design item besides the band placeholder: the "editing phase" (d6b) — per-slide
@@ -273,24 +280,31 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 ## 4. Open bugs / TODOs
 
 ### Shipped path (blocking polish)
-1. **Keynote left open after preview export → 409.** Symptom: every propose→apply needs a manual
-   Keynote quit (done by hand twice in P7). Expected: propose quits Keynote after exporting
-   previews, or the runner quits it before apply. Evidence `~/Desktop/dsk-d4-work/evidence-p7/`
-   (job 45757e4f, export job cb17ff41; first export apply → HTTP 409).
-2. **Stage PNGs land in the wrong folder.** Written to `output/<DSK deck stem>/dsk/`
-   (`output/Sermon_PK (GW)_DSK/dsk/`) instead of the deck's own flat asset folder
-   `output/Sermon_PK (GW)/dsk/` beside the `.mov` clips (owner Q2: ONE flat folder).
-   Fix in `_run_dsk_export_apply`: write into the folder holding the deck being exported when
-   it is a generated deck, else beside the deck. Evidence: same dir.
-3. **Exporter never run on a hand-built DSK deck** (owner Q3). Run next session on a copy of
-   `~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`; the gold copy was prepared and
-   deleted unused.
-4. **UI never clicked through** — P7 drove the API directly on port 8891.
-5. **`DskGenerator` lacks the per-tab job-rename wiring** `main` added.
-6. **Library callers can pass text-only kwargs with `content_only=True`** — silently a no-op
-   rather than refused (the CLI refuses them).
-7. Offline-only so far: the two-batch job (clip export then assemble) and the Exporter's
-   `isStageDeck` gate.
+1. FIXED + LIVE-VERIFIED 2026-09-16 (r14): propose quits the Keynote it launched for preview
+   export (`_dsk_preview_thumbs`, both Generator and Exporter); a Keynote the operator already
+   had open is left alone. Exporter propose → `pgrep -x Keynote` empty → apply 200 (no 409);
+   Generator propose on GW 21,24 likewise. Evidence `~/Desktop/dsk-d4-work/evidence-r14/`
+   (server.out, manifest.json; export job f6106641, generator job bc071de3).
+2. FIXED + LIVE-VERIFIED 2026-09-16 (r14): the Exporter writes stage PNGs beside the deck it
+   exports (`path.parent`). For a generated deck that is the flat asset folder
+   `output/<FW stem>/dsk/` next to the `.mov` clips (owner Q2); for a hand-built deck it is
+   the deck's own folder, so run it on a copy in a scratch folder.
+3. DONE 2026-09-16 (r14, owner Q3): Exporter run on a copy of
+   `Sermon_PK (DSK)_with mistakes.key` (slides 1–3 → 1 and 3 exported, 2 empty). Both PNGs
+   1920×1080 RGBA, `alpha_ok`, `bg_alpha_max` 0, peak RSS 0.82 GB. Source fingerprint unchanged.
+4. DONE 2026-09-16 (r14): UI clicked through in the in-app browser — Exporter propose → Export
+   → JobName rename, and Generator propose review table. Not clicked: Generator apply (P7
+   covered it via the API). Observation: the JobName edit committed on blur, not on the
+   automated Enter keypress; unconfirmed whether a real keyboard Enter commits (shared
+   component, not DSK-specific).
+5. FIXED 2026-09-16: both DSK sub-tabs render `JobName` with rename wiring (live-verified r14).
+6. FIXED 2026-09-16: `assemble_dsk_deck(content_only=True, …)` refuses `text_fit="shrink"`,
+   a non-default `min_text_pt`, `allow_split=False` and `split_overrides`, matching the CLI.
+7. LIVE-VERIFIED 2026-09-16 (r15, PR #138 + #140): the two-batch Generator job (clip export
+   then assemble) on `DSK_Gen_Export_Input.key` 11–13 with the "Blank Black" alias; the
+   Exporter's `isStageDeck` gate, its `.mov` path on the hand-built deck (slide 13 → 53 s
+   ProRes), and Generator-clip reuse (3 reused, 0 exported, manifest byte-identical).
+   Evidence `~/Desktop/dsk-d4-work/evidence-r15/`.
 
 ### Benched path (before the verse/text work resumes)
 8. **Pill z-order fix is live-unverified.**

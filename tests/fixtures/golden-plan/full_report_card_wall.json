@@ -12,9 +12,9 @@
   "OBED_GEOM_PROPS": null,
   "OBED_OFFLINE_READ": "on",
   "OBED_OFFLINE_WRITE": "off",
-  "OBED_SLIDE_REUSE": "off",
   "OBED_SUPPRESS_GEOMETRY": null,
-  "OBED_WRITE_TIMING": null
+  "OBED_WRITE_TIMING": null,
+  "OBED_ZORDER_WRITE": "off"
  },
  "goldenVersion": 1,
  "inspectVersion": 5,

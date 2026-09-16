@@ -5056,6 +5056,29 @@ def _run_refit_and_finalize(
     overflows[:] = [o for o in overflows if (o["slide"], o["item"]) not in eligible_keys]
 
 
+def _refuse_text_only_kwargs(
+    *,
+    text_fit: str,
+    min_text_pt: float,
+    allow_split: bool,
+    split_overrides: Mapping[int, int] | None,
+) -> None:
+    """Mirrors the CLI: text-fit options have no meaning when text slides are skipped."""
+    given = []
+    if text_fit == "shrink":
+        given.append("text_fit='shrink'")
+    if min_text_pt != DEFAULT_MIN_TEXT_PT:
+        given.append("min_text_pt")
+    if not allow_split:
+        given.append("allow_split=False")
+    if split_overrides:
+        given.append("split_overrides")
+    if given:
+        raise ValueError(
+            f"{', '.join(given)} has no meaning with content_only=True (text slides are skipped)."
+        )
+
+
 def assemble_dsk_deck(
     fw_deck: Path,
     out_path: Path,
@@ -5114,6 +5137,10 @@ def assemble_dsk_deck(
     dsk_live.guard_out_dir(out_path.parent, fw_deck)
 
     if content_only:
+        _refuse_text_only_kwargs(
+            text_fit=text_fit, min_text_pt=min_text_pt, allow_split=allow_split,
+            split_overrides=split_overrides,
+        )
         no_pills = True
         no_style = True
         if layout_policy == "import":

@@ -150,8 +150,8 @@ import {
 } from "../maps/types";
 
 const HOP_TIPS: Record<MapsHopKind, string> = {
-  morph: "Magic Move: Keynote pan/zoom of a shared plate. Same map style, same bearing, no 3D, zoom change ≤ 2. Region highlights must match; panning off-screen is fine.",
-  movie: "Movie: rendered fly when pitch, bearing changes, 3D buildings, or the shared plate is too large. Use any combination of zoom out, move, and zoom in.",
+  morph: "Magic Move: Keynote pan/zoom of a shared plate. Same map style, same bearing. 3D buildings only block when the Buildings layer is on. The plate may overflow the frame when zooming in.",
+  movie: "Movie: rendered fly when pitch, bearing, or 3D buildings change. Use any combination of zoom out, move, and zoom in.",
   dissolve: "Dissolve: Keynote crossfade of the two stills, using the duration below.",
   cut: "Cut: instant switch. No Keynote transition.",
 };

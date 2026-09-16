@@ -148,24 +148,24 @@ def test_resolve_stat_group_index_is_not_bridged_again_when_hides_exist(tmp_path
     assert stat_ids == ["304"]
 
 
-def test_resolve_stat_targets_ambiguous_child_sig_refused(tmp_path):
+def test_resolve_stat_targets_shared_sig_matching_cardinality_resolves_all(tmp_path):
     # Both candidates carry the same saved signature "dup" and both jobs are flagged
-    # `twin` (count-matched, 2 jobs / 2 candidates) — the twin rule's geometry check is
-    # what must refuse this: B sits at a different rect from A, non-coincident, so this
-    # stays unresolved even with a proven twin count.
+    # `twin` (count-matched, 2 jobs / 2 candidates) — but B sits at a different rect from
+    # A, non-coincident, so the twin arm's geometry check fails and the sig falls to the
+    # shared-sig bijection arm instead: G("dup") = {300, 302}, J("dup") has 2 jobs, the
+    # cardinalities match, so both are claimed.
     members = [*_group(300, 301, "dup", rect=(0, 0, 10, 10)), *_group(302, 303, "dup", rect=(200, 0, 10, 10))]
     deck = _write_deck(tmp_path / "ambig.key", members, [300, 302])
     slide, objects = _slide_and_objects(deck)
 
     stat_jobs = [
-        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
-        {"slide": 1, "groupIndex": 2, "childSig": "dup", "twin": True},
+        {"slide": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "childSig": "dup", "twin": True},
     ]
     stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
 
-    assert stat_ids == []
-    assert len(unresolved) == 2
-    assert all("ambiguous" in u for u in unresolved)
+    assert unresolved == []
+    assert stat_ids == ["300", "302"]
 
 
 def test_coincident_group_rects_all_pairs_not_just_first():
@@ -193,83 +193,117 @@ def test_resolve_stat_targets_coincident_twin_sig_resolves_both_in_z_order(tmp_p
     assert stat_ids == ["302", "300"]  # ascending by z-position (302 is z-slot 0)
 
 
-def test_resolve_stat_targets_coincident_twin_sig_with_third_noncoincident_candidate_unresolved(tmp_path):
-    # A third group C also carries "dup" but sits elsewhere — the candidate set is no
-    # longer purely coincident, so the whole sig stays ambiguous even with `twin` proof.
+def test_resolve_stat_targets_extra_same_sig_candidate_at_end_refuses(tmp_path):
+    # Codex regression: a third group C also carries "dup" but sits elsewhere, so the
+    # twin arm's coincidence check fails and the sig falls to the shared-sig bijection
+    # arm. G("dup") = {300, 302, 304} (3) != J("dup") (2) — the whole slide must refuse
+    # with an ambiguous-cardinality token, NOT silently resolve 2 of the 3 candidates
+    # (the bug the positional arm's index-hint verification could not catch).
     members = [
         *_group(300, 301, "dup"),
         *_group(302, 303, "dup"),
         *_group(304, 305, "dup", rect=(500, 500, 10, 10)),
     ]
-    deck = _write_deck(tmp_path / "twin3.key", members, [300, 302, 304])
+    deck = _write_deck(tmp_path / "twin3_end.key", members, [300, 302, 304])
     slide, objects = _slide_and_objects(deck)
 
     stat_jobs = [
-        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
-        {"slide": 1, "groupIndex": 2, "childSig": "dup", "twin": True},
+        {"slide": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "childSig": "dup", "twin": True},
     ]
     stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
 
     assert stat_ids == []
-    assert len(unresolved) == 2
-    assert all("ambiguous" in u for u in unresolved)
+    assert unresolved == [
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=2 groups=3)",
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=2 groups=3)",
+    ]
 
 
-def test_resolve_stat_targets_twin_sig_job_count_mismatch_unresolved(tmp_path):
+def test_resolve_stat_targets_extra_same_sig_candidate_at_start_refuses(tmp_path):
+    # Same regression, mirrored: the extra non-coincident "dup" candidate sits FIRST in
+    # saved z order (this is the shape of the banked Gold slide-19 scramble — a group
+    # moved from LAST to FIRST in its kind on save) rather than last. Cardinality still
+    # governs: 3 candidates, 2 jobs, refuse.
+    members = [
+        *_group(304, 305, "dup", rect=(500, 500, 10, 10)),
+        *_group(300, 301, "dup"),
+        *_group(302, 303, "dup"),
+    ]
+    deck = _write_deck(tmp_path / "twin3_start.key", members, [304, 300, 302])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "childSig": "dup", "twin": True},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == []
+    assert unresolved == [
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=2 groups=3)",
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=2 groups=3)",
+    ]
+
+
+def test_resolve_stat_targets_fewer_groups_than_jobs_refuses(tmp_path):
     # Two jobs claim sig "dup" (ambiguous by job count), both flagged `twin`, but only
     # ONE saved-deck group actually carries it (B's real signature is "other") —
-    # candidate count (1) != job count (2), so the twin rule does not apply and the sig
-    # stays unresolved.
+    # candidate count (1) != job count (2), so neither the twin rule nor the bijection
+    # rule applies: both jobs refuse with ambiguous-cardinality, none resolve.
     members = [*_group(300, 301, "dup"), *_group(302, 303, "other")]
     deck = _write_deck(tmp_path / "twin_mismatch.key", members, [300, 302])
     slide, objects = _slide_and_objects(deck)
 
     stat_jobs = [
-        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
-        {"slide": 1, "groupIndex": 2, "childSig": "dup", "twin": True},
+        {"slide": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "childSig": "dup", "twin": True},
     ]
     stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
 
     assert stat_ids == []
-    assert len(unresolved) == 2
-    assert all("ambiguous" in u for u in unresolved)
+    assert unresolved == [
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=2 groups=1)",
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=2 groups=1)",
+    ]
 
 
-def test_resolve_stat_targets_coincident_sigs_neither_flagged_twin_unresolved(tmp_path):
-    # Same coincident twin geometry as the positive case, but the planner never proved
-    # a twin (`twin` absent on both jobs) — must stay unresolved like plain ambiguity.
+def test_resolve_stat_targets_coincident_sigs_neither_flagged_twin_resolves_via_bijection(tmp_path):
+    # Same coincident twin geometry as the positive twin case, but the planner never
+    # proved a twin (`twin` absent on both jobs) — the twin arm never applies (job count
+    # of `twin`-flagged jobs is 0), so this falls to the shared-sig bijection arm, where
+    # cardinality matches (2 == 2) and both resolve.
     members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
     deck = _write_deck(tmp_path / "twin_noflag.key", members, [302, 300])
     slide, objects = _slide_and_objects(deck)
 
     stat_jobs = [
-        {"slide": 1, "groupIndex": 1, "childSig": "dup"},
-        {"slide": 1, "groupIndex": 2, "childSig": "dup"},
+        {"slide": 1, "childSig": "dup"},
+        {"slide": 1, "childSig": "dup"},
     ]
     stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
 
-    assert stat_ids == []
-    assert len(unresolved) == 2
-    assert all("ambiguous" in u for u in unresolved)
+    assert unresolved == []
+    assert stat_ids == ["302", "300"]  # ascending by z-position (302 is z-slot 0)
 
 
-def test_resolve_stat_targets_coincident_sigs_one_flagged_twin_unresolved(tmp_path):
+def test_resolve_stat_targets_coincident_sigs_one_flagged_twin_resolves_via_bijection(tmp_path):
     # Same coincident twin geometry, but only ONE of the two jobs sharing the sig is
     # flagged `twin` — mirrors keynote.py's `allow_fallback = 2 only if ALL jobs sharing
-    # the sig are twin`; a partial flag must not resolve.
+    # the sig are twin`; a partial flag must not resolve via the twin arm, so this falls
+    # to the shared-sig bijection arm instead, where cardinality matches and both resolve.
     members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
     deck = _write_deck(tmp_path / "twin_partial.key", members, [302, 300])
     slide, objects = _slide_and_objects(deck)
 
     stat_jobs = [
-        {"slide": 1, "groupIndex": 1, "childSig": "dup", "twin": True},
-        {"slide": 1, "groupIndex": 2, "childSig": "dup"},
+        {"slide": 1, "childSig": "dup", "twin": True},
+        {"slide": 1, "childSig": "dup"},
     ]
     stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
 
-    assert stat_ids == []
-    assert len(unresolved) == 2
-    assert all("ambiguous" in u for u in unresolved)
+    assert unresolved == []
+    assert stat_ids == ["302", "300"]
 
 
 def test_resolve_badge_rows_of_each_kind(tmp_path):
@@ -360,6 +394,107 @@ def test_resolve_stat_job_with_falsy_child_sig_yields_no_target(tmp_path):
     assert stat_ids == []
     assert badge_ids == []
     assert unresolved == []
+
+
+def test_resolve_stat_targets_extra_job_beyond_matching_candidates_refuses(tmp_path):
+    # Three jobs share sig "dup" but only two saved-deck groups carry it — cardinality
+    # mismatch (3 jobs vs 2 groups) refuses the whole signature, all three jobs unresolved.
+    members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
+    deck = _write_deck(tmp_path / "positional_range.key", members, [300, 302])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "childSig": "dup"},
+        {"slide": 1, "childSig": "dup"},
+        {"slide": 1, "childSig": "dup"},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert stat_ids == []
+    assert unresolved == [
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=3 groups=2)",
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=3 groups=2)",
+        "stat:s=1,sig=dup(ambiguous-cardinality jobs=3 groups=2)",
+    ]
+
+
+def test_resolve_mixed_slide_twin_shared_and_unique_all_resolve_disjoint(tmp_path):
+    # One proven-twin pair (sig "t"), one shared-non-twin pair resolved via the bijection
+    # arm (sig "p"), and one unique sig ("u") on the same slide — all three arms in play,
+    # all ids disjoint, front block ascending by z regardless of job order.
+    members = [
+        *_group(300, 301, "t"), *_group(302, 303, "t"),
+        *_group(304, 305, "p"), *_group(306, 307, "p"),
+        *_group(308, 309, "u"),
+    ]
+    deck = _write_deck(tmp_path / "mixed.key", members, [300, 302, 304, 306, 308])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 5, "childSig": "u"},
+        {"slide": 1, "childSig": "t", "twin": True},
+        {"slide": 1, "childSig": "p"},
+        {"slide": 1, "childSig": "t", "twin": True},
+        {"slide": 1, "childSig": "p"},
+    ]
+    stat_ids, _badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, [], [])
+
+    assert unresolved == []
+    assert len(stat_ids) == len(set(stat_ids)) == 5
+    assert stat_ids == sorted(stat_ids, key=["300", "302", "304", "306", "308"].index)
+
+    order = plan_slide_order(slide, objects, stat_ids, [])
+    assert order[-5:] == ["300", "302", "304", "306", "308"]
+
+
+def test_resolve_mixed_slide_order_independent(tmp_path):
+    # Same mixed slide as above, jobs shuffled — resolve_raise_targets and
+    # plan_slide_order must produce identical output regardless of job order.
+    members = [
+        *_group(300, 301, "t"), *_group(302, 303, "t"),
+        *_group(304, 305, "p"), *_group(306, 307, "p"),
+        *_group(308, 309, "u"),
+    ]
+    deck = _write_deck(tmp_path / "mixed_shuffled.key", members, [300, 302, 304, 306, 308])
+    slide, objects = _slide_and_objects(deck)
+
+    base_jobs = [
+        {"slide": 1, "groupIndex": 5, "childSig": "u"},
+        {"slide": 1, "childSig": "t", "twin": True},
+        {"slide": 1, "childSig": "p"},
+        {"slide": 1, "childSig": "t", "twin": True},
+        {"slide": 1, "childSig": "p"},
+    ]
+    shuffled_jobs = list(reversed(base_jobs))
+
+    stat_ids_a, _b1, unresolved_a = resolve_raise_targets(slide, objects, base_jobs, [], [])
+    stat_ids_b, _b2, unresolved_b = resolve_raise_targets(slide, objects, shuffled_jobs, [], [])
+
+    assert unresolved_a == unresolved_b == []
+    assert sorted(stat_ids_a) == sorted(stat_ids_b)
+    order_a = plan_slide_order(slide, objects, stat_ids_a, [])
+    order_b = plan_slide_order(slide, objects, stat_ids_b, [])
+    assert order_a == order_b
+
+
+def test_resolve_badge_and_shared_stat_collision_refused(tmp_path):
+    # A badge row and a bijection-resolved stat job land on the same id — must refuse,
+    # not silently drop one (which raise_to_front would otherwise explode on later).
+    # badge_rows wall index 1 below resolves to id 300, which the stat block claims first.
+    members = [*_group(300, 301, "dup"), *_group(302, 303, "dup")]
+    deck = _write_deck(tmp_path / "badge_stat_collision.key", members, [300, 302])
+    slide, objects = _slide_and_objects(deck)
+
+    stat_jobs = [
+        {"slide": 1, "childSig": "dup"},
+        {"slide": 1, "childSig": "dup"},
+    ]
+    badge_rows = [{"kind": "group", "index": 1}]
+    stat_ids, badge_ids, unresolved = resolve_raise_targets(slide, objects, stat_jobs, badge_rows, [])
+
+    assert stat_ids == ["300", "302"]
+    assert badge_ids == []
+    assert unresolved == ["badge:k=group,i=1(collision)"]
 
 
 def test_resolve_unresolvable_badge_row(tmp_path):

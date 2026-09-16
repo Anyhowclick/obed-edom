@@ -5,6 +5,7 @@ module's own `_run_osascript`/`_ffprobe`/`_keynote_running` seams.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -341,7 +342,27 @@ def test_script_black_layout_uses_explicit_approved_name_list():
         assert f'set wantLayoutName to "{name}"' in script
     assert "words of" not in script
     assert "begins with" not in script
-    assert "blankName" not in script
+
+
+def test_resolve_black_layout_name_accepts_blank_black_alias(monkeypatch, tmp_path):
+    """"Blank Black" is a 2025-template-family alias for the alpha-safe black layout;
+    an FW deck owning it exactly must resolve without any template donor/import."""
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    fw_objects = _layout_objects_multi(entries=[("Blank Black", [])])
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", lambda _path: (fw_objects, {}, {}))
+
+    assert _REAL_RESOLVE_BLACK_LAYOUT_NAME(fw, dme.DEFAULT_BLACK_LAYOUT_NAMES) == "Blank Black"
+
+
+def test_resolve_black_layout_name_rejects_non_alias_black_copy(monkeypatch, tmp_path):
+    """"BLACK copy" is not one of the approved aliases; owning it alone must not resolve."""
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    fw_objects = _layout_objects_multi(entries=[("BLACK copy", [])])
+    monkeypatch.setattr(dme.dsk_live, "_load_deck", lambda _path: (fw_objects, {}, {}))
+
+    assert _REAL_RESOLVE_BLACK_LAYOUT_NAME(fw, dme.DEFAULT_BLACK_LAYOUT_NAMES) is None
 
 
 def test_script_black_layout_approved_list_refuses_substring_match():
@@ -356,6 +377,78 @@ def test_script_black_layout_approved_list_refuses_substring_match():
     )
     assert '"Black"' in script
     assert "Blackboard" not in script
+
+
+# --- _build_dsk_export_script -------------------------------------------------
+
+
+def _dsk_per_slide():
+    return [
+        (2, 1, Path("/work/tmp.0002.m4v")),
+        (5, 2, Path("/work/tmp.0005.m4v")),
+    ]
+
+
+def _dsk_sample_script():
+    return dme._build_dsk_export_script(
+        scratch_path=Path("/Users/x/Desktop/dsk-d3-work/.dsk-export-Sermon_DSK/Sermon_DSK.key"),
+        per_slide=_dsk_per_slide(),
+        codec="AppleProRes422LT",
+        fps=30,
+    )
+
+
+def test_dsk_script_uses_application_id_not_literal_name():
+    script = _dsk_sample_script()
+    assert 'application id "' in script
+    assert '"Keynote"' not in script
+    assert 'tell application "Keynote"' not in script
+
+
+def test_dsk_script_has_export_clause_for_each_slide():
+    script = _dsk_sample_script()
+    for _slide, _ordinal, tmp in _dsk_per_slide():
+        assert str(tmp) in script
+
+
+def test_dsk_script_export_clause_has_m4v_destination_and_properties():
+    script = _dsk_sample_script()
+    assert "as QuickTime movie with properties" in script
+    assert "movie format:native size" in script
+    assert "movie codec:AppleProRes422LT" in script
+    assert "movie framerate:FPS30" in script
+    assert "skipped slides:false" in script
+    assert ".m4v\"" in script
+
+
+def test_dsk_script_deletes_by_keep_list_membership():
+    script = _dsk_sample_script()
+    assert "set keepList to {2, 5}" in script
+    assert "if keepList does not contain i then delete slide i of theDoc" in script
+
+
+def test_dsk_script_toggles_skipped_per_ordinal():
+    script = _dsk_sample_script()
+    assert "set skipped of slide 1 of theDoc to false" in script
+    assert "set skipped of slide 1 of theDoc to true" in script
+    assert "set skipped of slide 2 of theDoc to false" in script
+    assert "set skipped of slide 2 of theDoc to true" in script
+
+
+def test_dsk_script_closes_without_saving():
+    script = _dsk_sample_script()
+    assert "close theDoc saving no" in script
+
+
+def test_dsk_script_no_base_layout_set():
+    script = _dsk_sample_script()
+    assert "set base layout of s to targetLayout" not in script
+
+
+def test_dsk_script_no_drawable_deletes():
+    script = _dsk_sample_script()
+    assert "delete theObj" not in script
+    assert "locked of theObj" not in script
 
 
 # --- quit script -------------------------------------------------------------
@@ -1787,3 +1880,142 @@ def test_rss_watchdog_loop_terminates_fake_process(monkeypatch):
     assert breached["n"] == 1
     assert fake_proc.terminated
     assert watchdog.peak_rss_bytes == 2000
+
+
+# --- export_dsk_slide_clips (offline, faked LiveBatch) -------------------------
+
+
+class _FakeDskLiveBatch:
+    """Stands in for `dsk_live.LiveBatch`: no Keynote, no lock/watchdog/poke. `run` writes
+    every `tmp.NNNN.m4v` the generated script references, so `export_dsk_slide_clips`
+    finds the exports it expects."""
+
+    def __init__(self, deck, out_dir, *, rss_limit_bytes=0, log=print):
+        self.deck = Path(deck)
+        self.out_dir = Path(out_dir)
+        self.work = None
+        self.scratch = None
+
+    def __enter__(self):
+        self.work = self.out_dir / f".dsk-export-{self.deck.stem}"
+        self.work.mkdir(parents=True, exist_ok=True)
+        self.scratch = self.work / self.deck.name
+        self.scratch.write_bytes(b"key")
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def run(self, script_path, *, on_progress=None):
+        text = script_path.read_text()
+        for name in sorted(set(re.findall(r"tmp\.\d{4}\.m4v", text))):
+            (self.work / name).write_bytes(b"movie-bytes")
+        return _FakeCompleted(returncode=0, stderr="")
+
+
+def _stub_dsk_offline(monkeypatch, *, count=5):
+    payload = {
+        "slideWidth": 1920.0,
+        "slideHeight": 1080.0,
+        "slides": [{"number": n} for n in range(1, count + 1)],
+    }
+    monkeypatch.setattr(dme, "offline_wall_payload", lambda path: payload)
+    monkeypatch.setattr(dme.dsk_live, "LiveBatch", _FakeDskLiveBatch)
+    monkeypatch.setattr(dme, "ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
+
+    def fake_ffmpeg_process(raw, dest, *, crop_rect, wall_w, wall_h, codec):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(raw.read_bytes())
+        return wall_w, wall_h
+
+    monkeypatch.setattr(dme, "_ffmpeg_process", fake_ffmpeg_process)
+    monkeypatch.setattr(dme, "_ffprobe", lambda path: (1920, 1080, 30.0, 2.0))
+    return payload
+
+
+def test_export_dsk_slide_clips_publishes_named_clips(monkeypatch, tmp_path):
+    deck = tmp_path / "Sermon_DSK.key"
+    deck.write_bytes(b"source")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _stub_dsk_offline(monkeypatch)
+
+    results = dme.export_dsk_slide_clips(deck, [2, 5], out_dir, log=lambda *_: None)
+
+    assert {r.slide for r in results} == {2, 5}
+    assert (out_dir / "Sermon_DSK.002.mov").is_file()
+    assert (out_dir / "Sermon_DSK.005.mov").is_file()
+    for r in results:
+        assert r.width == 1920 and r.height == 1080
+
+
+def test_export_dsk_slide_clips_uses_ordinals_in_script(monkeypatch, tmp_path):
+    deck = tmp_path / "Sermon_DSK.key"
+    deck.write_bytes(b"source")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _stub_dsk_offline(monkeypatch)
+
+    orig = dme._build_dsk_export_script
+    captured = {}
+
+    def wrapper(**kwargs):
+        captured["per_slide"] = list(kwargs["per_slide"])
+        return orig(**kwargs)
+
+    monkeypatch.setattr(dme, "_build_dsk_export_script", wrapper)
+
+    dme.export_dsk_slide_clips(deck, [2, 5], out_dir, log=lambda *_: None)
+
+    ordinals = {slide: ordinal for slide, ordinal, _tmp in captured["per_slide"]}
+    assert ordinals == {2: 1, 5: 2}
+
+
+def test_export_dsk_slide_clips_refuses_non_1920_deck(monkeypatch, tmp_path):
+    deck = tmp_path / "Sermon.key"
+    deck.write_bytes(b"source")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _stub_dsk_offline(monkeypatch)
+    monkeypatch.setattr(
+        dme, "offline_wall_payload",
+        lambda path: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slides": [{"number": 1}]},
+    )
+    with pytest.raises(ValueError, match="not a 1920x1080 DSK deck"):
+        dme.export_dsk_slide_clips(deck, [1], out_dir, log=lambda *_: None)
+
+
+def test_export_dsk_slide_clips_refuses_unknown_slide(monkeypatch, tmp_path):
+    deck = tmp_path / "Sermon_DSK.key"
+    deck.write_bytes(b"source")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _stub_dsk_offline(monkeypatch, count=3)
+    with pytest.raises(ValueError, match="not found"):
+        dme.export_dsk_slide_clips(deck, [99], out_dir, log=lambda *_: None)
+
+
+def test_export_dsk_slide_clips_empty_slides_returns_empty(monkeypatch, tmp_path):
+    deck = tmp_path / "Sermon_DSK.key"
+    deck.write_bytes(b"source")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _stub_dsk_offline(monkeypatch)
+    assert dme.export_dsk_slide_clips(deck, [], out_dir, log=lambda *_: None) == []
+
+
+def test_export_dsk_slide_clips_preflights_ffmpeg_before_live_batch(monkeypatch, tmp_path):
+    deck = tmp_path / "Sermon_DSK.key"
+    deck.write_bytes(b"source")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _stub_dsk_offline(monkeypatch)
+    monkeypatch.setattr(dme, "ffmpeg_exe", lambda: None)
+
+    def _forbidden(*_a, **_k):
+        raise AssertionError("LiveBatch must not open when ffmpeg is missing")
+
+    monkeypatch.setattr(dme.dsk_live, "LiveBatch", _forbidden)
+
+    with pytest.raises(RuntimeError, match="ffmpeg executable not found"):
+        dme.export_dsk_slide_clips(deck, [1], out_dir, log=lambda *_: None)

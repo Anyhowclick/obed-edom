@@ -10,8 +10,10 @@ Offline helpers (`stage_counts`, `stage_name`, `reconstruct`, `build_stage_scrip
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +22,7 @@ from typing import Any
 from PIL import Image
 
 from obed_edom import dsk_live
+from obed_edom.dsk_movie_export import clip_name
 from obed_edom.dsk_live import (
     DEFAULT_RSS_LIMIT_BYTES,
     DEFAULT_TRANSPARENT_LAYOUT_NAMES,
@@ -357,6 +360,57 @@ def validate_alpha(
     return alpha_ok, bg_alpha_max, content_alpha_frac, transparent_frac
 
 
+def read_manifest(out_dir: Path, deck: Path | None = None) -> dict[str, Any] | None:
+    """The `manifest.json` in `out_dir`, or None when absent, unreadable, or (when
+    `deck` is given) written for a different deck -- compared by resolved path, so a
+    manifest left behind by another deck sharing the folder is ignored entirely
+    rather than merged or reused."""
+    path = Path(out_dir) / "manifest.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if deck is not None:
+        manifest_deck = data.get("deck")
+        if not manifest_deck:
+            return None
+        try:
+            if Path(manifest_deck).expanduser().resolve() != Path(deck).expanduser().resolve():
+                return None
+        except OSError:
+            return None
+    return data
+
+
+def published_clips(
+    out_dir: Path, deck_stem: str, manifest: Mapping[str, Any] | None = None
+) -> dict[int, Path]:
+    """Slide -> clip path for every manifest clip that still exists in `out_dir`, named
+    exactly `clip_name(deck_stem, slide)` and resolving to a file directly inside
+    `out_dir` (rejects absolute paths, `../` traversal, and other stems/names)."""
+    manifest = manifest if manifest is not None else read_manifest(out_dir)
+    out_dir = Path(out_dir).resolve()
+    found: dict[int, Path] = {}
+    for key, entry in ((manifest or {}).get("slides") or {}).items():
+        name = entry.get("clip") if isinstance(entry, dict) else None
+        if not name:
+            continue
+        try:
+            slide = int(key)
+        except ValueError:
+            continue
+        if str(name) != clip_name(deck_stem, slide):
+            continue
+        candidate = Path(out_dir) / str(name)
+        if candidate.resolve().parent != out_dir:
+            continue
+        if candidate.is_file():
+            found[slide] = candidate
+    return found
+
+
 def write_manifest(
     out_dir: Path,
     deck: Path,
@@ -365,22 +419,46 @@ def write_manifest(
     categories: Mapping[int, str],
     clips: Mapping[int, Path] | None = None,
     generated: str | None = None,
+    source_slides: Mapping[int, int] | None = None,
+    existing: Mapping[str, Any] | None = None,
 ) -> Path:
     """`generated` is omitted from the manifest when `None` (the default) -- callers
     that need it stamped pass an ISO timestamp explicitly. Serialised with
     `sort_keys=True` so the file is byte-identical across runs of an unchanged
-    export."""
+    export. `source_slides` maps a DSK slide to the FW slide it came from (Generator
+    output). `existing` is a previously written manifest for the same folder whose
+    slide entries are kept and updated, so a Generator manifest survives an Exporter
+    run and vice versa; `clips` entries win over an existing clip for the same slide."""
     clips = clips or {}
+    source_slides = source_slides or {}
     by_slide: dict[int, list[StageAsset]] = {}
     for asset in assets:
         by_slide.setdefault(asset.slide, []).append(asset)
 
     slides_out: dict[str, dict[str, Any]] = {}
+    for key, entry in ((existing or {}).get("slides") or {}).items():
+        if isinstance(entry, dict):
+            slides_out[str(key)] = dict(entry)
+    for slide in sorted(set(by_slide) | set(clips) | set(source_slides)):
+        entry = slides_out.get(str(slide), {})
+        if slide in categories:
+            entry["category"] = categories[slide]
+        elif "category" not in entry:
+            entry["category"] = ""
+        if slide in source_slides:
+            entry["source_slide"] = int(source_slides[slide])
+        clip = clips.get(slide)
+        if clip is not None:
+            entry["clip"] = Path(clip).name
+            if slide not in by_slide:
+                entry.pop("stages", None)
+        slides_out[str(slide)] = entry
     for slide, stage_assets in by_slide.items():
         stage_assets = sorted(stage_assets, key=lambda a: a.stage_index)
-        entry: dict[str, Any] = {
-            "category": categories.get(slide, ""),
-            "stages": [
+        entry = slides_out[str(slide)]
+        if slide not in clips:
+            entry.pop("clip", None)
+        entry["stages"] = [
                 {
                     "index": a.stage_index,
                     "file": a.path.name,
@@ -392,14 +470,11 @@ def write_manifest(
                     "alpha_route": "keynote-stage-png",
                 }
                 for a in stage_assets
-            ],
-        }
-        clip = clips.get(slide)
-        if clip is not None:
-            entry["clip"] = Path(clip).name
-        slides_out[str(slide)] = entry
+            ]
 
     geometry = {"width": assets[0].width, "height": assets[0].height} if assets else {}
+    if not geometry and existing and existing.get("geometry"):
+        geometry = dict(existing["geometry"])
     manifest: dict[str, Any] = {
         "deck": str(Path(deck)),
         "geometry": geometry,
@@ -407,9 +482,15 @@ def write_manifest(
     }
     if generated is not None:
         manifest["generated"] = generated
-    path = Path(out_dir) / "manifest.json"
-    path.write_text(json.dumps(manifest, sort_keys=True, indent=2))
+    out_dir = Path(out_dir)
+    path = out_dir / "manifest.json"
+    tmp_path = out_dir / f".manifest.json.{uuid.uuid4().hex}.tmp"
+    tmp_path.write_text(json.dumps(manifest, sort_keys=True, indent=2))
+    os.replace(tmp_path, path)
     return path
+
+
+_write_manifest = write_manifest
 
 
 def export_stage_pngs(
@@ -425,11 +506,14 @@ def export_stage_pngs(
     categories: Mapping[int, str] | None = None,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     include_skipped: bool = False,
+    write_manifest: bool = True,
     log: Callable[[str], None] = print,
 ) -> list[StageAsset]:
     """Exports one PNG per build stage for `slides` of `deck` into `out_dir`, named by
     `stage_name` (1-based stage index) and validated by `validate_alpha`, then writes
-    `manifest.json`. Layouts are left untouched unless `transparent_layout_names` is
+    `manifest.json` unless `write_manifest=False`, letting a caller that merges assets
+    across multiple calls (e.g. `_run_dsk_export_apply`) perform one atomic write at
+    the end instead. Layouts are left untouched unless `transparent_layout_names` is
     passed. Refuses slides `skipped` in the offline payload unless `include_skipped`,
     and decks whose offline geometry is not `EXPECTED_GEOMETRY` (1920x1080).
 
@@ -522,5 +606,6 @@ def export_stage_pngs(
                     )
                 )
 
-    write_manifest(out_dir, deck, assets, categories=categories, clips=clips)
+    if write_manifest:
+        _write_manifest(out_dir, deck, assets, categories=categories, clips=clips)
     return assets

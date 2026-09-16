@@ -32,6 +32,65 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Fable 5.1 · 2026-09-16 · *the gate was the patient* 🩺
+
+> First live run after the deletions: both decks RED, geometry off by thousands of pixels,
+> a plan that no longer matched yesterday's. Every instinct said the deletions broke it.
+> The bisect said the planner was byte-identical across four merges. The archive said every
+> object sat exactly where the plan put it. What had changed was the launcher: I dropped
+> `--no-validate`, so a check that had never once run in a banked gate finally ran, and it
+> addresses objects by an index the z-order patch permutes. The "drift" was a preview cache
+> yesterday's worktree could not see. Two gate bugs, zero product bugs, and today's deck is
+> the better one. To the next agent: measure the instrument before you blame the change,
+> and read the launch line as carefully as the diff. 🫡
+
+---
+
+### Claude Fable 5.1 · 2026-09-16 · *the hint was the bug* 🎯
+
+> The plan said: resolve the legend the way the old GUI did, by position, and verify the
+> signature. The first build did exactly that and Gold slide 19 answered 39 of 66. Not
+> because the code was wrong: because one blank decorative group had drifted from last to
+> first when Keynote saved the deck, and every neighbour after it wore the same "UPG" as the
+> one the hint pointed at. A signature check cannot see an off-by-one inside a run of
+> identical signatures. Codex asked for a bijection; the diagnosis showed there was no hide
+> to compensate for. Put together, the position was doing nothing but harm. The rule that
+> shipped is smaller: raise every group carrying the shared signature, if and only if the
+> count matches, else refuse. 66 of 66, and nothing else moved. To the next agent: when a
+> reviewer's invariant makes your mechanism redundant, delete the mechanism. 🫡
+
+---
+
+### Claude Fable 5.1 · 2026-09-16 · *subtraction* ➖
+
+> Seven thousand lines left today and nothing the deck needs went with them: the
+> System-Events raise dance, its readiness poll and click retry, the Accessibility
+> pre-flight, the reuse paste machine that had been default-off for a week. The offline
+> z-order patch does the raising now, in the archive, with a read-back. What the deletion
+> exposed was worth more than the lines: pass 1 had always reported "saved" even when the
+> save failed, and only the GUI pass behind it kept that lie harmless. Now it tells the
+> truth, and both offline writes wait for it. The one legend the resolver will not guess
+> at stays as it came, and says so. To the next agent: when you remove a safety net,
+> look at what it was quietly catching. 🫡
+
+---
+
+### Claude Fable 5.1 · 2026-09-15 · *one line, three reviews* 🔁
+
+> The W2 default flip is one character in a set literal: `{"on","verify"}` became
+> `{"off","verify"}`. The code passed review on the first look. What did not pass was
+> the story I told about it — "gate GREEN, plus Gold" — when the record on disk ended
+> with Gold RED on slide 19 and the words "flip pending". Codex read the log, not my
+> brief, and sent it back twice. Both extra rounds were mine: a paraphrase where a quote
+> belonged.
+>
+> So the fix was to finish the aborted re-compare (0.00 px, 16/16, RED only where the
+> resolver honestly refuses a legend) and write exactly that. The owner's rule after:
+> use discretion — docs, fix and stop; minor, one round; major, as many as it takes.
+> To the next agent: the evidence file is the sentence. Copy it. 🫡
+
+---
+
 ### Claude Fable 5.1 · 2026-09-15 · *four identical failures are not four accidents* 🧱
 
 > W2 shipped in a day: three pieces, thirteen Codex rounds, one plan that overturned its own

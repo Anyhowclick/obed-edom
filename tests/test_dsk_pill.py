@@ -22,6 +22,7 @@ from obed_edom.iwa_write import (
 )
 
 GOLD = Path.home() / "Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key"
+# Local operator deck; removed in the 2026-09-16 dsk-d4-work cleanup, so this skips unless regenerated.
 R12B = Path.home() / "Desktop/dsk-d4-work/out-r12b/Sermon_PK_DSK.key"
 
 # Gold's own 8 measured pill widths (§1.4): 7 gold slides + the layout's own default.
