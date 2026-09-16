@@ -3,8 +3,34 @@
 Reviewed 2026-09-16 against the current source and
 [`kpf_renderer_probe_2026-09-12.md`](../research/kpf_renderer_probe_2026-09-12.md).
 This expands DSK plan item 21; the DSK plan remains authoritative for operator decisions.
-Status: plan only. No KPF renderer or alpha-video implementation was found in the current
-source. The existing stage-PNG exporter is implemented and must remain usable independently.
+Status: **P1 implemented and live-checked 2026-09-16.** Parser had to be taught the
+live Keynote 15.3.1 HTML shape (`majorVersion`/`minorVersion`,
+`events[].accessibility[].text`, media-filename noise, IWA-only operator notes)
+before `Alpha_Wall.key` / `Alpha_DSK.key` would map. Source decks were not
+modified. P2/P3 are not implemented.
+
+Live P1 record (fixtures on Desktop, hashes unchanged after every Keynote run):
+
+| deck | sha256 | mtime | inode | size |
+| --- | --- | --- | --- | --- |
+| `Alpha_Wall.key` | `82f66298805c9dccf4e2d494038c6c8a676398b10397a808040fe9f5eca843dd` | 2026-09-16 11:59:00 | 135441448 | 1952381018 |
+| `Alpha_DSK.key` | `d8de34a942806f54fd401acb3ca7070774d1bb13331dc5dc39b200d63f64795c` | 2026-09-16 11:58:07 | 135440387 | 184556673 |
+
+| check | DSK (`Alpha_DSK.key`) | GW (`Alpha_Wall.key`) |
+| --- | --- | --- |
+| HTML export | 18 s, 36.7 MB, 4/5 live, skip 2 omitted | 62 s, 454 MB, 9/10 live, skip 4 omitted, 7680×1080, peak RSS 1.1 GB |
+| Mapping | 1→#0, 2 skipped, 3→#1, 4→#2, 5→#3 | 1→#0 … 4 skipped … 10→#8 |
+| First / middle / last | UI 1 / 3 / 5; Previous disabled on 1, Next disabled on 5 | Player hashes #0 / #4 / #8 assigned; first slide rendered (wall photo) |
+| Skipped jump | Slide 2 labelled “2 — skipped”; iframe removed; status explains omit | Same mapping rule; skip 4 has no player index |
+| Multi-build | Slide 3 initial Genesis 1 plate rendered | Slide 5 mapped (#3); intra-build step not sampled here |
+| Magic Move | none (all `transition: none`) | Slides 1, 3, 8, 9 carry `apple:magic-move-implied-motion-path`; #0 rendered |
+| Close / switch | Back to stills leaves zero iframes; jump-to-skipped also disposes | — |
+| Build stepping | Real click reached the iframe; Space/ArrowRight did not advance in this hidden Cursor browser (same rAF freeze the 2026-09-12 probe measured) | Hash set to #2/#6/#8; picture stayed on slide 1 in the hidden pane |
+
+P1 is **not merged**: first-slide playback, skip mapping, close/dispose, and
+source-fingerprint invariance passed; intra-build stepping and Magic Move
+*motion* still need a visible browser (or the probe’s `requestAnimFrame`
+setTimeout shim) before the playback gate is green.
 
 ## 1. Scope and delivery order
 

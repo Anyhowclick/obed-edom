@@ -28,7 +28,7 @@ from obed_edom.offline_inspect import _canvas_size
 from obed_edom.paths import _within_root, output_root
 
 MANIFEST_VERSION = 2
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 # Adapter/player contract this parser understands. Bump when hash channel,
 # identity field, or required header fields change. Distinct from Keynote's
 # own HTML export major/minor (measured 1.2 on 2026-09-12).
@@ -50,6 +50,11 @@ _REMOTE_MEDIA = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_MEDIA_FILENAME = re.compile(
+    r"\.(?:tiff?|png|jpe?g|gif|heic|webp|bmp|pdf|mov|m4v|mp4|m4a|mp3|aac|wav)$",
+    re.IGNORECASE,
+)
+_JSONP_CALL = re.compile(r"^[A-Za-z_$][\w$]*\s*\(\s*(.*)\s*\)\s*;?\s*$", re.DOTALL)
 _REGISTRY_LOCK = threading.Lock()
 PREVIEW_ISSUE_SOURCE = "obed-edom-preview"
 _DIAGNOSTICS_MARK = "data-obed-preview-diagnostics"
@@ -220,14 +225,16 @@ def current_keynote_identity() -> dict[str, str]:
 
 
 def header_export_contract(header: dict[str, Any]) -> dict[str, int]:
-    if "major" not in header or "minor" not in header:
+    # Live Keynote 15.3.1 HTML writes majorVersion/minorVersion. Older notes and
+    # tests also use major/minor.
+    major = header.get("majorVersion", header.get("major"))
+    minor = header.get("minorVersion", header.get("minor"))
+    if major is None or minor is None:
         raise PreviewStructureError("header is missing export contract version")
     try:
-        major = int(header["major"])
-        minor = int(header["minor"])
+        return {"major": int(major), "minor": int(minor)}
     except (TypeError, ValueError) as exc:
         raise PreviewStructureError("header export contract version is not an integer") from exc
-    return {"major": major, "minor": minor}
 
 
 def validate_export_contract(header: dict[str, Any]) -> dict[str, int]:
@@ -240,21 +247,49 @@ def validate_export_contract(header: dict[str, Any]) -> dict[str, int]:
     return contract
 
 
+def _identity_token(text: str) -> str:
+    cleaned = (
+        str(text)
+        .replace("\\u2028", " ")
+        .replace("\\u2029", " ")
+        .replace("\u2028", " ")
+        .replace("\u2029", " ")
+    )
+    token = _normalize_text(cleaned)
+    if not token or _MEDIA_FILENAME.search(token):
+        return ""
+    return token
+
+
 def identity_key(texts: Sequence[str]) -> tuple[str, ...]:
-    tokens = {_normalize_text(text) for text in texts}
+    tokens = {_identity_token(text) for text in texts}
     return tuple(sorted(token for token in tokens if token))
 
 
-def export_payload_identity(payload: Any) -> tuple[str, ...]:
-    """Probe-backed identity: ``accessibility[].text`` from the 2026-09-12 HTML export."""
-    if not isinstance(payload, dict):
-        return ()
+def _accessibility_texts(node: Any) -> list[str]:
     texts: list[str] = []
-    raw = payload.get("accessibility")
+    if not isinstance(node, dict):
+        return texts
+    raw = node.get("accessibility")
     if isinstance(raw, list):
         for item in raw:
             if isinstance(item, dict) and item.get("text"):
                 texts.append(str(item["text"]))
+    return texts
+
+
+def export_payload_identity(payload: Any) -> tuple[str, ...]:
+    """Identity from ``events[].accessibility[].text``, with a top-level fallback.
+
+    Measured 2026-09-16 on Alpha_DSK HTML: slide JSON is ``{assets, events}``;
+    accessibility lives on each event, not the payload root. Media filenames
+    (``pasted-image.tiff``, ``Untitled.mov``) are not slide copy.
+    """
+    if not isinstance(payload, dict):
+        return ()
+    texts = _accessibility_texts(payload)
+    for event in payload.get("events") or []:
+        texts.extend(_accessibility_texts(event))
     return identity_key(texts)
 
 
@@ -275,23 +310,32 @@ def source_slide_identity(
 
 
 def assert_identity_mapping(live: Sequence[SourceSlide], exported: Sequence[dict[str, Any]]) -> None:
-    """Refuse a same-length reorder or any pairing that identity cannot confirm uniquely."""
+    """Refuse a same-length reorder or any pairing that identity cannot confirm uniquely.
+
+    Empty identities (photo/movie slides with no readable text) may occupy more than
+    one live slot only when both sides are empty at the same indices. Duplicate
+    non-empty tokens stay ambiguous.
+    """
     source_keys = [slide.identity for slide in live]
     export_keys = [tuple(item.get("identity") or ()) for item in exported]
     if len(source_keys) != len(export_keys):
         raise PreviewMappingError(
             f"exported {len(export_keys)} slide(s) but the source has {len(source_keys)} non-skipped slide(s)"
         )
-    source_counts = Counter(source_keys)
-    export_counts = Counter(export_keys)
-    if source_counts != export_counts:
+    aligned: list[tuple[str, ...]] = []
+    for src, exp in zip(source_keys, export_keys, strict=True):
+        source_set, export_set = set(src), set(exp)
+        # Player accessibility is the visible set. Source IWA can carry extra
+        # operator notes (export ⊆ source, including an empty export). A
+        # nonempty source that is a subset of export covers leftover media
+        # names the filter missed. Empty source + nonempty export is a miss.
+        if export_set <= source_set or (source_set and source_set <= export_set):
+            aligned.append(tuple(sorted(source_set & export_set)))
+            continue
         raise PreviewMappingError("exported slide identities do not match the source")
-    if any(count != 1 for count in source_counts.values()):
+    aligned_counts = Counter(key for key in aligned if key)
+    if any(count != 1 for count in aligned_counts.values()):
         raise PreviewMappingError("ambiguous source-to-export mapping")
-    export_index = {key: index for index, key in enumerate(export_keys)}
-    for index, key in enumerate(source_keys):
-        if export_index[key] != index:
-            raise PreviewMappingError("exported slides are not in source order")
 
 
 def player_hash(player_index: int) -> str:
@@ -299,7 +343,7 @@ def player_hash(player_index: int) -> str:
 
 
 def parse_jsonish(text: str) -> Any:
-    """Parse raw JSON or the `var local_header = {...};` JSONP the exporter writes."""
+    """Parse raw JSON, `var local_header = {...};`, or `local_header({...})` JSONP."""
     payload = text.lstrip("\ufeff").strip()
     try:
         return json.loads(payload)
@@ -310,8 +354,15 @@ def parse_jsonish(text: str) -> Any:
         stripped = stripped[:-1].strip()
     try:
         return json.loads(stripped)
-    except json.JSONDecodeError as exc:
-        raise PreviewStructureError(f"could not parse JSON/JSONP: {exc}") from exc
+    except json.JSONDecodeError:
+        pass
+    called = _JSONP_CALL.match(payload)
+    if called:
+        try:
+            return json.loads(called.group(1))
+        except json.JSONDecodeError:
+            pass
+    raise PreviewStructureError("could not parse JSON/JSONP")
 
 
 def read_jsonish(path: Path) -> Any:
@@ -692,10 +743,11 @@ def build_html_export_script(scratch: Path, dest: Path) -> str:
 
 
 def export_html(deck: Path, dest: Path, *, log: Callable[[str], None] = print) -> None:
-    dest = Path(dest)
+    dest = Path(dest).expanduser()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = dest.resolve()
     if dest.exists():
         shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
     work_root = dest.parent / f".export-work-{os.getpid()}"
     work_root.mkdir(parents=True, exist_ok=True)
     try:
