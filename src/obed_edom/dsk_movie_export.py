@@ -275,7 +275,11 @@ def _build_export_script(
     black_layout_names: Sequence[str] = DEFAULT_BLACK_LAYOUT_NAMES,
 ) -> str:
     """One AppleScript, one document open for the whole batch, exported at its own native
-    size; the clip is always cropped afterwards by ffmpeg, never by a Keynote resize."""
+    size; the clip is always cropped afterwards by ffmpeg, never by a Keynote resize.
+    Per-movie pure-video jobs duplicate their slide to a scratch copy at the end of the
+    deck, delete everything but that one movie item on the copy, export, then discard the
+    copy, rather than mutating the kept slide in place -- the source slide is never
+    touched and other movies on it stay intact for their own jobs."""
     keep = sorted({j.slide for j in per_slide})
     stem_name = _as_escape(scratch_path.stem)
     doc_name = _as_escape(scratch_path.name)
@@ -352,7 +356,9 @@ def _build_export_script(
         return [
             "      try",
             f"        set theObj to {addr}",
-            "        if locked of theObj then set locked of theObj to false",
+            "        try",
+            "          if locked of theObj then set locked of theObj to false",
+            "        end try",
             *_delete_or_hide_placeholder_lines(slide_for_log, ordinal_addr, addr, indent="          "),
             "      on error errMsg number errNum",
             f'        log ("DELETEFAIL" & tab & "{slide_for_log}" & tab & "{addr}" & tab & errNum & tab & errMsg)',
@@ -367,15 +373,7 @@ def _build_export_script(
                 if not name:
                     raise ValueError(f"Slide {j.slide}: no AppleScript class name for delete kind {kind!r}")
                 addr = f"{name} {kind_index + 1} of slide {j.ordinal}"
-                lines += [
-                    "      try",
-                    f"        set theObj to {addr}",
-                    "        if locked of theObj then set locked of theObj to false",
-                    *_delete_or_hide_placeholder_lines(j.slide, j.ordinal, addr, indent="          "),
-                    "      on error errMsg number errNum",
-                    f'        log ("DELETEFAIL" & tab & "{j.slide}" & tab & "{addr}" & tab & errNum & tab & errMsg)',
-                    "      end try",
-                ]
+                lines += _delete_block(j.slide, j.ordinal, addr)
             lines += [
                 "      try",
                 f'        export theDoc to POSIX file "{_as_escape(str(j.tmp))}" as QuickTime movie with properties '
@@ -388,11 +386,6 @@ def _build_export_script(
                 f"      set skipped of slide {j.ordinal} of theDoc to true",
             ]
         else:
-            # Per-movie pure-video mode: rather than mutating the kept slide in place (which
-            # would delete the OTHER movie items needed by later jobs on the same slide),
-            # duplicate it to a scratch copy at the end of the deck, delete everything but
-            # this one movie item on the copy, export, then discard the copy. One document
-            # stays open for the whole batch; the source slide is never touched.
             dup_ordinal = j.ordinal + 1
             lines += [
                 f"      duplicate slide {j.ordinal} to after slide {j.ordinal} of theDoc",
