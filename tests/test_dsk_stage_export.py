@@ -595,6 +595,41 @@ def test_manifest_src_clips_written_for_generator_entry(tmp_path):
     assert "clip" not in manifest["slides"]["4"]
 
 
+def test_manifest_generator_mode_drops_stale_clip_after_exporter(tmp_path):
+    existing = {
+        "slides": {
+            "4": {"category": "movie", "source_slide": 44, "clip": "Deck.004.mov"},
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "movie"},
+        source_slides={4: 44}, src_clips={4: ["src/Deck.004.01.src.mov"]},
+        generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert "clip" not in manifest["slides"]["4"]
+    assert manifest["slides"]["4"]["srcClips"] == ["src/Deck.004.01.src.mov"]
+
+
+def test_manifest_generator_mode_drops_src_clips_for_movie_to_static_regeneration(tmp_path):
+    existing = {
+        "slides": {
+            "4": {
+                "category": "movie", "source_slide": 44,
+                "srcClips": ["src/Deck.004.01.src.mov"], "clip": "Deck.004.mov",
+            },
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "static"},
+        source_slides={4: 44}, generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert "srcClips" not in manifest["slides"]["4"]
+    assert "clip" not in manifest["slides"]["4"]
+    assert manifest["slides"]["4"]["category"] == "static"
+
+
 def test_manifest_drop_src_removes_src_clips_from_every_slide(tmp_path):
     existing = {
         "slides": {

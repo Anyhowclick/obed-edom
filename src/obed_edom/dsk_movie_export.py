@@ -410,6 +410,9 @@ def _build_export_script(
                 f"{{movie format:native size, movie codec:{codec}, movie framerate:{fps_name}, skipped slides:false}}",
                 "      on error errMsg number errNum",
                 f'        log ("ERR" & tab & "{j.slide}.{j.movie_id[1]}" & tab & errNum & tab & errMsg)',
+                "        try",
+                f"          delete slide {dup_ordinal} of theDoc",
+                "        end try",
                 "        error errMsg number errNum",
                 "      end try",
                 f'      log ("OBED" & tab & "{j.slide}.{j.movie_id[1]}" & tab & ((current date) as string))',
@@ -977,16 +980,14 @@ def export_slide_clips(
             for n in keep:
                 slide = slides_by_number[n]
                 items = slide.get("items") or []
-                movie_items = sorted(
-                    (it for it in items if it.get("kind") == "movie"),
-                    key=lambda it: it["kindIndex"],
-                )
-                if not movie_items:
-                    raise ValueError(f"Slide {n} has no movie items; per_movie export requires at least one")
-                base_crop = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
+                items_by_id = {(it["kind"], it["kindIndex"]): it for it in items}
                 cls = classes[n]
-                for movie_index, movie_item in enumerate(movie_items, start=1):
-                    movie_id: ItemId = ("movie", movie_item["kindIndex"])
+                kept_movie_ids = sorted(iid for iid in cls.kept if iid[0] == "movie")
+                if not kept_movie_ids:
+                    raise ValueError(f"Slide {n} has no kept movie items; per_movie export requires at least one")
+                base_crop = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
+                for movie_index, movie_id in enumerate(kept_movie_ids, start=1):
+                    movie_item = items_by_id[movie_id]
                     crop_rect = _rect_intersect(item_rect(movie_item), base_crop)
                     del_ids = _derive_pure_video_delete_ids(items, movie_id)
                     _validate_delete_ids(n, del_ids, cls, slide, pure_video=True)
@@ -1124,14 +1125,7 @@ def export_slide_clips(
                 raise RuntimeError(f"Slide {job.slide}: exported fps {fps_out} does not match requested {fps}")
             crop_x, crop_y, crop_w, crop_h = _clamp_crop(job.crop_rect, wall_w, wall_h)
             crop_x, crop_y, crop_w, crop_h = _normalize_even_crop(crop_x, crop_y, crop_w, crop_h, wall_w, wall_h)
-            movie_rect = None
-            if job.movie_id is not None:
-                movie_item = next(
-                    it
-                    for it in (slides_by_number[job.slide].get("items") or [])
-                    if it.get("kind") == "movie" and it["kindIndex"] == job.movie_id[1]
-                )
-                movie_rect = item_rect(movie_item)
+            movie_rect = job.crop_rect if job.movie_id is not None else None
             expected_rect = _expected_content_rect(
                 payload,
                 job.slide,
@@ -1153,7 +1147,7 @@ def export_slide_clips(
                     wall_s=elapsed_by_slide.get(job.slide, time.monotonic() - t0),
                     crop_width=crop_w,
                     movie_id=job.movie_id,
-                    crop_rect=job.crop_rect,
+                    crop_rect=Rect(crop_x, crop_y, crop_w, crop_h),
                 )
             )
 

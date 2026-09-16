@@ -2121,6 +2121,108 @@ def test_export_slide_clips_per_movie_rejects_delete_ids(monkeypatch, tmp_path):
         dme.export_slide_clips(fw, [12], out_dir, per_movie=True, delete_ids={12: (("image", 0),)})
 
 
+def test_export_slide_clips_per_movie_uses_kept_movie_ids_not_all_movies(monkeypatch, tmp_path):
+    """A side movie the classifier dropped (absent from `cls.kept`) must not get its own
+    per-movie clip -- only the movie ids `classify_deck` actually kept are exported,
+    regardless of how many top-level movie items the slide has."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    slide = {
+        "number": 12,
+        "items": [
+            {"kind": "movie", "kindIndex": 0, "x": 1920.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
+            {"kind": "movie", "kindIndex": 1, "x": 0.0, "y": 0.0, "w": 500.0, "h": 1080.0},
+        ],
+    }
+    _stub_live(monkeypatch, tmp_path, payload_slides=[slide])
+    cls = SlideClass(12, "mixed", 0, 2, (("movie", 0),), (("movie", 1),), (), None, 0, ())
+    monkeypatch.setattr(dme, "classify_deck", lambda path, **k: [cls])
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert len(results) == 1
+    assert results[0].movie_id == ("movie", 0)
+    assert [r.path.name for r in results] == ["Sermon.012.01.mov"]
+
+
+def test_export_slide_clips_per_movie_content_assert_uses_visible_intersection(monkeypatch, tmp_path):
+    """A movie mostly outside the centre panel must have its coverage check against the
+    *visible* intersection (`job.crop_rect`), not the full off-canvas movie rectangle --
+    otherwise a correctly-cropped clip whose movie is less than half onscreen is wrongly
+    rejected for covering too little of an inflated expected rect."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    slide = {
+        "number": 11,
+        "items": [
+            # Spans x=[-2000, 4000); only [1920, 4000) (2080 of 6000, ~35%) overlaps the
+            # centre panel [1920, 5760).
+            {"kind": "movie", "kindIndex": 0, "x": -2000.0, "y": 0.0, "w": 6000.0, "h": 1080.0},
+        ],
+    }
+    _stub_live(monkeypatch, tmp_path, payload_slides=[slide], stub_content_assert=False)
+    _patch_build_export_script_capture(monkeypatch)
+
+    captured = {}
+
+    def fake_assert(path, width, height, *, duration, expected=None, log=print):
+        captured["expected"] = expected
+
+    monkeypatch.setattr(dme, "_assert_clip_covers_frame", fake_assert)
+
+    dme.export_slide_clips(fw, [11], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert captured["expected"] == Rect(0.0, 0.0, 2080.0, 1080.0)
+
+
+def test_export_slide_clips_per_movie_odd_intersection_normalizes_with_matching_geometry(monkeypatch, tmp_path):
+    """A 101x100 visible intersection normalizes to an even 102x100 published size;
+    `ClipResult.width`/`height` must be that actual published size, and `crop_rect` the
+    same even-normalised wall-space crop actually used, so their aspects agree exactly
+    (no drift) and the assembler can fit from the same reported geometry."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    slide = {
+        "number": 1,
+        "items": [
+            {"kind": "movie", "kindIndex": 0, "x": 2000.0, "y": 10.0, "w": 101.0, "h": 100.0},
+        ],
+    }
+    cls = SlideClass(1, "mixed", 0, 1, (("movie", 0),), (), (), None, 0, ())
+    _stub_live(monkeypatch, tmp_path, payload_slides=[slide], stub_content_assert=True)
+    monkeypatch.setattr(dme, "classify_deck", lambda path, **k: [cls])
+    _patch_build_export_script_capture(monkeypatch)
+
+    def fake_ffmpeg_process(raw, dest, *, crop_rect, wall_w, wall_h, codec):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"movie-bytes")
+        x, y, w, h = dme._clamp_crop(crop_rect, wall_w, wall_h)
+        return dme._normalize_even_crop(x, y, w, h, wall_w, wall_h)[2:]
+
+    monkeypatch.setattr(dme, "_ffmpeg_process", fake_ffmpeg_process)
+    monkeypatch.setattr(dme, "_ffprobe", lambda path: (102, 100, 30.0, 8.43))
+
+    results = dme.export_slide_clips(fw, [1], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert len(results) == 1
+    r = results[0]
+    assert (r.width, r.height) == (102, 100)
+    assert (r.crop_rect.w, r.crop_rect.h) == (102, 100)
+    aspect_reported = r.crop_rect.w / r.crop_rect.h
+    aspect_output = r.width / r.height
+    assert abs(aspect_reported - aspect_output) / aspect_output < 0.005
+
+
 def _per_movie_jobs():
     return [
         dme._SlideJob(
@@ -2165,6 +2267,25 @@ def test_script_has_one_export_clause_per_movie_item():
 def test_script_per_movie_duplicates_and_deletes_scratch_slide():
     script = _per_movie_script()
     assert script.count("duplicate slide 1 to after slide 1 of theDoc") == 2
-    assert script.count("delete slide 2 of theDoc") == 2
+    # One success-path delete (unindented under "tell theDoc") and one error-path delete
+    # (nested inside the export's on-error handler) per job -- four occurrences total.
+    assert script.count("delete slide 2 of theDoc") == 4
+    lines = script.splitlines()
+    assert lines.count("      delete slide 2 of theDoc") == 2
+    assert lines.count("          delete slide 2 of theDoc") == 2
     assert "movie 2 of slide 2" in script  # deletes the OTHER movie (kindIndex 1) for job 1
     assert "movie 1 of slide 2" in script  # deletes the OTHER movie (kindIndex 0) for job 2
+
+
+def test_script_per_movie_export_error_deletes_scratch_slide_before_reraising():
+    """If the per-movie export itself errors, the AppleScript must delete the duplicate
+    scratch slide (in a nested try/on error) before re-raising, so a failed batch never
+    leaves a stray slide behind in the scratch deck."""
+    script = _per_movie_script()
+    for job in _per_movie_jobs():
+        marker = f'log ("ERR" & tab & "{job.slide}.{job.movie_id[1]}" & tab & errNum & tab & errMsg)'
+        idx = script.index(marker)
+        following = script[idx : idx + 400]
+        assert following.index("try") < following.index("delete slide 2 of theDoc") < following.index(
+            "end try"
+        ) < following.index("error errMsg number errNum")

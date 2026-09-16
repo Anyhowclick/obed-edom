@@ -1874,6 +1874,11 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             movie_ids = sorted(item for item in classes[number].kept if item[0] == "movie")
             if not movie_ids:
                 raise ValueError(f"Slide {number}: operator-supplied clip but no movie item found")
+            if len(movie_ids) > 1:
+                raise ValueError(
+                    f"Slide {number}: operator-supplied clip cannot cover {len(movie_ids)} kept "
+                    "movies; supply one clip per movie item instead"
+                )
             nested_clips.setdefault(number, {})[movie_ids[0]] = clip_path
             job.log(f"slide {number}: operator-supplied clip has no offline size probe; skipping the aspect guard")
 
@@ -1918,6 +1923,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         categories=categories,
         source_slides={o: n for n, o in result.ordinals.items()},
         src_clips=published,
+        generator=True,
         existing=read_manifest(out_dir, deck=result.path),
     )
     return {
@@ -1987,7 +1993,6 @@ def _run_dsk_export_propose(
     classes = {c.number: c for c in classify_deck(path, payload=payload)}
     thumbs = _dsk_preview_thumbs(job, path, payload)
     thumb_dir = wall_thumb_dir(deck_digest(path))
-    manifest = read_manifest(path.parent, deck=path) if is_stage_deck else None
     pages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for number in numbers:
@@ -2022,7 +2027,6 @@ def _run_dsk_export_propose(
         "path": str(path),
         "isStageDeck": is_stage_deck,
         "isFwDeck": is_fw_deck,
-        "hasManifest": manifest is not None,
         "slideRange": sorted(slide_range) if slide_range else None,
         "thumbDir": str(thumb_dir),
         "pages": pages,
@@ -2073,17 +2077,39 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         job.log(f"Exported {len(assets)} stage PNG(s).")
     manifest_path = write_manifest(out_dir, path, assets, categories=categories, clips=clips, existing=existing)
     merged = json.loads(manifest_path.read_text())
+    out_dir_real = out_dir.resolve()
     to_delete: list[Path] = []
-    for entry in (merged.get("slides") or {}).values():
-        for rel in entry.get("srcClips") or []:
-            candidate = (out_dir / str(rel)).resolve()
-            if candidate.parent == src_dir.resolve() and candidate.is_file():
-                to_delete.append(candidate)
-    if to_delete:
-        for f in to_delete:
-            f.unlink()
-        job.log(f"Deleted {len(to_delete)} Generator intermediate clip(s): " + ", ".join(f.name for f in to_delete))
-        write_manifest(out_dir, path, [], categories={}, existing=merged, drop_src=True)
+    seen: set[Path] = set()
+    if src_dir.is_symlink():
+        job.log(f"Skipping src/ cleanup: {src_dir} is a symlink")
+    else:
+        for entry in (merged.get("slides") or {}).values():
+            for rel in entry.get("srcClips") or []:
+                rel_path = Path(str(rel))
+                if len(rel_path.parts) != 2 or rel_path.parts[0] != "src" or ".." in rel_path.parts:
+                    job.log(f"Skipping suspicious srcClips entry {rel!r}")
+                    continue
+                candidate = src_dir / rel_path.parts[1]
+                if candidate.is_symlink():
+                    job.log(f"Skipping symlinked path component for {rel!r}")
+                    continue
+                try:
+                    candidate_real = candidate.resolve()
+                    candidate_real.relative_to(out_dir_real)
+                except ValueError:
+                    job.log(f"Skipping {rel!r}: resolves outside the output directory")
+                    continue
+                if candidate.is_file() and candidate_real not in seen:
+                    seen.add(candidate_real)
+                    to_delete.append(candidate)
+        if to_delete:
+            for f in to_delete:
+                f.unlink()
+            job.log(
+                f"Deleted {len(to_delete)} Generator intermediate clip(s): "
+                + ", ".join(f.name for f in to_delete)
+            )
+    write_manifest(out_dir, path, [], categories={}, existing=merged, drop_src=True)
 
     sequence = sorted(
         [a.path.name for a in assets] + [c.name for c in clips.values()],

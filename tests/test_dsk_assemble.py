@@ -188,6 +188,35 @@ def test_clip_slide_without_clip_raises():
         plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
 
 
+def test_clip_mapping_must_cover_every_kept_movie_exactly():
+    # Codex r1 finding 2: a partial per-item clips[number] mapping must refuse, naming
+    # the missing movie id(s), rather than silently dropping the unmapped movie.
+    slide = _slide(
+        1, [_movie_item(0, x=1920, y=-763, w=1920, h=1080), _movie_item(1, x=3840, y=-763, w=1920, h=1080)]
+    )
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match=r"missing kept movie item\(s\)"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND,
+            clips={1: {("movie", 0): Path("/clip0.mov")}},
+        )
+
+
+def test_clip_single_path_requires_exactly_one_kept_movie():
+    # The legacy single-Path form only applies when the slide has exactly one kept
+    # movie; two kept movies with a single Path must refuse (Codex r1 finding 2).
+    slide = _slide(
+        1, [_movie_item(0, x=1920, y=-763, w=1920, h=1080), _movie_item(1, x=3840, y=-763, w=1920, h=1080)]
+    )
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="requires exactly one kept movie"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={1: Path("/clip.mov")})
+
+
 def test_delete_order_descending_within_kind():
     slide = _slide(
         1,
@@ -201,9 +230,37 @@ def test_delete_order_descending_within_kind():
     classes = [_classify(slide)]
     decisions = {1: SlideDecision(1, "in_deck")}
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips={1: Path("/clip.mov")}
+        payload, classes, decisions=decisions, band=BAND,
+        clips={1: {("movie", 0): Path("/clip0.mov"), ("movie", 1): Path("/clip1.mov")}},
     )
     assert plan.deletes[1] == (("movie", 1), ("movie", 0))
+
+
+def test_clip_aspect_guard_uses_published_even_normalized_clip_size():
+    # A 101x100 source crop, published by S2 as even-normalized geometry (the actual
+    # exported clip's size), must pass the +/-0.5% aspect guard when compared against
+    # that published geometry rather than a stale un-normalized aspect (Codex r1
+    # finding 7). Baseline fit rect aspect is whatever fit_slide produces for a single
+    # full-band movie item; a clip_sizes entry within 0.5% of it (mirroring a 101x100
+    # source published as a slightly different even size) must not be refused.
+    movie = _movie_item(0, x=1920, y=-763, w=3840, h=2160)
+    slide = _slide(1, [movie])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clip_path = Path("/tmp/clip.mov")
+
+    baseline = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={1: clip_path})
+    rect = baseline.fits[1][("movie", 0)]
+    even_h = 1000.0
+    even_w = round(rect.w / rect.h * even_h / 2) * 2
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={1: clip_path},
+        clip_sizes={str(clip_path): (even_w, even_h)},
+    )
+    fit = plan.fits[1][("movie", 0)]
+    assert fit.w / fit.h == pytest.approx(even_w / even_h, rel=0.005)
 
 
 def test_dropped_side_included_in_deletes_unless_kept():
@@ -3927,7 +3984,7 @@ def test_assemble_clip_slide_transition_mismatch_alone_is_tolerated(tmp_path, mo
         lambda src_by_number, out_by_number, slides=None: {
             "surplus": [],
             "missing": [],
-            "transitions": [{"slide": 32, "source": ("magicMove", 1.0), "output": ("none", 0.0)}],
+            "transitions": [{"slide": 32, "source": ("magicMove", 1.0), "output": ("apple:dissolve", 0.5)}],
             "order": [],
         },
     )
@@ -5544,7 +5601,9 @@ def test_verify_builds_tolerates_clip_auto_attached_movie_start(monkeypatch):
     }]
 
 
-def test_verify_builds_refuses_surplus_movie_start_with_no_paired_source_build(monkeypatch):
+def test_verify_builds_tolerates_single_movie_start_surplus_without_a_paired_source_build(monkeypatch):
+    """One auto-added apple:movie-start per inserted clip identity is tolerated
+    regardless of whether a source build went missing (finding 4 fix)."""
     from obed_edom import iwa_builds
 
     plan = AssemblyPlan(
@@ -5567,8 +5626,11 @@ def test_verify_builds_refuses_surplus_movie_start_with_no_paired_source_build(m
         },
     )
     warnings: list[str] = []
-    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
-        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert builds["tolerated_surplus"] == [{
+        "slide": 32, "effect": "apple:movie-start", "animationType": "In",
+        "identity": ("movie", "clip.mov"), "count": 1,
+    }]
 
 
 def test_verify_builds_refuses_surplus_movie_start_count_exceeding_source(monkeypatch):
@@ -5659,14 +5721,14 @@ def test_verify_builds_tolerates_movie_start_surplus_within_the_missing_budget(m
     }]
 
 
-def test_verify_builds_tolerates_movie_start_surplus_at_the_full_source_count(monkeypatch):
+def test_verify_builds_refuses_movie_start_surplus_beyond_one_per_clip_even_at_the_full_source_count(monkeypatch):
+    """Tolerance is capped at ONE auto-added movie-start per inserted clip identity,
+    independent of how many source movie-starts were deleted (finding 4 fix) -- a
+    surplus of 2 is refused even though 2 source builds went missing."""
     plan = _movie_start_plan_and_src(monkeypatch, missing_count=2, surplus_count=2)
     warnings: list[str] = []
-    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
-    assert builds["tolerated_surplus"] == [{
-        "slide": 32, "effect": "apple:movie-start", "animationType": "In",
-        "identity": ("movie", "clip.mov"), "count": 2,
-    }]
+    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
 
 
 def test_verify_builds_refuses_surplus_not_matching_the_clip_filename(monkeypatch):
@@ -7522,6 +7584,67 @@ def test_explicit_anchor_overrides_auto():
     assert plan.fits[48][("image", 2)].x == pytest.approx(BAND.x_min)
 
 
+def _magic_move_transition(duration=1.0):
+    return {"attributes": {"databaseEffect": "apple:magic-move", "databaseDuration": duration}}
+
+
+def test_magic_move_chain_anchor_from_source_head_even_when_head_not_requested():
+    # An 11->12 magic-move chain: requesting slide 12 alone must still anchor it from
+    # slide 11's own content, even though 11 is not in this run's kept set (Codex r1
+    # finding 3) -- chain topology comes from the full source build sequence.
+    head_slide = _slide(11, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    tail_image = _image_item(0, x=4702, y=15, w=645, h=92)
+    tail_group = _group_item(0, x=4702, y=15, w=645, h=92)
+    tail_slide = _slide(12, [tail_image, tail_group])
+    tail_slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:caption"}
+    tail_slide["groupChildren"] = {
+        0: [{"kind": "image", "kindIndex": 0, "x": 4702.0, "y": 15.0, "w": 645.0, "h": 92.0}]
+    }
+    payload = _payload([head_slide, tail_slide])
+    classes = [_classify(head_slide), _classify(tail_slide)]
+    decisions = {12: SlideDecision(12, "in_deck", anchor="auto")}
+    builds = {
+        11: {"slideId": "s11", "builds": [], "transition": _magic_move_transition()},
+        12: {"slideId": "s12", "builds": [], "transition": None},
+    }
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, builds=builds, all_classes=classes,
+    )
+    assert plan.chain_head[12] == 11
+    assert plan.anchors[12] == "right"
+
+
+def test_magic_move_chain_anchor_survives_excluded_middle_slide():
+    # 11->12->13 chain; excluding 12 from this run must not break the chain -- 13 still
+    # anchors from 11 (Codex r1 finding 3, test (b)).
+    head_slide = _slide(11, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    mid_slide = _slide(12, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    tail_image = _image_item(0, x=4702, y=15, w=645, h=92)
+    tail_group = _group_item(0, x=4702, y=15, w=645, h=92)
+    tail_slide = _slide(13, [tail_image, tail_group])
+    tail_slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:caption"}
+    tail_slide["groupChildren"] = {
+        0: [{"kind": "image", "kindIndex": 0, "x": 4702.0, "y": 15.0, "w": 645.0, "h": 92.0}]
+    }
+    payload = _payload([head_slide, mid_slide, tail_slide])
+    classes = [_classify(head_slide), _classify(mid_slide), _classify(tail_slide)]
+    decisions = {
+        11: SlideDecision(11, "in_deck", anchor="auto"),
+        13: SlideDecision(13, "in_deck", anchor="auto"),
+    }
+    builds = {
+        11: {"slideId": "s11", "builds": [], "transition": _magic_move_transition()},
+        12: {"slideId": "s12", "builds": [], "transition": _magic_move_transition()},
+        13: {"slideId": "s13", "builds": [], "transition": None},
+    }
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, builds=builds, all_classes=classes,
+    )
+    assert plan.anchors[11] == "right"
+    assert plan.chain_head[13] == 11
+    assert plan.anchors[13] == "right"
+
+
 def test_text_items_do_not_count_towards_placement():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921), _text_item(0, x=2000, y=900, w=400, h=100)])
     payload = _payload([slide])
@@ -8518,6 +8641,107 @@ def test_split_and_crop_together_refuses(monkeypatch):
             payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0,
             deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
         )
+
+
+def test_stage_unique_clips_gives_distinct_basenames_for_duplicate_source_names(tmp_path):
+    # Two different source clips that happen to share a basename must be staged under
+    # distinct basenames before insertion, so `_restore_clip_zorder` never has to
+    # disambiguate a real collision (Codex r1 finding 5).
+    src_dir_a = tmp_path / "a"
+    src_dir_b = tmp_path / "b"
+    src_dir_a.mkdir()
+    src_dir_b.mkdir()
+    clip_a = src_dir_a / "clip.mov"
+    clip_b = src_dir_b / "clip.mov"
+    clip_a.write_bytes(b"AAAA")
+    clip_b.write_bytes(b"BBBB")
+
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={1: {}}, deletes={1: ()}, text_sizes={}, autosize={}, warnings=(),
+        clips={1: {("movie", 0): clip_a, ("movie", 1): clip_b}},
+    )
+    staged = dsa._stage_unique_clips(plan, tmp_path / "work")
+    staged_paths = staged.clips[1]
+    names = {p.name for p in staged_paths.values()}
+    assert len(names) == 2
+    assert staged_paths[("movie", 0)].read_bytes() == b"AAAA"
+    assert staged_paths[("movie", 1)].read_bytes() == b"BBBB"
+
+
+def test_restore_clip_zorder_refuses_on_duplicate_clip_basenames(tmp_path, monkeypatch):
+    # Two clips inserted on the same slide happen to share a basename -- fileName
+    # matching alone cannot tell them apart, so this must refuse rather than guess
+    # (Codex r1 finding 5).
+    import zipfile as _zipfile
+
+    out_slide = {
+        "_pbtype": "KN.SlideArchive",
+        "drawablesZOrder": [{"identifier": "mov1"}, {"identifier": "mov2"}],
+    }
+    mov1 = {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "d1"}}
+    mov2 = {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "d2"}}
+    out_objects = {"slideO": out_slide, "mov1": mov1, "mov2": mov2}
+
+    def fake_load_deck(path):
+        return (out_objects, {}, {})
+
+    def fake_slide_order(objects):
+        return [("slideO", False)]
+
+    out_path = tmp_path / "out.key"
+    with _zipfile.ZipFile(out_path, "w"):
+        pass
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "slide_order", fake_slide_order)
+    monkeypatch.setattr(dsa, "_build_data_index", lambda names: {"d1": "clip.mov", "d2": "clip.mov"})
+    monkeypatch.setattr(dsa, "_data_identifier", lambda obj: (obj.get("movieData") or {}).get("identifier"))
+
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={1: {}}, deletes={1: ()}, text_sizes={}, autosize={}, warnings=(),
+        clips={1: {("movie", 0): Path("/a/clip.mov"), ("movie", 1): Path("/b/clip.mov")}},
+    )
+    warnings: list = []
+    with pytest.raises(AssemblyRefusal, match="matched 2 drawable"):
+        dsa._restore_clip_zorder(out_path, plan, warnings)
+
+
+def test_restore_clip_zorder_refuses_when_a_preexisting_movie_shares_the_clip_basename(tmp_path, monkeypatch):
+    # A pre-existing (untouched) movie in the deck happens to share the inserted clip's
+    # basename -- ambiguous by fileName alone, so this must refuse, not silently pick
+    # one (Codex r1 finding 5).
+    import zipfile as _zipfile
+
+    out_slide = {
+        "_pbtype": "KN.SlideArchive",
+        "drawablesZOrder": [{"identifier": "movPre"}, {"identifier": "movNew"}],
+    }
+    mov_pre = {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dPre"}}
+    mov_new = {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dNew"}}
+    out_objects = {"slideO": out_slide, "movPre": mov_pre, "movNew": mov_new}
+
+    def fake_load_deck(path):
+        return (out_objects, {}, {})
+
+    def fake_slide_order(objects):
+        return [("slideO", False)]
+
+    out_path = tmp_path / "out.key"
+    with _zipfile.ZipFile(out_path, "w"):
+        pass
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "slide_order", fake_slide_order)
+    monkeypatch.setattr(dsa, "_build_data_index", lambda names: {"dPre": "clip.mov", "dNew": "clip.mov"})
+    monkeypatch.setattr(dsa, "_data_identifier", lambda obj: (obj.get("movieData") or {}).get("identifier"))
+
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={1: {}}, deletes={1: ()}, text_sizes={}, autosize={}, warnings=(),
+        clips={1: {("movie", 0): Path("/a/clip.mov")}},
+    )
+    warnings: list = []
+    with pytest.raises(AssemblyRefusal, match="matched 2 drawable"):
+        dsa._restore_clip_zorder(out_path, plan, warnings)
 
 
 def test_restore_crop_zorder_real_pair_end_to_end(tmp_path):

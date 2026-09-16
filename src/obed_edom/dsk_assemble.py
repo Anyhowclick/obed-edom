@@ -10,6 +10,7 @@ import copy
 import math
 import os
 import re
+import shutil
 import time
 import traceback
 import zipfile
@@ -1315,13 +1316,13 @@ def plan_assembly(
 
     chain_head_map: dict[int, int] = {}
     if not no_auto_anchor:
-        kept_set = set(kept_numbers)
-        for n in kept_numbers:
+        source_numbers = set(builds.keys()) if builds else set(kept_numbers)
+        for n in sorted(source_numbers):
             rec = (builds or {}).get(n) or {}
             eff_dur = _transition_effect_duration(rec.get("transition"))
             effect = str(eff_dur[0]) if eff_dur and eff_dur[0] is not None else ""
             nxt = n + 1
-            if effect.startswith("apple:magic-move") and nxt in kept_set:
+            if effect.startswith("apple:magic-move") and nxt in source_numbers:
                 chain_head_map[nxt] = chain_head_map.get(n, n)
 
     fits: dict[int, dict[ItemId, Rect]] = {}
@@ -1360,6 +1361,24 @@ def plan_assembly(
 
     pending_crop_writes: list[tuple[Path, Path]] = []
     consumed_splits: set[int] = set()
+
+    def _chain_source_anchor(n: int) -> str | None:
+        if n in chain_auto_anchor:
+            return chain_auto_anchor[n]
+        cls_n = full_classes_by_number.get(n)
+        slide_n = slides_by_number.get(n)
+        if cls_n is None or slide_n is None:
+            return None
+        items_n = slide_n.get("items") or []
+        text_group_kis_n = {iid[1] for iid in cls_n.long_text_ids if iid[0] == "groupchild"}
+        anchor_n = _content_anchor(
+            cls_n, items_n, wall=wall,
+            group_signature=slide_n.get("groupChildSignature"),
+            exclude_group_kis=text_group_kis_n,
+        )
+        if anchor_n is not None:
+            chain_auto_anchor[n] = anchor_n
+        return anchor_n
 
     for number in kept_numbers:
         try:
@@ -1410,21 +1429,16 @@ def plan_assembly(
                             "(piece D1 handles autosize group text only)"
                         )
 
-            own_content_anchor = None if no_auto_anchor else _content_anchor(
-                cls, items, wall=wall,
-                group_signature=slide.get("groupChildSignature"),
-                exclude_group_kis=text_group_kis,
-            )
-            if own_content_anchor is not None:
-                chain_auto_anchor[number] = own_content_anchor
+            own_content_anchor = None if no_auto_anchor else _chain_source_anchor(number)
 
             if decision.anchor in (None, "auto"):
                 if no_auto_anchor:
                     anchor = "centre"
                 else:
                     head = chain_head_map.get(number)
-                    if head is not None and head != number and head in chain_auto_anchor:
-                        anchor = chain_auto_anchor[head]
+                    head_anchor = _chain_source_anchor(head) if head is not None and head != number else None
+                    if head_anchor is not None:
+                        anchor = head_anchor
                         chain_head_applied[number] = head
                     else:
                         anchor = own_content_anchor
@@ -2184,17 +2198,25 @@ def plan_assembly(
                 if not movie_ids:
                     raise AssemblyRefusal(f"slide {number} classified {cls.category} with no kept movie")
                 if isinstance(raw_clip, (str, Path)):
-                    first_movie = min(movie_ids, key=lambda iid: iid[1])
-                    item_clips = {first_movie: Path(raw_clip)}
+                    if len(movie_ids) != 1:
+                        raise AssemblyRefusal(
+                            f"slide {number}: a single clip path requires exactly one kept movie, "
+                            f"found {len(movie_ids)} ({sorted(movie_ids)})"
+                        )
+                    item_clips = {movie_ids[0]: Path(raw_clip)}
                 else:
                     item_clips = {iid: Path(p) for iid, p in raw_clip.items()}
-                    unknown = set(item_clips) - set(movie_ids)
+                    kept_movie_set = set(movie_ids)
+                    unknown = set(item_clips) - kept_movie_set
                     if unknown:
                         raise AssemblyRefusal(
                             f"slide {number}: clip(s) given for unknown movie item(s) {sorted(unknown)}"
                         )
-                    if not item_clips:
-                        raise AssemblyRefusal(f"slide {number}: empty clip mapping")
+                    missing = kept_movie_set - set(item_clips)
+                    if missing:
+                        raise AssemblyRefusal(
+                            f"slide {number}: clip mapping missing kept movie item(s) {sorted(missing)}"
+                        )
                 for movie_id, clip_path in item_clips.items():
                     size = clip_sizes.get(str(clip_path))
                     if size is None:
@@ -4119,11 +4141,48 @@ def _restore_crop_zorder(
     return result
 
 
+def _stage_unique_clips(plan: AssemblyPlan, work_dir: Path) -> AssemblyPlan:
+    """Copies every inserted clip to a unique, collision-checked basename under
+    ``work_dir/clips`` before insertion -- basename is the only handle Keynote's
+    AppleScript-visible ``fileName`` gives `_restore_clip_zorder`/`_verify_builds` to
+    identify an inserted movie by, so two clips sharing a basename (duplicate source
+    names, or a pre-existing deck movie with the same name) must never reach insertion
+    with that basename intact."""
+    if not plan.clips:
+        return plan
+    clips_dir = work_dir / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    staged: dict[int, dict[ItemId, Path]] = {}
+    used_names: set[str] = set()
+    for number, item_clips in plan.clips.items():
+        staged_slide: dict[ItemId, Path] = {}
+        for movie_id, clip_path in item_clips.items():
+            src = Path(clip_path)
+            name = f"clip-{number}-{movie_id[1]}{src.suffix}"
+            if name in used_names:
+                raise AssemblyRefusal(
+                    f"slide {number} movie {movie_id[1]}: staged clip basename {name} collides"
+                )
+            used_names.add(name)
+            dest = clips_dir / name
+            try:
+                shutil.copyfile(src, dest)
+            except FileNotFoundError:
+                staged_slide[movie_id] = src
+                continue
+            staged_slide[movie_id] = dest
+        staged[number] = staged_slide
+    return _dc_replace(plan, clips=staged)
+
+
 def _restore_clip_zorder(out_path: Path, plan: AssemblyPlan, warnings: list[str]) -> dict[int, dict]:
     """Move every inserted clip movie to the back of its slide's ``drawablesZOrder``,
     behind every copied content object -- ``make new image`` on a movie file appends it
     to the front, same as a cropped image insert. Multiple clips on one slide keep their
-    own ``kindIndex`` order at the very back (index 0 first)."""
+    own ``kindIndex`` order at the very back (index 0 first). `_stage_unique_clips`
+    already guarantees every inserted clip a unique basename, so a match here must be
+    exactly one candidate -- zero or more than one, or a rejected reorder, is refused
+    (`AssemblyRefusal`), never just a warning."""
     result: dict[int, dict] = {}
     if not plan.clips:
         return result
@@ -4138,12 +4197,11 @@ def _restore_clip_zorder(out_path: Path, plan: AssemblyPlan, warnings: list[str]
             continue
         ordinal = plan.ordinals.get(number)
         if ordinal is None or ordinal > len(out_order):
-            continue
+            raise AssemblyRefusal(f"slide {number}: clip z-order restore refused, slide ordinal out of range")
         out_slide_id, _skipped = out_order[ordinal - 1]
         out_slide = out_objects.get(out_slide_id)
         if out_slide is None:
-            warnings.append(f"slide {number}: clip z-order restore skipped, slide archive missing")
-            continue
+            raise AssemblyRefusal(f"slide {number}: clip z-order restore refused, slide archive missing")
 
         out_z = [
             str(ref["identifier"]) for ref in (out_slide.get("drawablesZOrder") or []) if ref.get("identifier") is not None
@@ -4151,23 +4209,23 @@ def _restore_clip_zorder(out_path: Path, plan: AssemblyPlan, warnings: list[str]
         moves: dict[str, int] = {}
         used_out_ids: set[str] = set()
         for target_index, (movie_id, clip_path) in enumerate(sorted(item_clips.items(), key=lambda kv: kv[0][1])):
-            out_id = None
-            for zid in reversed(out_z):
+            clip_name = Path(clip_path).name
+            candidates = []
+            for zid in out_z:
                 if zid in used_out_ids:
                     continue
                 out_obj = out_objects.get(zid)
                 if out_obj is None or out_obj.get("_pbtype") != "TSD.MovieArchive":
                     continue
                 data_id = _data_identifier(out_obj)
-                if data_id is not None and out_data_index.get(data_id) == Path(clip_path).name:
-                    out_id = zid
-                    break
-            if out_id is None:
-                warnings.append(
-                    f"slide {number} movie {movie_id[1]}: inserted clip not found by fileName, "
-                    "z-order not restored"
+                if data_id is not None and out_data_index.get(data_id) == clip_name:
+                    candidates.append(zid)
+            if len(candidates) != 1:
+                raise AssemblyRefusal(
+                    f"slide {number} movie {movie_id[1]}: inserted clip {clip_name} matched "
+                    f"{len(candidates)} drawable(s) by fileName, expected exactly 1"
                 )
-                continue
+            out_id = candidates[0]
             used_out_ids.add(out_id)
             moves[out_id] = target_index
 
@@ -4181,7 +4239,7 @@ def _restore_clip_zorder(out_path: Path, plan: AssemblyPlan, warnings: list[str]
             move_result = {"refused": True, "reason": f"reorder_drawables raised: {exc}"}
         result[number] = move_result
         if move_result.get("refused"):
-            warnings.append(f"slide {number}: clip z-order restore refused: {move_result.get('reason')}")
+            raise AssemblyRefusal(f"slide {number}: clip z-order restore refused: {move_result.get('reason')}")
 
     return result
 
@@ -4516,13 +4574,10 @@ def _verify_builds(
     attributable to a deletion, on a transition change unexplained by a clip insert, or
     on any reveal-order mismatch. A missing build is tolerated only when it matches (by
     kind/kindIndex, via the source build records) an item this slide's plan actually
-    deleted. A surplus `apple:movie-start`/`In` on an inserted clip is tolerated only up to
-    the count of matching `apple:movie-start`/`In` builds the slide's deleted source movie
-    carried, and only when that deleted movie-start also shows up in `report["missing"]` --
-    Keynote auto-attaches the build to a freshly imported movie, and it is legitimate only
-    as a replacement for the ones the deleted source movie carried; each tolerated count is
-    consumed so a later surplus cannot reuse the same source build, and any surplus beyond
-    that (or with no such source build) is refused like any other."""
+    deleted. A surplus `apple:movie-start`/`In` on an inserted clip is tolerated up to
+    ONE per inserted clip identity (Keynote auto-attaches a movie-start build to a freshly
+    imported movie); any surplus beyond that one, for that same clip identity, is refused
+    like any other."""
     from obed_edom.iwa_builds import deck_builds, verify_builds
 
     builds: dict = {}
@@ -4569,7 +4624,6 @@ def _verify_builds(
 
     tolerated_surplus: list[dict] = []
     real_surplus: list[dict] = []
-    avail_movie_start: dict[int, int] = {}
     for s in report["surplus"]:
         item_clips = plan.clips.get(s["slide"])
         clip_names = {p.name for p in item_clips.values()} if item_clips else set()
@@ -4580,37 +4634,22 @@ def _verify_builds(
             and s["identity"][0] == "movie"
             and s["identity"][1] in clip_names
         )
-        paired = False
         if is_clip_movie_start:
-            clip_kind_indexes = {iid[1] for iid in item_clips}
-            matching_src = [
-                b for b in src_by_number.get(s["slide"], {}).get("builds", [])
-                if b["kind"] == "movie" and b["kindIndex"] in clip_kind_indexes
-                and b["effect"] == "apple:movie-start" and b["animationType"] == "In"
-            ]
-            if s["slide"] not in avail_movie_start:
-                matching_identities = {b["identity"] for b in matching_src}
-                missing_count = sum(
-                    m["count"] for m in report["missing"]
-                    if m["slide"] == s["slide"] and m["effect"] == "apple:movie-start"
-                    and m["animationType"] == "In" and m["identity"] in matching_identities
-                )
-                avail_movie_start[s["slide"]] = min(len(matching_src), missing_count)
-            avail = avail_movie_start[s["slide"]]
-            if s["count"] <= avail:
-                paired = True
-                avail_movie_start[s["slide"]] = avail - s["count"]
+            tolerated_count = min(s["count"], 1)
+            tolerated_surplus.append({**s, "count": tolerated_count})
+            if s["count"] > tolerated_count:
+                real_surplus.append({**s, "count": s["count"] - tolerated_count})
+            continue
         is_cloned_repr = False
-        if not paired:
-            split_parts = plan.splits.get(s["slide"], ())
-            if split_parts and any(p.char_window is not None for p in split_parts):
-                expected_surplus = len(split_parts) - 1
-                has_source_build = any(
-                    (b["effect"], b["animationType"], b["identity"]) == (s["effect"], s["animationType"], s["identity"])
-                    for b in src_by_number.get(s["slide"], {}).get("builds", [])
-                )
-                is_cloned_repr = has_source_build and s["count"] == expected_surplus
-        (tolerated_surplus if paired or is_cloned_repr else real_surplus).append(s)
+        split_parts = plan.splits.get(s["slide"], ())
+        if split_parts and any(p.char_window is not None for p in split_parts):
+            expected_surplus = len(split_parts) - 1
+            has_source_build = any(
+                (b["effect"], b["animationType"], b["identity"]) == (s["effect"], s["animationType"], s["identity"])
+                for b in src_by_number.get(s["slide"], {}).get("builds", [])
+            )
+            is_cloned_repr = has_source_build and s["count"] == expected_surplus
+        (tolerated_surplus if is_cloned_repr else real_surplus).append(s)
     builds["tolerated_surplus"] = tolerated_surplus
     if real_surplus:
         raise AssemblyRefusal(f"builds verify surplus on assembled deck: {real_surplus}")
@@ -4642,7 +4681,18 @@ def _verify_builds(
         raise AssemblyRefusal(f"builds verify missing build(s) not explained by a delete: {real_missing}")
 
     clip_slides = set(plan.clips)
-    unexplained_transitions = [t for t in report["transitions"] if t["slide"] not in clip_slides]
+    unexplained_transitions = []
+    for t in report["transitions"]:
+        if t["slide"] in clip_slides:
+            out_effect, out_duration = (t["output"] or (None, None))
+            expected_dur = plan.clip_dissolve.get(t["slide"], 0.5)
+            if (
+                str(out_effect) == "apple:dissolve"
+                and out_duration is not None
+                and abs(float(out_duration) - expected_dur) <= 0.05
+            ):
+                continue
+        unexplained_transitions.append(t)
     if unexplained_transitions:
         raise AssemblyRefusal(f"builds verify unexplained transition change(s): {unexplained_transitions}")
 
@@ -5357,6 +5407,7 @@ def assemble_dsk_deck(
     slide_layout_names = resolve_slide_layouts(payload, classes, plan) if layout_policy == "import" else None
 
     with LiveBatch(fw_deck, out_path.parent, rss_limit_bytes=rss_limit_bytes, log=log) as batch:
+        plan = _stage_unique_clips(plan, batch.work)
         staging_path = batch.work / f"staged-{out_path.name}"
         script = build_assembly_script(
             plan,

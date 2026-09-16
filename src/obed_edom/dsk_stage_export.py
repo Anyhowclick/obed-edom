@@ -394,6 +394,7 @@ def write_manifest(
     source_slides: Mapping[int, int] | None = None,
     src_clips: Mapping[int, Sequence[str]] | None = None,
     drop_src: bool = False,
+    generator: bool = False,
     existing: Mapping[str, Any] | None = None,
 ) -> Path:
     """`generated` is omitted from the manifest when `None` (the default) -- callers
@@ -405,7 +406,11 @@ def write_manifest(
     calls with `drop_src=True` to remove the key from every slide entry. `existing`
     is a previously written manifest for the same folder whose slide entries are
     kept and updated, so a Generator manifest survives an Exporter run and vice
-    versa; `clips` entries win over an existing clip for the same slide."""
+    versa; `clips` entries win over an existing clip for the same slide. `generator`
+    marks this call as a Generator run: for every slide regenerated this run (the
+    union of `source_slides` and `src_clips`), any prior `clip` is removed and
+    `srcClips` is replaced with this run's value or removed if the slide is now
+    static/absent, rather than merely overlaid onto the existing entry."""
     clips = clips or {}
     source_slides = source_slides or {}
     src_clips = src_clips or {}
@@ -417,6 +422,7 @@ def write_manifest(
     for key, entry in ((existing or {}).get("slides") or {}).items():
         if isinstance(entry, dict):
             slides_out[str(key)] = dict(entry)
+    regenerated = set(source_slides) | set(src_clips) if generator else set()
     for slide in sorted(set(by_slide) | set(clips) | set(source_slides) | set(src_clips)):
         entry = slides_out.get(str(slide), {})
         if slide in categories:
@@ -427,6 +433,10 @@ def write_manifest(
             entry["source_slide"] = int(source_slides[slide])
         if slide in src_clips:
             entry["srcClips"] = list(src_clips[slide])
+        elif slide in regenerated:
+            entry.pop("srcClips", None)
+        if slide in regenerated:
+            entry.pop("clip", None)
         clip = clips.get(slide)
         if clip is not None:
             entry["clip"] = Path(clip).name

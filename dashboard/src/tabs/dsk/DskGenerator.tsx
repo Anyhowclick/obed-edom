@@ -47,7 +47,7 @@ type DskResult = {
   warnings?: string[];
   overflows?: string[];
   clips?: Record<string, string[]>;
-  ordinals?: number[];
+  ordinals?: Record<string, number>;
 };
 
 export function DskGenerator() {
