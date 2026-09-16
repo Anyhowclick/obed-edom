@@ -389,6 +389,10 @@ class JobRunner:
             if not job:
                 return False
             self._session_file(job_id).unlink(missing_ok=True)
+        if job.kind == "html-preview":
+            from obed_edom.html_preview import release_job_claim  # noqa: PLC0415
+
+            release_job_claim(job.id, job.result or {})
         if purge:
             self._purge_artifacts(job)
         return True
@@ -443,6 +447,7 @@ class JobRunner:
         # Never purge the warm cache (rebuild is ~1h of Keynote). Honour OBED_EDOM_CACHE_DIR even inside output/.
         cache_root = _cache_root().resolve()
         geocode_root = (self._output_root / ".geocode").resolve()
+        preview_root = (self._output_root / ".html-preview").resolve()
         seen: set[Path] = set()
         for path in candidates:
             try:
@@ -459,6 +464,11 @@ class JobRunner:
                 pass
             try:
                 resolved.relative_to(geocode_root)
+                continue
+            except ValueError:
+                pass
+            try:
+                resolved.relative_to(preview_root)
                 continue
             except ValueError:
                 pass

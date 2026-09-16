@@ -12,6 +12,7 @@ import {
 } from "../../api";
 import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
+import { BuildPreview } from "../../components/BuildPreview";
 import { LoadingOverlay } from "../../components/PreviewGrid";
 import { JobName } from "../../components/JobName";
 import { renameAndApply } from "../../sessions";
@@ -176,6 +177,7 @@ export function DskExporter() {
               Export
             </button>
           </div>
+          <BuildPreview path={result.path || keynote?.path} disabled={busy} />
         </>
       )}
       <ErrorNotice message={error} onDismiss={() => setError(null)} />
@@ -199,6 +201,7 @@ export function DskExporter() {
               Open folder
             </button>
           </div>
+          <BuildPreview path={result.path || keynote?.path} disabled={busy} />
         </>
       )}
     </div>
