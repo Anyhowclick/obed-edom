@@ -405,7 +405,7 @@ test("documentFromResult round-trips flight, drops invalid values, leaves missin
   assert.equal(stillMissing.links[0].easeIn, 0.3);
 });
 
-const movieCamera = { ...baseCamera, bearing: 90 };
+const movieCamera = { ...baseCamera, pitch: 20 };
 
 test("restitchLinks/restitchWithMemory default new movie links to flight arc, retired links keep their own", () => {
   const s1 = slide("s1");

@@ -132,7 +132,7 @@ import {
   moveSlideTo,
   restitchWithMemory,
   slideHiddenLayers,
-  suggestedHopKind,
+  suggestedHopKindForLink,
   surfaceWidthOf,
   type MapsCamera,
   type MapsAudience,
@@ -150,8 +150,8 @@ import {
 } from "../maps/types";
 
 const HOP_TIPS: Record<MapsHopKind, string> = {
-  morph: "Magic Move: Keynote pan/zoom of a shared plate. Same map style, same bearing. 3D buildings only block when the Buildings layer is on. The plate may overflow the frame when zooming in.",
-  movie: "Movie: rendered fly when pitch, bearing, or 3D buildings change. Use any combination of zoom out, move, and zoom in.",
+  morph: "Magic Move: Keynote pan, zoom, and rotate of a shared plate. Same map style. 3D buildings only block when the Buildings layer is on. The plate may overflow the frame when zooming in or out.",
+  movie: "Movie: rendered fly when pitch or 3D buildings change. Use any combination of zoom out, move, and zoom in.",
   dissolve: "Dissolve: Keynote crossfade of the two stills, using the duration below.",
   cut: "Cut: instant switch. No Keynote transition.",
 };
@@ -687,7 +687,7 @@ export function MapsTab() {
   function setLocalDoc(next: MapsDocument) {
     const currentJob = jobRef.current;
     if (!currentJob) return;
-    const coerced = coerceHopKinds(next);
+    const coerced = coerceHopKinds(next, docRef.current);
     docRef.current = coerced;
     setJob({ ...currentJob, result: { ...(currentJob.result || {}), ...coerced } });
     return coerced;
@@ -2397,7 +2397,7 @@ export function MapsTab() {
     !!nextSlide &&
     (!!active.cg || !!nextSlide.cg) &&
     appearanceMismatch(slideForAudience(active, otherAudience), slideForAudience(nextSlide, otherAudience)).length > 0;
-  const suggested = outgoing && active && nextSlide ? suggestedHopKind(active, nextSlide) : "morph";
+  const suggested = outgoing && active && nextSlide ? suggestedHopKindForLink(active, nextSlide) : "morph";
   const morphOk = suggested === "morph";
   const cruiseAuto =
     activeView && nextView

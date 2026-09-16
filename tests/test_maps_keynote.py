@@ -68,6 +68,7 @@ from obed_edom.maps_keynote import (
     split_cg_export_plan,
     whole,
     _emit_adjust_map,
+    _emit_item,
 )
 from obed_edom.maps_pins import LABEL_PILL_RGB, PIN_ASPECT, label_pill_png_path
 from obed_edom.maps_reveal import REVEAL_FPS, reveal_movie_fingerprint
@@ -235,6 +236,43 @@ def test_matching_rotation_uses_one_rotated_plate():
     assert project_into_plate(a["lat"], a["lon"], geom, place_a) == pytest.approx(
         (WALL_WIDTH / 2, WALL_HEIGHT / 2), abs=0.1
     )
+    assert "rotation" not in place_a
+    assert "rotation" not in place_b
+
+
+def test_bearing_change_rotates_the_shared_plate():
+    a, b = _pan_camera(8, 400)
+    a["bearing"] = 0
+    b["bearing"] = 30
+    same = morph_plate_geom([a, {**b, "bearing": 0}])
+    turned = morph_plate_geom([a, b])
+    assert same is not None and turned is not None
+    assert turned["plateW"] * turned["plateH"] > same["plateW"] * same["plateH"]
+    place_a = plate_placement(a, turned)
+    place_b = plate_placement(b, turned)
+    assert "rotation" not in place_a
+    assert place_b["rotation"] == pytest.approx(30)
+    assert project_into_plate(a["lat"], a["lon"], turned, place_a) == pytest.approx(
+        (WALL_WIDTH / 2, WALL_HEIGHT / 2), abs=1.0
+    )
+
+
+def test_emit_sets_keynote_rotation_on_bearing_change():
+    item = {
+        "kind": "image",
+        "x": -200,
+        "y": -50,
+        "w": 8000,
+        "h": 2000,
+        "path": "/tmp/plate.png",
+        "map": True,
+        "rotation": 30,
+    }
+    script = "\n".join(_emit_item(item))
+    assert "set rotation of img to 30" in script
+    assert "set width of img to 8000" in script
+    adjust = "\n".join(_emit_adjust_map(item))
+    assert "set rotation of image 1 to 30" in adjust
 
 
 def test_cg_shift_clamp_used(tmp_path: Path):
