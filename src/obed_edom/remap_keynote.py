@@ -32,7 +32,6 @@ from obed_edom.map_remap import (
     format_slide_range,
     learn_recipe,
     plan_payload_transforms,
-    plan_slide_reuses,
     roster_slides,
     score_against_gold,
     slides_for_plan,
@@ -164,12 +163,6 @@ def zorder_write_mode(
                 "forcing z-order write off.")
         return "off"
     return mode
-
-
-def slide_reuse_mode(explicit: str | None = None) -> str:
-    """`off` (default) or `on`. Env `OBED_SLIDE_REUSE`; unknown tokens fall back to `off`."""
-    raw = (explicit if explicit is not None else os.environ.get("OBED_SLIDE_REUSE", "")).strip().lower()
-    return raw if raw in {"on", "off"} else "off"
 
 
 def _spec_addr(spec: dict[str, Any]) -> tuple:
@@ -1286,33 +1279,11 @@ def remap_keynote(
             + ("…" if len(hidden) > 10 else "")
             + ". Un-skip in Keynote and re-run to include them."
         )
-    if slide_reuse_mode() == "on":
-        reuses = plan_slide_reuses(
-            wall,
-            transforms,
-            slide_range=slide_range,
-            canvas=(float(recipe.get("destWidth") or CG_WIDTH), float(recipe.get("destHeight") or CG_HEIGHT)),
-        )
-    else:
-        reuses = []
-    say(f"OBED_SLIDE_REUSE={slide_reuse_mode()}: {len(reuses)} reuse slide(s).")
-    reuse_slides = {int(r["slide"]) for r in reuses}
-    # Group removes skip JXA deleteRefs (duplicate re-derives the frame). Dedup by child-text in stat-finalize.
-    group_removes: list[dict[str, Any]] = []
-    for r in reuses:
-        for gr in r.get("groupRemove") or []:
-            group_removes.append(
-                {
-                    "slide": int(r["slide"]),
-                    "childSig": gr.get("childSig"),
-                    "expectedKeep": gr.get("expectedKeep"),
-                }
-            )
-    stat_adjustments = adjust_child_resize_indexes(child_resize, transforms, reuse_slides)
+    reuses: list[dict[str, Any]] = []
+    stat_adjustments = adjust_child_resize_indexes(child_resize, transforms)
     if stat_adjustments:
         say(
-            f"Adjusted {len(stat_adjustments)} stat-group index(es) for deleted group hides or "
-            "voided on reuse slide(s): "
+            f"Adjusted {len(stat_adjustments)} stat-group index(es) for deleted group hides: "
             + ", ".join(f"slide {a['slide']} {a['from']}→{a['to']}" for a in stat_adjustments[:8])
             + "."
         )
@@ -1357,23 +1328,6 @@ def remap_keynote(
                 bit += f" rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})"
             bits.append(bit)
         say("Unpaired text picks the closest CG character style: " + "; ".join(bits) + ".")
-    if reuses:
-        bits = []
-        for job in reuses:
-            extra = []
-            if job.get("basePreAdd"):
-                extra.append("pre-add")
-            if job.get("remove"):
-                extra.append(f"drop {len(job['remove'])}")
-            if job.get("add"):
-                extra.append(f"add {len(job['add'])}")
-            if job.get("mutate"):
-                extra.append(f"tweak {len(job['mutate'])}")
-            bits.append(
-                f"slide {job['slide']}←{job['from']}"
-                + (f" ({', '.join(extra)})" if extra else " (identical map/dots)")
-            )
-        say("Duplicating remapped slides for unchanged map/dots: " + "; ".join(bits) + ".")
     origin_pins = [
         t for t in transforms if t.role == "pin" and abs(t.x) < 2 and abs(t.y) < 2
     ]
@@ -1406,14 +1360,10 @@ def remap_keynote(
         offline_mode = offline_write.probe_iwa_extra(offline_mode, say)
         offline_slides: set[int] = set()
         if offline_mode != "off":
-            offline_slides = offline_write._offline_write_slides(
-                transform_dicts, reuses, reuse_slides, wanted
-            )
-            donors = {int(r["from"]) for r in reuses if r.get("from") is not None}
+            offline_slides = offline_write._offline_write_slides(transform_dicts, wanted)
             say(
                 f"OBED_OFFLINE_WRITE={offline_mode}: {len(offline_slides)} slide(s) go "
-                f"offline (surgical IWA patch); {len(reuse_slides)} reuse-target + "
-                f"{len(donors)} donor slide(s) stay on the AppleScript path."
+                "offline (surgical IWA patch)."
             )
         suppressed = env_suppressed | offline_slides
         plan: dict[str, Any] = {
@@ -1427,15 +1377,15 @@ def remap_keynote(
         }
         if env_suppressed:
             say(
-                "OBED_SUPPRESS_GEOMETRY on: attrs-only (no geometry) for non-reuse "
+                "OBED_SUPPRESS_GEOMETRY on: attrs-only (no geometry) for "
                 f"slide(s) {sorted(env_suppressed)}."
             )
         if as_geometry_enabled():
             plan["asGeometry"] = True
             plan["asGeom"] = _build_as_geometry(transform_dicts, suppress=suppressed)
             say(
-                "OBED_AS_GEOMETRY on: non-reuse geometry via batched AppleScript "
-                f"for {len(plan['asGeom'])} slide(s); reuse slides stay on JXA."
+                "OBED_AS_GEOMETRY on: geometry via batched AppleScript "
+                f"for {len(plan['asGeom'])} slide(s)."
             )
         if wanted:
             plan["slides"] = wanted
@@ -1448,7 +1398,7 @@ def remap_keynote(
             plan_out["reuses"] = reuses
             plan_out["suppressGeometry"] = plan.get("suppressGeometry")
             plan_out["asGeom"] = plan.get("asGeom")
-            plan_out["groupRemoves"] = list(group_removes)
+            plan_out["groupRemoves"] = []
             plan_out["badgeRaises"] = list(badge_raises)
             # "statJobs" (not "childResize") — the run record's pass-2 RESULT dict already
             # uses "childResize" for `_run_stat_finalize`'s return; this is the JOB LIST.
@@ -1470,20 +1420,6 @@ def remap_keynote(
     missed = int(jxa.get("missed") or 0)
     if jxa.get("collections"):
         say(f"Keynote collections: {jxa.get('collections')}")
-    add_fail = jxa.get("addFailure")
-    if add_fail:
-        say(
-            f"FATAL reuse slide {add_fail.get('slide')}: the add-delta paste was not verified — "
-            f"expected {add_fail.get('expected')}, pasted {add_fail.get('pasted')}, "
-            f"shortfall {add_fail.get('shortfall')} after {add_fail.get('attempts')} attempt(s); "
-            f"gates={add_fail.get('gates')}; original slide after strip={add_fail.get('origAfterStrip')}."
-        )
-        raise RuntimeError(
-            f"Keynote reuse slide {add_fail.get('slide')} could not verify its pasted add-delta "
-            f"(expected {add_fail.get('expected')}, pasted {add_fail.get('pasted')}). The original "
-            "wall slide was left intact and the remapped copy was NOT saved — re-run. "
-            f"Detail: {add_fail}"
-        )
     if applied == 0:
         detail = ""
         if jxa.get("collections"):
@@ -1497,33 +1433,6 @@ def remap_keynote(
     say(f"Applied {applied}, missed {missed}.")
     for reason in jxa.get("missReasons") or []:
         say(f"WARNING remap: {reason}")
-    for entry in jxa.get("removeShortfalls") or []:
-        slide_no = entry.get("slide")
-        short = {
-            kind: rec
-            for kind, rec in (entry.get("byKind") or {}).items()
-            if int((rec or {}).get("shortfall") or 0) > 0
-        }
-        if short:
-            detail = ", ".join(
-                f"{rec['removed']} of {rec['expected']} {kind}"
-                for kind, rec in sorted(short.items())
-            )
-            say(
-                f"WARNING reuse slide {slide_no}: only removed {detail} on the donor "
-                "copy — a stranded donor object survived (doubling) until it is deduped."
-            )
-    for entry in jxa.get("addReports") or []:
-        rep = entry.get("report") or {}
-        if int(rep.get("attempts") or 1) > 1 or rep.get("surplus") or rep.get("unmeasured") or rep.get("shortfall"):
-            say(
-                f"WARNING reuse slide {entry.get('slide')}: add-delta paste took "
-                f"{rep.get('attempts')} attempt(s); expected {rep.get('expected')}, "
-                f"pasted {rep.get('pasted')}, surplus {rep.get('surplus')}, "
-                f"unmeasured {rep.get('unmeasured')}."
-            )
-    if jxa.get("cloned"):
-        say(f"Duplicated {jxa.get('cloned')} remapped slide(s) instead of re-placing the map and dots.")
     layouts = jxa.get("layouts") or {}
     if layouts.get("imported"):
         say(f"Imported 16:9 layouts: {', '.join(str(n) for n in layouts['imported'])}.")
@@ -1631,16 +1540,11 @@ def remap_keynote(
     export_path = Path(export_dir).expanduser().resolve() if export_dir else None
     pass2_export_path = None if zorder_mode != "off" else export_path
     child_resize_result: dict[str, Any] | None = None
-    if child_resize or group_removes:
+    if child_resize:
         stat_sizes = read_template_stat_sizes(template_path) if child_resize else {}
         say(
             f"Finalizing {len(child_resize)} stat group(s): template sizes "
             f"({', '.join(f'{k}→{int(v)}pt' for k, v in sorted(stat_sizes.items())) or 'none found'})"
-            + (
-                f"; deduping {len(group_removes)} stranded donor-copy group(s)"
-                if group_removes
-                else ""
-            )
             + "."
             + (" Exporting previews in the same session." if pass2_export_path else "")
             + (" Preview export moved after the z-order patch (extra Keynote open)."
@@ -1651,12 +1555,10 @@ def remap_keynote(
             child_resize,
             stat_sizes,
             export_dir=pass2_export_path,
-            group_removes=group_removes,
         )
         done = child_resize_result.get("done") or 0
         skipped = child_resize_result.get("skipped") or 0
         sized = child_resize_result.get("sized") or 0
-        dedup_deleted = child_resize_result.get("dedupDeleted") or 0
         dedup_shortfall = child_resize_result.get("dedupShortfall") or 0
         sig_fallback = child_resize_result.get("sigFallback") or 0
         unresolved = child_resize_result.get("unresolved") or 0
@@ -1664,7 +1566,6 @@ def remap_keynote(
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
                 "the template"
-                + (f", {dedup_deleted} donor-copy group(s) deduped" if group_removes else "")
                 + (f", {skipped} skipped" if skipped else "")
                 + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
                 + "."
@@ -1701,7 +1602,7 @@ def remap_keynote(
     zorder_write_info = offline_write.run_offline_zorder(dest, zorder_mode, zorder_targets, say)
     # Builds/transitions follow the source. Unconditional and runs last — verify-all,
     # patch-none when the slide set is empty; must keep running LAST, after the z-order write.
-    build_result = restore_source_builds(dest, source, reuse_slides, say)
+    build_result = restore_source_builds(dest, source, set(), say)
     result: dict[str, Any] = {
         "source": str(source),
         "dest": str(dest),
@@ -1713,8 +1614,6 @@ def remap_keynote(
         "width": jxa.get("width"),
         "height": jxa.get("height"),
         "collections": jxa.get("collections"),
-        "removeShortfalls": jxa.get("removeShortfalls") or [],
-        "addReports": jxa.get("addReports") or [],
         "slideRange": slides_for_plan(slide_range),
         "skippedSlides": jxa.get("skippedSlides"),
         "layouts": jxa.get("layouts"),

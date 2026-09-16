@@ -51,8 +51,8 @@ function countOf(col) {
 
 // Same read as countOf, but a throw or a bad length is reported as -1 ("unmeasured"),
 // never folded into a genuine 0. Used only by collectionCounts — countOf's 0 degrade
-// stays correct for itemAt/deleteRefs/slide counts, which need "absent" and "empty"
-// to look the same.
+// stays correct for itemAt/slide counts, which need "absent" and "empty" to look
+// the same.
 function countOrUnreadable(col) {
   if (col == null) return -1;
   try {
@@ -291,233 +291,6 @@ function whOf(obj) {
   return [w, h];
 }
 
-// Text/line boxes autosize their height; only x/y/w are ever load-bearing there.
-function matchesRect(kind, x, y, w, h, rect, tol) {
-  const t = tol != null ? Number(tol) : 4;
-  if (Math.abs(x - Number(rect.x)) > t || Math.abs(y - Number(rect.y)) > t) return false;
-  if (kind === "text" || kind === "line") {
-    return Math.abs(w - Number(rect.w)) <= t;
-  }
-  return Math.abs(w - Number(rect.w)) <= t && Math.abs(h - Number(rect.h)) <= t;
-}
-
-// Reuse-donor copies drift; resolve removals by live output rect, not wall kindIndex. tol=4px.
-function itemsByGeom(slide, kind, rect, tol) {
-  const out = [];
-  const col = collectionNamed(slide, kindColName(kind));
-  const n = countOf(col);
-  const t = tol != null ? Number(tol) : 4;
-  for (let i = 0; i < n; i++) {
-    const obj = itemAt(col, i);
-    if (!obj) continue;
-    const p = xyOf(obj);
-    const wh = whOf(obj);
-    if (matchesRect(kind, p[0], p[1], wh[0], wh[1], rect, t)) {
-      out.push({ obj: obj, index: i });
-    }
-  }
-  return out;
-}
-
-function getItemByGeom(slide, kind, rect, tol) {
-  const hits = itemsByGeom(slide, kind, rect, tol);
-  return hits.length ? hits[0].obj : null;
-}
-
-function refHasGeom(ref) {
-  return ref != null && ref.x != null && ref.y != null && ref.w != null && ref.h != null;
-}
-
-function deleteRefs(Keynote, slide, refs, flags, tally) {
-  const all = refs || [];
-  const indexRefs = [];
-  const geomRefs = [];
-  for (let i = 0; i < all.length; i++) {
-    if (refHasGeom(all[i])) geomRefs.push(all[i]);
-    else indexRefs.push(all[i]);
-  }
-  let n = 0;
-  // Index-addressed deletes: highest kindIndex first so lower live indices stay valid.
-  const ordered = indexRefs.slice().sort(function (a, b) {
-    const ka = String(a.kind || "");
-    const kb = String(b.kind || "");
-    if (ka !== kb) return ka < kb ? -1 : 1;
-    return Number(b.kindIndex) - Number(a.kindIndex);
-  });
-  for (let i = 0; i < ordered.length; i++) {
-    if (deleteObj(Keynote, getItem(slide, ordered[i]))) {
-      n += 1;
-      if (tally) {
-        const k = String(ordered[i].kind || "item");
-        tally[k] = (tally[k] || 0) + 1;
-      }
-    }
-  }
-  // A JXA element ref is bound to its index: deleting a lower one renumbers every
-  // specifier captured above it. Match every ref against a snapshot first, claim at
-  // match time, then delete every claimed entry in one pass, highest index first.
-  const snapByKind = {};
-  function snapshotFor(kind) {
-    if (snapByKind[kind]) return snapByKind[kind];
-    const snap = [];
-    const col = collectionNamed(slide, kindColName(kind));
-    const cnt = countOf(col);
-    for (let i = 0; i < cnt; i++) {
-      const obj = itemAt(col, i);
-      if (!obj) continue;
-      const p = xyOf(obj);
-      const wh = whOf(obj);
-      const entry = { obj: obj, index: i, x: p[0], y: p[1], w: wh[0], h: wh[1] };
-      if (kind === "text") {
-        try {
-          entry.text = String(obj.objectText()).trim();
-        } catch (e) {
-          entry.text = "";
-        }
-      }
-      snap.push(entry);
-    }
-    snapByKind[kind] = snap;
-    return snap;
-  }
-  const claimed = [];
-  function claim(entry, kind) {
-    entry.claimed = true;
-    claimed.push({ entry: entry, kind: kind });
-  }
-  // Text refs resolve by content first: a unique text match survives a drifted rect.
-  const geomOnly = [];
-  for (let i = 0; i < geomRefs.length; i++) {
-    const r = geomRefs[i];
-    const kind = String(r.kind || "");
-    if (kind === "text" && r.matchText) {
-      const want = String(r.matchText).trim();
-      const snap = snapshotFor("text");
-      const hits = [];
-      for (let s = 0; s < snap.length; s++) {
-        if (!snap[s].claimed && snap[s].text === want) hits.push(snap[s]);
-      }
-      if (hits.length === 1) {
-        claim(hits[0], "text");
-        continue;
-      }
-    }
-    geomOnly.push(r);
-  }
-  // Geometry-addressed reuse removals: delete only when live match count equals ref count; else fail loud, never guess.
-  const groups = {};
-  const order = [];
-  for (let i = 0; i < geomOnly.length; i++) {
-    const r = geomOnly[i];
-    const kind = String(r.kind || "");
-    const hPart = kind === "text" || kind === "line" ? "*" : Math.round(Number(r.h));
-    const key =
-      kind + "|" + Math.round(Number(r.x)) + "|" + Math.round(Number(r.y)) + "|" + Math.round(Number(r.w)) + "|" + hPart;
-    if (!groups[key]) {
-      groups[key] = [];
-      order.push(key);
-    }
-    groups[key].push(r);
-  }
-  for (let g = 0; g < order.length; g++) {
-    const key = order[g];
-    const grp = groups[key];
-    const r0 = grp[0];
-    const snap = snapshotFor(r0.kind);
-    const hits = [];
-    for (let s = 0; s < snap.length; s++) {
-      const e = snap[s];
-      if (e.claimed) continue;
-      if (matchesRect(r0.kind, e.x, e.y, e.w, e.h, r0, 4)) {
-        hits.push(e);
-      }
-    }
-    if (hits.length === grp.length) {
-      for (let i = 0; i < hits.length; i++) claim(hits[i], r0.kind);
-    } else if (flags && flags.length < 8) {
-      flags.push(
-        "reuse remove geom split: " +
-          grp.length +
-          " ref(s) vs " +
-          hits.length +
-          " live match(es) for " +
-          r0.kind +
-          " @ " +
-          key +
-          " — kept, no delete (fail loud)"
-      );
-    }
-  }
-  claimed.sort(function (a, b) {
-    return b.entry.index - a.entry.index;
-  });
-  for (let i = 0; i < claimed.length; i++) {
-    if (deleteObj(Keynote, claimed[i].entry.obj)) {
-      n += 1;
-      if (tally) {
-        const k = String(claimed[i].kind || "item");
-        tally[k] = (tally[k] || 0) + 1;
-      }
-    }
-  }
-  return n;
-}
-
-function textLookup(slide) {
-  const map = {};
-  const col = collectionNamed(slide, "textItems");
-  for (let i = 0; i < countOf(col); i++) {
-    const obj = itemAt(col, i);
-    if (!obj) continue;
-    try {
-      const key = String(obj.objectText()).trim();
-      if (key && map[key] == null) map[key] = obj;
-    } catch (e) {}
-  }
-  return map;
-}
-
-function keystroke(cmd) {
-  const SE = Application("System Events");
-  SE.keystroke(cmd, { using: "command down" });
-}
-
-function pasteboardChangeCount() {
-  try {
-    const n = Number($.NSPasteboard.generalPasteboard.changeCount);
-    return isNaN(n) ? null : n;
-  } catch (e) {
-    return null;
-  }
-}
-
-// Polls pred() every stepSec, up to maxSec. Returns true once pred() is truthy,
-// false if it never was within the bound, or null immediately if pred() throws
-// (an unreadable API) — callers must treat both false and null as "proceed".
-function waitUntil(pred, maxSec, stepSec) {
-  const step = stepSec > 0 ? stepSec : 0.25;
-  const steps = Math.max(1, Math.round((maxSec > 0 ? maxSec : 0) / step));
-  for (let i = 0; i < steps; i++) {
-    let v;
-    try {
-      v = pred();
-    } catch (e) {
-      return null;
-    }
-    if (v) return true;
-    delay(step);
-  }
-  return false;
-}
-
-function applySpec(obj, spec) {
-  // Reuse keeps JXA geometry: paste appends, so live index ≠ wall kindIndex the AppleScript block would use.
-  if (!obj || !spec || spec.x == null) return false;
-  const a = applyGeom(obj, spec, "full");
-  applyGeom(obj, spec, "pos");
-  return a;
-}
-
 function tempScriptPath(dir, uniq) {
   const base = dir.charAt(dir.length - 1) === "/" ? dir : dir + "/";
   return base + "obed-edom-keynote-" + uniq + ".applescript";
@@ -553,319 +326,11 @@ function runAppleScript(doc, body) {
   $.NSFileManager.defaultManager.removeItemAtPathError(path, null);
 }
 
-function removeShortfallOf(refs, tally) {
-  const list = refs || [];
-  const expected = {};
-  for (let i = 0; i < list.length; i++) {
-    const k = String(list[i].kind || "item");
-    expected[k] = (expected[k] || 0) + 1;
-  }
-  const removed = tally || {};
-  const out = {};
-  const keys = Object.keys(expected);
-  for (let i = 0; i < keys.length; i++) {
-    const k = keys[i];
-    const got = Number(removed[k] || 0);
-    out[k] = { expected: expected[k], removed: got, shortfall: expected[k] - got };
-  }
-  return out;
-}
-
-function addHistogram(add) {
-  const out = {};
-  for (let i = 0; i < (add || []).length; i++) {
-    if (!add[i]) continue;
-    const k = String(add[i].kind || "item");
-    if (!kindColName(k)) continue;
-    out[k] = (out[k] || 0) + 1;
-  }
-  return out;
-}
-
-// Blocks the post-paste delete on a per-kind DEFICIT only — surplus (e.g. a strip
-// ref deleteRefs could not resolve, riding the paste onto `copy`) is recorded but
-// never fails the gate: it is a doubling, not data loss, and pass-2 groupRemove
-// dedup exists for exactly that. A kind collectionCounts could not read (-1) is
-// "unmeasured": if it is not a kind this job actually added, it cannot manufacture
-// a shortfall. If it IS a kind this job added, the paste against it can never be
-// verified either way — that is unresolved, not a pass, and blocks `ok` (see
-// `unmeasuredNamed` below; the caller must treat this as non-retryable).
-function addShortfallOf(add, beforeCounts, afterCounts) {
-  const expected = addHistogram(add);
-  const pasted = {};
-  const shortfall = {};
-  const surplus = {};
-  const unmeasured = [];
-  const kinds = ["text", "image", "shape", "movie", "group", "line"];
-  for (let i = 0; i < kinds.length; i++) {
-    const k = kinds[i];
-    const col = kindColName(k);
-    const b = Number((beforeCounts || {})[col]);
-    const a = Number((afterCounts || {})[col]);
-    if (isNaN(b) || isNaN(a) || b < 0 || a < 0) {
-      unmeasured.push(k);
-      continue;
-    }
-    const d = a - b;
-    pasted[k] = d;
-    const e = Number(expected[k] || 0);
-    if (d < e) shortfall[k] = e - d;
-    else if (d > e) surplus[k] = d - e; // §3.7: recorded, never blocks `ok` — documented residual hole
-  }
-  const unmeasuredNamed = unmeasured.some(function (k) {
-    return Object.prototype.hasOwnProperty.call(expected, k);
-  });
-  return {
-    expected: expected,
-    pasted: pasted,
-    shortfall: shortfall,
-    surplus: surplus,
-    unmeasured: unmeasured,
-    unmeasuredNamed: unmeasuredNamed,
-    ok: Object.keys(shortfall).length === 0 && !unmeasuredNamed,
-  };
-}
-
-function applyReuse(doc, Keynote, job, missReasons, basePlaced) {
-  const from = Number(job.from);
-  const to = Number(job.slide);
-  let slides = doc.slides();
-  if (from < 1 || to < 1 || from > countOf(slides) || to > countOf(slides)) {
-    return { ok: false, duplicated: 0, applied: 0, missed: 1 };
-  }
-  const nBefore = countOf(slides);
-  if (!basePlaced) {
-    try {
-      Keynote.activate();
-      runAppleScript(doc, "duplicate slide " + from + " to before slide " + to);
-    } catch (eDup) {
-      if (missReasons.length < 8) missReasons.push("duplicate slide " + from + " failed: " + eDup);
-      return { ok: false, duplicated: 0, applied: 0, missed: 1 };
-    }
-    slides = doc.slides();
-    if (countOf(slides) !== nBefore + 1) {
-      return { ok: false, duplicated: 0, applied: 0, missed: 1 };
-    }
-  }
-  let copy = slides[to - 1];
-  let orig = slides[to];
-  const beforeCounts = collectionCounts(copy);
-  // Count what actually disappeared, not what did not throw.
-  const refs = basePlaced ? (job.remove || []) : (job.remove || []).concat(job.removeFallback || []);
-  const removed = deleteRefs(Keynote, copy, refs, missReasons);
-  slides = doc.slides();
-  copy = slides[to - 1];
-  orig = slides[to];
-  const afterCounts = collectionCounts(copy);
-  const removedByKind = {};
-  ["text", "image", "shape", "movie", "group", "line"].forEach(function (kind) {
-    const before = beforeCounts[kindColName(kind)];
-    const after = afterCounts[kindColName(kind)];
-    if (before < 0 || after < 0) {
-      if (missReasons.length < 8) missReasons.push("slide " + to + " " + kind + " count failed, drop not measured");
-      return;
-    }
-    if (before > after) removedByKind[kind] = before - after;
-  });
-  // Next slide's base is this slide BEFORE its adds — one duplicate either way, minus the deletes.
-  let parked = false;
-  if (job.snapshotNext) {
-    try {
-      runAppleScript(doc, "duplicate slide " + to + " to before slide " + (to + 2));
-      slides = doc.slides();
-      parked = countOf(slides) === nBefore + (basePlaced ? 1 : 2);
-      if (!parked && missReasons.length < 8) missReasons.push("snapshot slide " + to + " count mismatch");
-      copy = slides[to - 1];
-      orig = slides[to];
-    } catch (eSnap) {
-      if (missReasons.length < 8) missReasons.push("snapshot slide " + to + " failed: " + eSnap);
-    }
-  }
-  const add = job.add || [];
-  let applied = 0;
-  let missed = 0;
-  let addReport = null;
-  let addFailure = null;
-  if (add.length) {
-    let addWrites = 0;
-    let addMisses = 0;
-    for (let i = 0; i < add.length; i++) {
-      const spec = add[i];
-      const obj = getItem(orig, spec);
-      if (!obj) {
-        addMisses += 1;
-        continue;
-      }
-      if (applySpec(obj, spec)) addWrites += 1;
-      else addMisses += 1;
-    }
-    deleteRefs(Keynote, orig, job.strip || []);
-    const beforeAdd = collectionCounts(copy);
-    const origAfterStrip = collectionCounts(orig);
-    const expected = addHistogram(add);
-    const expectedKinds = Object.keys(expected);
-    const expectedCols = expectedKinds.map(kindColName);
-    const gates = [];
-    let attempts = 0;
-    let pasteErrLogged = false;
-    while (attempts < 3) {
-      attempts += 1;
-      if (attempts > 1) delay(0.5 * (attempts - 1));
-      delay(0.3);
-      const gate = {
-        attempt: attempts,
-        frontmostAtA: null,
-        frontmostAtV: null,
-        changeCountBefore: null,
-        changeCountAfter: null,
-        pasteboard: "unavailable",
-        pastedCmdV: false,
-      };
-      try {
-        Keynote.activate();
-        doc.currentSlide = orig;
-        delay(0.25);
-        gate.frontmostAtA = waitUntil(function () { return Keynote.frontmost(); }, 5, 0.25);
-        const cc0 = pasteboardChangeCount();
-        gate.changeCountBefore = cc0;
-        keystroke("a");
-        delay(0.2);
-        keystroke("c");
-        delay(0.25);
-        if (cc0 === null) {
-          gate.pasteboard = "unavailable";
-        } else {
-          // cc0 read OK but changeCount turns unreadable mid-burst: cc stays null on
-          // every poll, waitUntil times out false, and this is "stuck" (fails closed,
-          // withholds Cmd-V) rather than "unavailable" (proceeds) — deliberate: we
-          // already had one good read, so an unreadable follow-up looks more like a
-          // wedged pasteboard than an absent API. Retried up to 3 attempts like any
-          // other stuck case.
-          const advanced = waitUntil(function () {
-            const cc = pasteboardChangeCount();
-            return cc !== null && cc > cc0;
-          }, 5, 0.25);
-          gate.changeCountAfter = pasteboardChangeCount();
-          gate.pasteboard = advanced === false ? "stuck" : advanced ? "advanced" : "unavailable";
-        }
-        if (gate.pasteboard !== "stuck") {
-          doc.currentSlide = copy;
-          delay(0.25);
-          gate.frontmostAtV = waitUntil(function () { return Keynote.frontmost(); }, 5, 0.25);
-          keystroke("v");
-          gate.pastedCmdV = true;
-          delay(0.6);
-          if (expectedCols.length) {
-            waitUntil(function () {
-              for (let k = 0; k < expectedCols.length; k++) {
-                const col = expectedCols[k];
-                if (countOf(collectionNamed(copy, col)) !== beforeAdd[col]) return true;
-              }
-              return false;
-            }, 5, 0.25);
-          }
-        }
-      } catch (ePaste) {
-        // One entry per job, not one per attempt: a throwing burst can retry up to
-        // 3 times and must not crowd out other diagnostics against the shared cap.
-        if (!pasteErrLogged && missReasons.length < 8) {
-          missReasons.push("paste delta slide " + to + ": " + ePaste);
-          pasteErrLogged = true;
-        }
-      }
-      gates.push(gate);
-      slides = doc.slides();
-      copy = slides[to - 1];
-      orig = slides[to];
-      const afterAdd = collectionCounts(copy);
-      addReport = addShortfallOf(add, beforeAdd, afterAdd);
-      addReport.attempts = attempts;
-      addReport.origAfterStrip = origAfterStrip;
-      addReport.gates = gates;
-      if (addReport.ok) break;
-      // A kind this job added but could not measure is unresolved, not a clean
-      // zero-delta: retrying against a baseline we could not read can double the
-      // payload if the first attempt actually landed. Non-retryable.
-      if (addReport.unmeasuredNamed) break;
-      // §3.4: per-kind, not summed — a kind that landed must not be masked by a
-      // deficit/negative delta on another (unmeasured-read) kind dragging the sum down.
-      const landed = Object.keys(addReport.pasted).some(function (k) {
-        return (addReport.pasted[k] || 0) !== 0;
-      });
-      if (!landed && attempts < 3) continue;
-      break;
-    }
-    if (addReport.ok) {
-      applied += addWrites;
-      missed += addMisses;
-    } else {
-      missed += add.length;
-      addFailure = {
-        slide: to,
-        expected: addReport.expected,
-        pasted: addReport.pasted,
-        shortfall: addReport.shortfall,
-        surplus: addReport.surplus,
-        unmeasured: addReport.unmeasured,
-        attempts: addReport.attempts,
-        gates: addReport.gates,
-        origAfterStrip: addReport.origAfterStrip,
-        addSpecs: add.length,
-      };
-    }
-  }
-  if (!addFailure) {
-    const mutate = job.mutate || [];
-    if (mutate.length) {
-      const byText = textLookup(copy);
-      for (let i = 0; i < mutate.length; i++) {
-        const spec = mutate[i];
-        let obj = spec.matchText ? byText[String(spec.matchText).trim()] : null;
-        if (!obj) obj = getItem(copy, spec);
-        if (spec.x == null) {
-          missed += 1;
-          continue;
-        }
-        if (!obj) {
-          missed += 1;
-          continue;
-        }
-        if (applySpec(obj, spec)) applied += 1;
-        else missed += 1;
-      }
-    }
-    try {
-      runAppleScript(doc, "delete slide " + (to + 1));
-    } catch (eDel) {
-      slides = doc.slides();
-      const leftover = slides[to];
-      if (leftover) deleteObj(Keynote, leftover);
-    }
-  }
-  return {
-    ok: true,
-    duplicated: 1,
-    parked: parked,
-    removed: removed,
-    removeShortfall: removeShortfallOf(refs, removedByKind),
-    applied: applied,
-    missed: missed,
-    addReport: addReport || null,
-    addFailure: addFailure || null,
-  };
-}
-
-function slidesInPlan(transforms, reuses) {
+function slidesInPlan(transforms) {
   const set = {};
   for (let t = 0; t < transforms.length; t++) {
     const n = Number(transforms[t].slide);
     if (!isNaN(n)) set[n] = true;
-  }
-  for (let i = 0; i < (reuses || []).length; i++) {
-    const n = Number(reuses[i].slide);
-    const f = Number(reuses[i].from);
-    if (!isNaN(n)) set[n] = true;
-    if (!isNaN(f)) set[f] = true;
   }
   return Object.keys(set)
     .map(Number)
@@ -1292,74 +757,23 @@ function run(argv) {
       } catch (eT) {}
     }
   }
-  const reuses = plan.reuses || [];
-  const reuseBy = {};
-  for (let i = 0; i < reuses.length; i++) {
-    reuseBy[Number(reuses[i].slide)] = reuses[i];
-  }
-  const order = slidesInPlan(transforms, reuses);
-  let cloned = 0;
+  const order = slidesInPlan(transforms);
   let appliedFirst = 0;
   let missedFirst = 0;
-  const removeShortfalls = [];
-  const addReports = [];
-  let addFailure = null;
-  const baseReady = {};
   for (let i = 0; i < order.length; i++) {
     const n = order[i];
-    if (reuseBy[n]) {
-      const r = applyReuse(doc, Keynote, reuseBy[n], missReasons, baseReady[n] === true);
-      if (r.ok) {
-        cloned += r.duplicated || 0;
-        appliedFirst += r.applied || 0;
-        missedFirst += r.missed || 0;
-        if (r.removeShortfall) removeShortfalls.push({ slide: n, byKind: r.removeShortfall });
-        if (r.addReport) addReports.push({ slide: n, report: r.addReport });
-        if (r.parked) baseReady[reuseBy[n].snapshotNext] = true;
-      } else {
-        const rf = applyNonReuseSlide(
-          doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry
-        );
-        appliedFirst += rf.applied;
-        missedFirst += rf.missed;
-      }
-      if (r.addFailure) { addFailure = r.addFailure; break; }
-      continue;
-    }
     const rn = applyNonReuseSlide(
       doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry
     );
     appliedFirst += rn.applied;
     missedFirst += rn.missed;
   }
-  if (addFailure) {
-    try {
-      Keynote.close(doc, { saving: "no" });
-    } catch (eHalt) {}
-    return JSON.stringify({
-      dest: plan.dest,
-      cloned: cloned,
-      applied: appliedFirst,
-      missed: missedFirst,
-      width: actualWidth,
-      height: actualHeight,
-      sizeProp: sizeProp,
-      collections: collections,
-      missReasons: missReasons,
-      removeShortfalls: removeShortfalls,
-      addReports: addReports,
-      addFailure: addFailure,
-      layouts: layoutReport,
-      saved: false,
-    });
-  }
-  if (appliedFirst === 0 && cloned === 0) {
+  if (appliedFirst === 0) {
     try {
       Keynote.close(doc, { saving: "no" });
     } catch (eAbort) {}
     return JSON.stringify({
       dest: plan.dest,
-      cloned: cloned,
       applied: 0,
       missed: missedFirst,
       width: actualWidth,
@@ -1367,7 +781,6 @@ function run(argv) {
       sizeProp: sizeProp,
       collections: collections,
       missReasons: missReasons,
-      removeShortfalls: removeShortfalls,
       layouts: layoutReport,
       saved: false,
     });
@@ -1400,7 +813,6 @@ function run(argv) {
   }
   return JSON.stringify({
     dest: plan.dest,
-    cloned: cloned,
     applied: appliedFirst,
     missed: missedFirst,
     width: actualWidth,
@@ -1408,8 +820,6 @@ function run(argv) {
     sizeProp: sizeProp,
     collections: collections,
     missReasons: missReasons,
-    removeShortfalls: removeShortfalls,
-    addReports: addReports,
     skippedSlides: skippedSlides,
     mapReadback: mapReadback,
     layouts: layoutReport,
@@ -1424,18 +834,11 @@ function run(argv) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     geometryPathForSlide: geometryPathForSlide,
-    itemsByGeom: itemsByGeom,
-    getItemByGeom: getItemByGeom,
-    deleteRefs: deleteRefs,
-    removeShortfallOf: removeShortfallOf,
-    addShortfallOf: addShortfallOf,
     collectionCounts: collectionCounts,
     countOrUnreadable: countOrUnreadable,
     tempScriptPath: tempScriptPath,
     applyGeom: applyGeom,
     applyGroupChildren: applyGroupChildren,
-    applyReuse: applyReuse,
     slidesInPlan: slidesInPlan,
-    keystroke: keystroke,
   };
 }

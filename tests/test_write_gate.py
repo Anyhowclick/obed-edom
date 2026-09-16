@@ -108,10 +108,9 @@ def test_slide_has_resized_image():
 
 def test_check_preconditions():
     good = [{"slide": 9, "kind": "image", "w": 160.0, "h": 80.0}]
-    assert check_preconditions(good, set(), 9) == []
-    assert check_preconditions(good, {9}, 9)  # reuse slide -> error
-    assert check_preconditions([], set(), 9)  # no transforms -> error
-    assert check_preconditions([{"slide": 9, "kind": "shape", "w": 1.0}], set(), 9)  # no image
+    assert check_preconditions(good, 9) == []
+    assert check_preconditions([], 9)  # no transforms -> error
+    assert check_preconditions([{"slide": 9, "kind": "shape", "w": 1.0}], 9)  # no image
 
 
 def test_build_reported_keys_soft_classes_by_kind_index():

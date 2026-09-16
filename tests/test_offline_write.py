@@ -156,34 +156,13 @@ def test_probe_iwa_extra_forces_off_on_import_failure(monkeypatch):
 # --- _offline_write_slides ---------------------------------------------------
 
 
-def test_offline_slides_excludes_reuse_targets():
-    specs = [
-        _spec(slide=3, kind="text", kindIndex=0),
-        _spec(slide=4, kind="image", kindIndex=0),
-        _spec(slide=5, kind="shape", kindIndex=0),
-    ]
-    out = _offline_write_slides(specs, reuses=[], reuse_slides={4}, wanted=None)
-    assert out == {3, 5}
-
-
-def test_offline_slides_excludes_reuse_donors():
-    specs = [
-        _spec(slide=3, kind="text", kindIndex=0),
-        _spec(slide=4, kind="image", kindIndex=0),
-        _spec(slide=5, kind="shape", kindIndex=0),
-    ]
-    reuses = [{"slide": 5, "from": 3}]
-    out = _offline_write_slides(specs, reuses=reuses, reuse_slides={5}, wanted=None)
-    assert out == {4}  # slide 5 is the reuse target, slide 3 is the donor
-
-
 def test_offline_slides_excludes_unaddressable_slides():
     specs = [
         _spec(slide=6, kind="text", kindIndex=0),
         _spec(slide=6, kind="table", kindIndex=0),  # no AS address -> whole slide excluded
         _spec(slide=7, kind="image", kindIndex=0),
     ]
-    out = _offline_write_slides(specs, reuses=[], reuse_slides=set(), wanted=None)
+    out = _offline_write_slides(specs, wanted=None)
     assert out == {7}
 
 
@@ -193,13 +172,13 @@ def test_offline_slides_intersects_slide_range():
         _spec(slide=4, kind="image", kindIndex=0),
         _spec(slide=5, kind="shape", kindIndex=0),
     ]
-    out = _offline_write_slides(specs, reuses=[], reuse_slides=set(), wanted=[3, 4])
+    out = _offline_write_slides(specs, wanted=[3, 4])
     assert out == {3, 4}
 
 
-def test_offline_slides_includes_former_reuse_chain_when_reuses_empty():
+def test_offline_slides_includes_former_reuse_chain():
     specs = [_spec(slide=n, kind="text", kindIndex=0) for n in range(120, 130)]
-    out = _offline_write_slides(specs, reuses=[], reuse_slides=set(), wanted=None)
+    out = _offline_write_slides(specs, wanted=None)
     assert {123, 124, 125, 126, 127, 128} <= out
 
 
@@ -1379,7 +1358,7 @@ def test_flag_off_builds_the_same_plan_as_today_pure(monkeypatch):
     assert mode == "off"
 
     env_suppressed = suppress_geometry_slides()
-    offline_slides = set() if mode == "off" else _offline_write_slides(transform_dicts, [], set(), None)
+    offline_slides = set() if mode == "off" else _offline_write_slides(transform_dicts, None)
     suppressed = env_suppressed | offline_slides
 
     today_suppressed = suppress_geometry_slides()
@@ -1421,7 +1400,6 @@ def test_flag_off_builds_the_same_plan_as_today(monkeypatch, tmp_path):
     # Seams used elsewhere (tests/test_export_fold.py: monkeypatch rk.<name>;
     # tests/test_as_geometry.py: exercise the real plan-building pieces directly).
     monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: transforms)
-    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -1475,73 +1453,6 @@ def test_flag_off_builds_the_same_plan_as_today(monkeypatch, tmp_path):
     )
 
 
-def test_reuse_chain_line_marks_the_preadd_links(monkeypatch, tmp_path):
-    """The chain-summary line (`remap_keynote.py:1042-1058`) must prepend `pre-add` for
-    a `basePreAdd` job ahead of its `drop`/`add`/`tweak` bits. Built on the harness at
-    `test_flag_off_builds_the_same_plan_as_today` above; `plan_slide_reuses` is stubbed
-    to hand back two hand-built jobs mirroring Gold's `12<-11`/`13<-12` link so the
-    asserted line is the exact string, not a re-derivation.
-
-    SAFETY: OBED_OFFLINE_WRITE is set EXPLICITLY (not delenv'd) — see the safety note
-    on `test_flag_off_builds_the_same_plan_as_today` above.
-    """
-    import obed_edom.remap_keynote as rk
-
-    monkeypatch.setenv("OBED_OFFLINE_WRITE", "off")
-    monkeypatch.setenv("OBED_SLIDE_REUSE", "on")
-    monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
-    monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
-
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
-    monkeypatch.setattr(
-        rk,
-        "plan_slide_reuses",
-        lambda *a, **k: [
-            {"slide": 12, "from": 11, "remove": [{}] * 6, "add": [{}] * 85, "mutate": []},
-            {
-                "slide": 13,
-                "from": 12,
-                "basePreAdd": True,
-                "remove": [],
-                "add": [{}] * 7,
-                "mutate": [],
-            },
-        ],
-    )
-    monkeypatch.setattr(
-        rk, "recipe_for",
-        lambda wall, template: {
-            "source": "test", "mapSrc": "src", "mapDst": "dst",
-            "destWidth": 1920, "destHeight": 1080, "characterStyles": [],
-        },
-    )
-    monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
-    monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
-    monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True})
-
-    source = tmp_path / "wall.key"
-    template = tmp_path / "tpl.key"
-    dest = tmp_path / "out.key"
-    source.touch()
-    template.touch()
-
-    wall_payload = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
-    template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
-
-    lines: list[str] = []
-    rk.remap_keynote(
-        source, dest, template=template,
-        wall_payload=wall_payload, template_payload=template_payload,
-        log=lines.append,
-    )
-
-    assert (
-        "Duplicating remapped slides for unchanged map/dots: "
-        "slide 12←11 (drop 6, add 85); slide 13←12 (pre-add, add 7)."
-    ) in lines
-
-
 # --- fix3 review finding 2: attach_group_children is offline-read-only ----------
 
 
@@ -1557,7 +1468,6 @@ def test_offline_read_off_skips_attach_group_children(monkeypatch, tmp_path):
     import obed_edom.remap_keynote as rk
 
     monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
-    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -3241,7 +3151,6 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr(rk, "plan_payload_transforms", fake_plan_payload_transforms)
-    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -3252,7 +3161,13 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
     monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
     monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
     monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True})
+    jxa_plans: list[dict] = []
+
+    def fake_run_jxa(plan):
+        jxa_plans.append(plan)
+        return {"applied": 1, "missed": 0, "saved": True, "closed": True}
+
+    monkeypatch.setattr(rk, "_run_jxa", fake_run_jxa)
     # child_resize/badgeRaises are non-empty below, which would otherwise route through
     # the REAL pass-2 stat-finalize AppleScript (Keynote-touching) — never allowed here.
     monkeypatch.setattr(rk, "_run_stat_finalize", lambda *a, **k: {"ok": True, "jobs": 1})
@@ -3279,6 +3194,9 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
     assert plan_out["badgeRaises"] == [{"slide": 5, "isTitle": True}]
     assert plan_out["groupRemoves"] == []
     assert plan_out["statSlides"] == [3]
+    assert plan_out["reuses"] == []
+    assert len(jxa_plans) == 1
+    assert jxa_plans[0]["reuses"] == []
 
 
 def test_plan_out_collects_group_collapse_refused_from_a_non_other_transform(monkeypatch, tmp_path):
@@ -3301,7 +3219,6 @@ def test_plan_out_collects_group_collapse_refused_from_a_non_other_transform(mon
     pin_transform.group_collapse_refused = "groupCollapseRefused(s=2,idx=1)"
 
     monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [pin_transform])
-    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -3346,7 +3263,6 @@ def test_plan_warns_once_per_run_on_aspect_less_items(monkeypatch, tmp_path):
     monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
     monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
 
-    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {

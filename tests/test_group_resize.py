@@ -660,23 +660,15 @@ def test_adjust_shifts_job_down_by_lower_group_hides():
     # group 5 (kind_index 4), so it drops by 2 to group 3.
     transforms = [_hide(5, 0), _hide(5, 3)]
     child_resize = [{"slide": 5, "groupIndex": 5}]
-    adjustments = adjust_child_resize_indexes(child_resize, transforms, set())
+    adjustments = adjust_child_resize_indexes(child_resize, transforms)
     assert child_resize[0]["groupIndex"] == 3
     assert adjustments == [{"slide": 5, "from": 5, "to": 3}]
 
 
-def test_adjust_excludes_reuse_slides():
-    transforms = [_hide(5, 0), _hide(5, 3)]
-    child_resize = [{"slide": 5, "groupIndex": 5}]
-    adjustments = adjust_child_resize_indexes(child_resize, transforms, {5})
-    assert child_resize[0]["groupIndex"] == 0
-    assert adjustments == [{"slide": 5, "from": 5, "to": 0}]
-
-
-def test_adjust_empty_reuse_set_leaves_group_index_and_only_shifts_hides():
+def test_adjust_leaves_group_index_and_only_shifts_hides():
     transforms = [_hide(5, 0), _hide(5, 3)]
     child_resize = [{"slide": 5, "groupIndex": 5}, {"slide": 6, "groupIndex": 3}]
-    adjustments = adjust_child_resize_indexes(child_resize, transforms, set())
+    adjustments = adjust_child_resize_indexes(child_resize, transforms)
     assert child_resize[0]["groupIndex"] == 3
     assert child_resize[1]["groupIndex"] == 3
     assert adjustments == [{"slide": 5, "from": 5, "to": 3}]
@@ -688,7 +680,7 @@ def test_adjust_only_counts_hides_lower_than_job():
     # shift it.
     transforms = [_hide(5, 5)]
     child_resize = [{"slide": 5, "groupIndex": 2}]
-    adjustments = adjust_child_resize_indexes(child_resize, transforms, set())
+    adjustments = adjust_child_resize_indexes(child_resize, transforms)
     assert child_resize[0]["groupIndex"] == 2
     assert adjustments == []
 
@@ -697,7 +689,7 @@ def test_adjust_only_counts_group_hides():
     # A lower role="hide" of kind "image" must not shift a group job.
     transforms = [_hide(5, 0, kind="image")]
     child_resize = [{"slide": 5, "groupIndex": 5}]
-    adjustments = adjust_child_resize_indexes(child_resize, transforms, set())
+    adjustments = adjust_child_resize_indexes(child_resize, transforms)
     assert child_resize[0]["groupIndex"] == 5
     assert adjustments == []
 
@@ -804,17 +796,6 @@ def test_finalize_twin_claims_are_recorded():
     assert "set end of claimed to _w" in branch
     assert "sigFallbacks to sigFallbacks + 1" in branch
     assert "sigTwin(s=" in branch
-
-
-def test_finalize_reuse_voids_group_index_in_call():
-    transforms = [_hide(2, 0)]
-    child_resize = [{"slide": 2, "groupIndex": 4, "childSig": "unique-sig"}]
-    adjustments = adjust_child_resize_indexes(child_resize, transforms, {2})
-    assert child_resize[0]["groupIndex"] == 0
-    assert adjustments == [{"slide": 2, "from": 4, "to": 0}]
-    script = _build_stat_finalize_script(Path("/tmp/x.key"), child_resize, {})
-    assert "my obedStatJob(2, _sigs, 0," in script
-    assert ", 0," in script
 
 
 # --------------------------------------------------------------------------
