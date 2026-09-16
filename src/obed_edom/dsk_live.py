@@ -38,7 +38,7 @@ _KEYNOTE_QUIT_POLL_S = 0.5
 _PROGRESS_RE = re.compile(r"^OBED\t(\d+)\t")
 _ERROR_RE = re.compile(r"^ERR\t(\d+)\t(-?\d+)\t(.*)$")
 
-DEFAULT_BLACK_LAYOUT_NAMES: tuple[str, ...] = ("BLACK BLANK", "Black", "BLACK", "black")
+DEFAULT_BLACK_LAYOUT_NAMES: tuple[str, ...] = ("BLACK BLANK", "Black", "BLACK", "black", "Blank Black")
 DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank Black",)
 
 
