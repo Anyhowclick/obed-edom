@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
+import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -42,9 +45,15 @@ from obed_edom.dsk_assemble import (
     assemble_dsk_deck,
 )
 from obed_edom.dsk_live import keynote_running, quit_and_wait_for_exit
-from obed_edom.dsk_movie_export import export_slide_clips
+from obed_edom.dsk_movie_export import clip_name, export_dsk_slide_clips, export_slide_clips
 from obed_edom.dsk_plan import classify_deck
-from obed_edom.dsk_stage_export import export_stage_pngs, stage_counts
+from obed_edom.dsk_stage_export import (
+    export_stage_pngs,
+    published_clips,
+    read_manifest,
+    stage_counts,
+    write_manifest,
+)
 from obed_edom.framing import (
     AUTO,
     DEFERRED,
@@ -1881,13 +1890,32 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         log=job.log,
     )
     job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
+    published = _publish_generator_clips(result.path, out_dir, clips, result.ordinals)
+    published_by_ordinal = {
+        result.ordinals[fw]: p for fw, p in published.items() if fw in result.ordinals
+    }
+    categories = {
+        result.ordinals[n]: str(p.get("category") or "")
+        for p in included
+        for n in [int(p["slide"])]
+        if n in result.ordinals
+    }
+    write_manifest(
+        out_dir,
+        result.path,
+        [],
+        categories=categories,
+        clips=published_by_ordinal,
+        source_slides={o: n for n, o in result.ordinals.items()},
+        existing=read_manifest(out_dir, deck=result.path),
+    )
     return {
         "phase": "done",
         "path": str(path),
         "deckPath": str(result.path),
         "slidesKept": list(result.slides_kept),
         "ordinals": result.ordinals,
-        "clips": {n: str(p) for n, p in clips.items()},
+        "clips": {o: str(p) for o, p in published_by_ordinal.items()},
         "skipped": proposal.get("skipped") or [],
         "warnings": list(result.warnings),
         "overflows": list(result.overflows),
@@ -1896,6 +1924,33 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         "pages": pages,
         "contentOnly": content_only,
     }
+
+
+def _publish_generator_clips(
+    deck: Path, out_dir: Path, clips: Mapping[int, Path], ordinals: Mapping[int, int]
+) -> dict[int, Path]:
+    """Names each inserted clip by its DSK slide number, `<DSK stem>.NNN.mov`, in the
+    deck's flat asset folder: the same sequence the Exporter's stage PNGs use, so
+    images and clips interleave in slide order. A clip already inside `out_dir` is
+    moved; an operator-supplied one elsewhere is copied. Returns FW slide -> path."""
+    published: dict[int, Path] = {}
+    for fw_slide, src in clips.items():
+        ordinal = ordinals.get(fw_slide)
+        if ordinal is None:
+            continue
+        src = Path(src)
+        dest = out_dir / clip_name(deck.stem, ordinal)
+        if src.resolve() != dest.resolve():
+            if src.parent.resolve() == out_dir.resolve():
+                os.replace(src, dest)
+            else:
+                shutil.copy2(src, dest)
+        published[fw_slide] = dest
+    return published
+
+
+def _dsk_export_action(category: str) -> str:
+    return "clip" if category in {"movie", "mixed"} else "stage"
 
 
 def _run_dsk_export_propose(
@@ -1912,6 +1967,8 @@ def _run_dsk_export_propose(
     classes = {c.number: c for c in classify_deck(path, payload=payload)}
     thumbs = _dsk_preview_thumbs(job, path, payload)
     thumb_dir = wall_thumb_dir(deck_digest(path))
+    manifest = read_manifest(path.parent, deck=path) if is_stage_deck else None
+    existing_clips = published_clips(path.parent, path.stem, manifest) if is_stage_deck else {}
     pages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for number in numbers:
@@ -1921,6 +1978,10 @@ def _run_dsk_export_propose(
         if cls.category == "empty":
             skipped.append({"slide": number, "reason": "empty"})
             continue
+        action = _dsk_export_action(cls.category)
+        existing = existing_clips.get(number)
+        if existing is not None:
+            job.log(f"slide {number}: clip already published ({existing.name}); not re-exported")
         page = {
             "slide": number,
             "thumb": thumbs.get(number),
@@ -1929,15 +1990,16 @@ def _run_dsk_export_propose(
             "movieCount": cls.movie_count,
             "isText": bool(cls.is_text),
             "skipReason": None,
-            "needsClip": False,
+            "needsClip": action == "clip",
+            "existingClip": existing.name if existing is not None else None,
         }
         page["decision"] = {
             "slide": number,
             "include": True,
-            "action": "export",
+            "action": action,
             "anchor": "auto",
             "keepSide": False,
-            "clip": None,
+            "clip": str(existing) if existing is not None else None,
         }
         pages.append(page)
     return {
@@ -1945,6 +2007,7 @@ def _run_dsk_export_propose(
         "path": str(path),
         "isStageDeck": is_stage_deck,
         "isFwDeck": is_fw_deck,
+        "hasManifest": manifest is not None,
         "slideRange": sorted(slide_range) if slide_range else None,
         "thumbDir": str(thumb_dir),
         "pages": pages,
@@ -1955,7 +2018,7 @@ def _run_dsk_export_propose(
 def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(proposal.get("path") or "")).expanduser()
     pages = proposal.get("pages") or []
-    included = sorted(int(p["slide"]) for p in pages if (p.get("decision") or {}).get("include"))
+    included = [p for p in pages if (p.get("decision") or {}).get("include")]
     if not included:
         raise ValueError("No slides selected to export; check Include on at least one page.")
     if not proposal.get("isStageDeck"):
@@ -1963,26 +2026,59 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             f"{path.name} is not a 1920x1080 DSK deck; stage PNG export needs a DSK-sized deck."
         )
     out_dir = path.parent
-    categories = {
-        c.number: c.category for c in classify_deck(path, text_slide_words=DEFAULT_TEXT_SLIDE_WORDS)
-    }
-    job.log(f"Exporting stage PNGs for slide(s) {included} to {out_dir}…")
-    expected_stage_counts = stage_counts(path, included)
-    assets = export_stage_pngs(
-        path,
-        included,
-        out_dir,
-        expected_stage_counts=expected_stage_counts,
-        categories=categories,
-        log=job.log,
+    categories = {int(p["slide"]): str(p.get("category") or "") for p in included}
+    clip_slides = sorted(
+        int(p["slide"]) for p in included if _dsk_export_action(categories[int(p["slide"])]) == "clip"
     )
-    job.log(f"Exported {len(assets)} stage PNG(s).")
+    stage_slides = sorted(int(p["slide"]) for p in included if int(p["slide"]) not in set(clip_slides))
+    clips: dict[int, Path] = {}
+    for p in included:
+        raw = (p.get("decision") or {}).get("clip")
+        n = int(p["slide"])
+        if raw and n in clip_slides and Path(raw).expanduser().is_file():
+            clips[n] = Path(raw).expanduser()
+    missing_clips = [n for n in clip_slides if n not in clips]
+    reused_clips = [n for n in clip_slides if n not in missing_clips]
+    existing = read_manifest(out_dir, deck=path)
+
+    if missing_clips:
+        job.log(f"Exporting clip(s) for movie slide(s) {missing_clips} to {out_dir}…")
+        for clip in export_dsk_slide_clips(path, missing_clips, out_dir, log=job.log):
+            clips[clip.slide] = clip.path
+        job.log(f"Exported {len(missing_clips)} clip(s).")
+    if clip_slides and not missing_clips:
+        job.log(f"Clip(s) for slide(s) {clip_slides} already published; not re-exported.")
+
+    assets: list = []
+    if stage_slides:
+        job.log(f"Exporting stage PNGs for slide(s) {stage_slides} to {out_dir}…")
+        expected_stage_counts = stage_counts(path, stage_slides)
+        assets = export_stage_pngs(
+            path,
+            stage_slides,
+            out_dir,
+            expected_stage_counts=expected_stage_counts,
+            categories=categories,
+            clips=clips,
+            write_manifest=False,
+            log=job.log,
+        )
+        job.log(f"Exported {len(assets)} stage PNG(s).")
+    write_manifest(out_dir, path, assets, categories=categories, clips=clips, existing=existing)
+    sequence = sorted(
+        [a.path.name for a in assets] + [c.name for c in clips.values()],
+    )
+    exported_clips = sorted(missing_clips)
     return {
         "phase": "done",
         "path": str(path),
         "pngDir": str(out_dir),
         "pngs": [a.path.name for a in assets],
+        "clips": {n: c.name for n, c in sorted(clips.items())},
+        "sequence": sequence,
         "skipped": proposal.get("skipped") or [],
+        "exportedClips": exported_clips,
+        "reusedClips": sorted(reused_clips),
     }
 
 

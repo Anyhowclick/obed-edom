@@ -570,13 +570,40 @@ class LiveBatch:
         if _keynote_running():
             raise RuntimeError("Keynote is already running; close it before an export batch (strictly serial).")
         self._lock_fd = _acquire_lock()
-        self._src_fingerprint = _fingerprint_source(self.deck)
-        self._poke = _DisplayPoke()
-        self._poke.start()
-        self.work = self.out_dir / f".dsk-export-{self.deck.stem}-{uuid.uuid4().hex}"
-        self.work.mkdir(parents=True, exist_ok=True)
-        self.scratch = self.work / self.deck.name
-        copy_keynote(self.deck, self.scratch)
+        try:
+            self._src_fingerprint = _fingerprint_source(self.deck)
+            self._poke = _DisplayPoke()
+            self._poke.start()
+            self.work = self.out_dir / f".dsk-export-{self.deck.stem}-{uuid.uuid4().hex}"
+            self.work.mkdir(parents=True, exist_ok=True)
+            self.scratch = self.work / self.deck.name
+            copy_keynote(self.deck, self.scratch)
+        except Exception:
+            try:
+                if self._poke is not None:
+                    self._poke.stop()
+            except Exception:
+                pass
+            try:
+                if self.work is not None:
+                    shutil.rmtree(self.work, ignore_errors=True)
+            except Exception:
+                pass
+            try:
+                if self._lock_fd is not None:
+                    _release_lock(self._lock_fd)
+            except Exception:
+                pass
+            try:
+                if _keynote_running():
+                    stem_name = self.deck.stem
+                    doc_name = self.deck.name
+                    if self.scratch is not None:
+                        stem_name, doc_name = self.scratch.stem, self.scratch.name
+                    _run_quit_script(stem_name, doc_name, self.out_dir)
+            except Exception:
+                pass
+            raise
         return self
 
     def run(
