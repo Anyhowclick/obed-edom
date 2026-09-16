@@ -357,6 +357,34 @@ def validate_alpha(
     return alpha_ok, bg_alpha_max, content_alpha_frac, transparent_frac
 
 
+def read_manifest(out_dir: Path) -> dict[str, Any] | None:
+    """The `manifest.json` in `out_dir`, or None when absent or unreadable."""
+    path = Path(out_dir) / "manifest.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def published_clips(out_dir: Path, manifest: Mapping[str, Any] | None = None) -> dict[int, Path]:
+    """Slide -> clip path for every manifest clip that still exists in `out_dir`."""
+    manifest = manifest if manifest is not None else read_manifest(out_dir)
+    found: dict[int, Path] = {}
+    for key, entry in ((manifest or {}).get("slides") or {}).items():
+        name = entry.get("clip") if isinstance(entry, dict) else None
+        if not name:
+            continue
+        candidate = Path(out_dir) / str(name)
+        try:
+            slide = int(key)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            found[slide] = candidate
+    return found
+
+
 def write_manifest(
     out_dir: Path,
     deck: Path,
@@ -365,22 +393,42 @@ def write_manifest(
     categories: Mapping[int, str],
     clips: Mapping[int, Path] | None = None,
     generated: str | None = None,
+    source_slides: Mapping[int, int] | None = None,
+    existing: Mapping[str, Any] | None = None,
 ) -> Path:
     """`generated` is omitted from the manifest when `None` (the default) -- callers
     that need it stamped pass an ISO timestamp explicitly. Serialised with
     `sort_keys=True` so the file is byte-identical across runs of an unchanged
-    export."""
+    export. `source_slides` maps a DSK slide to the FW slide it came from (Generator
+    output). `existing` is a previously written manifest for the same folder whose
+    slide entries are kept and updated, so a Generator manifest survives an Exporter
+    run and vice versa; `clips` entries win over an existing clip for the same slide."""
     clips = clips or {}
+    source_slides = source_slides or {}
     by_slide: dict[int, list[StageAsset]] = {}
     for asset in assets:
         by_slide.setdefault(asset.slide, []).append(asset)
 
     slides_out: dict[str, dict[str, Any]] = {}
+    for key, entry in ((existing or {}).get("slides") or {}).items():
+        if isinstance(entry, dict):
+            slides_out[str(key)] = dict(entry)
+    for slide in sorted(set(by_slide) | set(clips) | set(source_slides)):
+        entry = slides_out.get(str(slide), {})
+        if slide in categories:
+            entry["category"] = categories[slide]
+        elif "category" not in entry:
+            entry["category"] = ""
+        if slide in source_slides:
+            entry["source_slide"] = int(source_slides[slide])
+        clip = clips.get(slide)
+        if clip is not None:
+            entry["clip"] = Path(clip).name
+        slides_out[str(slide)] = entry
     for slide, stage_assets in by_slide.items():
         stage_assets = sorted(stage_assets, key=lambda a: a.stage_index)
-        entry: dict[str, Any] = {
-            "category": categories.get(slide, ""),
-            "stages": [
+        entry = slides_out[str(slide)]
+        entry["stages"] = [
                 {
                     "index": a.stage_index,
                     "file": a.path.name,
@@ -392,14 +440,11 @@ def write_manifest(
                     "alpha_route": "keynote-stage-png",
                 }
                 for a in stage_assets
-            ],
-        }
-        clip = clips.get(slide)
-        if clip is not None:
-            entry["clip"] = Path(clip).name
-        slides_out[str(slide)] = entry
+            ]
 
     geometry = {"width": assets[0].width, "height": assets[0].height} if assets else {}
+    if not geometry and existing and existing.get("geometry"):
+        geometry = dict(existing["geometry"])
     manifest: dict[str, Any] = {
         "deck": str(Path(deck)),
         "geometry": geometry,
