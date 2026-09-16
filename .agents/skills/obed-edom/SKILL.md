@@ -63,6 +63,14 @@ it only on those.
 Generate writes `output/<stem>/` containing the LW/DSK decks, `_CUED.docx`,
 `review.pdf`, and previews when applicable.
 
+DSK from a finalised FW wall deck is a three-step process: the dashboard DSK **Generator**
+builds an editable 1920×1080 deck under `output/<FW stem>/dsk/` (image/movie slides only;
+each movie item becomes a pure-video clip inserted behind the copied overlays, intermediates
+under `dsk/src/`), the operator edits the live objects in Keynote, then the DSK **Exporter**
+renders the deck as one flat asset sequence in slide order (`<stem>.NNN.SS.png` per build
+step, `<stem>.NNN.mov` per movie slide, always re-rendered) and removes the `src/`
+intermediates. The DSK deck is kept.
+
 **Never overwrite the source outline or dropped Keynote templates.**
 
 ---

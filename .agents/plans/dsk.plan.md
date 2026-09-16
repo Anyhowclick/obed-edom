@@ -88,12 +88,34 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   the target only once Keynote alpha output exists (§4 item 21, `.agents/research/
   kpf_renderer_probe_2026-09-12.md`). `SlideDecision.overlay_bake` stays an unused field
   until then.
+- 2026-09-16 (owner, after the r15 deck review): process is GENERATE → operator edits the live
+  objects in the DSK deck → EXPORT. Each FW movie item becomes its own PURE-VIDEO clip (only
+  that movie rendered, cropped to its rect ∩ centre panel) inserted at that item's fitted rect
+  through the same affine as every other copied object, BEHIND the live overlays. Scale stays
+  per slide (the source authors different sizes across a magic-move chain); consecutive FW
+  slides linked by an outgoing magic move share the chain head's auto anchor (explicit anchor
+  still wins). Clip slides get a DISSOLVE (interim: the Keynote-alpha work may later retain
+  source transitions). The Generator's clips are intermediates under `output/<FW stem>/dsk/src/`
+  (`<DSK stem>.NNN.MM.src.mov`), listed as `srcClips` in `manifest.json`; the Exporter ALWAYS
+  re-renders movie/mixed slides (never reuses) and deletes the `src/` intermediates after a
+  successful run. The DSK deck is retained. Supersedes the "one baked clip" rule above and the
+  #138 reuse rule.
 - Keynote hands-off rule: work on a copy under `~/Desktop` or repo `output/` (never
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
 - Owner's open design item besides the band placeholder: the "editing phase" (d6b) — per-slide
   operator nudges of position/size/crop over the auto defaults — is explicitly out of scope.
 
 ## 3. Measured facts that must not be re-learned
+
+- Keynote's movie insert is ASPECT-LOCKED: writing position, then width, then height re-derives
+  the unwritten dimension from the media aspect and the growth goes rightwards (r15: requested
+  622×350 came out 1244×350). Write size first, position LAST; the requested rect must match
+  the clip media aspect (`clip_sizes` guard ±0.5%).
+- `make new image/movie … with properties {file:…}` lands at the FRONT of `drawablesZOrder`;
+  nothing raises the copied objects afterwards. `_restore_clip_zorder` (modelled on
+  `_restore_crop_zorder`) moves inserted `TSD.MovieArchive` objects to the back offline.
+- r15 (2026-09-16): the copied overlay objects on FW 12/13 were placed correctly (centre); the
+  misplacement was the whole-panel clip sitting at ONE movie item's fitted rect.
 
 ### Band and slots
 - Band (read from the hand-built DSK reference, `dsk_assemble.DEFAULT_BAND`):
