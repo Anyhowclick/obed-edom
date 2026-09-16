@@ -29,6 +29,8 @@ from obed_edom.html_preview import (
     build_html_export_script,
     build_manifest,
     cache_key,
+    export_payload_identity,
+    header_export_contract,
     cleanup_preview,
     inject_player_diagnostics,
     current_keynote_identity,
@@ -140,17 +142,46 @@ def test_renderer_contract_fixture_matches_parser_constants():
     assert RENDERER_CONTRACT_VERSION == 1
 
 
+def test_header_accepts_live_major_version_fields():
+    assert header_export_contract({"majorVersion": 1, "minorVersion": 2}) == {"major": 1, "minor": 2}
+    assert header_export_contract({"major": 1, "minor": 2}) == {"major": 1, "minor": 2}
+
+
+def test_export_identity_reads_event_accessibility_and_drops_media():
+    payload = {
+        "assets": {},
+        "events": [
+            {
+                "accessibility": [
+                    {"text": "pasted-image.tiff"},
+                    {"text": "Matthew 18"},
+                    {
+                        "text": "19 Again, truly I tell you that if two of you on earth agree "
+                        "about anything they\\u2028ask for, it will be done for them\xa0by My Father in heaven. "
+                    },
+                    {"text": "Untitled.mov"},
+                ]
+            }
+        ],
+    }
+    assert export_payload_identity(payload) == (
+        "19 Again, truly I tell you that if two of you on earth agree about anything they ask for, it will be done for them by My Father in heaven.",
+        "Matthew 18",
+    )
+
+
 def test_slide_identity_fixture_names_accessibility_field():
     fixture = json.loads(
         Path("tests/fixtures/html_preview/slide_identity.json").read_text(encoding="utf-8")
     )
-    assert fixture["exportIdentityField"] == "accessibility[].text"
+    assert fixture["exportIdentityField"] == "events[].accessibility[].text"
     assert fixture["example"]["exportInOrder"] != fixture["example"]["exportReordered"]
 
 
 def test_parse_jsonish_accepts_json_and_local_header_jsonp():
     assert parse_jsonish('{"slideCount": 2}') == {"slideCount": 2}
     assert parse_jsonish('var local_header = {"slideCount": 2};') == {"slideCount": 2}
+    assert parse_jsonish('local_header( {"slideCount": 2} )') == {"slideCount": 2}
     assert parse_jsonish('local_slide={"ok": true}') == {"ok": True}
 
 
@@ -198,7 +229,7 @@ def test_refuse_same_length_reordered_export(tmp_path):
     write_fake_export(export, ["ccc", "aaa"], identities=[("gamma",), ("alpha",)])
     header, header_path = load_header(export)
     exported = discover_export_assets(export, ["ccc", "aaa"])
-    with pytest.raises(PreviewMappingError, match="not in source order"):
+    with pytest.raises(PreviewMappingError, match="do not match the source|not in source order"):
         build_manifest(header=header, exported=exported, **_manifest_kwargs(export, header_path))
 
 
@@ -214,6 +245,70 @@ def test_refuse_ambiguous_identical_identities(tmp_path):
     kwargs = _manifest_kwargs(export, header_path)
     kwargs["source"] = source
     with pytest.raises(PreviewMappingError, match="ambiguous"):
+        build_manifest(header=header, exported=exported, **kwargs)
+
+
+def test_empty_identities_may_align_at_matching_positions(tmp_path):
+    export = tmp_path / "html"
+    write_fake_export(export, ["aaa", "bbb", "ccc"], identities=[("alpha",), (), ()])
+    header, header_path = load_header(export)
+    exported = discover_export_assets(export, ["aaa", "bbb", "ccc"])
+    source = [
+        SourceSlide(1, "10", False, ("alpha",)),
+        SourceSlide(2, "11", False, ()),
+        SourceSlide(3, "12", False, ()),
+    ]
+    kwargs = _manifest_kwargs(export, header_path)
+    kwargs["source"] = source
+    manifest = build_manifest(header=header, exported=exported, **kwargs)
+    by_ord = {row["originalOrdinal"]: row for row in manifest["slides"]}
+    assert by_ord[1]["playerHash"] == "#0"
+    assert by_ord[2]["playerHash"] == "#1"
+    assert by_ord[3]["playerHash"] == "#2"
+
+
+def test_source_notes_may_outnumber_export_tokens(tmp_path):
+    export = tmp_path / "html"
+    write_fake_export(
+        export,
+        ["aaa", "ccc"],
+        identities=[("Guo Rong", "Ps Aizhen"), ()],
+    )
+    header, header_path = load_header(export)
+    exported = discover_export_assets(export, ["aaa", "ccc"])
+    source = [
+        SourceSlide(1, "10", False, ("Guo Rong", "Ps Aizhen", "Replace Guo Rong & Ps Aizhen")),
+        SourceSlide(2, "12", False, ("Make the second video faster.",)),
+    ]
+    kwargs = _manifest_kwargs(export, header_path)
+    kwargs["source"] = source
+    manifest = build_manifest(header=header, exported=exported, **kwargs)
+    by_ord = {row["originalOrdinal"]: row for row in manifest["slides"]}
+    assert by_ord[1]["playerHash"] == "#0"
+    assert by_ord[2]["playerHash"] == "#1"
+
+
+def test_export_identity_drops_pdf_media_names():
+    payload = {
+        "events": [
+            {"accessibility": [{"text": "CHC Kuching"}, {"text": "pasted-image.pdf"}]}
+        ]
+    }
+    assert export_payload_identity(payload) == ("CHC Kuching",)
+
+
+def test_refuse_empty_identity_when_export_has_text(tmp_path):
+    export = tmp_path / "html"
+    write_fake_export(export, ["aaa", "ccc"], identities=[(), ("gamma",)])
+    header, header_path = load_header(export)
+    exported = discover_export_assets(export, ["aaa", "ccc"])
+    source = [
+        SourceSlide(1, "10", False, ()),
+        SourceSlide(2, "12", False, ()),
+    ]
+    kwargs = _manifest_kwargs(export, header_path)
+    kwargs["source"] = source
+    with pytest.raises(PreviewMappingError, match="do not match the source"):
         build_manifest(header=header, exported=exported, **kwargs)
 
 
