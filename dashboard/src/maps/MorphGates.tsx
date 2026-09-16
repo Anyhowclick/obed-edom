@@ -121,28 +121,30 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
     },
     {
       id: "bearing",
-      label: "Same rotation",
-      ok: dBearing <= MORPH_MAX_DBEARING,
+      label: "Rotation",
+      ok: true,
       detail:
         dBearing <= MORPH_MAX_DBEARING
           ? fmtDeg(from.camera.bearing)
           : `${fmtDeg(from.camera.bearing)} → ${fmtDeg(to.camera.bearing)} · Δ ${fmtDeg(dBearing)}`,
-      tip: "Both cameras may be rotated, but their bearings must match for one shared plate.",
+      tip: "Keynote rotates the shared plate. A pitch change still needs a Movie fly.",
     },
     {
       id: "plate",
       label: "Shared plate",
       ok: plateOk,
       detail: plate
-        ? `${Math.round(plate.w)} × ${Math.round(plate.h)}${dZoom > 0.05 ? ` · Δz ${dZoom.toFixed(1)}` : ""}`
+        ? `${Math.round(plate.w)} × ${Math.round(plate.h)}${dZoom > 0.05 ? ` · Δz ${dZoom.toFixed(1)}` : ""}${
+            dBearing > MORPH_MAX_DBEARING ? ` · Δθ ${fmtDeg(dBearing)}` : ""
+          }`
         : "none",
-      tip: "One PNG on both slides. It may be larger than the frame — overflow is how zoom-in works. Capture is capped at 8192px.",
+      tip: "One PNG on both slides. It may be larger than the frame — overflow is how zoom-in and zoom-out work. Capture is capped at 8192px.",
     },
   ];
 }
 
 function gateHint(gates: Gate[]): string {
-  if (gates.every((gate) => gate.ok)) return "Keynote can pan this hop on one plate — land leaving the frame is fine.";
+  if (gates.every((gate) => gate.ok)) return "Keynote can pan, zoom, and rotate this hop on one plate — land leaving the frame is fine.";
   const failed = gates.filter((gate) => !gate.ok);
   if (failed.some((gate) => gate.id === "style" || gate.id === "countries" || gate.id === "layers")) {
     return "Map style, region highlights, or layers changed — that cannot Magic Move. Use Cut or Dissolve.";
@@ -150,7 +152,7 @@ function gateHint(gates: Gate[]): string {
   if (failed.every((gate) => gate.id === "plate")) {
     return "The two cameras do not share a usable plate — Export will use Movie.";
   }
-  return "Pitch, a rotation change, or 3D buildings need a Movie fly.";
+  return "Pitch or 3D buildings need a Movie fly.";
 }
 
 export function MorphGates({ from, to }: { from: MapsSlide; to: MapsSlide }) {

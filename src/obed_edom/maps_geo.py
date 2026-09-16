@@ -279,15 +279,18 @@ def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     from_cam = from_slide.get("camera") or {}
     to_cam = to_slide.get("camera") or {}
     pitch = max(abs(float(from_cam.get("pitch") or 0)), abs(float(to_cam.get("pitch") or 0)))
-    from_bearing = float(from_cam.get("bearing") or 0)
-    to_bearing = float(to_cam.get("bearing") or 0)
-    d_bearing = abs((to_bearing - from_bearing + 180.0) % 360.0 - 180.0)
     extruded = is_extruded_style(from_style) or is_extruded_style(to_style)
     buildings_on = buildings_layer_on(from_slide) or buildings_layer_on(to_slide)
-    # Zoom delta is not a Movie trigger: one shared plate may overflow the frame (zoom-in).
-    if (extruded and buildings_on) or pitch > 0.5 or d_bearing > 0.05:
+    # Zoom/bearing deltas are not Movie triggers: one shared plate may overflow
+    # (zoom) and Keynote rotates that plate (bearing). Pitch is still a 3D orbit.
+    if (extruded and buildings_on) or pitch > 0.5:
         return "movie"
     return "morph"
+
+
+def signed_bearing_delta(from_bearing: float, to_bearing: float) -> float:
+    """Shortest signed turn in (−180, 180]."""
+    return (float(to_bearing) - float(from_bearing) + 180.0) % 360.0 - 180.0
 
 
 def sea_overview_camera() -> dict[str, float]:

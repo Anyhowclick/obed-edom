@@ -204,12 +204,14 @@ def test_infer_hop_kind_distinguishes_explicit_empty_hidden_layers():
     assert infer_hop_kind(a, c) == "morph"
 
 
-def test_infer_hop_kind_allows_matching_rotation_and_any_zoom_delta():
+def test_infer_hop_kind_allows_rotation_change_and_any_zoom_delta():
     a = {"style": "positron", "highlights": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 22}}
     b = {"style": "positron", "highlights": [], "camera": {"zoom": 6, "pitch": 0, "bearing": 22}}
     assert infer_hop_kind(a, b) == "morph"
     b["camera"] = {**b["camera"], "bearing": 23}
-    assert infer_hop_kind(a, b) == "movie"
+    assert infer_hop_kind(a, b) == "morph"
+    b["camera"] = {**b["camera"], "bearing": 50}
+    assert infer_hop_kind(a, b) == "morph"
     b["camera"] = {**b["camera"], "bearing": 22, "zoom": 8.5}
     assert infer_hop_kind(a, b) == "morph"
 

@@ -33,6 +33,7 @@ from obed_edom.maps_geo import (
     inherit_hidden_layers,
     inverse_mercator_y,
     mercator_y,
+    signed_bearing_delta,
     slide_hidden_layers,
     world_width,
 )
@@ -257,6 +258,37 @@ def union_viewports(
     )
 
 
+def _rotate_offset(dx: float, dy: float, bearing: float) -> tuple[float, float]:
+    theta = math.radians(float(bearing) or 0.0)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    return cos_t * dx + sin_t * dy, -sin_t * dx + cos_t * dy
+
+
+def viewport_aabb(
+    camera: dict[str, Any],
+    width: float,
+    height: float,
+    plate_bearing: float,
+) -> tuple[float, float, float, float]:
+    """Camera viewport as an AABB in the plate's bearing frame."""
+    axis = normalized_viewport(camera, width, height, plate_bearing)
+    delta = signed_bearing_delta(plate_bearing, float(camera.get("bearing") or 0))
+    if abs(delta) < 1e-9:
+        return axis
+    cx = (axis[0] + axis[2]) / 2.0
+    cy = (axis[1] + axis[3]) / 2.0
+    hw = (axis[2] - axis[0]) / 2.0
+    hh = (axis[3] - axis[1]) / 2.0
+    xs: list[float] = []
+    ys: list[float] = []
+    for dx, dy in ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)):
+        rx, ry = _rotate_offset(dx, dy, delta)
+        xs.append(cx + rx)
+        ys.append(cy + ry)
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 def morph_plate_geom(
     cameras: list[dict[str, Any]],
     *,
@@ -271,7 +303,7 @@ def morph_plate_geom(
     if len(canvas) != len(cameras):
         canvas = [width] * len(cameras)
     bearing = float(cameras[0].get("bearing") or 0)
-    boxes = [normalized_viewport(cam, w, height, bearing) for cam, w in zip(cameras, canvas)]
+    boxes = [viewport_aabb(cam, w, height, bearing) for cam, w in zip(cameras, canvas)]
     union = (
         min(box[0] for box in boxes),
         min(box[1] for box in boxes),
@@ -334,8 +366,12 @@ def plate_placement(
     *,
     width: float | None = None,
     height: float | None = None,
-) -> dict[str, int]:
-    """Place the shared plate so this camera is full-bleed on its capture canvas."""
+) -> dict[str, Any]:
+    """Place the shared plate so this camera is full-bleed on its capture canvas.
+
+    `x`/`y` are the unrotated top-left. A non-zero `rotation` is Keynote's CCW
+    iWork angle (degrees) so Magic Move can spin the same PNG to a new bearing.
+    """
     width = float(width if width is not None else plate.get("width") or WALL_WIDTH)
     height = float(height if height is not None else plate.get("height") or WALL_HEIGHT)
     union = plate["union"]
@@ -349,14 +385,60 @@ def plate_placement(
     disp_h = float(plate["plateH"]) * scale
     img_x = -((cam[0] - union[0]) * world) * scale
     img_y = -((cam[1] - union[1]) * world) * scale
-    return {"x": whole(img_x), "y": whole(img_y), "w": whole(disp_w), "h": whole(disp_h)}
+    rotation = signed_bearing_delta(bearing, float(camera.get("bearing") or 0))
+    if abs(rotation) < 0.5:
+        rotation = 0.0
+    row: dict[str, Any] = {"x": whole(img_x), "y": whole(img_y), "w": whole(disp_w), "h": whole(disp_h)}
+    if rotation:
+        row["rotation"] = rotation
+    return row
+
+
+def _rotate_about(px: float, py: float, cx: float, cy: float, degrees: float) -> tuple[float, float]:
+    """Rotate (px, py) about (cx, cy) by Keynote's CCW-positive angle."""
+    theta = math.radians(float(degrees) or 0.0)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    dx, dy = px - cx, py - cy
+    return cx + cos_t * dx - sin_t * dy, cy + sin_t * dx + cos_t * dy
+
+
+def keynote_rotation(degrees: float) -> int:
+    """iWork `rotation` is an integer in 0–359."""
+    return int(round(float(degrees))) % 360
+
+
+def visual_origin(x: float, y: float, w: float, h: float, rotation: float) -> tuple[int, int]:
+    """AABB top-left after CCW rotation about the unrotated frame centre."""
+    if abs(float(rotation) or 0.0) < 0.5:
+        return whole(x), whole(y)
+    cx, cy = x + w / 2.0, y + h / 2.0
+    corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+    rot = [_rotate_about(px, py, cx, cy, rotation) for px, py in corners]
+    return whole(min(p[0] for p in rot)), whole(min(p[1] for p in rot))
+
+
+def orbit_item(item: dict[str, Any], origin: dict[str, Any], rotation: float) -> dict[str, Any]:
+    """Move `item` so rotating both objects about their own centres keeps them glued."""
+    if abs(float(rotation) or 0.0) < 0.5:
+        return item
+    ocx = float(origin["x"]) + float(origin["w"]) / 2.0
+    ocy = float(origin["y"]) + float(origin["h"]) / 2.0
+    icx = float(item["x"]) + float(item["w"]) / 2.0
+    icy = float(item["y"]) + float(item["h"]) / 2.0
+    ncx, ncy = _rotate_about(icx, icy, ocx, ocy, rotation)
+    next_item = dict(item)
+    next_item["x"] = ncx - float(item["w"]) / 2.0
+    next_item["y"] = ncy - float(item["h"]) / 2.0
+    next_item["rotation"] = rotation
+    return next_item
 
 
 def project_into_plate(
     lat: float,
     lon: float,
     plate: dict[str, Any],
-    placement: dict[str, int],
+    placement: dict[str, Any],
 ) -> tuple[float, float]:
     union = plate["union"]
     world = world_width(float(plate["zPlate"]))
@@ -371,6 +453,11 @@ def project_into_plate(
     scale_y = placement["h"] / float(plate["plateH"]) if plate["plateH"] else 1.0
     px = placement["x"] + (nx - union[0]) * world * scale_x
     py = placement["y"] + (ny - union[1]) * world * scale_y
+    rotation = float(placement.get("rotation") or 0)
+    if abs(rotation) >= 0.5:
+        cx = float(placement["x"]) + float(placement["w"]) / 2.0
+        cy = float(placement["y"]) + float(placement["h"]) / 2.0
+        px, py = _rotate_about(px, py, cx, cy, rotation)
     return px, py
 
 
@@ -981,7 +1068,7 @@ def _place_churches(
     churches: list[dict[str, Any]],
     *,
     plate: dict[str, Any] | None,
-    placement: dict[str, int] | None,
+    placement: dict[str, Any] | None,
     camera: dict[str, Any],
     wall: bool,
     movie: Path | None,
@@ -1013,6 +1100,9 @@ def _place_churches(
             theta = math.radians(bearing)
             copy_dx = math.cos(theta) * copy_world * scale_x
             copy_dy = -math.sin(theta) * copy_world * scale_y
+            rotation = float(placement.get("rotation") or 0)
+            if abs(rotation) >= 0.5:
+                copy_dx, copy_dy = _rotate_about(copy_dx, copy_dy, 0.0, 0.0, rotation)
         else:
             base_x, base_y = project_into_camera(lat, lon, camera, width=capture_w)
             copy_world = world_width(float(camera.get("zoom") or 0))
@@ -1158,7 +1248,8 @@ def _map_item(
     ox = slide_map_origin_x(slide)
     if plate is not None and plate_path is not None:
         geom = plate_placement(camera, plate, width=cap_w, height=cap_h)
-        return _item("image", geom["x"] + ox, geom["y"], geom["w"], geom["h"], path=str(plate_path), map=True), geom
+        extra = {"rotation": geom["rotation"]} if geom.get("rotation") else {}
+        return _item("image", geom["x"] + ox, geom["y"], geom["w"], geom["h"], path=str(plate_path), map=True, **extra), geom
     if still is None:
         raise FileNotFoundError("Missing export still for a non-morph slide")
     return _item("image", ox, 0, cap_w, cap_h, path=str(still), map=True), None
@@ -1227,6 +1318,9 @@ def build_slide_items(
                     country=True,
                 )
             )
+        rot = float(mapped.get("rotation") or 0)
+        if abs(rot) >= 0.5:
+            items[:] = [orbit_item(item, mapped, rot) if item.get("country") else item for item in items]
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
     if bg_movie is None or skip_landmarks:
@@ -1415,22 +1509,31 @@ def _emit_clear() -> list[str]:
     ]
 
 
-def _emit_adjust_map(item: dict[str, Any], cutouts: list[dict[str, Any]] | None = None) -> list[str]:
-    lines = [
-        "        try",
-        f"          set position of image 1 to {{{item['x']}, {item['y']}}}",
-        f"          set width of image 1 to {item['w']}",
-        f"          set height of image 1 to {item['h']}",
-        "        end try",
-    ]
-    for i, cutout in enumerate(cutouts or [], start=2):
-        lines += [
-            "        try",
-            f"          set position of image {i} to {{{cutout['x']}, {cutout['y']}}}",
-            f"          set width of image {i} to {cutout['w']}",
-            f"          set height of image {i} to {cutout['h']}",
-            "        end try",
+def _emit_image_layout(item: dict[str, Any], target: str) -> list[str]:
+    """Width/height/position, plus rotation when Magic Move must spin the plate."""
+    x, y, w, h = item["x"], item["y"], item["w"], item["h"]
+    rot = float(item.get("rotation") or 0)
+    kn = keynote_rotation(rot) if abs(rot) >= 0.5 else 0
+    if kn:
+        x, y = visual_origin(x, y, w, h, rot)
+        return [
+            f"        set width of {target} to {w}",
+            f"        set height of {target} to {h}",
+            f"        set rotation of {target} to {kn}",
+            f"        set position of {target} to {{{x}, {y}}}",
         ]
+    return [
+        f"        set position of {target} to {{{x}, {y}}}",
+        f"        set width of {target} to {w}",
+        f"        set height of {target} to {h}",
+    ]
+
+
+def _emit_adjust_map(item: dict[str, Any], cutouts: list[dict[str, Any]] | None = None) -> list[str]:
+    lines = ["        try", *("          " + line.strip() for line in _emit_image_layout(item, "image 1")), "        end try"]
+    for i, cutout in enumerate(cutouts or [], start=2):
+        layout = _emit_image_layout(cutout, f"image {i}")
+        lines += ["        try", *("          " + line.strip() for line in layout), "        end try"]
     last = len(cutouts or []) + 2
     lines += [
         "        try",
@@ -1462,9 +1565,7 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
         return [
             f'        set imgFile to (POSIX file "{path}") as alias',
             "        set img to make new image with properties {file:imgFile}",
-            f"        set position of img to {{{x}, {y}}}",
-            f"        set width of img to {w}",
-            f"        set height of img to {h}",
+            *_emit_image_layout(item, "img"),
         ]
     if kind == "movie":
         path = _as_escape(item["path"])

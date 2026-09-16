@@ -227,8 +227,8 @@ export const HOP_LABELS: Record<MapsHopKind, string> = {
 };
 
 export const HOP_TIPS: Record<MapsHopKind, string> = {
-  morph: "Keynote Magic Move on one shared map plate — pan/zoom, including overflow off-canvas.",
-  movie: "Keynote movie. Used for pitch, bearing changes, or 3D buildings. Fly phases are optional.",
+  morph: "Keynote Magic Move on one shared map plate — pan, zoom, and rotate, including overflow off-canvas.",
+  movie: "Keynote movie. Used for pitch or 3D buildings. Fly phases are optional.",
   dissolve: "Keynote Dissolve. Crossfade stills over the hop duration.",
   cut: "Instant cut. Used when the map style or region highlights change.",
 };
@@ -379,25 +379,40 @@ export function showCgBand(slide: { cg?: unknown }): boolean {
   return !slide.cg;
 }
 
-export function coerceHopKinds(doc: MapsDocument): MapsDocument {
+/** Strictest hop across LW and a CG split — same rule `coerceHopKinds` uses. */
+export function suggestedHopKindForLink(from: MapsSlide, to: MapsSlide): MapsHopKind {
+  let suggested = suggestedHopKind(from, to);
+  if (from.cg || to.cg) {
+    const cgSuggested = suggestedHopKind(slideForAudience(from, "cg"), slideForAudience(to, "cg"));
+    const rank = (kind: MapsHopKind) => (kind === "cut" ? 2 : kind === "movie" ? 1 : 0);
+    if (rank(cgSuggested) > rank(suggested)) suggested = cgSuggested;
+  }
+  return suggested;
+}
+
+export function coerceHopKinds(doc: MapsDocument, prev: MapsDocument | null = null): MapsDocument {
   const byId = new Map(doc.slides.map((slide) => [slide.id, slide]));
+  const prevById = prev ? new Map(prev.slides.map((slide) => [slide.id, slide])) : null;
   return {
     ...doc,
     links: doc.links.map((link) => {
       const from = byId.get(link.from);
       const to = byId.get(link.to);
       if (!from || !to) return link;
-      let suggested = suggestedHopKind(from, to);
-      if (from.cg || to.cg) {
-        const cgSuggested = suggestedHopKind(slideForAudience(from, "cg"), slideForAudience(to, "cg"));
-        const rank = (kind: MapsHopKind) => (kind === "cut" ? 2 : kind === "movie" ? 1 : 0);
-        if (rank(cgSuggested) > rank(suggested)) suggested = cgSuggested;
-      }
+      const suggested = suggestedHopKindForLink(from, to);
       let next: MapsLink = link;
       if (link.kind === "morph" && suggested !== "morph") {
         next = { ...link, kind: suggested };
         if (suggested === "movie") next.objectTransition = "fade";
         delete next.plateId;
+      } else if (link.kind === "movie" && suggested === "morph" && prevById) {
+        const oldFrom = prevById.get(link.from);
+        const oldTo = prevById.get(link.to);
+        const oldSuggested = oldFrom && oldTo ? suggestedHopKindForLink(oldFrom, oldTo) : "morph";
+        if (oldSuggested !== "morph") {
+          next = { ...link, kind: "morph" };
+          delete next.plateId;
+        }
       }
       if (next.kind !== "movie") {
         delete next.easing;
@@ -457,18 +472,22 @@ export function movieAppearanceMismatch(from: MapsSlide, to: MapsSlide): boolean
 export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   if (appearanceMismatch(from, to).length) return "cut";
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
-  const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const extruded = isExtrudedStyle(from.style) || isExtrudedStyle(to.style);
   const buildingsOn = buildingsLayerOn(from) || buildingsLayerOn(to);
-  // Zoom delta is not a Movie trigger: one shared plate may overflow the frame (zoom-in).
-  if ((extruded && buildingsOn) || pitch > MORPH_MAX_PITCH || dBearing > MORPH_MAX_DBEARING) {
+  // Zoom/bearing deltas are not Movie triggers: one shared plate may overflow
+  // (zoom, either direction) and Keynote rotates that plate (bearing).
+  if ((extruded && buildingsOn) || pitch > MORPH_MAX_PITCH) {
     return "movie";
   }
   return "morph";
 }
 
+export function bearingDeltaSigned(from: number, to: number): number {
+  return ((to - from + 540) % 360) - 180;
+}
+
 export function bearingDelta(from: number, to: number): number {
-  return Math.abs(((to - from + 540) % 360) - 180);
+  return Math.abs(bearingDeltaSigned(from, to));
 }
 
 export function plateFitsMorph(from: MapsSlide, to: MapsSlide): boolean {
@@ -629,6 +648,43 @@ function wallViewport(camera: MapsCamera, width = WALL_W, height = WALL_H, beari
   return { x0: rotated.x - nw / 2, y0: rotated.y - nh / 2, x1: rotated.x + nw / 2, y1: rotated.y + nh / 2 };
 }
 
+/** Axis-aligned box of a camera viewport in the plate's bearing frame. */
+function viewportAabb(
+  camera: MapsCamera,
+  width: number,
+  height: number,
+  plateBearing: number,
+): { x0: number; y0: number; x1: number; y1: number } {
+  const axis = wallViewport(camera, width, height, plateBearing);
+  const delta = bearingDeltaSigned(plateBearing, camera.bearing);
+  if (Math.abs(delta) < 1e-6) return axis;
+  const cx = (axis.x0 + axis.x1) / 2;
+  const cy = (axis.y0 + axis.y1) / 2;
+  const hw = (axis.x1 - axis.x0) / 2;
+  const hh = (axis.y1 - axis.y0) / 2;
+  const theta = (delta * Math.PI) / 180;
+  const cos = Math.cos(theta);
+  const sin = Math.sin(theta);
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const [dx, dy] of [
+    [-hw, -hh],
+    [hw, -hh],
+    [hw, hh],
+    [-hw, hh],
+  ] as const) {
+    const rx = cos * dx + sin * dy;
+    const ry = -sin * dx + cos * dy;
+    x0 = Math.min(x0, cx + rx);
+    y0 = Math.min(y0, cy + ry);
+    x1 = Math.max(x1, cx + rx);
+    y1 = Math.max(y1, cy + ry);
+  }
+  return { x0, y0, x1, y1 };
+}
+
 /** Union plate at the deeper zoom, same math as Keynote `morph_plate_geom`, then fitted to 8192.
  * Overflow on the slide is fine — the cap is the capture raster, not the FW frame. */
 export function morphPlatePx(
@@ -638,8 +694,8 @@ export function morphPlatePx(
   toW = WALL_W,
 ): { w: number; h: number } | null {
   const sharedBearing = from.bearing;
-  const a = wallViewport(from, fromW, WALL_H, sharedBearing);
-  const b = wallViewport(to, toW, WALL_H, sharedBearing);
+  const a = viewportAabb(from, fromW, WALL_H, sharedBearing);
+  const b = viewportAabb(to, toW, WALL_H, sharedBearing);
   const world = TILE_SIZE * 2 ** Math.max(from.zoom, to.zoom);
   let w = (Math.max(a.x1, b.x1) - Math.min(a.x0, b.x0)) * world;
   let h = (Math.max(a.y1, b.y1) - Math.min(a.y0, b.y0)) * world;

@@ -15,6 +15,7 @@ const compile = spawnSync(runtime, [
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 const {
   appearanceMismatch,
+  coerceHopKinds,
   inferHopKind,
   morphPlatePx,
   plateFitsMorph,
@@ -139,4 +140,44 @@ test("a wide-wall pan that used to exceed 8192 still morphs on a fitted plate", 
   assert.ok(plate);
   assert.ok(plate.w <= 8192 + 1e-6);
   assert.ok(plate.h <= 8192 + 1e-6);
+});
+
+test("a bearing change stays a Morph", () => {
+  const from = slide({ camera: { ...camera, bearing: 0 } });
+  const to = slide({ id: "t", camera: { ...camera, bearing: 30 } });
+  assert.equal(inferHopKind(from, to), "morph");
+  assert.equal(suggestedHopKind(from, to), "morph");
+});
+
+test("a bearing change grows the shared plate", () => {
+  const from = slide({ camera: { lat: 3, lon: 101, zoom: 8, bearing: 0, pitch: 0 } });
+  const aligned = slide({ id: "t", camera: { lat: 3, lon: 101, zoom: 8, bearing: 0, pitch: 0 } });
+  const turned = slide({ id: "t", camera: { lat: 3, lon: 101, zoom: 8, bearing: 30, pitch: 0 } });
+  const same = morphPlatePx(from.camera, aligned.camera, 7680, 7680);
+  const rotated = morphPlatePx(from.camera, turned.camera, 7680, 7680);
+  assert.ok(same && rotated);
+  assert.ok(rotated.w * rotated.h > same.w * same.h);
+});
+
+test("coerceHopKinds upgrades Movie to Magic Move once gates clear", () => {
+  const hidden = ["roadnames", "arrows", "labels", "waternames", "boundaries", "buildings"];
+  const on = slide({ id: "s1", style: "buildings3d" });
+  const on2 = slide({ id: "s2", style: "buildings3d" });
+  const off = slide({ id: "s1", style: "buildings3d", hiddenLayers: hidden });
+  const off2 = slide({ id: "s2", style: "buildings3d", hiddenLayers: hidden });
+  const movieLink = { from: "s1", to: "s2", kind: "movie", duration: 1, playWithoutClick: false, flight: "arc" };
+  const prev = { slides: [on, on2], links: [movieLink] };
+  const next = coerceHopKinds({ slides: [off, off2], links: [movieLink] }, prev);
+  assert.equal(next.links[0].kind, "morph");
+  assert.equal(next.links[0].flight, undefined);
+});
+
+test("coerceHopKinds keeps an explicit Movie when Magic Move was already available", () => {
+  const a = slide({ id: "s1" });
+  const b = slide({ id: "s2" });
+  const movieLink = { from: "s1", to: "s2", kind: "movie", duration: 1, playWithoutClick: false, flight: "arc" };
+  const prev = { slides: [a, b], links: [movieLink] };
+  const next = coerceHopKinds({ slides: [a, b], links: [movieLink] }, prev);
+  assert.equal(next.links[0].kind, "movie");
+  assert.equal(next.links[0].flight, "arc");
 });
