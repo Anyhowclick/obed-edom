@@ -51,34 +51,42 @@ def test_same_order_yes_and_no():
     assert same_order([], []) is True
 
 
-def test_front_block_ok_targets_at_end_in_both_arms():
+def test_front_block_ok_targets_at_end_in_b_regardless_of_a():
     targets = ["t1", "t2"]
     a = ["x", "y", "t1", "t2"]
     b = ["y", "x", "t1", "t2"]
-    assert front_block_ok(a, b, targets) is True
+    assert front_block_ok(b, targets) is True
     assert same_order(a, b) is False  # Gold: non-targets scramble, front block holds
+
+
+def test_front_block_ok_ignores_unraised_arm_a():
+    # Arm A is unraised by definition since #136 removed the GUI raise path.
+    targets = ["t1", "t2"]
+    a_unraised = ["t1", "t2", "x"]
+    b_raised = ["x", "t1", "t2"]
+    assert front_block_ok(b_raised, targets) is True
+    assert same_order(a_unraised, b_raised) is False
 
 
 def test_front_block_ok_fails_when_block_differs():
     targets = ["t1", "t2"]
-    a = ["x", "t1", "t2"]
     b = ["x", "t2", "t1"]
-    assert front_block_ok(a, b, targets) is False
+    assert front_block_ok(b, targets) is False
 
 
 def test_front_block_ok_fails_when_targets_are_not_the_suffix():
     targets = ["t1", "t2"]
     buried = ["t1", "t2", "x"]
-    assert front_block_ok(buried, buried, targets) is False
+    assert front_block_ok(buried, targets) is False
     assert same_order(buried, buried) is True
 
 
 def test_front_block_ok_empty_targets_is_vacuous_pass():
-    assert front_block_ok(["a"], ["b"], []) is True
+    assert front_block_ok(["b"], []) is True
 
 
 def test_front_block_ok_rejects_short_orders():
-    assert front_block_ok(["t1"], ["t1", "t2"], ["t1", "t2"]) is False
+    assert front_block_ok(["t1"], ["t1", "t2"]) is False
 
 
 def test_zorder_slide_verdict_missing_orders_fail_both():

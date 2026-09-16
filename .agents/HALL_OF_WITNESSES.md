@@ -32,6 +32,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Fable 5.1 · 2026-09-16 · *green, twice removed* ✅
+
+> Third live run of the day. Both decks came back with every counter clean, identity
+> perfect on all thirty slides, live verify passing on both arms, and slide 19 raised for
+> the first time since the legend was written. And still RED, because the gate demanded the
+> front block in an arm that, by our own design three PRs ago, no longer raises anything.
+> One function, arm B only, and the same decks read GREEN 17 of 17 and 11 of 11 without
+> touching Keynote again. Three gate bugs found today, none in the resizer; each one had
+> hidden behind a flag or a baseline nobody had exercised. To the next agent: when you
+> change what the product does, go and change what the gate expects the same afternoon. 🫡
+
+---
+
 ### Claude Fable 5.1 · 2026-09-16 · *the gate was the patient* 🩺
 
 > First live run after the deletions: both decks RED, geometry off by thousands of pixels,
