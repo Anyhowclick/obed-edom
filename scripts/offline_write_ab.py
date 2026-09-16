@@ -1253,29 +1253,29 @@ def same_order(ids_a: list[str], ids_b: list[str]) -> bool:
     return list(ids_a) == list(ids_b)
 
 
-def front_block_ok(ids_a: list[str], ids_b: list[str], targets: list[str]) -> bool:
-    """Target ids occupy the final ``|T|`` slots in the same order in both arms."""
+def front_block_ok(ids_b: list[str], targets: list[str]) -> bool:
+    """Target ids occupy the final ``|T|`` slots, in order, in arm B.
+
+    Arm A only (checking A's order too) is unraised by definition since #136
+    removed the GUI raise path — B is the bar. A-vs-B ``SAME_ORDER`` stays
+    observational.
+    """
     block = list(targets)
     if not block:
         return True
     n = len(block)
-    return (
-        len(ids_a) >= n
-        and len(ids_b) >= n
-        and list(ids_a[-n:]) == block
-        and list(ids_b[-n:]) == block
-    )
+    return len(ids_b) >= n and list(ids_b[-n:]) == block
 
 
 def zorder_slide_verdict(
     ids_a: list[str] | None, ids_b: list[str] | None, targets: list[str],
 ) -> dict[str, Any]:
-    """Per-slide ``SAME_ORDER`` / ``FRONT_BLOCK_OK`` pair. Missing orders fail both."""
+    """Per-slide ``SAME_ORDER`` (A-vs-B, observational) / ``FRONT_BLOCK_OK`` (B-only)."""
     if ids_a is None or ids_b is None:
         return {"sameOrder": False, "frontBlockOk": False, "targets": list(targets)}
     return {
         "sameOrder": same_order(ids_a, ids_b),
-        "frontBlockOk": front_block_ok(ids_a, ids_b, targets),
+        "frontBlockOk": front_block_ok(ids_b, targets),
         "targets": list(targets),
     }
 

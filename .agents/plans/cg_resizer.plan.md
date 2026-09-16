@@ -115,16 +115,17 @@ Gate RAISE10 slides `40,55,56,109,110,123-128` and Gold, piece-2 contract: arm A
 Do not weaken eligibility to make the gate green. A slide that cannot prove a unique safe archive
 order stays on the GUI path.
 
-The owner-run live gate after `w2-ambiguous-sig-positional` is one default-env build of RAISE10
-(`40,55,56,109,110,123-128`) + Gold, re-compared Keynote-free against the banked 2026-09-15
-`B_flagged` arms via `--reuse-a`/`--reuse-b` (v2 records load). Bars: identity 100%,
-`FRONT_BLOCK_OK` all eligible, 0.00px, `zorderGui=[]` on **both** Gold and RAISE10 (this is the
-change: Gold was `[19]`), `restore_source_builds` identical. Two caveats: the banked
-`A_unflagged` never raised slide 19, so `SAME_ORDER(A-vs-B)=no` there is the intended new
-difference, observational only; and `FRONT_BLOCK_OK` on slide 19 may read inconclusive against
-that same unraised arm-A bank rather than RED — settle it with a direct read of the new B deck's
-slide-19 tail (last 66 `drawablesZOrder` ids == the 66 resolved ids, ascending pre-raise z), or
-gate a fresh A/A pair instead of reusing the 2026-09-15 A.
+RUN 2026-09-16 19:22–19:53 at main 6bb4aeb (#141 resolver + #142 gate fixes), fresh two-arm Gold +
+RAISE10, live verify on: identity 100% every slide; live verify PASS both arms (coverage 9→2
+slides on Gold, 1→0 on RAISE10 — see todo live-verify-zorder-bridge); B counters
+unresolved/refused/lost 0, zorderGui [] on both; Gold slide 19 raised (17 slides patched, 181 stat
+targets); FRONT_BLOCK_OK 17/17 Gold, 11/11 RAISE10 under the arm-B-only bar
+(fix/gate-front-block-b-only — arm A is unraised since #136, the gate had still required the block
+in both arms). Bank: output/bank/2026-09-16/fresh-gate/. This is the live acceptance of the W2
+deletions and the shared-signature resolver.
+
+Gate rule: `FRONT_BLOCK_OK` is measured on arm B only; `SAME_ORDER` A-vs-B stays observational; an
+A-vs-A control needs a second same-code A deck.
 
 Live verify excludes z-order-patched slides until the kindIndex bridge covers permutations
 (todo id `live-verify-zorder-bridge`, pending). Gate arms must share preview-cache provenance:
