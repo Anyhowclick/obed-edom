@@ -416,7 +416,7 @@ def test_manifest_is_deterministic_sort_keys(tmp_path):
     assert list(json.loads(text1).keys()) == sorted(json.loads(text1).keys())
 
 
-# --- read_manifest / published_clips ----------------------------------------------
+# --- read_manifest ------------------------------------------------------------------
 
 
 def test_read_manifest_absent(tmp_path):
@@ -458,66 +458,6 @@ def test_read_manifest_deck_match_returned(tmp_path):
 def test_read_manifest_no_deck_field_ignored_when_deck_requested(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({"slides": {}}))
     assert dse.read_manifest(tmp_path, deck=tmp_path / "Deck.key") is None
-
-
-def test_published_clips_skips_missing_file(tmp_path):
-    (tmp_path / "Deck.001.mov").write_bytes(b"mov")
-    manifest = {
-        "slides": {
-            "1": {"clip": "Deck.001.mov"},
-            "2": {"clip": "Deck.002.mov"},
-        }
-    }
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {1: tmp_path / "Deck.001.mov"}
-
-
-def test_published_clips_skips_non_int_keys(tmp_path):
-    (tmp_path / "Deck.001.mov").write_bytes(b"mov")
-    (tmp_path / "Deck.x.mov").write_bytes(b"mov")
-    manifest = {
-        "slides": {
-            "1": {"clip": "Deck.001.mov"},
-            "x": {"clip": "Deck.x.mov"},
-        }
-    }
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {1: tmp_path / "Deck.001.mov"}
-
-
-def test_published_clips_reads_manifest_from_disk_when_omitted(tmp_path):
-    (tmp_path / "Deck.001.mov").write_bytes(b"mov")
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"slides": {"1": {"clip": "Deck.001.mov"}}})
-    )
-    assert dse.published_clips(tmp_path, "Deck") == {1: tmp_path / "Deck.001.mov"}
-
-
-def test_published_clips_rejects_absolute_path(tmp_path):
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    other = elsewhere / "evil.mov"
-    other.write_bytes(b"mov")
-    manifest = {"slides": {"1": {"clip": str(other)}}}
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {}
-
-
-def test_published_clips_rejects_traversal(tmp_path):
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    (tmp_path / "Deck.001.mov").write_bytes(b"mov")
-    manifest = {"slides": {"1": {"clip": "../Deck.001.mov"}}}
-    assert dse.published_clips(out_dir, "Deck", manifest) == {}
-
-
-def test_published_clips_rejects_other_stem(tmp_path):
-    (tmp_path / "Other.001.mov").write_bytes(b"mov")
-    manifest = {"slides": {"1": {"clip": "Other.001.mov"}}}
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {}
-
-
-def test_published_clips_rejects_wrong_name_format(tmp_path):
-    (tmp_path / "Deck.weird.mov").write_bytes(b"mov")
-    manifest = {"slides": {"1": {"clip": "Deck.weird.mov"}}}
-    assert dse.published_clips(tmp_path, "Deck", manifest) == {}
 
 
 # --- write_manifest existing/source_slides merge ------------------------------------
@@ -643,6 +583,118 @@ def test_manifest_source_slides_added_for_new_entry(tmp_path):
     )
     manifest = json.loads(path.read_text())
     assert manifest["slides"]["4"]["source_slide"] == 44
+
+
+def test_manifest_src_clips_written_for_generator_entry(tmp_path):
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "movie"},
+        source_slides={4: 44}, src_clips={4: ["src/Deck.004.01.src.mov", "src/Deck.004.02.src.mov"]},
+    )
+    manifest = json.loads(path.read_text())
+    assert manifest["slides"]["4"]["srcClips"] == ["src/Deck.004.01.src.mov", "src/Deck.004.02.src.mov"]
+    assert "clip" not in manifest["slides"]["4"]
+
+
+def test_manifest_generator_mode_drops_stale_clip_after_exporter(tmp_path):
+    existing = {
+        "slides": {
+            "4": {"category": "movie", "source_slide": 44, "clip": "Deck.004.mov"},
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "movie"},
+        source_slides={4: 44}, src_clips={4: ["src/Deck.004.01.src.mov"]},
+        generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert "clip" not in manifest["slides"]["4"]
+    assert manifest["slides"]["4"]["srcClips"] == ["src/Deck.004.01.src.mov"]
+
+
+def test_manifest_generator_mode_drops_src_clips_for_movie_to_static_regeneration(tmp_path):
+    existing = {
+        "slides": {
+            "4": {
+                "category": "movie", "source_slide": 44,
+                "srcClips": ["src/Deck.004.01.src.mov"], "clip": "Deck.004.mov",
+            },
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "static"},
+        source_slides={4: 44}, generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert "srcClips" not in manifest["slides"]["4"]
+    assert "clip" not in manifest["slides"]["4"]
+    assert manifest["slides"]["4"]["category"] == "static"
+
+
+def test_manifest_generator_mode_drops_exporter_stages_for_regenerated_slide(tmp_path):
+    existing = {
+        "slides": {
+            "4": {
+                "category": "static", "source_slide": 44,
+                "stages": [{"index": 1, "file": "Deck.004.01.png"}],
+            },
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "static"},
+        source_slides={4: 44}, generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert "stages" not in manifest["slides"]["4"]
+
+
+def test_manifest_generator_mode_drops_ordinal_absent_from_rerun(tmp_path):
+    existing = {
+        "slides": {
+            "4": {"category": "movie", "source_slide": 44, "clip": "Deck.004.mov"},
+            "5": {"category": "static", "source_slide": 45},
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "movie"},
+        source_slides={4: 44}, generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert "4" in manifest["slides"]
+    assert "5" not in manifest["slides"]
+
+
+def test_manifest_generator_mode_fewer_slides_prunes_tail(tmp_path):
+    existing = {
+        "slides": {
+            "1": {"category": "static", "source_slide": 1},
+            "2": {"category": "static", "source_slide": 2},
+            "3": {"category": "static", "source_slide": 3},
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={1: "static", 2: "static"},
+        source_slides={1: 1, 2: 2}, generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert set(manifest["slides"]) == {"1", "2"}
+
+
+def test_manifest_drop_src_removes_src_clips_from_every_slide(tmp_path):
+    existing = {
+        "slides": {
+            "4": {"category": "movie", "source_slide": 44, "srcClips": ["src/Deck.004.01.src.mov"]},
+            "5": {"category": "static", "source_slide": 45, "srcClips": ["src/Deck.005.01.src.mov"]},
+        },
+    }
+    clip = tmp_path / "Deck.004.mov"
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "movie"},
+        clips={4: clip}, existing=existing, drop_src=True,
+    )
+    manifest = json.loads(path.read_text())
+    assert "srcClips" not in manifest["slides"]["4"]
+    assert "srcClips" not in manifest["slides"]["5"]
+    assert manifest["slides"]["4"]["clip"] == "Deck.004.mov"
 
 
 def test_manifest_geometry_falls_back_to_existing_when_no_assets(tmp_path):
@@ -908,6 +960,43 @@ def test_export_stage_pngs_failure_leaves_previous_manifest_untouched(tmp_path, 
         )
 
     assert json.loads(manifest_path.read_text()) == original
+
+
+def test_export_stage_pngs_err_line_surfaces_errnum_and_message(tmp_path, monkeypatch):
+    deck = tmp_path / "Deck.key"
+    deck.touch()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    class _ErrBatch:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            self.work = out_dir / ".work"
+            self.work.mkdir(parents=True, exist_ok=True)
+            self.scratch = self.work / "Deck.key"
+            self.scratch.touch()
+            return self
+
+        def run(self, script_path, on_progress=None):
+            return subprocess.CompletedProcess(
+                ["osascript"], 1, "", "ERR\t3\t-1712\tmsg\n"
+            )
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(dse, "LiveBatch", _ErrBatch)
+    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
+    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+
+    with pytest.raises(RuntimeError, match=r"errNum -1712.*msg"):
+        dse.export_stage_pngs(
+            deck, [2], out_dir,
+            expected_stage_counts={2: 3},
+            categories={2: "built"},
+        )
 
 
 def test_export_stage_pngs_multi_slide_each_own_folder(tmp_path, monkeypatch):

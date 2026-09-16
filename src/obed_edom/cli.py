@@ -427,6 +427,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
         SlideDecision,
         assemble_dsk_deck,
     )
+    from obed_edom.dsk_movie_export import _ffprobe
     from obed_edom.offline_inspect import offline_wall_payload
 
     source = Path(args.keynote).expanduser()
@@ -566,6 +567,18 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             return 1
         clips[slide_no] = clip_path
 
+    clip_sizes: dict[str, tuple[int, int]] = {}
+    for clip_path in clips.values():
+        try:
+            probe_width, probe_height, _fps, _duration = _ffprobe(clip_path)
+        except Exception as exc:
+            print(f"Bad --clip; could not probe {clip_path}: {exc}", file=sys.stderr)
+            return 1
+        if probe_width <= 0 or probe_height <= 0:
+            print(f"Bad --clip; {clip_path} has zero dimensions.", file=sys.stderr)
+            return 1
+        clip_sizes[str(clip_path)] = (probe_width, probe_height)
+
     decisions = {
         n: SlideDecision(
             n, "both" if n in clips else "in_deck", anchor=anchors.get(n, "auto"), keep_side=n in include_side
@@ -584,6 +597,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             decisions=decisions,
             reference_deck=reference_deck,
             clips=clips,
+            clip_sizes=clip_sizes,
             log=print,
             layout_policy=args.layout,
             black_layout_names=black_layout_names,

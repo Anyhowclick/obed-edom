@@ -46,6 +46,8 @@ type DskResult = {
   slidesKept?: number[];
   warnings?: string[];
   overflows?: string[];
+  clips?: Record<string, string[]>;
+  ordinals?: Record<string, number>;
 };
 
 export function DskGenerator() {
@@ -211,6 +213,11 @@ export function DskGenerator() {
           <p className="note path-note">
             Wrote {result.deckPath}
             {result.slidesKept ? ` — ${result.slidesKept.length} slide(s)` : ""}
+          </p>
+          <p className="note">
+            The deck is editable — each movie item became a pure-video clip inserted behind the
+            live objects. Export it with the Exporter tab to bake the live overlays and produce
+            the final .mov(s).
           </p>
           <div className="actions">
             <button className="btn secondary" type="button" onClick={() => reveal(result.deckPath!)}>

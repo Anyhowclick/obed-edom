@@ -35,8 +35,8 @@ _RSS_WATCHDOG_INTERVAL_S = 2
 _APPLESCRIPT_TIMEOUT_S = 3600
 _KEYNOTE_QUIT_WAIT_S = 30
 _KEYNOTE_QUIT_POLL_S = 0.5
-_PROGRESS_RE = re.compile(r"^OBED\t(\d+)\t")
-_ERROR_RE = re.compile(r"^ERR\t(\d+)\t(-?\d+)\t(.*)$")
+_PROGRESS_RE = re.compile(r"^OBED\t(\d+)(?:\t(\d+))?\t")
+_ERROR_RE = re.compile(r"^ERR\t(\d+)(?:\t(\d+))?\t(-?\d+)\t(.*)$")
 
 DEFAULT_BLACK_LAYOUT_NAMES: tuple[str, ...] = ("BLACK BLANK", "Black", "BLACK", "black", "Blank Black")
 DEFAULT_TRANSPARENT_LAYOUT_NAMES: tuple[str, ...] = ("Blank Black",)
@@ -79,11 +79,13 @@ def _run_osascript(
     *,
     timeout: int = _APPLESCRIPT_TIMEOUT_S,
     register_proc: Callable[[subprocess.Popen], None] | None = None,
-    on_progress: Callable[[int], None] | None = None,
+    on_progress: Callable[..., None] | None = None,
 ) -> subprocess.CompletedProcess:
     """Runs osascript via an owned `Popen` (so a watchdog can `terminate()` it). Exactly one
     reader thread per pipe drains stdout/stderr live -- Keynote's `log` writes to stderr, not
     stdout -- and `on_progress` fires as each `OBED` marker is received, not after the fact.
+    `on_progress` is called as `(slide)` for a whole-slide marker (`OBED\\t<slide>\\t...`) or
+    `(slide, movie_index)` for a per-movie marker (`OBED\\t<slide>\\t<movie_index>\\t...`).
     Never call `Popen.communicate()` here: it would spawn its own reader on the same pipes."""
     proc = subprocess.Popen(
         ["osascript", str(script_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -105,7 +107,11 @@ def _run_osascript(
             if on_progress is not None:
                 match = _PROGRESS_RE.match(line)
                 if match:
-                    on_progress(int(match.group(1)))
+                    slide = int(match.group(1))
+                    if match.group(2) is None:
+                        on_progress(slide)
+                    else:
+                        on_progress(slide, int(match.group(2)))
 
     stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)

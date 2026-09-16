@@ -7,8 +7,8 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping
-from dataclasses import replace
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -44,12 +44,12 @@ from obed_edom.dsk_assemble import (
     SlideDecision,
     assemble_dsk_deck,
 )
-from obed_edom.dsk_live import keynote_running, quit_and_wait_for_exit
-from obed_edom.dsk_movie_export import clip_name, export_dsk_slide_clips, export_slide_clips
-from obed_edom.dsk_plan import classify_deck
+from obed_edom.dsk_live import guard_out_dir, keynote_running, quit_and_wait_for_exit
+from obed_edom.dsk_movie_export import _ffprobe, export_dsk_slide_clips, export_slide_clips
+from obed_edom.dsk_plan import ItemId, classify_deck
+from obed_edom.map_remap import Rect
 from obed_edom.dsk_stage_export import (
     export_stage_pngs,
-    published_clips,
     read_manifest,
     stage_counts,
     write_manifest,
@@ -1857,65 +1857,120 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     out_dir = _dsk_output_dir(path)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{path.stem}_DSK.key"
+    src_dir = out_dir / "src"
 
-    clips: dict[int, Path] = {}
+    clip_slides = sorted(int(p["slide"]) for p in included if p.get("needsClip"))
+    operator_clips: dict[int, Path] = {}
     for page in included:
         raw_clip = (page.get("decision") or {}).get("clip")
         if raw_clip:
-            clips[int(page["slide"])] = Path(raw_clip).expanduser()
-    missing_clip_slides = sorted(
-        int(p["slide"]) for p in included if p.get("needsClip") and int(p["slide"]) not in clips
-    )
-    if missing_clip_slides:
-        job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")
-        clip_results = export_slide_clips(
+            operator_clips[int(page["slide"])] = Path(raw_clip).expanduser()
+    missing_clip_slides = [n for n in clip_slides if n not in operator_clips]
+
+    nested_clips: dict[int, dict[ItemId, Path]] = {}
+    clip_sizes: dict[str, tuple[int, int]] = {}
+    clip_crops: dict[int, dict[ItemId, Rect]] = {}
+    if operator_clips:
+        classes = {c.number: c for c in classify_deck(path, payload=offline_wall_payload(path))}
+        for number, clip_path in operator_clips.items():
+            movie_ids = sorted(item for item in classes[number].kept if item[0] == "movie")
+            if not movie_ids:
+                raise ValueError(f"Slide {number}: operator-supplied clip but no movie item found")
+            if len(movie_ids) > 1:
+                raise ValueError(
+                    f"Slide {number}: operator-supplied clip cannot cover {len(movie_ids)} kept "
+                    "movies; supply one clip per movie item instead"
+                )
+            nested_clips.setdefault(number, {})[movie_ids[0]] = clip_path
+            try:
+                probe_width, probe_height, _fps, _duration = _ffprobe(clip_path)
+            except Exception as exc:
+                raise ValueError(f"Slide {number}: could not probe operator-supplied clip {clip_path}: {exc}") from exc
+            if probe_width <= 0 or probe_height <= 0:
+                raise ValueError(f"Slide {number}: operator-supplied clip {clip_path} has zero dimensions")
+            clip_sizes[str(clip_path)] = (probe_width, probe_height)
+
+    tmp_src_dir: Path | None = None
+    publish_journal: list[_PublishedClip] = []
+    stale_src_clips: set[str] = set()
+    try:
+        if missing_clip_slides:
+            tmp_src_dir = out_dir / f".src-{uuid4().hex}"
+            guard_out_dir(tmp_src_dir, path)
+            job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")
+            clip_results = export_slide_clips(
+                path,
+                missing_clip_slides,
+                tmp_src_dir,
+                per_movie=True,
+                include_side=include_side & set(missing_clip_slides),
+                log=job.log,
+            )
+            for clip in clip_results:
+                nested_clips.setdefault(clip.slide, {})[clip.movie_id] = clip.path
+                clip_sizes[str(clip.path)] = (clip.width, clip.height)
+                if clip.crop_rect is not None:
+                    clip_crops.setdefault(clip.slide, {})[clip.movie_id] = clip.crop_rect
+
+        job.log(f"Assembling {out_path.name} (content-only={content_only})…")
+        result = assemble_dsk_deck(
             path,
-            missing_clip_slides,
-            out_dir,
-            include_side=include_side & set(missing_clip_slides),
+            out_path,
+            decisions=decisions,
+            reference_deck=reference_deck,
+            clips=nested_clips,
+            clip_sizes=clip_sizes,
+            clip_crops=clip_crops,
+            text_slide_words=words,
+            content_only=content_only,
             log=job.log,
         )
-        for clip in clip_results:
-            clips[clip.slide] = clip.path
-
-    job.log(f"Assembling {out_path.name} (content-only={content_only})…")
-    result = assemble_dsk_deck(
-        path,
-        out_path,
-        decisions=decisions,
-        reference_deck=reference_deck,
-        clips=clips,
-        text_slide_words=words,
-        content_only=content_only,
-        log=job.log,
-    )
-    job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
-    published = _publish_generator_clips(result.path, out_dir, clips, result.ordinals)
-    published_by_ordinal = {
-        result.ordinals[fw]: p for fw, p in published.items() if fw in result.ordinals
-    }
-    categories = {
-        result.ordinals[n]: str(p.get("category") or "")
-        for p in included
-        for n in [int(p["slide"])]
-        if n in result.ordinals
-    }
-    write_manifest(
-        out_dir,
-        result.path,
-        [],
-        categories=categories,
-        clips=published_by_ordinal,
-        source_slides={o: n for n, o in result.ordinals.items()},
-        existing=read_manifest(out_dir, deck=result.path),
-    )
+        job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
+        existing_manifest = read_manifest(out_dir, deck=result.path)
+        previous_src_clips: set[str] = set()
+        for entry in ((existing_manifest or {}).get("slides") or {}).values():
+            previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
+        published = _publish_generator_clips(
+            job, result.path, src_dir, nested_clips, result.ordinals, publish_journal, tmp_src_dir
+        )
+        categories = {
+            result.ordinals[n]: str(p.get("category") or "")
+            for p in included
+            for n in [int(p["slide"])]
+            if n in result.ordinals
+        }
+        new_manifest_path = write_manifest(
+            out_dir,
+            result.path,
+            [],
+            categories=categories,
+            source_slides={o: n for n, o in result.ordinals.items()},
+            src_clips=published,
+            generator=True,
+            existing=existing_manifest,
+        )
+        new_manifest = json.loads(new_manifest_path.read_text())
+        current_src_clips: set[str] = set()
+        for entry in (new_manifest.get("slides") or {}).values():
+            current_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
+        stale_src_clips = previous_src_clips - current_src_clips
+        _discard_publish_backups(publish_journal)
+    except Exception:
+        _rollback_published_clips(job, publish_journal)
+        raise
+    finally:
+        if tmp_src_dir is not None and tmp_src_dir.is_dir():
+            shutil.rmtree(tmp_src_dir, ignore_errors=True)
+            job.log(f"Removed clip export dir {tmp_src_dir}")
+    if stale_src_clips:
+        _delete_managed_src_clips(job, out_dir, src_dir, stale_src_clips)
     return {
         "phase": "done",
         "path": str(path),
         "deckPath": str(result.path),
         "slidesKept": list(result.slides_kept),
         "ordinals": result.ordinals,
-        "clips": {o: str(p) for o, p in published_by_ordinal.items()},
+        "clips": published,
         "skipped": proposal.get("skipped") or [],
         "warnings": list(result.warnings),
         "overflows": list(result.overflows),
@@ -1926,27 +1981,159 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@dataclass
+class _PublishedClip:
+    """One clip written by `_publish_generator_clips`. `backup` is the sibling a
+    pre-existing managed destination was renamed to before being overwritten, or
+    `None` for a destination that did not previously exist."""
+
+    dest: Path
+    backup: Path | None
+
+
 def _publish_generator_clips(
-    deck: Path, out_dir: Path, clips: Mapping[int, Path], ordinals: Mapping[int, int]
-) -> dict[int, Path]:
-    """Names each inserted clip by its DSK slide number, `<DSK stem>.NNN.mov`, in the
-    deck's flat asset folder: the same sequence the Exporter's stage PNGs use, so
-    images and clips interleave in slide order. A clip already inside `out_dir` is
-    moved; an operator-supplied one elsewhere is copied. Returns FW slide -> path."""
-    published: dict[int, Path] = {}
-    for fw_slide, src in clips.items():
+    job: Job,
+    deck: Path,
+    src_dir: Path,
+    clips: Mapping[int, Mapping[ItemId, Path]],
+    ordinals: Mapping[int, int],
+    journal: list[_PublishedClip],
+    movable_root: Path | None,
+) -> dict[int, list[str]]:
+    """Renames/moves each inserted movie's clip into `src_dir` as
+    `<DSK stem>.NNN.MM.src.mov` (NNN = DSK ordinal, MM = 1-based movie order within
+    the slide, by ascending item id). Only a clip whose parent resolves to
+    `movable_root` (this run's freshly exported intermediates) is moved; every other
+    source, including an operator-supplied clip that happens to sit inside `src_dir`,
+    is copied so the caller's original file is never touched. `src_dir` is created
+    only if absent; a symlinked `src_dir` or destination, or a destination whose
+    resolved parent is not `src_dir` itself, is refused, and every destination is
+    preflighted before any file is written. A pre-existing managed destination is
+    renamed to a `.prev-<uuid>` sibling before being overwritten, so a mid-run
+    failure can restore it; each write (and its backup, if any) is appended to
+    `journal` as soon as it lands, so the caller can roll back a partial run.
+    Returns DSK ordinal -> the ordered `src/<name>` relative paths for
+    `manifest.json`'s `srcClips`."""
+    if src_dir.is_symlink():
+        job.log(f"Refusing to publish clips: {src_dir} is a symlink")
+        raise ValueError(f"Refusing to publish through symlinked directory: {src_dir}")
+    if not src_dir.is_dir():
+        src_dir.mkdir(parents=True)
+    src_dir_real = src_dir.resolve()
+    movable_root_real = movable_root.resolve() if movable_root is not None else None
+    published: dict[int, list[str]] = {}
+    plan: list[tuple[Path, Path]] = []
+    for fw_slide, movies in clips.items():
         ordinal = ordinals.get(fw_slide)
         if ordinal is None:
             continue
-        src = Path(src)
-        dest = out_dir / clip_name(deck.stem, ordinal)
-        if src.resolve() != dest.resolve():
-            if src.parent.resolve() == out_dir.resolve():
+        names: list[str] = []
+        for order, movie_id in enumerate(sorted(movies), start=1):
+            src = Path(movies[movie_id])
+            name = f"{deck.stem}.{ordinal:03d}.{order:02d}.src.mov"
+            dest = src_dir / name
+            if dest.is_symlink():
+                job.log(f"Refusing to publish clip: {dest} is a symlink")
+                raise ValueError(f"Refusing to publish through symlinked destination: {dest}")
+            if dest.resolve().parent != src_dir_real:
+                job.log(f"Refusing to publish clip: {dest} resolves outside {src_dir_real}")
+                raise ValueError(f"Refusing to publish {dest}: resolved parent is not {src_dir_real}")
+            if src.resolve() != dest.resolve():
+                plan.append((src, dest))
+            names.append(f"src/{name}")
+        published[ordinal] = names
+    for src, dest in plan:
+        backup: Path | None = None
+        if dest.exists():
+            backup = dest.with_name(f"{dest.name}.prev-{uuid4().hex}")
+            os.replace(dest, backup)
+        try:
+            if movable_root_real is not None and src.resolve().parent == movable_root_real:
                 os.replace(src, dest)
             else:
                 shutil.copy2(src, dest)
-        published[fw_slide] = dest
+        except Exception:
+            if backup is not None:
+                os.replace(backup, dest)
+            raise
+        journal.append(_PublishedClip(dest=dest, backup=backup))
     return published
+
+
+def _rollback_published_clips(job: Job, journal: list[_PublishedClip]) -> None:
+    """Undoes every entry in `journal`: unlinks the new write and, if a
+    pre-existing destination was backed up, restores it."""
+    for entry in reversed(journal):
+        try:
+            if entry.dest.is_file() or entry.dest.is_symlink():
+                entry.dest.unlink()
+        except OSError:
+            pass
+        if entry.backup is not None:
+            try:
+                os.replace(entry.backup, entry.dest)
+            except OSError:
+                pass
+    if journal:
+        job.log(f"Rolled back {len(journal)} clip publish(es) from this failed run")
+
+
+def _discard_publish_backups(journal: list[_PublishedClip]) -> None:
+    """Deletes the backups recorded in `journal` once the run they belong to has
+    committed successfully."""
+    for entry in journal:
+        if entry.backup is not None:
+            try:
+                entry.backup.unlink()
+            except OSError:
+                pass
+
+
+def _delete_managed_src_clips(
+    job: Job, out_dir: Path, src_dir: Path, stale_rel_paths: Iterable[str]
+) -> None:
+    """Deletes `src/<name>` files under `src_dir` named by `stale_rel_paths` (a
+    `srcClips` value collected before an overwrite) that are no longer referenced.
+    Rejects any entry that is not a bare two-part `src/<name>` path, resolves
+    outside `out_dir`, or passes through a symlink, matching the Exporter's
+    `src/` cleanup safety rules. Best-effort: called only after the new manifest
+    has committed, so a per-file failure is logged and skipped, never raised."""
+    out_dir_real = out_dir.resolve()
+    if src_dir.is_symlink():
+        job.log(f"Skipping src/ cleanup: {src_dir} is a symlink")
+        return
+    to_delete: list[Path] = []
+    seen: set[Path] = set()
+    for rel in stale_rel_paths:
+        rel_path = Path(str(rel))
+        if len(rel_path.parts) != 2 or rel_path.parts[0] != "src" or ".." in rel_path.parts:
+            job.log(f"Skipping suspicious srcClips entry {rel!r}")
+            continue
+        candidate = src_dir / rel_path.parts[1]
+        if candidate.is_symlink():
+            job.log(f"Skipping symlinked path component for {rel!r}")
+            continue
+        try:
+            candidate_real = candidate.resolve()
+            candidate_real.relative_to(out_dir_real)
+        except ValueError:
+            job.log(f"Skipping {rel!r}: resolves outside the output directory")
+            continue
+        if candidate.is_file() and candidate_real not in seen:
+            seen.add(candidate_real)
+            to_delete.append(candidate)
+    deleted: list[Path] = []
+    for f in to_delete:
+        try:
+            f.unlink()
+            deleted.append(f)
+        except OSError as exc:
+            job.log(f"Failed to delete stale Generator clip {f}: {exc}")
+    if deleted:
+        job.log(
+            f"Deleted {len(deleted)} orphaned Generator clip(s): "
+            + ", ".join(f.name for f in deleted)
+        )
 
 
 def _dsk_export_action(category: str) -> str:
@@ -1967,8 +2154,6 @@ def _run_dsk_export_propose(
     classes = {c.number: c for c in classify_deck(path, payload=payload)}
     thumbs = _dsk_preview_thumbs(job, path, payload)
     thumb_dir = wall_thumb_dir(deck_digest(path))
-    manifest = read_manifest(path.parent, deck=path) if is_stage_deck else None
-    existing_clips = published_clips(path.parent, path.stem, manifest) if is_stage_deck else {}
     pages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for number in numbers:
@@ -1979,9 +2164,6 @@ def _run_dsk_export_propose(
             skipped.append({"slide": number, "reason": "empty"})
             continue
         action = _dsk_export_action(cls.category)
-        existing = existing_clips.get(number)
-        if existing is not None:
-            job.log(f"slide {number}: clip already published ({existing.name}); not re-exported")
         page = {
             "slide": number,
             "thumb": thumbs.get(number),
@@ -1991,7 +2173,6 @@ def _run_dsk_export_propose(
             "isText": bool(cls.is_text),
             "skipReason": None,
             "needsClip": action == "clip",
-            "existingClip": existing.name if existing is not None else None,
         }
         page["decision"] = {
             "slide": number,
@@ -1999,7 +2180,7 @@ def _run_dsk_export_propose(
             "action": action,
             "anchor": "auto",
             "keepSide": False,
-            "clip": str(existing) if existing is not None else None,
+            "clip": None,
         }
         pages.append(page)
     return {
@@ -2007,7 +2188,6 @@ def _run_dsk_export_propose(
         "path": str(path),
         "isStageDeck": is_stage_deck,
         "isFwDeck": is_fw_deck,
-        "hasManifest": manifest is not None,
         "slideRange": sorted(slide_range) if slide_range else None,
         "thumbDir": str(thumb_dir),
         "pages": pages,
@@ -2026,28 +2206,20 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             f"{path.name} is not a 1920x1080 DSK deck; stage PNG export needs a DSK-sized deck."
         )
     out_dir = path.parent
+    src_dir = out_dir / "src"
     categories = {int(p["slide"]): str(p.get("category") or "") for p in included}
     clip_slides = sorted(
         int(p["slide"]) for p in included if _dsk_export_action(categories[int(p["slide"])]) == "clip"
     )
     stage_slides = sorted(int(p["slide"]) for p in included if int(p["slide"]) not in set(clip_slides))
-    clips: dict[int, Path] = {}
-    for p in included:
-        raw = (p.get("decision") or {}).get("clip")
-        n = int(p["slide"])
-        if raw and n in clip_slides and Path(raw).expanduser().is_file():
-            clips[n] = Path(raw).expanduser()
-    missing_clips = [n for n in clip_slides if n not in clips]
-    reused_clips = [n for n in clip_slides if n not in missing_clips]
     existing = read_manifest(out_dir, deck=path)
 
-    if missing_clips:
-        job.log(f"Exporting clip(s) for movie slide(s) {missing_clips} to {out_dir}…")
-        for clip in export_dsk_slide_clips(path, missing_clips, out_dir, log=job.log):
+    clips: dict[int, Path] = {}
+    if clip_slides:
+        job.log(f"Exporting clip(s) for movie slide(s) {clip_slides} to {out_dir}…")
+        for clip in export_dsk_slide_clips(path, clip_slides, out_dir, log=job.log):
             clips[clip.slide] = clip.path
-        job.log(f"Exported {len(missing_clips)} clip(s).")
-    if clip_slides and not missing_clips:
-        job.log(f"Clip(s) for slide(s) {clip_slides} already published; not re-exported.")
+        job.log(f"Exported {len(clip_slides)} clip(s).")
 
     assets: list = []
     if stage_slides:
@@ -2064,11 +2236,51 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             log=job.log,
         )
         job.log(f"Exported {len(assets)} stage PNG(s).")
-    write_manifest(out_dir, path, assets, categories=categories, clips=clips, existing=existing)
+    out_dir_real = out_dir.resolve()
+    to_delete: list[Path] = []
+    seen: set[Path] = set()
+    if src_dir.is_symlink():
+        job.log(f"Skipping src/ cleanup: {src_dir} is a symlink")
+    else:
+        for entry in ((existing or {}).get("slides") or {}).values():
+            for rel in entry.get("srcClips") or []:
+                rel_path = Path(str(rel))
+                if len(rel_path.parts) != 2 or rel_path.parts[0] != "src" or ".." in rel_path.parts:
+                    job.log(f"Skipping suspicious srcClips entry {rel!r}")
+                    continue
+                candidate = src_dir / rel_path.parts[1]
+                if candidate.is_symlink():
+                    job.log(f"Skipping symlinked path component for {rel!r}")
+                    continue
+                try:
+                    candidate_real = candidate.resolve()
+                    candidate_real.relative_to(out_dir_real)
+                except ValueError:
+                    job.log(f"Skipping {rel!r}: resolves outside the output directory")
+                    continue
+                if candidate.is_file() and candidate_real not in seen:
+                    seen.add(candidate_real)
+                    to_delete.append(candidate)
+    write_manifest(
+        out_dir, path, assets, categories=categories, clips=clips, existing=existing, drop_src=True
+    )
+    if to_delete:
+        deleted: list[Path] = []
+        for f in to_delete:
+            try:
+                f.unlink()
+                deleted.append(f)
+            except OSError as exc:
+                job.log(f"Could not delete Generator intermediate clip {f}: {exc}")
+        if deleted:
+            job.log(
+                f"Deleted {len(deleted)} Generator intermediate clip(s): "
+                + ", ".join(f.name for f in deleted)
+            )
+
     sequence = sorted(
         [a.path.name for a in assets] + [c.name for c in clips.values()],
     )
-    exported_clips = sorted(missing_clips)
     return {
         "phase": "done",
         "path": str(path),
@@ -2077,8 +2289,7 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         "clips": {n: c.name for n, c in sorted(clips.items())},
         "sequence": sequence,
         "skipped": proposal.get("skipped") or [],
-        "exportedClips": exported_clips,
-        "reusedClips": sorted(reused_clips),
+        "exportedClips": clip_slides,
     }
 
 

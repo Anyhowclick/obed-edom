@@ -22,7 +22,6 @@ from typing import Any
 from PIL import Image
 
 from obed_edom import dsk_live
-from obed_edom.dsk_movie_export import clip_name
 from obed_edom.dsk_live import (
     DEFAULT_RSS_LIMIT_BYTES,
     DEFAULT_TRANSPARENT_LAYOUT_NAMES,
@@ -384,33 +383,6 @@ def read_manifest(out_dir: Path, deck: Path | None = None) -> dict[str, Any] | N
     return data
 
 
-def published_clips(
-    out_dir: Path, deck_stem: str, manifest: Mapping[str, Any] | None = None
-) -> dict[int, Path]:
-    """Slide -> clip path for every manifest clip that still exists in `out_dir`, named
-    exactly `clip_name(deck_stem, slide)` and resolving to a file directly inside
-    `out_dir` (rejects absolute paths, `../` traversal, and other stems/names)."""
-    manifest = manifest if manifest is not None else read_manifest(out_dir)
-    out_dir = Path(out_dir).resolve()
-    found: dict[int, Path] = {}
-    for key, entry in ((manifest or {}).get("slides") or {}).items():
-        name = entry.get("clip") if isinstance(entry, dict) else None
-        if not name:
-            continue
-        try:
-            slide = int(key)
-        except ValueError:
-            continue
-        if str(name) != clip_name(deck_stem, slide):
-            continue
-        candidate = Path(out_dir) / str(name)
-        if candidate.resolve().parent != out_dir:
-            continue
-        if candidate.is_file():
-            found[slide] = candidate
-    return found
-
-
 def write_manifest(
     out_dir: Path,
     deck: Path,
@@ -420,26 +392,49 @@ def write_manifest(
     clips: Mapping[int, Path] | None = None,
     generated: str | None = None,
     source_slides: Mapping[int, int] | None = None,
+    src_clips: Mapping[int, Sequence[str]] | None = None,
+    drop_src: bool = False,
+    generator: bool = False,
     existing: Mapping[str, Any] | None = None,
 ) -> Path:
     """`generated` is omitted from the manifest when `None` (the default) -- callers
     that need it stamped pass an ISO timestamp explicitly. Serialised with
     `sort_keys=True` so the file is byte-identical across runs of an unchanged
     export. `source_slides` maps a DSK slide to the FW slide it came from (Generator
-    output). `existing` is a previously written manifest for the same folder whose
-    slide entries are kept and updated, so a Generator manifest survives an Exporter
-    run and vice versa; `clips` entries win over an existing clip for the same slide."""
+    output). `src_clips` records each slide's Generator intermediate clip names
+    (relative to `out_dir`) under `srcClips`, until the Exporter deletes them and
+    calls with `drop_src=True` to remove the key from every slide entry. `existing`
+    is a previously written manifest for the same folder whose slide entries are
+    kept and updated, so a Generator manifest survives an Exporter run and vice
+    versa; `clips` entries win over an existing clip for the same slide. `generator`
+    marks this call as a Generator run: any existing entry whose ordinal is not in
+    this run's `source_slides` is dropped outright (the deck was regenerated, so
+    that ordinal no longer exists); for every slide regenerated this run (the union
+    of `source_slides` and `src_clips`), any prior `clip` and `stages` are removed
+    and `srcClips` is replaced with this run's value or removed if the slide is now
+    static/absent, rather than merely overlaid onto the existing entry."""
     clips = clips or {}
     source_slides = source_slides or {}
+    src_clips = src_clips or {}
     by_slide: dict[int, list[StageAsset]] = {}
     for asset in assets:
         by_slide.setdefault(asset.slide, []).append(asset)
 
     slides_out: dict[str, dict[str, Any]] = {}
+    kept_ordinals = set(source_slides) if generator else None
     for key, entry in ((existing or {}).get("slides") or {}).items():
-        if isinstance(entry, dict):
-            slides_out[str(key)] = dict(entry)
-    for slide in sorted(set(by_slide) | set(clips) | set(source_slides)):
+        if not isinstance(entry, dict):
+            continue
+        if kept_ordinals is not None:
+            try:
+                key_ordinal = int(key)
+            except (TypeError, ValueError):
+                key_ordinal = None
+            if key_ordinal not in kept_ordinals:
+                continue
+        slides_out[str(key)] = dict(entry)
+    regenerated = set(source_slides) | set(src_clips) if generator else set()
+    for slide in sorted(set(by_slide) | set(clips) | set(source_slides) | set(src_clips)):
         entry = slides_out.get(str(slide), {})
         if slide in categories:
             entry["category"] = categories[slide]
@@ -447,12 +442,22 @@ def write_manifest(
             entry["category"] = ""
         if slide in source_slides:
             entry["source_slide"] = int(source_slides[slide])
+        if slide in src_clips:
+            entry["srcClips"] = list(src_clips[slide])
+        elif slide in regenerated:
+            entry.pop("srcClips", None)
+        if slide in regenerated:
+            entry.pop("clip", None)
+            entry.pop("stages", None)
         clip = clips.get(slide)
         if clip is not None:
             entry["clip"] = Path(clip).name
             if slide not in by_slide:
                 entry.pop("stages", None)
         slides_out[str(slide)] = entry
+    if drop_src:
+        for entry in slides_out.values():
+            entry.pop("srcClips", None)
     for slide, stage_assets in by_slide.items():
         stage_assets = sorted(stage_assets, key=lambda a: a.stage_index)
         entry = slides_out[str(slide)]
@@ -572,7 +577,7 @@ def export_stage_pngs(
         for line in (proc.stderr or "").splitlines():
             match = _ERROR_RE.match(line)
             if match:
-                last_error = (int(match.group(2)), match.group(3))
+                last_error = (int(match.group(3)), match.group(4))
         if proc.returncode != 0:
             if last_error is not None:
                 errnum, errmsg = last_error

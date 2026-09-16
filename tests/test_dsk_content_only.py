@@ -101,6 +101,7 @@ def _patch_common(monkeypatch, payload, classes, stderr_text="", returncode=0):
     monkeypatch.setattr(dsa, "copy_keynote", _fake_copy_keynote)
     monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
     monkeypatch.setattr(dsa, "deck_builds", lambda path, *, deck=None: {})
+    monkeypatch.setattr(dsa, "_restore_clip_zorder", lambda out_path, plan, warnings: {})
     monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
     monkeypatch.setattr(
         iwa_write, "match_card_stroke_styles",
@@ -149,6 +150,17 @@ def test_content_only_skips_text_slides_keeps_movie_and_image(tmp_path, monkeypa
         32: SlideDecision(32, "in_deck"),
     }
     _patch_common(monkeypatch, payload, classes)
+    # Kept slides 21,32 -> ordinals 1,2; slide 32 is the clip slide, so its staged
+    # transition must read back as the expected dissolve (see dsk_assemble's own
+    # `_verify_builds` clip-transition read-back, Codex r1 finding 10).
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: {
+            2: {"slideId": "o2", "builds": [], "transition": {
+                "attributes": {"databaseEffect": "apple:dissolve", "databaseDuration": 0.5}
+            }},
+        },
+    )
 
     logs: list[str] = []
     result = assemble_dsk_deck(

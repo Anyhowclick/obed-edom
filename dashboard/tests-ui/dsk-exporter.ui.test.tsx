@@ -15,7 +15,6 @@ const reviewJob: Job = {
     path: "/tmp/deck.key",
     isStageDeck: true,
     isFwDeck: false,
-    hasManifest: true,
     pages: [
       {
         slide: 1,
@@ -24,7 +23,6 @@ const reviewJob: Job = {
         movieCount: 0,
         isText: false,
         needsClip: false,
-        existingClip: null,
         decision: { slide: 1, include: true, action: "stage", anchor: "auto", keepSide: false, clip: null },
       },
       {
@@ -34,7 +32,6 @@ const reviewJob: Job = {
         movieCount: 1,
         isText: false,
         needsClip: true,
-        existingClip: null,
         decision: { slide: 2, include: true, action: "clip", anchor: "auto", keepSide: false, clip: null },
       },
       {
@@ -44,7 +41,6 @@ const reviewJob: Job = {
         movieCount: 1,
         isText: false,
         needsClip: true,
-        existingClip: "deck.003.mov",
         decision: { slide: 3, include: true, action: "clip", anchor: "auto", keepSide: false, clip: "/tmp/deck.003.mov" },
       },
     ],
@@ -63,8 +59,7 @@ const doneJob: Job = {
     pngs: ["deck.001.00.png"],
     clips: { "2": "deck.002.mov", "3": "deck.003.mov" },
     sequence: ["deck.001.00.png", "deck.002.mov", "deck.003.mov"],
-    exportedClips: [2],
-    reusedClips: [3],
+    exportedClips: [2, 3],
     skipped: [],
   },
 };
@@ -94,13 +89,13 @@ async function proposeReview() {
 }
 
 describe("DskExporter review table", () => {
-  it("shows Output per slide: stage PNG, clip, and reused clip", async () => {
+  it("shows Output per slide: stage PNG or clip", async () => {
     await proposeReview();
 
     const rows = screen.getAllByRole("row").slice(1); // skip header
     expect(rows[0]).toHaveTextContent("stage PNG(s)");
     expect(rows[1]).toHaveTextContent("clip (.mov)");
-    expect(rows[2]).toHaveTextContent("clip — already published: deck.003.mov");
+    expect(rows[2]).toHaveTextContent("clip (.mov)");
   });
 });
 
@@ -119,9 +114,7 @@ describe("DskExporter done summary", () => {
     });
 
     expect(applyDskExport).toHaveBeenCalledWith("job-1");
-    expect(
-      screen.getByText(/Wrote \/tmp\/out — 1 PNG\(s\), 1 clip\(s\) exported, 1 reused/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Wrote \/tmp\/out — 1 PNG\(s\), 2 clip\(s\)/)).toBeInTheDocument();
 
     const items = screen.getAllByRole("listitem");
     expect(items.map((el) => el.textContent)).toEqual([
@@ -147,8 +140,6 @@ describe("DskExporter done summary", () => {
     });
 
     expect(applyDskExport).not.toHaveBeenCalled();
-    expect(
-      screen.getByText(/Wrote \/tmp\/out — 1 PNG\(s\), 1 clip\(s\) exported, 1 reused/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Wrote \/tmp\/out — 1 PNG\(s\), 2 clip\(s\)/)).toBeInTheDocument();
   });
 });

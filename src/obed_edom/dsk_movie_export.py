@@ -62,7 +62,7 @@ from obed_edom.dsk_live import (
 )
 from obed_edom.dsk_plan import ItemId, SlideClass, _delete_order, classify_deck, visible_union
 from obed_edom.iwa_runs import attach_group_content_signature
-from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, is_lw_wall
+from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, is_lw_wall, item_rect
 from obed_edom.maps_movie import ffmpeg_exe
 from obed_edom.offline_inspect import offline_wall_payload
 from obed_edom.remap_keynote import _AS_KIND_NAMES, _delete_or_hide_placeholder_lines, copy_keynote
@@ -150,6 +150,8 @@ class ClipResult:
     duration_s: float
     wall_s: float
     crop_width: int
+    movie_id: ItemId | None = None
+    crop_rect: Rect | None = None
 
 
 @dataclass(frozen=True)
@@ -160,13 +162,29 @@ class _SlideJob:
     dest: Path
     tmp: Path
     delete_ids: tuple[ItemId, ...] = ()
+    movie_id: ItemId | None = None
 
 
-def clip_name(stem: str, slide: int) -> str:
+def clip_name(stem: str, slide: int, movie_index: int | None = None) -> str:
     """`{stem}.{slide:03d}.mov`, keyed by Keynote slide number. The published clip is a
     QuickTime/.mov container (ProRes-compatible, importable by Keynote and PP7); this is
-    distinct from `require_m4v`, which guards Keynote's own export destination."""
-    return f"{stem}.{slide:03d}.mov"
+    distinct from `require_m4v`, which guards Keynote's own export destination. When
+    `movie_index` is given (per-movie pure-video mode, 1-based order by kindIndex), the
+    name is `{stem}.{slide:03d}.{movie_index:02d}.mov` -- one clip per movie item."""
+    if movie_index is None:
+        return f"{stem}.{slide:03d}.mov"
+    return f"{stem}.{slide:03d}.{movie_index:02d}.mov"
+
+
+def _rect_intersect(a: Rect, b: Rect) -> Rect:
+    """Wall-space intersection of `a` and `b`; raises on a degenerate (empty) result."""
+    x0 = max(a.x, b.x)
+    y0 = max(a.y, b.y)
+    x1 = min(a.x + a.w, b.x + b.w)
+    y1 = min(a.y + a.h, b.y + b.h)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"Degenerate intersection of {a} and {b}")
+    return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
 def require_m4v(path: Path) -> Path:
@@ -330,33 +348,78 @@ def _build_export_script(
         "        set skipped of s to true",
         "      end repeat",
     ]
-    for j in sorted(per_slide, key=lambda j: j.ordinal):
-        lines.append(f"      set skipped of slide {j.ordinal} of theDoc to false")
-        for kind, kind_index in _delete_order(j.delete_ids):
-            name = _AS_KIND_NAMES.get(kind)
-            if not name:
-                raise ValueError(f"Slide {j.slide}: no AppleScript class name for delete kind {kind!r}")
-            addr = f"{name} {kind_index + 1} of slide {j.ordinal}"
+    def _delete_block(slide_for_log: int, ordinal_addr: int, addr: str) -> list[str]:
+        return [
+            "      try",
+            f"        set theObj to {addr}",
+            "        if locked of theObj then set locked of theObj to false",
+            *_delete_or_hide_placeholder_lines(slide_for_log, ordinal_addr, addr, indent="          "),
+            "      on error errMsg number errNum",
+            f'        log ("DELETEFAIL" & tab & "{slide_for_log}" & tab & "{addr}" & tab & errNum & tab & errMsg)',
+            "      end try",
+        ]
+
+    for j in sorted(per_slide, key=lambda j: (j.ordinal, 0 if j.movie_id is None else j.movie_id[1])):
+        if j.movie_id is None:
+            lines.append(f"      set skipped of slide {j.ordinal} of theDoc to false")
+            for kind, kind_index in _delete_order(j.delete_ids):
+                name = _AS_KIND_NAMES.get(kind)
+                if not name:
+                    raise ValueError(f"Slide {j.slide}: no AppleScript class name for delete kind {kind!r}")
+                addr = f"{name} {kind_index + 1} of slide {j.ordinal}"
+                lines += [
+                    "      try",
+                    f"        set theObj to {addr}",
+                    "        if locked of theObj then set locked of theObj to false",
+                    *_delete_or_hide_placeholder_lines(j.slide, j.ordinal, addr, indent="          "),
+                    "      on error errMsg number errNum",
+                    f'        log ("DELETEFAIL" & tab & "{j.slide}" & tab & "{addr}" & tab & errNum & tab & errMsg)',
+                    "      end try",
+                ]
             lines += [
                 "      try",
-                f"        set theObj to {addr}",
-                "        if locked of theObj then set locked of theObj to false",
-                *_delete_or_hide_placeholder_lines(j.slide, j.ordinal, addr, indent="          "),
+                f'        export theDoc to POSIX file "{_as_escape(str(j.tmp))}" as QuickTime movie with properties '
+                f"{{movie format:native size, movie codec:{codec}, movie framerate:{fps_name}, skipped slides:false}}",
                 "      on error errMsg number errNum",
-                f'        log ("DELETEFAIL" & tab & "{j.slide}" & tab & "{addr}" & tab & errNum & tab & errMsg)',
+                f'        log ("ERR" & tab & "{j.slide}" & tab & errNum & tab & errMsg)',
+                "        error errMsg number errNum",
                 "      end try",
+                f'      log ("OBED" & tab & "{j.slide}" & tab & ((current date) as string))',
+                f"      set skipped of slide {j.ordinal} of theDoc to true",
             ]
-        lines += [
-            "      try",
-            f'        export theDoc to POSIX file "{_as_escape(str(j.tmp))}" as QuickTime movie with properties '
-            f"{{movie format:native size, movie codec:{codec}, movie framerate:{fps_name}, skipped slides:false}}",
-            "      on error errMsg number errNum",
-            f'        log ("ERR" & tab & "{j.slide}" & tab & errNum & tab & errMsg)',
-            "        error errMsg number errNum",
-            "      end try",
-            f'      log ("OBED" & tab & "{j.slide}" & tab & ((current date) as string))',
-            f"      set skipped of slide {j.ordinal} of theDoc to true",
-        ]
+        else:
+            # Per-movie pure-video mode: rather than mutating the kept slide in place (which
+            # would delete the OTHER movie items needed by later jobs on the same slide),
+            # duplicate it to a scratch copy at the end of the deck, delete everything but
+            # this one movie item on the copy, export, then discard the copy. One document
+            # stays open for the whole batch; the source slide is never touched.
+            dup_ordinal = j.ordinal + 1
+            lines += [
+                f"      duplicate slide {j.ordinal} to after slide {j.ordinal} of theDoc",
+                f"      set skipped of slide {dup_ordinal} of theDoc to false",
+                f"      set transition properties of slide {dup_ordinal} to {{transition effect:no transition effect}}",
+            ]
+            for kind, kind_index in _delete_order(j.delete_ids):
+                name = _AS_KIND_NAMES.get(kind)
+                if not name:
+                    raise ValueError(f"Slide {j.slide}: no AppleScript class name for delete kind {kind!r}")
+                addr = f"{name} {kind_index + 1} of slide {dup_ordinal}"
+                lines += _delete_block(j.slide, dup_ordinal, addr)
+            lines += [
+                "      try",
+                f'        export theDoc to POSIX file "{_as_escape(str(j.tmp))}" as QuickTime movie with properties '
+                f"{{movie format:native size, movie codec:{codec}, movie framerate:{fps_name}, skipped slides:false}}",
+                "      on error errMsg number errNum",
+                f'        log ("ERR" & tab & "{j.slide}" & tab & "{j.movie_id[1]}" & tab & errNum & tab & errMsg)',
+                "        try",
+                f"          delete slide {dup_ordinal} of theDoc",
+                "        end try",
+                "        error errMsg number errNum",
+                "      end try",
+                f'      log ("OBED" & tab & "{j.slide}" & tab & "{j.movie_id[1]}" & tab & ((current date) as string))',
+                f"      set skipped of slide {dup_ordinal} of theDoc to true",
+                f"      delete slide {dup_ordinal} of theDoc",
+            ]
     lines += [
         "    end tell",
         "    try",
@@ -492,7 +555,7 @@ def export_dsk_slide_clips(
         for line in (proc.stderr or "").splitlines():
             error_m = _ERROR_RE.match(line)
             if error_m:
-                last_error = (int(error_m.group(2)), error_m.group(3))
+                last_error = (int(error_m.group(3)), error_m.group(4))
         if proc.returncode != 0:
             if last_error is not None:
                 errnum, errmsg = last_error
@@ -752,10 +815,21 @@ def _derive_include_side_crop(payload: dict, slides: Collection[int]) -> dict[in
 
 
 def _expected_content_rect(
-    payload: dict, slide_number: int, *, include_side: bool, crop_origin: tuple[int, int], wall: tuple[float, float]
+    payload: dict,
+    slide_number: int,
+    *,
+    include_side: bool,
+    crop_origin: tuple[int, int],
+    wall: tuple[float, float],
+    movie_rect: Rect | None = None,
 ) -> Rect | None:
-    """The slide's offline `visible_union`, remapped from wall space into the exported
-    clip's own frame pixels (the clip's origin is `crop_origin` in wall space)."""
+    """The expected content rect, remapped from wall space into the exported clip's own
+    frame pixels (the clip's origin is `crop_origin` in wall space). In per-movie mode
+    `movie_rect` (the single kept movie item's own wall-space rect) is used directly
+    instead of the slide's visible union, since only that one item survives the crop."""
+    ox, oy = crop_origin
+    if movie_rect is not None:
+        return Rect(movie_rect.x - ox, movie_rect.y - oy, movie_rect.w, movie_rect.h)
     by_number = {s["number"]: s for s in payload["slides"]}
     slide = by_number.get(slide_number)
     if slide is None:
@@ -765,7 +839,6 @@ def _expected_content_rect(
     )
     if union is None:
         return None
-    ox, oy = crop_origin
     return Rect(union.x - ox, union.y - oy, union.w, union.h)
 
 
@@ -790,16 +863,33 @@ def _derive_delete_ids(
     return derived
 
 
-def _validate_delete_ids(number: int, ids: Collection[ItemId], cls: SlideClass, slide: dict) -> None:
-    """Refuses a supplied delete id absent from the slide, or one that is part of ``cls.kept``."""
+def _validate_delete_ids(
+    number: int, ids: Collection[ItemId], cls: SlideClass, slide: dict, *, pure_video: bool = False
+) -> None:
+    """Refuses a supplied delete id absent from the slide, or (unless `pure_video`) one that
+    is part of ``cls.kept``. `pure_video=True` is the per-movie mode's explicit bypass of the
+    kept-overlap guard -- the derived delete set legitimately drops every other kept item
+    (including other movies) to isolate one movie per clip; it never weakens the guard for
+    caller-supplied delete_ids, only for this internally-derived path."""
     all_ids = {(item["kind"], item["kindIndex"]) for item in slide.get("items") or []}
     supplied = set(ids)
     invalid = supplied - all_ids
     if invalid:
         raise ValueError(f"Slide {number}: delete_ids {sorted(invalid)} not present on the slide")
+    if pure_video:
+        return
     overlap = supplied & set(cls.kept)
     if overlap:
         raise ValueError(f"Slide {number}: delete_ids {sorted(overlap)} are kept content; refusing")
+
+
+def _derive_pure_video_delete_ids(items: Sequence[dict], movie_id: ItemId) -> tuple[ItemId, ...]:
+    """All drawable ids on a slide except `movie_id`, in `_delete_order` -- the per-movie
+    scratch copy keeps exactly one movie item and deletes every other drawable (side
+    panels, non-content, and all other kept items including other movies, text, shapes,
+    groups, lines, images)."""
+    all_ids = {(item["kind"], item["kindIndex"]) for item in items}
+    return _delete_order([iid for iid in all_ids if iid != movie_id])
 
 
 def export_slide_clips(
@@ -812,6 +902,7 @@ def export_slide_clips(
     fps: float = 30,
     crop_rects: Mapping[int, Rect] | None = None,
     delete_ids: Mapping[int, Collection[ItemId]] | None = None,
+    per_movie: bool = False,
     log: Callable[[str], None] = print,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     layout_template: Path | None = None,
@@ -824,6 +915,8 @@ def export_slide_clips(
     fps_enum_name(fps)
     expected_fps = fps_rational(fps)
     dsk_live.guard_out_dir(out_dir, fw_deck)
+    if per_movie and delete_ids:
+        raise ValueError("delete_ids is not supported with per_movie=True; delete ids are derived per movie item")
 
     payload = offline_wall_payload(fw_deck)
     attach_group_content_signature(fw_deck, payload)
@@ -853,13 +946,12 @@ def export_slide_clips(
             log(f"slide {n}: {w}")
         if cls.category == "empty":
             raise ValueError(f"Slide {n} is empty/skipped; refusing to export it")
-        if n in delete_ids:
+        if not per_movie and n in delete_ids:
             _validate_delete_ids(n, delete_ids[n], cls, slide)
-    missing_deletes = [n for n in slides if n not in delete_ids]
-    if missing_deletes:
-        delete_ids.update(_derive_delete_ids(classes, slides_by_number, missing_deletes))
-
-    dests = {n: out_dir / clip_name(fw_deck.stem, n) for n in slides}
+    if not per_movie:
+        missing_deletes = [n for n in slides if n not in delete_ids]
+        if missing_deletes:
+            delete_ids.update(_derive_delete_ids(classes, slides_by_number, missing_deletes))
 
     if _keynote_running():
         raise RuntimeError("Keynote is already running; close it before an export batch (strictly serial).")
@@ -882,21 +974,49 @@ def export_slide_clips(
         stem_name = scratch.stem
         doc_name = scratch.name
 
-        keep = sorted(dests)
+        keep = sorted(set(slides))
         ordinals = ordinal_map(keep)
         per_slide: list[_SlideJob] = []
-        for n in keep:
-            crop_rect = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
-            per_slide.append(
-                _SlideJob(
-                    slide=n,
-                    ordinal=ordinals[n],
-                    crop_rect=crop_rect,
-                    dest=dests[n],
-                    tmp=require_m4v(work / f"tmp.{n:04d}.m4v"),
-                    delete_ids=tuple(delete_ids.get(n, ())),
+        if per_movie:
+            for n in keep:
+                slide = slides_by_number[n]
+                items = slide.get("items") or []
+                items_by_id = {(it["kind"], it["kindIndex"]): it for it in items}
+                cls = classes[n]
+                kept_movie_ids = sorted(iid for iid in cls.kept if iid[0] == "movie")
+                if not kept_movie_ids:
+                    raise ValueError(f"Slide {n} has no kept movie items; per_movie export requires at least one")
+                base_crop = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
+                for movie_index, movie_id in enumerate(kept_movie_ids, start=1):
+                    movie_item = items_by_id[movie_id]
+                    crop_rect = _rect_intersect(item_rect(movie_item), base_crop)
+                    del_ids = _derive_pure_video_delete_ids(items, movie_id)
+                    _validate_delete_ids(n, del_ids, cls, slide, pure_video=True)
+                    per_slide.append(
+                        _SlideJob(
+                            slide=n,
+                            ordinal=ordinals[n],
+                            crop_rect=crop_rect,
+                            dest=out_dir / clip_name(fw_deck.stem, n, movie_index),
+                            tmp=require_m4v(work / f"tmp.{n:04d}.{movie_index:02d}.m4v"),
+                            delete_ids=del_ids,
+                            movie_id=movie_id,
+                        )
+                    )
+        else:
+            dests = {n: out_dir / clip_name(fw_deck.stem, n) for n in keep}
+            for n in keep:
+                crop_rect = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
+                per_slide.append(
+                    _SlideJob(
+                        slide=n,
+                        ordinal=ordinals[n],
+                        crop_rect=crop_rect,
+                        dest=dests[n],
+                        tmp=require_m4v(work / f"tmp.{n:04d}.m4v"),
+                        delete_ids=tuple(delete_ids.get(n, ())),
+                    )
                 )
-            )
 
         resolved_template = layout_template or DEFAULT_LAYOUT_TEMPLATE
         resolved_template = resolved_template if resolved_template.exists() else None
@@ -944,10 +1064,10 @@ def export_slide_clips(
         watchdog = _RssWatchdog(_keynote_pid, rss_limit_bytes, on_breach)
         watchdog.start()
 
-        elapsed_by_slide: dict[int, float] = {}
+        elapsed_by_job: dict[tuple[int, int | None], float] = {}
 
-        def on_progress(slide: int) -> None:
-            elapsed_by_slide[slide] = time.monotonic() - t0
+        def on_progress(slide: int, movie_index: int | None = None) -> None:
+            elapsed_by_job[(slide, movie_index)] = time.monotonic() - t0
 
         attempts = 0
         proc = None
@@ -965,7 +1085,7 @@ def export_slide_clips(
         for line in (proc.stderr or "").splitlines():
             error_m = _ERROR_RE.match(line)
             if error_m:
-                last_error = (int(error_m.group(2)), error_m.group(3))
+                last_error = (int(error_m.group(3)), error_m.group(4))
             delete_fail_m = _DELETEFAIL_RE.match(line)
             if delete_fail_m and delete_fail is None:
                 delete_fail = (
@@ -991,7 +1111,8 @@ def export_slide_clips(
         for job in per_slide:
             if not job.tmp.exists():
                 raise RuntimeError(f"Expected export missing for slide {job.slide}: {job.tmp}")
-            publish_tmp = work / f"pub.{job.slide:04d}.mov"
+            publish_suffix = f"{job.slide:04d}" if job.movie_id is None else f"{job.slide:04d}.{job.movie_id[1]:02d}"
+            publish_tmp = work / f"pub.{publish_suffix}.mov"
             expected_w, expected_h = _ffmpeg_process(
                 job.tmp, publish_tmp, crop_rect=job.crop_rect, wall_w=wall_w, wall_h=wall_h, codec=codec
             )
@@ -1005,12 +1126,14 @@ def export_slide_clips(
                 raise RuntimeError(f"Slide {job.slide}: exported fps {fps_out} does not match requested {fps}")
             crop_x, crop_y, crop_w, crop_h = _clamp_crop(job.crop_rect, wall_w, wall_h)
             crop_x, crop_y, crop_w, crop_h = _normalize_even_crop(crop_x, crop_y, crop_w, crop_h, wall_w, wall_h)
+            movie_rect = job.crop_rect if job.movie_id is not None else None
             expected_rect = _expected_content_rect(
                 payload,
                 job.slide,
                 include_side=job.slide in include_side,
                 crop_origin=(crop_x, crop_y),
                 wall=(float(wall_w), float(wall_h)),
+                movie_rect=movie_rect,
             )
             _assert_clip_covers_frame(publish_tmp, width, height, duration=duration, expected=expected_rect, log=log)
             job.dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1022,8 +1145,13 @@ def export_slide_clips(
                     width=width,
                     height=height,
                     duration_s=duration,
-                    wall_s=elapsed_by_slide.get(job.slide, time.monotonic() - t0),
+                    wall_s=elapsed_by_job.get(
+                        (job.slide, job.movie_id[1] if job.movie_id is not None else None),
+                        time.monotonic() - t0,
+                    ),
                     crop_width=crop_w,
+                    movie_id=job.movie_id,
+                    crop_rect=Rect(crop_x, crop_y, crop_w, crop_h),
                 )
             )
 

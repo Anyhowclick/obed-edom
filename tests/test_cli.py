@@ -358,6 +358,75 @@ def test_dsk_assemble_content_only_refuses_min_text_pt(tmp_path, capsys, monkeyp
     assert "--min-text-pt has no meaning with --content-only" in capsys.readouterr().err
 
 
+def test_dsk_assemble_clip_probed_and_sizes_passed(tmp_path, monkeypatch):
+    import obed_edom.dsk_assemble as dsk_assemble
+    import obed_edom.dsk_movie_export as dsk_movie_export
+
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+    clip = tmp_path / "clip.mov"
+    clip.write_text("movie")
+    monkeypatch.setattr(dsk_movie_export, "_ffprobe", lambda _path: (1920, 1080, 24.0, 2.0))
+    captured = {}
+
+    def fake_assemble_dsk_deck(*_args, **kwargs):
+        captured["clip_sizes"] = kwargs["clip_sizes"]
+        return dsk_assemble.AssembleResult(
+            path=tmp_path / "out.key", slides_kept=(17,), ordinals={17: 1}, fits={},
+            clips_inserted={}, stroke={}, zorder={}, builds={}, size_bytes=0,
+            source_size_bytes=0, wall_s=0.0, warnings=(), movie_props={},
+        )
+
+    monkeypatch.setattr(dsk_assemble, "assemble_dsk_deck", fake_assemble_dsk_deck)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--clip", f"17={clip}",
+        ]
+    )
+    assert rc == 0
+    assert captured["clip_sizes"] == {str(clip): (1920, 1080)}
+
+
+def test_dsk_assemble_clip_probe_failure_refused(tmp_path, capsys, monkeypatch):
+    import obed_edom.dsk_movie_export as dsk_movie_export
+
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+    clip = tmp_path / "clip.mov"
+    clip.write_text("movie")
+
+    def _boom(_path):
+        raise RuntimeError("ffprobe failed")
+
+    monkeypatch.setattr(dsk_movie_export, "_ffprobe", _boom)
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--clip", f"17={clip}",
+        ]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert str(clip) in err
+
+
+def test_dsk_assemble_clip_zero_dimensions_refused(tmp_path, capsys, monkeypatch):
+    import obed_edom.dsk_movie_export as dsk_movie_export
+
+    source = _dsk_assemble_deck(tmp_path, monkeypatch)
+    clip = tmp_path / "clip.mov"
+    clip.write_text("movie")
+    monkeypatch.setattr(dsk_movie_export, "_ffprobe", lambda _path: (0, 0, 24.0, 2.0))
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--clip", f"17={clip}",
+        ]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert str(clip) in err
+
+
 def test_dsk_assemble_content_only_layout_preserve_warns(tmp_path, capsys, monkeypatch):
     import obed_edom.dsk_assemble as dsk_assemble
 
