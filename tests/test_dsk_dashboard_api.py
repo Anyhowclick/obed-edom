@@ -7,6 +7,7 @@ faked, mirroring `tests/test_dashboard_api.py`'s resize tests. No test may start
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -580,6 +581,160 @@ def test_dsk_apply_manifest_write_failure_removes_this_runs_published_clips(tmp_
     assert leftover_tmp == [], f"no .src-* dir expected, found: {leftover_tmp}"
 
 
+def test_dsk_apply_publish_failure_on_later_destination_leaves_no_new_file(tmp_path, monkeypatch):
+    """If publishing slide 2's clip succeeds but writing slide 3's clip then fails,
+    the already-written slide 2 file must not survive -- it was new this run, so
+    rollback removes it rather than leaving a half-published run behind."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(3))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1), 3: _cls(3, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+
+    def fake_export_clips(fw, slides, out_dir, **_kwargs):
+        from obed_edom.dsk_movie_export import ClipResult
+
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        results = []
+        for n in slides:
+            dest = Path(out_dir) / f"clip.{n:03d}.mov"
+            dest.write_text(f"movie-{n}")
+            results.append(
+                ClipResult(
+                    slide=n, movie_id=("movie", 0), path=dest, crop_rect=None,
+                    width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+                )
+            )
+        return results
+
+    def fake_assemble(fw, out_path, *, decisions, clips, content_only, **_kwargs):
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path, slides_kept=(1, 2, 3), ordinals={1: 1, 2: 2, 3: 3}, fits={},
+            clips_inserted={n: next(iter(clips[n].values())) for n in clips}, stroke={}, zorder={},
+            builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
+            movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    real_copy2 = shutil.copy2
+    calls: list[Path] = []
+
+    def flaky_copy2(src, dst, *a, **k):
+        calls.append(Path(dst))
+        if len(calls) >= 2:
+            raise OSError("disk full")
+        return real_copy2(src, dst, *a, **k)
+
+    monkeypatch.setattr(app_mod.shutil, "copy2", flaky_copy2)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "error"
+
+    out_dir = tmp_path / "output" / "GW" / "dsk"
+    src_dir = out_dir / "src"
+    assert len(calls) == 2, "the second destination write is the one that fails"
+    assert not (src_dir / "GW_DSK.002.01.src.mov").is_file(), "the earlier successful write is rolled back"
+    assert not (src_dir / "GW_DSK.003.01.src.mov").is_file(), "the failed write leaves no file"
+    assert not (out_dir / "manifest.json").exists(), "no manifest is committed on this first-ever run"
+
+
+def test_dsk_apply_rerun_overwrite_failure_restores_original_bytes(tmp_path, monkeypatch):
+    """A rerun that overwrites slide 2's clip and then fails the manifest write
+    must restore slide 2's original bytes, and the previous manifest must still
+    reference a file that exists on disk."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    def make_fake_export_clips(content):
+        def fake_export_clips(fw, slides, out_dir, **_kwargs):
+            from obed_edom.dsk_movie_export import ClipResult
+
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            results = []
+            for n in slides:
+                dest = Path(out_dir) / f"clip.{n:03d}.mov"
+                dest.write_text(content)
+                results.append(
+                    ClipResult(
+                        slide=n, movie_id=("movie", 0), path=dest, crop_rect=None,
+                        width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+                    )
+                )
+            return results
+
+        return fake_export_clips
+
+    def fake_assemble(fw, out_path, *, decisions, clips, content_only, **_kwargs):
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
+            clips_inserted={2: next(iter(clips[2].values()))}, stroke={}, zorder={},
+            builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
+            movie_props={},
+        )
+
+    client = TestClient(app)
+
+    # Run 1 succeeds and publishes slide 2's clip with original content.
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "export_slide_clips", make_fake_export_clips("movie-v1"))
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+
+    out_dir = tmp_path / "output" / "GW" / "dsk"
+    src_dir = out_dir / "src"
+    manifest_path = out_dir / "manifest.json"
+    published = src_dir / "GW_DSK.002.01.src.mov"
+    assert published.read_text() == "movie-v1"
+    previous_manifest = manifest_path.read_text()
+
+    # Run 2: publication overwrites slide 2's clip, then the manifest write fails.
+    monkeypatch.setattr(app_mod, "export_slide_clips", make_fake_export_clips("movie-v2"))
+
+    def failing_write_manifest(*_a, **_k):
+        raise RuntimeError("manifest write failed")
+
+    monkeypatch.setattr(app_mod, "write_manifest", failing_write_manifest)
+    job_id2 = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id2)
+    applied2 = client.post(f"/api/dsk/{job_id2}/apply")
+    assert applied2.status_code == 200
+    job2 = _wait(client, job_id2)
+    assert job2["status"] == "error"
+
+    assert published.is_file(), "the overwritten clip must survive as a file"
+    assert published.read_text() == "movie-v1", "the original bytes are restored"
+    assert manifest_path.read_text() == previous_manifest, "the previous manifest is left intact"
+    assert published.is_file(), "the previous manifest's srcClips entry still resolves to a real file"
+    leftover_backups = [p for p in src_dir.iterdir() if ".prev-" in p.name]
+    assert leftover_backups == [], f"no backup file expected to remain, found: {leftover_backups}"
+
+
 def test_dsk_apply_refuses_symlinked_src_dir(tmp_path, monkeypatch):
     """Publication must refuse when `out_dir/src` is a symlink rather than follow it."""
     import obed_edom.web.app as app_mod
@@ -1073,6 +1228,54 @@ def test_dsk_export_re_exports_and_deletes_a_src_clip_the_generator_published(tm
     assert job["result"]["clips"] == {"2": "Sermon (GW)_DSK.002.mov", "3": "Sermon (GW)_DSK.003.mov"}
     assert job["result"]["exportedClips"] == [2, 3]
     assert not (src_dir / "Sermon (GW)_DSK.002.01.src.mov").exists(), "the consumed src clip is deleted"
+
+
+def test_dsk_export_apply_succeeds_when_intermediate_deletion_fails(tmp_path, monkeypatch):
+    """The final manifest is committed with `srcClips` already dropped before
+    cleanup runs, so a failure deleting a src/ intermediate is logged but does not
+    fail the apply, and never leaves the manifest pointing at a deleted file."""
+    import obed_edom.web.app as app_mod
+
+    folder = tmp_path / "Sermon (GW)" / "dsk"
+    src_dir = folder / "src"
+    src_dir.mkdir(parents=True)
+    deck = folder / "Sermon (GW)_DSK.key"
+    deck.write_text("placeholder")
+    stale = src_dir / "Sermon (GW)_DSK.002.01.src.mov"
+    stale.write_bytes(b"mov")
+    (folder / "manifest.json").write_text(json.dumps({
+        "deck": str(deck),
+        "geometry": {"width": 1920, "height": 1080},
+        "slides": {
+            "2": {"category": "movie", "source_slide": 32, "srcClips": ["src/Sermon (GW)_DSK.002.01.src.mov"]},
+        },
+    }))
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _dsk_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "stage_counts", lambda *_a, **_k: {1: 1})
+    monkeypatch.setattr(app_mod, "export_stage_pngs", lambda *_a, **_k: [])
+    seen: list = []
+    monkeypatch.setattr(app_mod, "export_dsk_slide_clips", _fake_clip_exporter(seen))
+
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self, *a, **k):
+        if self == stale:
+            raise OSError("permission denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    client = TestClient(app)
+    job = _wait(client, client.post("/api/dsk/export", data={"path": str(deck)}).json()["id"])
+    job = _wait(client, client.post(f"/api/dsk/export/{job['id']}/apply").json()["id"])
+    assert job["status"] == "done", job.get("error")
+    assert stale.is_file(), "the file that failed to delete is still on disk"
+    manifest = json.loads((folder / "manifest.json").read_text())
+    assert "srcClips" not in manifest["slides"]["2"], "the final manifest never references the file"
+    assert manifest["slides"]["2"]["clip"] == "Sermon (GW)_DSK.002.mov"
 
 
 def test_dsk_export_apply_refuses_symlinked_src_dir(tmp_path, monkeypatch):

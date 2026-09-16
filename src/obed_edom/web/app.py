@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -1891,7 +1891,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             clip_sizes[str(clip_path)] = (probe_width, probe_height)
 
     tmp_src_dir: Path | None = None
-    published_files: list[Path] = []
+    publish_journal: list[_PublishedClip] = []
     try:
         if missing_clip_slides:
             tmp_src_dir = out_dir / f".src-{uuid4().hex}"
@@ -1929,8 +1929,8 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         previous_src_clips: set[str] = set()
         for entry in ((existing_manifest or {}).get("slides") or {}).values():
             previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
-        published, published_files = _publish_generator_clips(
-            job, result.path, src_dir, nested_clips, result.ordinals
+        published = _publish_generator_clips(
+            job, result.path, src_dir, nested_clips, result.ordinals, publish_journal
         )
         categories = {
             result.ordinals[n]: str(p.get("category") or "")
@@ -1955,15 +1955,9 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         stale_src_clips = previous_src_clips - current_src_clips
         if stale_src_clips:
             _delete_managed_src_clips(job, out_dir, src_dir, stale_src_clips)
+        _discard_publish_backups(publish_journal)
     except Exception:
-        for f in published_files:
-            try:
-                if f.is_file():
-                    f.unlink()
-            except OSError:
-                pass
-        if published_files:
-            job.log(f"Removed {len(published_files)} file(s) published by this failed run")
+        _rollback_published_clips(job, publish_journal)
         raise
     finally:
         if tmp_src_dir is not None and tmp_src_dir.is_dir():
@@ -1986,21 +1980,35 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@dataclass
+class _PublishedClip:
+    """One clip written by `_publish_generator_clips`. `backup` is the sibling a
+    pre-existing managed destination was renamed to before being overwritten, or
+    `None` for a destination that did not previously exist."""
+
+    dest: Path
+    backup: Path | None
+
+
 def _publish_generator_clips(
     job: Job,
     deck: Path,
     src_dir: Path,
     clips: Mapping[int, Mapping[ItemId, Path]],
     ordinals: Mapping[int, int],
-) -> tuple[dict[int, list[str]], list[Path]]:
+    journal: list[_PublishedClip],
+) -> dict[int, list[str]]:
     """Renames/moves each inserted movie's clip into `src_dir` as
     `<DSK stem>.NNN.MM.src.mov` (NNN = DSK ordinal, MM = 1-based movie order within
     the slide, by ascending item id). A clip already inside `src_dir` is moved; a
     clip elsewhere (an operator-supplied one) is copied. `src_dir` is created only
     if absent; a symlinked `src_dir` or destination, or a destination whose resolved
-    parent is not `src_dir` itself, is refused. Returns (DSK ordinal -> the ordered
-    `src/<name>` relative paths for `manifest.json`'s `srcClips`, the destination
-    paths actually written by this call)."""
+    parent is not `src_dir` itself, is refused, and every destination is preflighted
+    before any file is written. A pre-existing managed destination is renamed to a
+    `.prev-<uuid>` sibling before being overwritten, so a mid-run failure can restore
+    it; each write (and its backup, if any) is appended to `journal` as soon as it
+    lands, so the caller can roll back a partial run. Returns DSK ordinal -> the
+    ordered `src/<name>` relative paths for `manifest.json`'s `srcClips`."""
     if src_dir.is_symlink():
         job.log(f"Refusing to publish clips: {src_dir} is a symlink")
         raise ValueError(f"Refusing to publish through symlinked directory: {src_dir}")
@@ -2008,7 +2016,7 @@ def _publish_generator_clips(
         src_dir.mkdir(parents=True)
     src_dir_real = src_dir.resolve()
     published: dict[int, list[str]] = {}
-    written: list[Path] = []
+    plan: list[tuple[Path, Path]] = []
     for fw_slide, movies in clips.items():
         ordinal = ordinals.get(fw_slide)
         if ordinal is None:
@@ -2025,14 +2033,54 @@ def _publish_generator_clips(
                 job.log(f"Refusing to publish clip: {dest} resolves outside {src_dir_real}")
                 raise ValueError(f"Refusing to publish {dest}: resolved parent is not {src_dir_real}")
             if src.resolve() != dest.resolve():
-                if src.parent.resolve() == src_dir_real:
-                    os.replace(src, dest)
-                else:
-                    shutil.copy2(src, dest)
-                written.append(dest)
+                plan.append((src, dest))
             names.append(f"src/{name}")
         published[ordinal] = names
-    return published, written
+    for src, dest in plan:
+        backup: Path | None = None
+        if dest.exists():
+            backup = dest.with_name(f"{dest.name}.prev-{uuid4().hex}")
+            os.replace(dest, backup)
+        try:
+            if src.parent.resolve() == src_dir_real:
+                os.replace(src, dest)
+            else:
+                shutil.copy2(src, dest)
+        except Exception:
+            if backup is not None:
+                os.replace(backup, dest)
+            raise
+        journal.append(_PublishedClip(dest=dest, backup=backup))
+    return published
+
+
+def _rollback_published_clips(job: Job, journal: list[_PublishedClip]) -> None:
+    """Undoes every entry in `journal`: unlinks the new write and, if a
+    pre-existing destination was backed up, restores it."""
+    for entry in reversed(journal):
+        try:
+            if entry.dest.is_file() or entry.dest.is_symlink():
+                entry.dest.unlink()
+        except OSError:
+            pass
+        if entry.backup is not None:
+            try:
+                os.replace(entry.backup, entry.dest)
+            except OSError:
+                pass
+    if journal:
+        job.log(f"Rolled back {len(journal)} clip publish(es) from this failed run")
+
+
+def _discard_publish_backups(journal: list[_PublishedClip]) -> None:
+    """Deletes the backups recorded in `journal` once the run they belong to has
+    committed successfully."""
+    for entry in journal:
+        if entry.backup is not None:
+            try:
+                entry.backup.unlink()
+            except OSError:
+                pass
 
 
 def _delete_managed_src_clips(
@@ -2176,15 +2224,13 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             log=job.log,
         )
         job.log(f"Exported {len(assets)} stage PNG(s).")
-    manifest_path = write_manifest(out_dir, path, assets, categories=categories, clips=clips, existing=existing)
-    merged = json.loads(manifest_path.read_text())
     out_dir_real = out_dir.resolve()
     to_delete: list[Path] = []
     seen: set[Path] = set()
     if src_dir.is_symlink():
         job.log(f"Skipping src/ cleanup: {src_dir} is a symlink")
     else:
-        for entry in (merged.get("slides") or {}).values():
+        for entry in ((existing or {}).get("slides") or {}).values():
             for rel in entry.get("srcClips") or []:
                 rel_path = Path(str(rel))
                 if len(rel_path.parts) != 2 or rel_path.parts[0] != "src" or ".." in rel_path.parts:
@@ -2203,14 +2249,22 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
                 if candidate.is_file() and candidate_real not in seen:
                     seen.add(candidate_real)
                     to_delete.append(candidate)
-        if to_delete:
-            for f in to_delete:
+    write_manifest(
+        out_dir, path, assets, categories=categories, clips=clips, existing=existing, drop_src=True
+    )
+    if to_delete:
+        deleted: list[Path] = []
+        for f in to_delete:
+            try:
                 f.unlink()
+                deleted.append(f)
+            except OSError as exc:
+                job.log(f"Could not delete Generator intermediate clip {f}: {exc}")
+        if deleted:
             job.log(
-                f"Deleted {len(to_delete)} Generator intermediate clip(s): "
-                + ", ".join(f.name for f in to_delete)
+                f"Deleted {len(deleted)} Generator intermediate clip(s): "
+                + ", ".join(f.name for f in deleted)
             )
-    write_manifest(out_dir, path, [], categories={}, existing=merged, drop_src=True)
 
     sequence = sorted(
         [a.path.name for a in assets] + [c.name for c in clips.values()],
