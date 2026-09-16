@@ -150,6 +150,56 @@ def test_zorder_eligible_slides_eligible_and_refused_and_unresolved_and_ambiguou
     assert any("ambiguous" in s for s in said)
 
 
+def test_zorder_eligible_slides_shared_nontwin_sig_now_eligible_via_bijection_arm(tmp_path):
+    # A slide with two non-twin groups sharing one signature ("shared"), positioned at
+    # distinct rects (not coincident, so the twin arm cannot claim them). Previously any
+    # shared, non-twin sig refused the whole slide onto zorderGui; the shared-sig
+    # bijection arm resolves the pair instead (cardinality 2 jobs == 2 groups) — the
+    # regression this todo (w2-ambiguous-sig-positional) closes.
+    pytest.importorskip("keynote_parser")
+    from test_iwa_write import _arch, _member, _shape_super  # noqa: PLC0415
+
+    def _group(child_id, gid, text, rect):
+        storage_id = child_id * 100
+        return [
+            _arch(child_id, "TSWP.ShapeInfoArchive", {
+                "isTextBox": False, "super": _shape_super(0, 0, 30, 30),
+                "ownedStorage": {"identifier": storage_id},
+            }),
+            _arch(storage_id, "TSWP.StorageArchive", {"text": [text]}),
+            _arch(gid, "TSD.GroupArchive", {"super": _shape_super(*rect)["super"], "children": [{"identifier": child_id}]}),
+        ]
+
+    groups = [*_group(301, 300, "shared", (0, 0, 10, 10)), *_group(303, 302, "shared", (200, 0, 10, 10))]
+    slide = _arch(100, "KN.SlideArchive", {
+        "drawablesZOrder": [{"identifier": i} for i in [300, 302]],
+        "ownedDrawables": [{"identifier": i} for i in [300, 302]],
+    })
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, *groups]))
+    deck = tmp_path / "shared_positional.key"
+    deck.write_bytes(buf.getvalue())
+
+    from obed_edom import offline_write
+
+    said = []
+    stat_jobs = [
+        {"slide": 1, "groupIndex": 1, "childSig": "shared"},
+        {"slide": 1, "groupIndex": 2, "childSig": "shared"},
+    ]
+    result, counts = offline_write.zorder_eligible_slides(
+        deck, "on", {1}, set(), stat_jobs, [], [], said.append,
+    )
+    assert list(result.keys()) == [1]
+    assert result[1]["stat"] == ["300", "302"]
+    assert counts["zorderGui"] == []
+    assert counts["zorderUnresolved"] == 0
+
+
 def test_zorder_eligible_slides_unresolved_group_index(zorder_deck):
     from obed_edom import offline_write
 

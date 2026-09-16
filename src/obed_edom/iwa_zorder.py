@@ -75,9 +75,37 @@ def resolve_raise_targets(
     `map_remap`'s `COINCIDENT_DUP_TOL`, the tolerance `coincident_duplicate_ids` uses) and
     their count equals the number of jobs carrying the signature — this is the same set the
     GUI's `obedResolveGroup` `allowFallback == 2` ("sigTwin") path claims, one hit per job
-    call, so the offline and live raises land the same front block. Any other ambiguity (a
-    job not flagged `twin`, non-coincident candidates, or a count mismatch) stays unresolved
-    exactly as today."""
+    call, so the offline and live raises land the same front block.
+
+    Any other shared, non-twin signature falls to a third, bijection arm instead of an
+    immediate refusal — `groupIndex` is not read here (it stays a hint used only by the
+    unique-sig arm above): let G(S) be every saved-deck group id on the slide whose own
+    child signature (`_group_child_signature`) equals S, and J(S) be the stat jobs on this
+    slide with `childSig == S`. Keynote's save path is known to scramble group order within
+    a kind on write (a banked deck showed one blank-signature decorative group move from
+    LAST to FIRST in the group-kind order on save with no other change), so a `groupIndex`
+    positional hint is not stable across saves and cannot safely pick one candidate out of
+    a same-signature run — an off-by-one inside the run would select a neighbour and still
+    "verify" clean. Membership plus cardinality is the safety property instead: when
+    `len(G(S)) == len(J(S))` and none of `G(S)` is already claimed, every id in `G(S)` is
+    claimed for `J(S)` (assigned ascending saved z order to jobs in job order — that
+    assignment is bookkeeping only, since every job in an indistinguishable run is raised
+    together and WHICH job claims WHICH id is observationally irrelevant to the resulting
+    z order). Otherwise the whole slide refuses with a token naming the mismatch
+    (`ambiguous-cardinality jobs=<n> groups=<m>`) or the prior claim (`ambiguous-
+    collision`). This replaces the old GUI's positional `obedResolveGroup(slideNo, sigs, gi,
+    targetSig, allowFallback == 0)` fallback (`keynote.py` ~line 1020) as history only — that
+    path trusted `groupIndex` inside a shared signature, which the banked-deck scramble
+    above shows is unsound offline.
+
+    `claimed` is one set threaded through all three stat arms for the whole call: two stat
+    jobs resolving to the same id is a refusal on the later one, not a silent de-dupe, and a
+    badge row landing on an id a stat job already claimed refuses too — `raise_to_front`
+    would otherwise raise `ValueError` later and refuse the whole slide with a worse message.
+    Badge rows are not checked against each other here: a dual-role row (e.g. an editable
+    shape that is both `text` and `shape`) can legitimately resolve two rows to the same id;
+    duplicate badge ids are rejected downstream by `raise_to_front` regardless of whether the
+    id also appears in the stat block."""
     z = [str(ref["identifier"]) for ref in slide.get("drawablesZOrder") or []]
     records = derive_kind_index(slide, objects)
     by_key = {(r["kind"], r["kindIndex"]): r["id"] for r in records}
@@ -105,6 +133,26 @@ def resolve_raise_targets(
         if _coincident_group_rects([group_rects[gid] for gid in candidates]):
             twin_sigs[sig] = candidates
 
+    shared_sigs: dict[str, list[str]] = {}
+    shared_refusals: dict[str, str] = {}
+    twin_claimed = {gid for ids in twin_sigs.values() for gid in ids}
+    for sig in ambiguous_sigs - set(twin_sigs):
+        candidates = [
+            gid for gid in group_rects
+            if _group_child_signature(gid, objects, sig_cache) == sig
+        ]
+        n_jobs = sig_counts[sig]
+        if len(candidates) != n_jobs:
+            shared_refusals[sig] = f"ambiguous-cardinality jobs={n_jobs} groups={len(candidates)}"
+            continue
+        if any(gid in twin_claimed for gid in candidates):
+            shared_refusals[sig] = "ambiguous-collision"
+            continue
+        shared_sigs[sig] = sorted(candidates, key=z.index)
+
+    claimed: set[str] = set()
+    sig_job_index: dict[str, int] = {}
+
     stat_ids: list[str] = []
     for job in stat_jobs:
         sig = job.get("childSig")
@@ -113,13 +161,25 @@ def resolve_raise_targets(
             # (keynote.py:1411) — a falsy childSig means no obedStatJob call is emitted,
             # so the row is neither a target nor unresolved.
             continue
+        if sig in twin_sigs:
+            for gid in twin_sigs[sig]:
+                if gid not in claimed:
+                    claimed.add(gid)
+                    stat_ids.append(gid)
+            continue
         if sig in ambiguous_sigs:
-            if sig in twin_sigs:
-                for gid in twin_sigs[sig]:
-                    if gid not in stat_ids:
-                        stat_ids.append(gid)
+            if sig in shared_sigs:
+                idx = sig_job_index.get(sig, 0)
+                sig_job_index[sig] = idx + 1
+                gid = shared_sigs[sig][idx]
+                if gid in claimed:
+                    unresolved.append(f"stat:s={job.get('slide')},sig={sig}(ambiguous-collision)")
+                    continue
+                claimed.add(gid)
+                stat_ids.append(gid)
             else:
-                unresolved.append(f"stat:s={job.get('slide')},sig={sig}(ambiguous)")
+                reason = shared_refusals[sig]
+                unresolved.append(f"stat:s={job.get('slide')},sig={sig}({reason})")
             continue
         wall_gi = int(job["groupIndex"])
         ki = wall_gi - 1
@@ -131,6 +191,10 @@ def resolve_raise_targets(
         if actual_sig != sig:
             unresolved.append(f"stat:s={job.get('slide')},gi={wall_gi},sig={sig}(mismatch)")
             continue
+        if drawable_id in claimed:
+            unresolved.append(f"stat:s={job.get('slide')},gi={wall_gi},sig={sig}(collision)")
+            continue
+        claimed.add(drawable_id)
         stat_ids.append(drawable_id)
     stat_ids = sorted(stat_ids, key=z.index)
 
@@ -142,6 +206,9 @@ def resolve_raise_targets(
         drawable_id = by_key.get((kind, ki))
         if drawable_id is None:
             unresolved.append(f"badge:k={kind},i={wall_index}")
+            continue
+        if drawable_id in claimed:
+            unresolved.append(f"badge:k={kind},i={wall_index}(collision)")
             continue
         badge_ids.append(drawable_id)
 
