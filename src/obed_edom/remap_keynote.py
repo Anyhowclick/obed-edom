@@ -1473,8 +1473,8 @@ def remap_keynote(
             )
             say(
                 f"WARNING zorder: {len(gui_slides)} slide(s) the offline resolver left "
-                f"un-raised ({detail}) — left in source stacking — stack by hand in "
-                "Keynote (todo w2-ambiguous-sig-positional)."
+                f"un-raised ({detail}) — left in source stacking — the resolver could not "
+                "prove a unique target set; see the unresolved tokens."
             )
     else:
         off_target_slides = sorted(

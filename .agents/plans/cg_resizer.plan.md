@@ -23,12 +23,13 @@ todos:
     status: completed
   - id: w2-ambiguous-sig-positional
     content: >-
-      Resolve shared, non-twin signatures positionally (groupIndex-1) with a signature verify and
-      no two jobs on one id, mirroring the GUI's `obedResolveGroup` path (Gold slide 19 legend,
-      66 jobs). Now the ONLY path to a raised Gold slide 19: the GUI raise fallback is gone
-      (w2-deletions piece 1), so an unresolved shared signature stays on `zorderGui` (WARNING,
-      stack by hand) until this lands.
-    status: pending
+      Resolve shared, non-twin signatures as a cardinality-matched set (`len(groups) ==
+      len(jobs)`, membership not position — Keynote's save path can scramble group order within
+      a kind, so `groupIndex` is not used here) instead of refusing (Gold slide 19 legend, 66
+      jobs). DONE 2026-09-16: Keynote-free, Gold slide 19 resolves 66/66 on both banked arms,
+      every other Gold and RAISE10 slide unchanged. Live confirmation is the next Gold gate,
+      expected `zorderGui=[]`.
+    status: completed
   - id: reuse-photo-placement
     content: >-
       Closed by construction: slide reuse removed 2026-09-16 (w2-deletions piece 3). The
@@ -114,11 +115,16 @@ Gate RAISE10 slides `40,55,56,109,110,123-128` and Gold, piece-2 contract: arm A
 Do not weaken eligibility to make the gate green. A slide that cannot prove a unique safe archive
 order stays on the GUI path.
 
-The owner-run live gate after the w2-deletions PR is one default-env build of RAISE10
+The owner-run live gate after `w2-ambiguous-sig-positional` is one default-env build of RAISE10
 (`40,55,56,109,110,123-128`) + Gold, re-compared Keynote-free against the banked 2026-09-15
 `B_flagged` arms via `--reuse-a`/`--reuse-b` (v2 records load). Bars: identity 100%,
-`FRONT_BLOCK_OK` all eligible, 0.00px, `zorderGui=[19]` on Gold / `[]` on RAISE10,
-`restore_source_builds` identical.
+`FRONT_BLOCK_OK` all eligible, 0.00px, `zorderGui=[]` on **both** Gold and RAISE10 (this is the
+change: Gold was `[19]`), `restore_source_builds` identical. Two caveats: the banked
+`A_unflagged` never raised slide 19, so `SAME_ORDER(A-vs-B)=no` there is the intended new
+difference, observational only; and `FRONT_BLOCK_OK` on slide 19 may read inconclusive against
+that same unraised arm-A bank rather than RED — settle it with a direct read of the new B deck's
+slide-19 tail (last 66 `drawablesZOrder` ids == the 66 resolved ids, ascending pre-raise z), or
+gate a fresh A/A pair instead of reusing the 2026-09-15 A.
 
 ## Active correctness backlog
 

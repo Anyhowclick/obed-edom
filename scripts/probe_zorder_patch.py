@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import copy
 import io
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -275,13 +277,152 @@ def _object_text_by_id(deck: Path, slide_number: int) -> dict[str, str]:
     return {r["id"]: r["text"] for r in derive_kind_index(slide, objects)}
 
 
+# ==========================================================================
+# --resolve: read-only resolver probe (w2-ambiguous-sig-positional evidence).
+# ==========================================================================
+_UNRESOLVED_RE = re.compile(r"^zorderUnresolved\(s=(\d+),(.*)\)$")
+_REFUSED_RE = re.compile(r"^zorderRefused\(s=(\d+),reason=(.*)\)$")
+
+
+def resolve_probe_report(
+    deck: Path,
+    stat_jobs: list[dict],
+    badge_rows: list[dict],
+    offline_slides: set[int],
+    refused: set[int],
+    transform_dicts: list[dict],
+    mode: str = "on",
+    slides: list[int] | None = None,
+) -> dict[int, dict]:
+    """Per-slide report driven by `offline_write.zorder_eligible_slides` itself — the
+    production eligibility function, not a reimplementation — so `--resolve` matches
+    `offline_slides`/`refused`/`transform_dicts` (hide specs) exactly the way
+    `remap_keynote.py` feeds it. Read-only: `zorder_eligible_slides` never writes the zip.
+
+    ``slides`` restricts the printed report to those slide numbers (default: every slide
+    carrying a stat job or badge row). Each entry: `jobs` (stat + badge count on that
+    slide), `stat_ids`/`badge_ids` (resolved, eligible slides only), `unresolved` (tokens,
+    parsed back out of the `say` lines `zorder_eligible_slides` emits), and `front_block`
+    (the resolved ids' final slots in `plan_slide_order`'s candidate order, ascending
+    pre-raise z) for an eligible slide. A slide `zorder_eligible_slides` refused outright
+    (member collision, out-of-range, ...) reports `refused` instead.
+    """
+    from obed_edom import offline_write  # noqa: PLC0415
+    from obed_edom.iwa_zorder import plan_slide_order  # noqa: PLC0415
+
+    say_lines: list[str] = []
+    targets, _counts = offline_write.zorder_eligible_slides(
+        deck, mode, offline_slides, refused, stat_jobs, badge_rows, transform_dicts,
+        say_lines.append,
+    )
+
+    unresolved_by_slide: dict[int, list[str]] = {}
+    refused_reason_by_slide: dict[int, str] = {}
+    for line in say_lines:
+        m = _UNRESOLVED_RE.match(line)
+        if m:
+            unresolved_by_slide.setdefault(int(m.group(1)), []).append(m.group(2))
+            continue
+        m = _REFUSED_RE.match(line)
+        if m:
+            refused_reason_by_slide[int(m.group(1))] = m.group(2)
+
+    stat_by_slide: dict[int, list[dict]] = {}
+    for job in stat_jobs:
+        stat_by_slide.setdefault(int(job["slide"]), []).append(job)
+    badge_by_slide: dict[int, list[dict]] = {}
+    for row in badge_rows:
+        badge_by_slide.setdefault(int(row["slide"]), []).append(row)
+
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    order = slide_order(objects)
+
+    wanted = slides if slides is not None else sorted(set(stat_by_slide) | set(badge_by_slide))
+    report: dict[int, dict] = {}
+    for n in wanted:
+        jobs = len(stat_by_slide.get(n, [])) + len(badge_by_slide.get(n, []))
+        if n in targets:
+            t = targets[n]
+            entry: dict = {
+                "jobs": jobs,
+                "stat_ids": t["stat"],
+                "badge_ids": t["badge"],
+                "unresolved": unresolved_by_slide.get(n, []),
+            }
+            if 1 <= n <= len(order):
+                slide = objects.get(order[n - 1][0])
+                if slide is not None:
+                    try:
+                        candidate_order = plan_slide_order(slide, objects, t["stat"], t["badge"])
+                        entry["front_block"] = candidate_order[-(len(t["stat"]) + len(t["badge"])):]
+                    except ValueError as exc:
+                        entry["plan_error"] = str(exc)
+            report[n] = entry
+        elif n in refused_reason_by_slide:
+            report[n] = {"refused": refused_reason_by_slide[n]}
+        elif n in unresolved_by_slide:
+            report[n] = {"jobs": jobs, "stat_ids": [], "badge_ids": [],
+                          "unresolved": unresolved_by_slide[n]}
+        elif jobs == 0:
+            report[n] = {"refused": "no stat job or badge row for this slide"}
+        else:
+            report[n] = {"refused": "no target after eligibility (not in offline_slides, "
+                                     "or mode==off)"}
+    return report
+
+
+def run_resolve_probe(deck: Path, run_record: Path, slide: int | None) -> int:
+    record = json.loads(run_record.read_text())
+    if "statJobs" not in record or "badgeRaises" not in record:
+        print(f"ABORT: {run_record} carries neither statJobs nor badgeRaises")
+        return 2
+    stat_jobs = list(record.get("statJobs") or [])
+    badge_rows = list(record.get("badgeRaises") or [])
+    offline_write_rec = record.get("offlineWrite") or {}
+    offline_slides = {int(s) for s in offline_write_rec.get("slides") or []}
+    refused = {int(s) for s in offline_write_rec.get("refused") or []}
+    transform_dicts = list((record.get("plan") or {}).get("transforms") or [])
+    mode = (record.get("zorderWrite") or {}).get("mode") or "on"
+
+    report = resolve_probe_report(deck, stat_jobs, badge_rows, offline_slides, refused,
+                                   transform_dicts, mode=mode,
+                                   slides=[slide] if slide else None)
+
+    for n in sorted(report):
+        entry = report[n]
+        if "refused" in entry:
+            print(f"slide {n}: REFUSED {entry['refused']}")
+            continue
+        print(f"slide {n}: jobs={entry['jobs']} "
+              f"resolved(stat={len(entry['stat_ids'])},badge={len(entry['badge_ids'])}) "
+              f"unresolved={len(entry['unresolved'])}")
+        for token in entry["unresolved"]:
+            print(f"  unresolved: {token}")
+        if "front_block" in entry:
+            print(f"  front_block: {entry['front_block']}")
+        elif "plan_error" in entry:
+            print(f"  plan_error: {entry['plan_error']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT,
                     help="scratch dir for the probe deck + PNGs (Keynote-writable, not /tmp)")
     ap.add_argument("--live", action="store_true",
                     help="drive a throwaway deck through Keynote — RUN ONLY WHEN KEYNOTE IS FREE")
+    ap.add_argument("--resolve", type=Path, default=None,
+                    help="read-only: report resolve_raise_targets per slide for DECK (no zip write)")
+    ap.add_argument("--run-record", type=Path, default=None,
+                    help="run-record or plan JSON carrying statJobs/badgeRaises (with --resolve)")
+    ap.add_argument("--slide", type=int, default=None,
+                    help="restrict --resolve to one slide number (default: every slide with a target)")
     args = ap.parse_args(argv)
+
+    if args.resolve:
+        if not args.run_record:
+            ap.error("--resolve requires --run-record")
+        return run_resolve_probe(args.resolve, args.run_record, args.slide)
 
     if not args.live:
         print("pure mode: no Keynote touched")
