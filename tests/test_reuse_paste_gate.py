@@ -139,7 +139,7 @@ def test_miss_reasons_are_surfaced_even_when_objects_were_applied(monkeypatch, t
     import obed_edom.remap_keynote as rk
 
     jxa_result = {
-        "applied": 3344, "missed": 0,
+        "applied": 3344, "missed": 0, "saved": True, "closed": True,
         "missReasons": ["paste delta slide 125: Error: some AppleScript failure"],
     }
     _wire_common(monkeypatch, rk, jxa_result=jxa_result)
@@ -159,7 +159,7 @@ def test_clean_run_emits_no_new_warning_lines(monkeypatch, tmp_path):
     import obed_edom.remap_keynote as rk
 
     jxa_result = {
-        "applied": 45, "missed": 0,
+        "applied": 45, "missed": 0, "saved": True, "closed": True,
         "addReports": [
             {
                 "slide": 125,
@@ -195,7 +195,7 @@ def test_add_reports_land_in_the_run_record(monkeypatch, tmp_path):
             },
         },
     ]
-    jxa_result = {"applied": 45, "missed": 0, "addReports": add_reports}
+    jxa_result = {"applied": 45, "missed": 0, "saved": True, "closed": True, "addReports": add_reports}
     _wire_common(monkeypatch, rk, jxa_result=jxa_result)
     source, template, dest = _touch_paths(tmp_path)
     wall_payload, template_payload = _payloads()

@@ -1437,7 +1437,7 @@ def test_flag_off_builds_the_same_plan_as_today(monkeypatch, tmp_path):
 
     def fake_run_jxa(plan):
         captured_plan.update(plan)
-        return {"applied": 1, "missed": 0}
+        return {"applied": 1, "missed": 0, "saved": True, "closed": True}
 
     monkeypatch.setattr(rk, "_run_jxa", fake_run_jxa)
 
@@ -1518,7 +1518,7 @@ def test_reuse_chain_line_marks_the_preadd_links(monkeypatch, tmp_path):
     monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
     monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
     monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True})
 
     source = tmp_path / "wall.key"
     template = tmp_path / "tpl.key"
@@ -1568,7 +1568,7 @@ def test_offline_read_off_skips_attach_group_children(monkeypatch, tmp_path):
     monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
     monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
     monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True})
 
     monkeypatch.setattr(iwa_mod, "_load_deck", lambda _p: ({}, {}, {}))
     monkeypatch.setattr(iwa_mod, "attach_group_child_text", lambda *a, **k: None)
@@ -3252,7 +3252,7 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
     monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
     monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
     monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True})
     # child_resize/badgeRaises are non-empty below, which would otherwise route through
     # the REAL pass-2 stat-finalize AppleScript (Keynote-touching) — never allowed here.
     monkeypatch.setattr(rk, "_run_stat_finalize", lambda *a, **k: {"ok": True, "jobs": 1})
@@ -3312,7 +3312,7 @@ def test_plan_out_collects_group_collapse_refused_from_a_non_other_transform(mon
     monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
     monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 1, "list": 0, "hide": 0})
     monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True})
     monkeypatch.setattr(rk, "restore_card_stroke_widths", lambda *a, **k: None)
 
     source = tmp_path / "wall.key"
@@ -3357,7 +3357,7 @@ def test_plan_warns_once_per_run_on_aspect_less_items(monkeypatch, tmp_path):
     monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
     monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
     monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True})
     monkeypatch.setattr(rk, "restore_card_stroke_widths", lambda *a, **k: None)
 
     source = tmp_path / "wall.key"

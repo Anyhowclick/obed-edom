@@ -1375,16 +1375,29 @@ function run(argv) {
   const mapReadback = readMapGeom(doc.slides(), transforms);
   let skippedSlides = 0;
   skippedSlides = skipOutsideRange(doc.slides(), wanted);
+  let saved = true;
+  let saveError = null;
   try {
     Keynote.save(doc);
   } catch (eSave) {
     try {
       Keynote.save(doc, { in: Path(plan.dest) });
-    } catch (eSave2) {}
+    } catch (eSave2) {
+      saved = false;
+      saveError = String(eSave2);
+    }
   }
+  let closed = true;
+  let closeError = null;
   try {
     Keynote.close(doc, { saving: "yes" });
-  } catch (eClose) {}
+    if (!saved) {
+      saved = true;
+    }
+  } catch (eClose) {
+    closed = false;
+    closeError = String(eClose);
+  }
   return JSON.stringify({
     dest: plan.dest,
     cloned: cloned,
@@ -1400,7 +1413,10 @@ function run(argv) {
     skippedSlides: skippedSlides,
     mapReadback: mapReadback,
     layouts: layoutReport,
-    saved: true,
+    saved: saved,
+    saveError: saveError,
+    closed: closed,
+    closeError: closeError,
     timing: TIMING,
   });
 }

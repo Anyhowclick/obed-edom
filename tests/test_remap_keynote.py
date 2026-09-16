@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from obed_edom.remap_keynote import slide_reuse_mode
+import pytest
+
+from obed_edom.remap_keynote import _require_pass1_saved_closed, slide_reuse_mode
 
 
 def test_slide_reuse_mode_defaults_off(monkeypatch):
@@ -59,7 +61,7 @@ def _wire_remap(monkeypatch, rk, *, reuse_spy=None):
     monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
     monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
     monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
-    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0, "saved": True, "closed": True})
 
 
 def _touch_paths(tmp_path: Path):
@@ -132,3 +134,17 @@ def test_plan_slide_reuses_called_when_on(monkeypatch, tmp_path):
     assert len(calls) == 1
     assert any("1 reuse slide(s)" in m for m in lines)
     assert any("Duplicating remapped slides" in m for m in lines)
+
+
+def test_require_pass1_saved_closed_accepts_true_true():
+    _require_pass1_saved_closed({"saved": True, "closed": True})
+
+
+def test_require_pass1_saved_closed_rejects_string_false():
+    with pytest.raises(RuntimeError):
+        _require_pass1_saved_closed({"saved": "false", "closed": True})
+
+
+def test_require_pass1_saved_closed_rejects_truthy_non_bool():
+    with pytest.raises(RuntimeError):
+        _require_pass1_saved_closed({"saved": 1, "closed": True})
