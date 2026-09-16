@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -222,8 +223,8 @@ def test_delete_order_descending_within_kind():
         1,
         [
             _image_item(0, x=1920, y=0, w=3840, h=1080),
-            _movie_item(0, x=1920, y=-763, w=3840, h=2160),
-            _movie_item(1, x=1920, y=-763, w=3840, h=2160),
+            _movie_item(0, x=0, y=-763, w=3840, h=2160),
+            _movie_item(1, x=3840, y=-763, w=3840, h=2160),
         ],
     )
     payload = _payload([slide])
@@ -3271,6 +3272,7 @@ def test_refit_shrink_path_clamps_to_floor_when_measured_fit_is_below_it(tmp_pat
 # assemble_dsk_deck -- fake LiveBatch and fake iwa functions, no real Keynote/IWA IO.
 # --------------------------------------------------------------------------
 import obed_edom.iwa_builds as iwa_builds  # noqa: E402
+import obed_edom.iwa_movies as iwa_movies  # noqa: E402
 import obed_edom.iwa_write as iwa_write  # noqa: E402
 
 
@@ -3349,6 +3351,7 @@ def _patch_common(monkeypatch, payload, classes, stderr_text, returncode=0):
     monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
     monkeypatch.setattr(dsa, "deck_builds", _default_fake_deck_builds)
     monkeypatch.setattr(dsa, "_restore_clip_zorder", lambda out_path, plan, warnings: {})
+    monkeypatch.setattr(dsa, "_restore_clip_timing", lambda staging_path, plan, log: {})
     monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
     monkeypatch.setattr(
         iwa_write,
@@ -3494,6 +3497,7 @@ def _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls):
     monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
     monkeypatch.setattr(dsa, "deck_builds", lambda path, *, deck=None: {})
     monkeypatch.setattr(dsa, "_restore_clip_zorder", lambda out_path, plan, warnings: {})
+    monkeypatch.setattr(dsa, "_restore_clip_timing", lambda staging_path, plan, log: {})
     monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
     monkeypatch.setattr(
         iwa_write, "match_card_stroke_styles",
@@ -12008,3 +12012,247 @@ def test_pill_width_law_pinned_to_gold_table():
         obj = objects[obj_id]
         law_width = dsa._pill_width_for_badge(badge_text, obj, objects, {})
         assert law_width == pytest.approx(mask_width, abs=tol), (ordinal, badge_text)
+
+
+# --------------------------------------------------------------------------
+# Clip start timing (visual order + AssemblyPlan.clip_timing) -- feat/dsk-clip-timing
+# --------------------------------------------------------------------------
+def _timing_deck(monkeypatch, flags_by_kind_index):
+    """Minimal objects graph resolving each ("movie", kindIndex) to a TSD.MovieArchive
+    stub carrying the given `playsAcrossSlides` flag, for slide 1."""
+    objects = {
+        f"movieObj{ki}": {"playsAcrossSlides": flag}
+        for ki, flag in flags_by_kind_index.items()
+    }
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {"slide": number})
+    monkeypatch.setattr(
+        dsa, "_item_object_ids",
+        lambda slide_archive, objects: {("movie", ki): f"movieObj{ki}" for ki in flags_by_kind_index},
+    )
+    return (objects, {}, {})
+
+
+def test_clip_timing_two_continuity_movies_leftmost_after_transition(monkeypatch):
+    # FW 13 shape: kindIndex reversed vs x -- movie 1 is placed LEFT of movie 0, both
+    # continuity (playsAcrossSlides True). Visual order must be [left, right] regardless
+    # of kindIndex, insertion (clips dict order) must follow it, and the timing plan
+    # must be leftmost -> after_transition, the other -> with_build_1.
+    left = _movie_item(1, x=0, y=0, w=3840, h=2160)
+    right = _movie_item(0, x=3840, y=0, w=3840, h=2160)
+    slide = _slide(1, [left, right])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clips = {1: {("movie", 0): Path("/tmp/clip0.mov"), ("movie", 1): Path("/tmp/clip1.mov")}}
+    deck = _timing_deck(monkeypatch, {0: True, 1: True})
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips,
+        deck=deck, fw_deck="/tmp/does-not-matter.key",
+    )
+
+    assert list(plan.clips[1]) == [("movie", 1), ("movie", 0)]
+    assert plan.clip_timing[1] == ((("movie", 1), "after_transition"), (("movie", 0), "with_build_1"))
+
+
+def test_clip_timing_continuity_plus_distinct_cascades_after_previous(monkeypatch):
+    # One continuity clip (leftmost, After Transition) and one distinct-movie clip
+    # (flag False) cascades After Previous, after the continuity group.
+    left = _movie_item(0, x=0, y=0, w=3840, h=2160)
+    right = _movie_item(1, x=3840, y=0, w=3840, h=2160)
+    slide = _slide(1, [left, right])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clips = {1: {("movie", 0): Path("/tmp/clip0.mov"), ("movie", 1): Path("/tmp/clip1.mov")}}
+    deck = _timing_deck(monkeypatch, {0: True, 1: False})
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips,
+        deck=deck, fw_deck="/tmp/does-not-matter.key",
+    )
+
+    assert list(plan.clips[1]) == [("movie", 0), ("movie", 1)]
+    assert plan.clip_timing[1] == ((("movie", 0), "after_transition"), (("movie", 1), "after_previous"))
+
+
+def test_clip_timing_single_movie_after_transition():
+    movie = _movie_item(0, x=1920, y=0, w=3840, h=1080)
+    slide = _slide(1, [movie])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clip_path = Path("/tmp/clip.mov")
+
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={1: clip_path})
+
+    assert plan.clip_timing[1] == ((("movie", 0), "after_transition"),)
+
+
+def test_clip_timing_fw_dsk_order_mismatch_refuses(monkeypatch):
+    # If the FW-space and DSK-fitted visual orders ever disagree, refuse rather than
+    # guess which order should win.
+    left = _movie_item(0, x=0, y=0, w=3840, h=2160)
+    right = _movie_item(1, x=3840, y=0, w=3840, h=2160)
+    slide = _slide(1, [left, right])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clips = {1: {("movie", 0): Path("/tmp/clip0.mov"), ("movie", 1): Path("/tmp/clip1.mov")}}
+
+    calls = {"n": 0}
+    real_order = dsa.visual_movie_order
+
+    def fake_order(rects):
+        calls["n"] += 1
+        order = real_order(rects)
+        # Flip the second (DSK-space) call's result so it disagrees with the first.
+        return list(reversed(order)) if calls["n"] == 2 else order
+
+    monkeypatch.setattr(dsa, "visual_movie_order", fake_order)
+
+    with pytest.raises(AssemblyRefusal, match="does not match"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips=clips)
+
+
+def test_restore_clip_timing_resolves_by_basename_and_calls_patch(tmp_path, monkeypatch):
+    # `_restore_clip_timing` must resolve each inserted clip to its staged
+    # TSD.MovieArchive id the same way `_restore_clip_zorder` does (unique basename
+    # match), and hand `iwa_movies.patch_clip_start_timing` a plan keyed by slideId with
+    # ClipTiming entries in the plan's given order.
+    staging_path = tmp_path / "staged.key"
+    with zipfile.ZipFile(staging_path, "w"):
+        pass
+
+    objects = {
+        "s1": {"drawablesZOrder": [{"identifier": "outA"}, {"identifier": "outB"}]},
+        "outA": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dataA"}},
+        "outB": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dataB"}},
+    }
+    monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
+    monkeypatch.setattr(dsa, "slide_order", lambda objs: [("s1", False)])
+    monkeypatch.setattr(dsa, "_data_identifier", lambda obj: (obj.get("movieData") or {}).get("identifier"))
+    monkeypatch.setattr(
+        dsa, "_build_data_index", lambda names: {"dataA": "clip0.mov", "dataB": "clip1.mov"}
+    )
+
+    captured: dict = {}
+
+    def fake_patch(deck, plans):
+        captured["deck"] = deck
+        captured["plans"] = plans
+        return {}
+
+    monkeypatch.setattr(iwa_movies, "patch_clip_start_timing", fake_patch)
+    monkeypatch.setattr(iwa_movies, "movie_autoplay_state", lambda deck, ids: {i: {} for i in ids})
+
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={
+            1: {("movie", 0): Path("/tmp/clip0.mov"), ("movie", 1): Path("/tmp/clip1.mov")}
+        },
+        text_sizes={}, autosize={}, warnings=(),
+        clip_timing={1: ((("movie", 0), "after_transition"), (("movie", 1), "with_build_1"))},
+    )
+
+    result = dsa._restore_clip_timing(staging_path, plan, lambda _msg: None)
+
+    assert captured["deck"] == staging_path
+    assert captured["plans"] == {
+        "s1": [
+            iwa_movies.ClipTiming("outA", "after_transition"),
+            iwa_movies.ClipTiming("outB", "with_build_1"),
+        ]
+    }
+    assert 1 in result
+
+
+def test_restore_clip_timing_refuses_on_ambiguous_basename_match(tmp_path, monkeypatch):
+    staging_path = tmp_path / "staged.key"
+    with zipfile.ZipFile(staging_path, "w"):
+        pass
+
+    objects = {
+        "s1": {"drawablesZOrder": [{"identifier": "outA"}, {"identifier": "outB"}]},
+        "outA": {"_pbtype": "TSD.MovieArchive"},
+        "outB": {"_pbtype": "TSD.MovieArchive"},
+    }
+    monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
+    monkeypatch.setattr(dsa, "slide_order", lambda objs: [("s1", False)])
+    # Both drawables resolve to the SAME basename -- ambiguous, must refuse.
+    monkeypatch.setattr(dsa, "_data_identifier", lambda obj: "dataShared")
+    monkeypatch.setattr(dsa, "_build_data_index", lambda names: {"dataShared": "clip0.mov"})
+
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={
+            1: {("movie", 0): Path("/tmp/clip0.mov")}
+        },
+        text_sizes={}, autosize={}, warnings=(),
+        clip_timing={1: ((("movie", 0), "after_transition"),)},
+    )
+
+    with pytest.raises(AssemblyRefusal):
+        dsa._restore_clip_timing(staging_path, plan, lambda _msg: None)
+
+
+def test_assemble_dsk_deck_post_pass_order_zorder_then_timing_then_builds(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    order: list[str] = []
+    monkeypatch.setattr(dsa, "_restore_clip_zorder", lambda out_path, plan, warnings: order.append("zorder") or {})
+    monkeypatch.setattr(dsa, "_restore_clip_timing", lambda staging_path, plan, log: order.append("timing") or {})
+
+    real_verify_builds = dsa._verify_builds
+
+    def fake_verify_builds(fw_deck, out_path, plan, warnings, *, hidden={}):
+        order.append("builds")
+        return real_verify_builds(fw_deck, out_path, plan, warnings, hidden=hidden)
+
+    monkeypatch.setattr(dsa, "_verify_builds", fake_verify_builds)
+
+    assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
+
+    assert order == ["zorder", "timing", "builds"]
+
+
+def test_verify_builds_tolerates_two_reordered_clip_movie_starts_and_transition(monkeypatch):
+    # Regression (dsk-clip-timing): with two inserted clips on one slide, one at chunk
+    # 0 (After Transition) and the other With Build 1/After Previous, the per-identity
+    # movie-start surplus tolerance and the independent transition read-back must both
+    # still pass -- neither cares about WHERE in the chunk order a clip's own
+    # apple:movie-start build sits, only that it is a fresh (unpaired) auto-attach.
+    plan = AssemblyPlan(
+        kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: ()},
+        clips={32: {("movie", 0): Path("/tmp/clip0.mov"), ("movie", 1): Path("/tmp/clip1.mov")}},
+        text_sizes={}, autosize={}, warnings=(),
+        clip_timing={32: ((("movie", 0), "after_transition"), (("movie", 1), "with_build_1"))},
+    )
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: (
+            {32: {"slideId": "s", "builds": [], "transition": None}}
+            if "fw" in str(path)
+            else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}}
+        ),
+    )
+    monkeypatch.setattr(
+        iwa_builds, "verify_builds",
+        lambda src_by_number, out_by_number, slides=None: {
+            "surplus": [
+                {
+                    "slide": 32, "effect": "apple:movie-start", "animationType": "In",
+                    "identity": ("movie", "clip0.mov"), "count": 1,
+                },
+                {
+                    "slide": 32, "effect": "apple:movie-start", "animationType": "In",
+                    "identity": ("movie", "clip1.mov"), "count": 1,
+                },
+            ],
+            "missing": [], "transitions": [], "order": [],
+        },
+    )
+    warnings: list[str] = []
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert {s["identity"] for s in builds["tolerated_surplus"]} == {
+        ("movie", "clip0.mov"), ("movie", "clip1.mov"),
+    }

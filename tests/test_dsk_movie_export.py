@@ -2213,6 +2213,52 @@ def test_export_slide_clips_per_movie_uses_kept_movie_ids_not_all_movies(monkeyp
     assert [r.path.name for r in results] == ["Sermon.012.01.mov"]
 
 
+def test_visual_movie_order_sorts_by_x_then_y():
+    rects = {
+        ("movie", 0): Rect(2850.0, 0.0, 100.0, 100.0),
+        ("movie", 1): Rect(1280.0, 0.0, 100.0, 100.0),
+    }
+    assert dme.visual_movie_order(rects) == [("movie", 1), ("movie", 0)]
+
+
+def test_visual_movie_order_raises_on_exact_tie():
+    rects = {
+        ("movie", 0): Rect(100.0, 0.0, 50.0, 50.0),
+        ("movie", 1): Rect(100.0, 0.0, 50.0, 50.0),
+    }
+    with pytest.raises(ValueError, match=r"\('movie', 0\).*\('movie', 1\)"):
+        dme.visual_movie_order(rects)
+
+
+def test_export_slide_clips_per_movie_names_by_visual_order_not_kind_index(monkeypatch, tmp_path):
+    """FW 13 shape: kindIndex 0 sits at x=3500 (right) and kindIndex 1 sits at x=2000
+    (left). The clip index MM must follow visual (x) order, so the LEFT movie
+    (kindIndex 1) is `.013.01.mov` and the RIGHT movie (kindIndex 0) is `.013.02.mov`."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    slide = {
+        "number": 13,
+        "items": [
+            {"kind": "movie", "kindIndex": 0, "x": 3500.0, "y": 0.0, "w": 500.0, "h": 1080.0},
+            {"kind": "movie", "kindIndex": 1, "x": 2000.0, "y": 0.0, "w": 500.0, "h": 1080.0},
+        ],
+    }
+    _stub_live(monkeypatch, tmp_path, payload_slides=[slide])
+    cls = SlideClass(13, "mixed", 0, 2, (("movie", 0), ("movie", 1)), (), (), None, 0, ())
+    monkeypatch.setattr(dme, "classify_deck", lambda path, **k: [cls])
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(fw, [13], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert [(r.movie_id, r.path.name) for r in results] == [
+        (("movie", 1), "Sermon.013.01.mov"),
+        (("movie", 0), "Sermon.013.02.mov"),
+    ]
+
+
 def test_export_slide_clips_per_movie_content_assert_uses_visible_intersection(monkeypatch, tmp_path):
     """A movie mostly outside the centre panel must have its coverage check against the
     *visible* intersection (`job.crop_rect`), not the full off-canvas movie rectangle --
