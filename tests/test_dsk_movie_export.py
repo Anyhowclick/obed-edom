@@ -2277,6 +2277,21 @@ def test_script_per_movie_duplicates_and_deletes_scratch_slide():
     assert "movie 1 of slide 2" in script  # deletes the OTHER movie (kindIndex 0) for job 2
 
 
+def test_script_per_movie_resets_duplicate_transition_before_export():
+    """The duplicate's outgoing transition must be cleared before export, so a per-movie
+    pure clip never bakes the source slide's magic move/dissolve -- the assembler adds
+    its own dissolve on the assembled DSK slide separately."""
+    script = _per_movie_script()
+    clause = "set transition properties of slide 2 to {transition effect:no transition effect}"
+    assert script.count(clause) == 2
+    lines = script.splitlines()
+    transition_idxs = [i for i, line in enumerate(lines) if clause in line]
+    export_idxs = [i for i, line in enumerate(lines) if "export theDoc to POSIX file" in line]
+    assert len(transition_idxs) == len(export_idxs) == 2
+    for t_idx, e_idx in zip(transition_idxs, export_idxs):
+        assert t_idx < e_idx
+
+
 def test_script_per_movie_export_error_deletes_scratch_slide_before_reraising():
     """If the per-movie export itself errors, the AppleScript must delete the duplicate
     scratch slide (in a nested try/on error) before re-raising, so a failed batch never

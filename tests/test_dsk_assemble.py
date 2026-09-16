@@ -236,13 +236,14 @@ def test_delete_order_descending_within_kind():
     assert plan.deletes[1] == (("movie", 1), ("movie", 0))
 
 
-def test_clip_aspect_guard_uses_published_even_normalized_clip_size():
-    # A 101x100 source crop, published by S2 as even-normalized geometry (the actual
-    # exported clip's size), must pass the +/-0.5% aspect guard when compared against
-    # that published geometry rather than a stale un-normalized aspect (Codex r1
-    # finding 7). Baseline fit rect aspect is whatever fit_slide produces for a single
-    # full-band movie item; a clip_sizes entry within 0.5% of it (mirroring a 101x100
-    # source published as a slightly different even size) must not be refused.
+def test_clip_aspect_guard_derives_insert_rect_from_real_clip_size():
+    # Codex r1 finding 7 (round 2): a 101x100 source crop, published by S2 as an
+    # even-normalized 102x100 clip, must not be refused even though its aspect (1.02)
+    # differs from the 101x100-derived fit rect's aspect (1.01) by ~1%, past a naive
+    # 0.5% tolerance. Assembly must instead derive the inserted movie's rect from the
+    # CLIP's own aspect (keeping the fit rect's origin and its unconstrained
+    # dimension), so the real 102x100 clip inserts without drift and the guard only
+    # catches gross (wrong-media) mismatches.
     movie = _movie_item(0, x=1920, y=-763, w=3840, h=2160)
     slide = _slide(1, [movie])
     payload = _payload([slide])
@@ -251,16 +252,22 @@ def test_clip_aspect_guard_uses_published_even_normalized_clip_size():
     clip_path = Path("/tmp/clip.mov")
 
     baseline = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={1: clip_path})
-    rect = baseline.fits[1][("movie", 0)]
-    even_h = 1000.0
-    even_w = round(rect.w / rect.h * even_h / 2) * 2
+    fit_rect = baseline.fits[1][("movie", 0)]
+    # Simulate a 101x100 source crop published (even-normalized) as 102x100 -- an
+    # aspect drift of ~1%, past the old naive 0.5% tolerance -- scaled to whatever
+    # aspect this fit rect actually has, so the test doesn't assume a specific band.
+    clip_h = 100.0
+    clip_w = round((fit_rect.w / fit_rect.h) * clip_h) + 1.0
 
     plan = plan_assembly(
         payload, classes, decisions=decisions, band=BAND, clips={1: clip_path},
-        clip_sizes={str(clip_path): (even_w, even_h)},
+        clip_sizes={str(clip_path): (clip_w, clip_h)},
     )
-    fit = plan.fits[1][("movie", 0)]
-    assert fit.w / fit.h == pytest.approx(even_w / even_h, rel=0.005)
+    inserted = plan.clip_rects[1][("movie", 0)]
+    assert inserted.x == pytest.approx(fit_rect.x)
+    assert inserted.y == pytest.approx(fit_rect.y)
+    assert inserted.w == pytest.approx(fit_rect.w) or inserted.h == pytest.approx(fit_rect.h)
+    assert inserted.w / inserted.h == pytest.approx(clip_w / clip_h)
 
 
 def test_dropped_side_included_in_deletes_unless_kept():
@@ -3216,6 +3223,23 @@ def _assemble_fixture(tmp_path):
     return fw_deck, out_path, payload, classes, decisions, clips
 
 
+def _dissolve_transition(duration=0.5):
+    return {"attributes": {"databaseEffect": "apple:dissolve", "databaseDuration": duration}}
+
+
+def _default_fake_deck_builds(path, *, deck=None):
+    # Slide 32 / ordinal 2 is the clip slide in `_assemble_fixture`; its output
+    # transition must read back as the expected dissolve so `_verify_builds`'s
+    # independent clip-transition read-back (Codex r1 finding 10) doesn't spuriously
+    # refuse tests that don't care about that check.
+    return {
+        13: {"slideId": "s13", "builds": [], "transition": None},
+        32: {"slideId": "s32", "builds": [], "transition": None},
+        1: {"slideId": "o1", "builds": [], "transition": None},
+        2: {"slideId": "o2", "builds": [], "transition": _dissolve_transition(0.5)},
+    }
+
+
 def _patch_common(monkeypatch, payload, classes, stderr_text, returncode=0):
     monkeypatch.setattr(
         dsa, "load_assembly_inputs",
@@ -3225,7 +3249,7 @@ def _patch_common(monkeypatch, payload, classes, stderr_text, returncode=0):
     monkeypatch.setattr(dsa, "LiveBatch", _make_fake_live_batch(stderr_text, returncode))
     monkeypatch.setattr(dsa, "copy_keynote", _fake_copy_keynote)
     monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
-    monkeypatch.setattr(dsa, "deck_builds", lambda path, *, deck=None: {})
+    monkeypatch.setattr(dsa, "deck_builds", _default_fake_deck_builds)
     monkeypatch.setattr(dsa, "_restore_clip_zorder", lambda out_path, plan, warnings: {})
     monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
     monkeypatch.setattr(
@@ -3239,7 +3263,7 @@ def _patch_common(monkeypatch, payload, classes, stderr_text, returncode=0):
     monkeypatch.setattr(
         iwa_write, "patch_media_stroke", lambda deck, strokes: {"refused": False, "patched": [], "created": []}
     )
-    monkeypatch.setattr(iwa_builds, "deck_builds", lambda path, *, deck=None: {})
+    monkeypatch.setattr(iwa_builds, "deck_builds", _default_fake_deck_builds)
     monkeypatch.setattr(
         iwa_builds,
         "verify_builds",
@@ -3271,7 +3295,7 @@ def test_assemble_parses_movie_props_ordinal_rekey_and_size(tmp_path, monkeypatc
             }
         return {
             1: {"slideId": "o1", "builds": [], "transition": None},
-            2: {"slideId": "o2", "builds": [], "transition": None},
+            2: {"slideId": "o2", "builds": [], "transition": _dissolve_transition(0.5)},
         }
 
     def fake_verify_builds(src_by_number, out_by_number, slides=None):
@@ -3291,7 +3315,7 @@ def test_assemble_parses_movie_props_ordinal_rekey_and_size(tmp_path, monkeypatc
     assert result.ordinals == {13: 1, 32: 2}
     assert captured["out"] == {
         13: {"slideId": "o1", "builds": [], "transition": None},
-        32: {"slideId": "o2", "builds": [], "transition": None},
+        32: {"slideId": "o2", "builds": [], "transition": _dissolve_transition(0.5)},
     }
     assert captured["src"][13]["slideId"] == "s13"
     assert result.clips_inserted == {32: {("movie", 0): Path("/tmp/clip.mov")}}
@@ -3897,7 +3921,7 @@ def test_assemble_missing_for_deleted_tolerated_other_slide_raises(tmp_path, mon
             }
         return {
             1: {"slideId": "o1", "builds": [], "transition": None},
-            2: {"slideId": "o2", "builds": [], "transition": None},
+            2: {"slideId": "o2", "builds": [], "transition": _dissolve_transition(0.5)},
         }
 
     monkeypatch.setattr(iwa_builds, "deck_builds", fake_deck_builds)
@@ -3935,7 +3959,7 @@ def test_assemble_missing_for_deleted_tolerated_no_refusal(tmp_path, monkeypatch
             }
         return {
             1: {"slideId": "o1", "builds": [], "transition": None},
-            2: {"slideId": "o2", "builds": [], "transition": None},
+            2: {"slideId": "o2", "builds": [], "transition": _dissolve_transition(0.5)},
         }
 
     monkeypatch.setattr(iwa_builds, "deck_builds", fake_deck_builds)
@@ -5573,7 +5597,7 @@ def test_verify_builds_tolerates_clip_auto_attached_movie_start(monkeypatch):
             "kind": "movie", "kindIndex": 0, "effect": "apple:movie-start",
             "animationType": "In", "identity": ("movie", "source.mov"),
         }], "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": None}},
+        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
     )
     monkeypatch.setattr(
         iwa_builds, "verify_builds",
@@ -5613,7 +5637,7 @@ def test_verify_builds_tolerates_single_movie_start_surplus_without_a_paired_sou
     monkeypatch.setattr(
         iwa_builds, "deck_builds",
         lambda path, *, deck=None: {32: {"slideId": "s", "builds": [], "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": None}},
+        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
     )
     monkeypatch.setattr(
         iwa_builds, "verify_builds",
@@ -5647,7 +5671,7 @@ def test_verify_builds_refuses_surplus_movie_start_count_exceeding_source(monkey
             "kind": "movie", "kindIndex": 0, "effect": "apple:movie-start",
             "animationType": "In", "identity": ("movie", "source.mov"),
         }], "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": None}},
+        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
     )
     monkeypatch.setattr(
         iwa_builds, "verify_builds",
@@ -5682,7 +5706,7 @@ def _movie_start_plan_and_src(monkeypatch, *, missing_count, surplus_count):
             "kind": "movie", "kindIndex": 0, "effect": "apple:movie-start",
             "animationType": "In", "identity": ("movie", "source.mov"),
         }] * 2, "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": None}},
+        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
     )
     monkeypatch.setattr(
         iwa_builds, "verify_builds",
@@ -5741,7 +5765,7 @@ def test_verify_builds_refuses_surplus_not_matching_the_clip_filename(monkeypatc
     monkeypatch.setattr(
         iwa_builds, "deck_builds",
         lambda path, *, deck=None: {32: {"slideId": "s", "builds": [], "transition": None}}
-        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": None}},
+        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
     )
     monkeypatch.setattr(
         iwa_builds, "verify_builds",
@@ -5756,6 +5780,51 @@ def test_verify_builds_refuses_surplus_not_matching_the_clip_filename(monkeypatc
     warnings: list[str] = []
     with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
         dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+def test_verify_builds_refuses_clip_slide_whose_transition_write_silently_failed(monkeypatch):
+    # Codex r1 finding 10 (round 2): a failed transition write leaves the source
+    # magic-move transition untouched, which produces NO diff in `report["transitions"]`
+    # (source == output). The old code only inspected that diff report, so this silent
+    # failure passed unnoticed. `_verify_builds` must now independently read back every
+    # clip slide's actual staged transition and refuse when it isn't the expected
+    # dissolve, regardless of what the diff report says.
+    from obed_edom import iwa_builds
+
+    plan = AssemblyPlan(
+        kept=(32,), ordinals={32: 1}, fits={32: {}}, deletes={32: (("movie", 0),)},
+        clips={32: {("movie", 0): Path("/tmp/clip.mov")}}, text_sizes={}, autosize={}, warnings=(),
+    )
+    unchanged_magic_move = _magic_move_transition(1.0)
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: {32: {"slideId": "s", "builds": [], "transition": unchanged_magic_move}}
+        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": unchanged_magic_move}},
+    )
+    monkeypatch.setattr(
+        iwa_builds, "verify_builds",
+        lambda src_by_number, out_by_number, slides=None: {
+            "surplus": [], "missing": [], "transitions": [], "order": [],
+        },
+    )
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal, match="not the expected dissolve"):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+def test_assemble_clips_inserted_returns_original_paths_not_deleted_staged_copies(tmp_path, monkeypatch):
+    # New finding 4: `AssembleResult.clips_inserted` must return the caller's
+    # normalised original clip mapping, not the `batch.work`-staged copies that
+    # `_stage_unique_clips` makes for insertion (and that `LiveBatch` deletes on exit).
+    fw_deck, out_path, payload, classes, decisions, _clips = _assemble_fixture(tmp_path)
+    real_clip = tmp_path / "real-clip.mov"
+    real_clip.write_bytes(b"clip")
+    clips = {32: real_clip}
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
+
+    assert result.clips_inserted == {32: {("movie", 0): real_clip}}
 
 
 # --------------------------------------------------------------------------

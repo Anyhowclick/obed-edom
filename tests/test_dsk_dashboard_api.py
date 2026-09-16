@@ -305,6 +305,7 @@ def test_dsk_apply_operator_clip_maps_single_movie_slide(tmp_path, monkeypatch):
     _patch_common(monkeypatch, app_mod, classes=classes)
     monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
     monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    monkeypatch.setattr(app_mod, "_ffprobe", lambda _p: (1920, 1080, 30.0, 1.0))
 
     operator_clip = tmp_path / "operator.mov"
     operator_clip.write_text("movie")
@@ -313,8 +314,9 @@ def test_dsk_apply_operator_clip_maps_single_movie_slide(tmp_path, monkeypatch):
     def unexpected_export(*_a, **_k):
         raise AssertionError("export_slide_clips must not run when the operator supplied a clip")
 
-    def fake_assemble(fw, out_path, *, decisions, clips, content_only, **kwargs):
+    def fake_assemble(fw, out_path, *, decisions, clips, clip_sizes, content_only, **kwargs):
         seen["clips"] = clips
+        seen["clip_sizes"] = clip_sizes
         from obed_edom.dsk_assemble import AssembleResult
 
         return AssembleResult(
@@ -339,6 +341,52 @@ def test_dsk_apply_operator_clip_maps_single_movie_slide(tmp_path, monkeypatch):
     job = _wait(client, job_id)
     assert job["status"] == "done", job.get("error")
     assert seen["clips"][2] == {("movie", 0): operator_clip}
+    assert seen["clip_sizes"][str(operator_clip)] == (1920, 1080)
+
+
+def test_dsk_apply_operator_clip_probe_failure_surfaces_error(tmp_path, monkeypatch):
+    """A clip the ffprobe seam cannot read must fail the job rather than silently
+    skip the aspect guard."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    one_movie = SlideClass(
+        number=2, category="movie", build_count=0, movie_count=1,
+        kept=(("movie", 0),), dropped_side=(), dropped_backdrop=(),
+        transition=None, is_text=False,
+    )
+    classes = {1: _cls(1, "static"), 2: one_movie}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    def broken_probe(_path):
+        raise RuntimeError("ffprobe unavailable/failed and no ffmpeg fallback")
+
+    monkeypatch.setattr(app_mod, "_ffprobe", broken_probe)
+
+    operator_clip = tmp_path / "operator.mov"
+    operator_clip.write_text("movie")
+
+    def unexpected_export(*_a, **_k):
+        raise AssertionError("export_slide_clips must not run when the operator supplied a clip")
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", unexpected_export)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    client.post(
+        f"/api/dsk/{job_id}/decisions",
+        json={"decisions": [{"slide": 2, "clip": str(operator_clip)}]},
+    )
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "error"
+    assert "could not probe" in job["error"]
 
 
 def test_dsk_apply_manifest_clips_keyed_by_dsk_ordinal_not_fw_slide(tmp_path, monkeypatch):

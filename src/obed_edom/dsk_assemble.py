@@ -385,6 +385,7 @@ class AssemblyPlan:
     layout_names: dict[int, str] = field(default_factory=dict)
     clip_dissolve: dict[int, float] = field(default_factory=dict)
     chain_head: dict[int, int] = field(default_factory=dict)
+    clip_rects: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -1328,6 +1329,7 @@ def plan_assembly(
     fits: dict[int, dict[ItemId, Rect]] = {}
     deletes: dict[int, tuple[ItemId, ...]] = {}
     clips_out: dict[int, dict[ItemId, Path]] = {}
+    clip_rects_out: dict[int, dict[ItemId, Rect]] = {}
     clip_dissolve_out: dict[int, float] = {}
     text_sizes: dict[int, dict[ItemId, float]] = {}
     autosize: dict[int, frozenset[ItemId]] = {}
@@ -2191,6 +2193,8 @@ def plan_assembly(
                         "not be resolved -- refusing to write blind"
                     )
 
+            wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if decision.keep_side else CENTRE_PANEL_RECT
+
             if cls.category in ("movie", "mixed"):
                 raw_clip = clips.get(number)
                 if raw_clip is None:
@@ -2217,6 +2221,7 @@ def plan_assembly(
                         raise AssemblyRefusal(
                             f"slide {number}: clip mapping missing kept movie item(s) {sorted(missing)}"
                         )
+                slide_clip_rects: dict[ItemId, Rect] = {}
                 for movie_id, clip_path in item_clips.items():
                     size = clip_sizes.get(str(clip_path))
                     if size is None:
@@ -2229,11 +2234,22 @@ def plan_assembly(
                         raise AssemblyRefusal(f"slide {number} movie {movie_id[1]}: clip {clip_path} has non-positive size")
                     rect_aspect = rect.w / rect.h
                     clip_aspect = clip_w / clip_h
-                    if abs(clip_aspect - rect_aspect) / rect_aspect > 0.005:
+                    # Even-dimension export rounding can nudge either axis by ~1px; widen the
+                    # gross-mismatch guard by that much so it only catches wrong media.
+                    tolerance = max(0.005, 1.0 / clip_w + 1.0 / clip_h)
+                    if abs(clip_aspect - rect_aspect) / rect_aspect > tolerance:
                         raise AssemblyRefusal(
                             f"slide {number} movie {movie_id[1]}: clip aspect {clip_aspect:.4f} does not match "
-                            f"fitted rect aspect {rect_aspect:.4f} ({rect.w:.2f}x{rect.h:.2f}) by more than 0.5%"
+                            f"fitted rect aspect {rect_aspect:.4f} ({rect.w:.2f}x{rect.h:.2f}) by more than "
+                            f"{tolerance * 100:.2f}%"
                         )
+                    width_bound = abs(rect.w - wall_rect.w) <= abs(rect.h - wall_rect.h)
+                    if width_bound:
+                        slide_clip_rects[movie_id] = Rect(rect.x, rect.y, rect.w, rect.w * (clip_h / clip_w))
+                    else:
+                        slide_clip_rects[movie_id] = Rect(rect.x, rect.y, rect.h * (clip_w / clip_h), rect.h)
+                if slide_clip_rects:
+                    clip_rects_out[number] = slide_clip_rects
                 clips_out[number] = item_clips
                 transition = ((builds or {}).get(number) or {}).get("transition")
                 eff_dur = _transition_effect_duration(transition)
@@ -2242,7 +2258,6 @@ def plan_assembly(
                 else:
                     clip_dissolve_out[number] = 0.5
 
-            wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if decision.keep_side else CENTRE_PANEL_RECT
             slide_text_sizes: dict[ItemId, float] = {}
             slide_shrink_sizes: dict[ItemId, float] = {}
             slide_autosize: set[ItemId] = set(cluster_autosize_map.get(number, frozenset()))
@@ -2359,6 +2374,7 @@ def plan_assembly(
         layout_names=layout_names,
         clip_dissolve=clip_dissolve_out,
         chain_head=chain_head_applied,
+        clip_rects=clip_rects_out,
     )
 
 
@@ -3350,7 +3366,7 @@ def _slide_lines(
 
     if is_clip:
         for idx, (movie_id, clip_path) in enumerate(clip_items):
-            clip_rect = plan.fits[number][movie_id]
+            clip_rect = plan.clip_rects.get(number, {}).get(movie_id, plan.fits[number][movie_id])
             lines += [
                 f"        set mBefore to (count of movies of slide {ordinal})",
                 f"        tell slide {ordinal}",
@@ -4696,6 +4712,21 @@ def _verify_builds(
     if unexplained_transitions:
         raise AssemblyRefusal(f"builds verify unexplained transition change(s): {unexplained_transitions}")
 
+    # Independently read back every clip slide's actual staged transition -- the diff
+    # report only emits an entry when output differs from source, so a silent failed
+    # write that leaves the source transition untouched would otherwise pass unnoticed.
+    bad_clip_transitions = []
+    for number in sorted(clip_slides):
+        expected_dur = plan.clip_dissolve.get(number, 0.5)
+        actual = (out_by_number.get(number) or {}).get("transition")
+        eff_dur = _transition_effect_duration(actual)
+        effect = str(eff_dur[0]) if eff_dur and eff_dur[0] is not None else None
+        duration = eff_dur[1] if eff_dur else None
+        if effect != "apple:dissolve" or duration is None or abs(float(duration) - expected_dur) > 0.05:
+            bad_clip_transitions.append({"slide": number, "expected": expected_dur, "actual": actual})
+    if bad_clip_transitions:
+        raise AssemblyRefusal(f"builds verify: clip slide transition not the expected dissolve: {bad_clip_transitions}")
+
     if report["order"]:
         raise AssemblyRefusal(f"builds verify reveal-order mismatch(es): {report['order']}")
 
@@ -5390,6 +5421,7 @@ def assemble_dsk_deck(
         no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop, split_overrides=split_overrides,
         all_classes=classes, layout_policy=layout_policy,
     )
+    original_clips = {number: dict(item_clips) for number, item_clips in plan.clips.items()}
     for number in sorted(plan.anchors):
         head = plan.chain_head.get(number)
         if head is not None:
@@ -5543,7 +5575,7 @@ def assemble_dsk_deck(
         slides_kept=plan.kept,
         ordinals=plan.ordinals,
         fits=plan.fits,
-        clips_inserted=dict(plan.clips),
+        clips_inserted=original_clips,
         clip_zorder=clip_zorder,
         stroke=stroke,
         zorder=zorder,

@@ -630,6 +630,55 @@ def test_manifest_generator_mode_drops_src_clips_for_movie_to_static_regeneratio
     assert manifest["slides"]["4"]["category"] == "static"
 
 
+def test_manifest_generator_mode_drops_exporter_stages_for_regenerated_slide(tmp_path):
+    existing = {
+        "slides": {
+            "4": {
+                "category": "static", "source_slide": 44,
+                "stages": [{"index": 1, "file": "Deck.004.01.png"}],
+            },
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "static"},
+        source_slides={4: 44}, generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert "stages" not in manifest["slides"]["4"]
+
+
+def test_manifest_generator_mode_drops_ordinal_absent_from_rerun(tmp_path):
+    existing = {
+        "slides": {
+            "4": {"category": "movie", "source_slide": 44, "clip": "Deck.004.mov"},
+            "5": {"category": "static", "source_slide": 45},
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={4: "movie"},
+        source_slides={4: 44}, generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert "4" in manifest["slides"]
+    assert "5" not in manifest["slides"]
+
+
+def test_manifest_generator_mode_fewer_slides_prunes_tail(tmp_path):
+    existing = {
+        "slides": {
+            "1": {"category": "static", "source_slide": 1},
+            "2": {"category": "static", "source_slide": 2},
+            "3": {"category": "static", "source_slide": 3},
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path, Path("Deck.key"), [], categories={1: "static", 2: "static"},
+        source_slides={1: 1, 2: 2}, generator=True, existing=existing,
+    )
+    manifest = json.loads(path.read_text())
+    assert set(manifest["slides"]) == {"1", "2"}
+
+
 def test_manifest_drop_src_removes_src_clips_from_every_slide(tmp_path):
     existing = {
         "slides": {

@@ -397,6 +397,7 @@ def _build_export_script(
             lines += [
                 f"      duplicate slide {j.ordinal} to after slide {j.ordinal} of theDoc",
                 f"      set skipped of slide {dup_ordinal} of theDoc to false",
+                f"      set transition properties of slide {dup_ordinal} to {{transition effect:no transition effect}}",
             ]
             for kind, kind_index in _delete_order(j.delete_ids):
                 name = _AS_KIND_NAMES.get(kind)

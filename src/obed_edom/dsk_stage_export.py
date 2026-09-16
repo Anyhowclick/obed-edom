@@ -407,9 +407,11 @@ def write_manifest(
     is a previously written manifest for the same folder whose slide entries are
     kept and updated, so a Generator manifest survives an Exporter run and vice
     versa; `clips` entries win over an existing clip for the same slide. `generator`
-    marks this call as a Generator run: for every slide regenerated this run (the
-    union of `source_slides` and `src_clips`), any prior `clip` is removed and
-    `srcClips` is replaced with this run's value or removed if the slide is now
+    marks this call as a Generator run: any existing entry whose ordinal is not in
+    this run's `source_slides` is dropped outright (the deck was regenerated, so
+    that ordinal no longer exists); for every slide regenerated this run (the union
+    of `source_slides` and `src_clips`), any prior `clip` and `stages` are removed
+    and `srcClips` is replaced with this run's value or removed if the slide is now
     static/absent, rather than merely overlaid onto the existing entry."""
     clips = clips or {}
     source_slides = source_slides or {}
@@ -419,9 +421,18 @@ def write_manifest(
         by_slide.setdefault(asset.slide, []).append(asset)
 
     slides_out: dict[str, dict[str, Any]] = {}
+    kept_ordinals = set(source_slides) if generator else None
     for key, entry in ((existing or {}).get("slides") or {}).items():
-        if isinstance(entry, dict):
-            slides_out[str(key)] = dict(entry)
+        if not isinstance(entry, dict):
+            continue
+        if kept_ordinals is not None:
+            try:
+                key_ordinal = int(key)
+            except (TypeError, ValueError):
+                key_ordinal = None
+            if key_ordinal not in kept_ordinals:
+                continue
+        slides_out[str(key)] = dict(entry)
     regenerated = set(source_slides) | set(src_clips) if generator else set()
     for slide in sorted(set(by_slide) | set(clips) | set(source_slides) | set(src_clips)):
         entry = slides_out.get(str(slide), {})
@@ -437,6 +448,7 @@ def write_manifest(
             entry.pop("srcClips", None)
         if slide in regenerated:
             entry.pop("clip", None)
+            entry.pop("stages", None)
         clip = clips.get(slide)
         if clip is not None:
             entry["clip"] = Path(clip).name

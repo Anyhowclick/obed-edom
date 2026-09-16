@@ -45,7 +45,7 @@ from obed_edom.dsk_assemble import (
     assemble_dsk_deck,
 )
 from obed_edom.dsk_live import keynote_running, quit_and_wait_for_exit
-from obed_edom.dsk_movie_export import export_dsk_slide_clips, export_slide_clips
+from obed_edom.dsk_movie_export import _ffprobe, export_dsk_slide_clips, export_slide_clips
 from obed_edom.dsk_plan import ItemId, classify_deck
 from obed_edom.dsk_stage_export import (
     export_stage_pngs,
@@ -1880,7 +1880,13 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
                     "movies; supply one clip per movie item instead"
                 )
             nested_clips.setdefault(number, {})[movie_ids[0]] = clip_path
-            job.log(f"slide {number}: operator-supplied clip has no offline size probe; skipping the aspect guard")
+            try:
+                probe_width, probe_height, _fps, _duration = _ffprobe(clip_path)
+            except Exception as exc:
+                raise ValueError(f"Slide {number}: could not probe operator-supplied clip {clip_path}: {exc}") from exc
+            if probe_width <= 0 or probe_height <= 0:
+                raise ValueError(f"Slide {number}: operator-supplied clip {clip_path} has zero dimensions")
+            clip_sizes[str(clip_path)] = (probe_width, probe_height)
 
     if missing_clip_slides:
         job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")

@@ -150,6 +150,17 @@ def test_content_only_skips_text_slides_keeps_movie_and_image(tmp_path, monkeypa
         32: SlideDecision(32, "in_deck"),
     }
     _patch_common(monkeypatch, payload, classes)
+    # Kept slides 21,32 -> ordinals 1,2; slide 32 is the clip slide, so its staged
+    # transition must read back as the expected dissolve (see dsk_assemble's own
+    # `_verify_builds` clip-transition read-back, Codex r1 finding 10).
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: {
+            2: {"slideId": "o2", "builds": [], "transition": {
+                "attributes": {"databaseEffect": "apple:dissolve", "databaseDuration": 0.5}
+            }},
+        },
+    )
 
     logs: list[str] = []
     result = assemble_dsk_deck(
