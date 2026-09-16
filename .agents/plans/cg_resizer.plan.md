@@ -42,6 +42,35 @@ todos:
       if the owner confirms the content changes often enough to justify automation. Residual
       reversals/placements on Full constellation slides `131,133,134,144` belong here.
     status: pending-owner-decision
+  - id: gold-6-7-backdrop-series
+    content: >-
+      SYMPTOM: Gold output slides 6/7 China backdrop not aligned with slides 5/8/9 (the owner
+      sees them as one series, raised 2026-09-10 and again 2026-09-16 evening). MECHANISM
+      (diagnosed, not a regression, identical in every Gold build since 09-15): 6/7 carry a
+      different asset (`China Adjusted.png`, 3840x1080) from 5/8/9 (`pasted-image.pdf`,
+      3686x2752); 6/7 have no map/text so the recipe pairs by size with template slide 1's cover
+      photo (`_recipe_source` -> template-cover, map_remap.py ~1511-1519), while the
+      sibling-affine chain is unreachable on an unpinned deck (`wanted is None` guard,
+      map_remap.py ~3681; PR #74's continuity fix lives inside the pinned branch and is intact).
+      Inheriting slide 5's affine would leave a 130px uncovered band (ty=129.99 from a
+      2752-tall image on a 1080-tall one), so "carry the previous affine" is disqualified for
+      this pair. SECOND DEFECT found: slide 5's backdrop is 100px off 8/9 (dest x -743 vs -843)
+      because the 1364x947 map inset is authored at wall x 3158 on 5 vs 3258 on 8/9 and the
+      backdrop rides the inset's affine. Slide 7's 12 thumbnails span 3561px wall width — an
+      authoring issue no framing fixes. OPTIONS: (a) series continuity by shared asset — cannot
+      fire here (assets differ), rejected; (b) editorial: add a template slide for generic
+      full-bleed photos (the open 2026-09-10 call) — recommended decision of record, zero code
+      risk, resurfaces deferred framings via templateDigest; (c) derive the crop from the
+      photo's own source placement when a slide's sole art is a full-bleed photo — durable code
+      fix, needs (b)'s template to define "right", must leave slides 1/2 (legitimate
+      template-cover) unchanged. VERIFY Keynote-free: unit test on the cached Gold payload
+      asserting 6/7 image-0 rect covers the full 1920x1080 frame with no band and a 5-9
+      source/templateSlide table; regression test that 5/8/9 share one backdrop tx (currently
+      fails); golden plan re-baselined with intent; slides 1-4 and 10-19 transforms
+      byte-identical to the 2026-09-16 fresh-gate record. Evidence: fresh-gate/gold/B_flagged.key
+      + .run.json, gold.log decision rows, and
+      `output/bank/2026-09-16/gold-6-7-series-diag.md`.
+    status: pending-owner-decision
   - id: residual-correctness
     content: >-
       Resolve the remaining card-border ref floor, stat-group/template sample, uncompared framing
