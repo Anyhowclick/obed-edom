@@ -3,10 +3,9 @@ import { STYLE_SWATCHES } from "./styles";
 import {
   LAYER_FILTERS,
   MORPH_MAX_DBEARING,
-  MORPH_MAX_DZOOM,
   MORPH_MAX_PITCH,
-  MORPH_MAX_PLATE_PX,
   appearanceMismatch,
+  buildingsLayerOn,
   isExtrudedStyle,
   morphPlatePx,
   bearingDelta,
@@ -66,12 +65,15 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
-  const threeD = isExtrudedStyle(from.style) || isExtrudedStyle(to.style) || pitch > MORPH_MAX_PITCH;
+  const extruded = isExtrudedStyle(from.style) || isExtrudedStyle(to.style);
+  const buildingsOn = buildingsLayerOn(from) || buildingsLayerOn(to);
+  const threeD = (extruded && buildingsOn) || pitch > MORPH_MAX_PITCH;
   const plate = morphPlatePx(from.camera, to.camera, captureWidth(from), captureWidth(to));
-  const plateOk = plate != null && plate.w <= MORPH_MAX_PLATE_PX && plate.h <= MORPH_MAX_PLATE_PX;
+  const plateOk = plate != null;
   let threeDDetail = "flat";
-  if (isExtrudedStyle(from.style) || isExtrudedStyle(to.style)) threeDDetail = "3D buildings";
+  if (extruded && buildingsOn) threeDDetail = "3D buildings";
   else if (pitch > MORPH_MAX_PITCH) threeDDetail = `pitch ${fmtDeg(pitch)}`;
+  else if (extruded) threeDDetail = "buildings off";
   const layersSame = !mismatch.has("hiddenLayers") && !mismatch.has("hillshade");
   const highlightsSame = !mismatch.has("highlights") && !mismatch.has("highlightColours");
   return [
@@ -115,7 +117,7 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
       label: "No 3D",
       ok: !threeD,
       detail: threeDDetail,
-      tip: "3D buildings or camera pitch need a Movie fly, not Magic Move.",
+      tip: "3D buildings block Magic Move only while the Buildings layer is on. Camera pitch still needs a Movie fly.",
     },
     {
       id: "bearing",
@@ -128,18 +130,13 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
       tip: "Both cameras may be rotated, but their bearings must match for one shared plate.",
     },
     {
-      id: "zoom",
-      label: `Zoom Δ ≤ ${MORPH_MAX_DZOOM}`,
-      ok: dZoom <= MORPH_MAX_DZOOM,
-      detail: `Δ ${dZoom.toFixed(1)}`,
-      tip: `The authoring limit is Δ${MORPH_MAX_DZOOM}; the 8192px plate-size check may impose a lower limit for wider outputs.`,
-    },
-    {
       id: "plate",
-      label: "Fits 1 image",
+      label: "Shared plate",
       ok: plateOk,
-      detail: plate ? `${Math.round(plate.w)} × ${Math.round(plate.h)}` : "too small",
-      tip: "Keynote Magic Move is one PNG that covers both cameras. Over 8192px becomes Movie.",
+      detail: plate
+        ? `${Math.round(plate.w)} × ${Math.round(plate.h)}${dZoom > 0.05 ? ` · Δz ${dZoom.toFixed(1)}` : ""}`
+        : "none",
+      tip: "One PNG on both slides. It may be larger than the frame — overflow is how zoom-in works. Capture is capped at 8192px.",
     },
   ];
 }
@@ -151,9 +148,9 @@ function gateHint(gates: Gate[]): string {
     return "Map style, region highlights, or layers changed — that cannot Magic Move. Use Cut or Dissolve.";
   }
   if (failed.every((gate) => gate.id === "plate")) {
-    return "The two cameras do not fit on one 8192px plate — Export will use Movie.";
+    return "The two cameras do not share a usable plate — Export will use Movie.";
   }
-  return "Pitch, a rotation change, 3D, or an oversized zoom jump needs a Movie fly.";
+  return "Pitch, a rotation change, or 3D buildings need a Movie fly.";
 }
 
 export function MorphGates({ from, to }: { from: MapsSlide; to: MapsSlide }) {

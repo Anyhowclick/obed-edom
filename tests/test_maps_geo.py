@@ -204,13 +204,31 @@ def test_infer_hop_kind_distinguishes_explicit_empty_hidden_layers():
     assert infer_hop_kind(a, c) == "morph"
 
 
-def test_infer_hop_kind_allows_matching_rotation_and_zoom_delta_two():
+def test_infer_hop_kind_allows_matching_rotation_and_any_zoom_delta():
     a = {"style": "positron", "highlights": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 22}}
     b = {"style": "positron", "highlights": [], "camera": {"zoom": 6, "pitch": 0, "bearing": 22}}
     assert infer_hop_kind(a, b) == "morph"
     b["camera"] = {**b["camera"], "bearing": 23}
     assert infer_hop_kind(a, b) == "movie"
-    b["camera"] = {**b["camera"], "bearing": 22, "zoom": 6.1}
+    b["camera"] = {**b["camera"], "bearing": 22, "zoom": 8.5}
+    assert infer_hop_kind(a, b) == "morph"
+
+
+def test_infer_hop_kind_3d_only_when_buildings_layer_on():
+    cam = {"zoom": 4, "pitch": 0, "bearing": 0}
+    hidden = [*DEFAULT_HIDDEN_LAYERS, "buildings"]
+    off = {"style": "buildings3d", "highlights": [], "camera": cam, "hiddenLayers": hidden}
+    assert infer_hop_kind(off, off) == "morph"
+    on = {"style": "buildings3d", "highlights": [], "camera": cam}
+    assert infer_hop_kind(on, on) == "movie"
+    border_off = {"style": "borderlands", "highlights": [], "camera": cam, "hiddenLayers": hidden}
+    assert infer_hop_kind(border_off, border_off) == "morph"
+
+
+def test_infer_hop_kind_pitch_still_movie_without_buildings():
+    hidden = [*DEFAULT_HIDDEN_LAYERS, "buildings"]
+    a = {"style": "buildings3d", "highlights": [], "hiddenLayers": hidden, "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    b = {"style": "buildings3d", "highlights": [], "hiddenLayers": hidden, "camera": {"zoom": 4, "pitch": 20, "bearing": 0}}
     assert infer_hop_kind(a, b) == "movie"
 
 

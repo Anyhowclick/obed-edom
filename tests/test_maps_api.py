@@ -1205,7 +1205,7 @@ def test_frame_rejects_index_not_less_than_count():
     assert response.status_code == 400
 
 
-def test_export_plan_coerces_oversized_morph():
+def test_export_plan_fits_wide_morph():
     job = _seed()
     doc = _doc(job)
     s1 = dict(doc["slides"][0])
@@ -1222,11 +1222,13 @@ def test_export_plan_coerces_oversized_morph():
     plan = client.get(f"/api/maps/{job['id']}/export-plan")
     assert plan.status_code == 200, plan.text
     payload = plan.json()
-    assert payload["links"][0]["kind"] == "movie"
-    assert "plateId" not in payload["links"][0]
-    assert {row["slideId"] for row in payload["stills"]} == {"s1", "s2"}
-    assert payload["plates"] == []
-    assert "camera" in payload["stills"][0]
+    assert payload["links"][0]["kind"] == "morph"
+    assert payload["links"][0].get("plateId")
+    assert payload["stills"] == []
+    assert len(payload["plates"]) == 1
+    assert payload["plates"][0]["plateW"] <= 8192
+    assert payload["plates"][0]["plateH"] <= 8192
+    assert "camera" in payload["plates"][0]
 
 
 def test_export_plan_small_morph_has_plate_camera():
