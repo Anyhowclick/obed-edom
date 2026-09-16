@@ -107,6 +107,7 @@ export function DskExporter() {
       <div className="row">
         <FileWell
           label="DSK .key"
+          tone="dsk"
           hint="A 1920×1080 DSK deck"
           file={keynote}
           onChoose={async () => {

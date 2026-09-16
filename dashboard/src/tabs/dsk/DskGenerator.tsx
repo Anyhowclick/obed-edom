@@ -140,6 +140,7 @@ export function DskGenerator() {
       <div className="row">
         <FileWell
           label="Finalised FW .key"
+          tone="lw"
           hint="The source 7680×1080 wall deck"
           file={keynote}
           onChoose={async () => {
@@ -154,6 +155,7 @@ export function DskGenerator() {
         />
         <FileWell
           label="Reference deck (optional)"
+          tone="dsk"
           hint="Layout import source; leave blank for the built-in DSK layouts"
           file={referenceDeck}
           onChoose={async () => {
