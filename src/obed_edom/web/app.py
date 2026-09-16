@@ -44,7 +44,7 @@ from obed_edom.dsk_assemble import (
     SlideDecision,
     assemble_dsk_deck,
 )
-from obed_edom.dsk_live import keynote_running, quit_and_wait_for_exit
+from obed_edom.dsk_live import guard_out_dir, keynote_running, quit_and_wait_for_exit
 from obed_edom.dsk_movie_export import _ffprobe, export_dsk_slide_clips, export_slide_clips
 from obed_edom.dsk_plan import ItemId, classify_deck
 from obed_edom.map_remap import Rect
@@ -1890,12 +1890,15 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"Slide {number}: operator-supplied clip {clip_path} has zero dimensions")
             clip_sizes[str(clip_path)] = (probe_width, probe_height)
 
+    tmp_src_dir: Path | None = None
     if missing_clip_slides:
+        tmp_src_dir = out_dir / f".src-{uuid4().hex}"
+        guard_out_dir(tmp_src_dir, path)
         job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")
         clip_results = export_slide_clips(
             path,
             missing_clip_slides,
-            src_dir,
+            tmp_src_dir,
             per_movie=True,
             include_side=include_side & set(missing_clip_slides),
             log=job.log,
@@ -1906,25 +1909,33 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             if clip.crop_rect is not None:
                 clip_crops.setdefault(clip.slide, {})[clip.movie_id] = clip.crop_rect
 
-    job.log(f"Assembling {out_path.name} (content-only={content_only})…")
-    result = assemble_dsk_deck(
-        path,
-        out_path,
-        decisions=decisions,
-        reference_deck=reference_deck,
-        clips=nested_clips,
-        clip_sizes=clip_sizes,
-        clip_crops=clip_crops,
-        text_slide_words=words,
-        content_only=content_only,
-        log=job.log,
-    )
+    try:
+        job.log(f"Assembling {out_path.name} (content-only={content_only})…")
+        result = assemble_dsk_deck(
+            path,
+            out_path,
+            decisions=decisions,
+            reference_deck=reference_deck,
+            clips=nested_clips,
+            clip_sizes=clip_sizes,
+            clip_crops=clip_crops,
+            text_slide_words=words,
+            content_only=content_only,
+            log=job.log,
+        )
+    except Exception:
+        if tmp_src_dir is not None and tmp_src_dir.is_dir():
+            shutil.rmtree(tmp_src_dir)
+            job.log(f"Removed unpublished clip export dir {tmp_src_dir}")
+        raise
     job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
     existing_manifest = read_manifest(out_dir, deck=result.path)
     previous_src_clips: set[str] = set()
     for entry in ((existing_manifest or {}).get("slides") or {}).values():
         previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
     published = _publish_generator_clips(result.path, src_dir, nested_clips, result.ordinals)
+    if tmp_src_dir is not None and tmp_src_dir.is_dir():
+        shutil.rmtree(tmp_src_dir, ignore_errors=True)
     categories = {
         result.ordinals[n]: str(p.get("category") or "")
         for p in included

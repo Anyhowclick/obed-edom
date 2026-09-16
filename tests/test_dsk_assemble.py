@@ -301,6 +301,35 @@ def test_clip_crops_places_insert_at_affine_transformed_normalized_rect():
     assert inserted.h == pytest.approx(crop.h * scale)
 
 
+def test_clip_crops_uses_wall_clipped_source_rect_for_off_canvas_movie():
+    # Codex r4 round-3 #7: an off-canvas movie (y=-667, extending above the wall) must
+    # have its affine derived from the VISIBLE rect `fit_slide` fit (the movie
+    # intersected with the wall), not the full movie rect -- otherwise a crop already
+    # expressed in that same visible rect inserts offset by the clipped portion.
+    movie = _movie_item(0, x=1920, y=-667, w=3840, h=2160)
+    slide = _slide(1, [movie])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck")}
+    clip_path = Path("/tmp/clip.mov")
+
+    baseline = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={1: clip_path})
+    fit_rect = baseline.fits[1][("movie", 0)]
+
+    # The crop matches the wall-visible rect (movie intersected with CENTRE_PANEL_RECT)
+    # exactly, so the inserted rect must equal the fit rect of that visible rect.
+    crop = Rect(1920.0, 0.0, 3840.0, 1080.0)
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={1: clip_path},
+        clip_crops={1: {("movie", 0): crop}},
+    )
+    inserted = plan.clip_rects[1][("movie", 0)]
+    assert inserted.x == pytest.approx(fit_rect.x)
+    assert inserted.y == pytest.approx(fit_rect.y)
+    assert inserted.w == pytest.approx(fit_rect.w)
+    assert inserted.h == pytest.approx(fit_rect.h)
+
+
 def test_operator_clip_16x10_against_16x9_fit_refused():
     # Operator clips (legacy path, no clip_crops) stay on a strict aspect threshold: a
     # 16x10 clip against a 16:9 fitted rect is a ~13% mismatch, well past 0.5%.

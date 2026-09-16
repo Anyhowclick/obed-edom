@@ -2258,10 +2258,10 @@ def plan_assembly(
                         item = items_by_id.get(movie_id)
                         if item is None:
                             raise AssemblyRefusal(f"slide {number} movie {movie_id[1]}: source item not found")
-                        src_rect = item_rect(item)
-                        if src_rect.w <= 0 or src_rect.h <= 0:
+                        src_rect = _intersect(item_rect(item), wall_rect)
+                        if src_rect is None or src_rect.w <= 0 or src_rect.h <= 0:
                             raise AssemblyRefusal(
-                                f"slide {number} movie {movie_id[1]}: source item has non-positive size"
+                                f"slide {number} movie {movie_id[1]}: source item has non-positive visible size"
                             )
                         slide_affine = Affine(
                             rect.w / src_rect.w, rect.x - src_rect.x * (rect.w / src_rect.w),

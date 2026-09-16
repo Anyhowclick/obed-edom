@@ -410,6 +410,52 @@ def test_dsk_apply_rerun_failure_before_manifest_write_deletes_nothing(tmp_path,
     assert clip_3.is_file(), "nothing is deleted before a successful manifest write"
 
 
+def test_dsk_apply_failed_assembly_leaves_no_unmanaged_clips_or_temp_dir(tmp_path, monkeypatch):
+    """A generator run whose export succeeds but whose assembly fails must not leak
+    per-movie clips into out_dir/src, and must remove its temporary export dir."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+
+    def fake_export_clips(fw, slides, out_dir, **_kwargs):
+        from obed_edom.dsk_movie_export import ClipResult
+
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        dest = Path(out_dir) / "clip.002.mov"
+        dest.write_text("movie")
+        return [
+            ClipResult(
+                slide=2, movie_id=("movie", 0), path=dest, crop_rect=None,
+                width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+            )
+        ]
+
+    def fake_assemble_fail(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble_fail)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "error"
+
+    out_dir = tmp_path / "output" / "GW" / "dsk"
+    if out_dir.is_dir():
+        remaining = [p for p in out_dir.iterdir() if p.name != "manifest.json"]
+        assert remaining == [], f"no leftover files/dirs expected, found: {remaining}"
+
+
 def test_dsk_apply_operator_clip_rejected_for_multi_movie_slide(tmp_path, monkeypatch):
     """An operator-supplied single `decision.clip` cannot cover a slide with more
     than one kept movie -- accepting it would silently drop the other movie."""

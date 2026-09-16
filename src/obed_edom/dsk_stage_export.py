@@ -577,7 +577,7 @@ def export_stage_pngs(
         for line in (proc.stderr or "").splitlines():
             match = _ERROR_RE.match(line)
             if match:
-                last_error = (int(match.group(2)), match.group(3))
+                last_error = (int(match.group(3)), match.group(4))
         if proc.returncode != 0:
             if last_error is not None:
                 errnum, errmsg = last_error

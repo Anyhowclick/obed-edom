@@ -962,6 +962,43 @@ def test_export_stage_pngs_failure_leaves_previous_manifest_untouched(tmp_path, 
     assert json.loads(manifest_path.read_text()) == original
 
 
+def test_export_stage_pngs_err_line_surfaces_errnum_and_message(tmp_path, monkeypatch):
+    deck = tmp_path / "Deck.key"
+    deck.touch()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    class _ErrBatch:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            self.work = out_dir / ".work"
+            self.work.mkdir(parents=True, exist_ok=True)
+            self.scratch = self.work / "Deck.key"
+            self.scratch.touch()
+            return self
+
+        def run(self, script_path, on_progress=None):
+            return subprocess.CompletedProcess(
+                ["osascript"], 1, "", "ERR\t3\t-1712\tmsg\n"
+            )
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(dse, "LiveBatch", _ErrBatch)
+    monkeypatch.setattr(dse, "offline_wall_payload", lambda d: _payload())
+    monkeypatch.setattr(dse, "deck_builds", lambda d: {1: {}, 2: {}})
+
+    with pytest.raises(RuntimeError, match=r"errNum -1712.*msg"):
+        dse.export_stage_pngs(
+            deck, [2], out_dir,
+            expected_stage_counts={2: 3},
+            categories={2: "built"},
+        )
+
+
 def test_export_stage_pngs_multi_slide_each_own_folder(tmp_path, monkeypatch):
     deck = tmp_path / "Deck.key"
     deck.touch()
