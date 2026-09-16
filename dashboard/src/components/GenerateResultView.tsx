@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { previewUrl, type Flag, type Job } from "../api";
 import { ArtifactActions } from "./ArtifactActions";
+import { BuildPreview } from "./BuildPreview";
 import { PreviewGrid } from "./PreviewGrid";
 import { ErrorNotice } from "./ErrorNotice";
 import { JobName } from "./JobName";
@@ -106,6 +107,7 @@ export function GenerateResultView({
       ) : (
         <p className="note">This run did not generate a {shown.toUpperCase()} deck (no template).</p>
       )}
+      <BuildPreview path={shown === "lw" ? result.lwKey : result.dskKey} />
       <ValidationPanel flags={result.flags || []} onJump={jumpToSlide} />
     </>
   );
