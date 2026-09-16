@@ -1774,14 +1774,12 @@ def main(argv: list[str] | None = None) -> int:
              "before paying for another run.")
         return 6
 
-    # `compared_slides` depends only on A's plan (transforms/reuses) — compute it once,
+    # `compared_slides` depends only on A's plan (transforms) — compute it once,
     # before B runs, so B's own suppressGeometry can be checked against it (D5/D1) and
     # the per-slide loop below does not recompute it.
-    reuses = plan_a.get("reuses") or []
-    reuse_slides = {int(r["slide"]) for r in reuses}
     wanted = slides_for_plan(slide_range)
     compared_slides = sorted(
-        offline_write._offline_write_slides(plan_a.get("transforms") or [], reuses, reuse_slides, wanted)
+        offline_write._offline_write_slides(plan_a.get("transforms") or [], wanted)
     )
 
     # ================================ run/reuse B =================================

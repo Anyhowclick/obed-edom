@@ -245,10 +245,7 @@ roster's own re-layout — and there it is packed into the visible frame, not le
 its wall extent. Every later slide that still carries the roster as a wall leftover
 hides it entirely, side band or centre band alike. A roster carrier may be a persisted
 GROUP whose names live only in its child text, so the rule is evaluated from
-`groupChildText` and fires independently of `--keep-side-panels`. Reuse must honour
-this on both the donor and the target: a persisted item invisible on one side and
-visible on the other needs an explicit add/remove job, not silent inheritance from
-whichever side reuse happened to copy.
+`groupChildText` and fires independently of `--keep-side-panels`.
 
 ### Loose text
 
@@ -453,7 +450,7 @@ compensation on a write path — the planner's y and Keynote's `position` are al
 same visual top, so writing the planner's y straight through is correct (a compensation
 once shipped on this basis was a pure write bug, reverted 2026-09-06); and never "fix" a
 composed-vs-live disagreement at write time — by construction that is a read-model bug.
-Text-content identity remains the robust way to address text items across a reuse copy.
+Text-content identity remains the robust way to address text items.
 
 ### Offline writes
 

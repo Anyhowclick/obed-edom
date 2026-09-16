@@ -18,9 +18,9 @@ todos:
       Remove the GUI raise path (`obedRaiseSlide`/`obedBadgeSlide` emission), the Accessibility
       pre-flight, and reuse step B now that the offline z-order write is the default; keeping
       `off` working until then is NOT required — owner decides scope. Piece 1 (GUI raise path
-      out of `keynote.py`/`remap_keynote.py`) and piece 2 (A/B gate + SKILL.md docs) DONE. Piece 3
-      (reuse step B) in flight.
-    status: pending
+      out of `keynote.py`/`remap_keynote.py`), piece 2 (A/B gate + SKILL.md docs), and piece 3
+      (reuse step B) DONE 2026-09-16, integrated on one PR.
+    status: completed
   - id: w2-ambiguous-sig-positional
     content: >-
       Resolve shared, non-twin signatures positionally (groupIndex-1) with a signature verify and
@@ -31,19 +31,20 @@ todos:
     status: pending
   - id: reuse-photo-placement
     content: >-
-      Diagnose the remaining reuse-slide photo/constellation placement and z-order residuals;
-      do not attribute them to W2 without measuring the saved deck.
-    status: pending
+      Closed by construction: slide reuse removed 2026-09-16 (w2-deletions piece 3). The
+      constellation residuals on Full `131,133,134,144` that used to be attributed to this
+      workstream now live under `constellation-cluster-affine`.
+    status: completed
   - id: constellation-cluster-affine
     content: >-
       Replace the constellation's one-slide affine with per-cluster sizing and template anchors
-      if the owner confirms the content changes often enough to justify automation.
+      if the owner confirms the content changes often enough to justify automation. Residual
+      reversals/placements on Full constellation slides `131,133,134,144` belong here.
     status: pending-owner-decision
   - id: residual-correctness
     content: >-
-      Resolve the remaining card-border ref floor, stat-group/template sample, parked reuse-chain
-      snapshot, uncompared framing fallback, off-slide map-label deletion, and stat bind-name
-      verification items independently.
+      Resolve the remaining card-border ref floor, stat-group/template sample, uncompared framing
+      fallback, off-slide map-label deletion, and stat bind-name verification items independently.
     status: pending
   - id: cache-and-bank-hygiene
     content: >-
@@ -113,13 +114,15 @@ Gate RAISE10 slides `40,55,56,109,110,123-128` and Gold, piece-2 contract: arm A
 Do not weaken eligibility to make the gate green. A slide that cannot prove a unique safe archive
 order stays on the GUI path.
 
+The owner-run live gate after the w2-deletions PR is one default-env build of RAISE10
+(`40,55,56,109,110,123-128`) + Gold, re-compared Keynote-free against the banked 2026-09-15
+`B_flagged` arms via `--reuse-a`/`--reuse-b` (v2 records load). Bars: identity 100%,
+`FRONT_BLOCK_OK` all eligible, 0.00px, `zorderGui=[19]` on Gold / `[]` on RAISE10,
+`restore_source_builds` identical.
+
 ## Active correctness backlog
 
-### Reuse photos and constellation
-
-Residual reversals/placements on Full constellation slides `131,133,134,144` belong to the reuse
-framing workstream until saved-deck evidence says otherwise. Reuse slides mint fresh drawable ids,
-so pair by stable structure/content, never id.
+### Constellation
 
 The constellation is not one affine. Each CHC cluster should scale as a unit, then land on a
 template anchor while preserving angular order around the central building. Discover membership
@@ -132,7 +135,6 @@ that yearly content churn justifies this automation before building it.
 - Card-border source-reference floor: output refs 10–31 on the Full wall still refuse in the
   residual case. Keep the source-ref census as a damage alarm.
 - Stat-group/template sample and stat bind-name verification remain independent correctness work.
-- The reuse-chain parked snapshot needs a concrete reproducer before implementation.
 - Uncompared framing fallback must report rather than silently claim parity.
 - Off-slide map-label deletion stays parked until a current output reproduces it.
 
