@@ -2370,3 +2370,52 @@ def test_script_per_movie_export_error_deletes_scratch_slide_before_reraising():
         assert following.index("try") < following.index("delete slide 2 of theDoc") < following.index(
             "end try"
         ) < following.index("error errMsg number errNum")
+
+
+def test_script_locked_guard_is_its_own_try_and_delete_still_follows():
+    """Some Keynote builds raise -1728 ("Can't get locked of ...") for the `group` class
+    even when the object exists and is deletable -- the locked-unlock probe must not abort
+    the whole delete block when that happens. Covers both the whole-slide and per-movie
+    delete emission, which share `_delete_block`."""
+    for script in (_sample_script(), _per_movie_script()):
+        lines = script.splitlines()
+        locked_idxs = [i for i, line in enumerate(lines) if "if locked of theObj then set locked of theObj to false" in line]
+        assert locked_idxs
+        for idx in locked_idxs:
+            assert lines[idx - 1].strip() == "try"
+            assert lines[idx + 1].strip() == "end try"
+            assert lines[idx - 2].strip().startswith("set theObj to")
+            outer_try_idx = idx - 3
+            assert lines[outer_try_idx].strip() == "try"
+            following = "\n".join(lines[idx + 2 : idx + 20])
+            assert "delete theObj" in following or "showing to false" in following
+
+
+def test_derive_pure_video_delete_ids_orders_fw12_group_last_within_its_class():
+    """Real FW deck item set for a per-movie slide with a standalone `group` item (a
+    watermark/badge unrelated to any movie), read from `DSK_Gen_Export_Input.key` slide
+    12: 4 images, 1 kept movie, 1 group. The derived delete set must carry every
+    non-movie item and stay in `_delete_order` (descending kindIndex per class)."""
+    items = [
+        {"kind": "image", "kindIndex": 0},
+        {"kind": "image", "kindIndex": 1},
+        {"kind": "image", "kindIndex": 2},
+        {"kind": "image", "kindIndex": 3},
+        {"kind": "movie", "kindIndex": 0},
+        {"kind": "group", "kindIndex": 0},
+    ]
+    movie_id = ("movie", 0)
+    delete_ids = dme._derive_pure_video_delete_ids(items, movie_id)
+    assert movie_id not in delete_ids
+    assert set(delete_ids) == {
+        ("image", 0),
+        ("image", 1),
+        ("image", 2),
+        ("image", 3),
+        ("group", 0),
+    }
+    by_kind: dict[str, list[int]] = {}
+    for kind, kind_index in delete_ids:
+        by_kind.setdefault(kind, []).append(kind_index)
+    for kind_indexes in by_kind.values():
+        assert kind_indexes == sorted(kind_indexes, reverse=True)

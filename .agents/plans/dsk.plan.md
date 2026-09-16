@@ -322,6 +322,15 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 5. FIXED 2026-09-16: both DSK sub-tabs render `JobName` with rename wiring (live-verified r14).
 6. FIXED 2026-09-16: `assemble_dsk_deck(content_only=True, …)` refuses `text_fit="shrink"`,
    a non-default `min_text_pt`, `allow_split=False` and `split_overrides`, matching the CLI.
+7a. LIVE-VERIFIED 2026-09-16 (r16, PR #143 + #148) on `DSK_Gen_Export_Input.key` 11–13 (14-slide
+   revision: FW 12 now one movie, FW 13 two): Generator made 4 pure per-movie clips into
+   `src/`, assembled 3 slides in 287 s (peak RSS 2.0 GB); offline read-back: slide 3's two
+   clips at x 345 and 968 (622 wide each, centred band), every inserted movie at the BACK of
+   `drawablesZOrder`, 0.5 s dissolve on all clip slides, builds intact, slides 12/13 share
+   the chain anchor. Exporter re-rendered 3 clips in 61 s and deleted the 4 intermediates;
+   manifest carries `clip` + `source_slide` only. Keynote quit itself after every step.
+   Found live: `locked of group N` raises -1728 on this Keynote build (fix #148). Evidence
+   `~/Desktop/dsk-d4-work/evidence-r16/`.
 7. LIVE-VERIFIED 2026-09-16 (r15, PR #138 + #140): the two-batch Generator job (clip export
    then assemble) on `DSK_Gen_Export_Input.key` 11–13 with the "Blank Black" alias; the
    Exporter's `isStageDeck` gate, its `.mov` path on the hand-built deck (slide 13 → 53 s
