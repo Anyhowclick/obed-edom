@@ -82,8 +82,8 @@ def _no_copy(source: Path, dest: Path) -> Path:
 
 def _no_previews(
     source: Path, wall: dict[str, Any], *, folder: Path | str | None = None, wanted: list[int] | None = None
-) -> tuple[dict[int, Any], str]:
-    return {}, ""
+) -> tuple[dict[int, Any], str, Path | None]:
+    return {}, "", None
 
 
 @contextmanager

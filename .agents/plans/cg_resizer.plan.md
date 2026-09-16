@@ -120,6 +120,15 @@ The owner-run live gate after the w2-deletions PR is one default-env build of RA
 `FRONT_BLOCK_OK` all eligible, 0.00px, `zorderGui=[19]` on Gold / `[]` on RAISE10,
 `restore_source_builds` identical.
 
+Live verify excludes z-order-patched slides until the kindIndex bridge covers permutations
+(todo id `live-verify-zorder-bridge`, pending). Gate arms must share preview-cache provenance:
+the banked 2026-09-15 Gold arms were planned WITHOUT the preview cache and are an invalid
+baseline for slides 11/12 list placement — the 2026-09-16 build is the correct one.
+
+2026-09-16 post-deletions gate outcome: RAISE10 deck geometry-identical to the 09-15 bank,
+`FRONT_BLOCK_OK` 11/11; Gold identical except the roster rows. Both live-verify REDs are this
+addressing gap (root cause B below), not the deletions.
+
 ## Active correctness backlog
 
 ### Constellation

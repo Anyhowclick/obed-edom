@@ -699,8 +699,10 @@ def resolve_source_previews(
     *,
     folder: Path | str | None = None,
     wanted: list[int] | None = None,
-) -> tuple[dict[int, Any], str]:
-    """Rendered wall slides keyed by number, for measuring empty space for loose text."""
+) -> tuple[dict[int, Any], str, Path | None]:
+    """Rendered wall slides keyed by number, for measuring empty space for loose text.
+    The third return value is the resolved candidate directory (None when no candidate
+    yielded any usable image), for run-record provenance."""
     from PIL import Image  # noqa: PLC0415
 
     from obed_edom.baseline import deck_digest, preview_cache_dir  # noqa: PLC0415
@@ -740,8 +742,8 @@ def resolve_source_previews(
             detail = f"{label} ({len(images)} image(s) for {len(slides)} slide(s))"
             if len(images) != len(slides):
                 detail += " — count differs, check the export is current"
-            return out, detail
-    return {}, ""
+            return out, detail, path
+    return {}, "", None
 
 
 def restore_card_stroke_widths(
@@ -1118,6 +1120,7 @@ def remap_keynote(
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
     preview_note = ""
+    preview_source_dir: Path | None = None
     preview_wanted = preview_wanted_slides(
         wall,
         slide_range,
@@ -1125,7 +1128,7 @@ def remap_keynote(
         side_content_slides=side_content_slides,
     )
     if preview_wanted is None or preview_wanted:
-        previews, preview_note = resolve_source_previews(
+        previews, preview_note, preview_source_dir = resolve_source_previews(
             source, wall, folder=source_previews, wanted=preview_wanted
         )
     placements: list[dict[str, Any]] = []
@@ -1620,6 +1623,10 @@ def remap_keynote(
         "templateScore": score_against_gold(transforms, template_data, wall=wall),
         "placements": placements,
         "placementSource": preview_note,
+        "previews": {
+            "source": str(preview_source_dir) if preview_source_dir else None,
+            "placements": len(placements),
+        },
         "skippedSlidesLeftAlone": hidden,
         "fittedSlides": fitted,
         "offFrame": offframe,
@@ -1772,9 +1779,18 @@ def remap_and_inspect(
     if ow and ow.get("mode") == "verify":
         planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
         stat_slides = frozenset(ow.get("statSlides") or [])
+        zorder_slides = frozenset((info.get("zorderWrite") or {}).get("slides") or [])
+        exclude_slides = stat_slides | zorder_slides
         live_report = offline_write.verify_live_frames(
-            planned, payload, exclude_slides=stat_slides
+            planned, payload, exclude_slides=exclude_slides
         )
+        if log:
+            log(
+                f"offline-write live verify: excluded {len(exclude_slides)} of "
+                f"{len(planned)} slide(s) ({len(stat_slides)} stat-finalize, "
+                f"{len(zorder_slides)} z-order-patched); covers only "
+                f"{max(len(planned) - len(exclude_slides), 0)} slide(s)."
+            )
         ow["liveVerifyPass"] = offline_write._say_verify_report(
             "offline-write live verify", live_report, offline_write.LIVE_VERIFY_TOL, log
         )

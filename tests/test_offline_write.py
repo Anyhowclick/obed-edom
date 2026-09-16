@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import _fake_osascript
+from obed_edom import offline_write
 from obed_edom.iwa_geometry import audit_natural_consistency, compose_geometry
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.paths import find_repo_root
@@ -58,6 +59,7 @@ from scripts.offline_write_ab import (
     plan_oracle_slide,
     w2_oracle_kwargs,
     plan_parity,
+    preview_provenance_warning,
     run_record,
     source_aspects,
     spec_id_map,
@@ -1561,6 +1563,57 @@ def test_remap_and_inspect_sets_live_verify_pass_key(monkeypatch, tmp_path):
     assert info["offlineWrite"]["liveVerifyPass"] is True  # exact match on the one shape
 
 
+def test_remap_and_inspect_excludes_zorder_patched_slides_from_live_verify(monkeypatch, tmp_path):
+    """Root cause B: the offline z-order patch permutes per-kind kindIndex order on its
+    target slides the same way a stat-finalize raise does, so `remap_and_inspect` must
+    union `zorderWrite["slides"]` into `exclude_slides` before calling `verify_live_frames`."""
+    import obed_edom.remap_keynote as rk
+
+    offline_info = {
+        "mode": "verify",
+        "specs": {
+            1: [_spec(slide=1, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10)],
+            2: [_spec(slide=2, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10)],
+        },
+        "statSlides": [],
+    }
+
+    def fake_remap(source, dest, *, export_dir=None, **kwargs):
+        return {
+            "dest": str(dest), "applied": 1, "offlineWrite": offline_info,
+            "zorderWrite": {"slides": [1]},
+        }
+
+    def fake_inspect(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
+        return {
+            "slideWidth": 1920, "slideHeight": 1080, "slideCount": 2,
+            "slides": [
+                {"number": 1, "items": []},
+                {"number": 2, "items": [
+                    {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+                ]},
+            ],
+        }
+
+    captured = {}
+    real_verify_live_frames = offline_write.verify_live_frames
+
+    def spy_verify_live_frames(planned, payload, *, exclude_slides=frozenset()):
+        captured["exclude_slides"] = exclude_slides
+        return real_verify_live_frames(planned, payload, exclude_slides=exclude_slides)
+
+    monkeypatch.setattr(rk, "remap_keynote", fake_remap)
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(offline_write, "verify_live_frames", spy_verify_live_frames)
+
+    info = rk.remap_and_inspect(
+        tmp_path / "wall.key", tmp_path / "out.key", template=tmp_path / "tpl.key",
+        validate=True,
+    )
+    assert captured["exclude_slides"] == frozenset({1})
+    assert info["offlineWrite"]["liveVerifyPass"] is True
+
+
 def test_summary_gate_reasons_green_on_clean_run():
     from scripts.offline_write_ab import summary_gate_reasons
 
@@ -2849,6 +2902,41 @@ def test_run_record_persists_stat_and_badge_job_lists():
                                         "statJobs": [{"slide": 3}], "badgeRaises": [{"slide": 5}]}))
     assert record["statJobs"] == [{"slide": 3}]
     assert record["badgeRaises"] == [{"slide": 5}]
+
+
+def test_run_record_round_trips_preview_provenance(tmp_path):
+    record = run_record(**_record(previews={"source": "/x/.cache/previews/abc", "placements": 90}))
+    assert record["previews"] == {"source": "/x/.cache/previews/abc", "placements": 90}
+    path = write_run_record(tmp_path / "A.run.json", record)  # raises on round-trip mismatch
+    assert json.loads(path.read_text())["previews"] == record["previews"]
+
+
+def test_run_record_previews_defaults_to_none():
+    record = run_record(**_record())
+    assert record["previews"] is None
+
+
+def test_preview_provenance_warning_none_when_sources_match():
+    a = run_record(**_record(previews={"source": "/cache/previews/x", "placements": 5}))
+    b = run_record(**_record(previews={"source": "/cache/previews/x", "placements": 5}))
+    assert preview_provenance_warning(a, b) is None
+
+
+def test_preview_provenance_warning_fires_on_mismatched_source():
+    a = run_record(**_record(previews={"source": None, "placements": 0}))
+    b = run_record(**_record(previews={"source": "/cache/previews/x", "placements": 90}))
+    warning = preview_provenance_warning(a, b)
+    assert warning is not None
+    assert "arm A planned with preview source None" in warning
+
+
+def test_preview_provenance_warning_flags_older_record_missing_field():
+    a = run_record(**_record())
+    del a["previews"]
+    b = run_record(**_record(previews={"source": "/cache/previews/x", "placements": 90}))
+    assert preview_provenance_warning(a, b) == (
+        "provenance unknown (older run record predates preview-cache provenance)."
+    )
 
 
 def test_run_record_raises_when_plan_carries_neither_key():

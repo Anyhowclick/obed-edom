@@ -215,7 +215,7 @@ def _no_copy(source: Path, dest: Path) -> Path:
 
 
 def _no_previews(source, wall, *, folder=None, wanted=None):
-    return {}, ""
+    return {}, "", None
 
 
 def _no_thumbs(deck, payload, *, log=None):
