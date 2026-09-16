@@ -273,22 +273,21 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 ## 4. Open bugs / TODOs
 
 ### Shipped path (blocking polish)
-1. **Keynote left open after preview export → 409.** Symptom: every propose→apply needs a manual
-   Keynote quit (done by hand twice in P7). Expected: propose quits Keynote after exporting
-   previews, or the runner quits it before apply. Evidence `~/Desktop/dsk-d4-work/evidence-p7/`
-   (job 45757e4f, export job cb17ff41; first export apply → HTTP 409).
-2. **Stage PNGs land in the wrong folder.** Written to `output/<DSK deck stem>/dsk/`
-   (`output/Sermon_PK (GW)_DSK/dsk/`) instead of the deck's own flat asset folder
-   `output/Sermon_PK (GW)/dsk/` beside the `.mov` clips (owner Q2: ONE flat folder).
-   Fix in `_run_dsk_export_apply`: write into the folder holding the deck being exported when
-   it is a generated deck, else beside the deck. Evidence: same dir.
+1. FIXED 2026-09-16 (offline, live-unverified): propose quits the Keynote it launched for
+   preview export (`_dsk_preview_thumbs`, both Generator and Exporter); a Keynote the
+   operator already had open is left alone. Evidence of the bug:
+   `~/Desktop/dsk-d4-work/evidence-p7/` (job 45757e4f, export job cb17ff41 → HTTP 409).
+2. FIXED 2026-09-16 (offline, live-unverified): the Exporter writes stage PNGs beside the
+   deck it exports (`path.parent`). For a generated deck that is the flat asset folder
+   `output/<FW stem>/dsk/` next to the `.mov` clips (owner Q2); for a hand-built deck it
+   is the deck's own folder, so run Q3 on a copy in a scratch folder.
 3. **Exporter never run on a hand-built DSK deck** (owner Q3). Run next session on a copy of
    `~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`; the gold copy was prepared and
    deleted unused.
 4. **UI never clicked through** — P7 drove the API directly on port 8891.
-5. **`DskGenerator` lacks the per-tab job-rename wiring** `main` added.
-6. **Library callers can pass text-only kwargs with `content_only=True`** — silently a no-op
-   rather than refused (the CLI refuses them).
+5. FIXED 2026-09-16: both DSK sub-tabs render `JobName` with rename wiring.
+6. FIXED 2026-09-16: `assemble_dsk_deck(content_only=True, …)` refuses `text_fit="shrink"`,
+   a non-default `min_text_pt`, `allow_split=False` and `split_overrides`, matching the CLI.
 7. Offline-only so far: the two-batch job (clip export then assemble) and the Exporter's
    `isStageDeck` gate.
 
