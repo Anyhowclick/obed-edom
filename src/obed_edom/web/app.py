@@ -1891,25 +1891,26 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             clip_sizes[str(clip_path)] = (probe_width, probe_height)
 
     tmp_src_dir: Path | None = None
-    if missing_clip_slides:
-        tmp_src_dir = out_dir / f".src-{uuid4().hex}"
-        guard_out_dir(tmp_src_dir, path)
-        job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")
-        clip_results = export_slide_clips(
-            path,
-            missing_clip_slides,
-            tmp_src_dir,
-            per_movie=True,
-            include_side=include_side & set(missing_clip_slides),
-            log=job.log,
-        )
-        for clip in clip_results:
-            nested_clips.setdefault(clip.slide, {})[clip.movie_id] = clip.path
-            clip_sizes[str(clip.path)] = (clip.width, clip.height)
-            if clip.crop_rect is not None:
-                clip_crops.setdefault(clip.slide, {})[clip.movie_id] = clip.crop_rect
-
+    published_files: list[Path] = []
     try:
+        if missing_clip_slides:
+            tmp_src_dir = out_dir / f".src-{uuid4().hex}"
+            guard_out_dir(tmp_src_dir, path)
+            job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")
+            clip_results = export_slide_clips(
+                path,
+                missing_clip_slides,
+                tmp_src_dir,
+                per_movie=True,
+                include_side=include_side & set(missing_clip_slides),
+                log=job.log,
+            )
+            for clip in clip_results:
+                nested_clips.setdefault(clip.slide, {})[clip.movie_id] = clip.path
+                clip_sizes[str(clip.path)] = (clip.width, clip.height)
+                if clip.crop_rect is not None:
+                    clip_crops.setdefault(clip.slide, {})[clip.movie_id] = clip.crop_rect
+
         job.log(f"Assembling {out_path.name} (content-only={content_only})…")
         result = assemble_dsk_deck(
             path,
@@ -1923,42 +1924,51 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             content_only=content_only,
             log=job.log,
         )
+        job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
+        existing_manifest = read_manifest(out_dir, deck=result.path)
+        previous_src_clips: set[str] = set()
+        for entry in ((existing_manifest or {}).get("slides") or {}).values():
+            previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
+        published, published_files = _publish_generator_clips(
+            job, result.path, src_dir, nested_clips, result.ordinals
+        )
+        categories = {
+            result.ordinals[n]: str(p.get("category") or "")
+            for p in included
+            for n in [int(p["slide"])]
+            if n in result.ordinals
+        }
+        new_manifest_path = write_manifest(
+            out_dir,
+            result.path,
+            [],
+            categories=categories,
+            source_slides={o: n for n, o in result.ordinals.items()},
+            src_clips=published,
+            generator=True,
+            existing=existing_manifest,
+        )
+        new_manifest = json.loads(new_manifest_path.read_text())
+        current_src_clips: set[str] = set()
+        for entry in (new_manifest.get("slides") or {}).values():
+            current_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
+        stale_src_clips = previous_src_clips - current_src_clips
+        if stale_src_clips:
+            _delete_managed_src_clips(job, out_dir, src_dir, stale_src_clips)
     except Exception:
-        if tmp_src_dir is not None and tmp_src_dir.is_dir():
-            shutil.rmtree(tmp_src_dir)
-            job.log(f"Removed unpublished clip export dir {tmp_src_dir}")
+        for f in published_files:
+            try:
+                if f.is_file():
+                    f.unlink()
+            except OSError:
+                pass
+        if published_files:
+            job.log(f"Removed {len(published_files)} file(s) published by this failed run")
         raise
-    job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
-    existing_manifest = read_manifest(out_dir, deck=result.path)
-    previous_src_clips: set[str] = set()
-    for entry in ((existing_manifest or {}).get("slides") or {}).values():
-        previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
-    published = _publish_generator_clips(result.path, src_dir, nested_clips, result.ordinals)
-    if tmp_src_dir is not None and tmp_src_dir.is_dir():
-        shutil.rmtree(tmp_src_dir, ignore_errors=True)
-    categories = {
-        result.ordinals[n]: str(p.get("category") or "")
-        for p in included
-        for n in [int(p["slide"])]
-        if n in result.ordinals
-    }
-    new_manifest_path = write_manifest(
-        out_dir,
-        result.path,
-        [],
-        categories=categories,
-        source_slides={o: n for n, o in result.ordinals.items()},
-        src_clips=published,
-        generator=True,
-        existing=existing_manifest,
-    )
-    new_manifest = json.loads(new_manifest_path.read_text())
-    current_src_clips: set[str] = set()
-    for entry in (new_manifest.get("slides") or {}).values():
-        current_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
-    stale_src_clips = previous_src_clips - current_src_clips
-    if stale_src_clips:
-        _delete_managed_src_clips(job, out_dir, src_dir, stale_src_clips)
+    finally:
+        if tmp_src_dir is not None and tmp_src_dir.is_dir():
+            shutil.rmtree(tmp_src_dir, ignore_errors=True)
+            job.log(f"Removed clip export dir {tmp_src_dir}")
     return {
         "phase": "done",
         "path": str(path),
@@ -1977,18 +1987,28 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
 
 
 def _publish_generator_clips(
+    job: Job,
     deck: Path,
     src_dir: Path,
     clips: Mapping[int, Mapping[ItemId, Path]],
     ordinals: Mapping[int, int],
-) -> dict[int, list[str]]:
+) -> tuple[dict[int, list[str]], list[Path]]:
     """Renames/moves each inserted movie's clip into `src_dir` as
     `<DSK stem>.NNN.MM.src.mov` (NNN = DSK ordinal, MM = 1-based movie order within
     the slide, by ascending item id). A clip already inside `src_dir` is moved; a
-    clip elsewhere (an operator-supplied one) is copied. Returns DSK ordinal -> the
-    ordered `src/<name>` relative paths, for `manifest.json`'s `srcClips`."""
-    src_dir.mkdir(parents=True, exist_ok=True)
+    clip elsewhere (an operator-supplied one) is copied. `src_dir` is created only
+    if absent; a symlinked `src_dir` or destination, or a destination whose resolved
+    parent is not `src_dir` itself, is refused. Returns (DSK ordinal -> the ordered
+    `src/<name>` relative paths for `manifest.json`'s `srcClips`, the destination
+    paths actually written by this call)."""
+    if src_dir.is_symlink():
+        job.log(f"Refusing to publish clips: {src_dir} is a symlink")
+        raise ValueError(f"Refusing to publish through symlinked directory: {src_dir}")
+    if not src_dir.is_dir():
+        src_dir.mkdir(parents=True)
+    src_dir_real = src_dir.resolve()
     published: dict[int, list[str]] = {}
+    written: list[Path] = []
     for fw_slide, movies in clips.items():
         ordinal = ordinals.get(fw_slide)
         if ordinal is None:
@@ -1998,14 +2018,21 @@ def _publish_generator_clips(
             src = Path(movies[movie_id])
             name = f"{deck.stem}.{ordinal:03d}.{order:02d}.src.mov"
             dest = src_dir / name
+            if dest.is_symlink():
+                job.log(f"Refusing to publish clip: {dest} is a symlink")
+                raise ValueError(f"Refusing to publish through symlinked destination: {dest}")
+            if dest.resolve().parent != src_dir_real:
+                job.log(f"Refusing to publish clip: {dest} resolves outside {src_dir_real}")
+                raise ValueError(f"Refusing to publish {dest}: resolved parent is not {src_dir_real}")
             if src.resolve() != dest.resolve():
-                if src.parent.resolve() == src_dir.resolve():
+                if src.parent.resolve() == src_dir_real:
                     os.replace(src, dest)
                 else:
                     shutil.copy2(src, dest)
+                written.append(dest)
             names.append(f"src/{name}")
         published[ordinal] = names
-    return published
+    return published, written
 
 
 def _delete_managed_src_clips(
