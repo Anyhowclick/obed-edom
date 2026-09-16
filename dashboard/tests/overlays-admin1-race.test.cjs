@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/overlays.ts"), path.join(root, "src/maps/adminSync.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { ensureAdmin0Highlights, syncAdmin1Source, applyHighlights, applyAdmin1Highlights, applyIsolate, addOverlays, ensureLabelPillImage, labelPillImageId, LABEL_PILL_BUCKETS } = require(path.join(out, "overlays.js"));
+const { ensureAdmin0Highlights, syncAdmin1Source, applyHighlights, applyAdmin1Highlights, applyIsolate, addOverlays, ensureLabelPillImage, labelPillImageId, LABEL_PILL_ID, LABEL_PILL_MAX_PX, LABEL_NAME_HEIGHT_PX } = require(path.join(out, "overlays.js"));
 const { AdminSyncGate } = require(path.join(out, "adminSync.js"));
 
 /** A fake MapLibre map recording every mutation `ensureAdmin0Highlights`/`syncAdmin1Source`
@@ -45,6 +45,12 @@ function fakeMap() {
     },
     setPaintProperty: (id, prop, value) => calls.push(["setPaintProperty", id, prop, value]),
     setLayoutProperty: (id, prop, value) => calls.push(["setLayoutProperty", id, prop, value]),
+    moveLayer: (id, before) => calls.push(["moveLayer", id, before]),
+    listImages: () => [...images.keys()],
+    removeImage: (id) => {
+      calls.push(["removeImage", id]);
+      images.delete(id);
+    },
     setFeatureState: (target, state) => calls.push(["setFeatureState", target, state]),
     getStyle: () => ({ layers: [] }),
     images,
@@ -63,8 +69,13 @@ global.document = {
     height: 0,
     getContext: () => ({
       beginPath() {},
+      moveTo() {},
+      lineTo() {},
+      closePath() {},
+      arc() {},
       roundRect() {},
       fill() {},
+      fillText() {},
       getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
     }),
   }),
@@ -504,45 +515,83 @@ test("dispose then reuse: a tracked promise outstanding at dispose must not sett
   assert.equal(settledDone, true, "settled() must resolve once the new lifecycle's own sync finishes");
 });
 
-test("ensureLabelPillImage registers one stretchable pill per scale bucket", () => {
-  const map = fakeMap();
-  ensureLabelPillImage(map);
-  for (const bucket of LABEL_PILL_BUCKETS) {
-    const entry = map.images.get(labelPillImageId(bucket));
-    assert.ok(entry, `missing pill variant for bucket ${bucket}`);
-    assert.equal(entry.options.pixelRatio, 2);
-    assert.equal(entry.options.stretchX.length, 1);
-    assert.equal(entry.options.stretchY.length, 1);
-    assert.equal(entry.options.content.length, 4);
-    const [left, top, right, bottom] = entry.options.content;
-    assert.ok(left > 0 && top > 0 && right > left && bottom > top);
-  }
+const labeled = (name, size = 64) => ({
+  id: "a",
+  name,
+  lat: 0,
+  lon: 0,
+  kind: "dropPin",
+  color: "#fff",
+  size,
+  showLabel: true,
 });
 
-test("ensureLabelPillImage scales pill padding and corner with the bucket", () => {
+test("ensureLabelPillImage bakes one 1x image per labeled name", () => {
   const map = fakeMap();
-  ensureLabelPillImage(map);
-  const one = map.images.get(labelPillImageId(1)).options;
-  const four = map.images.get(labelPillImageId(4)).options;
-  assert.equal(four.content[0], one.content[0] * 4);
-  assert.equal(four.content[1], one.content[1] * 4);
-  assert.equal(four.stretchX[0][0], one.stretchX[0][0] * 4);
+  ensureLabelPillImage(map, [labeled("CHC Medan")]);
+  const id = labelPillImageId("CHC Medan");
+  assert.ok(map.hasImage(id));
+  assert.equal([...map.images.keys()].filter((key) => key.startsWith(`${LABEL_PILL_ID}-`)).length, 1);
+  const entry = map.images.get(id);
+  assert.equal(entry.options.pixelRatio, 2);
+  assert.ok(entry.data.width <= (LABEL_PILL_MAX_PX + 12) * 2);
+  assert.ok(entry.data.height <= (LABEL_NAME_HEIGHT_PX + 4) * 2);
+});
+
+test("a bucket-8 authored size still bakes a 1x pill, not a 6912-wide raster", () => {
+  const map = fakeMap();
+  ensureLabelPillImage(map, [labeled("Cathedral of Immaculate Conception", 4000)]);
+  const entry = map.images.get(labelPillImageId("Cathedral of Immaculate Conception"));
+  assert.ok(entry.data.width <= (LABEL_PILL_MAX_PX + 12) * 2);
+  assert.ok(entry.data.width < 1000, `device width ${entry.data.width}`);
+  assert.ok(entry.data.height <= (LABEL_NAME_HEIGHT_PX + 4) * 2);
+});
+
+test("ensureLabelPillImage drops the previous name when the source is renamed", () => {
+  const map = fakeMap();
+  ensureLabelPillImage(map, [labeled("Alpha")]);
+  const first = labelPillImageId("Alpha");
+  ensureLabelPillImage(map, [labeled("Beta")]);
+  assert.equal(map.images.size, 1);
+  assert.ok(!map.hasImage(first));
+  assert.ok(map.hasImage(labelPillImageId("Beta")));
+  assert.ok(map.calls.some((call) => call[0] === "removeImage" && call[1] === first));
+});
+
+test("renames keep one 1x pill image and bound its raster size", () => {
+  const map = fakeMap();
+  let name = "";
+  for (const char of "Cathedral of Immaculate Conception") {
+    name += char;
+    ensureLabelPillImage(map, [labeled(name, 4000)]);
+    assert.equal(
+      [...map.images.keys()].filter((key) => key.startsWith(`${LABEL_PILL_ID}-`)).length,
+      1,
+      `image count after "${name}"`
+    );
+    const entry = map.images.get(labelPillImageId(name));
+    assert.ok(entry.data.width <= (LABEL_PILL_MAX_PX + 12) * 2);
+    assert.ok(entry.data.width < 1000, `device width ${entry.data.width}`);
+    assert.ok(entry.data.height <= (LABEL_NAME_HEIGHT_PX + 4) * 2);
+  }
 });
 
 test("ensureLabelPillImage is idempotent and re-registers after a style reload", () => {
   const map = fakeMap();
-  ensureLabelPillImage(map);
+  const churches = [labeled("CHC Medan")];
+  ensureLabelPillImage(map, churches);
   const first = map.calls.filter((c) => c[0] === "addImage").length;
-  assert.equal(first, LABEL_PILL_BUCKETS.length);
-  ensureLabelPillImage(map);
+  assert.equal(first, 1);
+  ensureLabelPillImage(map, churches);
   assert.equal(map.calls.filter((c) => c[0] === "addImage").length, first);
-  map.images.clear(); // a style reload drops every registered image
-  ensureLabelPillImage(map);
+  map.images.clear();
+  ensureLabelPillImage(map, churches);
   assert.equal(map.calls.filter((c) => c[0] === "addImage").length, first * 2);
 });
 
-test("addOverlays registers the label pill images", async () => {
+test("addOverlays registers the labeled pill image", async () => {
   const map = fakeMap();
-  await addOverlays(map, [], [], null, "positron", false, undefined, 1, undefined, [], () => true);
-  for (const bucket of LABEL_PILL_BUCKETS) assert.ok(map.hasImage(labelPillImageId(bucket)));
+  const church = { ...labeled("CHC Medan"), kind: "dot" };
+  await addOverlays(map, [], [church], null, "positron", false, undefined, 1, undefined, [], () => true);
+  assert.ok(map.hasImage(labelPillImageId("CHC Medan")));
 });

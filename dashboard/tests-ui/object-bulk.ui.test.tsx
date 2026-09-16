@@ -1,4 +1,5 @@
 import { act, fireEvent, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeDoc, makeJob, makeSlide } from "./fakes/doc";
@@ -198,6 +199,42 @@ describe("object bulk actions", () => {
     const churches = document.slides[0].churches;
     expect(churches.find((c) => c.id === "c1")).toMatchObject({ size: 40, sizeZoom: 12 });
     expect(churches.find((c) => c.id === "c2")).toMatchObject({ size: 40, sizeZoom: 12 });
+  });
+
+  it("lets the pin hex field be typed character by character", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({
+      result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha", { color: "#c44a42" })] })] }), stateRevision: 1 },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Alpha/ }));
+    });
+
+    const hex = screen.getByLabelText("Colour hex");
+    expect(hex).toHaveValue("#c44a42");
+    await user.clear(hex);
+    expect(hex).toHaveValue("");
+    await user.type(hex, "#112233");
+    expect(hex).toHaveValue("#112233");
+  });
+
+  it("lets the bulk hex field be typed character by character", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({
+      result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha"), pin("c2", "Beta")] })] }), stateRevision: 1 },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+    await selectNamed("Alpha");
+    await selectNamed("Beta");
+
+    const hex = screen.getByLabelText("Colour hex");
+    await user.clear(hex);
+    expect(hex).toHaveValue("");
+    await user.type(hex, "#112233");
+    expect(hex).toHaveValue("#112233");
   });
 
   it("does not show opacity on a selected object", async () => {

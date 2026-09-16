@@ -314,14 +314,13 @@ test("the label pill clears a scaleWithMap marker at and past the 8x icon-size c
   for (const { kind, church, markerPx } of cases) {
     const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, color: "#fff", kind, scaleWithMap: true, sizeZoom: ref, ...church }], null, false, 1);
     const props = geo.features[0].properties;
-    const bucket = Number(props.labelBucket);
     for (const zoom of [ref, ref + 3, ref + 3.5, ref + 4]) {
       const size = iconSize(zoom, props);
       const markerTop = markerPx * Math.pow(2, zoom - ref);
       const pillBottom = -offsetAt(zoom, props)[1] * size;
       assert.ok(pillBottom >= markerTop - 1e-9, `${kind} z=${zoom}: pill bottom ${pillBottom} < marker top ${markerTop}`);
       const clearance = pillBottom - markerTop;
-      const textPx = size * bucket * LABEL_FONT_PX;
+      const textPx = size * LABEL_FONT_PX;
       assert.ok(clearance >= LABEL_GAP_EMS * textPx - 1e-9, `${kind} z=${zoom}: clearance ${clearance}`);
       assert.ok(clearance <= LABEL_GAP_EMS * textPx + 0.05 * markerTop + 1, `${kind} z=${zoom}: clearance ${clearance}`);
     }
@@ -346,7 +345,7 @@ function labelIconSize() {
 
 test("churches-labels icon-size clamps the total scale to 0.5x..8x", () => {
   const evaluate = labelIconSize();
-  const props = { labelScale: 1, objectScale: 1, scaleWithMap: true, sizeZoomRef: 8, labelBucket: "1" };
+  const props = { labelScale: 1, objectScale: 1, scaleWithMap: true, sizeZoomRef: 8 };
   assert.equal(evaluate(8, props), 1);
   assert.equal(evaluate(9, props), 2);
   assert.equal(evaluate(6, props), 0.5);
@@ -355,8 +354,8 @@ test("churches-labels icon-size clamps the total scale to 0.5x..8x", () => {
 
 test("churches-labels icon-size clamps a non-scaling feature's authored size too", () => {
   const evaluate = labelIconSize();
-  assert.equal(evaluate(8, { labelScale: 0.25, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0, labelBucket: "0.5" }), 1);
-  assert.equal(evaluate(8, { labelScale: 16, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0, labelBucket: "8" }), 1);
+  assert.equal(evaluate(8, { labelScale: 0.25, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0 }), 0.5);
+  assert.equal(evaluate(8, { labelScale: 16, objectScale: 1, scaleWithMap: false, sizeZoomRef: 0 }), 8);
 });
 
 test("labelPillBucket snaps to the nearest registered variant in log2, bounding the error at sqrt(2)", () => {
@@ -393,12 +392,11 @@ function assertPillClears(church, markerHeightPx, zooms, ref) {
   const offsetAt = labelIconOffset();
   const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, color: "#fff", scaleWithMap: true, sizeZoom: ref, ...church }], null, false, 1);
   const props = geo.features[0].properties;
-  const bucket = Number(props.labelBucket);
   for (const zoom of zooms) {
     const size = iconSize(zoom, props);
     const markerTop = markerHeightPx * Math.pow(2, zoom - ref);
     const pillBottom = -offsetAt(zoom, props)[1] * size;
-    const textPx = size * bucket * LABEL_FONT_PX;
+    const textPx = size * LABEL_FONT_PX;
     assert.ok(pillBottom >= markerTop - 1e-9, `${church.kind} z=${zoom}: pill bottom ${pillBottom} < marker top ${markerTop}`);
     assert.ok(pillBottom - markerTop >= LABEL_GAP_EMS * textPx - 1e-9, `${church.kind} z=${zoom}: clearance ${pillBottom - markerTop}`);
   }
@@ -444,12 +442,11 @@ function assertSelectedPillClears(church, markerHeightPx, zooms, ref) {
   const geo = churchesGeo([{ id, name: "a", lat: 0, lon: 0, color: "#fff", scaleWithMap: true, sizeZoom: ref, ...church }], id, false, 1);
   const props = geo.features[0].properties;
   assert.equal(props.sel, true);
-  const bucket = Number(props.labelBucket);
   for (const zoom of zooms) {
     const size = iconSize(zoom, props);
     const markerTop = markerHeightPx * DROP_PIN_SELECTED_SCALE * Math.pow(2, zoom - ref);
     const pillBottom = -offsetAt(zoom, props)[1] * size;
-    const textPx = size * bucket * LABEL_FONT_PX;
+    const textPx = size * LABEL_FONT_PX;
     assert.ok(pillBottom >= markerTop - 1e-9, `z=${zoom}: pill bottom ${pillBottom} < marker top ${markerTop}`);
     assert.ok(pillBottom - markerTop >= LABEL_GAP_EMS * textPx - 1e-9, `z=${zoom}: clearance ${pillBottom - markerTop}`);
   }

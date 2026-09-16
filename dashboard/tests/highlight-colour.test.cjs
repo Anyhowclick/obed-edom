@@ -25,6 +25,7 @@ const {
   pruneHighlightColours,
   highlightColoursKey,
   setHighlightColour,
+  contrastInk,
 } = require(path.join(out, "highlight.js"));
 const { ensureAdmin0Highlights, applyHighlightColour } = require(path.join(out, "overlays.js"));
 
@@ -64,6 +65,12 @@ global.fetch = async (url) => {
   }
   return { ok: false, json: async () => null };
 };
+
+test("contrastInk uses WCAG luminance so default orange gets dark ink", () => {
+  assert.equal(contrastInk("#e8772a"), "#0D1402");
+  assert.equal(contrastInk("#000000"), "#FFFFFF");
+  assert.equal(contrastInk("#ffffff"), "#0D1402");
+});
 
 test("normaliseHighlightColour accepts hex with or without #, rejects garbage", () => {
   assert.equal(normaliseHighlightColour("#0A84FF"), "#0a84ff");

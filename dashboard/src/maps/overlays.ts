@@ -481,6 +481,9 @@ function labelNameKey(name: string): string {
   return String(hash >>> 0);
 }
 
+/** Named pills bake at 1× CSS; `icon-size` applies labelScale × objectScale × zoom. */
+export const LABEL_PILL_BAKE_SCALE = 1;
+
 /** Keynote `_place_churches` box: `nw = clamp(48, 420, 13 * len) * scale`, plus pads. */
 export function labelPillCssSize(name: string, scale: number): { w: number; h: number } {
   const s = Math.max(scale, Number.MIN_VALUE);
@@ -509,8 +512,8 @@ function measureNamePx(name: string, scale: number): number {
  * MapLibre then multiplies it by `icon-size`, so each integer zoom stores
  * `-needScreen / iconSize`. A selected drop pin's height already includes
  * `DROP_PIN_SELECTED_SCALE` via `markerHeightPx`. */
-function labelOffsets(markerPx: number, totalScale: number, bucket: number, scaleWithMap: boolean, sizeZoomRef: number): Record<string, [number, number]> {
-  const bake = Math.max(bucket, Number.MIN_VALUE);
+function labelOffsets(markerPx: number, totalScale: number, bakeScale: number, scaleWithMap: boolean, sizeZoomRef: number): Record<string, [number, number]> {
+  const bake = Math.max(bakeScale, Number.MIN_VALUE);
   const factorAt = (zoom: number) => (scaleWithMap ? Math.pow(2, zoom - sizeZoomRef) : 1);
   const textScaleAt = (zoom: number) => Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, totalScale * factorAt(zoom)));
   const iconSizeAt = (zoom: number) => textScaleAt(zoom) / bake;
@@ -599,11 +602,11 @@ export function churchesGeo(
           sizeZoomRef: (church.sizeZoom ?? 0) + Math.log2(objectScale),
           labelScale: scale,
           labelBucket: String(bucket),
-          labelPill: labelPillImageId(bucket, labelPillCssSize(name, bucket).w, labelNameKey(name)),
+          labelPill: labelPillImageId(name),
           ...labelOffsets(
             markerHeightPx(church, size, church.id === selectedPinId) * objectScale,
             scale * objectScale,
-            bucket,
+            LABEL_PILL_BAKE_SCALE,
             church.scaleWithMap === true,
             (church.sizeZoom ?? 0) + Math.log2(objectScale)
           ),
@@ -725,29 +728,9 @@ export function ensureDropPinImages(map: MapLibreMap, churches: MapsChurch[]) {
 /** Gold_Wall_Input.key slide 8: corner scalar 9.57 at h~46 -> radius ~= 0.21*h. Mirrors `maps_pins.LABEL_RADIUS_FRAC`. */
 const LABEL_RADIUS_FRAC = 0.21;
 export const LABEL_PILL_ID = "church-label-pill";
-const LABEL_PILL_TEMPLATE_W = 64;
-const LABEL_PILL_TEMPLATE_H = 32;
 
-export function labelPillImageId(bucket: number, widthPx?: number, nameKey?: string): string {
-  if (widthPx != null && nameKey != null) return `${LABEL_PILL_ID}-${bucket}-${widthPx}-${nameKey}`;
-  return widthPx != null ? `${LABEL_PILL_ID}-${bucket}-${widthPx}` : `${LABEL_PILL_ID}-${bucket}`;
-}
-
-function labelPillBox(bucket: number): { w: number; h: number; cornerPx: number; padX: number; padY: number } {
-  const w = LABEL_PILL_TEMPLATE_W * bucket * DROP_PIN_PIXEL_RATIO;
-  const h = LABEL_PILL_TEMPLATE_H * bucket * DROP_PIN_PIXEL_RATIO;
-  return {
-    w,
-    h,
-    cornerPx: LABEL_RADIUS_FRAC * h,
-    padX: PILL_PAD_X_PX * bucket * DROP_PIN_PIXEL_RATIO,
-    padY: PILL_PAD_Y_PX * bucket * DROP_PIN_PIXEL_RATIO,
-  };
-}
-
-function labelPillImage(bucket: number): ImageData {
-  const { w, h, cornerPx } = labelPillBox(bucket);
-  return drawLabelPill(w, h, cornerPx);
+export function labelPillImageId(name: string): string {
+  return `${LABEL_PILL_ID}-${labelNameKey(name)}`;
 }
 
 function labelPillImageSized(cssW: number, cssH: number, name: string, scale: number): ImageData {
@@ -777,32 +760,28 @@ function drawLabelPill(w: number, h: number, cornerPx: number, name?: string, fo
   return ctx.getImageData(0, 0, w, h);
 }
 
-/** Re-runnable: a style reload drops every image, so `addOverlays` calls this again. */
-export function ensureLabelPillImage(map: MapLibreMap, churches: MapsChurch[] = [], objectScale = 1, numberPins = false) {
-  for (const bucket of LABEL_PILL_BUCKETS) {
-    const id = labelPillImageId(bucket);
-    if (map.hasImage(id)) continue;
-    const { w, h, cornerPx, padX, padY } = labelPillBox(bucket);
-    map.addImage(id, labelPillImage(bucket), {
-      pixelRatio: DROP_PIN_PIXEL_RATIO,
-      stretchX: [[cornerPx, w - cornerPx]],
-      stretchY: [[cornerPx, h - cornerPx]],
-      // The content inset is the pill padding: `icon-text-fit` sizes the image so this box
-      // covers the text, leaving a bucket-scaled margin all round.
-      content: [padX, padY, w - padX, h - padY],
-    });
+function pruneLabelPillImages(map: MapLibreMap, keep: Set<string>) {
+  const ids = typeof map.listImages === "function" ? map.listImages() : [];
+  for (const id of ids) {
+    if (!id.startsWith(`${LABEL_PILL_ID}-`) || keep.has(id)) continue;
+    map.removeImage(id);
   }
+}
+
+/** Re-runnable: a style reload drops every image, so `addOverlays` calls this again.
+ * Pills bake at 1×; stale name keys are removed so rename does not leak GPU images. */
+export function ensureLabelPillImage(map: MapLibreMap, churches: MapsChurch[] = [], _objectScale = 1, numberPins = false) {
+  const keep = new Set<string>();
   churches.forEach((church, index) => {
     if (church.showLabel !== true) return;
-    const size = church.size || defaultObjectSize(church.kind, church.assetWidth);
-    const scale = labelScale(church.kind, size, church.assetWidth);
-    const bucket = labelPillBucket(Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, scale * objectScale)));
     const name = numberPins ? `${index + 1}. ${church.name}` : church.name;
-    const box = labelPillCssSize(name, bucket);
-    const id = labelPillImageId(bucket, box.w, labelNameKey(name));
+    const box = labelPillCssSize(name, LABEL_PILL_BAKE_SCALE);
+    const id = labelPillImageId(name);
+    keep.add(id);
     if (map.hasImage(id)) return;
-    map.addImage(id, labelPillImageSized(box.w, box.h, name, bucket), { pixelRatio: DROP_PIN_PIXEL_RATIO });
+    map.addImage(id, labelPillImageSized(box.w, box.h, name, LABEL_PILL_BAKE_SCALE), { pixelRatio: DROP_PIN_PIXEL_RATIO });
   });
+  pruneLabelPillImages(map, keep);
 }
 
 export async function ensureLandmarkImages(map: MapLibreMap, churches: MapsChurch[], assetBaseUrl?: string): Promise<void> {
@@ -908,12 +887,7 @@ export function churchesLayers(): LayerSpecification[] {
         "icon-image": ["get", "labelPill"],
         "icon-anchor": "bottom",
         "icon-offset": labelOffsetExpression(),
-        "icon-size": zoomScaledStops(
-          ["*", ["get", "labelScale"], ["get", "objectScale"]],
-          LABEL_SCALE_MAX,
-          LABEL_SCALE_MIN,
-          ["max", 0.5, ["to-number", ["get", "labelBucket"]]]
-        ),
+        "icon-size": zoomScaledStops(["*", ["get", "labelScale"], ["get", "objectScale"]], LABEL_SCALE_MAX, LABEL_SCALE_MIN),
         "icon-text-fit": "none",
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,

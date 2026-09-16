@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ColourPicker } from "../src/maps/ColourPicker";
 import { DEFAULT_SAVED_COLOUR, loadSavedColours, writeSavedColours } from "../src/maps/savedColours";
@@ -77,6 +78,23 @@ describe("ColourPicker", () => {
 
     fireEvent.change(screen.getByLabelText("Highlight colour"), { target: { value: "#00aaff" } });
     expect(onColour).toHaveBeenCalledWith("#00aaff");
+  });
+
+  it("keeps a hex draft while typing through a 3-digit prefix", async () => {
+    const user = userEvent.setup();
+    const onText = vi.fn();
+    render(
+      <ColourPicker colour="#c44a42" text="#c44a42" onColour={() => undefined} onText={onText} onCommit={() => undefined} />
+    );
+    const hex = screen.getByLabelText("Highlight colour hex");
+    await user.clear(hex);
+    expect(hex).toHaveValue("");
+    await user.type(hex, "#112");
+    expect(hex).toHaveValue("#112");
+    expect(onText).not.toHaveBeenCalled();
+    await user.type(hex, "233");
+    expect(hex).toHaveValue("#112233");
+    expect(onText).toHaveBeenCalledWith("#112233");
   });
 });
 

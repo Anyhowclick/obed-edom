@@ -30,11 +30,14 @@ export function ColourPicker({
 }) {
   const [saved, setSaved] = useSavedColours();
   const [hexDirty, setHexDirty] = useState(false);
+  const [draft, setDraft] = useState(none ? "" : text);
   const currentHex = isHighlightHex(colour || text) ? normaliseHighlightColour(colour || text) : "";
   const canAdd = Boolean(currentHex) && !saved.includes(currentHex);
+  const hexValue = none && !hexDirty ? "" : draft;
 
   useEffect(() => {
     setHexDirty(false);
+    setDraft(none ? "" : text);
   }, [none, colour]);
 
   function pick(hex: string) {
@@ -80,7 +83,7 @@ export function ColourPicker({
         </span>
         <input
           type="text"
-          value={none && !hexDirty ? "" : text}
+          value={hexValue}
           disabled={disabled}
           spellCheck={false}
           autoCapitalize="off"
@@ -88,18 +91,38 @@ export function ColourPicker({
           placeholder={none ? "No fill" : "#e8772a"}
           aria-label={hexLabel}
           onChange={(event) => {
+            const value = event.target.value;
             setHexDirty(true);
-            onText(event.target.value);
+            setDraft(value);
+            // 3-digit hex is valid but expands (#112 → #111122) and steals the caret.
+            // Apply while typing only once the user has a full 6 digits.
+            if (/^#?[0-9a-fA-F]{6}$/.test(value.trim())) onText(normaliseHighlightColour(value));
           }}
           onBlur={() => {
             if (none && !hexDirty) return;
-            if (none && !isHighlightHex(text)) return;
-            onCommit();
+            if (isHighlightHex(draft)) {
+              const hex = normaliseHighlightColour(draft);
+              onText(hex);
+              onColour(hex);
+              onCommit();
+              return;
+            }
+            if (none) return;
+            setDraft(text);
+            setHexDirty(false);
           }}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
-            if (none && !isHighlightHex(text)) return;
-            onCommit();
+            if (isHighlightHex(draft)) {
+              const hex = normaliseHighlightColour(draft);
+              onText(hex);
+              onColour(hex);
+              onCommit();
+              return;
+            }
+            if (none) return;
+            setDraft(text);
+            setHexDirty(false);
           }}
         />
       </div>
