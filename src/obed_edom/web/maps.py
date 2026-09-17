@@ -274,6 +274,7 @@ class MapsChurch(BaseModel):
     kind: MapsPinKind
     color: str
     showLabel: bool = False
+    labelColor: str | None = None
     icon: MapsIconId | None = None
     photoPath: str | None = None
     assetId: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,80}$")
@@ -520,6 +521,8 @@ class MapsDocument(BaseModel):
             raise ValueError("Slide ids must be non-empty and unique")
         if any(sid.endswith("__landing") for sid in slide_ids):
             raise ValueError("Slide ids may not end in '__landing' (reserved for synthetic landings)")
+        if any(sid.endswith("__takeoff") for sid in slide_ids):
+            raise ValueError("Slide ids may not end in '__takeoff' (reserved for synthetic movie takeoffs)")
         for slide in self.slides:
             for view in (slide, slide.cg):
                 if view is None:
@@ -807,7 +810,9 @@ def _read_limited(stream, limit: int = 20 * 1024 * 1024) -> bytes:
         chunks.append(chunk)
 
 
-RASTER_MAX_BYTES = 20 * 1024 * 1024
+# Landmark uploads stay at 20 MB (`decode_png`). Export stills/plates/cutouts can
+# be a fitted morph plate up to RASTER_MAX_SIDE, and a PNG of that size overshoots 20 MB.
+RASTER_MAX_BYTES = 96 * 1024 * 1024
 RASTER_MAX_SIDE = 8192
 
 
@@ -1758,7 +1763,8 @@ async def post_png(
     if not slideId:
         raise HTTPException(400, "slideId is required")
     landing_base = slideId[: -len("__landing")] if slideId.endswith("__landing") else None
-    landing_ok = landing_base in ids and kind == "still" and variant is None if landing_base else False
+    # Isolated landings post the dest cutout pair (base + region pieces + manifest).
+    landing_ok = bool(landing_base and landing_base in ids and kind == "still")
     if slideId not in ids and not landing_ok:
         raise HTTPException(400, "slideId is not in this deck")
     safe = _safe_name(slideId)

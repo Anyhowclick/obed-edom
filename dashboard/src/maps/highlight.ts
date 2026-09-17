@@ -106,6 +106,60 @@ export function highlightColoursKey(colours: Record<string, string> | undefined)
     .join(",");
 }
 
+export type HighlightFill = { none: boolean; hex: string };
+
+export function resolvedHighlightColour(
+  code: string,
+  colours: Record<string, string> | undefined,
+  fallback: string = DEFAULT_HIGHLIGHT_COLOUR
+): HighlightFill {
+  const raw = colours?.[code];
+  if (isHighlightNone(raw)) return { none: true, hex: normaliseHighlightColour(fallback) };
+  if (isHighlightHex(raw)) return { none: false, hex: normaliseHighlightColour(raw) };
+  return { none: false, hex: normaliseHighlightColour(fallback) };
+}
+
+function fillEquals(a: HighlightFill, b: HighlightFill): boolean {
+  if (a.none && b.none) return true;
+  if (a.none !== b.none) return false;
+  return a.hex === b.hex;
+}
+
+export type HighlightMismatch = {
+  leave: Array<{ code: string; fill: HighlightFill }>;
+  join: Array<{ code: string; fill: HighlightFill }>;
+  recolour: Array<{ code: string; from: HighlightFill; to: HighlightFill }>;
+};
+
+export function highlightMismatchEmpty(mismatch: HighlightMismatch): boolean {
+  return mismatch.leave.length === 0 && mismatch.join.length === 0 && mismatch.recolour.length === 0;
+}
+
+/** Regions that differ between shots — added, removed, or the same id with a different fill. */
+export function highlightMismatch(
+  from: { highlights: string[]; highlightColours?: Record<string, string> },
+  to: { highlights: string[]; highlightColours?: Record<string, string> },
+  fallback: string = DEFAULT_HIGHLIGHT_COLOUR
+): HighlightMismatch {
+  const toSet = new Set(to.highlights);
+  const fromSet = new Set(from.highlights);
+  const leave = from.highlights
+    .filter((code) => !toSet.has(code))
+    .map((code) => ({ code, fill: resolvedHighlightColour(code, from.highlightColours, fallback) }));
+  const join = to.highlights
+    .filter((code) => !fromSet.has(code))
+    .map((code) => ({ code, fill: resolvedHighlightColour(code, to.highlightColours, fallback) }));
+  const recolour = from.highlights
+    .filter((code) => toSet.has(code))
+    .map((code) => ({
+      code,
+      from: resolvedHighlightColour(code, from.highlightColours, fallback),
+      to: resolvedHighlightColour(code, to.highlightColours, fallback),
+    }))
+    .filter((item) => !fillEquals(item.from, item.to));
+  return { leave, join, recolour };
+}
+
 export function pruneHighlightColours(
   highlights: string[],
   colours: Record<string, string> | undefined

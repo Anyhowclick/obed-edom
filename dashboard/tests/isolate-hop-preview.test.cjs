@@ -43,6 +43,14 @@ test("isolateDissolveNeeded is false when the destination has isolate but no hig
   assert.equal(isolateDissolveNeeded(from, to), false);
 });
 
+test("isolateDissolveNeeded is false when the source is already isolated", () => {
+  const iso = { mode: "darken", strength: 0.65 };
+  const from = slide("a", { highlights: ["FR"], isolate: iso });
+  const to = slide("b", { highlights: ["FR"], isolate: iso });
+  assert.equal(isolateDissolveNeeded(from, to), false);
+  assert.equal(movieAppearanceMismatch(from, to), false);
+});
+
 test("movieAppearanceMismatch is false when only isolate/highlights differ", () => {
   const from = slide("a");
   const to = slide("b", { highlights: ["FR"], isolate: { mode: "darken", strength: 0.65 } });

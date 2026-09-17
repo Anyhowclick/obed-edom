@@ -1,5 +1,6 @@
 #!/bin/bash
-# Double-click this in Finder after cloning. Homebrew and Node are not required.
+# Double-click this in Finder after cloning. Homebrew is not required.
+# Node/npm is only needed when the dashboard UI is missing or out of date.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -166,19 +167,39 @@ fi
 
 echo "Installing Obed-Edom into that folder…"
 "$VENV/bin/python" -m pip install -q --upgrade pip || fail "Could not update pip in the private Python folder. Try deleting the .venv folder next to this file and running this again."
-"$VENV/bin/python" -m pip install -q -e "$ROOT" || fail "Could not install Obed-Edom into the private Python folder. Try deleting the .venv folder next to this file and running this again."
+"$VENV/bin/python" -m pip install -q -e "$ROOT[iwa]" || fail "Could not install Obed-Edom into the private Python folder. Try deleting the .venv folder next to this file and running this again."
 
-if ! "$VENV/bin/python" -c 'import obed_edom' >/dev/null 2>&1; then
+if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf' >/dev/null 2>&1; then
   echo "The first install attempt didn't take. Trying again…"
   export PATH="$HOME/.local/bin:$PATH"
   if command -v uv >/dev/null 2>&1; then
-    uv pip install --python "$VENV/bin/python" --reinstall -e "$ROOT" || true
+    uv pip install --python "$VENV/bin/python" --reinstall -e "$ROOT[iwa]" || true
   else
-    "$VENV/bin/python" -m pip install --force-reinstall --no-deps -e "$ROOT" || true
+    "$VENV/bin/python" -m pip install --force-reinstall -e "$ROOT[iwa]" || true
   fi
-  if ! "$VENV/bin/python" -c 'import obed_edom' >/dev/null 2>&1; then
+  if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf' >/dev/null 2>&1; then
     fail "Obed-Edom could not be installed into its private Python folder. Try deleting the .venv folder next to this file and running this again."
   fi
+fi
+
+dashboard_needs_rebuild() {
+  local stamp="$ROOT/dashboard/dist/index.html"
+  [[ -f "$stamp" ]] || return 0
+  local paths=("$ROOT/dashboard/src" "$ROOT/dashboard/index.html" "$ROOT/dashboard/package.json" "$ROOT/dashboard/package-lock.json")
+  [[ -f "$ROOT/dashboard/vite.config.ts" ]] && paths+=("$ROOT/dashboard/vite.config.ts")
+  [[ -f "$ROOT/dashboard/tsconfig.json" ]] && paths+=("$ROOT/dashboard/tsconfig.json")
+  [[ -d "$ROOT/dashboard/public" ]] && paths+=("$ROOT/dashboard/public")
+  local hit
+  hit="$(find "${paths[@]}" -type f -newer "$stamp" -print -quit 2>/dev/null || true)"
+  [[ -n "$hit" ]]
+}
+
+if dashboard_needs_rebuild; then
+  echo "Dashboard UI is out of date. Rebuilding…"
+  if ! command -v npm >/dev/null 2>&1; then
+    fail "The dashboard UI needs a rebuild, but npm (Node.js) was not found. Install Node from https://nodejs.org/ then run this again."
+  fi
+  (cd "$ROOT/dashboard" && npm install && npm run build) || fail "Could not rebuild the dashboard UI."
 fi
 
 if [[ ! -f "$ROOT/dashboard/dist/index.html" ]]; then

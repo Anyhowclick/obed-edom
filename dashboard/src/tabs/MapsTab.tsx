@@ -78,6 +78,7 @@ import {
   normaliseHighlightColour,
   parseHighlightColourValue,
   pruneHighlightColours,
+  resolvedHighlightColour,
   setHighlightColour,
 } from "../maps/highlight";
 import { jobLabel, useCurrentJob } from "../sessions";
@@ -94,7 +95,7 @@ import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
 import { OBJECT_SIZE_MAX, defaultObjectSize, effectiveObjectSize, pasteRebase, zoomSizeFactor } from "../maps/objects";
 import type { ObjectClipboard } from "../maps/objects";
-import { admin0Name, admin1Name, highlightedCountries, isAdmin1Loaded, loadAdmin0, loadAdmin1 } from "../maps/overlays";
+import { highlightName, highlightedCountries, isAdmin1Loaded, loadAdmin0, loadAdmin1 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { SlidingSeg } from "../maps/SlidingSeg";
 import { StylePicker } from "../maps/StylePicker";
@@ -103,6 +104,7 @@ import {
   CG_SHIFT_MAX,
   CG_W,
   CENTRE_W,
+  churchLabelColor,
   DEFAULT_ISOLATE_STRENGTH,
   HOP_LABELS,
   LAYER_FILTERS,
@@ -110,14 +112,17 @@ import {
   appearanceMismatch,
   authoredSurfaceWidth,
   hopSurfaceWidth,
+  morphPlateHints,
+  movieHopView,
   showCgBand,
   shouldFocusAddedLandmark,
   slideForAudience,
   clampCgShift,
   clampZoom,
+  cloneSlide,
   coerceHopKinds,
   documentFromResult,
-  exportScale,
+  exportSurface,
   exportZoomDelta,
   plateSurfaceWidth,
   hasOutgoingMovie,
@@ -132,7 +137,7 @@ import {
   moveSlideTo,
   restitchWithMemory,
   slideHiddenLayers,
-  suggestedHopKind,
+  suggestedHopKindForLink,
   surfaceWidthOf,
   type MapsCamera,
   type MapsAudience,
@@ -150,8 +155,8 @@ import {
 } from "../maps/types";
 
 const HOP_TIPS: Record<MapsHopKind, string> = {
-  morph: "Magic Move: Keynote pan/zoom of a shared plate. Same map style, same bearing. 3D buildings only block when the Buildings layer is on. The plate may overflow the frame when zooming in.",
-  movie: "Movie: rendered fly when pitch, bearing, or 3D buildings change. Use any combination of zoom out, move, and zoom in.",
+  morph: "Magic Move: Keynote pan, zoom, and rotate of a shared plate. Same map style. Overflow is fine up to 16384pt; a bigger zoom hop becomes a Movie. 3D buildings only block when the Buildings layer is on.",
+  movie: "Movie: rendered fly when pitch, 3D buildings, or a zoom too large for one Magic Move image. Use any combination of zoom out, move, and zoom in.",
   dissolve: "Dissolve: Keynote crossfade of the two stills, using the duration below.",
   cut: "Cut: instant switch. No Keynote transition.",
 };
@@ -197,16 +202,73 @@ function PinKindIcon({ kind }: { kind: MapsPinKind }) {
   return <IconDot />;
 }
 
+type ObjectColourTarget = "marker" | "pill";
+
+type ObjectColourField = {
+  colour: string;
+  text: string;
+  none?: boolean;
+  allowNone?: boolean;
+  onColour: (value: string) => void;
+  onText: (value: string) => void;
+  onNone?: () => void;
+  onCommit: () => void;
+};
+
+function ObjectColourEditor({
+  showMarker,
+  target,
+  onTarget,
+  marker,
+  pill,
+  disabled,
+}: {
+  showMarker: boolean;
+  target: ObjectColourTarget;
+  onTarget: (next: ObjectColourTarget) => void;
+  marker?: ObjectColourField;
+  pill: ObjectColourField;
+  disabled: boolean;
+}) {
+  const resolved: ObjectColourTarget = showMarker && marker ? target : "pill";
+  const field = resolved === "marker" && marker ? marker : pill;
+  return (
+    <div className="maps-object-colour">
+      {showMarker && marker && (
+        <SlidingSeg
+          value={resolved}
+          disabled={disabled}
+          ariaLabel="Colour target"
+          options={[
+            { id: "marker", label: "Dots/pins" },
+            { id: "pill", label: "Label BG" },
+          ]}
+          onChange={(id) => onTarget(id as ObjectColourTarget)}
+        />
+      )}
+      <ColourPicker
+        colour={field.colour}
+        text={field.text}
+        none={field.none === true}
+        allowNone={field.allowNone === true}
+        disabled={disabled}
+        colourLabel={resolved === "marker" ? "Colour" : "Pill colour"}
+        hexLabel={resolved === "marker" ? "Colour hex" : "Pill colour hex"}
+        onColour={field.onColour}
+        onText={field.onText}
+        onNone={field.onNone}
+        onCommit={field.onCommit}
+      />
+    </div>
+  );
+}
+
 function highlightClass(code: string): string {
   return code.startsWith("A1:") ? "region" : "country";
 }
 
 function HighlightIcon({ code }: { code: string }) {
   return code.startsWith("A1:") ? <IconRegion /> : <IconCountry />;
-}
-
-function highlightName(code: string): string {
-  return code.startsWith("A1:") ? admin1Name(code) : admin0Name(code);
 }
 
 function parentDir(path: string): string {
@@ -241,39 +303,6 @@ type PendingHighlightOverride = {
   value: string;
 };
 
-function resolvedHighlightColour(
-  code: string,
-  colours: Record<string, string> | undefined,
-  fallback: string
-): { none: boolean; hex: string } {
-  const raw = colours?.[code];
-  if (isHighlightNone(raw)) return { none: true, hex: fallback };
-  if (isHighlightHex(raw)) return { none: false, hex: raw };
-  return { none: false, hex: fallback };
-}
-
-function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
-  return {
-    ...slide,
-    id,
-    churches: [],
-    stillPng: undefined,
-    cg: slide.cg
-      ? {
-          ...slide.cg,
-          camera: { ...slide.cg.camera },
-          highlights: [...slide.cg.highlights],
-          churches: [],
-          stillPng: undefined,
-          movieMov: undefined,
-        }
-      : undefined,
-    cgShiftX: slide.cgShiftX,
-    cgShiftY: 0,
-    includeSidePanels: slide.includeSidePanels === true,
-  };
-}
-
 function linkBetween(links: MapsLink[], from: string, to: string): MapsLink | undefined {
   return links.find((link) => link.from === from && link.to === to);
 }
@@ -306,6 +335,7 @@ export function MapsTab() {
   const [dropIndicator, setDropIndicator] = useState<{ id: string; position: "before" | "after" } | null>(null);
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [selectedPins, setSelectedPins] = useState<string[]>([]);
+  const [objectColourTarget, setObjectColourTarget] = useState<ObjectColourTarget>("marker");
   const [selectedHighlight, setSelectedHighlight] = useState<string | null>(null);
   const [selectedHighlights, setSelectedHighlights] = useState<string[]>([]);
   const [colourText, setColourText] = useState("");
@@ -687,7 +717,7 @@ export function MapsTab() {
   function setLocalDoc(next: MapsDocument) {
     const currentJob = jobRef.current;
     if (!currentJob) return;
-    const coerced = coerceHopKinds(next);
+    const coerced = coerceHopKinds(next, docRef.current);
     docRef.current = coerced;
     setJob({ ...currentJob, result: { ...(currentJob.result || {}), ...coerced } });
     return coerced;
@@ -1006,10 +1036,10 @@ export function MapsTab() {
     cachePrefetches.current.add(prefetch);
   }
 
-  function addSlide() {
+  function insertClonedSlide(objects: boolean) {
     const current = docRef.current;
     if (!current || !active || locked) return;
-    const created = cloneSlide(active, nextSlideId(current.slides));
+    const created = cloneSlide(active, nextSlideId(current.slides), { objects });
     const index = current.slides.findIndex((s) => s.id === active.id);
     const slidesNext = [...current.slides.slice(0, index + 1), created, ...current.slides.slice(index + 1)];
     const { links, retired } = restitch(slidesNext, current.links, current.retiredLinks);
@@ -1022,6 +1052,14 @@ export function MapsTab() {
       setActiveId(created.id);
       mapRef.current?.jumpTo(created.camera);
     })();
+  }
+
+  function addSlide() {
+    insertClonedSlide(false);
+  }
+
+  function duplicateSlide() {
+    insertClonedSlide(true);
   }
 
   function restitch(
@@ -1372,6 +1410,12 @@ export function MapsTab() {
     if (partial.churches) updateActive(partial);
   }
 
+  function colourSelectedPills(value: string) {
+    const colour = parseHighlightColourValue(value);
+    if (!colour || colour === HIGHLIGHT_NO_FILL) return;
+    updateSelectedPins({ labelColor: colour });
+  }
+
   function updateSelectedPins(partial: Partial<MapsChurch>) {
     if (!activeView || selectedPins.length === 0) return;
     const selected = new Set(selectedPins);
@@ -1588,12 +1632,21 @@ export function MapsTab() {
       return;
     }
     if (link.kind === "movie") {
-      await applyPreviewView(fromView, run);
+      const plates = morphPlateHints(slides, docRef.current?.links || [], audience);
+      const hop = movieHopView(fromView, toView, audience, plates, new Map(slides.map((slide) => [slide.id, slide])));
+      await applyPreviewView(
+        {
+          ...fromView,
+          camera: hop.from,
+          includeSidePanels: hop.fromWidth > CENTRE_W,
+        },
+        run
+      );
       if (previewAbort.current || previewRun.current !== run) return;
       try {
         await mapRef.current?.animateHop({
-          from: fromView.camera,
-          to: toView.camera,
+          from: hop.from,
+          to: hop.to,
           durationMs: link.duration * 1000,
           easing: link.easing,
           routePoints: link.route?.points,
@@ -1606,7 +1659,10 @@ export function MapsTab() {
           toObjects: toView.churches,
           objectTransition: link.objectTransition,
           destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
-          width: hopSurfaceWidth(from, to, audience),
+          width: hop.width,
+          surfaceWidth: hop.surfaceWidth,
+          fromWidth: hop.fromWidth,
+          toWidth: hop.toWidth,
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -1926,15 +1982,17 @@ export function MapsTab() {
         cameras: Array<{ lat: number; lon: number; zoom: number; bearing: number; pitch: number }>;
         width: number;
         height: number;
+        surfaceWidth?: number;
         terrain: boolean;
         phase: string;
       }): Promise<void> => {
-        const scale = exportScale(opts.width);
-        const delta = exportZoomDelta(opts.width);
+        const renderSurface = opts.surfaceWidth ?? opts.width;
+        const delta = exportZoomDelta(renderSurface);
+        const surface = exportSurface(opts.width, opts.height, renderSurface);
         const tilePlan = await planMapsTiles({
           cameras: opts.cameras.map((c) => ({ ...c, zoom: c.zoom + delta })),
-          width: opts.width / scale,
-          height: opts.height / scale,
+          width: surface.cssWidth,
+          height: surface.cssHeight,
           maxzoom: 14,
           terrain: opts.terrain,
         });
@@ -2059,17 +2117,9 @@ export function MapsTab() {
           highlightColour: readyColour,
           highlightColours: coloursOf(plate.slideIds[0] || ""),
         };
-        if (plate.highlights.length) {
-          const pair = await captureIsolatePair(plateOpts);
-          throwIfCancelled();
-          if (pair) {
-            await postIsolatePair(pair, { kind: "plate", plateId: plate.plateId }, plateOpts.width, plateOpts.height);
-          }
-        } else {
-          const blob = await captureExportRaster(plateOpts);
-          throwIfCancelled();
-          reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId }));
-        }
+        const blob = await captureExportRaster(plateOpts);
+        throwIfCancelled();
+        reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId }));
         stepIndex += 1;
         setStepProgress("Rendering plates", i + 1, plan.plates.length);
       }
@@ -2128,22 +2178,9 @@ export function MapsTab() {
             highlightColour: readyColour,
             highlightColours: coloursOf(plate.slideIds[0] || "", "cg"),
           };
-          if (plate.highlights.length) {
-            const pair = await captureIsolatePair(plateOpts);
-            throwIfCancelled();
-            if (pair) {
-              await postIsolatePair(
-                pair,
-                { kind: "plate", plateId: plate.plateId, audience: "cg" },
-                plateOpts.width,
-                plateOpts.height
-              );
-            }
-          } else {
-            const blob = await captureExportRaster(plateOpts);
-            throwIfCancelled();
-            reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
-          }
+          const blob = await captureExportRaster(plateOpts);
+          throwIfCancelled();
+          reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
           stepIndex += 1;
           setStepProgress("Rendering CG plates", i + 1, plan.cg.plates.length);
         }
@@ -2153,12 +2190,16 @@ export function MapsTab() {
         const from = slidesById.get(link.from);
         const to = slidesById.get(link.to);
         if (!from || !to) continue;
-        const width = hopSurfaceWidth(from, to, "lw");
+        const hop = movieHopView(from, to, "lw", plan.plates, slidesById);
+        const width = hop.width;
+        const surfaceWidth = hop.surfaceWidth;
+        const fromWidth = hop.fromWidth;
+        const toWidth = hop.toWidth;
         const height = 1080;
         const fps = FLY_EXPORT_FPS;
         const count = Math.max(2, Math.round(link.duration * fps));
         const cameras = Array.from({ length: count }, (_, i) =>
-          cameraAtHop(from.camera, to.camera, i / (count - 1), {
+          cameraAtHop(hop.from, hop.to, i / (count - 1), {
             easing: link.easing,
             routePoints: link.route?.points,
             curve: link.curve,
@@ -2179,6 +2220,7 @@ export function MapsTab() {
             cameras,
             width,
             height,
+            surfaceWidth: hop.prefetchSurface,
             terrain: from.hillshade === true,
             phase: `Prefetching tiles (${hopLabel})`,
           });
@@ -2192,8 +2234,11 @@ export function MapsTab() {
         await captureFlyFrames({
           width,
           height,
-          from: from.camera,
-          to: to.camera,
+          surfaceWidth,
+          fromWidth,
+          toWidth,
+          from: hop.from,
+          to: hop.to,
           styleId: from.style,
           highlights: from.highlights,
           hiddenLayers: slideHiddenLayers(from),
@@ -2233,13 +2278,16 @@ export function MapsTab() {
           if (!baseFrom || !baseTo) continue;
           const from = slideForAudience(baseFrom, "cg");
           const to = slideForAudience(baseTo, "cg");
-          const width = hopSurfaceWidth(baseFrom, baseTo, "cg");
+          const hop = movieHopView(from, to, "cg", plan.cg?.plates || [], slidesById);
+          const width = hop.width;
+          const fromWidth = hop.fromWidth;
+          const toWidth = hop.toWidth;
           const cropFromX = (width - 1920) / 2 + (baseFrom.cg ? 0 : baseFrom.cgShiftX);
           const cropToX = (width - 1920) / 2 + (baseTo.cg ? 0 : baseTo.cgShiftX);
           const fps = FLY_EXPORT_FPS;
           const count = Math.max(2, Math.round(link.duration * fps));
           const cameras = Array.from({ length: count }, (_, i) =>
-            cameraAtHop(from.camera, to.camera, i / (count - 1), {
+            cameraAtHop(hop.from, hop.to, i / (count - 1), {
               easing: link.easing,
               routePoints: link.route?.points,
               curve: link.curve,
@@ -2260,6 +2308,7 @@ export function MapsTab() {
               cameras,
               width,
               height: 1080,
+              surfaceWidth: hop.prefetchSurface,
               terrain: from.hillshade === true,
               phase: `Prefetching CG tiles (${hopLabel})`,
             });
@@ -2272,8 +2321,11 @@ export function MapsTab() {
           await captureFlyFrames({
             width,
             height: 1080,
-            from: from.camera,
-            to: to.camera,
+            surfaceWidth: hop.surfaceWidth,
+            fromWidth,
+            toWidth,
+            from: hop.from,
+            to: hop.to,
             styleId: from.style,
             highlights: from.highlights,
             hiddenLayers: slideHiddenLayers(from),
@@ -2377,7 +2429,9 @@ export function MapsTab() {
   }, []);
 
   const pin = activeView?.churches.find((c) => c.id === selectedPin) || null;
-  const selectedMarkers = (activeView?.churches || []).filter((church) => selectedPins.includes(church.id) && isPinOrDot(church));
+  const selectedObjects = (activeView?.churches || []).filter((church) => selectedPins.includes(church.id));
+  const labelsOn = selectedObjects.length > 0 && selectedObjects.every((church) => church.showLabel === true);
+  const selectedMarkers = selectedObjects.filter((church) => isPinOrDot(church));
   const selectedMarkerSize = selectedMarkers[0]
     ? Math.round(effectiveObjectSize(selectedMarkers[0], activeView?.camera.zoom ?? 0))
     : 28;
@@ -2388,6 +2442,7 @@ export function MapsTab() {
     ? resolvedHighlightColour(firstSelectedHighlight, activeView?.highlightColours, highlightColour)
     : { none: false, hex: highlightColour };
   const bulkObjectColour = selectedMarkers[0]?.color || bulkHighlight.hex;
+  const bulkLabelColour = churchLabelColor(selectedObjects[0]);
   const bulkObjectNone = selectedMarkers.length === 0 && selectedHighlightCodes.length > 0 && selectedHighlightCodes.every((code) => isHighlightNone(activeView?.highlightColours?.[code]));
   const nextSlide = outgoing && activeIndex >= 0 ? slides[activeIndex + 1] : null;
   const nextView = nextSlide ? slideForAudience(nextSlide, activeAudience) : null;
@@ -2397,7 +2452,7 @@ export function MapsTab() {
     !!nextSlide &&
     (!!active.cg || !!nextSlide.cg) &&
     appearanceMismatch(slideForAudience(active, otherAudience), slideForAudience(nextSlide, otherAudience)).length > 0;
-  const suggested = outgoing && active && nextSlide ? suggestedHopKind(active, nextSlide) : "morph";
+  const suggested = outgoing && active && nextSlide ? suggestedHopKindForLink(active, nextSlide) : "morph";
   const morphOk = suggested === "morph";
   const cruiseAuto =
     activeView && nextView
@@ -2831,6 +2886,9 @@ export function MapsTab() {
             <button className="btn secondary icon-btn" type="button" onClick={addSlide} disabled={locked} title="Add slide" aria-label="Add slide">
               <IconPlus />
             </button>
+            <button className="btn maps-duplicate" type="button" onClick={duplicateSlide} disabled={locked} title="Duplicate slide" aria-label="Duplicate slide">
+              <IconCopy />
+            </button>
             <button className="btn maps-delete" type="button" onClick={removeSlide} disabled={locked || slides.length < 2} title="Delete slide" aria-label="Delete slide">
               <IconTrash />
             </button>
@@ -3127,26 +3185,48 @@ export function MapsTab() {
                     </>
                   )}
                   <label className="maps-check"><input type="checkbox" checked={pin.showLabel === true} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
-                  {pin.showLabel === true && <p className="note">Preview only: Keynote sets this label in Amplitude Bold on the red pill.</p>}
-                  <ColourPicker
-                    colour={pin.color}
-                    text={pin.color}
-                    disabled={locked}
-                    colourLabel="Colour"
-                    hexLabel="Colour hex"
-                    onColour={(color) =>
-                      updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, color } : c)) })
+                  {pin.showLabel === true && <p className="note">Preview only: Keynote sets this label in Amplitude Bold on the pill.</p>}
+                  <ObjectColourEditor
+                    showMarker={isPinOrDot(pin)}
+                    target={objectColourTarget}
+                    onTarget={setObjectColourTarget}
+                    marker={
+                      isPinOrDot(pin)
+                        ? {
+                            colour: pin.color,
+                            text: pin.color,
+                            onColour: (color) =>
+                              updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, color } : c)) }),
+                            onText: (color) => {
+                              if (isHighlightHex(color)) {
+                                updateActive({
+                                  churches: (activeView?.churches || []).map((c) =>
+                                    c.id === pin.id ? { ...c, color: normaliseHighlightColour(color) } : c
+                                  ),
+                                });
+                              }
+                            },
+                            onCommit: () => fireAndForgetSave(),
+                          }
+                        : undefined
                     }
-                    onText={(color) => {
-                      if (isHighlightHex(color)) {
-                        updateActive({
-                          churches: (activeView?.churches || []).map((c) =>
-                            c.id === pin.id ? { ...c, color: normaliseHighlightColour(color) } : c
-                          ),
-                        });
-                      }
+                    pill={{
+                      colour: churchLabelColor(pin),
+                      text: churchLabelColor(pin),
+                      onColour: (labelColor) =>
+                        updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, labelColor } : c)) }),
+                      onText: (labelColor) => {
+                        if (isHighlightHex(labelColor)) {
+                          updateActive({
+                            churches: (activeView?.churches || []).map((c) =>
+                              c.id === pin.id ? { ...c, labelColor: normaliseHighlightColour(labelColor) } : c
+                            ),
+                          });
+                        }
+                      },
+                      onCommit: () => fireAndForgetSave(),
                     }}
-                    onCommit={() => fireAndForgetSave()}
+                    disabled={locked}
                   />
                   <button
                     className="btn secondary"
@@ -3553,11 +3633,16 @@ export function MapsTab() {
                     <>
                       <div className="maps-pin-bulk" role="group" aria-label="Selected objects">
                         {selectedObjectCount > 0 && <span className="note">{selectedObjectCount} selected</span>}
-                        <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: true })} title="Show labels" aria-label="Show labels">
-                          <IconLabel />
-                        </button>
-                        <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: false })} title="Hide labels" aria-label="Hide labels">
-                          <IconLabelOff />
+                        <button
+                          className={`btn secondary icon-btn${labelsOn ? " on" : ""}`}
+                          type="button"
+                          disabled={locked || selectedPins.length === 0}
+                          onClick={() => updateSelectedPins({ showLabel: !labelsOn })}
+                          title={labelsOn ? "Hide labels" : "Show labels"}
+                          aria-label={labelsOn ? "Hide labels" : "Show labels"}
+                          aria-pressed={labelsOn}
+                        >
+                          {labelsOn ? <IconLabel /> : <IconLabelOff />}
                         </button>
                         <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={copySelectedPins} title="Copy" aria-label="Copy">
                           <IconCopy />
@@ -3593,56 +3678,76 @@ export function MapsTab() {
                           </button>
                         </div>
                       )}
-                      {selectedMarkers.length > 0 && (
+                      {selectedPins.length > 0 && (
                         <div className="maps-pin-bulk" role="group" aria-label="Selected pin style">
-                          <label className="maps-slider-field">
-                            <span>Size</span>
-                            <input
-                              type="range"
-                              min="24"
-                              max="4000"
-                              step="10"
-                              value={selectedMarkerSize}
-                              disabled={locked}
-                              onChange={(event) => updateSelectedMarkers((church) => withSizeAtCamera(church, Number(event.target.value), activeView?.camera.zoom ?? 0))}
-                            />
-                            <DraftNumberInput
-                              min={24}
-                              max={4000}
-                              digits={0}
-                              value={selectedMarkerSize}
-                              disabled={locked}
-                              aria-label="Pin size"
-                              onChange={(size) => updateSelectedMarkers((church) => withSizeAtCamera(church, size, activeView?.camera.zoom ?? 0))}
-                              onCommit={() => fireAndForgetSave()}
-                            />
-                          </label>
-                          <label className="maps-check">
-                            <input
-                              type="checkbox"
-                              checked={selectedMarkers.every((item) => !!item.scaleWithMap)}
-                              disabled={locked}
-                              onChange={(event) => {
-                                const zoom = activeView?.camera.zoom ?? 0;
-                                updateSelectedMarkers((church) => withScaleWithMap(church, event.target.checked, zoom));
-                              }}
-                            />{" "}
-                            Scale with map
-                          </label>
-                          <ColourPicker
-                            colour={bulkObjectColour}
-                            text={bulkObjectColour}
-                            none={bulkObjectNone}
-                            allowNone={selectedHighlightCodes.length > 0}
-                            disabled={locked}
-                            colourLabel="Colour"
-                            hexLabel="Colour hex"
-                            onColour={colourSelectedObjects}
-                            onText={(value) => {
-                              if (isHighlightHex(value)) colourSelectedObjects(value);
+                          {selectedMarkers.length > 0 && (
+                            <>
+                              <label className="maps-slider-field">
+                                <span>Size</span>
+                                <input
+                                  type="range"
+                                  min="24"
+                                  max="4000"
+                                  step="10"
+                                  value={selectedMarkerSize}
+                                  disabled={locked}
+                                  onChange={(event) => updateSelectedMarkers((church) => withSizeAtCamera(church, Number(event.target.value), activeView?.camera.zoom ?? 0))}
+                                />
+                                <DraftNumberInput
+                                  min={24}
+                                  max={4000}
+                                  digits={0}
+                                  value={selectedMarkerSize}
+                                  disabled={locked}
+                                  aria-label="Pin size"
+                                  onChange={(size) => updateSelectedMarkers((church) => withSizeAtCamera(church, size, activeView?.camera.zoom ?? 0))}
+                                  onCommit={() => fireAndForgetSave()}
+                                />
+                              </label>
+                              <label className="maps-check">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedMarkers.every((item) => !!item.scaleWithMap)}
+                                  disabled={locked}
+                                  onChange={(event) => {
+                                    const zoom = activeView?.camera.zoom ?? 0;
+                                    updateSelectedMarkers((church) => withScaleWithMap(church, event.target.checked, zoom));
+                                  }}
+                                />{" "}
+                                Scale with map
+                              </label>
+                            </>
+                          )}
+                          <ObjectColourEditor
+                            showMarker={selectedMarkers.length > 0}
+                            target={objectColourTarget}
+                            onTarget={setObjectColourTarget}
+                            marker={
+                              selectedMarkers.length > 0
+                                ? {
+                                    colour: bulkObjectColour,
+                                    text: bulkObjectColour,
+                                    none: bulkObjectNone,
+                                    allowNone: selectedHighlightCodes.length > 0,
+                                    onColour: colourSelectedObjects,
+                                    onText: (value) => {
+                                      if (isHighlightHex(value)) colourSelectedObjects(value);
+                                    },
+                                    onNone: () => applyHighlightColours(selectedHighlightCodes, HIGHLIGHT_NO_FILL),
+                                    onCommit: () => fireAndForgetSave(),
+                                  }
+                                : undefined
+                            }
+                            pill={{
+                              colour: bulkLabelColour,
+                              text: bulkLabelColour,
+                              onColour: colourSelectedPills,
+                              onText: (value) => {
+                                if (isHighlightHex(value)) colourSelectedPills(value);
+                              },
+                              onCommit: () => fireAndForgetSave(),
                             }}
-                            onNone={() => applyHighlightColours(selectedHighlightCodes, HIGHLIGHT_NO_FILL)}
-                            onCommit={() => fireAndForgetSave()}
+                            disabled={locked}
                           />
                         </div>
                       )}

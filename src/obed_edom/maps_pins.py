@@ -23,11 +23,15 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-RENDER_VERSION = 3
+RENDER_VERSION = 4
 
 DOT_PX = 512
 PIN_ASPECT = 1.45
 SUPERSAMPLE = 4
+# 1× Keynote placement; keep in sync with maps_keynote.DOT_SIZE / defaultObjectSize("dot").
+DOT_DISPLAY_PT = 28
+DOT_BORDER_PT = 0.25
+DOT_BORDER_RGB = (0, 0, 0)
 
 # Gold_Wall_Input.key slide 8: corner scalar 9.57 at h~46 -> radius ~= 0.21*h.
 LABEL_PILL_RGB = (0xEE * 257, 0x22 * 257, 0x0C * 257)
@@ -55,8 +59,15 @@ def _downscale(image: Image.Image, width: int, height: int) -> Image.Image:
 def render_dot(color: tuple[int, int, int]) -> Image.Image:
     size = DOT_PX * SUPERSAMPLE
     rgb = _rgb8(color)
-    image = Image.new("RGBA", (size, size), (*rgb, 0))
-    ImageDraw.Draw(image).ellipse((0, 0, size - 1, size - 1), fill=(*rgb, 255))
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    # 0.25pt at 1× display, baked so Keynote's stretch keeps the same ratio as MapLibre.
+    stroke = max(1, round(DOT_BORDER_PT * size / DOT_DISPLAY_PT))
+    draw.ellipse((0, 0, size - 1, size - 1), fill=(*DOT_BORDER_RGB, 255))
+    inset = stroke
+    inner = size - 1 - inset
+    if inner > inset:
+        draw.ellipse((inset, inset, inner, inner), fill=(*rgb, 255))
     return _downscale(image, DOT_PX, DOT_PX)
 
 

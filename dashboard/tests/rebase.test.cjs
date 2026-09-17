@@ -14,7 +14,7 @@ const compile = spawnSync(runtime, [
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 const { rebaseMapsDocument } = require(path.join(out, "rebase.js"));
-const { nextPinId, shouldFocusAddedLandmark } = require(path.join(out, "types.js"));
+const { cloneSlide, nextPinId, shouldFocusAddedLandmark } = require(path.join(out, "types.js"));
 
 const camera = (zoom = 8) => ({ lat: 1, lon: 2, zoom, bearing: 0, pitch: 0 });
 const church = (id, extra = {}) => ({ id, name: id, lat: 1, lon: 2, kind: "dot", color: "#fff", ...extra });
@@ -129,6 +129,44 @@ test("remote-only server-minted church merges without conflict while local edits
 
 test("nextPinId skips the server's w-namespace and mints the first free p-id", () => {
   assert.equal(nextPinId([{ id: "w1234abcd" }]), "p1");
+});
+
+test("cloneSlide add drops objects; duplicate copies LW and CG pins without sharing them", () => {
+  const pin = church("p1", { reveal: { kind: "brush", duration: 1.2 } });
+  const source = slide({
+    id: "s1",
+    stillPng: "old.png",
+    churches: [pin],
+    cgShiftY: 40,
+    cg: {
+      camera: camera(10),
+      style: "dark",
+      highlights: ["MYS"],
+      churches: [church("p2", { name: "CG pin" })],
+      stillPng: "cg.png",
+      movieMov: "cg.mov",
+    },
+  });
+  const added = cloneSlide(source, "s2");
+  assert.equal(added.id, "s2");
+  assert.deepEqual(added.churches, []);
+  assert.equal(added.stillPng, undefined);
+  assert.equal(added.cgShiftY, 0);
+  assert.deepEqual(added.cg.churches, []);
+  assert.equal(added.cg.stillPng, undefined);
+
+  const dup = cloneSlide(source, "s3", { objects: true });
+  assert.equal(dup.churches.length, 1);
+  assert.equal(dup.churches[0].id, "p1");
+  assert.equal(dup.churches[0].reveal.duration, 1.2);
+  assert.notEqual(dup.churches[0], source.churches[0]);
+  assert.notEqual(dup.churches[0].reveal, source.churches[0].reveal);
+  assert.equal(dup.cg.churches[0].name, "CG pin");
+  assert.notEqual(dup.cg.churches[0], source.cg.churches[0]);
+  source.churches[0].name = "mutated";
+  source.churches[0].reveal.duration = 9;
+  assert.equal(dup.churches[0].name, "p1");
+  assert.equal(dup.churches[0].reveal.duration, 1.2);
 });
 
 test("shouldFocusAddedLandmark only focuses when the slide+audience the upload targeted is still active", () => {

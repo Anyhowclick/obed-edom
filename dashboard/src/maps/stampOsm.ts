@@ -32,13 +32,35 @@ export function stampOsmCropOnCanvas(
   styleId?: string,
   stamp = true
 ): Promise<Blob> {
-  const canvas = scratchCanvas(width, height);
+  return stampOsmMovieFrame(source, x, y, width, height, width, height, mime, quality, terrain, styleId, stamp);
+}
+
+/** Crop `visW×visH` from the map and composite it onto a black `outW×outH` frame.
+ * Frame 0 of a centre→FW movie keeps the plate's 3840 viewport; later frames widen. */
+export function stampOsmMovieFrame(
+  source: HTMLCanvasElement,
+  x: number,
+  y: number,
+  visW: number,
+  visH: number,
+  outW: number,
+  outH: number,
+  mime: string,
+  quality: number,
+  terrain = false,
+  styleId?: string,
+  stamp = true
+): Promise<Blob> {
+  const canvas = scratchCanvas(outW, outH);
   const ctx = canvas.getContext("2d");
   if (!ctx) return Promise.reject(new Error("2d context unavailable"));
-  ctx.clearRect(0, 0, width, height);
-  ctx.drawImage(source, x, y, width, height, 0, 0, width, height);
-  if (styleId === "watercolour") compositePaperGrain(ctx, width, height);
-  if (stamp) paintOsmBar(ctx, width, height, terrain, styleId);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, outW, outH);
+  const dx = Math.floor((outW - visW) / 2);
+  const dy = Math.floor((outH - visH) / 2);
+  ctx.drawImage(source, x, y, visW, visH, dx, dy, visW, visH);
+  if (styleId === "watercolour") compositePaperGrain(ctx, outW, outH);
+  if (stamp) paintOsmBar(ctx, outW, outH, terrain, styleId);
   return new Promise((resolve, reject) => {
     try {
       canvas.toBlob((next) => (next ? resolve(next) : reject(new Error("toBlob failed"))), mime, quality);

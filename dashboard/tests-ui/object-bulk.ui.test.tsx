@@ -214,10 +214,17 @@ describe("object bulk actions", () => {
 
     const hex = screen.getByLabelText("Colour hex");
     expect(hex).toHaveValue("#c44a42");
+    expect(screen.queryByLabelText("Pill colour hex")).not.toBeInTheDocument();
     await user.clear(hex);
     expect(hex).toHaveValue("");
     await user.type(hex, "#112233");
     expect(hex).toHaveValue("#112233");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Label BG" }));
+    });
+    expect(screen.queryByLabelText("Colour hex")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Pill colour hex")).toHaveValue("#ee220c");
   });
 
   it("lets the bulk hex field be typed character by character", async () => {
@@ -237,6 +244,32 @@ describe("object bulk actions", () => {
     expect(hex).toHaveValue("#112233");
   });
 
+  it("lets the pill hex field be typed and persists labelColor", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({
+      result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha", { showLabel: true })] })] }), stateRevision: 1 },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+    await selectNamed("Alpha");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Label BG" }));
+    });
+
+    const hex = screen.getByLabelText("Pill colour hex");
+    expect(hex).toHaveValue("#ee220c");
+    await user.clear(hex);
+    await user.type(hex, "#112233");
+    expect(hex).toHaveValue("#112233");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 550));
+    });
+    const document = mapsApiScript.saveMapsState.calls[mapsApiScript.saveMapsState.calls.length - 1]?.document as {
+      slides: Array<{ churches: Array<{ id: string; labelColor?: string }> }>;
+    };
+    expect(document.slides[0].churches.find((church) => church.id === "c1")?.labelColor).toBe("#112233");
+  });
+
   it("does not show opacity on a selected object", async () => {
     const job = makeJob({
       result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha")] })] }), stateRevision: 1 },
@@ -249,5 +282,71 @@ describe("object bulk actions", () => {
 
     expect(screen.queryByText("Opacity")).not.toBeInTheDocument();
     expect(screen.getByLabelText(/Scale with map/)).toBeInTheDocument();
+  });
+
+  it("toggles labels on the selected objects from one control", async () => {
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [makeSlide({ churches: [pin("c1", "Alpha", { showLabel: true }), pin("c2", "Beta", { showLabel: false })] })],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+    await openObjects();
+    await selectNamed("Alpha");
+
+    const toggle = screen.getByRole("button", { name: "Hide labels" });
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+    expect(screen.getByRole("button", { name: "Show labels" })).toHaveAttribute("aria-pressed", "false");
+
+    await selectNamed("Beta");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Show labels" }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 550));
+    });
+    const document = mapsApiScript.saveMapsState.calls[mapsApiScript.saveMapsState.calls.length - 1]?.document as {
+      slides: Array<{ churches: Array<{ id: string; showLabel?: boolean }> }>;
+    };
+    expect(document.slides[0].churches.find((church) => church.id === "c1")?.showLabel).toBe(true);
+    expect(document.slides[0].churches.find((church) => church.id === "c2")?.showLabel).toBe(true);
+  });
+
+  it("add leaves objects empty; duplicate copies them onto the new slide", async () => {
+    const job = makeJob({
+      result: {
+        ...makeDoc({
+          slides: [makeSlide({ id: "s1", title: "SEA", churches: [pin("c1", "Alpha")] })],
+        }),
+        stateRevision: 1,
+      },
+    });
+    await renderMapsTab({ job });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Duplicate slide" }));
+    });
+    const afterDup = mapsApiScript.saveMapsState.calls[mapsApiScript.saveMapsState.calls.length - 1]?.document as {
+      slides: Array<{ churches: Array<{ id: string; name: string }> }>;
+    };
+    expect(afterDup.slides).toHaveLength(2);
+    expect(afterDup.slides[0].churches).toEqual([expect.objectContaining({ id: "c1", name: "Alpha" })]);
+    expect(afterDup.slides[1].churches).toEqual([expect.objectContaining({ id: "c1", name: "Alpha" })]);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add slide" }));
+    });
+    const afterAdd = mapsApiScript.saveMapsState.calls[mapsApiScript.saveMapsState.calls.length - 1]?.document as {
+      slides: Array<{ churches: Array<{ id: string; name: string }> }>;
+    };
+    // Add runs on the duplicate (same objects), and must still drop them.
+    expect(afterAdd.slides).toHaveLength(3);
+    expect(afterAdd.slides[2].churches).toEqual([]);
   });
 });

@@ -263,6 +263,19 @@ def buildings_layer_on(slide: dict[str, Any]) -> bool:
     return "buildings" not in slide_hidden_layers(slide)
 
 
+def isolate_key(slide: dict[str, Any]) -> str:
+    """Fingerprint of isolate on/off + strength. Mirrors the TS `appearanceMismatch` isolate field."""
+    raw = slide.get("isolate")
+    if not isinstance(raw, dict):
+        return "off"
+    try:
+        strength = float(raw.get("strength") or 0)
+    except (TypeError, ValueError):
+        strength = 0.0
+    mode = str(raw.get("mode") or "darken")
+    return f"{mode}:{strength:.2f}"
+
+
 def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     from_style = coerce_maps_style(str(from_slide.get("style") or ""))
     to_style = coerce_maps_style(str(to_slide.get("style") or ""))
@@ -274,20 +287,30 @@ def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     to_layers = sorted(slide_hidden_layers(to_slide))
     from_hillshade = bool(from_slide.get("hillshade"))
     to_hillshade = bool(to_slide.get("hillshade"))
-    if from_style != to_style or from_hi != to_hi or from_colours != to_colours or from_layers != to_layers or from_hillshade != to_hillshade:
+    if (
+        from_style != to_style
+        or from_hi != to_hi
+        or from_colours != to_colours
+        or from_layers != to_layers
+        or from_hillshade != to_hillshade
+        or isolate_key(from_slide) != isolate_key(to_slide)
+    ):
         return "cut"
     from_cam = from_slide.get("camera") or {}
     to_cam = to_slide.get("camera") or {}
     pitch = max(abs(float(from_cam.get("pitch") or 0)), abs(float(to_cam.get("pitch") or 0)))
-    from_bearing = float(from_cam.get("bearing") or 0)
-    to_bearing = float(to_cam.get("bearing") or 0)
-    d_bearing = abs((to_bearing - from_bearing + 180.0) % 360.0 - 180.0)
     extruded = is_extruded_style(from_style) or is_extruded_style(to_style)
     buildings_on = buildings_layer_on(from_slide) or buildings_layer_on(to_slide)
-    # Zoom delta is not a Movie trigger: one shared plate may overflow the frame (zoom-in).
-    if (extruded and buildings_on) or pitch > 0.5 or d_bearing > 0.05:
+    # Zoom/bearing deltas are not Movie triggers: one shared plate may overflow
+    # (zoom) and Keynote rotates that plate (bearing). Pitch is still a 3D orbit.
+    if (extruded and buildings_on) or pitch > 0.5:
         return "movie"
     return "morph"
+
+
+def signed_bearing_delta(from_bearing: float, to_bearing: float) -> float:
+    """Shortest signed turn in (−180, 180]."""
+    return (float(to_bearing) - float(from_bearing) + 180.0) % 360.0 - 180.0
 
 
 def sea_overview_camera() -> dict[str, float]:

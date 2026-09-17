@@ -3,7 +3,7 @@ import { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import type { MapMouseEvent } from "maplibre-gl";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { cameraAtHop } from "./captureFly";
+import { cameraAtHop, movieViewportWidth } from "./captureFly";
 import { applyLayerFilters } from "./layers";
 import { AdminSyncGate } from "./adminSync";
 import { addOverlays, applyAdmin1Highlights, applyHighlightColour, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLabelPillImage, ensureLandmarkImages, ensureLowZoomRaster, highlightedCountries, loadAdmin0, movieObjectsAt, selectedDragScale, syncAdmin1Source, syncChurchesLayerSpecs, withoutRevealed } from "./overlays";
@@ -203,6 +203,13 @@ export type MapViewHandle = {
     easeOut?: number;
     flight?: MapsFlight;
     width?: number;
+    /** Style/tile zoom surface. Defaults to `width`. A movie leaving a morph
+     * plate must pass the source plate's `movieRenderSurface`. */
+    surfaceWidth?: number;
+    /** Source-plate viewport. Defaults to `width`. Mixed-surface hops start here
+     * and transition to `toWidth`. */
+    fromWidth?: number;
+    toWidth?: number;
     fromObjects?: MapsChurch[];
     toObjects?: MapsChurch[];
     objectTransition?: "fade" | "hold";
@@ -335,9 +342,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   // than a value closed over at call time, so it restores to whatever is current even if the
   // prop changed mid-hop.
   const propWidthRef = useRef(authoredWidth);
-  // While a movie hop is animating, the render surface is pinned to the hop's own (wider) export
-  // surface rather than the active slide's authoredWidth prop — see animateHop.
+  // While a movie hop is animating, the band is pinned to hop `width` (flight geometry) rather
+  // than the active slide's authoredWidth prop. Style zoom uses `surfaceWidth` — see animateHop.
   const hopWidthRef = useRef<number | null>(null);
+  const hopRenderRef = useRef<number | null>(null);
   const [hopWidth, setHopWidth] = useState<number | null>(null);
   const sidePanelsRef = useRef(sidePanels);
   const pickRegionsRef = useRef(pickRegions);
@@ -429,7 +437,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const map = mapRef.current;
     if (!frameEl || !innerEl) return;
     const surfaceWidth = surfaceWidthOf(authoredW, sidePanelsOn);
-    const L = previewLayout(frameEl.clientWidth, frameEl.clientHeight, surfaceWidth, exportScale(authoredW));
+    const L = previewLayout(frameEl.clientWidth, frameEl.clientHeight, surfaceWidth, exportScale(hopRenderRef.current ?? authoredW));
     if (L.innerW <= 0 || L.innerH <= 0) return;
     innerEl.style.width = `${L.innerW}px`;
     innerEl.style.height = `${L.innerH}px`;
@@ -506,35 +514,41 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         });
       });
     },
-    animateHop({ from, to, durationMs, easing, routePoints, curve, flyZoom, easeIn, easeOut, flight, width, fromObjects, toObjects, objectTransition, destinationPaintsReveal = true }) {
+    animateHop({ from, to, durationMs, easing, routePoints, curve, flyZoom, easeIn, easeOut, flight, width, surfaceWidth, fromWidth, toWidth, fromObjects, toObjects, objectTransition, destinationPaintsReveal = true }) {
       const map = mapRef.current;
       if (!map) return Promise.resolve();
       hopAbort.current = false;
       finishHop();
-      // Render the hop at its own export surface (mirrors captureFlyFrames), not the active
-      // slide's authoredWidth prop, so a mixed-surface hop previews at the export's density.
+      // `width` is flight/output geometry. Frame 0 uses `fromWidth` (source plate
+      // viewport); the band then transitions to `toWidth`. `surfaceWidth` is the
+      // source plate's style/tile zoom so takeoff matches the landing composite.
       const priorWidth = authoredWidthRef.current;
-      const hopSurfaceW = width || priorWidth;
+      const hopGeomW = width || priorWidth;
+      const fromW = fromWidth || hopGeomW;
+      const toW = toWidth || hopGeomW;
+      const renderSurface = surfaceWidth || hopGeomW;
       // Idempotent against the LIVE prop, not a value closed over at call time, so a restore
       // that fires after the prop has since changed still lands on the current surface.
-      const applyHopWidth = (w: number) => {
-        const authored = readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom);
-        const next = w === propWidthRef.current ? null : w;
+      const applyHopWidth = (geomW: number, renderW: number, jump = true) => {
+        const authored = jump ? readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom) : null;
+        const next = geomW === propWidthRef.current ? null : geomW;
         hopWidthRef.current = next;
+        hopRenderRef.current = renderW;
         setHopWidth(next);
-        authoredWidthRef.current = w;
-        const delta = exportZoomDelta(w);
+        authoredWidthRef.current = geomW;
+        const delta = exportZoomDelta(renderW);
         deltaRef.current = delta;
         applyPreviewZoomLimits(map, minZoomRef.current, delta);
         applyAuthoredZoomGates(map, delta);
-        applyTransform(w, sidePanelsRef.current);
-        silentJump(map, suppress, cameraView(map, authored, delta, minZoomRef.current));
+        applyTransform(geomW, sidePanelsRef.current);
+        if (jump && authored) silentJump(map, suppress, cameraView(map, authored, delta, minZoomRef.current));
       };
-      if (hopSurfaceW !== priorWidth) {
-        // Armed before applying the override so a synchronous throw inside applyHopWidth
-        // still leaves finishHop() something to restore.
-        hopRestore.current = () => applyHopWidth(propWidthRef.current);
-        applyHopWidth(hopSurfaceW);
+      hopRestore.current = () => {
+        applyHopWidth(propWidthRef.current, propWidthRef.current);
+        hopRenderRef.current = null;
+      };
+      if (fromW !== priorWidth || renderSurface !== priorWidth) {
+        applyHopWidth(fromW, renderSurface);
       }
       const toObjectsPainted = destinationPaintsReveal ? withoutRevealed(toObjects || []) : toObjects || [];
       const seq = ++hopSeq.current;
@@ -547,6 +561,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             new Promise<void>((resolve, reject) => {
               if (hopSeq.current !== seq) return resolve();
               const apply = (t: number) => {
+                if (fromW !== toW) {
+                  const visW = movieViewportWidth(fromW, toW, t, easing);
+                  if (visW !== authoredWidthRef.current) applyHopWidth(visW, renderSurface, false);
+                }
                 const cam = cameraAtHop(from, to, t, {
                   easing,
                   routePoints,

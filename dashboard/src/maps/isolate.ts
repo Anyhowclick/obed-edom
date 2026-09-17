@@ -38,13 +38,16 @@ export type HighlightPiece = { id: string; rings: number[][][] };
  * nested inside an already-highlighted country — every highlighted country is emitted from
  * its own admin-1 rings instead of the 50m admin-0 outline, so the two never disagree along a
  * shared border. Regions nested inside an already-highlighted country are dropped as redundant,
- * their rings folded into the country's own piece (keyed by the ADM0 code).
+ * their rings folded into the country's own piece (keyed by the ADM0 code), unless
+ * `keepNestedRegions` is set — export cutouts keep the region as its own Keynote object.
  */
 export function highlightPieces(
   features: Admin0Feature[],
   highlights: string[],
-  admin1: Admin1Feature[] = []
+  admin1: Admin1Feature[] = [],
+  opts?: { keepNestedRegions?: boolean }
 ): HighlightPiece[] {
+  const keepNested = opts?.keepNestedRegions === true;
   const adm0 = new Set<string>();
   const adm1 = new Set<string>();
   for (const raw of highlights) {
@@ -54,9 +57,11 @@ export function highlightPieces(
     else adm0.add(highlight.toUpperCase());
   }
   const hadAdmin1Highlight = adm1.size > 0;
-  for (const code of [...adm1]) {
-    const feat = admin1.find((item) => item.properties?.adm1_code === code);
-    if (adm0.has(feat ? admin1Country(feat, code) : code.slice(0, 3).toUpperCase())) adm1.delete(code);
+  if (!keepNested) {
+    for (const code of [...adm1]) {
+      const feat = admin1.find((item) => item.properties?.adm1_code === code);
+      if (adm0.has(feat ? admin1Country(feat, code) : code.slice(0, 3).toUpperCase())) adm1.delete(code);
+    }
   }
   if (!adm0.size && !adm1.size) return [];
 
@@ -90,7 +95,10 @@ export function highlightPieces(
         byId.set(country, piece);
       }
       piece.rings.push(...ringsOf(feat.geometry));
-    } else {
+      if (keepNested && adm1.has(code)) {
+        pieces.push({ id: "A1:" + code, rings: ringsOf(feat.geometry) });
+      }
+    } else if (adm1.has(code)) {
       pieces.push({ id: "A1:" + code, rings: ringsOf(feat.geometry) });
     }
   }

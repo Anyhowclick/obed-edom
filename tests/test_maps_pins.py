@@ -60,7 +60,7 @@ def test_drop_pin_has_the_keynote_aspect_and_a_tip_at_the_bottom_centre():
 
 
 def test_render_version_is_bumped_for_the_new_pin_geometry():
-    assert RENDER_VERSION == 3
+    assert RENDER_VERSION == 4
 
 
 def test_pin_aspect_is_the_keynote_constant():
@@ -103,11 +103,14 @@ def test_drop_pin_hole_is_opaque_white_and_the_head_is_the_requested_colour():
     assert (red, green, blue) == (0xFF, 0x8A, 0x00)
 
 
-def test_dot_has_no_stroke_ring_around_the_edge():
+def test_dot_has_a_black_hairline_ring():
     image = render_dot(RED)
-    rim = image.getpixel((image.width // 2, 3))
-    assert rim[3] == 255
-    assert rim[:3] == (0xC4, 0x4A, 0x42)
+    cx = image.width // 2
+    rim = next(image.getpixel((cx, y)) for y in range(image.height) if image.getpixel((cx, y))[3] > 200)
+    assert rim[:3] == (0, 0, 0)
+    red, green, blue, alpha = image.getpixel((256, 256))
+    assert alpha == 255
+    assert (red, green, blue) == (0xC4, 0x4A, 0x42)
 
 
 def test_filename_is_content_addressed_and_stable(tmp_path: Path):

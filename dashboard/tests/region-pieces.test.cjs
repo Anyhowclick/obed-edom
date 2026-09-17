@@ -75,6 +75,18 @@ test("a country whose region is also highlighted emits one piece keyed by the co
   assert.deepEqual(pieces, [{ id: "MYS", rings: [SABAH, SARAWAK] }]);
 });
 
+test("keepNestedRegions emits the country piece and the nested region as its own cutout", () => {
+  const pieces = highlightPieces(admin0Features, ["MYS", "A1:MYS-1186"], admin1Features, {
+    keepNestedRegions: true,
+  });
+  assert.deepEqual(
+    pieces.map((p) => p.id),
+    ["MYS", "A1:MYS-1186"]
+  );
+  assert.deepEqual(pieces[0].rings, [SABAH, SARAWAK]);
+  assert.deepEqual(pieces[1].rings, [SABAH]);
+});
+
 test("border cut: a highlighted country beside a highlighted region is still its own piece", () => {
   const withIdn = [...admin1Features, admin1("IDN", "IDN-1", IDN_KAL)];
   const pieces = highlightPieces(admin0Features, ["IDN", "A1:MYS-1186"], withIdn);

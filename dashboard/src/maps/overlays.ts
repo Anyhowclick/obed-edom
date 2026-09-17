@@ -6,9 +6,12 @@ import {
 } from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
-import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, ML_MAX_ZOOM, ML_MIN_ZOOM, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
+import { churchLabelColor, DEFAULT_LABEL_PILL_COLOR, HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, ML_MAX_ZOOM, ML_MIN_ZOOM, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
 import { defaultObjectSize, ICON_SIZE_PACK_MAX, zoomScaledStops } from "./objects";
 import { filledHighlights, highlightColour, highlightColourExpression, setHighlightColour } from "./highlight";
+
+/** Hairline on every dot; 0.25pt at 1× (defaultObjectSize("dot")), scales with the marker. */
+export const DOT_BORDER_PT = 0.25;
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -22,6 +25,10 @@ export function admin0Name(code: string): string {
   const wanted = code.toUpperCase();
   const feat = admin0Cache?.features.find((item) => String(item.properties?.ADM0_A3 || "").toUpperCase() === wanted);
   return feat?.properties?.NAME || code;
+}
+
+export function highlightName(code: string): string {
+  return code.startsWith("A1:") ? admin1Name(code) : admin0Name(code);
 }
 
 export type Admin1Feature = {
@@ -209,9 +216,9 @@ export function applyHighlights(map: MapLibreMap, highlights: string[], highligh
   }
 }
 
-export const ADMIN0_FILL_OPACITY = 0.4;
+export const ADMIN0_FILL_OPACITY = 0.55;
 export const ADMIN0_LINE_OPACITY = 0.9;
-export const ADMIN1_FILL_OPACITY = 0.4;
+export const ADMIN1_FILL_OPACITY = 0.55;
 export const ADMIN1_LINE_OPACITY = 0.9;
 
 /** Highlighted-country fill/line opacity, keyed off `feature-state.hl` set by `applyHighlights`. */
@@ -443,10 +450,11 @@ export const LABEL_GAP_EMS = 0.35;
 const PILL_PAD_X_PX = 6;
 export const PILL_PAD_Y_PX = 2;
 
-/** Mirrors `maps_keynote._label_scale`: authored size over the kind's default, every kind alike.
- * The zoom-driven half of the total scale lives in the `icon-size` stops, which carry the clamp. */
+/** Mirrors `maps_keynote._label_scale`: pins and dots share the drop-pin default so a
+ * grouped pin and dot at the same size get the same text and pill. Landmarks use their
+ * own authored default as 1×. Zoom lives in the `icon-size` stops, which carry the clamp. */
 function labelScale(kind: string, size: number, assetWidth = 0): number {
-  const base = defaultObjectSize(kind, assetWidth);
+  const base = kind === "landmark" ? defaultObjectSize(kind, assetWidth) : defaultObjectSize("dropPin");
   return base ? size / base : 1;
 }
 
@@ -602,7 +610,7 @@ export function churchesGeo(
           sizeZoomRef: (church.sizeZoom ?? 0) + Math.log2(objectScale),
           labelScale: scale,
           labelBucket: String(bucket),
-          labelPill: labelPillImageId(name),
+          labelPill: labelPillImageId(name, churchLabelColor(church)),
           ...labelOffsets(
             markerHeightPx(church, size, church.id === selectedPinId) * objectScale,
             scale * objectScale,
@@ -729,18 +737,18 @@ export function ensureDropPinImages(map: MapLibreMap, churches: MapsChurch[]) {
 const LABEL_RADIUS_FRAC = 0.21;
 export const LABEL_PILL_ID = "church-label-pill";
 
-export function labelPillImageId(name: string): string {
-  return `${LABEL_PILL_ID}-${labelNameKey(name)}`;
+export function labelPillImageId(name: string, color: string = DEFAULT_LABEL_PILL_COLOR): string {
+  return `${LABEL_PILL_ID}-${labelNameKey(name)}-${churchLabelColor({ labelColor: color }).slice(1)}`;
 }
 
-function labelPillImageSized(cssW: number, cssH: number, name: string, scale: number): ImageData {
+function labelPillImageSized(cssW: number, cssH: number, name: string, scale: number, color: string): ImageData {
   const ratio = DROP_PIN_PIXEL_RATIO;
   const w = Math.max(1, Math.round(cssW * ratio));
   const h = Math.max(1, Math.round(cssH * ratio));
-  return drawLabelPill(w, h, LABEL_RADIUS_FRAC * h, name, LABEL_FONT_PX * scale * ratio);
+  return drawLabelPill(w, h, LABEL_RADIUS_FRAC * h, name, LABEL_FONT_PX * scale * ratio, color);
 }
 
-function drawLabelPill(w: number, h: number, cornerPx: number, name?: string, fontPx?: number): ImageData {
+function drawLabelPill(w: number, h: number, cornerPx: number, name?: string, fontPx?: number, color: string = DEFAULT_LABEL_PILL_COLOR): ImageData {
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
@@ -748,7 +756,7 @@ function drawLabelPill(w: number, h: number, cornerPx: number, name?: string, fo
   if (!ctx) return new ImageData(w, h);
   ctx.beginPath();
   ctx.roundRect(0, 0, w, h, cornerPx);
-  ctx.fillStyle = "#EE220C";
+  ctx.fillStyle = churchLabelColor({ labelColor: color });
   ctx.fill();
   if (name && fontPx) {
     ctx.font = `700 ${fontPx}px "Noto Sans", sans-serif`;
@@ -775,11 +783,12 @@ export function ensureLabelPillImage(map: MapLibreMap, churches: MapsChurch[] = 
   churches.forEach((church, index) => {
     if (church.showLabel !== true) return;
     const name = numberPins ? `${index + 1}. ${church.name}` : church.name;
+    const color = churchLabelColor(church);
     const box = labelPillCssSize(name, LABEL_PILL_BAKE_SCALE);
-    const id = labelPillImageId(name);
+    const id = labelPillImageId(name, color);
     keep.add(id);
     if (map.hasImage(id)) return;
-    map.addImage(id, labelPillImageSized(box.w, box.h, name, LABEL_PILL_BAKE_SCALE), { pixelRatio: DROP_PIN_PIXEL_RATIO });
+    map.addImage(id, labelPillImageSized(box.w, box.h, name, LABEL_PILL_BAKE_SCALE, color), { pixelRatio: DROP_PIN_PIXEL_RATIO });
   });
   pruneLabelPillImages(map, keep);
 }
@@ -839,8 +848,8 @@ export function churchesLayers(): LayerSpecification[] {
         "circle-color": ["get", "color"],
         "circle-opacity": ["coalesce", ["get", "opacity"], 1],
         "circle-stroke-opacity": ["coalesce", ["get", "opacity"], 1],
-        "circle-stroke-width": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 3, 1.5], ["get", "objectScale"], ["/", ["get", "size"], defaultObjectSize("dot")]]),
-        "circle-stroke-color": "#FFFFFF",
+        "circle-stroke-width": zoomScaledStops(["*", DOT_BORDER_PT, ["get", "objectScale"], ["/", ["get", "size"], defaultObjectSize("dot")]]),
+        "circle-stroke-color": "#000000",
       },
     },
     {

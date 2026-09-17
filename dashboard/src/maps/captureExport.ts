@@ -4,6 +4,8 @@ import { applyLayerFilters } from "./layers";
 import {
   addOverlays,
   admin1FeaturesInPlay,
+  applyAdmin1Highlights,
+  applyHighlights,
   highlightedCountries,
   applyHillshade,
   ensureAdmin0Highlights,
@@ -12,6 +14,7 @@ import {
   loadAdmin1,
 } from "./overlays";
 import { isolatePairBaseVisibility, isolatePairCutoutVisibility } from "./captureIsolateVisibility";
+import { filledHighlights } from "./highlight";
 import { highlightPieces, pieceClip } from "./isolate";
 import { stampOsmCropOnCanvas } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
@@ -276,11 +279,16 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
   }
 }
 
-/** Highlighted slides render a second still: the highlighted area cut out of the base, so Keynote
- * can stack it above the mask with pins on top. Null when there is nothing highlighted.
+/** Highlighted *stills* render a second raster: each filled region as its own transparent PNG
+ * so isolate-landing / reveal movies can stack a wash above the base. Null when there is
+ * nothing highlighted.
  *
- * The base always drops the highlight. The cutout restores it so filled colours land in the piece;
- * no-fill (`none`) highlights stay map-style only. */
+ * Morph plates must not use this path — Keynote's colour-managed alpha and per-cutout
+ * rotate/orbit miss the live MapLibre composite. Those captures go through
+ * `captureExportRaster` with highlights left on.
+ *
+ * The base always drops the highlight. The cutout paints only the wash (no basemap).
+ * No-fill (`none`) codes are skipped — they still punch the isolate hole on the base. */
 export async function captureIsolatePair(
   opts: ExportMapOpts
 ): Promise<{ base: Blob; pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] } | null> {
@@ -312,11 +320,19 @@ export async function captureIsolatePair(
     const highlightedPieces = highlightPieces(
       (admin0?.features || []) as never,
       opts.highlights,
-      admin1FeaturesInPlay(opts.highlights)
+      admin1FeaturesInPlay(opts.highlights),
+      { keepNestedRegions: true }
     );
     const pr = surface.pixelRatio;
     const pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] = [];
     for (const piece of highlightedPieces) {
+      if (!filledHighlights([piece.id], opts.highlightColours).length) continue;
+      // One country/region per raster: only this highlight is painted on a transparent
+      // canvas. Copy the bbox as-is — a second JS clip of the same rings fights MapLibre's
+      // fill and was shifting the wash off the plate.
+      applyHighlights(map, [piece.id], opts.highlightColours);
+      applyAdmin1Highlights(map, [piece.id], opts.highlightColours);
+      await waitIdleForFrame(map, undefined, opts.isCancelled);
       const clip = pieceClip(
         piece.rings,
         (lonLat) => map.project(lonLat),
@@ -327,33 +343,13 @@ export async function captureIsolatePair(
         opts.height
       );
       if (!clip) continue;
-      const { box, ringsPx, source, dest } = clip;
+      const { box, source } = clip;
       const canvas = document.createElement("canvas");
       canvas.width = box.w;
       canvas.height = box.h;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("2D canvas context is unavailable for the isolate cut-out.");
-      ctx.translate(-box.x, -box.y);
-      ctx.beginPath();
-      for (const ring of ringsPx) {
-        ring.forEach(([px, py], index) => {
-          if (index === 0) ctx.moveTo(px, py);
-          else ctx.lineTo(px, py);
-        });
-        ctx.closePath();
-      }
-      ctx.clip();
-      ctx.drawImage(
-        map.getCanvas(),
-        source.sx,
-        source.sy,
-        source.sw,
-        source.sh,
-        dest.dx,
-        dest.dy,
-        dest.dw,
-        dest.dh
-      );
+      ctx.drawImage(map.getCanvas(), source.sx, source.sy, source.sw, source.sh, 0, 0, box.w, box.h);
       const blob = await new Promise<Blob>((resolve, reject) => {
         canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Isolate cut-out toBlob failed."))), "image/png");
       });

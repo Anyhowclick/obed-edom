@@ -33,6 +33,7 @@ from obed_edom.maps_geo import (
     inherit_hidden_layers,
     inverse_mercator_y,
     mercator_y,
+    signed_bearing_delta,
     slide_hidden_layers,
     world_width,
 )
@@ -50,6 +51,9 @@ DSK_SCALE = 0.5
 DSK_Y = 540
 CG_ORIGIN_X = (WALL_WIDTH - CG_WIDTH) / 2.0  # 2880
 MAX_TEXTURE_SIZE = 8192
+# Keynote object size after placement. Capture still fits to MAX_TEXTURE_SIZE; this
+# is how big the PNG is drawn on the slide. 16384 is 2× the old unfitted-8192 gate.
+MAX_MORPH_DISPLAY_PX = 16384
 TIMEOUT_SECONDS = 3600
 PANEL_EDGES = (1920.0, 5760.0)
 PIN_MAX_PT = 180
@@ -64,8 +68,12 @@ LABEL_GAP = 8
 LABEL_CHAR_W = 13
 PILL_PAD_X = 6
 PILL_PAD_Y = 2
+# Amplitude-Bold sits high in a top-aligned Keynote box; nudge text down inside the pill.
+LABEL_TEXT_DY = 2
 LABEL_SCALE_MIN = 0.5
 LABEL_SCALE_MAX = 8
+# Keynote starts the movie→still dissolve before the last frame holds; wait this extra beat.
+MOVIE_END_HOLD = 0.5
 CREDITS_TITLE = "Map data"
 CREDITS_FONT = 28
 CREDITS_TITLE_FONT = 40
@@ -173,6 +181,11 @@ def parse_color(value: str) -> tuple[int, int, int]:
     return red * 257, green * 257, blue * 257
 
 
+def _label_pill_rgb(church: dict[str, Any]) -> tuple[int, int, int]:
+    raw = church.get("labelColor")
+    return parse_color(str(raw)) if raw else LABEL_PILL_RGB
+
+
 def cg_crop_origin(slide: dict[str, Any]) -> tuple[float, float]:
     dx, _dy = clamp_cg_shift(slide.get("cgShiftX") or 0, 0)
     return (CG_ORIGIN_X + dx, 0.0)
@@ -207,6 +220,63 @@ def hop_capture_size(from_slide: dict[str, Any], to_slide: dict[str, Any] | None
 
 def hop_map_origin_x(width: int) -> int:
     return 0 if int(width) >= int(WALL_WIDTH) else int(CENTRE_ORIGIN_X)
+
+
+EXPORT_REF_WIDTH = 1920
+
+
+def export_scale(surface_width: float) -> float:
+    """Mirrors `dashboard` `exportScale`: 1920→1, 3840→2, 7680→4."""
+    return 2 ** max(0, round(math.log2(max(float(surface_width), 1.0) / EXPORT_REF_WIDTH)))
+
+
+def export_zoom_delta(surface_width: float) -> float:
+    """Mirrors `dashboard` `exportZoomDelta`. Style/tile zoom offset for a capture surface."""
+    scale = export_scale(surface_width)
+    return -math.log2(scale) if scale else 0.0
+
+
+def movie_endpoint_surface(
+    slide: dict[str, Any],
+    plates: list[dict[str, Any]] | dict[str, dict[str, Any]],
+    slides: list[dict[str, Any]],
+) -> int:
+    """Style/tile surface at one movie end: that slide's plate, else its own capture."""
+    own = slide_capture_size(slide)[0]
+    sid = str(slide.get("id") or "")
+    by_id = {str(row.get("id") or ""): row for row in slides}
+    plate_rows = plates.values() if isinstance(plates, dict) else plates
+    for plate in plate_rows:
+        ids = [str(item) for item in (plate.get("slideIds") or [])]
+        if sid not in ids:
+            continue
+        widest = own
+        for member_id in ids:
+            member = by_id.get(member_id)
+            if member is not None:
+                widest = max(widest, slide_capture_size(member)[0])
+        return widest
+    return own
+
+
+def movie_render_surface(
+    from_slide: dict[str, Any],
+    to_slide: dict[str, Any],
+    plates: list[dict[str, Any]] | dict[str, dict[str, Any]],
+    slides: list[dict[str, Any]],
+) -> int:
+    """Style/tile surface for movie frame 0: the *source* plate, else the source slide.
+
+    Hop output size stays `hop_capture_size`. Do not `max` with the dest/hop — a
+    3840 plate followed by a 7680 movie must take off at 3840.
+    """
+    return movie_endpoint_surface(from_slide, plates, slides)
+
+
+def movie_viewport_width(from_width: float, to_width: float, t: float) -> int:
+    """Visible authored width at hop progress `t` (0 = source plate, 1 = dest)."""
+    u = max(0.0, min(1.0, float(t)))
+    return int(round_half_away(float(from_width) + (float(to_width) - float(from_width)) * u))
 
 
 def normalized_viewport(
@@ -257,27 +327,59 @@ def union_viewports(
     )
 
 
-def morph_plate_geom(
+def _rotate_offset(dx: float, dy: float, bearing: float) -> tuple[float, float]:
+    theta = math.radians(float(bearing) or 0.0)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    return cos_t * dx + sin_t * dy, -sin_t * dx + cos_t * dy
+
+
+def viewport_aabb(
+    camera: dict[str, Any],
+    width: float,
+    height: float,
+    plate_bearing: float,
+) -> tuple[float, float, float, float]:
+    """Camera viewport as an AABB in the plate's bearing frame."""
+    axis = normalized_viewport(camera, width, height, plate_bearing)
+    delta = signed_bearing_delta(plate_bearing, float(camera.get("bearing") or 0))
+    if abs(delta) < 1e-9:
+        return axis
+    cx = (axis[0] + axis[2]) / 2.0
+    cy = (axis[1] + axis[3]) / 2.0
+    hw = (axis[2] - axis[0]) / 2.0
+    hh = (axis[3] - axis[1]) / 2.0
+    xs: list[float] = []
+    ys: list[float] = []
+    for dx, dy in ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)):
+        rx, ry = _rotate_offset(dx, dy, delta)
+        xs.append(cx + rx)
+        ys.append(cy + ry)
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _camera_cover_box(
+    camera: dict[str, Any],
+    width: float,
+    height: float,
+    plate_bearing: float,
+) -> tuple[float, float, float, float]:
+    """Mercator AABB of the LW circumcircle, so any rotation about the camera still covers the frame."""
+    axis = normalized_viewport(camera, width, height, plate_bearing)
+    cx = (axis[0] + axis[2]) / 2.0
+    cy = (axis[1] + axis[3]) / 2.0
+    world = world_width(float(camera.get("zoom") or 0))
+    radius = math.hypot(float(width) / 2.0, float(height) / 2.0) / world if world else 0.0
+    return (cx - radius, cy - radius, cx + radius, cy + radius)
+
+
+def _geom_from_union(
+    union: tuple[float, float, float, float],
     cameras: list[dict[str, Any]],
-    *,
-    width: float = WALL_WIDTH,
-    height: float = WALL_HEIGHT,
-    widths: list[float] | None = None,
+    canvas: list[float],
+    height: float,
+    bearing: float,
 ) -> dict[str, Any] | None:
-    """Union mercator viewports; one raster at the deeper zoom. None if the union is degenerate."""
-    if not cameras:
-        return None
-    canvas = list(widths) if widths is not None else [width] * len(cameras)
-    if len(canvas) != len(cameras):
-        canvas = [width] * len(cameras)
-    bearing = float(cameras[0].get("bearing") or 0)
-    boxes = [normalized_viewport(cam, w, height, bearing) for cam, w in zip(cameras, canvas)]
-    union = (
-        min(box[0] for box in boxes),
-        min(box[1] for box in boxes),
-        max(box[2] for box in boxes),
-        max(box[3] for box in boxes),
-    )
     z_plate = max(float(cam.get("zoom") or 0) for cam in cameras)
     world = world_width(z_plate)
     plate_w = (union[2] - union[0]) * world
@@ -293,10 +395,105 @@ def morph_plate_geom(
         "zPlate": z_plate,
         "plateW": plate_w,
         "plateH": plate_h,
-        "width": float(max(canvas) if canvas else width),
+        "width": float(max(canvas) if canvas else WALL_WIDTH),
         "height": float(height),
         "captureCamera": capture,
     }
+
+
+def _slide_xy_to_mercator(
+    sx: float,
+    sy: float,
+    plate: dict[str, Any],
+    placement: dict[str, Any],
+) -> tuple[float, float]:
+    """Inverse of `project_into_plate`: slide pixels back to the plate's bearing-frame mercator."""
+    rot = quantized_rotation(placement.get("rotation") or 0)
+    ux, uy = sx, sy
+    if rot:
+        cx = float(placement["x"]) + float(placement["w"]) / 2.0
+        cy = float(placement["y"]) + float(placement["h"]) / 2.0
+        ux, uy = _keynote_rotate_about(sx, sy, cx, cy, -rot)
+    scale_x = float(placement["w"]) / float(plate["plateW"]) if plate["plateW"] else 1.0
+    scale_y = float(placement["h"]) / float(plate["plateH"]) if plate["plateH"] else 1.0
+    world = world_width(float(plate["zPlate"]))
+    union = plate["union"]
+    nx = union[0] + (ux - float(placement["x"])) / (world * scale_x) if world and scale_x else union[0]
+    ny = union[1] + (uy - float(placement["y"])) / (world * scale_y) if world and scale_y else union[1]
+    return nx, ny
+
+
+def _grow_union_for_rotated_lw(
+    cameras: list[dict[str, Any]],
+    canvas: list[float],
+    height: float,
+    bearing: float,
+    union: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """Expand the union until each camera's placed+rotated plate covers its LW rectangle.
+
+    Keynote rotates about the plate centre, not the camera, so the AABB of a rotated
+    viewport is not always enough — zoom/pan leaves the plate centre off the LW
+    centre and the corners swing out.
+    """
+    next_union = union
+    for _ in range(8):
+        geom = _geom_from_union(next_union, cameras, canvas, height, bearing)
+        if geom is None:
+            return next_union
+        grew = False
+        x0, y0, x1, y1 = next_union
+        for cam, width in zip(cameras, canvas):
+            place = _place_plate_float(cam, geom, width=width, height=height)
+            for sx, sy in ((0.0, 0.0), (width, 0.0), (width, height), (0.0, height)):
+                nx, ny = _slide_xy_to_mercator(sx, sy, geom, place)
+                if nx < x0 - 1e-12 or ny < y0 - 1e-12 or nx > x1 + 1e-12 or ny > y1 + 1e-12:
+                    grew = True
+                x0, y0, x1, y1 = min(x0, nx), min(y0, ny), max(x1, nx), max(y1, ny)
+        next_union = (x0, y0, x1, y1)
+        if not grew:
+            break
+    return next_union
+
+
+def morph_plate_geom(
+    cameras: list[dict[str, Any]],
+    *,
+    width: float = WALL_WIDTH,
+    height: float = WALL_HEIGHT,
+    widths: list[float] | None = None,
+) -> dict[str, Any] | None:
+    """Union mercator viewports; one raster at the deeper zoom. None if the union is degenerate.
+
+    Each camera contributes its bearing-frame AABB. A hop that actually rotates also
+    adds the LW circumcircle and grows until a Keynote rotate-about-centre still
+    covers the frame. Zoom/pan hops stay on the AABB so the fitted 8192 raster
+    matches the live preview instead of a padded square.
+    """
+    if not cameras:
+        return None
+    canvas = list(widths) if widths is not None else [width] * len(cameras)
+    if len(canvas) != len(cameras):
+        canvas = [width] * len(cameras)
+    bearing = float(cameras[0].get("bearing") or 0)
+    boxes = [viewport_aabb(cam, w, height, bearing) for cam, w in zip(cameras, canvas)]
+    # Circumcircle + grow are only for Keynote rotate-about-centre. A zoom/pan hop
+    # must stay the AABB of the cameras or the fitted 8192 raster spends most of
+    # its pixels on empty padding and Magic Move no longer matches the preview.
+    needs_rotation_pad = any(
+        quantized_rotation(signed_bearing_delta(bearing, float(cam.get("bearing") or 0))) for cam in cameras
+    )
+    if needs_rotation_pad:
+        boxes += [_camera_cover_box(cam, w, height, bearing) for cam, w in zip(cameras, canvas)]
+    union = (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+    if needs_rotation_pad:
+        union = _grow_union_for_rotated_lw(cameras, canvas, height, bearing, union)
+    return _geom_from_union(union, cameras, canvas, height, bearing)
 
 
 def fit_morph_plate(geom: dict[str, Any], max_side: float = MAX_TEXTURE_SIZE) -> dict[str, Any]:
@@ -328,16 +525,17 @@ def fit_morph_plate(geom: dict[str, Any], max_side: float = MAX_TEXTURE_SIZE) ->
     return {**geom, "zPlate": z_plate, "plateW": plate_w, "plateH": plate_h, "captureCamera": capture}
 
 
-def plate_placement(
+def _place_plate_float(
     camera: dict[str, Any],
     plate: dict[str, Any],
     *,
-    width: float | None = None,
-    height: float | None = None,
-) -> dict[str, int]:
-    """Place the shared plate so this camera is full-bleed on its capture canvas."""
-    width = float(width if width is not None else plate.get("width") or WALL_WIDTH)
-    height = float(height if height is not None else plate.get("height") or WALL_HEIGHT)
+    width: float,
+    height: float,
+) -> dict[str, Any]:
+    """Unrounded placement. Rotation is about the plate centre, so a zoom/pan
+    hop shifts `(x, y)` until that centre-rotation keeps the camera on the LW
+    midpoint — Keynote cannot rotate about an off-centre viewport.
+    """
     union = plate["union"]
     z_plate = float(plate["zPlate"])
     world = world_width(z_plate)
@@ -349,14 +547,163 @@ def plate_placement(
     disp_h = float(plate["plateH"]) * scale
     img_x = -((cam[0] - union[0]) * world) * scale
     img_y = -((cam[1] - union[1]) * world) * scale
-    return {"x": whole(img_x), "y": whole(img_y), "w": whole(disp_w), "h": whole(disp_h)}
+    rotation = quantized_rotation(signed_bearing_delta(bearing, float(camera.get("bearing") or 0)))
+    if rotation:
+        cx = img_x + disp_w / 2.0
+        cy = img_y + disp_h / 2.0
+        vx, vy = width / 2.0, height / 2.0
+        dx, dy = vx - cx, vy - cy
+        rdx, rdy = _keynote_rotate_about(dx, dy, 0.0, 0.0, rotation)
+        img_x = vx - rdx - disp_w / 2.0
+        img_y = vy - rdy - disp_h / 2.0
+    row: dict[str, Any] = {"x": img_x, "y": img_y, "w": disp_w, "h": disp_h}
+    if rotation:
+        row["rotation"] = rotation
+    return row
+
+
+def plate_placement(
+    camera: dict[str, Any],
+    plate: dict[str, Any],
+    *,
+    width: float | None = None,
+    height: float | None = None,
+) -> dict[str, Any]:
+    """Place the shared plate so this camera is full-bleed on its capture canvas.
+
+    `x`/`y` are the unrotated top-left. A non-zero `rotation` is Keynote's
+    iWork angle (degrees, clockwise on screen) so Magic Move can spin the same
+    PNG to a new bearing.
+    """
+    width = float(width if width is not None else plate.get("width") or WALL_WIDTH)
+    height = float(height if height is not None else plate.get("height") or WALL_HEIGHT)
+    row = _place_plate_float(camera, plate, width=width, height=height)
+    snapped: dict[str, Any] = {
+        "x": whole(row["x"]),
+        "y": whole(row["y"]),
+        "w": whole(row["w"]),
+        "h": whole(row["h"]),
+    }
+    if row.get("rotation"):
+        snapped["rotation"] = row["rotation"]
+    return snapped
+
+
+def _rotate_about(px: float, py: float, cx: float, cy: float, degrees: float) -> tuple[float, float]:
+    """Rotate (px, py) about (cx, cy) by a Y-up CCW-positive angle.
+
+    Do not call this for Keynote image placement — iWork's positive rotation is
+    clockwise in screen coordinates. Use `_keynote_rotate_about`.
+    """
+    theta = math.radians(float(degrees) or 0.0)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    dx, dy = px - cx, py - cy
+    return cx + cos_t * dx - sin_t * dy, cy + sin_t * dx + cos_t * dy
+
+
+def _keynote_rotate_about(px: float, py: float, cx: float, cy: float, degrees: float) -> tuple[float, float]:
+    """Rotate (px, py) about (cx, cy) the way Keynote spins an image.
+
+    Positive iWork `rotation` is clockwise in screen coordinates (Y down).
+    `_rotate_about` is the opposite screen-space transform, so every forward
+    Keynote placement passes the negated angle through that helper.
+    """
+    return _rotate_about(px, py, cx, cy, -(float(degrees) or 0.0))
+
+
+def round_half_away(value: float) -> int:
+    """Half away from zero. Shared with dashboard `roundHalfAway`.
+
+    Python `round` is half-to-even and `Math.round` is half-toward-+∞, so 10.5
+    and −11.5 would otherwise put the Keynote plate one degree off the movie.
+    """
+    number = float(value)
+    if number >= 0:
+        return int(math.floor(number + 0.5))
+    return int(math.ceil(number - 0.5))
+
+
+def quantized_rotation(degrees: float) -> float:
+    """Signed integer degrees, or 0. The one angle Keynote can honour.
+
+    Placement, region orbit, visual-origin, and the emitted iWork property must
+    all spin by this value — a leftover 0.4° on an 8k plate is tens of pixels.
+    """
+    snapped = round_half_away(float(degrees) or 0.0)
+    return float(snapped) if snapped else 0.0
+
+
+def effective_plate_bearing(plate_bearing: float, camera_bearing: float) -> float:
+    """The bearing Keynote actually shows after integer plate rotation.
+
+    The plate PNG is captured at `plate_bearing`. Placement then rotates by
+    `quantized_rotation(signed_bearing_delta(...))`. A movie that takes off
+    from (or lands on) that plate must use this snapped bearing — interpolating
+    from the authored 10.4° while Keynote holds 10° is a visible jump.
+    The result stays on the authored wrap so hop interpolation does not spin.
+    """
+    delta = signed_bearing_delta(plate_bearing, camera_bearing)
+    next_bearing = float(camera_bearing) + quantized_rotation(delta) - delta
+    nearest = float(round_half_away(next_bearing))
+    return nearest if abs(next_bearing - nearest) < 1e-6 else next_bearing
+
+
+def _plate_capture_bearing(plate: dict[str, Any]) -> float:
+    cam = plate.get("captureCamera") or plate.get("camera") or {}
+    return float(cam.get("bearing") or 0)
+
+
+def movie_endpoint_camera(camera: dict[str, Any], plate: dict[str, Any] | None) -> dict[str, Any]:
+    """Copy of `camera` with bearing snapped to the plate Keynote will show."""
+    if not plate:
+        return dict(camera)
+    next_cam = dict(camera)
+    next_cam["bearing"] = effective_plate_bearing(
+        _plate_capture_bearing(plate),
+        float(camera.get("bearing") or 0),
+    )
+    return next_cam
+
+
+def keynote_rotation(degrees: float) -> int:
+    """iWork `rotation` is an integer in 0–359."""
+    return int(quantized_rotation(degrees)) % 360
+
+
+def visual_origin(x: float, y: float, w: float, h: float, rotation: float) -> tuple[int, int]:
+    """AABB top-left after Keynote screen-space rotation about the frame centre."""
+    rotation = quantized_rotation(rotation)
+    if not rotation:
+        return whole(x), whole(y)
+    cx, cy = x + w / 2.0, y + h / 2.0
+    corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+    rot = [_keynote_rotate_about(px, py, cx, cy, rotation) for px, py in corners]
+    return whole(min(p[0] for p in rot)), whole(min(p[1] for p in rot))
+
+
+def orbit_item(item: dict[str, Any], origin: dict[str, Any], rotation: float) -> dict[str, Any]:
+    """Move `item` so rotating both objects about their own centres keeps them glued."""
+    rotation = quantized_rotation(rotation)
+    if not rotation:
+        return item
+    ocx = float(origin["x"]) + float(origin["w"]) / 2.0
+    ocy = float(origin["y"]) + float(origin["h"]) / 2.0
+    icx = float(item["x"]) + float(item["w"]) / 2.0
+    icy = float(item["y"]) + float(item["h"]) / 2.0
+    ncx, ncy = _keynote_rotate_about(icx, icy, ocx, ocy, rotation)
+    next_item = dict(item)
+    next_item["x"] = ncx - float(item["w"]) / 2.0
+    next_item["y"] = ncy - float(item["h"]) / 2.0
+    next_item["rotation"] = rotation
+    return next_item
 
 
 def project_into_plate(
     lat: float,
     lon: float,
     plate: dict[str, Any],
-    placement: dict[str, int],
+    placement: dict[str, Any],
 ) -> tuple[float, float]:
     union = plate["union"]
     world = world_width(float(plate["zPlate"]))
@@ -371,6 +718,11 @@ def project_into_plate(
     scale_y = placement["h"] / float(plate["plateH"]) if plate["plateH"] else 1.0
     px = placement["x"] + (nx - union[0]) * world * scale_x
     py = placement["y"] + (ny - union[1]) * world * scale_y
+    rotation = quantized_rotation(placement.get("rotation") or 0)
+    if rotation:
+        cx = float(placement["x"]) + float(placement["w"]) / 2.0
+        cy = float(placement["y"]) + float(placement["h"]) / 2.0
+        px, py = _keynote_rotate_about(px, py, cx, cy, rotation)
     return px, py
 
 
@@ -503,7 +855,20 @@ def assign_morph_plates(
         if geom is None:
             movie_pairs.update(hops)
             continue
+        display = 0.0
+        for cam, canvas_w in zip(cameras, widths):
+            place = _place_plate_float(cam, geom, width=canvas_w, height=height)
+            display = max(display, float(place["w"]), float(place["h"]))
+        if display > MAX_MORPH_DISPLAY_PX:
+            movie_pairs.update(hops)
+            continue
         geom = fit_morph_plate(geom)
+        # Capture uses ceil(plateW/H); keep placement on those same integer pixels.
+        geom = {
+            **geom,
+            "plateW": float(math.ceil(float(geom["plateW"]))),
+            "plateH": float(math.ceil(float(geom["plateH"]))),
+        }
         plate_id = plate_id_for(run)
         plates[plate_id] = {**geom, "slideIds": run, "plateId": plate_id}
         for hop in hops:
@@ -525,10 +890,46 @@ def assign_morph_plates(
 
 
 def _first_plate_slide(slides: list[dict[str, Any]], slide_ids: list[str]) -> dict[str, Any] | None:
-    """The plate's own slide, in document order — the plate raster and its cutout gate must
+    """The plate's own slide, in document order — the baked plate raster must
     agree on which slide's highlights/style/isolate represent the whole group."""
     wanted = set(slide_ids)
     return next((slide for slide in slides if str(slide.get("id") or "") in wanted), None)
+
+
+def _plate_group_highlights(slides: list[dict[str, Any]], slide_ids: list[str]) -> list[str]:
+    """Union of highlight ids on the plate run, document order, first-seen.
+
+    Morph hops already refuse a highlight mismatch, so this matches the first
+    slide today. Collecting the group keeps the baked plate's wash list complete
+    even if a later slide is the one that authored it.
+    """
+    wanted = {str(sid) for sid in slide_ids}
+    seen: list[str] = []
+    for slide in slides:
+        if str(slide.get("id") or "") not in wanted:
+            continue
+        for raw in slide.get("highlights") or []:
+            code = str(raw)
+            if code and code not in seen:
+                seen.append(code)
+    return seen
+
+
+def _plate_group_isolate(slides: list[dict[str, Any]], slide_ids: list[str]) -> Any:
+    """First isolate-on in the plate run.
+
+    A morph hop with isolate only on a later slide used to capture the first
+    slide's off-state, so the shared PNG (and every Magic Move frame) lost the
+    darken mask the preview still shows.
+    """
+    wanted = {str(sid) for sid in slide_ids}
+    for slide in slides:
+        if str(slide.get("id") or "") not in wanted:
+            continue
+        isolate = slide.get("isolate")
+        if isolate:
+            return isolate
+    return None
 
 
 def maps_export_plan(
@@ -554,48 +955,33 @@ def maps_export_plan(
     covered: set[str] = set()
     for geom in plates.values():
         covered.update(str(sid) for sid in (geom.get("slideIds") or []))
-    landing_targets = {str(to_slide.get("id") or "") for _link, _from_slide, to_slide in _qualifying_movie_landing_links(slides, links)}
     stills: list[dict[str, Any]] = []
     for slide in slides:
         sid = str(slide.get("id") or "")
-        if not sid or sid in covered:
+        if not sid:
             continue
         cap_w, cap_h = slide_capture_size(slide)
-        highlights = list(slide.get("highlights") or [])
-        row = {
-            "slideId": sid,
-            "style": slide.get("style") or "positron",
-            "camera": slide.get("camera") or {},
-            "highlights": highlights,
-            "hiddenLayers": slide_hidden_layers(slide),
-            "hillshade": bool(slide.get("hillshade")),
-            "isolate": slide.get("isolate"),
-            "width": cap_w,
-            "height": cap_h,
-            "revealMovie": bool(slide.get("revealMovie")),
-        }
-        if highlights:
-            row["stillPngRegions"] = f"{sid}{'_CG' if audience == 'cg' else ''}-regions.json"
-        stills.append(row)
-        if sid in landing_targets:
-            stills.append(
-                {
-                    "slideId": f"{sid}__landing",
-                    "style": slide.get("style") or "positron",
-                    "camera": slide.get("camera") or {},
-                    "highlights": [],
-                    "hiddenLayers": slide_hidden_layers(slide),
-                    "hillshade": bool(slide.get("hillshade")),
-                    "isolate": None,
-                    "width": cap_w,
-                    "height": cap_h,
-                    "synthetic": True,
-                    "_landingFor": sid,
-                }
-            )
+        if sid not in covered:
+            highlights = list(slide.get("highlights") or [])
+            row = {
+                "slideId": sid,
+                "style": slide.get("style") or "positron",
+                "camera": slide.get("camera") or {},
+                "highlights": highlights,
+                "hiddenLayers": slide_hidden_layers(slide),
+                "hillshade": bool(slide.get("hillshade")),
+                "isolate": slide.get("isolate"),
+                "width": cap_w,
+                "height": cap_h,
+                "revealMovie": bool(slide.get("revealMovie")),
+            }
+            if highlights:
+                row["stillPngRegions"] = f"{sid}{'_CG' if audience == 'cg' else ''}-regions.json"
+            stills.append(row)
     plate_list: list[dict[str, Any]] = []
     for plate_id, geom in plates.items():
         first = _first_plate_slide(slides, geom.get("slideIds") or [])
+        highlights = _plate_group_highlights(slides, geom.get("slideIds") or [])
         output_id = f"{plate_id}-cg" if audience == "cg" else plate_id
         if audience == "cg":
             for link in links:
@@ -609,15 +995,10 @@ def maps_export_plan(
                 "slideIds": [str(sid) for sid in (geom.get("slideIds") or [])],
                 "camera": geom["captureCamera"],
                 "style": (first or {}).get("style") or "positron",
-                "highlights": list((first or {}).get("highlights") or []),
+                "highlights": highlights,
                 "hiddenLayers": slide_hidden_layers(first or {}),
                 "hillshade": bool((first or {}).get("hillshade")),
-                "isolate": (first or {}).get("isolate"),
-                **(
-                    {"platePngRegions": f"{output_id}-regions.json"}
-                    if (first or {}).get("highlights")
-                    else {}
-                ),
+                "isolate": _plate_group_isolate(slides, geom.get("slideIds") or []),
             }
         )
     if audience == "cg":
@@ -694,12 +1075,23 @@ def _remove_key(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _qualifying_movie_landing_links(
+def _qualifying_movie_takeoff_links(
     slides: list[dict[str, Any]], links: list[dict[str, Any]]
 ) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
-    """Movie links whose isolated+highlighted destination immediately follows its source."""
+    """Movie hops whose source just landed a Magic Move on a shared plate.
+
+    That slide must keep the plate objects (duplicate + adjust) so Keynote can
+    interpolate. The fly is moved onto a follow-up takeoff slide.
+    """
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
     index_of = {str(slide.get("id") or ""): index for index, slide in enumerate(slides)}
+    morph_dests: set[str] = set()
+    for link in links:
+        if str(link.get("kind") or "") != "morph" or not link.get("plateId"):
+            continue
+        _start, end = _link_ends(link)
+        if end:
+            morph_dests.add(end)
     out: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
     for link in links:
         if str(link.get("kind") or "") != "movie":
@@ -708,7 +1100,7 @@ def _qualifying_movie_landing_links(
         from_slide, to_slide = by_id.get(start), by_id.get(end)
         if not from_slide or not to_slide:
             continue
-        if not to_slide.get("isolate") or not to_slide.get("highlights"):
+        if start not in morph_dests:
             continue
         if index_of.get(end) != index_of.get(start, -2) + 1:
             continue
@@ -716,37 +1108,42 @@ def _qualifying_movie_landing_links(
     return out
 
 
-def isolate_landing_slides(
+def movie_takeoff_slides(
     slides: list[dict[str, Any]], links: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Insert a synthetic plain-view landing slide before each isolated movie destination."""
-    landing_after: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {}
-    for link, from_slide, to_slide in _qualifying_movie_landing_links(slides, links):
-        to_id = str(to_slide.get("id") or "")
-        landing_slide = {**to_slide, "id": f"{to_id}__landing", "highlights": [], "isolate": None, "_landingFor": to_id}
-        landing_after[str(from_slide.get("id") or "")] = (landing_slide, link, to_id)
-    if not landing_after:
+    """After a Magic Move landing, play the outgoing fly on a synthetic takeoff slide."""
+    takeoff_after: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {}
+    for link, from_slide, to_slide in _qualifying_movie_takeoff_links(slides, links):
+        from_id = str(from_slide.get("id") or "")
+        duration = float(link.get("duration") or 0) or 1.0
+        takeoff_slide = {
+            **from_slide,
+            "id": f"{from_id}__takeoff",
+            "_takeoffFor": from_id,
+            "movieDuration": float(from_slide.get("movieDuration") or duration),
+        }
+        takeoff_after[from_id] = (takeoff_slide, link, str(to_slide.get("id") or ""))
+    if not takeoff_after:
         return slides, links
     next_slides: list[dict[str, Any]] = []
     next_links = list(links)
     for slide in slides:
         next_slides.append(slide)
-        landing = landing_after.get(str(slide.get("id") or ""))
-        if landing is None:
+        takeoff = takeoff_after.get(str(slide.get("id") or ""))
+        if takeoff is None:
             continue
-        landing_slide, link, to_id = landing
-        next_slides.append(landing_slide)
+        takeoff_slide, link, to_id = takeoff
+        next_slides.append(takeoff_slide)
         for index, existing in enumerate(next_links):
             if existing is link:
-                next_links[index] = {**link, "to": landing_slide["id"]}
+                next_links[index] = {**link, "from": takeoff_slide["id"]}
                 break
-        duration = float(link.get("duration") or 0) or 1.0
         next_links.append(
             {
-                "from": landing_slide["id"],
-                "to": to_id,
-                "kind": "dissolve",
-                "duration": duration,
+                "from": str(slide.get("id") or ""),
+                "to": takeoff_slide["id"],
+                "kind": "cut",
+                "duration": 0.0,
                 "playWithoutClick": bool(link.get("playWithoutClick")),
             }
         )
@@ -771,17 +1168,23 @@ def _still_path(slide: dict[str, Any], output_dir: Path, preview_dir: Path | Non
     return path
 
 
-def _region_manifest_scale(mapped_w: float, mapped_h: float, manifest: dict[str, Any]) -> float:
-    """Uniform width-derived scale for mapping manifest-space region pieces onto `mapped_w`x`mapped_h`."""
+def _region_manifest_scale(
+    mapped_w: float, mapped_h: float, manifest: dict[str, Any]
+) -> tuple[float, float]:
+    """Per-axis scale from manifest pixels onto the placed map (`mapped_w`×`mapped_h`).
+
+    A width-only scale leaves Y drifting when Keynote's placed aspect is not the PNG's —
+    region washes then sit off the plate land they were captured against.
+    """
     manifest_w = float(manifest["width"])
     manifest_h = float(manifest["height"])
-    scale = mapped_w / manifest_w
-    expected_h = manifest_h * scale
-    if mapped_h > 0 and abs(expected_h - mapped_h) > max(1.0, mapped_h * 0.02):
+    scale_x = mapped_w / manifest_w if manifest_w else 1.0
+    scale_y = mapped_h / manifest_h if manifest_h else 1.0
+    if manifest_w > 0 and manifest_h > 0 and mapped_h > 0 and abs(scale_x - scale_y) > max(1e-6, abs(scale_x) * 0.02):
         warnings.warn(
             f"region manifest aspect ratio mismatch: mapped {mapped_w:g}x{mapped_h:g} vs manifest {manifest_w:g}x{manifest_h:g}"
         )
-    return scale
+    return scale_x, scale_y
 
 
 REGION_MANIFEST_MAX_SIDE = 8192
@@ -841,11 +1244,6 @@ def _still_region_manifest_path(slide: dict[str, Any], output_dir: Path, audienc
 
 def _still_region_manifest(slide: dict[str, Any], output_dir: Path, audience: str = "lw") -> dict[str, Any] | None:
     return _read_region_manifest(_still_region_manifest_path(slide, output_dir, audience))
-
-
-def _plate_region_manifest(plate_id: str, output_dir: Path) -> dict[str, Any] | None:
-    name = plate_filename(plate_id)
-    return _read_region_manifest(Path(output_dir) / "plates" / f"{Path(name).stem}-regions.json")
 
 
 def _plate_path(plate_id: str, output_dir: Path) -> Path:
@@ -960,10 +1358,25 @@ def _default_object_size(kind: str, church: dict[str, Any] | None = None) -> int
 
 
 def _label_scale(church: dict[str, Any], size: float) -> float:
-    """`size` is the zoom-scaled marker size, so the clamp bounds the total scale."""
-    base = _default_object_size(str(church.get("kind") or "dot"), church)
+    """`size` is the zoom-scaled marker size, so the clamp bounds the total scale.
+
+    Pins and dots share ``DROP_SIZE`` as the 1× baseline so a grouped pin and
+    dot that share a size also share text and pill sizes. Landmarks keep their
+    own authored default as 1×.
+    """
+    kind = str(church.get("kind") or "dot")
+    base = _default_object_size(kind, church) if kind == "landmark" else float(DROP_SIZE)
     scale = size / base if base else 1.0
     return min(LABEL_SCALE_MAX, max(LABEL_SCALE_MIN, scale))
+
+
+def _label_text_dy(scale: float) -> int:
+    """Even-pixel down-shift so DSK halving keeps the pill and text paired."""
+    if LABEL_TEXT_DY <= 0:
+        return 0
+    dy = whole(LABEL_TEXT_DY * scale)
+    dy -= dy % 2
+    return max(2, dy)
 
 
 EFFECTIVE_SIZE_MAX = 20000
@@ -977,11 +1390,47 @@ def _effective_size(church: dict[str, Any], zoom: float, movie: Path | None) -> 
     return min(EFFECTIVE_SIZE_MAX, size)
 
 
+def _marker_on_canvas_or_plate(
+    cx: float,
+    cy: float,
+    size: float,
+    capture_w: float,
+    *,
+    plate: dict[str, Any] | None,
+    placement: dict[str, Any] | None,
+) -> bool:
+    """Keep markers that sit on the LW frame *or* on the overflowing plate.
+
+    Magic Move needs the same pin on every slide of a run — a zoomed-in landing
+    still has to carry the overview pins so they can fly off-canvas. The tight
+    LW cull dropped those, and a rotate-about-centre used to orbit in-view pins
+    off the frame entirely.
+    """
+    margin = max(float(size), 64.0)
+    xs = [0.0, float(capture_w)]
+    ys = [0.0, float(WALL_HEIGHT)]
+    if plate is not None and placement is not None:
+        px, py = float(placement["x"]), float(placement["y"])
+        pw, ph = float(placement["w"]), float(placement["h"])
+        rot = quantized_rotation(placement.get("rotation") or 0)
+        if rot:
+            vx, vy = visual_origin(px, py, pw, ph, rot)
+            theta = math.radians(rot)
+            aw = abs(pw * math.cos(theta)) + abs(ph * math.sin(theta))
+            ah = abs(pw * math.sin(theta)) + abs(ph * math.cos(theta))
+            xs += [vx, vx + aw]
+            ys += [vy, vy + ah]
+        else:
+            xs += [px, px + pw]
+            ys += [py, py + ph]
+    return min(xs) - margin <= cx <= max(xs) + margin and min(ys) - margin <= cy <= max(ys) + margin
+
+
 def _place_churches(
     churches: list[dict[str, Any]],
     *,
     plate: dict[str, Any] | None,
-    placement: dict[str, int] | None,
+    placement: dict[str, Any] | None,
     camera: dict[str, Any],
     wall: bool,
     movie: Path | None,
@@ -1013,6 +1462,9 @@ def _place_churches(
             theta = math.radians(bearing)
             copy_dx = math.cos(theta) * copy_world * scale_x
             copy_dy = -math.sin(theta) * copy_world * scale_y
+            rotation = quantized_rotation(placement.get("rotation") or 0)
+            if rotation:
+                copy_dx, copy_dy = _keynote_rotate_about(copy_dx, copy_dy, 0.0, 0.0, rotation)
         else:
             base_x, base_y = project_into_camera(lat, lon, camera, width=capture_w)
             copy_world = world_width(float(camera.get("zoom") or 0))
@@ -1041,7 +1493,9 @@ def _place_churches(
         for copy_index in range(-copy_count, copy_count + 1):
             cx = base_x + copy_index * copy_dx
             cy = base_y + copy_index * copy_dy
-            if not (-size <= cx <= capture_w + size and -size <= cy <= WALL_HEIGHT + size):
+            if not _marker_on_canvas_or_plate(
+                cx, cy, size, capture_w, plate=plate, placement=placement
+            ):
                 continue
             x = cx + origin_x - size / 2.0
             drop_h = whole(size * PIN_ASPECT)
@@ -1131,11 +1585,11 @@ def _place_churches(
                         ny - pad_y,
                         pw,
                         ph,
-                        path=str(ensure_label_pill_png(pin_root, LABEL_PILL_RGB, pw, ph)),
+                        path=str(ensure_label_pill_png(pin_root, _label_pill_rgb(church), pw, ph)),
                         labelPill=True,
                     )
                 )
-                items.append(_item("text", nx, ny, nw, nh, text=name, bold=True, fontSize=font))
+                items.append(_item("text", nx, ny + _label_text_dy(scale), nw, nh, text=name, bold=True, fontSize=font))
     return items
 
 
@@ -1158,7 +1612,8 @@ def _map_item(
     ox = slide_map_origin_x(slide)
     if plate is not None and plate_path is not None:
         geom = plate_placement(camera, plate, width=cap_w, height=cap_h)
-        return _item("image", geom["x"] + ox, geom["y"], geom["w"], geom["h"], path=str(plate_path), map=True), geom
+        extra = {"rotation": geom["rotation"]} if geom.get("rotation") else {}
+        return _item("image", geom["x"] + ox, geom["y"], geom["w"], geom["h"], path=str(plate_path), map=True, **extra), geom
     if still is None:
         raise FileNotFoundError("Missing export still for a non-morph slide")
     return _item("image", ox, 0, cap_w, cap_h, path=str(still), map=True), None
@@ -1207,9 +1662,12 @@ def build_slide_items(
     )
     items = [mapped]
     cutout_gate = slide.get("highlights") if cutout_highlights is None else cutout_highlights
-    if region_manifest is not None and mapped.get("kind") == "image" and cutout_gate:
+    # Morph plates already bake country/admin-1 washes into the shared PNG.
+    # Stacking translucent cutouts here lets Keynote recomposite ~55% alpha and
+    # orbit each piece independently of the plate — both of which miss the live map.
+    if plate is None and region_manifest is not None and mapped.get("kind") == "image" and cutout_gate:
         base_path = Path(mapped["path"])
-        scale = _region_manifest_scale(float(mapped["w"]), float(mapped["h"]), region_manifest)
+        scale_x, scale_y = _region_manifest_scale(float(mapped["w"]), float(mapped["h"]), region_manifest)
         for piece in region_manifest.get("pieces") or []:
             k = piece["index"]
             png = base_path.with_name(f"{base_path.stem}-region-{k}{base_path.suffix}")
@@ -1219,14 +1677,17 @@ def build_slide_items(
             items.append(
                 _item(
                     "image",
-                    mapped["x"] + piece["x"] * scale,
-                    mapped["y"] + piece["y"] * scale,
-                    piece["w"] * scale,
-                    piece["h"] * scale,
+                    mapped["x"] + piece["x"] * scale_x,
+                    mapped["y"] + piece["y"] * scale_y,
+                    piece["w"] * scale_x,
+                    piece["h"] * scale_y,
                     path=str(png),
                     country=True,
                 )
             )
+        rot = quantized_rotation(mapped.get("rotation") or 0)
+        if rot:
+            items[:] = [orbit_item(item, mapped, rot) if item.get("country") else item for item in items]
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
     if bg_movie is None or skip_landmarks:
@@ -1256,9 +1717,23 @@ def build_slide_items(
     return items
 
 
+def _church_label_visible(church: dict[str, Any]) -> bool:
+    name = str(church.get("name") or "").strip()
+    return bool(name) and church.get("showLabel", True) is True
+
+
+def _slide_has_visible_labels(slide: dict[str, Any] | None) -> bool:
+    """Keynote paints Amplitude labels on stills, not movie rasters."""
+    if not slide:
+        return False
+    view = _cg_view(slide) if slide.get("_splitCg") else slide
+    return any(_church_label_visible(church) for church in (view.get("churches") or []))
+
+
 def _transition_for(
     link: dict[str, Any] | None,
     slide: dict[str, Any] | None = None,
+    dest_slide: dict[str, Any] | None = None,
     *,
     bg_movie: bool = False,
 ) -> dict[str, Any] | None:
@@ -1270,8 +1745,12 @@ def _transition_for(
     if kind == "morph" and link.get("plateId"):
         return {"effect": "magic_move", "duration": duration, "automatic": automatic}
     if bg_movie:
-        delay = float((slide or {}).get("movieDuration") or duration)
-        return {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": delay}
+        # Last movie frame is the dest still. Labels are not baked into the fly, so a
+        # labeled dest auto-dissolves after the hold; a label-less dest waits for a click.
+        if _slide_has_visible_labels(dest_slide):
+            delay = float((slide or {}).get("movieDuration") or duration) + MOVIE_END_HOLD
+            return {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": delay}
+        return {"effect": "dissolve", "duration": 1.0, "automatic": False}
     if kind == "dissolve":
         return {"effect": "dissolve", "duration": duration, "automatic": automatic}
     if automatic:
@@ -1293,7 +1772,7 @@ def plan_deck(
     reveals: dict[tuple[str, str, str], str] | None = None,
     reveal_movies: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, Any]]:
-    slides, links = isolate_landing_slides(slides, links)
+    slides, links = movie_takeoff_slides(slides, links)
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
     slide_plate: dict[str, str] = {}
     plate_highlights: dict[str, list[str]] = {}
@@ -1301,8 +1780,7 @@ def plan_deck(
         ids = [str(sid) for sid in (geom.get("slideIds") or [])]
         for sid in ids:
             slide_plate[sid] = plate_id
-        first = _first_plate_slide(slides, ids)
-        plate_highlights[plate_id] = list((first or {}).get("highlights") or [])
+        plate_highlights[plate_id] = _plate_group_highlights(slides, ids)
     ops: list[dict[str, Any]] = []
     for index, slide in enumerate(slides):
         sid = str(slide.get("id") or "")
@@ -1315,7 +1793,8 @@ def plan_deck(
         dest_slide = by_id.get(str(outgoing.get("to") or "")) if outgoing else None
         bg_movie = None
         if outgoing and str(outgoing.get("kind") or "") == "movie":
-            candidate = movie_path(output_dir, sid, asset_audience)
+            movie_sid = str(slide.get("_takeoffFor") or sid)
+            candidate = movie_path(output_dir, movie_sid, asset_audience)
             if candidate.exists():
                 bg_movie = candidate
                 plate_id = None
@@ -1340,6 +1819,7 @@ def plan_deck(
                 if dest_slide
                 else None
             )
+        transition_dest = item_dest
         if reveal_bg:
             item_dest = None
             reveal_view = item_slide if item_slide.get("_splitCg") else slide
@@ -1359,14 +1839,9 @@ def plan_deck(
             and prev_link.get("plateId") == plate_id
         )
         region_manifest = None
-        if bg_movie is None:
-            region_manifest = (
-                _still_region_manifest(slide, output_dir, asset_audience)
-                if plate_id is None
-                else _plate_region_manifest(plate_id, output_dir)
-            )
-            cutout_expected = plate_highlights.get(plate_id) if plate_id else slide.get("highlights")
-            if cutout_expected and region_manifest is None:
+        if bg_movie is None and plate_id is None:
+            region_manifest = _still_region_manifest(slide, output_dir, asset_audience)
+            if slide.get("highlights") and region_manifest is None:
                 warnings.warn(f"missing region manifest for slide {sid} (expected -regions.json)")
         items = build_slide_items(
             item_slide,
@@ -1392,7 +1867,9 @@ def plan_deck(
                 "id": sid,
                 "duplicate": duplicate,
                 "items": items,
-                "transition": _transition_for(outgoing, item_slide, bg_movie=bg_movie is not None),
+                "transition": _transition_for(
+                    outgoing, item_slide, dest_slide=transition_dest, bg_movie=bg_movie is not None
+                ),
             }
         )
     return ops
@@ -1415,22 +1892,34 @@ def _emit_clear() -> list[str]:
     ]
 
 
-def _emit_adjust_map(item: dict[str, Any], cutouts: list[dict[str, Any]] | None = None) -> list[str]:
-    lines = [
-        "        try",
-        f"          set position of image 1 to {{{item['x']}, {item['y']}}}",
-        f"          set width of image 1 to {item['w']}",
-        f"          set height of image 1 to {item['h']}",
-        "        end try",
-    ]
-    for i, cutout in enumerate(cutouts or [], start=2):
-        lines += [
-            "        try",
-            f"          set position of image {i} to {{{cutout['x']}, {cutout['y']}}}",
-            f"          set width of image {i} to {cutout['w']}",
-            f"          set height of image {i} to {cutout['h']}",
-            "        end try",
+def _emit_image_layout(item: dict[str, Any], target: str) -> list[str]:
+    """Width/height/position, plus rotation when Magic Move must spin the plate."""
+    x, y, w, h = item["x"], item["y"], item["w"], item["h"]
+    rot = quantized_rotation(item.get("rotation") or 0)
+    kn = keynote_rotation(rot) if rot else 0
+    if kn:
+        x, y = visual_origin(x, y, w, h, rot)
+        return [
+            f"        set width of {target} to {w}",
+            f"        set height of {target} to {h}",
+            f"        set rotation of {target} to {kn}",
+            f"        set position of {target} to {{{x}, {y}}}",
         ]
+    # Size first. Keynote scales about the centre when width/height change, so a
+    # position set against the PNG's intrinsic 8192px would slide off the LW
+    # frame once the plate is displayed at Magic Move overflow size.
+    return [
+        f"        set width of {target} to {w}",
+        f"        set height of {target} to {h}",
+        f"        set position of {target} to {{{x}, {y}}}",
+    ]
+
+
+def _emit_adjust_map(item: dict[str, Any], cutouts: list[dict[str, Any]] | None = None) -> list[str]:
+    lines = ["        try", *("          " + line.strip() for line in _emit_image_layout(item, "image 1")), "        end try"]
+    for i, cutout in enumerate(cutouts or [], start=2):
+        layout = _emit_image_layout(cutout, f"image {i}")
+        lines += ["        try", *("          " + line.strip() for line in layout), "        end try"]
     last = len(cutouts or []) + 2
     lines += [
         "        try",
@@ -1462,14 +1951,13 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
         return [
             f'        set imgFile to (POSIX file "{path}") as alias',
             "        set img to make new image with properties {file:imgFile}",
-            f"        set position of img to {{{x}, {y}}}",
-            f"        set width of img to {w}",
-            f"        set height of img to {h}",
+            *_emit_image_layout(item, "img"),
         ]
     if kind == "movie":
         path = _as_escape(item["path"])
         # `make new image with properties {file:<mov>}` yields a movie object in Keynote 15;
-        # `make new movie` no longer imports the file. Autoplay-on-appear still needs a manual check.
+        # `make new movie` no longer imports the file. Start = After Transition is patched
+        # offline by `_apply_movie_autoplay` (AppleScript exposes no autoplay property).
         if item.get("map"):
             return [
                 f'        set movFile to (POSIX file "{path}") as alias',
@@ -1534,7 +2022,9 @@ def _emit_transition(slide_no: int, trans: dict[str, Any] | None) -> list[str]:
     elif effect == "dissolve":
         props.append("transition effect:dissolve")
     else:
-        props.append("transition effect:none")
+        # Keynote's enumerator is `no transition effect`, not `none`. A duplicate
+        # Magic Move dest inherits the source transition; a failed set leaves it.
+        props.append("transition effect:no transition effect")
     if trans.get("duration") is not None:
         props.append(f"transition duration:{float(trans['duration'])}")
     if trans.get("automatic"):
@@ -1828,17 +2318,17 @@ def maps_poster_frame_mode(explicit: str | None = None) -> str:
 
 
 def maps_movie_autoplay_mode(explicit: str | None = None) -> str:
-    """`on` (default; surgical offline autoplay-after-transition patch), `off`, or
+    """`off` (default; movies stay On Click), `on` (after-transition patch), or
     `verify` (patch + read-back log). Env `OBED_MAPS_MOVIE_AUTOPLAY`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_MOVIE_AUTOPLAY", "")).strip().lower()
-    if raw in _OFF_ALIASES:
-        return "off"
-    return raw if raw == "verify" else "on"
+    if raw in {"on", "verify"}:
+        return raw
+    return "off"
 
 
 def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[str, str, str], float]) -> list[dict[str, Any]]:
     targets: list[dict[str, Any]] = []
-    for op in ops:
+    for slide_index, op in enumerate(ops, start=1):
         for item in op.get("items") or []:
             if not (item.get("landmark") and item.get("kind") == "movie"):
                 continue
@@ -1847,6 +2337,7 @@ def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[s
                 continue
             targets.append(
                 {
+                    "slideIndex": slide_index,
                     "x": float(item["x"]),
                     "y": float(item["y"]),
                     "w": float(item["w"]),
@@ -1859,14 +2350,28 @@ def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[s
 
 
 def _autoplay_targets(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every movie on the slide — fly backdrop, pin-drop wave, and reveal alike.
+
+    Keynote inserts them as On Click; `_apply_movie_autoplay` flips Start to
+    After Transition so the movie plays once the incoming slide transition
+    (including `no transition effect`) has been triggered. ``slideIndex`` is
+    1-based deck order so two full-frame fly movies do not match each other.
+    """
     targets: list[dict[str, Any]] = []
-    for op in ops:
+    for slide_index, op in enumerate(ops, start=1):
         for item in op.get("items") or []:
-            if item.get("landmark") and item.get("kind") == "movie":
-                targets.append(
-                    {"x": float(item["x"]), "y": float(item["y"]), "w": float(item["w"]), "h": float(item["h"]),
-                     "name": item.get("path")}
-                )
+            if item.get("kind") != "movie":
+                continue
+            targets.append(
+                {
+                    "slideIndex": slide_index,
+                    "x": float(item["x"]),
+                    "y": float(item["y"]),
+                    "w": float(item["w"]),
+                    "h": float(item["h"]),
+                    "name": item.get("path"),
+                }
+            )
     return targets
 
 
@@ -1880,13 +2385,14 @@ def _apply_movie_autoplay(
     height: int,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any] | None:
-    """Patch reveal movies in ``dest`` to start right after their slide's build-in
+    """Patch movies in ``dest`` to start right after their slide's build-in
     transition, no click needed (owner 2026-09-12 probe: Keynote's AppleScript movie
     class exposes no autoplay-style property -- only file name/volume/reflection/
     repetition method/rotation, see Keynote.sdef -- so this is patched offline the
-    same way Keynote itself saves "Start = After Transition"). Gated behind
-    `OBED_MAPS_MOVIE_AUTOPLAY` (default on); a refusal is never fatal to export, same
-    containment as `_apply_poster_frames`."""
+    same way Keynote itself saves "Start = After Transition"). Applies to fly
+    backdrops as well as reveal movies. Gated behind `OBED_MAPS_MOVIE_AUTOPLAY`
+    (default off — movies stay On Click); a refusal is never fatal to export,
+    same containment as `_apply_poster_frames`."""
     mode = maps_movie_autoplay_mode()
     from obed_edom.offline_write import probe_iwa_extra
 
@@ -1917,7 +2423,7 @@ def _apply_movie_autoplay(
                 "regenerated": False,
             }
 
-        _log(job, f"movieAutoplay {deck_label}: patched {patched['applied']} reveal movie(s)")
+        _log(job, f"movieAutoplay {deck_label}: patched {patched['applied']} movie(s)")
         if mode == "verify":
             state = movie_autoplay_state(dest, patched["touched"])
             bad: list[str] = []
@@ -2224,17 +2730,17 @@ def _render_reveals(
             manifest_path = _still_region_manifest_path(item_slide, output_dir, audience)
             pieces = []
             if region_manifest is not None:
-                pscale = _region_manifest_scale(float(cap_w), float(cap_h), region_manifest)
+                pscale_x, pscale_y = _region_manifest_scale(float(cap_w), float(cap_h), region_manifest)
                 for piece in region_manifest.get("pieces") or []:
                     k = piece["index"]
                     piece_png = still.with_name(f"{still.stem}-region-{k}{still.suffix}")
                     pieces.append(
                         (
                             piece_png,
-                            round(piece["x"] * pscale),
-                            round(piece["y"] * pscale),
-                            round(piece["w"] * pscale),
-                            round(piece["h"] * pscale),
+                            round(piece["x"] * pscale_x),
+                            round(piece["y"] * pscale_y),
+                            round(piece["w"] * pscale_x),
+                            round(piece["h"] * pscale_y),
                         )
                     )
             piece_paths = [piece_path for piece_path, *_ in pieces]

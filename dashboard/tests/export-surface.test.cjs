@@ -22,6 +22,15 @@ const {
   plateSurfaceWidth,
   surfaceWidthOf,
   hopSurfaceWidth,
+  movieRenderSurface,
+  movieEndpointSurface,
+  morphRuns,
+  morphPlateHints,
+  quantizedRotation,
+  roundHalfAway,
+  effectivePlateBearing,
+  movieEndpointCamera,
+  movieHopView,
   cgDragDx,
   clampMapZoom,
   ML_MIN_ZOOM,
@@ -152,6 +161,8 @@ test("surfaceWidthOf: FW-authored slides always display full wall; toggle only w
   assert.equal(surfaceWidthOf(WALL_W, true), WALL_W);
   // CG split always shows just the CG crop regardless of the toggle.
   assert.equal(surfaceWidthOf(CG_W, true), CG_W);
+  // In-between hop viewports (centre → FW) display at the lerped width.
+  assert.equal(surfaceWidthOf(5000, false), 5000);
 });
 
 test("clampMapZoom: FW authored zoom 1 renders at -1 (exportZoomDelta(7680) === -2), unclamped", () => {
@@ -175,6 +186,103 @@ test("hopSurfaceWidth: mixed-surface hops render at the wider of the two endpoin
 test("hopSurfaceWidth: a CG-audience hop always renders at the CG surface (1920)", () => {
   const cgSlide = { includeSidePanels: true, cg: { camera: {}, style: "positron", highlights: [], churches: [] } };
   assert.equal(hopSurfaceWidth(cgSlide, cgSlide, "cg"), CG_W);
+});
+
+test("movieRenderSurface carries the morph plate's surface through an outgoing movie", () => {
+  const s1 = { id: "s1", includeSidePanels: true };
+  const s2 = { id: "s2", includeSidePanels: false };
+  const s3 = { id: "s3", includeSidePanels: false };
+  const slidesById = new Map([["s1", s1], ["s2", s2], ["s3", s3]]);
+  const plates = [{ slideIds: ["s1", "s2"], plateW: 8000 }];
+  assert.equal(hopSurfaceWidth(s2, s3, "lw"), CENTRE_W);
+  assert.equal(plateSurfaceWidth(["s1", "s2"], slidesById, 8000), WALL_W);
+  assert.equal(movieRenderSurface(s2, s3, "lw", plates, slidesById), WALL_W);
+  assert.equal(exportZoomDelta(movieRenderSurface(s2, s3, "lw", plates, slidesById)), exportZoomDelta(WALL_W));
+  assert.notEqual(exportZoomDelta(hopSurfaceWidth(s2, s3, "lw")), exportZoomDelta(WALL_W));
+});
+
+test("roundHalfAway matches Python at .5 so plate and movie share one integer", () => {
+  assert.equal(roundHalfAway(10.5), 11);
+  assert.equal(roundHalfAway(11.5), 12);
+  assert.equal(roundHalfAway(-10.5), -11);
+  assert.equal(roundHalfAway(-11.5), -12);
+  assert.equal(quantizedRotation(10.5), 11);
+  assert.equal(quantizedRotation(-11.5), -12);
+});
+
+test("effectivePlateBearing snaps a movie endpoint to the integer plate Keynote shows", () => {
+  assert.equal(quantizedRotation(10.4), 10);
+  assert.equal(quantizedRotation(-10.4), -10);
+  assert.equal(effectivePlateBearing(0, 10.4), 10);
+  assert.equal(effectivePlateBearing(0, -10.4), -10);
+  assert.equal(effectivePlateBearing(350, 10.4), 10);
+  const cam = { lat: 3.05, lon: 101.12, zoom: 6.4, bearing: 10.4, pitch: 0 };
+  assert.equal(movieEndpointCamera(cam, 0).bearing, 10);
+  assert.equal(movieEndpointCamera(cam).bearing, 10.4);
+});
+
+test("morphRuns group consecutive morph hops; movieHopView uses that plate for bearing and surface", () => {
+  const cam = (bearing, panels) => ({
+    id: bearing === 0 ? "s1" : bearing === 10.4 ? "s2" : "s3",
+    includeSidePanels: panels,
+    camera: { lat: 3, lon: 101, zoom: 6, bearing, pitch: 0 },
+  });
+  const s1 = { ...cam(0, true), id: "s1", title: "s1", style: "positron", highlights: [], churches: [], cgShiftX: 0, cgShiftY: 0 };
+  const s2 = { ...cam(10.4, false), id: "s2", title: "s2", style: "positron", highlights: [], churches: [], cgShiftX: 0, cgShiftY: 0 };
+  const s3 = { ...cam(0, false), id: "s3", title: "s3", style: "positron", highlights: [], churches: [], cgShiftX: 0, cgShiftY: 0 };
+  const links = [
+    { from: "s1", to: "s2", kind: "morph", duration: 1, playWithoutClick: false },
+    { from: "s2", to: "s3", kind: "movie", duration: 2, playWithoutClick: false },
+  ];
+  assert.deepEqual(morphRuns([s1, s2, s3], links), [["s1", "s2"]]);
+  const plates = morphPlateHints([s1, s2, s3], links);
+  assert.equal(plates[0].captureBearing, 0);
+  const slidesById = new Map([["s1", s1], ["s2", s2], ["s3", s3]]);
+  const hop = movieHopView(s2, s3, "lw", plates, slidesById);
+  assert.equal(hop.width, CENTRE_W);
+  assert.equal(hop.fromWidth, CENTRE_W);
+  assert.equal(hop.toWidth, CENTRE_W);
+  assert.equal(hop.fromSurface, WALL_W);
+  assert.equal(hop.surfaceWidth, WALL_W);
+  assert.equal(hop.from.bearing, 10);
+  assert.equal(hop.to.bearing, 0);
+});
+
+test("movieHopView keeps a centre-plate takeoff when the dest is full-wall", () => {
+  const base = (id, panels, bearing = 0) => ({
+    id, title: id, style: "positron", highlights: [], churches: [],
+    cgShiftX: 0, cgShiftY: 0, includeSidePanels: panels,
+    camera: { lat: 3, lon: 101, zoom: 6, bearing, pitch: 0 },
+  });
+  const s1 = base("s1", false);
+  const s2 = base("s2", false, 10.4);
+  const s3 = base("s3", true);
+  const links = [
+    { from: "s1", to: "s2", kind: "morph", duration: 1, playWithoutClick: false },
+    { from: "s2", to: "s3", kind: "movie", duration: 2, playWithoutClick: false },
+  ];
+  const plates = morphPlateHints([s1, s2, s3], links);
+  const slidesById = new Map([["s1", s1], ["s2", s2], ["s3", s3]]);
+  assert.equal(hopSurfaceWidth(s2, s3, "lw"), WALL_W);
+  assert.equal(movieRenderSurface(s2, s3, "lw", plates, slidesById), CENTRE_W);
+  assert.equal(movieEndpointSurface(s3, "lw", plates, slidesById), WALL_W);
+  const hop = movieHopView(s2, s3, "lw", plates, slidesById);
+  assert.equal(hop.width, WALL_W);
+  assert.equal(hop.fromWidth, CENTRE_W);
+  assert.equal(hop.toWidth, WALL_W);
+  assert.equal(hop.surfaceWidth, CENTRE_W);
+  assert.equal(hop.fromSurface, CENTRE_W);
+  assert.equal(hop.prefetchSurface, WALL_W);
+  assert.equal(hop.from.bearing, 10);
+});
+
+test("movieRenderSurface stays on the hop for CG and when no plate touches the movie", () => {
+  const s2 = { id: "s2", includeSidePanels: false };
+  const s3 = { id: "s3", includeSidePanels: false };
+  const slidesById = new Map([["s2", s2], ["s3", s3]]);
+  assert.equal(movieRenderSurface(s2, s3, "lw", [], slidesById), CENTRE_W);
+  const cg = { id: "s2", includeSidePanels: true, cg: { camera: {}, style: "positron", highlights: [], churches: [] } };
+  assert.equal(movieRenderSurface(cg, cg, "cg", [{ slideIds: ["s2"], plateW: 8000 }], slidesById), CG_W);
 });
 
 test("cgDragDx converts a client-px drag using the DISPLAYED surface width, not authoredWidth", () => {
