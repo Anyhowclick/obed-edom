@@ -104,6 +104,22 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
 - Owner's open design item besides the band placeholder: the "editing phase" (d6b) — per-slide
   operator nudges of position/size/crop over the auto defaults — is explicitly out of scope.
+- 2026-09-17 (owner, clip start timing + visual order — validated against the gold
+  `Alpha_DSK.key` slides 6–8): every consumer orders a slide's movie items by VISUAL order
+  (left-to-right by placed x, then y; refuse on an exact tie) via
+  `dsk_movie_export.visual_movie_order`. That one order drives the clip index MM in
+  `<stem>.NNN.MM(.src).mov`, the ClipResult / manifest `srcClips` order, the insertion order,
+  and the build-chunk order; the publisher takes it from the assembler's `clips_inserted`,
+  never recomputed from crop rects. Clip start timing is written OFFLINE (Keynote's auto
+  movie-start timing is non-deterministic and AppleScript has no build API), keyed by the
+  SOURCE movie's `playsAcrossSlides`: the leftmost continuity clip is After Transition at
+  build-chunk position 0 (`automatic True, referent True, delay 0`), other continuity clips are
+  With Build 1 (`automatic True, referent False`), distinct movies cascade After Previous in
+  visual order, and a single-movie slide is After Transition. `playsAcrossSlides` is written
+  False on every inserted clip; chunk `duration` is Keynote's own and is never touched. A clip
+  slide is expected to carry only movie-start build chunks (the gold's overlays are static); a
+  non-movie build chunk, a missing/duplicate/extra timing entry, an unknown mode, or more than
+  one After Transition is REFUSED, never guessed.
 
 ## 3. Measured facts that must not be re-learned
 
@@ -298,6 +314,15 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 - ProRes 422HQ at 3840×1080/30 is ~5 GB per 30 s — default `AppleProRes422LT` or h264.
   `native size` is required for any codec choice to apply. 7680×1080 exports fine; behaviour
   above 2160 height is UNVERIFIED — assert and refuse on tall canvases.
+- Build-chunk flag encoding (read offline from `Alpha_DSK.key` slides 6–8 and the r16 generated
+  deck): a `KN.BuildChunkArchive`'s `automatic False, referent True` = On Click; `automatic
+  True, referent True` at `buildChunks` position 0 = After Transition, at pos>0 = After Build N;
+  `automatic True, referent False` = With Build N; `delay` is seconds. On both the hand-made
+  gold and the generator output, overlay shapes carry NO build chunks (static), so every
+  clip-slide build chunk is a movie-start and the leftmost clip's chunk sits at position 0
+  naturally. The offline writer `iwa_movies.patch_clip_start_timing` front-loads the planned
+  movie chunks and reads back `(automatic, referent, delay, chunkPos, playsAcrossSlides)` per
+  movie, refusing on mismatch.
 
 ## 4. Open bugs / TODOs
 
