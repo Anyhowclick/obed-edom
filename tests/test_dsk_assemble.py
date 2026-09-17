@@ -12141,10 +12141,9 @@ def test_restore_clip_timing_resolves_by_basename_and_calls_patch(tmp_path, monk
     def fake_patch(deck, plans):
         captured["deck"] = deck
         captured["plans"] = plans
-        return {}
+        return {slide_id: {t.movie_id: {} for t in entries} for slide_id, entries in plans.items()}
 
     monkeypatch.setattr(iwa_movies, "patch_clip_start_timing", fake_patch)
-    monkeypatch.setattr(iwa_movies, "movie_autoplay_state", lambda deck, ids: {i: {} for i in ids})
 
     plan = AssemblyPlan(
         kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={
@@ -12164,6 +12163,37 @@ def test_restore_clip_timing_resolves_by_basename_and_calls_patch(tmp_path, monk
         ]
     }
     assert 1 in result
+
+
+def test_restore_clip_timing_refuses_on_partial_clip_timing(tmp_path, monkeypatch):
+    # A hand-built AssemblyPlan whose clip_timing for a two-clip slide names only one
+    # clip must refuse rather than silently leave the other clip's timing unresolved.
+    staging_path = tmp_path / "staged.key"
+    with zipfile.ZipFile(staging_path, "w"):
+        pass
+
+    objects = {
+        "s1": {"drawablesZOrder": [{"identifier": "outA"}, {"identifier": "outB"}]},
+        "outA": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dataA"}},
+        "outB": {"_pbtype": "TSD.MovieArchive", "movieData": {"identifier": "dataB"}},
+    }
+    monkeypatch.setattr(dsa, "_load_deck", lambda path: (objects, {}, {}))
+    monkeypatch.setattr(dsa, "slide_order", lambda objs: [("s1", False)])
+    monkeypatch.setattr(dsa, "_data_identifier", lambda obj: (obj.get("movieData") or {}).get("identifier"))
+    monkeypatch.setattr(
+        dsa, "_build_data_index", lambda names: {"dataA": "clip0.mov", "dataB": "clip1.mov"}
+    )
+
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={}, deletes={}, clips={
+            1: {("movie", 0): Path("/tmp/clip0.mov"), ("movie", 1): Path("/tmp/clip1.mov")}
+        },
+        text_sizes={}, autosize={}, warnings=(),
+        clip_timing={1: ((("movie", 0), "after_transition"),)},
+    )
+
+    with pytest.raises(AssemblyRefusal, match="partial or duplicate"):
+        dsa._restore_clip_timing(staging_path, plan, lambda _msg: None)
 
 
 def test_restore_clip_timing_refuses_on_ambiguous_basename_match(tmp_path, monkeypatch):

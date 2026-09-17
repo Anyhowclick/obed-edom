@@ -45,7 +45,7 @@ from obed_edom.dsk_assemble import (
     assemble_dsk_deck,
 )
 from obed_edom.dsk_live import guard_out_dir, keynote_running, quit_and_wait_for_exit
-from obed_edom.dsk_movie_export import _ffprobe, export_dsk_slide_clips, export_slide_clips, visual_movie_order
+from obed_edom.dsk_movie_export import _ffprobe, export_dsk_slide_clips, export_slide_clips
 from obed_edom.dsk_plan import ItemId, classify_deck
 from obed_edom.map_remap import Rect
 from obed_edom.dsk_stage_export import (
@@ -1912,15 +1912,6 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
                 if clip.crop_rect is not None:
                     clip_crops.setdefault(clip.slide, {})[clip.movie_id] = clip.crop_rect
 
-        clip_order: dict[int, list[ItemId]] = {}
-        for fw_slide, movies in nested_clips.items():
-            movie_ids = list(movies.keys())
-            if len(movie_ids) == 1:
-                clip_order[fw_slide] = movie_ids
-            else:
-                rects = clip_crops.get(fw_slide) or {}
-                clip_order[fw_slide] = visual_movie_order({mid: rects[mid] for mid in movie_ids})
-
         job.log(f"Assembling {out_path.name} (content-only={content_only})…")
         result = assemble_dsk_deck(
             path,
@@ -1935,6 +1926,9 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             log=job.log,
         )
         job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
+        clip_order: dict[int, list[ItemId]] = {
+            number: list(item_clips) for number, item_clips in result.clips_inserted.items()
+        }
         existing_manifest = read_manifest(out_dir, deck=result.path)
         previous_src_clips: set[str] = set()
         for entry in ((existing_manifest or {}).get("slides") or {}).values():

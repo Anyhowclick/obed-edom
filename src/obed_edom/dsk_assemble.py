@@ -2287,12 +2287,16 @@ def plan_assembly(
                 if len(item_clips) == 1:
                     plays_across = {visual_order[0]: False}
                 elif objects_graph is None:
-                    # No FW deck loaded (planning-only call, e.g. a unit test) -- the
-                    # continuity flag cannot be resolved; fall back to the cascade
-                    # timing (as if every movie were a distinct source) and warn.
+                    # Planning-only fallback: a live apply always has fw_deck set, so
+                    # plan_assembly loads objects_graph itself and never reaches this
+                    # branch. Only a planning-only caller with no deck at all (e.g. a
+                    # unit test) lands here, where playsAcrossSlides cannot be resolved;
+                    # fall back to the cascade timing (as if every movie were a distinct
+                    # source) and warn.
                     warnings.append(
-                        f"slide {number}: no FW deck loaded, cannot resolve playsAcrossSlides "
-                        "for multi-clip timing -- defaulting every clip to distinct-movie cascade"
+                        f"slide {number}: planning-only, no FW deck loaded -- cannot resolve "
+                        "playsAcrossSlides for multi-clip timing, defaulting every clip to "
+                        "distinct-movie cascade"
                     )
                     plays_across = {iid: False for iid in item_clips}
                 else:
@@ -4434,6 +4438,12 @@ def _restore_clip_timing(staging_path: Path, plan: AssemblyPlan, log: Callable[[
             timing = plan.clip_timing.get(number)
             if not timing:
                 raise AssemblyRefusal(f"slide {number}: no clip timing plan for an inserted clip")
+            timing_ids = [mid for mid, _mode in timing]
+            if len(timing_ids) != len(set(timing_ids)) or set(timing_ids) != set(item_clips):
+                raise AssemblyRefusal(
+                    f"slide {number}: clip timing plan covers {sorted(timing_ids)} but inserted "
+                    f"clips are {sorted(item_clips)} -- refusing partial or duplicate timing plan"
+                )
             ordinal = plan.ordinals.get(number)
             if ordinal is None or ordinal > len(out_order):
                 raise AssemblyRefusal(f"slide {number}: clip timing restore refused, slide ordinal out of range")
@@ -4456,13 +4466,13 @@ def _restore_clip_timing(staging_path: Path, plan: AssemblyPlan, log: Callable[[
         return result
 
     try:
-        iwa_movies.patch_clip_start_timing(staging_path, plans)
+        verified_by_slide = iwa_movies.patch_clip_start_timing(staging_path, plans)
     except ValueError as exc:
         raise AssemblyRefusal(f"clip timing write refused: {exc}") from exc
 
     for out_slide_id, entries in plans.items():
         number = number_by_slide_id[out_slide_id]
-        verified = iwa_movies.movie_autoplay_state(staging_path, [t.movie_id for t in entries])
+        verified = verified_by_slide[out_slide_id]
         result[number] = verified
         log(f"slide {number}: clip timing {[(t.movie_id, t.mode) for t in entries]} -> {verified}")
 

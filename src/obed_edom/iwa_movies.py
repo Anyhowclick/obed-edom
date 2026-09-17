@@ -357,8 +357,12 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
     via `_movie_build_chunk`; any resolution failure raises ``ValueError`` before any
     write. Build-chunk ORDER is patched via ``iwa_write.patch_slide_builds`` only when
     it differs from the deck's current order -- the slide's own ``builds`` list and
-    ``transition`` pass through verbatim, and any build chunk not named in the plan
-    keeps its current slot. Never touches chunk ``duration``, delivery, or ids.
+    ``transition`` pass through verbatim. The planned movie chunks are ordered at the
+    FRONT of ``buildChunks`` (after_transition at position 0). A clip slide is expected
+    to carry only movie-start chunks (the gold decks' overlays are static); a build
+    chunk not named in the plan means the retiming is undefined, so the write is refused
+    (``ValueError``) rather than silently moving it. Requires exactly one after_transition
+    entry and only known modes. Never touches chunk ``duration``, delivery, or ids.
     Re-reads and verifies ``(automatic, referent, delay, chunkPos)`` per movie and
     ``playsAcrossSlides is False``, raising ``ValueError`` on any mismatch. Returns the
     verified state per slide: ``{slideId: {movieId: {...}}}``.
@@ -380,6 +384,15 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
         movie_ids = [str(e.movie_id) for e in entries]
         if len(set(movie_ids)) != len(movie_ids):
             raise ValueError(f"slide {slide_id}: duplicate movie id in plan")
+
+        modes = [e.mode for e in entries]
+        unknown = sorted({m for m in modes if m not in _CLIP_TIMING_RANK})
+        if unknown:
+            raise ValueError(f"slide {slide_id}: unknown clip timing mode(s) {unknown}")
+        if modes.count("after_transition") != 1:
+            raise ValueError(
+                f"slide {slide_id}: expected exactly one after_transition clip, got {modes.count('after_transition')}"
+            )
 
         chunk_by_movie: dict[str, str] = {}
         for movie_id in movie_ids:
@@ -408,9 +421,13 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
         if len(slots) != len(target_order):
             raise ValueError(f"slide {slide_id}: plan chunk(s) not all listed in buildChunks")
 
-        new_chunk_ids = list(current_chunk_ids)
-        for slot, cid in zip(slots, target_order):
-            new_chunk_ids[slot] = cid
+        non_target = [cid for cid in current_chunk_ids if cid not in target_set]
+        if non_target:
+            raise ValueError(
+                f"slide {slide_id}: {len(non_target)} non-clip build chunk(s) present; clip-slide "
+                "retiming is only defined when every build chunk is a movie-start, refusing"
+            )
+        new_chunk_ids = target_order
 
         if new_chunk_ids != current_chunk_ids:
             build_plans[slide_id] = {

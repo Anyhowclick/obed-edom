@@ -606,5 +606,77 @@ def test_clip_timing_leaves_duration_and_ids_untouched(tmp_path):
     assert objects_after["900"]["delivery"] == objects_before["900"]["delivery"]
 
 
+def test_clip_timing_refuses_non_movie_build_chunks(tmp_path):
+    # A clip slide is expected to carry only movie-start chunks (gold overlays are
+    # static). A non-movie build chunk (810 before, 811 between the movie chunks) makes
+    # the retiming undefined -- front-loading the clips would silently shift 810/811 to
+    # later positions and change their meaning -- so the write is refused, deck untouched.
+    frame = (400.0, 300.0, 60.0, 80.0)
+    movie300 = _timing_movie(300, frame, plays_across_slides=True)
+    movie301 = _timing_movie(301, frame, plays_across_slides=True)
+    build900, chunk910 = _timing_build_chunk(300, 900, 910, automatic=False, referent=True)
+    build920, chunk930 = _timing_build_chunk(301, 920, 930, automatic=False, referent=True)
+    image = _arch(320, "TSD.ImageArchive", {"super": _geom(10, 10, 40, 40), "originalSize": {"width": 40.0, "height": 40.0}})
+    build800 = _arch(
+        800, "KN.BuildArchive",
+        {"drawable": {"identifier": 320}, "delivery": "All at Once", "duration": 0.0,
+         "attributes": _build_effect("apple:shape-appear"), "chunkIdSeed": 1},
+    )
+    chunk810 = _arch(
+        810, "KN.BuildChunkArchive",
+        {"build": {"identifier": 800}, "delay": 0.0, "duration": 0.3, "automatic": True, "referent": True,
+         "buildChunkIdentifier": {"buildId": {"lower": "800", "upper": "1"}, "buildChunkId": 1},
+         "buildId": {"lower": "800", "upper": "1"}},
+    )
+    build801 = _arch(
+        801, "KN.BuildArchive",
+        {"drawable": {"identifier": 320}, "delivery": "All at Once", "duration": 0.0,
+         "attributes": _build_effect("apple:shape-appear"), "chunkIdSeed": 1},
+    )
+    chunk811 = _arch(
+        811, "KN.BuildChunkArchive",
+        {"build": {"identifier": 801}, "delay": 0.0, "duration": 0.3, "automatic": True, "referent": True,
+         "buildChunkIdentifier": {"buildId": {"lower": "801", "upper": "1"}, "buildChunkId": 1},
+         "buildId": {"lower": "801", "upper": "1"}},
+    )
+    zorder = [{"identifier": 300}, {"identifier": 301}, {"identifier": 320}]
+    build_refs = [{"identifier": 900}, {"identifier": 800}, {"identifier": 920}, {"identifier": 801}]
+    chunk_refs = [{"identifier": 810}, {"identifier": 930}, {"identifier": 811}, {"identifier": 910}]
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": zorder, "builds": build_refs, "buildChunks": chunk_refs})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    archives = [movie300, movie301, build900, chunk910, build920, chunk930, image, build800, chunk810, build801, chunk811]
+    deck = tmp_path / "timing.key"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, *archives]))
+    deck.write_bytes(buf.getvalue())
+
+    before = deck.read_bytes()
+    plan = [ClipTiming("300", "after_transition"), ClipTiming("301", "with_build_1")]
+    with pytest.raises(ValueError, match="non-clip build chunk"):
+        patch_clip_start_timing(deck, {"100": plan})
+    assert deck.read_bytes() == before
+
+
+def test_clip_timing_refuses_two_after_transition(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2)
+    before = deck.read_bytes()
+    plan = [ClipTiming(movie_ids[0], "after_transition"), ClipTiming(movie_ids[1], "after_transition")]
+    with pytest.raises(ValueError, match="exactly one after_transition"):
+        patch_clip_start_timing(deck, {"100": plan})
+    assert deck.read_bytes() == before
+
+
+def test_clip_timing_refuses_unknown_mode(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 1)
+    before = deck.read_bytes()
+    plan = [ClipTiming(movie_ids[0], "sideways")]
+    with pytest.raises(ValueError, match="unknown clip timing mode"):
+        patch_clip_start_timing(deck, {"100": plan})
+    assert deck.read_bytes() == before
+
+
 def test_clip_timing_empty_plans_is_a_noop(deck):
     assert patch_clip_start_timing(deck, {}) == {}
