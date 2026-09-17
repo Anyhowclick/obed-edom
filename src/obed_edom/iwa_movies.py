@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import copy
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Mapping, Sequence
 
 from keynote_parser.codec import IWAFile
 
 from obed_edom.iwa_geometry import compose_geometry
 from obed_edom.iwa_runs import _load_deck, slide_order
-from obed_edom.iwa_write import OfflineWriteCorrupted, _archive_diff, _rewrite_members
+from obed_edom.iwa_write import OfflineWriteCorrupted, _archive_diff, _rewrite_members, patch_slide_builds
 
 _FRAME_TOL = 1.0
 
@@ -268,7 +269,9 @@ def _movie_build_chunk(objects: dict, id_to_file: dict, movie_id: str) -> tuple[
 
 def movie_autoplay_state(deck: Path, ids: list[str]) -> dict[str, dict[str, Any]]:
     """Read back each movie's ``playsAcrossSlides`` and its ``apple:movie-start`` build
-    chunk's ``automatic``, for verify-mode logging after `patch_movie_autoplay`."""
+    chunk's ``automatic``/``referent``/``delay``/``chunkPos`` (0-based index into the
+    owning slide's ``buildChunks``), for verify-mode logging after `patch_movie_autoplay`
+    and `patch_clip_start_timing`."""
     deck = Path(deck)
     objects, id_to_file, _file_ids = _load_deck(deck)
     out: dict[str, dict[str, Any]] = {}
@@ -276,9 +279,19 @@ def movie_autoplay_state(deck: Path, ids: list[str]) -> dict[str, dict[str, Any]
         obj = objects.get(oid) or {}
         chunk_id, _error = _movie_build_chunk(objects, id_to_file, oid)
         chunk = objects.get(chunk_id) if chunk_id else None
+        chunk_pos = None
+        if chunk_id is not None:
+            slide_id = _movie_slide(objects, oid)
+            slide = objects.get(slide_id) or {}
+            chunk_refs = [str((ref or {}).get("identifier")) for ref in slide.get("buildChunks") or []]
+            if chunk_id in chunk_refs:
+                chunk_pos = chunk_refs.index(chunk_id)
         out[oid] = {
             "playsAcrossSlides": bool(obj.get("playsAcrossSlides") or False),
             "automatic": bool(chunk.get("automatic")) if chunk is not None else None,
+            "referent": bool(chunk.get("referent")) if chunk is not None else None,
+            "delay": float(chunk.get("delay")) if chunk is not None and chunk.get("delay") is not None else None,
+            "chunkPos": chunk_pos,
         }
     return out
 
@@ -314,3 +327,138 @@ def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:
     if result["refused"]:
         return {"refused": True, "reason": result["reason"], "touched": [], "applied": 0}
     return {"refused": False, "reason": None, "touched": ids, "applied": len(ids)}
+
+
+@dataclass(frozen=True)
+class ClipTiming:
+    """One inserted DSK clip's start timing, per owner rule
+    (see ``.agents/briefs/dsk-clip-timing.md`` rule 2)."""
+
+    movie_id: str
+    mode: Literal["after_transition", "with_build_1", "after_previous"]
+
+
+_CLIP_TIMING_FLAGS: dict[str, dict[str, Any]] = {
+    "after_transition": {"automatic": True, "referent": True, "delay": 0.0},
+    "with_build_1": {"automatic": True, "referent": False, "delay": 0.0},
+    "after_previous": {"automatic": True, "referent": True, "delay": 0.0},
+}
+
+# Category rank within a slide's build-chunk order: every ``after_transition`` entry
+# (chunk position 0) first, then every ``with_build_1`` entry (right after chunk 0),
+# then every ``after_previous`` entry (cascade), each group keeping its given order.
+_CLIP_TIMING_RANK = {"after_transition": 0, "with_build_1": 1, "after_previous": 2}
+
+
+def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]]) -> dict:
+    """Set the start timing of inserted DSK clip movies (see rule 2 of the brief) and
+    clear ``playsAcrossSlides`` on every one of them. ``plans`` maps slideId to its
+    clips in VISUAL ORDER. Resolves each movie's single ``apple:movie-start`` chunk
+    via `_movie_build_chunk`; any resolution failure raises ``ValueError`` before any
+    write. Build-chunk ORDER is patched via ``iwa_write.patch_slide_builds`` only when
+    it differs from the deck's current order -- the slide's own ``builds`` list and
+    ``transition`` pass through verbatim, and any build chunk not named in the plan
+    keeps its current slot. Never touches chunk ``duration``, delivery, or ids.
+    Re-reads and verifies ``(automatic, referent, delay, chunkPos)`` per movie and
+    ``playsAcrossSlides is False``, raising ``ValueError`` on any mismatch. Returns the
+    verified state per slide: ``{slideId: {movieId: {...}}}``.
+    """
+    deck = Path(deck)
+    plans = {str(k): list(v) for k, v in plans.items()}
+    if not plans:
+        return {}
+
+    objects, id_to_file, _file_ids = _load_deck(deck)
+
+    field_patches: list[tuple[str, str, dict[str, Any]]] = []
+    build_plans: dict[str, dict[str, Any]] = {}
+    expected_pos: dict[str, dict[str, int]] = {}
+
+    for slide_id, entries in plans.items():
+        if not entries:
+            continue
+        movie_ids = [str(e.movie_id) for e in entries]
+        if len(set(movie_ids)) != len(movie_ids):
+            raise ValueError(f"slide {slide_id}: duplicate movie id in plan")
+
+        chunk_by_movie: dict[str, str] = {}
+        for movie_id in movie_ids:
+            obj = objects.get(movie_id)
+            if obj is None or obj.get("_pbtype") != "TSD.MovieArchive":
+                raise ValueError(f"{movie_id} does not resolve to a TSD.MovieArchive")
+            chunk_id, error = _movie_build_chunk(objects, id_to_file, movie_id)
+            if error:
+                raise ValueError(error)
+            chunk_by_movie[movie_id] = chunk_id
+
+        owning_slides = {_movie_slide(objects, movie_id) for movie_id in movie_ids}
+        if len(owning_slides) != 1 or slide_id not in owning_slides:
+            raise ValueError(f"slide {slide_id}: plan movies do not all resolve to that slide")
+
+        slide = objects.get(slide_id) or {}
+        current_chunk_ids = [str((ref or {}).get("identifier")) for ref in slide.get("buildChunks") or []]
+
+        ordered = sorted(
+            range(len(entries)), key=lambda i: (_CLIP_TIMING_RANK[entries[i].mode], i)
+        )
+        target_order = [chunk_by_movie[movie_ids[i]] for i in ordered]
+
+        target_set = set(target_order)
+        slots = [i for i, cid in enumerate(current_chunk_ids) if cid in target_set]
+        if len(slots) != len(target_order):
+            raise ValueError(f"slide {slide_id}: plan chunk(s) not all listed in buildChunks")
+
+        new_chunk_ids = list(current_chunk_ids)
+        for slot, cid in zip(slots, target_order):
+            new_chunk_ids[slot] = cid
+
+        if new_chunk_ids != current_chunk_ids:
+            build_plans[slide_id] = {
+                "builds": [str((r or {}).get("identifier")) for r in slide.get("builds") or []],
+                "buildChunks": new_chunk_ids,
+                "transition": copy.deepcopy(slide.get("transition")),
+            }
+
+        expected_pos[slide_id] = {movie_id: new_chunk_ids.index(chunk_by_movie[movie_id]) for movie_id in movie_ids}
+
+        for entry in entries:
+            movie_id = str(entry.movie_id)
+            chunk_id = chunk_by_movie[movie_id]
+            flags = _CLIP_TIMING_FLAGS[entry.mode]
+            field_patches.append((chunk_id, "KN.BuildChunkArchive", dict(flags)))
+            field_patches.append((movie_id, "TSD.MovieArchive", {"playsAcrossSlides": False}))
+
+    if build_plans:
+        result = patch_slide_builds(deck, build_plans)
+        if result["refused"]:
+            raise ValueError(result["reason"])
+
+    if field_patches:
+        result = _patch_archive_fields(deck, field_patches)
+        if result["refused"]:
+            raise ValueError(result["reason"])
+
+    all_movie_ids = sorted({str(e.movie_id) for entries in plans.values() for e in entries})
+    state = movie_autoplay_state(deck, all_movie_ids)
+
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for slide_id, entries in plans.items():
+        if not entries:
+            continue
+        slide_state: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            movie_id = str(entry.movie_id)
+            got = state[movie_id]
+            want_flags = _CLIP_TIMING_FLAGS[entry.mode]
+            want_pos = expected_pos[slide_id][movie_id]
+            if (
+                got["automatic"] != want_flags["automatic"]
+                or got["referent"] != want_flags["referent"]
+                or got["delay"] != want_flags["delay"]
+                or got["chunkPos"] != want_pos
+                or got["playsAcrossSlides"] is not False
+            ):
+                raise ValueError(f"slide {slide_id} movie {movie_id}: verify mismatch, got {got}, want {want_flags} at chunkPos {want_pos}")
+            slide_state[movie_id] = got
+        out[slide_id] = slide_state
+    return out

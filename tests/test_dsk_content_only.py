@@ -102,6 +102,7 @@ def _patch_common(monkeypatch, payload, classes, stderr_text="", returncode=0):
     monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
     monkeypatch.setattr(dsa, "deck_builds", lambda path, *, deck=None: {})
     monkeypatch.setattr(dsa, "_restore_clip_zorder", lambda out_path, plan, warnings: {})
+    monkeypatch.setattr(dsa, "_restore_clip_timing", lambda staging_path, plan, log: {})
     monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
     monkeypatch.setattr(
         iwa_write, "match_card_stroke_styles",

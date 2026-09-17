@@ -85,6 +85,8 @@ from obed_edom.iwa_geometry import (
     _xywha,
     compose_geometry,
 )
+from obed_edom import iwa_movies
+from obed_edom.dsk_movie_export import visual_movie_order
 from obed_edom.iwa_kindindex import _memberships, derive_kind_index
 from obed_edom.iwa_runs import (
     _SIG_JOIN,
@@ -386,6 +388,7 @@ class AssemblyPlan:
     clip_dissolve: dict[int, float] = field(default_factory=dict)
     chain_head: dict[int, int] = field(default_factory=dict)
     clip_rects: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
+    clip_timing: dict[int, tuple[tuple[ItemId, str], ...]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -1260,6 +1263,29 @@ def _content_anchor(
     return "right" if len(rects) <= 2 else "centre"
 
 
+def _clip_timing_for_slide(
+    order: Sequence[ItemId], plays_across: Mapping[ItemId, bool]
+) -> tuple[tuple[ItemId, str], ...]:
+    """Brief rule 2: a single clip is always After Transition; among source-continuity
+    clips (`playsAcrossSlides` True) the leftmost is After Transition and the rest are
+    With Build 1; distinct-movie clips (flag False) cascade After Previous, in visual
+    order, after the continuity group -- or after their own leftmost clip when there is
+    no continuity group on this slide."""
+    if len(order) == 1:
+        return ((order[0], "after_transition"),)
+    continuity = [iid for iid in order if plays_across.get(iid, False)]
+    distinct = [iid for iid in order if not plays_across.get(iid, False)]
+    plan: list[tuple[ItemId, str]] = []
+    if continuity:
+        plan.append((continuity[0], "after_transition"))
+        plan.extend((iid, "with_build_1") for iid in continuity[1:])
+        plan.extend((iid, "after_previous") for iid in distinct)
+    else:
+        plan.append((distinct[0], "after_transition"))
+        plan.extend((iid, "after_previous") for iid in distinct[1:])
+    return tuple(plan)
+
+
 def plan_assembly(
     payload: dict,
     classes: Sequence[SlideClass],
@@ -1339,6 +1365,7 @@ def plan_assembly(
     clips_out: dict[int, dict[ItemId, Path]] = {}
     clip_rects_out: dict[int, dict[ItemId, Rect]] = {}
     clip_dissolve_out: dict[int, float] = {}
+    clip_timing_out: dict[int, tuple[tuple[ItemId, str], ...]] = {}
     text_sizes: dict[int, dict[ItemId, float]] = {}
     autosize: dict[int, frozenset[ItemId]] = {}
     group_scale: dict[int, float] = {}
@@ -2229,6 +2256,57 @@ def plan_assembly(
                         raise AssemblyRefusal(
                             f"slide {number}: clip mapping missing kept movie item(s) {sorted(missing)}"
                         )
+
+                if len(item_clips) > 1:
+                    fw_rects: dict[ItemId, Rect] = {}
+                    dsk_rects: dict[ItemId, Rect] = {}
+                    for iid in item_clips:
+                        item = items_by_id.get(iid)
+                        if item is None:
+                            raise AssemblyRefusal(f"slide {number} movie {iid[1]}: source item not found")
+                        fw_rects[iid] = item_rect(item)
+                        rect = fit.get(iid)
+                        if rect is None:
+                            raise AssemblyRefusal(f"slide {number} movie {iid[1]}: no fitted rect for clip")
+                        dsk_rects[iid] = rect
+                    try:
+                        fw_order = visual_movie_order(fw_rects)
+                        dsk_order = visual_movie_order(dsk_rects)
+                    except ValueError as exc:
+                        raise AssemblyRefusal(f"slide {number}: {exc}") from exc
+                    if fw_order != dsk_order:
+                        raise AssemblyRefusal(
+                            f"slide {number}: FW visual movie order {fw_order} does not match "
+                            f"DSK visual order {dsk_order}"
+                        )
+                    visual_order = fw_order
+                else:
+                    visual_order = list(item_clips)
+                item_clips = {iid: item_clips[iid] for iid in visual_order}
+
+                if len(item_clips) == 1:
+                    plays_across = {visual_order[0]: False}
+                elif objects_graph is None:
+                    # No FW deck loaded (planning-only call, e.g. a unit test) -- the
+                    # continuity flag cannot be resolved; fall back to the cascade
+                    # timing (as if every movie were a distinct source) and warn.
+                    warnings.append(
+                        f"slide {number}: no FW deck loaded, cannot resolve playsAcrossSlides "
+                        "for multi-clip timing -- defaulting every clip to distinct-movie cascade"
+                    )
+                    plays_across = {iid: False for iid in item_clips}
+                else:
+                    plays_across = {}
+                    for iid in item_clips:
+                        obj_id = (id_by_item or {}).get(iid)
+                        obj = objects_graph.get(obj_id) if obj_id is not None else None
+                        if obj is None:
+                            raise AssemblyRefusal(
+                                f"slide {number} movie {iid[1]}: source movie object not found for timing"
+                            )
+                        plays_across[iid] = bool(obj.get("playsAcrossSlides") or False)
+                clip_timing_out[number] = _clip_timing_for_slide(visual_order, plays_across)
+
                 slide_clip_rects: dict[ItemId, Rect] = {}
                 slide_clip_crops = (clip_crops or {}).get(number, {})
                 for movie_id, clip_path in item_clips.items():
@@ -2422,6 +2500,7 @@ def plan_assembly(
         two_column_cluster=two_column_cluster_map,
         layout_names=layout_names,
         clip_dissolve=clip_dissolve_out,
+        clip_timing=clip_timing_out,
         chain_head=chain_head_applied,
         clip_rects=clip_rects_out,
     )
@@ -3257,7 +3336,7 @@ def _slide_lines(
 ) -> list[str]:
     clip_map = plan.clips.get(number, {})
     is_clip = bool(clip_map)
-    clip_items = sorted(clip_map.items(), key=lambda kv: kv[0][1])
+    clip_items = list(clip_map.items())
     lines: list[str] = ["      try"]
     for idx, (movie_id, _clip_path) in enumerate(clip_items):
         movie_addr = f"movie {movie_id[1] + 1} of slide {ordinal}"
@@ -3696,6 +3775,7 @@ class AssembleResult:
     movie_props: dict[int, dict[str, str]]
     overflows: tuple[dict, ...] = ()
     clip_zorder: dict[int, dict] = field(default_factory=dict)
+    clip_timing: dict[int, dict] = field(default_factory=dict)
     ordinal_to_number: dict[int, int] = field(default_factory=dict)
     hidden: tuple[dict, ...] = ()
     skipped: tuple[dict, ...] = ()
@@ -4240,11 +4320,48 @@ def _stage_unique_clips(plan: AssemblyPlan, work_dir: Path) -> AssemblyPlan:
     return _dc_replace(plan, clips=staged)
 
 
+def _resolve_clip_out_ids(
+    number: int,
+    item_clips: Mapping[ItemId, Path],
+    out_objects: Mapping[str, dict],
+    out_data_index: Mapping[str, str],
+    out_z: Sequence[str],
+) -> dict[ItemId, str]:
+    """Matches each inserted clip to its staged ``TSD.MovieArchive`` id by unique
+    basename among ``out_z`` -- the same identity ``_restore_clip_zorder`` establishes,
+    reused by ``_restore_clip_timing`` so both passes agree on which drawable is which
+    clip. Refuses (``AssemblyRefusal``) unless every clip matches exactly one candidate."""
+    used_out_ids: set[str] = set()
+    resolved: dict[ItemId, str] = {}
+    for movie_id, clip_path in item_clips.items():
+        clip_name = Path(clip_path).name
+        candidates = []
+        for zid in out_z:
+            if zid in used_out_ids:
+                continue
+            out_obj = out_objects.get(zid)
+            if out_obj is None or out_obj.get("_pbtype") != "TSD.MovieArchive":
+                continue
+            data_id = _data_identifier(out_obj)
+            if data_id is not None and out_data_index.get(data_id) == clip_name:
+                candidates.append(zid)
+        if len(candidates) != 1:
+            raise AssemblyRefusal(
+                f"slide {number} movie {movie_id[1]}: inserted clip {clip_name} matched "
+                f"{len(candidates)} drawable(s) by fileName, expected exactly 1"
+            )
+        out_id = candidates[0]
+        used_out_ids.add(out_id)
+        resolved[movie_id] = out_id
+    return resolved
+
+
 def _restore_clip_zorder(out_path: Path, plan: AssemblyPlan, warnings: list[str]) -> dict[int, dict]:
     """Move every inserted clip movie to the back of its slide's ``drawablesZOrder``,
     behind every copied content object -- ``make new image`` on a movie file appends it
-    to the front, same as a cropped image insert. Multiple clips on one slide keep their
-    own ``kindIndex`` order at the very back (index 0 first). `_stage_unique_clips`
+    to the front, same as a cropped image insert. Multiple clips on one slide are placed
+    at the very back in ``plan.clips[number]``'s own (visual, left-to-right) order, index
+    0 first. `_stage_unique_clips`
     already guarantees every inserted clip a unique basename, so a match here must be
     exactly one candidate -- zero or more than one, or a rejected reorder, is refused
     (`AssemblyRefusal`), never just a warning."""
@@ -4271,28 +4388,11 @@ def _restore_clip_zorder(out_path: Path, plan: AssemblyPlan, warnings: list[str]
         out_z = [
             str(ref["identifier"]) for ref in (out_slide.get("drawablesZOrder") or []) if ref.get("identifier") is not None
         ]
-        moves: dict[str, int] = {}
-        used_out_ids: set[str] = set()
-        for target_index, (movie_id, clip_path) in enumerate(sorted(item_clips.items(), key=lambda kv: kv[0][1])):
-            clip_name = Path(clip_path).name
-            candidates = []
-            for zid in out_z:
-                if zid in used_out_ids:
-                    continue
-                out_obj = out_objects.get(zid)
-                if out_obj is None or out_obj.get("_pbtype") != "TSD.MovieArchive":
-                    continue
-                data_id = _data_identifier(out_obj)
-                if data_id is not None and out_data_index.get(data_id) == clip_name:
-                    candidates.append(zid)
-            if len(candidates) != 1:
-                raise AssemblyRefusal(
-                    f"slide {number} movie {movie_id[1]}: inserted clip {clip_name} matched "
-                    f"{len(candidates)} drawable(s) by fileName, expected exactly 1"
-                )
-            out_id = candidates[0]
-            used_out_ids.add(out_id)
-            moves[out_id] = target_index
+        resolved = _resolve_clip_out_ids(number, item_clips, out_objects, out_data_index, out_z)
+        moves = {
+            resolved[movie_id]: target_index
+            for target_index, movie_id in enumerate(item_clips)
+        }
 
         if not moves:
             continue
@@ -4305,6 +4405,66 @@ def _restore_clip_zorder(out_path: Path, plan: AssemblyPlan, warnings: list[str]
         result[number] = move_result
         if move_result.get("refused"):
             raise AssemblyRefusal(f"slide {number}: clip z-order restore refused: {move_result.get('reason')}")
+
+    return result
+
+
+def _restore_clip_timing(staging_path: Path, plan: AssemblyPlan, log: Callable[[str], None]) -> dict[int, dict]:
+    """Post-pass (between ``_restore_clip_zorder`` and ``_verify_builds``): resolves each
+    inserted clip to its staged ``TSD.MovieArchive`` id via ``_resolve_clip_out_ids`` --
+    the SAME identity the z-order pass established -- builds
+    ``{slideId: [ClipTiming(...), ...]}`` from ``plan.clip_timing`` and writes it offline
+    via ``iwa_movies.patch_clip_start_timing``. Any ``ValueError`` (unresolvable chunk,
+    ambiguous match, rejected write) is a refusal, never a guess."""
+    result: dict[int, dict] = {}
+    if not plan.clips:
+        return result
+
+    out_objects, _out_i2f, _out_fi = _load_deck(staging_path)
+    with zipfile.ZipFile(staging_path) as zf:
+        out_data_index = _build_data_index(zf.namelist())
+    out_order = slide_order(out_objects)
+
+    plans: dict[str, list] = {}
+    number_by_slide_id: dict[str, int] = {}
+    try:
+        for number, item_clips in plan.clips.items():
+            if not item_clips:
+                continue
+            timing = plan.clip_timing.get(number)
+            if not timing:
+                raise AssemblyRefusal(f"slide {number}: no clip timing plan for an inserted clip")
+            ordinal = plan.ordinals.get(number)
+            if ordinal is None or ordinal > len(out_order):
+                raise AssemblyRefusal(f"slide {number}: clip timing restore refused, slide ordinal out of range")
+            out_slide_id, _skipped = out_order[ordinal - 1]
+            out_slide = out_objects.get(out_slide_id)
+            if out_slide is None:
+                raise AssemblyRefusal(f"slide {number}: clip timing restore refused, slide archive missing")
+            out_z = [
+                str(ref["identifier"])
+                for ref in (out_slide.get("drawablesZOrder") or [])
+                if ref.get("identifier") is not None
+            ]
+            resolved = _resolve_clip_out_ids(number, item_clips, out_objects, out_data_index, out_z)
+            plans[out_slide_id] = [iwa_movies.ClipTiming(resolved[mid], mode) for mid, mode in timing]
+            number_by_slide_id[out_slide_id] = number
+    except ValueError as exc:
+        raise AssemblyRefusal(f"slide clip timing resolve refused: {exc}") from exc
+
+    if not plans:
+        return result
+
+    try:
+        iwa_movies.patch_clip_start_timing(staging_path, plans)
+    except ValueError as exc:
+        raise AssemblyRefusal(f"clip timing write refused: {exc}") from exc
+
+    for out_slide_id, entries in plans.items():
+        number = number_by_slide_id[out_slide_id]
+        verified = iwa_movies.movie_autoplay_state(staging_path, [t.movie_id for t in entries])
+        result[number] = verified
+        log(f"slide {number}: clip timing {[(t.movie_id, t.mode) for t in entries]} -> {verified}")
 
     return result
 
@@ -5577,6 +5737,8 @@ def assemble_dsk_deck(
             current_pass = "zorder"
             zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
             clip_zorder = _restore_clip_zorder(staging_path, plan, warnings)
+            current_pass = "clip_timing"
+            clip_timing = _restore_clip_timing(staging_path, plan, log)
             current_pass = "builds"
             builds = _verify_builds(fw_deck, staging_path, plan, warnings, hidden=hidden_map)
 
@@ -5627,6 +5789,7 @@ def assemble_dsk_deck(
         fits=plan.fits,
         clips_inserted=original_clips,
         clip_zorder=clip_zorder,
+        clip_timing=clip_timing,
         stroke=stroke,
         zorder=zorder,
         builds=builds,

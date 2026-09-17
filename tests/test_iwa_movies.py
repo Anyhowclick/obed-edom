@@ -18,8 +18,10 @@ pytest.importorskip("keynote_parser")
 from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
 from obed_edom.iwa_movies import (  # noqa: E402
+    ClipTiming,
     movie_archives,
     movie_autoplay_state,
+    patch_clip_start_timing,
     patch_movie_autoplay,
     patch_movie_posters,
     plan_movie_autoplay,
@@ -426,4 +428,183 @@ def test_patch_autoplay_refuses_a_chunk_in_another_member(tmp_path):
 def test_movie_autoplay_state_reads_the_listed_chunk(deck):
     patch_movie_autoplay(deck, ["300"])
     state = movie_autoplay_state(deck, ["300"])
-    assert state["300"] == {"playsAcrossSlides": False, "automatic": True}
+    assert state["300"] == {
+        "playsAcrossSlides": False,
+        "automatic": True,
+        "referent": True,
+        "delay": 0.0,
+        "chunkPos": 0,
+    }
+
+
+def _timing_movie(ident, frame, *, plays_across_slides):
+    x, y, w, h = frame
+    return _arch(
+        ident, "TSD.MovieArchive",
+        {"super": _geom(x, y, w, h), "posterTime": 0.0, "startTime": 0.0, "endTime": 2.0,
+         "naturalSize": {"width": w, "height": h}, "playsAcrossSlides": plays_across_slides},
+    )
+
+
+def _timing_build_chunk(movie_ident, build_ident, chunk_ident, *, automatic, referent):
+    build = _arch(
+        build_ident, "KN.BuildArchive",
+        {"drawable": {"identifier": movie_ident}, "delivery": "All at Once", "duration": 0.0,
+         "attributes": _build_effect("apple:movie-start"), "chunkIdSeed": 1},
+    )
+    chunk = _arch(
+        chunk_ident, "KN.BuildChunkArchive",
+        {"build": {"identifier": build_ident}, "delay": 0.0, "duration": 0.5,
+         "automatic": automatic, "referent": referent,
+         "buildChunkIdentifier": {"buildId": {"lower": str(build_ident), "upper": "1"}, "buildChunkId": 1},
+         "buildId": {"lower": str(build_ident), "upper": "1"}},
+    )
+    return build, chunk
+
+
+def _build_timing_deck(path, n_clips, *, initial_chunk_order=None, no_chunk_for=None, dup_chunk_for=None):
+    """``n_clips`` inserted DSK clips (300, 301, ...), each with its own not-yet-timed
+    ``apple:movie-start`` build/chunk (initial flags ``automatic False, referent True``,
+    same as Keynote's own non-deterministic auto-add). ``initial_chunk_order`` -- indices
+    into range(n_clips) -- scrambles the slide's starting ``buildChunks`` order so a
+    reorder test can prove `patch_clip_start_timing` actually moves them."""
+    frame = (400.0, 300.0, 60.0, 80.0)
+    archives = []
+    zorder = []
+    build_refs = []
+    chunk_refs_by_index = {}
+    extra_chunk_refs = []
+    movie_ids = []
+    for i in range(n_clips):
+        movie_ident = 300 + i
+        movie_ids.append(str(movie_ident))
+        archives.append(_timing_movie(movie_ident, frame, plays_across_slides=True))
+        zorder.append({"identifier": movie_ident})
+        if no_chunk_for == i:
+            continue
+        build_ident = 900 + i * 20
+        chunk_ident = 910 + i * 20
+        build, chunk = _timing_build_chunk(movie_ident, build_ident, chunk_ident, automatic=False, referent=True)
+        archives.append(build)
+        archives.append(chunk)
+        build_refs.append({"identifier": build_ident})
+        chunk_refs_by_index[i] = chunk_ident
+        if dup_chunk_for == i:
+            dup_chunk_ident = chunk_ident + 1
+            dup_chunk = _arch(
+                dup_chunk_ident, "KN.BuildChunkArchive",
+                {"build": {"identifier": build_ident}, "delay": 0.0, "duration": 0.5,
+                 "automatic": False, "referent": True,
+                 "buildChunkIdentifier": {"buildId": {"lower": str(build_ident), "upper": "1"}, "buildChunkId": 2},
+                 "buildId": {"lower": str(build_ident), "upper": "1"}},
+            )
+            archives.append(dup_chunk)
+            extra_chunk_refs.append({"identifier": dup_chunk_ident})
+
+    order = initial_chunk_order if initial_chunk_order is not None else list(range(n_clips))
+    chunk_refs = [{"identifier": chunk_refs_by_index[i]} for i in order if i in chunk_refs_by_index]
+    chunk_refs.extend(extra_chunk_refs)
+
+    image = _arch(320, "TSD.ImageArchive", {"super": _geom(10, 10, 40, 40), "originalSize": {"width": 40.0, "height": 40.0}})
+    archives.append(image)
+    zorder.append({"identifier": 320})
+
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": zorder, "builds": build_refs, "buildChunks": chunk_refs})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, *archives]))
+    path.write_bytes(buf.getvalue())
+    return path, movie_ids
+
+
+def test_clip_timing_single_movie_after_transition(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 1)
+    before = deck.read_bytes()
+    state = patch_clip_start_timing(deck, {"100": [ClipTiming(movie_ids[0], "after_transition")]})
+    assert state == {
+        "100": {
+            movie_ids[0]: {"playsAcrossSlides": False, "automatic": True, "referent": True, "delay": 0.0, "chunkPos": 0}
+        }
+    }
+    assert deck.read_bytes() != before
+
+
+def test_clip_timing_continuity_reorders_with_build_1_after_chunk_0(tmp_path):
+    # Two continuity clips, chunk 0 initially belongs to the SECOND clip -- proves the
+    # reorder actually runs (leftmost/after_transition clip must land at position 0).
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2, initial_chunk_order=[1, 0])
+    plan = [ClipTiming(movie_ids[0], "after_transition"), ClipTiming(movie_ids[1], "with_build_1")]
+    state = patch_clip_start_timing(deck, {"100": plan})
+    assert state["100"][movie_ids[0]] == {
+        "playsAcrossSlides": False, "automatic": True, "referent": True, "delay": 0.0, "chunkPos": 0,
+    }
+    assert state["100"][movie_ids[1]] == {
+        "playsAcrossSlides": False, "automatic": True, "referent": False, "delay": 0.0, "chunkPos": 1,
+    }
+    objects, _, _ = _load_deck(deck)
+    chunk_refs = [str((r or {}).get("identifier")) for r in objects["100"].get("buildChunks") or []]
+    assert chunk_refs == ["910", "930"]
+    # duration is Keynote's own and must never be touched
+    assert objects["910"]["duration"] == 0.5
+    assert objects["930"]["duration"] == 0.5
+
+
+def test_clip_timing_cascade_after_previous(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 3, initial_chunk_order=[2, 0, 1])
+    plan = [
+        ClipTiming(movie_ids[0], "after_transition"),
+        ClipTiming(movie_ids[1], "after_previous"),
+        ClipTiming(movie_ids[2], "after_previous"),
+    ]
+    state = patch_clip_start_timing(deck, {"100": plan})
+    assert [state["100"][m]["chunkPos"] for m in movie_ids] == [0, 1, 2]
+    assert [state["100"][m]["automatic"] for m in movie_ids] == [True, True, True]
+    assert [state["100"][m]["referent"] for m in movie_ids] == [True, True, True]
+    objects, _, _ = _load_deck(deck)
+    chunk_refs = [str((r or {}).get("identifier")) for r in objects["100"].get("buildChunks") or []]
+    assert chunk_refs == ["910", "930", "950"]
+
+
+def test_clip_timing_sets_plays_across_slides_false_on_every_listed_movie(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2)
+    plan = [ClipTiming(movie_ids[0], "after_transition"), ClipTiming(movie_ids[1], "with_build_1")]
+    patch_clip_start_timing(deck, {"100": plan})
+    objects, _, _ = _load_deck(deck)
+    assert objects[movie_ids[0]]["playsAcrossSlides"] is False
+    assert objects[movie_ids[1]]["playsAcrossSlides"] is False
+
+
+def test_clip_timing_refuses_a_movie_with_no_build_chunk(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 1, no_chunk_for=0)
+    before = deck.read_bytes()
+    with pytest.raises(ValueError, match="0 listed apple:movie-start build chunk"):
+        patch_clip_start_timing(deck, {"100": [ClipTiming(movie_ids[0], "after_transition")]})
+    assert deck.read_bytes() == before
+
+
+def test_clip_timing_refuses_a_movie_with_ambiguous_build_chunks(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 1, dup_chunk_for=0)
+    before = deck.read_bytes()
+    with pytest.raises(ValueError, match="2 listed apple:movie-start build chunk"):
+        patch_clip_start_timing(deck, {"100": [ClipTiming(movie_ids[0], "after_transition")]})
+    assert deck.read_bytes() == before
+
+
+def test_clip_timing_leaves_duration_and_ids_untouched(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2, initial_chunk_order=[1, 0])
+    objects_before, _, _ = _load_deck(deck)
+    plan = [ClipTiming(movie_ids[0], "after_transition"), ClipTiming(movie_ids[1], "with_build_1")]
+    patch_clip_start_timing(deck, {"100": plan})
+    objects_after, _, _ = _load_deck(deck)
+    for oid in ("910", "930", "900", "920"):
+        assert objects_after[oid]["_pbtype"] == objects_before[oid]["_pbtype"]
+    assert objects_after["910"]["duration"] == objects_before["910"]["duration"] == 0.5
+    assert objects_after["930"]["duration"] == objects_before["930"]["duration"] == 0.5
+    assert objects_after["900"]["delivery"] == objects_before["900"]["delivery"]
+
+
+def test_clip_timing_empty_plans_is_a_noop(deck):
+    assert patch_clip_start_timing(deck, {}) == {}
