@@ -42,6 +42,7 @@ const admin1Stubs = vi.hoisted(() => ({
     features: [{ properties: { adm0_a3: code, adm1_code: `${code}-1186`, name: "Sabah", type_en: "State" }, geometry: null }],
   })),
   admin1Name: vi.fn((id: string) => (id === "A1:MYS-1186" ? "Sabah" : id)),
+  highlightName: vi.fn((id: string) => (id === "A1:MYS-1186" ? "Sabah" : id)),
 }));
 
 export const loadAdmin0Stub = admin1Stubs.loadAdmin0;
@@ -54,6 +55,7 @@ vi.mock("../src/maps/overlays", async (importOriginal) => {
     loadAdmin0: admin1Stubs.loadAdmin0,
     loadAdmin1: admin1Stubs.loadAdmin1,
     admin1Name: admin1Stubs.admin1Name,
+    highlightName: admin1Stubs.highlightName,
   };
 });
 

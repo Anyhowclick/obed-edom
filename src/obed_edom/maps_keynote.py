@@ -218,6 +218,63 @@ def hop_map_origin_x(width: int) -> int:
     return 0 if int(width) >= int(WALL_WIDTH) else int(CENTRE_ORIGIN_X)
 
 
+EXPORT_REF_WIDTH = 1920
+
+
+def export_scale(surface_width: float) -> float:
+    """Mirrors `dashboard` `exportScale`: 1920→1, 3840→2, 7680→4."""
+    return 2 ** max(0, round(math.log2(max(float(surface_width), 1.0) / EXPORT_REF_WIDTH)))
+
+
+def export_zoom_delta(surface_width: float) -> float:
+    """Mirrors `dashboard` `exportZoomDelta`. Style/tile zoom offset for a capture surface."""
+    scale = export_scale(surface_width)
+    return -math.log2(scale) if scale else 0.0
+
+
+def movie_endpoint_surface(
+    slide: dict[str, Any],
+    plates: list[dict[str, Any]] | dict[str, dict[str, Any]],
+    slides: list[dict[str, Any]],
+) -> int:
+    """Style/tile surface at one movie end: that slide's plate, else its own capture."""
+    own = slide_capture_size(slide)[0]
+    sid = str(slide.get("id") or "")
+    by_id = {str(row.get("id") or ""): row for row in slides}
+    plate_rows = plates.values() if isinstance(plates, dict) else plates
+    for plate in plate_rows:
+        ids = [str(item) for item in (plate.get("slideIds") or [])]
+        if sid not in ids:
+            continue
+        widest = own
+        for member_id in ids:
+            member = by_id.get(member_id)
+            if member is not None:
+                widest = max(widest, slide_capture_size(member)[0])
+        return widest
+    return own
+
+
+def movie_render_surface(
+    from_slide: dict[str, Any],
+    to_slide: dict[str, Any],
+    plates: list[dict[str, Any]] | dict[str, dict[str, Any]],
+    slides: list[dict[str, Any]],
+) -> int:
+    """Style/tile surface for movie frame 0: the *source* plate, else the source slide.
+
+    Hop output size stays `hop_capture_size`. Do not `max` with the dest/hop — a
+    3840 plate followed by a 7680 movie must take off at 3840.
+    """
+    return movie_endpoint_surface(from_slide, plates, slides)
+
+
+def movie_viewport_width(from_width: float, to_width: float, t: float) -> int:
+    """Visible authored width at hop progress `t` (0 = source plate, 1 = dest)."""
+    u = max(0.0, min(1.0, float(t)))
+    return int(round_half_away(float(from_width) + (float(to_width) - float(from_width)) * u))
+
+
 def normalized_viewport(
     camera: dict[str, Any],
     width: float = WALL_WIDTH,
@@ -347,9 +404,9 @@ def _slide_xy_to_mercator(
     placement: dict[str, Any],
 ) -> tuple[float, float]:
     """Inverse of `project_into_plate`: slide pixels back to the plate's bearing-frame mercator."""
-    rot = float(placement.get("rotation") or 0)
+    rot = quantized_rotation(placement.get("rotation") or 0)
     ux, uy = sx, sy
-    if abs(rot) >= 0.5:
+    if rot:
         cx = float(placement["x"]) + float(placement["w"]) / 2.0
         cy = float(placement["y"]) + float(placement["h"]) / 2.0
         ux, uy = _rotate_about(sx, sy, cx, cy, -rot)
@@ -420,7 +477,7 @@ def morph_plate_geom(
     # must stay the AABB of the cameras or the fitted 8192 raster spends most of
     # its pixels on empty padding and Magic Move no longer matches the preview.
     needs_rotation_pad = any(
-        abs(signed_bearing_delta(bearing, float(cam.get("bearing") or 0))) >= 0.5 for cam in cameras
+        quantized_rotation(signed_bearing_delta(bearing, float(cam.get("bearing") or 0))) for cam in cameras
     )
     if needs_rotation_pad:
         boxes += [_camera_cover_box(cam, w, height, bearing) for cam, w in zip(cameras, canvas)]
@@ -486,9 +543,7 @@ def _place_plate_float(
     disp_h = float(plate["plateH"]) * scale
     img_x = -((cam[0] - union[0]) * world) * scale
     img_y = -((cam[1] - union[1]) * world) * scale
-    rotation = signed_bearing_delta(bearing, float(camera.get("bearing") or 0))
-    if abs(rotation) < 0.5:
-        rotation = 0.0
+    rotation = quantized_rotation(signed_bearing_delta(bearing, float(camera.get("bearing") or 0)))
     if rotation:
         cx = img_x + disp_w / 2.0
         cy = img_y + disp_h / 2.0
@@ -538,14 +593,69 @@ def _rotate_about(px: float, py: float, cx: float, cy: float, degrees: float) ->
     return cx + cos_t * dx - sin_t * dy, cy + sin_t * dx + cos_t * dy
 
 
+def round_half_away(value: float) -> int:
+    """Half away from zero. Shared with dashboard `roundHalfAway`.
+
+    Python `round` is half-to-even and `Math.round` is half-toward-+∞, so 10.5
+    and −11.5 would otherwise put the Keynote plate one degree off the movie.
+    """
+    number = float(value)
+    if number >= 0:
+        return int(math.floor(number + 0.5))
+    return int(math.ceil(number - 0.5))
+
+
+def quantized_rotation(degrees: float) -> float:
+    """Signed integer degrees, or 0. The one angle Keynote can honour.
+
+    Placement, region orbit, visual-origin, and the emitted iWork property must
+    all spin by this value — a leftover 0.4° on an 8k plate is tens of pixels.
+    """
+    snapped = round_half_away(float(degrees) or 0.0)
+    return float(snapped) if snapped else 0.0
+
+
+def effective_plate_bearing(plate_bearing: float, camera_bearing: float) -> float:
+    """The bearing Keynote actually shows after integer plate rotation.
+
+    The plate PNG is captured at `plate_bearing`. Placement then rotates by
+    `quantized_rotation(signed_bearing_delta(...))`. A movie that takes off
+    from (or lands on) that plate must use this snapped bearing — interpolating
+    from the authored 10.4° while Keynote holds 10° is a visible jump.
+    The result stays on the authored wrap so hop interpolation does not spin.
+    """
+    delta = signed_bearing_delta(plate_bearing, camera_bearing)
+    next_bearing = float(camera_bearing) + quantized_rotation(delta) - delta
+    nearest = float(round_half_away(next_bearing))
+    return nearest if abs(next_bearing - nearest) < 1e-6 else next_bearing
+
+
+def _plate_capture_bearing(plate: dict[str, Any]) -> float:
+    cam = plate.get("captureCamera") or plate.get("camera") or {}
+    return float(cam.get("bearing") or 0)
+
+
+def movie_endpoint_camera(camera: dict[str, Any], plate: dict[str, Any] | None) -> dict[str, Any]:
+    """Copy of `camera` with bearing snapped to the plate Keynote will show."""
+    if not plate:
+        return dict(camera)
+    next_cam = dict(camera)
+    next_cam["bearing"] = effective_plate_bearing(
+        _plate_capture_bearing(plate),
+        float(camera.get("bearing") or 0),
+    )
+    return next_cam
+
+
 def keynote_rotation(degrees: float) -> int:
     """iWork `rotation` is an integer in 0–359."""
-    return int(round(float(degrees))) % 360
+    return int(quantized_rotation(degrees)) % 360
 
 
 def visual_origin(x: float, y: float, w: float, h: float, rotation: float) -> tuple[int, int]:
     """AABB top-left after CCW rotation about the unrotated frame centre."""
-    if abs(float(rotation) or 0.0) < 0.5:
+    rotation = quantized_rotation(rotation)
+    if not rotation:
         return whole(x), whole(y)
     cx, cy = x + w / 2.0, y + h / 2.0
     corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
@@ -555,7 +665,8 @@ def visual_origin(x: float, y: float, w: float, h: float, rotation: float) -> tu
 
 def orbit_item(item: dict[str, Any], origin: dict[str, Any], rotation: float) -> dict[str, Any]:
     """Move `item` so rotating both objects about their own centres keeps them glued."""
-    if abs(float(rotation) or 0.0) < 0.5:
+    rotation = quantized_rotation(rotation)
+    if not rotation:
         return item
     ocx = float(origin["x"]) + float(origin["w"]) / 2.0
     ocy = float(origin["y"]) + float(origin["h"]) / 2.0
@@ -588,8 +699,8 @@ def project_into_plate(
     scale_y = placement["h"] / float(plate["plateH"]) if plate["plateH"] else 1.0
     px = placement["x"] + (nx - union[0]) * world * scale_x
     py = placement["y"] + (ny - union[1]) * world * scale_y
-    rotation = float(placement.get("rotation") or 0)
-    if abs(rotation) >= 0.5:
+    rotation = quantized_rotation(placement.get("rotation") or 0)
+    if rotation:
         cx = float(placement["x"]) + float(placement["w"]) / 2.0
         cy = float(placement["y"]) + float(placement["h"]) / 2.0
         px, py = _rotate_about(px, py, cx, cy, rotation)
@@ -760,7 +871,7 @@ def assign_morph_plates(
 
 
 def _first_plate_slide(slides: list[dict[str, Any]], slide_ids: list[str]) -> dict[str, Any] | None:
-    """The plate's own slide, in document order — the plate raster and its cutout gate must
+    """The plate's own slide, in document order — the baked plate raster must
     agree on which slide's highlights/style/isolate represent the whole group."""
     wanted = set(slide_ids)
     return next((slide for slide in slides if str(slide.get("id") or "") in wanted), None)
@@ -770,8 +881,8 @@ def _plate_group_highlights(slides: list[dict[str, Any]], slide_ids: list[str]) 
     """Union of highlight ids on the plate run, document order, first-seen.
 
     Morph hops already refuse a highlight mismatch, so this matches the first
-    slide today. Collecting the group keeps each country a cutout even if a
-    later slide is the one that authored the list.
+    slide today. Collecting the group keeps the baked plate's wash list complete
+    even if a later slide is the one that authored it.
     """
     wanted = {str(sid) for sid in slide_ids}
     seen: list[str] = []
@@ -886,11 +997,6 @@ def maps_export_plan(
                 "hiddenLayers": slide_hidden_layers(first or {}),
                 "hillshade": bool((first or {}).get("hillshade")),
                 "isolate": _plate_group_isolate(slides, geom.get("slideIds") or []),
-                **(
-                    {"platePngRegions": f"{output_id}-regions.json"}
-                    if highlights
-                    else {}
-                ),
             }
         )
     if audience == "cg":
@@ -1199,11 +1305,6 @@ def _still_region_manifest(slide: dict[str, Any], output_dir: Path, audience: st
     return _read_region_manifest(_still_region_manifest_path(slide, output_dir, audience))
 
 
-def _plate_region_manifest(plate_id: str, output_dir: Path) -> dict[str, Any] | None:
-    name = plate_filename(plate_id)
-    return _read_region_manifest(Path(output_dir) / "plates" / f"{Path(name).stem}-regions.json")
-
-
 def _plate_path(plate_id: str, output_dir: Path) -> Path:
     name = plate_filename(plate_id)
     path = Path(output_dir) / "plates" / name
@@ -1355,8 +1456,8 @@ def _marker_on_canvas_or_plate(
     if plate is not None and placement is not None:
         px, py = float(placement["x"]), float(placement["y"])
         pw, ph = float(placement["w"]), float(placement["h"])
-        rot = float(placement.get("rotation") or 0)
-        if abs(rot) >= 0.5:
+        rot = quantized_rotation(placement.get("rotation") or 0)
+        if rot:
             vx, vy = visual_origin(px, py, pw, ph, rot)
             theta = math.radians(rot)
             aw = abs(pw * math.cos(theta)) + abs(ph * math.sin(theta))
@@ -1405,8 +1506,8 @@ def _place_churches(
             theta = math.radians(bearing)
             copy_dx = math.cos(theta) * copy_world * scale_x
             copy_dy = -math.sin(theta) * copy_world * scale_y
-            rotation = float(placement.get("rotation") or 0)
-            if abs(rotation) >= 0.5:
+            rotation = quantized_rotation(placement.get("rotation") or 0)
+            if rotation:
                 copy_dx, copy_dy = _rotate_about(copy_dx, copy_dy, 0.0, 0.0, rotation)
         else:
             base_x, base_y = project_into_camera(lat, lon, camera, width=capture_w)
@@ -1605,7 +1706,10 @@ def build_slide_items(
     )
     items = [mapped]
     cutout_gate = slide.get("highlights") if cutout_highlights is None else cutout_highlights
-    if region_manifest is not None and mapped.get("kind") == "image" and cutout_gate:
+    # Morph plates already bake country/admin-1 washes into the shared PNG.
+    # Stacking translucent cutouts here lets Keynote recomposite ~55% alpha and
+    # orbit each piece independently of the plate — both of which miss the live map.
+    if plate is None and region_manifest is not None and mapped.get("kind") == "image" and cutout_gate:
         base_path = Path(mapped["path"])
         scale_x, scale_y = _region_manifest_scale(float(mapped["w"]), float(mapped["h"]), region_manifest)
         for piece in region_manifest.get("pieces") or []:
@@ -1625,8 +1729,8 @@ def build_slide_items(
                     country=True,
                 )
             )
-        rot = float(mapped.get("rotation") or 0)
-        if abs(rot) >= 0.5:
+        rot = quantized_rotation(mapped.get("rotation") or 0)
+        if rot:
             items[:] = [orbit_item(item, mapped, rot) if item.get("country") else item for item in items]
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
@@ -1761,14 +1865,9 @@ def plan_deck(
             and prev_link.get("plateId") == plate_id
         )
         region_manifest = None
-        if bg_movie is None:
-            region_manifest = (
-                _still_region_manifest(slide, output_dir, asset_audience)
-                if plate_id is None
-                else _plate_region_manifest(plate_id, output_dir)
-            )
-            cutout_expected = plate_highlights.get(plate_id) if plate_id else slide.get("highlights")
-            if cutout_expected and region_manifest is None:
+        if bg_movie is None and plate_id is None:
+            region_manifest = _still_region_manifest(slide, output_dir, asset_audience)
+            if slide.get("highlights") and region_manifest is None:
                 warnings.warn(f"missing region manifest for slide {sid} (expected -regions.json)")
         items = build_slide_items(
             item_slide,
@@ -1820,8 +1919,8 @@ def _emit_clear() -> list[str]:
 def _emit_image_layout(item: dict[str, Any], target: str) -> list[str]:
     """Width/height/position, plus rotation when Magic Move must spin the plate."""
     x, y, w, h = item["x"], item["y"], item["w"], item["h"]
-    rot = float(item.get("rotation") or 0)
-    kn = keynote_rotation(rot) if abs(rot) >= 0.5 else 0
+    rot = quantized_rotation(item.get("rotation") or 0)
+    kn = keynote_rotation(rot) if rot else 0
     if kn:
         x, y = visual_origin(x, y, w, h, rot)
         return [

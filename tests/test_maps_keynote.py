@@ -9,10 +9,19 @@ import subprocess
 import threading
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import pytest
 
-from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, DEFAULT_HIDDEN_LAYERS, clamp_cg_shift, default_landmark_size, world_width
+from obed_edom.maps_geo import (
+    CENTRE_ORIGIN_X,
+    CENTRE_WIDTH,
+    DEFAULT_HIDDEN_LAYERS,
+    clamp_cg_shift,
+    default_landmark_size,
+    find_country,
+    signed_bearing_delta,
+    world_width,
+)
 from obed_edom.maps_keynote import (
     CG_HEIGHT,
     CG_WIDTH,
@@ -51,22 +60,33 @@ from obed_edom.maps_keynote import (
     credits_op,
     dsk_item,
     dsk_ops,
+    effective_plate_bearing,
     export_maps_job,
+    export_zoom_delta,
     fit_morph_plate,
     maps_export_dests,
     maps_export_stem,
     hop_capture_size,
+    keynote_rotation,
     maps_export_plan,
     maps_movie_autoplay_mode,
     maps_poster_frame_mode,
     morph_plate_geom,
+    movie_endpoint_camera,
+    movie_endpoint_surface,
+    movie_render_surface,
+    movie_viewport_width,
+    round_half_away,
     plate_filename,
     plate_id_for,
     plate_placement,
     plan_deck,
     project_into_camera,
     project_into_plate,
+    quantized_rotation,
     slide_capture_size,
+    slide_map_origin_x,
+    visual_origin,
     split_cg_export_plan,
     whole,
     _emit_adjust_map,
@@ -80,8 +100,8 @@ from obed_edom.web.jobs import Job
 from scripts.probe_maps_shared_plate import build_probe, main as probe_main
 
 
-def _camera(lat: float, lon: float, zoom: float = 8.0) -> dict:
-    return {"lat": lat, "lon": lon, "zoom": zoom, "bearing": 0.0, "pitch": 0.0}
+def _camera(lat: float, lon: float, zoom: float = 8.0, bearing: float = 0.0) -> dict:
+    return {"lat": lat, "lon": lon, "zoom": zoom, "bearing": bearing, "pitch": 0.0}
 
 
 def _slide(sid: str, camera: dict, **extra) -> dict:
@@ -1788,6 +1808,582 @@ def test_plan_deck_morph_dest_keeps_plate_when_outgoing_movie(tmp_path: Path):
     assert ops[2]["transition"]["delay"] == 2.0
 
 
+def test_quantized_rotation_is_the_angle_placement_orbit_and_keynote_share():
+    assert quantized_rotation(10.4) == 10.0
+    assert quantized_rotation(-10.4) == -10.0
+    assert quantized_rotation(0.4) == 0.0
+    assert round_half_away(10.5) == 11
+    assert round_half_away(11.5) == 12
+    assert round_half_away(-10.5) == -11
+    assert round_half_away(-11.5) == -12
+    assert quantized_rotation(10.5) == 11.0
+    assert quantized_rotation(-11.5) == -12.0
+    assert keynote_rotation(10.4) == 10
+    assert keynote_rotation(-10.4) == 350
+    assert effective_plate_bearing(0.0, 10.4) == pytest.approx(10.0)
+    assert effective_plate_bearing(0.0, -10.4) == pytest.approx(-10.0)
+    assert effective_plate_bearing(350.0, 10.4) == pytest.approx(10.0)
+    item = {
+        "kind": "image",
+        "x": -200,
+        "y": -50,
+        "w": 8000,
+        "h": 2000,
+        "path": "/tmp/plate.png",
+        "map": True,
+        "rotation": 10.4,
+    }
+    script = "\n".join(_emit_item(item))
+    assert "set rotation of img to 10" in script
+    origin_raw = visual_origin(-200, -50, 8000, 2000, 10.4)
+    origin_q = visual_origin(-200, -50, 8000, 2000, 10.0)
+    assert origin_raw == origin_q
+
+
+HIGHLIGHT_RING = [(101.00, 2.90), (101.25, 2.90), (101.25, 3.20), (101.00, 3.20), (101.00, 2.90)]
+
+
+def _frange(start: float, stop: float, step: float):
+    value = start
+    while value <= stop + 1e-9:
+        yield value
+        value += step
+
+
+def _paint_diagnostic(camera: dict, width: int, height: int, surface_width: float, highlight: bool) -> Image.Image:
+    """Land tint and grid density follow export_zoom_delta(surface); yellow is the region wash."""
+    delta = export_zoom_delta(surface_width)
+    z_eff = float(camera.get("zoom") or 0) + delta
+    step = max(0.08, 2 ** (4.5 - z_eff))
+    bg = (int(168 - delta * 18), int(188 - delta * 6), int(208), 255)
+    img = Image.new("RGBA", (int(width), int(height)), bg)
+    draw = ImageDraw.Draw(img, "RGBA")
+    lat0, lon0 = float(camera["lat"]), float(camera["lon"])
+    for lon in _frange(lon0 - 8, lon0 + 8, step):
+        pts = [
+            project_into_camera(lat, lon, camera, width=width, height=height)
+            for lat in _frange(lat0 - 5, lat0 + 5, step / 3)
+        ]
+        draw.line([(p[0], p[1]) for p in pts], fill=(24, 28, 36, 255), width=2)
+    for lat in _frange(lat0 - 5, lat0 + 5, step):
+        pts = [
+            project_into_camera(lat, lon, camera, width=width, height=height)
+            for lon in _frange(lon0 - 8, lon0 + 8, step / 3)
+        ]
+        draw.line([(p[0], p[1]) for p in pts], fill=(24, 28, 36, 255), width=2)
+    if highlight:
+        poly = [
+            project_into_camera(lat, lon, camera, width=width, height=height)
+            for lon, lat in HIGHLIGHT_RING
+        ]
+        draw.polygon([(p[0], p[1]) for p in poly], fill=(245, 217, 10, 140))
+    return img
+
+
+def _paste(dst: Image.Image, src: Image.Image, x: int, y: int) -> None:
+    sx0, sy0 = max(0, -x), max(0, -y)
+    sx1, sy1 = min(src.width, dst.width - x), min(src.height, dst.height - y)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return
+    dst.alpha_composite(src.crop((sx0, sy0, sx1, sy1)), (x + sx0, y + sy0))
+
+
+def _rms(a: Image.Image, b: Image.Image) -> float:
+    sa = a.convert("RGB").resize((240, 68), Image.Resampling.BOX)
+    sb = b.convert("RGB").resize((240, 68), Image.Resampling.BOX)
+    px, py = sa.load(), sb.load()
+    acc = 0
+    for y in range(68):
+        for x in range(240):
+            r, g, bl = px[x, y]
+            r2, g2, b2 = py[x, y]
+            acc += (r - r2) ** 2 + (g - g2) ** 2 + (bl - b2) ** 2
+    return (acc / (240 * 68)) ** 0.5
+
+
+def _xy_err(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _pad_viewport(img: Image.Image, out_w: int, out_h: int) -> Image.Image:
+    if img.size == (out_w, out_h):
+        return img
+    canvas = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 255))
+    canvas.paste(img, ((out_w - img.width) // 2, (out_h - img.height) // 2))
+    return canvas
+
+
+def _side_map_ratio(img: Image.Image, vis_w: int) -> float:
+    """Fraction of pixels outside the source viewport that are not black."""
+    rgb = img.convert("RGB")
+    w, h = rgb.size
+    x0 = max(0, (w - vis_w) // 2)
+    x1 = min(w, x0 + vis_w)
+    px = rgb.load()
+    n = lit = 0
+    for y in range(0, h, 4):
+        for x in range(0, w, 4):
+            if x0 <= x < x1:
+                continue
+            n += 1
+            r, g, b = px[x, y]
+            if r + g + b > 30:
+                lit += 1
+    return lit / max(1, n)
+
+
+def _compose_keynote_images(items: list[dict], width: int, height: int, origin_x: int = 0) -> Image.Image:
+    """Place Keynote image items. One baked plate uses PIL's CCW rotate — not cutout orbit."""
+    canvas = Image.new("RGBA", (int(width), int(height)), (0, 0, 0, 255))
+    for item in items:
+        if item.get("kind") != "image" or not item.get("path"):
+            continue
+        src = Image.open(item["path"]).convert("RGBA")
+        src = src.resize((int(item["w"]), int(item["h"])), Image.Resampling.BILINEAR)
+        rot = quantized_rotation(item.get("rotation") or 0)
+        x, y = int(item["x"]) - origin_x, int(item["y"])
+        if rot:
+            src = src.rotate(rot, expand=True, resample=Image.Resampling.BILINEAR)
+            x, y = visual_origin(item["x"], item["y"], item["w"], item["h"], rot)
+            x -= origin_x
+        _paste(canvas, src, int(x), int(y))
+    return canvas
+
+
+def _feature_rings(feat: dict | None) -> list[list[tuple[float, float]]]:
+    if not feat:
+        return []
+    geom = feat.get("geometry") or {}
+    coords = geom.get("coordinates") or []
+    kind = geom.get("type")
+    if kind == "Polygon" and coords:
+        return [[(float(x), float(y)) for x, y in ring] for ring in coords[:1]]
+    if kind == "MultiPolygon":
+        return [[(float(x), float(y)) for x, y in poly[0]] for poly in coords if poly]
+    return []
+
+
+def _fill_rings(draw: ImageDraw.ImageDraw, camera: dict, width: int, height: int, rings, fill) -> None:
+    for ring in rings:
+        if len(ring) < 3:
+            continue
+        pts = [project_into_camera(lat, lon, camera, width=width, height=height) for lon, lat in ring]
+        draw.polygon([(p[0], p[1]) for p in pts], fill=fill)
+
+
+def _paint_maplibre_highlights(
+    camera: dict,
+    width: int,
+    height: int,
+    *,
+    idn_rings: list,
+    region_rings: list,
+    land: tuple[int, int, int] = (168, 188, 208),
+) -> Image.Image:
+    """Dest-camera MapLibre stand-in: land, then 55% blue IDN, then 55% yellow admin-1.
+
+    Washes are composited onto an opaque plate — the same baked framebuffer MapLibre
+    exports — so Keynote never sees a translucent PNG.
+    """
+    img = Image.new("RGBA", (int(width), int(height)), (*land, 255))
+    wash = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(wash, "RGBA")
+    _fill_rings(draw, camera, width, height, idn_rings, (37, 99, 235, 140))
+    img = Image.alpha_composite(img, wash)
+    wash = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(wash, "RGBA")
+    _fill_rings(draw, camera, width, height, region_rings, (245, 217, 10, 140))
+    return Image.alpha_composite(img, wash)
+
+
+def _sample_rgb(img: Image.Image, xy: tuple[float, float], radius: int = 3) -> tuple[int, int, int]:
+    px = img.convert("RGB").load()
+    w, h = img.size
+    cx, cy = int(round(xy[0])), int(round(xy[1]))
+    rs = gs = bs = n = 0
+    for y in range(max(0, cy - radius), min(h, cy + radius + 1)):
+        for x in range(max(0, cx - radius), min(w, cx + radius + 1)):
+            r, g, b = px[x, y]
+            rs += r
+            gs += g
+            bs += b
+            n += 1
+    return (rs // n, gs // n, bs // n) if n else (0, 0, 0)
+
+
+def _is_baked_yellow(rgb: tuple[int, int, int]) -> bool:
+    r, g, b = rgb
+    return g > 150 and r > 140 and b < 140 and (r + g) / 2 > b + 40
+
+
+def _is_baked_blue(rgb: tuple[int, int, int]) -> bool:
+    r, g, b = rgb
+    return b > r + 15 and b > 90 and r < 160
+
+
+def _registered_disagree(a: Image.Image, b: Image.Image, *, step: int = 4, slop: int = 18) -> float:
+    """Fraction of co-located samples whose RGB differs by more than `slop`.
+
+    Global means / centroids miss a 0.4° bearing slip; this does not.
+    """
+    pa, pb = a.convert("RGB").load(), b.convert("RGB").load()
+    w, h = a.size
+    bad = tot = 0
+    for y in range(0, h, step):
+        for x in range(0, w, step):
+            tot += 1
+            ra, ga, ba = pa[x, y]
+            rb, gb, bb = pb[x, y]
+            if abs(ra - rb) > slop or abs(ga - gb) > slop or abs(ba - bb) > slop:
+                bad += 1
+    return bad / max(1, tot)
+
+
+def test_s2_landing_composite_matches_movie_frame0_on_mixed_surface_rotation(tmp_path: Path):
+    """S1 Magic Move → isolated S2 → movie → S3: landing raster equals movie frame 0."""
+    iso = {"mode": "darken", "strength": 0.65}
+    hl = ["A1:IDN-KA"]
+    s1 = _slide("s1", _camera(3.0, 101.0, 6.0), includeSidePanels=True, highlights=hl, isolate=iso)
+    s2 = _slide("s2", _camera(3.05, 101.12, 6.4, bearing=10.4), highlights=hl, isolate=iso)
+    s3 = _slide("s3", _camera(3.2, 101.4, 6.4), highlights=hl, isolate=iso)
+    links = [
+        {"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False},
+        {"from": "s2", "to": "s3", "kind": "movie", "duration": 2.0, "playWithoutClick": False},
+    ]
+    plates, _links = assign_morph_plates([s1, s2, s3], links)
+    assert plates
+    plate = next(iter(plates.values()))
+    place = plate_placement(s2["camera"], plate, width=CENTRE_WIDTH, height=WALL_HEIGHT)
+    assert quantized_rotation(place.get("rotation") or 0) == 10.0
+    plate_bearing = float((plate.get("captureCamera") or {}).get("bearing") or 0)
+    assert effective_plate_bearing(plate_bearing, 10.4) == pytest.approx(10.0)
+    snapped = movie_endpoint_camera(s2["camera"], plate)
+    assert snapped["bearing"] == pytest.approx(10.0)
+
+    hop_w, hop_h = hop_capture_size(s2, s3)
+    from_w = slide_capture_size(s2)[0]
+    plate_surface = max(slide_capture_size(s1)[0], slide_capture_size(s2)[0])
+    movie_surface = movie_render_surface(s2, s3, plates, [s1, s2, s3])
+    assert hop_w == CENTRE_WIDTH
+    assert from_w == CENTRE_WIDTH
+    assert movie_viewport_width(from_w, slide_capture_size(s3)[0], 0) == from_w
+    assert plate_surface == WALL_WIDTH
+    assert movie_surface == plate_surface
+    assert export_zoom_delta(movie_surface) == export_zoom_delta(plate_surface)
+    assert export_zoom_delta(hop_w) != export_zoom_delta(plate_surface)
+
+    plate_w, plate_h = int(plate["plateW"]), int(plate["plateH"])
+    plate_cam = plate["captureCamera"]
+    baked = _paint_diagnostic(plate_cam, plate_w, plate_h, plate_surface, highlight=True)
+
+    plate_dir = tmp_path / "plates"
+    plate_path = plate_dir / plate_filename(plate["plateId"])
+    plate_dir.mkdir(parents=True)
+    baked.save(plate_path)
+    items = build_slide_items(
+        s2,
+        plate=plate,
+        plate_path=plate_path,
+        still=None,
+        movie=None,
+        wall=True,
+        pin_root=tmp_path / "pins",
+    )
+    assert not any(item.get("country") for item in items)
+    mapped = next(item for item in items if item.get("map"))
+    assert quantized_rotation(mapped.get("rotation") or 0) == 10.0
+    assert "set rotation of img to 10" in "\n".join(_emit_item(mapped))
+
+    origin = slide_map_origin_x(s2)
+    landing = Image.new("RGBA", (hop_w, hop_h), (0, 0, 0, 255))
+    for item in items:
+        if item.get("kind") != "image" or not item.get("path"):
+            continue
+        src = Image.open(item["path"]).convert("RGBA")
+        src = src.resize((int(item["w"]), int(item["h"])), Image.Resampling.NEAREST)
+        rot = quantized_rotation(item.get("rotation") or 0)
+        x, y = int(item["x"]) - origin, int(item["y"])
+        if rot:
+            src = src.rotate(rot, expand=True, resample=Image.Resampling.NEAREST)
+            x, y = visual_origin(item["x"], item["y"], item["w"], item["h"], rot)
+            x -= origin
+        _paste(landing, src, x, y)
+    assert landing.getbbox()
+
+    def movie_xy(camera: dict, lat: float, lon: float) -> tuple[float, float]:
+        return project_into_camera(lat, lon, camera, width=hop_w, height=hop_h)
+
+    # Far from the optical centre so a 0.4° slip is several pixels, not a centroid near-miss.
+    probes = [
+        (3.05, 101.12),
+        (3.05, 107.5),
+        (3.05, 94.7),
+        (6.4, 101.12),
+        (0.0, 107.5),
+        (6.4, 94.7),
+    ]
+    authored_miss = max(_xy_err(movie_xy(snapped, lat, lon), movie_xy(s2["camera"], lat, lon)) for lat, lon in probes)
+    assert authored_miss > 6.0, authored_miss
+
+    frame0 = _pad_viewport(_paint_diagnostic(snapped, from_w, hop_h, movie_surface, highlight=True), hop_w, hop_h)
+    authored_frame = _pad_viewport(_paint_diagnostic(s2["camera"], from_w, hop_h, movie_surface, highlight=True), hop_w, hop_h)
+    wrong_surface = _paint_diagnostic(snapped, hop_w, hop_h, hop_w, highlight=True)
+    assert landing.size == frame0.size
+    assert _registered_disagree(frame0, frame0) == 0
+    assert _registered_disagree(frame0, authored_frame) > 0.01, "10° vs 10.4° must fail registered pixels"
+    assert _registered_disagree(landing, frame0) < _registered_disagree(landing, authored_frame)
+    assert _rms(wrong_surface.convert("RGB"), frame0.convert("RGB")) > 8, "hop-only surface must not match the plate surface"
+
+
+def test_s2_landing_composite_matches_movie_frame0_center_to_full_wall(tmp_path: Path):
+    """Centre-wall plate → full-wall movie: frame 0 keeps the 3840 viewport, then widens."""
+    iso = {"mode": "darken", "strength": 0.65}
+    hl = ["A1:IDN-KA"]
+    s1 = _slide("s1", _camera(3.0, 101.0, 6.0), highlights=hl, isolate=iso)
+    s2 = _slide("s2", _camera(3.05, 101.12, 6.4, bearing=10.4), highlights=hl, isolate=iso)
+    s3 = _slide("s3", _camera(3.2, 101.4, 6.4), includeSidePanels=True, highlights=hl, isolate=iso)
+    links = [
+        {"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False},
+        {"from": "s2", "to": "s3", "kind": "movie", "duration": 2.0, "playWithoutClick": False},
+    ]
+    plates, _links = assign_morph_plates([s1, s2, s3], links)
+    assert plates
+    plate = next(iter(plates.values()))
+    snapped = movie_endpoint_camera(s2["camera"], plate)
+    assert snapped["bearing"] == pytest.approx(10.0)
+
+    hop_w, hop_h = hop_capture_size(s2, s3)
+    from_w = slide_capture_size(s2)[0]
+    to_w = slide_capture_size(s3)[0]
+    from_surface = movie_endpoint_surface(s2, plates, [s1, s2, s3])
+    assert hop_w == WALL_WIDTH
+    assert from_w == CENTRE_WIDTH
+    assert to_w == WALL_WIDTH
+    assert from_surface == CENTRE_WIDTH
+    assert movie_render_surface(s2, s3, plates, [s1, s2, s3]) == CENTRE_WIDTH
+    assert movie_viewport_width(from_w, to_w, 0) == from_w
+    assert movie_viewport_width(from_w, to_w, 1) == to_w
+
+    plate_w, plate_h = int(plate["plateW"]), int(plate["plateH"])
+    plate_cam = plate["captureCamera"]
+    baked = _paint_diagnostic(plate_cam, plate_w, plate_h, from_surface, highlight=True)
+    plate_dir = tmp_path / "plates"
+    plate_path = plate_dir / plate_filename(plate["plateId"])
+    plate_dir.mkdir(parents=True)
+    baked.save(plate_path)
+    items = build_slide_items(
+        s2,
+        plate=plate,
+        plate_path=plate_path,
+        still=None,
+        movie=None,
+        wall=True,
+        pin_root=tmp_path / "pins",
+    )
+    assert not any(item.get("country") for item in items)
+    origin = slide_map_origin_x(s2)
+    landing = Image.new("RGBA", (from_w, hop_h), (0, 0, 0, 255))
+    for item in items:
+        if item.get("kind") != "image" or not item.get("path"):
+            continue
+        src = Image.open(item["path"]).convert("RGBA")
+        src = src.resize((int(item["w"]), int(item["h"])), Image.Resampling.NEAREST)
+        rot = quantized_rotation(item.get("rotation") or 0)
+        x, y = int(item["x"]) - origin, int(item["y"])
+        if rot:
+            src = src.rotate(rot, expand=True, resample=Image.Resampling.NEAREST)
+            x, y = visual_origin(item["x"], item["y"], item["w"], item["h"], rot)
+            x -= origin
+        _paste(landing, src, x, y)
+
+    vis = _paint_diagnostic(snapped, from_w, hop_h, from_surface, highlight=True)
+    frame0 = _pad_viewport(vis, hop_w, hop_h)
+    padded_landing = _pad_viewport(landing, hop_w, hop_h)
+    leaked = _paint_diagnostic(snapped, hop_w, hop_h, hop_w, highlight=True)
+    assert landing.size == (from_w, hop_h)
+    assert frame0.size == padded_landing.size == (hop_w, hop_h)
+    center = frame0.crop(((hop_w - from_w) // 2, 0, (hop_w + from_w) // 2, hop_h))
+    assert center.size == landing.size
+    assert _registered_disagree(center, vis) == 0
+    assert _side_map_ratio(frame0, from_w) < 0.02
+    assert _side_map_ratio(padded_landing, from_w) < 0.02
+    assert _side_map_ratio(leaked, from_w) > 0.2, "a 7680 frame 0 must fail: sides show map the plate never had"
+
+
+PLATE_BEARING_IDN = -13.918882681
+DEST_BEARING_IDN = -10.0
+IDN_HIGHLIGHTS = ["IDN", "A1:IDN-1185", "A1:IDN-1230"]
+IDN_COLOURS = {"IDN": "#2563eb", "A1:IDN-1185": "#f5d90a", "A1:IDN-1230": "#f5d90a"}
+# Sumatera Selatan (A1:IDN-1230) sits west of a typical Indo plate centre.
+SUMSEL_RING = [(102.4, -4.7), (106.1, -4.7), (106.1, -1.7), (102.4, -1.7), (102.4, -4.7)]
+SUMSEL_IN = (104.0, -3.2)
+# A1:IDN-1185 — east of centre so +4° about the plate midpoint is a large swing.
+IDN_1185_RING = [(115.0, -1.4), (118.9, -1.4), (118.9, 3.3), (115.0, 3.3), (115.0, -1.4)]
+IDN_1185_IN = (116.8, 0.8)
+IDN_BLUE_IN = (120.5, -2.5)
+IDN_FALLBACK_RING = [(95.0, -11.0), (141.0, -11.0), (141.0, 6.0), (95.0, 6.0), (95.0, -11.0)]
+
+
+def _idn_bake_slides() -> tuple[dict, dict, list[dict]]:
+    iso = {"mode": "darken", "strength": 0.65}
+    s1 = _slide(
+        "s1",
+        _camera(-2.2, 118.0, 4.5, bearing=PLATE_BEARING_IDN),
+        highlights=IDN_HIGHLIGHTS,
+        isolate=iso,
+        highlightColours=IDN_COLOURS,
+    )
+    s2 = _slide(
+        "s2",
+        _camera(-2.8, 112.0, 4.8, bearing=DEST_BEARING_IDN),
+        highlights=IDN_HIGHLIGHTS,
+        isolate=iso,
+        highlightColours=IDN_COLOURS,
+    )
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+    return s1, s2, links
+
+
+def _idn_highlight_rings() -> tuple[list, list]:
+    idn = _feature_rings(find_country("IDN")) or [IDN_FALLBACK_RING]
+    return idn, [SUMSEL_RING, IDN_1185_RING]
+
+
+def test_idn_baked_plate_matches_maplibre_dest_at_plus_four_degrees(tmp_path: Path):
+    """Magic Move plate is one MapLibre-composited PNG. Dest +4° must keep both
+    yellow interiors registered and the baked (not Keynote-alpha) wash colour.
+
+    The dest-camera paint uses `project_into_camera` — MapLibre's mercator+bearing
+    — not `_rotate_about` on per-region cutouts.
+    """
+    s1, s2, links = _idn_bake_slides()
+    plates, links = assign_morph_plates([s1, s2], links)
+    assert plates, "expected a morph plate for the Indonesia +4° hop"
+    assert links[0].get("kind") == "morph"
+    plate = next(iter(plates.values()))
+    plate_bearing = float((plate.get("captureCamera") or {}).get("bearing") or 0)
+    assert plate_bearing == pytest.approx(PLATE_BEARING_IDN)
+    place = plate_placement(s2["camera"], plate, width=CENTRE_WIDTH, height=WALL_HEIGHT)
+    assert quantized_rotation(place.get("rotation") or 0) == 4.0
+    assert quantized_rotation(signed_bearing_delta(plate_bearing, DEST_BEARING_IDN)) == 4.0
+
+    plan = maps_export_plan([s1, s2], links)
+    assert "platePngRegions" not in plan["plates"][0]
+    assert plan["plates"][0]["highlights"] == IDN_HIGHLIGHTS
+
+    plate_w, plate_h = int(plate["plateW"]), int(plate["plateH"])
+    plate_cam = plate["captureCamera"]
+    idn_rings, region_rings = _idn_highlight_rings()
+    surface = max(slide_capture_size(s1)[0], slide_capture_size(s2)[0])
+    baked = _paint_maplibre_highlights(plate_cam, plate_w, plate_h, idn_rings=idn_rings, region_rings=region_rings)
+    plate_dir = tmp_path / "plates"
+    plate_path = plate_dir / plate_filename(plate["plateId"])
+    plate_dir.mkdir(parents=True)
+    baked.save(plate_path)
+    leftover = _region_manifest(
+        [
+            {"id": "IDN", "x": 0, "y": 0, "w": 8, "h": 8},
+            {"id": "A1:IDN-1185", "x": 8, "y": 0, "w": 8, "h": 8},
+            {"id": "A1:IDN-1230", "x": 0, "y": 8, "w": 8, "h": 8},
+        ]
+    )
+    (plate_dir / f"{plate_path.stem}-regions.json").write_text(json.dumps(leftover))
+
+    ops = plan_deck([s1, s2], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    dest_op = next(op for op in ops if op["id"] == "s2")
+    dest_items = dest_op["items"]
+    maps = [item for item in dest_items if item.get("map")]
+    assert len(maps) == 1
+    assert not [item for item in dest_items if item.get("country")]
+    assert quantized_rotation(maps[0].get("rotation") or 0) == 4.0
+    assert dest_op.get("duplicate") is True
+    assert "set rotation of img to 4" in "\n".join(_emit_item(maps[0]))
+    assert "set rotation of image 1 to 4" in "\n".join(_emit_adjust_map(maps[0]))
+
+    cap_w, cap_h = slide_capture_size(s2)
+    origin = slide_map_origin_x(s2)
+    keynote = _compose_keynote_images(dest_items, cap_w, cap_h, origin)
+    dest_cam = movie_endpoint_camera(s2["camera"], plate)
+    assert dest_cam["bearing"] == pytest.approx(effective_plate_bearing(plate_bearing, DEST_BEARING_IDN))
+    assert dest_cam["bearing"] == pytest.approx(DEST_BEARING_IDN + 4.0 - signed_bearing_delta(plate_bearing, DEST_BEARING_IDN))
+    reference = _paint_maplibre_highlights(dest_cam, cap_w, cap_h, idn_rings=idn_rings, region_rings=region_rings)
+
+    probes = [SUMSEL_IN, IDN_1185_IN]
+    for lon, lat in probes:
+        xy = project_into_camera(lat, lon, dest_cam, width=cap_w, height=cap_h)
+        assert 8 < xy[0] < cap_w - 8 and 8 < xy[1] < cap_h - 8, (lon, lat, xy)
+        got = _sample_rgb(keynote, xy)
+        want = _sample_rgb(reference, xy)
+        assert _is_baked_yellow(got), f"{lon, lat} keynote {got}"
+        assert _is_baked_yellow(want), f"{lon, lat} maplibre {want}"
+        assert abs(got[0] - want[0]) < 28 and abs(got[1] - want[1]) < 28 and abs(got[2] - want[2]) < 28, (
+            lon,
+            lat,
+            got,
+            want,
+        )
+    blue_xy = project_into_camera(IDN_BLUE_IN[1], IDN_BLUE_IN[0], dest_cam, width=cap_w, height=cap_h)
+    assert _is_baked_blue(_sample_rgb(keynote, blue_xy))
+    assert _is_baked_blue(_sample_rgb(reference, blue_xy))
+    assert _registered_disagree(keynote, reference, slop=36) < 0.12
+
+
+def test_idn_keynote_render_matches_maplibre_dest(tmp_path: Path):
+    """Live Keynote slide PNG vs dest-camera MapLibre paint. Off unless OBED_LIVE_KEYNOTE=1."""
+    import os
+
+    if os.environ.get("OBED_LIVE_KEYNOTE", "").strip() not in {"1", "true", "yes"}:
+        pytest.skip("set OBED_LIVE_KEYNOTE=1 to export a real Keynote frame")
+    from obed_edom.inspect import export_applescript
+    from obed_edom.maps_keynote import keynote_is_available, run_osascript
+
+    if not keynote_is_available():
+        pytest.skip("Keynote is not installed")
+
+    s1, s2, links = _idn_bake_slides()
+    plates, links = assign_morph_plates([s1, s2], links)
+    assert plates
+    plate = next(iter(plates.values()))
+    plate_w, plate_h = int(plate["plateW"]), int(plate["plateH"])
+    idn_rings, region_rings = _idn_highlight_rings()
+    baked = _paint_maplibre_highlights(
+        plate["captureCamera"], plate_w, plate_h, idn_rings=idn_rings, region_rings=region_rings
+    )
+    plate_dir = tmp_path / "plates"
+    plate_path = plate_dir / plate_filename(plate["plateId"])
+    plate_dir.mkdir(parents=True)
+    baked.save(plate_path)
+    ops = plan_deck([s1, s2], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    dest = tmp_path / "idn-bake.key"
+    script = build_deck_script(ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT)
+    built = run_osascript(script)
+    if built.returncode != 0:
+        pytest.skip(f"Keynote deck build failed: {built.stderr or built.stdout}")
+    export_dir = tmp_path / "slides"
+    export_dir.mkdir()
+    exported = run_osascript(export_applescript(dest, export_dir))
+    if exported.returncode != 0:
+        pytest.skip(f"Keynote slide export failed: {exported.stderr or exported.stdout}")
+    pngs = sorted(p for p in export_dir.glob("*.png") if p.is_file())
+    assert pngs, f"no slide images in {export_dir}: {list(export_dir.iterdir())}"
+    dest_png = pngs[-1] if len(pngs) > 1 else pngs[0]
+    rendered = Image.open(dest_png).convert("RGBA")
+    cap_w, cap_h = slide_capture_size(s2)
+    origin = slide_map_origin_x(s2)
+    if rendered.size[0] >= origin + cap_w:
+        rendered = rendered.crop((origin, 0, origin + cap_w, min(cap_h, rendered.size[1])))
+    if rendered.size != (cap_w, cap_h):
+        rendered = rendered.resize((cap_w, cap_h), Image.Resampling.BILINEAR)
+    dest_cam = movie_endpoint_camera(s2["camera"], plate)
+    reference = _paint_maplibre_highlights(dest_cam, cap_w, cap_h, idn_rings=idn_rings, region_rings=region_rings)
+    for lon, lat in (SUMSEL_IN, IDN_1185_IN):
+        xy = project_into_camera(lat, lon, dest_cam, width=cap_w, height=cap_h)
+        got = _sample_rgb(rendered, xy)
+        want = _sample_rgb(reference, xy)
+        assert _is_baked_yellow(got), f"{lon, lat} keynote-render {got}"
+        assert abs(got[0] - want[0]) < 40 and abs(got[1] - want[1]) < 40 and abs(got[2] - want[2]) < 40
+
+
 def test_coerce_preserves_explicit_movie_on_style_mismatch():
     a = _slide("s1", _camera(3.0, 101.0, 8), style="positron")
     b = _slide("s2", _camera(3.0, 102.0, 8), style="dark")
@@ -1987,21 +2583,17 @@ def test_plan_deck_emits_country_cutout_image_above_base(tmp_path: Path):
     assert len([item for item in ops[1]["items"] if item.get("map")]) == 1
 
 
-def test_plan_deck_magic_move_duplicate_keeps_country_cutout(tmp_path: Path):
+def test_plan_deck_magic_move_duplicate_adjusts_only_the_baked_plate(tmp_path: Path):
     cam_a, cam_b = _pan_camera(8, 400)
     a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
     b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
     links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
     plates, links = assign_morph_plates([a, b], links)
-    plan = _write_plan_rasters(tmp_path, [a, b], links)
-    for plate in plan["plates"]:
-        name = plate_filename(plate["plateId"])
-        _dummy_region(tmp_path / "plates" / name)
+    _write_plan_rasters(tmp_path, [a, b], links)
     ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     assert ops[1]["duplicate"] is True
-    country_items = [item for item in ops[1]["items"] if item.get("country")]
-    assert len(country_items) == 1
-    assert Path(country_items[0]["path"]).name.endswith("-region-0.png")
+    assert not any(item.get("country") for item in ops[1]["items"])
+    assert len([item for item in ops[1]["items"] if item.get("map")]) == 1
 
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
     tell_start = script.index("tell slide 2")
@@ -2009,12 +2601,12 @@ def test_plan_deck_magic_move_duplicate_keeps_country_cutout(tmp_path: Path):
     body = script[tell_start:tell_end]
     assert "-country.png" not in body
     assert "make new image" not in body
-    assert "set width of image 2 to" in body
-    assert "set height of image 2 to" in body
-    assert re.search(r"repeat with i from \(count of images\) to 3 by -1", body) is not None
+    assert "set width of image 1 to" in body
+    assert "set width of image 2 to" not in body
+    assert re.search(r"repeat with i from \(count of images\) to 2 by -1", body) is not None
 
 
-def test_plan_deck_morph_emits_one_cutout_per_country(tmp_path: Path):
+def test_plan_deck_morph_ignores_stale_plate_region_cutouts(tmp_path: Path):
     cam_a, cam_b = _pan_camera(8, 400)
     highlights = ["MYS", "IDN", "A1:IDN-1185"]
     a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=highlights)
@@ -2023,7 +2615,7 @@ def test_plan_deck_morph_emits_one_cutout_per_country(tmp_path: Path):
     plates, links = assign_morph_plates([a, b], links)
     plan = maps_export_plan([a, b], links)
     assert plan["plates"][0]["highlights"] == highlights
-    assert plan["plates"][0]["platePngRegions"]
+    assert "platePngRegions" not in plan["plates"][0]
     for plate in plan["plates"]:
         name = plate_filename(plate["plateId"])
         _dummy_png(tmp_path / "plates" / name)
@@ -2039,23 +2631,17 @@ def test_plan_deck_morph_emits_one_cutout_per_country(tmp_path: Path):
         )
     ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     for op in ops:
-        countries = [item for item in op["items"] if item.get("country")]
-        assert [Path(item["path"]).name for item in countries] == [
-            f"{Path(plate_filename(plan['plates'][0]['plateId'])).stem}-region-0.png",
-            f"{Path(plate_filename(plan['plates'][0]['plateId'])).stem}-region-1.png",
-            f"{Path(plate_filename(plan['plates'][0]['plateId'])).stem}-region-2.png",
-        ]
+        assert not [item for item in op["items"] if item.get("country")]
+        assert len([item for item in op["items"] if item.get("map")]) == 1
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
     tell_start = script.index("tell slide 2")
     tell_end = script.index("end tell", tell_start)
     body = script[tell_start:tell_end]
-    assert "set width of image 2 to" in body
-    assert "set width of image 3 to" in body
-    assert "set width of image 4 to" in body
-    assert re.search(r"repeat with i from \(count of images\) to 5 by -1", body) is not None
+    assert "set width of image 2 to" not in body
+    assert re.search(r"repeat with i from \(count of images\) to 2 by -1", body) is not None
 
 
-def test_plan_deck_morph_member_with_no_own_highlights_still_gets_plate_cutout(tmp_path: Path):
+def test_plan_deck_morph_member_shares_the_baked_plate(tmp_path: Path):
     cam_a, cam_b = _pan_camera(8, 400)
     a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
     b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=[])
@@ -2066,9 +2652,10 @@ def test_plan_deck_morph_member_with_no_own_highlights_still_gets_plate_cutout(t
         _dummy_png(tmp_path / "plates" / name)
         _dummy_region(tmp_path / "plates" / name)
     ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
-    country_items = [item for item in ops[1]["items"] if item.get("country")]
-    assert len(country_items) == 1
-    assert Path(country_items[0]["path"]).name.endswith("-region-0.png")
+    assert not [item for item in ops[1]["items"] if item.get("country")]
+    maps = [item for item in ops[1]["items"] if item.get("map")]
+    assert len(maps) == 1
+    assert Path(maps[0]["path"]).name == plate_filename(next(iter(plates)))
 
 
 def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
@@ -3419,7 +4006,7 @@ def test_landing_slide_plans_no_cutout():
     assert all("stillPngRegions" not in row for row in landing)
 
 
-def test_plate_plans_a_cutout_when_highlighted():
+def test_plate_plans_no_cutout_when_highlighted():
     a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
     b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
     links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
@@ -3428,7 +4015,8 @@ def test_plate_plans_a_cutout_when_highlighted():
     plates = plan["plates"]
 
     assert plates, "expected a morph plate"
-    assert plates[0]["platePngRegions"] == f"{plates[0]['plateId']}-regions.json"
+    assert plates[0]["highlights"] == ["MYS"]
+    assert "platePngRegions" not in plates[0]
 
 
 def test_plate_plans_no_cutout_without_highlights():
@@ -3468,19 +4056,12 @@ def test_build_slide_items_stacks_the_cutout_without_isolate(tmp_path: Path):
     assert (country_items[0]["w"], country_items[0]["h"]) == (map_items[0]["w"], map_items[0]["h"])
 
 
-def test_build_slide_items_gives_a_plate_cutout_the_plate_geometry(tmp_path: Path):
+def test_build_slide_items_ignores_a_plate_region_manifest(tmp_path: Path):
     a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
     b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
     geom = morph_plate_geom([a, b])
     plate_path = _dummy_png(tmp_path / "plates" / plate_filename("p-s1-s2"))
-    piece_path = _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-region-0.png")
-
-    unmapped = build_slide_items(
-        a, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True,
-        pin_root=tmp_path / "pins", region_manifest=None,
-    )
-    plate_w = next(item for item in unmapped if item.get("map"))["w"]
-    plate_h = next(item for item in unmapped if item.get("map"))["h"]
+    _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-region-0.png")
 
     items = build_slide_items(
         a,
@@ -3490,15 +4071,11 @@ def test_build_slide_items_gives_a_plate_cutout_the_plate_geometry(tmp_path: Pat
         movie=None,
         wall=True,
         pin_root=tmp_path / "pins",
-        region_manifest=_region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": plate_w, "h": plate_h}], width=plate_w, height=plate_h),
+        region_manifest=_region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": 16, "h": 16}]),
+        cutout_highlights=["MYS"],
     )
-    map_items = [item for item in items if item.get("map")]
-    country_items = [item for item in items if item.get("country")]
-
-    assert len(map_items) == 1
-    assert len(country_items) == 1
-    assert country_items[0]["path"] == str(piece_path)
-    assert [country_items[0][key] for key in ("x", "y", "w", "h")] == [map_items[0][key] for key in ("x", "y", "w", "h")]
+    assert len([item for item in items if item.get("map")]) == 1
+    assert not [item for item in items if item.get("country")]
 
 
 def test_build_slide_items_emits_n_pieces_in_manifest_order(tmp_path: Path):
@@ -3529,28 +4106,20 @@ def test_build_slide_items_emits_n_pieces_in_manifest_order(tmp_path: Path):
     ]
 
 
-def test_build_slide_items_scales_pieces_to_plate_placement(tmp_path: Path):
+def test_build_slide_items_does_not_scale_plate_cutouts(tmp_path: Path):
     a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
     b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
     geom = morph_plate_geom([a, b])
     plate_path = _dummy_png(tmp_path / "plates" / plate_filename("p-s1-s2"))
-    piece_path = _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-region-0.png")
+    _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-region-0.png")
     manifest = _region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": 320, "h": 45}], width=640, height=90)
 
     items = build_slide_items(
         a, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True,
-        pin_root=tmp_path / "pins", region_manifest=manifest,
+        pin_root=tmp_path / "pins", region_manifest=manifest, cutout_highlights=["MYS"],
     )
-    mapped = next(item for item in items if item.get("map"))
-    piece = next(item for item in items if item.get("country"))
-    assert piece["path"] == str(piece_path)
-    scale_x = mapped["w"] / 640.0
-    scale_y = mapped["h"] / 90.0
-    assert piece["w"] == pytest.approx(320 * scale_x, abs=1)
-    assert piece["h"] == pytest.approx(45 * scale_y, abs=1)
-    assert piece["x"] == pytest.approx(mapped["x"] + 0 * scale_x)
-    assert piece["y"] == pytest.approx(mapped["y"] + 0 * scale_y)
-    assert (mapped["w"], mapped["h"]) != (640, 90), "plate placement should not coincidentally match the manifest size"
+    assert next(item for item in items if item.get("map"))["path"] == str(plate_path)
+    assert not [item for item in items if item.get("country")]
 
 
 def test_build_slide_items_warns_but_does_not_crash_on_aspect_mismatch(tmp_path: Path):

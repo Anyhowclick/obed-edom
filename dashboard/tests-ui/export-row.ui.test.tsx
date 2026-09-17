@@ -125,4 +125,45 @@ describe("export stills with highlights but no isolate", () => {
     expect(posts.map((opts) => opts?.variant)).toEqual([undefined, "region", "regions"]);
     expect(posts.map((opts) => opts?.index)).toEqual([undefined, 0, undefined]);
   });
+
+  it("bakes highlighted morph plates as one raster instead of isolate cutouts", async () => {
+    const { captureIsolatePair, captureExportRaster } = await import("../src/maps/captureExport");
+    vi.mocked(captureIsolatePair).mockClear();
+    vi.mocked(captureExportRaster).mockClear();
+    await renderMapsTab();
+    mapsApiScript.exportPlan.set({
+      links: [],
+      stills: [],
+      plates: [
+        {
+          plateId: "p-s1-s2",
+          plateW: 2048,
+          plateH: 1024,
+          slideIds: ["s1", "s2"],
+          camera: { lat: -2.2, lon: 118, zoom: 4.5, bearing: -13.9, pitch: 0 },
+          style: "positron",
+          highlights: ["IDN", "A1:IDN-1185", "A1:IDN-1230"],
+          hiddenLayers: [],
+          hillshade: false,
+          isolate: { mode: "darken", strength: 0.65 },
+        },
+      ],
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Export" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(captureExportRaster).toHaveBeenCalledTimes(1);
+    expect(captureIsolatePair).not.toHaveBeenCalled();
+    const plateOpts = vi.mocked(captureExportRaster).mock.calls[0][0] as { highlights: string[] };
+    expect(plateOpts.highlights).toEqual(["IDN", "A1:IDN-1185", "A1:IDN-1230"]);
+    const posts = mapsApiScript.postMapsPng.calls.filter((opts) => opts?.kind === "plate");
+    expect(posts.map((opts) => opts?.variant)).toEqual([undefined]);
+  });
 });

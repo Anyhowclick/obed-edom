@@ -140,6 +140,168 @@ export function hopSurfaceWidth(from: MapsSlide, to: MapsSlide, audience: MapsAu
   return Math.max(authoredSurfaceWidth(from, audience), authoredSurfaceWidth(to, audience));
 }
 
+export type PlateSurfaceHint = {
+  slideIds: string[];
+  plateW?: number;
+  /** Plate capture bearing (first camera of the morph run / `captureCamera`). */
+  captureBearing?: number;
+  camera?: { bearing?: number };
+};
+
+/** MapLibre render surface for a movie hop. Output size stays `hopSurfaceWidth`; this is the
+ * style/tile zoom surface. When either end sits on a morph plate, use that plate's surface so
+ * the Magic Move landing and movie frame 0 share one zoom offset. */
+export function movieEndpointSurface(
+  slide: MapsSlide,
+  audience: MapsAudience,
+  plates: PlateSurfaceHint[] = [],
+  slidesById: Map<string, { includeSidePanels?: boolean }> = new Map()
+): number {
+  const own = authoredSurfaceWidth(slide, audience);
+  if (audience === "cg") return own;
+  for (const plate of plates) {
+    if (!plate.slideIds.includes(slide.id)) continue;
+    return Math.max(own, plateSurfaceWidth(plate.slideIds, slidesById, plate.plateW));
+  }
+  return own;
+}
+
+/** Style/tile surface for movie frame 0: the *source* plate's surface, else the source slide.
+ * Does not take `Math.max` with the hop/dest — a 3840 plate followed by a 7680 movie must
+ * still take off at 3840, or frame 0 shows the side panels the plate never had. */
+export function movieRenderSurface(
+  from: MapsSlide,
+  _to: MapsSlide,
+  audience: MapsAudience,
+  plates: PlateSurfaceHint[] = [],
+  slidesById: Map<string, { includeSidePanels?: boolean }> = new Map()
+): number {
+  return movieEndpointSurface(from, audience, plates, slidesById);
+}
+
+/** Consecutive morph hops share one plate (pairwise union would dissolve on a chain). */
+export function morphRuns(slides: { id: string }[], links: { from: string; to: string; kind?: string }[]): string[][] {
+  const byPair = new Map<string, { kind?: string }>();
+  for (const link of links) byPair.set(`${link.from}\0${link.to}`, link);
+  const ids = slides.map((slide) => slide.id);
+  const runs: string[][] = [];
+  let current: string[] = [];
+  for (let i = 0; i < ids.length - 1; i++) {
+    const start = ids[i];
+    const end = ids[i + 1];
+    const link = byPair.get(`${start}\0${end}`);
+    if (link && link.kind === "morph") {
+      if (!current.length) current = [start, end];
+      else current.push(end);
+    } else if (current.length) {
+      runs.push(current);
+      current = [];
+    }
+  }
+  if (current.length) runs.push(current);
+  return runs;
+}
+
+/** Plate hints from the document's morph runs — same grouping export uses for `movieRenderSurface`. */
+export function morphPlateHints(slides: MapsSlide[], links: MapsLink[], audience: MapsAudience = "lw"): PlateSurfaceHint[] {
+  return morphRuns(slides, links).map((slideIds) => {
+    const first = slides.find((slide) => slide.id === slideIds[0]);
+    const view = first ? slideForAudience(first, audience) : undefined;
+    return { slideIds, captureBearing: view?.camera.bearing ?? 0 };
+  });
+}
+
+/** Half away from zero. Shared with Python `round_half_away` — `Math.round` / `round()`
+ * disagree at `.5` (10.5 → 11 vs 10, −11.5 → −11 vs −12). */
+export function roundHalfAway(value: number): number {
+  return value >= 0 ? Math.floor(value + 0.5) : Math.ceil(value - 0.5);
+}
+
+export function quantizedRotation(degrees: number): number {
+  const snapped = roundHalfAway(Number(degrees) || 0);
+  return snapped ? snapped : 0;
+}
+
+/** Bearing Keynote shows after integer plate rotation, kept on the authored wrap. */
+export function effectivePlateBearing(plateBearing: number, cameraBearing: number): number {
+  const delta = bearingDeltaSigned(plateBearing, cameraBearing);
+  const next = cameraBearing + quantizedRotation(delta) - delta;
+  const nearest = roundHalfAway(next);
+  return Math.abs(next - nearest) < 1e-6 ? nearest : next;
+}
+
+export function plateCaptureBearing(
+  plate: PlateSurfaceHint,
+  slidesById?: Map<string, { camera?: { bearing?: number } }>
+): number | undefined {
+  if (typeof plate.captureBearing === "number") return plate.captureBearing;
+  if (typeof plate.camera?.bearing === "number") return plate.camera.bearing;
+  const first = plate.slideIds[0];
+  const slide = first ? slidesById?.get(first) : undefined;
+  if (typeof slide?.camera?.bearing === "number") return slide.camera.bearing;
+  return undefined;
+}
+
+/** Snap a movie endpoint to the plate Keynote will show when that end sits on a morph plate. */
+export function movieEndpointCamera(camera: MapsCamera, plateBearing?: number | null): MapsCamera {
+  if (plateBearing == null || !Number.isFinite(plateBearing)) return camera;
+  const bearing = effectivePlateBearing(plateBearing, camera.bearing);
+  return bearing === camera.bearing ? camera : { ...camera, bearing };
+}
+
+export function movieHopCameras(
+  from: MapsSlide,
+  to: MapsSlide,
+  plates: PlateSurfaceHint[],
+  slidesById?: Map<string, { camera?: { bearing?: number } }>
+): { from: MapsCamera; to: MapsCamera } {
+  const fromPlate = plates.find((plate) => plate.slideIds.includes(from.id));
+  const toPlate = plates.find((plate) => plate.slideIds.includes(to.id));
+  return {
+    from: movieEndpointCamera(from.camera, fromPlate ? plateCaptureBearing(fromPlate, slidesById) : undefined),
+    to: movieEndpointCamera(to.camera, toPlate ? plateCaptureBearing(toPlate, slidesById) : undefined),
+  };
+}
+
+/** Flight width, endpoint viewports, and plate-snapped cameras for one movie hop.
+ * `width` is the Keynote/output size (max of the ends). Frame 0 uses `fromWidth` /
+ * `fromSurface`; the hop then transitions to `toWidth`. */
+export function movieHopView(
+  from: MapsSlide,
+  to: MapsSlide,
+  audience: MapsAudience,
+  plates: PlateSurfaceHint[],
+  slidesById: Map<string, MapsSlide> = new Map()
+): {
+  width: number;
+  fromWidth: number;
+  toWidth: number;
+  fromSurface: number;
+  toSurface: number;
+  surfaceWidth: number;
+  prefetchSurface: number;
+  from: MapsCamera;
+  to: MapsCamera;
+} {
+  const ends = movieHopCameras(from, to, plates, slidesById);
+  const fromWidth = authoredSurfaceWidth(from, audience);
+  const toWidth = authoredSurfaceWidth(to, audience);
+  const fromSurface = movieEndpointSurface(from, audience, plates, slidesById);
+  const toSurface = movieEndpointSurface(to, audience, plates, slidesById);
+  const width = hopSurfaceWidth(from, to, audience);
+  return {
+    width,
+    fromWidth,
+    toWidth,
+    fromSurface,
+    toSurface,
+    surfaceWidth: fromSurface,
+    prefetchSurface: Math.max(width, fromSurface, toSurface),
+    from: ends.from,
+    to: ends.to,
+  };
+}
+
 export type MapsFlight = "arc" | "phases";
 
 export type MapsRoutePoint = { lat: number; lon: number };
@@ -362,9 +524,10 @@ export function captureWidth(slide: { includeSidePanels?: boolean }): number {
  * CENTRE_W) shows just the centre unless "Show side panels" widens the visible band to the full
  * wall for context — density (authoredWidth) is unchanged either way. */
 export function surfaceWidthOf(authoredWidth: number, sidePanels: boolean): number {
-  const splitCg = authoredWidth <= CG_W;
-  const fullWall = authoredWidth === WALL_W || (sidePanels && !splitCg);
-  return splitCg ? CG_W : fullWall ? WALL_W : WALL_W - FW_W * 2;
+  if (authoredWidth <= CG_W) return CG_W;
+  if (authoredWidth === WALL_W) return WALL_W;
+  if (authoredWidth === CENTRE_W) return sidePanels ? WALL_W : CENTRE_W;
+  return authoredWidth;
 }
 
 /** Widest capture surface among a plate's constituent slides — this picks the render scale

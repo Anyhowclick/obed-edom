@@ -1,6 +1,6 @@
 import { Map as MapLibreMap, MercatorCoordinate } from "maplibre-gl";
 import { createExportMap, waitIdleForFrame } from "./captureExport";
-import { stampOsmCropOnCanvas } from "./stampOsm";
+import { stampOsmMovieFrame } from "./stampOsm";
 import { churchesGeo, movieObjectsAt, withoutRevealed } from "./overlays";
 import { arcPath, clampRho } from "./flight";
 import {
@@ -144,6 +144,12 @@ export function lerpCamera(from: MapsCamera, to: MapsCamera, t: number, interp: 
 
 export function easeAt(easing: MapsEasing, t: number): number {
   return (EASE_FNS[easing] || EASE_FNS["ease-in-out"])(t);
+}
+
+/** Visible authored width at hop progress `t`. Frame 0 is the source plate viewport. */
+export function movieViewportWidth(fromWidth: number, toWidth: number, t: number, easing?: MapsEasing): number {
+  const u = easeAt(easing || "linear", Math.max(0, Math.min(1, t)));
+  return Math.round(fromWidth + (toWidth - fromWidth) * u);
 }
 
 type MercatorPoint = { x: number; y: number };
@@ -356,6 +362,13 @@ async function waitFrameOrRetry(
 export async function captureFlyFrames(opts: {
   width: number;
   height: number;
+  /** Style/tile zoom surface. Defaults to `width`. A movie leaving a morph plate
+   * must pass the *source* plate's surface so frame 0 matches the landing composite. */
+  surfaceWidth?: number;
+  /** Source-plate viewport. Defaults to `width`. A centre plate → FW movie
+   * starts at 3840 and transitions to `toWidth`. */
+  fromWidth?: number;
+  toWidth?: number;
   from: MapsCamera;
   to: MapsCamera;
   styleId: MapsStyleId;
@@ -397,6 +410,9 @@ export async function captureFlyFrames(opts: {
   const {
     width,
     height,
+    surfaceWidth: surfaceWidthOpt,
+    fromWidth: fromWidthOpt,
+    toWidth: toWidthOpt,
     from,
     to,
     styleId,
@@ -429,9 +445,11 @@ export async function captureFlyFrames(opts: {
   const cancelled = () => Boolean(isCancelled?.());
   if (cancelled()) throw new Error("Export cancelled.");
   const count = Math.max(2, Math.round(duration * fps));
+  const renderSurface = surfaceWidthOpt ?? width;
   const { map, host, surface } = await createExportMap({
     width,
     height,
+    surfaceWidth: renderSurface,
     camera: from,
     styleId,
     highlights,
@@ -463,14 +481,22 @@ export async function captureFlyFrames(opts: {
         (map.getSource("churches") as unknown as { setData(data: GeoJSON.FeatureCollection): void }).setData(churchesGeo(objects, null, numberPins, objectScale));
         map.triggerRepaint();
       }
-      await waitFrameOrRetry(map, cam, width, i, Date.now() + FRAME_TILE_WAIT_MS, isCancelled);
+      await waitFrameOrRetry(map, cam, renderSurface, i, Date.now() + FRAME_TILE_WAIT_MS, isCancelled);
       if (cancelled()) throw new Error("Export cancelled.");
-      const cropX = surface.cropX + (outputCrop ? outputCrop.fromX + (outputCrop.toX - outputCrop.fromX) * t : 0);
+      const fromW = fromWidthOpt ?? width;
+      const toW = toWidthOpt ?? width;
+      const visW = outputCrop ? outputCrop.width : movieViewportWidth(fromW, toW, t, easing);
+      const visH = outputCrop ? outputCrop.height : height;
+      const cropX =
+        surface.cropX +
+        (outputCrop ? outputCrop.fromX + (outputCrop.toX - outputCrop.fromX) * t : Math.floor((width - visW) / 2));
       const cropY = surface.cropY + (outputCrop ? (outputCrop.fromY || 0) + ((outputCrop.toY || 0) - (outputCrop.fromY || 0)) * t : 0);
-      const blob = await stampOsmCropOnCanvas(
+      const blob = await stampOsmMovieFrame(
         map.getCanvas(),
         cropX,
         cropY,
+        visW,
+        visH,
         outputCrop ? outputCrop.width : width,
         outputCrop ? outputCrop.height : height,
         "image/jpeg",

@@ -279,13 +279,16 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
   }
 }
 
-/** Highlighted slides render a second still: each filled region as its own transparent PNG, so
- * Keynote can stack it above the isolate plate with pins on top. Null when there is nothing
- * highlighted.
+/** Highlighted *stills* render a second raster: each filled region as its own transparent PNG
+ * so isolate-landing / reveal movies can stack a wash above the base. Null when there is
+ * nothing highlighted.
  *
- * The base always drops the highlight. The cutout paints only the wash (no basemap) so the
- * colour and edges match the live map instead of a land-sticker. No-fill (`none`) codes are
- * skipped — they still punch the isolate hole on the base. */
+ * Morph plates must not use this path — Keynote's colour-managed alpha and per-cutout
+ * rotate/orbit miss the live MapLibre composite. Those captures go through
+ * `captureExportRaster` with highlights left on.
+ *
+ * The base always drops the highlight. The cutout paints only the wash (no basemap).
+ * No-fill (`none`) codes are skipped — they still punch the isolate hole on the base. */
 export async function captureIsolatePair(
   opts: ExportMapOpts
 ): Promise<{ base: Blob; pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] } | null> {
