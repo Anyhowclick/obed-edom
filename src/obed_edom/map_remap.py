@@ -965,6 +965,35 @@ def centre_panel_image(
     return item_rect(item) if item is not None else None
 
 
+def _is_unpinned_photo_only_backdrop(
+    slide: dict, recipe: dict[str, Any], wall_w: float, wall_h: float
+) -> bool:
+    """A `template-cover` slide whose only content is the centre-panel photo itself —
+    no overlay (image, movie, group, or non-placeholder text) needs its own placement.
+    Decorative shape chrome is not counted."""
+    if recipe.get("source") != "template-cover":
+        return False
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    items = slide.get("items") or []
+    panel_item = _centre_panel_item(items, wall_w, wall_h, dest_w, dest_h)
+    if panel_item is None:
+        return False
+    for item in items:
+        if item is panel_item or is_side_panel_item(item, wall_w, wall_h):
+            continue
+        if not is_visible(item, wall_w, wall_h):
+            continue
+        kind = item.get("kind") or ""
+        if kind == "image" and is_pairable_image(item):
+            return False
+        if kind in {"movie", "group"}:
+            return False
+        if kind == "text" and not is_placeholder_text(item):
+            return False
+    return True
+
+
 def _slide_for_panel_framing(slide: dict, panel: Rect) -> dict:
     """Framing view without centre-panel thumbnails — they ride the panel affine."""
     threshold = panel.w * panel.h * CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION
@@ -3527,7 +3556,13 @@ def _cover_clamp(affine: Affine, src: Rect, dest_w: float, dest_h: float) -> Aff
 
 
 def _recipe_reusing_affine(
-    slide: dict, recipe: dict[str, Any], affine: Affine, wall_w: float, wall_h: float
+    slide: dict,
+    recipe: dict[str, Any],
+    affine: Affine,
+    wall_w: float,
+    wall_h: float,
+    *,
+    clamp: bool = True,
 ) -> dict[str, Any] | None:
     """Re-anchor this recipe on an adjacent same-pin sibling's affine so a magic-move map stays 1:1."""
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
@@ -3543,7 +3578,7 @@ def _recipe_reusing_affine(
     # mapSrc) or its rotation is absent/unknown, that cannot be proven — refuse the clamp rather than
     # move an already-valid crop on an unproven assumption.
     known_rotation = panel_item.get("rotation") if panel_item is not None else None
-    if known_rotation is not None and _f(known_rotation) % 360 == 0:
+    if clamp and known_rotation is not None and _f(known_rotation) % 360 == 0:
         affine = _cover_clamp(affine, src, dest_w, dest_h)
     dst = affine.apply_rect(src)
     out = dict(recipe)
@@ -3654,6 +3689,7 @@ def plan_payload_transforms(
     prev_number: int | None = None
     prev_template: int | None = None
     prev_affine: Affine | None = None
+    prev_source: str | None = None
     roster_keep, roster_drop = roster_slides(payload.get("slides") or [])
     if roster_report is not None:
         roster_report["keep"] = roster_keep
@@ -3678,6 +3714,7 @@ def plan_payload_transforms(
             slide_recipe = learn_recipe(single, template, template_slide=wanted)
             pin_overridden = False
             reused_sibling = False
+            uncovered_top: float | None = None
             if wanted is not None and _framing_unusable(
                 slide, slide_recipe, wall_w, wall_h, min_on_canvas
             ):
@@ -3700,20 +3737,38 @@ def plan_payload_transforms(
                     if not _framing_unusable(slide, auto_recipe, wall_w, wall_h, min_on_canvas):
                         slide_recipe = auto_recipe
                         pin_overridden = True
-            if framing_report is not None:
-                framing_report.append(
-                    {
-                        "slide": number,
-                        "templateSlide": slide_recipe.get("templateSlide"),
-                        "requested": wanted,
-                        "confirmed": bool(slide_recipe.get("framingPinned")),
-                        "source": slide_recipe.get("source"),
-                        "pairQuality": slide_recipe.get("pairQuality"),
-                        "fitted": False,
-                        "pinOverridden": pin_overridden,
-                        "reusedSibling": reused_sibling,
-                    }
+            elif (
+                wanted is None
+                and prev_number == number - 1
+                and prev_source == "template-layout"
+                and prev_affine is not None
+                and _is_unpinned_photo_only_backdrop(slide, slide_recipe, wall_w, wall_h)
+            ):
+                # clamp=False keeps the reused affine source-faithful, band and all.
+                reused = _recipe_reusing_affine(
+                    slide, slide_recipe, prev_affine, wall_w, wall_h, clamp=False
                 )
+                if reused is not None and not _framing_unusable(
+                    slide, reused, wall_w, wall_h, min_on_canvas
+                ):
+                    slide_recipe = reused
+                    reused_sibling = True
+                    uncovered_top = max(0.0, _f((reused.get("mapDst") or {}).get("y")))
+            if framing_report is not None:
+                row = {
+                    "slide": number,
+                    "templateSlide": slide_recipe.get("templateSlide"),
+                    "requested": wanted,
+                    "confirmed": bool(slide_recipe.get("framingPinned")),
+                    "source": slide_recipe.get("source"),
+                    "pairQuality": slide_recipe.get("pairQuality"),
+                    "fitted": False,
+                    "pinOverridden": pin_overridden,
+                    "reusedSibling": reused_sibling,
+                }
+                if uncovered_top is not None:
+                    row["uncoveredTopPx"] = round(uncovered_top, 1)
+                framing_report.append(row)
         if template and (template.get("slides") or []):
             unusable = _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas)
             if unusable:
@@ -3781,12 +3836,11 @@ def plan_payload_transforms(
             )
         transforms.extend(planned)
         used_affine = frame_affine(slide_recipe)
-        prev_affine = (
-            used_affine
-            if used_affine is not None
-            and not _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas)
-            else None
+        slide_still_usable = used_affine is not None and not _framing_unusable(
+            slide, slide_recipe, wall_w, wall_h, min_on_canvas
         )
+        prev_affine = used_affine if slide_still_usable else None
+        prev_source = slide_recipe.get("source") if slide_still_usable else None
         prev_number = number
         prev_template = (
             slide_recipe.get("templateSlide")

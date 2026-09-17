@@ -1194,7 +1194,7 @@ def remap_keynote(
                 else ""
             )
         )
-    reused = [r for r in framing_rows if r.get("reusedSibling")]
+    reused = [r for r in framing_rows if r.get("reusedSibling") and r.get("uncoveredTopPx") is None]
     if reused:
         say(
             f"Kept {len(reused)} slide(s) 1:1 with the page before them by reusing "
@@ -1203,6 +1203,16 @@ def remap_keynote(
             + ("…" if len(reused) > 10 else "")
             + " (their own art paired to a sliver, but they share the pin and are "
             "adjacent, so the magic-move map stays put)."
+        )
+    banded = [r for r in framing_rows if r.get("uncoveredTopPx") is not None]
+    if banded:
+        say(
+            "Carried the previous slide's framing onto "
+            + ", ".join(
+                f"slide {r['slide']} (~{r['uncoveredTopPx']:.0f}px uncovered at the top)"
+                for r in banded
+            )
+            + " to stay source-faithful — this backdrop has no content of its own to frame."
         )
     overridden = [r for r in framing_rows if r.get("pinOverridden")]
     if overridden:
