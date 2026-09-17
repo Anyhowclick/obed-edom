@@ -112,9 +112,10 @@ def plan_movie_posters(deck: Path, targets: list[dict]) -> dict:
 
 
 def plan_movie_autoplay(deck: Path, targets: list[dict]) -> dict:
-    """Same one-to-one geometry match as `plan_movie_posters`, for landmark reveal
-    movies that should start playing right after the slide's build-in transition.
-    `target` needs only x/y/w/h/name.
+    """Same one-to-one geometry match as `plan_movie_posters`, for movies that
+    should start playing right after the slide's build-in transition (fly
+    backdrops, pin-drop waves, and landmark reveals). `target` needs only
+    x/y/w/h/name.
     """
     match = _match_one_to_one(deck, targets)
     if match["refused"]:
@@ -297,10 +298,10 @@ def movie_autoplay_state(deck: Path, ids: list[str]) -> dict[str, dict[str, Any]
 
 
 def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:
-    """Start each named landmark reveal movie right after its slide's build-in
-    transition: set the movie's ``apple:movie-start`` build chunk's ``automatic`` to
-    ``True`` and the movie's own ``playsAcrossSlides`` to ``False`` (probe-confirmed
-    against Keynote's own "Start = After Transition" save). Refuses (deck untouched)
+    """Start each named movie right after its slide's build-in transition: set
+    the movie's ``apple:movie-start`` build chunk's ``automatic`` to ``True`` and
+    the movie's own ``playsAcrossSlides`` to ``False`` (probe-confirmed against
+    Keynote's own "Start = After Transition" save). Refuses (deck untouched)
     unless every id resolves to a ``TSD.MovieArchive`` with exactly one such build
     and chunk.
     """

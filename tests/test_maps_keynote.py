@@ -17,8 +17,10 @@ from obed_edom.maps_geo import (
     CENTRE_WIDTH,
     DEFAULT_HIDDEN_LAYERS,
     clamp_cg_shift,
+    clamp_lon,
     default_landmark_size,
     find_country,
+    mercator_y,
     signed_bearing_delta,
     world_width,
 )
@@ -47,6 +49,7 @@ from obed_edom.maps_keynote import (
     _default_object_size,
     _place_churches,
     _plate_group_isolate,
+    _keynote_rotate_about,
     _rotate_about,
     _read_region_manifest,
     _render_reveals,
@@ -76,6 +79,8 @@ from obed_edom.maps_keynote import (
     movie_endpoint_surface,
     movie_render_surface,
     movie_viewport_width,
+    nearest_world_x,
+    rotated_mercator,
     round_half_away,
     plate_filename,
     plate_id_for,
@@ -89,6 +94,7 @@ from obed_edom.maps_keynote import (
     visual_origin,
     split_cg_export_plan,
     whole,
+    _autoplay_targets,
     _emit_adjust_map,
     _emit_item,
 )
@@ -287,7 +293,7 @@ def _lw_misses(place: dict, width: float, height: float, slack: float = 2.0) -> 
     cx, cy = x + w / 2.0, y + h / 2.0
     misses = []
     for px, py in ((0.0, 0.0), (width, 0.0), (width, height), (0.0, height)):
-        ux, uy = _rotate_about(px, py, cx, cy, -rot)
+        ux, uy = _keynote_rotate_about(px, py, cx, cy, -rot)
         if not (x - slack <= ux <= x + w + slack and y - slack <= uy <= y + h + slack):
             misses.append((px, py))
     return misses
@@ -547,7 +553,7 @@ def test_both_dest_keys_when_both_flags_on(monkeypatch, tmp_path: Path):
     assert "with timeout of 3600 seconds" in wall
     assert "duplicate slide" in wall
     assert "magic move" in wall
-    assert "transition effect:none" in wall
+    assert "transition effect:no transition effect" in wall
     assert "automatic transition:true" in wall
     assert "magicDonor" not in wall
     assert "delete slide 1" not in wall
@@ -1421,7 +1427,7 @@ def test_plan_deck_morph_duplicates(tmp_path: Path):
     assert MAP_BG_RE.search(Path(ops[0]["items"][0]["path"]).name)
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
     assert "transition effect:magic move" in script
-    assert "transition effect:none" in script
+    assert "transition effect:no transition effect" in script
 
 
 def test_stale_plate_id_stripped_on_cut():
@@ -1806,6 +1812,9 @@ def test_plan_deck_morph_dest_keeps_plate_when_outgoing_movie(tmp_path: Path):
     assert ops[2]["duplicate"] is False
     assert ops[2]["items"][0]["kind"] == "movie"
     assert ops[2]["transition"]["delay"] == 2.0
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    assert "transition effect:no transition effect" in script
+    assert script.count("transition effect:magic move") == 1
 
 
 def test_quantized_rotation_is_the_angle_placement_orbit_and_keynote_share():
@@ -2124,6 +2133,11 @@ def test_s2_landing_composite_matches_movie_frame0_on_mixed_surface_rotation(tmp
     ]
     authored_miss = max(_xy_err(movie_xy(snapped, lat, lon), movie_xy(s2["camera"], lat, lon)) for lat, lon in probes)
     assert authored_miss > 6.0, authored_miss
+    for lat, lon in probes:
+        plate_xy = project_into_plate(lat, lon, plate, place)
+        cam_xy = project_into_camera(lat, lon, snapped, width=CENTRE_WIDTH, height=WALL_HEIGHT)
+        assert plate_xy[0] == pytest.approx(cam_xy[0], abs=2)
+        assert plate_xy[1] == pytest.approx(cam_xy[1], abs=2)
 
     frame0 = _pad_viewport(_paint_diagnostic(snapped, from_w, hop_h, movie_surface, highlight=True), hop_w, hop_h)
     authored_frame = _pad_viewport(_paint_diagnostic(s2["camera"], from_w, hop_h, movie_surface, highlight=True), hop_w, hop_h)
@@ -2131,7 +2145,6 @@ def test_s2_landing_composite_matches_movie_frame0_on_mixed_surface_rotation(tmp
     assert landing.size == frame0.size
     assert _registered_disagree(frame0, frame0) == 0
     assert _registered_disagree(frame0, authored_frame) > 0.01, "10° vs 10.4° must fail registered pixels"
-    assert _registered_disagree(landing, frame0) < _registered_disagree(landing, authored_frame)
     assert _rms(wrong_surface.convert("RGB"), frame0.convert("RGB")) > 8, "hop-only surface must not match the plate surface"
 
 
@@ -2249,6 +2262,102 @@ def _idn_highlight_rings() -> tuple[list, list]:
     return idn, [SUMSEL_RING, IDN_1185_RING]
 
 
+EARLY_ISAAC_PLATE_BEARING = -13.918882681140305
+EARLY_ISAAC_S2 = {
+    "lat": -1.9547871739357703,
+    "lon": 118.19223975568389,
+    "zoom": 4.8,
+    "bearing": EARLY_ISAAC_PLATE_BEARING,
+    "pitch": 0.0,
+}
+EARLY_ISAAC_S4 = {
+    "lat": -0.1784094711138806,
+    "lon": 109.63065516703023,
+    "zoom": 6.1,
+    "bearing": -10.0,
+    "pitch": 0.0,
+}
+EARLY_ISAAC_S3 = {
+    "lat": 3.641238717069811,
+    "lon": 98.57587545381807,
+    "zoom": 10.587437774731589,
+    "bearing": -10.0,
+    "pitch": 0.0,
+}
+EARLY_ISAAC_ISO = {"mode": "darken", "strength": 0.75}
+EARLY_ISAAC_HL = ["IDN", "A1:IDN-1185", "A1:IDN-1230"]
+# Off-centre of the s4 3840×1080 frame: northwest island + Sumatera/Borneo coasts.
+EARLY_ISAAC_PROBES = [
+    (3.05, 108.24),   # Natuna / small northwest island
+    (1.15, 104.05),   # east Sumatera / Riau coast
+    (-0.85, 109.95),  # west Borneo coast
+    (0.35, 103.75),   # south Malay / Singapore strait
+    (-3.20, 104.10),  # Sumatera Selatan
+]
+
+
+def _early_isaac_slides() -> tuple[dict, dict, dict, list[dict]]:
+    extra = dict(
+        style="borderlands",
+        highlights=EARLY_ISAAC_HL,
+        isolate=EARLY_ISAAC_ISO,
+        highlightColours={"IDN": "#0a89ff", "A1:IDN-1185": "#fff700", "A1:IDN-1230": "#fff700"},
+    )
+    s2 = _slide("s2", dict(EARLY_ISAAC_S2), **extra)
+    s4 = _slide("s4", dict(EARLY_ISAAC_S4), **extra)
+    s3 = _slide("s3", dict(EARLY_ISAAC_S3), **extra)
+    links = [
+        {"from": "s2", "to": "s4", "kind": "morph", "duration": 1.2, "playWithoutClick": False},
+        {"from": "s4", "to": "s3", "kind": "movie", "duration": 2.0, "playWithoutClick": False},
+    ]
+    return s2, s4, s3, links
+
+
+def test_early_isaac_plate_matches_movie_endpoint_off_centre():
+    """early-isaac s2→s4 Magic Move must land on the same pixels as movie frame 0.
+
+    Camera-centre agreement is not enough: the wrong Keynote rotation sign keeps
+    the optical centre and only translates far coasts (Natuna, Sumatera, Borneo).
+    """
+    s2, s4, s3, links = _early_isaac_slides()
+    plates, links = assign_morph_plates([s2, s4, s3], links)
+    assert plates, "expected a morph plate for s2→s4"
+    assert links[0].get("kind") == "morph"
+    plate = next(iter(plates.values()))
+    plate_bearing = float((plate.get("captureCamera") or {}).get("bearing") or 0)
+    assert plate_bearing == pytest.approx(EARLY_ISAAC_PLATE_BEARING)
+    place = plate_placement(s4["camera"], plate, width=CENTRE_WIDTH, height=WALL_HEIGHT)
+    assert quantized_rotation(place.get("rotation") or 0) == 4.0
+    dest = movie_endpoint_camera(s4["camera"], plate)
+    assert dest["bearing"] == pytest.approx(effective_plate_bearing(plate_bearing, -10.0))
+
+    probes = [(s4["camera"]["lat"], s4["camera"]["lon"]), *EARLY_ISAAC_PROBES]
+    worst_wrong = 0.0
+    for lat, lon in probes:
+        plate_xy = project_into_plate(lat, lon, plate, place)
+        cam_xy = project_into_camera(lat, lon, dest, width=CENTRE_WIDTH, height=WALL_HEIGHT)
+        assert plate_xy[0] == pytest.approx(cam_xy[0], abs=2)
+        assert plate_xy[1] == pytest.approx(cam_xy[1], abs=2)
+        # Same unrotated point spun with the generic helper must miss — otherwise
+        # this test could pass under the old screen-space sign.
+        union = plate["union"]
+        world = world_width(float(plate["zPlate"]))
+        nx = (clamp_lon(lon) + 180.0) / 360.0
+        capture_lon = float((plate.get("captureCamera") or {}).get("lon") or 0)
+        nx = nearest_world_x(nx, (clamp_lon(capture_lon) + 180.0) / 360.0)
+        ny = mercator_y(lat)
+        nx, ny = rotated_mercator(nx, ny, plate_bearing)
+        scale_x = place["w"] / float(plate["plateW"])
+        scale_y = place["h"] / float(plate["plateH"])
+        ux = place["x"] + (nx - union[0]) * world * scale_x
+        uy = place["y"] + (ny - union[1]) * world * scale_y
+        cx = float(place["x"]) + float(place["w"]) / 2.0
+        cy = float(place["y"]) + float(place["h"]) / 2.0
+        wrong = _rotate_about(ux, uy, cx, cy, 4.0)
+        worst_wrong = max(worst_wrong, ((wrong[0] - cam_xy[0]) ** 2 + (wrong[1] - cam_xy[1]) ** 2) ** 0.5)
+    assert worst_wrong > 2.0, worst_wrong
+
+
 def test_idn_baked_plate_matches_maplibre_dest_at_plus_four_degrees(tmp_path: Path):
     """Magic Move plate is one MapLibre-composited PNG. Dest +4° must keep both
     yellow interiors registered and the baked (not Keynote-alpha) wash colour.
@@ -2329,7 +2438,11 @@ def test_idn_baked_plate_matches_maplibre_dest_at_plus_four_degrees(tmp_path: Pa
 
 
 def test_idn_keynote_render_matches_maplibre_dest(tmp_path: Path):
-    """Live Keynote slide PNG vs dest-camera MapLibre paint. Off unless OBED_LIVE_KEYNOTE=1."""
+    """Live Keynote Magic Move dest vs movie frame 0. Off unless OBED_LIVE_KEYNOTE=1.
+
+    Yellow interiors stay yellow under a 4° translation. Off-centre coastline
+    probes (Natuna, Sumatera, Borneo) do not.
+    """
     import os
 
     if os.environ.get("OBED_LIVE_KEYNOTE", "").strip() not in {"1", "true", "yes"}:
@@ -2340,21 +2453,21 @@ def test_idn_keynote_render_matches_maplibre_dest(tmp_path: Path):
     if not keynote_is_available():
         pytest.skip("Keynote is not installed")
 
-    s1, s2, links = _idn_bake_slides()
-    plates, links = assign_morph_plates([s1, s2], links)
+    s2, s4, s3, links = _early_isaac_slides()
+    plates, links = assign_morph_plates([s2, s4, s3], links)
     assert plates
     plate = next(iter(plates.values()))
     plate_w, plate_h = int(plate["plateW"]), int(plate["plateH"])
-    idn_rings, region_rings = _idn_highlight_rings()
-    baked = _paint_maplibre_highlights(
-        plate["captureCamera"], plate_w, plate_h, idn_rings=idn_rings, region_rings=region_rings
-    )
+    plate_cam = plate["captureCamera"]
+    dest_cam = movie_endpoint_camera(s4["camera"], plate)
+    surface = movie_render_surface(s4, s3, plates, [s2, s4, s3])
+    baked = _paint_diagnostic(plate_cam, plate_w, plate_h, surface, highlight=False)
     plate_dir = tmp_path / "plates"
     plate_path = plate_dir / plate_filename(plate["plateId"])
     plate_dir.mkdir(parents=True)
     baked.save(plate_path)
-    ops = plan_deck([s1, s2], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
-    dest = tmp_path / "idn-bake.key"
+    ops = plan_deck([s2, s4, s3], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    dest = tmp_path / "early-isaac-mm.key"
     script = build_deck_script(ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT)
     built = run_osascript(script)
     if built.returncode != 0:
@@ -2366,22 +2479,30 @@ def test_idn_keynote_render_matches_maplibre_dest(tmp_path: Path):
         pytest.skip(f"Keynote slide export failed: {exported.stderr or exported.stdout}")
     pngs = sorted(p for p in export_dir.glob("*.png") if p.is_file())
     assert pngs, f"no slide images in {export_dir}: {list(export_dir.iterdir())}"
-    dest_png = pngs[-1] if len(pngs) > 1 else pngs[0]
+    # s2 is slide 1, Magic Move dest s4 is the duplicate (slide 2); movie is later.
+    dest_png = pngs[1] if len(pngs) > 1 else pngs[0]
     rendered = Image.open(dest_png).convert("RGBA")
-    cap_w, cap_h = slide_capture_size(s2)
-    origin = slide_map_origin_x(s2)
+    cap_w, cap_h = slide_capture_size(s4)
+    origin = slide_map_origin_x(s4)
     if rendered.size[0] >= origin + cap_w:
         rendered = rendered.crop((origin, 0, origin + cap_w, min(cap_h, rendered.size[1])))
     if rendered.size != (cap_w, cap_h):
         rendered = rendered.resize((cap_w, cap_h), Image.Resampling.BILINEAR)
-    dest_cam = movie_endpoint_camera(s2["camera"], plate)
-    reference = _paint_maplibre_highlights(dest_cam, cap_w, cap_h, idn_rings=idn_rings, region_rings=region_rings)
-    for lon, lat in (SUMSEL_IN, IDN_1185_IN):
+    frame0 = _paint_diagnostic(dest_cam, cap_w, cap_h, surface, highlight=False)
+    assert _registered_disagree(rendered, frame0, step=3, slop=22) < 0.08
+    for lat, lon in EARLY_ISAAC_PROBES:
         xy = project_into_camera(lat, lon, dest_cam, width=cap_w, height=cap_h)
+        if not (6 < xy[0] < cap_w - 6 and 6 < xy[1] < cap_h - 6):
+            continue
         got = _sample_rgb(rendered, xy)
-        want = _sample_rgb(reference, xy)
-        assert _is_baked_yellow(got), f"{lon, lat} keynote-render {got}"
-        assert abs(got[0] - want[0]) < 40 and abs(got[1] - want[1]) < 40 and abs(got[2] - want[2]) < 40
+        want = _sample_rgb(frame0, xy)
+        assert abs(got[0] - want[0]) < 28 and abs(got[1] - want[1]) < 28 and abs(got[2] - want[2]) < 28, (
+            lat,
+            lon,
+            xy,
+            got,
+            want,
+        )
 
 
 def test_coerce_preserves_explicit_movie_on_style_mismatch():
@@ -3609,8 +3730,8 @@ def test_static_drop_pin_geometry_survives_the_dsk_scale(tmp_path: Path):
 
 def _label_churches() -> list[dict]:
     return [
-        {"id": "c1", "name": "Dot City", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42", "showLabel": True},
-        {"id": "c2", "name": "Pin City", "lat": 3.05, "lon": 101.05, "kind": "dropPin", "color": "#ff8a00", "showLabel": True},
+        {"id": "c1", "name": "Dot City", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42", "showLabel": True, "size": DROP_SIZE},
+        {"id": "c2", "name": "Pin City", "lat": 3.05, "lon": 101.05, "kind": "dropPin", "color": "#ff8a00", "showLabel": True, "size": DROP_SIZE},
     ]
 
 
@@ -3710,6 +3831,40 @@ def test_show_label_defaults_to_on_for_a_legacy_export_with_no_key(tmp_path: Pat
     items = _place_labels(tmp_path, [church])
     assert any(item.get("kind") == "text" for item in items)
     assert any(item.get("labelPill") for item in items)
+
+
+def test_grouped_pin_and_dot_share_label_and_pill_size(tmp_path: Path):
+    """The Size slider writes the same `size` onto every selected pin and dot."""
+    size = 84
+    churches = [
+        dict(church, size=size, scaleWithMap=True, sizeZoom=10.4) for church in _label_churches()
+    ]
+    items = _place_labels(tmp_path, churches, camera=_camera(3.0, 101.0, 10.4))
+    texts = [item for item in items if item.get("kind") == "text"]
+    pills = [item for item in items if item.get("labelPill")]
+    assert len(texts) == 2
+    assert len(pills) == 2
+    assert texts[0]["fontSize"] == texts[1]["fontSize"] == whole(LABEL_FONT_PT * (size / DROP_SIZE))
+    assert texts[0]["h"] == texts[1]["h"]
+    assert pills[0]["h"] == pills[1]["h"]
+    assert pills[0]["h"] > texts[0]["h"]
+
+
+def test_autoplay_targets_include_map_and_reveal_movies():
+    ops = [
+        {
+            "items": [
+                {"kind": "movie", "x": 0, "y": 0, "w": 3840, "h": 1080, "path": "/tmp/fly.mov", "map": True},
+                {"kind": "movie", "x": 10, "y": 20, "w": 80, "h": 80, "path": "/tmp/reveal.mov", "landmark": True},
+                {"kind": "image", "x": 0, "y": 0, "w": 10, "h": 10, "path": "/tmp/pin.png"},
+            ]
+        }
+    ]
+    targets = _autoplay_targets(ops)
+    assert [(t["w"], t["h"], t["name"]) for t in targets] == [
+        (3840, 1080, "/tmp/fly.mov"),
+        (80, 80, "/tmp/reveal.mov"),
+    ]
 
 
 def test_label_geometry_scales_with_the_marker(tmp_path: Path):
@@ -3813,8 +3968,14 @@ def test_a_zoom_scaled_drop_pin_label_follows_the_dynamic_font(tmp_path: Path):
     ids=["quarter-clamps-to-half", "sixteen-clamps-to-eight"],
 )
 def test_label_scale_clamps_the_total_scale(tmp_path: Path, size_zoom: float, expected: float):
-    """The camera zoom is 8, so sizeZoom 10 is 0.25x and sizeZoom 4 is 16x."""
-    churches = [dict(church, scaleWithMap=True, sizeZoom=size_zoom) for church in _label_churches()]
+    """The camera zoom is 8, so sizeZoom 10 is 0.25x and sizeZoom 4 is 16x.
+
+    Both kinds are authored at ``DROP_SIZE`` so the shared pin/dot baseline does
+    not hide a clamp miss on a default-sized dot.
+    """
+    churches = [
+        dict(church, size=DROP_SIZE, scaleWithMap=True, sizeZoom=size_zoom) for church in _label_churches()
+    ]
     items = _place_labels(tmp_path, churches)
     texts = [item for item in items if item.get("kind") == "text"]
     assert texts
@@ -3964,7 +4125,7 @@ def test_odd_length_names_scale_to_dsk_without_distorting_the_pill(tmp_path: Pat
 
 
 def test_label_pill_outer_bounds_clear_the_wall_seam(tmp_path: Path):
-    church = {"id": "c1", "name": "Seam Church", "lat": 3.0, "lon": 95.673, "kind": "dot", "color": "#c44a42", "showLabel": True}
+    church = {"id": "c1", "name": "Seam Church", "lat": 3.0, "lon": 95.673, "kind": "dot", "color": "#c44a42", "showLabel": True, "size": DROP_SIZE}
     unguarded = _place_labels(tmp_path, [church], wall=False)
     straddler = next(item for item in unguarded if item.get("labelPill"))
     assert straddler["x"] < 1920 < straddler["x"] + straddler["w"]

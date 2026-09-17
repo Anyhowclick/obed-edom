@@ -409,7 +409,7 @@ def _slide_xy_to_mercator(
     if rot:
         cx = float(placement["x"]) + float(placement["w"]) / 2.0
         cy = float(placement["y"]) + float(placement["h"]) / 2.0
-        ux, uy = _rotate_about(sx, sy, cx, cy, -rot)
+        ux, uy = _keynote_rotate_about(sx, sy, cx, cy, -rot)
     scale_x = float(placement["w"]) / float(plate["plateW"]) if plate["plateW"] else 1.0
     scale_y = float(placement["h"]) / float(plate["plateH"]) if plate["plateH"] else 1.0
     world = world_width(float(plate["zPlate"]))
@@ -549,7 +549,7 @@ def _place_plate_float(
         cy = img_y + disp_h / 2.0
         vx, vy = width / 2.0, height / 2.0
         dx, dy = vx - cx, vy - cy
-        rdx, rdy = _rotate_about(dx, dy, 0.0, 0.0, rotation)
+        rdx, rdy = _keynote_rotate_about(dx, dy, 0.0, 0.0, rotation)
         img_x = vx - rdx - disp_w / 2.0
         img_y = vy - rdy - disp_h / 2.0
     row: dict[str, Any] = {"x": img_x, "y": img_y, "w": disp_w, "h": disp_h}
@@ -567,8 +567,9 @@ def plate_placement(
 ) -> dict[str, Any]:
     """Place the shared plate so this camera is full-bleed on its capture canvas.
 
-    `x`/`y` are the unrotated top-left. A non-zero `rotation` is Keynote's CCW
-    iWork angle (degrees) so Magic Move can spin the same PNG to a new bearing.
+    `x`/`y` are the unrotated top-left. A non-zero `rotation` is Keynote's
+    iWork angle (degrees, clockwise on screen) so Magic Move can spin the same
+    PNG to a new bearing.
     """
     width = float(width if width is not None else plate.get("width") or WALL_WIDTH)
     height = float(height if height is not None else plate.get("height") or WALL_HEIGHT)
@@ -585,12 +586,26 @@ def plate_placement(
 
 
 def _rotate_about(px: float, py: float, cx: float, cy: float, degrees: float) -> tuple[float, float]:
-    """Rotate (px, py) about (cx, cy) by Keynote's CCW-positive angle."""
+    """Rotate (px, py) about (cx, cy) by a Y-up CCW-positive angle.
+
+    Do not call this for Keynote image placement — iWork's positive rotation is
+    clockwise in screen coordinates. Use `_keynote_rotate_about`.
+    """
     theta = math.radians(float(degrees) or 0.0)
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
     dx, dy = px - cx, py - cy
     return cx + cos_t * dx - sin_t * dy, cy + sin_t * dx + cos_t * dy
+
+
+def _keynote_rotate_about(px: float, py: float, cx: float, cy: float, degrees: float) -> tuple[float, float]:
+    """Rotate (px, py) about (cx, cy) the way Keynote spins an image.
+
+    Positive iWork `rotation` is clockwise in screen coordinates (Y down).
+    `_rotate_about` is the opposite screen-space transform, so every forward
+    Keynote placement passes the negated angle through that helper.
+    """
+    return _rotate_about(px, py, cx, cy, -(float(degrees) or 0.0))
 
 
 def round_half_away(value: float) -> int:
@@ -653,13 +668,13 @@ def keynote_rotation(degrees: float) -> int:
 
 
 def visual_origin(x: float, y: float, w: float, h: float, rotation: float) -> tuple[int, int]:
-    """AABB top-left after CCW rotation about the unrotated frame centre."""
+    """AABB top-left after Keynote screen-space rotation about the frame centre."""
     rotation = quantized_rotation(rotation)
     if not rotation:
         return whole(x), whole(y)
     cx, cy = x + w / 2.0, y + h / 2.0
     corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-    rot = [_rotate_about(px, py, cx, cy, rotation) for px, py in corners]
+    rot = [_keynote_rotate_about(px, py, cx, cy, rotation) for px, py in corners]
     return whole(min(p[0] for p in rot)), whole(min(p[1] for p in rot))
 
 
@@ -672,7 +687,7 @@ def orbit_item(item: dict[str, Any], origin: dict[str, Any], rotation: float) ->
     ocy = float(origin["y"]) + float(origin["h"]) / 2.0
     icx = float(item["x"]) + float(item["w"]) / 2.0
     icy = float(item["y"]) + float(item["h"]) / 2.0
-    ncx, ncy = _rotate_about(icx, icy, ocx, ocy, rotation)
+    ncx, ncy = _keynote_rotate_about(icx, icy, ocx, ocy, rotation)
     next_item = dict(item)
     next_item["x"] = ncx - float(item["w"]) / 2.0
     next_item["y"] = ncy - float(item["h"]) / 2.0
@@ -703,7 +718,7 @@ def project_into_plate(
     if rotation:
         cx = float(placement["x"]) + float(placement["w"]) / 2.0
         cy = float(placement["y"]) + float(placement["h"]) / 2.0
-        px, py = _rotate_about(px, py, cx, cy, rotation)
+        px, py = _keynote_rotate_about(px, py, cx, cy, rotation)
     return px, py
 
 
@@ -1417,8 +1432,14 @@ def _default_object_size(kind: str, church: dict[str, Any] | None = None) -> int
 
 
 def _label_scale(church: dict[str, Any], size: float) -> float:
-    """`size` is the zoom-scaled marker size, so the clamp bounds the total scale."""
-    base = _default_object_size(str(church.get("kind") or "dot"), church)
+    """`size` is the zoom-scaled marker size, so the clamp bounds the total scale.
+
+    Pins and dots share ``DROP_SIZE`` as the 1× baseline so a grouped pin and
+    dot that share a size also share text and pill sizes. Landmarks keep their
+    own authored default as 1×.
+    """
+    kind = str(church.get("kind") or "dot")
+    base = _default_object_size(kind, church) if kind == "landmark" else float(DROP_SIZE)
     scale = size / base if base else 1.0
     return min(LABEL_SCALE_MAX, max(LABEL_SCALE_MIN, scale))
 
@@ -1508,7 +1529,7 @@ def _place_churches(
             copy_dy = -math.sin(theta) * copy_world * scale_y
             rotation = quantized_rotation(placement.get("rotation") or 0)
             if rotation:
-                copy_dx, copy_dy = _rotate_about(copy_dx, copy_dy, 0.0, 0.0, rotation)
+                copy_dx, copy_dy = _keynote_rotate_about(copy_dx, copy_dy, 0.0, 0.0, rotation)
         else:
             base_x, base_y = project_into_camera(lat, lon, camera, width=capture_w)
             copy_world = world_width(float(camera.get("zoom") or 0))
@@ -1980,7 +2001,8 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
     if kind == "movie":
         path = _as_escape(item["path"])
         # `make new image with properties {file:<mov>}` yields a movie object in Keynote 15;
-        # `make new movie` no longer imports the file. Autoplay-on-appear still needs a manual check.
+        # `make new movie` no longer imports the file. Start = After Transition is patched
+        # offline by `_apply_movie_autoplay` (AppleScript exposes no autoplay property).
         if item.get("map"):
             return [
                 f'        set movFile to (POSIX file "{path}") as alias',
@@ -2045,7 +2067,9 @@ def _emit_transition(slide_no: int, trans: dict[str, Any] | None) -> list[str]:
     elif effect == "dissolve":
         props.append("transition effect:dissolve")
     else:
-        props.append("transition effect:none")
+        # Keynote's enumerator is `no transition effect`, not `none`. A duplicate
+        # Magic Move dest inherits the source transition; a failed set leaves it.
+        props.append("transition effect:no transition effect")
     if trans.get("duration") is not None:
         props.append(f"transition duration:{float(trans['duration'])}")
     if trans.get("automatic"):
@@ -2370,14 +2394,26 @@ def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[s
 
 
 def _autoplay_targets(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every movie on the slide — fly backdrop, pin-drop wave, and reveal alike.
+
+    Keynote inserts them as On Click; `_apply_movie_autoplay` flips Start to
+    After Transition so the movie plays once the incoming slide transition
+    (including `no transition effect`) has been triggered.
+    """
     targets: list[dict[str, Any]] = []
     for op in ops:
         for item in op.get("items") or []:
-            if item.get("landmark") and item.get("kind") == "movie":
-                targets.append(
-                    {"x": float(item["x"]), "y": float(item["y"]), "w": float(item["w"]), "h": float(item["h"]),
-                     "name": item.get("path")}
-                )
+            if item.get("kind") != "movie":
+                continue
+            targets.append(
+                {
+                    "x": float(item["x"]),
+                    "y": float(item["y"]),
+                    "w": float(item["w"]),
+                    "h": float(item["h"]),
+                    "name": item.get("path"),
+                }
+            )
     return targets
 
 
@@ -2391,13 +2427,14 @@ def _apply_movie_autoplay(
     height: int,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any] | None:
-    """Patch reveal movies in ``dest`` to start right after their slide's build-in
+    """Patch movies in ``dest`` to start right after their slide's build-in
     transition, no click needed (owner 2026-09-12 probe: Keynote's AppleScript movie
     class exposes no autoplay-style property -- only file name/volume/reflection/
     repetition method/rotation, see Keynote.sdef -- so this is patched offline the
-    same way Keynote itself saves "Start = After Transition"). Gated behind
-    `OBED_MAPS_MOVIE_AUTOPLAY` (default on); a refusal is never fatal to export, same
-    containment as `_apply_poster_frames`."""
+    same way Keynote itself saves "Start = After Transition"). Applies to fly
+    backdrops as well as reveal movies. Gated behind `OBED_MAPS_MOVIE_AUTOPLAY`
+    (default on); a refusal is never fatal to export, same containment as
+    `_apply_poster_frames`."""
     mode = maps_movie_autoplay_mode()
     from obed_edom.offline_write import probe_iwa_extra
 
@@ -2428,7 +2465,7 @@ def _apply_movie_autoplay(
                 "regenerated": False,
             }
 
-        _log(job, f"movieAutoplay {deck_label}: patched {patched['applied']} reveal movie(s)")
+        _log(job, f"movieAutoplay {deck_label}: patched {patched['applied']} movie(s)")
         if mode == "verify":
             state = movie_autoplay_state(dest, patched["touched"])
             bad: list[str] = []

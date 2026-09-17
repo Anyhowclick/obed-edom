@@ -447,11 +447,13 @@ export const LABEL_GAP_EMS = 0.35;
 const PILL_PAD_X_PX = 6;
 export const PILL_PAD_Y_PX = 2;
 
-/** Mirrors `maps_keynote._label_scale`: authored size over the kind's default, every kind alike.
- * The zoom-driven half of the total scale lives in the `icon-size` stops, which carry the clamp. */
+/** Mirrors `maps_keynote._label_scale`: pins and dots share the drop-pin default so a
+ * grouped pin and dot at the same size get the same text and pill. Landmarks use their
+ * own authored default as 1×. Zoom lives in the `icon-size` stops, which carry the clamp. */
 function labelScale(kind: string, size: number, assetWidth = 0): number {
-  const base = defaultObjectSize(kind, assetWidth);
-  return base ? size / base : 1;
+  const base = kind === "landmark" ? defaultObjectSize(kind, assetWidth) : defaultObjectSize("dropPin");
+  const raw = base ? size / base : 1;
+  return Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, raw));
 }
 
 /** `icon-text-fit-padding` and an image's corner radius are layout constants, so the pill's

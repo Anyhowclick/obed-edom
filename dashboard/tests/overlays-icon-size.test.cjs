@@ -264,6 +264,15 @@ test("labelOffset in icon pixels clears a non-scaling dropPin of either authored
   }
 });
 
+test("a grouped pin and dot at the same size share labelScale so text and pill match", () => {
+  const size = 84;
+  const pin = churchesGeo([{ id: "p", name: "Pin", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size }], null, false, 1);
+  const dot = churchesGeo([{ id: "d", name: "Dot", lat: 0, lon: 0, kind: "dot", color: "#fff", size }], null, false, 1);
+  assert.equal(pin.features[0].properties.labelScale, size / 64);
+  assert.equal(dot.features[0].properties.labelScale, pin.features[0].properties.labelScale);
+  assert.equal(pin.features[0].properties.labelBucket, dot.features[0].properties.labelBucket);
+});
+
 test("a landmark's labelScale is 1 at the size it is created at, defaultLandmarkSize(assetWidth)", () => {
   const baseline = defaultLandmarkSize(600);
   const one = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "landmark", color: "#fff", assetWidth: 600, size: baseline }], null, false, 1);
@@ -281,7 +290,7 @@ test("labelOffset clears a non-scaling marker past the icon-size clamp", () => {
   const size = 64 * 16;
   const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size }], null, false, 1);
   const props = geo.features[0].properties;
-  assert.equal(props.labelScale, 16);
+  assert.equal(props.labelScale, 8);
   const screen = -props.labelOffset0[1] * labelIconSize()(0, props);
   assert.ok(screen > size * 1.45);
 });
