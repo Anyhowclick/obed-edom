@@ -1782,19 +1782,38 @@ def remap_and_inspect(
         kind_index_map_raw = (info.get("zorderWrite") or {}).get("kindIndexMap") or {}
         kindindex_remap = offline_write.coerce_kind_index_map(kind_index_map_raw)
         multiset_kinds_by_slide = {n: {"group"} for n in stat_slides}
+        fallback_kinds_raw = ow.get("fallbackKinds") or {}
+        not_gated_kinds_by_slide = {
+            n: kinds & set(fallback_kinds_raw.get(str(n), ()))
+            for n, kinds in multiset_kinds_by_slide.items()
+        }
+        not_gated_kinds_by_slide = {n: ks for n, ks in not_gated_kinds_by_slide.items() if ks}
+        gated_kinds_by_slide = {
+            n: kinds - not_gated_kinds_by_slide.get(n, set())
+            for n, kinds in multiset_kinds_by_slide.items()
+        }
+        gated_kinds_by_slide = {n: ks for n, ks in gated_kinds_by_slide.items() if ks}
         live_report = offline_write.verify_live_frames(
             planned, payload,
             kindindex_remap=kindindex_remap,
             multiset_kinds_by_slide=multiset_kinds_by_slide,
         )
         set_report = offline_write.verify_live_frames_multiset(
-            planned, payload, multiset_kinds_by_slide
+            planned, payload, gated_kinds_by_slide
         )
         coverage = offline_write.live_verify_coverage(
-            planned, kindindex_remap, multiset_kinds_by_slide
+            planned, kindindex_remap, multiset_kinds_by_slide,
+            not_gated_kinds_by_slide=not_gated_kinds_by_slide,
         )
         if log:
             log(offline_write.format_live_verify_coverage(coverage))
+            if not_gated_kinds_by_slide:
+                n_buckets = sum(len(ks) for ks in not_gated_kinds_by_slide.values())
+                log(
+                    f"live verify (set): {n_buckets} group bucket(s) on "
+                    f"{len(not_gated_kinds_by_slide)} slide(s) NOT GATED (AppleScript "
+                    "fallback)."
+                )
             if coverage["uncovered"]:
                 log(
                     f"offline-write live verify: UNCOVERED {coverage['uncovered']} -- "

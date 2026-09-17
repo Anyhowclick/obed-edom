@@ -931,16 +931,46 @@ def test_live_verify_coverage_unresolved_kindindex_still_covered_via_multiset_ro
     assert coverage["coveredSlides"] == 1
 
 
+def test_live_verify_coverage_not_gated_bucket_counted_separately_not_uncovered_not_set():
+    # Defect B: a `(slide, kind)` bucket the AppleScript fallback touched is covered but
+    # neither GATED-set (`setSlides`/`groupBuckets`, which the set bar enforces) nor
+    # `uncovered` (which reds the gate) -- its own `notGatedSlides`/`notGatedBuckets`.
+    planned = {5: [_spec(slide=5, kind="group", kindIndex=0, x=0, y=0, w=1, h=1)]}
+    coverage = live_verify_coverage(
+        planned, kindindex_remap={}, multiset_kinds_by_slide={5: {"group"}},
+        not_gated_kinds_by_slide={5: {"group"}},
+    )
+    assert coverage["setSlides"] == []
+    assert coverage["groupBuckets"] == 0
+    assert coverage["notGatedSlides"] == [5]
+    assert coverage["notGatedBuckets"] == 1
+    assert coverage["uncovered"] == []
+    assert coverage["coveredSlides"] == 1
+
+
+def test_live_verify_coverage_not_gated_default_empty_preserves_old_behavior():
+    # No `not_gated_kinds_by_slide` argument at all -- every routed bucket stays GATED,
+    # matching pre-Defect-B behaviour exactly.
+    planned = {5: [_spec(slide=5, kind="group", kindIndex=0, x=0, y=0, w=1, h=1)]}
+    coverage = live_verify_coverage(planned, kindindex_remap={}, multiset_kinds_by_slide={5: {"group"}})
+    assert coverage["setSlides"] == [5]
+    assert coverage["groupBuckets"] == 1
+    assert coverage["notGatedSlides"] == []
+    assert coverage["notGatedBuckets"] == 0
+
+
 def test_format_live_verify_coverage_matches_plan_line_shape():
     coverage = {
         "positionalSlides": list(range(19)), "remappedSlides": list(range(17)),
-        "setSlides": list(range(10)), "groupBuckets": 10, "uncovered": [],
+        "setSlides": list(range(10)), "groupBuckets": 10,
+        "notGatedSlides": [], "notGatedBuckets": 0, "uncovered": [],
         "totalSlides": 19, "coveredSlides": 19,
     }
     line = format_live_verify_coverage(coverage)
     assert line == (
         "live verify: positional 19 slide(s) (17 remapped), set-compare 10 group "
-        "bucket(s) on 10 slide(s), uncovered [] — total 19 of 19."
+        "bucket(s) on 10 slide(s), not-gated 0 group bucket(s) on 0 slide(s) "
+        "(AppleScript fallback), uncovered [] — total 19 of 19."
     )
 
 
@@ -994,7 +1024,7 @@ def test_run_offline_zorder_kind_index_map_joins_on_id_and_kind(monkeypatch):
 
     assert result["slides"] == [1]
     assert result["kindIndexMap"] == {
-        1: {"shape": {0: 2, 1: 1, 2: 0}, "text": {0: 1, 1: 0}},
+        "1": {"shape": {"0": 2, "1": 1, "2": 0}, "text": {"0": 1, "1": 0}},
     }
 
 
@@ -1045,7 +1075,31 @@ def test_run_offline_zorder_kind_index_map_omits_rolled_back_slide(monkeypatch):
     result = offline_write.run_offline_zorder(Path("dummy.key"), "verify", targets, lambda s: None)
 
     assert result["slides"] == [1]
-    assert set(result["kindIndexMap"]) == {1}
+    assert set(result["kindIndexMap"]) == {"1"}
+
+
+def test_run_offline_zorder_kind_index_map_round_trips_via_write_run_record(tmp_path):
+    """Defect A regression: `run_offline_zorder` emits a STRING-keyed `kindIndexMap`
+    (slide, then old kindIndex), so a record built straight from it survives
+    `write_run_record`'s JSON round-trip self-check. Before this fix, production emitted
+    int keys, which came back string-keyed after the JSON round trip and raised
+    `RuntimeError: run record round-trip mismatch` -- the unit tests missed it because
+    they used string keys directly, unlike production."""
+    zorder_write = {
+        "mode": "verify",
+        "slides": [1, 2],
+        "kindIndexMap": {
+            "1": {"shape": {"0": 2, "1": 1, "2": 0}, "text": {"0": 1, "1": 0}},
+            "2": {"group": {"0": 1, "1": 0}},
+        },
+        "zorderSlides": 2, "zorderStatRaised": 0, "zorderBadgeRaised": 0,
+        "zorderNoop": 0, "zorderRefused": 0, "zorderLost": 0, "failures": [],
+    }
+    record = run_record(**_record(zorder_write=zorder_write))
+    path = write_run_record(tmp_path / "A.run.json", record)  # raises on round-trip mismatch
+    reloaded = json.loads(path.read_text())
+    assert reloaded == record
+    assert reloaded["zorderWrite"]["kindIndexMap"] == zorder_write["kindIndexMap"]
 
 
 # --- run_offline_write (BLOCKER items 2 and 5) -----------------------------------
@@ -2009,6 +2063,97 @@ def test_remap_and_inspect_sets_live_verify_set_pass_for_stat_slide_group(monkey
     assert ow["liveVerifyCoverage"]["setSlides"] == [5]
 
 
+def test_remap_and_inspect_not_gates_stat_group_bucket_with_fallback_spec(monkeypatch, tmp_path):
+    """Defect B: a stat slide's `group` bucket that had ANY spec routed to the
+    AppleScript fallback must be excluded from the set bar's gate entirely -- even a
+    genuine mismatch on that bucket must not fail the run. It stays visible as
+    `notGated`, not `uncovered` (which would red the gate) and not a gated `setSlides`
+    bucket."""
+    import obed_edom.remap_keynote as rk
+
+    offline_info = {
+        "mode": "verify",
+        "specs": {
+            5: [
+                _spec(slide=5, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10),
+                _spec(slide=5, kind="group", kindIndex=0, x=0, y=0, w=10, h=10),
+            ],
+        },
+        "statSlides": [5],
+        "fallbackKinds": {"5": ["group"]},
+    }
+
+    def fake_remap(source, dest, *, export_dir=None, **kwargs):
+        return {"dest": str(dest), "applied": 1, "offlineWrite": offline_info}
+
+    def fake_inspect(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
+        return {
+            "slideWidth": 1920, "slideHeight": 1080, "slideCount": 1,
+            "slides": [{"number": 5, "items": [
+                {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+                # Genuine mismatch on the group bucket -- would FAIL the set bar if gated.
+                {"kind": "group", "kindIndex": 0, "x": 999, "y": 999, "w": 999, "h": 999},
+            ]}],
+        }
+
+    monkeypatch.setattr(rk, "remap_keynote", fake_remap)
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
+
+    info = rk.remap_and_inspect(
+        tmp_path / "wall.key", tmp_path / "out.key", template=tmp_path / "tpl.key",
+        validate=True,
+    )
+    ow = info["offlineWrite"]
+    assert ow["liveVerifyPass"] is True
+    assert ow["liveVerifySetPass"] is True
+    assert ow["liveVerifyCoverage"]["uncovered"] == []
+    assert ow["liveVerifyCoverage"]["setSlides"] == []
+    assert ow["liveVerifyCoverage"]["notGatedSlides"] == [5]
+    assert ow["liveVerifyCoverage"]["notGatedBuckets"] == 1
+
+
+def test_remap_and_inspect_still_gates_stat_group_bucket_without_fallback_spec(monkeypatch, tmp_path):
+    """Regression: absent any fallback spec on the slide's `group` kind, the set bar
+    still gates it -- a genuine mismatch on the bucket must FAIL the run, exactly as
+    before Defect B's fix."""
+    import obed_edom.remap_keynote as rk
+
+    offline_info = {
+        "mode": "verify",
+        "specs": {
+            5: [
+                _spec(slide=5, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10),
+                _spec(slide=5, kind="group", kindIndex=0, x=0, y=0, w=10, h=10),
+            ],
+        },
+        "statSlides": [5],
+    }
+
+    def fake_remap(source, dest, *, export_dir=None, **kwargs):
+        return {"dest": str(dest), "applied": 1, "offlineWrite": offline_info}
+
+    def fake_inspect(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
+        return {
+            "slideWidth": 1920, "slideHeight": 1080, "slideCount": 1,
+            "slides": [{"number": 5, "items": [
+                {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+                {"kind": "group", "kindIndex": 0, "x": 999, "y": 999, "w": 999, "h": 999},
+            ]}],
+        }
+
+    monkeypatch.setattr(rk, "remap_keynote", fake_remap)
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
+
+    info = rk.remap_and_inspect(
+        tmp_path / "wall.key", tmp_path / "out.key", template=tmp_path / "tpl.key",
+        validate=True,
+    )
+    ow = info["offlineWrite"]
+    assert ow["liveVerifySetPass"] is False
+    assert ow["liveVerifyCoverage"]["setSlides"] == [5]
+    assert ow["liveVerifyCoverage"]["notGatedSlides"] == []
+
+
 def test_remap_and_inspect_reds_gate_when_coverage_reports_uncovered(monkeypatch, tmp_path):
     """A non-empty `uncovered` (a routing-table wiring bug between the two live-verify
     calls) must RED `liveVerifyPass` even when both bars individually PASS."""
@@ -2031,10 +2176,11 @@ def test_remap_and_inspect_reds_gate_when_coverage_reports_uncovered(monkeypatch
             ]}],
         }
 
-    def fake_coverage(planned, kindindex_remap, multiset_kinds_by_slide):
+    def fake_coverage(planned, kindindex_remap, multiset_kinds_by_slide, not_gated_kinds_by_slide=None):
         return {
             "positionalSlides": [], "remappedSlides": [], "setSlides": [],
-            "groupBuckets": 0, "uncovered": [(1, "shape")], "totalSlides": 1,
+            "groupBuckets": 0, "notGatedSlides": [], "notGatedBuckets": 0,
+            "uncovered": [(1, "shape")], "totalSlides": 1,
             "coveredSlides": 0,
         }
 

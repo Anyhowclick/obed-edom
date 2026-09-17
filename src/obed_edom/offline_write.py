@@ -722,6 +722,7 @@ def live_verify_coverage(
     planned_specs_by_slide: dict[int, list[dict[str, Any]]],
     kindindex_remap: dict[int, dict[str, dict[int, int]]],
     multiset_kinds_by_slide: dict[int, set[str]],
+    not_gated_kinds_by_slide: dict[int, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Coverage accounting for the two live-verify bars (positional `verify_live_frames`,
     multiset `verify_live_frames_multiset`) -- ROUTING, not outcome: a `(slide, kind)`
@@ -733,19 +734,30 @@ def live_verify_coverage(
     is `None`, so a kind whose every spec lacks one would otherwise vanish from BOTH bars
     without a trace. `uncovered` lists every `(slide, kind)` pair that fails both tests.
 
+    `not_gated_kinds_by_slide` is the subset of `multiset_kinds_by_slide` the AppleScript
+    fallback wrote at least one spec of (the same w2-ambiguous-signature groups the
+    offline verify's `group-missed` line already excludes) -- those buckets are covered
+    but counted separately (`notGatedSlides`/`notGatedBuckets`), neither `setSlides`/
+    `groupBuckets` (which are GATED) nor `uncovered` (which reds the gate).
+
     Target is empty on a healthy run, but unlike a routing-table mirror this is not
     empty BY CONSTRUCTION -- an unresolved `kindIndex` on an unrouted kind is a real data
     condition this line surfaces, not a wiring artifact of the two calls disagreeing.
     """
     from obed_edom.iwa_write import bridge_specs_kindindex  # noqa: PLC0415 (optional iwa extra)
 
+    not_gated_kinds_by_slide = not_gated_kinds_by_slide or {}
     positional_slides: set[int] = set()
     set_slides: set[int] = set()
+    not_gated_slides: set[int] = set()
     group_buckets = 0
+    not_gated_buckets = 0
     uncovered: list[tuple[int, str]] = []
     for n, specs in planned_specs_by_slide.items():
         bridged = bridge_specs_kindindex(specs)
         skip_kinds = multiset_kinds_by_slide.get(n, set())
+        not_gated_kinds = skip_kinds & not_gated_kinds_by_slide.get(n, set())
+        gated_skip_kinds = skip_kinds - not_gated_kinds
         has_resolvable_index: dict[str, bool] = {}
         for spec in bridged:
             if spec.get("role") == "hide":
@@ -756,14 +768,18 @@ def live_verify_coverage(
         positional_kinds = {
             k for k, resolvable in has_resolvable_index.items() if k not in skip_kinds and resolvable
         }
-        multiset_kinds = {k for k in has_resolvable_index if k in skip_kinds}
+        multiset_kinds = {k for k in has_resolvable_index if k in gated_skip_kinds}
+        not_gated_present = {k for k in has_resolvable_index if k in not_gated_kinds}
         if positional_kinds:
             positional_slides.add(n)
         if multiset_kinds:
             set_slides.add(n)
             group_buckets += len(multiset_kinds)
+        if not_gated_present:
+            not_gated_slides.add(n)
+            not_gated_buckets += len(not_gated_present)
         for kind in has_resolvable_index:
-            if kind not in positional_kinds and kind not in multiset_kinds:
+            if kind not in positional_kinds and kind not in multiset_kinds and kind not in not_gated_present:
                 uncovered.append((n, kind))
     total_slides = len(planned_specs_by_slide)
     uncovered_slides = {n for n, _ in uncovered}
@@ -772,6 +788,8 @@ def live_verify_coverage(
         "remappedSlides": sorted(set(kindindex_remap) & set(planned_specs_by_slide)),
         "setSlides": sorted(set_slides),
         "groupBuckets": group_buckets,
+        "notGatedSlides": sorted(not_gated_slides),
+        "notGatedBuckets": not_gated_buckets,
         "uncovered": sorted(uncovered),
         "totalSlides": total_slides,
         "coveredSlides": total_slides - len(uncovered_slides),
@@ -786,7 +804,9 @@ def format_live_verify_coverage(coverage: dict[str, Any]) -> str:
         f"live verify: positional {len(coverage['positionalSlides'])} slide(s) "
         f"({len(coverage['remappedSlides'])} remapped), set-compare "
         f"{coverage['groupBuckets']} group bucket(s) on {len(coverage['setSlides'])} "
-        f"slide(s), uncovered {coverage['uncovered']} — total "
+        f"slide(s), not-gated {coverage.get('notGatedBuckets', 0)} group bucket(s) on "
+        f"{len(coverage.get('notGatedSlides', []))} slide(s) (AppleScript fallback), "
+        f"uncovered {coverage['uncovered']} — total "
         f"{coverage['coveredSlides']} of {coverage['totalSlides']}."
     )
 
@@ -852,6 +872,15 @@ def run_offline_write(
         str(n): sum(1 for s in v if s.get("role") != "hide")
         for n, v in fallback_by_slide.items()
     }
+    # Finest granularity the fallback exposes: per (slide, kind) -- individual specs
+    # within a kind are not distinguishable once Keynote reports back, so a caller
+    # (`remap_and_inspect`'s live-verify set bar) that needs to route a whole `(slide,
+    # kind)` bucket away from gating uses this, not `fallback_counts`.
+    fallback_kinds = {
+        str(n): sorted({str(s.get("kind") or "") for s in v if s.get("role") != "hide"})
+        for n, v in fallback_by_slide.items()
+    }
+    fallback_kinds = {n: ks for n, ks in fallback_kinds.items() if ks}
     fallback_ok = True
     fallback_unwritable: list[str] = []
     if fallback_by_slide:
@@ -936,6 +965,7 @@ def run_offline_write(
         "slides": sorted(offline_slides),
         "refused": sorted(n for n, r in patch_results.items() if getattr(r, "refused", False)),
         "fallbackSpecs": fallback_counts,
+        "fallbackKinds": fallback_kinds,
         "fallbackUnwritable": len(fallback_unwritable),
         "applied": sum(getattr(r, "applied", 0) for r in patch_results.values()),
         "missedSpecs": sum(
@@ -1094,10 +1124,14 @@ def run_offline_zorder(
     (the deck is already written at that point); `OfflineWriteCorrupted` (a corrupted
     rewrite) still propagates.
 
-    Also returns `kindIndexMap[n] = {kind: {old_ki: new_ki}}` for every FINALLY patched
-    slide (verify-mode rollbacks absent), joined on `(id, kind)` since a dual (custom-path
-    text box) emits two records for one id. A derivation disagreement on a slide emits no
-    map for it and is appended to `failures` instead."""
+    Also returns `kindIndexMap[str(n)] = {kind: {str(old_ki): new_ki}}` for every FINALLY
+    patched slide (verify-mode rollbacks absent), joined on `(id, kind)` since a dual
+    (custom-path text box) emits two records for one id. Slide and inner old-kindIndex
+    keys are stringified here (values stay ints) so the map is JSON-round-trip-stable —
+    `write_run_record` reloads what it writes and compares, and an int-keyed map would
+    come back string-keyed and mismatch; `coerce_kind_index_map` converts these back to
+    ints on read. A derivation disagreement on a slide emits no map for it and is appended
+    to `failures` instead."""
     if mode == "off" or not targets_by_slide:
         return None
     from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415 (optional iwa extra)
@@ -1211,7 +1245,7 @@ def run_offline_zorder(
                     if pre_order[n] == want:
                         noop -= 1
 
-    kind_index_map: dict[int, dict[str, dict[int, int]]] = {}
+    kind_index_map: dict[str, dict[str, dict[str, int]]] = {}
     for n in patched_slides:
         slide = objects.get(order[n - 1][0])
         old_records = derive_kind_index(slide, objects)
@@ -1222,10 +1256,10 @@ def run_offline_zorder(
         if set(old_by_key) != set(new_by_key):
             failures.append((n, "kindIndexMap derivation disagreement"))
             continue
-        per_kind: dict[str, dict[int, int]] = {}
+        per_kind: dict[str, dict[str, int]] = {}
         for (ident, kind), old_ki in old_by_key.items():
-            per_kind.setdefault(kind, {})[old_ki] = new_by_key[(ident, kind)]
-        kind_index_map[n] = per_kind
+            per_kind.setdefault(kind, {})[str(old_ki)] = new_by_key[(ident, kind)]
+        kind_index_map[str(n)] = per_kind
 
     return {
         "mode": mode,
