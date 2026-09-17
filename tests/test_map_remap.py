@@ -50,6 +50,7 @@ from obed_edom.map_remap import (
     on_canvas_fraction,
     _card_pitch,
     _card_sample_for,
+    _is_unpinned_photo_only_backdrop,
     _recipe_reusing_affine,
     _reflow_card_grid,
     pair_by_size,
@@ -506,6 +507,159 @@ def test_a_cover_fallback_predecessor_never_seeds_reuse():
     slide2 = next(r for r in rows if r["slide"] == 2)
     assert slide2["reusedSibling"] is False  # cover-fallback's templateSlide=4 must not seed reuse
     assert slide2["source"] != "sibling-affine"
+
+
+def test_unpinned_photo_only_backdrop_predicate():
+    """`_is_unpinned_photo_only_backdrop` is the Gold slide-6 gate: a `template-cover`
+    slide whose only content is the centre-panel photo qualifies; a centre thumbnail
+    (slide 7) or any real text (slides 1/2) disqualifies it. Decorative shape chrome
+    (slide 6/7's right-panel shape) never counts."""
+    wall_w, wall_h = 7680.0, 1080.0
+    recipe = {"source": "template-cover", "destWidth": 1920.0, "destHeight": 1080.0}
+    panel = _item(index=0, kind="image", fileName="China Adjusted.png", x=1821, y=0, w=3840, h=1080)
+
+    photo_only = {"number": 6, "items": [panel]}
+    assert _is_unpinned_photo_only_backdrop(photo_only, recipe, wall_w, wall_h) is True
+
+    decorative_shape = {
+        "number": 6,
+        "items": [panel, _item(index=1, kind="shape", x=5000, y=0, w=500, h=1080)],
+    }
+    assert _is_unpinned_photo_only_backdrop(decorative_shape, recipe, wall_w, wall_h) is True
+
+    with_thumbnail = {
+        "number": 7,
+        "items": [panel, _item(index=1, kind="image", fileName="thumb.png", x=3200, y=300, w=600, h=400)],
+    }
+    assert _is_unpinned_photo_only_backdrop(with_thumbnail, recipe, wall_w, wall_h) is False
+
+    with_text = {
+        "number": 1,
+        "items": [panel, _item(index=1, kind="text", text="MISSIONS UPDATE", x=3600, y=100, w=400, h=80)],
+    }
+    assert _is_unpinned_photo_only_backdrop(with_text, recipe, wall_w, wall_h) is False
+
+    not_a_cover = {**recipe, "source": "template-layout"}
+    assert _is_unpinned_photo_only_backdrop(photo_only, not_a_cover, wall_w, wall_h) is False
+
+
+def test_no_clamp_reuse_preserves_the_uncovered_band():
+    """The owner-approved unpinned reuse path bypasses `_cover_clamp` so a reused
+    affine that leaves a band of the frame uncovered stays source-faithful instead
+    of being silently closed -- the Gold slide 5 -> 6 case (ty=130 stays 130). The
+    pinned path (default `clamp=True`) is untouched and still clamps to 0."""
+    slide = {
+        "number": 6,
+        "items": [_item(index=0, kind="image", fileName="Panel.png", x=1821, y=0, w=3840, h=1080, rotation=0)],
+    }
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 1821.0, "y": 0.0, "w": 3840.0, "h": 1080.0},
+    }
+    affine = Affine(s=1.0, tx=-2932.0, ty=130.0)
+
+    unclamped = _recipe_reusing_affine(slide, recipe, affine, 7680.0, 1080.0, clamp=False)
+    assert unclamped["mapDst"]["y"] == 130.0  # band preserved, source-faithful
+
+    clamped = _recipe_reusing_affine(slide, recipe, affine, 7680.0, 1080.0)
+    assert clamped["mapDst"]["y"] == 0.0  # default clamp still closes the gap on the pinned path
+
+
+@lru_cache(maxsize=1)
+def _gold_wall_and_template_payloads():
+    """Cached offline inspect payloads for the real Gold deck (wall 7680x1080)
+    and CG template, read straight from the repo's `.cache/inspect/` -- never opens
+    Keynote. Uses `find_repo_root()` directly, not `cache_root()`: the test suite's
+    `conftest.py` sandboxes `OBED_EDOM_CACHE_DIR` to an empty tmp dir, and this fixed
+    cache predates that sandbox. Returns None if the cache files are not present."""
+    from obed_edom.paths import find_repo_root
+
+    cache_dir = find_repo_root() / ".cache" / "inspect"
+    wall_path = cache_dir / "c7f870edf4a5be2f862eec95a52e7c8224a8628d133e4d236beb611d06011f67.v5.k15.3.1.json"
+    template_path = cache_dir / "bbb0d1d45b46e7fe943bee2badeea8cdaac9ca5e7dac29fa74403913b9ea38f1.v5.k15.3.1.json"
+    if not wall_path.exists() or not template_path.exists():
+        return None
+    import json
+
+    wall = json.loads(wall_path.read_text())
+    template = json.loads(template_path.read_text())
+    return wall, template
+
+
+@lru_cache(maxsize=1)
+def _gold_unpinned_backdrop_plan():
+    """The real Gold framing run as the operator actually runs it: no pins
+    (`framing_overrides=None`) -- see `output/bank/2026-09-16/gold-6-7-series-diag.md`,
+    `requested: None` on all 19 rows. Slides 6/7 are auto-paired to template-cover on
+    their own; only slide 6 qualifies as an unpinned photo-only backdrop."""
+    payloads = _gold_wall_and_template_payloads()
+    if payloads is None:
+        return None
+    wall, template = payloads
+    rows: list[dict] = []
+    transforms = plan_payload_transforms(
+        wall, learn_recipe(wall, template), template=template, framing_report=rows,
+    )
+    return {"wall": wall, "template": template, "rows": rows, "transforms": transforms}
+
+
+def test_gold_slide_6_carries_slide_5s_affine_source_faithfully():
+    """Owner-approved fix: slide 6 (a `template-cover` photo backdrop with no
+    content of its own) carries slide 5's (`template-layout`) affine unchanged,
+    reporting the uncovered top band rather than closing it. Slide 7 is excluded
+    by the predicate (its 12 thumbnails are real content) and keeps its own
+    `template-cover` framing; slides 5, 8, 9 are untouched."""
+    data = _gold_unpinned_backdrop_plan()
+    if data is None:
+        pytest.skip("Gold wall/template deck cache not available; refuse to open Keynote")
+    rows = {r["slide"]: r for r in data["rows"]}
+
+    assert rows[5]["source"] == "template-layout"
+    assert rows[5]["reusedSibling"] is False
+
+    assert rows[6]["source"] == "sibling-affine"
+    assert rows[6]["reusedSibling"] is True
+    assert rows[6]["uncoveredTopPx"] == pytest.approx(130.0, abs=1.0)
+
+    assert rows[7]["source"] == "template-cover"
+    assert rows[7]["reusedSibling"] is False
+    assert "uncoveredTopPx" not in rows[7]
+
+    for n in (8, 9):
+        assert rows[n]["source"] == "template-layout"
+        assert rows[n]["reusedSibling"] is False
+
+    from obed_edom.map_remap import frame_affine
+
+    wall, template = data["wall"], data["template"]
+    slide5 = next(s for s in wall["slides"] if s.get("number") == 5)
+    slide6 = next(s for s in wall["slides"] if s.get("number") == 6)
+    single5 = {"slideWidth": wall["slideWidth"], "slideHeight": wall["slideHeight"], "slides": [slide5]}
+    a5 = frame_affine(learn_recipe(single5, template, template_slide=None))
+    recipe6_auto = learn_recipe(
+        {"slideWidth": wall["slideWidth"], "slideHeight": wall["slideHeight"], "slides": [slide6]},
+        template, template_slide=None,
+    )
+    reused6 = _recipe_reusing_affine(
+        slide6, recipe6_auto, a5, wall["slideWidth"], wall["slideHeight"], clamp=False
+    )
+    a6 = frame_affine(reused6)
+    assert abs(a6.s - a5.s) < 1e-6 and abs(a6.tx - a5.tx) < 1e-6 and abs(a6.ty - a5.ty) < 1e-6
+
+
+def test_gold_slides_1_through_5_and_8_through_19_are_confined_from_the_backdrop_fix():
+    """Confinement: only slide 6 changes `reusedSibling`/`source`. Every other
+    slide's framing decision -- 1-5, 7 (excluded by the predicate), 8-19 -- is
+    identical to the pre-fix behaviour recorded in the diagnosis."""
+    data = _gold_unpinned_backdrop_plan()
+    if data is None:
+        pytest.skip("Gold wall/template deck cache not available; refuse to open Keynote")
+    rows = {r["slide"]: r for r in data["rows"]}
+    for n in range(1, 20):
+        if n == 6:
+            continue
+        assert rows[n]["reusedSibling"] is False, f"slide {n} unexpectedly reused a sibling"
+    assert rows[7]["source"] == "template-cover"  # unchanged despite sharing slide 6's asset
 
 
 def test_a_degenerate_pin_falls_back_to_the_pages_own_framing():
