@@ -2088,9 +2088,21 @@ def plan_assembly(
                             # fits the slot after all (often thanks to the 50pt emphasis
                             # cap); fall back to the normal slot-fit path rather than
                             # emitting a no-op split that deletes nothing.
+                            if split_box.runs:
+                                one_h = wrapped_height_runs(
+                                    tuple(Run(r.text, r.font_name, r.size * split_t) for r in split_box.runs),
+                                    stack_band.width,
+                                )
+                            else:
+                                one_h = wrapped_height(
+                                    split_box.text, split_box.font_name, split_box.size * split_t, stack_band.width,
+                                )
+                            one_rect = _stacked_text_rects(
+                                [split_box], {split_box.item_id: one_h}, stack_band, top_anchor=True,
+                            )[split_box.item_id]
                             fit.update(
                                 _slot_part_fit(
-                                    split_box.item_id, split_rect, short_fit, short_row_h,
+                                    split_box.item_id, one_rect, short_fit, short_row_h,
                                     split_badge_pinned_ids,
                                 )
                             )
@@ -2139,12 +2151,14 @@ def plan_assembly(
                         stacked_ids = set(long_ids)
                         split_slot_top_anchor = slot_layout_name is not None
                         split_slot_pinned_ids = None
+                        slot_pt = None
                         if slot_layout_name is not None:
                             used_slot_layout_name = slot_layout_name
                             multi_slot = LAYOUT_SLOTS[slot_layout_name]
                             stack_band = _slot_band(
                                 multi_slot.verse if slot_category == "verse" else multi_slot.text
                             )
+                            slot_pt = multi_slot.verse_pt if slot_category == "verse" else multi_slot.text_pt
                             split_slot_pinned_ids = (
                                 frozenset(
                                     iid for iid in (slot_badge_id, slot_badge_twin_id)
@@ -2156,26 +2170,52 @@ def plan_assembly(
                         part_list: list[SplitPart] = []
                         for box in boxes:
                             _refuse_split_box_char_word_builds(number, box.item_id, builds)
-                            single = fit_text_stack([box], stack_band, min_text_pt)
-                            if single is None:
-                                raise AssemblyRefusal(
-                                    f"slide {number} box {_item_label(box.item_id)} does not fit the band even alone at --min-text-pt {min_text_pt}"
+                            box_slot_t = slot_pt / box.size if split_slot_top_anchor and box.size else None
+                            box_slot_h = None
+                            if box_slot_t is not None and box_slot_t >= _box_min_t(box, min_text_pt):
+                                if box.runs:
+                                    box_slot_h = wrapped_height_runs(
+                                        tuple(Run(r.text, r.font_name, r.size * box_slot_t) for r in box.runs),
+                                        stack_band.width,
+                                    )
+                                else:
+                                    box_slot_h = wrapped_height(
+                                        box.text, box.font_name, box.size * box_slot_t, stack_band.width
+                                    )
+                                if box_slot_h is not None and box_slot_h > stack_band.height:
+                                    box_slot_h = None
+                            if box_slot_h is not None:
+                                t = box_slot_t
+                                rect = _stacked_text_rects(
+                                    [box], {box.item_id: box_slot_h}, stack_band, top_anchor=True,
+                                )[box.item_id]
+                                part_ranges, part_unresolved = _run_size_ranges(
+                                    items_by_id[box.item_id], t, item_id=box.item_id,
+                                    slide_number=number, warnings=warnings, cap=_EMPHASIS_CAP_PT,
                                 )
-                            t1, sizes1, heights1 = single
+                                sizes_fallback = box.size * t
+                            else:
+                                single = fit_text_stack([box], stack_band, min_text_pt)
+                                if single is None:
+                                    raise AssemblyRefusal(
+                                        f"slide {number} box {_item_label(box.item_id)} does not fit the band even alone at --min-text-pt {min_text_pt}"
+                                    )
+                                t, sizes1, heights1 = single
+                                rect = _stacked_text_rects(
+                                    [box], heights1, stack_band, top_anchor=split_slot_top_anchor,
+                                )[box.item_id]
+                                part_ranges, part_unresolved = _run_size_ranges(
+                                    items_by_id[box.item_id], t, item_id=box.item_id,
+                                    slide_number=number, warnings=warnings,
+                                )
+                                sizes_fallback = sizes1[box.item_id]
                             if split_slot_top_anchor and box is boxes[0]:
-                                stack_t_map[number] = t1
-                            rect = _stacked_text_rects(
-                                [box], heights1, stack_band, top_anchor=split_slot_top_anchor,
-                            )[box.item_id]
+                                stack_t_map[number] = t
                             part_fit = _slot_part_fit(
                                 box.item_id, rect, short_fit, short_row_h, split_slot_pinned_ids,
                             )
                             other_long = [b.item_id for b in boxes if b.item_id != box.item_id]
                             part_deletes = _delete_order(list(base_deletes) + other_long, id_by_item)
-                            part_ranges, part_unresolved = _run_size_ranges(
-                                items_by_id[box.item_id], t1, item_id=box.item_id,
-                                slide_number=number, warnings=warnings,
-                            )
                             part_autosize = _autosize_text_ids(
                                 (box.item_id,), id_by_item, objects_graph
                             )
@@ -2183,17 +2223,17 @@ def plan_assembly(
                             if isinstance(part_ranges, float):
                                 part_text_sizes[box.item_id] = part_ranges
                             elif part_ranges is None and not part_unresolved:
-                                part_text_sizes[box.item_id] = sizes1[box.item_id]
+                                part_text_sizes[box.item_id] = sizes_fallback
                             elif part_unresolved:
-                                if t1 < 1.0:
+                                if t < 1.0:
                                     if text_fit == "warn":
                                         raise AssemblyRefusal(
                                             f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap and "
-                                            f"fit t={t1:.2f} < 1.0, would overflow with un-shrunken text"
+                                            f"fit t={t:.2f} < 1.0, would overflow with un-shrunken text"
                                         )
                                     warnings.append(
                                         f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap and "
-                                        f"fit t={t1:.2f} < 1.0, flattening run sizes to the lead size under "
+                                        f"fit t={t:.2f} < 1.0, flattening run sizes to the lead size under "
                                         "--text-fit shrink"
                                     )
                                 elif text_fit == "shrink":
@@ -2206,7 +2246,7 @@ def plan_assembly(
                                         f"slide {number} box {_item_label(box.item_id)}: run ranges leave a gap, "
                                         "preserving source sizing"
                                     )
-                                stacked_shrink_only_sizes[box.item_id] = sizes1[box.item_id]
+                                stacked_shrink_only_sizes[box.item_id] = sizes_fallback
                             part_list.append(
                                 SplitPart(
                                     fits=part_fit, deletes=part_deletes,

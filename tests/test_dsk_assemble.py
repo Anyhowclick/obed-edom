@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 import subprocess
 import zipfile
 from pathlib import Path
@@ -11023,6 +11024,43 @@ def test_gw17_forced_split_routes_the_generic_multi_box_branch_through_the_slot(
         assert verse_rect.y == pytest.approx(slot.verse.y)
 
 
+_SET_SIZE_RE = re.compile(
+    r"set size (?:of characters \d+ thru \d+ )?of object text of theObj to (-?[\d.]+)"
+)
+
+
+@pytest.mark.deck
+def test_gw17_forced_multi_box_split_emits_45pt_lead_and_caps_emphasis():
+    # DSK §4 item 12: the generic multi-box split branch used to scale every box via
+    # the bare (uncapped) `fit_text_stack` fit, off the slot entirely -- GW 17's forced
+    # 2-way split emitted a 54.6pt lead and a 66.3pt emphasis run instead of the slot's
+    # 45pt lead and gold's 50pt emphasis cap. The slot-authoritative sub-path fixes
+    # both: the lead box's own `slot_pt/box.size` scale, and
+    # `_run_size_ranges(..., cap=_EMPHASIS_CAP_PT)`.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(
+        payload, [by_number[17]], decisions=decisions, band=BAND, clips={}, runs=runs,
+        all_classes=classes, deck=deck, fw_deck=GW_DECK, layout_policy="import",
+        split_overrides={17: 2},
+    )
+    assert plan.stack_t[17] == pytest.approx(45.0 / 70.0)
+    ordinal0 = plan.ordinals[17]
+    all_sizes: list[float] = []
+    for part_no in range(plan.parts[17]):
+        lines = dsa._slide_lines(plan, 17, ordinal0 + part_no, part=part_no)
+        for line in lines:
+            m = _SET_SIZE_RE.search(line)
+            if m:
+                all_sizes.append(float(m.group(1)))
+    assert any(sz == pytest.approx(45.0) for sz in all_sizes)
+    assert max(all_sizes) <= 50.0 + 1e-6
+
+
 def test_gw38_one_part_fallback_matches_the_direct_slot_fit_geometry(monkeypatch):
     # Review 4 finding 3: no end-to-end `plan_assembly` fixture previously reached the
     # one-part fallback (`len(chunks) == 1`, S2/§2.2 -- the height-budget pack fits in
@@ -11050,11 +11088,25 @@ def test_gw38_one_part_fallback_matches_the_direct_slot_fit_geometry(monkeypatch
     assert plan.layout_names[38] == "Verse Standard (Variation 2)"
     assert 38 not in plan.splits
     slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
-    assert plan.fits[38][verse_id] == slot.verse
-    assert plan.stack_bands[38] == dsa._slot_band(slot.verse)
+    split_t = slot.verse_pt / items[verse_id]["size"]
+    stack_band = dsa._slot_band(slot.verse)
+    box_runs = tuple(
+        dsk_plan.Run(
+            r.get("text") or "", r.get("fontName") or items[verse_id]["font"],
+            (r.get("size") or items[verse_id]["size"]) * split_t,
+        )
+        for r in items[verse_id]["runs"]
+    )
+    expected_h = dsk_plan.wrapped_height_runs(box_runs, stack_band.width)
+    verse_rect = plan.fits[38][verse_id]
+    assert verse_rect.x == slot.verse.x
+    assert verse_rect.w == slot.verse.w
+    assert verse_rect.y == pytest.approx(slot.verse.y)
+    assert verse_rect.h == pytest.approx(expected_h)
+    assert plan.stack_bands[38] == stack_band
     badge_id = plan.slot_badge_ids[38]
     assert plan.fits[38][badge_id] == slot.badge
-    assert plan.stack_t[38] == pytest.approx(slot.verse_pt / items[verse_id]["size"])
+    assert plan.stack_t[38] == pytest.approx(split_t)
     sizes = {round(sz, 2) for _lo, _hi, sz in plan.run_sizes[38][verse_id]}
     assert 50.0 in sizes  # the same 50pt emphasis cap as the split path (S1/S2)
 
