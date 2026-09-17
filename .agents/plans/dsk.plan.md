@@ -430,6 +430,25 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
    exception); `out_path` is never written with an unverified deck.
 10. Cleanup rule: delete superseded work decks and evidence dirs once the next round supersedes
     them (each GW copy is ~670 MB and each output ~1.7 GB).
+11. Pure-clip round is DASHBOARD-driven (not the CLI in item 1): start the dashboard UNSANDBOXED
+    with `PYTHONPATH=<detached-worktree>/src <repo>/.venv/bin/python -m obed_edom dashboard
+    --no-browser` (the `.venv` editable-installs from the MAIN checkout, so the PYTHONPATH
+    override is required to exercise the worktree's code; the framework python3 lacks cv2). Drive
+    the HTTP API: `POST /api/dsk` (propose) → `/api/dsk/<id>/apply` (generate; writes the offline
+    clip timing) → `POST /api/dsk/export` → `/api/dsk/export/<id>/apply` (renders final clips).
+    Poll `GET /api/jobs/<id>`.
+12. KEYNOTE NEW-PRESENTATION DIALOG (found live r17, this "Keynote Creator Studio" build): every
+    Keynote launch pops a theme/new-presentation chooser that BLOCKS the automation AND the quit —
+    it caused a ~38-min preview hang and a reproducible "Keynote is already running (strictly
+    serial)" refusal (the intermediate export's Keynote never quit). Fix: Keynote → Settings →
+    General → "For New Documents: Use theme <specific>" so no dialog pops; otherwise dismiss it
+    each launch. This is an environment/harness issue, not a code bug.
+13. Clip-timing acceptance = build-chunk inspection of the generated DSK deck, then re-inspect
+    after the Export's Keynote round-trip and confirm IDENTICAL: per clip slide exactly one
+    `apple:movie-start` per clip, leftmost After Transition at `buildChunks[0]` (automatic True,
+    referent True, delay 0), others With Build 1 (True, False, 0), `playsAcrossSlides` False. Live
+    r17 (2026-09-17, PR #151) PASSED on `DSK_Gen_Export_Input.key` 11–13; evidence
+    `~/Desktop/dsk-d4-work/evidence-r17/`.
 
 ## 6. Test gates
 
