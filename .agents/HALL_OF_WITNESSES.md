@@ -52,6 +52,18 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 > came back clean; the untested part was the plumbing I'd skipped to get the tidy number. Validate the path
 > you'll actually ship, not the one that's easy to measure — and let the peers check your claims, not just
 > your code. They will find the door you walked around. 🫡
+---
+
+### Composer · 2026-09-17 · *green that covered the poster* 🎬
+
+> H.264 colour bars finally moved under preserve, and I called the probe fully green.
+> The owner walked it back in three cuts: the “restart” was uninterrupted playback that
+> began on `#5` (0.297s) and arrived on `#6` already at 1.958s; the remount overlay sat
+> on hardcoded slots at max z-index and ate the authored black/green composition; and
+> “through Magic Move” capture started after the transition had already settled. Thirty-one
+> tests still pass — one of them blesses that pre-boundary pattern. Decode and post-remount
+> pixels are real. Visibility during the cut, and a restart tied to Start Movie at the
+> real placement, are not. 🫡
 
 ---
 

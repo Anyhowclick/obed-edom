@@ -321,9 +321,149 @@ LIFECYCLE_SCRIPT = r"""
 PRESERVE_SCRIPT = r"""
 (function(){
   if (window.__OBED_P2_PRESERVE__) return;
-  window.__OBED_P2_PRESERVE__ = {version: 2, mode: 'decoder-preserve', events: [], poolKeys: []};
-  const pool = new Map(); // assetKey -> HTMLVideoElement
+  window.__OBED_P2_PRESERVE__ = {
+    version: 6,
+    mode: 'decoder-preserve',
+    events: [],
+    poolKeys: [],
+    remountAll: function() {
+      let n = 0;
+      pool.forEach(function(q) {
+        (q || []).forEach(function(v) {
+          tryRemount(v);
+          n += 1;
+        });
+      });
+      document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
+        tryRemount(v);
+        n += 1;
+      });
+      return n;
+    },
+    clear: function() {
+      // Drop pooled handles and tear down remount overlays so a deliberate
+      // restart measurement is not polluted by continued slide-1/2 clocks.
+      remountEpoch += 1;
+      preserveGeneration += 1;
+      suppressRemount = true;
+      try {
+        pool.clear();
+        document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
+          try {
+            v.pause();
+            delete v.dataset.obedPreserved;
+            v.__obedRemountEpoch = -1;
+            v.__obedGen = -1;
+            if (v.parentNode) v.parentNode.removeChild(v);
+          } catch (e) {}
+        });
+        note('pool-cleared', {
+          remountEpoch: remountEpoch,
+          preserveGeneration: preserveGeneration
+        });
+      } finally {
+        suppressRemount = false;
+      }
+    },
+    snapshot: function() {
+      const out = [];
+      pool.forEach(function(q, key) {
+        (q || []).forEach(function(v) {
+          out.push({
+            key: key,
+            elId: v.__obedElId,
+            currentTime: v.currentTime,
+            paused: v.paused,
+            readyState: v.readyState,
+            ended: v.ended,
+            inDocument: document.contains(v),
+            videoWidth: v.videoWidth,
+            videoHeight: v.videoHeight
+          });
+        });
+      });
+      document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
+        out.push({
+          key: assetKey(v.currentSrc || v.src || ''),
+          elId: v.__obedElId,
+          currentTime: v.currentTime,
+          paused: v.paused,
+          readyState: v.readyState,
+          ended: v.ended,
+          inDocument: document.contains(v),
+          fromDom: true,
+          videoWidth: v.videoWidth,
+          videoHeight: v.videoHeight
+        });
+      });
+      return out;
+    },
+    /** Draw a pooled/preserved video frame to a data URL (decoder pixels, not page composite). */
+    sampleFrame: function(elId) {
+      let target = null;
+      let where = null;
+      pool.forEach(function(q) {
+        (q || []).forEach(function(v) {
+          if (v.__obedElId === elId) { target = v; where = 'pool'; }
+        });
+      });
+      if (!target) {
+        document.querySelectorAll('video').forEach(function(v) {
+          if (v.__obedElId === elId) { target = v; where = 'dom'; }
+        });
+      }
+      // Facade stubs proxy clocks but have no decoded pixels — draw the real decoder.
+      if (target && target.__obedFacadeFor) {
+        target = target.__obedFacadeFor;
+        where = (where || 'facade') + '+real';
+      }
+      if (!target) {
+        return {ok: false, reason: 'not-found', elId: elId, snap: window.__OBED_P2_PRESERVE__.snapshot()};
+      }
+      const vw = target.videoWidth || 0;
+      const vh = target.videoHeight || 0;
+      if (!(vw > 0 && vh > 0)) {
+        return {
+          ok: false,
+          reason: 'no-video-pixels',
+          elId: elId,
+          where: where,
+          currentTime: target.currentTime,
+          readyState: target.readyState,
+          videoWidth: vw,
+          videoHeight: vh,
+          paused: target.paused,
+          inDocument: document.contains(target)
+        };
+      }
+      const c = document.createElement('canvas');
+      const w = Math.min(320, vw);
+      const h = Math.round(w * vh / vw);
+      c.width = w; c.height = h;
+      try {
+        c.getContext('2d').drawImage(target, 0, 0, w, h);
+        return {
+          ok: true,
+          elId: elId,
+          realElId: target.__obedElId,
+          where: where,
+          currentTime: target.currentTime,
+          width: w,
+          height: h,
+          dataURL: c.toDataURL('image/jpeg', 0.7)
+        };
+      } catch (e) {
+        return {ok: false, reason: 'draw-failed', message: String(e && e.message || e), elId: elId, where: where};
+      }
+    }
+  };
+  const pool = new Map(); // assetKey -> HTMLVideoElement[] (FIFO; same file may appear twice)
   let nextId = 1;
+  let suppressRemount = false;
+  let remountEpoch = 0;
+  // clear() bumps this so pre-clear decoders cannot re-enter the pool / remount.
+  // Videos created after clear get the new generation and remount normally.
+  let preserveGeneration = 0;
   function assetKey(src) {
     const s = String(src || '');
     const tail = (s.split('/').pop() || s).split('?')[0];
@@ -332,30 +472,144 @@ PRESERVE_SCRIPT = r"""
     return tail.toLowerCase();
   }
   function note(kind, detail) {
-    window.__OBED_P2_PRESERVE__.events.push({kind: kind, detail: detail, t: performance.now()});
+    const d = Object.assign({}, detail || {}, {sceneHash: String(location.hash || '')});
+    window.__OBED_P2_PRESERVE__.events.push({kind: kind, detail: d, t: performance.now()});
     window.__OBED_P2_PRESERVE__.poolKeys = Array.from(pool.keys());
   }
   function tag(v) {
     if (!v.__obedElId) v.__obedElId = nextId++;
+    if (v.__obedGen == null) v.__obedGen = preserveGeneration;
     return v.__obedElId;
   }
   function stash(v, why) {
     if (!(v instanceof HTMLVideoElement)) return;
+    if ((v.__obedGen == null ? 0 : v.__obedGen) < preserveGeneration) {
+      note('stash-stale-gen', {
+        elId: v.__obedElId, why: why,
+        gen: v.__obedGen, current: preserveGeneration
+      });
+      return;
+    }
     const src = v.currentSrc || v.src || '';
     const key = assetKey(src);
     if (!key) return;
     if (!(v.readyState >= 2 || v.currentTime > 0.05)) return;
     tag(v);
-    pool.set(key, v);
+    if (!pool.has(key)) pool.set(key, []);
+    const q = pool.get(key);
+    if (q.indexOf(v) < 0) q.push(v);
     v.dataset.obedPreserved = '1';
+    // Remember layout so we can remount as a visible overlay after Magic Move
+    // tears the video layer down and leaves only the WebGL/poster texture.
+    try {
+      const r = v.getBoundingClientRect();
+      if (r.width > 1 && r.height > 1) {
+        v.__obedRect = {x: r.left, y: r.top, w: r.width, h: r.height};
+      } else {
+        captureLayout(v);
+      }
+      v.__obedStyle = v.getAttribute('style') || '';
+      v.__obedId = v.id || '';
+    } catch (e) {}
     note(why, {
-      key: key, elId: v.__obedElId, t: v.currentTime,
+      key: key, elId: v.__obedElId, t: v.currentTime, queue: q.length,
       paused: v.paused, readyState: v.readyState, srcTail: String(src).slice(-60)
     });
     // Keep decoder warm even if destroy()/detach paused it.
     if (v.paused && !v.ended) {
       const p = v.play();
       if (p && p.catch) p.catch(function(){});
+    }
+    if (String(why || '').indexOf('detach') >= 0) {
+      scheduleRemount(v, why);
+    }
+  }
+
+  /**
+   * After Magic Move, Keynote HTML detaches <video> and never recreateElement
+   * for continuing movies — the composed stage keeps the static poster texture.
+   * Remount the preserved decoder as a visible DOM overlay at its last rect so
+   * colour frames cover the poster (same path handleMovieDidStart uses).
+   */
+  function scheduleRemount(v, why) {
+    if (suppressRemount) {
+      note('remount-suppressed', {elId: v && v.__obedElId, why: why});
+      return;
+    }
+    const epoch = remountEpoch;
+    v.__obedRemountEpoch = epoch;
+    note('remount-scheduled', {elId: v.__obedElId, why: why, epoch: epoch});
+    const delays = [50, 200, 500, 900, 1400, 2000];
+    delays.forEach(function(ms) {
+      setTimeout(function(){ tryRemount(v, epoch); }, ms);
+    });
+    window.addEventListener('hashchange', function onHash() {
+      setTimeout(function(){ tryRemount(v, epoch); }, 80);
+      setTimeout(function(){ tryRemount(v, epoch); }, 400);
+    });
+  }
+
+  function tryRemount(v, epoch) {
+    if (!v || suppressRemount) return;
+    if (epoch != null && epoch !== remountEpoch) {
+      note('remount-stale', {elId: v.__obedElId, epoch: epoch, current: remountEpoch});
+      return;
+    }
+    if (v.__obedRemountEpoch === -1) return;
+    const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
+    if (!stage) {
+      note('remount-no-stage', {elId: v.__obedElId});
+      return;
+    }
+    if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
+    let box = v.__obedRect || {};
+    // Style-derived boxes are often left/top 0 relative to a parent that is already
+    // gone at detach time. Map origin-only boxes onto known movie footprints.
+    if (!(box.w > 1 && box.h > 1) || (Math.abs(box.x) < 2 && Math.abs(box.y) < 2)) {
+      if (!window.__OBED_REMOUNT_SLOTS__) {
+        window.__OBED_REMOUNT_SLOTS__ = [
+          {x: 109, y: 795, w: 952, h: 268},
+          {x: 109, y: 500, w: 663, h: 186}
+        ];
+      }
+      const idx = ((v.__obedElId || 1) - 1) % window.__OBED_REMOUNT_SLOTS__.length;
+      const slot = window.__OBED_REMOUNT_SLOTS__[idx];
+      box = {
+        x: slot.x,
+        y: slot.y,
+        w: (box.w > 1 ? box.w : slot.w),
+        h: (box.h > 1 ? box.h : slot.h)
+      };
+      note('remount-fallback-rect', {elId: v.__obedElId, rect: box});
+    }
+    v.__obedRect = box;
+    try {
+      v.style.position = 'absolute';
+      v.style.left = box.x + 'px';
+      v.style.top = box.y + 'px';
+      v.style.width = box.w + 'px';
+      v.style.height = box.h + 'px';
+      v.style.visibility = 'visible';
+      v.style.display = 'block';
+      v.style.opacity = '1';
+      v.style.zIndex = '2147483000';
+      v.style.pointerEvents = 'none';
+      if (v.__obedId && !document.getElementById(v.__obedId)) v.id = v.__obedId;
+      if (!document.contains(v) || v.parentElement !== stage) stage.appendChild(v);
+      if (v.paused && !v.ended) {
+        const p = v.play();
+        if (p && p.catch) p.catch(function(){});
+      }
+      note('remount-done', {
+        elId: v.__obedElId,
+        key: assetKey(v.currentSrc || v.src || ''),
+        rect: box,
+        videoWidth: v.videoWidth,
+        currentTime: v.currentTime,
+        inDocument: document.contains(v)
+      });
+    } catch (e) {
+      note('remount-error', {elId: v.__obedElId, message: String(e && e.message || e)});
     }
   }
   function bindFacade(stub, real) {
@@ -437,6 +691,55 @@ PRESERVE_SCRIPT = r"""
     attributes: true, subtree: true, attributeFilter: ['style', 'bgcolor', 'class']
   });
 
+  function captureLayout(v) {
+    if (!(v instanceof HTMLVideoElement)) return false;
+    try {
+      let el = v;
+      for (let i = 0; i < 8 && el; i++) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 1 && r.height > 1) {
+          v.__obedRect = {x: r.left, y: r.top, w: r.width, h: r.height};
+          v.__obedStyle = v.getAttribute('style') || v.__obedStyle || '';
+          v.__obedId = v.id || v.__obedId || '';
+          return true;
+        }
+        el = el.parentElement;
+      }
+      // Style may still carry authored movie box even when the layout box is zero.
+      const st = v.getAttribute('style') || v.__obedStyle || '';
+      const mw = /width:\s*([\d.]+)px/i.exec(st);
+      const mh = /height:\s*([\d.]+)px/i.exec(st);
+      if (mw && mh && parseFloat(mw[1]) > 1 && parseFloat(mh[1]) > 1) {
+        const parent = v.parentElement;
+        const pr = parent ? parent.getBoundingClientRect() : {left: 0, top: 0};
+        v.__obedRect = {
+          x: pr.left || 0,
+          y: pr.top || 0,
+          w: parseFloat(mw[1]),
+          h: parseFloat(mh[1])
+        };
+        return v.__obedRect.w > 1;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  // Detached decoders often pause; keep pooled clocks alive through Magic Move.
+  // Refresh layout while videos are still attached (detach often zeroes the box).
+  setInterval(function(){
+    document.querySelectorAll('video').forEach(function(v){ captureLayout(v); });
+    pool.forEach(function(q){
+      (q || []).forEach(function(v){
+        try {
+          if (v && v.paused && !v.ended) {
+            const p = v.play();
+            if (p && p.catch) p.catch(function(){});
+          }
+        } catch (e) {}
+      });
+    });
+  }, 200);
+
   function patchSrcAccessor(proto, label) {
     const desc = Object.getOwnPropertyDescriptor(proto, 'src');
     if (!desc || !desc.set) {
@@ -486,25 +789,43 @@ PRESERVE_SCRIPT = r"""
     const el = origCreate.call(this, name, opts);
     if (String(name).toLowerCase() !== 'video') return el;
     tag(el);
-    note('createElement-video', {elId: el.__obedElId});
+    el.__obedGen = preserveGeneration;
+    note('createElement-video', {elId: el.__obedElId, gen: preserveGeneration});
     const origSA = el.setAttribute.bind(el);
     el.setAttribute = function(attr, value) {
       if (String(attr).toLowerCase() === 'src') {
         const key = assetKey(value);
-        const preserved = pool.get(key);
+        // Never reuse a decoder from an older preserve generation.
+        let preserved = null;
+        const q = pool.get(key);
+        if (q && q.length) {
+          while (q.length) {
+            const cand = q.shift();
+            if ((cand.__obedGen == null ? 0 : cand.__obedGen) < preserveGeneration) {
+              note('reuse-skip-stale', {
+                key: key, elId: cand.__obedElId,
+                gen: cand.__obedGen, current: preserveGeneration
+              });
+              continue;
+            }
+            preserved = cand;
+            break;
+          }
+          if (q.length === 0) pool.delete(key);
+        }
         if (preserved && preserved !== el) {
           tag(preserved);
           note('reuse-decoder', {
             key: key, newElId: el.__obedElId, oldElId: preserved.__obedElId,
             preservedT: preserved.currentTime, paused: preserved.paused,
-            readyState: preserved.readyState
+            readyState: preserved.readyState,
+            queueLeft: q ? q.length : 0
           });
           try {
             if (el.id) preserved.id = el.id;
             const st = el.getAttribute('style');
             if (st) preserved.setAttribute('style', st);
           } catch (e) {}
-          pool.delete(key);
           bindFacade(el, preserved);
           return;
         }

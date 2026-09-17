@@ -969,9 +969,27 @@ def score_playback_continuity(
     position_continuous = (
         pre is not None
         and first_after is not None
-        and abs(float(first_after) - float(pre)) < position_eps
         and not remount
     )
+    if position_continuous:
+        media_dt = abs(float(first_after) - float(pre))
+        # When capture offsets exist, allow media to advance with wall time during a
+        # slow transition (Magic Move) instead of requiring a <0.75s media step.
+        first_after_i = next(
+            (i for i, t in enumerate(clock) if i > click_i and t is not None),
+            None,
+        )
+        cap_pre = caps[click_i] if caps is not None and click_i < len(caps) else None
+        cap_after = (
+            caps[first_after_i]
+            if caps is not None and first_after_i is not None and first_after_i < len(caps)
+            else None
+        )
+        if cap_pre is not None and cap_after is not None:
+            wall_dt = abs(float(cap_after) - float(cap_pre))
+            position_continuous = abs(media_dt - wall_dt) <= max(position_eps, rate_slack_s) or media_dt < position_eps
+        else:
+            position_continuous = media_dt < position_eps
 
     # Whole-window media advance must not exceed capture elapsed by a jump margin.
     elapsed_consistent = True
@@ -1024,6 +1042,266 @@ def score_playback_continuity(
         "continuesThroughDissolve": continues,
         "noRestart": no_restart,
         "noJump": no_jump,
+    }
+
+
+def score_visible_movie_motion(
+    frames: Sequence[np.ndarray],
+    *,
+    pair_eps: float = 2.0,
+    identical_eps: float = 0.01,
+    min_changing_frac: float = 0.45,
+) -> dict[str, Any]:
+    """Require sustained composed-frame motion — one mid-window cut is not enough.
+
+    ``frames`` are already-cropped movie ROI patches (RGB or RGBA). A sequence
+    that is still except for a single change halfway through must fail even when
+    first→last MAE is large. Empty or mismatched crops are hard rejects — they
+    must not count as motion via infinite MAE.
+    """
+    if len(frames) < 3:
+        return {"ok": False, "reason": "need >=3 frames", "n": len(frames)}
+
+    shapes = [tuple(getattr(f, "shape", ())) for f in frames]
+    empty_i = [
+        i
+        for i, (f, s) in enumerate(zip(frames, shapes, strict=True))
+        if f.size == 0 or len(s) < 2 or s[0] == 0 or s[1] == 0
+    ]
+    if empty_i:
+        return {
+            "ok": False,
+            "reason": "empty crop",
+            "n": len(frames),
+            "emptyIndices": empty_i[:8],
+            "shapes": list(shapes)[:8],
+        }
+    if len(set(shapes)) != 1:
+        return {
+            "ok": False,
+            "reason": "mismatched crop shapes",
+            "n": len(frames),
+            "shapes": list(shapes)[:8],
+        }
+
+    def _mae(a: np.ndarray, b: np.ndarray) -> float:
+        return float(
+            np.mean(np.abs(a[:, :, :3].astype(np.float64) - b[:, :, :3].astype(np.float64)))
+        )
+
+    pair = [_mae(frames[i], frames[i + 1]) for i in range(len(frames) - 1)]
+    if any(not np.isfinite(m) for m in pair):
+        return {
+            "ok": False,
+            "reason": "non-finite pair mae",
+            "n": len(frames),
+            "pairMae": pair[:12],
+        }
+    first_last = _mae(frames[0], frames[-1])
+    identical_pairs = sum(1 for m in pair if m < identical_eps)
+    changing_pairs = sum(1 for m in pair if m >= pair_eps)
+    n_pair = len(pair)
+    changing_frac = changing_pairs / max(1, n_pair)
+    half = max(1, n_pair // 2)
+    early_max = max(pair[:half]) if pair else 0.0
+    late_max = max(pair[half:]) if pair else 0.0
+    ok = bool(
+        changing_frac >= min_changing_frac
+        and early_max >= pair_eps
+        and late_max >= pair_eps
+        and first_last >= pair_eps
+        and np.isfinite(first_last)
+    )
+    return {
+        "ok": ok,
+        "n": len(frames),
+        "firstLastMae": first_last,
+        "maxPairMae": max(pair) if pair else 0.0,
+        "identicalPairs": identical_pairs,
+        "identicalPairFrac": identical_pairs / max(1, n_pair),
+        "changingPairs": changing_pairs,
+        "changingPairFrac": changing_frac,
+        "earlyMaxPairMae": early_max,
+        "lateMaxPairMae": late_max,
+        "minChangingFrac": min_changing_frac,
+        "pairEps": pair_eps,
+        "shape": list(shapes[0]),
+    }
+
+
+def score_restart_movie_from_observations(
+    observations: Sequence[dict[str, Any]],
+    *,
+    slide_min_hash: int,
+    near_zero_max_s: float = 0.35,
+    progression_wall_s: float = 0.25,
+    progression_media_s: float = 0.20,
+) -> dict[str, Any]:
+    """Build one expected-movie restart row from continuous samples.
+
+    Observations are ``{t|currentTime, w|videoWidth, captureOffsetS, sceneHash,
+    decoderId?}``. Continued remount clocks for the same asset key must not hide
+    a fresh decoder: we pick the decoder that shows a near-zero clock, then
+    require spaced progression and at least one sample on
+    ``sceneHash >= slide_min_hash`` with decoded width.
+    """
+    rows: list[dict[str, Any]] = []
+    for raw in observations:
+        if raw.get("t") is None and raw.get("currentTime") is None:
+            continue
+        t = float(raw["t"] if raw.get("t") is not None else raw["currentTime"])
+        w_raw = raw.get("w")
+        if w_raw is None:
+            w_raw = raw.get("videoWidth")
+        rows.append(
+            {
+                "t": t,
+                "w": w_raw,
+                "captureOffsetS": float(raw.get("captureOffsetS") or 0.0),
+                "sceneHash": raw.get("sceneHash"),
+                "decoderId": raw.get("decoderId"),
+                "phase": raw.get("phase"),
+            }
+        )
+
+    def _hash_num(h: object) -> int | None:
+        token = str(h or "").lstrip("#").split("?")[0]
+        return int(token) if token.isdigit() else None
+
+    slide3 = [r for r in rows if (_hash_num(r.get("sceneHash")) or -1) >= slide_min_hash]
+    by_dec: dict[object, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_dec.setdefault(r.get("decoderId"), []).append(r)
+
+    # Prefer a near-zero decoder that also appears on the target slide.
+    chosen_id: object | None = None
+    near_zero_row: dict[str, Any] | None = None
+    for dec_id, series in by_dec.items():
+        series_sorted = sorted(series, key=lambda r: float(r["captureOffsetS"]))
+        hit = next(
+            (
+                r
+                for r in series_sorted
+                if float(r["t"]) < near_zero_max_s and (r.get("w") or 0) > 0
+            ),
+            None,
+        )
+        if hit is None:
+            continue
+        on_slide = any((_hash_num(r.get("sceneHash")) or -1) >= slide_min_hash for r in series)
+        if near_zero_row is None or on_slide:
+            chosen_id = dec_id
+            near_zero_row = hit
+            if on_slide:
+                break
+
+    series = list(by_dec.get(chosen_id, [])) if near_zero_row is not None else []
+    slide3_series = [
+        r for r in series if (_hash_num(r.get("sceneHash")) or -1) >= slide_min_hash
+    ]
+    # Fallback: no decoderId grouping — use min-t among width>0 on slide 3.
+    if near_zero_row is None and slide3:
+        with_w = [r for r in slide3 if (r.get("w") or 0) > 0]
+        pool = with_w or slide3
+        near_zero_row = min(pool, key=lambda r: float(r["t"])) if pool else None
+        slide3_series = slide3
+        series = slide3
+
+    progressed = False
+    if near_zero_row is not None:
+        for row in series:
+            wall_dt = float(row["captureOffsetS"]) - float(near_zero_row["captureOffsetS"])
+            media_dt = float(row["t"]) - float(near_zero_row["t"])
+            if wall_dt >= progression_wall_s and media_dt >= progression_media_s:
+                progressed = True
+                break
+
+    decoded = bool(slide3_series) and any((r.get("w") or 0) > 0 for r in slide3_series)
+    near_zero = bool(near_zero_row and float(near_zero_row["t"]) < near_zero_max_s)
+    earliest_slide3 = None
+    if slide3_series:
+        with_w = [r for r in slide3_series if (r.get("w") or 0) > 0]
+        earliest_slide3 = min(with_w or slide3_series, key=lambda r: float(r["t"]))
+
+    ok = bool(
+        len(slide3_series) >= 1
+        and near_zero
+        and progressed
+        and decoded
+        and near_zero_row is not None
+        and (near_zero_row.get("w") or 0) > 0
+    )
+    return {
+        "slide3ObsN": len(slide3_series),
+        "earliest": earliest_slide3,
+        "nearZeroObs": near_zero_row,
+        "restartDecoderId": chosen_id,
+        "nearZeroAtBoundary": near_zero,
+        "progressedAfterRestart": progressed,
+        "decodedWidthAtBoundary": decoded,
+        "ok": ok,
+    }
+
+
+def score_restart_at_slide_boundary(
+    *,
+    reached_slide: bool,
+    per_movie: dict[str, dict[str, Any]],
+    expected_keys: Sequence[str],
+    canvas_all_identical: bool = False,
+) -> dict[str, Any]:
+    """Verdict for deliberate restart — evidence must be on the target slide.
+
+    ``per_movie`` maps asset key → {
+      slide3ObsN, earliest: {t, w, ...}|None, nearZeroAtBoundary,
+      progressedAfterRestart, decodedWidthAtBoundary, ok
+    }.
+
+    ``expected_keys`` is required (never derived from observed keys) — missing
+    movies must not silently pass. Decoded width is always required so
+    audio-only clocks cannot pass. Pre-boundary restart signals alone must
+    never pass.
+    """
+    expected = [k for k in expected_keys if k]
+    missing = [
+        k
+        for k in expected
+        if int((per_movie.get(k) or {}).get("slide3ObsN") or 0) == 0
+    ]
+    width_fail = [
+        k
+        for k in expected
+        if k not in missing and not bool((per_movie.get(k) or {}).get("decodedWidthAtBoundary"))
+    ]
+    all_ok = bool(expected) and all(
+        bool((per_movie.get(k) or {}).get("ok")) for k in expected
+    )
+    late = any(
+        int((per_movie.get(k) or {}).get("slide3ObsN") or 0) > 0
+        and (per_movie.get(k) or {}).get("earliest")
+        and float(((per_movie.get(k) or {}).get("earliest") or {}).get("t") or 0) >= 0.35
+        for k in expected
+    )
+    inconclusive = bool(
+        reached_slide and (missing or width_fail or (not all_ok and late))
+    )
+    ok = bool(
+        reached_slide
+        and expected
+        and not missing
+        and not width_fail
+        and all_ok
+        and not canvas_all_identical
+    )
+    verdict = "pass" if ok else ("inconclusive" if inconclusive else "fail")
+    return {
+        "ok": ok,
+        "verdict": verdict,
+        "expectedKeys": list(expected),
+        "missingSlide3Media": missing,
+        "missingDecodedWidth": width_fail,
+        "allMoviesOk": all_ok,
+        "inconclusive": inconclusive,
     }
 
 

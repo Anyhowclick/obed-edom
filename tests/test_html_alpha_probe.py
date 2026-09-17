@@ -506,3 +506,203 @@ def test_sparse_capture_wall_paced_not_jump():
     assert scored["mediaProgressing"] is True
     assert scored["continuesThroughDissolve"] is True
 
+
+def test_visible_movie_motion_rejects_single_mid_window_cut():
+    """22 stills with one change halfway must fail — not continuous playback."""
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    a = np.zeros((80, 160, 3), dtype=np.uint8)
+    b = np.full((80, 160, 3), 80, dtype=np.uint8)
+    frames = [a.copy() for _ in range(11)] + [b.copy() for _ in range(11)]
+    scored = score_visible_movie_motion(frames)
+    assert scored["identicalPairFrac"] >= 20 / 21
+    assert scored["changingPairs"] == 1
+    assert scored["ok"] is False
+
+
+def test_visible_movie_motion_requires_early_and_late_change():
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    frames = []
+    for i in range(12):
+        arr = np.zeros((40, 80, 3), dtype=np.uint8)
+        arr[:, :] = (i * 20) % 200
+        frames.append(arr)
+    scored = score_visible_movie_motion(frames, min_changing_frac=0.45)
+    assert scored["ok"] is True
+    assert scored["earlyMaxPairMae"] >= 2.0
+    assert scored["lateMaxPairMae"] >= 2.0
+
+
+def test_visible_movie_motion_rejects_frozen_sequence():
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    frames = [np.zeros((40, 80, 3), dtype=np.uint8) for _ in range(10)]
+    scored = score_visible_movie_motion(frames)
+    assert scored["ok"] is False
+    assert scored["changingPairs"] == 0
+
+
+def test_visible_movie_motion_rejects_empty_crops():
+    """Empty / zero-sized crops must not pass via infinite MAE."""
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    empty = np.zeros((0, 80, 3), dtype=np.uint8)
+    frames = [empty for _ in range(22)]
+    scored = score_visible_movie_motion(frames)
+    assert scored["ok"] is False
+    assert scored["reason"] == "empty crop"
+
+    # Mismatched shapes previously yielded inf MAE → false motion.
+    a = np.zeros((40, 80, 3), dtype=np.uint8)
+    b = np.zeros((0, 80, 3), dtype=np.uint8)
+    scored2 = score_visible_movie_motion([a, b, a, b, a, b])
+    assert scored2["ok"] is False
+    assert scored2["reason"] in ("empty crop", "mismatched crop shapes")
+
+
+def test_restart_boundary_rejects_preboundary_only():
+    """Restart during drain without slide-3 media must not pass."""
+    from obed_edom.html_alpha_probe import score_restart_at_slide_boundary
+
+    # Reached slide 3 but no observations for the intended movie.
+    scored = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 0,
+                "earliest": None,
+                "nearZeroAtBoundary": False,
+                "progressedAfterRestart": False,
+                "decodedWidthAtBoundary": False,
+                "ok": False,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored["ok"] is False
+    assert scored["verdict"] == "inconclusive"
+    assert scored["missingSlide3Media"] == ["untitled.mov"]
+
+    # Expected key absent from per_movie entirely.
+    scored_missing = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov", "other.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 1920},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": True,
+                "ok": True,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored_missing["ok"] is False
+    assert "other.mov" in scored_missing["missingSlide3Media"]
+
+    # Audio-only (no decoded width) must not pass.
+    scored_audio = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 0},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": False,
+                "ok": True,  # even if caller set ok, width gate catches it
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored_audio["ok"] is False
+    assert scored_audio["missingDecodedWidth"] == ["untitled.mov"]
+
+    # Drain-time restart signal alone (empty expected) must fail.
+    scored2 = score_restart_at_slide_boundary(
+        reached_slide=True, expected_keys=[], per_movie={}, canvas_all_identical=False
+    )
+    assert scored2["ok"] is False
+    assert scored2["verdict"] == "fail"
+
+    # Observed-key fallback is gone — empty expected cannot pass via per_movie keys.
+    scored_obs = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=[],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 1920},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": True,
+                "ok": True,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored_obs["ok"] is False
+    assert scored_obs["expectedKeys"] == []
+
+    # Proper boundary: near-zero + progression + decoded width on slide 3.
+    scored3 = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 1920},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": True,
+                "ok": True,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored3["ok"] is True
+    assert scored3["verdict"] == "pass"
+
+
+def test_restart_movie_picks_fresh_decoder_not_continue_clock():
+    """Same asset key: remount continue (t=14) must not hide fresh restart (t≈0)."""
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        # Continued remount overlays from slide 1/2.
+        {"t": 14.0, "w": 1920, "captureOffsetS": 4.0, "sceneHash": "#4", "decoderId": 1},
+        {"t": 14.5, "w": 1920, "captureOffsetS": 4.5, "sceneHash": "#5", "decoderId": 1},
+        {"t": 15.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#6", "decoderId": 1},
+        # Fresh decoder created for restart path.
+        {"t": 0.02, "w": 1920, "captureOffsetS": 4.1, "sceneHash": "#4", "decoderId": 3},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 4.4, "sceneHash": "#5", "decoderId": 3},
+        {"t": 1.90, "w": 1920, "captureOffsetS": 6.1, "sceneHash": "#6", "decoderId": 3},
+        # Null-width duplicate of the fresh decoder must not win.
+        {"t": 0.02, "w": None, "captureOffsetS": 4.1, "sceneHash": "#4", "decoderId": 3},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 3
+    assert scored["nearZeroAtBoundary"] is True
+    assert scored["progressedAfterRestart"] is True
+    assert scored["decodedWidthAtBoundary"] is True
+    assert scored["ok"] is True
+    assert scored["slide3ObsN"] >= 1
+
+    # Sub-ms duplicate samples do not count as progression.
+    scored_fast = score_restart_movie_from_observations(
+        [
+            {"t": 0.02, "w": 1920, "captureOffsetS": 1.0, "sceneHash": "#6", "decoderId": 1},
+            {"t": 0.25, "w": 1920, "captureOffsetS": 1.0005, "sceneHash": "#6", "decoderId": 1},
+        ],
+        slide_min_hash=6,
+    )
+    assert scored_fast["nearZeroAtBoundary"] is True
+    assert scored_fast["progressedAfterRestart"] is False
+    assert scored_fast["ok"] is False
+
+

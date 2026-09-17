@@ -276,21 +276,55 @@ P3 / DSK Exporter alpha stay off until these gates pass.
     `successAlpha=True`, `success=True`. Pre-click ~99% transparent; empty right
     corners stay α=0 through dissolve; left opaque content retained. P3 still off.
     Samples: `p2-alpha/output/p2-recovery/html-dissolve-preserve-alpha/`.
+12. **Adversarial HTML gate — alpha HOLD / playback FAIL (2026-09-17).** Owner-edited
+    `Minimal Alpha_DSK.key` (`1c86a3db…`, 4 slides, No Fill): opaque black art,
+    green MM 1→2 (authored interior α=75/255 ≈29.4%; ROI mean ≈82 averages white
+    border), dual Untitled crops, across-slides continue 1→2, deliberate restart
+    intent 2→3. Gate `scripts/p2_recovery_html_adversarial.py` with preserve + strip:
+    - **Alpha holds:** empty corners clear; black sentinel opaque; green partial α.
+    - **Playback:** composed Magic Move movie ROI stays pixel-identical while
+      `currentTime` advances — **audio-only clock**. `Untitled.mov` in the export
+      is **HEVC Main 10**; Chrome advances AAC/`currentTime` with `videoWidth=0`.
+      Reattaching the preserved element did not restore pixels.
+    - **Gate corrections:** (1) visible motion now requires sustained changing
+      adjacent pairs (early+late), not one mid-window cut; (2) nav drains to
+      `#6+`; (3) restart samples continuously through the drain with sceneHash +
+      per-movie rows — late first obs → **inconclusive**, not conclusive fail;
+      preserve `note()` carries `sceneHash`. Pool-clear alone is not a pass.
+    Samples: `p2-alpha/output/p2-recovery/html-adversarial/`.
+13. **Disposable H.264 decode probe — decode yes / “fully green” no (2026-09-17).**
+    `scripts/p2_recovery_html_decode_probe.py` clones the adversarial HTML export
+    (no Keynote), replaces HEVC `Untitled.mov*` with H.264 testsrc under the same
+    filenames. **Established:** browser decode (`videoWidth>0` + changing
+    `sampleFrame`) and visible moving pixels *after* remount-after-detach.
+    Owner reproduction of the MM failure still stands: colour bars play before Magic
+    Move; during MM both `<video>` leave the DOM; afterward the street **poster**
+    remains. Remount is an overlay workaround, not Keynote restoring the layer.
+    **Owner blocking findings (not green):**
+    - Restart gate falsely passes on uninterrupted playback that starts pre-boundary
+      (`0.297s` on `#5` → `1.958s` on `#6`). Near-zero must be tied to the target
+      slide’s Start Movie, not any earlier hash.
+    - Hardcoded remount slots + max z-index break authored composition (~55% of black
+      rect covered, green obscured, extra movie upper-left) —
+      `html-decode-probe/runs/primary/after-1to2.png`.
+    - Dense “through MM” capture starts after `#1→#2` settle + remount + 0.35s — cannot
+      prove uninterrupted visibility *during* the transition.
+    Gate hardenings that remain valid: fixed `EXPECTED_MOVIE_KEYS`, mandatory decoded
+    width, wall/media-spaced progression, `w>0` over null-width dupes,
+    `preserveGeneration` on clear. Samples:
+    `p2-alpha/output/p2-recovery/html-decode-probe/`.
+    Handover: `.agents/handovers/keynote-alpha-html-2026-09-17.md` (OPEN 1).
 
 **Stop line:** native UI transparent ProRes is proven for Genesis **and** Alpha_DSK
-mixed clips 6–8 (including dense dissolve windows). On Minimal Alpha_DSK HTML,
-decoder-preserve keeps across-slides media time and PDF bg-strip restores composed
-empty-canvas alpha through dissolve (dual gate green). Stock player remounts at
-`t≈0` without preserve; unstripped PDF fills bake opaque black. Seek-handoff did
-not stick. Magic Move (7→8) export-path proven; live playhead compare still open.
-HTML live alpha is **demonstrated** on this fixture — not merely plausible.
-**Do not wire P3** until product gates for the HTML/exporter path are decided.
+mixed clips 6–8. On Minimal Alpha_DSK HTML, PDF bg-strip restores empty-canvas
+alpha; authored black/green survive. **HEVC Untitled.mov = audio-only clocks.**
+Disposable H.264 decodes; remount shows post-transition colour motion — but restart
+scoring, overlay composition, and during-transition capture are still red under
+owner review. **Do not wire P3.**
 
-**Next gate (generalization):** adversarial fixtures — intentional black artwork,
-translucent panels/shadows, different crops of the same movie, repeated transitions
-and backward navigation. Background stripping must distinguish slide background
-from authored content; decoder reuse must distinguish intended continuation from a
-deliberate restart. Then run Magic Move through this same live HTML path.
+**Next (OPEN 1):** preserve authored movie placement / layering / lifetime; restart
+tied to Start Movie on the target boundary; capture that covers the Magic Move
+itself — see handover.
 
 ## P2.4 — native PNG mid-frame probe (2026-09-16) — **no intermediate frames**
 
