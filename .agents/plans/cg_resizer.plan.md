@@ -30,6 +30,28 @@ todos:
       every other Gold and RAISE10 slide unchanged. Live confirmation is the next Gold gate,
       expected `zorderGui=[]`.
     status: completed
+  - id: live-verify-zorder-bridge
+    content: >-
+      Live verify addressed the saved deck by `(kind, kindIndex)`; the offline z-order patch
+      rewrites that per-kind order, so PR #142 excluded z-order-patched slides — a near-vacuous
+      oracle (Gold 2/19, RAISE10 0/11) still reporting `liveVerifyPass: true`. Bridge it
+      writer-side. DONE 2026-09-17 -> PR #152 (`claude/live-verify-zorder-bridge-0c598b`). Piece 1:
+      `run_offline_zorder` returns `kindIndexMap` (pre/post-patch `derive_kind_index`, join on
+      `(id, kind)` so a dual emits two records safely); `verify_live_frames` remaps `kindIndex`, a
+      mapped-but-missing index is a counted miss. Piece 2: `verify_live_frames_multiset` (membership
+      bar for the `group`-on-stat-slide bucket, which has no per-index delete tokens),
+      `live_verify_coverage` line, `GATE_VERSION` 3->4 (`COMPATIBLE {3,4}`, v3 absence = not
+      measured), `scripts/replay_live_verify.py`, SKILL.md. Two live-run fixes: string-key
+      `kindIndexMap` so `write_run_record` round-trips (tests used string keys and hid the int-key
+      crash); AppleScript-fallback group buckets routed NOT-GATED per `(slide, kind)` (the
+      w2-ambiguous-sig groups the offline `group-missed` line already excludes — offline-verified,
+      not gating the bridge). LIVE-ACCEPTED 2026-09-17 both arms GREEN: Gold positional 19 (17
+      remapped), set `group Δ0.00 n=67` PASS, not-gated 9, `uncovered []`; RAISE10 11/11, `uncovered
+      []`; `zorderGui 0` both. Bank `output/bank/2026-09-17/live-verify-bridge/`. Set bar proves
+      membership not assignment; live-gated group coverage is intentionally thin (the fallback
+      groups are NOT-GATED, §(d) tradeoff). Optional piece 3 (per-index dedup delete tokens to gate
+      the fallback groups too) remains unbuilt. Awaits owner merge + Codex.
+    status: completed
   - id: reuse-photo-placement
     content: >-
       Closed by construction: slide reuse removed 2026-09-16 (w2-deletions piece 3). The
@@ -77,8 +99,15 @@ todos:
       for the owner's eye. Evidence: fresh-gate/gold/B_flagged.key + .run.json, gold.log decision
       rows, and `output/bank/2026-09-16/gold-6-7-series-diag.md` (note: that diag's coverage-based
       rejection was overruled by the owner's criterion above, and its slide-7 findings are
-      context, not part of this bug's scope).
-    status: pending
+      context, not part of this bug's scope). DONE 2026-09-17 -> PR #150
+      (`fix/gold-6-backdrop-series`): `_is_unpinned_photo_only_backdrop` gate makes sibling-affine
+      reuse reachable for an unpinned photo-only cover-size slide after a template-layout sibling,
+      and `_recipe_reusing_affine(clamp=False)` carries slide 5's affine onto slide 6 so the ~130px
+      band is REPORTED (`uncoveredTopPx`), not closed by the cover-clamp. Slide 7 (12 thumbnails)
+      and slides 1/2 (text) fail the predicate and are unchanged; a HEAD-vs-branch `golden_plan`
+      capture confirms only slide 6 changed; golden re-baselined; suite green. Awaits owner merge +
+      Codex.
+    status: completed
   - id: residual-correctness
     content: >-
       Resolve the remaining card-border ref floor, stat-group/template sample, uncompared framing
@@ -164,8 +193,10 @@ deletions and the shared-signature resolver.
 Gate rule: `FRONT_BLOCK_OK` is measured on arm B only; `SAME_ORDER` A-vs-B stays observational; an
 A-vs-A control needs a second same-code A deck.
 
-Live verify excludes z-order-patched slides until the kindIndex bridge covers permutations
-(todo id `live-verify-zorder-bridge`, pending). Gate arms must share preview-cache provenance:
+Live verify now covers every slide: the kindIndex bridge remaps z-order-patched slides and a
+group multiset bar handles the one un-addressable bucket (todo id `live-verify-zorder-bridge`,
+DONE 2026-09-17, PR #152 — live-accepted GREEN both arms, `output/bank/2026-09-17/live-verify-bridge/`).
+Gate arms must share preview-cache provenance:
 the banked 2026-09-15 Gold arms were planned WITHOUT the preview cache and are an invalid
 baseline for slides 11/12 list placement — the 2026-09-16 build is the correct one.
 
