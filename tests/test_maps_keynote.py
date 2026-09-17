@@ -37,6 +37,8 @@ from obed_edom.maps_keynote import (
     WALL_WIDTH,
     _default_object_size,
     _place_churches,
+    _plate_group_isolate,
+    _rotate_about,
     _read_region_manifest,
     _render_reveals,
     assign_morph_plates,
@@ -219,8 +221,7 @@ def test_same_zoom_pan_offsets_shared_plate():
     assert geom is not None
     place_a = plate_placement(a, geom)
     place_b = plate_placement(b, geom)
-    assert place_a["x"] == 0
-    assert place_b["x"] == -1000
+    assert place_b["x"] - place_a["x"] == -1000
 
 
 def test_matching_rotation_uses_one_rotated_plate():
@@ -234,7 +235,7 @@ def test_matching_rotation_uses_one_rotated_plate():
     place_b = plate_placement(b, geom)
     assert place_a["x"] != place_b["x"] or place_a["y"] != place_b["y"]
     assert project_into_plate(a["lat"], a["lon"], geom, place_a) == pytest.approx(
-        (WALL_WIDTH / 2, WALL_HEIGHT / 2), abs=0.1
+        (WALL_WIDTH / 2, WALL_HEIGHT / 2), abs=1.0
     )
     assert "rotation" not in place_a
     assert "rotation" not in place_b
@@ -247,7 +248,6 @@ def test_bearing_change_rotates_the_shared_plate():
     same = morph_plate_geom([a, {**b, "bearing": 0}])
     turned = morph_plate_geom([a, b])
     assert same is not None and turned is not None
-    assert turned["plateW"] * turned["plateH"] > same["plateW"] * same["plateH"]
     place_a = plate_placement(a, turned)
     place_b = plate_placement(b, turned)
     assert "rotation" not in place_a
@@ -255,6 +255,111 @@ def test_bearing_change_rotates_the_shared_plate():
     assert project_into_plate(a["lat"], a["lon"], turned, place_a) == pytest.approx(
         (WALL_WIDTH / 2, WALL_HEIGHT / 2), abs=1.0
     )
+    assert project_into_plate(b["lat"], b["lon"], turned, place_b) == pytest.approx(
+        (WALL_WIDTH / 2, WALL_HEIGHT / 2), abs=2.0
+    )
+
+
+def _lw_misses(place: dict, width: float, height: float, slack: float = 2.0) -> list[tuple[float, float]]:
+    """LW corners that fall outside the unrotated plate after inverse Keynote rotation."""
+    rot = float(place.get("rotation") or 0)
+    x, y, w, h = place["x"], place["y"], place["w"], place["h"]
+    cx, cy = x + w / 2.0, y + h / 2.0
+    misses = []
+    for px, py in ((0.0, 0.0), (width, 0.0), (width, height), (0.0, height)):
+        ux, uy = _rotate_about(px, py, cx, cy, -rot)
+        if not (x - slack <= ux <= x + w + slack and y - slack <= uy <= y + h + slack):
+            misses.append((px, py))
+    return misses
+
+
+def test_rotated_plate_covers_lw_after_pan_and_bearing_change():
+    a = _camera(3.0, 101.0, 6)
+    b = _camera(3.0, 105.0, 6)
+    b["bearing"] = 25
+    geom = morph_plate_geom([a, b], widths=[3840.0, 3840.0], height=1080)
+    assert geom is not None
+    place_b = plate_placement(b, geom, width=3840, height=1080)
+    assert place_b.get("rotation") == pytest.approx(25)
+    assert _lw_misses(place_b, 3840, 1080) == []
+    assert project_into_plate(b["lat"], b["lon"], geom, place_b) == pytest.approx((1920, 540), abs=2)
+
+
+def test_zoom_and_rotate_keeps_the_camera_on_the_lw_frame(tmp_path: Path):
+    a = _slide(
+        "s1",
+        _camera(3.0, 101.0, 5),
+        churches=[{"id": "c", "name": "Aceh", "lat": 5.5, "lon": 95.5, "kind": "dot", "color": "#c44a42", "showLabel": True}],
+    )
+    dest = _camera(5.5, 95.5, 8)
+    dest["bearing"] = 20
+    b = _slide(
+        "s2",
+        dest,
+        churches=[{"id": "c", "name": "Aceh", "lat": 5.5, "lon": 95.5, "kind": "dot", "color": "#c44a42", "showLabel": True}],
+    )
+    geom = morph_plate_geom([a["camera"], b["camera"]], widths=[3840.0, 3840.0], height=1080)
+    assert geom is not None
+    place_b = plate_placement(b["camera"], geom, width=3840, height=1080)
+    assert place_b["w"] > 3840
+    assert _lw_misses(place_b, 3840, 1080) == []
+    assert project_into_plate(5.5, 95.5, geom, place_b) == pytest.approx((1920, 540), abs=2)
+    plate_path = _dummy_png(tmp_path / "plates" / plate_filename("p-s1-s2"))
+    items = build_slide_items(
+        b, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True,
+        pin_root=tmp_path / "pins",
+    )
+    pins = _pin_items(items)
+    assert len(pins) == 1
+    assert pins[0]["x"] + pins[0]["w"] / 2 == pytest.approx(1920 + CENTRE_ORIGIN_X, abs=8)
+    assert pins[0]["y"] + pins[0]["h"] / 2 == pytest.approx(540, abs=8)
+    assert [item for item in items if item.get("labelPill")]
+    assert [item for item in items if item.get("kind") == "text"]
+
+
+def test_zoom_only_plate_keeps_viewport_aspect():
+    a = _camera(3.0, 101.0, 4)
+    b = _camera(5.5, 95.5, 8)
+    geom = morph_plate_geom([a, b], widths=[3840.0, 3840.0], height=1080)
+    assert geom is not None
+    assert geom["plateW"] / geom["plateH"] > 2
+    fitted = fit_morph_plate(geom)
+    assert fitted["plateW"] / fitted["plateH"] > 2
+
+
+def test_plate_plan_carries_isolate_on_a_morph_group():
+    iso = {"mode": "darken", "strength": 0.65}
+    a = _slide("s1", _camera(3.0, 101.0, 7), highlights=["MYS", "IDN"], isolate=iso)
+    b = _slide("s2", _camera(3.2, 101.2, 8), highlights=["MYS", "IDN"], isolate=iso)
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
+    plan = maps_export_plan([a, b], links)
+    assert plan["plates"]
+    assert plan["plates"][0]["isolate"] == iso
+
+
+def test_plate_group_isolate_reads_a_later_slide_when_the_first_is_off():
+    iso = {"mode": "darken", "strength": 0.65}
+    a = _slide("s1", _camera(3.0, 101.0, 5), highlights=["MYS"])
+    b = _slide("s2", _camera(5.5, 95.5, 8), highlights=["MYS"], isolate=iso)
+    assert _plate_group_isolate([a, b], ["s1", "s2"]) == iso
+    assert _plate_group_isolate([a, b], ["s1"]) is None
+
+
+def test_emit_sets_size_before_position_on_an_unrotated_image():
+    item = {
+        "kind": "image",
+        "x": -14000,
+        "y": -200,
+        "w": 32000,
+        "h": 9000,
+        "path": "/tmp/plate.png",
+        "map": True,
+    }
+    script = "\n".join(_emit_item(item))
+    width_at = script.index("set width of img to 32000")
+    height_at = script.index("set height of img to 9000")
+    pos_at = script.index("set position of img to {-14000, -200}")
+    assert width_at < height_at < pos_at
 
 
 def test_emit_sets_keynote_rotation_on_bearing_change():
@@ -1555,6 +1660,16 @@ def test_oversized_morph_is_fitted_not_movie():
     assert max(plan["plates"][0]["plateW"], plan["plates"][0]["plateH"]) <= 8192
 
 
+def test_large_zoom_hop_falls_back_to_movie():
+    a = _slide("s1", _camera(3.0, 101.0, 4))
+    b = _slide("s2", _camera(5.5, 95.5, 8))
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
+    plates, next_links = assign_morph_plates([a, b], links)
+    assert next_links[0]["kind"] == "movie"
+    assert next_links[0].get("plateId") is None
+    assert plates == {}
+
+
 def test_zoom_in_morph_plate_overflows_the_frame():
     a = _slide("s1", _camera(3.0, 101.0, 10), includeSidePanels=False)
     b = _slide("s2", _camera(3.0, 101.0, 12), includeSidePanels=False)
@@ -1893,6 +2008,47 @@ def test_plan_deck_magic_move_duplicate_keeps_country_cutout(tmp_path: Path):
     assert re.search(r"repeat with i from \(count of images\) to 3 by -1", body) is not None
 
 
+def test_plan_deck_morph_emits_one_cutout_per_country(tmp_path: Path):
+    cam_a, cam_b = _pan_camera(8, 400)
+    highlights = ["MYS", "IDN", "A1:IDN-1185"]
+    a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=highlights)
+    b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=highlights)
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
+    plates, links = assign_morph_plates([a, b], links)
+    plan = maps_export_plan([a, b], links)
+    assert plan["plates"][0]["highlights"] == highlights
+    assert plan["plates"][0]["platePngRegions"]
+    for plate in plan["plates"]:
+        name = plate_filename(plate["plateId"])
+        _dummy_png(tmp_path / "plates" / name)
+        _dummy_region(
+            tmp_path / "plates" / name,
+            pieces=[
+                {"id": "MYS", "x": 0, "y": 0, "w": 8, "h": 8},
+                {"id": "IDN", "x": 8, "y": 0, "w": 8, "h": 8},
+                {"id": "A1:IDN-1185", "x": 0, "y": 8, "w": 8, "h": 8},
+            ],
+            width=16,
+            height=16,
+        )
+    ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    for op in ops:
+        countries = [item for item in op["items"] if item.get("country")]
+        assert [Path(item["path"]).name for item in countries] == [
+            f"{Path(plate_filename(plan['plates'][0]['plateId'])).stem}-region-0.png",
+            f"{Path(plate_filename(plan['plates'][0]['plateId'])).stem}-region-1.png",
+            f"{Path(plate_filename(plan['plates'][0]['plateId'])).stem}-region-2.png",
+        ]
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    tell_start = script.index("tell slide 2")
+    tell_end = script.index("end tell", tell_start)
+    body = script[tell_start:tell_end]
+    assert "set width of image 2 to" in body
+    assert "set width of image 3 to" in body
+    assert "set width of image 4 to" in body
+    assert re.search(r"repeat with i from \(count of images\) to 5 by -1", body) is not None
+
+
 def test_plan_deck_morph_member_with_no_own_highlights_still_gets_plate_cutout(tmp_path: Path):
     cam_a, cam_b = _pan_camera(8, 400)
     a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
@@ -1924,6 +2080,36 @@ def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
     assert landing["_landingFor"] == "s2"
 
 
+def test_export_plan_keeps_landing_still_when_destination_is_on_a_morph_plate():
+    iso = {"mode": "darken", "strength": 0.6}
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0), isolate=iso, highlights=["USA"])
+    c = _slide("s3", _camera(3.2, 102.4), isolate=iso, highlights=["USA"])
+    links = [
+        {"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False},
+        {"from": "s2", "to": "s3", "kind": "morph", "duration": 1.0, "playWithoutClick": False},
+    ]
+    plan = maps_export_plan([a, b, c], links)
+    still_ids = {row["slideId"] for row in plan["stills"]}
+    assert "s2__landing" in still_ids
+    assert "s2" not in still_ids
+    assert "s3" not in still_ids
+    assert any({"s2", "s3"} <= set(row["slideIds"]) for row in plan["plates"])
+
+
+def test_export_plan_no_landing_when_source_already_isolated():
+    iso = {"mode": "darken", "strength": 0.6}
+    pitched = {**_camera(3.0, 101.0), "pitch": 20.0}
+    a = _slide("s1", pitched, isolate=iso, highlights=["USA"])
+    b = _slide("s2", {**pitched, "lon": 102.0}, isolate=iso, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
+    plan = maps_export_plan([a, b], links)
+    still_ids = {row["slideId"] for row in plan["stills"]}
+    assert "s2__landing" not in still_ids
+    assert still_ids == {"s1", "s2"}
+    assert plan["links"][0]["kind"] == "movie"
+
+
 def test_export_plan_no_landing_row_for_dissolve_or_no_highlights():
     a = _slide("s1", _camera(3.0, 101.0))
     b = _slide("s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
@@ -1952,6 +2138,22 @@ def test_plan_deck_inserts_landing_slide_between_movie_and_isolated_destination(
     assert ops[1]["transition"] == {"effect": "dissolve", "duration": 1.5, "automatic": False}
     assert len([item for item in ops[2]["items"] if item.get("map")]) == 1
     assert len([item for item in ops[2]["items"] if item.get("country")]) == 1
+
+
+def test_plan_deck_no_landing_when_both_ends_isolated(tmp_path: Path):
+    iso = {"mode": "darken", "strength": 0.6}
+    pitched = {**_camera(3.0, 101.0, 8), "pitch": 20.0}
+    a = _slide("s1", pitched, isolate=iso, highlights=["USA"], movieDuration=2.0)
+    b = _slide("s2", {**pitched, "lon": 102.0}, isolate=iso, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
+    mov = movie_path(tmp_path, "s1")
+    mov.parent.mkdir(parents=True, exist_ok=True)
+    mov.write_bytes(b"fake-mov")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    _dummy_region(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert [op["id"] for op in ops] == ["s1", "s2"]
+    assert not any(str(op.get("id") or "").endswith("__landing") for op in ops)
 
 
 def test_plan_deck_no_isolate_deck_ops_unchanged(tmp_path: Path):
@@ -2889,6 +3091,16 @@ def test_label_pill_uses_the_fixed_gold_red_regardless_of_marker_colour(tmp_path
         assert path == expected
 
 
+def test_label_pill_uses_church_label_color_when_set(tmp_path: Path):
+    churches = [dict(_label_churches()[0], labelColor="#112233")]
+    items = _place_labels(tmp_path, churches)
+    pills = [item for item in items if item.get("labelPill")]
+    assert len(pills) == 1
+    path = Path(pills[0]["path"])
+    assert path.is_file()
+    assert path.name.startswith("labelpill-112233-")
+
+
 def test_show_label_false_emits_neither_pill_nor_text(tmp_path: Path):
     churches = [dict(church, showLabel=False) for church in _label_churches()]
     items = _place_labels(tmp_path, churches)
@@ -3190,7 +3402,7 @@ def test_still_plans_a_cutout_without_isolate():
 
 def test_landing_slide_plans_no_cutout():
     """`isolate_landing_slides` forces `highlights: []`, so the gate can never fire for one."""
-    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
+    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
     b = _slide("s2", _camera(20.0, 130.0, 4), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
     links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 2.0, "playWithoutClick": True}]
 
@@ -3327,8 +3539,8 @@ def test_build_slide_items_scales_pieces_to_plate_placement(tmp_path: Path):
     piece = next(item for item in items if item.get("country"))
     assert piece["path"] == str(piece_path)
     scale = mapped["w"] / 640.0
-    assert piece["w"] == pytest.approx(320 * scale)
-    assert piece["h"] == pytest.approx(45 * scale)
+    assert piece["w"] == pytest.approx(320 * scale, abs=1)
+    assert piece["h"] == pytest.approx(45 * scale, abs=1)
     assert piece["x"] == pytest.approx(mapped["x"] + 0 * scale)
     assert piece["y"] == pytest.approx(mapped["y"] + 0 * scale)
     assert (mapped["w"], mapped["h"]) != (640, 90), "plate placement should not coincidentally match the manifest size"

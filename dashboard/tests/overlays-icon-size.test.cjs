@@ -374,6 +374,7 @@ test("churchesGeo emits a labelBucket naming a registered pill image", () => {
     const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size }], null, false, 1);
     assert.equal(geo.features[0].properties.labelBucket, bucket);
     assert.ok(LABEL_PILL_BUCKETS.map(String).includes(geo.features[0].properties.labelBucket));
+    assert.match(geo.features[0].properties.labelPill, /ee220c$/);
   }
 });
 

@@ -2362,6 +2362,7 @@ input.maps-thumb-title-input:focus {
   background-size: 10px 10px;
   background-position: 0 0, 0 5px, 5px -5px, -5px 0;
 }
+.btn.maps-duplicate,
 .btn.maps-delete {
   display: inline-flex;
   align-items: center;
@@ -2370,9 +2371,20 @@ input.maps-thumb-title-input:focus {
   width: var(--ctl-h);
   height: var(--ctl-h);
   padding: 0;
+  border-radius: var(--radius-pill);
+}
+.btn.maps-duplicate {
+  background: var(--job-watercolour);
+  color: var(--ink-inverse);
+  box-shadow: 0 0 16px rgba(127, 169, 255, 0.32);
+}
+.btn.maps-duplicate:hover:not(:disabled) {
+  background: #96b6ff;
+  box-shadow: 0 0 20px rgba(127, 169, 255, 0.42);
+}
+.btn.maps-delete {
   background: var(--accent-danger);
   color: var(--accent-danger-fg);
-  border-radius: var(--radius-pill);
   box-shadow: 0 0 16px rgba(255, 77, 77, 0.28);
 }
 .btn.maps-delete:hover:not(:disabled) {
@@ -2908,6 +2920,7 @@ input.maps-thumb-title-input:focus {
 }
 .maps-pin-bulk .note { flex: 1 1 100%; margin: 0; }
 .maps-pin-bulk .maps-colour,
+.maps-pin-bulk .maps-object-colour,
 .maps-pin-bulk .maps-slider-field { flex: 1 1 100%; }
 .hop-tl-wrap { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
 .hop-phase-toggles {
@@ -2999,6 +3012,24 @@ input.maps-thumb-title-input:focus {
 .morph-gate.bad .morph-gate-detail { color: #ff8a8a; }
 .morph-gate.soft { color: var(--ink-secondary); }
 .morph-gate.soft .morph-gate-detail { color: var(--warn); }
+.morph-gate-pills,
+.morph-gate-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 6px;
+}
+.morph-gate-pills { margin-top: 2px; }
+.morph-gate-pills-arrow {
+  color: inherit;
+  opacity: 0.7;
+  font-size: 11px;
+}
+.morph-gate-pills .maps-hl-chip {
+  pointer-events: none;
+  padding: 2px 8px;
+  font-size: 11px;
+}
 .morph-mark {
   width: 16px;
   height: 16px;
@@ -3273,6 +3304,20 @@ input.maps-thumb-title-input:focus {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.maps-object-colour {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-ctl);
+  min-width: 0;
+}
+.maps-object-colour > .seg {
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+}
+.maps-object-colour > .seg.seg-slide button {
+  flex: 1 1 0;
 }
 .maps-colour-row input[type="text"] { flex: 1; min-width: 0; }
 .maps-colour-well {

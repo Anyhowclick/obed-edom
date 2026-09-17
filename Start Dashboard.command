@@ -167,17 +167,17 @@ fi
 
 echo "Installing Obed-Edom into that folder…"
 "$VENV/bin/python" -m pip install -q --upgrade pip || fail "Could not update pip in the private Python folder. Try deleting the .venv folder next to this file and running this again."
-"$VENV/bin/python" -m pip install -q -e "$ROOT" || fail "Could not install Obed-Edom into the private Python folder. Try deleting the .venv folder next to this file and running this again."
+"$VENV/bin/python" -m pip install -q -e "$ROOT[iwa]" || fail "Could not install Obed-Edom into the private Python folder. Try deleting the .venv folder next to this file and running this again."
 
-if ! "$VENV/bin/python" -c 'import obed_edom' >/dev/null 2>&1; then
+if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf' >/dev/null 2>&1; then
   echo "The first install attempt didn't take. Trying again…"
   export PATH="$HOME/.local/bin:$PATH"
   if command -v uv >/dev/null 2>&1; then
-    uv pip install --python "$VENV/bin/python" --reinstall -e "$ROOT" || true
+    uv pip install --python "$VENV/bin/python" --reinstall -e "$ROOT[iwa]" || true
   else
-    "$VENV/bin/python" -m pip install --force-reinstall --no-deps -e "$ROOT" || true
+    "$VENV/bin/python" -m pip install --force-reinstall -e "$ROOT[iwa]" || true
   fi
-  if ! "$VENV/bin/python" -c 'import obed_edom' >/dev/null 2>&1; then
+  if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf' >/dev/null 2>&1; then
     fail "Obed-Edom could not be installed into its private Python folder. Try deleting the .venv folder next to this file and running this again."
   fi
 fi

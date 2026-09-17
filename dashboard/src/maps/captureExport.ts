@@ -4,6 +4,8 @@ import { applyLayerFilters } from "./layers";
 import {
   addOverlays,
   admin1FeaturesInPlay,
+  applyAdmin1Highlights,
+  applyHighlights,
   highlightedCountries,
   applyHillshade,
   ensureAdmin0Highlights,
@@ -312,11 +314,17 @@ export async function captureIsolatePair(
     const highlightedPieces = highlightPieces(
       (admin0?.features || []) as never,
       opts.highlights,
-      admin1FeaturesInPlay(opts.highlights)
+      admin1FeaturesInPlay(opts.highlights),
+      { keepNestedRegions: true }
     );
     const pr = surface.pixelRatio;
     const pieces: { id: string; x: number; y: number; w: number; h: number; blob: Blob }[] = [];
     for (const piece of highlightedPieces) {
+      // One country/region per raster: even if the clip path is too complex and
+      // the browser draws the bbox, only this highlight is painted.
+      applyHighlights(map, [piece.id], opts.highlightColours);
+      applyAdmin1Highlights(map, [piece.id], opts.highlightColours);
+      await waitIdleForFrame(map, undefined, opts.isCancelled);
       const clip = pieceClip(
         piece.rings,
         (lonLat) => map.project(lonLat),

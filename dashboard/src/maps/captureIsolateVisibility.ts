@@ -45,20 +45,29 @@ export function setHighlightOpacity(
   }
 }
 
-/** Hides the highlight layers for the "base" capture of an isolate pair — the base always drops
- * the highlight, regardless of isolate mode. */
-export function isolatePairBaseVisibility(map: CaptureMapLike, highlights: string[]): void {
-  setHighlightOpacity(map, 0, highlights);
+function setHighlightLayerVisibility(map: CaptureMapLike, visibility: "visible" | "none"): void {
+  for (const [id] of HIGHLIGHT_LAYERS) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
+  }
 }
 
-/** The cutout capture's toggle. The isolate mask itself must never bake into either raster, so
- * it is hidden first, unconditionally; highlight fill then returns so coloured regions land in
- * the piece. No-fill (`none`) codes stay unpainted via the restored opacity expressions. */
+/** Hides the highlight layers for the "base" capture of an isolate pair — the base always drops
+ * the highlight, regardless of isolate mode. Isolate itself stays on the base so the darken
+ * mask travels with the shared plate. */
+export function isolatePairBaseVisibility(map: CaptureMapLike, highlights: string[]): void {
+  setHighlightOpacity(map, 0, highlights);
+  setHighlightLayerVisibility(map, "none");
+}
+
+/** The cutout capture's toggle. Isolate must not bake into a piece (it lives on the base);
+ * highlight fill then returns so coloured regions land in the piece. No-fill (`none`) codes
+ * stay unpainted via the restored opacity expressions. */
 export function isolatePairCutoutVisibility(
   map: CaptureMapLike,
   highlights: string[],
   highlightColours?: Record<string, string>
 ): void {
   if (map.getLayer("isolate-fill")) map.setLayoutProperty("isolate-fill", "visibility", "none");
+  setHighlightLayerVisibility(map, "visible");
   setHighlightOpacity(map, null, highlights, highlightColours);
 }

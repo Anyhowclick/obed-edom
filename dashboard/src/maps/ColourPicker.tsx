@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { IconClose, IconNoFill, IconPlus, IconTick } from "../components/icons";
 import { isHighlightHex, normaliseHighlightColour } from "./highlight";
 import { addSavedColour, removeSavedColour, useSavedColours } from "./savedColours";
@@ -11,6 +11,7 @@ export function ColourPicker({
   disabled = false,
   colourLabel = "Highlight colour",
   hexLabel = "Highlight colour hex",
+  prefix,
   onColour,
   onText,
   onNone,
@@ -23,6 +24,7 @@ export function ColourPicker({
   disabled?: boolean;
   colourLabel?: string;
   hexLabel?: string;
+  prefix?: ReactNode;
   onColour: (value: string) => void;
   onText: (value: string) => void;
   onNone?: () => void;
@@ -38,7 +40,7 @@ export function ColourPicker({
   useEffect(() => {
     setHexDirty(false);
     setDraft(none ? "" : text);
-  }, [none, colour]);
+  }, [none, colour, text]);
 
   function pick(hex: string) {
     if (disabled) return;
@@ -59,6 +61,7 @@ export function ColourPicker({
   return (
     <div className="maps-colour">
       <div className="maps-colour-row">
+        {prefix}
         <span className={`maps-colour-well${none ? " none" : ""}`}>
           <input
             type="color"

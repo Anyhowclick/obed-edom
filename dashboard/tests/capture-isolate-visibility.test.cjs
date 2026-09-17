@@ -52,11 +52,22 @@ test("setHighlightOpacity(null) restores authored expressions, admin1 via admin1
 test("isolatePairBaseVisibility always hides the highlight layers, isolate on or off", () => {
   const map = fakeMap(ALL_LAYERS);
   isolatePairBaseVisibility(map, ["USA"]);
+  const paint = map.calls.filter((c) => c[0] === "setPaintProperty");
+  const layout = map.calls.filter((c) => c[0] === "setLayoutProperty");
   assert.deepEqual(
-    map.calls.map((c) => c[1]),
+    paint.map((c) => c[1]),
     ["admin0-fill", "admin0-line", "admin1-fill", "admin1-line"]
   );
-  assert.ok(map.calls.every((c) => c[3] === 0));
+  assert.ok(paint.every((c) => c[3] === 0));
+  assert.deepEqual(
+    layout.map((c) => [c[1], c[3]]),
+    [
+      ["admin0-fill", "none"],
+      ["admin0-line", "none"],
+      ["admin1-fill", "none"],
+      ["admin1-line", "none"],
+    ]
+  );
 });
 
 test("cutout: isolate-fill is hidden first, then highlights restore to authored expressions", () => {
@@ -64,8 +75,20 @@ test("cutout: isolate-fill is hidden first, then highlights restore to authored 
   isolatePairCutoutVisibility(map, ["A1:MYS-1186"]);
   assert.equal(map.calls[0][0], "setLayoutProperty");
   assert.equal(map.calls[0][1], "isolate-fill");
+  const paint = map.calls.filter((c) => c[0] === "setPaintProperty");
   assert.deepEqual(
-    map.calls.slice(1).map((c) => c[1]),
+    paint.map((c) => c[1]),
+    ["admin0-fill", "admin0-line", "admin1-fill", "admin1-line"]
+  );
+});
+
+test("cutout restores highlight layer visibility after the base hid them", () => {
+  const map = fakeMap(ALL_LAYERS);
+  isolatePairBaseVisibility(map, ["USA"]);
+  isolatePairCutoutVisibility(map, ["USA"]);
+  const visible = map.calls.filter((c) => c[0] === "setLayoutProperty" && c[3] === "visible");
+  assert.deepEqual(
+    visible.map((c) => c[1]),
     ["admin0-fill", "admin0-line", "admin1-fill", "admin1-line"]
   );
 });
@@ -75,7 +98,7 @@ test("cutout visibility is a no-op for isolate-fill when no isolate layer exists
   isolatePairCutoutVisibility(map, ["USA"]);
   assert.ok(!map.calls.some((c) => c[1] === "isolate-fill"));
   assert.deepEqual(
-    map.calls.map((c) => c[1]),
+    map.calls.filter((c) => c[0] === "setPaintProperty").map((c) => c[1]),
     ["admin0-fill", "admin0-line"]
   );
 });
@@ -92,6 +115,6 @@ test("full pair call order: base hide happens entirely before the cutout's isola
 test("cutout restore drops no-fill admin1 ids from the authored opacity expression", () => {
   const map = fakeMap(ALL_LAYERS);
   isolatePairCutoutVisibility(map, ["A1:MYS-1186", "A1:MYS-1187"], { "A1:MYS-1186": "none" });
-  const admin1Fill = map.calls.find((c) => c[1] === "admin1-fill");
+  const admin1Fill = map.calls.find((c) => c[0] === "setPaintProperty" && c[1] === "admin1-fill");
   assert.deepEqual(admin1Fill[3][1][2], ["literal", ["MYS-1187"]]);
 });

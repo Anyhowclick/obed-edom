@@ -226,7 +226,7 @@ export function ManualEntriesForm({ mode, busy, onDone, onCancel }: Props) {
       )}
       <div className="maps-manual-actions">
         <button
-          className="btn secondary"
+          className="btn secondary icon-btn"
           type="button"
           disabled={busy || rows.length >= MANUAL_MAX_ROWS}
           aria-label="Add row"
@@ -234,7 +234,6 @@ export function ManualEntriesForm({ mode, busy, onDone, onCancel }: Props) {
           onClick={add}
         >
           <IconPlus />
-          Add row
         </button>
         <span className="spacer" />
         <button className="btn maps-manual-done" type="button" disabled={busy} onClick={done}>

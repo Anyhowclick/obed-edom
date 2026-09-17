@@ -1,4 +1,5 @@
-import { admin0Name } from "./overlays";
+import { highlightCssVars, highlightMismatch, highlightMismatchEmpty, type HighlightFill, type HighlightMismatch } from "./highlight";
+import { highlightName } from "./overlays";
 import { STYLE_SWATCHES } from "./styles";
 import {
   LAYER_FILTERS,
@@ -7,6 +8,8 @@ import {
   appearanceMismatch,
   buildingsLayerOn,
   isExtrudedStyle,
+  MORPH_MAX_DISPLAY_PX,
+  morphPlateNativePx,
   morphPlatePx,
   bearingDelta,
   captureWidth,
@@ -17,7 +20,7 @@ import {
   type MapsSlide,
 } from "./types";
 
-type Gate = { id: string; label: string; ok: boolean; detail: string; tip: string };
+type Gate = { id: string; label: string; ok: boolean; detail: string; tip: string; pills?: HighlightMismatch };
 
 function WarnMark({ className = "" }: { className?: string }) {
   return (
@@ -37,7 +40,50 @@ function styleLabel(id: MapsSlide["style"]): string {
 
 function countriesLabel(codes: string[]): string {
   if (!codes.length) return "none";
-  return codes.map((code) => admin0Name(code)).join(", ");
+  return codes.map((code) => highlightName(code)).join(", ");
+}
+
+function HighlightGateChip({ code, fill, title }: { code: string; fill: HighlightFill; title: string }) {
+  return (
+    <span
+      className={`maps-hl-chip${fill.none ? " none" : ""}`}
+      style={fill.none ? undefined : highlightCssVars(fill.hex)}
+      title={title}
+    >
+      {highlightName(code)}
+    </span>
+  );
+}
+
+function HighlightGatePills({ pills }: { pills: HighlightMismatch }) {
+  return (
+    <span className="morph-gate-pills">
+      {(pills.leave.length > 0 || pills.join.length > 0) && (
+        <span className="morph-gate-pill-row">
+          {pills.leave.map((item) => (
+            <HighlightGateChip key={`leave-${item.code}`} code={item.code} fill={item.fill} title="Only on this shot" />
+          ))}
+          {pills.leave.length > 0 && pills.join.length > 0 && (
+            <span className="morph-gate-pills-arrow" aria-hidden="true">
+              →
+            </span>
+          )}
+          {pills.join.map((item) => (
+            <HighlightGateChip key={`join-${item.code}`} code={item.code} fill={item.fill} title="Only on the next shot" />
+          ))}
+        </span>
+      )}
+      {pills.recolour.map((item) => (
+        <span key={`recolour-${item.code}`} className="morph-gate-pill-row">
+          <HighlightGateChip code={item.code} fill={item.from} title="Colour on this shot" />
+          <span className="morph-gate-pills-arrow" aria-hidden="true">
+            →
+          </span>
+          <HighlightGateChip code={item.code} fill={item.to} title="Colour on the next shot" />
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function layersLabel(ids: MapsLayerFilterId[], relief: boolean): string {
@@ -68,6 +114,9 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   const extruded = isExtrudedStyle(from.style) || isExtrudedStyle(to.style);
   const buildingsOn = buildingsLayerOn(from) || buildingsLayerOn(to);
   const threeD = (extruded && buildingsOn) || pitch > MORPH_MAX_PITCH;
+  const nativePlate = morphPlateNativePx(from.camera, to.camera, captureWidth(from), captureWidth(to));
+  const plateOversize =
+    nativePlate != null && Math.max(nativePlate.w, nativePlate.h) > MORPH_MAX_DISPLAY_PX;
   const plate = morphPlatePx(from.camera, to.camera, captureWidth(from), captureWidth(to));
   const plateOk = plate != null;
   let threeDDetail = "flat";
@@ -76,6 +125,14 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   else if (extruded) threeDDetail = "buildings off";
   const layersSame = !mismatch.has("hiddenLayers") && !mismatch.has("hillshade");
   const highlightsSame = !mismatch.has("highlights") && !mismatch.has("highlightColours");
+  const hlPills = highlightMismatch(from, to);
+  const countriesDetail = highlightsSame
+    ? countriesLabel(fromHi)
+    : highlightMismatchEmpty(hlPills)
+      ? mismatch.has("highlightColours")
+        ? `${countriesLabel(fromHi)} · colours differ`
+        : `${countriesLabel(fromHi)} → ${countriesLabel(toHi)}`
+      : "";
   return [
     {
       id: "style",
@@ -88,12 +145,8 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
       id: "countries",
       label: "Same region highlights",
       ok: highlightsSame,
-      detail:
-        fromHi.join(",") === toHi.join(",")
-          ? mismatch.has("highlightColours")
-            ? `${countriesLabel(fromHi)} · colours differ`
-            : countriesLabel(fromHi)
-          : `${countriesLabel(fromHi)} → ${countriesLabel(toHi)}`,
+      detail: countriesDetail,
+      pills: highlightsSame || highlightMismatchEmpty(hlPills) ? undefined : hlPills,
       tip: "Highlighted regions and their colours must match on both shots. Panning part of the map off-screen is fine.",
     },
     {
@@ -133,12 +186,14 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
       id: "plate",
       label: "Shared plate",
       ok: plateOk,
-      detail: plate
-        ? `${Math.round(plate.w)} × ${Math.round(plate.h)}${dZoom > 0.05 ? ` · Δz ${dZoom.toFixed(1)}` : ""}${
-            dBearing > MORPH_MAX_DBEARING ? ` · Δθ ${fmtDeg(dBearing)}` : ""
-          }`
-        : "none",
-      tip: "One PNG on both slides. It may be larger than the frame — overflow is how zoom-in and zoom-out work. Capture is capped at 8192px.",
+      detail: plateOversize && nativePlate
+        ? `${Math.round(nativePlate.w)} × ${Math.round(nativePlate.h)} · over ${MORPH_MAX_DISPLAY_PX}pt`
+        : plate
+          ? `${Math.round(plate.w)} × ${Math.round(plate.h)}${dZoom > 0.05 ? ` · Δz ${dZoom.toFixed(1)}` : ""}${
+              dBearing > MORPH_MAX_DBEARING ? ` · Δθ ${fmtDeg(dBearing)}` : ""
+            }`
+          : "none",
+      tip: `One PNG on both slides. Overflow is fine up to ${MORPH_MAX_DISPLAY_PX}pt — past that, Keynote Magic Move lags and Export uses Movie. Capture is capped at 8192px.`,
     },
   ];
 }
@@ -150,7 +205,7 @@ function gateHint(gates: Gate[]): string {
     return "Map style, region highlights, or layers changed — that cannot Magic Move. Use Cut or Dissolve.";
   }
   if (failed.every((gate) => gate.id === "plate")) {
-    return "The two cameras do not share a usable plate — Export will use Movie.";
+    return "The shared plate would be larger than Keynote can Magic Move — Export will use Movie.";
   }
   return "Pitch or 3D buildings need a Movie fly.";
 }
@@ -181,7 +236,7 @@ export function MorphGates({ from, to }: { from: MapsSlide; to: MapsSlide }) {
               <span className="morph-sr">{gate.ok ? "Pass: " : "Fail: "}</span>
               {gate.label}
             </span>
-            <span className="morph-gate-detail">{gate.detail}</span>
+            <span className="morph-gate-detail">{gate.pills ? <HighlightGatePills pills={gate.pills} /> : gate.detail}</span>
           </li>
         ))}
       </ul>
@@ -204,7 +259,7 @@ export function MovieAppearanceGate({
   onMatch: () => void;
 }) {
   const destIsolated = isolateDissolveNeeded(from, to);
-  const sourceIsolated = !!from.isolate && !destIsolated;
+  const sourceIsolated = !!from.isolate && !to.isolate;
   const softFields = softMovieFields(from, to);
   const mismatch = new Set(appearanceMismatch(from, to));
   const allRows = morphGateList(from, to).filter(
@@ -245,7 +300,7 @@ export function MovieAppearanceGate({
                 <span className="morph-sr">Fail: </span>
                 {gate.label}
               </span>
-              <span className="morph-gate-detail">{gate.detail}</span>
+              <span className="morph-gate-detail">{gate.pills ? <HighlightGatePills pills={gate.pills} /> : gate.detail}</span>
             </li>
           ))}
           {softRows.map((gate) => (
@@ -255,7 +310,7 @@ export function MovieAppearanceGate({
                 <span className="morph-sr">Heads-up: </span>
                 {gate.label}
               </span>
-              <span className="morph-gate-detail">{gate.detail}</span>
+              <span className="morph-gate-detail">{gate.pills ? <HighlightGatePills pills={gate.pills} /> : gate.detail}</span>
             </li>
           ))}
         </ul>

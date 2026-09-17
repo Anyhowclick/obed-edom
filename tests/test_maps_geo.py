@@ -136,6 +136,15 @@ def test_infer_hop_kind_retired_liberty_matches_buildings3d():
     assert infer_hop_kind(liberty, positron) == "cut"
 
 
+def test_infer_hop_kind_cut_on_isolate():
+    cam = {"zoom": 4, "pitch": 0, "bearing": 0}
+    off = {"style": "positron", "highlights": ["MYS"], "camera": cam}
+    on = {**off, "isolate": {"mode": "darken", "strength": 0.65}}
+    assert infer_hop_kind(off, on) == "cut"
+    assert infer_hop_kind(on, {**on, "isolate": {"mode": "darken", "strength": 0.40}}) == "cut"
+    assert infer_hop_kind(on, {**on, "isolate": {"mode": "darken", "strength": 0.65}}) == "morph"
+
+
 def test_infer_hop_kind_cut_on_style_or_highlights():
     a = {"style": "positron", "highlights": ["MYS"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
     b = {"style": "dark", "highlights": ["MYS"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}

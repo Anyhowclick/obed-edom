@@ -1,4 +1,4 @@
-import { highlightColoursKey, parseHighlightColours } from "./highlight";
+import { highlightColoursKey, isHighlightHex, normaliseHighlightColour, parseHighlightColours } from "./highlight";
 
 export const HILLSHADE_LAYER_ID = "hillshade";
 export const HILLSHADE_SOURCE_ID = "terrarium";
@@ -67,6 +67,8 @@ export type MapsChurch = {
   kind: MapsPinKind;
   color: string;
   showLabel?: boolean;
+  /** Pill background. Omitted = gold-red `#ee220c`. */
+  labelColor?: string;
   icon?: MapsIconId;
   photoPath?: string;
   assetId?: string;
@@ -227,8 +229,8 @@ export const HOP_LABELS: Record<MapsHopKind, string> = {
 };
 
 export const HOP_TIPS: Record<MapsHopKind, string> = {
-  morph: "Keynote Magic Move on one shared map plate — pan, zoom, and rotate, including overflow off-canvas.",
-  movie: "Keynote movie. Used for pitch or 3D buildings. Fly phases are optional.",
+  morph: "Keynote Magic Move on one shared map plate — pan, zoom, and rotate. Overflow is fine up to 16384pt; a bigger zoom hop becomes a Movie.",
+  movie: "Keynote movie. Used for pitch, 3D buildings, or a zoom too large for one Magic Move image.",
   dissolve: "Keynote Dissolve. Crossfade stills over the hop duration.",
   cut: "Instant cut. Used when the map style or region highlights change.",
 };
@@ -339,6 +341,10 @@ export function exportCamera(camera: MapsCamera, surfaceWidth: number): MapsCame
 export const MORPH_MAX_PITCH = 0.5;
 export const MORPH_MAX_DBEARING = 0.05;
 export const MORPH_MAX_PLATE_PX = 8192;
+/** Keynote object size, not the capture raster. A z+4 hop on the 3840 centre is ~61k pt
+ * and Magic Move hitching / wrong placement is Keynote giving up on that object. 16384 is
+ * 2× the old unfitted-8192 gate: about two zoom stops of overflow, then Movie. */
+export const MORPH_MAX_DISPLAY_PX = 16384;
 const TILE_SIZE = 512;
 export const WALL_W = 7680;
 export const WALL_H = 1080;
@@ -454,8 +460,9 @@ export function softMovieFields(from: MapsSlide, to: MapsSlide): Set<MapsAppeara
   return fields;
 }
 
-export function isolateDissolveNeeded(_from: MapsSlide, to: MapsSlide): boolean {
-  return !!(to.isolate && to.highlights.length);
+/** Movie dest isolate+highlights after a non-isolated source: land on a plain still, then dissolve in. */
+export function isolateDissolveNeeded(from: MapsSlide, to: MapsSlide): boolean {
+  return !!(to.isolate && to.highlights.length && !from.isolate);
 }
 
 export function plainIsolateTarget(slide: MapsSlide): MapsSlide {
@@ -685,21 +692,59 @@ function viewportAabb(
   return { x0, y0, x1, y1 };
 }
 
-/** Union plate at the deeper zoom, same math as Keynote `morph_plate_geom`, then fitted to 8192.
- * Overflow on the slide is fine — the cap is the capture raster, not the FW frame. */
-export function morphPlatePx(
+/** Mercator AABB of the LW circumcircle — same pad as Keynote `_camera_cover_box`. */
+function cameraCoverBox(
+  camera: MapsCamera,
+  width: number,
+  height: number,
+  plateBearing: number,
+): { x0: number; y0: number; x1: number; y1: number } {
+  const axis = wallViewport(camera, width, height, plateBearing);
+  const cx = (axis.x0 + axis.x1) / 2;
+  const cy = (axis.y0 + axis.y1) / 2;
+  const world = TILE_SIZE * 2 ** camera.zoom;
+  const radius = world ? Math.hypot(width / 2, height / 2) / world : 0;
+  return { x0: cx - radius, y0: cy - radius, x1: cx + radius, y1: cy + radius };
+}
+
+/** Union plate at the deeper zoom, same math as Keynote `morph_plate_geom` before the 8192 fit.
+ * This is the size Keynote actually places (overflow), not the capture PNG. */
+export function morphPlateNativePx(
   from: MapsCamera,
   to: MapsCamera,
   fromW = WALL_W,
   toW = WALL_W,
 ): { w: number; h: number } | null {
   const sharedBearing = from.bearing;
-  const a = viewportAabb(from, fromW, WALL_H, sharedBearing);
-  const b = viewportAabb(to, toW, WALL_H, sharedBearing);
+  const boxes = [
+    viewportAabb(from, fromW, WALL_H, sharedBearing),
+    viewportAabb(to, toW, WALL_H, sharedBearing),
+  ];
+  // Same gate as Keynote `morph_plate_geom`: only a bearing hop pays for the
+  // circumcircle. Zoom/pan must keep the camera AABB or the fitted 8192 raster
+  // is mostly padding and export no longer matches the live preview.
+  if (Math.abs(bearingDeltaSigned(from.bearing, to.bearing)) >= 0.5) {
+    boxes.push(cameraCoverBox(from, fromW, WALL_H, sharedBearing), cameraCoverBox(to, toW, WALL_H, sharedBearing));
+  }
   const world = TILE_SIZE * 2 ** Math.max(from.zoom, to.zoom);
-  let w = (Math.max(a.x1, b.x1) - Math.min(a.x0, b.x0)) * world;
-  let h = (Math.max(a.y1, b.y1) - Math.min(a.y0, b.y0)) * world;
+  const w = (Math.max(...boxes.map((b) => b.x1)) - Math.min(...boxes.map((b) => b.x0))) * world;
+  const h = (Math.max(...boxes.map((b) => b.y1)) - Math.min(...boxes.map((b) => b.y0))) * world;
   if (w <= 1 || h <= 1) return null;
+  return { w, h };
+}
+
+/** Capture size after the 8192 fit. Null when the union is degenerate or the Keynote
+ * object would exceed `MORPH_MAX_DISPLAY_PX` (Export then uses Movie). */
+export function morphPlatePx(
+  from: MapsCamera,
+  to: MapsCamera,
+  fromW = WALL_W,
+  toW = WALL_W,
+): { w: number; h: number } | null {
+  const native = morphPlateNativePx(from, to, fromW, toW);
+  if (!native) return null;
+  if (Math.max(native.w, native.h) > MORPH_MAX_DISPLAY_PX) return null;
+  let { w, h } = native;
   const longest = Math.max(w, h);
   if (longest > MORPH_MAX_PLATE_PX) {
     const scale = MORPH_MAX_PLATE_PX / longest;
@@ -789,6 +834,37 @@ export function nextSlideId(slides: MapsSlide[]): string {
   return `s${n}`;
 }
 
+function cloneChurches(churches: MapsChurch[]): MapsChurch[] {
+  return churches.map((church) => ({
+    ...church,
+    reveal: church.reveal ? { ...church.reveal } : church.reveal,
+  }));
+}
+
+/** New slide after the current one. Add leaves objects empty; Duplicate copies them. */
+export function cloneSlide(slide: MapsSlide, id: string, opts?: { objects?: boolean }): MapsSlide {
+  const objects = opts?.objects === true;
+  return {
+    ...slide,
+    id,
+    churches: objects ? cloneChurches(slide.churches) : [],
+    stillPng: undefined,
+    cg: slide.cg
+      ? {
+          ...slide.cg,
+          camera: { ...slide.cg.camera },
+          highlights: [...slide.cg.highlights],
+          churches: objects ? cloneChurches(slide.cg.churches) : [],
+          stillPng: undefined,
+          movieMov: undefined,
+        }
+      : undefined,
+    cgShiftX: slide.cgShiftX,
+    cgShiftY: 0,
+    includeSidePanels: slide.includeSidePanels === true,
+  };
+}
+
 export function nextPinId(churches: MapsChurch[]): string {
   let n = 1;
   const used = new Set(churches.map((c) => c.id));
@@ -827,6 +903,15 @@ export function parseIsolate(raw: unknown): MapsIsolate | undefined {
     ? Math.max(0, Math.min(1, strengthRaw))
     : DEFAULT_ISOLATE_STRENGTH;
   return { mode: "darken", strength };
+}
+
+/** Gold_Wall_Input.key slide 8; Keynote `LABEL_PILL_RGB` and the preview bake. */
+export const DEFAULT_LABEL_PILL_COLOR = "#ee220c";
+
+export function churchLabelColor(church: { labelColor?: string } | undefined): string {
+  const raw = church?.labelColor;
+  if (isHighlightHex(raw)) return normaliseHighlightColour(raw);
+  return DEFAULT_LABEL_PILL_COLOR;
 }
 
 /** `showLabel` defaulted to true before it was written explicitly, so a saved church with no

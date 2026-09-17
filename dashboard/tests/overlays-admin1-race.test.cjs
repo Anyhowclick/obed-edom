@@ -576,6 +576,17 @@ test("renames keep one 1x pill image and bound its raster size", () => {
   }
 });
 
+test("ensureLabelPillImage bakes a distinct image per pill colour", () => {
+  const map = fakeMap();
+  ensureLabelPillImage(map, [
+    { ...labeled("Same"), labelColor: "#ee220c" },
+    { ...labeled("Same"), id: "b", labelColor: "#112233" },
+  ]);
+  assert.ok(map.hasImage(labelPillImageId("Same", "#ee220c")));
+  assert.ok(map.hasImage(labelPillImageId("Same", "#112233")));
+  assert.equal([...map.images.keys()].filter((key) => key.startsWith(`${LABEL_PILL_ID}-`)).length, 2);
+});
+
 test("ensureLabelPillImage is idempotent and re-registers after a style reload", () => {
   const map = fakeMap();
   const churches = [labeled("CHC Medan")];
