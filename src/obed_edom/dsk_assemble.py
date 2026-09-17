@@ -740,9 +740,11 @@ def _slot_one_part_fit(
     chunks = _pack_split_lines(spans, table_for_pack, lead_pt, band.height, slide_number, box.item_id)
     if len(chunks) > 1:
         return None
-    if capped_runs:
-        return wrapped_height_runs(capped_runs, band.width)
-    return wrapped_height(box.text, box.font_name, box.size * t, band.width)
+    h = (
+        wrapped_height_runs(capped_runs, band.width) if capped_runs
+        else wrapped_height(box.text, box.font_name, box.size * t, band.width)
+    )
+    return min(h, band.height) if h is not None else None
 
 
 def _group_child_geometry(

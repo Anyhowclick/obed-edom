@@ -11110,6 +11110,14 @@ def test_gw38_one_part_fallback_places_the_slot_capped_rect_inside_the_slot():
     assert verse_rect.x == slot.verse.x
     assert verse_rect.w == slot.verse.w
     assert verse_rect.y == pytest.approx(slot.verse.y)
+    # the rect is the CAPPED wrapped height, not the raw 177pt slot rect (the pre-12b bug)
+    # nor the uncapped 184.6pt height (the first-attempt bug)
+    capped_runs = (
+        dsk_plan.Run(emphasis, font, 50.0),
+        dsk_plan.Run(tail, font, 45.0),
+    )
+    expected_h = dsk_plan.wrapped_height_runs(capped_runs, dsa._slot_band(slot.verse).width)
+    assert verse_rect.h == pytest.approx(expected_h)
     assert verse_rect.h <= slot.verse.h
     assert plan.stack_t[38] == pytest.approx(45.0 / 70.0)
     run_sizes = {sz for _lo, _hi, sz in plan.run_sizes[38][verse_id]}
