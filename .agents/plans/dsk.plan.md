@@ -369,13 +369,15 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 10. **Two-column badge sits above the panel** — D1b rect y 719.4 vs panel top 840.
 11. **Point-layout ordinals are verified against the D1b PLAN rects, not the slot table**
     (temporary, logged as such). L5 must reconcile the two.
-12. **Codex L3 review 5, BANKED UNFIXED** (owner: "R5 final iteration, get an MVP out first"):
-    (a) MAJOR, latent — the generic multi-box slot split fits each part through
-    `fit_text_stack` at any scale and skips `_EMPHASIS_CAP_PT`, so a GW 17-shaped forced split
-    can emit a lead ≠ 45 pt / emphasis > 50 pt while passing geometry verification. Fix =
-    slot-authoritative scale (45 / lead source size) per part + `_run_size_ranges(cap=…)` +
-    an emitted-script test. (b) MINOR — the one-part fallback assigns the full 177 pt slot rect
-    instead of the wrapped height; fix = one slot-fit finalizer for both outcomes.
+12. **FIXED 2026-09-17** (Codex L3 review 5, both gaps): the generic multi-box slot split and the
+    one-part fallback now go through `_slot_one_part_fit`, which builds the 50pt-capped `Run`
+    objects once and uses them for BOTH the wrap height and the emitted sizes, gating through
+    `_pack_split_lines`'s own ≤3-line/`_SPLIT_TOL` budget (not a raw height compare); a box whose
+    capped 45pt text still exceeds the slot REFUSES rather than shrinking below the slot lead;
+    `SplitPart` gained per-part `scale`+`slot_capped` so the `--text-fit shrink` refit uses the
+    part's own scale and preserves the 50pt cap. Claude high-effort was not used; Claude planned,
+    Sonnet implemented, GPT-5.6 Sol r1/r2 under `.agents/reviews/dsk-split-cap/`. (a) MAJOR latent
+    emphasis-cap/scale gap + (b) MINOR one-part height both closed; offline only, full suite green.
 13. **C5: split is never re-run after a refit** — a part's geometry is corrected, never
     re-windowed live; enforced explicitly in `_build_refit_round`.
 14. **Fixed-frame grouped text is refused, not supported** — needs `set height` emission for a
@@ -410,6 +412,15 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 25. **`Full_Report_Card_Wall.key` (6.7 GB, 155 slides) is still unmeasured** for whole-deck live work.
 26. **`saveToken` and the minted media style's inherited picture `frame`** are open questions on
     `mint_media_style` — no offline evidence either way.
+27. **Joint slot fit shrinks a too-long verse instead of splitting** (owner-banked 2026-09-17, from
+    the item-12 Codex r2). The JOINT slot candidate is measured with UNCAPPED runs (`~:1838/:1877`),
+    so a natural over-long verse fits jointly at a tiny scale and takes the shrink path (`~:1924`)
+    rather than splitting: natural GW17 (no `--split`) emits stack_t 0.39 → 27.3pt lead / 33.1pt
+    emphasis, never reaching the item-12 multi-box split. This means the §2:67 "a verse needing >3
+    lines SPLITS" rule is not honoured for natural content — the fix landed in item 12 only bites
+    forced (`--split`) splits. Next slice: cap the joint-fit measurement and route a failed joint
+    slot candidate to per-box splitting (slot-authoritative 45pt) instead of `fit_text_stack`; it
+    moves the acceptance decks and needs a live text run. Pre-existing; beyond item 12's scope.
 
 ## 5. Live-run recipe
 
