@@ -104,6 +104,22 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
 - Owner's open design item besides the band placeholder: the "editing phase" (d6b) — per-slide
   operator nudges of position/size/crop over the auto defaults — is explicitly out of scope.
+- 2026-09-17 (owner, clip start timing + visual order — validated against the gold
+  `Alpha_DSK.key` slides 6–8): every consumer orders a slide's movie items by VISUAL order
+  (left-to-right by placed x, then y; refuse on an exact tie) via
+  `dsk_movie_export.visual_movie_order`. That one order drives the clip index MM in
+  `<stem>.NNN.MM(.src).mov`, the ClipResult / manifest `srcClips` order, the insertion order,
+  and the build-chunk order; the publisher takes it from the assembler's `clips_inserted`,
+  never recomputed from crop rects. Clip start timing is written OFFLINE (Keynote's auto
+  movie-start timing is non-deterministic and AppleScript has no build API), keyed by the
+  SOURCE movie's `playsAcrossSlides`: the leftmost continuity clip is After Transition at
+  build-chunk position 0 (`automatic True, referent True, delay 0`), other continuity clips are
+  With Build 1 (`automatic True, referent False`), distinct movies cascade After Previous in
+  visual order, and a single-movie slide is After Transition. `playsAcrossSlides` is written
+  False on every inserted clip; chunk `duration` is Keynote's own and is never touched. A clip
+  slide is expected to carry only movie-start build chunks (the gold's overlays are static); a
+  non-movie build chunk, a missing/duplicate/extra timing entry, an unknown mode, or more than
+  one After Transition is REFUSED, never guessed.
 
 ## 3. Measured facts that must not be re-learned
 
@@ -298,6 +314,15 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 - ProRes 422HQ at 3840×1080/30 is ~5 GB per 30 s — default `AppleProRes422LT` or h264.
   `native size` is required for any codec choice to apply. 7680×1080 exports fine; behaviour
   above 2160 height is UNVERIFIED — assert and refuse on tall canvases.
+- Build-chunk flag encoding (read offline from `Alpha_DSK.key` slides 6–8 and the r16 generated
+  deck): a `KN.BuildChunkArchive`'s `automatic False, referent True` = On Click; `automatic
+  True, referent True` at `buildChunks` position 0 = After Transition, at pos>0 = After Build N;
+  `automatic True, referent False` = With Build N; `delay` is seconds. On both the hand-made
+  gold and the generator output, overlay shapes carry NO build chunks (static), so every
+  clip-slide build chunk is a movie-start and the leftmost clip's chunk sits at position 0
+  naturally. The offline writer `iwa_movies.patch_clip_start_timing` front-loads the planned
+  movie chunks and reads back `(automatic, referent, delay, chunkPos, playsAcrossSlides)` per
+  movie, refusing on mismatch.
 
 ## 4. Open bugs / TODOs
 
@@ -405,6 +430,25 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
    exception); `out_path` is never written with an unverified deck.
 10. Cleanup rule: delete superseded work decks and evidence dirs once the next round supersedes
     them (each GW copy is ~670 MB and each output ~1.7 GB).
+11. Pure-clip round is DASHBOARD-driven (not the CLI in item 1): start the dashboard UNSANDBOXED
+    with `PYTHONPATH=<detached-worktree>/src <repo>/.venv/bin/python -m obed_edom dashboard
+    --no-browser` (the `.venv` editable-installs from the MAIN checkout, so the PYTHONPATH
+    override is required to exercise the worktree's code; the framework python3 lacks cv2). Drive
+    the HTTP API: `POST /api/dsk` (propose) → `/api/dsk/<id>/apply` (generate; writes the offline
+    clip timing) → `POST /api/dsk/export` → `/api/dsk/export/<id>/apply` (renders final clips).
+    Poll `GET /api/jobs/<id>`.
+12. KEYNOTE NEW-PRESENTATION DIALOG (found live r17, this "Keynote Creator Studio" build): every
+    Keynote launch pops a theme/new-presentation chooser that BLOCKS the automation AND the quit —
+    it caused a ~38-min preview hang and a reproducible "Keynote is already running (strictly
+    serial)" refusal (the intermediate export's Keynote never quit). Fix: Keynote → Settings →
+    General → "For New Documents: Use theme <specific>" so no dialog pops; otherwise dismiss it
+    each launch. This is an environment/harness issue, not a code bug.
+13. Clip-timing acceptance = build-chunk inspection of the generated DSK deck, then re-inspect
+    after the Export's Keynote round-trip and confirm IDENTICAL: per clip slide exactly one
+    `apple:movie-start` per clip, leftmost After Transition at `buildChunks[0]` (automatic True,
+    referent True, delay 0), others With Build 1 (True, False, 0), `playsAcrossSlides` False. Live
+    r17 (2026-09-17, PR #151) PASSED on `DSK_Gen_Export_Input.key` 11–13; evidence
+    `~/Desktop/dsk-d4-work/evidence-r17/`.
 
 ## 6. Test gates
 

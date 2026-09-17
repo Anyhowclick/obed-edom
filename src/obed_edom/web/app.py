@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -1926,12 +1926,15 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             log=job.log,
         )
         job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
+        clip_order: dict[int, list[ItemId]] = {
+            number: list(item_clips) for number, item_clips in result.clips_inserted.items()
+        }
         existing_manifest = read_manifest(out_dir, deck=result.path)
         previous_src_clips: set[str] = set()
         for entry in ((existing_manifest or {}).get("slides") or {}).values():
             previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
         published = _publish_generator_clips(
-            job, result.path, src_dir, nested_clips, result.ordinals, publish_journal, tmp_src_dir
+            job, result.path, src_dir, nested_clips, result.ordinals, publish_journal, tmp_src_dir, order=clip_order
         )
         categories = {
             result.ordinals[n]: str(p.get("category") or "")
@@ -1999,10 +2002,13 @@ def _publish_generator_clips(
     ordinals: Mapping[int, int],
     journal: list[_PublishedClip],
     movable_root: Path | None,
+    *,
+    order: Mapping[int, Sequence[ItemId]],
 ) -> dict[int, list[str]]:
     """Renames/moves each inserted movie's clip into `src_dir` as
     `<DSK stem>.NNN.MM.src.mov` (NNN = DSK ordinal, MM = 1-based movie order within
-    the slide, by ascending item id). Only a clip whose parent resolves to
+    the slide, by `order[fw_slide]` -- visual left-to-right order, matching the
+    ClipResult and manifest `srcClips` order). Only a clip whose parent resolves to
     `movable_root` (this run's freshly exported intermediates) is moved; every other
     source, including an operator-supplied clip that happens to sit inside `src_dir`,
     is copied so the caller's original file is never touched. `src_dir` is created
@@ -2028,9 +2034,9 @@ def _publish_generator_clips(
         if ordinal is None:
             continue
         names: list[str] = []
-        for order, movie_id in enumerate(sorted(movies), start=1):
+        for movie_index, movie_id in enumerate(order[fw_slide], start=1):
             src = Path(movies[movie_id])
-            name = f"{deck.stem}.{ordinal:03d}.{order:02d}.src.mov"
+            name = f"{deck.stem}.{ordinal:03d}.{movie_index:02d}.src.mov"
             dest = src_dir / name
             if dest.is_symlink():
                 job.log(f"Refusing to publish clip: {dest} is a symlink")

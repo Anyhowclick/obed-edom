@@ -202,7 +202,7 @@ def test_dsk_apply_passes_content_only_and_derived_fields(tmp_path, monkeypatch)
             slides_kept=(1, 2),
             ordinals={1: 1, 2: 2},
             fits={},
-            clips_inserted={2: next(iter(clips[2].values()))},
+            clips_inserted={2: dict(clips[2])},
             stroke={},
             zorder={},
             builds={},
@@ -255,6 +255,88 @@ def test_dsk_apply_passes_content_only_and_derived_fields(tmp_path, monkeypatch)
     assert manifest["slides"]["1"]["source_slide"] == 1
 
 
+def test_dsk_apply_publishes_clips_in_visual_not_crop_rect_order(tmp_path, monkeypatch):
+    """Publish must name clips by the assembler's `result.clips_inserted` order (the
+    real, left-to-right placement it committed), not by sorting `ClipResult.crop_rect`
+    x-offsets. The ClipResults here carry crop rects whose x-sort would pick the
+    OPPOSITE order from `clips_inserted`, proving crop rects are no longer the
+    authority: the LEFT movie is `.002.01.src.mov` and the RIGHT movie is
+    `.002.02.src.mov`, and the manifest `srcClips` / job `clips` order must match."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "mixed", movie_count=2)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    from obed_edom.dsk_movie_export import ClipResult
+    from obed_edom.map_remap import Rect
+
+    def fake_export_clips(fw, slides, out_dir, **kwargs):
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        right = Path(out_dir) / "right.mov"
+        left = Path(out_dir) / "left.mov"
+        right.write_text("movie")
+        left.write_text("movie")
+        return [
+            ClipResult(
+                slide=2, movie_id=("movie", 0), path=right, crop_rect=Rect(1000, 0, 500, 1080),
+                width=500, height=1080, duration_s=1.0, wall_s=1.0, crop_width=500,
+            ),
+            ClipResult(
+                slide=2, movie_id=("movie", 1), path=left, crop_rect=Rect(5000, 0, 500, 1080),
+                width=500, height=1080, duration_s=1.0, wall_s=1.0, crop_width=500,
+            ),
+        ]
+
+    def fake_assemble(fw, out_path, *, decisions, clips, clip_sizes, clip_crops, content_only, **kwargs):
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path,
+            slides_kept=(1, 2),
+            ordinals={1: 1, 2: 2},
+            fits={},
+            clips_inserted={2: {("movie", 1): clips[2][("movie", 1)], ("movie", 0): clips[2][("movie", 0)]}},
+            stroke={},
+            zorder={},
+            builds={},
+            size_bytes=10,
+            source_size_bytes=20,
+            wall_s=1.0,
+            warnings=(),
+            movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+
+    out_dir = tmp_path / "output" / "GW" / "dsk"
+    left_dest = out_dir / "src" / "GW_DSK.002.01.src.mov"
+    right_dest = out_dir / "src" / "GW_DSK.002.02.src.mov"
+    assert left_dest.is_file(), "the LEFT movie (first in clips_inserted) must be MM=01"
+    assert right_dest.is_file(), "the RIGHT movie (second in clips_inserted) must be MM=02"
+    assert job["result"]["clips"] == {
+        "2": ["src/GW_DSK.002.01.src.mov", "src/GW_DSK.002.02.src.mov"]
+    }
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert manifest["slides"]["2"]["srcClips"] == [
+        "src/GW_DSK.002.01.src.mov",
+        "src/GW_DSK.002.02.src.mov",
+    ]
+
+
 def test_dsk_apply_rerun_deletes_orphaned_src_clip(tmp_path, monkeypatch):
     """A Generator rerun that drops a movie slide deletes its now-unreferenced
     `src/*.src.mov` intermediate once the new deck and manifest are written."""
@@ -290,7 +372,7 @@ def test_dsk_apply_rerun_deletes_orphaned_src_clip(tmp_path, monkeypatch):
                 slides_kept=tuple(sorted(ordinals)),
                 ordinals=dict(ordinals),
                 fits={}, stroke={}, zorder={}, builds={},
-                clips_inserted={n: next(iter(clips[n].values())) for n in clips},
+                clips_inserted={n: dict(clips[n]) for n in clips},
                 size_bytes=10, source_size_bytes=20, wall_s=1.0,
                 warnings=(), movie_props={},
             )
@@ -370,7 +452,7 @@ def test_dsk_apply_rerun_failure_before_manifest_write_deletes_nothing(tmp_path,
         return AssembleResult(
             path=out_path, slides_kept=(1, 2, 3), ordinals={1: 1, 2: 2, 3: 3},
             fits={}, stroke={}, zorder={}, builds={},
-            clips_inserted={n: next(iter(clips[n].values())) for n in clips},
+            clips_inserted={n: dict(clips[n]) for n in clips},
             size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(), movie_props={},
         )
 
@@ -530,7 +612,7 @@ def test_dsk_apply_manifest_write_failure_removes_this_runs_published_clips(tmp_
                 slides_kept=tuple(sorted(ordinals)),
                 ordinals=dict(ordinals),
                 fits={}, stroke={}, zorder={}, builds={},
-                clips_inserted={n: next(iter(clips[n].values())) for n in clips},
+                clips_inserted={n: dict(clips[n]) for n in clips},
                 size_bytes=10, source_size_bytes=20, wall_s=1.0,
                 warnings=(), movie_props={},
             )
@@ -616,7 +698,7 @@ def test_dsk_apply_publish_failure_on_later_destination_leaves_no_new_file(tmp_p
 
         return AssembleResult(
             path=out_path, slides_kept=(1, 2, 3), ordinals={1: 1, 2: 2, 3: 3}, fits={},
-            clips_inserted={n: next(iter(clips[n].values())) for n in clips}, stroke={}, zorder={},
+            clips_inserted={n: dict(clips[n]) for n in clips}, stroke={}, zorder={},
             builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
             movie_props={},
         )
@@ -699,7 +781,7 @@ def test_dsk_apply_rerun_overwrite_failure_restores_original_bytes(tmp_path, mon
 
         return AssembleResult(
             path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
-            clips_inserted={2: next(iter(clips[2].values()))}, stroke={}, zorder={},
+            clips_inserted={2: dict(clips[2])}, stroke={}, zorder={},
             builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
             movie_props={},
         )
@@ -784,7 +866,7 @@ def test_dsk_apply_refuses_symlinked_src_dir(tmp_path, monkeypatch):
 
         return AssembleResult(
             path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
-            clips_inserted={2: next(iter(clips[2].values()))}, stroke={}, zorder={},
+            clips_inserted={2: dict(clips[2])}, stroke={}, zorder={},
             builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
             movie_props={},
         )
@@ -841,7 +923,7 @@ def test_dsk_apply_refuses_symlinked_destination_file(tmp_path, monkeypatch):
 
         return AssembleResult(
             path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
-            clips_inserted={2: next(iter(clips[2].values()))}, stroke={}, zorder={},
+            clips_inserted={2: dict(clips[2])}, stroke={}, zorder={},
             builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
             movie_props={},
         )
@@ -932,7 +1014,7 @@ def test_dsk_apply_operator_clip_maps_single_movie_slide(tmp_path, monkeypatch):
 
         return AssembleResult(
             path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
-            clips_inserted={2: next(iter(clips[2].values()))}, stroke={}, zorder={},
+            clips_inserted={2: dict(clips[2])}, stroke={}, zorder={},
             builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
             movie_props={},
         )
@@ -1036,7 +1118,7 @@ def test_dsk_apply_stale_cleanup_failure_still_succeeds(tmp_path, monkeypatch):
                 slides_kept=tuple(sorted(ordinals)),
                 ordinals=dict(ordinals),
                 fits={}, stroke={}, zorder={}, builds={},
-                clips_inserted={n: next(iter(clips[n].values())) for n in clips},
+                clips_inserted={n: dict(clips[n]) for n in clips},
                 size_bytes=10, source_size_bytes=20, wall_s=1.0,
                 warnings=(), movie_props={},
             )
@@ -1135,7 +1217,7 @@ def test_dsk_apply_operator_clip_inside_src_dir_survives_later_rollback(tmp_path
 
         return AssembleResult(
             path=out_path, slides_kept=(1, 2, 3), ordinals={1: 1, 2: 2, 3: 3}, fits={},
-            clips_inserted={n: next(iter(clips[n].values())) for n in clips}, stroke={}, zorder={},
+            clips_inserted={n: dict(clips[n]) for n in clips}, stroke={}, zorder={},
             builds={}, size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(),
             movie_props={},
         )
@@ -1209,7 +1291,7 @@ def test_dsk_apply_manifest_clips_keyed_by_dsk_ordinal_not_fw_slide(tmp_path, mo
             slides_kept=(1, 5),
             ordinals={1: 1, 5: 2},
             fits={},
-            clips_inserted={2: next(iter(clips[5].values()))},
+            clips_inserted={5: dict(clips[5])},
             stroke={},
             zorder={},
             builds={},

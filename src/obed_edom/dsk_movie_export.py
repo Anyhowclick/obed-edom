@@ -169,11 +169,24 @@ def clip_name(stem: str, slide: int, movie_index: int | None = None) -> str:
     """`{stem}.{slide:03d}.mov`, keyed by Keynote slide number. The published clip is a
     QuickTime/.mov container (ProRes-compatible, importable by Keynote and PP7); this is
     distinct from `require_m4v`, which guards Keynote's own export destination. When
-    `movie_index` is given (per-movie pure-video mode, 1-based order by kindIndex), the
+    `movie_index` is given (per-movie pure-video mode, 1-based `visual_movie_order`), the
     name is `{stem}.{slide:03d}.{movie_index:02d}.mov` -- one clip per movie item."""
     if movie_index is None:
         return f"{stem}.{slide:03d}.mov"
     return f"{stem}.{slide:03d}.{movie_index:02d}.mov"
+
+
+def visual_movie_order(rects: Mapping[ItemId, Rect]) -> list[ItemId]:
+    """Movie item ids ordered left-to-right by placed (x, y); raises ValueError naming
+    the ids on an exact (x, y) tie. `rects` may be FW-space item rects or DSK-space
+    fitted rects; the affine preserves x-order for unrotated items."""
+    keys: dict[tuple[float, float], list[ItemId]] = {}
+    for item_id, rect in rects.items():
+        keys.setdefault((rect.x, rect.y), []).append(item_id)
+    for key, ids in keys.items():
+        if len(ids) > 1:
+            raise ValueError(f"Movie items {sorted(ids)} tie at position {key}; cannot derive visual order")
+    return [ids[0] for _, ids in sorted(keys.items())]
 
 
 def _rect_intersect(a: Rect, b: Rect) -> Rect:
@@ -976,11 +989,13 @@ def export_slide_clips(
                 items = slide.get("items") or []
                 items_by_id = {(it["kind"], it["kindIndex"]): it for it in items}
                 cls = classes[n]
-                kept_movie_ids = sorted(iid for iid in cls.kept if iid[0] == "movie")
+                kept_movie_ids = [iid for iid in cls.kept if iid[0] == "movie"]
                 if not kept_movie_ids:
                     raise ValueError(f"Slide {n} has no kept movie items; per_movie export requires at least one")
+                movie_rects = {iid: item_rect(items_by_id[iid]) for iid in kept_movie_ids}
+                ordered_movie_ids = visual_movie_order(movie_rects)
                 base_crop = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
-                for movie_index, movie_id in enumerate(kept_movie_ids, start=1):
+                for movie_index, movie_id in enumerate(ordered_movie_ids, start=1):
                     movie_item = items_by_id[movie_id]
                     crop_rect = _rect_intersect(item_rect(movie_item), base_crop)
                     del_ids = _derive_pure_video_delete_ids(items, movie_id)
