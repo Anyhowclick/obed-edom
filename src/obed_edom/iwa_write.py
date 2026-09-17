@@ -69,6 +69,7 @@ class PatchResult:
     edited_ids: list[str] = field(default_factory=list)
     soft_fallbacks: int = 0  # text/masked used composed frame because reported was missing
     missed_specs: list[dict] = field(default_factory=list)  # specs the patcher could not place
+    miss_reasons: list[str] = field(default_factory=list)  # one reason per missed_specs entry, aligned by index
 
 
 def _find_geom(objdict: dict) -> list[str] | None:
@@ -527,24 +528,29 @@ def _slide_edits(
     address: str = "positional",
     source_counts: dict[str, int] | None = None,
     require_reconcile: bool = False,
-) -> tuple[str | None, dict[str, dict], int, list[dict], str | None]:
+) -> tuple[str | None, dict[str, dict], int, list[dict], list[str], str | None]:
     """Pure, no-I/O resolution of one slide's edits against an already-loaded deck.
 
-    Returns (target_member, edits, soft_fallbacks, missed_specs, refuse_reason).
-    ``refuse_reason`` set => edits is always {}. Positional + source_counts: refuse on
-    reconcile_counts mismatch. (``len(edits)`` is the applied-object count; the caller's
-    ``_patch_member`` recomputes it for real after the actual archive mutation.)
+    Returns (target_member, edits, soft_fallbacks, missed_specs, miss_reasons,
+    refuse_reason). ``miss_reasons`` is aligned index-for-index with ``missed_specs`` --
+    a coarse family label ("unresolved", "text-autosize", "masked-media", …) for why the
+    patcher deferred that spec to the AppleScript fallback, for the fallback-reason
+    histogram; it never rides on the spec dicts themselves (callers rely on
+    ``missed_specs`` being the untouched planned specs). ``refuse_reason`` set => edits is
+    always {}. Positional + source_counts: refuse on reconcile_counts mismatch.
+    (``len(edits)`` is the applied-object count; the caller's ``_patch_member`` recomputes
+    it for real after the actual archive mutation.)
     """
     if require_reconcile and source_counts is None:
-        return (None, {}, 0, [], "reconcile required but source_counts missing")
+        return (None, {}, 0, [], [], "reconcile required but source_counts missing")
     reported = reported or {}
 
     if not (1 <= slide_number <= len(order)):
-        return (None, {}, 0, [], f"slide {slide_number} out of range (deck has {len(order)})")
+        return (None, {}, 0, [], [], f"slide {slide_number} out of range (deck has {len(order)})")
     slide_id = order[slide_number - 1][0]
     slide = objects.get(slide_id)
     if not slide:
-        return (None, {}, 0, [], f"slide archive {slide_id} not decoded")
+        return (None, {}, 0, [], [], f"slide archive {slide_id} not decoded")
 
     records = derive_kind_index(slide, objects)
     comp = compose_geometry(slide, objects)
@@ -554,7 +560,7 @@ def _slide_edits(
     members = {id_to_file.get(r["id"]) for r in comp if r["id"] in id_to_file}
     members.discard(None)
     if len(members) != 1:
-        return (None, {}, 0, [], f"slide drawables span {sorted(members)} (need exactly one member)")
+        return (None, {}, 0, [], [], f"slide drawables span {sorted(members)} (need exactly one member)")
     target_member = next(iter(members))
 
     if address == "positional" and source_counts is not None:
@@ -562,14 +568,20 @@ def _slide_edits(
         derived_counts = derived_kind_counts(records)
         mismatched = reconcile_counts(derived_counts, base)
         if mismatched:
-            return (target_member, {}, 0, [],
+            return (target_member, {}, 0, [], [],
                     f"reconcile mismatch on kinds {mismatched} (derived {derived_counts} vs expected {base})")
 
     hide_specs = [s for s in specs if s.get("role") == "hide"]
 
     edits: dict[str, dict] = {}
     missed_specs: list[dict] = []
+    miss_reasons: list[str] = []
     soft_fallbacks = 0
+
+    def _miss(reason: str) -> None:
+        missed_specs.append(spec)
+        miss_reasons.append(reason)
+
     for spec in specs:
         if spec.get("role") == "hide" or not _spec_bears_geometry(spec):
             continue
@@ -578,7 +590,7 @@ def _slide_edits(
         else:
             rec = _resolve_positional(spec, comp_by_key, hide_specs)
         if rec is None:
-            missed_specs.append(spec)
+            _miss("unresolved")
             continue
         kind = rec["kind"]
         obj = objects.get(rec["id"]) or {}
@@ -590,17 +602,17 @@ def _slide_edits(
 
         if kind == "line":
             if _natural_unwritable(obj, spec):
-                missed_specs.append(spec)
+                _miss("line-resize-unwritable")
                 continue
             ops = _line_fields(rec, obj, spec)
         elif kind == "shape":
             if _natural_unwritable(obj, spec):
-                missed_specs.append(spec)
+                _miss("shape-resize-unwritable")
                 continue
             ops = _shape_fields(rec, spec, stored)
         elif kind == "group":
             if rec.get("needs_keynote"):
-                missed_specs.append(spec)
+                _miss(f"group-needs-keynote:{rec.get('needs_keynote')}")
                 continue
             union = [rec["x"], rec["y"], rec["w"], rec["h"]]
             spec_w, spec_h = spec.get("w"), spec.get("h")
@@ -611,18 +623,18 @@ def _slide_edits(
             if scaled:
                 child_ops, ok = _group_child_scale_ops(obj, objects, sx, sy, id_to_file, target_member)
                 if not ok:
-                    missed_specs.append(spec)
+                    _miss("group-child-scale")
                     continue
                 ops = ops + child_ops
         elif kind == "text":
             # An autosize width or height (the 0.0 sentinel on either axis) is a Keynote
             # render cache only the live app refreshes -- hard miss to the AppleScript fallback.
             if stored[2] == 0.0 or stored[3] == 0.0:
-                missed_specs.append(spec)
+                _miss("text-autosize")
                 continue
             wants_h = spec.get("h") is not None
             if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
-                missed_specs.append(spec)
+                _miss("text-resize-unwritable")
                 continue
             ops = _text_fields(rec, spec, rep, stored)
         elif kind in ("image", "movie"):
@@ -630,15 +642,15 @@ def _slide_edits(
                 ops, mask_id, ok = _masked_media_fields(rec, obj, objects, spec, rep)
                 # Cropped, rotated, unresolved or cross-member mask: miss, never mis-write.
                 if not ok or mask_id is None or id_to_file.get(mask_id) != target_member:
-                    missed_specs.append(spec)
+                    _miss("masked-media")
                     continue
             else:  # unmasked image/movie: plain frame, same as a shape
                 if _natural_unwritable(obj, spec):
-                    missed_specs.append(spec)
+                    _miss(f"{kind}-resize-unwritable")
                     continue
                 ops = _shape_fields(rec, spec, stored)
         else:
-            missed_specs.append(spec)
+            _miss(f"unsupported-kind:{kind}")
             continue
 
         # Soft class used the reported frame: count for the 0-fallback gate. Masked
@@ -654,7 +666,7 @@ def _slide_edits(
                 continue
             edits.setdefault(obj_id, {}).update(fields)
 
-    return (target_member, edits, soft_fallbacks, missed_specs, None)
+    return (target_member, edits, soft_fallbacks, missed_specs, miss_reasons, None)
 
 
 def _decode_apply_reencode_diff(
@@ -860,7 +872,7 @@ def patch_deck_geometry(
     slide_state: dict[int, tuple] = {}
     member_owner: dict[str, int] = {}
     for n in sorted(specs_by_slide):
-        target_member, edits, soft, missed_specs, refuse_reason = _slide_edits(
+        target_member, edits, soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
             n, specs_by_slide[n], objects, id_to_file, order,
             reported=reported_by_slide.get(n),
             address=address,
@@ -873,7 +885,7 @@ def patch_deck_geometry(
                 refuse_reason, edits = f"member shared with slide {owner}", {}
             else:
                 member_owner[target_member] = n
-        slide_state[n] = (target_member, edits, soft, missed_specs, refuse_reason)
+        slide_state[n] = (target_member, edits, soft, missed_specs, miss_reasons, refuse_reason)
 
     if extra_member_edits:
         collision = set(extra_member_edits) & set(member_owner)
@@ -885,18 +897,20 @@ def patch_deck_geometry(
     if member_owner:
         with zipfile.ZipFile(saved_deck) as zf:  # one handle shared across every member patch
             for member, n in member_owner.items():
-                _tm, edits, _soft, _missed, _reason = slide_state[n]
+                _tm, edits, _soft, _missed, _mr, _reason = slide_state[n]
                 new_bytes, applied, obj_diffs, header_diffs = _patch_member(zf, member, edits)
                 member_edits[member] = new_bytes
                 member_diag[member] = (applied, obj_diffs, header_diffs)
 
     results: dict[int, PatchResult] = {}
-    for n, (target_member, edits, soft, missed_specs, refuse_reason) in slide_state.items():
+    for n, (target_member, edits, soft, missed_specs, miss_reasons, refuse_reason) in slide_state.items():
         if refuse_reason:
             results[n] = PatchResult(refused=True, reason=refuse_reason, target_member=target_member,
-                                     missed=len(missed_specs), missed_specs=missed_specs)
+                                     missed=len(missed_specs), missed_specs=missed_specs,
+                                     miss_reasons=miss_reasons)
         elif not edits:
             results[n] = PatchResult(applied=0, missed=len(missed_specs), missed_specs=missed_specs,
+                                     miss_reasons=miss_reasons,
                                      target_member=target_member, value_clean=True, soft_fallbacks=soft)
         else:
             m_applied, obj_diffs, header_diffs = member_diag[target_member]
@@ -904,6 +918,7 @@ def patch_deck_geometry(
             value_clean = obj_diffs <= len(edits) and header_diffs == 0
             results[n] = PatchResult(
                 applied=m_applied, missed=len(missed_specs), missed_specs=missed_specs,
+                miss_reasons=miss_reasons,
                 target_member=target_member, value_clean=value_clean,
                 obj_diffs=obj_diffs, header_diffs=header_diffs,
                 edited_ids=sorted(edits), soft_fallbacks=soft,
@@ -923,7 +938,8 @@ def patch_deck_geometry(
             for n, prev in results.items():
                 results[n] = PatchResult(refused=True, reason=f"rewrite failed: {exc}",
                                          target_member=prev.target_member,
-                                         missed=len(prev.missed_specs), missed_specs=prev.missed_specs)
+                                         missed=len(prev.missed_specs), missed_specs=prev.missed_specs,
+                                         miss_reasons=prev.miss_reasons)
             return results
 
     return results
