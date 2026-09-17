@@ -8,19 +8,18 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 
 ## 1. Status
 
-- SHIPPED: FW(7680×1080)→DSK(1920×1080) image/movie path — `dsk-assemble --content-only`
-  (skips `SlideClass.is_text` slides), `dsk-export-clips` (FW-only), `dsk-export-stages`
-  (any 1920×1080 deck), `/api/dsk` + `/api/dsk/export` propose→decisions→apply, DSK tab
-  with Generator/Exporter sub-tabs. P7 live acceptance PASS 2026-09-15 (GW 21,24,32,33,48).
-- BENCHED (owner pivot 2026-09-15, "bench the verse/text resizing, ship image/video first"):
-  layouts L1–L4, split engine S1–S5, refit, D1/D1b grouped + two-column text, style pass,
-  pill pass. All landed in-branch and tested; not exercised by the shipped `--content-only` path.
-- Branch `feat/dsk-gen`, draft PR #72, squashed to b519f58 + follow-ups; pre-squash history
-  at tag `backup/feat-dsk-gen-pre-squash-2026-09-15`; merged with `main` 2026-09-15 (0 behind).
-  Suite after the merge: 3487 passed / 87 skipped / 1 xfailed / 3 failed (the 3 are main's own
-  pre-existing maps failures).
+- SHIPPED + merged to main: the FW(7680×1080)→DSK(1920×1080) image/movie path — `dsk-assemble
+  --content-only` (skips `SlideClass.is_text`), `dsk-export-clips`, `dsk-export-stages`, the
+  `/api/dsk` + `/api/dsk/export` propose→decisions→apply flow, and the DSK tab (Generator/Exporter
+  sub-tabs). Plus pure per-movie clips behind live overlays, clip START timing written offline, and
+  visual-order clip naming (contract in §2/§3). Live-verified P7 → r17 (movie chain end to end).
+- ACTIVE (verse/text resumed 2026-09-17): the resizing engine (layouts L1–L4, split S1–S5, refit,
+  D1/D1b two-column, style, pill) — code-complete + offline-tested + wired via `content_only=False`;
+  the shipped call passes `content_only=True` so text slides are pre-filtered. §4 item 12 (multi-box
+  split cap) merged; item 8 (pill z-order, LIVE-BROKEN in text-r1) + item 27 (joint-fit
+  split-vs-shrink) are the open next slices.
 - Deliverable contract: an EDITABLE DSK deck (operator finishes crops by hand) plus a flat
-  PP7 asset folder; never a finished deck.
+  PP7 asset folder; never a finished deck. (Merged-PR history + suite counts live in Git, not here.)
 
 ## 2. Contract / rules of record (owner decisions, each still governing)
 
@@ -326,44 +325,23 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 
 ## 4. Open bugs / TODOs
 
-### Shipped path (blocking polish)
-1. FIXED + LIVE-VERIFIED 2026-09-16 (r14): propose quits the Keynote it launched for preview
-   export (`_dsk_preview_thumbs`, both Generator and Exporter); a Keynote the operator already
-   had open is left alone. Exporter propose → `pgrep -x Keynote` empty → apply 200 (no 409);
-   Generator propose on GW 21,24 likewise. Evidence `~/Desktop/dsk-d4-work/evidence-r14/`
-   (server.out, manifest.json; export job f6106641, generator job bc071de3).
-2. FIXED + LIVE-VERIFIED 2026-09-16 (r14): the Exporter writes stage PNGs beside the deck it
-   exports (`path.parent`). For a generated deck that is the flat asset folder
-   `output/<FW stem>/dsk/` next to the `.mov` clips (owner Q2); for a hand-built deck it is
-   the deck's own folder, so run it on a copy in a scratch folder.
-3. DONE 2026-09-16 (r14, owner Q3): Exporter run on a copy of
-   `Sermon_PK (DSK)_with mistakes.key` (slides 1–3 → 1 and 3 exported, 2 empty). Both PNGs
-   1920×1080 RGBA, `alpha_ok`, `bg_alpha_max` 0, peak RSS 0.82 GB. Source fingerprint unchanged.
-4. DONE 2026-09-16 (r14): UI clicked through in the in-app browser — Exporter propose → Export
-   → JobName rename, and Generator propose review table. Not clicked: Generator apply (P7
-   covered it via the API). Observation: the JobName edit committed on blur, not on the
-   automated Enter keypress; unconfirmed whether a real keyboard Enter commits (shared
-   component, not DSK-specific).
-5. FIXED 2026-09-16: both DSK sub-tabs render `JobName` with rename wiring (live-verified r14).
-6. FIXED 2026-09-16: `assemble_dsk_deck(content_only=True, …)` refuses `text_fit="shrink"`,
-   a non-default `min_text_pt`, `allow_split=False` and `split_overrides`, matching the CLI.
-7a. LIVE-VERIFIED 2026-09-16 (r16, PR #143 + #148) on `DSK_Gen_Export_Input.key` 11–13 (14-slide
-   revision: FW 12 now one movie, FW 13 two): Generator made 4 pure per-movie clips into
-   `src/`, assembled 3 slides in 287 s (peak RSS 2.0 GB); offline read-back: slide 3's two
-   clips at x 345 and 968 (622 wide each, centred band), every inserted movie at the BACK of
-   `drawablesZOrder`, 0.5 s dissolve on all clip slides, builds intact, slides 12/13 share
-   the chain anchor. Exporter re-rendered 3 clips in 61 s and deleted the 4 intermediates;
-   manifest carries `clip` + `source_slide` only. Keynote quit itself after every step.
-   Found live: `locked of group N` raises -1728 on this Keynote build (fix #148). Evidence
-   `~/Desktop/dsk-d4-work/evidence-r16/`.
-7. LIVE-VERIFIED 2026-09-16 (r15, PR #138 + #140): the two-batch Generator job (clip export
-   then assemble) on `DSK_Gen_Export_Input.key` 11–13 with the "Blank Black" alias; the
-   Exporter's `isStageDeck` gate, its `.mov` path on the hand-built deck (slide 13 → 53 s
-   ProRes), and Generator-clip reuse (3 reused, 0 exported, manifest byte-identical).
-   Evidence `~/Desktop/dsk-d4-work/evidence-r15/`.
+### Shipped path — DONE (detail in Git + evidence dirs)
+1–7. All FIXED + live-verified 2026-09-16 (r14–r16): propose quits its own preview Keynote (leaves
+   an operator's open Keynote alone); the Exporter stages PNGs beside the deck; exporter verified on
+   the hand-built + `..._with mistakes` decks; JobName rename on both sub-tabs; `content_only=True`
+   refuses the text-only kwargs (`text_fit`, `min_text_pt`, `allow_split`, `split_overrides`); and
+   the two-batch + pure-per-movie Generator→Exporter chains on `DSK_Gen_Export_Input.key` 11–13 (PRs
+   #135/#138/#140/#143/#148). Evidence `~/Desktop/dsk-d4-work/evidence-r1[456]/`. Durable Keynote
+   quirk found here: this build raises -1728 on `locked of group N` though the group deletes fine
+   (tolerated, #148).
 
-### Benched path (before the verse/text work resumes)
-8. **Pill z-order fix is live-unverified.**
+### Verse/text backlog (resumed 2026-09-17)
+8. **Pill z-order — LIVE-BROKEN (text-r1, 2026-09-17).** On a group-verse slide (GW5) the pill pass
+   refuses `badge <id> has no z-order anchor`: the group-child badge's `super.parent` is None, so
+   `_z_order_anchor` (`dsk_pill.py:390`) can't walk badge → owning group (which IS the sole
+   `ownedDrawables` entry). Fix: set the badge's `super.parent` to its group in assembly, OR resolve
+   group membership via the group's children in `_z_order_anchor`. Blocks the live text pass.
+   Evidence `~/Desktop/dsk-d4-work/evidence-text-r1/` (`DIAGNOSIS.md` + the `.refused.key`).
 9. **GW 44/50 heading heights vs the D1b rects** — Keynote lays a 60 pt two-line heading at 130,
    the estimator predicts 159.84 (+23%); recalibrate before trusting heading budgets.
 10. **Two-column badge sits above the panel** — D1b rect y 719.4 vs panel top 840.
