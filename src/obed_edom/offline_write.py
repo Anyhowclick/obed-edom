@@ -542,25 +542,31 @@ def verify_live_frames(
     planned_specs_by_slide: dict[int, list[dict[str, Any]]],
     payload: dict[str, Any],
     *,
-    exclude_slides: frozenset[int] = frozenset(),
+    kindindex_remap: dict[int, dict[str, dict[int, int]]] | None = None,
+    multiset_kinds_by_slide: dict[int, set[str]] | None = None,
 ) -> dict[str, tuple[float, int, list[dict[str, Any]]]]:
     """Planned vs the live Keynote-reported frame.
 
-    `exclude_slides` drops the WHOLE slide, every kind — not just group: Bring to Front
-    moves the raised item to the END of its per-kind collection, so on a stat-finalize
-    slide EVERY kind's kindIndex may be wrong post-raise, not only the group's, and even a
-    bridged index is then meaningless. The offline z-order patch (`OBED_ZORDER_WRITE`)
-    permutes per-kind order the same way on every slide it targets, so callers must also
-    exclude `zorderWrite["slides"]`; `bridge_specs_kindindex` bridges wall→saved deletions
-    only, not this reordering. The reported payload is keyed by SAVED kindIndex,
-    so each slide's specs are bridged (wall → saved) before the lookup, same as
-    `verify_offline_frames`.
+    Composition, wall spec to reported item, is three stages: `bridge_specs_kindindex`
+    bridges wall addressing to the post-`deleteHides` saved addressing; pass 2's
+    stat-finalize group deletes shift `group` indices further on stat slides (routed to
+    `multiset_kinds_by_slide` instead — those `(slide, kind)` pairs are skipped here,
+    pending the Piece 2 multiset bar); the offline z-order patch (`OBED_ZORDER_WRITE`)
+    then permutes per-kind order again on every slide it targets, bridged here via
+    `kindindex_remap` (`run_offline_zorder`'s `kindIndexMap`, `{old_ki: new_ki}` per
+    kind). A kind present in `kindindex_remap[n]` but missing the spec's index is a
+    counted miss (an infinite delta, not a silent skip) — the remap claims that kind was
+    permuted on this slide, so an unmapped index is unresolvable, not a no-op. This check
+    runs only under `ow["mode"] == "verify"` (the A/B gate), never in production.
 
     Text is now a real (if loose) bar, not merely reported: `y` is a centre delta and `x`
     is approximate, so both are compared but callers should apply a loose per-kind
     tolerance (see `LIVE_VERIFY_TOL`) rather than the tighter shape/image bar.
     """
     from obed_edom.iwa_write import bridge_specs_kindindex  # noqa: PLC0415 (optional iwa extra)
+
+    kindindex_remap = kindindex_remap or {}
+    multiset_kinds_by_slide = multiset_kinds_by_slide or {}
 
     reported: dict[int, dict[tuple[str, int], dict[str, Any]]] = {}
     for i, slide in enumerate(payload.get("slides") or []):
@@ -575,18 +581,30 @@ def verify_live_frames(
 
     per_kind: dict[str, list[dict[str, Any]]] = {}
     for n, specs in planned_specs_by_slide.items():
-        if n in exclude_slides:
-            continue
         bridged = bridge_specs_kindindex(specs)
         by_key = reported.get(n, {})
+        remap = kindindex_remap.get(n, {})
+        skip_kinds = multiset_kinds_by_slide.get(n, set())
         for spec in bridged:
             if spec.get("role") == "hide":
                 continue
             kind = str(spec.get("kind") or "")
+            if kind in skip_kinds:
+                continue
             ki = spec.get("kindIndex")
             if ki is None:
                 continue
-            item = by_key.get((kind, int(ki)))
+            ki = int(ki)
+            kind_remap = remap.get(kind)
+            if kind_remap is not None:
+                if ki in kind_remap:
+                    ki = kind_remap[ki]
+                else:
+                    per_kind.setdefault(kind, []).append(
+                        {"slide": n, "kindIndex": ki, "delta": float("inf")}
+                    )
+                    continue
+            item = by_key.get((kind, ki))
             if item is None:
                 continue
             if kind == "text":
@@ -597,7 +615,7 @@ def verify_live_frames(
             else:
                 planned, actual = _spec_box(spec, item)
                 delta = max(abs(a - b) for a, b in zip(planned, actual))
-            per_kind.setdefault(kind, []).append({"slide": n, "kindIndex": int(ki), "delta": delta})
+            per_kind.setdefault(kind, []).append({"slide": n, "kindIndex": ki, "delta": delta})
     return _summarize_verify(per_kind)
 
 
@@ -902,9 +920,15 @@ def run_offline_zorder(
     `RuntimeError` naming the failed slides. `patch_deck_zorder`'s mandatory read-back
     mismatch and this function's own `verify`-mode mismatch are caught as `failures` too
     (the deck is already written at that point); `OfflineWriteCorrupted` (a corrupted
-    rewrite) still propagates."""
+    rewrite) still propagates.
+
+    Also returns `kindIndexMap[n] = {kind: {old_ki: new_ki}}` for every FINALLY patched
+    slide (verify-mode rollbacks absent), joined on `(id, kind)` since a dual (custom-path
+    text box) emits two records for one id. A derivation disagreement on a slide emits no
+    map for it and is appended to `failures` instead."""
     if mode == "off" or not targets_by_slide:
         return None
+    from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.iwa_write import read_slide_zorder  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.iwa_zorder import patch_deck_zorder, plan_slide_order  # noqa: PLC0415
@@ -1015,9 +1039,26 @@ def run_offline_zorder(
                     if pre_order[n] == want:
                         noop -= 1
 
+    kind_index_map: dict[int, dict[str, dict[int, int]]] = {}
+    for n in patched_slides:
+        slide = objects.get(order[n - 1][0])
+        old_records = derive_kind_index(slide, objects)
+        new_slide = {**slide, "drawablesZOrder": [{"identifier": i} for i in orders_by_slide[n]]}
+        new_records = derive_kind_index(new_slide, objects)
+        old_by_key = {(r["id"], r["kind"]): r["kindIndex"] for r in old_records}
+        new_by_key = {(r["id"], r["kind"]): r["kindIndex"] for r in new_records}
+        if set(old_by_key) != set(new_by_key):
+            failures.append((n, "kindIndexMap derivation disagreement"))
+            continue
+        per_kind: dict[str, dict[int, int]] = {}
+        for (ident, kind), old_ki in old_by_key.items():
+            per_kind.setdefault(kind, {})[old_ki] = new_by_key[(ident, kind)]
+        kind_index_map[n] = per_kind
+
     return {
         "mode": mode,
         "slides": sorted(patched_slides),
+        "kindIndexMap": kind_index_map,
         "zorderSlides": zorder_slides,
         "zorderStatRaised": stat_raised,
         "zorderBadgeRaised": badge_raised,

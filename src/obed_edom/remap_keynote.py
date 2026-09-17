@@ -1779,17 +1779,26 @@ def remap_and_inspect(
     if ow and ow.get("mode") == "verify":
         planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
         stat_slides = frozenset(ow.get("statSlides") or [])
-        zorder_slides = frozenset((info.get("zorderWrite") or {}).get("slides") or [])
-        exclude_slides = stat_slides | zorder_slides
+        kind_index_map_raw = (info.get("zorderWrite") or {}).get("kindIndexMap") or {}
+        kindindex_remap = {
+            int(n): {
+                kind: {int(old_ki): int(new_ki) for old_ki, new_ki in per_kind.items()}
+                for kind, per_kind in kinds.items()
+            }
+            for n, kinds in kind_index_map_raw.items()
+        }
+        multiset_kinds_by_slide = {n: {"group"} for n in stat_slides}
         live_report = offline_write.verify_live_frames(
-            planned, payload, exclude_slides=exclude_slides
+            planned, payload,
+            kindindex_remap=kindindex_remap,
+            multiset_kinds_by_slide=multiset_kinds_by_slide,
         )
+        remapped_slides = len(set(kindindex_remap) & set(planned))
         if log:
             log(
-                f"offline-write live verify: excluded {len(exclude_slides)} of "
-                f"{len(planned)} slide(s) ({len(stat_slides)} stat-finalize, "
-                f"{len(zorder_slides)} z-order-patched); covers only "
-                f"{max(len(planned) - len(exclude_slides), 0)} slide(s)."
+                f"offline-write live verify: positional {len(planned)} slide(s) "
+                f"({remapped_slides} remapped); set-compare and uncovered totals "
+                "arrive with the Piece 2 multiset bar."
             )
         ow["liveVerifyPass"] = offline_write._say_verify_report(
             "offline-write live verify", live_report, offline_write.LIVE_VERIFY_TOL, log

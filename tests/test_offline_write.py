@@ -662,9 +662,11 @@ def test_verify_live_frames_bridges_before_lookup(monkeypatch):
     assert out["shape"][0] == 1.0
 
 
-def test_verify_live_frames_excludes_whole_slide_when_stat_finalized():
-    # Bring to Front reorders EVERY kind's per-kind collection on a stat-finalize slide,
-    # not just the group's — so the whole slide is excluded, despite the param's name.
+def test_verify_live_frames_skips_only_multiset_routed_kinds_on_stat_slides():
+    # W2 zorder-bridge Piece 1: pass 2 no longer permutes anything but `group` on a
+    # stat-finalize slide, so only `(slide, "group")` routes to the Piece 2 multiset bar
+    # (skipped here, not compared) — text/shape on the same slide still take the exact
+    # positional bar, unlike the old whole-slide exclusion.
     planned = {
         1: [
             _spec(slide=1, kind="text", kindIndex=0, x=0, y=0, w=10, h=10),
@@ -677,15 +679,17 @@ def test_verify_live_frames_excludes_whole_slide_when_stat_finalized():
             {
                 "number": 1,
                 "items": [
-                    {"kind": "text", "kindIndex": 0, "x": 999, "y": 999, "w": 999, "h": 999},
+                    {"kind": "text", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
                     {"kind": "group", "kindIndex": 0, "x": 999, "y": 999, "w": 999, "h": 999},
-                    {"kind": "shape", "kindIndex": 0, "x": 999, "y": 999, "w": 999, "h": 999},
+                    {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
                 ],
             }
         ]
     }
-    out = verify_live_frames(planned, payload, exclude_slides=frozenset({1}))
-    assert out == {}
+    out = verify_live_frames(planned, payload, multiset_kinds_by_slide={1: {"group"}})
+    assert set(out) == {"text", "shape"}
+    assert out["text"][0] == 0.0
+    assert out["shape"][0] == 0.0
 
 
 def test_verify_live_frames_includes_text_on_non_stat_slides():
@@ -699,6 +703,165 @@ def test_verify_live_frames_includes_text_on_non_stat_slides():
     max_delta, n, _worst5 = out["text"]
     assert max_delta == 3.0  # max(|0-2|, |100-103|)
     assert n == 1
+
+
+def test_verify_live_frames_zorder_permutation_needs_remap():
+    """W2 zorder-bridge Piece 1: the offline z-order patch permutes per-kind order on its
+    target slides, so `planned` (pre-patch addressing) and `payload` (post-patch,
+    Keynote-reported addressing) disagree on which kindIndex names which object.
+    Positional compare FAILs without the `kindIndexMap`-derived remap, 0.00px with it."""
+    planned = {
+        3: [
+            _spec(kind="shape", kindIndex=0, x=0, y=0, w=10, h=10),
+            _spec(kind="shape", kindIndex=1, x=100, y=100, w=20, h=20),
+            _spec(kind="shape", kindIndex=2, x=200, y=200, w=30, h=30),
+            _spec(kind="text", kindIndex=0, x=5, y=5, w=1, h=1),
+            _spec(kind="text", kindIndex=1, x=50, y=50, w=2, h=2),
+        ]
+    }
+    payload = {"slides": [{"number": 3, "items": [
+        {"kind": "shape", "kindIndex": 2, "x": 0, "y": 0, "w": 10, "h": 10},
+        {"kind": "shape", "kindIndex": 1, "x": 100, "y": 100, "w": 20, "h": 20},
+        {"kind": "shape", "kindIndex": 0, "x": 200, "y": 200, "w": 30, "h": 30},
+        {"kind": "text", "kindIndex": 1, "x": 5, "y": 5, "w": 1, "h": 1},
+        {"kind": "text", "kindIndex": 0, "x": 50, "y": 50, "w": 2, "h": 2},
+    ]}]}
+
+    without = verify_live_frames(planned, payload)
+    assert without["shape"][0] > 0
+    assert without["text"][0] > 0
+
+    remap = {3: {"shape": {0: 2, 1: 1, 2: 0}, "text": {0: 1, 1: 0}}}
+    with_remap = verify_live_frames(planned, payload, kindindex_remap=remap)
+    assert with_remap["shape"][0] == 0.0
+    assert with_remap["text"][0] == 0.0
+
+
+def test_verify_live_frames_identity_remap_is_noop():
+    planned = {1: [_spec(slide=1, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10)]}
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+    ]}]}
+    out = verify_live_frames(planned, payload, kindindex_remap={1: {"shape": {0: 0}}})
+    assert out["shape"][0] == 0.0
+
+
+def test_verify_live_frames_remap_missing_index_counts_as_miss():
+    # The remap says `shape` WAS permuted on slide 1 (it has an entry for that kind) but
+    # carries no mapping for old index 0 — an unresolvable address, not a no-op fallback.
+    planned = {1: [_spec(slide=1, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10)]}
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+    ]}]}
+    out = verify_live_frames(planned, payload, kindindex_remap={1: {"shape": {1: 2}}})
+    assert "shape" in out
+    max_delta, n, _worst5 = out["shape"]
+    assert max_delta == float("inf")
+    assert n == 1
+
+
+# --- run_offline_zorder kindIndexMap (W2 zorder-bridge Piece 1) ------------------
+
+
+def _zorder_shape(text_box=False, custom_path=False):
+    obj = {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": text_box}
+    if custom_path:
+        obj["super"] = {"pathsource": {"editableBezierPathSource": {"present": True}}}
+    return obj
+
+
+def test_run_offline_zorder_kind_index_map_joins_on_id_and_kind(monkeypatch):
+    """The (id, kind) join regression: a dual (custom-path text box, "d") is permuted
+    across both its `text` and `shape` slots and must remap each independently."""
+    from obed_edom import offline_write
+
+    slide = {"drawablesZOrder": [{"identifier": i} for i in ("a", "b", "c", "d")]}
+    objects = {
+        "a": _zorder_shape(),
+        "b": _zorder_shape(),
+        "c": _zorder_shape(text_box=True),
+        "d": _zorder_shape(text_box=True, custom_path=True),
+        "slide1": slide,
+    }
+
+    # iwa_zorder patched FIRST: it imports `_load_deck`/`slide_order` from iwa_runs at
+    # ITS OWN module load, so if this test is the first thing in the process to import
+    # iwa_zorder, that import must run before iwa_runs' names below are stubbed -- else
+    # iwa_zorder's own copies bind to the stubs permanently (module imports cache once).
+    monkeypatch.setattr(
+        "obed_edom.iwa_zorder.plan_slide_order",
+        lambda slide, objects, stat_ids, badge_ids: ["d", "c", "b", "a"],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_zorder.patch_deck_zorder",
+        lambda dest, orders_by_slide: {n: SimpleNamespace(refused=False) for n in orders_by_slide},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_runs._load_deck", lambda *a, **k: (objects, {}, {}), raising=False
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_runs.slide_order", lambda objs: [("slide1", False)], raising=False
+    )
+
+    targets = {1: {"stat": ["a"], "badge": []}}
+    result = offline_write.run_offline_zorder(Path("dummy.key"), "on", targets, lambda s: None)
+
+    assert result["slides"] == [1]
+    assert result["kindIndexMap"] == {
+        1: {"shape": {0: 2, 1: 1, 2: 0}, "text": {0: 1, 1: 0}},
+    }
+
+
+def test_run_offline_zorder_kind_index_map_omits_rolled_back_slide(monkeypatch):
+    """`verify`-mode rollback removes a slide from `patched_slides` before the map is
+    built, so a slide whose read-back mismatched must carry no `kindIndexMap` entry."""
+    from obed_edom import iwa_write, offline_write
+
+    slide1 = {"drawablesZOrder": [{"identifier": i} for i in ("a", "b")]}
+    slide2 = {"drawablesZOrder": [{"identifier": i} for i in ("x", "y")]}
+    objects = {
+        "a": _zorder_shape(), "b": _zorder_shape(),
+        "x": _zorder_shape(), "y": _zorder_shape(),
+        "slide1": slide1, "slide2": slide2,
+    }
+
+    # See the ordering comment in the join-regression test above: iwa_zorder patched
+    # before iwa_runs so a first-ever import of iwa_zorder doesn't bind to the stubs.
+    monkeypatch.setattr(
+        "obed_edom.iwa_zorder.plan_slide_order",
+        lambda slide, objects, stat_ids, badge_ids: list(
+            reversed([str(r["identifier"]) for r in slide["drawablesZOrder"]])
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_zorder.patch_deck_zorder",
+        lambda dest, orders_by_slide: {n: SimpleNamespace(refused=False) for n in orders_by_slide},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_runs._load_deck", lambda *a, **k: (objects, {}, {}), raising=False
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_runs.slide_order",
+        lambda objs: [("slide1", False), ("slide2", False)],
+        raising=False,
+    )
+
+    def fake_read_slide_zorder(dest, n):
+        if n == 1:
+            return (["b", "a"], ["b", "a"])  # matches the patched order -> keeps slide 1
+        return (["bogus"], ["bogus"])  # mismatches slide 2's patched order -> rolls back
+
+    monkeypatch.setattr(iwa_write, "read_slide_zorder", fake_read_slide_zorder)
+
+    targets = {1: {"stat": ["a"], "badge": []}, 2: {"stat": ["x"], "badge": []}}
+    result = offline_write.run_offline_zorder(Path("dummy.key"), "verify", targets, lambda s: None)
+
+    assert result["slides"] == [1]
+    assert set(result["kindIndexMap"]) == {1}
 
 
 # --- run_offline_write (BLOCKER items 2 and 5) -----------------------------------
@@ -1563,10 +1726,10 @@ def test_remap_and_inspect_sets_live_verify_pass_key(monkeypatch, tmp_path):
     assert info["offlineWrite"]["liveVerifyPass"] is True  # exact match on the one shape
 
 
-def test_remap_and_inspect_excludes_zorder_patched_slides_from_live_verify(monkeypatch, tmp_path):
-    """Root cause B: the offline z-order patch permutes per-kind kindIndex order on its
-    target slides the same way a stat-finalize raise does, so `remap_and_inspect` must
-    union `zorderWrite["slides"]` into `exclude_slides` before calling `verify_live_frames`."""
+def test_remap_and_inspect_remaps_zorder_patched_slides_in_live_verify(monkeypatch, tmp_path):
+    """W2 zorder-bridge Piece 1 (inverse of the old exclusion test): the offline z-order
+    patch's `kindIndexMap` now lets `remap_and_inspect` positionally verify its target
+    slides via `kindindex_remap`, instead of excluding them from live verify wholesale."""
     import obed_edom.remap_keynote as rk
 
     offline_info = {
@@ -1581,14 +1744,16 @@ def test_remap_and_inspect_excludes_zorder_patched_slides_from_live_verify(monke
     def fake_remap(source, dest, *, export_dir=None, **kwargs):
         return {
             "dest": str(dest), "applied": 1, "offlineWrite": offline_info,
-            "zorderWrite": {"slides": [1]},
+            "zorderWrite": {"slides": [1], "kindIndexMap": {"1": {"shape": {"0": 1}}}},
         }
 
     def fake_inspect(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
         return {
             "slideWidth": 1920, "slideHeight": 1080, "slideCount": 2,
             "slides": [
-                {"number": 1, "items": []},
+                {"number": 1, "items": [
+                    {"kind": "shape", "kindIndex": 1, "x": 0, "y": 0, "w": 10, "h": 10},
+                ]},
                 {"number": 2, "items": [
                     {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
                 ]},
@@ -1598,9 +1763,12 @@ def test_remap_and_inspect_excludes_zorder_patched_slides_from_live_verify(monke
     captured = {}
     real_verify_live_frames = offline_write.verify_live_frames
 
-    def spy_verify_live_frames(planned, payload, *, exclude_slides=frozenset()):
-        captured["exclude_slides"] = exclude_slides
-        return real_verify_live_frames(planned, payload, exclude_slides=exclude_slides)
+    def spy_verify_live_frames(planned, payload, *, kindindex_remap=None, multiset_kinds_by_slide=None):
+        captured["kindindex_remap"] = kindindex_remap
+        return real_verify_live_frames(
+            planned, payload,
+            kindindex_remap=kindindex_remap, multiset_kinds_by_slide=multiset_kinds_by_slide,
+        )
 
     monkeypatch.setattr(rk, "remap_keynote", fake_remap)
     monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
@@ -1610,7 +1778,7 @@ def test_remap_and_inspect_excludes_zorder_patched_slides_from_live_verify(monke
         tmp_path / "wall.key", tmp_path / "out.key", template=tmp_path / "tpl.key",
         validate=True,
     )
-    assert captured["exclude_slides"] == frozenset({1})
+    assert captured["kindindex_remap"] == {1: {"shape": {0: 1}}}
     assert info["offlineWrite"]["liveVerifyPass"] is True
 
 
