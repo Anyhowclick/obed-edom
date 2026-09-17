@@ -82,6 +82,19 @@ test("cutout: isolate-fill is hidden first, then highlights restore to authored 
   );
 });
 
+test("cutout hides the basemap so the piece is highlight-only", () => {
+  const extras = ["background", "water", "landcover", "boundary_state", "isolate-fill"];
+  const map = fakeMap([...ALL_LAYERS, ...extras]);
+  map.getStyle = () => ({ layers: extras.concat(["admin0-fill", "admin1-fill"]).map((id) => ({ id })) });
+  isolatePairCutoutVisibility(map, ["A1:MYS-1186"]);
+  const hidden = map.calls.filter((c) => c[0] === "setLayoutProperty" && c[3] === "none").map((c) => c[1]);
+  for (const id of extras) assert.ok(hidden.includes(id), id);
+  assert.equal(hidden.includes("admin0-fill"), false);
+  assert.equal(hidden.includes("admin1-fill"), false);
+  const bgOpacity = map.calls.find((c) => c[0] === "setPaintProperty" && c[1] === "background");
+  assert.deepEqual(bgOpacity, ["setPaintProperty", "background", "background-opacity", 0]);
+});
+
 test("cutout restores highlight layer visibility after the base hid them", () => {
   const map = fakeMap(ALL_LAYERS);
   isolatePairBaseVisibility(map, ["USA"]);

@@ -521,6 +521,8 @@ class MapsDocument(BaseModel):
             raise ValueError("Slide ids must be non-empty and unique")
         if any(sid.endswith("__landing") for sid in slide_ids):
             raise ValueError("Slide ids may not end in '__landing' (reserved for synthetic landings)")
+        if any(sid.endswith("__takeoff") for sid in slide_ids):
+            raise ValueError("Slide ids may not end in '__takeoff' (reserved for synthetic movie takeoffs)")
         for slide in self.slides:
             for view in (slide, slide.cg):
                 if view is None:

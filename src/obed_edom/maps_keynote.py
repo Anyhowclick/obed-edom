@@ -1028,6 +1028,81 @@ def isolate_landing_slides(
     return next_slides, next_links
 
 
+def _qualifying_movie_takeoff_links(
+    slides: list[dict[str, Any]], links: list[dict[str, Any]]
+) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
+    """Movie hops whose source just landed a Magic Move on a shared plate.
+
+    That slide must keep the plate objects (duplicate + adjust) so Keynote can
+    interpolate. The fly is moved onto a follow-up takeoff slide.
+    """
+    by_id = {str(slide.get("id") or ""): slide for slide in slides}
+    index_of = {str(slide.get("id") or ""): index for index, slide in enumerate(slides)}
+    morph_dests: set[str] = set()
+    for link in links:
+        if str(link.get("kind") or "") != "morph" or not link.get("plateId"):
+            continue
+        _start, end = _link_ends(link)
+        if end:
+            morph_dests.add(end)
+    out: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    for link in links:
+        if str(link.get("kind") or "") != "movie":
+            continue
+        start, end = _link_ends(link)
+        from_slide, to_slide = by_id.get(start), by_id.get(end)
+        if not from_slide or not to_slide:
+            continue
+        if start not in morph_dests:
+            continue
+        if index_of.get(end) != index_of.get(start, -2) + 1:
+            continue
+        out.append((link, from_slide, to_slide))
+    return out
+
+
+def movie_takeoff_slides(
+    slides: list[dict[str, Any]], links: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """After a Magic Move landing, play the outgoing fly on a synthetic takeoff slide."""
+    takeoff_after: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {}
+    for link, from_slide, to_slide in _qualifying_movie_takeoff_links(slides, links):
+        from_id = str(from_slide.get("id") or "")
+        duration = float(link.get("duration") or 0) or 1.0
+        takeoff_slide = {
+            **from_slide,
+            "id": f"{from_id}__takeoff",
+            "_takeoffFor": from_id,
+            "movieDuration": float(from_slide.get("movieDuration") or duration),
+        }
+        takeoff_after[from_id] = (takeoff_slide, link, str(to_slide.get("id") or ""))
+    if not takeoff_after:
+        return slides, links
+    next_slides: list[dict[str, Any]] = []
+    next_links = list(links)
+    for slide in slides:
+        next_slides.append(slide)
+        takeoff = takeoff_after.get(str(slide.get("id") or ""))
+        if takeoff is None:
+            continue
+        takeoff_slide, link, to_id = takeoff
+        next_slides.append(takeoff_slide)
+        for index, existing in enumerate(next_links):
+            if existing is link:
+                next_links[index] = {**link, "from": takeoff_slide["id"]}
+                break
+        next_links.append(
+            {
+                "from": str(slide.get("id") or ""),
+                "to": takeoff_slide["id"],
+                "kind": "cut",
+                "duration": 0.0,
+                "playWithoutClick": bool(link.get("playWithoutClick")),
+            }
+        )
+    return next_slides, next_links
+
+
 def _outgoing(slide_id: str, links: list[dict[str, Any]]) -> dict[str, Any] | None:
     for link in links:
         start, _end = _link_ends(link)
@@ -1046,17 +1121,23 @@ def _still_path(slide: dict[str, Any], output_dir: Path, preview_dir: Path | Non
     return path
 
 
-def _region_manifest_scale(mapped_w: float, mapped_h: float, manifest: dict[str, Any]) -> float:
-    """Uniform width-derived scale for mapping manifest-space region pieces onto `mapped_w`x`mapped_h`."""
+def _region_manifest_scale(
+    mapped_w: float, mapped_h: float, manifest: dict[str, Any]
+) -> tuple[float, float]:
+    """Per-axis scale from manifest pixels onto the placed map (`mapped_w`×`mapped_h`).
+
+    A width-only scale leaves Y drifting when Keynote's placed aspect is not the PNG's —
+    region washes then sit off the plate land they were captured against.
+    """
     manifest_w = float(manifest["width"])
     manifest_h = float(manifest["height"])
-    scale = mapped_w / manifest_w
-    expected_h = manifest_h * scale
-    if mapped_h > 0 and abs(expected_h - mapped_h) > max(1.0, mapped_h * 0.02):
+    scale_x = mapped_w / manifest_w if manifest_w else 1.0
+    scale_y = mapped_h / manifest_h if manifest_h else 1.0
+    if manifest_w > 0 and manifest_h > 0 and mapped_h > 0 and abs(scale_x - scale_y) > max(1e-6, abs(scale_x) * 0.02):
         warnings.warn(
             f"region manifest aspect ratio mismatch: mapped {mapped_w:g}x{mapped_h:g} vs manifest {manifest_w:g}x{manifest_h:g}"
         )
-    return scale
+    return scale_x, scale_y
 
 
 REGION_MANIFEST_MAX_SIDE = 8192
@@ -1526,7 +1607,7 @@ def build_slide_items(
     cutout_gate = slide.get("highlights") if cutout_highlights is None else cutout_highlights
     if region_manifest is not None and mapped.get("kind") == "image" and cutout_gate:
         base_path = Path(mapped["path"])
-        scale = _region_manifest_scale(float(mapped["w"]), float(mapped["h"]), region_manifest)
+        scale_x, scale_y = _region_manifest_scale(float(mapped["w"]), float(mapped["h"]), region_manifest)
         for piece in region_manifest.get("pieces") or []:
             k = piece["index"]
             png = base_path.with_name(f"{base_path.stem}-region-{k}{base_path.suffix}")
@@ -1536,10 +1617,10 @@ def build_slide_items(
             items.append(
                 _item(
                     "image",
-                    mapped["x"] + piece["x"] * scale,
-                    mapped["y"] + piece["y"] * scale,
-                    piece["w"] * scale,
-                    piece["h"] * scale,
+                    mapped["x"] + piece["x"] * scale_x,
+                    mapped["y"] + piece["y"] * scale_y,
+                    piece["w"] * scale_x,
+                    piece["h"] * scale_y,
                     path=str(png),
                     country=True,
                 )
@@ -1614,6 +1695,7 @@ def plan_deck(
     reveal_movies: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, Any]]:
     slides, links = isolate_landing_slides(slides, links)
+    slides, links = movie_takeoff_slides(slides, links)
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
     slide_plate: dict[str, str] = {}
     plate_highlights: dict[str, list[str]] = {}
@@ -1634,7 +1716,8 @@ def plan_deck(
         dest_slide = by_id.get(str(outgoing.get("to") or "")) if outgoing else None
         bg_movie = None
         if outgoing and str(outgoing.get("kind") or "") == "movie":
-            candidate = movie_path(output_dir, sid, asset_audience)
+            movie_sid = str(slide.get("_takeoffFor") or sid)
+            candidate = movie_path(output_dir, movie_sid, asset_audience)
             if candidate.exists():
                 bg_movie = candidate
                 plate_id = None
@@ -2553,17 +2636,17 @@ def _render_reveals(
             manifest_path = _still_region_manifest_path(item_slide, output_dir, audience)
             pieces = []
             if region_manifest is not None:
-                pscale = _region_manifest_scale(float(cap_w), float(cap_h), region_manifest)
+                pscale_x, pscale_y = _region_manifest_scale(float(cap_w), float(cap_h), region_manifest)
                 for piece in region_manifest.get("pieces") or []:
                     k = piece["index"]
                     piece_png = still.with_name(f"{still.stem}-region-{k}{still.suffix}")
                     pieces.append(
                         (
                             piece_png,
-                            round(piece["x"] * pscale),
-                            round(piece["y"] * pscale),
-                            round(piece["w"] * pscale),
-                            round(piece["h"] * pscale),
+                            round(piece["x"] * pscale_x),
+                            round(piece["y"] * pscale_y),
+                            round(piece["w"] * pscale_x),
+                            round(piece["h"] * pscale_y),
                         )
                     )
             piece_paths = [piece_path for piece_path, *_ in pieces]

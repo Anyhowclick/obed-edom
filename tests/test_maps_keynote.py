@@ -1752,7 +1752,7 @@ def test_plan_deck_backdrop_movie_missing_file_falls_back_to_still(tmp_path: Pat
     assert item["kind"] == "image"
 
 
-def test_plan_deck_movie_wins_over_ending_plate(tmp_path: Path):
+def test_plan_deck_morph_dest_keeps_plate_when_outgoing_movie(tmp_path: Path):
     cam_a, cam_b = _pan_camera(8, 400)
     a = _slide("s1", cam_a)
     b = _slide("s2", cam_b, movieDuration=2.0)
@@ -1775,11 +1775,17 @@ def test_plan_deck_movie_wins_over_ending_plate(tmp_path: Path):
         movie=None,
         wall=True,
     )
+    assert [op["id"] for op in ops] == ["s1", "s2", "s2__takeoff", "s3"]
     assert ops[0]["items"][0]["kind"] == "image"
     assert MAP_BG_RE.search(Path(ops[0]["items"][0]["path"]).name)
-    assert ops[1]["items"][0]["kind"] == "movie"
-    assert ops[1]["duplicate"] is False
-    assert ops[1]["transition"]["delay"] == 2.0
+    assert ops[0]["transition"]["effect"] == "magic_move"
+    assert ops[1]["duplicate"] is True
+    assert ops[1]["items"][0]["kind"] == "image"
+    assert MAP_BG_RE.search(Path(ops[1]["items"][0]["path"]).name)
+    assert ops[1]["transition"] is None
+    assert ops[2]["duplicate"] is False
+    assert ops[2]["items"][0]["kind"] == "movie"
+    assert ops[2]["transition"]["delay"] == 2.0
 
 
 def test_coerce_preserves_explicit_movie_on_style_mismatch():
@@ -3538,11 +3544,12 @@ def test_build_slide_items_scales_pieces_to_plate_placement(tmp_path: Path):
     mapped = next(item for item in items if item.get("map"))
     piece = next(item for item in items if item.get("country"))
     assert piece["path"] == str(piece_path)
-    scale = mapped["w"] / 640.0
-    assert piece["w"] == pytest.approx(320 * scale, abs=1)
-    assert piece["h"] == pytest.approx(45 * scale, abs=1)
-    assert piece["x"] == pytest.approx(mapped["x"] + 0 * scale)
-    assert piece["y"] == pytest.approx(mapped["y"] + 0 * scale)
+    scale_x = mapped["w"] / 640.0
+    scale_y = mapped["h"] / 90.0
+    assert piece["w"] == pytest.approx(320 * scale_x, abs=1)
+    assert piece["h"] == pytest.approx(45 * scale_y, abs=1)
+    assert piece["x"] == pytest.approx(mapped["x"] + 0 * scale_x)
+    assert piece["y"] == pytest.approx(mapped["y"] + 0 * scale_y)
     assert (mapped["w"], mapped["h"]) != (640, 90), "plate placement should not coincidentally match the manifest size"
 
 
@@ -3550,14 +3557,21 @@ def test_build_slide_items_warns_but_does_not_crash_on_aspect_mismatch(tmp_path:
     slide = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
     still_path = _dummy_png(tmp_path / "stills" / "s1.png")
     _dummy_png(tmp_path / "stills" / "s1-region-0.png")
-    manifest = _region_manifest([{"id": "MYS", "x": 0, "y": 0, "w": 16, "h": 16}], width=16, height=16)
+    manifest = _region_manifest([{"id": "MYS", "x": 2, "y": 4, "w": 8, "h": 8}], width=16, height=16)
     with pytest.warns(UserWarning, match="aspect ratio mismatch"):
         items = build_slide_items(
             slide, plate=None, plate_path=None, still=still_path, movie=None, wall=True,
             pin_root=tmp_path / "pins", region_manifest=manifest,
         )
-    country_items = [item for item in items if item.get("country")]
-    assert len(country_items) == 1
+    mapped = next(item for item in items if item.get("map"))
+    piece = next(item for item in items if item.get("country"))
+    scale_x = mapped["w"] / 16.0
+    scale_y = mapped["h"] / 16.0
+    assert scale_x != pytest.approx(scale_y)
+    assert piece["x"] == pytest.approx(mapped["x"] + 2 * scale_x, abs=1)
+    assert piece["y"] == pytest.approx(mapped["y"] + 4 * scale_y, abs=1)
+    assert piece["w"] == pytest.approx(8 * scale_x, abs=1)
+    assert piece["h"] == pytest.approx(8 * scale_y, abs=1)
 
 
 def test_build_slide_items_warns_and_skips_a_missing_piece(tmp_path: Path):

@@ -10,7 +10,9 @@ import {
 
 /** The subset of `MapLibreMap` the isolate-pair visibility toggles touch — kept narrow so this
  * logic is testable against a fake map without a real MapLibre instance. */
-export type CaptureMapLike = Pick<MapLibreMap, "getLayer" | "setPaintProperty" | "setLayoutProperty">;
+export type CaptureMapLike = Pick<MapLibreMap, "getLayer" | "setPaintProperty" | "setLayoutProperty"> & {
+  getStyle?: MapLibreMap["getStyle"];
+};
 
 const HIGHLIGHT_LAYERS: Array<[string, "fill-opacity" | "line-opacity"]> = [
   ["admin0-fill", "fill-opacity"],
@@ -18,6 +20,17 @@ const HIGHLIGHT_LAYERS: Array<[string, "fill-opacity" | "line-opacity"]> = [
   ["admin1-fill", "fill-opacity"],
   ["admin1-line", "line-opacity"],
 ];
+
+const HIGHLIGHT_LAYER_IDS = new Set(HIGHLIGHT_LAYERS.map(([id]) => id));
+
+function hideNonHighlightLayers(map: CaptureMapLike): void {
+  const layers = map.getStyle?.()?.layers;
+  if (!layers) return;
+  for (const layer of layers) {
+    if (HIGHLIGHT_LAYER_IDS.has(layer.id) || layer.id.startsWith("churches-")) continue;
+    if (map.getLayer(layer.id)) map.setLayoutProperty(layer.id, "visibility", "none");
+  }
+}
 
 /** `value === null` restores each layer to its authored (feature-state/id-list driven) opacity
  * expression; any number pins every highlight layer present on `map` to that flat opacity. */
@@ -59,15 +72,18 @@ export function isolatePairBaseVisibility(map: CaptureMapLike, highlights: strin
   setHighlightLayerVisibility(map, "none");
 }
 
-/** The cutout capture's toggle. Isolate must not bake into a piece (it lives on the base);
- * highlight fill then returns so coloured regions land in the piece. No-fill (`none`) codes
- * stay unpainted via the restored opacity expressions. */
+/** Cutout pass: drop the basemap (and isolate — it lives on the base) so the piece PNG is
+ * only the authored highlight wash. Stacking that over the isolate plate matches the live
+ * preview instead of a pale land-sticker whose NE clip fights the style's admin lines.
+ * No-fill (`none`) codes stay unpainted via the restored opacity expressions. */
 export function isolatePairCutoutVisibility(
   map: CaptureMapLike,
   highlights: string[],
   highlightColours?: Record<string, string>
 ): void {
   if (map.getLayer("isolate-fill")) map.setLayoutProperty("isolate-fill", "visibility", "none");
+  hideNonHighlightLayers(map);
+  if (map.getLayer("background")) map.setPaintProperty("background", "background-opacity", 0);
   setHighlightLayerVisibility(map, "visible");
   setHighlightOpacity(map, null, highlights, highlightColours);
 }

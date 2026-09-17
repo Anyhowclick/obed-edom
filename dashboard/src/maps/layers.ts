@@ -46,7 +46,7 @@ export function filterForLayer(layer: LayerBits): MapsLayerFilterId | null {
   if (id === BORDERLANDS_INK_LAYER_ID || sl === "building" || id.includes("building")) return "buildings";
   if (isWaterName(layer)) return "waternames";
   if (sl === "place" || id.startsWith("label_")) return "labels";
-  if (sl === "boundary" || id.startsWith("boundary_")) return "boundaries";
+  if (sl === "boundary" || sl === "admin" || id.startsWith("boundary") || id.includes("boundary")) return "boundaries";
   return null;
 }
 
