@@ -137,8 +137,12 @@ from typing import Any, NamedTuple
 # `python scripts/x.py` puts scripts/ (not the repo root) on sys.path[0].
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-GATE_VERSION = 3
-COMPATIBLE_GATE_VERSIONS = {2, GATE_VERSION}
+GATE_VERSION = 4
+# v2 dropped explicitly (W2 zorder-bridge Piece 2): a v3 record lacks `liveVerifySetPass`/
+# `liveVerifyCoverage` but is otherwise still a valid B run -- `summary_gate_reasons`
+# treats their absence as "not measured", never as a red; v2 predates fields this gate
+# no longer knows how to interpret and is refused outright.
+COMPATIBLE_GATE_VERSIONS = {3, 4}
 
 TOL_HARD = 0.5
 TOL_SOFT = 1.0
@@ -1007,10 +1011,19 @@ def summary_gate_reasons(ow: dict[str, Any], applied_a: int, applied_b: int) -> 
     red — empty list == green on this part of the gate. Pure, no Keynote: unit-tested
     directly against a synthetic ``ow`` dict.
 
-    ``offlineVerifyPass``/``liveVerifyPass`` are the bools ``offline_write._say_verify_report``
-    returned for run B's own verify passes (offline compose vs planned, and Keynote-
-    reported vs planned); checked for an explicit ``False`` (not merely absent) so a run
-    that never verified — ``mode`` wasn't ``"verify"`` — doesn't spuriously fail here.
+    ``offlineVerifyPass``/``liveVerifyPass``/``liveVerifySetPass`` are the bools
+    ``offline_write._say_verify_report`` returned for run B's own verify passes (offline
+    compose vs planned, Keynote-reported vs planned positionally, and Keynote-reported vs
+    planned by multiset); checked for an explicit ``False`` (not merely absent) so a run
+    that never verified — ``mode`` wasn't ``"verify"`` — doesn't spuriously fail here. A
+    v3 run record predates ``liveVerifySetPass``/``liveVerifyCoverage`` entirely (GATE_VERSION
+    3→4, W2 zorder-bridge Piece 2); their absence on a reused v3 record must read the same
+    as "not measured", not as a red.
+
+    ``liveVerifyCoverage["uncovered"]`` non-empty means the positional and multiset bars
+    left at least one ``(slide, kind)`` pair unchecked between them — always a red, not
+    merely informational (see ``offline_write.live_verify_coverage``'s docstring for when
+    this can happen at all).
 
     ``missedSpecs`` gates on fallback coverage (sum(fallbackSpecs.values()) >= missedSpecs
     and fallbackUnwritable == 0), not the raw count.
@@ -1055,6 +1068,18 @@ def summary_gate_reasons(ow: dict[str, Any], applied_a: int, applied_b: int) -> 
             "offline-write live verify (Keynote-reported vs planned) reported FAIL — see "
             "the per-kind lines above."
         )
+    if ow.get("liveVerifySetPass") is False:
+        reasons.append(
+            "offline-write live verify (set) (Keynote-reported vs planned, multiset "
+            "bar for group-on-stat-slide buckets) reported FAIL — see the per-kind "
+            "lines above."
+        )
+    uncovered = (ow.get("liveVerifyCoverage") or {}).get("uncovered")
+    if uncovered:
+        reasons.append(
+            f"offline-write live verify: {len(uncovered)} (slide, kind) pair(s) "
+            f"uncovered by either bar: {uncovered}."
+        )
     return reasons
 
 
@@ -1081,7 +1106,11 @@ def run_record(
 
     ``statJobs`` / ``badgeRaises`` are persisted at the top level (the trimmed plan
     drops them) so a reused record can still resolve the W2 front-block targets.
-    ``zorderWrite`` is the piece 3 result dict (counters + eligible ``slides``).
+    ``zorderWrite`` is the piece 3 result dict (counters + eligible ``slides``), including
+    ``kindIndexMap`` (W2 zorder-bridge Piece 1). ``offline_write``'s ``liveVerifySetPass``
+    and ``liveVerifyCoverage`` (W2 zorder-bridge Piece 2) ride along inside it like
+    ``liveVerifyPass`` always has -- nothing extra to do here, but a record written before
+    Piece 2 (``gateVersion`` 3) simply lacks them.
     ``previews`` is the planner's preview-cache provenance (``info["previews"]`` from
     ``remap_and_inspect``: ``{"source": <dir or None>, "placements": n}``) — a record
     written before this field existed has no ``"previews"`` key.
@@ -1883,7 +1912,7 @@ def main(argv: list[str] | None = None) -> int:
         f"refused={ow_b.get('refused') or []}, missedSpecs={ow_b.get('missedSpecs') or 0}, "
         f"softFallbacks={ow_b.get('softFallbacks') or 0}, valueClean={ow_b.get('valueClean', True)}, "
         f"offlineVerifyPass={ow_b.get('offlineVerifyPass')}, liveVerifyPass={ow_b.get('liveVerifyPass')}, "
-        f"applied={ow_b.get('applied')}."
+        f"liveVerifySetPass={ow_b.get('liveVerifySetPass')}, applied={ow_b.get('applied')}."
     )
 
     reasons_b = pass2_health(child_resize_b, label="B", zero_keys_hard=zero_keys_hard)

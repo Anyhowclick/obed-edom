@@ -32,11 +32,15 @@ from obed_edom.offline_write import (
     _soft_seed_slides,
     _tol_for_kind,
     build_fallback_scripts,
+    coerce_kind_index_map,
     counts_from_payload,
+    format_live_verify_coverage,
     group_frame_rows,
+    live_verify_coverage,
     probe_iwa_extra,
     run_offline_write,
     verify_live_frames,
+    verify_live_frames_multiset,
     verify_offline_frames,
 )
 from obed_edom.remap_keynote import offline_write_mode
@@ -758,6 +762,186 @@ def test_verify_live_frames_remap_missing_index_counts_as_miss():
     max_delta, n, _worst5 = out["shape"]
     assert max_delta == float("inf")
     assert n == 1
+
+
+# --- verify_live_frames_multiset / live_verify_coverage (W2 zorder-bridge Piece 2) --
+
+
+def test_verify_live_frames_multiset_passes_on_permuted_set():
+    # Same three group frames as the payload, reported in a DIFFERENT order -- the
+    # multiset bar must not care about order/assignment, only population.
+    planned = {
+        1: [
+            _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=10, h=10),
+            _spec(slide=1, kind="group", kindIndex=1, x=100, y=100, w=20, h=20),
+            _spec(slide=1, kind="group", kindIndex=2, x=200, y=200, w=30, h=30),
+        ]
+    }
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "group", "kindIndex": 2, "x": 200, "y": 200, "w": 30, "h": 30},
+        {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+        {"kind": "group", "kindIndex": 1, "x": 100, "y": 100, "w": 20, "h": 20},
+    ]}]}
+    out = verify_live_frames_multiset(planned, payload, {1: {"group"}})
+    assert out["group"][0] == 0.0
+    assert out["group"][1] == 3
+
+
+def test_verify_live_frames_multiset_fails_on_one_perturbed_frame():
+    planned = {
+        1: [
+            _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=10, h=10),
+            _spec(slide=1, kind="group", kindIndex=1, x=100, y=100, w=20, h=20),
+        ]
+    }
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+        {"kind": "group", "kindIndex": 1, "x": 150, "y": 100, "w": 20, "h": 20},  # +50px
+    ]}]}
+    out = verify_live_frames_multiset(planned, payload, {1: {"group"}})
+    assert out["group"][0] == 50.0
+
+
+def test_verify_live_frames_multiset_only_compares_routed_kinds():
+    planned = {
+        1: [
+            _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=10, h=10),
+            _spec(slide=1, kind="shape", kindIndex=0, x=999, y=999, w=1, h=1),
+        ]
+    }
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+        {"kind": "shape", "kindIndex": 0, "x": 999, "y": 999, "w": 1, "h": 1},
+    ]}]}
+    out = verify_live_frames_multiset(planned, payload, {1: {"group"}})
+    assert set(out) == {"group"}
+
+
+def test_verify_live_frames_multiset_population_mismatch_is_infinite():
+    # One extra planned frame with no corresponding reported box -- a real population
+    # mismatch (an object went missing), reported as an infinite delta, not dropped.
+    planned = {1: [
+        _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=10, h=10),
+        _spec(slide=1, kind="group", kindIndex=1, x=500, y=500, w=5, h=5),
+    ]}
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+    ]}]}
+    out = verify_live_frames_multiset(planned, payload, {1: {"group"}})
+    assert out["group"][0] == float("inf")
+    assert out["group"][1] == 2
+
+
+def test_verify_live_frames_multiset_bridges_before_lookup(monkeypatch):
+    def fake_bridge(specs):
+        return [dict(s, kindIndex=int(s["kindIndex"]) + 5) for s in specs]
+
+    monkeypatch.setattr("obed_edom.iwa_write.bridge_specs_kindindex", fake_bridge, raising=False)
+    planned = {1: [_spec(slide=1, kind="group", kindIndex=0, x=1, y=2, w=3, h=4)]}
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "group", "kindIndex": 5, "x": 1, "y": 2, "w": 3, "h": 4},
+    ]}]}
+    out = verify_live_frames_multiset(planned, payload, {1: {"group"}})
+    assert out["group"][0] == 0.0
+
+
+def test_zorder_bridge_falsifier_perturbed_frame_fails_positional_bar():
+    """Plan (c) falsifier (a): perturbing one planned frame by +50px FAILs the
+    POSITIONAL bar, naming the offending slide/kindIndex."""
+    planned = {4: [_spec(slide=4, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10)]}
+    payload = {"slides": [{"number": 4, "items": [
+        {"kind": "shape", "kindIndex": 0, "x": 50, "y": 0, "w": 10, "h": 10},
+    ]}]}
+    out = verify_live_frames(planned, payload)
+    max_delta, n, worst5 = out["shape"]
+    assert max_delta == 50.0
+    assert n == 1
+    assert worst5[0]["slide"] == 4
+    assert worst5[0]["kindIndex"] == 0
+
+
+def test_zorder_bridge_falsifier_swap_within_stat_group_is_positional_blind_multiset_sees_population():
+    """Plan (c) falsifier (b): swapping two planned frames WITHIN a stat slide's `group`
+    kind is exactly Option 2's documented blind spot -- the positional bar never sees it
+    (the kind is routed away), while the multiset bar only proves population, not
+    assignment, so it PASSes too. Both halves asserted together, as the plan requires."""
+    # "Swap": what spec A/B *would* individually report is exchanged, but the multiset
+    # of the two group frames on the slide is unchanged from what Keynote reports.
+    planned = {19: [
+        _spec(slide=19, kind="group", kindIndex=0, x=100, y=100, w=20, h=20),  # swapped
+        _spec(slide=19, kind="group", kindIndex=1, x=0, y=0, w=10, h=10),      # swapped
+    ]}
+    payload = {"slides": [{"number": 19, "items": [
+        {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+        {"kind": "group", "kindIndex": 1, "x": 100, "y": 100, "w": 20, "h": 20},
+    ]}]}
+    multiset_kinds_by_slide = {19: {"group"}}
+
+    positional = verify_live_frames(planned, payload, multiset_kinds_by_slide=multiset_kinds_by_slide)
+    assert "group" not in positional  # routed away, silent -- NOT a false PASS on 0 rows
+
+    multiset = verify_live_frames_multiset(planned, payload, multiset_kinds_by_slide)
+    assert multiset["group"][0] == 0.0  # PASSes: same two frames, just reassigned
+
+
+def test_coerce_kind_index_map_int_keys_from_json_strings():
+    raw = {"3": {"shape": {"0": 2, "1": 0, "2": 1}}}
+    assert coerce_kind_index_map(raw) == {3: {"shape": {0: 2, 1: 0, 2: 1}}}
+
+
+def test_live_verify_coverage_routes_group_to_set_bar_rest_positional():
+    planned = {
+        1: [
+            _spec(slide=1, kind="text", kindIndex=0, x=0, y=0, w=1, h=1),
+            _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=1, h=1),
+        ],
+        2: [_spec(slide=2, kind="shape", kindIndex=0, x=0, y=0, w=1, h=1)],
+    }
+    coverage = live_verify_coverage(planned, kindindex_remap={2: {"shape": {0: 0}}},
+                                    multiset_kinds_by_slide={1: {"group"}})
+    assert coverage["positionalSlides"] == [1, 2]
+    assert coverage["remappedSlides"] == [2]
+    assert coverage["setSlides"] == [1]
+    assert coverage["groupBuckets"] == 1
+    assert coverage["uncovered"] == []
+    assert coverage["totalSlides"] == 2
+    assert coverage["coveredSlides"] == 2
+
+
+def test_live_verify_coverage_uncovered_when_kindindex_unresolved_and_unrouted():
+    # A spec whose `kindIndex` is None is unresolvable by the positional bar
+    # (`verify_live_frames` silently `continue`s past it), and this kind is not routed
+    # to the multiset bar either -- neither bar can check it. Real data condition, not
+    # a routing-table mirror (see `live_verify_coverage`'s docstring).
+    planned = {1: [_spec(slide=1, kind="group", kindIndex=None, x=0, y=0, w=1, h=1)]}
+    coverage = live_verify_coverage(planned, kindindex_remap={}, multiset_kinds_by_slide={})
+    assert coverage["uncovered"] == [(1, "group")]
+    assert coverage["coveredSlides"] == 0
+    assert coverage["totalSlides"] == 1
+
+
+def test_live_verify_coverage_unresolved_kindindex_still_covered_via_multiset_route():
+    # The SAME unresolved kindIndex, but the kind IS routed to the multiset bar this
+    # time -- multiset needs no kindIndex, so this is covered, not uncovered.
+    planned = {1: [_spec(slide=1, kind="group", kindIndex=None, x=0, y=0, w=1, h=1)]}
+    coverage = live_verify_coverage(planned, kindindex_remap={},
+                                    multiset_kinds_by_slide={1: {"group"}})
+    assert coverage["uncovered"] == []
+    assert coverage["setSlides"] == [1]
+    assert coverage["coveredSlides"] == 1
+
+
+def test_format_live_verify_coverage_matches_plan_line_shape():
+    coverage = {
+        "positionalSlides": list(range(19)), "remappedSlides": list(range(17)),
+        "setSlides": list(range(10)), "groupBuckets": 10, "uncovered": [],
+        "totalSlides": 19, "coveredSlides": 19,
+    }
+    line = format_live_verify_coverage(coverage)
+    assert line == (
+        "live verify: positional 19 slide(s) (17 remapped), set-compare 10 group "
+        "bucket(s) on 10 slide(s), uncovered [] — total 19 of 19."
+    )
 
 
 # --- run_offline_zorder kindIndexMap (W2 zorder-bridge Piece 1) ------------------
@@ -1782,6 +1966,89 @@ def test_remap_and_inspect_remaps_zorder_patched_slides_in_live_verify(monkeypat
     assert info["offlineWrite"]["liveVerifyPass"] is True
 
 
+def test_remap_and_inspect_sets_live_verify_set_pass_for_stat_slide_group(monkeypatch, tmp_path):
+    """W2 zorder-bridge Piece 2: a stat-finalize slide's `group` kind is routed to the
+    multiset bar and lands on `liveVerifySetPass`, alongside (not instead of)
+    `liveVerifyPass` for the slide's other kinds."""
+    import obed_edom.remap_keynote as rk
+
+    offline_info = {
+        "mode": "verify",
+        "specs": {
+            5: [
+                _spec(slide=5, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10),
+                _spec(slide=5, kind="group", kindIndex=0, x=0, y=0, w=10, h=10),
+            ],
+        },
+        "statSlides": [5],
+    }
+
+    def fake_remap(source, dest, *, export_dir=None, **kwargs):
+        return {"dest": str(dest), "applied": 1, "offlineWrite": offline_info}
+
+    def fake_inspect(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
+        return {
+            "slideWidth": 1920, "slideHeight": 1080, "slideCount": 1,
+            "slides": [{"number": 5, "items": [
+                {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+                {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+            ]}],
+        }
+
+    monkeypatch.setattr(rk, "remap_keynote", fake_remap)
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
+
+    info = rk.remap_and_inspect(
+        tmp_path / "wall.key", tmp_path / "out.key", template=tmp_path / "tpl.key",
+        validate=True,
+    )
+    ow = info["offlineWrite"]
+    assert ow["liveVerifyPass"] is True
+    assert ow["liveVerifySetPass"] is True
+    assert ow["liveVerifyCoverage"]["uncovered"] == []
+    assert ow["liveVerifyCoverage"]["setSlides"] == [5]
+
+
+def test_remap_and_inspect_reds_gate_when_coverage_reports_uncovered(monkeypatch, tmp_path):
+    """A non-empty `uncovered` (a routing-table wiring bug between the two live-verify
+    calls) must RED `liveVerifyPass` even when both bars individually PASS."""
+    import obed_edom.remap_keynote as rk
+
+    offline_info = {
+        "mode": "verify",
+        "specs": {1: [_spec(slide=1, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10)]},
+        "statSlides": [],
+    }
+
+    def fake_remap(source, dest, *, export_dir=None, **kwargs):
+        return {"dest": str(dest), "applied": 1, "offlineWrite": offline_info}
+
+    def fake_inspect(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
+        return {
+            "slideWidth": 1920, "slideHeight": 1080, "slideCount": 1,
+            "slides": [{"number": 1, "items": [
+                {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+            ]}],
+        }
+
+    def fake_coverage(planned, kindindex_remap, multiset_kinds_by_slide):
+        return {
+            "positionalSlides": [], "remappedSlides": [], "setSlides": [],
+            "groupBuckets": 0, "uncovered": [(1, "shape")], "totalSlides": 1,
+            "coveredSlides": 0,
+        }
+
+    monkeypatch.setattr(rk, "remap_keynote", fake_remap)
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(offline_write, "live_verify_coverage", fake_coverage)
+
+    info = rk.remap_and_inspect(
+        tmp_path / "wall.key", tmp_path / "out.key", template=tmp_path / "tpl.key",
+        validate=True,
+    )
+    assert info["offlineWrite"]["liveVerifyPass"] is False
+
+
 def test_summary_gate_reasons_green_on_clean_run():
     from scripts.offline_write_ab import summary_gate_reasons
 
@@ -1813,6 +2080,37 @@ def test_summary_gate_reasons_missing_verify_keys_do_not_spuriously_fail():
     from scripts.offline_write_ab import summary_gate_reasons
 
     ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True}
+    assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
+
+
+def test_summary_gate_reasons_flags_live_verify_set_fail():
+    from scripts.offline_write_ab import summary_gate_reasons
+
+    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
+          "offlineVerifyPass": True, "liveVerifyPass": True, "liveVerifySetPass": False}
+    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
+    assert any("live verify (set)" in r for r in reasons)
+
+
+def test_summary_gate_reasons_flags_uncovered_pairs():
+    from scripts.offline_write_ab import summary_gate_reasons
+
+    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
+          "offlineVerifyPass": True, "liveVerifyPass": True, "liveVerifySetPass": True,
+          "liveVerifyCoverage": {"uncovered": [[3, "group"]]}}
+    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
+    assert any("uncovered" in r for r in reasons)
+
+
+def test_summary_gate_reasons_v3_record_missing_set_pass_and_coverage_is_not_a_fail():
+    # GATE_VERSION 3->4 (W2 zorder-bridge Piece 2): a reused v3 record has neither
+    # `liveVerifySetPass` nor `liveVerifyCoverage` -- absence must read as "not
+    # measured", never as a red, exactly like the older liveVerifyPass/offlineVerifyPass
+    # absence case above.
+    from scripts.offline_write_ab import summary_gate_reasons
+
+    ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True,
+          "offlineVerifyPass": True, "liveVerifyPass": True}
     assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
 
 
@@ -3177,7 +3475,24 @@ def test_load_run_record_warns_but_does_not_refuse_commit_mismatch(tmp_path, mon
     assert "WARN" in out and "commit" in out
 
 
-def test_load_run_record_accepts_compatible_v2_record(tmp_path, monkeypatch):
+def test_load_run_record_accepts_compatible_v3_record(tmp_path, monkeypatch):
+    # W2 zorder-bridge Piece 2: GATE_VERSION bumped 3->4 (COMPATIBLE_GATE_VERSIONS
+    # {3, 4}) -- a v3 record (predates liveVerifySetPass/liveVerifyCoverage) is still
+    # accepted; only v2 and older are refused now.
+    deck = tmp_path / "d.key"
+    deck.write_bytes(b"x")
+    source = tmp_path / "s.key"
+    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
+    record = run_record(**_record(deck_digest="digestX", source_digest="digestX"))
+    record["gateVersion"] = 3
+    path = tmp_path / "d.run.json"
+    path.write_text(json.dumps(record))
+    loaded = load_run_record(path, deck=deck, source=source)
+    assert loaded == record
+
+
+def test_load_run_record_refuses_v2_record_now_incompatible(tmp_path, monkeypatch):
+    # v2 was dropped from COMPATIBLE_GATE_VERSIONS when GATE_VERSION bumped 3->4.
     deck = tmp_path / "d.key"
     deck.write_bytes(b"x")
     source = tmp_path / "s.key"
@@ -3186,8 +3501,8 @@ def test_load_run_record_accepts_compatible_v2_record(tmp_path, monkeypatch):
     record["gateVersion"] = 2
     path = tmp_path / "d.run.json"
     path.write_text(json.dumps(record))
-    loaded = load_run_record(path, deck=deck, source=source)
-    assert loaded == record
+    with pytest.raises(ValueError, match="gateVersion"):
+        load_run_record(path, deck=deck, source=source)
 
 
 def test_load_run_record_refuses_unknown_gate_version(tmp_path, monkeypatch):

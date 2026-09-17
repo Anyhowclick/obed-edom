@@ -325,6 +325,13 @@ Pass 2 (stat-finalize) no longer raises at all (W2 piece 1) — every raise goes
 through the offline z-order patch (see "Offline z-order (W2)" below); there is
 no GUI raise token or Accessibility dependency left to read here.
 
+Live verify (`--mode verify`) now covers every slide, not a shrinking "excluded N of M"
+carve-out: `verify_live_frames` positionally checks every kind the offline z-order patch
+did not orphan (bridged through `run_offline_zorder`'s `kindIndexMap` — see "Offline
+z-order (W2)" below), and `verify_live_frames_multiset` covers the one remaining bucket
+(`group` on a stat-finalize slide) with a weaker population-only bar. Both bars must PASS
+and `uncovered` must be empty for the gate to go green.
+
 The 2026-09-07 Full bank under
 `output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:
 both A/B decks and run records are present, so diagnose and re-run comparisons
@@ -533,6 +540,34 @@ arm clears is named on `zorderGui` and logged as a loud, non-gating `WARNING zor
 a silent un-raise. Export consequence: when the knob is on, pass 2 exports nothing,
 and `remap_and_inspect`'s existing fallback exports previews after the z-order patch —
 one extra Keynote open per knob-on run.
+
+**Live-verify z-order bridge (`ow["mode"] == "verify"` only, i.e. the A/B gate, never
+production).** The offline z-order patch permutes each patched slide's per-kind
+`kindIndex`, so `verify_live_frames`'s planned-vs-Keynote compare needs bridging or it
+addresses the wrong objects. `run_offline_zorder` derives `kindIndexMap[n] =
+{kind: {old_ki: new_ki}}` for every finally-patched slide by running `derive_kind_index`
+twice (pre- and post-patch `drawablesZOrder`) and joining on `(id, kind)` — a dual
+(custom-path text box) emits two records per id, so `kind` must be part of the join key.
+`remap_and_inspect` rewrites each spec's `kindIndex` through this map before the lookup;
+an index the map claims was permuted but does not list is a counted miss, not a silent
+skip. This covers every kind except `group` on a stat-finalize slide: pass 2's
+`obedApplyDeletes` only reports a dedup COUNT, not per-index tokens, so that one
+`(slide, kind)` bucket is routed instead to `verify_live_frames_multiset` — a greedy
+multiset match of rounded `(x, y, w, h)` within `LIVE_VERIFY_TOL`. The two bars differ in
+strength: positional proves object-for-object identity; multiset proves only that the
+right population of frames is present, not which spec owns which — two same-kind objects
+whose planned frames are swapped pass the multiset bar and are invisible to it. Pass 2 no
+longer permutes any kind but `group` (piece 1 removed the last GUI raise), so this is the
+only kind that ever needs the multiset bar. `remap_and_inspect` logs one coverage line
+(`live verify: positional N slide(s) (K remapped), set-compare G group bucket(s) on M
+slide(s), uncovered [...] — total P of P.`) built from `offline_write.live_verify_coverage`;
+a non-empty `uncovered` REDs the gate. `scripts/offline_write_ab.py`'s `GATE_VERSION` is 4
+(`COMPATIBLE_GATE_VERSIONS = {3, 4}`) — a reused v3 record simply lacks
+`liveVerifySetPass`/`liveVerifyCoverage`, read as "not measured", never as a red.
+`scripts/replay_live_verify.py` re-derives both bars Keynote-free against a banked A/B
+round (re-running the planner against the original source+template, reading
+`B_flagged.key` back with `derive_deck_kind_index`) to prove the addressing/coverage
+arithmetic on real decks — it does not prove Keynote agrees; only a live gate does that.
 
 ### External reference: KeynoteKit
 

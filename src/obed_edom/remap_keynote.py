@@ -1780,29 +1780,35 @@ def remap_and_inspect(
         planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
         stat_slides = frozenset(ow.get("statSlides") or [])
         kind_index_map_raw = (info.get("zorderWrite") or {}).get("kindIndexMap") or {}
-        kindindex_remap = {
-            int(n): {
-                kind: {int(old_ki): int(new_ki) for old_ki, new_ki in per_kind.items()}
-                for kind, per_kind in kinds.items()
-            }
-            for n, kinds in kind_index_map_raw.items()
-        }
+        kindindex_remap = offline_write.coerce_kind_index_map(kind_index_map_raw)
         multiset_kinds_by_slide = {n: {"group"} for n in stat_slides}
         live_report = offline_write.verify_live_frames(
             planned, payload,
             kindindex_remap=kindindex_remap,
             multiset_kinds_by_slide=multiset_kinds_by_slide,
         )
-        remapped_slides = len(set(kindindex_remap) & set(planned))
+        set_report = offline_write.verify_live_frames_multiset(
+            planned, payload, multiset_kinds_by_slide
+        )
+        coverage = offline_write.live_verify_coverage(
+            planned, kindindex_remap, multiset_kinds_by_slide
+        )
         if log:
-            log(
-                f"offline-write live verify: positional {len(planned)} slide(s) "
-                f"({remapped_slides} remapped); set-compare and uncovered totals "
-                "arrive with the Piece 2 multiset bar."
-            )
+            log(offline_write.format_live_verify_coverage(coverage))
+            if coverage["uncovered"]:
+                log(
+                    f"offline-write live verify: UNCOVERED {coverage['uncovered']} -- "
+                    "neither bar checked these (slide, kind) pairs; gate RED."
+                )
         ow["liveVerifyPass"] = offline_write._say_verify_report(
             "offline-write live verify", live_report, offline_write.LIVE_VERIFY_TOL, log
         )
+        ow["liveVerifySetPass"] = offline_write._say_verify_report(
+            "offline-write live verify (set)", set_report, offline_write.LIVE_VERIFY_TOL, log
+        )
+        ow["liveVerifyCoverage"] = {**coverage, "uncovered": [list(u) for u in coverage["uncovered"]]}
+        if coverage["uncovered"]:
+            ow["liveVerifyPass"] = False
     if export_dir:
         info["previewFiles"] = [p.name for p in preview_pngs(Path(export_dir))]
     return info
