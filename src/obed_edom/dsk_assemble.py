@@ -344,6 +344,8 @@ class SplitPart:
     autosize: frozenset[ItemId] = frozenset()
     char_window: tuple[int, int] | None = None
     char_total: int | None = None
+    scale: float = 1.0
+    slot_capped: bool = False
 
 
 @dataclass(frozen=True)
@@ -704,6 +706,43 @@ def _pack_split_lines(
     if current:
         chunks.append(current)
     return chunks or [[(0, 0)]]
+
+
+def _slot_one_part_fit(
+    box: TextBox,
+    long_item: Mapping[str, object],
+    t: float,
+    lead_pt: float,
+    band: Band,
+    slide_number: int,
+) -> float | None:
+    """Findings 1+2: does ``box`` fit the slot ``band`` as ONE part at scale ``t`` under the
+    50pt emphasis cap? Builds the capped ``_emitted_run_sizes`` table, wraps with the SAME
+    50pt-capped run objects, and runs ``_pack_split_lines`` against the slot's own height
+    (``_SPLIT_TOL`` tolerance, <=3 lines) -- the identical gate the single-box slot split uses --
+    rather than a raw ``wrapped_height > band.height`` compare. Returns ``wrapped_height_runs``
+    over the SAME capped runs when the pack yields one part, else ``None``."""
+    run_table = _emitted_run_sizes(long_item, t, lead_pt)
+    runs = long_item.get("runs") or []
+    if run_table == "unresolved" or not runs:
+        capped_runs: tuple[Run, ...] = ()
+        spans = wrap_line_spans(box.text, box.font_name, lead_pt, band.width)
+        table_for_pack: tuple[tuple[int, int, float], ...] = ()
+    else:
+        capped_runs = tuple(
+            Run(r.get("text") or "", r.get("fontName") or box.font_name, size)
+            for r, (_lo, _hi, size) in zip((r for r in runs if r.get("text")), run_table)
+        )
+        spans = wrap_line_spans_runs(box.text, capped_runs, box.font_name, lead_pt, band.width)
+        table_for_pack = run_table
+    if spans is None:
+        return None
+    chunks = _pack_split_lines(spans, table_for_pack, lead_pt, band.height, slide_number, box.item_id)
+    if len(chunks) > 1:
+        return None
+    if capped_runs:
+        return wrapped_height_runs(capped_runs, band.width)
+    return wrapped_height(box.text, box.font_name, box.size * t, band.width)
 
 
 def _group_child_geometry(
@@ -2088,14 +2127,13 @@ def plan_assembly(
                             # fits the slot after all (often thanks to the 50pt emphasis
                             # cap); fall back to the normal slot-fit path rather than
                             # emitting a no-op split that deletes nothing.
-                            if split_box.runs:
-                                one_h = wrapped_height_runs(
-                                    tuple(Run(r.text, r.font_name, r.size * split_t) for r in split_box.runs),
-                                    stack_band.width,
-                                )
-                            else:
-                                one_h = wrapped_height(
-                                    split_box.text, split_box.font_name, split_box.size * split_t, stack_band.width,
+                            one_h = _slot_one_part_fit(
+                                split_box, long_item, split_t, split_pt, stack_band, number,
+                            )
+                            if one_h is None:
+                                raise AssemblyRefusal(
+                                    f"slide {number} box {_item_label(split_box.item_id)}: verse text still "
+                                    f"exceeds the {split_pt:.0f}pt slot after the {_EMPHASIS_CAP_PT:.0f}pt cap"
                                 )
                             one_rect = _stacked_text_rects(
                                 [split_box], {split_box.item_id: one_h}, stack_band, top_anchor=True,
@@ -2132,6 +2170,7 @@ def plan_assembly(
                                         fits=part_fit, deletes=base_deletes, text_sizes=part_text_sizes,
                                         run_sizes=part_run_sizes, stacked_ids=frozenset({split_box.item_id}),
                                         autosize=part_autosize, char_window=(start0 + 1, end0), char_total=full_len,
+                                        scale=split_t, slot_capped=True,
                                     )
                                 )
                             parts[number] = len(part_list)
@@ -2171,26 +2210,28 @@ def plan_assembly(
                         for box in boxes:
                             _refuse_split_box_char_word_builds(number, box.item_id, builds)
                             box_slot_t = slot_pt / box.size if split_slot_top_anchor and box.size else None
+                            box_item = items_by_id[box.item_id]
                             box_slot_h = None
+                            slot_capped = False
                             if box_slot_t is not None and box_slot_t >= _box_min_t(box, min_text_pt):
-                                if box.runs:
-                                    box_slot_h = wrapped_height_runs(
-                                        tuple(Run(r.text, r.font_name, r.size * box_slot_t) for r in box.runs),
-                                        stack_band.width,
+                                box_slot_h = _slot_one_part_fit(
+                                    box, box_item, box_slot_t, slot_pt, stack_band, number,
+                                )
+                                if box_slot_h is None:
+                                    raise AssemblyRefusal(
+                                        f"slide {number} box {_item_label(box.item_id)}: verse text still "
+                                        f"exceeds the {slot_pt:.0f}pt slot after the "
+                                        f"{_EMPHASIS_CAP_PT:.0f}pt emphasis cap -- refusing to shrink below "
+                                        "the slot lead"
                                     )
-                                else:
-                                    box_slot_h = wrapped_height(
-                                        box.text, box.font_name, box.size * box_slot_t, stack_band.width
-                                    )
-                                if box_slot_h is not None and box_slot_h > stack_band.height:
-                                    box_slot_h = None
                             if box_slot_h is not None:
                                 t = box_slot_t
+                                slot_capped = True
                                 rect = _stacked_text_rects(
                                     [box], {box.item_id: box_slot_h}, stack_band, top_anchor=True,
                                 )[box.item_id]
                                 part_ranges, part_unresolved = _run_size_ranges(
-                                    items_by_id[box.item_id], t, item_id=box.item_id,
+                                    box_item, t, item_id=box.item_id,
                                     slide_number=number, warnings=warnings, cap=_EMPHASIS_CAP_PT,
                                 )
                                 sizes_fallback = box.size * t
@@ -2254,6 +2295,7 @@ def plan_assembly(
                                     run_sizes={box.item_id: part_ranges} if isinstance(part_ranges, tuple) else {},
                                     stacked_ids=frozenset({box.item_id}),
                                     autosize=part_autosize,
+                                    scale=t, slot_capped=slot_capped,
                                 )
                             )
                         parts[number] = len(part_list)
@@ -5481,7 +5523,7 @@ def _run_refit_and_finalize(
             lead_source_size = float(item.get("size") or min_source_size)
             shrink_box = _box_with_runs(TextBox(item_id, "", "", lead_source_size), item)
             t_floor = min(1.0, _box_min_t(shrink_box, min_text_pt))
-            t_prev = last_t.get(slide_no, 1.0)
+            t_prev = split_parts[part].scale if split_parts is not None else last_t.get(slide_no, 1.0)
             measured_h = measured.get((slide_no, item_key))
             t_fit = t_prev * (rect.h / measured_h) if measured_h and measured_h > 0 else t_prev
             t = min(max(min(t_fit, t_prev), t_floor), t_prev)
@@ -5489,6 +5531,7 @@ def _run_refit_and_finalize(
             at_floor = t_floor >= t_prev
             ranges, unresolved = _run_size_ranges(
                 item, t, item_id=item_id, slide_number=slide_no, warnings=None,
+                cap=_EMPHASIS_CAP_PT if (split_parts is not None and split_parts[part].slot_capped) else None,
             )
             if unresolved:
                 gap_key = (slide_no, item_id)

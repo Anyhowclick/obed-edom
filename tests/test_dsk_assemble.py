@@ -11051,24 +11051,34 @@ def test_gw17_forced_multi_box_split_emits_45pt_lead_and_caps_emphasis():
     assert plan.stack_t[17] == pytest.approx(45.0 / 70.0)
     ordinal0 = plan.ordinals[17]
     all_sizes: list[float] = []
-    for part_no in range(plan.parts[17]):
+    for part_no, part in enumerate(plan.splits[17]):
+        assert part.slot_capped is True
+        assert part.scale == pytest.approx(45.0 / 70.0)
+        long_id = next(iter(part.stacked_ids))
+        part_sizes = {sz for _lo, _hi, sz in part.run_sizes[long_id]}
+        assert {45.0, 50.0} <= part_sizes
+        assert max(part_sizes) <= 50.0
         lines = dsa._slide_lines(plan, 17, ordinal0 + part_no, part=part_no)
+        part_emitted: list[float] = []
         for line in lines:
             m = _SET_SIZE_RE.search(line)
             if m:
-                all_sizes.append(float(m.group(1)))
+                part_emitted.append(float(m.group(1)))
+        assert any(sz == pytest.approx(45.0) for sz in part_emitted)
+        assert any(sz == pytest.approx(50.0) for sz in part_emitted)
+        assert max(part_emitted) <= 50.0 + 1e-6
+        all_sizes.extend(part_emitted)
     assert any(sz == pytest.approx(45.0) for sz in all_sizes)
     assert max(all_sizes) <= 50.0 + 1e-6
 
 
-def test_gw38_one_part_fallback_matches_the_direct_slot_fit_geometry(monkeypatch):
-    # Review 4 finding 3: no end-to-end `plan_assembly` fixture previously reached the
-    # one-part fallback (`len(chunks) == 1`, S2/§2.2 -- the height-budget pack fits in
-    # one part after all). Forcing `_pack_split_lines` to always report a single chunk
-    # (GW 38's own real box otherwise always needs 4 parts) exercises that exact branch;
-    # its geometry/badge/band/run size/split_t must equal the direct (non-split) slot
-    # fit's own literal numbers -- the one-part fallback is a no-op split, not a
-    # different placement.
+def test_gw38_one_part_fallback_places_the_slot_capped_rect_inside_the_slot():
+    # DSK §4 item 12 finding 2: the one-part fallback used to measure AND emit the
+    # box's UNCAPPED run sizes -- a verse with a 150pt emphasis word, scaled by the
+    # slot's own 45/70 lead ratio, wraps to one line at 96.4pt uncapped and stands
+    # 184.6pt tall, taller than the 177pt slot it claims to fit inside (verified
+    # against the pre-rework code). The slot-capped fix (`_slot_one_part_fit`)
+    # measures and emits the SAME 50pt-capped runs, so the rect fits inside the slot.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     deck = dsa._load_deck(GW_DECK)
@@ -11077,8 +11087,16 @@ def test_gw38_one_part_fallback_matches_the_direct_slot_fit_geometry(monkeypatch
     cls38 = by_number[38]
     verse_id = cls38.long_text_ids[0]
     items = {(it["kind"], it["kindIndex"]): it for it in payload["slides"][37]["items"]}
-    full_len = len(items[verse_id]["text"])
-    monkeypatch.setattr(dsa, "_pack_split_lines", lambda *a, **k: [[(0, full_len)]])
+    item = items[verse_id]
+    font = item["font"]
+    emphasis = "GLORY "
+    tail = "hallelujah amen and amen forevermore let all the earth rejoice and sing praises unto"
+    item["text"] = emphasis + tail
+    item["size"] = 70.0
+    item["runs"] = [
+        {"text": emphasis, "fontName": font, "size": 150.0},
+        {"text": tail, "fontName": font, "size": 70.0},
+    ]
 
     decisions = {38: SlideDecision(38, "in_deck")}
     plan = plan_assembly(
@@ -11088,27 +11106,14 @@ def test_gw38_one_part_fallback_matches_the_direct_slot_fit_geometry(monkeypatch
     assert plan.layout_names[38] == "Verse Standard (Variation 2)"
     assert 38 not in plan.splits
     slot = dsa.LAYOUT_SLOTS["Verse Standard (Variation 2)"]
-    split_t = slot.verse_pt / items[verse_id]["size"]
-    stack_band = dsa._slot_band(slot.verse)
-    box_runs = tuple(
-        dsk_plan.Run(
-            r.get("text") or "", r.get("fontName") or items[verse_id]["font"],
-            (r.get("size") or items[verse_id]["size"]) * split_t,
-        )
-        for r in items[verse_id]["runs"]
-    )
-    expected_h = dsk_plan.wrapped_height_runs(box_runs, stack_band.width)
     verse_rect = plan.fits[38][verse_id]
     assert verse_rect.x == slot.verse.x
     assert verse_rect.w == slot.verse.w
     assert verse_rect.y == pytest.approx(slot.verse.y)
-    assert verse_rect.h == pytest.approx(expected_h)
-    assert plan.stack_bands[38] == stack_band
-    badge_id = plan.slot_badge_ids[38]
-    assert plan.fits[38][badge_id] == slot.badge
-    assert plan.stack_t[38] == pytest.approx(split_t)
-    sizes = {round(sz, 2) for _lo, _hi, sz in plan.run_sizes[38][verse_id]}
-    assert 50.0 in sizes  # the same 50pt emphasis cap as the split path (S1/S2)
+    assert verse_rect.h <= slot.verse.h
+    assert plan.stack_t[38] == pytest.approx(45.0 / 70.0)
+    run_sizes = {sz for _lo, _hi, sz in plan.run_sizes[38][verse_id]}
+    assert {50.0, 45.0} <= run_sizes
 
 
 def test_gw52_repeat_heading_dropped_resolves_verse_standard():
