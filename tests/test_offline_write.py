@@ -1288,6 +1288,67 @@ def test_run_offline_write_group_missed_reports_and_does_not_fail(monkeypatch):
     assert not any("group bar did NOT run" in m for m in said2)
 
 
+def test_run_offline_write_fallback_reason_histogram(monkeypatch):
+    # OPEN 1 instrumentation: every fallback spec is bucketed by its coarse miss reason
+    # (from PatchResult.miss_reasons, aligned with missed_specs), surfaced both in the
+    # payload and on a log line, so a future run can characterize which specs miss.
+    import obed_edom.offline_write as ow_mod
+
+    s1a = _spec(slide=1, kind="text", kindIndex=0)
+    s1b = _spec(slide=1, kind="image", kindIndex=0)
+    s2 = _spec(slide=2, kind="text", kindIndex=0)
+    transform_dicts = [s1a, s1b, s2]
+
+    monkeypatch.setattr(
+        ow_mod, "_patch_offline_slides",
+        lambda *a, **k: {
+            1: _result(missed_specs=[s1a, s1b], miss_reasons=["text-autosize", "masked-media"]),
+            2: _result(missed_specs=[s2], miss_reasons=["text-autosize"]),
+        },
+    )
+    monkeypatch.setattr(ow_mod, "_fallback_bodies", lambda fb: {n: "BODY" for n in fb})
+    monkeypatch.setattr(ow_mod, "build_fallback_scripts", lambda dest, bodies: ["SCRIPT"])
+    monkeypatch.setattr(ow_mod, "_run_fallback_scripts", lambda dest, scripts, say: (True, [], []))
+
+    said: list[str] = []
+    info = run_offline_write(Path("/tmp/x.key"), "on", {1, 2}, transform_dicts, {}, [], said.append)
+
+    assert info["fallbackReasons"] == {"text-autosize": 2, "masked-media": 1}
+    assert info["fallbackReasonsBySlide"] == {
+        "1": {"text-autosize": 1, "masked-media": 1},
+        "2": {"text-autosize": 1},
+    }
+    # Sorted by descending count, so the dominant reason leads.
+    assert any("fallback reasons: text-autosize 2, masked-media 1." in m for m in said)
+    assert any("fallback worst slides" in m for m in said)
+
+
+def test_run_offline_write_refused_slide_reason_bucket(monkeypatch):
+    # A refused slide falls back whole; its non-hide specs land in a single refused:<reason>
+    # bucket rather than a per-spec family (the patcher never reached per-spec resolution).
+    import obed_edom.offline_write as ow_mod
+
+    s1 = _spec(slide=1, kind="shape", kindIndex=0)
+    s2 = _spec(slide=1, kind="shape", kindIndex=1)
+    hide = _spec(slide=1, kind="shape", kindIndex=2, role="hide")
+    transform_dicts = [s1, s2, hide]
+
+    monkeypatch.setattr(
+        ow_mod, "_patch_offline_slides",
+        lambda *a, **k: {1: _result(refused=True, reason="reconcile mismatch", missed_specs=[])},
+    )
+    monkeypatch.setattr(ow_mod, "_fallback_bodies", lambda fb: {n: "BODY" for n in fb})
+    monkeypatch.setattr(ow_mod, "build_fallback_scripts", lambda dest, bodies: ["SCRIPT"])
+    monkeypatch.setattr(ow_mod, "_run_fallback_scripts", lambda dest, scripts, say: (True, [], []))
+
+    said: list[str] = []
+    info = run_offline_write(Path("/tmp/x.key"), "on", {1}, transform_dicts, {}, [], said.append)
+
+    # Two non-hide specs, one refused bucket; the hide does not count.
+    assert info["fallbackReasons"] == {"refused:reconcile mismatch": 2}
+    assert info["fallbackReasonsBySlide"] == {"1": {"refused:reconcile mismatch": 2}}
+
+
 def test_run_offline_write_group_bar_still_gates_the_written_group(monkeypatch):
     # T6 -- fix 3 must not weaken the writer's own bar: a WRITTEN group 5px off-plan
     # still fails offlineVerifyPass (2.5px tolerance).

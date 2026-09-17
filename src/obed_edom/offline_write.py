@@ -154,6 +154,43 @@ def _fallback_specs_by_slide(
     return out
 
 
+def _fallback_reason_histogram(
+    offline_slides: set[int],
+    specs_by_slide: dict[int, list[dict[str, Any]]],
+    results: dict[int, Any],
+) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+    """Coarse `{reason: count}` for every spec routed to the AppleScript fallback, plus
+    the same per slide (`{str(slide): {reason: count}}`) — diagnostic only, so a future run
+    can characterize WHICH specs miss the surgical patcher without a second decode.
+
+    A patched slide's reasons come from `PatchResult.miss_reasons` (aligned with
+    `missed_specs`, see `iwa_write._slide_edits`); a refused slide falls back whole, so its
+    non-hide specs are attributed to a single `refused:<reason>` bucket."""
+    total: dict[str, int] = {}
+    by_slide: dict[str, dict[str, int]] = {}
+    for n in sorted(offline_slides):
+        res = results.get(n)
+        if res is None:
+            continue
+        if getattr(res, "refused", False):
+            cnt = sum(1 for s in specs_by_slide.get(n) or [] if s.get("role") != "hide")
+            if not cnt:
+                continue
+            reason = f"refused:{getattr(res, 'reason', None)}"
+            per = {reason: cnt}
+        else:
+            reasons = list(getattr(res, "miss_reasons", None) or [])
+            if not reasons:
+                continue
+            per = {}
+            for r in reasons:
+                per[r] = per.get(r, 0) + 1
+        by_slide[str(n)] = per
+        for r, c in per.items():
+            total[r] = total.get(r, 0) + c
+    return total, by_slide
+
+
 def _written_specs_by_slide(
     specs_by_slide: dict[int, list[dict[str, Any]]],
     fallback_by_slide: dict[int, list[dict[str, Any]]],
@@ -867,6 +904,9 @@ def run_offline_write(
     say(f"Offline-write ({mode}): patching {len(offline_slides)} slide(s) in place…")
     patch_results = _patch_offline_slides(dest, offline_slides, specs_by_slide, wall, say)
     fallback_by_slide = _fallback_specs_by_slide(offline_slides, specs_by_slide, patch_results)
+    fallback_reasons, fallback_reasons_by_slide = _fallback_reason_histogram(
+        offline_slides, specs_by_slide, patch_results
+    )
     # Hides ride along only to feed the bridge; count the specs the script actually writes.
     fallback_counts = {
         str(n): sum(1 for s in v if s.get("role") != "hide")
@@ -889,6 +929,20 @@ def run_offline_write(
             f"Offline-write fallback: {len(fallback_by_slide)} slide(s) "
             f"({fallback_specs_n} spec(s)) via AppleScript."
         )
+        if fallback_reasons:
+            hist = ", ".join(
+                f"{r} {c}" for r, c in sorted(fallback_reasons.items(), key=lambda kv: (-kv[1], kv[0]))
+            )
+            say(f"Offline-write fallback reasons: {hist}.")
+            worst = sorted(
+                fallback_reasons_by_slide.items(),
+                key=lambda kv: (-sum(kv[1].values()), int(kv[0])),
+            )[:8]
+            detail = "; ".join(
+                f"slide {n} {dict(sorted(per.items(), key=lambda kv: (-kv[1], kv[0])))}"
+                for n, per in worst
+            )
+            say(f"Offline-write fallback worst slides (by fallback specs): {detail}.")
         bodies = _fallback_bodies(fallback_by_slide)
         scripts = build_fallback_scripts(dest, bodies)
         fallback_ok, failed_dumps, fallback_unwritable = _run_fallback_scripts(dest, scripts, say)
@@ -966,6 +1020,8 @@ def run_offline_write(
         "refused": sorted(n for n, r in patch_results.items() if getattr(r, "refused", False)),
         "fallbackSpecs": fallback_counts,
         "fallbackKinds": fallback_kinds,
+        "fallbackReasons": fallback_reasons,
+        "fallbackReasonsBySlide": fallback_reasons_by_slide,
         "fallbackUnwritable": len(fallback_unwritable),
         "applied": sum(getattr(r, "applied", 0) for r in patch_results.values()),
         "missedSpecs": sum(

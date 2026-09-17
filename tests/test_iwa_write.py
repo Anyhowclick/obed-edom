@@ -1441,6 +1441,8 @@ def test_patch_deck_geometry_reports_missed_specs(deck):
     assert not res.refused
     assert res.applied == 1 and res.missed == 1
     assert len(res.missed_specs) == 1 and res.missed_specs[0]["kindIndex"] == 5
+    # miss_reasons is aligned index-for-index with missed_specs.
+    assert res.miss_reasons == ["unresolved"]
 
 
 def test_patch_slide_geometry_wrapper_matches_deck_path(tmp_path):
@@ -1463,7 +1465,7 @@ def test_slide_edits_writes_nothing(deck):
     objects, id_to_file, _fi = _load_deck(deck)
     order = slide_order(objects)
     specs = [{"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0, "role": "other"}]
-    target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+    target_member, edits, _soft, missed_specs, _miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None and len(edits) == 1 and not missed_specs
     assert target_member == "Index/Slide-100.iwa"
@@ -1486,10 +1488,11 @@ def test_line_no_pathsource_hard_misses(monkeypatch):
     order = [("100", False)]
     id_to_file = {"1": "M"}
     specs = [{"kind": "line", "kindIndex": 0, "w": 140.0, "role": "other"}]
-    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+    _target_member, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
     assert missed_specs == specs
+    assert miss_reasons == ["line-resize-unwritable"]
     assert edits == {}
 
 
@@ -1505,7 +1508,7 @@ def test_text_editable_bezier_autosize_width_only_hard_misses():
     order = [("100", False)]
     id_to_file = {"1": "M"}
     specs = [{"kind": "text", "kindIndex": 0, "w": 113.0, "role": "other"}]
-    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+    _target_member, edits, _soft, missed_specs, _miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
     assert missed_specs == specs
@@ -1526,7 +1529,7 @@ def test_text_editable_bezier_fixed_height_only_hard_misses():
     order = [("100", False)]
     id_to_file = {"1": "M"}
     specs = [{"kind": "text", "kindIndex": 0, "h": 40.0, "role": "other"}]
-    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+    _target_member, edits, _soft, missed_specs, _miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
     assert missed_specs == specs
@@ -1545,10 +1548,11 @@ def test_autosize_height_text_hard_misses_to_the_fallback():
     order = [("100", False)]
     id_to_file = {"1": "M"}
     specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "x": 107.15, "role": "other"}]
-    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+    _target_member, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
     assert missed_specs == specs
+    assert miss_reasons == ["text-autosize"]
     assert edits == {}
 
 
@@ -1564,10 +1568,11 @@ def test_autosize_width_text_hard_misses_to_the_fallback():
     order = [("100", False)]
     id_to_file = {"1": "M"}
     specs = [{"kind": "text", "kindIndex": 0, "h": 34.0, "y": 391.0, "role": "other"}]
-    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+    _target_member, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
     assert missed_specs == specs
+    assert miss_reasons == ["text-autosize"]
     assert edits == {}
 
 
@@ -1581,7 +1586,7 @@ def test_fixed_height_text_is_still_patched_offline():
     order = [("100", False)]
     id_to_file = {"1": "M"}
     specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "h": 34.0, "x": 107.15, "role": "other"}]
-    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+    _target_member, edits, _soft, missed_specs, _miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
     assert missed_specs == []
@@ -2410,7 +2415,7 @@ def test_group_union_write_lands_on_plan_on_the_full_wall_deck():
                  if t["slide"] == n and t.get("role") != "hide" and t.get("kind") == "group"]
         if not specs:
             continue
-        _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        _target_member, edits, _soft, missed_specs, _miss_reasons, refuse_reason = _slide_edits(
             n, specs, objects, id_to_file, order, reported=None,
             address="positional", source_counts=None, require_reconcile=False,
         )
