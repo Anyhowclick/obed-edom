@@ -10,6 +10,9 @@ import { churchLabelColor, DEFAULT_LABEL_PILL_COLOR, HILLSHADE_LAYER_ID, HILLSHA
 import { defaultObjectSize, ICON_SIZE_PACK_MAX, zoomScaledStops } from "./objects";
 import { filledHighlights, highlightColour, highlightColourExpression, setHighlightColour } from "./highlight";
 
+/** Hairline on every dot; 0.25pt at 1× (defaultObjectSize("dot")), scales with the marker. */
+export const DOT_BORDER_PT = 0.25;
+
 export type Admin0 = {
   type: "FeatureCollection";
   features: Array<{
@@ -452,8 +455,7 @@ export const PILL_PAD_Y_PX = 2;
  * own authored default as 1×. Zoom lives in the `icon-size` stops, which carry the clamp. */
 function labelScale(kind: string, size: number, assetWidth = 0): number {
   const base = kind === "landmark" ? defaultObjectSize(kind, assetWidth) : defaultObjectSize("dropPin");
-  const raw = base ? size / base : 1;
-  return Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, raw));
+  return base ? size / base : 1;
 }
 
 /** `icon-text-fit-padding` and an image's corner radius are layout constants, so the pill's
@@ -846,8 +848,8 @@ export function churchesLayers(): LayerSpecification[] {
         "circle-color": ["get", "color"],
         "circle-opacity": ["coalesce", ["get", "opacity"], 1],
         "circle-stroke-opacity": ["coalesce", ["get", "opacity"], 1],
-        "circle-stroke-width": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 3, 1.5], ["get", "objectScale"], ["/", ["get", "size"], defaultObjectSize("dot")]]),
-        "circle-stroke-color": "#FFFFFF",
+        "circle-stroke-width": zoomScaledStops(["*", DOT_BORDER_PT, ["get", "objectScale"], ["/", ["get", "size"], defaultObjectSize("dot")]]),
+        "circle-stroke-color": "#000000",
       },
     },
     {

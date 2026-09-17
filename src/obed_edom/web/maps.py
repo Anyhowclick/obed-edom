@@ -1763,7 +1763,8 @@ async def post_png(
     if not slideId:
         raise HTTPException(400, "slideId is required")
     landing_base = slideId[: -len("__landing")] if slideId.endswith("__landing") else None
-    landing_ok = landing_base in ids and kind == "still" and variant is None if landing_base else False
+    # Isolated landings post the dest cutout pair (base + region pieces + manifest).
+    landing_ok = bool(landing_base and landing_base in ids and kind == "still")
     if slideId not in ids and not landing_ok:
         raise HTTPException(400, "slideId is not in this deck")
     safe = _safe_name(slideId)

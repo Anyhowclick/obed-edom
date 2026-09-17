@@ -4421,20 +4421,29 @@ def test_post_png_bogus_variant_rejected():
     assert response.status_code == 400
 
 
-def test_post_png_landing_rejects_any_variant():
+def test_post_png_landing_accepts_isolate_cutout_variants():
     job = _seed()
     body = _landmark_png()
+    base = client.post(f"/api/maps/{job['id']}/png?slideId=s1__landing&kind=still", content=body)
+    assert base.status_code == 200
+
     region = client.post(
         f"/api/maps/{job['id']}/png?slideId=s1__landing&kind=still&variant=region&index=0", content=body
     )
-    assert region.status_code == 400
+    assert region.status_code == 200
 
-    manifest = {"width": 100, "height": 50, "pieces": [{"id": "MYS", "x": 0, "y": 0, "w": 10, "h": 10}]}
+    with Image.open(BytesIO(body)) as image:
+        manifest = {"width": image.width, "height": image.height, "pieces": [{"id": "MYS", "x": 0, "y": 0, "w": 10, "h": 10}]}
     regions = client.post(
         f"/api/maps/{job['id']}/png?slideId=s1__landing&kind=still&variant=regions",
         content=json.dumps(manifest).encode("utf-8"),
     )
-    assert regions.status_code == 400
+    assert regions.status_code == 200
+
+    thumb = client.post(f"/api/maps/{job['id']}/png?slideId=s1__landing&kind=thumb", content=body)
+    assert thumb.status_code == 400
+    unknown = client.post(f"/api/maps/{job['id']}/png?slideId=s9__landing&kind=still", content=body)
+    assert unknown.status_code == 400
 
 
 def test_session_zip_excludes_admin1(admin1_root):

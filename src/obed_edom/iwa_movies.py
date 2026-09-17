@@ -22,11 +22,15 @@ _FRAME_TOL = 1.0
 
 
 def movie_archives(deck: Path) -> list[dict]:
-    """One dict per ``TSD.MovieArchive`` in the deck, composed geometry included."""
+    """One dict per ``TSD.MovieArchive`` in the deck, composed geometry included.
+
+    ``slideIndex`` is 1-based ``slideTree`` order (skipped slides included, same
+    numbering Keynote uses). ``slideId`` is the owning ``KN.SlideArchive`` id.
+    """
     deck = Path(deck)
     objects, id_to_file, _file_ids = _load_deck(deck)
     out: list[dict] = []
-    for slide_id, _skipped in slide_order(objects):
+    for slide_index, (slide_id, _skipped) in enumerate(slide_order(objects), start=1):
         slide = objects.get(slide_id)
         if not slide:
             continue
@@ -46,6 +50,8 @@ def movie_archives(deck: Path) -> list[dict]:
                 {
                     "id": rec["id"],
                     "member": id_to_file.get(rec["id"]),
+                    "slideId": slide_id,
+                    "slideIndex": slide_index,
                     "x": rec["x"],
                     "y": rec["y"],
                     "w": rec["w"],
@@ -64,45 +70,69 @@ def movie_archives(deck: Path) -> list[dict]:
     return out
 
 
+def _target_slide(target: dict) -> tuple[str, Any] | None:
+    """Prefer ``slideId`` (archive identity) over 1-based ``slideIndex``."""
+    slide_id = target.get("slideId")
+    if slide_id is not None and str(slide_id) != "":
+        return ("slideId", str(slide_id))
+    if target.get("slideIndex") is not None:
+        return ("slideIndex", int(target["slideIndex"]))
+    return None
+
+
+def _archives_on_slide(archives: list[dict], target: dict) -> list[dict] | None:
+    key = _target_slide(target)
+    if key is None:
+        return None
+    kind, value = key
+    return [archive for archive in archives if archive.get(kind) == value]
+
+
+def _frame_matches(archive: dict, target: dict) -> bool:
+    return (
+        abs(archive["x"] - target["x"]) <= _FRAME_TOL
+        and abs(archive["y"] - target["y"]) <= _FRAME_TOL
+        and abs(archive["w"] - target["w"]) <= _FRAME_TOL
+        and abs(archive["h"] - target["h"]) <= _FRAME_TOL
+    )
+
+
 def _match_one_to_one(deck: Path, targets: list[dict]) -> dict:
-    """Match each ``target`` ({x,y,w,h,name}) to exactly one composed movie archive
-    frame within ``_FRAME_TOL`` px on all four of x/y/w/h. Refuses (nothing planned)
-    on zero or ambiguous matches. Returns ``{"refused", "reason", "ids"}`` with ``ids``
-    in target order; this selection deliberately excludes full-width ``map:True``
-    background fly movies, whose geometry never matches a landmark target.
+    """Match each ``target`` to exactly one composed movie archive.
+
+    Restricts candidates to the target's slide (``slideId`` or 1-based
+    ``slideIndex``) before checking x/y/w/h within ``_FRAME_TOL``. Two full-frame
+    fly movies on different slides therefore do not collide. Refuses (nothing
+    planned) when the target has no slide identity, or on zero/ambiguous
+    geometry matches. Returns ``{"refused", "reason", "ids"}`` in target order.
     """
     archives = movie_archives(deck)
     ids: list[str] = []
     claimed_by: dict[str, Any] = {}
     for i, target in enumerate(targets):
-        matches = [
-            a
-            for a in archives
-            if abs(a["x"] - target["x"]) <= _FRAME_TOL
-            and abs(a["y"] - target["y"]) <= _FRAME_TOL
-            and abs(a["w"] - target["w"]) <= _FRAME_TOL
-            and abs(a["h"] - target["h"]) <= _FRAME_TOL
-        ]
+        name = target.get("name", i)
+        pool = _archives_on_slide(archives, target)
+        if pool is None:
+            return {"refused": True, "reason": f"target {name!r} has no slide identity", "ids": []}
+        matches = [archive for archive in pool if _frame_matches(archive, target)]
         if len(matches) != 1:
-            name = target.get("name", i)
             return {"refused": True, "reason": f"target {name!r} matched {len(matches)} movie archive(s)", "ids": []}
         aid = matches[0]["id"]
         if aid in claimed_by:
-            name = target.get("name", i)
             other = claimed_by[aid]
             return {
                 "refused": True,
                 "reason": f"movie archive {aid} matched both target {other!r} and target {name!r}",
                 "ids": [],
             }
-        claimed_by[aid] = target.get("name", i)
+        claimed_by[aid] = name
         ids.append(aid)
     return {"refused": False, "reason": None, "ids": ids}
 
 
 def plan_movie_posters(deck: Path, targets: list[dict]) -> dict:
-    """Match each ``target`` ({x,y,w,h,posterTime,name}) to exactly one composed movie
-    archive frame. See `_match_one_to_one`.
+    """Match each ``target`` ({x,y,w,h,posterTime,name,slideIndex|slideId}) to
+    exactly one composed movie archive frame. See `_match_one_to_one`.
     """
     match = _match_one_to_one(deck, targets)
     if match["refused"]:
@@ -112,10 +142,10 @@ def plan_movie_posters(deck: Path, targets: list[dict]) -> dict:
 
 
 def plan_movie_autoplay(deck: Path, targets: list[dict]) -> dict:
-    """Same one-to-one geometry match as `plan_movie_posters`, for movies that
-    should start playing right after the slide's build-in transition (fly
-    backdrops, pin-drop waves, and landmark reveals). `target` needs only
-    x/y/w/h/name.
+    """Same one-to-one slide-then-geometry match as `plan_movie_posters`, for
+    movies that should start playing right after the slide's build-in transition
+    (fly backdrops, pin-drop waves, and landmark reveals). `target` needs
+    x/y/w/h/name and ``slideIndex`` or ``slideId``.
     """
     match = _match_one_to_one(deck, targets)
     if match["refused"]:

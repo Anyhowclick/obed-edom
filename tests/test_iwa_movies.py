@@ -228,9 +228,9 @@ def deck(tmp_path):
     return _build_movies_deck(tmp_path / "movies.key")
 
 
-def _target(frame, poster_time, name="reveal"):
+def _target(frame, poster_time, name="reveal", slide_index=1):
     x, y, w, h = frame
-    return {"x": x, "y": y, "w": w, "h": h, "posterTime": poster_time, "name": name}
+    return {"x": x, "y": y, "w": w, "h": h, "posterTime": poster_time, "name": name, "slideIndex": slide_index}
 
 
 def test_movie_archives_reports_both_with_composed_frames(deck):
@@ -240,6 +240,10 @@ def test_movie_archives_reports_both_with_composed_frames(deck):
     assert (by_id["300"]["x"], by_id["300"]["y"], by_id["300"]["w"], by_id["300"]["h"]) == _LANDMARK_FRAME
     assert (by_id["310"]["x"], by_id["310"]["y"], by_id["310"]["w"], by_id["310"]["h"]) == _BG_FRAME
     assert by_id["300"]["posterTime"] == 0.0
+    assert by_id["300"]["slideIndex"] == 1
+    assert by_id["300"]["slideId"] == "100"
+    assert by_id["310"]["slideIndex"] == 1
+    assert by_id["310"]["slideId"] == "100"
 
 
 def test_plan_picks_only_the_landmark_sized_movie(deck):
@@ -322,9 +326,9 @@ def test_patch_empty_posters_is_a_noop(deck):
     assert result == {"refused": False, "reason": None, "touched": [], "applied": 0}
 
 
-def _autoplay_target(frame, name="reveal"):
+def _autoplay_target(frame, name="reveal", slide_index=1):
     x, y, w, h = frame
-    return {"x": x, "y": y, "w": w, "h": h, "name": name}
+    return {"x": x, "y": y, "w": w, "h": h, "name": name, "slideIndex": slide_index}
 
 
 def test_plan_autoplay_picks_only_the_landmark_sized_movie(deck):
@@ -680,3 +684,123 @@ def test_clip_timing_refuses_unknown_mode(tmp_path):
 
 def test_clip_timing_empty_plans_is_a_noop(deck):
     assert patch_clip_start_timing(deck, {}) == {}
+
+
+def test_plan_autoplay_refuses_a_target_with_no_slide_identity(deck):
+    x, y, w, h = _LANDMARK_FRAME
+    plan = plan_movie_autoplay(deck, [{"x": x, "y": y, "w": w, "h": h, "name": "reveal"}])
+    assert plan["refused"] is True
+    assert "no slide identity" in plan["reason"]
+
+
+def test_plan_autoplay_refuses_a_target_on_the_wrong_slide(deck):
+    plan = plan_movie_autoplay(deck, [_autoplay_target(_LANDMARK_FRAME, slide_index=2)])
+    assert plan["refused"] is True
+    assert "matched 0" in plan["reason"]
+
+
+def _build_two_full_frame_slides_deck(path):
+    """Two slides, each with one identical full-frame fly movie and its own start build."""
+    bx, by, bw, bh = _BG_FRAME
+    rows = []
+    nodes = []
+    for movie_id, build_id, chunk_id, slide_id, node_id in (
+        (310, 900, 910, 100, 10),
+        (311, 901, 911, 101, 11),
+    ):
+        rows.append(
+            (
+                slide_id,
+                _arch(
+                    movie_id,
+                    "TSD.MovieArchive",
+                    {
+                        "super": _geom(bx, by, bw, bh),
+                        "posterTime": 0.0,
+                        "startTime": 0.0,
+                        "endTime": 30.0,
+                        "naturalSize": {"width": bw, "height": bh},
+                        "playsAcrossSlides": True,
+                    },
+                ),
+                _arch(
+                    build_id,
+                    "KN.BuildArchive",
+                    {
+                        "drawable": {"identifier": movie_id},
+                        "delivery": "All at Once",
+                        "duration": 0.0,
+                        "attributes": _build_effect("apple:movie-start"),
+                        "chunkIdSeed": 1,
+                    },
+                ),
+                _arch(
+                    chunk_id,
+                    "KN.BuildChunkArchive",
+                    {
+                        "build": {"identifier": build_id},
+                        "delay": 0.0,
+                        "duration": 0.5,
+                        "automatic": False,
+                        "referent": True,
+                        "buildChunkIdentifier": {
+                            "buildId": {"lower": str(movie_id), "upper": "1"},
+                            "buildChunkId": 1,
+                        },
+                        "buildId": {"lower": str(movie_id), "upper": "1"},
+                    },
+                ),
+                _arch(
+                    slide_id,
+                    "KN.SlideArchive",
+                    {
+                        "drawablesZOrder": [{"identifier": movie_id}],
+                        "builds": [{"identifier": build_id}],
+                        "buildChunks": [{"identifier": chunk_id}],
+                    },
+                ),
+            )
+        )
+        nodes.append(
+            _arch(node_id, "KN.SlideNodeArchive", {"slide": {"identifier": slide_id}, "isSkipped": False})
+        )
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}, {"identifier": 11}]}})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Index/Document.iwa", _member([show, *nodes]))
+        for slide_id, movie, build, chunk, slide in rows:
+            zf.writestr(f"Index/Slide-{slide_id}.iwa", _member([slide, movie, build, chunk]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_plan_autoplay_matches_identical_full_frame_movies_per_slide(tmp_path):
+    deck = _build_two_full_frame_slides_deck(tmp_path / "two-flies.key")
+    archives = movie_archives(deck)
+    assert {(a["id"], a["slideIndex"]) for a in archives} == {("310", 1), ("311", 2)}
+    plan = plan_movie_autoplay(
+        deck,
+        [
+            _autoplay_target(_BG_FRAME, name="s1-fly", slide_index=1),
+            _autoplay_target(_BG_FRAME, name="s2-fly", slide_index=2),
+        ],
+    )
+    assert plan["refused"] is False
+    assert plan["ids"] == ["310", "311"]
+    patched = patch_movie_autoplay(deck, plan["ids"])
+    assert patched["refused"] is False
+    assert patched["applied"] == 2
+    objects, _, _ = _load_deck(deck)
+    assert objects["910"]["automatic"] is True
+    assert objects["911"]["automatic"] is True
+    assert objects["310"]["playsAcrossSlides"] is False
+    assert objects["311"]["playsAcrossSlides"] is False
+
+
+def test_plan_autoplay_identical_full_frames_collide_without_per_slide_match(tmp_path):
+    """Geometry-only matching is what the old deck-wide scan did: two flies, one refusal."""
+    deck = _build_two_full_frame_slides_deck(tmp_path / "two-flies.key")
+    x, y, w, h = _BG_FRAME
+    plan = plan_movie_autoplay(deck, [{"x": x, "y": y, "w": w, "h": h, "name": "fly"}])
+    assert plan["refused"] is True
+    assert "no slide identity" in plan["reason"]

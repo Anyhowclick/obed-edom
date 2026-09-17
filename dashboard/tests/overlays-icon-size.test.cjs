@@ -124,8 +124,8 @@ const overlaysCompile = spawnSync(runtime, [
   "--outDir", overlaysOut, path.join(root, "src/maps/overlays.ts"), path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(overlaysCompile.status, 0, overlaysCompile.stderr || overlaysCompile.stdout);
-const { churchesGeo, churchesLayers, labelPillBucket, labelPillCssSize, LABEL_FONT_PX, LABEL_GAP_EMS, LABEL_CHAR_W_PX, LABEL_PILL_BUCKETS, DROP_PIN_SELECTED_SCALE } = require(path.join(overlaysOut, "overlays.js"));
-const { defaultLandmarkSize, ICON_SIZE_PACK_MAX } = require(path.join(overlaysOut, "objects.js"));
+const { churchesGeo, churchesLayers, labelPillBucket, labelPillCssSize, LABEL_FONT_PX, LABEL_GAP_EMS, LABEL_CHAR_W_PX, LABEL_PILL_BUCKETS, DROP_PIN_SELECTED_SCALE, DOT_BORDER_PT } = require(path.join(overlaysOut, "overlays.js"));
+const { defaultLandmarkSize, defaultObjectSize, ICON_SIZE_PACK_MAX } = require(path.join(overlaysOut, "objects.js"));
 
 test("churchesLayers (churches-dots/-drops/-landmarks) validates with the real maplibre style spec", () => {
   const style = {
@@ -165,6 +165,18 @@ test("churches-dots circle-radius is exactly geometric (base 2) for a scaleWithM
     layers: [{ id: "l", type: "circle", source: "src", paint: { "circle-radius": expr } }],
   };
   assert.deepEqual(validateStyleMin(style), []);
+});
+
+test("churches-dots use a 0.25pt black hairline that scales with the marker", () => {
+  const paint = churchesLayers().find((item) => item.id === "churches-dots").paint;
+  assert.equal(paint["circle-stroke-color"], "#000000");
+  assert.equal(DOT_BORDER_PT, 0.25);
+  const parsed = createExpression(paint["circle-stroke-width"], { type: "number" });
+  assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
+  const evaluate = (zoom, properties) => parsed.value.evaluate({ zoom }, { properties });
+  const size = defaultObjectSize("dot");
+  assert.equal(evaluate(8, { size, objectScale: 1, scaleWithMap: false, sizeZoomRef: 8 }), 0.25);
+  assert.equal(evaluate(8, { size: size * 3, objectScale: 1, scaleWithMap: false, sizeZoomRef: 8 }), 0.75);
 });
 
 test("churches-drops icon-size scales geometrically off the drop-pin head px and validates with the style spec", () => {
@@ -264,6 +276,36 @@ test("labelOffset in icon pixels clears a non-scaling dropPin of either authored
   }
 });
 
+test("a small authored labelScale is not pre-clamped; zoomScaledStops clamp the zoom-adjusted total", () => {
+  const geo = churchesGeo(
+    [{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size: 16, scaleWithMap: true, sizeZoom: 8 }],
+    null,
+    false,
+    1
+  );
+  const props = geo.features[0].properties;
+  assert.equal(props.labelScale, 0.25);
+  const evaluate = labelIconSize();
+  assert.equal(evaluate(8, props), 0.5);
+  // 0.25 × 4 = 1. Pre-clamping authored 0.25 to 0.5 would render 2× here.
+  assert.equal(evaluate(10, props), 1);
+});
+
+test("a large authored labelScale is not pre-clamped; zoom-out can drop below the 8× ceiling", () => {
+  const geo = churchesGeo(
+    [{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size: 1024, scaleWithMap: true, sizeZoom: 8 }],
+    null,
+    false,
+    1
+  );
+  const props = geo.features[0].properties;
+  assert.equal(props.labelScale, 16);
+  const evaluate = labelIconSize();
+  assert.equal(evaluate(8, props), 8);
+  // 16 × 0.25 = 4. Pre-clamping authored 16 to 8 would render 2× here.
+  assert.equal(evaluate(6, props), 4);
+});
+
 test("a grouped pin and dot at the same size share labelScale so text and pill match", () => {
   const size = 84;
   const pin = churchesGeo([{ id: "p", name: "Pin", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size }], null, false, 1);
@@ -290,7 +332,7 @@ test("labelOffset clears a non-scaling marker past the icon-size clamp", () => {
   const size = 64 * 16;
   const geo = churchesGeo([{ id: "a", name: "a", lat: 0, lon: 0, kind: "dropPin", color: "#fff", size }], null, false, 1);
   const props = geo.features[0].properties;
-  assert.equal(props.labelScale, 8);
+  assert.equal(props.labelScale, 16);
   const screen = -props.labelOffset0[1] * labelIconSize()(0, props);
   assert.ok(screen > size * 1.45);
 });
@@ -420,7 +462,7 @@ test("the label pill clears the marker when the text-size clamp lands mid-segmen
     const zooms = [];
     for (let step = 0; step <= 500; step++) zooms.push(ref + step / 100);
     assertPillClears({ kind: "dropPin", size: 64 * scale }, 64 * scale * 1.45, zooms, ref);
-    assertPillClears({ kind: "dot", size: 28 * scale }, (28 * scale) / 2, zooms, ref);
+    assertPillClears({ kind: "dot", size: 64 * scale }, (64 * scale) / 2, zooms, ref);
   }
 });
 
@@ -436,7 +478,7 @@ test("the label pill clears dot, dropPin and landmark at every 0.01 zoom step ov
   const ref = 8;
   const zooms = [];
   for (let step = 0; step <= 500; step++) zooms.push(ref + step / 100);
-  assertPillClears({ kind: "dot", size: 28 }, 28 / 2, zooms, ref);
+  assertPillClears({ kind: "dot", size: 64 }, 64 / 2, zooms, ref);
   assertPillClears({ kind: "dropPin", size: 100 }, 100 * 1.45, zooms, ref);
   assertPillClears({ kind: "landmark", size: 480, assetWidth: 600, assetHeight: 300 }, 480 * (300 / 600), zooms, ref);
 });

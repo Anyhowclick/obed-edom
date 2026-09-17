@@ -68,8 +68,12 @@ LABEL_GAP = 8
 LABEL_CHAR_W = 13
 PILL_PAD_X = 6
 PILL_PAD_Y = 2
+# Amplitude-Bold sits high in a top-aligned Keynote box; nudge text down inside the pill.
+LABEL_TEXT_DY = 2
 LABEL_SCALE_MIN = 0.5
 LABEL_SCALE_MAX = 8
+# Keynote starts the movie→still dissolve before the last frame holds; wait this extra beat.
+MOVIE_END_HOLD = 0.5
 CREDITS_TITLE = "Map data"
 CREDITS_FONT = 28
 CREDITS_TITLE_FONT = 40
@@ -951,7 +955,6 @@ def maps_export_plan(
     covered: set[str] = set()
     for geom in plates.values():
         covered.update(str(sid) for sid in (geom.get("slideIds") or []))
-    landing_targets = {str(to_slide.get("id") or "") for _link, _from_slide, to_slide in _qualifying_movie_landing_links(slides, links)}
     stills: list[dict[str, Any]] = []
     for slide in slides:
         sid = str(slide.get("id") or "")
@@ -975,22 +978,6 @@ def maps_export_plan(
             if highlights:
                 row["stillPngRegions"] = f"{sid}{'_CG' if audience == 'cg' else ''}-regions.json"
             stills.append(row)
-        if sid in landing_targets:
-            stills.append(
-                {
-                    "slideId": f"{sid}__landing",
-                    "style": slide.get("style") or "positron",
-                    "camera": slide.get("camera") or {},
-                    "highlights": [],
-                    "hiddenLayers": slide_hidden_layers(slide),
-                    "hillshade": bool(slide.get("hillshade")),
-                    "isolate": None,
-                    "width": cap_w,
-                    "height": cap_h,
-                    "synthetic": True,
-                    "_landingFor": sid,
-                }
-            )
     plate_list: list[dict[str, Any]] = []
     for plate_id, geom in plates.items():
         first = _first_plate_slide(slides, geom.get("slideIds") or [])
@@ -1086,67 +1073,6 @@ def _remove_key(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     elif path.exists():
         path.unlink(missing_ok=True)
-
-
-def _qualifying_movie_landing_links(
-    slides: list[dict[str, Any]], links: list[dict[str, Any]]
-) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
-    """Movie links that land on isolate+highlights from a non-isolated source (plain still, then dissolve)."""
-    by_id = {str(slide.get("id") or ""): slide for slide in slides}
-    index_of = {str(slide.get("id") or ""): index for index, slide in enumerate(slides)}
-    out: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
-    for link in links:
-        if str(link.get("kind") or "") != "movie":
-            continue
-        start, end = _link_ends(link)
-        from_slide, to_slide = by_id.get(start), by_id.get(end)
-        if not from_slide or not to_slide:
-            continue
-        if from_slide.get("isolate"):
-            continue
-        if not to_slide.get("isolate") or not to_slide.get("highlights"):
-            continue
-        if index_of.get(end) != index_of.get(start, -2) + 1:
-            continue
-        out.append((link, from_slide, to_slide))
-    return out
-
-
-def isolate_landing_slides(
-    slides: list[dict[str, Any]], links: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Insert a synthetic plain-view landing slide before each isolated movie destination."""
-    landing_after: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {}
-    for link, from_slide, to_slide in _qualifying_movie_landing_links(slides, links):
-        to_id = str(to_slide.get("id") or "")
-        landing_slide = {**to_slide, "id": f"{to_id}__landing", "highlights": [], "isolate": None, "_landingFor": to_id}
-        landing_after[str(from_slide.get("id") or "")] = (landing_slide, link, to_id)
-    if not landing_after:
-        return slides, links
-    next_slides: list[dict[str, Any]] = []
-    next_links = list(links)
-    for slide in slides:
-        next_slides.append(slide)
-        landing = landing_after.get(str(slide.get("id") or ""))
-        if landing is None:
-            continue
-        landing_slide, link, to_id = landing
-        next_slides.append(landing_slide)
-        for index, existing in enumerate(next_links):
-            if existing is link:
-                next_links[index] = {**link, "to": landing_slide["id"]}
-                break
-        duration = float(link.get("duration") or 0) or 1.0
-        next_links.append(
-            {
-                "from": landing_slide["id"],
-                "to": to_id,
-                "kind": "dissolve",
-                "duration": duration,
-                "playWithoutClick": bool(link.get("playWithoutClick")),
-            }
-        )
-    return next_slides, next_links
 
 
 def _qualifying_movie_takeoff_links(
@@ -1444,6 +1370,15 @@ def _label_scale(church: dict[str, Any], size: float) -> float:
     return min(LABEL_SCALE_MAX, max(LABEL_SCALE_MIN, scale))
 
 
+def _label_text_dy(scale: float) -> int:
+    """Even-pixel down-shift so DSK halving keeps the pill and text paired."""
+    if LABEL_TEXT_DY <= 0:
+        return 0
+    dy = whole(LABEL_TEXT_DY * scale)
+    dy -= dy % 2
+    return max(2, dy)
+
+
 EFFECTIVE_SIZE_MAX = 20000
 
 
@@ -1654,7 +1589,7 @@ def _place_churches(
                         labelPill=True,
                     )
                 )
-                items.append(_item("text", nx, ny, nw, nh, text=name, bold=True, fontSize=font))
+                items.append(_item("text", nx, ny + _label_text_dy(scale), nw, nh, text=name, bold=True, fontSize=font))
     return items
 
 
@@ -1782,9 +1717,23 @@ def build_slide_items(
     return items
 
 
+def _church_label_visible(church: dict[str, Any]) -> bool:
+    name = str(church.get("name") or "").strip()
+    return bool(name) and church.get("showLabel", True) is True
+
+
+def _slide_has_visible_labels(slide: dict[str, Any] | None) -> bool:
+    """Keynote paints Amplitude labels on stills, not movie rasters."""
+    if not slide:
+        return False
+    view = _cg_view(slide) if slide.get("_splitCg") else slide
+    return any(_church_label_visible(church) for church in (view.get("churches") or []))
+
+
 def _transition_for(
     link: dict[str, Any] | None,
     slide: dict[str, Any] | None = None,
+    dest_slide: dict[str, Any] | None = None,
     *,
     bg_movie: bool = False,
 ) -> dict[str, Any] | None:
@@ -1796,8 +1745,12 @@ def _transition_for(
     if kind == "morph" and link.get("plateId"):
         return {"effect": "magic_move", "duration": duration, "automatic": automatic}
     if bg_movie:
-        delay = float((slide or {}).get("movieDuration") or duration)
-        return {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": delay}
+        # Last movie frame is the dest still. Labels are not baked into the fly, so a
+        # labeled dest auto-dissolves after the hold; a label-less dest waits for a click.
+        if _slide_has_visible_labels(dest_slide):
+            delay = float((slide or {}).get("movieDuration") or duration) + MOVIE_END_HOLD
+            return {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": delay}
+        return {"effect": "dissolve", "duration": 1.0, "automatic": False}
     if kind == "dissolve":
         return {"effect": "dissolve", "duration": duration, "automatic": automatic}
     if automatic:
@@ -1819,7 +1772,6 @@ def plan_deck(
     reveals: dict[tuple[str, str, str], str] | None = None,
     reveal_movies: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, Any]]:
-    slides, links = isolate_landing_slides(slides, links)
     slides, links = movie_takeoff_slides(slides, links)
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
     slide_plate: dict[str, str] = {}
@@ -1867,6 +1819,7 @@ def plan_deck(
                 if dest_slide
                 else None
             )
+        transition_dest = item_dest
         if reveal_bg:
             item_dest = None
             reveal_view = item_slide if item_slide.get("_splitCg") else slide
@@ -1914,7 +1867,9 @@ def plan_deck(
                 "id": sid,
                 "duplicate": duplicate,
                 "items": items,
-                "transition": _transition_for(outgoing, item_slide, bg_movie=bg_movie is not None),
+                "transition": _transition_for(
+                    outgoing, item_slide, dest_slide=transition_dest, bg_movie=bg_movie is not None
+                ),
             }
         )
     return ops
@@ -2363,17 +2318,17 @@ def maps_poster_frame_mode(explicit: str | None = None) -> str:
 
 
 def maps_movie_autoplay_mode(explicit: str | None = None) -> str:
-    """`on` (default; surgical offline autoplay-after-transition patch), `off`, or
+    """`off` (default; movies stay On Click), `on` (after-transition patch), or
     `verify` (patch + read-back log). Env `OBED_MAPS_MOVIE_AUTOPLAY`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_MOVIE_AUTOPLAY", "")).strip().lower()
-    if raw in _OFF_ALIASES:
-        return "off"
-    return raw if raw == "verify" else "on"
+    if raw in {"on", "verify"}:
+        return raw
+    return "off"
 
 
 def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[str, str, str], float]) -> list[dict[str, Any]]:
     targets: list[dict[str, Any]] = []
-    for op in ops:
+    for slide_index, op in enumerate(ops, start=1):
         for item in op.get("items") or []:
             if not (item.get("landmark") and item.get("kind") == "movie"):
                 continue
@@ -2382,6 +2337,7 @@ def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[s
                 continue
             targets.append(
                 {
+                    "slideIndex": slide_index,
                     "x": float(item["x"]),
                     "y": float(item["y"]),
                     "w": float(item["w"]),
@@ -2398,15 +2354,17 @@ def _autoplay_targets(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Keynote inserts them as On Click; `_apply_movie_autoplay` flips Start to
     After Transition so the movie plays once the incoming slide transition
-    (including `no transition effect`) has been triggered.
+    (including `no transition effect`) has been triggered. ``slideIndex`` is
+    1-based deck order so two full-frame fly movies do not match each other.
     """
     targets: list[dict[str, Any]] = []
-    for op in ops:
+    for slide_index, op in enumerate(ops, start=1):
         for item in op.get("items") or []:
             if item.get("kind") != "movie":
                 continue
             targets.append(
                 {
+                    "slideIndex": slide_index,
                     "x": float(item["x"]),
                     "y": float(item["y"]),
                     "w": float(item["w"]),
@@ -2433,8 +2391,8 @@ def _apply_movie_autoplay(
     repetition method/rotation, see Keynote.sdef -- so this is patched offline the
     same way Keynote itself saves "Start = After Transition"). Applies to fly
     backdrops as well as reveal movies. Gated behind `OBED_MAPS_MOVIE_AUTOPLAY`
-    (default on); a refusal is never fatal to export, same containment as
-    `_apply_poster_frames`."""
+    (default off — movies stay On Click); a refusal is never fatal to export,
+    same containment as `_apply_poster_frames`."""
     mode = maps_movie_autoplay_mode()
     from obed_edom.offline_write import probe_iwa_extra
 

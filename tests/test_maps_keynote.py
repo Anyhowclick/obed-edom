@@ -39,6 +39,8 @@ from obed_edom.maps_keynote import (
     LABEL_FONT_PT,
     LABEL_SCALE_MAX,
     LABEL_SCALE_MIN,
+    LABEL_TEXT_DY,
+    MOVIE_END_HOLD,
     MAP_BG_RE,
     NAME_HEIGHT,
     PANEL_EDGES,
@@ -1163,7 +1165,7 @@ def test_reveal_movie_transition_is_automatic_dissolve_after_duration(tmp_path: 
         [slide, slide2], [link], {}, output_dir=output_dir, preview_dir=output_dir / "previews", movie=None,
         wall=True, reveals={}, reveal_movies={("lw", "s1"): str(reveal_movie)},
     )
-    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 1.5}
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": False}
 
 
 def test_export_maps_job_does_not_leak_reveal_mov_into_stored_document(tmp_path: Path, monkeypatch):
@@ -1753,7 +1755,55 @@ def test_plan_deck_uses_backdrop_movie_when_present(tmp_path: Path):
     assert item["kind"] == "movie"
     assert (item["x"], item["y"], item["w"], item["h"]) == (CENTRE_ORIGIN_X, 0, CENTRE_WIDTH, WALL_HEIGHT)
     assert item["map"] is True
-    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.5}
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": False}
+
+
+def test_plan_deck_labeled_dest_auto_dissolves_after_movie_hold(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0, 8), movieDuration=2.5)
+    b = _slide(
+        "s2",
+        _camera(3.0, 102.0, 8),
+        churches=[
+            {
+                "id": "p1",
+                "name": "CHC Medan",
+                "lat": 3.555,
+                "lon": 98.644,
+                "kind": "dropPin",
+                "color": "#c44a42",
+                "showLabel": True,
+            }
+        ],
+    )
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.0, "playWithoutClick": False}]
+    mov = movie_path(tmp_path, "s1")
+    mov.parent.mkdir(parents=True, exist_ok=True)
+    mov.write_bytes(b"fake-mov")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert ops[0]["transition"] == {
+        "effect": "dissolve",
+        "duration": 1.0,
+        "automatic": True,
+        "delay": 2.5 + MOVIE_END_HOLD,
+    }
+
+    hidden = _slide(
+        "s3",
+        _camera(3.0, 102.0, 8),
+        churches=[{**b["churches"][0], "id": "p2", "showLabel": False}],
+    )
+    _dummy_png(tmp_path / "stills" / "s3.png")
+    hidden_ops = plan_deck(
+        [a, hidden],
+        [{"from": "s1", "to": "s3", "kind": "movie", "duration": 1.0, "playWithoutClick": False}],
+        {},
+        output_dir=tmp_path,
+        preview_dir=tmp_path,
+        movie=None,
+        wall=True,
+    )
+    assert hidden_ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": False}
 
 
 def test_plan_deck_backdrop_movie_cg_shift(tmp_path: Path):
@@ -1811,7 +1861,7 @@ def test_plan_deck_morph_dest_keeps_plate_when_outgoing_movie(tmp_path: Path):
     assert ops[1]["transition"] is None
     assert ops[2]["duplicate"] is False
     assert ops[2]["items"][0]["kind"] == "movie"
-    assert ops[2]["transition"]["delay"] == 2.0
+    assert ops[2]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": False}
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
     assert "transition effect:no transition effect" in script
     assert script.count("transition effect:magic move") == 1
@@ -2610,7 +2660,7 @@ def test_coerce_clears_route_when_not_movie():
     assert "easing" not in next_links[0]
 
 
-def test_build_deck_script_movie_backdrop_has_delay(tmp_path: Path):
+def test_build_deck_script_unlabeled_movie_dissolves_on_click(tmp_path: Path):
     a, b, links = _backdrop_movie_slides_links()
     mov = movie_path(tmp_path, "s1")
     mov.parent.mkdir(parents=True, exist_ok=True)
@@ -2619,7 +2669,8 @@ def test_build_deck_script_movie_backdrop_has_delay(tmp_path: Path):
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
     assert "set mv to make new image with properties {file:movFile}" in script
-    assert "transition delay:2.5" in script
+    assert "transition delay:" not in script
+    assert "automatic transition:false" in script
 
 
 def test_lw_still_sits_on_centre_wall(tmp_path: Path):
@@ -2779,22 +2830,18 @@ def test_plan_deck_morph_member_shares_the_baked_plate(tmp_path: Path):
     assert Path(maps[0]["path"]).name == plate_filename(next(iter(plates)))
 
 
-def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
+def test_export_plan_has_no_landing_still_for_isolated_movie_destination():
     a = _slide("s1", _camera(3.0, 101.0))
     b = _slide("s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
     links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
     plan = maps_export_plan([a, b], links)
     stills = {row["slideId"]: row for row in plan["stills"]}
-    assert set(stills) == {"s1", "s2", "s2__landing"}
-    landing = stills["s2__landing"]
-    assert landing["camera"] == b["camera"]
-    assert landing["highlights"] == []
-    assert landing["isolate"] is None
-    assert "stillPngRegions" not in landing
-    assert landing["_landingFor"] == "s2"
+    assert set(stills) == {"s1", "s2"}
+    assert stills["s2"]["isolate"] == b["isolate"]
+    assert stills["s2"]["highlights"] == ["USA"]
 
 
-def test_export_plan_keeps_landing_still_when_destination_is_on_a_morph_plate():
+def test_export_plan_movie_onto_morph_plate_has_no_landing_still():
     iso = {"mode": "darken", "strength": 0.6}
     a = _slide("s1", _camera(3.0, 101.0))
     b = _slide("s2", _camera(3.0, 102.0), isolate=iso, highlights=["USA"])
@@ -2805,60 +2852,14 @@ def test_export_plan_keeps_landing_still_when_destination_is_on_a_morph_plate():
     ]
     plan = maps_export_plan([a, b, c], links)
     still_ids = {row["slideId"] for row in plan["stills"]}
-    assert "s2__landing" in still_ids
-    assert "s2" not in still_ids
-    assert "s3" not in still_ids
+    assert still_ids == {"s1"}
+    assert not any(str(sid).endswith("__landing") for sid in still_ids)
     assert any({"s2", "s3"} <= set(row["slideIds"]) for row in plan["plates"])
 
 
-def test_export_plan_no_landing_when_source_already_isolated():
-    iso = {"mode": "darken", "strength": 0.6}
-    pitched = {**_camera(3.0, 101.0), "pitch": 20.0}
-    a = _slide("s1", pitched, isolate=iso, highlights=["USA"])
-    b = _slide("s2", {**pitched, "lon": 102.0}, isolate=iso, highlights=["USA"])
-    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
-    plan = maps_export_plan([a, b], links)
-    still_ids = {row["slideId"] for row in plan["stills"]}
-    assert "s2__landing" not in still_ids
-    assert still_ids == {"s1", "s2"}
-    assert plan["links"][0]["kind"] == "movie"
-
-
-def test_export_plan_no_landing_row_for_dissolve_or_no_highlights():
-    a = _slide("s1", _camera(3.0, 101.0))
-    b = _slide("s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
-    links = [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 1.0}]
-    plan = maps_export_plan([a, b], links)
-    assert {row["slideId"] for row in plan["stills"]} == {"s1", "s2"}
-
-    c = _slide("s3", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=[])
-    plan2 = maps_export_plan([a, c], [{"from": "s1", "to": "s3", "kind": "movie", "duration": 1.0}])
-    assert {row["slideId"] for row in plan2["stills"]} == {"s1", "s3"}
-
-
-def test_plan_deck_inserts_landing_slide_between_movie_and_isolated_destination(tmp_path: Path):
+def test_plan_deck_movie_goes_straight_to_isolated_destination(tmp_path: Path):
     a = _slide("s1", _camera(3.0, 101.0, 8), movieDuration=2.0)
     b = _slide("s2", _camera(3.0, 102.0, 8), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
-    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
-    mov = movie_path(tmp_path, "s1")
-    mov.parent.mkdir(parents=True, exist_ok=True)
-    mov.write_bytes(b"fake-mov")
-    _dummy_png(tmp_path / "stills" / "s2__landing.png")
-    _dummy_png(tmp_path / "stills" / "s2.png")
-    _dummy_region(tmp_path / "stills" / "s2.png")
-    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
-    assert [op["id"] for op in ops] == ["s1", "s2__landing", "s2"]
-    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.0}
-    assert ops[1]["transition"] == {"effect": "dissolve", "duration": 1.5, "automatic": False}
-    assert len([item for item in ops[2]["items"] if item.get("map")]) == 1
-    assert len([item for item in ops[2]["items"] if item.get("country")]) == 1
-
-
-def test_plan_deck_no_landing_when_both_ends_isolated(tmp_path: Path):
-    iso = {"mode": "darken", "strength": 0.6}
-    pitched = {**_camera(3.0, 101.0, 8), "pitch": 20.0}
-    a = _slide("s1", pitched, isolate=iso, highlights=["USA"], movieDuration=2.0)
-    b = _slide("s2", {**pitched, "lon": 102.0}, isolate=iso, highlights=["USA"])
     links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
     mov = movie_path(tmp_path, "s1")
     mov.parent.mkdir(parents=True, exist_ok=True)
@@ -2867,7 +2868,8 @@ def test_plan_deck_no_landing_when_both_ends_isolated(tmp_path: Path):
     _dummy_region(tmp_path / "stills" / "s2.png")
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     assert [op["id"] for op in ops] == ["s1", "s2"]
-    assert not any(str(op.get("id") or "").endswith("__landing") for op in ops)
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": False}
+    assert len([item for item in ops[1]["items"] if item.get("country")]) == 1
 
 
 def test_plan_deck_no_isolate_deck_ops_unchanged(tmp_path: Path):
@@ -2880,7 +2882,7 @@ def test_plan_deck_no_isolate_deck_ops_unchanged(tmp_path: Path):
     assert [op["id"] for op in ops] == ["s1", "s2"]
 
 
-def test_split_cg_export_plan_keeps_landing_still_for_affected_slide():
+def test_split_cg_export_plan_keeps_dest_still_for_affected_slide():
     a = _slide("s1", _camera(3.0, 101.0))
     b = _slide(
         "s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"],
@@ -2888,7 +2890,9 @@ def test_split_cg_export_plan_keeps_landing_still_for_affected_slide():
     )
     links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.0}]
     plan = split_cg_export_plan([a, b], links)
-    assert "s2__landing" in {row["slideId"] for row in plan["stills"]}
+    still_ids = {row["slideId"] for row in plan["stills"]}
+    assert "s2" in still_ids
+    assert not any(sid.endswith("__landing") for sid in still_ids)
 
 
 def test_render_reveals_returns_poster_times_matching_shared_formula(tmp_path: Path, monkeypatch):
@@ -2965,6 +2969,7 @@ def test_export_maps_job_never_calls_patcher_when_gate_unset(tmp_path: Path, mon
 
 def test_export_maps_job_records_movie_autoplay_refusal_reason(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("OBED_MAPS_POSTER_FRAME", raising=False)
+    monkeypatch.setenv("OBED_MAPS_MOVIE_AUTOPLAY", "on")
     monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
     monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
     monkeypatch.setattr(
@@ -3320,16 +3325,17 @@ def test_build_deck_script_theme_and_master_scripts_compile(tmp_path: Path):
     assert "-2741" not in proc.stderr
 
 
-def test_maps_movie_autoplay_mode_defaults_on(monkeypatch):
+def test_maps_movie_autoplay_mode_defaults_off(monkeypatch):
     monkeypatch.delenv("OBED_MAPS_MOVIE_AUTOPLAY", raising=False)
-    assert maps_movie_autoplay_mode() == "on"
+    assert maps_movie_autoplay_mode() == "off"
     assert maps_movie_autoplay_mode("off") == "off"
+    assert maps_movie_autoplay_mode("on") == "on"
     assert maps_movie_autoplay_mode("verify") == "verify"
-    assert maps_movie_autoplay_mode("bogus") == "on"
+    assert maps_movie_autoplay_mode("bogus") == "off"
 
 
 def test_export_maps_job_movie_autoplay_happy_path(tmp_path: Path, monkeypatch):
-    monkeypatch.delenv("OBED_MAPS_MOVIE_AUTOPLAY", raising=False)
+    monkeypatch.setenv("OBED_MAPS_MOVIE_AUTOPLAY", "on")
     monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
     monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
     monkeypatch.setattr(
@@ -3414,7 +3420,7 @@ def test_export_maps_job_movie_autoplay_off_records_nothing(tmp_path: Path, monk
 
 
 def test_export_maps_job_movie_autoplay_missing_extra_degrades_cleanly(tmp_path: Path, monkeypatch):
-    monkeypatch.delenv("OBED_MAPS_MOVIE_AUTOPLAY", raising=False)
+    monkeypatch.setenv("OBED_MAPS_MOVIE_AUTOPLAY", "on")
     monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
     monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
     monkeypatch.setattr(
@@ -3447,7 +3453,7 @@ def test_export_maps_job_invalidates_poster_record_on_autoplay_regeneration(tmp_
     from obed_edom.iwa_write import OfflineWriteCorrupted, recovery_tmp_path
 
     monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "on")
-    monkeypatch.delenv("OBED_MAPS_MOVIE_AUTOPLAY", raising=False)
+    monkeypatch.setenv("OBED_MAPS_MOVIE_AUTOPLAY", "on")
     monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
     monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
     monkeypatch.setattr(
@@ -3491,7 +3497,7 @@ def test_export_maps_job_plain_autoplay_refusal_leaves_poster_record_intact(tmp_
     """A plain (non-truncating) autoplay refusal must not invalidate a successful
     poster-frame record for the same deck -- only regeneration does that."""
     monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "on")
-    monkeypatch.delenv("OBED_MAPS_MOVIE_AUTOPLAY", raising=False)
+    monkeypatch.setenv("OBED_MAPS_MOVIE_AUTOPLAY", "on")
     monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
     monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
     monkeypatch.setattr(
@@ -3529,7 +3535,7 @@ def test_export_maps_job_cg_autoplay_regeneration_invalidates_cg_poster_record(t
     from obed_edom.iwa_write import OfflineWriteCorrupted, recovery_tmp_path
 
     monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "on")
-    monkeypatch.delenv("OBED_MAPS_MOVIE_AUTOPLAY", raising=False)
+    monkeypatch.setenv("OBED_MAPS_MOVIE_AUTOPLAY", "on")
     monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
     monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
     monkeypatch.setattr(
@@ -3760,7 +3766,7 @@ def test_label_pill_is_emitted_before_its_text_and_inflated_by_the_pad_constants
         pill, text = items[pill_index], items[text_index]
         assert pill["kind"] == "image"
         assert pill["x"] == text["x"] - PILL_PAD_X
-        assert pill["y"] == text["y"] - PILL_PAD_Y
+        assert pill["y"] == text["y"] - PILL_PAD_Y - LABEL_TEXT_DY
         assert pill["w"] == text["w"] + 2 * PILL_PAD_X
         assert pill["h"] == text["h"] + 2 * PILL_PAD_Y
         assert text["h"] == NAME_HEIGHT
@@ -3833,6 +3839,30 @@ def test_show_label_defaults_to_on_for_a_legacy_export_with_no_key(tmp_path: Pat
     assert any(item.get("labelPill") for item in items)
 
 
+def test_export_label_scale_uses_zoom_adjusted_size_before_the_clamp(tmp_path: Path):
+    """A 16px pin at +2 zoom is 1× (64/64), not 2× from pre-clamping 16/64 to 0.5.
+
+    A 1024px pin at −2 zoom is 4× (256/64), not 2× from pre-clamping 16× to 8×.
+    """
+    small = {
+        "id": "small",
+        "name": "Small",
+        "lat": 3.0,
+        "lon": 101.0,
+        "kind": "dropPin",
+        "color": "#c44a42",
+        "showLabel": True,
+        "size": 16,
+        "scaleWithMap": True,
+        "sizeZoom": 8,
+    }
+    large = dict(small, id="large", name="Large", size=1024)
+    small_items = _place_labels(tmp_path, [small], camera=_camera(3.0, 101.0, 10))
+    large_items = _place_labels(tmp_path, [large], camera=_camera(3.0, 101.0, 6))
+    assert next(item for item in small_items if item.get("kind") == "text")["fontSize"] == LABEL_FONT_PT
+    assert next(item for item in large_items if item.get("kind") == "text")["fontSize"] == whole(LABEL_FONT_PT * 4)
+
+
 def test_grouped_pin_and_dot_share_label_and_pill_size(tmp_path: Path):
     """The Size slider writes the same `size` onto every selected pin and dot."""
     size = 84
@@ -3861,10 +3891,17 @@ def test_autoplay_targets_include_map_and_reveal_movies():
         }
     ]
     targets = _autoplay_targets(ops)
-    assert [(t["w"], t["h"], t["name"]) for t in targets] == [
-        (3840, 1080, "/tmp/fly.mov"),
-        (80, 80, "/tmp/reveal.mov"),
+    assert [(t["slideIndex"], t["w"], t["h"], t["name"]) for t in targets] == [
+        (1, 3840, 1080, "/tmp/fly.mov"),
+        (1, 80, 80, "/tmp/reveal.mov"),
     ]
+
+
+def test_autoplay_targets_number_full_frame_movies_per_slide():
+    frame = {"kind": "movie", "x": 0, "y": 0, "w": 3840, "h": 1080, "path": "/tmp/fly.mov", "map": True}
+    targets = _autoplay_targets([{"items": [frame]}, {"items": [dict(frame, path="/tmp/fly-2.mov")]}])
+    assert [t["slideIndex"] for t in targets] == [1, 2]
+    assert targets[0]["w"] == targets[1]["w"] == 3840
 
 
 def test_label_geometry_scales_with_the_marker(tmp_path: Path):
@@ -4053,13 +4090,14 @@ def test_fractional_label_scales_keep_the_pill_centred_on_its_text(tmp_path: Pat
             assert pill_cx == pytest.approx(text_cx)
             pill_cy = mapped_pill["y"] + mapped_pill["h"] / 2.0
             text_cy = mapped_text["y"] + mapped_text["h"] / 2.0
-            assert pill_cy == pytest.approx(text_cy)
             left = mapped_text["x"] - mapped_pill["x"]
             right = (mapped_pill["x"] + mapped_pill["w"]) - (mapped_text["x"] + mapped_text["w"])
             assert left == right
+            dy = text_cy - pill_cy
+            assert dy > 0
             top = mapped_text["y"] - mapped_pill["y"]
             bottom = (mapped_pill["y"] + mapped_pill["h"]) - (mapped_text["y"] + mapped_text["h"])
-            assert top == bottom
+            assert top == pytest.approx(bottom + 2 * dy)
 
 
 def test_movie_backdrop_slides_emit_no_label_pills(tmp_path: Path):
@@ -4154,17 +4192,13 @@ def test_still_plans_a_cutout_without_isolate():
     assert "stillPngRegions" not in rows["s3"]
 
 
-def test_landing_slide_plans_no_cutout():
-    """`isolate_landing_slides` forces `highlights: []`, so the gate can never fire for one."""
+def test_export_plan_movie_destination_has_no_landing_row():
     a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
     b = _slide("s2", _camera(20.0, 130.0, 4), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
     links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 2.0, "playWithoutClick": True}]
 
     plan = maps_export_plan([a, b], links)
-    landing = [row for row in plan["stills"] if row["slideId"].endswith("__landing")]
-
-    assert landing, "expected a synthetic landing still"
-    assert all("stillPngRegions" not in row for row in landing)
+    assert not any(row["slideId"].endswith("__landing") for row in plan["stills"])
 
 
 def test_plate_plans_no_cutout_when_highlighted():
