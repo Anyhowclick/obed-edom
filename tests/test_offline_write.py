@@ -24,6 +24,7 @@ from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.paths import find_repo_root
 from obed_edom.offline_write import (
     OFFLINE_VERIFY_TOL,
+    _drop_unreadable_seed_rows,
     _fallback_bodies,
     _fallback_specs_by_slide,
     _offline_write_slides,
@@ -128,6 +129,44 @@ def test_offline_write_mode_forced_off_without_as_geometry(monkeypatch):
     said = []
     assert offline_write_mode(say=said.append) == "off"
     assert said and "OBED_AS_GEOMETRY" in said[0]
+
+
+# --- _drop_unreadable_seed_rows ----------------------------------------------
+
+
+def test_drop_unreadable_seed_rows_drops_only_errored_item():
+    # Error slide is 0-based (doc index); the seed is keyed 1-based. where=item:<row>,
+    # row == kindIndex. Only the (text, 0) row on slide 5 is dropped.
+    reported = {
+        5: {("text", 0): [0.0, 0.0, 174.0, 77.0], ("text", 1): [100.0, 200.0, 50.0, 20.0]},
+        6: {("text", 0): [10.0, 20.0, 30.0, 40.0]},
+    }
+    errors = [{"slide": 4, "kind": "text", "where": "item:0", "error": "position unreadable"}]
+    out = _drop_unreadable_seed_rows(reported, errors)
+    assert ("text", 0) not in out[5]
+    assert out[5][("text", 1)] == [100.0, 200.0, 50.0, 20.0]  # sibling untouched
+    assert out[6][("text", 0)] == [10.0, 20.0, 30.0, 40.0]    # other slide untouched
+
+
+def test_drop_unreadable_seed_rows_ignores_non_item_errors():
+    # Whole-collection / bulk / count errors carry no row index; they already null the
+    # kind's rows upstream, so there is nothing to drop here.
+    reported = {1: {("image", 0): [1.0, 2.0, 3.0, 4.0]}}
+    errors = [
+        {"slide": 0, "kind": "image", "where": "collection", "error": "x"},
+        {"slide": 0, "kind": "image", "where": "bulk:position", "error": "y"},
+        {"slide": None, "kind": "text", "where": "item:0", "error": "z"},  # no slide -> skip
+    ]
+    out = _drop_unreadable_seed_rows(reported, errors)
+    assert out[1][("image", 0)] == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_drop_unreadable_seed_rows_handles_empty_and_missing():
+    reported = {2: {("movie", 3): [0.0, 0.0, 0.0, 0.0]}}
+    assert _drop_unreadable_seed_rows(reported, None) == reported  # no errors -> unchanged
+    # error for a (kind, idx)/slide not present in the seed is a no-op, not an error
+    out = _drop_unreadable_seed_rows(reported, [{"slide": 99, "kind": "movie", "where": "item:3"}])
+    assert out[2][("movie", 3)] == [0.0, 0.0, 0.0, 0.0]
 
 
 # --- offline_text_reposition_enabled -----------------------------------------

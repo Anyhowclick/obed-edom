@@ -132,6 +132,37 @@ def _reported_from_bulk_rows(
     return out
 
 
+def _drop_unreadable_seed_rows(
+    reported_by_slide: dict[int, dict[tuple[str, int], list[float]]],
+    errors: list[dict[str, Any]] | None,
+    *, say: Callable[[str], None] | None = None,
+) -> dict[int, dict[tuple[str, int], list[float]]]:
+    """Drop seed rows whose live per-item read failed. `bulk_geometry.js` zero-fills a
+    failed item read (a [0, 0, …] row -- a bogus 0 position) and records an `item:<i>`
+    error; such a row is an untrustworthy seed, so remove it -> the caller sees it as
+    absent (`have_reported` False) and defers to the AppleScript fallback rather than
+    repositioning off a bad seed. `errors` is `inspect.LAST_BULK_ERRORS`, whose `slide` is
+    the 0-based document index (the seed is keyed 1-based) and `where` is `item:<row>`
+    (the row index == kindIndex). Non-item errors (whole collection/count/bulk) already
+    null the kind's rows, so there is nothing to drop for those."""
+    dropped = 0
+    for entry in errors or []:
+        where = str(entry.get("where") or "")
+        if not where.startswith("item:"):
+            continue
+        try:
+            idx = int(where.split(":", 1)[1])
+            slide1 = int(entry["slide"]) + 1
+        except (TypeError, ValueError, KeyError):
+            continue
+        row_map = reported_by_slide.get(slide1)
+        if row_map is not None and row_map.pop((str(entry.get("kind") or ""), idx), None) is not None:
+            dropped += 1
+    if dropped and say:
+        say(f"Offline-write soft seed: dropped {dropped} unreadable live row(s) → AppleScript fallback.")
+    return reported_by_slide
+
+
 def _fallback_specs_by_slide(
     offline_slides: set[int],
     specs_by_slide: dict[int, list[dict[str, Any]]],
@@ -350,10 +381,12 @@ def _patch_offline_slides(
     reported_by_slide: dict[int, dict] | None = None
     if soft_slides:
         try:
-            from obed_edom.inspect import bulk_geometry  # noqa: PLC0415
+            from obed_edom import inspect as _inspect  # noqa: PLC0415
 
-            bulk = bulk_geometry(dest, slides=sorted(soft_slides), log=say)
+            bulk = _inspect.bulk_geometry(dest, slides=sorted(soft_slides), log=say)
             reported_by_slide = _reported_from_bulk_rows(bulk)
+            reported_by_slide = _drop_unreadable_seed_rows(
+                reported_by_slide, _inspect.LAST_BULK_ERRORS, say=say)
         except Exception as exc:  # noqa: BLE001 — never patch soft classes blind
             say(
                 f"Offline-write soft seed unavailable ({type(exc).__name__}: {exc}); "
