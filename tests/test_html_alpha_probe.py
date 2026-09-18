@@ -649,7 +649,7 @@ def test_restart_boundary_rejects_preboundary_only():
     assert scored_obs["ok"] is False
     assert scored_obs["expectedKeys"] == []
 
-    # Proper boundary: near-zero + progression + decoded width on slide 3.
+    # Proper boundary: near-zero + progression + decoded width + presented motion.
     scored3 = score_restart_at_slide_boundary(
         reached_slide=True,
         expected_keys=["untitled.mov"],
@@ -660,6 +660,7 @@ def test_restart_boundary_rejects_preboundary_only():
                 "nearZeroAtBoundary": True,
                 "progressedAfterRestart": True,
                 "decodedWidthAtBoundary": True,
+                "presentedMotionOk": True,
                 "ok": True,
             }
         },
@@ -667,6 +668,27 @@ def test_restart_boundary_rejects_preboundary_only():
     )
     assert scored3["ok"] is True
     assert scored3["verdict"] == "pass"
+
+    # currentTime + width progression alone (no presented-frame motion attested)
+    # must not pass — another movie could satisfy whole-canvas non-identity.
+    scored_no_presented_motion = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 1920},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": True,
+                "presentedMotionOk": False,
+                "ok": True,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored_no_presented_motion["ok"] is False
+    assert scored_no_presented_motion["missingPresentedMotion"] == ["untitled.mov"]
 
 
 def test_restart_movie_rejects_preboundary_near_zero_that_continues():
@@ -820,6 +842,45 @@ def test_restart_movie_accepts_genuine_backward_reset_decoder():
     assert scored["ok"] is True
 
 
+def test_restart_movie_rejects_backward_reset_that_was_already_near_zero():
+    """A decoder seen far from zero at some earlier point does not get a free
+    pass on backwardReset if it was ALSO already near-zero before the
+    boundary — that pre-boundary near-zero read is the real continuing clock,
+    and the later high-t sample does not erase it (Codex repro:
+    12@#4 -> 0.01@#5 -> 0.02@#6 -> 0.35@#6).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 12.0, "w": 1920, "captureOffsetS": 4.0, "sceneHash": "#4", "decoderId": 12},
+        {"t": 0.01, "w": 1920, "captureOffsetS": 5.9, "sceneHash": "#5", "decoderId": 12},
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 12},
+        {"t": 0.35, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 12},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 12
+    assert scored["firstSeenAtBoundary"] is False
+    assert scored["backwardReset"] is False
+    assert scored["ok"] is False
+
+
+def test_restart_movie_accepts_backward_reset_that_leads_directly_in():
+    """A genuine backward reset with no pre-boundary near-zero read leads
+    directly into the boundary candidate and must still pass.
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 12.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#5", "decoderId": 13},
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 13},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 13},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["firstSeenAtBoundary"] is False
+    assert scored["backwardReset"] is True
+    assert scored["ok"] is True
+
+
 def _motion_sample(value: int, scene_hash: str, offset: float, w: int = 1920, decoder_id=1):
     roi = np.full((20, 20, 3), value % 256, dtype=np.uint8)
     return {
@@ -850,6 +911,31 @@ def test_motion_across_flip_accepts_motion_before_across_and_after():
     assert scored["acrossOk"] is True
     assert scored["afterOk"] is True
     assert scored["crossingDecoded"] is True
+    assert scored["crossingDecoderStable"] is True
+
+
+def test_motion_across_flip_rejects_decoder_switch_at_crossing():
+    """A decoder handoff exactly at the flip (1 -> 2) must not pass as the
+    target movie progressing — decoderId across the crossing must be stable.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1),
+        _motion_sample(20, "#5", 0.1, decoder_id=1),
+        _motion_sample(40, "#5", 0.2, decoder_id=1),
+        _motion_sample(60, "#6", 0.3, decoder_id=2),
+        _motion_sample(80, "#6", 0.4, decoder_id=2),
+        _motion_sample(100, "#6", 0.5, decoder_id=2),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoded"] is True
+    assert scored["crossingDecoderStable"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "crossing decoder switched"
 
 
 def test_motion_across_flip_rejects_frozen_crossing():

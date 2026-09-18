@@ -1158,7 +1158,9 @@ def score_motion_across_flip(
     motion plus a late navigation must not pass: motion is required before,
     across, and after ``flipIndex`` (the first sample whose scene hash differs
     from ``start_hash``), with no mid-window stall longer than ``max_still_run``
-    and a decoded movie present in the flip neighbourhood.
+    and a decoded movie present in the flip neighbourhood. The crossing frames
+    must also share one stable ``decoderId`` — a switch to a different decoder
+    at the flip is not the target movie progressing.
     """
     n = len(samples)
     if n < 3:
@@ -1224,10 +1226,23 @@ def score_motion_across_flip(
     crossing_decoded = bool(
         (samples[f - 1].get("w") or 0) > 0 and (samples[f].get("w") or 0) > 0
     )
+    crossing_decoder_ids = [samples[f - 1].get("decoderId"), samples[f].get("decoderId")]
+    crossing_decoder_stable = bool(
+        crossing_decoder_ids[0] is not None
+        and crossing_decoder_ids[1] is not None
+        and crossing_decoder_ids[0] == crossing_decoder_ids[1]
+    )
     flip_neighbourhood = [i for i in (f - 1, f, f + 1) if 0 <= i < n]
     decoder_ids_across_flip = [samples[i].get("decoderId") for i in flip_neighbourhood]
 
-    ok = bool(before_ok and across_ok and after_ok and crossing_decoded and still_ok)
+    ok = bool(
+        before_ok
+        and across_ok
+        and after_ok
+        and crossing_decoded
+        and crossing_decoder_stable
+        and still_ok
+    )
     reason = None
     if not ok:
         if not before_ok:
@@ -1238,6 +1253,8 @@ def score_motion_across_flip(
             reason = "no motion after flip"
         elif not crossing_decoded:
             reason = "crossing frame not decoded"
+        elif not crossing_decoder_stable:
+            reason = "crossing decoder switched"
         else:
             reason = "still run exceeds max across flip"
 
@@ -1253,6 +1270,8 @@ def score_motion_across_flip(
         "maxStillRun": max_still_run_actual,
         "crossingPairMae": crossing,
         "crossingDecoded": crossing_decoded,
+        "crossingDecoderStable": crossing_decoder_stable,
+        "crossingDecoderIds": crossing_decoder_ids,
         "decoderIdsAcrossFlip": decoder_ids_across_flip,
         "firstLastMae": first_last,
         "maxPairMae": max(pair) if pair else 0.0,
@@ -1281,9 +1300,10 @@ def score_restart_movie_from_observations(
     progression and at least one sample on ``sceneHash >= slide_min_hash`` with
     decoded width. The near-zero decoder must also be a genuine restart — it
     either first appears at/after the boundary, or was observed pre-boundary
-    with a clock clearly above ``near_zero_max_s`` before resetting — so a
-    decoder that merely happened to be near-zero while continuing across the
-    boundary does not pass.
+    with a clock clearly above ``near_zero_max_s`` and never near-zero before
+    resetting — so a decoder that merely happened to be near-zero while
+    continuing across the boundary does not pass, even if it was also seen
+    far from zero at some earlier point.
     """
     rows: list[dict[str, Any]] = []
     for raw in observations:
@@ -1348,9 +1368,14 @@ def score_restart_movie_from_observations(
     def _first_seen_at_boundary(dec_id: object) -> bool:
         return dec_id is not None and len(_pre_boundary_rows(dec_id)) == 0
 
+    def _has_pre_boundary_near_zero(dec_id: object) -> bool:
+        return any(float(r["t"]) < near_zero_max_s for r in _pre_boundary_rows(dec_id))
+
     def _backward_reset(dec_id: object) -> bool:
-        return dec_id is not None and any(
-            float(r["t"]) > backward_reset_min_s for r in _pre_boundary_rows(dec_id)
+        return (
+            dec_id is not None
+            and any(float(r["t"]) > backward_reset_min_s for r in _pre_boundary_rows(dec_id))
+            and not _has_pre_boundary_near_zero(dec_id)
         )
 
     def _genuine(dec_id: object) -> bool:
@@ -1438,13 +1463,16 @@ def score_restart_at_slide_boundary(
 
     ``per_movie`` maps asset key → {
       slide3ObsN, earliest: {t, w, ...}|None, nearZeroAtBoundary,
-      progressedAfterRestart, decodedWidthAtBoundary, ok
+      progressedAfterRestart, decodedWidthAtBoundary, presentedMotionOk, ok
     }.
 
     ``expected_keys`` is required (never derived from observed keys) — missing
     movies must not silently pass. Decoded width is always required so
     audio-only clocks cannot pass. Pre-boundary restart signals alone must
-    never pass.
+    never pass. ``currentTime``/width progression alone does not prove the
+    presented frame progresses — a caller must additionally attest
+    ``presentedMotionOk`` (target-footprint composed-ROI motion or rVFC
+    progression on the target slide), or that movie fails.
     """
     expected = [k for k in expected_keys if k]
     missing = [
@@ -1457,8 +1485,15 @@ def score_restart_at_slide_boundary(
         for k in expected
         if k not in missing and not bool((per_movie.get(k) or {}).get("decodedWidthAtBoundary"))
     ]
+    presented_motion_fail = [
+        k
+        for k in expected
+        if k not in missing and not bool((per_movie.get(k) or {}).get("presentedMotionOk"))
+    ]
     all_ok = bool(expected) and all(
-        bool((per_movie.get(k) or {}).get("ok")) for k in expected
+        bool((per_movie.get(k) or {}).get("ok"))
+        and bool((per_movie.get(k) or {}).get("presentedMotionOk"))
+        for k in expected
     )
     late = any(
         int((per_movie.get(k) or {}).get("slide3ObsN") or 0) > 0
@@ -1467,13 +1502,14 @@ def score_restart_at_slide_boundary(
         for k in expected
     )
     inconclusive = bool(
-        reached_slide and (missing or width_fail or (not all_ok and late))
+        reached_slide and (missing or width_fail or presented_motion_fail or (not all_ok and late))
     )
     ok = bool(
         reached_slide
         and expected
         and not missing
         and not width_fail
+        and not presented_motion_fail
         and all_ok
         and not canvas_all_identical
     )
@@ -1484,6 +1520,7 @@ def score_restart_at_slide_boundary(
         "expectedKeys": list(expected),
         "missingSlide3Media": missing,
         "missingDecodedWidth": width_fail,
+        "missingPresentedMotion": presented_motion_fail,
         "allMoviesOk": all_ok,
         "inconclusive": inconclusive,
     }

@@ -213,6 +213,29 @@ def _mae_rgb(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs(a[:, :, :3].astype(np.float64) - b[:, :, :3].astype(np.float64))))
 
 
+def _presented_time_advances(samples: list[dict], decoder_id: object, min_hash: int) -> dict:
+    """rVFC-presented mediaTime advancement for a decoder, on/after min_hash.
+
+    An alternate, pixel-independent signal for presentedMotionOk: the decoder
+    is genuinely presenting new frames even if the composed-ROI pixel check
+    is inconclusive (e.g. a still moment in the source pattern).
+    """
+    if decoder_id is None:
+        return {"ok": False, "reason": "no decoderId", "n": 0}
+    vals: list[float] = []
+    for s in samples:
+        hn = _hash_num(s.get("sceneHash"))
+        if hn is None or hn < min_hash:
+            continue
+        for v in s.get("videos") or []:
+            if v.get("decoderId") == decoder_id and v.get("presentedMediaTime") is not None:
+                vals.append(float(v["presentedMediaTime"]))
+    if len(vals) < 2:
+        return {"ok": False, "reason": "insufficient presented-time samples", "n": len(vals)}
+    advance = max(vals) - min(vals)
+    return {"ok": bool(advance > 0.05), "n": len(vals), "advance": advance}
+
+
 def _score_visible_movie_motion(frame_paths: list[Path], roi: tuple[int, int, int, int] = MOVIE_ROI) -> dict:
     """Require sustained composed movie ROI motion — clock-only / one cut is not enough."""
     if len(frame_paths) < 3:
@@ -504,7 +527,9 @@ async def _media_snapshot_with_pool(chrome: ChromeCdp) -> dict:
 
 
 def _pick_decoded_video(media: dict) -> dict | None:
-    """First video with a decoder id or decoded width — used to tag flip-scorer frames."""
+    """First video with a decoder id or decoded width. Legacy fallback only —
+    prefer _footprint_target, which picks the decoder that actually owns the
+    movie's on-screen footprint instead of whichever video happens first."""
     return next(
         (
             v
@@ -513,6 +538,48 @@ def _pick_decoded_video(media: dict) -> dict | None:
         ),
         None,
     )
+
+
+def _resolve_target_media(media: dict, decoder_id: object) -> dict | None:
+    """Decoded width / currentTime for a decoderId, across native videos + pool."""
+    if decoder_id is None:
+        return None
+    for v in media.get("videos") or []:
+        if v.get("decoderId") == decoder_id:
+            w = v.get("w") if v.get("w") is not None else v.get("videoWidth")
+            return {"w": w, "currentTime": v.get("currentTime")}
+    for p in media.get("preservePool") or []:
+        if p.get("elId") == decoder_id:
+            return {"w": p.get("videoWidth"), "currentTime": p.get("currentTime")}
+    return None
+
+
+async def _footprint_target(chrome: ChromeCdp, media: dict, roi: tuple[int, int, int, int]) -> dict:
+    """Decoder that currently owns the movie footprint (active texture-feed
+    canvas first, else the positioned <video> overlapping it most) — stable
+    across the Magic Move cut so score_motion_across_flip's crossing-decoder
+    check reflects the actual target movie, not whichever video happened
+    to be first in the DOM.
+    """
+    x, y, w, h = roi
+    owner = await chrome.evaluate(
+        "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId "
+        f"? window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId({{x:{x}, y:{y}, w:{w}, h:{h}}}) "
+        ": {elId: null, via: 'unavailable'}"
+    ) or {"elId": None, "via": "unavailable"}
+    decoder_id = owner.get("elId")
+    resolved = _resolve_target_media(media, decoder_id)
+    if resolved is not None:
+        return {"decoderId": decoder_id, "w": resolved.get("w"), "via": owner.get("via")}
+    # PRESERVE_SCRIPT missing/stale or nothing positioned yet — fall back.
+    fallback = _pick_decoded_video(media)
+    if fallback is not None:
+        return {
+            "decoderId": fallback.get("decoderId"),
+            "w": fallback.get("w"),
+            "via": "fallback-first-decoded",
+        }
+    return {"decoderId": None, "w": None, "via": owner.get("via", "none")}
 
 
 async def _pre_advance_frames(
@@ -536,7 +603,7 @@ async def _pre_advance_frames(
                 "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
             )
         )
-        vid = _pick_decoded_video(media)
+        target = await _footprint_target(chrome, media, MOVIE_ROI)
         frames.append(
             {
                 "name": name,
@@ -544,8 +611,9 @@ async def _pre_advance_frames(
                 "empty": _score_empty(arr),
                 "sceneHash": scene_hash,
                 "captureOffsetS": capture_wall - click_wall,
-                "decoderId": vid.get("decoderId") if vid else None,
-                "w": vid.get("w") if vid else None,
+                "decoderId": target.get("decoderId"),
+                "w": target.get("w"),
+                "targetVia": target.get("via"),
             }
         )
         if gap_s > 0:
@@ -582,7 +650,7 @@ async def _dense_after_click(
                     "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
                 )
             )
-            vid = _pick_decoded_video(media)
+            target = await _footprint_target(chrome, media, MOVIE_ROI)
             frames.append(
                 {
                     "name": name,
@@ -590,8 +658,9 @@ async def _dense_after_click(
                     "empty": _score_empty(arr),
                     "sceneHash": scene_hash,
                     "captureOffsetS": capture_wall - click_wall,
-                    "decoderId": vid.get("decoderId") if vid else None,
-                    "w": vid.get("w") if vid else None,
+                    "decoderId": target.get("decoderId"),
+                    "w": target.get("w"),
+                    "targetVia": target.get("via"),
                 }
             )
         if sample_decoder and (i % 8 == 0 or i == n - 1) and len(decoder_frames) < 6:
@@ -1084,7 +1153,8 @@ async def _run(player: Path) -> dict:
               if (!p) return [];
               const keep = [
                 'reuse-skip-boundary', 'retire-on-start-movie', 'pool-cleared',
-                'reuse-decoder', 'createElement-video'
+                'reuse-decoder', 'createElement-video',
+                'texture-feed-start', 'texture-feed-stop'
               ];
               const important = p.events.filter((e) => keep.indexOf(e.kind) >= 0);
               const remounts = p.events.filter((e) => e.kind === 'remount-done').slice(-20);
@@ -1126,6 +1196,9 @@ async def _run(player: Path) -> dict:
         reached_slide3 = (_hash_num(hash3) or -1) >= SLIDE3_MIN_HASH
         # Fixed expected keys — never derive solely from what happened to be observed.
         intended_keys = list(EXPECTED_MOVIE_KEYS)
+        # Composed-ROI motion on slide 3 — same footprint/scorer as the 1->2 check,
+        # applied to the restart window's dense frames.
+        restart_pixel_motion = _score_visible_movie_motion(restart_paths, MOVIE_ROI)
         per_movie_boundary: dict[str, dict] = {}
         for key in intended_keys:
             obs = []
@@ -1149,6 +1222,17 @@ async def _run(player: Path) -> dict:
                 progression_wall_s=PROGRESSION_WALL_S,
                 progression_media_s=PROGRESSION_MEDIA_S,
             )
+            # presentedMotionOk: footprint-ROI pixel motion OR rVFC-presented
+            # mediaTime advancement for the movie's own restart decoder.
+            restart_decoder_id = per_movie_boundary[key].get("restartDecoderId")
+            presented_rvfc = _presented_time_advances(samples_b, restart_decoder_id, SLIDE3_MIN_HASH)
+            per_movie_boundary[key]["presentedMotionOk"] = bool(
+                restart_pixel_motion.get("ok") or presented_rvfc.get("ok")
+            )
+            per_movie_boundary[key]["presentedMotionDetail"] = {
+                "pixelMotion": restart_pixel_motion,
+                "rvfcAdvance": presented_rvfc,
+            }
         boundary = score_restart_at_slide_boundary(
             reached_slide=reached_slide3,
             per_movie=per_movie_boundary,
