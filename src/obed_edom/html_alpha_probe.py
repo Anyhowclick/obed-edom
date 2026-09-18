@@ -1175,9 +1175,16 @@ def score_restart_movie_from_observations(
     for r in rows:
         by_dec.setdefault(r.get("decoderId"), []).append(r)
 
-    # Prefer a near-zero decoder that also appears on the target slide.
-    chosen_id: object | None = None
-    near_zero_row: dict[str, Any] | None = None
+    def _first_progression(series: list[dict[str, Any]], ref: dict[str, Any]) -> bool:
+        for row in series:
+            wall_dt = float(row["captureOffsetS"]) - float(ref["captureOffsetS"])
+            media_dt = float(row["t"]) - float(ref["t"])
+            if wall_dt >= progression_wall_s and media_dt >= progression_media_s:
+                return True
+        return False
+
+    # One boundary near-zero candidate per decoder — its own earliest near-zero on-slide sample.
+    candidates: list[tuple[object, dict[str, Any], list[dict[str, Any]]]] = []
     for dec_id, series in by_dec.items():
         series_sorted = sorted(series, key=lambda r: float(r["captureOffsetS"]))
         hit = next(
@@ -1190,20 +1197,22 @@ def score_restart_movie_from_observations(
             ),
             None,
         )
-        if hit is None:
-            continue
-        on_slide = any((_hash_num(r.get("sceneHash")) or -1) >= slide_min_hash for r in series)
-        if near_zero_row is None or on_slide:
-            chosen_id = dec_id
-            near_zero_row = hit
-            if on_slide:
-                break
+        if hit is not None:
+            candidates.append((dec_id, hit, series))
 
-    series = list(by_dec.get(chosen_id, [])) if near_zero_row is not None else []
+    # Prefer an identified decoder that both near-zeros and progresses; a stalled candidate
+    # appearing first must not mask a genuine restart in another decoder.
+    chosen = next(
+        ((d, h, s) for d, h, s in candidates if d is not None and _first_progression(s, h)),
+        None,
+    ) or next(iter(candidates), None)
+    chosen_id: object | None = chosen[0] if chosen else None
+    near_zero_row: dict[str, Any] | None = chosen[1] if chosen else None
+    series = list(chosen[2]) if chosen else []
     slide3_series = [
         r for r in series if (_hash_num(r.get("sceneHash")) or -1) >= slide_min_hash
     ]
-    # Fallback: no decoderId grouping — use min-t among width>0 on slide 3.
+    # Fallback: no boundary near-zero decoder — surface slide-3 evidence for reporting only.
     if near_zero_row is None and slide3:
         with_w = [r for r in slide3 if (r.get("w") or 0) > 0]
         pool = with_w or slide3
@@ -1211,14 +1220,13 @@ def score_restart_movie_from_observations(
         slide3_series = slide3
         series = slide3
 
-    progressed = False
-    if near_zero_row is not None:
-        for row in series:
-            wall_dt = float(row["captureOffsetS"]) - float(near_zero_row["captureOffsetS"])
-            media_dt = float(row["t"]) - float(near_zero_row["t"])
-            if wall_dt >= progression_wall_s and media_dt >= progression_media_s:
-                progressed = True
-                break
+    # Progression must be attributable to one identified decoder — id-less rows can mix a
+    # stalled decoder with a different continued one, which is not a restart.
+    progressed = bool(
+        near_zero_row is not None
+        and chosen_id is not None
+        and _first_progression(series, near_zero_row)
+    )
 
     decoded = bool(slide3_series) and any((r.get("w") or 0) > 0 for r in slide3_series)
     near_zero = bool(near_zero_row and float(near_zero_row["t"]) < near_zero_max_s)

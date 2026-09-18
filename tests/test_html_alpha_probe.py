@@ -730,3 +730,38 @@ def test_restart_movie_accepts_near_zero_observed_on_boundary_slide():
     assert scored["slide3ObsN"] >= 1
 
 
+def test_restart_movie_prefers_progressing_decoder_over_stalled_first():
+    """A stalled boundary decoder listed first must not mask a genuine restart in
+    another decoder that near-zeros and progresses (competing-candidate control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        # Decoder 1: near-zero on the boundary but stalls (single sample, no progression).
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 1},
+        # Decoder 2: near-zero on the boundary and progresses with wall/media spacing.
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 2},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.4, "sceneHash": "#6", "decoderId": 2},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 2
+    assert scored["progressedAfterRestart"] is True
+    assert scored["ok"] is True
+
+
+def test_restart_movie_idless_rows_do_not_mix_into_a_pass():
+    """Without decoderId, a stalled near-zero row and a different continued row must
+    not be stitched into a single restart+progression (id-less null control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 0.02, "w": 1920, "captureOffsetS": 1.0, "sceneHash": "#6"},
+        {"t": 12.0, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6"},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["nearZeroAtBoundary"] is True
+    assert scored["progressedAfterRestart"] is False
+    assert scored["ok"] is False
+
+

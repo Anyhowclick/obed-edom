@@ -400,7 +400,7 @@ async def _run() -> dict:
             d_mid = np.array(Image.open(ok_dec[-1]["path"]))
             mid_match = _composed_vs_decoder_mae(mid_roi, d_mid)
         visible_colour_through_mm = bool(
-            hash2 != _norm_hash(live_hash)
+            hash2 != hash0_a
             and mid_bars.get("ok")
             and visible_mm.get("ok")
             and mid_match.get("ok")
