@@ -940,6 +940,37 @@ def test_motion_across_flip_accepts_matching_expected_key_at_crossing():
     assert scored["ok"] is True
     assert scored["crossingKeyOk"] is True
     assert scored["crossingMovieKeys"] == ["movie1.mov", "movie1.mov"]
+    assert scored["windowKeyOk"] is True
+    assert scored["afterDecoderStable"] is True
+
+
+def test_motion_across_flip_rejects_decoder_handoff_later_in_after_window():
+    """The crossing itself is a stable, correctly-keyed decoder, but it hands
+    off to a different decoder later within the after-window (same movieKey
+    throughout) — this must not pass as continuous target-decoder motion
+    (Round-4 Codex repro: decoderId sequence [1,1,1,1,2,2] around the flip).
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(80, "#6", 0.4, decoder_id=2, movie_key="movie1.mov"),
+        _motion_sample(100, "#6", 0.5, decoder_id=2, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoderStable"] is True
+    assert scored["crossingKeyOk"] is True
+    assert scored["windowKeyOk"] is True
+    assert scored["afterDecoderIds"] == [1, 2, 2]
+    assert scored["afterDecoderStable"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "after-flip decoder switched"
 
 
 def test_motion_across_flip_rejects_wrong_movie_key_at_crossing():
@@ -1146,5 +1177,129 @@ def test_visible_movie_motion_max_still_run_gate():
     )
     assert scored_gated["ok"] is False
     assert scored_gated["maxStillRun"] > 4
+
+
+def _index_sample(index, scene_hash: str, offset: float = 0.0):
+    return {"index": index, "sceneHash": scene_hash, "captureOffsetS": offset}
+
+
+def test_composited_index_run_accepts_monotonic_advance_across_flip():
+    """Positive control: decoded index advances steadily through the cut."""
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(10, "#5", 0.0),
+        _index_sample(11, "#5", 0.1),
+        _index_sample(12, "#5", 0.2),
+        _index_sample(13, "#6", 0.3),
+        _index_sample(14, "#6", 0.4),
+        _index_sample(15, "#6", 0.5),
+    ]
+    scored = score_composited_index_run(samples, flip_index=3)
+    assert scored["ok"] is True
+    assert scored["freezeRunAtCut"] <= 2
+    assert scored["negativeAnomaly"] is False
+
+
+def test_composited_index_run_rejects_freeze_at_cut():
+    """A poster freeze straddling the cut must fail even though the sequence
+    advances cleanly before and after it.
+    """
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(18, "#5", 0.0),
+        _index_sample(19, "#5", 0.1),
+        _index_sample(20, "#5", 0.2),
+        _index_sample(21, "#5", 0.3),
+        _index_sample(21, "#6", 0.4),
+        _index_sample(21, "#6", 0.5),
+        _index_sample(21, "#6", 0.6),
+        _index_sample(22, "#6", 0.7),
+        _index_sample(23, "#6", 0.8),
+    ]
+    scored = score_composited_index_run(samples, flip_index=4)
+    assert scored["ok"] is False
+    assert scored["freezeRunAtCut"] > 2
+    assert scored["reason"] == "freeze run at cut"
+
+
+def test_composited_index_run_accepts_wraparound():
+    """A mod-``modulo`` wrap is forward progress, not a negative anomaly."""
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(252, "#5", 0.0),
+        _index_sample(253, "#5", 0.1),
+        _index_sample(254, "#5", 0.2),
+        _index_sample(255, "#5", 0.3),
+        _index_sample(0, "#6", 0.4),
+        _index_sample(1, "#6", 0.5),
+    ]
+    scored = score_composited_index_run(samples, flip_index=4)
+    assert scored["ok"] is True
+    assert scored["negativeAnomaly"] is False
+
+
+def test_composited_index_run_rejects_negative_anomaly():
+    """A drop beyond half the modulo is a restart/poster-swap, not a wrap."""
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(38, "#5", 0.0),
+        _index_sample(39, "#5", 0.1),
+        _index_sample(40, "#5", 0.2),
+        _index_sample(41, "#5", 0.3),
+        _index_sample(5, "#6", 0.4),
+        _index_sample(6, "#6", 0.5),
+        _index_sample(7, "#6", 0.6),
+        _index_sample(8, "#6", 0.7),
+    ]
+    scored = score_composited_index_run(samples, flip_index=2)
+    assert scored["ok"] is False
+    assert scored["negativeAnomaly"] is True
+    assert scored["reason"] == "negative delta anomaly"
+
+
+def test_composited_index_run_rejects_none_in_flip_window():
+    """An undecodable sample inside the flip window must fail closed."""
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(10, "#5", 0.0),
+        _index_sample(11, "#5", 0.1),
+        _index_sample(None, "#6", 0.2),
+        _index_sample(13, "#6", 0.3),
+        _index_sample(14, "#6", 0.4),
+        _index_sample(15, "#6", 0.5),
+    ]
+    scored = score_composited_index_run(samples, flip_index=2)
+    assert scored["ok"] is False
+    assert scored["reason"] == "undecodable in flip window"
+
+
+def test_composited_index_run_baseline_freeze_does_not_gate_clean_cut():
+    """Only the cut window gates: a freeze elsewhere in the run must not fail
+    a sequence that is clean across the flip itself.
+    """
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(5, "#5", 0.0),
+        _index_sample(5, "#5", 0.1),
+        _index_sample(5, "#5", 0.2),
+        _index_sample(5, "#5", 0.3),
+        _index_sample(5, "#5", 0.4),
+        _index_sample(6, "#5", 0.5),
+        _index_sample(7, "#5", 0.6),
+        _index_sample(8, "#5", 0.7),
+        _index_sample(9, "#6", 0.8),
+        _index_sample(10, "#6", 0.9),
+        _index_sample(11, "#6", 1.0),
+    ]
+    scored = score_composited_index_run(samples, flip_index=8)
+    assert scored["ok"] is True
+    assert scored["freezeRunBaseline"] > 2
+    assert scored["freezeRunAtCut"] <= 2
 
 

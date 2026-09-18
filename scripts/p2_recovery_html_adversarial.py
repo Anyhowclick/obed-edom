@@ -49,6 +49,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
     file_identity,
     inventory_deck,
+    score_composited_index_run,
     score_motion_across_flip,
     score_playback_continuity,
     score_restart_at_slide_boundary,
@@ -84,6 +85,18 @@ GREEN_FRONT_ROI = (820, 810, 160, 120)   # green square ∩ movie -> translucent
 EMPTY_CORNERS = ((1864, 8, 48, 48), (1864, 1024, 48, 48))  # right side stays emptier after MM
 # Large continuing movie footprint on slide 1 (inventory). Center is unobscured.
 MOVIE_ROI = (109, 795, 952, 268)
+# The disposable movie's frame-index stimulus patch occupies the top-left
+# 120x48 of its 1920x540 source; map it to screen space via the movie's own
+# footprint fraction (see _write_h264_pattern in p2_recovery_html_dissolve_live.py).
+# Inset well inside the ~60x24 on-screen patch: the full mapped size spills past
+# the patch's bottom-right edge into the high-contrast grating (std explodes ->
+# the neutrality gate rejects it). A shrunk inner ROI stays flat (std ~0).
+INDEX_PATCH_ROI = (
+    MOVIE_ROI[0] + 2,
+    MOVIE_ROI[1],
+    max(1, round(MOVIE_ROI[2] * 120 / 1920) - 18),
+    max(1, round(MOVIE_ROI[3] * 48 / 540) - 10),
+)
 # HTML event index where slide 3 begins (2 + 4 events before it → scene #6).
 SLIDE3_MIN_HASH = 6
 # Fixed expected movie keys for restart evidence (not derived from observations).
@@ -120,6 +133,116 @@ def _crop(arr: np.ndarray, xywh: tuple[int, int, int, int]) -> np.ndarray:
     return arr[y0:y1, x0:x1]
 
 
+def _decode_index_patch(arr: np.ndarray, roi: tuple[int, int, int, int] = INDEX_PATCH_ROI) -> int | None:
+    """Decode the frame-index stimulus patch off a composite screenshot.
+
+    None if the mapped ROI isn't a flat neutral patch (composite not settled,
+    ROI mislocated, or occluded) — never guess a value from noisy pixels.
+    """
+    patch = _crop(arr, roi)
+    if patch.size == 0:
+        return None
+    rgb = patch[:, :, :3].astype(np.float64)
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    if max(float(r.std()), float(g.std()), float(b.std())) > 8:
+        return None
+    if max(float(np.abs(r - g).max()), float(np.abs(g - b).max())) > 12:
+        return None
+    return int(round(float(rgb.mean())))
+
+
+def _extract_movie_texids(
+    events: object,
+    footprint_wh: tuple[float, float] | None = None,
+    tol: float = 30.0,
+) -> set[str]:
+    """Walk a slide-UUID JSON's `events` tree for ONE movie's texture ids.
+
+    Two structural signatures, unioned (either may carry the ids depending on
+    whether the movie is mid-crossfade at this event boundary): a layer
+    flagged `isVideoLayer` (its steady-state decoded texture), and any
+    animation with `property == "contents"` (the MM poster crossfade's
+    from/to textures — the two stacked canvases the player builds at the cut).
+
+    Both signatures are gated by `footprint_wh` (the target movie's on-screen
+    w/h, e.g. MOVIE_ROI's) matched against the enclosing layer's own
+    `initialState` width/height — the deck has more than one movie, and a
+    plain structural match alone would also pick up the OTHER movie's layer.
+    `footprint_wh=None` disables the gate (matches any size).
+    """
+    texids: set[str] = set()
+
+    def size_matches(size: tuple[float, float] | None) -> bool:
+        if footprint_wh is None:
+            return True
+        if size is None:
+            return False
+        return abs(size[0] - footprint_wh[0]) <= tol and abs(size[1] - footprint_wh[1]) <= tol
+
+    def walk(o: object, layer_size: tuple[float, float] | None) -> None:
+        if isinstance(o, dict):
+            size = layer_size
+            init = o.get("initialState")
+            if isinstance(init, dict) and isinstance(init.get("width"), (int, float)) and isinstance(
+                init.get("height"), (int, float)
+            ):
+                size = (init["width"], init["height"])
+            if o.get("isVideoLayer") and o.get("texture") and size_matches(size):
+                texids.add(o["texture"])
+            if o.get("property") == "contents" and size_matches(size):
+                frm = (o.get("from") or {}).get("texture")
+                to = (o.get("to") or {}).get("texture")
+                # A genuine MM crossfade swaps texture; from==to is a same-texture
+                # animation on an unrelated layer (e.g. a background opacity tween)
+                # that happens to use the "contents" property, not a movie poster.
+                if frm and to and frm != to:
+                    texids.add(frm)
+                    texids.add(to)
+            for v in o.values():
+                walk(v, size)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, layer_size)
+
+    walk(events, None)
+    return texids
+
+
+def _derive_movie_texids(
+    player_dir: Path, footprint_wh: tuple[float, float] = (MOVIE_ROI[2], MOVIE_ROI[3])
+) -> dict:
+    """Derive the continuing (footprint_wh-sized) movie's texture ids from every
+    slide-UUID JSON under the export, generically (no hardcoded slide UUID).
+
+    Unions isVideoLayer + contents-crossfade texture ids across ALL slides
+    rather than guessing which one slide's JSON stores the 1->2 boundary's
+    data — empirically (this deck) that does not follow slideList order 1:1.
+    The size gate in _extract_movie_texids (matched against the enclosing
+    layer's own initialState) keeps a whole-deck scan from also picking up a
+    differently-sized OTHER movie's layer.
+    """
+    header_path = player_dir / "assets" / "header.json"
+    try:
+        header = json.loads(header_path.read_text())
+    except Exception as e:  # noqa: BLE001
+        return {"texids": [], "warning": f"header read failed: {e}"}
+    slide_list = header.get("slideList") or []
+
+    texids: set[str] = set()
+    scanned = []
+    for uuid in slide_list:
+        path = player_dir / "assets" / uuid / f"{uuid}.json"
+        if not path.is_file():
+            continue
+        scanned.append(uuid)
+        try:
+            data = json.loads(path.read_text())
+        except Exception:  # noqa: BLE001
+            continue
+        texids |= _extract_movie_texids(data.get("events") or [], footprint_wh=footprint_wh)
+    return {"texids": sorted(texids), "scannedSlideUuids": scanned, "slideList": slide_list}
+
+
 def _score_black(arr: np.ndarray, roi: tuple[int, int, int, int]) -> dict:
     patch = _crop(arr, roi)
     if patch.size == 0:
@@ -150,6 +273,70 @@ def _score_green(arr: np.ndarray, roi: tuple[int, int, int, int] = GREEN_ROI_S1)
         "partial": partial,
         "greenish": greenish,
         "shape": list(patch.shape[:2]),
+    }
+
+
+def _score_green_front_composite(
+    composite: np.ndarray,
+    roi: tuple[int, int, int, int],
+    footprint: tuple[int, int, int, int],
+    source: np.ndarray | None,
+) -> dict:
+    """Prove the green square is IN FRONT of the movie by diffing the composite
+    against the movie1 decoder's OWN source pixels for the same mapped region.
+
+    A standalone "is this ROI greenish" test is satisfied by the movie's own
+    green content even with the square BEHIND it. If the translucent green
+    square (~75/255 alpha) is genuinely in front, compositing green-over-movie
+    must shift the region toward green and away from red relative to the raw
+    source; if it's behind, composite == source and the deltas are ~0.
+    Fails closed (ok=False) if the decoder source can't be sampled — no
+    fallback to the standalone greenish test.
+    """
+    comp_patch = _crop(composite, roi)
+    if comp_patch.size == 0:
+        return {"ok": False, "reason": "empty composite crop"}
+    comp_rgb = comp_patch[:, :, :3].astype(np.float64).reshape(-1, 3).mean(axis=0)
+    if source is None or source.size == 0:
+        return {
+            "ok": False,
+            "reason": "no decoder source sample",
+            "compositeRGB": comp_rgb.tolist(),
+            "sourceRGB": None,
+            "dG": None,
+            "dR": None,
+        }
+    fx, fy, fw, fh = footprint
+    gx, gy, gw, gh = roi
+    nx0, ny0 = (gx - fx) / fw, (gy - fy) / fh
+    nw, nh = gw / fw, gh / fh
+    sh, sw = source.shape[:2]
+    x0, y0 = max(0, int(round(nx0 * sw))), max(0, int(round(ny0 * sh)))
+    x1, y1 = min(sw, int(round((nx0 + nw) * sw))), min(sh, int(round((ny0 + nh) * sh)))
+    source_patch = source[y0:y1, x0:x1]
+    if source_patch.size == 0:
+        return {
+            "ok": False,
+            "reason": "empty mapped source crop",
+            "compositeRGB": comp_rgb.tolist(),
+            "sourceRGB": None,
+            "dG": None,
+            "dR": None,
+            "mappedRect": [x0, y0, x1, y1],
+        }
+    source_rgb = source_patch[:, :, :3].astype(np.float64).reshape(-1, 3).mean(axis=0)
+    dG = float(comp_rgb[1] - source_rgb[1])
+    dR = float(comp_rgb[0] - source_rgb[0])
+    greenish = bool(comp_rgb[1] > comp_rgb[0] + 15)
+    ok = bool(dG >= 20 and dR < 0 and greenish)
+    return {
+        "ok": ok,
+        "compositeRGB": comp_rgb.tolist(),
+        "sourceRGB": source_rgb.tolist(),
+        "dG": dG,
+        "dR": dR,
+        "greenish": greenish,
+        "mappedRect": [x0, y0, x1, y1],
     }
 
 
@@ -184,12 +371,16 @@ def _times(samples: list[dict], key: str = "primary") -> list[float | None]:
         elif key == "min":
             out.append(min(times) if times else None)
         else:
-            hit = None
-            for v in vids:
-                if _movie_key(v.get("src") or "") == key:
-                    hit = v.get("currentTime")
-                    break
-            out.append(hit)
+            # Max currentTime AMONG videos of this key — a pooled/fresh same-key
+            # instance can sit at 0 and be listed first; the advancing DOM decoder
+            # is the movie's real playback clock. Still bound to THIS movie's key
+            # (not the global max across other movies).
+            hits = [
+                float(v["currentTime"])
+                for v in vids
+                if _movie_key(v.get("src") or "") == key and v.get("currentTime") is not None
+            ]
+            out.append(max(hits) if hits else None)
     return out
 
 
@@ -610,27 +801,43 @@ async def _pre_advance_frames(
     frames: list[dict] = []
     for i in range(n):
         media = await _media_snapshot_with_pool(chrome)
-        capture_wall = time.monotonic()
-        arr = await chrome.screenshot()
-        name = f"{prefix}-pre{i:02d}.png"
-        Image.fromarray(arr).save(run_dir / name)
-        scene_hash = _norm_hash(
+        # Bracket the screenshot: read sceneHash + footprint owner both before AND
+        # after so a flip mid-capture can be detected instead of silently mislabeling
+        # a post-flip frame with pre-flip (or vice versa) identity metadata.
+        scene_hash_before = _norm_hash(
             await chrome.evaluate(
                 "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
             )
         )
-        target = await _footprint_target(chrome, media, MOVIE_ROI)
+        target_before = await _footprint_target(chrome, media, MOVIE_ROI)
+        capture_wall = time.monotonic()
+        arr = await chrome.screenshot()
+        name = f"{prefix}-pre{i:02d}.png"
+        Image.fromarray(arr).save(run_dir / name)
+        scene_hash_after = _norm_hash(
+            await chrome.evaluate(
+                "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+            )
+        )
+        target_after = await _footprint_target(chrome, media, MOVIE_ROI)
+        bracket_consistent = bool(
+            scene_hash_before == scene_hash_after
+            and target_before.get("decoderId") == target_after.get("decoderId")
+            and target_before.get("movieKey") == target_after.get("movieKey")
+        )
         frames.append(
             {
                 "name": name,
                 "i": -(n - i),
                 "empty": _score_empty(arr),
-                "sceneHash": scene_hash,
+                "sceneHash": scene_hash_after,
                 "captureOffsetS": capture_wall - click_wall,
-                "decoderId": target.get("decoderId"),
-                "w": target.get("w"),
-                "movieKey": target.get("movieKey"),
-                "targetVia": target.get("via"),
+                "decoderId": target_after.get("decoderId") if bracket_consistent else None,
+                "w": target_after.get("w") if bracket_consistent else None,
+                "movieKey": target_after.get("movieKey") if bracket_consistent else None,
+                "targetVia": target_after.get("via"),
+                "bracketConsistent": bracket_consistent,
+                "index": _decode_index_patch(arr),
             }
         )
         if gap_s > 0:
@@ -659,26 +866,41 @@ async def _dense_after_click(
         media = await _media_snapshot_with_pool(chrome)
         do_shot = i % 2 == 0 or i == n - 1
         if do_shot:
-            arr = await chrome.screenshot()
-            name = f"{prefix}-t{i:03d}.png"
-            Image.fromarray(arr).save(run_dir / name)
-            scene_hash = _norm_hash(
+            # Bracket the screenshot (see _pre_advance_frames) so a flip mid-capture
+            # is detected rather than silently mislabeling the frame.
+            scene_hash_before = _norm_hash(
                 await chrome.evaluate(
                     "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
                 )
             )
-            target = await _footprint_target(chrome, media, MOVIE_ROI)
+            target_before = await _footprint_target(chrome, media, MOVIE_ROI)
+            arr = await chrome.screenshot()
+            name = f"{prefix}-t{i:03d}.png"
+            Image.fromarray(arr).save(run_dir / name)
+            scene_hash_after = _norm_hash(
+                await chrome.evaluate(
+                    "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+                )
+            )
+            target_after = await _footprint_target(chrome, media, MOVIE_ROI)
+            bracket_consistent = bool(
+                scene_hash_before == scene_hash_after
+                and target_before.get("decoderId") == target_after.get("decoderId")
+                and target_before.get("movieKey") == target_after.get("movieKey")
+            )
             frames.append(
                 {
                     "name": name,
                     "i": i,
                     "empty": _score_empty(arr),
-                    "sceneHash": scene_hash,
+                    "sceneHash": scene_hash_after,
                     "captureOffsetS": capture_wall - click_wall,
-                    "decoderId": target.get("decoderId"),
-                    "w": target.get("w"),
-                    "movieKey": target.get("movieKey"),
-                    "targetVia": target.get("via"),
+                    "decoderId": target_after.get("decoderId") if bracket_consistent else None,
+                    "w": target_after.get("w") if bracket_consistent else None,
+                    "movieKey": target_after.get("movieKey") if bracket_consistent else None,
+                    "targetVia": target_after.get("via"),
+                    "bracketConsistent": bracket_consistent,
+                    "index": _decode_index_patch(arr),
                 }
             )
         if sample_decoder and (i % 8 == 0 or i == n - 1) and len(decoder_frames) < 6:
@@ -889,6 +1111,13 @@ async def _run(player: Path) -> dict:
     try:
         boot = await _boot(chrome, base)
         await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
+        # Derive the continuing movie's texture ids (see PRESERVE_SCRIPT's
+        # pre-paint MutationObserver) and inject before the 1->2 advance.
+        texids_info = _derive_movie_texids(player_dir)
+        write_json(OUT / "movie-texids.json", texids_info)
+        await chrome.evaluate(
+            f"window.__OBED_MOVIE_TEXIDS__ = {json.dumps(texids_info.get('texids') or [])}"
+        )
         await asyncio.sleep(wait_profile["clickDelayS"])
         media_pre = await _media_snapshot_with_pool(chrome)
         pre = await chrome.screenshot()
@@ -951,6 +1180,25 @@ async def _run(player: Path) -> dict:
         method_a = f"arrow-nonblocking:{hash1}->{hash2}"
         mid = await chrome.screenshot()
         Image.fromarray(mid).save(run_dir / "after-1to2.png")
+        # Sample the movie1 decoder's OWN frame (not the composite) as close to the
+        # mid screenshot as possible, to prove the green square composites IN FRONT
+        # of it rather than just "this ROI looks greenish" (which the movie's own
+        # green content can satisfy on its own).
+        media_for_green = await _media_snapshot_with_pool(chrome)
+        green_target = await _footprint_target(chrome, media_for_green, MOVIE_ROI)
+        green_decoder_id = green_target.get("decoderId")
+        green_source_arr: np.ndarray | None = None
+        if green_decoder_id is not None:
+            green_sample = await chrome.evaluate(
+                "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.sampleFrame "
+                f"? window.__OBED_P2_PRESERVE__.sampleFrame({int(green_decoder_id)}) : {{ok: false}}"
+            )
+            if green_sample and green_sample.get("ok") and green_sample.get("dataURL"):
+                raw = green_sample["dataURL"].split(",", 1)[-1]
+                green_source_arr = np.array(
+                    Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGB")
+                )
+                Image.fromarray(green_source_arr).save(run_dir / "green-front-source.jpg")
         mid_scores = {
             "empty": _score_empty(mid),
             "black": _score_black_auto(mid),
@@ -960,10 +1208,19 @@ async def _run(player: Path) -> dict:
             "blackAbove": _score_black(mid, BLACK_ABOVE_ROI),
             "blackBehind": _score_black(mid, BLACK_BEHIND_ROI),
             "greenFront": _score_green(mid, GREEN_FRONT_ROI),
+            "greenFrontComposite": _score_green_front_composite(
+                mid, GREEN_FRONT_ROI, MOVIE_ROI, green_source_arr
+            ),
         }
 
+        # Bind continuity to the TARGET (movie1) decoder's own clock, not "primary"
+        # (max currentTime across ALL videos) — movie2 running alongside must not be
+        # able to supply continuity while movie1 itself hands off or restarts.
+        primary_times_a = _times(samples_a, "primary")
+        min_times_a = _times(samples_a, "min")
+        target_times_a = _times(samples_a, EXPECTED_MOVIE_KEYS[0])
         cont = score_playback_continuity(
-            _times(samples_a, "primary"),
+            target_times_a,
             click_i=0,
             capture_offsets=_caps(samples_a),
             dissolve_s=TRANS_S,
@@ -971,6 +1228,9 @@ async def _run(player: Path) -> dict:
         )
         mm_paths = sorted(run_dir.glob("mm12-t*.png"))
         visible_motion = _score_visible_movie_motion(mm_paths, MOVIE_ROI)
+        capture_race_frames_a = sum(
+            1 for f in [*pre_frames_a, *frames_a] if f.get("bracketConsistent") is False
+        )
         flip_samples = []
         for f in [*pre_frames_a, *frames_a]:
             if f.get("sceneHash") is None:
@@ -989,6 +1249,29 @@ async def _run(player: Path) -> dict:
         motion_across_flip = score_motion_across_flip(
             flip_samples, start_hash=hash1, expected_key=EXPECTED_MOVIE_KEYS[0]
         )
+        # Composited-freeze check: decode the frame-index patch off every dense
+        # capture and confirm it keeps progressing across the MM cut, rather than
+        # sticking on the newborn canvas's stale poster frame for 1-2 frames.
+        index_samples = [
+            {
+                "index": f.get("index"),
+                "sceneHash": f.get("sceneHash"),
+                "captureOffsetS": f.get("captureOffsetS"),
+            }
+            for f in [*pre_frames_a, *frames_a]
+        ]
+        flip_index = next(
+            (
+                i
+                for i, s in enumerate(index_samples)
+                if s["sceneHash"] is not None and s["sceneHash"] != hash1
+            ),
+            None,
+        )
+        if flip_index is None:
+            index_run = {"ok": False, "reason": "no scene-hash flip observed in dense window"}
+        else:
+            index_run = score_composited_index_run(index_samples, flip_index=flip_index)
         decoder_motion: dict = {"ok": False, "n": 0, "attempts": len(decoder_frames)}
         ok_frames = [d for d in decoder_frames if d.get("path")]
         if len(ok_frames) >= 2:
@@ -1179,11 +1462,13 @@ async def _run(player: Path) -> dict:
               const keep = [
                 'reuse-skip-boundary', 'retire-on-start-movie', 'pool-cleared',
                 'reuse-decoder', 'createElement-video',
-                'texture-feed-start', 'texture-feed-stop'
+                'texture-feed-start', 'texture-feed-stop',
+                'player-build-error', 'mo-prepaint-draw', 'mo-no-stage'
               ];
               const important = p.events.filter((e) => keep.indexOf(e.kind) >= 0);
               const remounts = p.events.filter((e) => e.kind === 'remount-done').slice(-20);
-              return important.concat(remounts);
+              const moNoTexids = p.events.filter((e) => e.kind === 'mo-no-texids').slice(-5);
+              return important.concat(remounts).concat(moNoTexids);
             })()"""
         ) or []
         clear_i = next(
@@ -1313,6 +1598,8 @@ async def _run(player: Path) -> dict:
     after = file_identity(SOURCE)
     write_json(OUT / "fingerprints-after.json", after.as_dict())
 
+    player_build_errors = [e for e in preserve_events if e.get("kind") == "player-build-error"]
+
     findings = [
         {"id": "sourceUnchanged", "pass": after.as_dict() == before.as_dict()},
         {"id": "emptyCanvasPre", "pass": pre_scores["empty"]["ok"], "detail": pre_scores["empty"]},
@@ -1320,12 +1607,14 @@ async def _run(player: Path) -> dict:
         {"id": "greenTranslucentPre", "pass": pre_scores["green"]["ok"], "detail": pre_scores["green"]},
         {
             "id": "continueThroughMagicMove1to2",
-            "pass": (
-                bool(cont.get("continuesThroughDissolve"))
+            "pass": bool(
+                cont.get("continuesThroughDissolve")
                 and hash1 != hash2
                 and visible_motion.get("ok", False)
-                and motion_across_flip.get("ok", False)
+                and index_run.get("ok", False)
+                and not player_build_errors
             ),
+            "status": "failed-by-player" if player_build_errors else None,
             "detail": {
                 "continues": cont.get("continuesThroughDissolve"),
                 "noJump": cont.get("noJump"),
@@ -1336,15 +1625,35 @@ async def _run(player: Path) -> dict:
                 "hash": f"{hash1}->{hash2}",
                 "method": method_a,
                 "visibleMovieMotion": visible_motion,
+                "indexRun": index_run,
+                "flipIndex": flip_index,
+                "indexSequence": [s.get("index") for s in index_samples],
+                "movieTexids": texids_info.get("texids"),
+                "movieTexidsWarning": texids_info.get("warning"),
                 "motionAcrossFlip": motion_across_flip,
                 "decoderMotion": decoder_motion,
+                "targetKey": EXPECTED_MOVIE_KEYS[0],
+                "primaryTimes": primary_times_a,
+                "minTimes": min_times_a,
+                "captureRaceFramesN": capture_race_frames_a,
+                "playerBuildErrors": player_build_errors,
                 "reuseEvents": [
                     e for e in preserve_events if e.get("kind") == "reuse-decoder"
                 ][:8],
                 "note": (
-                    "Clock continuity alone is insufficient; composed movie ROI must move "
-                    "before, across, and after the scene-hash flip. "
-                    "Decoder sampleFrame motion without visible motion = detached clock."
+                    "Pass gate is target-decoder continuity + visibleMovieMotion + "
+                    "indexRun (the composited frame-index patch keeps progressing across "
+                    "the MM cut, i.e. the canvas is not stuck on the newborn poster frame). "
+                    "motionAcrossFlip is kept as corroboration, not gating: it scores "
+                    "ROI pixel motion, which the neutral scrolling grating provides even "
+                    "while frozen on a single stale poster frame's own motion blur, so it "
+                    "cannot by itself distinguish a live feed from a freeze. Any "
+                    "player-build-error (an uncaught exception/rejection during the MM "
+                    "rebuild, e.g. getTextureObject returning null) fails this finding "
+                    "outright as failed-by-player, never masked as a pass. "
+                    "Continuity is bound to the target (movie1) decoder's own clock — "
+                    "primary/min (max/min across ALL videos) are informational only, since "
+                    "movie2 must not be able to supply continuity for movie1's handoff."
                 ),
             },
         },
@@ -1369,6 +1678,7 @@ async def _run(player: Path) -> dict:
             "detail": {
                 "blackAbove": mid_scores["blackAbove"],
                 "blackBehind": mid_scores["blackBehind"],
+                "greenFrontComposite": mid_scores["greenFrontComposite"],
                 "greenFront": mid_scores["greenFront"],
                 "blackAuto": mid_scores["black"],
             },
@@ -1377,10 +1687,14 @@ async def _run(player: Path) -> dict:
                 "smaller movie. Verifies the composition against the LARGER movie: the black "
                 "sentinel is opaque above the movie (blackAbove ok), is OCCLUDED by the movie "
                 "where they overlap (blackBehind shows the movie, rgbMean>40, not opaque black), "
-                "and the green square is IN FRONT of the movie (greenFront greenish; the composite "
-                "over the opaque movie is alpha 255, so green's translucency is proven separately by "
-                "greenTranslucentPre on slide 1). A root-level overlay on top would fail blackBehind "
-                "(black would show) or greenFront (movie/orange would show, not green)."
+                "and the green square is IN FRONT (greenFront greenish). The disposable movie is a "
+                "NEUTRAL grayscale grating (r==g==b), so greenish uniquely means the green square "
+                "composites in front — it is NOT satisfiable by the movie's own colour (Codex's "
+                "content-dependence concern). greenFrontComposite (composite vs decoder source) is "
+                "kept as extra evidence but not gating, since a fast movie races the source sample. "
+                "Green's translucency is proven separately by greenTranslucentPre on slide 1. A "
+                "root-level overlay on top would fail blackBehind (black would show); green behind "
+                "would fail greenFront (the neutral grating, not green, would show)."
             ),
         },
         {

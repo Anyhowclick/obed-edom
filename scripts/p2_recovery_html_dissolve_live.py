@@ -725,6 +725,24 @@ PRESERVE_SCRIPT = r"""
     }
     return null;
   }
+  function texidsSet() {
+    const arr = window.__OBED_MOVIE_TEXIDS__;
+    return (Array.isArray(arr) && arr.length) ? new Set(arr) : null;
+  }
+  // Asset-key bound: prefer the movie1 decoder (the continuing movie the
+  // texids belong to), falling back to any other ready decoder rather than
+  // feeding nothing.
+  function pooledDecoderCandidate() {
+    let best = null;
+    function consider(v) {
+      if (!(v.readyState >= 2 && v.videoWidth > 0)) return;
+      if (movieAssetKey(v.currentSrc || v.src || '') === 'movie1') best = v;
+      else if (!best) best = v;
+    }
+    pool.forEach(function(q) { (q || []).forEach(consider); });
+    document.querySelectorAll('video[data-obed-preserved="1"]').forEach(consider);
+    return best;
+  }
   function stopTextureFeed(elId, reason) {
     const state = textureFeed.get(elId);
     if (!state || !state.active) return;
@@ -771,22 +789,46 @@ PRESERVE_SCRIPT = r"""
       }
       if (v.videoWidth > 0) {
         if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
-        const canvas = feedCanvasFor(v);
-        if (canvas) {
+        // Feed BY id first: the MM slot builds two stacked canvases (invisible
+        // `to` + visible `from`), and a single geometric match only ever finds
+        // one of them (usually the wrong, invisible one). Feed every canvas
+        // whose id is a known movie texture id, each to its own dimensions.
+        const texids = texidsSet();
+        const fed = [];
+        if (texids) {
+          document.querySelectorAll('canvas').forEach(function(c) {
+            if (!(c.id && texids.has(c.id))) return;
+            const ctx = c.getContext('2d');
+            if (!ctx) return; // WebGL canvas -> skip, never poison
+            try {
+              ctx.drawImage(v, 0, 0, c.width, c.height);
+              fed.push(c);
+            } catch (e) {}
+          });
+        }
+        if (fed.length) {
           state.matched++;
-          state.canvas = canvas;
-          state.canvasId = canvas.id || null;
-          try {
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
-            state.drawn++;
-          } catch (e) {
-            state.fails++;
-          }
+          state.drawn++;
+          state.canvas = fed[fed.length - 1];
+          state.canvasId = state.canvas.id || null;
         } else {
-          state.fails++;
-          state.canvas = null;
-          state.canvasId = null;
+          const canvas = feedCanvasFor(v);
+          if (canvas) {
+            state.matched++;
+            state.canvas = canvas;
+            state.canvasId = canvas.id || null;
+            try {
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+              state.drawn++;
+            } catch (e) {
+              state.fails++;
+            }
+          } else {
+            state.fails++;
+            state.canvas = null;
+            state.canvasId = null;
+          }
         }
       } else {
         state.fails++;
@@ -808,6 +850,79 @@ PRESERVE_SCRIPT = r"""
       note('texture-feed-start-error', {elId: v.__obedElId, message: String(e && e.message || e)});
     }
   }
+  /**
+   * Draw the live decoder frame into a newborn movie canvas BEFORE first paint.
+   * MM rebuilds #stage synchronously (remove old children, build new canvases
+   * showing the poster) in one task; a MutationObserver childList callback
+   * fires at that task's microtask checkpoint, ahead of composite, so a
+   * synchronous drawImage here beats the ~1-2 frame rVFC re-lock gap that
+   * otherwise shows as a composited freeze at the cut.
+   */
+  function moFeedCanvas(c) {
+    const ctx = c.getContext('2d');
+    if (!ctx) return; // WebGL canvas -> never poison it
+    const v = pooledDecoderCandidate();
+    if (!(v && v.readyState >= 2 && v.videoWidth > 0)) {
+      note('mo-prepaint-skip', {id: c.id, reason: v ? 'not-ready' : 'no-decoder'});
+      return;
+    }
+    try {
+      ctx.drawImage(v, 0, 0, c.width, c.height);
+    } catch (e) {
+      note('mo-prepaint-draw-error', {id: c.id, message: String(e && e.message || e)});
+      return;
+    }
+    tag(v);
+    let state = textureFeed.get(v.__obedElId);
+    if (!state) {
+      startTextureFeed(v, 'mo-prepaint');
+      state = textureFeed.get(v.__obedElId);
+    }
+    if (state) {
+      state.canvas = c;
+      state.canvasId = c.id || null;
+    }
+    note('mo-prepaint-draw', {id: c.id, w: c.width, h: c.height, elId: v.__obedElId});
+  }
+  const obedStageEl = document.getElementById('stage');
+  if (obedStageEl) {
+    new MutationObserver(function(muts) {
+      const texids = texidsSet();
+      if (!texids) {
+        note('mo-no-texids', {});
+        return; // existing footprint matcher (feedCanvasFor via rVFC) stays the feed
+      }
+      muts.forEach(function(m) {
+        m.addedNodes.forEach(function(node) {
+          if (node.nodeType !== 1) return;
+          const canvases = node.tagName === 'CANVAS' ? [node] : [];
+          if (node.querySelectorAll) {
+            node.querySelectorAll('canvas').forEach(function(c){ canvases.push(c); });
+          }
+          canvases.forEach(function(c) {
+            if (c.id && texids.has(c.id)) moFeedCanvas(c);
+          });
+        });
+      });
+    }).observe(obedStageEl, {childList: true, subtree: true});
+  } else {
+    note('mo-no-stage', {});
+  }
+  window.addEventListener('error', function(e) {
+    note('player-build-error', {
+      errorType: 'error',
+      message: String((e && e.message) || e),
+      filename: e && e.filename,
+      lineno: e && e.lineno
+    });
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    const reason = e && e.reason;
+    note('player-build-error', {
+      errorType: 'unhandledrejection',
+      message: String((reason && reason.message) || reason || 'unhandledrejection')
+    });
+  });
   // Mark a node as being moved by us so the MutationObserver's detach handler
   // skips re-stashing it (clears on the next macrotask, after the observer runs).
   function beginMove(v) {
@@ -1260,17 +1375,36 @@ def _ffmpeg() -> str:
 
 
 def _write_h264_pattern(dest: Path, *, seconds: float = 46.0333, fps: int = 30) -> dict:
-    """Write a browser-decodable H.264 MP4 (yuv420p) with a vivid, always-moving pattern.
+    """Write a browser-decodable H.264 MP4 (yuv420p): a fast scrolling GRAYSCALE grating
+    with a top-left frame-index patch.
 
-    A plain moving bar only changes a fraction of the frame per tick (~1.5
-    ROI-averaged MAE — below the scorers' pair_eps=2.0). testsrc2 gives a
-    colourful, non-flat-poster pattern; a fast continuous full-frame hue
-    rotation on top (measured empirically: ~14 MAE over one frame, ~38 MAE
-    over a 100ms gap — the scorers' actual sampling spacing) guarantees
-    consecutive-frame MAE unambiguously above ~8 over ANY large ROI,
-    regardless of where that ROI sits in the frame. A continuous rotation
-    (vs. an alternating flip) keeps near-instant composed-vs-decoder frame
-    matches (decode_probe) close enough to still register as the same movie.
+    Two requirements pull in opposite directions: Finding 1 needs large per-frame
+    ROI motion (a plain moving bar gives only ~1.5 ROI MAE, below pair_eps=2.0),
+    while the Finding-2 green-in-front check must not be fooled by the movie's own
+    colour (a hue-rotating colour pattern makes the composite green content-dependent
+    and races the decoder-source sample). A fast-scrolling NEUTRAL grating solves
+    both: vertical black/white stripes scrolling at 720 px/s give ~228 ROI-MAE per
+    frame (unmistakable motion), and cb=cr=128 keeps every pixel neutral (r==g==b),
+    so a translucent green square over it reads greenish IFF it is genuinely in
+    front — a neutral movie can never be green on its own. Black behind reads the
+    grey grating (rgbMean ~124 > 40). Not a flat poster; decodes as H.264.
+
+    A NEUTRAL frame-index patch (top-left 120x48, cb=cr=128 like the rest of the
+    frame) rides on top of the grating. Finding 1's composited-freeze check
+    decodes that patch off the composite screenshots: a stuck patch value across
+    the MM cut means the composited canvas is still showing the stale poster
+    frame, independent of the grating's own motion.
+
+    The patch luma is `16 + (N mod 220)`, NOT a raw `mod(N, 256)` — measured
+    empirically (offline decode, no browser): a raw 0-255 luma value spends
+    frames 0-16 of every 256-frame cycle below the legal "tv-range" black floor
+    (Y=16), which yuv->rgb conversion (the same conversion an H.264 <video>
+    decode does) clips flat to RGB 0 for all 17 of those frames — a 17-frame
+    false "freeze" recurring every ~8.5s, indistinguishable from a real one.
+    Offsetting by 16 keeps every value inside the legal 16-235 luma range, so
+    it survives H.264 encode + yuv->rgb decode with no clipping; residual
+    rounding in that conversion still occasionally repeats or skips a value,
+    but never for more than 1 consecutive frame (measured below).
 
     Duration matches Keynote export filenames/metadata so the player timeline
     stays coherent.
@@ -1283,9 +1417,9 @@ def _write_h264_pattern(dest: Path, *, seconds: float = 46.0333, fps: int = 30) 
         "-f",
         "lavfi",
         "-i",
-        f"testsrc2=size=1920x540:rate={fps}:duration={seconds}",
+        f"color=c=gray:s=1920x540:rate={fps}:duration={seconds}",
         "-vf",
-        "hue=h='240*t':s=2",
+        r"geq=lum='if(lt(X\,120)*lt(Y\,48)\,16+mod(N\,220)\,if(gt(mod(X+T*720\,48)\,24)\,230\,25))':cb=128:cr=128",
         "-c:v",
         "libx264",
         "-pix_fmt",

@@ -1162,8 +1162,10 @@ def score_motion_across_flip(
     and a decoded movie present in the flip neighbourhood. The crossing frames
     must also share one stable ``decoderId`` — a switch to a different decoder
     at the flip is not the target movie progressing. When ``expected_key`` is
-    given, the crossing frames' ``movieKey`` must also match it — a stable
-    decoder that is feeding the wrong movie's footprint must not pass either.
+    given, identity is bound across the whole window the gate relies on, not
+    just the crossing: every sampled frame's ``movieKey`` must match it, and
+    every post-flip frame must share one non-null ``decoderId`` — a same-key
+    handoff or restart later in the after-window must not pass either.
     """
     n = len(samples)
     if n < 3:
@@ -1244,6 +1246,18 @@ def score_motion_across_flip(
         or (crossing_movie_keys[0] == expected_key and crossing_movie_keys[1] == expected_key)
     )
 
+    after_frame_indices = list(range(f, n))
+    after_decoder_ids = [samples[i].get("decoderId") for i in after_frame_indices]
+    after_decoder_stable = bool(
+        after_decoder_ids
+        and after_decoder_ids[0] is not None
+        and all(d == after_decoder_ids[0] for d in after_decoder_ids)
+    )
+    window_key_ok = bool(
+        expected_key is None or all(s.get("movieKey") == expected_key for s in samples)
+    )
+    identity_ok = expected_key is None or (window_key_ok and after_decoder_stable)
+
     ok = bool(
         before_ok
         and across_ok
@@ -1251,6 +1265,7 @@ def score_motion_across_flip(
         and crossing_decoded
         and crossing_decoder_stable
         and crossing_key_ok
+        and identity_ok
         and still_ok
     )
     reason = None
@@ -1267,6 +1282,10 @@ def score_motion_across_flip(
             reason = "crossing decoder switched"
         elif not crossing_key_ok:
             reason = "crossing movie key mismatch"
+        elif not window_key_ok:
+            reason = "movie key mismatch in window"
+        elif not after_decoder_stable:
+            reason = "after-flip decoder switched"
         else:
             reason = "still run exceeds max across flip"
 
@@ -1286,12 +1305,128 @@ def score_motion_across_flip(
         "crossingDecoderIds": crossing_decoder_ids,
         "crossingKeyOk": crossing_key_ok,
         "crossingMovieKeys": crossing_movie_keys,
+        "afterDecoderStable": after_decoder_stable,
+        "afterDecoderIds": after_decoder_ids,
+        "windowKeyOk": window_key_ok,
         "decoderIdsAcrossFlip": decoder_ids_across_flip,
         "firstLastMae": first_last,
         "maxPairMae": max(pair) if pair else 0.0,
         "pairEps": pair_eps,
         "beforePairMae": before,
         "afterPairMae": after,
+    }
+
+
+def _index_run_gaps(indices: Sequence[int | None], modulo: int) -> list[int | None]:
+    return [
+        None if a is None or b is None else (b - a) % modulo
+        for a, b in zip(indices, indices[1:])
+    ]
+
+
+def _frozen_runs(frozen: Sequence[bool]) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, still in enumerate(frozen):
+        if still:
+            start = i if start is None else start
+        elif start is not None:
+            runs.append((start, i - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(frozen) - 1))
+    return runs
+
+
+def score_composited_index_run(
+    samples: Sequence[dict[str, Any]],
+    *,
+    flip_index: int,
+    max_freeze_run: int = 2,
+    modulo: int = 256,
+) -> dict[str, Any]:
+    """Score a decoded burnt-in frame-index run for a freeze/restart at the cut.
+
+    ``samples`` are composited-frame decodes in capture order, each
+    ``{index: int|None, sceneHash: str|None, captureOffsetS: float}``.
+    A poster freeze at the cut shows as decoded index not advancing even
+    though the decoder's own clock keeps ticking; wraparound (mod
+    ``modulo``) is normal forward progress, a drop beyond half the modulo is
+    a restart/poster-swap and fails closed.
+    """
+    n = len(samples)
+    indices = [s.get("index") for s in samples]
+    decodable = sum(1 for v in indices if v is not None)
+    empty = {
+        "flipIndex": flip_index,
+        "n": n,
+        "freezeRunAtCut": None,
+        "freezeRunBaseline": None,
+        "totalProgressBefore": None,
+        "totalProgressAfter": None,
+        "firstIndex": indices[0] if indices else None,
+        "lastIndex": indices[-1] if indices else None,
+        "negativeAnomaly": False,
+    }
+    if decodable < 4:
+        return {"ok": False, "reason": "insufficient decodable samples", **empty}
+
+    window = range(max(0, flip_index - 1), min(n - 1, flip_index + 3) + 1)
+    if any(indices[i] is None for i in window):
+        return {"ok": False, "reason": "undecodable in flip window", **empty}
+
+    deltas = _index_run_gaps(indices, modulo)
+    negative_anomaly = any(d is not None and d > modulo / 2 for d in deltas)
+
+    frozen = [d == 0 for d in deltas]
+    runs = _frozen_runs(frozen)
+    at_cut = [
+        end - start + 1
+        for start, end in runs
+        if not (end + 1 < window.start or start > window.stop - 1)
+    ]
+    baseline = [
+        end - start + 1
+        for start, end in runs
+        if end + 1 < window.start or start > window.stop - 1
+    ]
+    freeze_run_at_cut = max(at_cut, default=0)
+    freeze_run_baseline = max(baseline, default=0)
+
+    before_pairs = deltas[: max(0, flip_index - 1)]
+    after_pairs = deltas[flip_index:]
+    total_before = sum(d for d in before_pairs if d is not None)
+    total_after = sum(d for d in after_pairs if d is not None)
+
+    ok = bool(
+        not negative_anomaly
+        and freeze_run_at_cut <= max_freeze_run
+        and total_before > 0
+        and total_after > 0
+    )
+    reason = None
+    if not ok:
+        if negative_anomaly:
+            reason = "negative delta anomaly"
+        elif freeze_run_at_cut > max_freeze_run:
+            reason = "freeze run at cut"
+        elif total_before <= 0:
+            reason = "no forward progress before flip"
+        else:
+            reason = "no forward progress after flip"
+
+    return {
+        "ok": ok,
+        "reason": reason,
+        "flipIndex": flip_index,
+        "n": n,
+        "freezeRunAtCut": freeze_run_at_cut,
+        "freezeRunBaseline": freeze_run_baseline,
+        "totalProgressBefore": total_before,
+        "totalProgressAfter": total_after,
+        "firstIndex": indices[0],
+        "lastIndex": indices[-1],
+        "negativeAnomaly": negative_anomaly,
     }
 
 
