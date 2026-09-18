@@ -1,5 +1,48 @@
 # Keynote alpha HTML — handover 2026-09-18 (supersedes 2026-09-17)
 
+## Step 1 (ownership & targeting) — DONE 2026-09-18, branch `claude/pr158-handover-findings-4366b9`
+Tip `5cfa8ee`. 7 implementation rounds folding 6 adversarial Codex (gpt-5.6-sol) reviews
+(`.agents/reviews/step1-ownership-codex-r1..r6.md`); contract + residuals in
+`.agents/plans/step1-ownership-contracts.md`. **Not pushed / not on the PR branch
+`feat/keynote-alpha-p2-html-mm` — awaiting owner integration decision.** No Keynote since one
+offline export (`edef8929`-equivalent rebuild; source deck byte-intact). Runs offline
+`--reuse-export --disposable`, main-checkout venv + `PYTHONPATH=<worktree>/src`.
+
+Delivered — ownership is now **deterministic** and the instrument **fail-closed**:
+- Feed binds to the ONE decoder the PLAYER itself drew into a target canvas (a
+  `CanvasRenderingContext2D.drawImage` wrapper records canvas-ELEMENT→video in a WeakMap; a
+  `__obedFeeding` guard keeps our own draws out; records only after the draw succeeds). No
+  ready-video / geometric / last-wins fallback. `footprintOwnerDecoderId` is a two-pass,
+  order-independent resolver that returns null on a distinct-decoder overlap tie, on zero
+  overlap, and on an unknown footprint key (all fail-closed).
+- getContext recording is element-stamp ONLY (no id-map probe).
+- Texids resolve the 1→2 boundary structurally: the ONE footprint-sized `contents` crossfade
+  under an authored `apple:magic-move-*` **transition** (steady-anchoring was wrong — the
+  movie's posters `0885→A223` are transition-only, never slide-1/2 steady; that mis-diagnosis
+  cost round 2). `movieTexids` = `{decoderKey, outgoing:[from], incoming:[to]}`, both-sided or null.
+- `feedEngagedAt1to2` fail-closed gate folded into `continueThroughMagicMove1to2`: passes ONLY
+  with both-sided texids + `motionAcrossFlip.ok` + one stable non-null decoderId + 2d context +
+  a player-authored incoming-slot draw on that decoder within `[num(hash2), SLIDE3_MIN_HASH)`.
+  Never passes by absence.
+
+Verified (offline, both wait profiles): texids resolve `movie1 0885/A223`; `feedEngagedAt1to2`
+RED on `motionAcrossFlipOk/stableDecoder/contextType2d/incomingFeedDraw`; **Finding 1 correctly
+OPEN**; Findings 2 & 3 green. 92 unit tests pass (`tests/test_p2_adversarial.py` +
+`tests/test_html_alpha_probe.py`). **2→3 restart is a capture-timing FLAKE** (~2–3/3 either
+profile, alternating; restart logic untouched) — worth stabilising but not a regression.
+
+Residuals deferred to Step 2 (documented in the contract): the `#6` cut-vs-restart window
+classification; JS-level single-feeder enforcement (gate is fail-closed against it); a repeated
+poster pair at genuinely distinct boundaries; a footprint non-movie raster contents-swap under MM.
+
+**Step 2 (next):** engage the feed at the real cut — the mo-prepaint fires at `#4/#6` and the
+rVFC feed draws 0 into incoming; intercept the poster-WRITE synchronously so the bound decoder's
+current frame lands on the correct newborn INCOMING canvas at `#1→#2`. That is what flips
+`feedEngagedAt1to2` (and Finding 1) green — honestly, because the gate now demands it.
+
+---
+
+
 Branch `feat/keynote-alpha-p2-html-mm` (PR #158), tip pushed. Disposable fixture: Minimal
 Alpha_DSK, owner-revised z-order. Source deck untouched; P3 stays unwired. **No Keynote needed** —
 the on-disk `html-unmodified` export (`edef8929`) reflects the owner's latest deck; all runs are
