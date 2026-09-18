@@ -181,43 +181,56 @@ def test_f3_repeated_pair_provenance_is_preserved(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# F5 — steady folding by object identity, not by size.
+# F5 — no steady folding; posters only. F2 — authored magic-move marker.
 # --------------------------------------------------------------------------- #
-def test_f5_steady_folding_picks_same_object_not_same_size(tmp_path):
-    """Fold only the steady textures owned by the boundary crossfade's OWN
-    object; a second, same-sized movie's steadys must not be folded in.
+def test_f5_no_steady_folding_only_posters(tmp_path):
+    """No steady texture is folded (Codex r2 F5): outgoing/incoming are exactly
+    the crossfade's `from`/`to` posters. A footprint-sized steady cannot be
+    proven to belong to THIS movie by size, so a second same-sized movie's steady
+    (and even this movie's own steady) is never included.
 
-    Slide 1: object `obj-movie1` owns steadys {A, A2}; a same-sized OTHER movie
-    `obj-movie2` owns steady {X}. Slide 2: `obj-movie1` owns {B}, `obj-movie2`
-    owns {Y}. The unique boundary A->B belongs to obj-movie1, so outgoing folds
-    {A, A2} (not X) and incoming folds {B} (not Y).
+    The unique magic-move boundary is P->R; the deck also has same-sized steadys
+    {A, X, B, Y}. Result must be exactly outgoing==[P], incoming==[R].
     """
     slides = [
         (
             "slide1",
-            [
-                _video_layer("obj-movie1", "A"),
-                # A second footprint-sized steady on the SAME object id.
-                _video_layer("obj-movie1", "A2"),
-                _video_layer("obj-movie2", "X"),
-            ],
+            [_video_layer("obj-movie1", "A"), _video_layer("obj-movie2", "X")],
         ),
         (
             "slide2",
             [
                 _video_layer("obj-movie1", "B"),
                 _video_layer("obj-movie2", "Y"),
-                _magic_move([_crossfade("A", "B")]),
+                _magic_move([_crossfade("P", "R")]),
             ],
         ),
     ]
     result = p2._derive_movie_texids(_write_player(tmp_path, slides))
 
     assert result["decoderKey"] == "movie1"
-    assert result["outgoing"] == ["A", "A2"]  # same-object fold, X excluded
-    assert result["incoming"] == ["B"]  # Y (other movie) excluded
-    assert "X" not in result["outgoing"]
-    assert "Y" not in result["incoming"]
+    assert result["outgoing"] == ["P"]
+    assert result["incoming"] == ["R"]
+    for leaked in ("A", "X", "B", "Y"):
+        assert leaked not in result["outgoing"] and leaked not in result["incoming"]
+
+
+def test_f2_loose_magic_move_substring_name_is_not_a_transition(tmp_path):
+    """Only the authored `apple:magic-move-*` transition marks a real poster swap
+    (Codex r2 F2). A layer merely NAMED to contain 'magic-move' (e.g. a caption
+    'not-a-magic-move-caption') must NOT make its footprint contents tween the
+    boundary — it is not an apple:magic-move transition.
+    """
+    fake = {"type": "group", "name": "not-a-magic-move-caption", "layers": [_crossfade("P", "Q")]}
+    slides = [
+        ("slide1", [_video_layer("obj-m1", "A")]),
+        ("slide2", [_video_layer("obj-m1", "B"), fake]),
+    ]
+    result = p2._derive_movie_texids(_write_player(tmp_path, slides))
+
+    assert result["decoderKey"] is None
+    assert result["outgoing"] == [] and result["incoming"] == []
+    assert result.get("warning")
 
 
 def test_f5_unidentified_owner_folds_no_steady(tmp_path):
@@ -312,17 +325,24 @@ def _post_flip_samples(decoder_id="dec-1", context_type="2d") -> list[dict]:
     ]
 
 
-def _incoming_draw(decoder_id="dec-1", canvas_id="in1", hash_num=6) -> dict:
-    return {
-        "kind": "texture-feed-draw",
-        "detail": {
-            "slot": "incoming",
-            "decoderId": decoder_id,
-            "canvasId": canvas_id,
-            "hashNum": hash_num,
-            "authoredBy": "player-draw",
-        },
+def _incoming_draw(
+    decoder_id="dec-1",
+    canvas_id="in1",
+    hash_num=4,
+    authored_by="player-draw",
+    context_type="2d",
+    kind="texture-feed-draw",
+) -> dict:
+    detail = {
+        "slot": "incoming",
+        "decoderId": decoder_id,
+        "hashNum": hash_num,
+        "authoredBy": authored_by,
+        "contextType": context_type,
     }
+    if canvas_id is not None:
+        detail["canvasId"] = canvas_id
+    return {"kind": kind, "detail": detail}
 
 
 def test_feed_engaged_passes_only_when_every_condition_holds():
@@ -447,3 +467,61 @@ def test_feed_engaged_fails_closed_on_empty_after_window():
     verdict = p2._score_feed_engaged(_valid_texids(), {"ok": True}, [], [_incoming_draw()], "#1", "#2")
     assert verdict["ok"] is False
     assert "stableDecoder" in verdict["failed"]
+
+
+# --- F1 hardening (Codex r2): reject unproven / out-of-window draw events ----- #
+def _engaged(events, *, restart_min_hash=None):
+    return p2._score_feed_engaged(
+        _valid_texids(), {"ok": True}, _post_flip_samples(), events, "#1", "#2",
+        restart_min_hash=restart_min_hash,
+    )
+
+
+def test_feed_engaged_rejects_geom_authored_draw():
+    """A `geom` (guessed) draw is not player-authored engagement (Codex r2 F1)."""
+    verdict = _engaged([_incoming_draw(authored_by="geom")])
+    assert verdict["ok"] is False
+    assert "incomingFeedDraw" in verdict["failed"]
+
+
+def test_feed_engaged_rejects_missing_authored_by():
+    """A draw with no authoredBy fails closed (must be explicitly player-draw)."""
+    ev = _incoming_draw()
+    del ev["detail"]["authoredBy"]
+    assert "incomingFeedDraw" in _engaged([ev])["failed"]
+
+
+def test_feed_engaged_rejects_missing_canvas_id():
+    """A draw with no canvasId cannot be proven to hit an incoming canvas."""
+    verdict = _engaged([_incoming_draw(canvas_id=None)])
+    assert "incomingFeedDraw" in verdict["failed"]
+
+
+def test_feed_engaged_rejects_canvas_id_not_in_incoming():
+    """A draw into a canvas outside the resolved `incoming` set does not count."""
+    verdict = _engaged([_incoming_draw(canvas_id="some-other-canvas")])
+    assert "incomingFeedDraw" in verdict["failed"]
+
+
+def test_feed_engaged_rejects_draw_event_context_not_2d():
+    """The incoming draw event's OWN contextType must be 2d — a webgl/absent
+    context on the incoming canvas is not a valid 2D composite (Codex r2 F1)."""
+    assert "incomingFeedDraw" in _engaged([_incoming_draw(context_type="webgl")])["failed"]
+
+
+def test_feed_engaged_rejects_unknown_hash_draw():
+    """A draw with neither a numeric hashNum nor a parseable sceneHash is not
+    placeable in the window => rejected, never accepted by absence of a hash."""
+    ev = _incoming_draw()
+    del ev["detail"]["hashNum"]  # no hashNum and no sceneHash => unknown
+    assert "incomingFeedDraw" in _engaged([ev])["failed"]
+
+
+def test_feed_engaged_rejects_draw_at_or_after_restart_boundary():
+    """With an upper window bound (the 2->3 restart), a draw at/after it — e.g.
+    an unrelated later hash like #99 — must not satisfy Finding 1 (Codex r2 F1)."""
+    late = _incoming_draw(hash_num=99)
+    assert "incomingFeedDraw" in _engaged([late], restart_min_hash=6)["failed"]
+    # A draw inside [hash1, restart) with everything else valid DOES count.
+    good = _incoming_draw(hash_num=4)
+    assert _engaged([good], restart_min_hash=6)["ok"] is True

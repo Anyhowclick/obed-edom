@@ -226,7 +226,10 @@ def _extract_movie_layers(
             # marker — not layer identity or texture-set membership — is what
             # distinguishes a real poster swap from a same-sized background tween.
             name = o.get("name")
-            if isinstance(name, str) and "magic-move" in name.lower():
+            # Require the AUTHORED transition prefix, not a loose "magic-move"
+            # substring (Codex r2 F2: e.g. "not-a-magic-move-caption" must NOT
+            # match). Keynote names the Magic Move transition `apple:magic-move-*`.
+            if isinstance(name, str) and name.lower().startswith("apple:magic-move"):
                 in_mm = True
             if o.get("isVideoLayer"):
                 owner = _layer_identity(o)
@@ -278,10 +281,11 @@ def _derive_movie_texids(
     preserved so a pair repeated at several boundaries cannot masquerade as a
     single unambiguous boundary.
 
-    Steady folding is by OBJECT IDENTITY, not size (Codex F5): only the steady
-    texture(s) owned by the same layer that owns the boundary crossfade's
-    `from`/`to` are folded into `outgoing`/`incoming`. If that owner cannot be
-    identified uniquely, no steady is folded (just `from`/`to`).
+    `outgoing`/`incoming` are exactly the crossfade `from`/`to` posters. No steady
+    texture is folded in (Codex r2 F5): a footprint-sized steady cannot be proven
+    to belong to THIS movie by size alone, and the magic-move crossfade carries no
+    object identity to tie one to it; the runtime player-draw wrapper discovers the
+    true canvas<->decoder binding instead.
     """
     header_path = player_dir / "assets" / "header.json"
     try:
@@ -298,7 +302,6 @@ def _derive_movie_texids(
             "slideList": slide_list,
         }
 
-    per_slide_steady: dict[str, dict[str | None, set[str]]] = {}
     occurrences: list[dict] = []  # {from, to, owner, slide} — provenance kept per hit
     scanned: list[str] = []
     for uuid in slide_list:
@@ -310,15 +313,11 @@ def _derive_movie_texids(
         except Exception:  # noqa: BLE001
             continue
         scanned.append(uuid)
-        steady_by_owner, cfs = _extract_movie_layers(
+        _steady_by_owner, cfs = _extract_movie_layers(
             data.get("events") or [], footprint_wh=footprint_wh
         )
-        per_slide_steady[uuid] = steady_by_owner
         for cf in cfs:
             occurrences.append({**cf, "slide": uuid})
-
-    slide1_by_owner = per_slide_steady.get(slide_list[0], {})
-    slide2_by_owner = per_slide_steady.get(slide_list[1], {})
 
     # Select the boundary crossfade STRUCTURALLY: a footprint-sized `contents`
     # crossfade under a Magic Move transition (`withinMagicMove`) — the movie's
@@ -354,20 +353,17 @@ def _derive_movie_texids(
 
     (frm, to), occs = next(iter(movie_cfs.items()))
 
-    # Fold steady by owner identity (F5): the owner is the slide-1 layer whose
-    # steady set contains `frm` (resp. slide-2 layer owning `to`). Textures are
-    # unique ids, so at most one owner matches. Fold only when that owner is a
-    # real, single, identified object; otherwise keep just from/to.
-    def _fold(endpoint: str, by_owner: dict[str | None, set[str]]) -> set[str]:
-        owners = [o for o, texs in by_owner.items() if o is not None and endpoint in texs]
-        if len(owners) == 1:
-            return {endpoint} | by_owner[owners[0]]
-        return {endpoint}
-
+    # outgoing = the crossfade `from` (pre-cut poster), incoming = `to` (post-cut
+    # poster). No steady folding (Codex r2 F5): a footprint-sized steady texture
+    # cannot be proven to belong to THIS movie by size, and on the real deck the
+    # magic-move crossfade carries no object identity to tie a steady to it. The
+    # provable, honest hint is exactly the two poster textures; at runtime the
+    # player-draw wrapper (dissolve_live.py) discovers the true canvas<->decoder
+    # binding, so the static hint need not (and must not) guess the steady canvas.
     return {
         "decoderKey": decoder_key,
-        "outgoing": sorted(_fold(frm, slide1_by_owner)),
-        "incoming": sorted(_fold(to, slide2_by_owner)),
+        "outgoing": [frm],
+        "incoming": [to],
         "boundaryCrossfade": {"from": frm, "to": to},
         "boundaryOccurrences": [{"slide": o["slide"], "owner": o["owner"]} for o in occs],
         "scannedSlideUuids": scanned,
@@ -382,6 +378,7 @@ def _score_feed_engaged(
     preserve_events: list[dict],
     hash1: object,
     hash2: object,
+    restart_min_hash: object = None,
 ) -> dict:
     """Fail-CLOSED sub-verdict: did the id-bound feed actually engage at the
     1->2 Magic Move boundary (Codex F1)? A green screenshot is not proof; only
@@ -398,13 +395,20 @@ def _score_feed_engaged(
         unresolved owner (null id) fails.
       - `contextType2d` — that bound decoder's fed canvas passively reported a
         `"2d"` context on every after sample (never null/webgl, never probed).
-      - `incomingFeedDraw` — >=1 `texture-feed-draw`/`mo-prepaint-draw` with
-        `slot=='incoming'`, bound to that `decoderId`, at/after the boundary
-        hash. Empirically today this is 0 (all draws were `outgoing`), so the
+      - `incomingFeedDraw` — >=1 `texture-feed-draw`/`mo-prepaint-draw` that is
+        ALL of: `authoredBy=='player-draw'` (never a `geom` guess — Codex r2 F1),
+        `slot=='incoming'`, `decoderId==boundDecoderId`, the event's OWN
+        `contextType=='2d'` (the incoming canvas itself, not an outgoing one), a
+        non-null `canvasId` in `incoming`, and a KNOWN hash within
+        `[num(hash1), restart_min_hash)`. The upper bound excludes a draw at an
+        unrelated later hash or during the 2->3 restart; missing authorship,
+        canvas, hash, or a `geom` origin are all rejected (never pass by absence).
+        Empirically today this is 0 (all draws were `outgoing`/skipped), so the
         finding stays RED — for a proven reason, failing closed.
 
     `after_samples` are the flip samples (roi/sceneHash/decoderId/contextType);
     the after window is the post-flip subset (`sceneHash != hash1`).
+    `restart_min_hash` (the 2->3 boundary) upper-bounds the accepted draw window.
     """
     outgoing = texids_info.get("outgoing") or []
     incoming = texids_info.get("incoming") or []
@@ -427,22 +431,35 @@ def _score_feed_engaged(
 
     incoming_set = set(incoming)
     n1 = _hash_num(hash1)
+    # restart_min_hash may be a bare int (SLIDE3_MIN_HASH) or a "#N" hash string.
+    n_restart = restart_min_hash if isinstance(restart_min_hash, int) else _hash_num(restart_min_hash)
     draw_hits: list[dict] = []
     for e in preserve_events or []:
         if e.get("kind") not in ("texture-feed-draw", "mo-prepaint-draw"):
             continue
         d = e.get("detail") or {}
+        # Only a player-authored incoming draw into a KNOWN incoming canvas, on
+        # the bound decoder, with the incoming canvas's OWN 2d context, at a KNOWN
+        # hash inside the 1->2 window, counts. Every missing field fails closed.
+        if d.get("authoredBy") != "player-draw":
+            continue
         if d.get("slot") != "incoming":
             continue
         if bound_decoder_id is None or d.get("decoderId") != bound_decoder_id:
             continue
+        if d.get("contextType") != "2d":
+            continue
+        cid = d.get("canvasId")
+        if cid is None or cid not in incoming_set:
+            continue
         hn = d.get("hashNum")
         if hn is None:
             hn = _hash_num(d.get("sceneHash"))
-        if n1 is not None and hn is not None and hn < n1:
+        if hn is None:
             continue
-        cid = d.get("canvasId")
-        if incoming_set and cid is not None and cid not in incoming_set:
+        if n1 is not None and hn < n1:
+            continue
+        if n_restart is not None and hn >= n_restart:
             continue
         draw_hits.append({"kind": e.get("kind"), "detail": d})
     incoming_draw_ok = bool(draw_hits)
@@ -1854,7 +1871,8 @@ async def _run(player: Path) -> dict:
     # bound decoder's feed drew into an incoming canvas at the boundary. Absence
     # of any sub-condition fails the gate closed.
     feed_engaged = _score_feed_engaged(
-        texids_info, motion_across_flip, flip_samples, preserve_events, hash1, hash2
+        texids_info, motion_across_flip, flip_samples, preserve_events, hash1, hash2,
+        restart_min_hash=SLIDE3_MIN_HASH,
     )
 
     findings = [

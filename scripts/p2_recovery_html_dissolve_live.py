@@ -348,7 +348,8 @@ PRESERVE_SCRIPT = r"""
       suppressRemount = true;
       try {
         pool.clear();
-        authoredDecoderByCanvasId.clear();
+        // authoredDecoderByCanvas is a WeakMap keyed by canvas element; its
+        // entries are GC'd as their canvases are torn down, so no explicit clear.
         document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
           try {
             v.pause();
@@ -461,7 +462,7 @@ PRESERVE_SCRIPT = r"""
     /** Which decoder the PLAYER authored for a screen rect's footprint canvas. */
     /**
      * The footprint owner is the EXACT player-authored decoder (F2): among the
-     * canvases the player drew a video into (authoredDecoderByCanvasId), pick the
+     * canvases the player drew a video into (authoredDecoderByCanvas), pick the
      * one whose element overlaps `rect` best and whose movie key matches the
      * rect's footprint. No DOM-position / first-decoded / ready-video fallback —
      * an unresolved owner yields elId null (the scorer fails the gate) rather
@@ -470,12 +471,14 @@ PRESERVE_SCRIPT = r"""
     footprintOwnerDecoderId: function(rect) {
       const wantKey = footprintKeyForRect(rect);
       let best = null, bestOverlap = 0, bestKey = null, bestCanvas = null;
-      authoredDecoderByCanvasId.forEach(function(v, canvasId) {
+      // Iterate live canvases and read the ELEMENT-keyed authored binding (F4):
+      // a rebuilt canvas reusing a retired id is a distinct element with no
+      // WeakMap entry, so it can never surface a stale decoder here.
+      document.querySelectorAll('canvas').forEach(function(c) {
+        const v = authoredDecoderByCanvas.get(c);
         if (!v) return;
         const key = movieAssetKey(v.currentSrc || v.src || '');
         if (wantKey != null && key !== wantKey) return;
-        const c = document.getElementById(canvasId);
-        if (!c) return;
         const r = c.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
         const ov = rectOverlapArea(r, rect);
@@ -499,11 +502,15 @@ PRESERVE_SCRIPT = r"""
   };
   const pool = new Map(); // assetKey -> HTMLVideoElement[] (FIFO; same file may appear twice)
   const textureFeed = new Map(); // elId -> {active, drawn, matched, fails, canvas, canvasId}
-  // canvas.id -> the EXACT <video> the PLAYER drew into that target canvas
-  // (F2). Populated only by the drawImage wrapper on the player's own video
-  // draws into an outgoing/incoming canvas; the feed binds to this element by
-  // identity, never last-wins across same-key siblings.
-  const authoredDecoderByCanvasId = new Map();
+  // canvas ELEMENT -> the EXACT <video> the PLAYER drew into that target canvas
+  // (F2). Keyed by the element itself, NOT canvas.id: a rebuilt canvas that
+  // REUSES a retired id is a different element with no binding, so it can never
+  // inherit the old decoder (Codex r2 F4 stale-id alias). Populated only by the
+  // drawImage wrapper on the player's own video draws into an outgoing/incoming
+  // canvas; the feed binds to this element by identity, never last-wins across
+  // same-key siblings. WeakMap: a removed canvas's binding is GC'd, so no manual
+  // clear is needed across a restart.
+  const authoredDecoderByCanvas = new WeakMap();
   let nextId = 1;
   let suppressRemount = false;
   let remountEpoch = 0;
@@ -540,16 +547,19 @@ PRESERVE_SCRIPT = r"""
     if (proto.__obedDrawWrapped) return;
     const orig = proto.drawImage;
     proto.drawImage = function(image) {
-      if (!window.__obedFeeding && image instanceof HTMLVideoElement) {
-        const canvas = this.canvas;
-        if (canvas && canvas.id) {
-          const tex = movieTexids();
-          if (tex && (tex.outgoing.has(canvas.id) || tex.incoming.has(canvas.id))) {
-            authoredDecoderByCanvasId.set(canvas.id, image);
-          }
+      const canvas = this.canvas;
+      const maybeRecord =
+        !window.__obedFeeding && image instanceof HTMLVideoElement && canvas && canvas.id;
+      // Draw FIRST: only a draw that actually SUCCEEDED establishes authorship
+      // (Codex r2 F6 — a throwing draw of an invalid/empty video must not bind).
+      const ret = orig.apply(this, arguments);
+      if (maybeRecord) {
+        const tex = movieTexids();
+        if (tex && (tex.outgoing.has(canvas.id) || tex.incoming.has(canvas.id))) {
+          authoredDecoderByCanvas.set(canvas, image);
         }
       }
-      return orig.apply(this, arguments);
+      return ret;
     };
     proto.__obedDrawWrapped = true;
   })();
@@ -789,11 +799,12 @@ PRESERVE_SCRIPT = r"""
     return null;
   }
   // F2: the ONE decoder the player authored for a specific target canvas, by
-  // identity (canvasId -> exact element). Returns null when the player has not
-  // drawn a ready video into that canvas — NO last-wins over same-key siblings.
-  function boundDecoder(canvasId) {
-    if (!canvasId) return null;
-    const v = authoredDecoderByCanvasId.get(canvasId);
+  // canvas-ELEMENT identity. Returns null when the player has not drawn a ready
+  // video into that canvas — NO last-wins over same-key siblings, and a rebuilt
+  // canvas reusing a retired id gets null (a different element; Codex r2 F4).
+  function boundDecoder(canvas) {
+    if (!canvas) return null;
+    const v = authoredDecoderByCanvas.get(canvas);
     if (v && v.readyState >= 2 && v.videoWidth > 0) return v;
     return null;
   }
@@ -902,7 +913,7 @@ PRESERVE_SCRIPT = r"""
           document.querySelectorAll('canvas').forEach(function(c) {
             if (!(c.id && (tex.outgoing.has(c.id) || tex.incoming.has(c.id)))) return;
             if (recordedCtxType(c) !== '2d') { noteSkipCanvas(c, 'no-2d-context'); return; }
-            if (boundDecoder(c.id) !== v) { noteSkipCanvas(c, 'not-authored-decoder'); return; }
+            if (boundDecoder(c) !== v) { noteSkipCanvas(c, 'not-authored-decoder'); return; }
             const ctx = c.getContext('2d'); // safe: player already made this 2D
             if (!ctx) { noteSkipCanvas(c, 'no-2d-context'); return; }
             try {
@@ -971,7 +982,7 @@ PRESERVE_SCRIPT = r"""
     // usually not drawn a newborn canvas yet, so fall back to the UNIQUE same-key
     // decoder (authoredBy 'geom'). Ambiguous/absent owner -> skip, never guess
     // across same-key siblings.
-    let v = boundDecoder(c.id);
+    let v = boundDecoder(c);
     let authoredBy = 'player-draw';
     if (!v) { v = uniqueKeyDecoder(tex.decoderKey); authoredBy = v ? 'geom' : 'none'; }
     if (!(v && v.readyState >= 2 && v.videoWidth > 0)) {

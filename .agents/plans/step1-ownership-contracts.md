@@ -1,3 +1,20 @@
+# Known residual limitations (documented, not yet fixed)
+
+- **Repeated poster pair at genuinely distinct boundaries (Codex r2 F3).** The boundary
+  resolver dedups magic-move footprint crossfades by `(from, to)` and requires exactly one
+  distinct pair. If the SAME `(from, to)` poster swap genuinely occurs at two different real
+  boundaries (e.g. 1→2 and 3→4), it is accepted as one boundary and provenance
+  (`boundaryOccurrences`) only exposes the repeat; the authored JSON carries no per-boundary
+  tag to distinguish redundant storage of ONE boundary (legitimate, must resolve) from two
+  distinct boundaries. Not observed on the current deck (one occurrence). Revisit if a deck
+  triggers it.
+- **Footprint magic-move contents swap of a non-movie raster.** Selection is a footprint-sized
+  `contents` crossfade (`from != to`) under an `apple:magic-move-*` transition. A non-movie
+  raster/image of the exact footprint size that magic-moves with a `contents` texture swap and
+  no size-distinct movie present would be mis-selected. The current deck's only such swap is the
+  movie; shapes magic-move transform/opacity, not `contents`. The runtime player-draw binding is
+  the authoritative ownership signal regardless.
+
 # Step 1 — Ownership & targeting: pinned contracts
 
 Frozen coordination surface for the three parallel implementation streams (PR #158,
