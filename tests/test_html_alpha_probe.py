@@ -1432,3 +1432,63 @@ def test_composited_index_run_baseline_freeze_does_not_gate_clean_cut():
     assert scored["freezeRunAtCut"] <= 2
 
 
+# --------------------------------------------------------------------------- #
+# score_index_progression — parity-immune restart corroboration (2->3 flake fix)
+# --------------------------------------------------------------------------- #
+def test_index_progression_accepts_real_slide3_counter():
+    """The real slide-3 burnt-in counter (measured from the restart frames)
+    marches forward with 1-4 steps and passes — this is what a MAE motion check
+    aliased to a ~1/3 coin flip under the two-state grating."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    real = [None, 2, 6, 8, 12, 13, 16, 20, 22, 25, 28, 30, 34, 36, 39, 42, 45, 47, 50, 54, 55, 59]
+    scored = score_index_progression(real)
+    assert scored["ok"] is True
+    assert scored["nDecodable"] == 21 and scored["nDistinct"] == 21
+
+
+def test_index_progression_rejects_frozen_counter():
+    """A stuck poster (counter frozen) has a long stall run => fail closed."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([5, 5, 5, 5, 5, 5, 5, 5])
+    assert scored["ok"] is False
+    assert scored["reason"] in ("stall run too long", "too few distinct indices")
+
+
+def test_index_progression_rejects_insufficient_decodable():
+    """A wrong/occluded ROI decodes few flat patches => fail closed, never a
+    false pass from absence of data."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([1, None, None, 4, None, None])
+    assert scored["ok"] is False
+    assert scored["reason"] == "insufficient decodable samples"
+
+
+def test_index_progression_rejects_backward_jump():
+    """A drop beyond half the modulo (restart/glitch) within the window fails."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([2, 6, 10, 200, 14, 18, 22, 26])
+    assert scored["ok"] is False
+    assert scored["reason"] == "backward jump (restart/glitch) in window"
+
+
+def test_index_progression_accepts_modulo_wraparound():
+    """Forward wraparound past the modulo is normal progress, not a backward jump."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    assert score_index_progression([250, 254, 2, 6, 10, 14, 18, 22])["ok"] is True
+
+
+def test_index_progression_tolerates_short_stall():
+    """A short stall (<=max_stall_run repeats, e.g. 30fps sampled faster) still
+    passes as long as the counter overall advances."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([2, 2, 6, 10, 10, 14, 18, 22, 26])
+    assert scored["ok"] is True
+    assert scored["longestStallRun"] <= 2
+
+

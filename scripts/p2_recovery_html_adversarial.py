@@ -50,6 +50,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     file_identity,
     inventory_deck,
     score_composited_index_run,
+    score_index_progression,
     score_motion_across_flip,
     score_playback_continuity,
     score_restart_at_slide_boundary,
@@ -97,6 +98,13 @@ INDEX_PATCH_ROI = (
     max(1, round(MOVIE_ROI[2] * 120 / 1920) - 18),
     max(1, round(MOVIE_ROI[3] * 48 / 540) - 10),
 )
+# On slide 3 the restarted movie renders at a DIFFERENT screen rect (~x232,
+# shifted right of the slide-2 footprint) and slightly smaller, so INDEX_PATCH_ROI
+# above reads the black margin. This is the slide-3 movie's index patch, measured
+# empirically from the restart frames (largest flat-neutral region that decodes
+# the counter across the window). A wrong ROI decodes to non-flat pixels -> None
+# -> score_index_progression fails closed on min_decodable, never a false pass.
+INDEX_PATCH_ROI_SLIDE3 = (233, 800, 24, 12)
 # HTML event index where slide 3 begins (2 + 4 events before it → scene #6).
 SLIDE3_MIN_HASH = 6
 # Fixed expected movie keys for restart evidence (not derived from observations).
@@ -1788,9 +1796,18 @@ async def _run(player: Path) -> dict:
         reached_slide3 = (_hash_num(hash3) or -1) >= SLIDE3_MIN_HASH
         # Fixed expected keys — never derive solely from what happened to be observed.
         intended_keys = list(EXPECTED_MOVIE_KEYS)
-        # Composed-ROI motion on slide 3 — same footprint/scorer as the 1->2 check,
-        # applied to the restart window's dense frames.
+        # Composed-ROI corroboration on slide 3. The burnt-in frame-index counter
+        # (parity-immune) is the gating signal; pixel-MAE is kept as a diagnostic
+        # only. The slide-2 grating aliases to a ~50/50 per-pair change under the
+        # work-bound capture cadence, which made MAE-based motion a ~1/3 coin flip
+        # (2->3 restart flake, Fable root-cause 2026-09-18); the counter marches
+        # forward every presented frame regardless of grating phase.
         restart_pixel_motion = _score_visible_movie_motion(restart_paths, MOVIE_ROI)
+        restart_index_seq = [
+            _decode_index_patch(np.asarray(Image.open(p).convert("RGBA")), INDEX_PATCH_ROI_SLIDE3)
+            for p in restart_paths
+        ]
+        restart_index_progression = score_index_progression(restart_index_seq)
         per_movie_boundary: dict[str, dict] = {}
         for key in intended_keys:
             obs = []
@@ -1816,14 +1833,16 @@ async def _run(player: Path) -> dict:
             )
             # presentedMotionOk: the TARGET decoder's own rVFC mediaTime progression
             # is mandatory (a frozen restart decoder must not pass just because some
-            # OTHER movie/animation moves the shared ROI); footprint-ROI pixel motion
-            # is required too, but only as corroboration — it alone is not enough.
+            # OTHER movie/animation moves the shared ROI); on-screen progression is
+            # required too as corroboration, via the parity-immune burnt-in index
+            # counter (pixelMotion stays as a diagnostic only — see above).
             restart_decoder_id = per_movie_boundary[key].get("restartDecoderId")
             presented_rvfc = _presented_time_advances(samples_b, restart_decoder_id, SLIDE3_MIN_HASH)
             per_movie_boundary[key]["presentedMotionOk"] = bool(
-                presented_rvfc.get("ok") and restart_pixel_motion.get("ok")
+                presented_rvfc.get("ok") and restart_index_progression.get("ok")
             )
             per_movie_boundary[key]["presentedMotionDetail"] = {
+                "indexProgression": restart_index_progression,
                 "pixelMotion": restart_pixel_motion,
                 "rvfcAdvance": presented_rvfc,
             }

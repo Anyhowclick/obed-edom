@@ -1338,6 +1338,75 @@ def _frozen_runs(frozen: Sequence[bool]) -> list[tuple[int, int]]:
     return runs
 
 
+def score_index_progression(
+    indices: Sequence[int | None],
+    *,
+    modulo: int = 256,
+    min_decodable: int = 6,
+    min_distinct: int = 6,
+    max_stall_run: int = 2,
+) -> dict[str, Any]:
+    """Parity-immune "the composited output kept advancing" corroboration.
+
+    ``indices`` are the burnt-in frame-index patch decodes (a flat gray counter,
+    ``None`` when the patch is occluded/unsettled/mislocated) in capture order.
+    Unlike a pixel-MAE motion check, this cannot be fooled by a two-state grating
+    whose inter-capture parity aliases visible motion to ~0 (the 2->3 restart
+    flake's root cause): the burnt-in counter increments every presented frame
+    regardless of grating phase. PASSES only when the counter genuinely marches
+    forward — enough decodable samples, enough distinct values, no stall run
+    longer than ``max_stall_run`` consecutive equal decodes, some net forward
+    progress, and no backward jump (a drop beyond half the modulo is a
+    restart/glitch mid-window and fails closed). A wrong ROI decodes to few/no
+    flat patches -> ``min_decodable`` fails closed, never a false pass.
+    """
+    n = len(indices)
+    decodable = [v for v in indices if v is not None]
+    base = {
+        "n": n,
+        "nDecodable": len(decodable),
+        "nDistinct": len(set(decodable)),
+        "firstIndex": decodable[0] if decodable else None,
+        "lastIndex": decodable[-1] if decodable else None,
+    }
+    if len(decodable) < min_decodable:
+        return {"ok": False, "reason": "insufficient decodable samples", **base}
+
+    deltas = [(b - a) % modulo for a, b in zip(decodable, decodable[1:])]
+    negative_anomaly = any(d > modulo / 2 for d in deltas)
+    longest_stall = 0
+    run = 0
+    for d in deltas:
+        run = run + 1 if d == 0 else 0
+        longest_stall = max(longest_stall, run)
+    total_forward = sum(d for d in deltas if d <= modulo / 2)
+
+    ok = bool(
+        not negative_anomaly
+        and base["nDistinct"] >= min_distinct
+        and longest_stall <= max_stall_run
+        and total_forward > 0
+    )
+    reason = None
+    if not ok:
+        if negative_anomaly:
+            reason = "backward jump (restart/glitch) in window"
+        elif base["nDistinct"] < min_distinct:
+            reason = "too few distinct indices"
+        elif longest_stall > max_stall_run:
+            reason = "stall run too long"
+        else:
+            reason = "no forward progress"
+    return {
+        "ok": ok,
+        "reason": reason,
+        "longestStallRun": longest_stall,
+        "totalForward": total_forward,
+        "negativeAnomaly": negative_anomaly,
+        **base,
+    }
+
+
 def score_composited_index_run(
     samples: Sequence[dict[str, Any]],
     *,
