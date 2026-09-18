@@ -441,11 +441,6 @@ def _score_feed_engaged(
     incoming_set = set(incoming)
     n1 = _hash_num(hash1)
     n2 = _hash_num(hash2)
-    # Lower bound is the FLIP hash (hash2, the first post-advance scene), STRICTLY
-    # after hash1 — a draw at hash1 is pre-transition (hash1 is captured before the
-    # ArrowRight advance) and must not count (Codex r3 F1). Fall back to n1+1 if
-    # hash2 is unparseable so the bound is never looser than "after hash1".
-    lower = n2 if n2 is not None else (n1 + 1 if n1 is not None else None)
     # restart_min_hash may be a bare int (SLIDE3_MIN_HASH) or a "#N" hash string.
     n_restart = restart_min_hash if isinstance(restart_min_hash, int) else _hash_num(restart_min_hash)
     draw_hits: list[dict] = []
@@ -472,7 +467,13 @@ def _score_feed_engaged(
             hn = _hash_num(d.get("sceneHash"))
         if hn is None:
             continue
-        if lower is not None and hn < lower:
+        # Window = at/after the FLIP (hash2 when known) AND strictly after the
+        # pre-advance hash1 (Codex r4 F1: a regressive or unparseable hash2 must
+        # not loosen this). An unparseable hash1 means we cannot place the window
+        # at all -> reject (fail closed).
+        if n1 is None or hn <= n1:
+            continue
+        if n2 is not None and hn < n2:
             continue
         if n_restart is not None and hn >= n_restart:
             continue

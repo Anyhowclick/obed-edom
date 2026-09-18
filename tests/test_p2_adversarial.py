@@ -565,3 +565,24 @@ def test_feed_engaged_rejects_draw_at_pre_advance_hash1():
         _valid_texids(), {"ok": True}, _post_flip_samples(), [at_flip], "#1", "#2",
         restart_min_hash=6,
     )["ok"] is True
+
+
+def test_feed_engaged_hash1_draw_rejected_even_if_hash2_regressive():
+    """A regressive/unparseable flip hash must not loosen the strictly-after-hash1
+    lower bound (Codex r4 F1). hash2=#0 < hash1=#1, draw at #1 => still rejected."""
+    at_hash1 = _incoming_draw(hash_num=1)
+    verdict = p2._score_feed_engaged(
+        _valid_texids(), {"ok": True}, _post_flip_samples(), [at_hash1], "#1", "#0",
+        restart_min_hash=6,
+    )
+    assert "incomingFeedDraw" in verdict["failed"]
+
+
+def test_feed_engaged_rejects_draw_when_hash1_unparseable():
+    """If hash1 cannot be parsed we cannot place the window => reject every draw
+    (fail closed), never accept by absence of a boundary (Codex r4 F1)."""
+    verdict = p2._score_feed_engaged(
+        _valid_texids(), {"ok": True}, _post_flip_samples(), [_incoming_draw(hash_num=3)],
+        "bad-a", "bad-b", restart_min_hash=6,
+    )
+    assert "incomingFeedDraw" in verdict["failed"]

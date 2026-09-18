@@ -470,14 +470,13 @@ PRESERVE_SCRIPT = r"""
      */
     footprintOwnerDecoderId: function(rect) {
       const wantKey = footprintKeyForRect(rect);
-      let best = null, bestOverlap = 0, bestKey = null, bestCanvas = null, ambiguous = false;
-      // Iterate live canvases and read the ELEMENT-keyed authored binding (F4):
-      // a rebuilt canvas reusing a retired id is a distinct element with no
-      // WeakMap entry, so it can never surface a stale decoder here. If TWO
-      // DISTINCT decoders own footprint canvases with (near-)equal overlap — e.g.
-      // sibling D1 drew outgoing and D2 drew incoming, stacked at the same rect —
-      // the owner is AMBIGUOUS: return null so the scorer fails closed rather than
-      // silently picking one by DOM order (Codex r3 F4).
+      // Read the ELEMENT-keyed authored binding (F4): a rebuilt canvas reusing a
+      // retired id is a distinct element with no WeakMap entry, so it can never
+      // surface a stale decoder here. Collect ALL footprint-overlapping authored
+      // canvases first, THEN decide ownership from the global maximum overlap —
+      // a single-pass running flag mis-handles a later-best clearing an earlier
+      // tie (Codex r4 F4), so this is order-independent.
+      const cands = [];
       document.querySelectorAll('canvas').forEach(function(c) {
         const v = authoredDecoderByCanvas.get(c);
         if (!v) return;
@@ -485,18 +484,23 @@ PRESERVE_SCRIPT = r"""
         if (wantKey != null && key !== wantKey) return;
         const r = c.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
-        const ov = rectOverlapArea(r, rect);
-        const tol = Math.max(1, bestOverlap * 0.05);
-        if (ov > bestOverlap + tol) {
-          bestOverlap = ov; best = v; bestKey = key; bestCanvas = c; ambiguous = false;
-        } else if (best != null && v !== best && ov >= bestOverlap - tol) {
-          ambiguous = true; // a different decoder ties the footprint owner
-        }
+        cands.push({v: v, ov: rectOverlapArea(r, rect), key: key, canvas: c});
       });
-      if (best != null && !ambiguous) {
-        return {elId: best.__obedElId, key: bestKey, via: 'player-draw', contextType: recordedCtxType(bestCanvas)};
+      if (!cands.length) return {elId: null, key: null, via: 'none', contextType: null};
+      let bestOverlap = 0;
+      cands.forEach(function(x) { if (x.ov > bestOverlap) bestOverlap = x.ov; });
+      const tol = Math.max(1, bestOverlap * 0.05);
+      // Everything within tol of the global max is "top band". If it holds more
+      // than ONE distinct decoder, ownership is AMBIGUOUS -> null (fail closed);
+      // sibling D1(outgoing)+D2(incoming) stacked at the footprint hit this.
+      const near = cands.filter(function(x) { return x.ov >= bestOverlap - tol; });
+      const distinct = [];
+      near.forEach(function(x) { if (distinct.indexOf(x.v) < 0) distinct.push(x.v); });
+      if (distinct.length > 1) {
+        return {elId: null, key: null, via: 'ambiguous', contextType: null};
       }
-      return {elId: null, key: null, via: ambiguous ? 'ambiguous' : 'none', contextType: null};
+      const owner = near.reduce(function(a, b) { return b.ov > a.ov ? b : a; });
+      return {elId: owner.v.__obedElId, key: owner.key, via: 'player-draw', contextType: recordedCtxType(owner.canvas)};
     },
     textureFeedStatus: function() {
       const out = [];
