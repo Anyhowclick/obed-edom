@@ -1579,10 +1579,11 @@ def test_autosize_height_text_hard_misses_to_the_fallback():
     assert edits == {}
 
 
-def _autosize_text_objects(*, valign: int = 0):
+def _autosize_text_objects(*, valign: int = 0, nw: float = 300.3, nh: float = 83.0):
     # valign: TSWP VerticalAlignmentType (0=Top, 1=Middle, 2=Bottom). Only Top makes an
     # autosize reposition Δh-immune, so the reposition tests default to a top-anchored box.
-    text_super = _shape_super(700, 374, 0.0, 0.0, nw=300.3, nh=83.0)
+    # nw==0.0 is the un-laid-out sentinel (no valid rendered frame in the saved deck).
+    text_super = _shape_super(700, 374, 0.0, 0.0, nw=nw, nh=nh)
     text_super["style"] = {"identifier": "9"}
     return {
         "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
@@ -1634,6 +1635,21 @@ def test_autosize_text_reposition_bottom_anchored_hard_misses():
     objects = _autosize_text_objects(valign=2)  # kFrameAlignBottom
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
     reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_autosize_text_reposition_unlaidout_hard_misses():
+    # Stored naturalSize width == 0.0 is the un-laid-out sentinel: the box has no valid
+    # rendered frame, so a position-only write leaves it un-laid-out and Keynote mis-renders
+    # it by ~its own width (174px, measured live on slide 70 ki18). The live seed can still
+    # read a width, so this is NOT caught by the seed guard -- defer to the AppleScript
+    # fallback, which lays the box out live.
+    objects = _autosize_text_objects(valign=0, nw=0.0, nh=0.0)  # top-anchored but un-laid-out
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}  # live read HAS a frame
     _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
     assert refuse_reason is None

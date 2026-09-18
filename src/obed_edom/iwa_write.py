@@ -35,6 +35,7 @@ from obed_edom.iwa_geometry import (
     _ALIGN_TOP,
     _geom_dict,
     _is_rotated,
+    _natural_size,
     _path_source,
     _vertical_alignment,
     _xywha,
@@ -661,10 +662,18 @@ def _slide_edits(
                 # pos_y also needs a TRUSTWORTHY seed: the exact saved (text, ki) row the bulk
                 # read returned (the composed frame is not the live top; a failed item read
                 # zero-fills to [0, 0, 0, 0]) -- without one, hard-miss to the fallback.
+                # The box must also be LAID OUT in the saved deck: a stored naturalSize width
+                # of 0 is the un-laid-out sentinel (no valid rendered frame). The live seed
+                # can read a width for it (Keynote lays it out on open), so rep alone doesn't
+                # catch it -- but a position-only write leaves it un-laid-out, and Keynote then
+                # mis-renders it by ~its own width (174px, measured). Only a live write
+                # (AppleScript) lays it out, so defer these.
                 writes_y = spec.get("y") is not None
                 seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
+                laid_out = _natural_size(obj)[0] > 0.0
                 top_anchored = _vertical_alignment(obj, objects) == _ALIGN_TOP
-                if not text_reposition or (writes_y and not (seed_ok and top_anchored)):
+                if (not text_reposition or not laid_out
+                        or (writes_y and not (seed_ok and top_anchored))):
                     _miss("text-autosize")
                     continue
                 ops = _text_fields(rec, spec, rep, stored, position_only=True)
