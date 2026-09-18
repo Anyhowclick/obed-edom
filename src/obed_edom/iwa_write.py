@@ -411,8 +411,23 @@ def _is_identity_mask(fw: float, fh: float, fa: float, mx: float, my: float,
     return (abs(mx) <= tol_x and abs(my) <= tol_y and abs(mw - fw) <= tol_x and abs(mh - fh) <= tol_y)
 
 
+def _is_origin_anchored_mask(fw: float, fh: float, fa: float, mx: float, my: float,
+                             mw: float, mh: float, ma: float) -> bool:
+    """Axis-aligned mask pinned at the image origin (offset ~0), possibly a CROP (mask
+    smaller than the frame). Superset of the identity case. The ``_masked_media_fields``
+    transform is exact for it (image pos = target - mask_pos*s ~ target, since mask_pos~0);
+    a live reopen was shown to render origin H/HV/V crops at target. An OFFSET crop
+    (mask_pos != 0) still needs an unproven crop redistribution and stays refused."""
+    if _is_rotated(fa) or _is_rotated(ma) or mw <= 0.0 or mh <= 0.0:
+        return False
+    tol_x = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fw, 1.0))
+    tol_y = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fh, 1.0))
+    return abs(mx) <= tol_x and abs(my) <= tol_y
+
+
 def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: dict,
-                         reported: list[float]) -> tuple[list[tuple[str, dict]], str | None, bool]:
+                         reported: list[float], *, allow_origin_crop: bool = False,
+                         ) -> tuple[list[tuple[str, dict]], str | None, bool]:
     """Place a masked image/movie whose mask is an IDENTITY window; REFUSE any real crop.
 
     Production never displaces a mask: the IMAGE frame moves and the mask stays put (325/325
@@ -431,7 +446,11 @@ def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: d
         return ([], None, False)
     _fx, _fy, fw, fh, fa = _xywha(_geom_dict(obj))
     mx, my, mw, mh, ma = _xywha(_geom_dict(mask_obj))
-    if not _is_identity_mask(fw, fh, fa, mx, my, mw, mh, ma):
+    # Identity (no crop) is always written; an origin-anchored axis-aligned CROP is written
+    # only under `allow_origin_crop` (its transform was live-validated for H/HV/V origin
+    # crops). Offset crops and rotations remain refused -> hard miss to the fallback.
+    if not (_is_identity_mask(fw, fh, fa, mx, my, mw, mh, ma)
+            or (allow_origin_crop and _is_origin_anchored_mask(fw, fh, fa, mx, my, mw, mh, ma))):
         return ([], mask_id, False)
     if not _natural_writable(mask_obj, both_axes=True) or not _natural_writable(obj, both_axes=True):
         return ([], mask_id, False)
@@ -551,6 +570,7 @@ def _slide_edits(
     source_counts: dict[str, int] | None = None,
     require_reconcile: bool = False,
     text_reposition: bool = False,
+    mask_crop: bool = False,
 ) -> tuple[str | None, dict[str, dict], int, list[dict], list[str], str | None]:
     """Pure, no-I/O resolution of one slide's edits against an already-loaded deck.
 
@@ -694,7 +714,8 @@ def _slide_edits(
                 ops = _text_fields(rec, spec, rep, stored)
         elif kind in ("image", "movie"):
             if masked:
-                ops, mask_id, ok = _masked_media_fields(rec, obj, objects, spec, rep)
+                ops, mask_id, ok = _masked_media_fields(
+                    rec, obj, objects, spec, rep, allow_origin_crop=mask_crop)
                 # Cropped, rotated, unresolved or cross-member mask: miss, never mis-write.
                 if not ok or mask_id is None or id_to_file.get(mask_id) != target_member:
                     _miss("masked-media")
@@ -909,6 +930,7 @@ def patch_deck_geometry(
     require_reconcile: bool = True,
     extra_member_edits: dict[str, bytes] | None = None,
     text_reposition: bool = False,
+    mask_crop: bool = False,
 ) -> dict[int, PatchResult]:
     """Patch every slide in ``specs_by_slide`` with exactly ONE zip rewrite.
 
@@ -938,6 +960,7 @@ def patch_deck_geometry(
             source_counts=source_counts_by_slide.get(n),
             require_reconcile=require_reconcile,
             text_reposition=text_reposition,
+            mask_crop=mask_crop,
         )
         if not refuse_reason and target_member is not None and edits:
             owner = member_owner.get(target_member)

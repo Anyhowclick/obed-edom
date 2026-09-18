@@ -184,6 +184,26 @@ def offline_text_reposition_enabled(
     return True
 
 
+def offline_maskcrop_enabled(
+    explicit: str | None = None, *, offline_mode: str | None = None,
+    say: Callable[[str], None] | None = None,
+) -> bool:
+    """Offline write of origin-anchored masked-media CROPs (default OFF). Env
+    `OBED_OFFLINE_MASKCROP` (`1`/`true`/`yes`/`on`). Today the surgical writer only writes
+    an IDENTITY mask (no crop) and hard-misses every real crop; when ON it also writes an
+    origin-anchored axis-aligned crop (mask offset ~0) via the existing
+    `_masked_media_fields` transform. Offset/rotated crops stay refused. Forced OFF when
+    `offline_mode` is `off`."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_MASKCROP", "")).strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    if offline_mode == "off":
+        if say:
+            say("OBED_OFFLINE_MASKCROP needs OBED_OFFLINE_WRITE on; no offline slides to write.")
+        return False
+    return True
+
+
 def _spec_addr(spec: dict[str, Any]) -> tuple:
     return (int(spec.get("slide", -1)), str(spec.get("kind")), int(spec.get("kindIndex", -1)))
 
@@ -1477,9 +1497,10 @@ def remap_keynote(
         )
     _require_pass1_saved_closed(jxa)
     text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
+    mask_crop = offline_maskcrop_enabled(offline_mode=offline_mode, say=say)
     offline_write_info = offline_write.run_offline_write(
         dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say,
-        text_reposition=text_reposition,
+        text_reposition=text_reposition, mask_crop=mask_crop,
     )
     zorder_mode = zorder_write_mode(offline_mode=offline_mode, say=say)
     zorder_refused = set((offline_write_info or {}).get("refused") or [])

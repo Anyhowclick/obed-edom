@@ -52,6 +52,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     _group_child_scale_ops,
     _group_fields,
     _is_identity_mask,
+    _is_origin_anchored_mask,
     _masked_media_fields,
     _natural_unwritable,
     _natural_writable,
@@ -239,6 +240,25 @@ def _build_cropped_mask_deck(path):
     """One masked image whose mask is a REAL crop (mask size < image size): the
     identity-mask write must refuse this rather than guess a redistribution."""
     mask = _arch(231, "TSD.MaskArchive", _mask_super(5, 5, 80, 40))
+    img = _arch(230, "TSD.ImageArchive",
+                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60),
+                 "originalSize": {"width": 120.0, "height": 60.0}})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, img, mask]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def _build_origin_crop_deck(path, *, mask_xy=(0, 0)):
+    """One masked image whose mask is an ORIGIN-anchored crop (offset ~0, smaller than the
+    image frame). Offset the mask to make it an OFFSET crop instead."""
+    mx, my = mask_xy
+    mask = _arch(231, "TSD.MaskArchive", _mask_super(mx, my, 80, 40))
     img = _arch(230, "TSD.ImageArchive",
                 {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60),
                  "originalSize": {"width": 120.0, "height": 60.0}})
@@ -994,6 +1014,61 @@ def test_is_identity_mask_boundaries():
     # An 11.8px-wide icon hits the 0.5% bound instead (0.5% of 11.8 = 0.059, tighter than 1px).
     assert _is_identity_mask(11.8, 20.9, 0.0, 0.05, 0.0, 11.8, 20.9, 0.0) is True
     assert _is_identity_mask(11.8, 20.9, 0.0, 0.07, 0.0, 11.8, 20.9, 0.0) is False
+
+
+def test_is_origin_anchored_mask_predicate():
+    # Origin-anchored CROP (offset ~0, mask smaller than frame): admitted.
+    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 0.0) is True
+    # Identity (offset 0, mask == frame) is a subset: also origin-anchored.
+    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 120.0, 60.0, 0.0) is True
+    # OFFSET crop (mask displaced): not origin-anchored -> stays refused.
+    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 5.0, 5.0, 80.0, 40.0, 0.0) is False
+    # Rotated frame or mask: never.
+    assert _is_origin_anchored_mask(120.0, 60.0, 90.0, 0.0, 0.0, 80.0, 40.0, 0.0) is False
+    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 12.0) is False
+
+
+def test_masked_media_fields_origin_crop_gated_by_flag():
+    # Origin crop: refused without the flag (ok=False), written with it. The transform
+    # scales mask+image by target/mask and pins the composed rect at the target.
+    objects = {
+        "231": {"_pbtype": "TSD.MaskArchive", **_mask_super(0, 0, 80, 40)},
+        "230": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "231"},
+                "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}},
+    }
+    rec = {"id": "230", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0}
+    reported = [300.0, 100.0, 120.0, 60.0]
+    off_ops, off_mask, off_ok = _masked_media_fields(rec, objects["230"], objects, spec, reported)
+    assert off_ok is False and off_ops == [] and off_mask == "231"  # refused, flag off
+    on_ops, on_mask, on_ok = _masked_media_fields(
+        rec, objects["230"], objects, spec, reported, allow_origin_crop=True)
+    assert on_ok is True and on_mask == "231" and len(on_ops) == 2  # mask + image writes
+    fields = dict(on_ops)
+    assert fields["231"]["size_w"] == pytest.approx(160.0)  # mask scaled to target (mask@origin)
+    assert fields["231"]["size_h"] == pytest.approx(80.0)
+
+
+def test_slide_edits_origin_crop_missed_off_written_on(tmp_path):
+    # End-to-end through _slide_edits: an origin-crop image hard-misses masked-media with the
+    # flag off, and is written (no miss) with mask_crop on. Offset crops stay refused either way.
+    deck = _build_origin_crop_deck(tmp_path / "origin.key")
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    off = patch_deck_geometry(deck, {1: specs}, require_reconcile=False)[1]
+    assert off.missed == 1 and off.applied == 0 and off.missed_specs == specs
+    on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert on.applied and not on.refused and on.value_clean and set(on.edited_ids) == {"230", "231"}
+
+
+def test_slide_edits_offset_crop_refused_even_with_maskcrop(tmp_path):
+    # An OFFSET crop (mask displaced) is not origin-anchored: refused even with mask_crop on
+    # (its crop redistribution is unproven offline). Deck untouched.
+    deck = _build_origin_crop_deck(tmp_path / "offset.key", mask_xy=(5, 5))
+    original = deck.read_bytes()
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert on.missed == 1 and on.applied == 0 and on.missed_specs == specs
+    assert deck.read_bytes() == original
 
 
 def test_value_clean_allows_noop_edit_below_edit_count(deck):

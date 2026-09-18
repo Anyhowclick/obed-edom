@@ -44,7 +44,11 @@ from obed_edom.offline_write import (
     verify_live_frames_multiset,
     verify_offline_frames,
 )
-from obed_edom.remap_keynote import offline_text_reposition_enabled, offline_write_mode
+from obed_edom.remap_keynote import (
+    offline_maskcrop_enabled,
+    offline_text_reposition_enabled,
+    offline_write_mode,
+)
 from scripts.offline_write_ab import (
     CARD_REF_FLOOR,
     Tolerances,
@@ -190,6 +194,27 @@ def test_offline_text_reposition_forced_off_when_offline_write_off(monkeypatch):
     monkeypatch.setenv("OBED_OFFLINE_TEXT", "on")
     said = []
     assert offline_text_reposition_enabled(offline_mode="off", say=said.append) is False
+    assert said and "OBED_OFFLINE_WRITE" in said[0]
+
+
+# --- offline_maskcrop_enabled ------------------------------------------------
+
+
+def test_offline_maskcrop_defaults_off_and_parses_tokens(monkeypatch):
+    monkeypatch.delenv("OBED_OFFLINE_MASKCROP", raising=False)
+    assert offline_maskcrop_enabled() is False
+    for tok in ("1", "true", "yes", "on", "ON"):
+        monkeypatch.setenv("OBED_OFFLINE_MASKCROP", tok)
+        assert offline_maskcrop_enabled() is True
+    for tok in ("0", "off", "no", "bogus", ""):
+        monkeypatch.setenv("OBED_OFFLINE_MASKCROP", tok)
+        assert offline_maskcrop_enabled() is False
+
+
+def test_offline_maskcrop_forced_off_when_offline_write_off(monkeypatch):
+    monkeypatch.setenv("OBED_OFFLINE_MASKCROP", "on")
+    said = []
+    assert offline_maskcrop_enabled(offline_mode="off", say=said.append) is False
     assert said and "OBED_OFFLINE_WRITE" in said[0]
 
 
