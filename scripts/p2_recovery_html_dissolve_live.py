@@ -499,7 +499,11 @@ PRESERVE_SCRIPT = r"""
       // Everything within tol of the global max is "top band". If it holds more
       // than ONE distinct decoder, ownership is AMBIGUOUS -> null (fail closed);
       // sibling D1(outgoing)+D2(incoming) stacked at the footprint hit this.
-      const near = cands.filter(function(x) { return x.ov >= bestOverlap - tol; });
+      // Scale-relative epsilon so a decoder sitting EXACTLY on the 5% band edge
+      // is included (ambiguous -> fail closed) rather than dropped by float
+      // rounding, e.g. 0.95*255136 == 242379.19999999998 < 242379.2 (Codex r6).
+      const eps = Math.max(1e-6, bestOverlap * 1e-9);
+      const near = cands.filter(function(x) { return x.ov >= bestOverlap - tol - eps; });
       const distinct = [];
       near.forEach(function(x) { if (distinct.indexOf(x.v) < 0) distinct.push(x.v); });
       if (distinct.length > 1) {
