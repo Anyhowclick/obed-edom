@@ -23,6 +23,59 @@ outgoing/incoming texids applies to the 2→3 boundary only, not 1→2.
 
 ---
 
+## Step 2 (live-`<video>` continuity through the 1→2 cut) — DONE 2026-09-18 (direction B)
+Finding 1 (`continueThroughMagicMove1to2`) is now **honestly GREEN**, offline, both wait profiles
+(fast 10/10, slow 6/6; restart 16/16; 103 unit tests; 7 Codex gpt-5.6-sol rounds
+`.agents/reviews/step2-livevideo-codex-r1..r7.md`, final verdict PASS).
+
+Root cause: the 1→2 movie is a live `<video>` at `MOVIE_ROI=(109,795,952,268)`; PRESERVE remounted it
+into the movie's authored poster layer (`layer51`), which the Magic Move ANIMATES, writing raw stage
+coords → double-counting the layer transform so the video rendered off-stage at `[214,1586]`, leaving
+only a static poster (sustained freeze `afterPairMae [0]×16` while the decoder ran).
+
+**Fix — `scripts/p2_recovery_html_dissolve_live.py` (PRESERVE_SCRIPT):**
+- `tryRemount` authored-layer branch: place by MEASURE-AND-CORRECT (zero left/top, measure
+  getBoundingClientRect, offset by footprint − measured) instead of raw stage coords — renders at the
+  on-screen footprint inside a transformed ancestor, keeping the poster's authored z-order (a
+  top/forced z-index breaks Finding 2's green-in-front).
+- `keepAtFootprint(v,tx,ty)`: a per-rAF measure-correct that HOLDS the video at the footprint every
+  frame through the 1→2 window (the authored layer keeps animating, so a one-shot placement drifts).
+  Stops at the 2→3 restart boundary / retire.
+- Synchronous `tryRemount` in `scheduleRemount` (same task as detach) — no owner-less frame at the
+  flip instant.
+- `footprintOwnerDecoderId` rewritten: resolve the positioned footprint `<video>` (DOM+pool) by
+  IoU≥0.75 (ranked by IoU), fail-closed null on unknown footprint / no match / distinct-decoder tie.
+
+**Gate rework — `scripts/p2_recovery_html_adversarial.py` + `tests/test_p2_adversarial.py`:**
+- `_score_feed_engaged` → `liveContinuity1to2`, fail-CLOSED, ok iff ALL: `boundaryValid` (strict-parse
+  hash1/hash2 + num(hash2)>num(hash1) + restart bound present); `stableFootprintDecoder` (one distinct
+  non-null footprint decoderId covering ≥70% of the after-window `[num(hash2), SLIDE3_MIN_HASH)`,
+  tolerating transient-remount nulls but rejecting any `ownerAmbiguous` frame = two decoders at the
+  footprint = handoff-in-progress); `crossingIdentity` (the PRE-flip footprint owner == the same single
+  after-window owner — rejects a same-key handoff; derived from flip_samples, jitter-tolerant);
+  `rvfcAdvance` (that decoder's rVFC presentedMediaTime advances in-window, ordered vs running-max —
+  rejects a rewind). Dropped the deck-texid `incomingFeedDraw`/`contextType2d`/`bothSidedTexids`.
+- Composited-motion proof = `index_run` (the burnt-in counter marching forward — aliasing-immune). The
+  pixel-MAE checks `motionAcrossFlip` AND `visible_motion` are de-gated (reported for provenance): they
+  alias to a false "still" on the two-state grating (the parity aliasing `index_run` was built to
+  defeat). **Owner-approved.** All GATED checks are now counter/clock/identity based (aliasing-immune).
+- `_derive_movie_texids` tagged `boundary="2to3"`; `window.__OBED_MOVIE_TEXIDS__` injection dropped.
+  `_dense_after_click` dense samples carry `sceneHash`; a per-frame `ownerAmbiguous` flag (from both
+  screenshot-bracket endpoints) flows into flip_samples. 2→3 restart verified independent + unregressed.
+
+**Documented residuals (accepted):** (1) footprint ownership is geometric (IoU), not paint-order/
+opacity-aware — accepted because `index_run` decodes the burnt-in counter from the COMPOSITE (visible)
+pixels so the verdict is tied to what paints, both footprint instances are the SAME movie (an inter-
+instance swap is visually seamless), and a distinct-decoder IoU tie / `ownerAmbiguous` frame fails
+closed. (2) Strict boundary parsing is fixture-scoped: `_norm_hash` prefix-normalises a malformed
+`#1junk` to `#1` before `_strict_hash_num`, so strict validation is bypassed in production; unreachable
+because the Keynote player only emits clean `#N?currentSlide=1` hashes — closing it end-to-end needs
+raw-hash pipeline re-plumbing. Both are fixture-specific, not general guarantees.
+
+**Base/branch:** built on PR #158 tip `d0d2c00` (origin/`feat/keynote-alpha-p2-html-mm`), fast-forwards.
+
+---
+
 
 ## Step 1 (ownership & targeting) — DONE 2026-09-18, branch `claude/pr158-handover-findings-4366b9`
 Tip `5cfa8ee`. 7 implementation rounds folding 6 adversarial Codex (gpt-5.6-sol) reviews

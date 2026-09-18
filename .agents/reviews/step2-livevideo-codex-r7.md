@@ -1,0 +1,10 @@
+Final verdict: **PASS — masked-handoff P1 is closed end-to-end.**
+
+- Capture: `_owner_ambiguous()` detects either ambiguous endpoint or differing non-null bracket owners, and both frame builders record it ([adversarial.py:1130](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/scripts/p2_recovery_html_adversarial.py:1130)).
+- Projection: `ownerAmbiguous` is preserved in `flip_samples` ([adversarial.py:1599](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/scripts/p2_recovery_html_adversarial.py:1599)).
+- Gate: any ambiguous post-frame fails `stableFootprintDecoder`; any ambiguous pre-frame fails `crossingIdentity` ([adversarial.py:491](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/scripts/p2_recovery_html_adversarial.py:491), [adversarial.py:516](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/scripts/p2_recovery_html_adversarial.py:516)).
+- Top-level finding requires `live_continuity.ok`, so neither failure can be bypassed ([adversarial.py:2012](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/scripts/p2_recovery_html_adversarial.py:2012)).
+
+No new reachable fail-open path was introduced. The only remaining residual is the documented strict-hash carryover: `_norm_hash` can sanitize malformed prefix hashes before strict validation. Clean fixture hashes make it unreachable; complete closure requires preserving raw hashes through the capture pipeline.
+
+Verification: 21 live-continuity tests and all 23 zero-argument adversarial tests passed directly, plus an explicit ambiguous-pre-frame probe. Standard pytest startup remained unavailable because the read-only sandbox has no writable temporary directory.

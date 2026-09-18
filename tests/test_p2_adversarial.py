@@ -332,257 +332,401 @@ def test_times_bound_decoder_absent_is_none_not_sibling_clock():
 
 
 # --------------------------------------------------------------------------- #
-# F1b — fail-closed engagement gate `feedEngagedAt1to2`.
+# `_derive_movie_texids` — corrected model relabels the crossfade as 2->3.
 # --------------------------------------------------------------------------- #
-def _valid_texids() -> dict:
-    return {"decoderKey": "movie1", "outgoing": ["out1"], "incoming": ["in1"]}
+def test_derive_movie_texids_labels_boundary_as_2to3(tmp_path):
+    """The resolved footprint magic-move `contents` crossfade is the 2->3
+    restart-side boundary (Keynote stores the transition under incoming slide #3),
+    not 1->2, so a successful resolve is tagged `boundary == "2to3"` (handover
+    CORRECTION 2026-09-18)."""
+    slides = [
+        ("slide1", [_video_layer("obj-m1", "S")]),
+        ("slide2", [_video_layer("obj-m1", "S"), _magic_move([_crossfade("P", "R")])]),
+    ]
+    result = p2._derive_movie_texids(_write_player(tmp_path, slides))
+    assert result["decoderKey"] == "movie1"
+    assert result["boundary"] == "2to3"
+    assert result["outgoing"] == ["P"]
+    assert result["incoming"] == ["R"]
 
 
-def _post_flip_samples(decoder_id="dec-1", context_type="2d") -> list[dict]:
-    """Two post-flip samples (`sceneHash != hash1`) with a stable decoder."""
+# --------------------------------------------------------------------------- #
+# `liveContinuity1to2` — fail-closed live-<video> continuity sub-verdict.
+#
+# Corrected model (handover CORRECTION 2026-09-18): the 1->2 movie is a live
+# `<video>` at the footprint, NOT a fed 2D canvas. The gate passes iff ALL of:
+#   - stableFootprintDecoder: exactly one non-null decoderId across the after
+#     window (sceneHash != hash1);
+#   - rvfcAdvance: the bound decoder's presentedMediaTime advances >0.05 on/after
+#     the flip (min_hash == num(hash2)).
+# motionAcrossFlip.ok is reported for provenance but is NOT gated: its crossing-
+# pair pixel-MAE aliases to ~0 ("frozen crossing") on the disposable grating, so
+# gating on it would reintroduce the parity-aliasing flake; the composited-motion
+# proof is the top-level visible_motion.ok + index_run.ok (aliasing-immune burnt-in
+# counter). The old deck-texid / 2d-context / incoming-feed-draw checks are DROPPED.
+# --------------------------------------------------------------------------- #
+RESTART = 6  # SLIDE3_MIN_HASH — upper-bounds the 1->2 window [num(hash2), RESTART)
+
+
+def _flip_samples(decoder_id="dec-1", pre_decoder_id=None) -> list[dict]:
+    """flip_samples spanning the PRE-flip footprint owner (#1) + the after-window
+    (#2,#3, in [num(hash2)=2, RESTART=6)). `pre_decoder_id` defaults to `decoder_id`
+    (continuity); set it to a different id to model a same-key HANDOFF (D1 before,
+    D2 after)."""
+    pre = pre_decoder_id if pre_decoder_id is not None else decoder_id
     return [
-        {"sceneHash": "#2", "decoderId": decoder_id, "contextType": context_type},
-        {"sceneHash": "#3", "decoderId": decoder_id, "contextType": context_type},
+        {"sceneHash": "#1", "decoderId": pre},        # pre-flip footprint owner
+        {"sceneHash": "#2", "decoderId": decoder_id},
+        {"sceneHash": "#3", "decoderId": decoder_id},
     ]
 
 
-def _incoming_draw(
-    decoder_id="dec-1",
-    canvas_id="in1",
-    hash_num=4,
-    authored_by="player-draw",
-    context_type="2d",
-    kind="texture-feed-draw",
-) -> dict:
-    detail = {
-        "slot": "incoming",
-        "decoderId": decoder_id,
-        "hashNum": hash_num,
-        "authoredBy": authored_by,
-        "contextType": context_type,
+def _advancing_presented(decoder_id="dec-1") -> list[dict]:
+    """Media snapshots whose bound decoder's presentedMediaTime advances >0.05
+    on/after the flip (`#2`, `#3` are both in-window for hash2 == "#2")."""
+    return [
+        {"sceneHash": "#2", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 10.5}]},
+    ]
+
+
+def _motion_healthy(decoder_id="dec-1", *, pixel_ok=True) -> dict:
+    """A score_motion_across_flip result whose CROSSING IDENTITY fields hold (same
+    decoded decoder + expected key immediately before and after the flip). `pixel_ok`
+    is the (non-gated) crossing-MAE verdict `ok`."""
+    return {
+        "ok": pixel_ok,
+        "crossingDecoded": True,
+        "crossingDecoderStable": True,
+        "crossingKeyOk": True,
+        "crossingDecoderIds": [decoder_id, decoder_id],
     }
-    if canvas_id is not None:
-        detail["canvasId"] = canvas_id
-    return {"kind": kind, "detail": detail}
 
 
-def test_feed_engaged_passes_only_when_every_condition_holds():
-    """Positive control: all five sub-conditions satisfied => ok, no failures.
-    Proves the gate is not wired to always-fail."""
-    verdict = p2._score_feed_engaged(
-        _valid_texids(),
-        {"ok": True},
-        _post_flip_samples(),
-        [_incoming_draw()],
-        "#1",
-        "#2",
+def test_live_continuity_passes_when_every_condition_holds():
+    """Positive control: valid forward boundary + one stable footprint decoder +
+    crossing identity + advancing presented time => ok, no failures. Proves the
+    gate is not wired to always-fail."""
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples(), _advancing_presented(), "#1", "#2",
+        restart_min_hash=RESTART,
     )
     assert verdict["ok"] is True
     assert verdict["failed"] == []
     assert verdict["boundDecoderId"] == "dec-1"
+    assert verdict["rvfcAdvance"]["ok"] is True
 
 
-def test_feed_engaged_fails_closed_when_incoming_draw_absent():
-    """No incoming texture-feed-draw/mo-prepaint-draw => the finding cannot pass.
-
-    This is the empirical round-1 reality: only outgoing prepaint draws fired,
-    zero incoming, so the gate stays RED for a proven reason.
-    """
-    verdict = p2._score_feed_engaged(
-        _valid_texids(),
-        {"ok": True},
-        _post_flip_samples(),
-        [],  # no engagement events at all
-        "#1",
-        "#2",
-    )
-    assert verdict["ok"] is False
-    assert verdict["failed"] == ["incomingFeedDraw"]
-
-
-def test_feed_engaged_fails_when_only_outgoing_draws_exist():
-    """An outgoing-slot draw is not engagement of the incoming canvas."""
-    outgoing_only = {
-        "kind": "mo-prepaint-draw",
-        "detail": {"slot": "outgoing", "decoderId": "dec-1", "canvasId": "out1", "hashNum": 4},
-    }
-    verdict = p2._score_feed_engaged(
-        _valid_texids(), {"ok": True}, _post_flip_samples(), [outgoing_only], "#1", "#2"
-    )
-    assert verdict["ok"] is False
-    assert "incomingFeedDraw" in verdict["failed"]
-
-
-def test_feed_engaged_fails_closed_when_decoder_id_unstable():
+def test_live_continuity_fails_closed_when_decoder_unstable():
     """Two different decoderIds across the after window => no single bound
-    decoder => fail. Cascades to context/draw checks (which need that id)."""
+    decoder => stableFootprintDecoder fails, and rvfcAdvance cascades closed
+    (no decoder to bind the clock to)."""
     unstable = [
-        {"sceneHash": "#2", "decoderId": "dec-1", "contextType": "2d"},
-        {"sceneHash": "#3", "decoderId": "dec-2", "contextType": "2d"},
+        {"sceneHash": "#2", "decoderId": "dec-1"},
+        {"sceneHash": "#3", "decoderId": "dec-2"},
     ]
-    verdict = p2._score_feed_engaged(
-        _valid_texids(), {"ok": True}, unstable, [_incoming_draw()], "#1", "#2"
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), unstable, _advancing_presented(), "#1", "#2", restart_min_hash=RESTART
     )
     assert verdict["ok"] is False
-    assert "stableDecoder" in verdict["failed"]
+    assert "stableFootprintDecoder" in verdict["failed"]
+    assert "rvfcAdvance" in verdict["failed"]
     assert verdict["boundDecoderId"] is None
 
 
-def test_feed_engaged_fails_closed_when_context_type_not_2d():
-    """A webgl (non-2D) fed canvas fails the passive-context condition in
-    isolation — decoder is stable, draw present, only contextType is wrong."""
-    verdict = p2._score_feed_engaged(
-        _valid_texids(),
-        {"ok": True},
-        _post_flip_samples(context_type="webgl"),
-        [_incoming_draw()],
-        "#1",
-        "#2",
+def test_live_continuity_fails_closed_on_handoff():
+    """A same-key HANDOFF (D1 owns the footprint before the flip, sibling D2 slides
+    in after) must fail: post-flip stability + D2's already-advancing rVFC alone
+    cannot see it, but crossingIdentity (pre-flip owner D1 != after-window owner D2)
+    does. This is the fail-open hole the pixel-MAE de-gating would otherwise open."""
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples("dec-2", pre_decoder_id="dec-1"),
+        _advancing_presented("dec-2"), "#1", "#2", restart_min_hash=RESTART,
     )
     assert verdict["ok"] is False
-    assert "contextType2d" in verdict["failed"]
-    # Isolation: the other conditions still held.
-    assert "stableDecoder" not in verdict["failed"]
-    assert "incomingFeedDraw" not in verdict["failed"]
+    assert "crossingIdentity" in verdict["failed"]
+    # Post-flip stability + rVFC still individually hold — only crossing identity fails.
+    assert "stableFootprintDecoder" not in verdict["failed"]
+    assert "rvfcAdvance" not in verdict["failed"]
+    assert verdict["boundDecoderId"] == "dec-2"
 
 
-def test_feed_engaged_fails_closed_on_one_sided_or_null_texids():
-    """Never pass by absence of texid data: a one-sided (or null) texid object
-    fails the both-sided condition."""
-    one_sided = {"decoderKey": "movie1", "outgoing": [], "incoming": ["in1"]}
-    verdict = p2._score_feed_engaged(
-        one_sided, {"ok": True}, _post_flip_samples(), [_incoming_draw()], "#1", "#2"
+def test_live_continuity_fails_closed_on_prefix_parseable_boundary():
+    """Boundary parsing is STRICT full-match: a malformed numeric-prefix hash like
+    '#1junk' -> '#2junk' must NOT be accepted as a valid 1->2 boundary (the old
+    prefix match read them as 1,2)."""
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples(), _advancing_presented(),
+        "#1junk", "#2junk", restart_min_hash=RESTART,
     )
     assert verdict["ok"] is False
-    assert "bothSidedTexids" in verdict["failed"]
+    assert "boundaryValid" in verdict["failed"]
 
 
-def test_feed_engaged_fails_when_motion_across_flip_not_ok():
-    """`motionAcrossFlip.ok` is a necessary condition."""
-    verdict = p2._score_feed_engaged(
-        _valid_texids(),
-        {"ok": False},
-        _post_flip_samples(),
-        [_incoming_draw()],
-        "#1",
-        "#2",
+def test_live_continuity_fails_closed_on_missing_pre_flip_owner():
+    """No resolved PRE-flip footprint owner (flip_samples carry only after-window
+    frames) cannot prove the owner is unchanged across the cut => crossingIdentity
+    fails closed (never pass by absence of before-evidence)."""
+    post_only = [
+        {"sceneHash": "#2", "decoderId": "dec-1"},
+        {"sceneHash": "#3", "decoderId": "dec-1"},
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), post_only, _advancing_presented(), "#1", "#2",
+        restart_min_hash=RESTART,
     )
     assert verdict["ok"] is False
-    assert "motionAcrossFlipOk" in verdict["failed"]
+    assert "crossingIdentity" in verdict["failed"]
 
 
-def test_feed_engaged_draw_before_boundary_window_does_not_count():
-    """A draw at a hashNum before the boundary (warmup) is not 1->2 engagement."""
-    early_draw = _incoming_draw(hash_num=0)
-    verdict = p2._score_feed_engaged(
-        _valid_texids(), {"ok": True}, _post_flip_samples(), [early_draw], "#1", "#2"
+def test_live_continuity_tolerates_a_transient_null_owner():
+    """A few transient unresolved (null) owner frames — the <video> briefly
+    mid-remount during the fast MM animation — do NOT fail stability, as long as one
+    distinct non-null owner covers a strong majority (>=70%) of the after-window."""
+    jittery = [
+        {"sceneHash": "#1", "decoderId": "dec-1"},  # pre-flip owner
+        {"sceneHash": "#2", "decoderId": "dec-1"},
+        {"sceneHash": "#3", "decoderId": "dec-1"},
+        {"sceneHash": "#3", "decoderId": None},   # one transient jitter frame
+        {"sceneHash": "#4", "decoderId": "dec-1"},
+        {"sceneHash": "#4", "decoderId": "dec-1"},
+    ]  # after-window 4/5 non-null = 0.8 >= 0.7, one distinct non-null owner
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), jittery, _advancing_presented(), "#1", "#2", restart_min_hash=RESTART
     )
-    # hash1 == "#1" (num 1); a draw at #0 is filtered out of the window.
+    assert verdict["ok"] is True
+    assert "stableFootprintDecoder" not in verdict["failed"]
+    assert verdict["boundDecoderId"] == "dec-1"
+
+
+def test_live_continuity_rejects_ambiguous_null_masked_handoff():
+    """A tolerated null must be a genuine ABSENCE gap, not a masked handoff. When a
+    frame is flagged `ownerAmbiguous` (two decoders both cover the footprint — D1
+    leaving + D2 arriving — or the bracket endpoints disagree), that after-frame must
+    fail closed even at >=70% D1 coverage, rather than being tolerated as jitter."""
+    masked = [
+        {"sceneHash": "#1", "decoderId": "dec-1"},                          # pre-flip owner
+        {"sceneHash": "#2", "decoderId": "dec-1"},
+        {"sceneHash": "#3", "decoderId": "dec-1"},
+        {"sceneHash": "#3", "decoderId": None, "ownerAmbiguous": True},     # D1+D2 both present
+        {"sceneHash": "#4", "decoderId": "dec-1"},
+        {"sceneHash": "#4", "decoderId": "dec-1"},
+    ]  # 4/5 after non-null = 0.8, but one ambiguous (handoff-in-progress) frame
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), masked, _advancing_presented(), "#1", "#2", restart_min_hash=RESTART
+    )
     assert verdict["ok"] is False
-    assert "incomingFeedDraw" in verdict["failed"]
+    assert "stableFootprintDecoder" in verdict["failed"]
 
 
-def test_feed_engaged_fails_closed_on_empty_after_window():
+def test_live_continuity_fails_closed_on_mostly_unresolved_window():
+    """A window that is mostly null (owner unresolved for the majority) fails: a
+    single resolved frame cannot prove continuity (never pass by absence)."""
+    mostly_null = [
+        {"sceneHash": "#2", "decoderId": "dec-1"},
+        {"sceneHash": "#3", "decoderId": None},
+        {"sceneHash": "#3", "decoderId": None},
+        {"sceneHash": "#4", "decoderId": None},
+    ]  # 1/4 non-null = 0.25 < 0.7
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), mostly_null, _advancing_presented(), "#1", "#2", restart_min_hash=RESTART
+    )
+    assert verdict["ok"] is False
+    assert "stableFootprintDecoder" in verdict["failed"]
+
+
+def test_live_continuity_fails_closed_on_null_decoder_id():
+    """An unresolved footprint owner (null decoderId across the window) fails
+    closed — never pass by absence of ownership."""
+    nulls = [
+        {"sceneHash": "#2", "decoderId": None},
+        {"sceneHash": "#3", "decoderId": None},
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), nulls, _advancing_presented(), "#1", "#2", restart_min_hash=RESTART
+    )
+    assert verdict["ok"] is False
+    assert "stableFootprintDecoder" in verdict["failed"]
+    assert verdict["boundDecoderId"] is None
+
+
+def test_live_continuity_fails_closed_on_empty_after_window():
     """No post-flip samples at all => stable decoder cannot be proven => fail
     (never pass by absence of data)."""
-    verdict = p2._score_feed_engaged(_valid_texids(), {"ok": True}, [], [_incoming_draw()], "#1", "#2")
-    assert verdict["ok"] is False
-    assert "stableDecoder" in verdict["failed"]
-
-
-# --- F1 hardening (Codex r2): reject unproven / out-of-window draw events ----- #
-def _engaged(events, *, restart_min_hash=None):
-    return p2._score_feed_engaged(
-        _valid_texids(), {"ok": True}, _post_flip_samples(), events, "#1", "#2",
-        restart_min_hash=restart_min_hash,
-    )
-
-
-def test_feed_engaged_rejects_geom_authored_draw():
-    """A `geom` (guessed) draw is not player-authored engagement (Codex r2 F1)."""
-    verdict = _engaged([_incoming_draw(authored_by="geom")])
-    assert verdict["ok"] is False
-    assert "incomingFeedDraw" in verdict["failed"]
-
-
-def test_feed_engaged_rejects_missing_authored_by():
-    """A draw with no authoredBy fails closed (must be explicitly player-draw)."""
-    ev = _incoming_draw()
-    del ev["detail"]["authoredBy"]
-    assert "incomingFeedDraw" in _engaged([ev])["failed"]
-
-
-def test_feed_engaged_rejects_missing_canvas_id():
-    """A draw with no canvasId cannot be proven to hit an incoming canvas."""
-    verdict = _engaged([_incoming_draw(canvas_id=None)])
-    assert "incomingFeedDraw" in verdict["failed"]
-
-
-def test_feed_engaged_rejects_canvas_id_not_in_incoming():
-    """A draw into a canvas outside the resolved `incoming` set does not count."""
-    verdict = _engaged([_incoming_draw(canvas_id="some-other-canvas")])
-    assert "incomingFeedDraw" in verdict["failed"]
-
-
-def test_feed_engaged_rejects_draw_event_context_not_2d():
-    """The incoming draw event's OWN contextType must be 2d — a webgl/absent
-    context on the incoming canvas is not a valid 2D composite (Codex r2 F1)."""
-    assert "incomingFeedDraw" in _engaged([_incoming_draw(context_type="webgl")])["failed"]
-
-
-def test_feed_engaged_rejects_unknown_hash_draw():
-    """A draw with neither a numeric hashNum nor a parseable sceneHash is not
-    placeable in the window => rejected, never accepted by absence of a hash."""
-    ev = _incoming_draw()
-    del ev["detail"]["hashNum"]  # no hashNum and no sceneHash => unknown
-    assert "incomingFeedDraw" in _engaged([ev])["failed"]
-
-
-def test_feed_engaged_rejects_draw_at_or_after_restart_boundary():
-    """With an upper window bound (the 2->3 restart), a draw at/after it — e.g.
-    an unrelated later hash like #99 — must not satisfy Finding 1 (Codex r2 F1)."""
-    late = _incoming_draw(hash_num=99)
-    assert "incomingFeedDraw" in _engaged([late], restart_min_hash=6)["failed"]
-    # A draw inside [hash2, restart) with everything else valid DOES count.
-    good = _incoming_draw(hash_num=4)
-    assert _engaged([good], restart_min_hash=6)["ok"] is True
-
-
-def test_feed_engaged_rejects_draw_at_pre_advance_hash1():
-    """hash1 is captured BEFORE the ArrowRight advance; a player-authored draw at
-    hash1 (#1) is pre-transition and must NOT count — the window starts at the
-    flip (hash2), strictly after hash1 (Codex r3 F1)."""
-    at_hash1 = _incoming_draw(hash_num=1)  # num(hash1) == 1, num(hash2) == 2
-    verdict = p2._score_feed_engaged(
-        _valid_texids(), {"ok": True}, _post_flip_samples(), [at_hash1], "#1", "#2",
-        restart_min_hash=6,
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), [], _advancing_presented(), "#1", "#2", restart_min_hash=RESTART
     )
     assert verdict["ok"] is False
-    assert "incomingFeedDraw" in verdict["failed"]
-    # The same draw one hash later (at the flip) counts.
-    at_flip = _incoming_draw(hash_num=2)
-    assert p2._score_feed_engaged(
-        _valid_texids(), {"ok": True}, _post_flip_samples(), [at_flip], "#1", "#2",
-        restart_min_hash=6,
-    )["ok"] is True
+    assert "stableFootprintDecoder" in verdict["failed"]
 
 
-def test_feed_engaged_hash1_draw_rejected_even_if_hash2_regressive():
-    """A regressive/unparseable flip hash must not loosen the strictly-after-hash1
-    lower bound (Codex r4 F1). hash2=#0 < hash1=#1, draw at #1 => still rejected."""
-    at_hash1 = _incoming_draw(hash_num=1)
-    verdict = p2._score_feed_engaged(
-        _valid_texids(), {"ok": True}, _post_flip_samples(), [at_hash1], "#1", "#0",
-        restart_min_hash=6,
+def test_live_continuity_excludes_restart_window_samples():
+    """Samples at/after the 2->3 restart boundary (hn >= restart_min_hash) are NOT
+    part of the 1->2 after-window: a decoder that only appears at #6 cannot earn
+    the 1->2 finding (Codex boundary hole — the old restart upper-bound restored)."""
+    at_restart = [
+        {"sceneHash": "#6", "decoderId": "dec-1"},
+        {"sceneHash": "#7", "decoderId": "dec-1"},
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), at_restart, _advancing_presented(), "#1", "#2", restart_min_hash=RESTART
     )
-    assert "incomingFeedDraw" in verdict["failed"]
+    assert verdict["ok"] is False
+    assert "stableFootprintDecoder" in verdict["failed"]  # empty in-window after set
 
 
-def test_feed_engaged_rejects_draw_when_hash1_unparseable():
-    """If hash1 cannot be parsed we cannot place the window => reject every draw
-    (fail closed), never accept by absence of a boundary (Codex r4 F1)."""
-    verdict = p2._score_feed_engaged(
-        _valid_texids(), {"ok": True}, _post_flip_samples(), [_incoming_draw(hash_num=3)],
-        "bad-a", "bad-b", restart_min_hash=6,
+def test_live_continuity_fails_closed_when_presented_time_flat():
+    """A stable bound decoder whose presentedMediaTime does NOT advance across
+    the cut fails rvfcAdvance in isolation (the freeze this whole probe hunts)."""
+    flat = [
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples(), flat, "#1", "#2", restart_min_hash=RESTART
     )
-    assert "incomingFeedDraw" in verdict["failed"]
+    assert verdict["ok"] is False
+    assert "rvfcAdvance" in verdict["failed"]
+    # Isolation: identity + crossing still held.
+    assert "stableFootprintDecoder" not in verdict["failed"]
+    assert "crossingIdentity" not in verdict["failed"]
+
+
+def test_live_continuity_fails_closed_when_presented_time_absent():
+    """No presented-time samples for the bound decoder => insufficient data =>
+    rvfcAdvance fails closed (never pass by absence)."""
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples(), [], "#1", "#2", restart_min_hash=RESTART
+    )
+    assert verdict["ok"] is False
+    assert "rvfcAdvance" in verdict["failed"]
+
+
+def test_live_continuity_fails_closed_on_rvfc_regression():
+    """A bound decoder whose presentedMediaTime REGRESSES across the window (e.g.
+    10.0 -> 1.0, a restart/seek) must NOT count as advance: ordered progression is
+    required, not max-min (which read the rewind as +9.0)."""
+    regress = [
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#3", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 1.0}]},
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples(), regress, "#1", "#2", restart_min_hash=RESTART
+    )
+    assert verdict["ok"] is False
+    assert "rvfcAdvance" in verdict["failed"]
+
+
+def test_live_continuity_rvfc_bound_to_footprint_decoder_not_sibling():
+    """A sibling same-key decoder advancing must NOT satisfy rvfcAdvance for a
+    stalled bound decoder — only the bound decoder's OWN clock counts (no
+    max-of-same-key masking)."""
+    presented = [
+        {
+            "sceneHash": "#2",
+            "videos": [
+                {"decoderId": "dec-1", "presentedMediaTime": 10.0},  # bound
+                {"decoderId": "dec-2", "presentedMediaTime": 20.0},  # sibling
+            ],
+        },
+        {
+            "sceneHash": "#3",
+            "videos": [
+                {"decoderId": "dec-1", "presentedMediaTime": 10.0},  # bound STALLED
+                {"decoderId": "dec-2", "presentedMediaTime": 29.0},  # sibling advances
+            ],
+        },
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples("dec-1"), presented, "#1", "#2",
+        restart_min_hash=RESTART,
+    )
+    assert verdict["ok"] is False
+    assert "rvfcAdvance" in verdict["failed"]
+
+
+def test_live_continuity_ignores_presented_advance_before_flip():
+    """An advance seen only BEFORE the flip (hn < num(hash2)) is out of window;
+    with a single in-window presented-time sample the advance is unprovable =>
+    rvfcAdvance fails closed."""
+    presented = [
+        {"sceneHash": "#1", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 5.0}]},
+        {"sceneHash": "#2", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples(), presented, "#1", "#2", restart_min_hash=RESTART
+    )
+    assert verdict["ok"] is False
+    assert "rvfcAdvance" in verdict["failed"]
+
+
+def test_live_continuity_does_not_gate_on_motion_across_flip_pixel_ok():
+    """The pixel crossing-MAE verdict `motionAcrossFlip.ok` is provenance-only, NOT
+    gated: it aliases to ~0 on the grating fixture, so gating it would reintroduce
+    the parity flake. With crossing IDENTITY + the real conditions holding, the
+    verdict passes even when the pixel `ok` is False; it is still reported."""
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(pixel_ok=False), _flip_samples(), _advancing_presented(),
+        "#1", "#2", restart_min_hash=RESTART,
+    )
+    assert verdict["ok"] is True
+    assert verdict["failed"] == []
+    assert "motionAcrossFlipOk" not in verdict["failed"]
+    assert verdict["motionAcrossFlipOk"] is False  # reported, non-gating
+
+
+def test_live_continuity_fails_closed_on_unparseable_hash2():
+    """If hash2 cannot be parsed the 1->2 boundary cannot be placed => boundaryValid
+    fails closed and rvfc cascades (never accepted by absence of a boundary)."""
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples(), _advancing_presented(), "#1", "bad",
+        restart_min_hash=RESTART,
+    )
+    assert verdict["ok"] is False
+    assert "boundaryValid" in verdict["failed"]
+    assert "rvfcAdvance" in verdict["failed"]
+
+
+def test_live_continuity_fails_closed_on_regressive_boundary():
+    """A regressive advance (num(hash2) <= num(hash1), e.g. #1 -> #0) is NOT a
+    forward entry into the 1->2 window => boundaryValid fails closed, even with
+    moving pixels/decoder present at the regressed hash."""
+    regressed_post = [
+        {"sceneHash": "#0", "decoderId": "dec-1"},
+    ]
+    regressed_presented = [
+        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.0}]},
+        {"sceneHash": "#0", "videos": [{"decoderId": "dec-1", "presentedMediaTime": 10.9}]},
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), regressed_post, regressed_presented, "#1", "#0", restart_min_hash=RESTART
+    )
+    assert verdict["ok"] is False
+    assert "boundaryValid" in verdict["failed"]
+
+
+def test_live_continuity_fails_closed_on_unparseable_hash1():
+    """An unparseable hash1 means we cannot place the window at all => boundaryValid
+    fails closed (never pass by absence of a placeable boundary)."""
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), _flip_samples(), _advancing_presented(), "bad", "#2",
+        restart_min_hash=RESTART,
+    )
+    assert verdict["ok"] is False
+    assert "boundaryValid" in verdict["failed"]
+
+
+def test_live_continuity_accepts_null_context_type():
+    """A live `<video>` owner reports contextType=null; the gate must NOT require
+    any 2D context or texid membership (the dropped model). Samples carrying
+    contextType=None still pass when the real conditions hold."""
+    flip = [
+        {"sceneHash": "#1", "decoderId": "dec-1", "contextType": None},  # pre-flip owner
+        {"sceneHash": "#2", "decoderId": "dec-1", "contextType": None},
+        {"sceneHash": "#3", "decoderId": "dec-1", "contextType": None},
+    ]
+    verdict = p2.liveContinuity1to2(
+        _motion_healthy(), flip, _advancing_presented(), "#1", "#2", restart_min_hash=RESTART
+    )
+    assert verdict["ok"] is True
+    assert verdict["failed"] == []

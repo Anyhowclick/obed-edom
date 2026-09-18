@@ -1,3 +1,11 @@
+> **⚠️ SUPERSEDED FOR 1→2 by Step 2 (2026-09-18).** The 1→2 model below (deck-texid outgoing/incoming
+> + canvas feed + `feedEngagedAt1to2`) was WRONG: the 1→2 movie is a live `<video>`, and those texids
+> are the **2→3** crossfade. Step 2 replaced the 1→2 gate with `liveContinuity1to2` (footprint `<video>`
+> owner + rVFC + crossing identity + fail-closed boundary) and root-caused the freeze (PRESERVE remount
+> off-footprint). See the handover `.agents/handovers/keynote-alpha-html-2026-09-18.md` (Step 2 section)
+> and `.agents/reviews/step2-livevideo-codex-r1..r7.md`. Everything below about deck-derived
+> outgoing/incoming texids now applies to the **2→3 boundary only**.
+
 # Known residual limitations (documented, not yet fixed)
 
 - **Repeated poster pair at genuinely distinct boundaries (Codex r2 F3).** The boundary

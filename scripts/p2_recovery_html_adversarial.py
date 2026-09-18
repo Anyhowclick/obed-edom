@@ -200,8 +200,9 @@ def _extract_movie_layers(
         (`from == to`) tween is a background/opacity animation, not a crossfade.
 
     This function never unions across slides. The caller
-    (`_derive_movie_texids`) resolves the single 1->2 boundary crossfade from
-    these per-slide pieces and preserves each occurrence's provenance.
+    (`_derive_movie_texids`) resolves the single footprint magic-move crossfade
+    (the 2->3 restart boundary under the corrected model) from these per-slide
+    pieces and preserves each occurrence's provenance.
     """
     steady_by_owner: dict[str | None, set[str]] = {}
     crossfades: list[dict] = []
@@ -270,9 +271,18 @@ def _derive_movie_texids(
     footprint_wh: tuple[float, float] = (MOVIE_ROI[2], MOVIE_ROI[3]),
     decoder_key: str = EXPECTED_MOVIE_KEYS[0],
 ) -> dict:
-    """Resolve the single 1->2 boundary crossfade for the footprint movie and
+    """Resolve the single footprint-movie Magic Move `contents` crossfade and
     emit Contract-1's `{decoderKey, outgoing, incoming}` (see
     `.agents/plans/step1-ownership-contracts.md`).
+
+    CORRECTED MODEL (handover CORRECTION 2026-09-18): this crossfade is the
+    **2->3** restart-side boundary, NOT 1->2. Keynote stores a Magic Move
+    transition under its INCOMING slide (#3), so the only footprint magic-move
+    `contents` crossfade in the deck is the 2->3 restart crossfade — its posters
+    (`0885 -> A223`) surface only at scene #6, OUTSIDE the 1->2 gate window. The
+    output is tagged `"boundary": "2to3"`. The 1->2 movie is a live `<video>`
+    (no canvas feed), so this crossfade is NOT injected for a 1->2 feed anymore;
+    `movie-texids.json` is kept for provenance only.
 
     NOT a whole-deck union (Codex defect #5): the boundary is the ONE
     footprint-sized `contents` crossfade under a Magic Move transition
@@ -377,6 +387,7 @@ def _derive_movie_texids(
     # binding, so the static hint need not (and must not) guess the steady canvas.
     return {
         "decoderKey": decoder_key,
+        "boundary": "2to3",
         "outgoing": [frm],
         "incoming": [to],
         "boundaryCrossfade": {"from": frm, "to": to},
@@ -386,130 +397,167 @@ def _derive_movie_texids(
     }
 
 
-def _score_feed_engaged(
-    texids_info: dict,
+def liveContinuity1to2(
     motion_across_flip: dict,
-    after_samples: list[dict],
-    preserve_events: list[dict],
+    flip_samples: list[dict],
+    presented_samples: list[dict],
     hash1: object,
     hash2: object,
     restart_min_hash: object = None,
 ) -> dict:
-    """Fail-CLOSED sub-verdict: did the id-bound feed actually engage at the
-    1->2 Magic Move boundary (Codex F1)? A green screenshot is not proof; only
-    the events + ownership are. This PASSES only when EVERY sub-condition holds
-    and FAILS by the absence of any one of them — never passes because data was
-    missing (that is the fail-open hole this closes).
+    """Fail-CLOSED sub-verdict for live-`<video>` continuity through the 1->2
+    Magic Move (corrected model — see the handover CORRECTION 2026-09-18 and the
+    Step-2 contract, Stream B). The 1->2 movie is a live `<video>` at the
+    footprint, NOT a fed 2D canvas, so the old deck-texid / canvas-feed checks
+    (`bothSidedTexids`, `contextType2d`, `incomingFeedDraw`) are DROPPED entirely:
+    they assumed a 2D-canvas surface that does not exist for 1->2, and the deck
+    texids they keyed off are the 2->3 crossfade (never in-window here). A live
+    `<video>` owner reports `contextType=null`, so this gate requires NO 2D
+    context and NO texid membership.
 
-    Necessary sub-conditions (all required):
-      - `bothSidedTexids`  — `decoderKey` set AND both `outgoing`/`incoming`
-        non-empty (a real `from != to` boundary supplies both sides).
-      - `motionAcrossFlipOk` — `motionAcrossFlip.ok`.
-      - `stableDecoder` — exactly one non-null `decoderId` across the whole
-        post-flip (after) window; a same-key handoff (two ids) or an
-        unresolved owner (null id) fails.
-      - `contextType2d` — that bound decoder's fed canvas passively reported a
-        `"2d"` context on every after sample (never null/webgl, never probed).
-      - `incomingFeedDraw` — >=1 `texture-feed-draw`/`mo-prepaint-draw` that is
-        ALL of: `authoredBy=='player-draw'` (never a `geom` guess — Codex r2 F1),
-        `slot=='incoming'`, `decoderId==boundDecoderId`, the event's OWN
-        `contextType=='2d'` (the incoming canvas itself, not an outgoing one), a
-        non-null `canvasId` in `incoming`, and a KNOWN hash within
-        `[num(hash2), restart_min_hash)` — at/after the FLIP (hash2), strictly
-        after the pre-advance hash1, and before the 2->3 restart. This rejects a
-        pre-transition draw at hash1, an unrelated later hash, and restart work;
-        missing authorship, canvas, hash, or a `geom` origin are all rejected
-        (never pass by absence).
-        Empirically today this is 0 (all draws were `outgoing`/skipped), so the
-        finding stays RED — for a proven reason, failing closed.
+    `ok` iff ALL hold (absence of any ⇒ fail closed; the failing name is
+    recorded):
+      - `boundaryValid` — `hash1` and `hash2` both parse AND `num(hash2) >
+        num(hash1)`: a genuine FORWARD entry into the 1->2 window. A regressive
+        (`#1->#0`), equal, or unparseable hash pair cannot place the after-window.
+      - `stableFootprintDecoder` — exactly ONE distinct non-null `decoderId`
+        covering a strong majority (>=70%) of the after-window, defined as samples
+        strictly inside `[num(hash2), restart_min_hash)` (NOT merely
+        `sceneHash != hash1`, which would admit a pre-advance or a 2->3 restart
+        frame). A same-key handoff (>=2 distinct non-null ids) or a mostly-
+        unresolved window fails; a few transient null frames (the <video> briefly
+        mid-remount during the fast MM animation) are tolerated.
+      - `crossingIdentity` — the PRE-flip footprint owner (flip_samples with
+        hn <= num(hash1)) is resolved AND is exactly the same single decoder as the
+        after-window owner. This rejects a same-key HANDOFF (D1 owns before, sibling
+        D2 slides into the footprint after): post-flip stability + rVFC advance alone
+        cannot see it because D2's own clock is already advancing. Derived from
+        flip_samples (jitter-tolerant), not the two exact crossing frames, and NOT
+        the aliased pixel crossing-MAE.
+      - `rvfcAdvance` — the bound footprint decoder's rVFC `presentedMediaTime`
+        advances (> 0.05) within `[num(hash2), restart_min_hash)`, proving the
+        live `<video>` is actually presenting new frames across the cut. Fails
+        closed on an invalid boundary, a null bound decoder, or <2 samples.
 
-    `after_samples` are the flip samples (roi/sceneHash/decoderId/contextType);
-    the after window is the post-flip subset (`sceneHash != hash1`).
-    `restart_min_hash` (the 2->3 boundary) upper-bounds the accepted draw window.
+    `motionAcrossFlip.ok` (the pixel crossing-MAE verdict) is NOT gated here — it
+    aliases to ~0 ("frozen crossing") on the disposable two-state grating, the
+    exact parity-aliasing that `score_index_progression` defeats; gating it would
+    reintroduce that flake. Composited motion is proven by the top-level
+    `visible_motion.ok` + `index_run.ok` (the aliasing-immune burnt-in counter);
+    this sub-verdict adds decoder IDENTITY + crossing continuity + LIVENESS.
+
+    `flip_samples` supply the after-window decoder identity (roi/sceneHash/
+    decoderId). `presented_samples` (media snapshots carrying `videos`) supply the
+    bound decoder's own rVFC clock. `restart_min_hash` upper-bounds both windows.
     """
-    outgoing = texids_info.get("outgoing") or []
-    incoming = texids_info.get("incoming") or []
-    both_sided = bool(texids_info.get("decoderKey") and outgoing and incoming)
-
     motion_ok = bool((motion_across_flip or {}).get("ok"))
 
-    h1 = _norm_hash(hash1)
-    post = [
-        s
-        for s in (after_samples or [])
-        if s.get("sceneHash") is not None and _norm_hash(s.get("sceneHash")) != h1
-    ]
-    distinct_ids = sorted({s.get("decoderId") for s in post}, key=lambda x: (x is None, str(x)))
-    stable = bool(post) and len(distinct_ids) == 1 and distinct_ids[0] is not None
-    bound_decoder_id = distinct_ids[0] if stable else None
+    n1 = _strict_hash_num(hash1)
+    n2 = _strict_hash_num(hash2)
+    n_restart = restart_min_hash if isinstance(restart_min_hash, int) else _strict_hash_num(restart_min_hash)
+    # A missing/malformed restart bound leaves the after-window unbounded above (a
+    # #99 sample would count) — so the bound is REQUIRED for a valid boundary (the
+    # function itself stays fail-closed, not only the production caller).
+    boundary_valid = n1 is not None and n2 is not None and n2 > n1 and n_restart is not None
 
-    bound_ctx = [s.get("contextType") for s in post if s.get("decoderId") == bound_decoder_id] if stable else []
-    ctx_ok = bool(bound_ctx) and all(c == "2d" for c in bound_ctx)
-
-    incoming_set = set(incoming)
-    n1 = _hash_num(hash1)
-    n2 = _hash_num(hash2)
-    # restart_min_hash may be a bare int (SLIDE3_MIN_HASH) or a "#N" hash string.
-    n_restart = restart_min_hash if isinstance(restart_min_hash, int) else _hash_num(restart_min_hash)
-    draw_hits: list[dict] = []
-    for e in preserve_events or []:
-        if e.get("kind") not in ("texture-feed-draw", "mo-prepaint-draw"):
-            continue
-        d = e.get("detail") or {}
-        # Only a player-authored incoming draw into a KNOWN incoming canvas, on
-        # the bound decoder, with the incoming canvas's OWN 2d context, at a KNOWN
-        # hash inside the 1->2 window, counts. Every missing field fails closed.
-        if d.get("authoredBy") != "player-draw":
-            continue
-        if d.get("slot") != "incoming":
-            continue
-        if bound_decoder_id is None or d.get("decoderId") != bound_decoder_id:
-            continue
-        if d.get("contextType") != "2d":
-            continue
-        cid = d.get("canvasId")
-        if cid is None or cid not in incoming_set:
-            continue
-        hn = d.get("hashNum")
-        if hn is None:
-            hn = _hash_num(d.get("sceneHash"))
-        if hn is None:
-            continue
-        # Window = at/after the FLIP (hash2 when known) AND strictly after the
-        # pre-advance hash1 (Codex r4 F1: a regressive or unparseable hash2 must
-        # not loosen this). An unparseable hash1 means we cannot place the window
-        # at all -> reject (fail closed).
-        if n1 is None or hn <= n1:
-            continue
-        if n2 is not None and hn < n2:
-            continue
+    def _in_window(s: dict) -> bool:
+        hn = _strict_hash_num(s.get("sceneHash"))
+        if hn is None or n2 is None or hn < n2:
+            return False
         if n_restart is not None and hn >= n_restart:
-            continue
-        draw_hits.append({"kind": e.get("kind"), "detail": d})
-    incoming_draw_ok = bool(draw_hits)
+            return False
+        return True
+
+    post = [s for s in (flip_samples or []) if _in_window(s)] if boundary_valid else []
+    distinct_ids = sorted({s.get("decoderId") for s in post}, key=lambda x: (x is None, str(x)))
+    # ONE dominant footprint owner: exactly one DISTINCT non-null decoderId across
+    # the after-window, covering a strong majority of it. A same-key HANDOFF is >=2
+    # distinct non-null ids -> fail. A mostly-unresolved window -> fail. A few
+    # transient unresolved (null) frames are tolerated: the footprint <video> is
+    # briefly mid-remount during the fast MM animation, so ~1 capture per run can
+    # land in that gap even though the movie is continuously present otherwise
+    # (measured: when placed its footprint IoU is ~0.998, never marginal) — a
+    # zero-null rule turned that instrument jitter into a spurious RED. Rejecting
+    # the real failure modes while tolerating jitter keeps this fail-closed.
+    non_null_ids = [s.get("decoderId") for s in post if s.get("decoderId") is not None]
+    distinct_non_null = sorted(set(non_null_ids))
+    non_null_frac = (len(non_null_ids) / len(post)) if post else 0.0
+    # A tolerated null must be a genuine ABSENCE gap, never a masked handoff: a null
+    # from `footprintOwnerDecoderId` returning `via=='ambiguous'` means TWO decoders
+    # both cover the footprint (D1 leaving + D2 arriving) — a handoff in progress —
+    # so ANY ambiguous after-frame fails closed rather than being tolerated as jitter.
+    # (A frame where a single OTHER decoder owns the footprint is not null; it makes
+    # distinct_non_null == 2 and fails anyway.)
+    has_ambiguous_owner = any(s.get("ownerAmbiguous") for s in post)
+    stable = (
+        bool(post)
+        and len(distinct_non_null) == 1
+        and non_null_frac >= 0.7
+        and not has_ambiguous_owner
+    )
+    bound_decoder_id = distinct_non_null[0] if stable else None
+
+    # Handoff defense, derived from flip_samples (jitter-tolerant): the PRE-flip
+    # footprint owner (frames with hn <= n1) must be resolved and be EXACTLY the same
+    # single decoder as the after-window owner. A different pre-flip owner (D1 before,
+    # D2 after) is a same-key HANDOFF -> fail. Deriving this from flip_samples rather
+    # than the two exact crossing frames score_motion_across_flip picks tolerates a
+    # transient unresolved frame at the flip instant (which flaked crossingDecoder
+    # Stable on the slow profile) while still requiring before-evidence (empty pre
+    # owners -> fail closed). Movie-key correctness is already guaranteed by
+    # footprintOwnerDecoderId (it owns a footprint only when assetKey matches it).
+    pre = (
+        [s for s in (flip_samples or [])
+         if (lambda h: h is not None and h <= n1)(_strict_hash_num(s.get("sceneHash")))]
+        if boundary_valid else []
+    )
+    pre_owner_ids = sorted({s.get("decoderId") for s in pre if s.get("decoderId") is not None},
+                           key=str)
+    pre_ambiguous = any(s.get("ownerAmbiguous") for s in pre)
+    crossing_identity = bool(
+        bound_decoder_id is not None
+        and pre_owner_ids == [bound_decoder_id]
+        and not pre_ambiguous
+    )
+
+    # rVFC advance of the bound footprint <video>, bounded to the SAME window.
+    if not boundary_valid:
+        rvfc = {"ok": False, "reason": "invalid 1->2 boundary", "n": 0}
+    elif bound_decoder_id is None:
+        rvfc = {"ok": False, "reason": "no bound decoder", "n": 0}
+    else:
+        bounded = [s for s in (presented_samples or []) if _in_window(s)]
+        rvfc = _presented_time_advances(bounded, bound_decoder_id, n2)
+    rvfc_ok = bool(rvfc.get("ok"))
 
     checks = {
-        "bothSidedTexids": both_sided,
-        "motionAcrossFlipOk": motion_ok,
-        "stableDecoder": stable,
-        "contextType2d": ctx_ok,
-        "incomingFeedDraw": incoming_draw_ok,
+        "boundaryValid": boundary_valid,
+        "stableFootprintDecoder": stable,
+        "crossingIdentity": crossing_identity,
+        "rvfcAdvance": rvfc_ok,
     }
     failed = [name for name, ok in checks.items() if not ok]
     return {
         "ok": not failed,
         "failed": failed,
         "boundDecoderId": bound_decoder_id,
-        "bothSidedTexids": {
-            "ok": both_sided,
-            "decoderKey": texids_info.get("decoderKey"),
-            "nOutgoing": len(outgoing),
-            "nIncoming": len(incoming),
+        "boundaryValid": {"ok": boundary_valid, "n1": n1, "n2": n2, "restart": n_restart},
+        "stableFootprintDecoder": {
+            "ok": stable,
+            "distinctDecoderIds": distinct_ids,
+            "distinctNonNull": distinct_non_null,
+            "nonNullFrac": round(non_null_frac, 3),
+            "afterN": len(post),
         },
+        "crossingIdentity": {
+            "ok": crossing_identity,
+            "preOwnerIds": pre_owner_ids,
+            "afterOwner": bound_decoder_id,
+        },
+        "rvfcAdvance": rvfc,
+        # Reported for provenance only — NOT a gating sub-condition (aliased pixel
+        # crossing-MAE; the crossing IDENTITY fields above ARE gated).
         "motionAcrossFlipOk": motion_ok,
-        "stableDecoder": {"ok": stable, "distinctDecoderIds": distinct_ids, "afterN": len(post)},
-        "contextType2d": {"ok": ctx_ok, "contextTypes": bound_ctx},
-        "incomingFeedDraw": {"ok": incoming_draw_ok, "n": len(draw_hits), "hits": draw_hits[:4]},
     }
 
 
@@ -687,6 +735,17 @@ def _hash_num(h: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _strict_hash_num(h: object) -> int | None:
+    """Strict scene-hash parse for boundary validation: FULL-match `#<digits>`
+    after stripping only a `?query` suffix. Unlike `_hash_num`'s prefix match, a
+    malformed value like `#1junk` returns None (fail closed) rather than 1."""
+    s = str(h if h is not None else "")
+    if "?" in s:
+        s = s.split("?", 1)[0]
+    m = __import__("re").fullmatch(r"#(\d+)", s)
+    return int(m.group(1)) if m else None
+
+
 def _mae_rgb(a: np.ndarray, b: np.ndarray) -> float:
     if a.shape != b.shape or a.size == 0:
         return float("inf")
@@ -712,8 +771,21 @@ def _presented_time_advances(samples: list[dict], decoder_id: object, min_hash: 
                 vals.append(float(v["presentedMediaTime"]))
     if len(vals) < 2:
         return {"ok": False, "reason": "insufficient presented-time samples", "n": len(vals)}
-    advance = max(vals) - min(vals)
-    return {"ok": bool(advance > 0.05), "n": len(vals), "advance": advance}
+    # ORDERED forward progression: net advance > 0.05 AND never regress more than
+    # 0.05 below ANY previously-presented time (compare to the running max, not just
+    # the adjacent step — a cumulative rewind split into small steps like
+    # 10.00->9.96->9.92->10.10 would slip past an adjacent-delta check). `max-min`
+    # accepted a plain rewind (10.0->1.0 reads as +9.0); a genuinely playing
+    # decoder's rVFC media time is monotonic, so any material regression is a
+    # restart/seek, not continuity — reject it (fail closed).
+    advance = vals[-1] - vals[0]
+    running_max = vals[0]
+    worst_regression = 0.0
+    for v in vals[1:]:
+        worst_regression = min(worst_regression, v - running_max)
+        running_max = max(running_max, v)
+    ok = advance > 0.05 and worst_regression >= -0.05
+    return {"ok": bool(ok), "n": len(vals), "advance": advance, "worstRegression": worst_regression}
 
 
 def _score_visible_movie_motion(frame_paths: list[Path], roi: tuple[int, int, int, int] = MOVIE_ROI) -> dict:
@@ -1055,6 +1127,18 @@ async def _footprint_target(chrome: ChromeCdp, media: dict, roi: tuple[int, int,
     }
 
 
+def _owner_ambiguous(before: dict, after: dict) -> bool:
+    """A footprint frame is handoff/ambiguous when EITHER screenshot-bracket endpoint
+    resolved ownership as `ambiguous` (two decoders both cover the footprint), OR the
+    two endpoints resolved to DIFFERENT non-null owners (the owner changed mid-capture
+    — a handoff in flight). Such a frame must never be tolerated as a mere absence gap
+    by the after-window null tolerance."""
+    if before.get("via") == "ambiguous" or after.get("via") == "ambiguous":
+        return True
+    b, a = before.get("decoderId"), after.get("decoderId")
+    return bool(b is not None and a is not None and b != a)
+
+
 async def _pre_advance_frames(
     chrome: ChromeCdp, run_dir: Path, prefix: str, click_wall: float, n: int, gap_s: float
 ) -> list[dict]:
@@ -1103,6 +1187,7 @@ async def _pre_advance_frames(
                 "movieKey": target_after.get("movieKey") if bracket_consistent else None,
                 "contextType": target_after.get("contextType") if bracket_consistent else None,
                 "targetVia": target_after.get("via"),
+                "ownerAmbiguous": _owner_ambiguous(target_before, target_after),
                 "bracketConsistent": bracket_consistent,
                 "index": _decode_index_patch(arr),
             }
@@ -1167,6 +1252,7 @@ async def _dense_after_click(
                     "movieKey": target_after.get("movieKey") if bracket_consistent else None,
                     "contextType": target_after.get("contextType") if bracket_consistent else None,
                     "targetVia": target_after.get("via"),
+                    "ownerAmbiguous": _owner_ambiguous(target_before, target_after),
                     "bracketConsistent": bracket_consistent,
                     "index": _decode_index_patch(arr),
                 }
@@ -1261,6 +1347,11 @@ async def _dense_after_click(
                 **media,
                 "i": i,
                 "captureOffsetS": capture_wall - click_wall,
+                # Normalise the media snapshot's location hash to `sceneHash` so a
+                # dense sample is a valid presented-time sample (it carries `videos`
+                # with rVFC presentedMediaTime; _presented_time_advances keys the
+                # window off `sceneHash`).
+                "sceneHash": _norm_hash(media.get("hash")),
             }
         )
     return samples, frames, decoder_frames
@@ -1379,22 +1470,13 @@ async def _run(player: Path) -> dict:
     try:
         boot = await _boot(chrome, base)
         await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
-        # Derive the continuing movie's texture ids (see PRESERVE_SCRIPT's
-        # pre-paint MutationObserver) and inject before the 1->2 advance.
+        # Derive the footprint movie's Magic Move crossfade texture ids. Under
+        # the corrected model this is the 2->3 restart-side crossfade (see
+        # `_derive_movie_texids`), so it is written for provenance only and is
+        # NO LONGER injected as `window.__OBED_MOVIE_TEXIDS__`: the 1->2 movie is
+        # a live `<video>`, not a fed 2D canvas, so that canvas-feed is gone.
         texids_info = _derive_movie_texids(player_dir)
         write_json(OUT / "movie-texids.json", texids_info)
-        # Contract-1 object: {decoderKey, outgoing, incoming} (+warning when the
-        # 1->2 boundary is unresolved). The consumer tolerates a null decoderKey.
-        movie_texids = {
-            "decoderKey": texids_info.get("decoderKey"),
-            "outgoing": texids_info.get("outgoing") or [],
-            "incoming": texids_info.get("incoming") or [],
-        }
-        if texids_info.get("warning"):
-            movie_texids["warning"] = texids_info["warning"]
-        await chrome.evaluate(
-            f"window.__OBED_MOVIE_TEXIDS__ = {json.dumps(movie_texids)}"
-        )
         await asyncio.sleep(wait_profile["clickDelayS"])
         media_pre = await _media_snapshot_with_pool(chrome)
         pre = await chrome.screenshot()
@@ -1528,6 +1610,7 @@ async def _run(player: Path) -> dict:
                     "w": f.get("w"),
                     "movieKey": f.get("movieKey"),
                     "contextType": f.get("contextType"),
+                    "ownerAmbiguous": f.get("ownerAmbiguous"),
                 }
             )
         motion_across_flip = score_motion_across_flip(
@@ -1901,12 +1984,13 @@ async def _run(player: Path) -> dict:
 
     player_build_errors = [e for e in preserve_events if e.get("kind") == "player-build-error"]
 
-    # F1b: fail-closed engagement sub-verdict — a necessary condition for the
-    # 1->2 finding. It proves (in events + ownership, not pixels) that the ONE
-    # bound decoder's feed drew into an incoming canvas at the boundary. Absence
-    # of any sub-condition fails the gate closed.
-    feed_engaged = _score_feed_engaged(
-        texids_info, motion_across_flip, flip_samples, preserve_events, hash1, hash2,
+    # Fail-closed live-<video> continuity sub-verdict — a necessary condition for
+    # the 1->2 finding under the corrected model. It proves the ONE footprint
+    # decoder is stable across the cut, its rVFC presentedMediaTime advances, and
+    # composited ROI motion crosses the flip. Absence of any sub-condition fails
+    # the gate closed. samples_a carries the `videos` rVFC clocks.
+    live_continuity = liveContinuity1to2(
+        motion_across_flip, flip_samples, samples_a, hash1, hash2,
         restart_min_hash=SLIDE3_MIN_HASH,
     )
 
@@ -1917,12 +2001,19 @@ async def _run(player: Path) -> dict:
         {"id": "greenTranslucentPre", "pass": pre_scores["green"]["ok"], "detail": pre_scores["green"]},
         {
             "id": "continueThroughMagicMove1to2",
+            # Composited motion is proven by index_run (the burnt-in counter marching
+            # forward — aliasing-immune). visible_motion (pixel-MAE) is NOT gated: it
+            # aliases to a false "still" on the two-state grating (the same parity
+            # aliasing index_run was built to defeat, and the reason motionAcrossFlip
+            # was de-gated), so gating it re-introduced a flake on runs where the
+            # decoder + counter + rVFC all advance. It is reported for provenance.
+            # Remaining gated checks are all counter/clock/identity based (immune):
+            # continuity clock, index_run, and liveContinuity (owner + rVFC + crossing).
             "pass": bool(
                 cont.get("continuesThroughDissolve")
                 and hash1 != hash2
-                and visible_motion.get("ok", False)
                 and index_run.get("ok", False)
-                and feed_engaged.get("ok", False)
+                and live_continuity.get("ok", False)
                 and not player_build_errors
             ),
             "status": "failed-by-player" if player_build_errors else None,
@@ -1941,11 +2032,12 @@ async def _run(player: Path) -> dict:
                 "indexSequence": [s.get("index") for s in index_samples],
                 "movieTexids": {
                     "decoderKey": texids_info.get("decoderKey"),
+                    "boundary": texids_info.get("boundary"),
                     "outgoing": texids_info.get("outgoing"),
                     "incoming": texids_info.get("incoming"),
                 },
                 "movieTexidsWarning": texids_info.get("warning"),
-                "feedEngagedAt1to2": feed_engaged,
+                "liveContinuity1to2": live_continuity,
                 "motionAcrossFlip": motion_across_flip,
                 "decoderMotion": decoder_motion,
                 "targetKey": EXPECTED_MOVIE_KEYS[0],
@@ -1958,11 +2050,17 @@ async def _run(player: Path) -> dict:
                 ][:8],
                 "note": (
                     "Pass gate is target-decoder continuity + visibleMovieMotion + "
-                    "indexRun + feedEngagedAt1to2 (the fail-closed engagement sub-verdict: "
-                    "both-sided texids, motionAcrossFlip.ok, one stable non-null decoderId "
-                    "across the after window, contextType=='2d' on the fed canvas, AND >=1 "
-                    "incoming texture-feed-draw/mo-prepaint-draw bound to that decoder at the "
-                    "boundary — absence of any sub-condition fails the finding closed). "
+                    "indexRun + liveContinuity1to2 (the fail-closed live-<video> sub-verdict: "
+                    "a valid forward 1->2 boundary (num(hash2)>num(hash1)); one stable non-null "
+                    "footprint decoderId across the after window [num(hash2), restart); the SAME "
+                    "decoded footprint owner immediately before AND after the flip (crossing "
+                    "identity — rejects a same-key handoff); AND that decoder's rVFC "
+                    "presentedMediaTime advancing >0.05 in-window — absence of any sub-condition "
+                    "fails the finding closed. motionAcrossFlip's pixel crossing-MAE is NOT "
+                    "gated (it aliases on the grating); its crossing IDENTITY fields ARE. "
+                    "The 1->2 movie is a live <video> at the footprint (not a fed 2D "
+                    "canvas), so the old deck-texid/canvas-feed checks are dropped; the deck "
+                    "crossfade texids are the 2->3 restart boundary, kept as provenance only. "
                     "indexRun means the composited frame-index patch keeps progressing across "
                     "the MM cut, i.e. the canvas is not stuck on the newborn poster frame. "
                     "motionAcrossFlip is kept as corroboration, not gating: it scores "

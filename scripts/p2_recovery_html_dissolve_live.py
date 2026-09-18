@@ -459,58 +459,71 @@ PRESERVE_SCRIPT = r"""
         return {ok: false, reason: 'draw-failed', message: String(e && e.message || e), elId: elId, where: where};
       }
     },
-    /** Which decoder the PLAYER authored for a screen rect's footprint canvas. */
+    /** Which live decoder owns a screen rect's movie footprint. */
     /**
-     * The footprint owner is the EXACT player-authored decoder (F2): among the
-     * canvases the player drew a video into (authoredDecoderByCanvas), pick the
-     * one whose element overlaps `rect` best and whose movie key matches the
-     * rect's footprint. No DOM-position / first-decoded / ready-video fallback —
-     * an unresolved owner yields elId null (the scorer fails the gate) rather
-     * than some other video.
+     * Corrected 1->2 model (Step 2): the continuing movie is a live `<video>` at
+     * the footprint, NEVER drawn into a 2D canvas here, so `authoredDecoderByCanvas`
+     * is empty for it and a canvas-authored resolution can never own it. Resolve
+     * the owner from the POSITIONED movie `<video>`s instead: the decoded movie
+     * `<video>` whose rendered rect best-overlaps `rect`. The two `untitled.mov`
+     * instances share assetKey `movie1`, so OVERLAP (not asset key) disambiguates
+     * them — the off-footprint sibling has zero overlap. Fail closed on an unknown
+     * footprint, zero overlap, or a distinct-decoder tie in the top overlap band.
+     * A `<video>` has no 2D context stamp, so contextType is null.
      */
     footprintOwnerDecoderId: function(rect) {
       const wantKey = footprintKeyForRect(rect);
       // Unresolved footprint key -> fail closed, never admit any movie key
       // (Codex r5 F2): the helper must not own a rect it cannot identify.
       if (wantKey == null) return {elId: null, key: null, via: 'unknown-key', contextType: null};
-      // Read the ELEMENT-keyed authored binding (F4): a rebuilt canvas reusing a
-      // retired id is a distinct element with no WeakMap entry, so it can never
-      // surface a stale decoder here. Collect the authored canvases that ACTUALLY
-      // OVERLAP the footprint (Codex r5 F1: a zero-overlap remote canvas must not
-      // become the owner), THEN decide ownership from the global maximum overlap —
-      // a single-pass running flag mis-handles a later-best clearing an earlier
-      // tie (Codex r4 F4), so this is order-independent.
+      // Collect the positioned movie <video>s (DOM + pool, deduped) whose rendered
+      // rect closely MATCHES the footprint, THEN decide ownership from the global
+      // maximum overlap — order-independent so a later-best cannot mis-clear an
+      // earlier tie. Gate on intersection-over-union (IoU), not bare overlap: IoU
+      // penalises BOTH a too-small owner (partial / quarter-sized / mis-scaled
+      // remount rendering smaller than the authored box) AND a too-large one (a
+      // giant surface that merely contains the footprint), so only a <video>
+      // rendered at ~the footprint geometry can own it (fail closed otherwise).
+      const fpArea = Math.max(1, rect.w * rect.h);
       const cands = [];
-      document.querySelectorAll('canvas').forEach(function(c) {
-        const v = authoredDecoderByCanvas.get(c);
-        if (!v) return;
+      const seen = [];
+      function consider(v) {
+        if (!(v instanceof HTMLVideoElement) || seen.indexOf(v) >= 0) return;
+        seen.push(v);
+        if (!(v.readyState >= 2 && v.videoWidth > 0)) return;
         const key = movieAssetKey(v.currentSrc || v.src || '');
         if (key !== wantKey) return;
-        const r = c.getBoundingClientRect();
+        const r = v.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
         const ov = rectOverlapArea(r, rect);
-        if (!(ov > 0)) return; // no footprint overlap -> not an owner candidate
-        cands.push({v: v, ov: ov, key: key, canvas: c});
-      });
+        if (!(ov > 0)) return;
+        const union = (r.width * r.height) + fpArea - ov;
+        const iou = union > 0 ? ov / union : 0;
+        // High IoU floor: the rendered rect must closely match the footprint. 0.75
+        // rejects a 60%-width partial (0.60), a 125%-uniform-scale container (0.64),
+        // and a 160%-width surface (0.625) that a looser floor admitted.
+        if (!(iou >= 0.75)) return;
+        cands.push({v: v, ov: ov, iou: iou, key: key});
+      }
+      document.querySelectorAll('video').forEach(consider);
+      pool.forEach(function(q) { (q || []).forEach(consider); });
       if (!cands.length) return {elId: null, key: null, via: 'none', contextType: null};
-      let bestOverlap = 0;
-      cands.forEach(function(x) { if (x.ov > bestOverlap) bestOverlap = x.ov; });
-      const tol = Math.max(1, bestOverlap * 0.05);
-      // Everything within tol of the global max is "top band". If it holds more
-      // than ONE distinct decoder, ownership is AMBIGUOUS -> null (fail closed);
-      // sibling D1(outgoing)+D2(incoming) stacked at the footprint hit this.
-      // Scale-relative epsilon so a decoder sitting EXACTLY on the 5% band edge
-      // is included (ambiguous -> fail closed) rather than dropped by float
-      // rounding, e.g. 0.95*255136 == 242379.19999999998 < 242379.2 (Codex r6).
-      const eps = Math.max(1e-6, bestOverlap * 1e-9);
-      const near = cands.filter(function(x) { return x.ov >= bestOverlap - tol - eps; });
+      // Rank by IoU, not raw overlap: an OVERSIZED sibling that merely contains the
+      // footprint has large overlap but low IoU, and must not beat the true owner.
+      let bestIou = 0;
+      cands.forEach(function(x) { if (x.iou > bestIou) bestIou = x.iou; });
+      const tol = Math.max(1e-6, bestIou * 0.05);
+      // Everything within tol of the global-max IoU is the "top band". If it holds
+      // more than ONE distinct decoder, ownership is AMBIGUOUS -> null (fail closed).
+      const eps = Math.max(1e-9, bestIou * 1e-9);
+      const near = cands.filter(function(x) { return x.iou >= bestIou - tol - eps; });
       const distinct = [];
       near.forEach(function(x) { if (distinct.indexOf(x.v) < 0) distinct.push(x.v); });
       if (distinct.length > 1) {
         return {elId: null, key: null, via: 'ambiguous', contextType: null};
       }
-      const owner = near.reduce(function(a, b) { return b.ov > a.ov ? b : a; });
-      return {elId: owner.v.__obedElId, key: owner.key, via: 'player-draw', contextType: recordedCtxType(owner.canvas)};
+      const owner = near.reduce(function(a, b) { return b.iou > a.iou ? b : a; });
+      return {elId: owner.v.__obedElId, key: owner.key, via: 'footprint-video', contextType: null};
     },
     textureFeedStatus: function() {
       const out = [];
@@ -703,6 +716,14 @@ PRESERVE_SCRIPT = r"""
     const epoch = remountEpoch;
     v.__obedRemountEpoch = epoch;
     note('remount-scheduled', {elId: v.__obedElId, why: why, epoch: epoch});
+    // Remount SYNCHRONOUSLY in the same task as the detach so the footprint has no
+    // owner-less frame at the flip instant (the detach->50ms-timeout gap otherwise
+    // leaves the first post-flip capture with a null footprint decoder, failing the
+    // crossing/after-window decoder-stability checks). The authored-layer poster
+    // canvas may not exist yet this early; tryRemount then falls back to the
+    // stage/body overlay at the (already-correct) __obedRect, and the later timed
+    // retries move it into the poster's authored-z slot before the Finding-2 frame.
+    tryRemount(v, epoch);
     const delays = [50, 200, 500, 900, 1400, 2000];
     delays.forEach(function(ms) {
       setTimeout(function(){ tryRemount(v, epoch); }, ms);
@@ -715,6 +736,43 @@ PRESERVE_SCRIPT = r"""
       setTimeout(function(){ tryRemount(v, epoch); }, 400);
     }
     window.addEventListener('hashchange', onHash);
+  }
+
+  /**
+   * Hold a remounted continuing movie's <video> at the on-screen footprint EVERY
+   * frame through the 1->2 Magic Move. The video is re-parented into the movie's
+   * authored poster layer (for correct z-order), but that layer is itself being
+   * ANIMATED by the Magic Move, so a one-shot measure-and-correct only holds until
+   * the next animation frame drags the child off the footprint — leaving sparse
+   * on-footprint frames (the residual flake: footprintOwnerDecoderId returns null
+   * on a drifted capture, failing the after-window decoder-stability check). A rAF
+   * loop re-applies the measure-and-correct offset every frame so the RENDERED rect
+   * stays at (tx,ty) despite the containing layer's transform, keeping authored
+   * z-order (no reparent, no forced z-index). Runs only through the 1->2 window and
+   * stops at the 2->3 restart boundary / retire so the restart teardown is untouched.
+   */
+  function keepAtFootprint(v, tx, ty) {
+    if (v.__obedPinning) return;
+    v.__obedPinning = true;
+    function frame() {
+      if (v.__obedRemountEpoch === -1 || v.ended || !document.contains(v)) {
+        v.__obedPinning = false; return;
+      }
+      const hn = currentHashNum();
+      if (hn != null && hn >= restartMinHash()) { v.__obedPinning = false; return; }
+      if (v.dataset.obedRemounted === '1') {
+        const cur = v.getBoundingClientRect();
+        if (cur.width > 1 && cur.height > 1) {
+          const dx = tx - cur.left, dy = ty - cur.top;
+          if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            v.style.left = ((parseFloat(v.style.left) || 0) + dx) + 'px';
+            v.style.top = ((parseFloat(v.style.top) || 0) + dy) + 'px';
+          }
+        }
+      }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
   }
 
   function rectOverlapArea(r, rect) {
@@ -1151,10 +1209,22 @@ PRESERVE_SCRIPT = r"""
           posterCanvas.parentNode.insertBefore(v, posterCanvas.nextSibling);
         }
         v.style.position = 'absolute';
-        v.style.left = box.x + 'px';
-        v.style.top = box.y + 'px';
         v.style.width = box.w + 'px';
         v.style.height = box.h + 'px';
+        // The poster canvas's parent (its authored MM layer) may carry a
+        // Magic-Move transform, so box.x/box.y (the ON-SCREEN footprint) are NOT
+        // valid raw left/top in that containing block — writing them raw
+        // double-counts the layer offset and renders the movie off-stage (the
+        // observed [214,1586] freeze). Place by measure-and-correct: zero,
+        // measure the rendered origin, then offset by the footprint delta so the
+        // RENDERED rect equals the on-screen footprint, transform-agnostic —
+        // while keeping the poster's authored z-order (a forced/top z-index would
+        // paint the movie over the green square and break Finding 2).
+        v.style.left = '0px';
+        v.style.top = '0px';
+        const cur = v.getBoundingClientRect();
+        v.style.left = (box.x - cur.left) + 'px';
+        v.style.top = (box.y - cur.top) + 'px';
         v.style.visibility = 'visible';
         v.style.display = 'block';
         v.style.opacity = '1';
@@ -1165,6 +1235,9 @@ PRESERVE_SCRIPT = r"""
           if (p && p.catch) p.catch(function(){});
         }
         v.dataset.obedRemounted = '1';
+        // Hold it at the footprint every frame — the authored layer is animated by
+        // the MM, so a one-shot placement drifts off between animation frames.
+        keepAtFootprint(v, box.x, box.y);
         note('remount-into-authored-layer', {
           elId: v.__obedElId,
           key: assetKey(v.currentSrc || v.src || ''),
