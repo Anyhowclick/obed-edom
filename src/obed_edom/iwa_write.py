@@ -268,16 +268,26 @@ def _line_fields(rec: dict, obj: dict, spec: dict) -> list[tuple[str, dict]]:
 
 
 def _text_fields(rec: dict, spec: dict, reported: list[float],
-                 stored: tuple[float, float, float, float, float]) -> list[tuple[str, dict]]:
-    """A stored width or height of ``0.0`` never reaches this function (the caller hard-misses
+                 stored: tuple[float, float, float, float, float],
+                 *, position_only: bool = False) -> list[tuple[str, dict]]:
+    """A stored width or height of ``0.0`` reaches this function only under
+    ``position_only`` (the autosize reposition path); otherwise the caller hard-misses
     it to the AppleScript fallback -- ``naturalSize`` is Keynote's render cache and only a
-    live write refreshes it). ``naturalSize`` tracks ``geometry.size`` on both axes.
+    live write refreshes it. ``naturalSize`` tracks ``geometry.size`` on both axes.
+
+    ``position_only`` emits ``pos_x``/``pos_y`` alone (never a size on either axis): an
+    autosize box was already regrown to its final size by pass 1, so the offline pass only
+    re-seats it -- the reposition the research validated at 0 px drift for top- and
+    middle-anchored boxes alike (the y formula is anchor-agnostic when Keynote's rendered
+    height equals the seeded ``reported`` height, which the soft-seed bulk read guarantees).
     """
     fields: dict[str, float] = {}
     if spec.get("x") is not None:  # left-aligned autosize x is exact absolute
         fields["pos_x"] = float(spec["x"])
     if spec.get("y") is not None:  # stored y is the vertical centre: move it by the delta
         fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
+    if position_only:
+        return [(rec["id"], fields)] if fields else []
     if spec.get("w") is not None and stored[2] != 0.0:  # autosize width has no writable frame
         fields["size_w"] = stored[2] + (float(spec["w"]) - reported[2])
         fields["natural_w"] = fields["size_w"]
@@ -528,6 +538,7 @@ def _slide_edits(
     address: str = "positional",
     source_counts: dict[str, int] | None = None,
     require_reconcile: bool = False,
+    text_reposition: bool = False,
 ) -> tuple[str | None, dict[str, dict], int, list[dict], list[str], str | None]:
     """Pure, no-I/O resolution of one slide's edits against an already-loaded deck.
 
@@ -628,15 +639,24 @@ def _slide_edits(
                 ops = ops + child_ops
         elif kind == "text":
             # An autosize width or height (the 0.0 sentinel on either axis) is a Keynote
-            # render cache only the live app refreshes -- hard miss to the AppleScript fallback.
+            # render cache only the live app refreshes, so a size write is impossible offline.
+            # With `text_reposition` we still re-seat the box (position only, never a size --
+            # pass 1 already regrew it); without the flag it hard-misses to the AppleScript
+            # fallback, unchanged.
             if stored[2] == 0.0 or stored[3] == 0.0:
-                _miss("text-autosize")
-                continue
-            wants_h = spec.get("h") is not None
-            if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
-                _miss("text-resize-unwritable")
-                continue
-            ops = _text_fields(rec, spec, rep, stored)
+                if not text_reposition:
+                    _miss("text-autosize")
+                    continue
+                ops = _text_fields(rec, spec, rep, stored, position_only=True)
+                if not ops or not ops[0][1]:  # nothing to reposition (spec bore only w/h)
+                    _miss("text-autosize")
+                    continue
+            else:
+                wants_h = spec.get("h") is not None
+                if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
+                    _miss("text-resize-unwritable")
+                    continue
+                ops = _text_fields(rec, spec, rep, stored)
         elif kind in ("image", "movie"):
             if masked:
                 ops, mask_id, ok = _masked_media_fields(rec, obj, objects, spec, rep)
@@ -850,6 +870,7 @@ def patch_deck_geometry(
     address: str = "positional",
     require_reconcile: bool = True,
     extra_member_edits: dict[str, bytes] | None = None,
+    text_reposition: bool = False,
 ) -> dict[int, PatchResult]:
     """Patch every slide in ``specs_by_slide`` with exactly ONE zip rewrite.
 
@@ -878,6 +899,7 @@ def patch_deck_geometry(
             address=address,
             source_counts=source_counts_by_slide.get(n),
             require_reconcile=require_reconcile,
+            text_reposition=text_reposition,
         )
         if not refuse_reason and target_member is not None and edits:
             owner = member_owner.get(target_member)

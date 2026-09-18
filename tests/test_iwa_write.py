@@ -675,6 +675,29 @@ def test_text_fields_fixed_height_also_writes_natural_h():
     assert fields["size_h"] == fields["natural_h"] == pytest.approx(90.0)
 
 
+def test_text_fields_position_only_emits_position_no_size():
+    # The autosize reposition path: even a spec asking for w/h on a box whose stored width
+    # is a real (non-sentinel) frame writes position ALONE -- pass 1 already sized the box.
+    rec = {"id": "9", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 200.0, 0.0, 0.0)  # sentinel height, real stored width
+    reported = [700.0, 344.0, 200.0, 46.0]
+    spec = {"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 250.0, "h": 90.0}
+    (obj_id, fields), = _text_fields(rec, spec, reported, stored, position_only=True)
+    assert obj_id == "9"
+    assert fields["pos_x"] == 760.0  # x is exact absolute
+    assert fields["pos_y"] == pytest.approx(434.0)  # 374 + (404 - 344)
+    assert not any(k in fields for k in ("size_w", "size_h", "natural_w", "natural_h"))
+
+
+def test_text_fields_position_only_size_only_spec_writes_nothing():
+    # No x/y in the spec: position-only has nothing to write (never a size), so it defers.
+    rec = {"id": "9", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 0.0, 0.0, 0.0)
+    reported = [700.0, 344.0, 452.0, 136.0]
+    spec = {"kind": "text", "kindIndex": 0, "w": 113.0}
+    assert _text_fields(rec, spec, reported, stored, position_only=True) == []
+
+
 def test_shape_fields_size_writes_geometry_and_naturalsize():
     rec = {"id": "5", "kind": "shape", "kindIndex": 0}
     spec = {"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0}
@@ -1554,6 +1577,66 @@ def test_autosize_height_text_hard_misses_to_the_fallback():
     assert missed_specs == specs
     assert miss_reasons == ["text-autosize"]
     assert edits == {}
+
+
+def _autosize_text_objects():
+    return {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 0.0, 0.0, nw=300.3, nh=83.0)},
+    }
+
+
+def test_autosize_text_reposition_off_still_hard_misses():
+    # text_reposition defaults OFF: the autosize box hard-misses exactly as before.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_autosize_text_reposition_on_writes_position_only():
+    # With the flag ON, the same box is repositioned (position only, never a size), so it
+    # is no longer a miss.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+    assert not any(k in edits["1"] for k in ("size_w", "size_h", "natural_w", "natural_h"))
+
+
+def test_autosize_text_reposition_on_size_only_spec_still_misses():
+    # Flag ON but the spec bears only w (no x/y): nothing to reposition, so it still defers
+    # to the fallback and keeps tagging text-autosize for the histogram.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_fixed_frame_text_unaffected_by_reposition_flag():
+    # A non-autosize (fixed-frame) text box takes the normal soft-class path regardless of
+    # the flag: the reposition flag only diverts the sentinel-size branch.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 200.0, 60.0, nw=200.0, nh=60.0)},
+    }
+    specs = [{"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 250.0, "h": 90.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 200.0, 60.0]}
+    _tm, edits, _soft, missed_specs, _mr, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and len(edits) == 1
+    assert edits["1"]["size_h"] == pytest.approx(90.0)  # full soft-class write, size included
 
 
 def test_autosize_width_text_hard_misses_to_the_fallback():

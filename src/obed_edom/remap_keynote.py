@@ -165,6 +165,25 @@ def zorder_write_mode(
     return mode
 
 
+def offline_text_reposition_enabled(
+    explicit: str | None = None, *, offline_mode: str | None = None,
+    say: Callable[[str], None] | None = None,
+) -> bool:
+    """Offline reposition of autosize text boxes (default OFF). Env `OBED_OFFLINE_TEXT`
+    (`1`/`true`/`yes`/`on` enables). An autosize box's `naturalSize` is Keynote's render
+    cache, unwritable offline, so today it hard-misses to the AppleScript fallback; when ON
+    the offline writer re-seats it (position only, no size -- pass 1 already regrew it).
+    Forced OFF when `offline_mode` is `off` (no offline slides to patch)."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_TEXT", "")).strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    if offline_mode == "off":
+        if say:
+            say("OBED_OFFLINE_TEXT needs OBED_OFFLINE_WRITE on; no offline slides to reposition.")
+        return False
+    return True
+
+
 def _spec_addr(spec: dict[str, Any]) -> tuple:
     return (int(spec.get("slide", -1)), str(spec.get("kind")), int(spec.get("kindIndex", -1)))
 
@@ -1457,8 +1476,10 @@ def remap_keynote(
             f"{len(applied_layouts)} slide(s)."
         )
     _require_pass1_saved_closed(jxa)
+    text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
     offline_write_info = offline_write.run_offline_write(
-        dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say
+        dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say,
+        text_reposition=text_reposition,
     )
     zorder_mode = zorder_write_mode(offline_mode=offline_mode, say=say)
     zorder_refused = set((offline_write_info or {}).get("refused") or [])

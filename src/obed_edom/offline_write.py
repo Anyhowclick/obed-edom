@@ -332,6 +332,8 @@ def _patch_offline_slides(
     specs_by_slide: dict[int, list[dict[str, Any]]],
     wall: dict[str, Any],
     say: Callable[[str], None],
+    *,
+    text_reposition: bool = False,
 ) -> dict[int, Any]:
     """Patch every offline slide in ONE zip rewrite. Empty result ⇒ caller falls the whole
     run back to AppleScript (never patch text without a live seed).
@@ -376,6 +378,7 @@ def _patch_offline_slides(
             reported_by_slide=reported_by_slide,
             source_counts_by_slide=counts,
             require_reconcile=True,
+            text_reposition=text_reposition,
         )
     except OfflineWriteCorrupted as exc:
         tmp_path = Path(dest).parent / f".{Path(dest).name}.obedwrite.tmp"
@@ -886,6 +889,8 @@ def run_offline_write(
     wall: dict[str, Any],
     child_resize: list[dict[str, Any]],
     say: Callable[[str], None],
+    *,
+    text_reposition: bool = False,
 ) -> dict[str, Any] | None:
     """The whole offline-write execution phase for one remap: patch every offline slide,
     AppleScript-fallback whatever was refused or individually missed, verify (offline,
@@ -902,7 +907,9 @@ def run_offline_write(
         n: [t for t in transform_dicts if int(t.get("slide", -1)) == n] for n in offline_slides
     }
     say(f"Offline-write ({mode}): patching {len(offline_slides)} slide(s) in place…")
-    patch_results = _patch_offline_slides(dest, offline_slides, specs_by_slide, wall, say)
+    patch_results = _patch_offline_slides(
+        dest, offline_slides, specs_by_slide, wall, say, text_reposition=text_reposition
+    )
     fallback_by_slide = _fallback_specs_by_slide(offline_slides, specs_by_slide, patch_results)
     fallback_reasons, fallback_reasons_by_slide = _fallback_reason_histogram(
         offline_slides, specs_by_slide, patch_results
