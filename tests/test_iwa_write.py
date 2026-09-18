@@ -1656,6 +1656,19 @@ def test_autosize_text_reposition_unlaidout_hard_misses():
     assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
 
 
+def test_autosize_text_reposition_zero_natural_height_hard_misses():
+    # naturalSize (width>0, height==0): the height axis is the un-laid-out sentinel
+    # (iwa_geometry's text-height-unlaid). Keynote re-derives the box on open, so a
+    # position-only write mis-renders it -- defer even though the width is present.
+    objects = _autosize_text_objects(valign=0, nw=174.0, nh=0.0)
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
 def test_autosize_text_reposition_on_missing_seed_hard_misses():
     # No live seed row for this (text, kindIndex): the composed frame is not an autosize
     # box's live top-left, so a reposition would be wrong. Hard-miss instead.
@@ -1685,10 +1698,11 @@ def test_autosize_text_reposition_x_without_y_needs_no_seed():
     # even with no live seed row -- the seed gate applies only when the spec bears y.
     objects = _autosize_text_objects()
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "w": 113.4, "h": 40.0, "role": "other"}]
-    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+    _tm, edits, soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, {"1": "M"}, [("100", False)], reported={}, text_reposition=True)
     assert refuse_reason is None and not missed_specs and miss_reasons == []
     assert edits == {"1": {"pos_x": pytest.approx(107.15)}}
+    assert soft == 0  # x-only never reads `reported`, so it is not a soft fallback
 
 
 def test_autosize_text_reposition_on_size_only_spec_still_misses():

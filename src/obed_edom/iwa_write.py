@@ -286,14 +286,17 @@ def _text_fields(rec: dict, spec: dict, reported: list[float],
 
     ``position_only`` emits ``pos_x``/``pos_y`` alone (never a size on either axis): an
     autosize box was already regrown to its final size by pass 1, so the offline pass only
-    re-seats it -- the reposition the research validated at 0 px drift for top- and
-    middle-anchored boxes alike (the y formula is anchor-agnostic when Keynote's rendered
-    height equals the seeded ``reported`` height, which the soft-seed bulk read guarantees).
+    re-seats it. The caller (``_slide_edits``) admits this path ONLY for a laid-out,
+    top-anchored box, because ``pos_y`` is a delta off the live ``reported`` top and is
+    Δh-immune only when stored y IS the visual top (Keynote grows the box downward). Live
+    ``--validate`` proved middle/bottom-anchored boxes drift by ~Δh/2 (174 px), so they are
+    deferred to the AppleScript fallback rather than repositioned here.
     """
     fields: dict[str, float] = {}
     if spec.get("x") is not None:  # left-aligned autosize x is exact absolute
         fields["pos_x"] = float(spec["x"])
-    if spec.get("y") is not None:  # stored y is the vertical centre: move it by the delta
+    if spec.get("y") is not None:  # y: delta off the reported frame (Δh-safe for a fixed
+        # frame; the caller restricts the autosize path to top-anchored, where y is the top)
         fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
     if position_only:
         return [(rec["id"], fields)] if fields else []
@@ -662,15 +665,18 @@ def _slide_edits(
                 # pos_y also needs a TRUSTWORTHY seed: the exact saved (text, ki) row the bulk
                 # read returned (the composed frame is not the live top; a failed item read
                 # zero-fills to [0, 0, 0, 0]) -- without one, hard-miss to the fallback.
-                # The box must also be LAID OUT in the saved deck: a stored naturalSize width
-                # of 0 is the un-laid-out sentinel (no valid rendered frame). The live seed
-                # can read a width for it (Keynote lays it out on open), so rep alone doesn't
-                # catch it -- but a position-only write leaves it un-laid-out, and Keynote then
-                # mis-renders it by ~its own width (174px, measured). Only a live write
-                # (AppleScript) lays it out, so defer these.
+                # The box must also be LAID OUT in the saved deck: a naturalSize of 0 on
+                # EITHER axis is the invalid-cache sentinel (`iwa_geometry` flags it
+                # text-natural-width / text-height-unlaid) -- Keynote re-derives the whole box
+                # from the text on open, discarding a written frame and re-anchoring. The live
+                # seed can read a frame for it, so rep alone doesn't catch it -- but a
+                # position-only write leaves it un-laid-out and Keynote mis-renders it (174px,
+                # measured on a naturalSize (0,0) box). Only a live write (AppleScript) lays it
+                # out, so defer these.
                 writes_y = spec.get("y") is not None
                 seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
-                laid_out = _natural_size(obj)[0] > 0.0
+                nat_w, nat_h = _natural_size(obj)
+                laid_out = nat_w > 0.0 and nat_h > 0.0
                 top_anchored = _vertical_alignment(obj, objects) == _ALIGN_TOP
                 if (not text_reposition or not laid_out
                         or (writes_y and not (seed_ok and top_anchored))):
@@ -702,11 +708,14 @@ def _slide_edits(
             _miss(f"unsupported-kind:{kind}")
             continue
 
-        # Soft class used the reported frame: count for the 0-fallback gate. Masked
-        # images only fall back to `reported` for x/y (never w/h — those read the mask).
-        used_reported = kind == "text" or (
-            masked and (spec.get("x") is None or spec.get("y") is None)
-        )
+        # Soft class used the reported frame: count for the 0-fallback gate. Text reads
+        # `reported` for pos_y and size deltas but NOT for the absolute pos_x, so an x-only
+        # write (e.g. an autosize position-only move) consumes nothing -- key off the fields
+        # actually emitted. Masked images only fall back to `reported` for x/y (never w/h).
+        used_reported = (
+            kind == "text"
+            and any(k in f for _oid, f in ops for k in ("pos_y", "size_w", "size_h"))
+        ) or (masked and (spec.get("x") is None or spec.get("y") is None))
         if used_reported and not have_reported and ops:
             soft_fallbacks += 1
 

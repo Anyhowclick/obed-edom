@@ -877,11 +877,11 @@ def _say_verify_report(
         if say:
             say(f"{title}: {kind} max Δ{max_delta:.2f}px (n={n}) {status} @ {kind_tol}px")
             if status == "FAIL" and _worst5:
-                worst = "; ".join(
-                    f"slide {w.get('slide')} ki{w.get('kindIndex')} Δ{float(w.get('delta', 0.0)):.1f}"
-                    for w in _worst5[:5]
-                )
-                say(f"{title}: {kind} worst: {worst}")
+                def _row(w: dict[str, Any]) -> str:
+                    ki = w.get("kindIndex")
+                    ki_str = f" ki{ki}" if ki is not None else ""  # multiset rows carry no kindIndex
+                    return f"slide {w.get('slide')}{ki_str} Δ{float(w.get('delta', 0.0)):.1f}"
+                say(f"{title}: {kind} worst: {'; '.join(_row(w) for w in _worst5[:5])}")
     if say:
         say(f"{title}: overall {'PASS' if overall else 'FAIL'}.")
     return overall
