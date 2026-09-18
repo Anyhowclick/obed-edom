@@ -1611,6 +1611,30 @@ def test_autosize_text_reposition_on_writes_position_only():
     assert not any(k in edits["1"] for k in ("size_w", "size_h", "natural_w", "natural_h"))
 
 
+def test_autosize_text_reposition_on_missing_seed_hard_misses():
+    # No live seed row for this (text, kindIndex): the composed frame is not an autosize
+    # box's live top-left, so a reposition would be wrong. Hard-miss instead.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported={}, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_autosize_text_reposition_on_zerofilled_seed_hard_misses():
+    # A failed per-item bulk read zero-fills the row to [0, 0, 0, 0] (bulk_geometry.js
+    # withItemFallback); that reported y=0 is garbage, so the reposition must refuse it
+    # rather than write pos_y off a bogus seed. Degenerate w/h (<=0) is the tell.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [0.0, 0.0, 0.0, 0.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
 def test_autosize_text_reposition_on_size_only_spec_still_misses():
     # Flag ON but the spec bears only w (no x/y): nothing to reposition, so it still defers
     # to the fallback and keeps tagging text-autosize for the histogram.

@@ -644,7 +644,13 @@ def _slide_edits(
             # pass 1 already regrew it); without the flag it hard-misses to the AppleScript
             # fallback, unchanged.
             if stored[2] == 0.0 or stored[3] == 0.0:
-                if not text_reposition:
+                # Reposition needs a TRUSTWORTHY live seed: the exact saved (text, ki) row
+                # the bulk read returned. The composed frame is not an autosize box's live
+                # top-left, and a failed item read zero-fills to [0, 0, 0, 0] -- either would
+                # give a wrong pos_y with nothing to catch it in production. Without a present,
+                # non-degenerate reported row, hard-miss to the AppleScript fallback.
+                if (not text_reposition or not have_reported
+                        or rep[2] <= 0.0 or rep[3] <= 0.0):
                     _miss("text-autosize")
                     continue
                 ops = _text_fields(rec, spec, rep, stored, position_only=True)
