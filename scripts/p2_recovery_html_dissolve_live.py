@@ -348,6 +348,7 @@ PRESERVE_SCRIPT = r"""
       suppressRemount = true;
       try {
         pool.clear();
+        authoredDecoderByCanvasId.clear();
         document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
           try {
             v.pause();
@@ -457,36 +458,33 @@ PRESERVE_SCRIPT = r"""
         return {ok: false, reason: 'draw-failed', message: String(e && e.message || e), elId: elId, where: where};
       }
     },
-    /** Which decoder currently owns a screen rect (active texture-feed first, else DOM position). */
+    /** Which decoder the PLAYER authored for a screen rect's footprint canvas. */
     /**
-     * Which decoder owns a screen rect — asset/layer-bound: a candidate must
-     * match the SAME movie key the rect's footprint corresponds to (never
-     * "whichever decoder happens to overlap"), so movie2 cannot be reported
-     * as the owner of movie1's footprint or vice versa.
+     * The footprint owner is the EXACT player-authored decoder (F2): among the
+     * canvases the player drew a video into (authoredDecoderByCanvasId), pick the
+     * one whose element overlaps `rect` best and whose movie key matches the
+     * rect's footprint. No DOM-position / first-decoded / ready-video fallback —
+     * an unresolved owner yields elId null (the scorer fails the gate) rather
+     * than some other video.
      */
     footprintOwnerDecoderId: function(rect) {
       const wantKey = footprintKeyForRect(rect);
-      let best = null, bestOverlap = 0, bestVia = 'none', bestKey = null, bestCanvas = null;
-      textureFeed.forEach(function(state, elId) {
-        if (!state.active || !state.canvas || !state.v) return;
-        const key = movieAssetKey(state.v.currentSrc || state.v.src || '');
-        if (wantKey != null && key !== wantKey) return;
-        const r = state.canvas.getBoundingClientRect();
-        const ov = rectOverlapArea(r, rect);
-        if (ov > bestOverlap) { bestOverlap = ov; best = elId; bestVia = 'texture-feed'; bestKey = key; bestCanvas = state.canvas; }
-      });
-      if (best != null) return {elId: best, key: bestKey, via: bestVia, contextType: recordedCtxType(bestCanvas)};
-      let bestVOverlap = 0;
-      document.querySelectorAll('video').forEach(function(v) {
-        if (!(v.videoWidth > 0)) return;
+      let best = null, bestOverlap = 0, bestKey = null, bestCanvas = null;
+      authoredDecoderByCanvasId.forEach(function(v, canvasId) {
+        if (!v) return;
         const key = movieAssetKey(v.currentSrc || v.src || '');
         if (wantKey != null && key !== wantKey) return;
-        const r = v.getBoundingClientRect();
+        const c = document.getElementById(canvasId);
+        if (!c) return;
+        const r = c.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
         const ov = rectOverlapArea(r, rect);
-        if (ov > bestVOverlap) { bestVOverlap = ov; best = v.__obedElId; bestVia = 'position'; bestKey = key; }
+        if (ov > bestOverlap) { bestOverlap = ov; best = v; bestKey = key; bestCanvas = c; }
       });
-      return {elId: best, key: best != null ? bestKey : null, via: best != null ? bestVia : 'none', contextType: null};
+      if (best != null) {
+        return {elId: best.__obedElId, key: bestKey, via: 'player-draw', contextType: recordedCtxType(bestCanvas)};
+      }
+      return {elId: null, key: null, via: 'none', contextType: null};
     },
     textureFeedStatus: function() {
       const out = [];
@@ -501,6 +499,11 @@ PRESERVE_SCRIPT = r"""
   };
   const pool = new Map(); // assetKey -> HTMLVideoElement[] (FIFO; same file may appear twice)
   const textureFeed = new Map(); // elId -> {active, drawn, matched, fails, canvas, canvasId}
+  // canvas.id -> the EXACT <video> the PLAYER drew into that target canvas
+  // (F2). Populated only by the drawImage wrapper on the player's own video
+  // draws into an outgoing/incoming canvas; the feed binds to this element by
+  // identity, never last-wins across same-key siblings.
+  const authoredDecoderByCanvasId = new Map();
   let nextId = 1;
   let suppressRemount = false;
   let remountEpoch = 0;
@@ -508,12 +511,12 @@ PRESERVE_SCRIPT = r"""
   // Videos created after clear get the new generation and remount normally.
   let preserveGeneration = 0;
   // Passively record the context type the PLAYER creates for each canvas
-  // (Contract 2 / directive 3): wrap getContext to remember the type of the
-  // context the player actually made, then delegate to the original. We only
-  // READ this record to decide whether a target canvas is a 2D surface we may
-  // draw into — we never probe a newborn canvas with getContext('2d') (that
-  // would both create a 2D context and break the player's later WebGL request).
-  const ctxTypeById = new Map(); // canvas.id -> recorded contextType
+  // (Contract 2 / directive 3): wrap getContext to stamp the type on the
+  // element it was called on (__obedCtxType), then delegate to the original. We
+  // only READ that element stamp to decide whether a target canvas is a 2D
+  // surface we may draw into — never probe a newborn canvas with
+  // getContext('2d') (F4: an id-keyed fallback misfires on canvas-id reuse and
+  // turns a passive read into the forbidden probe).
   (function installCtxRecorder(){
     const proto = HTMLCanvasElement.prototype;
     if (proto.__obedCtxWrapped) return;
@@ -521,22 +524,47 @@ PRESERVE_SCRIPT = r"""
     proto.getContext = function(type) {
       const ctx = orig.apply(this, arguments);
       if (ctx) {
-        const t = String(type || '').toLowerCase();
-        this.__obedCtxType = t;
-        if (this.id) ctxTypeById.set(this.id, t);
+        this.__obedCtxType = String(type || '').toLowerCase();
       }
       return ctx;
     };
     proto.__obedCtxWrapped = true;
   })();
-  // Recorded context type for a canvas (element stamp is authoritative; the id
-  // map mirrors the contract's canvas.id -> contextType shape). null == the
-  // player has not created a context we saw, so we must NOT draw into it.
+  // Record the ONE decoder the PLAYER authors for each target canvas (F2):
+  // wrap CanvasRenderingContext2D.drawImage so that when the player draws an
+  // HTMLVideoElement into an outgoing/incoming canvas we remember (canvasId ->
+  // that exact element). Our OWN feed draws are guarded by __obedFeeding so they
+  // never masquerade as player draws. Always delegate to the original.
+  (function installDrawRecorder(){
+    const proto = CanvasRenderingContext2D.prototype;
+    if (proto.__obedDrawWrapped) return;
+    const orig = proto.drawImage;
+    proto.drawImage = function(image) {
+      if (!window.__obedFeeding && image instanceof HTMLVideoElement) {
+        const canvas = this.canvas;
+        if (canvas && canvas.id) {
+          const tex = movieTexids();
+          if (tex && (tex.outgoing.has(canvas.id) || tex.incoming.has(canvas.id))) {
+            authoredDecoderByCanvasId.set(canvas.id, image);
+          }
+        }
+      }
+      return orig.apply(this, arguments);
+    };
+    proto.__obedDrawWrapped = true;
+  })();
+  // Wrap our own decoder->canvas draws so the drawImage recorder above ignores
+  // them (only the player's own draws populate the authored-decoder map).
+  function feedDraw(ctx, v, w, h) {
+    window.__obedFeeding = true;
+    try { ctx.drawImage(v, 0, 0, w, h); }
+    finally { window.__obedFeeding = false; }
+  }
+  // Recorded context type for a canvas — the element's own __obedCtxType stamp
+  // ONLY (F4). null == the player never created a context we saw on THIS
+  // element, so it is context-unknown and we must NOT draw into it or probe it.
   function recordedCtxType(c) {
-    if (!c) return null;
-    if (c.__obedCtxType) return c.__obedCtxType;
-    if (c.id && ctxTypeById.has(c.id)) return ctxTypeById.get(c.id);
-    return null;
+    return (c && c.__obedCtxType) || null;
   }
   function assetKey(src) {
     const s = String(src || '');
@@ -738,9 +766,11 @@ PRESERVE_SCRIPT = r"""
   // Contract 1 reader: window.__OBED_MOVIE_TEXIDS__ is
   // {decoderKey, outgoing:[...], incoming:[...]}. Return
   // {decoderKey, outgoing:Set, incoming:Set} or null. A missing value, the old
-  // flat-array shape, a malformed object, or an unresolved boundary
-  // (decoderKey null / empty slots) all yield null so callers note mo-no-texids
-  // and skip the id-bound feed — never crash, never guess the other movie's slot.
+  // flat-array shape, a malformed object, or an unresolved boundary all yield
+  // null so callers note mo-no-texids and skip the id-bound feed — never crash,
+  // never guess the other movie's slot. F7: a genuine from!=to boundary supplies
+  // BOTH sides, so require decoderKey AND both outgoing and incoming non-empty;
+  // a one-sided/empty object is unresolved -> null.
   function movieTexids() {
     const t = window.__OBED_MOVIE_TEXIDS__;
     if (!t || typeof t !== 'object' || Array.isArray(t)) return null;
@@ -749,7 +779,7 @@ PRESERVE_SCRIPT = r"""
     if (!decoderKey) return null;
     const outgoing = new Set(t.outgoing);
     const incoming = new Set(t.incoming);
-    if (!(outgoing.size || incoming.size)) return null;
+    if (!(outgoing.size && incoming.size)) return null;
     return {decoderKey: decoderKey, outgoing: outgoing, incoming: incoming};
   }
   // Which side of the 1->2 cut a fed canvas id belongs to (event provenance).
@@ -758,18 +788,32 @@ PRESERVE_SCRIPT = r"""
     if (tex.incoming.has(id)) return 'incoming';
     return null;
   }
-  // Bind the ONE decoder whose asset key === the texids' decoderKey. No
-  // ready-video fallback: a decoder of any other key is never fed.
-  function boundDecoder(decoderKey) {
+  // F2: the ONE decoder the player authored for a specific target canvas, by
+  // identity (canvasId -> exact element). Returns null when the player has not
+  // drawn a ready video into that canvas — NO last-wins over same-key siblings.
+  function boundDecoder(canvasId) {
+    if (!canvasId) return null;
+    const v = authoredDecoderByCanvasId.get(canvasId);
+    if (v && v.readyState >= 2 && v.videoWidth > 0) return v;
+    return null;
+  }
+  // Geom fallback for the prepaint path only (before the player has drawn a
+  // newborn canvas): the decoder of `decoderKey` iff it is UNAMBIGUOUS — exactly
+  // one ready same-key decoder exists. Two same-key movie1 decoders -> null, so
+  // they never all feed (F2). Dedupe elements shared by pool + DOM.
+  function uniqueKeyDecoder(decoderKey) {
     if (!decoderKey) return null;
-    let best = null;
+    const seen = new Set();
+    let found = null, count = 0;
     function consider(v) {
+      if (!v || seen.has(v)) return;
+      seen.add(v);
       if (!(v.readyState >= 2 && v.videoWidth > 0)) return;
-      if (movieAssetKey(v.currentSrc || v.src || '') === decoderKey) best = v;
+      if (movieAssetKey(v.currentSrc || v.src || '') === decoderKey) { found = v; count++; }
     }
     pool.forEach(function(q) { (q || []).forEach(consider); });
     document.querySelectorAll('video[data-obed-preserved="1"]').forEach(consider);
-    return best;
+    return count === 1 ? found : null;
   }
   function stopTextureFeed(elId, reason) {
     const state = textureFeed.get(elId);
@@ -841,11 +885,13 @@ PRESERVE_SCRIPT = r"""
       }
       if (v.videoWidth > 0) {
         if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
-        // Feed BY id only, bound to ONE decoder: the MM slot builds two stacked
-        // canvases (invisible `to` + visible `from`); feed each canvas whose id
-        // is in outgoing/incoming for THIS cut, but only when the player itself
-        // made it a 2D surface (recordedCtxType). No geometric fallback, no
-        // other movie's decoder, and never a getContext('2d') probe.
+        // Feed BY id, bound to ONE EXACT decoder (F2): the MM slot builds two
+        // stacked canvases (invisible `to` + visible `from`). Feed a canvas in
+        // outgoing/incoming only when (a) the player itself made it a 2D surface
+        // (recordedCtxType element stamp) AND (b) THIS element is that canvas's
+        // player-authored decoder (boundDecoder identity). No geometric
+        // fallback, no other movie's decoder, no last-wins over same-key
+        // siblings, and never a getContext('2d') probe.
         const tex = movieTexids();
         if (!tex) {
           feedSkip('mo-no-texids');
@@ -856,19 +902,17 @@ PRESERVE_SCRIPT = r"""
           document.querySelectorAll('canvas').forEach(function(c) {
             if (!(c.id && (tex.outgoing.has(c.id) || tex.incoming.has(c.id)))) return;
             if (recordedCtxType(c) !== '2d') { noteSkipCanvas(c, 'no-2d-context'); return; }
+            if (boundDecoder(c.id) !== v) { noteSkipCanvas(c, 'not-authored-decoder'); return; }
             const ctx = c.getContext('2d'); // safe: player already made this 2D
             if (!ctx) { noteSkipCanvas(c, 'no-2d-context'); return; }
             try {
-              ctx.drawImage(v, 0, 0, c.width, c.height);
+              feedDraw(ctx, v, c.width, c.height);
               fed.push(c);
-              if (!state.notedIds.has(c.id)) {
-                state.notedIds.add(c.id);
-                note('texture-feed-draw', {
-                  decoderId: v.__obedElId, canvasId: c.id,
-                  contextType: recordedCtxType(c), slot: texidSlot(tex, c.id),
-                  hashNum: currentHashNum()
-                });
-              }
+              note('texture-feed-draw', {
+                decoderId: v.__obedElId, canvasId: c.id,
+                contextType: recordedCtxType(c), slot: texidSlot(tex, c.id),
+                hashNum: currentHashNum(), authoredBy: 'player-draw'
+              });
             } catch (e) {}
           });
           if (fed.length) {
@@ -923,13 +967,19 @@ PRESERVE_SCRIPT = r"""
       note('mo-prepaint-skip', {id: c.id, reason: 'no-2d-context', hashNum: currentHashNum()});
       return;
     }
-    const v = boundDecoder(tex.decoderKey);
+    // Prefer this canvas's exact player-authored decoder (F2); the player has
+    // usually not drawn a newborn canvas yet, so fall back to the UNIQUE same-key
+    // decoder (authoredBy 'geom'). Ambiguous/absent owner -> skip, never guess
+    // across same-key siblings.
+    let v = boundDecoder(c.id);
+    let authoredBy = 'player-draw';
+    if (!v) { v = uniqueKeyDecoder(tex.decoderKey); authoredBy = v ? 'geom' : 'none'; }
     if (!(v && v.readyState >= 2 && v.videoWidth > 0)) {
-      note('mo-prepaint-skip', {id: c.id, reason: 'no-bound-decoder', decoderKey: tex.decoderKey, hashNum: currentHashNum()});
+      note('mo-prepaint-skip', {id: c.id, reason: 'no-bound-decoder', decoderKey: tex.decoderKey, hashNum: currentHashNum(), authoredBy: 'none'});
       return;
     }
     try {
-      ctx.drawImage(v, 0, 0, c.width, c.height);
+      feedDraw(ctx, v, c.width, c.height);
     } catch (e) {
       note('mo-prepaint-draw-error', {id: c.id, message: String(e && e.message || e), hashNum: currentHashNum()});
       return;
@@ -948,7 +998,7 @@ PRESERVE_SCRIPT = r"""
       id: c.id, canvasId: c.id || null, w: c.width, h: c.height,
       decoderId: v.__obedElId, elId: v.__obedElId,
       contextType: recordedCtxType(c), slot: texidSlot(tex, c.id),
-      hashNum: currentHashNum()
+      hashNum: currentHashNum(), authoredBy: authoredBy
     });
   }
   const obedStageEl = document.getElementById('stage');

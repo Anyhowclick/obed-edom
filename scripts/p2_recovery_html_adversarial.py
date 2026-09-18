@@ -151,30 +151,52 @@ def _decode_index_patch(arr: np.ndarray, roi: tuple[int, int, int, int] = INDEX_
     return int(round(float(rgb.mean())))
 
 
+def _layer_identity(node: dict) -> str | None:
+    """Stable identity for an authored layer/object node, used to fold a steady
+    texture only into the SAME object that owns the resolved crossfade (Codex
+    F5). Size equality is NOT identity: two same-sized movies each own a
+    footprint-sized steady, so folding by size would feed movie1 into movie2's
+    canvases. Magic Move persists an object's id across the 1->2 pair, so the id
+    is the join key. Returns None when the node carries no id — the caller then
+    folds no steady rather than guessing.
+    """
+    for k in ("id", "objectID", "uuid", "layerUUID"):
+        v = node.get(k)
+        if isinstance(v, (str, int)) and str(v):
+            return f"{k}:{v}"
+    return None
+
+
 def _extract_movie_layers(
     events: object,
     footprint_wh: tuple[float, float] | None = None,
     tol: float = 30.0,
-) -> tuple[set[str], list[tuple[str, str]]]:
+) -> tuple[dict[str | None, set[str]], list[dict]]:
     """Walk ONE slide-UUID JSON's `events` tree for the footprint movie's textures.
 
-    Returns `(steady, crossfades)` for the layer(s) whose enclosing
+    Returns `(steady_by_owner, crossfades)` for the layer(s) whose enclosing
     `initialState` w/h matches `footprint_wh` (so a differently-sized OTHER
     movie's layer is excluded; `footprint_wh=None` disables the gate):
 
-      - `steady` — `isVideoLayer` texture ids: the movie's steady-state decoded
-        texture on this slide.
-      - `crossfades` — `(from, to)` pairs from `property == "contents"`
-        animations with `from != to`: the Magic Move poster swap's outgoing
-        (`from`) and incoming (`to`) textures. A same-texture (`from == to`)
-        tween is a background/opacity animation, not a movie crossfade.
+      - `steady_by_owner` — `{ownerId | None: {texture, ...}}`: each footprint
+        video layer's steady-state `isVideoLayer` texture(s), keyed by the
+        owning object's identity (`_layer_identity`). Keeping the owner (not a
+        flat set) is what lets `_derive_movie_texids` fold a steady into ONLY the
+        object that owns the boundary crossfade (Codex F5). An id-less layer's
+        steady lands under `None` and is never folded.
+      - `crossfades` — `[{"from", "to", "owner", "withinMagicMove"}, ...]` from
+        `property == "contents"` animations with `from != to`: the poster swap's
+        outgoing (`from`) and incoming (`to`) textures, tagged with the enclosing
+        video layer's identity (`owner`, may be None) and whether an ancestor is
+        an `apple:magic-move-*` transition (`withinMagicMove`). A same-texture
+        (`from == to`) tween is a background/opacity animation, not a crossfade.
 
     This function never unions across slides. The caller
     (`_derive_movie_texids`) resolves the single 1->2 boundary crossfade from
-    these per-slide pieces.
+    these per-slide pieces and preserves each occurrence's provenance.
     """
-    steady: set[str] = set()
-    crossfades: list[tuple[str, str]] = []
+    steady_by_owner: dict[str | None, set[str]] = {}
+    crossfades: list[dict] = []
 
     def size_matches(size: tuple[float, float] | None) -> bool:
         if footprint_wh is None:
@@ -183,7 +205,12 @@ def _extract_movie_layers(
             return False
         return abs(size[0] - footprint_wh[0]) <= tol and abs(size[1] - footprint_wh[1]) <= tol
 
-    def walk(o: object, layer_size: tuple[float, float] | None) -> None:
+    def walk(
+        o: object,
+        layer_size: tuple[float, float] | None,
+        owner: str | None,
+        in_mm: bool,
+    ) -> None:
         if isinstance(o, dict):
             size = layer_size
             init = o.get("initialState")
@@ -191,21 +218,35 @@ def _extract_movie_layers(
                 init.get("height"), (int, float)
             ):
                 size = (init["width"], init["height"])
+            # A `contents` crossfade is the movie's OWN poster swap only when it
+            # sits inside a Magic Move transition (Keynote authors the enclosing
+            # layer name `apple:magic-move-*`). The crossfade lives in a separate
+            # event subtree from the steady `isVideoLayer`, and this deck's layers
+            # carry no id on the video node itself, so this authored transition
+            # marker — not layer identity or texture-set membership — is what
+            # distinguishes a real poster swap from a same-sized background tween.
+            name = o.get("name")
+            if isinstance(name, str) and "magic-move" in name.lower():
+                in_mm = True
+            if o.get("isVideoLayer"):
+                owner = _layer_identity(o)
             if o.get("isVideoLayer") and o.get("texture") and size_matches(size):
-                steady.add(o["texture"])
+                steady_by_owner.setdefault(owner, set()).add(o["texture"])
             if o.get("property") == "contents" and size_matches(size):
                 frm = (o.get("from") or {}).get("texture")
                 to = (o.get("to") or {}).get("texture")
                 if frm and to and frm != to:
-                    crossfades.append((frm, to))
+                    crossfades.append(
+                        {"from": frm, "to": to, "owner": owner, "withinMagicMove": in_mm}
+                    )
             for v in o.values():
-                walk(v, size)
+                walk(v, size, owner, in_mm)
         elif isinstance(o, list):
             for v in o:
-                walk(v, layer_size)
+                walk(v, layer_size, owner, in_mm)
 
-    walk(events, None)
-    return steady, crossfades
+    walk(events, None, None, False)
+    return steady_by_owner, crossfades
 
 
 def _derive_movie_texids(
@@ -218,20 +259,29 @@ def _derive_movie_texids(
     `.agents/plans/step1-ownership-contracts.md`).
 
     NOT a whole-deck union (Codex defect #5): the boundary is the ONE
-    footprint-sized `contents` crossfade whose `from` is slide 1's steady
-    `isVideoLayer` texture and `to` is slide 2's — `from` -> `outgoing`,
-    `to` -> `incoming`. Slide 1 = `slideList[0]`, slide 2 = `slideList[1]`; the
-    crossfade animation itself may be stored under any slide's JSON, so
-    crossfades are gathered across the deck but the from->to endpoints must
-    bridge slide 1's steady texture to slide 2's. The slide-1/2 steady textures
-    are folded into `outgoing`/`incoming`.
+    footprint-sized `contents` crossfade under a Magic Move transition
+    (`withinMagicMove`) — the movie's own poster swap; `from` -> `outgoing`,
+    `to` -> `incoming`. The crossfade's `from`/`to` are transition posters that
+    never appear as slide-1/2 steady textures (empirically true on this deck), so
+    steady-texture anchoring cannot match them; the authored `apple:magic-move-*`
+    transition marker is what ties the poster swap to the movie when no object
+    identity is on the video node. The animation may be stored under any slide's
+    JSON, so crossfades are gathered across the deck.
 
-    "Unambiguous" = exactly one distinct boundary crossfade can be named: either
-    exactly one footprint-sized crossfade bridges slide 1's steady texture to
-    slide 2's, or (when the steady textures cannot disambiguate) the whole deck
-    holds exactly one footprint-sized crossfade. Any other count returns
+    "Unambiguous" = EXACTLY ONE distinct magic-move footprint crossfade exists
+    (Codex F3). There is NO whole-deck "sole footprint-sized crossfade" fallback:
+    a same-sized nonmovie `contents` tween on slide 4 is rejected because it is
+    NOT inside a Magic Move (and a different-sized movie's crossfade by the size
+    gate). Zero such candidates, or more than one, returns
     `{"decoderKey": null, "outgoing": [], "incoming": [], "warning": ...}` —
-    NEVER a whole-deck union.
+    NEVER a whole-deck union. Occurrence provenance (slide uuid + count) is
+    preserved so a pair repeated at several boundaries cannot masquerade as a
+    single unambiguous boundary.
+
+    Steady folding is by OBJECT IDENTITY, not size (Codex F5): only the steady
+    texture(s) owned by the same layer that owns the boundary crossfade's
+    `from`/`to` are folded into `outgoing`/`incoming`. If that owner cannot be
+    identified uniquely, no steady is folded (just `from`/`to`).
     """
     header_path = player_dir / "assets" / "header.json"
     try:
@@ -248,8 +298,8 @@ def _derive_movie_texids(
             "slideList": slide_list,
         }
 
-    per_slide_steady: dict[str, set[str]] = {}
-    crossfades: list[tuple[str, str]] = []
+    per_slide_steady: dict[str, dict[str | None, set[str]]] = {}
+    occurrences: list[dict] = []  # {from, to, owner, slide} — provenance kept per hit
     scanned: list[str] = []
     for uuid in slide_list:
         path = player_dir / "assets" / uuid / f"{uuid}.json"
@@ -260,41 +310,165 @@ def _derive_movie_texids(
         except Exception:  # noqa: BLE001
             continue
         scanned.append(uuid)
-        steady, cfs = _extract_movie_layers(data.get("events") or [], footprint_wh=footprint_wh)
-        per_slide_steady[uuid] = steady
-        crossfades.extend(cfs)
+        steady_by_owner, cfs = _extract_movie_layers(
+            data.get("events") or [], footprint_wh=footprint_wh
+        )
+        per_slide_steady[uuid] = steady_by_owner
+        for cf in cfs:
+            occurrences.append({**cf, "slide": uuid})
 
-    slide1_steady = per_slide_steady.get(slide_list[0], set())
-    slide2_steady = per_slide_steady.get(slide_list[1], set())
-    uniq_crossfades = sorted(set(crossfades))
-    boundary = [
-        (frm, to) for (frm, to) in uniq_crossfades if frm in slide1_steady and to in slide2_steady
-    ]
-    if len(boundary) == 1:
-        frm, to = boundary[0]
-    elif not boundary and len(uniq_crossfades) == 1:
-        frm, to = uniq_crossfades[0]
-    else:
+    slide1_by_owner = per_slide_steady.get(slide_list[0], {})
+    slide2_by_owner = per_slide_steady.get(slide_list[1], {})
+
+    # Select the boundary crossfade STRUCTURALLY: a footprint-sized `contents`
+    # crossfade under a Magic Move transition (`withinMagicMove`) — the movie's
+    # own poster swap. Its `from`/`to` are transition-only poster textures that
+    # never appear as slide-1/2 steady state, so steady-texture anchoring cannot
+    # match them (and the whole-deck "sole crossfade" fallback that Codex F3
+    # flagged was the only thing that used to resolve this). A spurious same-sized
+    # *background* `contents` tween is rejected because it is not inside a Magic
+    # Move; a differently-sized movie's crossfade is rejected by the footprint
+    # size gate. DISTINCT by (from, to); provenance retained.
+    movie_cfs: dict[tuple[str, str], list[dict]] = {}
+    for occ in occurrences:
+        if occ.get("withinMagicMove"):
+            movie_cfs.setdefault((occ["from"], occ["to"]), []).append(occ)
+
+    if len(movie_cfs) != 1:
+        crossfade_summary = [
+            {"from": f, "to": t, "count": len(occs), "slides": sorted({o["slide"] for o in occs})}
+            for (f, t), occs in sorted(movie_cfs.items())
+        ]
         return {
             "decoderKey": None,
             "outgoing": [],
             "incoming": [],
             "warning": (
-                f"1->2 boundary ambiguous: {len(boundary)} steady-anchored / "
-                f"{len(uniq_crossfades)} footprint crossfade(s)"
+                f"1->2 boundary not uniquely resolvable: {len(movie_cfs)} distinct "
+                f"magic-move footprint crossfade(s) among {len(occurrences)} occurrence(s)"
             ),
             "scannedSlideUuids": scanned,
             "slideList": slide_list,
-            "crossfades": uniq_crossfades,
+            "movieCrossfadeCandidates": crossfade_summary,
         }
+
+    (frm, to), occs = next(iter(movie_cfs.items()))
+
+    # Fold steady by owner identity (F5): the owner is the slide-1 layer whose
+    # steady set contains `frm` (resp. slide-2 layer owning `to`). Textures are
+    # unique ids, so at most one owner matches. Fold only when that owner is a
+    # real, single, identified object; otherwise keep just from/to.
+    def _fold(endpoint: str, by_owner: dict[str | None, set[str]]) -> set[str]:
+        owners = [o for o, texs in by_owner.items() if o is not None and endpoint in texs]
+        if len(owners) == 1:
+            return {endpoint} | by_owner[owners[0]]
+        return {endpoint}
 
     return {
         "decoderKey": decoder_key,
-        "outgoing": sorted({frm} | slide1_steady),
-        "incoming": sorted({to} | slide2_steady),
+        "outgoing": sorted(_fold(frm, slide1_by_owner)),
+        "incoming": sorted(_fold(to, slide2_by_owner)),
         "boundaryCrossfade": {"from": frm, "to": to},
+        "boundaryOccurrences": [{"slide": o["slide"], "owner": o["owner"]} for o in occs],
         "scannedSlideUuids": scanned,
         "slideList": slide_list,
+    }
+
+
+def _score_feed_engaged(
+    texids_info: dict,
+    motion_across_flip: dict,
+    after_samples: list[dict],
+    preserve_events: list[dict],
+    hash1: object,
+    hash2: object,
+) -> dict:
+    """Fail-CLOSED sub-verdict: did the id-bound feed actually engage at the
+    1->2 Magic Move boundary (Codex F1)? A green screenshot is not proof; only
+    the events + ownership are. This PASSES only when EVERY sub-condition holds
+    and FAILS by the absence of any one of them — never passes because data was
+    missing (that is the fail-open hole this closes).
+
+    Necessary sub-conditions (all required):
+      - `bothSidedTexids`  — `decoderKey` set AND both `outgoing`/`incoming`
+        non-empty (a real `from != to` boundary supplies both sides).
+      - `motionAcrossFlipOk` — `motionAcrossFlip.ok`.
+      - `stableDecoder` — exactly one non-null `decoderId` across the whole
+        post-flip (after) window; a same-key handoff (two ids) or an
+        unresolved owner (null id) fails.
+      - `contextType2d` — that bound decoder's fed canvas passively reported a
+        `"2d"` context on every after sample (never null/webgl, never probed).
+      - `incomingFeedDraw` — >=1 `texture-feed-draw`/`mo-prepaint-draw` with
+        `slot=='incoming'`, bound to that `decoderId`, at/after the boundary
+        hash. Empirically today this is 0 (all draws were `outgoing`), so the
+        finding stays RED — for a proven reason, failing closed.
+
+    `after_samples` are the flip samples (roi/sceneHash/decoderId/contextType);
+    the after window is the post-flip subset (`sceneHash != hash1`).
+    """
+    outgoing = texids_info.get("outgoing") or []
+    incoming = texids_info.get("incoming") or []
+    both_sided = bool(texids_info.get("decoderKey") and outgoing and incoming)
+
+    motion_ok = bool((motion_across_flip or {}).get("ok"))
+
+    h1 = _norm_hash(hash1)
+    post = [
+        s
+        for s in (after_samples or [])
+        if s.get("sceneHash") is not None and _norm_hash(s.get("sceneHash")) != h1
+    ]
+    distinct_ids = sorted({s.get("decoderId") for s in post}, key=lambda x: (x is None, str(x)))
+    stable = bool(post) and len(distinct_ids) == 1 and distinct_ids[0] is not None
+    bound_decoder_id = distinct_ids[0] if stable else None
+
+    bound_ctx = [s.get("contextType") for s in post if s.get("decoderId") == bound_decoder_id] if stable else []
+    ctx_ok = bool(bound_ctx) and all(c == "2d" for c in bound_ctx)
+
+    incoming_set = set(incoming)
+    n1 = _hash_num(hash1)
+    draw_hits: list[dict] = []
+    for e in preserve_events or []:
+        if e.get("kind") not in ("texture-feed-draw", "mo-prepaint-draw"):
+            continue
+        d = e.get("detail") or {}
+        if d.get("slot") != "incoming":
+            continue
+        if bound_decoder_id is None or d.get("decoderId") != bound_decoder_id:
+            continue
+        hn = d.get("hashNum")
+        if hn is None:
+            hn = _hash_num(d.get("sceneHash"))
+        if n1 is not None and hn is not None and hn < n1:
+            continue
+        cid = d.get("canvasId")
+        if incoming_set and cid is not None and cid not in incoming_set:
+            continue
+        draw_hits.append({"kind": e.get("kind"), "detail": d})
+    incoming_draw_ok = bool(draw_hits)
+
+    checks = {
+        "bothSidedTexids": both_sided,
+        "motionAcrossFlipOk": motion_ok,
+        "stableDecoder": stable,
+        "contextType2d": ctx_ok,
+        "incomingFeedDraw": incoming_draw_ok,
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    return {
+        "ok": not failed,
+        "failed": failed,
+        "boundDecoderId": bound_decoder_id,
+        "bothSidedTexids": {
+            "ok": both_sided,
+            "decoderKey": texids_info.get("decoderKey"),
+            "nOutgoing": len(outgoing),
+            "nIncoming": len(incoming),
+        },
+        "motionAcrossFlipOk": motion_ok,
+        "stableDecoder": {"ok": stable, "distinctDecoderIds": distinct_ids, "afterN": len(post)},
+        "contextType2d": {"ok": ctx_ok, "contextTypes": bound_ctx},
+        "incomingFeedDraw": {"ok": incoming_draw_ok, "n": len(draw_hits), "hits": draw_hits[:4]},
     }
 
 
@@ -1532,6 +1706,12 @@ async def _run(player: Path) -> dict:
                 'reuse-skip-boundary', 'retire-on-start-movie', 'pool-cleared',
                 'reuse-decoder', 'createElement-video',
                 'texture-feed-start', 'texture-feed-stop',
+                // F1a: engagement events the fail-closed 1->2 gate keys off — a
+                // texture-feed-draw / mo-prepaint-draw into an incoming canvas is
+                // the ONLY positive proof the feed drew; the skip notes explain a
+                // non-engagement so the gate fails for a named reason, not silently.
+                'texture-feed-draw', 'texture-feed-skip', 'texture-feed-skip-canvas',
+                'mo-prepaint-skip',
                 'player-build-error', 'mo-prepaint-draw', 'mo-no-stage'
               ];
               const important = p.events.filter((e) => keep.indexOf(e.kind) >= 0);
@@ -1669,6 +1849,14 @@ async def _run(player: Path) -> dict:
 
     player_build_errors = [e for e in preserve_events if e.get("kind") == "player-build-error"]
 
+    # F1b: fail-closed engagement sub-verdict — a necessary condition for the
+    # 1->2 finding. It proves (in events + ownership, not pixels) that the ONE
+    # bound decoder's feed drew into an incoming canvas at the boundary. Absence
+    # of any sub-condition fails the gate closed.
+    feed_engaged = _score_feed_engaged(
+        texids_info, motion_across_flip, flip_samples, preserve_events, hash1, hash2
+    )
+
     findings = [
         {"id": "sourceUnchanged", "pass": after.as_dict() == before.as_dict()},
         {"id": "emptyCanvasPre", "pass": pre_scores["empty"]["ok"], "detail": pre_scores["empty"]},
@@ -1681,6 +1869,7 @@ async def _run(player: Path) -> dict:
                 and hash1 != hash2
                 and visible_motion.get("ok", False)
                 and index_run.get("ok", False)
+                and feed_engaged.get("ok", False)
                 and not player_build_errors
             ),
             "status": "failed-by-player" if player_build_errors else None,
@@ -1703,6 +1892,7 @@ async def _run(player: Path) -> dict:
                     "incoming": texids_info.get("incoming"),
                 },
                 "movieTexidsWarning": texids_info.get("warning"),
+                "feedEngagedAt1to2": feed_engaged,
                 "motionAcrossFlip": motion_across_flip,
                 "decoderMotion": decoder_motion,
                 "targetKey": EXPECTED_MOVIE_KEYS[0],
@@ -1715,8 +1905,13 @@ async def _run(player: Path) -> dict:
                 ][:8],
                 "note": (
                     "Pass gate is target-decoder continuity + visibleMovieMotion + "
-                    "indexRun (the composited frame-index patch keeps progressing across "
-                    "the MM cut, i.e. the canvas is not stuck on the newborn poster frame). "
+                    "indexRun + feedEngagedAt1to2 (the fail-closed engagement sub-verdict: "
+                    "both-sided texids, motionAcrossFlip.ok, one stable non-null decoderId "
+                    "across the after window, contextType=='2d' on the fed canvas, AND >=1 "
+                    "incoming texture-feed-draw/mo-prepaint-draw bound to that decoder at the "
+                    "boundary — absence of any sub-condition fails the finding closed). "
+                    "indexRun means the composited frame-index patch keeps progressing across "
+                    "the MM cut, i.e. the canvas is not stuck on the newborn poster frame. "
                     "motionAcrossFlip is kept as corroboration, not gating: it scores "
                     "ROI pixel motion, which the neutral scrolling grating provides even "
                     "while frozen on a single stale poster frame's own motion blur, so it "
