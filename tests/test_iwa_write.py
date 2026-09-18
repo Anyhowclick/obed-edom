@@ -1579,11 +1579,15 @@ def test_autosize_height_text_hard_misses_to_the_fallback():
     assert edits == {}
 
 
-def _autosize_text_objects():
+def _autosize_text_objects(*, valign: int = 0):
+    # valign: TSWP VerticalAlignmentType (0=Top, 1=Middle, 2=Bottom). Only Top makes an
+    # autosize reposition Δh-immune, so the reposition tests default to a top-anchored box.
+    text_super = _shape_super(700, 374, 0.0, 0.0, nw=300.3, nh=83.0)
+    text_super["style"] = {"identifier": "9"}
     return {
         "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
-        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
-              "super": _shape_super(700, 374, 0.0, 0.0, nw=300.3, nh=83.0)},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "super": text_super},
+        "9": {"_pbtype": "TSWP.ShapeStyleArchive", "shapeProperties": {"verticalAlignment": valign}},
     }
 
 
@@ -1609,6 +1613,31 @@ def test_autosize_text_reposition_on_writes_position_only():
     assert refuse_reason is None and not missed_specs and miss_reasons == []
     assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
     assert not any(k in edits["1"] for k in ("size_w", "size_h", "natural_w", "natural_h"))
+
+
+def test_autosize_text_reposition_middle_anchored_hard_misses():
+    # Middle-anchored autosize box: stored y is the CENTRE, so a pos_y written against the
+    # live top drifts by ~Δh/2 across the pipeline's reopens (measured live: 174px). Even
+    # with a valid seed, a y-bearing spec must defer to the AppleScript fallback.
+    objects = _autosize_text_objects(valign=1)  # kFrameAlignMiddle
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_autosize_text_reposition_bottom_anchored_hard_misses():
+    # Bottom-anchored: stored y is the visual BOTTOM -> same Δh mismatch against the live
+    # top. Defer to the fallback.
+    objects = _autosize_text_objects(valign=2)  # kFrameAlignBottom
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
 
 
 def test_autosize_text_reposition_on_missing_seed_hard_misses():

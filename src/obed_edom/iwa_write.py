@@ -31,7 +31,15 @@ from google.protobuf.json_format import MessageToDict, ParseDict
 from keynote_parser.codec import IWAFile, import_version
 
 from obed_edom.iwa_builds import _contains_identifier
-from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _path_source, _xywha, compose_geometry
+from obed_edom.iwa_geometry import (
+    _ALIGN_TOP,
+    _geom_dict,
+    _is_rotated,
+    _path_source,
+    _vertical_alignment,
+    _xywha,
+    compose_geometry,
+)
 from obed_edom.iwa_kindindex import (
     derive_kind_index,
     derived_kind_counts,
@@ -644,15 +652,19 @@ def _slide_edits(
             # pass 1 already regrew it); without the flag it hard-misses to the AppleScript
             # fallback, unchanged.
             if stored[2] == 0.0 or stored[3] == 0.0:
-                # pos_y is the only seed-dependent write (a delta off the live reported top;
-                # pos_x is absolute), and it needs a TRUSTWORTHY seed: the exact saved
-                # (text, ki) row the bulk read returned. The composed frame is not an autosize
-                # box's live top-left, and a failed item read zero-fills to [0, 0, 0, 0] --
-                # either gives a wrong pos_y with nothing to catch it in production. Without a
-                # present, non-degenerate reported row, hard-miss to the AppleScript fallback.
-                needs_seed = spec.get("y") is not None
+                # pos_y is the only seed- and anchor-sensitive write (pos_x is absolute).
+                # It is Δh-immune ONLY for a top-anchored box: stored y IS the visual top and
+                # Keynote grows the box downward, so writing the top holds across the pipeline's
+                # reopens whatever the final height. A middle/bottom box stores the centre/bottom,
+                # so a pos_y written against the live top drifts by ~Δh/2 (measured live: 174px) --
+                # defer those to the AppleScript fallback, which places text live at ~0.5px.
+                # pos_y also needs a TRUSTWORTHY seed: the exact saved (text, ki) row the bulk
+                # read returned (the composed frame is not the live top; a failed item read
+                # zero-fills to [0, 0, 0, 0]) -- without one, hard-miss to the fallback.
+                writes_y = spec.get("y") is not None
                 seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
-                if not text_reposition or (needs_seed and not seed_ok):
+                top_anchored = _vertical_alignment(obj, objects) == _ALIGN_TOP
+                if not text_reposition or (writes_y and not (seed_ok and top_anchored)):
                     _miss("text-autosize")
                     continue
                 ops = _text_fields(rec, spec, rep, stored, position_only=True)
