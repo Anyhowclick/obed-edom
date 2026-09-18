@@ -1,5 +1,29 @@
 # Keynote alpha HTML — handover 2026-09-18 (supersedes 2026-09-17)
 
+## ⚠️ CORRECTION 2026-09-18 (Step-2 session live finding — read before trusting the texid/gate model below)
+The Step-2 session proved on the live DOM (reproduced 3×) that the **1→2 movie is a live `<video>`
+at the footprint, NOT a fed 2D canvas**, and the sustained after-cut freeze (afterPairMae `[0]×16`)
+is caused by **PRESERVE remounting that `<video>` OFF the footprint** (rect → `[214,1586]`, off-stage),
+leaving only a static poster. Independently confirmed here: the deck's **only** footprint magic-move
+`contents` crossfade lives in slide **#3's** JSON = the **2→3** transition (Keynote stores a
+transition under its incoming slide); slide #2's JSON has none. So `_derive_movie_texids` resolved
+the 2→3 crossfade and the code **mislabeled it "1→2"** — `outgoing=[0885]/incoming=[A223]` are 2→3
+posters that only surface at #6, OUTSIDE the gate's `[2,6)` window. The `feedEngagedAt1to2`
+`incomingFeedDraw` (canvasId ∈ deck-incoming) is therefore **unsatisfiable in-window by construction**
+and aimed at the wrong surface. The gate stays fail-closed (never false-passes), but the texid/
+canvas-feed model for 1→2 is WRONG.
+
+**Owner-chosen direction: (B) root-cause the remount.** Peer stops PRESERVE moving the live
+`<video>` off the footprint through the 1→2 MM (so it stays visible; no canvas feed). The gate is
+then reworked (handed to the Step-2 session) to verify **composited motion across the cut bound to
+the footprint decoder + identity** (e.g. `score_index_progression` on the 1→2 footprint's own
+burnt-in counter + the footprint `<video>`'s rVFC advance + one stable footprint decoder),
+DROPPING the deck-texid `incomingFeedDraw` canvasId check. Everything below about the deck-derived
+outgoing/incoming texids applies to the 2→3 boundary only, not 1→2.
+
+---
+
+
 ## Step 1 (ownership & targeting) — DONE 2026-09-18, branch `claude/pr158-handover-findings-4366b9`
 Tip `5cfa8ee`. 7 implementation rounds folding 6 adversarial Codex (gpt-5.6-sol) reviews
 (`.agents/reviews/step1-ownership-codex-r1..r6.md`); contract + residuals in
