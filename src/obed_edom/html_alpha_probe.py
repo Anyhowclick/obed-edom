@@ -1343,8 +1343,10 @@ def score_index_progression(
     *,
     modulo: int = 256,
     min_decodable: int = 6,
+    min_decodable_frac: float = 0.5,
     min_distinct: int = 6,
     max_stall_run: int = 2,
+    max_forward_step: int = 30,
 ) -> dict[str, Any]:
     """Parity-immune "the composited output kept advancing" corroboration.
 
@@ -1354,11 +1356,20 @@ def score_index_progression(
     whose inter-capture parity aliases visible motion to ~0 (the 2->3 restart
     flake's root cause): the burnt-in counter increments every presented frame
     regardless of grating phase. PASSES only when the counter genuinely marches
-    forward — enough decodable samples, enough distinct values, no stall run
-    longer than ``max_stall_run`` consecutive equal decodes, some net forward
-    progress, and no backward jump (a drop beyond half the modulo is a
-    restart/glitch mid-window and fails closed). A wrong ROI decodes to few/no
-    flat patches -> ``min_decodable`` fails closed, never a false pass.
+    forward — enough decodable samples both in count (``min_decodable``) and as a
+    fraction of the window (``min_decodable_frac``, so a run that advances briefly
+    then loses its ROI for the rest of the window fails, Codex flake-review F1),
+    enough distinct values, no stall run longer than ``max_stall_run`` consecutive
+    equal decodes, some net forward progress, and every step a PLAUSIBLE forward
+    increment ``0 < d <= max_forward_step`` (a larger modular delta is a reset /
+    occlusion / wraparound-misread, not real single-capture progress — Codex F3;
+    genuine mod wraparound stays a small positive step and passes).
+
+    Fail-closed on a non-flat/occluded ROI (decodes to None -> coverage fails).
+    NOT source-bound: it trusts that ``indices`` were decoded at the target
+    movie's own patch ROI. For a fixed fixture whose ROI lies on the target movie
+    that holds; binding the counter to the decoder's own media time is a Step-2
+    concern (Codex flake-review F2).
     """
     n = len(indices)
     decodable = [v for v in indices if v is not None]
@@ -1366,31 +1377,34 @@ def score_index_progression(
         "n": n,
         "nDecodable": len(decodable),
         "nDistinct": len(set(decodable)),
+        "decodableFrac": (len(decodable) / n) if n else 0.0,
         "firstIndex": decodable[0] if decodable else None,
         "lastIndex": decodable[-1] if decodable else None,
     }
     if len(decodable) < min_decodable:
         return {"ok": False, "reason": "insufficient decodable samples", **base}
+    if base["decodableFrac"] < min_decodable_frac:
+        return {"ok": False, "reason": "sparse decodable coverage", **base}
 
     deltas = [(b - a) % modulo for a, b in zip(decodable, decodable[1:])]
-    negative_anomaly = any(d > modulo / 2 for d in deltas)
+    implausible = any(d > max_forward_step for d in deltas)
     longest_stall = 0
     run = 0
     for d in deltas:
         run = run + 1 if d == 0 else 0
         longest_stall = max(longest_stall, run)
-    total_forward = sum(d for d in deltas if d <= modulo / 2)
+    total_forward = sum(d for d in deltas if 0 < d <= max_forward_step)
 
     ok = bool(
-        not negative_anomaly
+        not implausible
         and base["nDistinct"] >= min_distinct
         and longest_stall <= max_stall_run
         and total_forward > 0
     )
     reason = None
     if not ok:
-        if negative_anomaly:
-            reason = "backward jump (restart/glitch) in window"
+        if implausible:
+            reason = "implausible index jump (reset/occlusion)"
         elif base["nDistinct"] < min_distinct:
             reason = "too few distinct indices"
         elif longest_stall > max_stall_run:
@@ -1402,7 +1416,7 @@ def score_index_progression(
         "reason": reason,
         "longestStallRun": longest_stall,
         "totalForward": total_forward,
-        "negativeAnomaly": negative_anomaly,
+        "implausibleStep": implausible,
         **base,
     }
 

@@ -1472,7 +1472,29 @@ def test_index_progression_rejects_backward_jump():
 
     scored = score_index_progression([2, 6, 10, 200, 14, 18, 22, 26])
     assert scored["ok"] is False
-    assert scored["reason"] == "backward jump (restart/glitch) in window"
+    assert scored["reason"] == "implausible index jump (reset/occlusion)"
+
+
+def test_index_progression_rejects_sparse_tail():
+    """Advances briefly then loses the ROI for the rest of the window => fail
+    closed on coverage; None-drop must not let a short good prefix carry it
+    (Codex flake-review F1)."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([2, 6, 10, 14, 18, 22] + [None] * 16)
+    assert scored["ok"] is False
+    assert scored["reason"] == "sparse decodable coverage"
+
+
+def test_index_progression_rejects_large_raw_drop_as_forward():
+    """A raw 200->14 read (modular +70) is not a plausible single-capture step
+    and must be rejected, not counted as forward progress (Codex flake-review F3);
+    real per-capture steps are 1-4."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([200, 14, 18, 22, 26, 30, 34, 38])
+    assert scored["ok"] is False
+    assert scored["reason"] == "implausible index jump (reset/occlusion)"
 
 
 def test_index_progression_accepts_modulo_wraparound():
