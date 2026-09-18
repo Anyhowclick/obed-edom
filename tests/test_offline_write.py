@@ -46,7 +46,6 @@ from obed_edom.offline_write import (
 )
 from obed_edom.remap_keynote import (
     offline_maskcrop_enabled,
-    offline_text_admit_unlaid_enabled,
     offline_text_reposition_enabled,
     offline_write_mode,
 )
@@ -217,27 +216,6 @@ def test_offline_maskcrop_forced_off_when_offline_write_off(monkeypatch):
     said = []
     assert offline_maskcrop_enabled(offline_mode="off", say=said.append) is False
     assert said and "OBED_OFFLINE_WRITE" in said[0]
-
-
-# --- offline_text_admit_unlaid_enabled (experiment arm) ----------------------
-
-
-def test_offline_text_admit_unlaid_defaults_off_and_parses_tokens(monkeypatch):
-    monkeypatch.delenv("OBED_OFFLINE_TEXT_ADMIT_UNLAID", raising=False)
-    assert offline_text_admit_unlaid_enabled(text_reposition=True) is False
-    for tok in ("1", "true", "yes", "on", "ON"):
-        monkeypatch.setenv("OBED_OFFLINE_TEXT_ADMIT_UNLAID", tok)
-        assert offline_text_admit_unlaid_enabled(text_reposition=True) is True
-    for tok in ("0", "off", "no", "bogus", ""):
-        monkeypatch.setenv("OBED_OFFLINE_TEXT_ADMIT_UNLAID", tok)
-        assert offline_text_admit_unlaid_enabled(text_reposition=True) is False
-
-
-def test_offline_text_admit_unlaid_needs_text_reposition(monkeypatch):
-    monkeypatch.setenv("OBED_OFFLINE_TEXT_ADMIT_UNLAID", "on")
-    said = []
-    assert offline_text_admit_unlaid_enabled(text_reposition=False, say=said.append) is False
-    assert said and "OBED_OFFLINE_TEXT" in said[0]
 
 
 # --- probe_iwa_extra (BLOCKER item 1) -----------------------------------------

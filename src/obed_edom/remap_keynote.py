@@ -204,27 +204,6 @@ def offline_maskcrop_enabled(
     return True
 
 
-def offline_text_admit_unlaid_enabled(
-    explicit: str | None = None, *, text_reposition: bool = False,
-    say: Callable[[str], None] | None = None,
-) -> bool:
-    """EXPERIMENT ARM (default OFF). Env `OBED_OFFLINE_TEXT_ADMIT_UNLAID`
-    (`1`/`true`/`yes`/`on`). Drops the offline text writer's laid-out gate so an autosize box
-    whose pass-1 `naturalSize` is 0 on an axis is still repositioned (position only, off the
-    live seed). Pass 1 zeroes `naturalSize` on every autosize box, so the default gate refuses
-    nearly all of them; this arm admits them to measure conversion in the owner-gated live
-    experiment. Only consulted when `OBED_OFFLINE_TEXT` is on."""
-    raw = (explicit if explicit is not None
-           else os.environ.get("OBED_OFFLINE_TEXT_ADMIT_UNLAID", "")).strip().lower()
-    if raw not in {"1", "true", "yes", "on"}:
-        return False
-    if not text_reposition:
-        if say:
-            say("OBED_OFFLINE_TEXT_ADMIT_UNLAID needs OBED_OFFLINE_TEXT on; ignoring.")
-        return False
-    return True
-
-
 def _debug_snapshot_pass1(dest: Path, say: Callable[[str], None] | None = None) -> None:
     """Diagnostic: when `OBED_DEBUG_PASS1_SNAPSHOT` is a path, copy the pass-1-saved deck
     there for an offline `naturalSize` census (the owner-gated text experiment's conversion
@@ -1538,10 +1517,9 @@ def remap_keynote(
     _debug_snapshot_pass1(dest, say)
     text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
     mask_crop = offline_maskcrop_enabled(offline_mode=offline_mode, say=say)
-    admit_unlaid = offline_text_admit_unlaid_enabled(text_reposition=text_reposition, say=say)
     offline_write_info = offline_write.run_offline_write(
         dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say,
-        text_reposition=text_reposition, mask_crop=mask_crop, admit_unlaid=admit_unlaid,
+        text_reposition=text_reposition, mask_crop=mask_crop,
     )
     zorder_mode = zorder_write_mode(offline_mode=offline_mode, say=say)
     zorder_refused = set((offline_write_info or {}).get("refused") or [])

@@ -34,7 +34,6 @@ from obed_edom.iwa_builds import _contains_identifier
 from obed_edom.iwa_geometry import (
     _geom_dict,
     _is_rotated,
-    _natural_size,
     _path_source,
     _xywha,
     compose_geometry,
@@ -587,7 +586,6 @@ def _slide_edits(
     require_reconcile: bool = False,
     text_reposition: bool = False,
     mask_crop: bool = False,
-    admit_unlaid: bool = False,
 ) -> tuple[str | None, dict[str, dict], int, list[dict], list[str], str | None]:
     """Pure, no-I/O resolution of one slide's edits against an already-loaded deck.
 
@@ -698,25 +696,22 @@ def _slide_edits(
                 # refreshes. `_text_fields(position_only)` moves BOTH axes by a delta off the
                 # live `reported` frame, which is anchor-agnostic: stored x/y is the alignment
                 # anchor, and the delta cancels it and any stale naturalSize when the size is
-                # unchanged (a position-only move guarantees that). So middle/bottom-anchored
-                # boxes reposition correctly too -- the earlier "middle drifts ~174px" refusal
-                # was a mis-diagnosis (the 174 was one right-anchored box under an absolute
-                # pos_x, now a delta; middle boxes measured 0px drift end-to-end). See
-                # .agents/plans/offline_text_middle_anchor.plan.md.
+                # unchanged (a position-only move guarantees that). Middle/bottom-anchored and
+                # un-laid-out boxes reposition correctly too -- the old "middle drifts ~174px" +
+                # "un-laid-out mis-renders" refusals were one mis-diagnosis (the 174 was a
+                # right-anchored box under an absolute pos_x, now a delta).
                 #
-                # Still required: a TRUSTWORTHY live seed -- the delta reads reported[x, y],
-                # a failed bulk read zero-fills to [0, 0, 0, 0], and the composed frame is not
-                # the live anchor. And the box must be LAID OUT in the saved deck (naturalSize
-                # > 0 on both axes): the un-laid-out sentinel is re-derived from text on open
-                # and would discard a written frame. NB pass 1 zeroes naturalSize on every
-                # autosize box, so this laid-out gate refuses most boxes offline; the opt-in
-                # `admit_unlaid` arm (OBED_OFFLINE_TEXT_ADMIT_UNLAID) drops it to convert the
-                # zeroed majority for the owner-gated live experiment (the plan). Default keeps
-                # the box refused.
+                # The one remaining gate is a TRUSTWORTHY live seed: the delta reads
+                # reported[x, y]; a failed bulk read zero-fills to [0, 0, 0, 0] and the composed
+                # frame is not the live anchor. There is NO laid-out gate -- pass 1 zeroes
+                # naturalSize on every autosize box, and admitting those is live-validated
+                # (2026-09-18: 137 boxes, 136/136 un-laid-out post-pass-1, verify text max
+                # 0.98px; see .agents/plans/offline_text_middle_anchor.plan.md). Grow-height
+                # boxes reposition but keep pass-1's narrow width (no width write here) -> they
+                # narrow-wrap; that width write is the separate OBED_OFFLINE_TEXT_REGROW
+                # increment, not this path.
                 seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
-                nat_w, nat_h = _natural_size(obj)
-                laid_out = nat_w > 0.0 and nat_h > 0.0
-                if not text_reposition or (not laid_out and not admit_unlaid) or not seed_ok:
+                if not text_reposition or not seed_ok:
                     _miss("text-autosize")
                     continue
                 ops = _text_fields(rec, spec, rep, stored, position_only=True)
@@ -950,7 +945,6 @@ def patch_deck_geometry(
     extra_member_edits: dict[str, bytes] | None = None,
     text_reposition: bool = False,
     mask_crop: bool = False,
-    admit_unlaid: bool = False,
 ) -> dict[int, PatchResult]:
     """Patch every slide in ``specs_by_slide`` with exactly ONE zip rewrite.
 
@@ -981,7 +975,6 @@ def patch_deck_geometry(
             require_reconcile=require_reconcile,
             text_reposition=text_reposition,
             mask_crop=mask_crop,
-            admit_unlaid=admit_unlaid,
         )
         if not refuse_reason and target_member is not None and edits:
             owner = member_owner.get(target_member)

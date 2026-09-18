@@ -1759,57 +1759,30 @@ def test_autosize_text_reposition_centre_anchored_x_is_a_delta():
     assert edits == {"1": {"pos_x": pytest.approx(700.0 + (107.15 - 850.15))}}
 
 
-def test_autosize_text_reposition_unlaidout_hard_misses():
-    # Stored naturalSize width == 0.0 is the un-laid-out sentinel. Pass 1 also zeroes
-    # naturalSize on laid-out boxes, so this gate is conservative (it cannot tell the two
-    # apart offline) and refuses; loosening it to convert the zeroed majority is the
-    # owner-gated live experiment (see the middle-anchor plan), not this write path.
-    objects = _autosize_text_objects(valign=0, nw=0.0, nh=0.0)  # un-laid-out
+def test_autosize_text_reposition_unlaidout_now_repositions():
+    # Un-laid-out box (naturalSize 0 on both axes): pass 1 zeroes naturalSize on EVERY autosize
+    # box, so there is no laid-out gate -- with a good live seed the box repositions off the
+    # seed (live-validated 2026-09-18: 136/136 un-laid-out converted at ≤0.98px). pos_x delta =
+    # 700 + (107.15 - 700) = 107.15; pos_y = 374 + (404 - 344) = 434.
+    objects = _autosize_text_objects(valign=1, nw=0.0, nh=0.0)  # middle, un-laid-out
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
     reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}  # live read HAS a frame
     _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
-    assert refuse_reason is None
-    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
 
 
-def test_autosize_text_reposition_zero_natural_height_hard_misses():
-    # naturalSize (width>0, height==0): the height axis is the un-laid-out sentinel
-    # (iwa_geometry's text-height-unlaid). The laid-out gate requires both axes > 0, so a
-    # zero height still defers even though the width is present.
+def test_autosize_text_reposition_zero_natural_height_now_repositions():
+    # naturalSize (width>0, height==0) is the same benign post-pass-1 state; no laid-out gate,
+    # so it repositions too (with a good seed).
     objects = _autosize_text_objects(valign=0, nw=174.0, nh=0.0)
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
     reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}
     _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
-    assert refuse_reason is None
-    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
-
-
-def test_autosize_text_reposition_admit_unlaid_arm_converts_with_seed():
-    # EXPERIMENT ARM: admit_unlaid drops the laid-out gate, so an un-laid-out box (pass-1
-    # zeroed naturalSize) with a good live seed is repositioned position-only off the seed.
-    # This is what the owner-gated live experiment measures; default (no arm) still refuses.
-    objects = _autosize_text_objects(valign=1, nw=0.0, nh=0.0)  # middle, un-laid-out
-    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
-    reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}
-    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
-        1, specs, objects, {"1": "M"}, [("100", False)],
-        reported=reported, text_reposition=True, admit_unlaid=True)
     assert refuse_reason is None and not missed_specs and miss_reasons == []
     assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
-
-
-def test_autosize_text_reposition_admit_unlaid_still_needs_seed():
-    # The arm loosens only the laid-out gate, not the seed gate: an un-laid-out box with no
-    # live seed still defers (the delta has no live anchor to read).
-    objects = _autosize_text_objects(valign=1, nw=0.0, nh=0.0)
-    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
-    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
-        1, specs, objects, {"1": "M"}, [("100", False)],
-        reported={}, text_reposition=True, admit_unlaid=True)
-    assert refuse_reason is None
-    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
 
 
 def test_autosize_text_reposition_on_missing_seed_hard_misses():
