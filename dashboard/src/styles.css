@@ -2352,6 +2352,8 @@ input.maps-thumb-title-input:focus {
 }
 .maps-nav-actions .btn { flex: 1; }
 .maps-landmark-pop { display: flex; flex-direction: column; gap: var(--gap-ctl); min-width: 220px; }
+.maps-insp-body .style-picker { z-index: 2; }
+.maps-insp-body .style-picker:has(.maps-landmark-pop) + .note { filter: blur(12px); }
 .maps-landmark-grid { grid-template-columns: repeat(3, 96px); margin-top: 4px; }
 .maps-landmark-tile {
   background-image:
