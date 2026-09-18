@@ -698,13 +698,16 @@ def test_text_fields_fixed_height_also_writes_natural_h():
 def test_text_fields_position_only_emits_position_no_size():
     # The autosize reposition path: even a spec asking for w/h on a box whose stored width
     # is a real (non-sentinel) frame writes position ALONE -- pass 1 already sized the box.
+    # Both axes are anchor-cancelling deltas: stored x 800 is the centre (seed left 700 +
+    # w/2), so pos_x = 800 + (760 - 700) = 860 seats the centre so Keynote's re-layout lands
+    # the left edge at spec.x = 760.
     rec = {"id": "9", "kind": "text", "kindIndex": 0}
-    stored = (700.0, 374.0, 200.0, 0.0, 0.0)  # sentinel height, real stored width
+    stored = (800.0, 374.0, 200.0, 0.0, 0.0)  # sentinel height; stored x is the centre
     reported = [700.0, 344.0, 200.0, 46.0]
     spec = {"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 250.0, "h": 90.0}
     (obj_id, fields), = _text_fields(rec, spec, reported, stored, position_only=True)
     assert obj_id == "9"
-    assert fields["pos_x"] == 760.0  # x is exact absolute
+    assert fields["pos_x"] == pytest.approx(860.0)  # 800 + (760 - 700), anchor-cancelling delta
     assert fields["pos_y"] == pytest.approx(434.0)  # 374 + (404 - 344)
     assert not any(k in fields for k in ("size_w", "size_h", "natural_w", "natural_h"))
 
@@ -1678,8 +1681,9 @@ def test_autosize_height_text_hard_misses_to_the_fallback():
 
 
 def _autosize_text_objects(*, valign: int = 0, nw: float = 300.3, nh: float = 83.0):
-    # valign: TSWP VerticalAlignmentType (0=Top, 1=Middle, 2=Bottom). Only Top makes an
-    # autosize reposition Δh-immune, so the reposition tests default to a top-anchored box.
+    # valign: TSWP VerticalAlignmentType (0=Top, 1=Middle, 2=Bottom). A position-only
+    # reposition is anchor-agnostic (both axes are a delta off the live seed), so every
+    # alignment repositions; the tests exercise Top, Middle and Bottom.
     # nw==0.0 is the un-laid-out sentinel (no valid rendered frame in the saved deck).
     text_super = _shape_super(700, 374, 0.0, 0.0, nw=nw, nh=nh)
     text_super["style"] = {"identifier": "9"}
@@ -1714,38 +1718,53 @@ def test_autosize_text_reposition_on_writes_position_only():
     assert not any(k in edits["1"] for k in ("size_w", "size_h", "natural_w", "natural_h"))
 
 
-def test_autosize_text_reposition_middle_anchored_hard_misses():
-    # Middle-anchored autosize box: stored y is the CENTRE, so a pos_y written against the
-    # live top drifts by ~Δh/2 across the pipeline's reopens (measured live: 174px). Even
-    # with a valid seed, a y-bearing spec must defer to the AppleScript fallback.
+def test_autosize_text_reposition_middle_anchored_writes_position_only():
+    # Middle-anchored autosize box: stored y is the CENTRE, but the position-only delta off
+    # the live seed cancels the anchor, so it repositions correctly (no Δh drift -- a
+    # position-only move changes no layout input). pos_y = stored 374 + (404 - 344) = 434;
+    # pos_x = stored 700 + (107.15 - 700) = 107.15 (left-anchored seed here).
     objects = _autosize_text_objects(valign=1)  # kFrameAlignMiddle
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
     reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
     _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
-    assert refuse_reason is None
-    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+    assert not any(k in edits["1"] for k in ("size_w", "size_h", "natural_w", "natural_h"))
 
 
-def test_autosize_text_reposition_bottom_anchored_hard_misses():
-    # Bottom-anchored: stored y is the visual BOTTOM -> same Δh mismatch against the live
-    # top. Defer to the fallback.
+def test_autosize_text_reposition_bottom_anchored_writes_position_only():
+    # Bottom-anchored (stored y is the visual BOTTOM): the delta cancels the anchor exactly
+    # as for middle/top, so it repositions correctly too.
     objects = _autosize_text_objects(valign=2)  # kFrameAlignBottom
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
     reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
     _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
-    assert refuse_reason is None
-    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+
+
+def test_autosize_text_reposition_centre_anchored_x_is_a_delta():
+    # A centre-aligned box stores x as the CENTRE (seed left 700, width 300.3 -> centre
+    # 850.15). The delta writes pos_x = 850.15 + (107.15 - 700) = 257.30 so Keynote's
+    # centre-anchored re-layout lands the left edge at spec.x; an absolute pos_x would land
+    # it w/2 to the left. y-less spec, so only pos_x is written.
+    objects = _autosize_text_objects(valign=1)
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [850.15, 344.0, 300.3, 46.0]}  # seed x = stored centre
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(700.0 + (107.15 - 850.15))}}
 
 
 def test_autosize_text_reposition_unlaidout_hard_misses():
-    # Stored naturalSize width == 0.0 is the un-laid-out sentinel: the box has no valid
-    # rendered frame, so a position-only write leaves it un-laid-out and Keynote mis-renders
-    # it by ~its own width (174px, measured live on slide 70 ki18). The live seed can still
-    # read a width, so this is NOT caught by the seed guard -- defer to the AppleScript
-    # fallback, which lays the box out live.
-    objects = _autosize_text_objects(valign=0, nw=0.0, nh=0.0)  # top-anchored but un-laid-out
+    # Stored naturalSize width == 0.0 is the un-laid-out sentinel. Pass 1 also zeroes
+    # naturalSize on laid-out boxes, so this gate is conservative (it cannot tell the two
+    # apart offline) and refuses; loosening it to convert the zeroed majority is the
+    # owner-gated live experiment (see the middle-anchor plan), not this write path.
+    objects = _autosize_text_objects(valign=0, nw=0.0, nh=0.0)  # un-laid-out
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
     reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}  # live read HAS a frame
     _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
@@ -1756,8 +1775,8 @@ def test_autosize_text_reposition_unlaidout_hard_misses():
 
 def test_autosize_text_reposition_zero_natural_height_hard_misses():
     # naturalSize (width>0, height==0): the height axis is the un-laid-out sentinel
-    # (iwa_geometry's text-height-unlaid). Keynote re-derives the box on open, so a
-    # position-only write mis-renders it -- defer even though the width is present.
+    # (iwa_geometry's text-height-unlaid). The laid-out gate requires both axes > 0, so a
+    # zero height still defers even though the width is present.
     objects = _autosize_text_objects(valign=0, nw=174.0, nh=0.0)
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
     reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}
@@ -1791,16 +1810,27 @@ def test_autosize_text_reposition_on_zerofilled_seed_hard_misses():
     assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
 
 
-def test_autosize_text_reposition_x_without_y_needs_no_seed():
-    # pos_x is absolute and never reads the seed, so an x-move that carries no y is written
-    # even with no live seed row -- the seed gate applies only when the spec bears y.
+def test_autosize_text_reposition_x_without_y_now_needs_seed():
+    # pos_x is now a delta off the live seed (anchor-agnostic), so an x-only move needs a
+    # trustworthy seed too: with none it defers to the AppleScript fallback.
     objects = _autosize_text_objects()
     specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "w": 113.4, "h": 40.0, "role": "other"}]
     _tm, edits, soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
         1, specs, objects, {"1": "M"}, [("100", False)], reported={}, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+    assert soft == 0  # refused before any write, so nothing counts
+
+
+def test_autosize_text_reposition_x_only_writes_delta_with_seed():
+    # x-only WITH a seed writes the anchor-cancelling delta and nothing else.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
     assert refuse_reason is None and not missed_specs and miss_reasons == []
-    assert edits == {"1": {"pos_x": pytest.approx(107.15)}}
-    assert soft == 0  # x-only never reads `reported`, so it is not a soft fallback
+    assert edits == {"1": {"pos_x": pytest.approx(107.15)}}  # 700 + (107.15 - 700)
 
 
 def test_autosize_text_reposition_on_size_only_spec_still_misses():
