@@ -32,12 +32,9 @@ from keynote_parser.codec import IWAFile, import_version
 
 from obed_edom.iwa_builds import _contains_identifier
 from obed_edom.iwa_geometry import (
-    _ALIGN_TOP,
     _geom_dict,
     _is_rotated,
-    _natural_size,
     _path_source,
-    _vertical_alignment,
     _xywha,
     compose_geometry,
 )
@@ -286,20 +283,25 @@ def _text_fields(rec: dict, spec: dict, reported: list[float],
 
     ``position_only`` emits ``pos_x``/``pos_y`` alone (never a size on either axis): an
     autosize box was already regrown to its final size by pass 1, so the offline pass only
-    re-seats it. The caller (``_slide_edits``) admits this path ONLY for a laid-out,
-    top-anchored box, because ``pos_y`` is a delta off the live ``reported`` top and is
-    Δh-immune only when stored y IS the visual top (Keynote grows the box downward). Live
-    ``--validate`` proved middle/bottom-anchored boxes drift by ~Δh/2 (174 px), so they are
-    deferred to the AppleScript fallback rather than repositioned here.
+    re-seats it. BOTH axes are a delta off the live ``reported`` frame; because the stored
+    origin is the box's alignment anchor (left/centre/right on x, top/middle/bottom on y),
+    the delta cancels the anchor and the stale ``naturalSize``, so the reposition is
+    anchor-agnostic when the box's width/height are unchanged -- which a position-only move
+    guarantees (it changes no layout input, so Keynote re-lays the box out identically).
+    The fixed-frame path keeps ``pos_x`` absolute (a fixed-width box is left-anchored) and
+    writes the size deltas.
     """
     fields: dict[str, float] = {}
-    if spec.get("x") is not None:  # left-aligned autosize x is exact absolute
-        fields["pos_x"] = float(spec["x"])
-    if spec.get("y") is not None:  # y: delta off the reported frame (Δh-safe for a fixed
-        # frame; the caller restricts the autosize path to top-anchored, where y is the top)
-        fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
     if position_only:
+        if spec.get("x") is not None:
+            fields["pos_x"] = stored[0] + (float(spec["x"]) - reported[0])
+        if spec.get("y") is not None:
+            fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
         return [(rec["id"], fields)] if fields else []
+    if spec.get("x") is not None:  # fixed frame: x is exact absolute (left-anchored)
+        fields["pos_x"] = float(spec["x"])
+    if spec.get("y") is not None:
+        fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
     if spec.get("w") is not None and stored[2] != 0.0:  # autosize width has no writable frame
         fields["size_w"] = stored[2] + (float(spec["w"]) - reported[2])
         fields["natural_w"] = fields["size_w"]
@@ -689,30 +691,27 @@ def _slide_edits(
             # pass 1 already regrew it); without the flag it hard-misses to the AppleScript
             # fallback, unchanged.
             if stored[2] == 0.0 or stored[3] == 0.0:
-                # pos_y is the only seed- and anchor-sensitive write (pos_x is absolute).
-                # It is Δh-immune ONLY for a top-anchored box: stored y IS the visual top and
-                # Keynote grows the box downward, so writing the top holds across the pipeline's
-                # reopens whatever the final height. A middle/bottom box stores the centre/bottom,
-                # so a pos_y written against the live top drifts by ~Δh/2 (measured live: 174px) --
-                # defer those to the AppleScript fallback, which places text live at ~0.5px.
-                # pos_y also needs a TRUSTWORTHY seed: the exact saved (text, ki) row the bulk
-                # read returned (the composed frame is not the live top; a failed item read
-                # zero-fills to [0, 0, 0, 0]) -- without one, hard-miss to the fallback.
-                # The box must also be LAID OUT in the saved deck: a naturalSize of 0 on
-                # EITHER axis is the invalid-cache sentinel (`iwa_geometry` flags it
-                # text-natural-width / text-height-unlaid) -- Keynote re-derives the whole box
-                # from the text on open, discarding a written frame and re-anchoring. The live
-                # seed can read a frame for it, so rep alone doesn't catch it -- but a
-                # position-only write leaves it un-laid-out and Keynote mis-renders it (174px,
-                # measured on a naturalSize (0,0) box). Only a live write (AppleScript) lays it
-                # out, so defer these.
-                writes_y = spec.get("y") is not None
+                # Autosize sentinel (0.0 width or height): reposition only -- pass 1 already
+                # regrew the box, and naturalSize is Keynote's render cache no offline write
+                # refreshes. `_text_fields(position_only)` moves BOTH axes by a delta off the
+                # live `reported` frame, which is anchor-agnostic: stored x/y is the alignment
+                # anchor, and the delta cancels it and any stale naturalSize when the size is
+                # unchanged (a position-only move guarantees that). Middle/bottom-anchored and
+                # un-laid-out boxes reposition correctly too -- the old "middle drifts ~174px" +
+                # "un-laid-out mis-renders" refusals were one mis-diagnosis (the 174 was a
+                # right-anchored box under an absolute pos_x, now a delta).
+                #
+                # The one remaining gate is a TRUSTWORTHY live seed: the delta reads
+                # reported[x, y]; a failed bulk read zero-fills to [0, 0, 0, 0] and the composed
+                # frame is not the live anchor. There is NO laid-out gate -- pass 1 zeroes
+                # naturalSize on every autosize box, and admitting those is live-validated
+                # (2026-09-18: 137 boxes, 136/136 un-laid-out post-pass-1, verify text max
+                # 0.98px; see .agents/plans/offline_text_middle_anchor.plan.md). Grow-height
+                # boxes reposition but keep pass-1's narrow width (no width write here) -> they
+                # narrow-wrap; that width write is the separate OBED_OFFLINE_TEXT_REGROW
+                # increment, not this path.
                 seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
-                nat_w, nat_h = _natural_size(obj)
-                laid_out = nat_w > 0.0 and nat_h > 0.0
-                top_anchored = _vertical_alignment(obj, objects) == _ALIGN_TOP
-                if (not text_reposition or not laid_out
-                        or (writes_y and not (seed_ok and top_anchored))):
+                if not text_reposition or not seed_ok:
                     _miss("text-autosize")
                     continue
                 ops = _text_fields(rec, spec, rep, stored, position_only=True)
@@ -742,10 +741,12 @@ def _slide_edits(
             _miss(f"unsupported-kind:{kind}")
             continue
 
-        # Soft class used the reported frame: count for the 0-fallback gate. Text reads
-        # `reported` for pos_y and size deltas but NOT for the absolute pos_x, so an x-only
-        # write (e.g. an autosize position-only move) consumes nothing -- key off the fields
-        # actually emitted. Masked images only fall back to `reported` for x/y (never w/h).
+        # Soft class used the reported frame: count for the 0-fallback gate. An autosize
+        # position-only move now reads `reported` for both pos_x and pos_y, but it is gated
+        # on a present seed (have_reported) above, so it can never be a MISSING-seed soft
+        # fallback; keying the text predicate off the pos_y/size deltas therefore still holds
+        # (the fixed-frame path is the only text path that falls back to the composed frame).
+        # Masked images only fall back to `reported` for x/y (never w/h).
         used_reported = (
             kind == "text"
             and any(k in f for _oid, f in ops for k in ("pos_y", "size_w", "size_h"))

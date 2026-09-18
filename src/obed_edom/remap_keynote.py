@@ -204,6 +204,24 @@ def offline_maskcrop_enabled(
     return True
 
 
+def _debug_snapshot_pass1(dest: Path, say: Callable[[str], None] | None = None) -> None:
+    """Diagnostic: when `OBED_DEBUG_PASS1_SNAPSHOT` is a path, copy the pass-1-saved deck
+    there for an offline `naturalSize` census (the owner-gated text experiment's conversion
+    ceiling). No-op otherwise; never fails the run."""
+    target = os.environ.get("OBED_DEBUG_PASS1_SNAPSHOT", "").strip()
+    if not target:
+        return
+    try:
+        import shutil  # noqa: PLC0415
+
+        shutil.copy2(dest, target)
+        if say:
+            say(f"Pass-1 snapshot written to {target}.")
+    except Exception as exc:  # noqa: BLE001 — diagnostic only, never break the run
+        if say:
+            say(f"Pass-1 snapshot failed ({type(exc).__name__}: {exc}); continuing.")
+
+
 def _spec_addr(spec: dict[str, Any]) -> tuple:
     return (int(spec.get("slide", -1)), str(spec.get("kind")), int(spec.get("kindIndex", -1)))
 
@@ -1496,6 +1514,7 @@ def remap_keynote(
             f"{len(applied_layouts)} slide(s)."
         )
     _require_pass1_saved_closed(jxa)
+    _debug_snapshot_pass1(dest, say)
     text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
     mask_crop = offline_maskcrop_enabled(offline_mode=offline_mode, say=say)
     offline_write_info = offline_write.run_offline_write(
