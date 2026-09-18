@@ -151,26 +151,30 @@ def _decode_index_patch(arr: np.ndarray, roi: tuple[int, int, int, int] = INDEX_
     return int(round(float(rgb.mean())))
 
 
-def _extract_movie_texids(
+def _extract_movie_layers(
     events: object,
     footprint_wh: tuple[float, float] | None = None,
     tol: float = 30.0,
-) -> set[str]:
-    """Walk a slide-UUID JSON's `events` tree for ONE movie's texture ids.
+) -> tuple[set[str], list[tuple[str, str]]]:
+    """Walk ONE slide-UUID JSON's `events` tree for the footprint movie's textures.
 
-    Two structural signatures, unioned (either may carry the ids depending on
-    whether the movie is mid-crossfade at this event boundary): a layer
-    flagged `isVideoLayer` (its steady-state decoded texture), and any
-    animation with `property == "contents"` (the MM poster crossfade's
-    from/to textures — the two stacked canvases the player builds at the cut).
+    Returns `(steady, crossfades)` for the layer(s) whose enclosing
+    `initialState` w/h matches `footprint_wh` (so a differently-sized OTHER
+    movie's layer is excluded; `footprint_wh=None` disables the gate):
 
-    Both signatures are gated by `footprint_wh` (the target movie's on-screen
-    w/h, e.g. MOVIE_ROI's) matched against the enclosing layer's own
-    `initialState` width/height — the deck has more than one movie, and a
-    plain structural match alone would also pick up the OTHER movie's layer.
-    `footprint_wh=None` disables the gate (matches any size).
+      - `steady` — `isVideoLayer` texture ids: the movie's steady-state decoded
+        texture on this slide.
+      - `crossfades` — `(from, to)` pairs from `property == "contents"`
+        animations with `from != to`: the Magic Move poster swap's outgoing
+        (`from`) and incoming (`to`) textures. A same-texture (`from == to`)
+        tween is a background/opacity animation, not a movie crossfade.
+
+    This function never unions across slides. The caller
+    (`_derive_movie_texids`) resolves the single 1->2 boundary crossfade from
+    these per-slide pieces.
     """
-    texids: set[str] = set()
+    steady: set[str] = set()
+    crossfades: list[tuple[str, str]] = []
 
     def size_matches(size: tuple[float, float] | None) -> bool:
         if footprint_wh is None:
@@ -188,16 +192,12 @@ def _extract_movie_texids(
             ):
                 size = (init["width"], init["height"])
             if o.get("isVideoLayer") and o.get("texture") and size_matches(size):
-                texids.add(o["texture"])
+                steady.add(o["texture"])
             if o.get("property") == "contents" and size_matches(size):
                 frm = (o.get("from") or {}).get("texture")
                 to = (o.get("to") or {}).get("texture")
-                # A genuine MM crossfade swaps texture; from==to is a same-texture
-                # animation on an unrelated layer (e.g. a background opacity tween)
-                # that happens to use the "contents" property, not a movie poster.
                 if frm and to and frm != to:
-                    texids.add(frm)
-                    texids.add(to)
+                    crossfades.append((frm, to))
             for v in o.values():
                 walk(v, size)
         elif isinstance(o, list):
@@ -205,42 +205,97 @@ def _extract_movie_texids(
                 walk(v, layer_size)
 
     walk(events, None)
-    return texids
+    return steady, crossfades
 
 
 def _derive_movie_texids(
-    player_dir: Path, footprint_wh: tuple[float, float] = (MOVIE_ROI[2], MOVIE_ROI[3])
+    player_dir: Path,
+    footprint_wh: tuple[float, float] = (MOVIE_ROI[2], MOVIE_ROI[3]),
+    decoder_key: str = EXPECTED_MOVIE_KEYS[0],
 ) -> dict:
-    """Derive the continuing (footprint_wh-sized) movie's texture ids from every
-    slide-UUID JSON under the export, generically (no hardcoded slide UUID).
+    """Resolve the single 1->2 boundary crossfade for the footprint movie and
+    emit Contract-1's `{decoderKey, outgoing, incoming}` (see
+    `.agents/plans/step1-ownership-contracts.md`).
 
-    Unions isVideoLayer + contents-crossfade texture ids across ALL slides
-    rather than guessing which one slide's JSON stores the 1->2 boundary's
-    data — empirically (this deck) that does not follow slideList order 1:1.
-    The size gate in _extract_movie_texids (matched against the enclosing
-    layer's own initialState) keeps a whole-deck scan from also picking up a
-    differently-sized OTHER movie's layer.
+    NOT a whole-deck union (Codex defect #5): the boundary is the ONE
+    footprint-sized `contents` crossfade whose `from` is slide 1's steady
+    `isVideoLayer` texture and `to` is slide 2's — `from` -> `outgoing`,
+    `to` -> `incoming`. Slide 1 = `slideList[0]`, slide 2 = `slideList[1]`; the
+    crossfade animation itself may be stored under any slide's JSON, so
+    crossfades are gathered across the deck but the from->to endpoints must
+    bridge slide 1's steady texture to slide 2's. The slide-1/2 steady textures
+    are folded into `outgoing`/`incoming`.
+
+    "Unambiguous" = exactly one distinct boundary crossfade can be named: either
+    exactly one footprint-sized crossfade bridges slide 1's steady texture to
+    slide 2's, or (when the steady textures cannot disambiguate) the whole deck
+    holds exactly one footprint-sized crossfade. Any other count returns
+    `{"decoderKey": null, "outgoing": [], "incoming": [], "warning": ...}` —
+    NEVER a whole-deck union.
     """
     header_path = player_dir / "assets" / "header.json"
     try:
         header = json.loads(header_path.read_text())
     except Exception as e:  # noqa: BLE001
-        return {"texids": [], "warning": f"header read failed: {e}"}
+        return {"decoderKey": None, "outgoing": [], "incoming": [], "warning": f"header read failed: {e}"}
     slide_list = header.get("slideList") or []
+    if len(slide_list) < 2:
+        return {
+            "decoderKey": None,
+            "outgoing": [],
+            "incoming": [],
+            "warning": f"need >=2 slides to resolve the 1->2 boundary, got {len(slide_list)}",
+            "slideList": slide_list,
+        }
 
-    texids: set[str] = set()
-    scanned = []
+    per_slide_steady: dict[str, set[str]] = {}
+    crossfades: list[tuple[str, str]] = []
+    scanned: list[str] = []
     for uuid in slide_list:
         path = player_dir / "assets" / uuid / f"{uuid}.json"
         if not path.is_file():
             continue
-        scanned.append(uuid)
         try:
             data = json.loads(path.read_text())
         except Exception:  # noqa: BLE001
             continue
-        texids |= _extract_movie_texids(data.get("events") or [], footprint_wh=footprint_wh)
-    return {"texids": sorted(texids), "scannedSlideUuids": scanned, "slideList": slide_list}
+        scanned.append(uuid)
+        steady, cfs = _extract_movie_layers(data.get("events") or [], footprint_wh=footprint_wh)
+        per_slide_steady[uuid] = steady
+        crossfades.extend(cfs)
+
+    slide1_steady = per_slide_steady.get(slide_list[0], set())
+    slide2_steady = per_slide_steady.get(slide_list[1], set())
+    uniq_crossfades = sorted(set(crossfades))
+    boundary = [
+        (frm, to) for (frm, to) in uniq_crossfades if frm in slide1_steady and to in slide2_steady
+    ]
+    if len(boundary) == 1:
+        frm, to = boundary[0]
+    elif not boundary and len(uniq_crossfades) == 1:
+        frm, to = uniq_crossfades[0]
+    else:
+        return {
+            "decoderKey": None,
+            "outgoing": [],
+            "incoming": [],
+            "warning": (
+                f"1->2 boundary ambiguous: {len(boundary)} steady-anchored / "
+                f"{len(uniq_crossfades)} footprint crossfade(s)"
+            ),
+            "scannedSlideUuids": scanned,
+            "slideList": slide_list,
+            "crossfades": uniq_crossfades,
+        }
+
+    return {
+        "decoderKey": decoder_key,
+        "outgoing": sorted({frm} | slide1_steady),
+        "incoming": sorted({to} | slide2_steady),
+        "boundaryCrossfade": {"from": frm, "to": to},
+        "scannedSlideUuids": scanned,
+        "slideList": slide_list,
+    }
 
 
 def _score_black(arr: np.ndarray, roi: tuple[int, int, int, int]) -> dict:
@@ -356,8 +411,19 @@ def _score_empty(arr: np.ndarray) -> dict:
     }
 
 
-def _times(samples: list[dict], key: str = "primary") -> list[float | None]:
-    """Track the continuing primary movie (max currentTime among playing videos)."""
+def _times(
+    samples: list[dict], key: str = "primary", decoder_id: object | None = None
+) -> list[float | None]:
+    """Track a movie's clock across samples.
+
+    `key="primary"`/`"min"` give the max/min currentTime across ALL playing
+    videos (informational only). Any other `key` gives that asset key's clock;
+    when `decoder_id` is given it is BOUND to that one decoder — only videos
+    whose `decoderId == decoder_id` (a DOM/pool mirror of the same element)
+    contribute, never a max across sibling same-key decoders. A stall on the
+    bound decoder then surfaces as a non-advancing (or None) clock instead of
+    being masked by a fresh/pooled same-key instance sitting at a higher time.
+    """
     out: list[float | None] = []
     for s in samples:
         vids = s.get("videos") or []
@@ -371,14 +437,12 @@ def _times(samples: list[dict], key: str = "primary") -> list[float | None]:
         elif key == "min":
             out.append(min(times) if times else None)
         else:
-            # Max currentTime AMONG videos of this key — a pooled/fresh same-key
-            # instance can sit at 0 and be listed first; the advancing DOM decoder
-            # is the movie's real playback clock. Still bound to THIS movie's key
-            # (not the global max across other movies).
             hits = [
                 float(v["currentTime"])
                 for v in vids
-                if _movie_key(v.get("src") or "") == key and v.get("currentTime") is not None
+                if _movie_key(v.get("src") or "") == key
+                and v.get("currentTime") is not None
+                and (decoder_id is None or v.get("decoderId") == decoder_id)
             ]
             out.append(max(hits) if hits else None)
     return out
@@ -727,20 +791,6 @@ async def _media_snapshot_with_pool(chrome: ChromeCdp) -> dict:
     return snap
 
 
-def _pick_decoded_video(media: dict) -> dict | None:
-    """First video with a decoder id or decoded width. Legacy fallback only —
-    prefer _footprint_target, which picks the decoder that actually owns the
-    movie's on-screen footprint instead of whichever video happens first."""
-    return next(
-        (
-            v
-            for v in (media.get("videos") or [])
-            if v.get("decoderId") is not None or (v.get("w") or 0) > 0
-        ),
-        None,
-    )
-
-
 def _resolve_target_media(media: dict, decoder_id: object) -> dict | None:
     """Decoded width / currentTime for a decoderId, across native videos + pool."""
     if decoder_id is None:
@@ -769,24 +819,25 @@ async def _footprint_target(chrome: ChromeCdp, media: dict, roi: tuple[int, int,
         ": {elId: null, key: null, via: 'unavailable'}"
     ) or {"elId": None, "key": None, "via": "unavailable"}
     decoder_id = owner.get("elId")
+    context_type = owner.get("contextType")  # passively recorded by PRESERVE_SCRIPT (Stream A)
     resolved = _resolve_target_media(media, decoder_id)
     if resolved is not None:
         return {
             "decoderId": decoder_id,
             "w": resolved.get("w"),
             "movieKey": owner.get("key"),
+            "contextType": context_type,
             "via": owner.get("via"),
         }
-    # PRESERVE_SCRIPT missing/stale or nothing positioned yet — fall back.
-    fallback = _pick_decoded_video(media)
-    if fallback is not None:
-        return {
-            "decoderId": fallback.get("decoderId"),
-            "w": fallback.get("w"),
-            "movieKey": _movie_key(fallback.get("src") or ""),
-            "via": "fallback-first-decoded",
-        }
-    return {"decoderId": None, "w": None, "movieKey": None, "via": owner.get("via", "none")}
+    # Footprint owner unresolved: fail the gate, never a ready-video fallback
+    # (Contract 2 — a first-decoded fallback would bind some OTHER movie).
+    return {
+        "decoderId": None,
+        "w": None,
+        "movieKey": None,
+        "contextType": context_type,
+        "via": owner.get("via", "none"),
+    }
 
 
 async def _pre_advance_frames(
@@ -835,6 +886,7 @@ async def _pre_advance_frames(
                 "decoderId": target_after.get("decoderId") if bracket_consistent else None,
                 "w": target_after.get("w") if bracket_consistent else None,
                 "movieKey": target_after.get("movieKey") if bracket_consistent else None,
+                "contextType": target_after.get("contextType") if bracket_consistent else None,
                 "targetVia": target_after.get("via"),
                 "bracketConsistent": bracket_consistent,
                 "index": _decode_index_patch(arr),
@@ -898,6 +950,7 @@ async def _dense_after_click(
                     "decoderId": target_after.get("decoderId") if bracket_consistent else None,
                     "w": target_after.get("w") if bracket_consistent else None,
                     "movieKey": target_after.get("movieKey") if bracket_consistent else None,
+                    "contextType": target_after.get("contextType") if bracket_consistent else None,
                     "targetVia": target_after.get("via"),
                     "bracketConsistent": bracket_consistent,
                     "index": _decode_index_patch(arr),
@@ -1115,8 +1168,17 @@ async def _run(player: Path) -> dict:
         # pre-paint MutationObserver) and inject before the 1->2 advance.
         texids_info = _derive_movie_texids(player_dir)
         write_json(OUT / "movie-texids.json", texids_info)
+        # Contract-1 object: {decoderKey, outgoing, incoming} (+warning when the
+        # 1->2 boundary is unresolved). The consumer tolerates a null decoderKey.
+        movie_texids = {
+            "decoderKey": texids_info.get("decoderKey"),
+            "outgoing": texids_info.get("outgoing") or [],
+            "incoming": texids_info.get("incoming") or [],
+        }
+        if texids_info.get("warning"):
+            movie_texids["warning"] = texids_info["warning"]
         await chrome.evaluate(
-            f"window.__OBED_MOVIE_TEXIDS__ = {json.dumps(texids_info.get('texids') or [])}"
+            f"window.__OBED_MOVIE_TEXIDS__ = {json.dumps(movie_texids)}"
         )
         await asyncio.sleep(wait_profile["clickDelayS"])
         media_pre = await _media_snapshot_with_pool(chrome)
@@ -1213,12 +1275,18 @@ async def _run(player: Path) -> dict:
             ),
         }
 
-        # Bind continuity to the TARGET (movie1) decoder's own clock, not "primary"
-        # (max currentTime across ALL videos) — movie2 running alongside must not be
-        # able to supply continuity while movie1 itself hands off or restarts.
+        # Bind continuity to the ONE footprint-owner decoder's own clock, not
+        # "primary" (max across ALL videos) nor max-of-same-key (a fresh/pooled
+        # movie1 instance sitting higher must not mask the bound decoder's stall).
+        # If the footprint owner is unresolved, emit all-None (the gate fails) —
+        # never a same-key fallback.
         primary_times_a = _times(samples_a, "primary")
         min_times_a = _times(samples_a, "min")
-        target_times_a = _times(samples_a, EXPECTED_MOVIE_KEYS[0])
+        target_times_a = (
+            _times(samples_a, EXPECTED_MOVIE_KEYS[0], decoder_id=green_decoder_id)
+            if green_decoder_id is not None
+            else [None] * len(samples_a)
+        )
         cont = score_playback_continuity(
             target_times_a,
             click_i=0,
@@ -1244,6 +1312,7 @@ async def _run(player: Path) -> dict:
                     "decoderId": f.get("decoderId"),
                     "w": f.get("w"),
                     "movieKey": f.get("movieKey"),
+                    "contextType": f.get("contextType"),
                 }
             )
         motion_across_flip = score_motion_across_flip(
@@ -1628,7 +1697,11 @@ async def _run(player: Path) -> dict:
                 "indexRun": index_run,
                 "flipIndex": flip_index,
                 "indexSequence": [s.get("index") for s in index_samples],
-                "movieTexids": texids_info.get("texids"),
+                "movieTexids": {
+                    "decoderKey": texids_info.get("decoderKey"),
+                    "outgoing": texids_info.get("outgoing"),
+                    "incoming": texids_info.get("incoming"),
+                },
                 "movieTexidsWarning": texids_info.get("warning"),
                 "motionAcrossFlip": motion_across_flip,
                 "decoderMotion": decoder_motion,
@@ -1651,9 +1724,10 @@ async def _run(player: Path) -> dict:
                     "player-build-error (an uncaught exception/rejection during the MM "
                     "rebuild, e.g. getTextureObject returning null) fails this finding "
                     "outright as failed-by-player, never masked as a pass. "
-                    "Continuity is bound to the target (movie1) decoder's own clock — "
-                    "primary/min (max/min across ALL videos) are informational only, since "
-                    "movie2 must not be able to supply continuity for movie1's handoff."
+                    "Continuity is bound to the ONE footprint-owner decoder's own clock "
+                    "(not max-of-same-key) — primary/min (max/min across ALL videos) are "
+                    "informational only, since neither movie2 nor a fresh/pooled movie1 "
+                    "instance may supply continuity for the bound decoder's handoff/stall."
                 ),
             },
         },

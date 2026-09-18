@@ -466,16 +466,16 @@ PRESERVE_SCRIPT = r"""
      */
     footprintOwnerDecoderId: function(rect) {
       const wantKey = footprintKeyForRect(rect);
-      let best = null, bestOverlap = 0, bestVia = 'none', bestKey = null;
+      let best = null, bestOverlap = 0, bestVia = 'none', bestKey = null, bestCanvas = null;
       textureFeed.forEach(function(state, elId) {
         if (!state.active || !state.canvas || !state.v) return;
         const key = movieAssetKey(state.v.currentSrc || state.v.src || '');
         if (wantKey != null && key !== wantKey) return;
         const r = state.canvas.getBoundingClientRect();
         const ov = rectOverlapArea(r, rect);
-        if (ov > bestOverlap) { bestOverlap = ov; best = elId; bestVia = 'texture-feed'; bestKey = key; }
+        if (ov > bestOverlap) { bestOverlap = ov; best = elId; bestVia = 'texture-feed'; bestKey = key; bestCanvas = state.canvas; }
       });
-      if (best != null) return {elId: best, key: bestKey, via: bestVia};
+      if (best != null) return {elId: best, key: bestKey, via: bestVia, contextType: recordedCtxType(bestCanvas)};
       let bestVOverlap = 0;
       document.querySelectorAll('video').forEach(function(v) {
         if (!(v.videoWidth > 0)) return;
@@ -486,7 +486,7 @@ PRESERVE_SCRIPT = r"""
         const ov = rectOverlapArea(r, rect);
         if (ov > bestVOverlap) { bestVOverlap = ov; best = v.__obedElId; bestVia = 'position'; bestKey = key; }
       });
-      return {elId: best, key: best != null ? bestKey : null, via: best != null ? bestVia : 'none'};
+      return {elId: best, key: best != null ? bestKey : null, via: best != null ? bestVia : 'none', contextType: null};
     },
     textureFeedStatus: function() {
       const out = [];
@@ -507,6 +507,37 @@ PRESERVE_SCRIPT = r"""
   // clear() bumps this so pre-clear decoders cannot re-enter the pool / remount.
   // Videos created after clear get the new generation and remount normally.
   let preserveGeneration = 0;
+  // Passively record the context type the PLAYER creates for each canvas
+  // (Contract 2 / directive 3): wrap getContext to remember the type of the
+  // context the player actually made, then delegate to the original. We only
+  // READ this record to decide whether a target canvas is a 2D surface we may
+  // draw into — we never probe a newborn canvas with getContext('2d') (that
+  // would both create a 2D context and break the player's later WebGL request).
+  const ctxTypeById = new Map(); // canvas.id -> recorded contextType
+  (function installCtxRecorder(){
+    const proto = HTMLCanvasElement.prototype;
+    if (proto.__obedCtxWrapped) return;
+    const orig = proto.getContext;
+    proto.getContext = function(type) {
+      const ctx = orig.apply(this, arguments);
+      if (ctx) {
+        const t = String(type || '').toLowerCase();
+        this.__obedCtxType = t;
+        if (this.id) ctxTypeById.set(this.id, t);
+      }
+      return ctx;
+    };
+    proto.__obedCtxWrapped = true;
+  })();
+  // Recorded context type for a canvas (element stamp is authoritative; the id
+  // map mirrors the contract's canvas.id -> contextType shape). null == the
+  // player has not created a context we saw, so we must NOT draw into it.
+  function recordedCtxType(c) {
+    if (!c) return null;
+    if (c.__obedCtxType) return c.__obedCtxType;
+    if (c.id && ctxTypeById.has(c.id)) return ctxTypeById.get(c.id);
+    return null;
+  }
   function assetKey(src) {
     const s = String(src || '');
     const tail = (s.split('/').pop() || s).split('?')[0];
@@ -675,16 +706,12 @@ PRESERVE_SCRIPT = r"""
     });
     return null;
   }
-  // Robust canvas match for the TEXTURE FEED: the movie's own canvas overlaps
-  // its footprint strongly even while Magic Move animates its geometry, so a
-  // strict pos/size tolerance (findMovieCanvas) misses it mid-cut. Match by
-  // strong overlap with the video's own footprint instead. Kept separate from
-  // findMovieCanvas so the remount insertion stays strict per Codex uniqueness.
-  // Bound to the video's own ASSET IDENTITY, never elId parity (which lets a
-  // second movie alias onto the wrong movie's canvas). Fixed authored
-  // footprints with position tolerance, NOT v.__obedRect (which MM can leave
-  // stale/0,0) — empirically this matches the settled movie canvas across
-  // the cut where an overlap-vs-__obedRect test did not.
+  // Asset identity of a movie <video> by its source, never elId parity (which
+  // lets a second movie alias onto the wrong movie's canvas). The texture feed
+  // is now bound purely by canvas id (Contract 1 outgoing/incoming) + the one
+  // decoder whose key matches decoderKey; MOVIE_FOOTPRINTS_BY_KEY below only
+  // survives to name the owner key for a rect (footprintKeyForRect), not to
+  // pick a feed canvas geometrically.
   function movieAssetKey(src) {
     const s = String(src || '').toLowerCase();
     if (s.indexOf('untitled.mov') >= 0) return 'movie1';
@@ -708,36 +735,37 @@ PRESERVE_SCRIPT = r"""
     }
     return bestKey;
   }
-  function feedCanvasFor(v) {
-    const key = movieAssetKey(v.currentSrc || v.src || '');
-    const box = key ? MOVIE_FOOTPRINTS_BY_KEY[key] : null;
-    // Unknown asset, or no footprint for it — never guess the other movie's slot.
-    if (!box) return null;
-    const canvases = document.querySelectorAll('canvas');
-    for (let i = 0; i < canvases.length; i++) {
-      const c = canvases[i];
-      const r = c.getBoundingClientRect();
-      if (!(r.width > 1 && r.height > 1)) continue;
-      if (Math.abs(r.left - box.x) <= 20 && Math.abs(r.top - box.y) <= 20 &&
-          Math.abs(r.width - box.w) <= 30 && Math.abs(r.height - box.h) <= 30) {
-        return c;
-      }
-    }
+  // Contract 1 reader: window.__OBED_MOVIE_TEXIDS__ is
+  // {decoderKey, outgoing:[...], incoming:[...]}. Return
+  // {decoderKey, outgoing:Set, incoming:Set} or null. A missing value, the old
+  // flat-array shape, a malformed object, or an unresolved boundary
+  // (decoderKey null / empty slots) all yield null so callers note mo-no-texids
+  // and skip the id-bound feed — never crash, never guess the other movie's slot.
+  function movieTexids() {
+    const t = window.__OBED_MOVIE_TEXIDS__;
+    if (!t || typeof t !== 'object' || Array.isArray(t)) return null;
+    if (!(Array.isArray(t.outgoing) && Array.isArray(t.incoming))) return null;
+    const decoderKey = (typeof t.decoderKey === 'string' && t.decoderKey) ? t.decoderKey : null;
+    if (!decoderKey) return null;
+    const outgoing = new Set(t.outgoing);
+    const incoming = new Set(t.incoming);
+    if (!(outgoing.size || incoming.size)) return null;
+    return {decoderKey: decoderKey, outgoing: outgoing, incoming: incoming};
+  }
+  // Which side of the 1->2 cut a fed canvas id belongs to (event provenance).
+  function texidSlot(tex, id) {
+    if (tex.outgoing.has(id)) return 'outgoing';
+    if (tex.incoming.has(id)) return 'incoming';
     return null;
   }
-  function texidsSet() {
-    const arr = window.__OBED_MOVIE_TEXIDS__;
-    return (Array.isArray(arr) && arr.length) ? new Set(arr) : null;
-  }
-  // Asset-key bound: prefer the movie1 decoder (the continuing movie the
-  // texids belong to), falling back to any other ready decoder rather than
-  // feeding nothing.
-  function pooledDecoderCandidate() {
+  // Bind the ONE decoder whose asset key === the texids' decoderKey. No
+  // ready-video fallback: a decoder of any other key is never fed.
+  function boundDecoder(decoderKey) {
+    if (!decoderKey) return null;
     let best = null;
     function consider(v) {
       if (!(v.readyState >= 2 && v.videoWidth > 0)) return;
-      if (movieAssetKey(v.currentSrc || v.src || '') === 'movie1') best = v;
-      else if (!best) best = v;
+      if (movieAssetKey(v.currentSrc || v.src || '') === decoderKey) best = v;
     }
     pool.forEach(function(q) { (q || []).forEach(consider); });
     document.querySelectorAll('video[data-obed-preserved="1"]').forEach(consider);
@@ -770,8 +798,32 @@ PRESERVE_SCRIPT = r"""
     }
     const existing = textureFeed.get(v.__obedElId);
     if (existing && existing.active) return;
-    const state = {active: true, drawn: 0, matched: 0, fails: 0, canvas: null, canvasId: null, v: v};
+    const state = {active: true, drawn: 0, matched: 0, fails: 0, canvas: null, canvasId: null, v: v, notedIds: new Set(), skip: null};
     textureFeed.set(v.__obedElId, state);
+    // Record a feed skip (no bound texids / this decoder isn't the bound one /
+    // no bound canvas / no pixels) once per reason transition, so a stalled feed
+    // is provable without flooding the log every rVFC tick.
+    function feedSkip(reason, extra) {
+      state.fails++;
+      state.canvas = null;
+      state.canvasId = null;
+      if (state.skip !== reason) {
+        state.skip = reason;
+        note('texture-feed-skip', Object.assign(
+          {decoderId: v.__obedElId, reason: reason, hashNum: currentHashNum()}, extra || {}));
+      }
+    }
+    // A target canvas in outgoing/incoming that the player never made a 2D
+    // surface — note once per (reason,id); never probe it with getContext('2d').
+    function noteSkipCanvas(c, reason) {
+      const k = reason + ':' + (c.id || '');
+      if (state.notedIds.has(k)) return;
+      state.notedIds.add(k);
+      note('texture-feed-skip-canvas', {
+        decoderId: v.__obedElId, canvasId: c.id || null, reason: reason,
+        contextType: recordedCtxType(c), hashNum: currentHashNum()
+      });
+    }
     function onHash() {
       const hn = currentHashNum();
       if (hn != null && hn >= restartMinHash()) {
@@ -789,51 +841,48 @@ PRESERVE_SCRIPT = r"""
       }
       if (v.videoWidth > 0) {
         if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
-        // Feed BY id first: the MM slot builds two stacked canvases (invisible
-        // `to` + visible `from`), and a single geometric match only ever finds
-        // one of them (usually the wrong, invisible one). Feed every canvas
-        // whose id is a known movie texture id, each to its own dimensions.
-        const texids = texidsSet();
-        const fed = [];
-        if (texids) {
+        // Feed BY id only, bound to ONE decoder: the MM slot builds two stacked
+        // canvases (invisible `to` + visible `from`); feed each canvas whose id
+        // is in outgoing/incoming for THIS cut, but only when the player itself
+        // made it a 2D surface (recordedCtxType). No geometric fallback, no
+        // other movie's decoder, and never a getContext('2d') probe.
+        const tex = movieTexids();
+        if (!tex) {
+          feedSkip('mo-no-texids');
+        } else if (movieAssetKey(v.currentSrc || v.src || '') !== tex.decoderKey) {
+          feedSkip('not-bound-decoder', {decoderKey: tex.decoderKey});
+        } else {
+          const fed = [];
           document.querySelectorAll('canvas').forEach(function(c) {
-            if (!(c.id && texids.has(c.id))) return;
-            const ctx = c.getContext('2d');
-            if (!ctx) return; // WebGL canvas -> skip, never poison
+            if (!(c.id && (tex.outgoing.has(c.id) || tex.incoming.has(c.id)))) return;
+            if (recordedCtxType(c) !== '2d') { noteSkipCanvas(c, 'no-2d-context'); return; }
+            const ctx = c.getContext('2d'); // safe: player already made this 2D
+            if (!ctx) { noteSkipCanvas(c, 'no-2d-context'); return; }
             try {
               ctx.drawImage(v, 0, 0, c.width, c.height);
               fed.push(c);
+              if (!state.notedIds.has(c.id)) {
+                state.notedIds.add(c.id);
+                note('texture-feed-draw', {
+                  decoderId: v.__obedElId, canvasId: c.id,
+                  contextType: recordedCtxType(c), slot: texidSlot(tex, c.id),
+                  hashNum: currentHashNum()
+                });
+              }
             } catch (e) {}
           });
-        }
-        if (fed.length) {
-          state.matched++;
-          state.drawn++;
-          state.canvas = fed[fed.length - 1];
-          state.canvasId = state.canvas.id || null;
-        } else {
-          const canvas = feedCanvasFor(v);
-          if (canvas) {
+          if (fed.length) {
+            state.skip = null;
             state.matched++;
-            state.canvas = canvas;
-            state.canvasId = canvas.id || null;
-            try {
-              const ctx = canvas.getContext('2d');
-              ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
-              state.drawn++;
-            } catch (e) {
-              state.fails++;
-            }
+            state.drawn++;
+            state.canvas = fed[fed.length - 1];
+            state.canvasId = state.canvas.id || null;
           } else {
-            state.fails++;
-            state.canvas = null;
-            state.canvasId = null;
+            feedSkip('no-bound-canvas', {decoderKey: tex.decoderKey});
           }
         }
       } else {
-        state.fails++;
-        state.canvas = null;
-        state.canvasId = null;
+        feedSkip('no-video-pixels');
       }
       try {
         v.requestVideoFrameCallback(tick);
@@ -844,7 +893,11 @@ PRESERVE_SCRIPT = r"""
     }
     try {
       v.requestVideoFrameCallback(tick);
-      note('texture-feed-start', {elId: v.__obedElId, why: why});
+      note('texture-feed-start', {
+        elId: v.__obedElId, decoderId: v.__obedElId,
+        boundKey: movieAssetKey(v.currentSrc || v.src || ''),
+        canvasId: null, contextType: null, hashNum: currentHashNum(), why: why
+      });
     } catch (e) {
       state.active = false;
       note('texture-feed-start-error', {elId: v.__obedElId, message: String(e && e.message || e)});
@@ -858,18 +911,27 @@ PRESERVE_SCRIPT = r"""
    * synchronous drawImage here beats the ~1-2 frame rVFC re-lock gap that
    * otherwise shows as a composited freeze at the cut.
    */
-  function moFeedCanvas(c) {
-    const ctx = c.getContext('2d');
-    if (!ctx) return; // WebGL canvas -> never poison it
-    const v = pooledDecoderCandidate();
+  function moFeedCanvas(c, tex) {
+    // Draw only into a canvas the PLAYER already made a 2D surface — never
+    // probe a newborn canvas with getContext('2d').
+    if (recordedCtxType(c) !== '2d') {
+      note('mo-prepaint-skip', {id: c.id, reason: 'no-2d-context', contextType: recordedCtxType(c), hashNum: currentHashNum()});
+      return;
+    }
+    const ctx = c.getContext('2d'); // safe: recorded 2D above
+    if (!ctx) {
+      note('mo-prepaint-skip', {id: c.id, reason: 'no-2d-context', hashNum: currentHashNum()});
+      return;
+    }
+    const v = boundDecoder(tex.decoderKey);
     if (!(v && v.readyState >= 2 && v.videoWidth > 0)) {
-      note('mo-prepaint-skip', {id: c.id, reason: v ? 'not-ready' : 'no-decoder'});
+      note('mo-prepaint-skip', {id: c.id, reason: 'no-bound-decoder', decoderKey: tex.decoderKey, hashNum: currentHashNum()});
       return;
     }
     try {
       ctx.drawImage(v, 0, 0, c.width, c.height);
     } catch (e) {
-      note('mo-prepaint-draw-error', {id: c.id, message: String(e && e.message || e)});
+      note('mo-prepaint-draw-error', {id: c.id, message: String(e && e.message || e), hashNum: currentHashNum()});
       return;
     }
     tag(v);
@@ -882,15 +944,20 @@ PRESERVE_SCRIPT = r"""
       state.canvas = c;
       state.canvasId = c.id || null;
     }
-    note('mo-prepaint-draw', {id: c.id, w: c.width, h: c.height, elId: v.__obedElId});
+    note('mo-prepaint-draw', {
+      id: c.id, canvasId: c.id || null, w: c.width, h: c.height,
+      decoderId: v.__obedElId, elId: v.__obedElId,
+      contextType: recordedCtxType(c), slot: texidSlot(tex, c.id),
+      hashNum: currentHashNum()
+    });
   }
   const obedStageEl = document.getElementById('stage');
   if (obedStageEl) {
     new MutationObserver(function(muts) {
-      const texids = texidsSet();
-      if (!texids) {
+      const tex = movieTexids();
+      if (!tex) {
         note('mo-no-texids', {});
-        return; // existing footprint matcher (feedCanvasFor via rVFC) stays the feed
+        return; // no bound texids -> no id-bound pre-paint feed; never guess a slot
       }
       muts.forEach(function(m) {
         m.addedNodes.forEach(function(node) {
@@ -900,7 +967,7 @@ PRESERVE_SCRIPT = r"""
             node.querySelectorAll('canvas').forEach(function(c){ canvases.push(c); });
           }
           canvases.forEach(function(c) {
-            if (c.id && texids.has(c.id)) moFeedCanvas(c);
+            if (c.id && (tex.outgoing.has(c.id) || tex.incoming.has(c.id))) moFeedCanvas(c, tex);
           });
         });
       });

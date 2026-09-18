@@ -410,6 +410,36 @@ def test_advancing_handoff_continues_through_dissolve():
     assert scored["remountRestart"] is False
 
 
+def test_frozen_bound_clock_fails_despite_sibling_higher_clock():
+    """Stream-C binding guard: the scorer must see ONLY the bound decoder's
+    own clock. A max-of-same-key reduction would have merged a sibling
+    decoder's higher clock over this frozen sequence and read it as progress;
+    because the bound clock is the sole input, a stall on it cannot be masked.
+
+    Here the bound decoder is frozen at 3.0s through the whole window (both the
+    ``currentTime`` samples and the presented-frame samples). No sibling clock
+    is passed — that is the point: the public signature admits one movie's
+    times, so a sibling advancing elsewhere is structurally excluded and can
+    never rescue this verdict.
+    """
+    from obed_edom.html_alpha_probe import score_playback_continuity
+
+    frozen = [3.0] * 32
+    caps = [i * 0.05 for i in range(len(frozen))]
+    scored = score_playback_continuity(
+        frozen,
+        click_i=0,
+        capture_offsets=caps,
+        presented_times=list(frozen),
+        dissolve_s=1.5,
+    )
+    assert scored["frozenClock"] is True
+    assert scored["advancingPairs"] == 0
+    assert scored["dissolveAdvanceS"] == 0.0
+    assert scored["mediaProgressing"] is False
+    assert scored["continuesThroughDissolve"] is False
+
+
 def test_presented_all_none_falls_back_to_current_time():
     from obed_edom.html_alpha_probe import score_playback_continuity
 
@@ -1153,6 +1183,105 @@ def test_motion_across_flip_rejects_empty_crop():
     scored = score_motion_across_flip(samples, start_hash="#5")
     assert scored["ok"] is False
     assert scored["reason"] == "empty crop"
+
+
+def test_motion_across_flip_rejects_same_key_handoff_at_flip():
+    """Stream-C (a), at-the-flip half: a handoff exactly at the flip where both
+    decoders carry the SAME movieKey must not pass. Identity is bound to one
+    decoder across the crossing, so a same-key swap at the boundary is caught by
+    the crossing-decoder check even though every movieKey matches expected_key.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=2, movie_key="movie1.mov"),
+        _motion_sample(80, "#6", 0.4, decoder_id=2, movie_key="movie1.mov"),
+        _motion_sample(100, "#6", 0.5, decoder_id=2, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["windowKeyOk"] is True
+    assert scored["crossingKeyOk"] is True
+    assert scored["crossingDecoderStable"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "crossing decoder switched"
+
+
+def test_motion_across_flip_rejects_single_late_restart_in_after_window():
+    """Stream-C (a), restart-later half: a lone fresh decoder appearing only on
+    the FINAL after-window sample (decoderId [1,1,1,1,1,2], one movieKey) must
+    fail. The binding is unanimous, not a majority vote — a single late restart
+    breaks the shared-decoder requirement even though the crossing and every
+    movieKey are clean.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(80, "#6", 0.4, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(100, "#6", 0.5, decoder_id=2, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["crossingDecoderStable"] is True
+    assert scored["crossingKeyOk"] is True
+    assert scored["windowKeyOk"] is True
+    assert scored["afterDecoderIds"] == [1, 1, 2]
+    assert scored["afterDecoderStable"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "after-flip decoder switched"
+
+
+def test_motion_across_flip_rejects_frozen_bound_decoder_despite_stable_identity():
+    """Stream-C (b): the bound decoder is frozen after the flip (its ROI does
+    not change) while its identity stays perfectly stable — one decoderId, one
+    movieKey. A max-of-same-key clock would let a sibling decoder's progress
+    stand in for this stall; the scorer, bound to this decoder's own crop, must
+    report no motion after the flip. Intact identity does not rescue a frozen
+    bound decoder.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.4, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.5, decoder_id=1, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["afterDecoderStable"] is True
+    assert scored["windowKeyOk"] is True
+    assert scored["afterOk"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "no motion after flip"
+
+
+def test_motion_across_flip_accepts_continuous_single_decoder_long_window():
+    """Stream-C (c) regression guard: a legitimately continuous single decoder,
+    one movieKey, motion before/across/after over a longer window, still passes
+    with expected_key bound — the tightened identity gate must not reject the
+    honest positive case.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    hashes = ["#5", "#5", "#5", "#6", "#6", "#6", "#6", "#6"]
+    samples = [
+        _motion_sample(i * 20, h, i * 0.1, decoder_id=7, movie_key="movie1.mov")
+        for i, h in enumerate(hashes)
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["ok"] is True
+    assert scored["flipIndex"] == 3
+    assert scored["windowKeyOk"] is True
+    assert scored["afterDecoderStable"] is True
+    assert scored["afterDecoderIds"] == [7, 7, 7, 7, 7]
+    assert scored["reason"] is None
 
 
 def test_visible_movie_motion_max_still_run_gate():
