@@ -765,3 +765,245 @@ def test_restart_movie_idless_rows_do_not_mix_into_a_pass():
     assert scored["ok"] is False
 
 
+def test_restart_movie_rejects_preexisting_decoder_continuing_near_zero():
+    """A decoder observed just before the boundary (not reset from a high
+    clock) that happens to read near-zero right at the flip and then
+    progresses is a continuing clock, not a restart (Codex repro).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 0.01, "w": 1920, "captureOffsetS": 5.9, "sceneHash": "#5", "decoderId": 7},
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 7},
+        {"t": 0.35, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 7},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 7
+    assert scored["nearZeroAtBoundary"] is True
+    assert scored["progressedAfterRestart"] is True
+    assert scored["firstSeenAtBoundary"] is False
+    assert scored["backwardReset"] is False
+    assert scored["ok"] is False
+
+
+def test_restart_movie_accepts_genuine_fresh_decoder_first_seen_at_boundary():
+    """A decoder with no observations before the boundary that near-zeros and
+    progresses is a genuine restart (positive control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 9},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 9},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["firstSeenAtBoundary"] is True
+    assert scored["backwardReset"] is False
+    assert scored["ok"] is True
+
+
+def test_restart_movie_accepts_genuine_backward_reset_decoder():
+    """A decoder seen well before the boundary with a clock clearly above
+    near_zero_max_s, then near-zero at the boundary and progressing, proves an
+    actual reset rather than a coincidental near-zero read (positive control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 12.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#5", "decoderId": 11},
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 11},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 11},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["firstSeenAtBoundary"] is False
+    assert scored["backwardReset"] is True
+    assert scored["ok"] is True
+
+
+def _motion_sample(value: int, scene_hash: str, offset: float, w: int = 1920, decoder_id=1):
+    roi = np.full((20, 20, 3), value % 256, dtype=np.uint8)
+    return {
+        "roi": roi,
+        "sceneHash": scene_hash,
+        "captureOffsetS": offset,
+        "decoderId": decoder_id,
+        "w": w,
+    }
+
+
+def test_motion_across_flip_accepts_motion_before_across_and_after():
+    """Positive control: motion in all three segments, flip mid-window."""
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(40, "#5", 0.2),
+        _motion_sample(60, "#6", 0.3),
+        _motion_sample(80, "#6", 0.4),
+        _motion_sample(100, "#6", 0.5),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is True
+    assert scored["flipIndex"] == 3
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoded"] is True
+
+
+def test_motion_across_flip_rejects_frozen_crossing():
+    """Frozen-crossing control: before and after both move, but the single
+    frame-pair straddling the flip itself is frozen — must not pass via the
+    first post-flip pair moving instead.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(20, "#6", 0.2),
+        _motion_sample(40, "#6", 0.3),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["flipIndex"] == 2
+    assert scored["beforeOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["acrossOk"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "frozen crossing"
+
+
+def test_motion_across_flip_rejects_poster_frame_at_crossing():
+    """Poster-frame control: the crossing pair moves (bars swap in) but the
+    post-flip frame has no decoded movie width — must not pass on MAE alone.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(200, "#6", 0.2, w=0),
+        _motion_sample(220, "#6", 0.3),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoded"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "crossing frame not decoded"
+
+
+def test_motion_across_flip_rejects_flip_at_first_sample():
+    """No pre-flip frame exists to prove before-motion."""
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#6", 0.0),
+        _motion_sample(20, "#6", 0.1),
+        _motion_sample(40, "#6", 0.2),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is False
+    assert scored["reason"] == "flip at first sample"
+    assert scored["flipIndex"] == 0
+
+
+def test_motion_across_flip_rejects_late_navigation():
+    """Late-navigation control: motion only before the flip, frozen after — a
+    continuously-playing movie plus a late navigation must not pass.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(40, "#5", 0.2),
+        _motion_sample(60, "#6", 0.3),
+        _motion_sample(60, "#6", 0.4),
+        _motion_sample(60, "#6", 0.5),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is False
+    assert scored["afterOk"] is False
+
+
+def test_motion_across_flip_rejects_mid_transition_disappearance():
+    """Disappearance control: before/across/after each contain one moving
+    pair, but frames freeze for a run longer than max_still_run spanning the
+    flip — must fail on the still-run gate even though the per-segment motion
+    checks alone would pass.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(20, "#5", 0.2),
+        _motion_sample(40, "#6", 0.3),
+        _motion_sample(40, "#6", 0.4),
+        _motion_sample(40, "#6", 0.5),
+        _motion_sample(40, "#6", 0.6),
+        _motion_sample(40, "#6", 0.7),
+        _motion_sample(40, "#6", 0.8),
+        _motion_sample(60, "#6", 0.9),
+        _motion_sample(80, "#6", 1.0),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", max_still_run=4)
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["maxStillRun"] > 4
+    assert scored["ok"] is False
+    assert scored["reason"] == "still run exceeds max across flip"
+
+
+def test_motion_across_flip_no_flip_observed():
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [_motion_sample(i * 20, "#5", i * 0.1) for i in range(5)]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is False
+    assert scored["reason"] == "no flip observed"
+
+
+def test_motion_across_flip_rejects_empty_crop():
+    """Empty crops are hard rejects — must not count as motion via infinite MAE."""
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(40, "#6", 0.2),
+    ]
+    samples[1]["roi"] = np.zeros((0, 20, 3), dtype=np.uint8)
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is False
+    assert scored["reason"] == "empty crop"
+
+
+def test_visible_movie_motion_max_still_run_gate():
+    """Documents the old gap: unset max_still_run passes a long mid-window
+    stall; setting it small rejects the same sequence.
+    """
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    frames = []
+    for i in range(6):
+        frames.append(np.full((20, 20, 3), i * 30, dtype=np.uint8))
+    still = np.full((20, 20, 3), frames[-1][0, 0, 0], dtype=np.uint8)
+    frames += [still.copy() for _ in range(6)]
+    for i in range(6):
+        frames.append(np.full((20, 20, 3), 200 - i * 30, dtype=np.uint8))
+
+    scored_unset = score_visible_movie_motion(frames, min_changing_frac=0.3)
+    assert scored_unset["ok"] is True
+
+    scored_gated = score_visible_movie_motion(
+        frames, min_changing_frac=0.3, max_still_run=4
+    )
+    assert scored_gated["ok"] is False
+    assert scored_gated["maxStillRun"] > 4
+
+

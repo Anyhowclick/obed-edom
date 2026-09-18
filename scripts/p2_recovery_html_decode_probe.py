@@ -51,6 +51,7 @@ from p2_recovery_html_adversarial import (  # noqa: E402
 )
 from p2_recovery_html_dissolve_live import (  # noqa: E402
     _ensure_videos_playing,
+    _replace_hevc_movies,
     _wait_hash_clean,
     inject_preserve,
 )
@@ -67,74 +68,6 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
 SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
 ADV_UNMOD = REPO / "output" / "p2-recovery" / "html-adversarial" / "html-unmodified"
 OUT = REPO / "output" / "p2-recovery" / "html-decode-probe"
-
-
-def _ffmpeg() -> str:
-    try:
-        import imageio_ffmpeg
-
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception as e:  # noqa: BLE001
-        raise SystemExit(f"imageio-ffmpeg required for disposable H.264 encode: {e}") from e
-
-
-def _write_h264_pattern(dest: Path, *, seconds: float = 46.0333, fps: int = 30) -> dict:
-    """Write a browser-decodable H.264 MP4 (yuv420p) with a moving bar.
-
-    Duration matches Keynote export filenames/metadata so the player timeline
-    stays coherent.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".tmp.mp4")
-    cmd = [
-        _ffmpeg(),
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        f"testsrc=size=1920x540:rate={fps}:duration={seconds}",
-        "-f",
-        "lavfi",
-        "-i",
-        f"sine=frequency=440:sample_rate=44100:duration={seconds}",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "baseline",
-        "-c:a",
-        "aac",
-        "-shortest",
-        "-movflags",
-        "+faststart",
-        str(tmp),
-    ]
-    import subprocess
-
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not tmp.is_file():
-        raise RuntimeError(f"ffmpeg encode failed: {proc.stderr[-800:]}")
-    dest.write_bytes(tmp.read_bytes())
-    tmp.unlink(missing_ok=True)
-    return {"path": str(dest), "bytes": dest.stat().st_size, "seconds": seconds, "fps": fps}
-
-
-def _replace_hevc_movies(root: Path) -> dict:
-    """Replace Untitled.mov* HEVC assets with H.264 test patterns (same filenames)."""
-    replaced = []
-    for mov in sorted(root.rglob("Untitled.mov-*.mov")):
-        # Parse duration from Keynote export name: …-0.0000-46.0333.mov
-        seconds = 46.0333
-        try:
-            tail = mov.name.rsplit("-", 1)[-1]
-            seconds = float(tail.replace(".mov", ""))
-        except ValueError:
-            pass
-        info = _write_h264_pattern(mov, seconds=seconds)
-        info["replaced"] = str(mov.relative_to(root))
-        replaced.append(info)
-    return {"replacedN": len(replaced), "files": replaced}
 
 
 async def _sample_decoder_frames(chrome: ChromeCdp, run_dir: Path, n: int = 6, gap_s: float = 0.25) -> list[dict]:
@@ -354,8 +287,8 @@ async def _run() -> dict:
             pre_match = _composed_vs_decoder_mae(pre_roi, d0)
 
         # Dense capture through Magic Move 1→2 — composed frames, not just decoder clocks.
-        # Start the transition, then sample straight through it. _advance_hash blocks polling
-        # until the hash flips (pushing the window past the transition), and ChromeCdp has no
+        # Start the transition, then sample straight through it. Blocking to poll until the
+        # hash flips would push the window past the transition, and ChromeCdp has no
         # concurrent recv, so we fire the key + one remount nudge, capture, and confirm after.
         await asyncio.sleep(1.5)
         click_wall_a = time.monotonic()

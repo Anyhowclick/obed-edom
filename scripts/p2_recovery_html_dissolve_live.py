@@ -61,10 +61,10 @@ MOVIE2_TOKEN = "WA0125"
 
 
 def _movie_key(src: str) -> str:
-    s = str(src or "")
-    if MOVIE1_TOKEN in s:
+    s = str(src or "").lower()
+    if MOVIE1_TOKEN.lower() in s:
         return "movie1"
-    if MOVIE2_TOKEN in s:
+    if MOVIE2_TOKEN.lower() in s:
         return "movie2"
     # fallback: basename stem
     return s.rsplit("/", 1)[-1][:40] or "unknown"
@@ -471,6 +471,22 @@ PRESERVE_SCRIPT = r"""
     if (m) return m[1].toLowerCase();
     return tail.toLowerCase();
   }
+  function currentHashNum() {
+    const m = /^#?(\d+)/.exec(String(location.hash || ''));
+    return m ? parseInt(m[1], 10) : null;
+  }
+  function restartMinHash() {
+    const v = window.__OBED_P2_RESTART_MIN_HASH__;
+    return (typeof v === 'number' && isFinite(v)) ? v : Infinity;
+  }
+  function nearestLayer(el) {
+    let n = el;
+    while (n) {
+      if (n.id && n.id.indexOf('layer') === 0) return n;
+      n = n.parentElement;
+    }
+    return null;
+  }
   function note(kind, detail) {
     const d = Object.assign({}, detail || {}, {sceneHash: String(location.hash || '')});
     window.__OBED_P2_PRESERVE__.events.push({kind: kind, detail: d, t: performance.now()});
@@ -483,6 +499,9 @@ PRESERVE_SCRIPT = r"""
   }
   function stash(v, why) {
     if (!(v instanceof HTMLVideoElement)) return;
+    // Our own remount moves briefly detach the node; that self-triggered detach
+    // must not re-stash and re-schedule a remount (exponential reschedule blowup).
+    if (v.__obedRemounting) return;
     if ((v.__obedGen == null ? 0 : v.__obedGen) < preserveGeneration) {
       note('stash-stale-gen', {
         elId: v.__obedElId, why: why,
@@ -512,6 +531,13 @@ PRESERVE_SCRIPT = r"""
       v.__obedId = v.id || '';
       const inlineZ = v.style.zIndex;
       v.__obedZ = (inlineZ !== '' && inlineZ != null) ? inlineZ : getComputedStyle(v).zIndex;
+      // Only capture while still attached — a later detach-triggered stash()
+      // must not clobber the authored position with nulls.
+      if (v.parentNode) {
+        v.__obedParent = v.parentNode;
+        v.__obedNextSibling = v.nextSibling;
+        v.__obedLayer = nearestLayer(v.parentElement);
+      }
     } catch (e) {}
     note(why, {
       key: key, elId: v.__obedElId, t: v.currentTime, queue: q.length,
@@ -555,6 +581,37 @@ PRESERVE_SCRIPT = r"""
     window.addEventListener('hashchange', onHash);
   }
 
+  /**
+   * Find the movie's own authored poster <canvas> (its layer's stacking
+   * context) by matching footprint geometry — MM destroys the video's
+   * authored parent, so we can't walk up from the video itself.
+   */
+  function findMovieCanvas(box) {
+    if (!(box && box.w > 1 && box.h > 1)) return null;
+    const maxArea = box.w * box.h * 1.5;
+    const canvases = document.querySelectorAll('canvas');
+    for (let i = 0; i < canvases.length; i++) {
+      const c = canvases[i];
+      const r = c.getBoundingClientRect();
+      if (!(r.width > 1 && r.height > 1)) continue;
+      if (r.width * r.height > maxArea) continue;
+      if (
+        Math.abs(r.left - box.x) <= 14 &&
+        Math.abs(r.top - box.y) <= 14 &&
+        Math.abs(r.width - box.w) <= 24 &&
+        Math.abs(r.height - box.h) <= 24
+      ) {
+        return c;
+      }
+    }
+    return null;
+  }
+  // Mark a node as being moved by us so the MutationObserver's detach handler
+  // skips re-stashing it (clears on the next macrotask, after the observer runs).
+  function beginMove(v) {
+    v.__obedRemounting = true;
+    setTimeout(function(){ v.__obedRemounting = false; }, 0);
+  }
   function tryRemount(v, epoch) {
     if (!v || suppressRemount) return;
     if (epoch != null && epoch !== remountEpoch) {
@@ -562,6 +619,43 @@ PRESERVE_SCRIPT = r"""
       return;
     }
     if (v.__obedRemountEpoch === -1 || v.ended) return;
+    if (v.__obedParent && document.contains(v.__obedParent)) {
+      try {
+        const anchor = (v.__obedNextSibling && v.__obedNextSibling.parentNode === v.__obedParent)
+          ? v.__obedNextSibling : null;
+        if (v.parentNode !== v.__obedParent || v.nextSibling !== anchor) {
+          beginMove(v);
+          v.__obedParent.insertBefore(v, anchor);
+        }
+        if (v.__obedStyle != null) v.setAttribute('style', v.__obedStyle);
+        v.style.visibility = 'visible';
+        v.style.display = 'block';
+        v.style.opacity = '1';
+        v.style.pointerEvents = 'none';
+        if (/^-?\d+$/.test(String(v.__obedZ))) {
+          v.style.zIndex = String(v.__obedZ);
+        } else {
+          v.style.removeProperty('z-index');
+        }
+        if (v.paused && !v.ended) {
+          const p = v.play();
+          if (p && p.catch) p.catch(function(){});
+        }
+        v.dataset.obedRemounted = '1';
+        note('remount-authored-parent', {
+          elId: v.__obedElId,
+          key: assetKey(v.currentSrc || v.src || ''),
+          layer: v.__obedLayer ? (v.__obedLayer.id || null) : null,
+          z: v.__obedZ,
+          videoWidth: v.videoWidth,
+          currentTime: v.currentTime,
+          inDocument: document.contains(v)
+        });
+        return;
+      } catch (e) {
+        note('remount-authored-parent-error', {elId: v.__obedElId, message: String(e && e.message || e)});
+      }
+    }
     if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
     let box = v.__obedRect || {};
     // Detach can leave getBoundingClientRect at 0,0 relative to a parent that is already gone.
@@ -578,6 +672,45 @@ PRESERVE_SCRIPT = r"""
       note('remount-footprint-rect', {elId: v.__obedElId, rect: box});
     }
     v.__obedRect = box;
+    // Prefer the movie's own authored poster canvas — its layer's stacking
+    // context is what makes later-authored artwork (green/black) paint in
+    // front. A root-stage append (below) always lands on top of everything.
+    const posterCanvas = findMovieCanvas(box);
+    if (posterCanvas && posterCanvas.parentNode) {
+      try {
+        if (!(v.parentNode === posterCanvas.parentNode && v.previousSibling === posterCanvas)) {
+          beginMove(v);
+          posterCanvas.parentNode.insertBefore(v, posterCanvas.nextSibling);
+        }
+        v.style.position = 'absolute';
+        v.style.left = box.x + 'px';
+        v.style.top = box.y + 'px';
+        v.style.width = box.w + 'px';
+        v.style.height = box.h + 'px';
+        v.style.visibility = 'visible';
+        v.style.display = 'block';
+        v.style.opacity = '1';
+        v.style.pointerEvents = 'none';
+        v.style.removeProperty('z-index');
+        if (v.paused && !v.ended) {
+          const p = v.play();
+          if (p && p.catch) p.catch(function(){});
+        }
+        v.dataset.obedRemounted = '1';
+        note('remount-into-authored-layer', {
+          elId: v.__obedElId,
+          key: assetKey(v.currentSrc || v.src || ''),
+          canvasId: posterCanvas.id || null,
+          rect: box,
+          videoWidth: v.videoWidth,
+          currentTime: v.currentTime,
+          inDocument: document.contains(v)
+        });
+        return;
+      } catch (e) {
+        note('remount-into-authored-layer-error', {elId: v.__obedElId, message: String(e && e.message || e)});
+      }
+    }
     const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
     if (!stage) {
       note('remount-no-stage', {elId: v.__obedElId});
@@ -600,11 +733,15 @@ PRESERVE_SCRIPT = r"""
       }
       v.style.pointerEvents = 'none';
       if (v.__obedId && !document.getElementById(v.__obedId)) v.id = v.__obedId;
-      if (!document.contains(v) || v.parentNode !== stage) stage.appendChild(v);
+      if (!document.contains(v) || v.parentNode !== stage) {
+        beginMove(v);
+        stage.appendChild(v);
+      }
       if (v.paused && !v.ended) {
         const p = v.play();
         if (p && p.catch) p.catch(function(){});
       }
+      v.dataset.obedRemounted = '1';
       note('remount-done', {
         elId: v.__obedElId,
         key: assetKey(v.currentSrc || v.src || ''),
@@ -801,39 +938,65 @@ PRESERVE_SCRIPT = r"""
     el.setAttribute = function(attr, value) {
       if (String(attr).toLowerCase() === 'src') {
         const key = assetKey(value);
-        // Never reuse a decoder from an older preserve generation.
-        let preserved = null;
+        const hn = currentHashNum();
+        const boundary = restartMinHash();
         const q = pool.get(key);
-        if (q && q.length) {
+        if (hn != null && hn >= boundary && q && q.length) {
+          // On/after the restart boundary this is the authored fresh Start
+          // Movie — never stitch a preserved decoder onto it.
+          note('reuse-skip-boundary', {key: key, hashNum: hn, boundary: boundary, queueLen: q.length});
+          // Retire the old decoders for THIS key only so they stop remounting
+          // over the restart movie and polluting slide-3 clock scoring. A
+          // continuing movie under a different key is never touched.
+          const elIds = [];
           while (q.length) {
-            const cand = q.shift();
-            if ((cand.__obedGen == null ? 0 : cand.__obedGen) < preserveGeneration) {
-              note('reuse-skip-stale', {
-                key: key, elId: cand.__obedElId,
-                gen: cand.__obedGen, current: preserveGeneration
-              });
-              continue;
-            }
-            preserved = cand;
-            break;
+            const old = q.shift();
+            elIds.push(old.__obedElId);
+            try { old.pause(); } catch (e) {}
+            try {
+              if (old.parentNode) old.parentNode.removeChild(old);
+            } catch (e) {}
+            delete old.dataset.obedPreserved;
+            delete old.dataset.obedRemounted;
+            old.__obedRemountEpoch = -1;
+            old.__obedGen = -1;
           }
-          if (q.length === 0) pool.delete(key);
-        }
-        if (preserved && preserved !== el) {
-          tag(preserved);
-          note('reuse-decoder', {
-            key: key, newElId: el.__obedElId, oldElId: preserved.__obedElId,
-            preservedT: preserved.currentTime, paused: preserved.paused,
-            readyState: preserved.readyState,
-            queueLeft: q ? q.length : 0
-          });
-          try {
-            if (el.id) preserved.id = el.id;
-            const st = el.getAttribute('style');
-            if (st) preserved.setAttribute('style', st);
-          } catch (e) {}
-          bindFacade(el, preserved);
-          return;
+          pool.delete(key);
+          note('retire-on-start-movie', {key: key, elIds: elIds, hashNum: hn});
+        } else {
+          // Never reuse a decoder from an older preserve generation.
+          let preserved = null;
+          if (q && q.length) {
+            while (q.length) {
+              const cand = q.shift();
+              if ((cand.__obedGen == null ? 0 : cand.__obedGen) < preserveGeneration) {
+                note('reuse-skip-stale', {
+                  key: key, elId: cand.__obedElId,
+                  gen: cand.__obedGen, current: preserveGeneration
+                });
+                continue;
+              }
+              preserved = cand;
+              break;
+            }
+            if (q.length === 0) pool.delete(key);
+          }
+          if (preserved && preserved !== el) {
+            tag(preserved);
+            note('reuse-decoder', {
+              key: key, newElId: el.__obedElId, oldElId: preserved.__obedElId,
+              preservedT: preserved.currentTime, paused: preserved.paused,
+              readyState: preserved.readyState,
+              queueLeft: q ? q.length : 0
+            });
+            try {
+              if (el.id) preserved.id = el.id;
+              const st = el.getAttribute('style');
+              if (st) preserved.setAttribute('style', st);
+            } catch (e) {}
+            bindFacade(el, preserved);
+            return;
+          }
         }
       }
       return origSA(attr, value);
@@ -882,6 +1045,74 @@ def inject_preserve(player: Path) -> dict:
         script=PRESERVE_SCRIPT,
         already="data-obed-p2-preserve=",
     )
+
+
+def _ffmpeg() -> str:
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e:  # noqa: BLE001
+        raise SystemExit(f"imageio-ffmpeg required for disposable H.264 encode: {e}") from e
+
+
+def _write_h264_pattern(dest: Path, *, seconds: float = 46.0333, fps: int = 30) -> dict:
+    """Write a browser-decodable H.264 MP4 (yuv420p) with a moving bar.
+
+    Duration matches Keynote export filenames/metadata so the player timeline
+    stays coherent.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp.mp4")
+    cmd = [
+        _ffmpeg(),
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=size=1920x540:rate={fps}:duration={seconds}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=440:sample_rate=44100:duration={seconds}",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "baseline",
+        "-c:a",
+        "aac",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        str(tmp),
+    ]
+    import subprocess
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not tmp.is_file():
+        raise RuntimeError(f"ffmpeg encode failed: {proc.stderr[-800:]}")
+    dest.write_bytes(tmp.read_bytes())
+    tmp.unlink(missing_ok=True)
+    return {"path": str(dest), "bytes": dest.stat().st_size, "seconds": seconds, "fps": fps}
+
+
+def _replace_hevc_movies(root: Path) -> dict:
+    """Replace Untitled.mov* HEVC assets with H.264 test patterns (same filenames)."""
+    replaced = []
+    for mov in sorted(root.rglob("Untitled.mov-*.mov")):
+        # Parse duration from Keynote export name: …-0.0000-46.0333.mov
+        seconds = 46.0333
+        try:
+            tail = mov.name.rsplit("-", 1)[-1]
+            seconds = float(tail.replace(".mov", ""))
+        except ValueError:
+            pass
+        info = _write_h264_pattern(mov, seconds=seconds)
+        info["replaced"] = str(mov.relative_to(root))
+        replaced.append(info)
+    return {"replacedN": len(replaced), "files": replaced}
 
 
 async def _media_snapshot(chrome: ChromeCdp) -> dict:

@@ -40,6 +40,7 @@ from p2_recovery_html_dissolve_live import (  # noqa: E402
     _media_snapshot,
     _movie_key,
     _norm_hash,
+    _replace_hevc_movies,
     _wait_hash_clean,
     inject_preserve,
 )
@@ -48,6 +49,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
     file_identity,
     inventory_deck,
+    score_motion_across_flip,
     score_playback_continuity,
     score_restart_at_slide_boundary,
     score_restart_movie_from_observations,
@@ -75,10 +77,29 @@ MOVIE_ROI = (109, 795, 952, 268)
 # HTML event index where slide 3 begins (2 + 4 events before it → scene #6).
 SLIDE3_MIN_HASH = 6
 # Fixed expected movie keys for restart evidence (not derived from observations).
-EXPECTED_MOVIE_KEYS = ("untitled.mov",)
+# untitled.mov (movie1, Shibuya crossing) is the restart target; after the
+# case-insensitive _movie_key fix, both its DOM src and pooled assetKey
+# observations collapse under "movie1".
+EXPECTED_MOVIE_KEYS = ("movie1",)
 # Wall-clock gap required between slide-3 samples to claim progression.
 PROGRESSION_WALL_S = 0.25
 PROGRESSION_MEDIA_S = 0.20
+# Operator-wait acceptance profiles: click delay, pre-advance straddle capture,
+# and post-MM settle before draining slide-2 builds. "fast" is prior behaviour.
+WAIT_PROFILES = {
+    "fast": {"clickDelayS": CLICK_DELAY_S, "preAdvanceFrames": 4, "preAdvanceGapS": 0.05, "postMmSettleS": 0.4},
+    "slow": {"clickDelayS": 3.5, "preAdvanceFrames": 10, "preAdvanceGapS": 0.2, "postMmSettleS": 1.5},
+}
+
+
+def _arg_value(name: str, default: str) -> str:
+    argv = sys.argv[1:]
+    for i, a in enumerate(argv):
+        if a == name and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return default
 
 
 def _crop(arr: np.ndarray, xywh: tuple[int, int, int, int]) -> np.ndarray:
@@ -181,51 +202,6 @@ def _score_black_auto(arr: np.ndarray) -> dict:
     }
 
 
-async def _advance_hash(chrome: ChromeCdp, *, prefer: str = "arrow", wait_s: float = 2.5) -> str:
-    """Advance and poll until hash changes (MM can lag past 0.35s)."""
-    hash0 = _norm_hash(
-        await chrome.evaluate(
-            "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
-        )
-    )
-
-    async def _poll(method: str) -> str | None:
-        deadline = time.monotonic() + wait_s
-        while time.monotonic() < deadline:
-            h = _norm_hash(
-                await chrome.evaluate(
-                    "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
-                )
-            )
-            if h != hash0:
-                return f"{method}:{hash0}->{h}"
-            await asyncio.sleep(0.05)
-        return None
-
-    order = ["arrow", "space", "click"] if prefer == "arrow" else ["space", "arrow", "click"]
-    for name in order:
-        if name == "arrow":
-            await chrome.key("ArrowRight", "ArrowRight", 39)
-        elif name == "space":
-            await chrome.key(" ", "Space", 32)
-        else:
-            await chrome.call(
-                "Input.dispatchMouseEvent", type="mousePressed", x=1880, y=40, button="left", clickCount=1
-            )
-            await chrome.call(
-                "Input.dispatchMouseEvent", type="mouseReleased", x=1880, y=40, button="left", clickCount=1
-            )
-        hit = await _poll(name)
-        if hit:
-            return hit
-    h = _norm_hash(
-        await chrome.evaluate(
-            "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
-        )
-    )
-    return f"none:{hash0}->{h}"
-
-
 def _hash_num(h: str | None) -> int | None:
     m = __import__("re").match(r"#(\d+)", _norm_hash(h))
     return int(m.group(1)) if m else None
@@ -325,6 +301,55 @@ def _annotate_sample(snap: dict, *, phase: str, capture_offset_s: float, scene_h
     }
 
 
+def _score_neighbours_retained_clocks(
+    samples: list[dict], restart_keys: list[str], min_hash: int
+) -> dict:
+    """Neighbour (non-restart-target) movies must not be disrupted by the restart.
+
+    movie2 (WA0125) plays alongside the untitled.mov (movie1) restart on slide 3
+    but may itself start fresh there — a near-zero first observation is not a
+    disruption. Only a backward clock jump (a reset caused by our own
+    retirement leaking onto the wrong key) fails this check. Informational —
+    does not gate deliberateRestart2to3.
+    """
+    neighbour_keys = sorted(
+        {
+            m.get("key")
+            for s in samples
+            for m in (s.get("movies") or [])
+            if m.get("key") and m.get("key") not in restart_keys
+        }
+    )
+    per_key: dict[str, dict] = {}
+    for key in neighbour_keys:
+        obs = []
+        for s in samples:
+            hn = _hash_num(s.get("sceneHash"))
+            if hn is None or hn < min_hash:
+                continue
+            for m in s.get("movies") or []:
+                if m.get("key") == key and m.get("currentTime") is not None:
+                    obs.append(float(m["currentTime"]))
+        if len(obs) < 2:
+            per_key[key] = {"ok": False, "reason": "insufficient obs", "n": len(obs)}
+            continue
+        max_backward_jump = max(
+            (obs[i] - obs[i + 1] for i in range(len(obs) - 1)), default=0.0
+        )
+        not_reset = max_backward_jump <= 0.35
+        per_key[key] = {
+            "ok": bool(not_reset),
+            "n": len(obs),
+            "first": obs[0],
+            "last": obs[-1],
+            "min": min(obs),
+            "max": max(obs),
+            "maxBackwardJump": max_backward_jump,
+        }
+    ok = bool(per_key) and all(v["ok"] for v in per_key.values())
+    return {"ok": ok, "keys": neighbour_keys, "perKey": per_key}
+
+
 def _score_canvas_identical(frame_paths: list[Path]) -> dict:
     if len(frame_paths) < 2:
         return {"ok": False, "n": len(frame_paths)}
@@ -397,9 +422,8 @@ async def _advance_until_hash_at_least_sampling(
             return log, samples
 
         hash0 = row["sceneHash"]
-        # Match adversarial advance: try arrow/space/click while sampling.
         prefer = "arrow" if step % 2 == 0 else "space"
-        # Kick the same input order as _advance_hash, but keep sampling during the wait.
+        # Try arrow/space/click in turn while sampling continuously during the wait.
         order = ["arrow", "space", "click"] if prefer == "arrow" else ["space", "arrow", "click"]
         changed = None
         for name in order:
@@ -479,6 +503,56 @@ async def _media_snapshot_with_pool(chrome: ChromeCdp) -> dict:
     return snap
 
 
+def _pick_decoded_video(media: dict) -> dict | None:
+    """First video with a decoder id or decoded width — used to tag flip-scorer frames."""
+    return next(
+        (
+            v
+            for v in (media.get("videos") or [])
+            if v.get("decoderId") is not None or (v.get("w") or 0) > 0
+        ),
+        None,
+    )
+
+
+async def _pre_advance_frames(
+    chrome: ChromeCdp, run_dir: Path, prefix: str, click_wall: float, n: int, gap_s: float
+) -> list[dict]:
+    """Capture composed frames BEFORE firing the advance.
+
+    score_motion_across_flip needs a genuine before-flip segment; without this,
+    dense capture starting only after the hash has already changed makes
+    flipIndex==0 with no pre-flip pairs to score.
+    """
+    frames: list[dict] = []
+    for i in range(n):
+        media = await _media_snapshot_with_pool(chrome)
+        capture_wall = time.monotonic()
+        arr = await chrome.screenshot()
+        name = f"{prefix}-pre{i:02d}.png"
+        Image.fromarray(arr).save(run_dir / name)
+        scene_hash = _norm_hash(
+            await chrome.evaluate(
+                "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+            )
+        )
+        vid = _pick_decoded_video(media)
+        frames.append(
+            {
+                "name": name,
+                "i": -(n - i),
+                "empty": _score_empty(arr),
+                "sceneHash": scene_hash,
+                "captureOffsetS": capture_wall - click_wall,
+                "decoderId": vid.get("decoderId") if vid else None,
+                "w": vid.get("w") if vid else None,
+            }
+        )
+        if gap_s > 0:
+            await asyncio.sleep(gap_s)
+    return frames
+
+
 async def _dense_after_click(
     chrome: ChromeCdp, run_dir: Path, prefix: str, click_wall: float | None = None,
     *, sample_decoder: bool = False,
@@ -503,7 +577,23 @@ async def _dense_after_click(
             arr = await chrome.screenshot()
             name = f"{prefix}-t{i:03d}.png"
             Image.fromarray(arr).save(run_dir / name)
-            frames.append({"name": name, "i": i, "empty": _score_empty(arr)})
+            scene_hash = _norm_hash(
+                await chrome.evaluate(
+                    "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+                )
+            )
+            vid = _pick_decoded_video(media)
+            frames.append(
+                {
+                    "name": name,
+                    "i": i,
+                    "empty": _score_empty(arr),
+                    "sceneHash": scene_hash,
+                    "captureOffsetS": capture_wall - click_wall,
+                    "decoderId": vid.get("decoderId") if vid else None,
+                    "w": vid.get("w") if vid else None,
+                }
+            )
         if sample_decoder and (i % 8 == 0 or i == n - 1) and len(decoder_frames) < 6:
             el_id = None
             pool = media.get("preservePool") or []
@@ -624,6 +714,9 @@ async def _boot(chrome: ChromeCdp, base: str) -> dict:
 
 async def _run(player: Path) -> dict:
     reuse = "--reuse-export" in sys.argv
+    disposable_mode = "--disposable" in sys.argv
+    wait_profile_name = _arg_value("--wait-profile", "fast")
+    wait_profile = WAIT_PROFILES[wait_profile_name]
     if OUT.exists() and not reuse:
         shutil.rmtree(OUT)
     OUT.mkdir(parents=True, exist_ok=True)
@@ -655,6 +748,7 @@ async def _run(player: Path) -> dict:
     )
 
     unmodified = OUT / "html-unmodified"
+    disposable_dir = OUT / "html-disposable"
     player_dir = OUT / "html-player"
     if reuse and (unmodified / "index.html").is_file():
         print("reusing HTML export at", unmodified)
@@ -663,12 +757,25 @@ async def _run(player: Path) -> dict:
         if unmodified.exists():
             shutil.rmtree(unmodified)
         export_html(SOURCE, unmodified, log=print)
-    strip_info = strip_export_pdf_bg_fills(unmodified)
+
+    asset_replace_info: dict | None = None
+    if disposable_mode:
+        # Clone from the on-disk unmodified export — no Keynote required.
+        if disposable_dir.exists():
+            shutil.rmtree(disposable_dir)
+        shutil.copytree(unmodified, disposable_dir)
+        asset_replace_info = _replace_hevc_movies(disposable_dir)
+        write_json(OUT / "asset-replace.json", asset_replace_info)
+        source_dir = disposable_dir
+    else:
+        source_dir = unmodified
+
+    strip_info = strip_export_pdf_bg_fills(source_dir)
     write_json(OUT / "pdf-strip.json", strip_info)
     print("stripped", [r["pdf"] for r in (strip_info.get("rewritten") or [])])
     if player_dir.exists():
         shutil.rmtree(player_dir)
-    write_patched_export(unmodified, player_dir)
+    write_patched_export(source_dir, player_dir)
     preserve = inject_preserve(player_dir)
     write_json(OUT / "preserve-inject.json", preserve)
 
@@ -694,7 +801,8 @@ async def _run(player: Path) -> dict:
     await chrome.start()
     try:
         boot = await _boot(chrome, base)
-        await asyncio.sleep(CLICK_DELAY_S)
+        await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
+        await asyncio.sleep(wait_profile["clickDelayS"])
         media_pre = await _media_snapshot_with_pool(chrome)
         pre = await chrome.screenshot()
         Image.fromarray(pre).save(run_dir / "pre.png")
@@ -712,7 +820,20 @@ async def _run(player: Path) -> dict:
         # --- Transition A: 1→2 Magic Move + continue ---
         samples_a = [{"phase": "pre", "captureOffsetS": 0.0, **media_pre}]
         click_wall_a = time.monotonic()
-        method_a = await _advance_hash(chrome, prefer="arrow", wait_s=3.0)
+        # Capture a few frames BEFORE firing the advance so the dense window
+        # straddles the flip (movie already playing from boot at hash1).
+        pre_frames_a = await _pre_advance_frames(
+            chrome,
+            run_dir,
+            "mm12",
+            click_wall_a,
+            wait_profile["preAdvanceFrames"],
+            wait_profile["preAdvanceGapS"],
+        )
+        # Fire the advance WITHOUT blocking on hash-settle — ChromeCdp has no
+        # concurrent recv, so a blocking poll here would push dense capture
+        # past the flip instant. Confirm the flip afterward instead.
+        await chrome.key("ArrowRight", "ArrowRight", 39)
         immediate = await _media_snapshot_with_pool(chrome)
         samples_a.append(
             {
@@ -721,21 +842,6 @@ async def _run(player: Path) -> dict:
                 "captureOffsetS": time.monotonic() - click_wall_a,
             }
         )
-        ready_snap = None
-        for _ in range(100):
-            ready_snap = await _media_snapshot_with_pool(chrome)
-            vids = ready_snap.get("videos") or []
-            if any((v.get("currentTime") or 0) > 0 for v in vids):
-                break
-            await asyncio.sleep(0.05)
-        if ready_snap:
-            samples_a.append(
-                {
-                    **ready_snap,
-                    "phase": "videos-ready",
-                    "captureOffsetS": time.monotonic() - click_wall_a,
-                }
-            )
         dense_a, frames_a, decoder_frames = await _dense_after_click(
             chrome, run_dir, "mm12", click_wall_a, sample_decoder=True
         )
@@ -745,11 +851,23 @@ async def _run(player: Path) -> dict:
                 "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
             )
         )
+        if hash2 == hash1:
+            # MM may still be settling past the dense window; short grace poll.
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline and hash2 == hash1:
+                await asyncio.sleep(0.05)
+                hash2 = _norm_hash(
+                    await chrome.evaluate(
+                        "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+                    )
+                )
+        method_a = f"arrow-nonblocking:{hash1}->{hash2}"
         mid = await chrome.screenshot()
         Image.fromarray(mid).save(run_dir / "after-1to2.png")
         mid_scores = {
             "empty": _score_empty(mid),
             "black": _score_black_auto(mid),
+            "blackFixedRoi": _score_black(mid, BLACK_ROI_S2),
             "green": _score_green(mid, GREEN_ROI_S1),
         }
 
@@ -762,6 +880,21 @@ async def _run(player: Path) -> dict:
         )
         mm_paths = sorted(run_dir.glob("mm12-t*.png"))
         visible_motion = _score_visible_movie_motion(mm_paths, MOVIE_ROI)
+        flip_samples = []
+        for f in [*pre_frames_a, *frames_a]:
+            if f.get("sceneHash") is None:
+                continue
+            farr = np.array(Image.open(run_dir / f["name"]))
+            flip_samples.append(
+                {
+                    "roi": _crop(farr, MOVIE_ROI),
+                    "sceneHash": f["sceneHash"],
+                    "captureOffsetS": f.get("captureOffsetS"),
+                    "decoderId": f.get("decoderId"),
+                    "w": f.get("w"),
+                }
+            )
+        motion_across_flip = score_motion_across_flip(flip_samples, start_hash=hash1)
         decoder_motion: dict = {"ok": False, "n": 0, "attempts": len(decoder_frames)}
         ok_frames = [d for d in decoder_frames if d.get("path")]
         if len(ok_frames) >= 2:
@@ -782,12 +915,9 @@ async def _run(player: Path) -> dict:
                 "firstFailure": next((d for d in decoder_frames if not d.get("path")), None),
             }
 
-        # After continue is scored, drop pooled decoders so 2→3 Start Movie can restart.
-        await chrome.evaluate(
-            "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.clear && "
-            "window.__OBED_P2_PRESERVE__.clear()"
-        )
-        await asyncio.sleep(0.4)
+        # 2→3 restart must come from the authored Start Movie (PRESERVE_SCRIPT's
+        # boundary guard), not a manual pool clear.
+        await asyncio.sleep(wait_profile["postMmSettleS"])
         await _ensure_videos_playing(chrome)
         media_mid = await _media_snapshot_with_pool(chrome)
         h_mid = _norm_hash(
@@ -830,6 +960,60 @@ async def _run(player: Path) -> dict:
                 s["sceneHash"] = hash3
         post = await chrome.screenshot()
         Image.fromarray(post).save(run_dir / "after-2to3.png")
+        preserved_on_slide3 = await chrome.evaluate(
+            """(() => {
+              const vids = Array.prototype.slice.call(
+                document.querySelectorAll('video[data-obed-preserved="1"]')
+              );
+              const visible = vids.filter((v) => {
+                if (!document.contains(v)) return false;
+                const st = getComputedStyle(v);
+                if (st.visibility === 'hidden' || st.display === 'none') return false;
+                const r = v.getBoundingClientRect();
+                return r.width > 1 && r.height > 1;
+              });
+              return {total: vids.length, visible: visible.length};
+            })()"""
+        ) or {"total": 0, "visible": 0}
+        lingering_movie_overlays = await chrome.evaluate(
+            """(() => {
+              const footprints = [
+                {x: 109, y: 795, w: 952, h: 268},
+                {x: 109, y: 500, w: 663, h: 186}
+              ];
+              function overlaps(r, fp) {
+                const ix = Math.max(0, Math.min(r.left + r.width, fp.x + fp.w) - Math.max(r.left, fp.x));
+                const iy = Math.max(0, Math.min(r.top + r.height, fp.y + fp.h) - Math.max(r.top, fp.y));
+                const inter = ix * iy;
+                const minArea = Math.min(r.width * r.height, fp.w * fp.h);
+                return minArea > 0 && inter > 0.25 * minArea;
+              }
+              // Only OUR remount overlays (data-obed-remounted) can be a leftover here —
+              // a fresh authored movie that legitimately (re)starts on slide 3 in the same
+              // footprint is not marked and must not be flagged.
+              const vids = Array.prototype.slice.call(
+                document.querySelectorAll('video[data-obed-remounted="1"]')
+              );
+              const lingering = vids.filter((v) => {
+                if (!document.contains(v)) return false;
+                const st = getComputedStyle(v);
+                if (st.visibility === 'hidden' || st.display === 'none') return false;
+                const r = v.getBoundingClientRect();
+                if (!(r.width > 1 && r.height > 1)) return false;
+                return footprints.some((fp) => overlaps(r, fp));
+              });
+              return {
+                count: lingering.length,
+                elIds: lingering.map((v) => v.__obedElId || null),
+                preservedCount: lingering.filter(
+                  (v) => v.dataset && v.dataset.obedPreserved === '1'
+                ).length
+              };
+            })()"""
+        ) or {"count": 0, "elIds": [], "preservedCount": 0}
+        post_black = _score_black_auto(post)
+        post_green = _score_green(post, GREEN_ROI_S1)
+        overlay_gone_by_roi = (not post_black.get("ok")) and (not post_green.get("ok"))
         restart_paths = sorted(run_dir.glob("restart23-t*.png"))
         restart_canvas = _score_canvas_identical(restart_paths)
 
@@ -891,8 +1075,21 @@ async def _run(player: Path) -> dict:
                 "slide3ObsN": len(slide3_obs),
             }
 
+        # Fetch by kind server-side — a flat last-120 slice lets ~100+ routine
+        # remount-done events crowd out the few guard/retire/clear events that
+        # findings actually depend on.
         preserve_events = await chrome.evaluate(
-            "window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events.slice(-120) : []"
+            """(() => {
+              const p = window.__OBED_P2_PRESERVE__;
+              if (!p) return [];
+              const keep = [
+                'reuse-skip-boundary', 'retire-on-start-movie', 'pool-cleared',
+                'reuse-decoder', 'createElement-video'
+              ];
+              const important = p.events.filter((e) => keep.indexOf(e.kind) >= 0);
+              const remounts = p.events.filter((e) => e.kind === 'remount-done').slice(-20);
+              return important.concat(remounts);
+            })()"""
         ) or []
         clear_i = next(
             (i for i, e in enumerate(preserve_events) if e.get("kind") == "pool-cleared"),
@@ -902,6 +1099,29 @@ async def _run(player: Path) -> dict:
             e
             for i, e in enumerate(preserve_events)
             if e.get("kind") == "reuse-decoder" and (clear_i is None or i > clear_i)
+        ]
+        reuse_skip_boundary_events = [
+            e for e in preserve_events if e.get("kind") == "reuse-skip-boundary"
+        ]
+        retire_events = [e for e in preserve_events if e.get("kind") == "retire-on-start-movie"]
+        target_key = EXPECTED_MOVIE_KEYS[0]
+        reuse_skip_boundary_for_target = [
+            e
+            for e in reuse_skip_boundary_events
+            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+        ]
+        retire_events_for_target = [
+            e
+            for e in retire_events
+            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+        ]
+        # Reuse of a preserved decoder is the LEGITIMATE 1→2 continue mechanism; only a
+        # reuse on/after the restart boundary would stitch a fake restart. Scope the ban there.
+        reuse_after_boundary = [
+            e
+            for e in preserve_events
+            if e.get("kind") == "reuse-decoder"
+            and (_hash_num((e.get("detail") or {}).get("sceneHash")) or -1) >= SLIDE3_MIN_HASH
         ]
         reached_slide3 = (_hash_num(hash3) or -1) >= SLIDE3_MIN_HASH
         # Fixed expected keys — never derive solely from what happened to be observed.
@@ -948,6 +1168,9 @@ async def _run(player: Path) -> dict:
                 earliest_any = e
         restart_observed = bool(boundary["allMoviesOk"])
         drain_samples_n = len(drain_samples)
+        neighbours_retained = _score_neighbours_retained_clocks(
+            samples_b, intended_keys, SLIDE3_MIN_HASH
+        )
     finally:
         await chrome.close()
         httpd.shutdown()
@@ -966,6 +1189,7 @@ async def _run(player: Path) -> dict:
                 bool(cont.get("continuesThroughDissolve"))
                 and hash1 != hash2
                 and visible_motion.get("ok", False)
+                and motion_across_flip.get("ok", False)
             ),
             "detail": {
                 "continues": cont.get("continuesThroughDissolve"),
@@ -977,12 +1201,14 @@ async def _run(player: Path) -> dict:
                 "hash": f"{hash1}->{hash2}",
                 "method": method_a,
                 "visibleMovieMotion": visible_motion,
+                "motionAcrossFlip": motion_across_flip,
                 "decoderMotion": decoder_motion,
                 "reuseEvents": [
                     e for e in preserve_events if e.get("kind") == "reuse-decoder"
                 ][:8],
                 "note": (
-                    "Clock continuity alone is insufficient; composed movie ROI must move. "
+                    "Clock continuity alone is insufficient; composed movie ROI must move "
+                    "before, across, and after the scene-hash flip. "
                     "Decoder sampleFrame motion without visible motion = detached clock."
                 ),
             },
@@ -998,6 +1224,20 @@ async def _run(player: Path) -> dict:
             "detail": mid_scores["empty"],
         },
         {
+            "id": "overlappingArtworkComposedAfter1to2",
+            "pass": bool(mid_scores["blackFixedRoi"]["ok"] and mid_scores["green"]["ok"]),
+            "detail": {
+                "blackFixedRoi": mid_scores["blackFixedRoi"],
+                "blackAuto": mid_scores["black"],
+                "green": mid_scores["green"],
+            },
+            "note": (
+                "Must hold at the FIXED authored ROIs (BLACK_ROI_S2, GREEN_ROI_S1) — "
+                "black-anywhere (_score_black_auto) is satisfied by the movie's own "
+                "test pattern and does not prove the overlay is unoccluding artwork."
+            ),
+        },
+        {
             "id": "reachedSlide3",
             "pass": reached_slide3,
             "detail": {
@@ -1005,6 +1245,26 @@ async def _run(player: Path) -> dict:
                 "minHash": SLIDE3_MIN_HASH,
                 "methods": methods_b,
             },
+        },
+        {
+            "id": "overlayRemovedOnLeave",
+            "pass": bool(
+                preserved_on_slide3.get("visible", 1) == 0
+                and lingering_movie_overlays.get("count", 1) == 0
+            ),
+            "detail": {
+                "preservedVideosOnSlide3": preserved_on_slide3,
+                "lingeringMovieOverlays": lingering_movie_overlays,
+                "roiCheck": {"black": post_black, "green": post_green},
+                "roiOverlayGone": overlay_gone_by_roi,
+                "hash": hash3,
+            },
+            "note": (
+                "Requires zero visible preserved videos AND zero visible <video> "
+                "elements overlapping the slide-1/2 movie footprints on slide 3 "
+                "(catches a lingering overlay even if it lost its preserved marker). "
+                "The ROI check is informational only, not gating."
+            ),
         },
         {
             "id": "deliberateRestart2to3",
@@ -1024,25 +1284,50 @@ async def _run(player: Path) -> dict:
                 "restartCanvas": restart_canvas,
                 "poolCleared": clear_i is not None,
                 "reuseAfterClear": reuse_after_clear[:6],
+                "reuseSkipBoundaryEvents": reuse_skip_boundary_events[:6],
+                "retireEvents": retire_events[:6],
+                "neighboursRetainedClocks": bool(neighbours_retained.get("ok")),
+                "neighboursRetainedClocksDetail": neighbours_retained,
                 "drainSampleN": drain_samples_n,
                 "note": (
                     "Pass only when each intended movie has slide-3 observations "
                     "with near-zero at the boundary and later progression. "
                     "Pre-boundary restart_observed alone is not a pass. "
-                    "Missing slide-3 media → inconclusive/fail."
+                    "Missing slide-3 media → inconclusive/fail. "
+                    "Restart now comes from the authored Start Movie via the "
+                    "boundary-guarded reuse skip, not a manual pool clear."
                 ),
             },
         },
         {
             "id": "preserveDidNotBlockRestart",
-            "pass": restart_playback_ok and len(reuse_after_clear) == 0,
+            "pass": bool(
+                restart_playback_ok
+                and clear_i is None
+                and len(reuse_skip_boundary_for_target) >= 1
+                and len(retire_events_for_target) >= 1
+                and len(reuse_after_boundary) == 0
+            ),
             "verdict": restart_verdict if restart_playback_ok or restart_inconclusive else "fail",
-            "note": "decoder-preserve must not stitch a deliberate Start Movie restart",
+            "note": (
+                "decoder-preserve must not stitch a deliberate Start Movie restart. "
+                "Requires: no manual pool-cleared event at all, at least one "
+                "reuse-skip-boundary AND one retire-on-start-movie event for the "
+                "target key, and zero reuse-decoder events ON/AFTER the boundary "
+                "(pre-boundary 1→2 reuse is the legitimate continue) — the boundary "
+                "guard + retirement, not a manual clear, keeps the restart fresh."
+            ),
             "detail": {
-                "reuseAfterClear": reuse_after_clear[:6],
-                "reuseScenes": [
-                    (e.get("detail") or {}).get("sceneHash") for e in reuse_after_clear[:6]
+                "targetKey": target_key,
+                "poolCleared": clear_i is not None,
+                "reuseSkipBoundaryForTargetN": len(reuse_skip_boundary_for_target),
+                "retireEventsForTargetN": len(retire_events_for_target),
+                "reuseAfterBoundary": reuse_after_boundary[:6],
+                "reuseAfterBoundaryScenes": [
+                    (e.get("detail") or {}).get("sceneHash") for e in reuse_after_boundary[:6]
                 ],
+                "reuseSkipBoundaryEvents": reuse_skip_boundary_events[:6],
+                "retireEvents": retire_events[:6],
             },
         },
     ]
@@ -1053,8 +1338,12 @@ async def _run(player: Path) -> dict:
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "source": before.as_dict(),
         "sourceUnchanged": after.as_dict() == before.as_dict(),
-        "fixture": "Minimal Alpha_DSK.key (owner adversarial 4-slide)",
-        "clickDelayS": CLICK_DELAY_S,
+        "deckFixture": "Minimal Alpha_DSK.key (owner adversarial 4-slide)",
+        "fixture": "disposable-h264" if disposable_mode else "hevc-original",
+        "assetReplace": asset_replace_info,
+        "waitProfile": wait_profile_name,
+        "waitProfileValues": wait_profile,
+        "clickDelayS": wait_profile["clickDelayS"],
         "reusedExport": reuse,
         "stripPdf": strip_info,
         "preserve": preserve,
@@ -1063,6 +1352,7 @@ async def _run(player: Path) -> dict:
         "midScores": mid_scores,
         "continue1to2": cont,
         "visibleMovieMotion": visible_motion,
+        "motionAcrossFlip": motion_across_flip,
         "decoderMotion": decoder_motion,
         "restart2to3": restart_scores,
         "perMovieBoundary": per_movie_boundary,
@@ -1082,8 +1372,15 @@ async def _run(player: Path) -> dict:
         },
         "tokens": {"movie1": MOVIE1_TOKEN, "movie2": MOVIE2_TOKEN},
         "note": (
-            "Untitled.mov in this export is HEVC Main 10 — Chrome often advances "
-            "currentTime (AAC) with videoWidth=0 (audio-only clock)."
+            "Disposable H.264 fixture: Untitled.mov replaced with a browser-decodable "
+            "yuv420p test pattern under the same filenames."
+            if disposable_mode
+            else (
+                "Untitled.mov in this export is HEVC Main 10 — Chrome often advances "
+                "currentTime (AAC) with videoWidth=0 (audio-only clock); decode/motion/"
+                "restart findings cannot pass on this fixture. Pass --disposable to gate "
+                "on the browser-decodable H.264 clone instead."
+            )
         ),
     }
     write_json(OUT / "report.json", report)

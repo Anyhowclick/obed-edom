@@ -1045,19 +1045,30 @@ def score_playback_continuity(
     }
 
 
+def _longest_still_run(pairs: Sequence[float], identical_eps: float) -> int:
+    longest = 0
+    current = 0
+    for m in pairs:
+        current = current + 1 if m < identical_eps else 0
+        longest = max(longest, current)
+    return longest
+
+
 def score_visible_movie_motion(
     frames: Sequence[np.ndarray],
     *,
     pair_eps: float = 2.0,
     identical_eps: float = 0.01,
     min_changing_frac: float = 0.45,
+    max_still_run: int | None = None,
 ) -> dict[str, Any]:
     """Require sustained composed-frame motion — one mid-window cut is not enough.
 
     ``frames`` are already-cropped movie ROI patches (RGB or RGBA). A sequence
     that is still except for a single change halfway through must fail even when
     first→last MAE is large. Empty or mismatched crops are hard rejects — they
-    must not count as motion via infinite MAE.
+    must not count as motion via infinite MAE. ``max_still_run``, when given,
+    additionally rejects a mid-window stall longer than that many still pairs.
     """
     if len(frames) < 3:
         return {"ok": False, "reason": "need >=3 frames", "n": len(frames)}
@@ -1105,12 +1116,14 @@ def score_visible_movie_motion(
     half = max(1, n_pair // 2)
     early_max = max(pair[:half]) if pair else 0.0
     late_max = max(pair[half:]) if pair else 0.0
+    max_still_run_actual = _longest_still_run(pair, identical_eps)
     ok = bool(
         changing_frac >= min_changing_frac
         and early_max >= pair_eps
         and late_max >= pair_eps
         and first_last >= pair_eps
         and np.isfinite(first_last)
+        and (max_still_run is None or max_still_run_actual <= max_still_run)
     )
     return {
         "ok": ok,
@@ -1125,7 +1138,127 @@ def score_visible_movie_motion(
         "lateMaxPairMae": late_max,
         "minChangingFrac": min_changing_frac,
         "pairEps": pair_eps,
+        "maxStillRun": max_still_run_actual,
         "shape": list(shapes[0]),
+    }
+
+
+def score_motion_across_flip(
+    samples: Sequence[dict[str, Any]],
+    *,
+    start_hash: object,
+    pair_eps: float = 2.0,
+    identical_eps: float = 0.01,
+    max_still_run: int = 4,
+) -> dict[str, Any]:
+    """Tie visible movie motion to the actual scene-hash flip instant.
+
+    ``samples`` are ``{roi, sceneHash, captureOffsetS, decoderId?, w?}`` in
+    capture order. A continuously-playing movie that satisfies pre-navigation
+    motion plus a late navigation must not pass: motion is required before,
+    across, and after ``flipIndex`` (the first sample whose scene hash differs
+    from ``start_hash``), with no mid-window stall longer than ``max_still_run``
+    and a decoded movie present in the flip neighbourhood.
+    """
+    n = len(samples)
+    if n < 3:
+        return {"ok": False, "reason": "need >=3 samples", "n": n}
+
+    rois = [s["roi"] for s in samples]
+    shapes = [tuple(getattr(r, "shape", ())) for r in rois]
+    empty_i = [
+        i
+        for i, (r, s) in enumerate(zip(rois, shapes, strict=True))
+        if r.size == 0 or len(s) < 2 or s[0] == 0 or s[1] == 0
+    ]
+    if empty_i:
+        return {
+            "ok": False,
+            "reason": "empty crop",
+            "n": n,
+            "emptyIndices": empty_i[:8],
+            "shapes": list(shapes)[:8],
+        }
+    if len(set(shapes)) != 1:
+        return {
+            "ok": False,
+            "reason": "mismatched crop shapes",
+            "n": n,
+            "shapes": list(shapes)[:8],
+        }
+
+    def _mae(a: np.ndarray, b: np.ndarray) -> float:
+        return float(
+            np.mean(np.abs(a[:, :, :3].astype(np.float64) - b[:, :, :3].astype(np.float64)))
+        )
+
+    pair = [_mae(rois[i], rois[i + 1]) for i in range(n - 1)]
+    if any(not np.isfinite(m) for m in pair):
+        return {"ok": False, "reason": "non-finite pair mae", "n": n, "pairMae": pair[:12]}
+
+    def _hash_num(h: object) -> int | None:
+        token = str(h or "").lstrip("#").split("?")[0]
+        return int(token) if token.isdigit() else None
+
+    start_norm = _hash_num(start_hash)
+    normalized = [_hash_num(s.get("sceneHash")) for s in samples]
+    flip_index = next((i for i, h in enumerate(normalized) if h != start_norm), None)
+    if flip_index is None:
+        return {"ok": False, "reason": "no flip observed", "n": n}
+    if flip_index < 1:
+        return {"ok": False, "reason": "flip at first sample", "n": n, "flipIndex": flip_index}
+    if flip_index > n - 2:
+        return {"ok": False, "reason": "no post-flip frame", "n": n, "flipIndex": flip_index}
+
+    f = flip_index
+    n_pair = len(pair)
+    before = pair[: max(0, f - 1)]
+    crossing = pair[f - 1]
+    after = pair[f:n_pair]
+    before_ok = any(m >= pair_eps for m in before)
+    across_ok = crossing >= pair_eps
+    after_ok = any(m >= pair_eps for m in after)
+    max_still_run_actual = _longest_still_run(pair, identical_eps)
+    still_ok = max_still_run_actual <= max_still_run
+
+    crossing_decoded = bool(
+        (samples[f - 1].get("w") or 0) > 0 and (samples[f].get("w") or 0) > 0
+    )
+    flip_neighbourhood = [i for i in (f - 1, f, f + 1) if 0 <= i < n]
+    decoder_ids_across_flip = [samples[i].get("decoderId") for i in flip_neighbourhood]
+
+    ok = bool(before_ok and across_ok and after_ok and crossing_decoded and still_ok)
+    reason = None
+    if not ok:
+        if not before_ok:
+            reason = "no motion before flip"
+        elif not across_ok:
+            reason = "frozen crossing"
+        elif not after_ok:
+            reason = "no motion after flip"
+        elif not crossing_decoded:
+            reason = "crossing frame not decoded"
+        else:
+            reason = "still run exceeds max across flip"
+
+    first_last = _mae(rois[0], rois[-1])
+    return {
+        "ok": ok,
+        "reason": reason,
+        "n": n,
+        "flipIndex": flip_index,
+        "beforeOk": before_ok,
+        "acrossOk": across_ok,
+        "afterOk": after_ok,
+        "maxStillRun": max_still_run_actual,
+        "crossingPairMae": crossing,
+        "crossingDecoded": crossing_decoded,
+        "decoderIdsAcrossFlip": decoder_ids_across_flip,
+        "firstLastMae": first_last,
+        "maxPairMae": max(pair) if pair else 0.0,
+        "pairEps": pair_eps,
+        "beforePairMae": before,
+        "afterPairMae": after,
     }
 
 
@@ -1136,6 +1269,7 @@ def score_restart_movie_from_observations(
     near_zero_max_s: float = 0.35,
     progression_wall_s: float = 0.25,
     progression_media_s: float = 0.20,
+    backward_reset_min_s: float = 1.0,
 ) -> dict[str, Any]:
     """Build one expected-movie restart row from continuous samples.
 
@@ -1145,7 +1279,11 @@ def score_restart_movie_from_observations(
     on ``sceneHash >= slide_min_hash`` (a decoder merely continuing onto the
     target slide from an earlier one does not count), then require spaced
     progression and at least one sample on ``sceneHash >= slide_min_hash`` with
-    decoded width.
+    decoded width. The near-zero decoder must also be a genuine restart — it
+    either first appears at/after the boundary, or was observed pre-boundary
+    with a clock clearly above ``near_zero_max_s`` before resetting — so a
+    decoder that merely happened to be near-zero while continuing across the
+    boundary does not pass.
     """
     rows: list[dict[str, Any]] = []
     for raw in observations:
@@ -1200,12 +1338,40 @@ def score_restart_movie_from_observations(
         if hit is not None:
             candidates.append((dec_id, hit, series))
 
-    # Prefer an identified decoder that both near-zeros and progresses; a stalled candidate
-    # appearing first must not mask a genuine restart in another decoder.
-    chosen = next(
-        ((d, h, s) for d, h, s in candidates if d is not None and _first_progression(s, h)),
-        None,
-    ) or next(iter(candidates), None)
+    def _pre_boundary_rows(dec_id: object) -> list[dict[str, Any]]:
+        return [
+            r
+            for r in by_dec.get(dec_id, [])
+            if (_hash_num(r.get("sceneHash")) or -1) < slide_min_hash
+        ]
+
+    def _first_seen_at_boundary(dec_id: object) -> bool:
+        return dec_id is not None and len(_pre_boundary_rows(dec_id)) == 0
+
+    def _backward_reset(dec_id: object) -> bool:
+        return dec_id is not None and any(
+            float(r["t"]) > backward_reset_min_s for r in _pre_boundary_rows(dec_id)
+        )
+
+    def _genuine(dec_id: object) -> bool:
+        return _first_seen_at_boundary(dec_id) or _backward_reset(dec_id)
+
+    # Prefer an identified, genuinely-restarting decoder that both near-zeros and
+    # progresses; a stalled candidate appearing first must not mask a genuine
+    # restart in another decoder, and a decoder that merely continued across the
+    # boundary near-zero (never reset) must not masquerade as one either.
+    chosen = (
+        next(
+            (
+                (d, h, s)
+                for d, h, s in candidates
+                if d is not None and _genuine(d) and _first_progression(s, h)
+            ),
+            None,
+        )
+        or next(((d, h, s) for d, h, s in candidates if d is not None and _genuine(d)), None)
+        or next(iter(candidates), None)
+    )
     chosen_id: object | None = chosen[0] if chosen else None
     near_zero_row: dict[str, Any] | None = chosen[1] if chosen else None
     series = list(chosen[2]) if chosen else []
@@ -1235,6 +1401,9 @@ def score_restart_movie_from_observations(
         with_w = [r for r in slide3_series if (r.get("w") or 0) > 0]
         earliest_slide3 = min(with_w or slide3_series, key=lambda r: float(r["t"]))
 
+    first_seen_at_boundary = _first_seen_at_boundary(chosen_id)
+    backward_reset = _backward_reset(chosen_id)
+
     ok = bool(
         len(slide3_series) >= 1
         and near_zero
@@ -1242,10 +1411,13 @@ def score_restart_movie_from_observations(
         and decoded
         and near_zero_row is not None
         and (near_zero_row.get("w") or 0) > 0
+        and (first_seen_at_boundary or backward_reset)
     )
     return {
         "slide3ObsN": len(slide3_series),
         "earliest": earliest_slide3,
+        "firstSeenAtBoundary": first_seen_at_boundary,
+        "backwardReset": backward_reset,
         "nearZeroObs": near_zero_row,
         "restartDecoderId": chosen_id,
         "nearZeroAtBoundary": near_zero,
