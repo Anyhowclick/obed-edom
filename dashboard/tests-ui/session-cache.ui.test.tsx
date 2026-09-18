@@ -5,7 +5,6 @@ import { makeJob } from "./fakes/doc";
 import { renderMapsTab } from "./renderMapsTab";
 
 beforeEach(() => {
-  vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:session");
   vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
 });
@@ -56,6 +55,9 @@ describe("session + cache overlay", () => {
     });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Load session + cache…" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Load" }));
     });
 
     const input = document.querySelector('input[accept=".obedmaps,.zip,application/zip"]') as HTMLInputElement;

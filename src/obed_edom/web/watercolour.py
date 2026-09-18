@@ -444,6 +444,34 @@ def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> di
     return {**updated, "churchId": church_id}
 
 
+@router.post("/{job_id}/export")
+def export_watercolour_job(job_id: str, export_dir: str = Form("")) -> dict:
+    job = _runner().get(job_id)
+    if not job or job.feature != "watercolour":
+        raise HTTPException(404, "Unknown Watercolour job")
+    if job.status == "running" or job.status == "queued":
+        raise HTTPException(409, "Watercolour job is still running")
+    result = dict(job.result or {})
+    rows = [row for row in result.get("items") or [] if row.get("status") == "done" and row.get("result")]
+    if not rows:
+        raise HTTPException(400, "No Watercolour results are available")
+    if export_dir.strip():
+        try:
+            result["exportDir"] = str(validate_export_dir(export_dir))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    else:
+        result.pop("exportDir", None)
+    updated = _runner().update_result(job_id, result)
+    job = updated or _runner().get(job_id)
+    if not job:
+        raise HTTPException(404, "Unknown Watercolour job")
+    results = Path(str((job.result or {}).get("resultDir") or _job_root(job_id) / "results"))
+    exported = _export_done_results(job, results, list((job.result or {}).get("items") or []))
+    final = _runner().update_result(job_id, {**(job.result or {}), "exportedResults": exported})
+    return _runner().public_dict(final or job)
+
+
 def _job_root(job_id: str) -> Path:
     job = _runner().get(job_id)
     output_dir = (job.result or {}).get("outputDir") if job else None

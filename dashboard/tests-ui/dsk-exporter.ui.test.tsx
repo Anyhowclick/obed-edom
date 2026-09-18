@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DskExporter } from "../src/tabs/dsk/DskExporter";
-import { chooseKeynote, startDskExport, applyDskExport, pollJob } from "../src/api";
+import { chooseFolder, chooseKeynote, startDskExport, applyDskExport, pollJob } from "../src/api";
 import type { Job } from "../src/api";
 
 const reviewJob: Job = {
@@ -15,35 +15,7 @@ const reviewJob: Job = {
     path: "/tmp/deck.key",
     isStageDeck: true,
     isFwDeck: false,
-    pages: [
-      {
-        slide: 1,
-        category: "image",
-        buildCount: 0,
-        movieCount: 0,
-        isText: false,
-        needsClip: false,
-        decision: { slide: 1, include: true, action: "stage", anchor: "auto", keepSide: false, clip: null },
-      },
-      {
-        slide: 2,
-        category: "movie",
-        buildCount: 0,
-        movieCount: 1,
-        isText: false,
-        needsClip: true,
-        decision: { slide: 2, include: true, action: "clip", anchor: "auto", keepSide: false, clip: null },
-      },
-      {
-        slide: 3,
-        category: "mixed",
-        buildCount: 1,
-        movieCount: 1,
-        isText: false,
-        needsClip: true,
-        decision: { slide: 3, include: true, action: "clip", anchor: "auto", keepSide: false, clip: "/tmp/deck.003.mov" },
-      },
-    ],
+    pages: [],
     skipped: [],
   },
   createdAt: 0,
@@ -69,62 +41,65 @@ vi.mock("../src/api", async (importOriginal) => {
   return {
     ...actual,
     chooseKeynote: vi.fn(async () => ({ path: "/tmp/deck.key", name: "deck.key" })),
+    chooseFolder: vi.fn(async () => ({ path: "/tmp/exports", name: "exports" })),
     startDskExport: vi.fn(async () => reviewJob),
     applyDskExport: vi.fn(async () => doneJob),
     pollJob: vi.fn(async (_id, onTick) => {
-      onTick(reviewJob);
-      return reviewJob;
+      const next = vi.mocked(applyDskExport).mock.calls.length ? doneJob : reviewJob;
+      onTick(next);
+      return next;
     }),
   };
 });
 
-async function proposeReview() {
+beforeEach(() => {
+  vi.mocked(startDskExport).mockReset();
+  vi.mocked(applyDskExport).mockReset();
+  vi.mocked(pollJob).mockReset();
+  vi.mocked(chooseFolder).mockReset();
+  vi.mocked(startDskExport).mockResolvedValue(reviewJob);
+  vi.mocked(applyDskExport).mockResolvedValue(doneJob);
+  vi.mocked(chooseFolder).mockResolvedValue({ path: "/tmp/exports", name: "exports" });
+  vi.mocked(pollJob).mockImplementation(async (_id, onTick) => {
+    const next = vi.mocked(applyDskExport).mock.calls.length ? doneJob : reviewJob;
+    onTick(next);
+    return next;
+  });
+});
+
+async function exportOnce() {
   render(<DskExporter />);
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Choose on this Mac" }));
   });
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Propose" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
   });
 }
 
-describe("DskExporter review table", () => {
-  it("shows Output per slide: stage PNG or clip", async () => {
-    await proposeReview();
-
-    const rows = screen.getAllByRole("row").slice(1); // skip header
-    expect(rows[0]).toHaveTextContent("stage PNG(s)");
-    expect(rows[1]).toHaveTextContent("clip (.mov)");
-    expect(rows[2]).toHaveTextContent("clip (.mov)");
-  });
-});
-
-describe("DskExporter done summary", () => {
-  it("shows counts and the interleaved sequence order", async () => {
+describe("DskExporter", () => {
+  it("exports without a propose table", async () => {
     vi.mocked(chooseKeynote);
     vi.mocked(startDskExport);
-    await proposeReview();
+    await exportOnce();
 
-    vi.mocked(pollJob).mockImplementationOnce(async (_id, onTick) => {
-      onTick(doneJob);
-      return doneJob;
+    expect(chooseFolder).toHaveBeenCalledWith("DSK workspace", "/tmp");
+    expect(startDskExport).toHaveBeenCalledWith("/tmp/deck.key", {
+      slides: undefined,
+      exportDir: "/tmp/exports",
     });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Export" }));
-    });
-
+    expect(screen.queryByRole("columnheader", { name: "Category" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Propose" })).not.toBeInTheDocument();
     expect(applyDskExport).toHaveBeenCalledWith("job-1");
     expect(screen.getByText(/Wrote \/tmp\/out — 1 PNG\(s\), 2 clip\(s\)/)).toBeInTheDocument();
-
-    const items = screen.getAllByRole("listitem");
-    expect(items.map((el) => el.textContent)).toEqual([
+    expect(screen.getAllByRole("listitem").map((el) => el.textContent)).toEqual([
       "deck.001.00.png",
       "deck.002.mov",
       "deck.003.mov",
     ]);
   });
 
-  it("renders counts from an already-completed job without traversing Propose/Export", async () => {
+  it("renders counts from an already-completed job without a second apply", async () => {
     vi.mocked(startDskExport).mockImplementationOnce(async () => doneJob);
     vi.mocked(pollJob).mockImplementationOnce(async (_id, onTick) => {
       onTick(doneJob);
@@ -136,10 +111,26 @@ describe("DskExporter done summary", () => {
       fireEvent.click(screen.getByRole("button", { name: "Choose on this Mac" }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Propose" }));
+      fireEvent.click(screen.getByRole("button", { name: "Export" }));
     });
 
     expect(applyDskExport).not.toHaveBeenCalled();
     expect(screen.getByText(/Wrote \/tmp\/out — 1 PNG\(s\), 2 clip\(s\)/)).toBeInTheDocument();
+  });
+
+  it("does not start an export when the folder picker is cancelled", async () => {
+    vi.mocked(chooseFolder).mockRejectedValueOnce(new Error("Cancelled"));
+
+    render(<DskExporter />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Choose on this Mac" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    });
+
+    expect(startDskExport).not.toHaveBeenCalled();
+    expect(applyDskExport).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Wrote/)).not.toBeInTheDocument();
   });
 });

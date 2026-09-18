@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   addWatercolourToMap,
+  chooseFolder,
+  exportWatercolour,
   fetchWatercolourOriginal,
   fetchWatercolourSpec,
   listJobs,
+  reveal,
   watercolourDownloadUrl,
   watercolourImageUrl,
   type Job,
@@ -36,12 +39,14 @@ export function WatercolourResultView({
   onError,
   onEdit,
   onRename,
+  onExported,
 }: {
   job: Job;
   onOpen: (src: string) => void;
   onError: (message: string | null) => void;
   onEdit?: (payload: { files: File[]; masks: Record<string, unknown>; transparent: boolean; wash: number; ink: number }) => void;
   onRename?: (id: string, name: string) => Promise<Job>;
+  onExported?: (job: Job) => void;
 }) {
   const [mapJobs, setMapJobs] = useState<Job[]>([]);
   const [target, setTarget] = useState("");
@@ -70,6 +75,18 @@ export function WatercolourResultView({
       await addWatercolourToMap(job.id, item.id, mapsJobId, slideId);
       onError(null);
       setAdded(true);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function exportBatch() {
+    try {
+      const chosen = await chooseFolder("Export watercolours");
+      const updated = await exportWatercolour(job.id, chosen.path);
+      onError(null);
+      onExported?.(updated);
+      await reveal(chosen.path);
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));
     }
@@ -110,6 +127,9 @@ export function WatercolourResultView({
       {onRename && <JobName job={job} onRename={onRename} className="note" />}
       {hasDone && (
         <div className="actions">
+          <button className="btn" type="button" onClick={() => void exportBatch()}>
+            Export
+          </button>
           <a className="btn secondary" href={watercolourDownloadUrl(job.id)}>
             Download batch
           </a>

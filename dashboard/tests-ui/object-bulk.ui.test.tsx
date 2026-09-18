@@ -1,6 +1,6 @@
 import { act, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeDoc, makeJob, makeSlide } from "./fakes/doc";
 import { renderMapsTab } from "./renderMapsTab";
@@ -14,10 +14,6 @@ const pin = (id: string, name: string, overrides: Record<string, unknown> = {}) 
   color: "#c44a42",
   size: 28,
   ...overrides,
-});
-
-beforeEach(() => {
-  vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -79,6 +75,9 @@ describe("object bulk actions", () => {
     await selectNamed("Alpha");
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Delete selected objects" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     });
     expect(screen.queryByRole("group", { name: "Paste destinations" })).not.toBeInTheDocument();
   });

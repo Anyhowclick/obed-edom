@@ -158,6 +158,7 @@ export const MAPS_INSPECTOR_KEY = "obed-edom.maps.inspector";
 export const MAPS_PICK_MODE_KEY = "obed-edom.maps.pickMode";
 export const LW_TEMPLATE_KEY = "obed-edom.generate.lwTemplate";
 export const DSK_TEMPLATE_KEY = "obed-edom.generate.dskTemplate";
+export const DSK_WORKSPACE_KEY = "obed-edom.dsk.workspace";
 
 export type StoredFile = { path: string; name: string };
 
