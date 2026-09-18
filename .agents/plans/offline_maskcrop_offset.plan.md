@@ -23,9 +23,14 @@ todos:
       run_offline_write -> _patch_offline_slides -> patch_deck_geometry -> _slide_edits, mirroring
       mask_crop. Default OFF. Tests: predicate, transform gating (offset written only under the
       flag, refused under origin-only), end-to-end convert-under-flag, flag helper.
-    status: pending
+    status: completed
   - id: live-experiment
     content: >-
+      DONE 2026-09-18 (PASS). Subset 4,57,70,123, text off: masked fallback 6->1 (5 offset crops
+      converted; the 1 left is rotated/cross-member). Frame verify image Δ0.48px PASS. PIXEL check vs
+      the AppleScript oracle subset_off_validate_CG: slides 4 & 70 pixel-identical; 57 & 123 bands
+      cross-correlate to best-fit shift <=1px (SAD 1.1-4.2/255) = sub-pixel edge resampling, NOT a
+      wrong region. Redistribution SOUND. Evidence: run_offsetcrop.log + diff crops. Original design:
       OWNER-GATED. The unproven bit is redistribution, so the bar is a PIXEL check. Subset
       4,57,70,123 (has the 6 masked-media offset crops the middle-anchor run refused);
       `OBED_OFFLINE_WRITE=verify OBED_OFFLINE_MASKCROP=on OBED_OFFLINE_MASKCROP_OFFSET=on
@@ -35,7 +40,7 @@ todos:
       correctly) — PASS = no region differs beyond anti-alias; a differing region = wrong crop =
       redistribution unsound. Kill: any wrong region -> keep offset refused (revert to
       origin-only). Runbook in scratchpad `offset_crop_experiment_runbook.md`.
-    status: pending
+    status: completed
   - id: promote-if-validated
     content: >-
       If the pixel check PASSES, promote like the text arm: fold `_is_axis_aligned_crop` into
