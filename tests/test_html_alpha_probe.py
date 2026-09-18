@@ -669,8 +669,11 @@ def test_restart_boundary_rejects_preboundary_only():
     assert scored3["verdict"] == "pass"
 
 
-def test_restart_movie_picks_fresh_decoder_not_continue_clock():
-    """Same asset key: remount continue (t=14) must not hide fresh restart (t≈0)."""
+def test_restart_movie_rejects_preboundary_near_zero_that_continues():
+    """A decoder near-zero at an earlier scene that merely continues onto the
+    target slide (clock already far past near_zero_max_s once on-slide) is a
+    continue-clock, not a restart — it must not masquerade as one (null control).
+    """
     from obed_edom.html_alpha_probe import score_restart_movie_from_observations
 
     obs = [
@@ -678,20 +681,17 @@ def test_restart_movie_picks_fresh_decoder_not_continue_clock():
         {"t": 14.0, "w": 1920, "captureOffsetS": 4.0, "sceneHash": "#4", "decoderId": 1},
         {"t": 14.5, "w": 1920, "captureOffsetS": 4.5, "sceneHash": "#5", "decoderId": 1},
         {"t": 15.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#6", "decoderId": 1},
-        # Fresh decoder created for restart path.
+        # Decoder near-zero at an earlier scene (#4/#5), not the target slide (#6):
+        # it merely continues onto #6 with a clock already past near_zero_max_s.
         {"t": 0.02, "w": 1920, "captureOffsetS": 4.1, "sceneHash": "#4", "decoderId": 3},
         {"t": 0.30, "w": 1920, "captureOffsetS": 4.4, "sceneHash": "#5", "decoderId": 3},
         {"t": 1.90, "w": 1920, "captureOffsetS": 6.1, "sceneHash": "#6", "decoderId": 3},
-        # Null-width duplicate of the fresh decoder must not win.
+        # Null-width duplicate of the pre-boundary near-zero sample.
         {"t": 0.02, "w": None, "captureOffsetS": 4.1, "sceneHash": "#4", "decoderId": 3},
     ]
     scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
-    assert scored["restartDecoderId"] == 3
-    assert scored["nearZeroAtBoundary"] is True
-    assert scored["progressedAfterRestart"] is True
-    assert scored["decodedWidthAtBoundary"] is True
-    assert scored["ok"] is True
-    assert scored["slide3ObsN"] >= 1
+    assert scored["nearZeroAtBoundary"] is False
+    assert scored["ok"] is False
 
     # Sub-ms duplicate samples do not count as progression.
     scored_fast = score_restart_movie_from_observations(
@@ -704,5 +704,29 @@ def test_restart_movie_picks_fresh_decoder_not_continue_clock():
     assert scored_fast["nearZeroAtBoundary"] is True
     assert scored_fast["progressedAfterRestart"] is False
     assert scored_fast["ok"] is False
+
+
+def test_restart_movie_accepts_near_zero_observed_on_boundary_slide():
+    """A decoder whose near-zero clock is observed while already on the target
+    slide, then progresses, is a genuine restart (positive control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        # Continued remount overlays from slide 1/2 — must not be picked.
+        {"t": 14.0, "w": 1920, "captureOffsetS": 4.0, "sceneHash": "#4", "decoderId": 1},
+        {"t": 14.5, "w": 1920, "captureOffsetS": 4.5, "sceneHash": "#5", "decoderId": 1},
+        {"t": 15.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#6", "decoderId": 1},
+        # Fresh decoder: near-zero clock observed already on the target slide.
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 3},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 3},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 3
+    assert scored["nearZeroAtBoundary"] is True
+    assert scored["progressedAfterRestart"] is True
+    assert scored["decodedWidthAtBoundary"] is True
+    assert scored["ok"] is True
+    assert scored["slide3ObsN"] >= 1
 
 

@@ -41,7 +41,6 @@ from p2_recovery_html_adversarial import (  # noqa: E402
     PROGRESSION_MEDIA_S,
     PROGRESSION_WALL_S,
     SLIDE3_MIN_HASH,
-    _advance_hash,
     _advance_until_hash_at_least_sampling,
     _annotate_sample,
     _dense_after_click,
@@ -355,23 +354,36 @@ async def _run() -> dict:
             pre_match = _composed_vs_decoder_mae(pre_roi, d0)
 
         # Dense capture through Magic Move 1→2 — composed frames, not just decoder clocks.
+        # Start the transition, then sample straight through it. _advance_hash blocks polling
+        # until the hash flips (pushing the window past the transition), and ChromeCdp has no
+        # concurrent recv, so we fire the key + one remount nudge, capture, and confirm after.
         await asyncio.sleep(1.5)
         click_wall_a = time.monotonic()
-        method_a = await _advance_hash(chrome, prefer="arrow", wait_s=3.0)
-        # Keep remounting through the dense window — scene changes can cover/detach again.
-        await chrome.evaluate(
-            "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.remountAll && "
-            "window.__OBED_P2_PRESERVE__.remountAll()"
-        )
-        await asyncio.sleep(0.35)
-        dense_a, _frames_a, decoder_during = await _dense_after_click(
-            chrome, run_dir, "mm12", click_wall_a, sample_decoder=True
-        )
-        hash2 = _norm_hash(
+        hash0_a = _norm_hash(
             await chrome.evaluate(
                 "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
             )
         )
+        await chrome.key("ArrowRight", "ArrowRight", 39)
+        await chrome.evaluate(
+            "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.remountAll && "
+            "window.__OBED_P2_PRESERVE__.remountAll()"
+        )
+        dense_a, _frames_a, decoder_during = await _dense_after_click(
+            chrome, run_dir, "mm12", click_wall_a, sample_decoder=True
+        )
+        hash2 = hash0_a
+        _flip_deadline = time.monotonic() + 1.5
+        while time.monotonic() < _flip_deadline:
+            hash2 = _norm_hash(
+                await chrome.evaluate(
+                    "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+                )
+            )
+            if hash2 != hash0_a:
+                break
+            await asyncio.sleep(0.05)
+        method_a = f"arrow:{hash0_a}->{hash2}"
         mid_shot = await chrome.screenshot()
         Image.fromarray(mid_shot).save(run_dir / "after-1to2.png")
         mid_roi = _crop_movie_roi(mid_shot)

@@ -1141,9 +1141,11 @@ def score_restart_movie_from_observations(
 
     Observations are ``{t|currentTime, w|videoWidth, captureOffsetS, sceneHash,
     decoderId?}``. Continued remount clocks for the same asset key must not hide
-    a fresh decoder: we pick the decoder that shows a near-zero clock, then
-    require spaced progression and at least one sample on
-    ``sceneHash >= slide_min_hash`` with decoded width.
+    a fresh decoder: we pick the decoder whose near-zero clock is itself observed
+    on ``sceneHash >= slide_min_hash`` (a decoder merely continuing onto the
+    target slide from an earlier one does not count), then require spaced
+    progression and at least one sample on ``sceneHash >= slide_min_hash`` with
+    decoded width.
     """
     rows: list[dict[str, Any]] = []
     for raw in observations:
@@ -1182,7 +1184,9 @@ def score_restart_movie_from_observations(
             (
                 r
                 for r in series_sorted
-                if float(r["t"]) < near_zero_max_s and (r.get("w") or 0) > 0
+                if float(r["t"]) < near_zero_max_s
+                and (r.get("w") or 0) > 0
+                and (_hash_num(r.get("sceneHash")) or -1) >= slide_min_hash
             ),
             None,
         )

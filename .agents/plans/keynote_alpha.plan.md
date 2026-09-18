@@ -314,6 +314,34 @@ P3 / DSK Exporter alpha stay off until these gates pass.
     `preserveGeneration` on clear. Samples:
     `p2-alpha/output/p2-recovery/html-decode-probe/`.
     Handover: `.agents/handovers/keynote-alpha-html-2026-09-17.md` (OPEN 1).
+14. **Owner findings 1–3 addressed; Codex-reviewed residuals (2026-09-18).** Live re-run on the
+    same adversarial `Minimal Alpha_DSK.key` export (source unchanged).
+    - **Restart gate (finding 1) — fixed offline.** Near-zero clock must be observed on
+      `sceneHash >= slide_min_hash`, not a pre-boundary decoder that merely continues; selection
+      prefers an identified decoder that both near-zeros and progresses (a stalled first candidate
+      no longer masks a genuine restart); id-less rows can no longer stitch a stalled + a continued
+      decoder into a pass. Null + positive + competing-candidate + id-less controls (34 tests).
+    - **Overlay (finding 2) — placement + layering fixed.** Remount restores the measured authored
+      rect (authored-footprint fallback for origin-only boxes), restores the authored z-index
+      instead of max z, appends to the top-level stage (no authored-parent drift), and the
+      hashchange remount listener self-removes after its own transition. Movies land at `109,795` /
+      `109,500`; the green translucent shape + black sentinel are visible; no max-z blanket, no
+      `0,0` pinning, no drift.
+    - **Through-MM capture (finding 3) — captures the cut.** Fire ArrowRight (no blocking wait) +
+      one remount nudge, dense-capture through the transition, confirm the hash flip after
+      (ChromeCdp has no concurrent recv). `visibleColourPatternThroughMagicMove` = **True**.
+    - **Live scorecard:** decode True, visibleColourPatternThroughMagicMove True, reachedSlide3
+      True, restartBoundaryPerMovie **inconclusive** (deliberate Start-Movie restart still unwired —
+      honest, not a false pass). `success=False` is only this line.
+    - **Codex L3 residuals (next implementation, not regressions):** (a) a detached `<video>`'s
+      stacking context is lost, so the remount still occludes the green shape where they overlap
+      (placement-correct, not fully composition-correct); (b) through-MM motion is not yet tied to
+      the actual hash-flip instant — continuously-playing bars could satisfy it via pre-nav motion +
+      late nav; a real fix needs per-frame hash inside the shared dense window (`_dense_after_click`
+      in `p2_recovery_html_adversarial.py`); (c) `score_visible_movie_motion` permits a mid-window
+      disappearance (45% changing pairs); (d) the self-removing listener can still remount once on
+      an unrelated later transition if detach runs after that transition's `hashchange`. Samples:
+      `output/p2-recovery/html-decode-probe/`. Review: Codex gpt-5.6-sol, 2026-09-18.
 
 **Stop line:** native UI transparent ProRes is proven for Genesis **and** Alpha_DSK
 mixed clips 6–8. On Minimal Alpha_DSK HTML, PDF bg-strip restores empty-canvas
@@ -322,9 +350,11 @@ Disposable H.264 decodes; remount shows post-transition colour motion — but re
 scoring, overlay composition, and during-transition capture are still red under
 owner review. **Do not wire P3.**
 
-**Next (OPEN 1):** preserve authored movie placement / layering / lifetime; restart
-tied to Start Movie on the target boundary; capture that covers the Magic Move
-itself — see handover.
+**Next (OPEN 2, 2026-09-18):** owner findings 1–3 are addressed (item 14). Remaining, per Codex
+L3: tie through-MM motion to the actual hash flip (per-frame hash in the shared dense window);
+true stacking-context restoration so the remount stops occluding overlapping authored artwork;
+and wire the deliberate Start-Movie restart on the target boundary (still the only red line) —
+see handover.
 
 ## P2.4 — native PNG mid-frame probe (2026-09-16) — **no intermediate frames**
 

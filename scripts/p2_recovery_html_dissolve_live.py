@@ -510,6 +510,8 @@ PRESERVE_SCRIPT = r"""
       }
       v.__obedStyle = v.getAttribute('style') || '';
       v.__obedId = v.id || '';
+      const inlineZ = v.style.zIndex;
+      v.__obedZ = (inlineZ !== '' && inlineZ != null) ? inlineZ : getComputedStyle(v).zIndex;
     } catch (e) {}
     note(why, {
       key: key, elId: v.__obedElId, t: v.currentTime, queue: q.length,
@@ -543,10 +545,14 @@ PRESERVE_SCRIPT = r"""
     delays.forEach(function(ms) {
       setTimeout(function(){ tryRemount(v, epoch); }, ms);
     });
-    window.addEventListener('hashchange', function onHash() {
+    // Bridge the immediate transition only — remove after the first hashchange so a
+    // preserved movie does not keep getting re-overlaid on later, unrelated scenes.
+    function onHash() {
+      window.removeEventListener('hashchange', onHash);
       setTimeout(function(){ tryRemount(v, epoch); }, 80);
       setTimeout(function(){ tryRemount(v, epoch); }, 400);
-    });
+    }
+    window.addEventListener('hashchange', onHash);
   }
 
   function tryRemount(v, epoch) {
@@ -555,34 +561,28 @@ PRESERVE_SCRIPT = r"""
       note('remount-stale', {elId: v.__obedElId, epoch: epoch, current: remountEpoch});
       return;
     }
-    if (v.__obedRemountEpoch === -1) return;
+    if (v.__obedRemountEpoch === -1 || v.ended) return;
+    if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
+    let box = v.__obedRect || {};
+    // Detach can leave getBoundingClientRect at 0,0 relative to a parent that is already gone.
+    // Fall back to the authored movie footprint (its real on-screen slot) — never overlay at 0,0.
+    if (!(box.w > 1 && box.h > 1) || (Math.abs(box.x) < 2 && Math.abs(box.y) < 2)) {
+      if (!window.__OBED_MOVIE_FOOTPRINTS__) {
+        window.__OBED_MOVIE_FOOTPRINTS__ = [
+          {x: 109, y: 795, w: 952, h: 268},
+          {x: 109, y: 500, w: 663, h: 186}
+        ];
+      }
+      const fp = window.__OBED_MOVIE_FOOTPRINTS__[((v.__obedElId || 1) - 1) % window.__OBED_MOVIE_FOOTPRINTS__.length];
+      box = {x: fp.x, y: fp.y, w: (box.w > 1 ? box.w : fp.w), h: (box.h > 1 ? box.h : fp.h)};
+      note('remount-footprint-rect', {elId: v.__obedElId, rect: box});
+    }
+    v.__obedRect = box;
     const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
     if (!stage) {
       note('remount-no-stage', {elId: v.__obedElId});
       return;
     }
-    if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
-    let box = v.__obedRect || {};
-    // Style-derived boxes are often left/top 0 relative to a parent that is already
-    // gone at detach time. Map origin-only boxes onto known movie footprints.
-    if (!(box.w > 1 && box.h > 1) || (Math.abs(box.x) < 2 && Math.abs(box.y) < 2)) {
-      if (!window.__OBED_REMOUNT_SLOTS__) {
-        window.__OBED_REMOUNT_SLOTS__ = [
-          {x: 109, y: 795, w: 952, h: 268},
-          {x: 109, y: 500, w: 663, h: 186}
-        ];
-      }
-      const idx = ((v.__obedElId || 1) - 1) % window.__OBED_REMOUNT_SLOTS__.length;
-      const slot = window.__OBED_REMOUNT_SLOTS__[idx];
-      box = {
-        x: slot.x,
-        y: slot.y,
-        w: (box.w > 1 ? box.w : slot.w),
-        h: (box.h > 1 ? box.h : slot.h)
-      };
-      note('remount-fallback-rect', {elId: v.__obedElId, rect: box});
-    }
-    v.__obedRect = box;
     try {
       v.style.position = 'absolute';
       v.style.left = box.x + 'px';
@@ -592,10 +592,15 @@ PRESERVE_SCRIPT = r"""
       v.style.visibility = 'visible';
       v.style.display = 'block';
       v.style.opacity = '1';
-      v.style.zIndex = '2147483000';
+      // Restore the authored layer instead of forcing a max z-index over everything.
+      if (/^-?\d+$/.test(String(v.__obedZ))) {
+        v.style.zIndex = String(v.__obedZ);
+      } else {
+        v.style.removeProperty('z-index');
+      }
       v.style.pointerEvents = 'none';
       if (v.__obedId && !document.getElementById(v.__obedId)) v.id = v.__obedId;
-      if (!document.contains(v) || v.parentElement !== stage) stage.appendChild(v);
+      if (!document.contains(v) || v.parentNode !== stage) stage.appendChild(v);
       if (v.paused && !v.ended) {
         const p = v.play();
         if (p && p.catch) p.catch(function(){});
@@ -604,6 +609,7 @@ PRESERVE_SCRIPT = r"""
         elId: v.__obedElId,
         key: assetKey(v.currentSrc || v.src || ''),
         rect: box,
+        z: v.__obedZ,
         videoWidth: v.videoWidth,
         currentTime: v.currentTime,
         inDocument: document.contains(v)
