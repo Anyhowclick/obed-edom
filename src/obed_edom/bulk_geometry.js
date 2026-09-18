@@ -29,7 +29,12 @@ function lenOf(v) {
 function xyFrom(p) {
   if (p == null) return null;
   if (lenOf(p) >= 2) {
-    return [num(p[0], 0), num(p[1], 0)];
+    // Reject NaN coords (return null) rather than coercing to 0: a silent [0,0] would be
+    // an untrustworthy zero seed. null routes to the per-item positionOf, which throws and
+    // records the failure if the live read is also unreadable.
+    const ax = Number(p[0]);
+    const ay = Number(p[1]);
+    return isNaN(ax) || isNaN(ay) ? null : [ax, ay];
   }
   let x = NaN;
   let y = NaN;
@@ -50,7 +55,11 @@ function xyFrom(p) {
 function positionOf(obj) {
   const pair = xyFrom(obj.position());
   if (pair) return pair;
-  return [0, 0];
+  // A null/malformed point is an unreadable position. THROW so the caller's
+  // withItemFallback records an `item:i` error (and still returns its [0,0]
+  // fallback -- output unchanged). A silent [0,0] here would leave an
+  // untrustworthy zero-position seed with no error trail for Python to drop.
+  throw new Error("position unreadable (null/malformed point)");
 }
 
 function widthOf(obj) {
