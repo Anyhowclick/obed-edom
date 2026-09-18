@@ -51,6 +51,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     _apply_geom_fields,
     _group_child_scale_ops,
     _group_fields,
+    _is_axis_aligned_crop,
     _is_identity_mask,
     _is_origin_anchored_mask,
     _masked_media_fields,
@@ -1072,6 +1073,48 @@ def test_is_origin_anchored_mask_rejects_degenerate():
     assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.3, 0.15, 80.0, 40.0, 0.0) is True
 
 
+def test_is_axis_aligned_crop_predicate():
+    # Superset of origin: an OFFSET mask fully inside the frame is accepted.
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 20.0, 10.0, 80.0, 40.0, 0.0) is True
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 0.0) is True   # origin too
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 40.0, 20.0, 80.0, 40.0, 0.0) is True  # flush to edge
+    # Refused: mask spills past the frame (offset + size > frame).
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 60.0, 10.0, 80.0, 40.0, 0.0) is False  # 60+80 > 120
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, -5.0, 10.0, 80.0, 40.0, 0.0) is False  # negative offset
+    # Refused: rotation on frame or mask; degenerate/non-finite dims.
+    assert _is_axis_aligned_crop(120.0, 60.0, 90.0, 20.0, 10.0, 80.0, 40.0, 0.0) is False
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 20.0, 10.0, 80.0, 40.0, 12.0) is False
+    assert _is_axis_aligned_crop(float("nan"), 60.0, 0.0, 20.0, 10.0, 80.0, 40.0, 0.0) is False
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 20.0, 10.0, 0.0, 40.0, 0.0) is False
+
+
+def test_masked_media_fields_offset_crop_gated_by_offset_flag():
+    # OFFSET crop, anisotropic target: refused under mask_crop-only (origin flag), written
+    # under allow_offset_crop. mask@(20,10,80,40), image@(300,100,120,60),
+    # target (400,200,160,120) => sx=2, sy=3; image pos = target - mask_pos*s.
+    objects = {
+        "231": {"_pbtype": "TSD.MaskArchive", **_mask_super(20, 10, 80, 40)},
+        "230": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "231"},
+                "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}},
+    }
+    rec = {"id": "230", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0}
+    reported = [300.0, 100.0, 120.0, 60.0]
+    # origin flag alone refuses an offset crop.
+    origin_ops, _m, origin_ok = _masked_media_fields(
+        rec, objects["230"], objects, spec, reported, allow_origin_crop=True)
+    assert origin_ok is False and origin_ops == []
+    # offset flag writes it via the same exact transform.
+    on_ops, on_mask, on_ok = _masked_media_fields(
+        rec, objects["230"], objects, spec, reported, allow_offset_crop=True)
+    assert on_ok is True and on_mask == "231"
+    f = dict(on_ops)
+    assert (f["231"]["pos_x"], f["231"]["pos_y"]) == pytest.approx((40.0, 30.0))  # mask_pos*s = (20*2,10*3)
+    assert (f["231"]["size_w"], f["231"]["size_h"]) == pytest.approx((160.0, 120.0))
+    assert (f["230"]["pos_x"], f["230"]["pos_y"]) == pytest.approx((360.0, 170.0))  # target - mask_pos*s
+    assert (f["230"]["size_w"], f["230"]["size_h"]) == pytest.approx((240.0, 180.0))  # frame * s
+
+
 def test_slide_edits_origin_crop_missed_off_written_on(tmp_path):
     # End-to-end through _slide_edits: an origin-crop image hard-misses masked-media with the
     # flag off, and is written (no miss) with mask_crop on. Offset crops stay refused either way.
@@ -1086,15 +1129,21 @@ def test_slide_edits_origin_crop_missed_off_written_on(tmp_path):
     assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
 
 
-def test_slide_edits_offset_crop_refused_even_with_maskcrop(tmp_path):
-    # An OFFSET crop (mask displaced) is not origin-anchored: refused even with mask_crop on
-    # (its crop redistribution is unproven offline). Deck untouched.
+def test_slide_edits_offset_crop_refused_under_maskcrop_written_under_offset_flag(tmp_path):
+    # An OFFSET crop (mask displaced) is not origin-anchored: refused with mask_crop alone
+    # (origin flag), but written under the opt-in offset_crop flag (same exact transform,
+    # redistribution pending live validation).
     deck = _build_origin_crop_deck(tmp_path / "offset.key", mask_xy=(5, 5))
     original = deck.read_bytes()
     specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
-    on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
-    assert on.missed == 1 and on.applied == 0 and on.missed_specs == specs
-    assert deck.read_bytes() == original
+    refused = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert refused.missed == 1 and refused.applied == 0 and refused.missed_specs == specs
+    assert deck.read_bytes() == original  # mask_crop alone leaves it byte-identical
+    on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False,
+                             mask_crop=True, offset_crop=True)[1]
+    assert on.applied and not on.refused and on.value_clean and set(on.edited_ids) == {"230", "231"}
+    after = _composed(deck)
+    assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
 
 
 def test_value_clean_allows_noop_edit_below_edit_count(deck):
