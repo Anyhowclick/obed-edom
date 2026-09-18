@@ -876,6 +876,12 @@ def _say_verify_report(
         overall = overall and status == "PASS"
         if say:
             say(f"{title}: {kind} max Δ{max_delta:.2f}px (n={n}) {status} @ {kind_tol}px")
+            if status == "FAIL" and _worst5:
+                worst = "; ".join(
+                    f"slide {w.get('slide')} ki{w.get('kindIndex')} Δ{float(w.get('delta', 0.0)):.1f}"
+                    for w in _worst5[:5]
+                )
+                say(f"{title}: {kind} worst: {worst}")
     if say:
         say(f"{title}: overall {'PASS' if overall else 'FAIL'}.")
     return overall
