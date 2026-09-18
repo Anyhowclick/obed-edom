@@ -99,7 +99,8 @@ import { highlightName, highlightedCountries, isAdmin1Loaded, loadAdmin0, loadAd
 import { stampOsm } from "../maps/stampOsm";
 import { SlidingSeg } from "../maps/SlidingSeg";
 import { StylePicker } from "../maps/StylePicker";
-import { MapsSaveConflictError, MapsSaveQueue, type MapsSaveStatus } from "../maps/saveQueue";
+import { MAPS_SAVE_IDLE_MS, MapsSaveConflictError, MapsSaveQueue, type MapsSaveStatus } from "../maps/saveQueue";
+import { loadMapsSaveStatus, writeMapsSaveStatus } from "../maps/saveStatusStore";
 import {
   CG_SHIFT_MAX,
   CG_W,
@@ -327,7 +328,7 @@ export function MapsTab() {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveConflict, setSaveConflict] = useState<{ paths: string[] } | null>(null);
-  const [saveStatus, setSaveStatus] = useState<MapsSaveStatus>("saved");
+  const [saveStatus, setSaveStatus] = useState<MapsSaveStatus>(() => loadMapsSaveStatus());
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeAudience, setActiveAudience] = useState<MapsAudience>("lw");
@@ -509,7 +510,10 @@ export function MapsTab() {
         setSaveConflict({ paths: conflict.paths });
       },
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
-      onStatus: (status) => setSaveStatus(status),
+      onStatus: (status) => {
+        setSaveStatus(status);
+        writeMapsSaveStatus(jobRef.current?.id ?? null, status);
+      },
     });
   }
 
@@ -779,7 +783,7 @@ export function MapsTab() {
       void saveQueue.current?.flush().catch(() => undefined);
     };
     if (immediate) run();
-    else saveTimer.current = window.setTimeout(run, 500);
+    else saveTimer.current = window.setTimeout(run, MAPS_SAVE_IDLE_MS);
   }
 
   async function persistCurrentState() {

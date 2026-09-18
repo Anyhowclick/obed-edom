@@ -17,6 +17,9 @@ export type MapsSaveQueueOptions = {
 
 export type MapsSaveStatus = "saved" | "saving" | "unsaved" | "paused" | "error";
 
+/** Idle wait before a background autosave. Immediate flushes still run on leave, export, and explicit commits. */
+export const MAPS_SAVE_IDLE_MS = 30_000;
+
 const copy = <T>(value: T): T => structuredClone(value);
 const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 

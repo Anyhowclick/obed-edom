@@ -1,6 +1,7 @@
 import { act, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMapsTab, tick } from "./renderMapsTab";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeCamera, makeDoc, makeJob, makeSlide } from "./fakes/doc";
 
@@ -31,7 +32,7 @@ describe("thumbnail token gating", () => {
       stateRevision: 3,
     });
 
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
     await tick(0);
     expect(screen.getByRole("alert")).toBeInTheDocument();
 

@@ -2,6 +2,7 @@ import { act, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MapsExportPlan } from "../src/api";
 import { flushMicrotasks, renderMapsTab, tick } from "./renderMapsTab";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeCamera, makeJob, makeSlide } from "./fakes/doc";
 
@@ -74,7 +75,7 @@ describe("export flow with credits toggled on", () => {
     await act(async () => {
       fireEvent.click(checkbox);
     });
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Export" }));
