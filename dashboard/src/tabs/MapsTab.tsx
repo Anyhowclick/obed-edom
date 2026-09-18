@@ -389,7 +389,7 @@ export function MapsTab() {
   const [exportDir, setExportDir] = useSessionPath("obed-edom.maps.exportDir");
   const defaultExportDir = useDefaultExportDir();
   const highlightColour = useHighlightColour();
-  const [sidePanels, setSidePanels] = useSessionToggle(MAPS_SIDE_PANELS_KEY, true);
+  const [sidePanels, setSidePanels] = useSessionToggle(MAPS_SIDE_PANELS_KEY, false);
   const [inspectorOpen, setInspectorOpen] = useSessionToggle(MAPS_INSPECTOR_KEY, true);
   const [pickRegions, setPickRegions] = useSessionToggle(MAPS_PICK_MODE_KEY, false);
   const [regionsLoading, setRegionsLoading] = useState(false);
