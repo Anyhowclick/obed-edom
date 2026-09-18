@@ -587,6 +587,7 @@ def _slide_edits(
     require_reconcile: bool = False,
     text_reposition: bool = False,
     mask_crop: bool = False,
+    admit_unlaid: bool = False,
 ) -> tuple[str | None, dict[str, dict], int, list[dict], list[str], str | None]:
     """Pure, no-I/O resolution of one slide's edits against an already-loaded deck.
 
@@ -708,13 +709,14 @@ def _slide_edits(
                 # the live anchor. And the box must be LAID OUT in the saved deck (naturalSize
                 # > 0 on both axes): the un-laid-out sentinel is re-derived from text on open
                 # and would discard a written frame. NB pass 1 zeroes naturalSize on every
-                # autosize box, so this laid-out gate refuses most boxes offline; loosening it
-                # to convert the zeroed majority is the owner-gated live experiment (the plan),
-                # not this write path.
+                # autosize box, so this laid-out gate refuses most boxes offline; the opt-in
+                # `admit_unlaid` arm (OBED_OFFLINE_TEXT_ADMIT_UNLAID) drops it to convert the
+                # zeroed majority for the owner-gated live experiment (the plan). Default keeps
+                # the box refused.
                 seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
                 nat_w, nat_h = _natural_size(obj)
                 laid_out = nat_w > 0.0 and nat_h > 0.0
-                if not text_reposition or not laid_out or not seed_ok:
+                if not text_reposition or (not laid_out and not admit_unlaid) or not seed_ok:
                     _miss("text-autosize")
                     continue
                 ops = _text_fields(rec, spec, rep, stored, position_only=True)
@@ -948,6 +950,7 @@ def patch_deck_geometry(
     extra_member_edits: dict[str, bytes] | None = None,
     text_reposition: bool = False,
     mask_crop: bool = False,
+    admit_unlaid: bool = False,
 ) -> dict[int, PatchResult]:
     """Patch every slide in ``specs_by_slide`` with exactly ONE zip rewrite.
 
@@ -978,6 +981,7 @@ def patch_deck_geometry(
             require_reconcile=require_reconcile,
             text_reposition=text_reposition,
             mask_crop=mask_crop,
+            admit_unlaid=admit_unlaid,
         )
         if not refuse_reason and target_member is not None and edits:
             owner = member_owner.get(target_member)
