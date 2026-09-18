@@ -226,10 +226,15 @@ def _extract_movie_layers(
             # marker — not layer identity or texture-set membership — is what
             # distinguishes a real poster swap from a same-sized background tween.
             name = o.get("name")
-            # Require the AUTHORED transition prefix, not a loose "magic-move"
-            # substring (Codex r2 F2: e.g. "not-a-magic-move-caption" must NOT
-            # match). Keynote names the Magic Move transition `apple:magic-move-*`.
-            if isinstance(name, str) and name.lower().startswith("apple:magic-move"):
+            # Require an AUTHORED Magic Move TRANSITION node: `type == "transition"`
+            # AND an `apple:magic-move-*` name — not a loose "magic-move" substring
+            # (Codex r2 F2: "not-a-magic-move-caption" must not match) and not a
+            # non-transition group that merely bears the name (Codex r3 F2).
+            if (
+                o.get("type") == "transition"
+                and isinstance(name, str)
+                and name.lower().startswith("apple:magic-move")
+            ):
                 in_mm = True
             if o.get("isVideoLayer"):
                 owner = _layer_identity(o)
@@ -278,8 +283,10 @@ def _derive_movie_texids(
     gate). Zero such candidates, or more than one, returns
     `{"decoderKey": null, "outgoing": [], "incoming": [], "warning": ...}` —
     NEVER a whole-deck union. Occurrence provenance (slide uuid + count) is
-    preserved so a pair repeated at several boundaries cannot masquerade as a
-    single unambiguous boundary.
+    preserved and EXPOSES a repeat; note the documented residual (contract doc):
+    the SAME `(from, to)` pair genuinely occurring at two distinct boundaries is
+    still accepted as one (the authored JSON carries no per-boundary tag to tell
+    it apart from redundant storage of one boundary). Not present on this deck.
 
     `outgoing`/`incoming` are exactly the crossfade `from`/`to` posters. No steady
     texture is folded in (Codex r2 F5): a footprint-sized steady cannot be proven
@@ -400,9 +407,11 @@ def _score_feed_engaged(
         `slot=='incoming'`, `decoderId==boundDecoderId`, the event's OWN
         `contextType=='2d'` (the incoming canvas itself, not an outgoing one), a
         non-null `canvasId` in `incoming`, and a KNOWN hash within
-        `[num(hash1), restart_min_hash)`. The upper bound excludes a draw at an
-        unrelated later hash or during the 2->3 restart; missing authorship,
-        canvas, hash, or a `geom` origin are all rejected (never pass by absence).
+        `[num(hash2), restart_min_hash)` — at/after the FLIP (hash2), strictly
+        after the pre-advance hash1, and before the 2->3 restart. This rejects a
+        pre-transition draw at hash1, an unrelated later hash, and restart work;
+        missing authorship, canvas, hash, or a `geom` origin are all rejected
+        (never pass by absence).
         Empirically today this is 0 (all draws were `outgoing`/skipped), so the
         finding stays RED — for a proven reason, failing closed.
 
@@ -431,6 +440,12 @@ def _score_feed_engaged(
 
     incoming_set = set(incoming)
     n1 = _hash_num(hash1)
+    n2 = _hash_num(hash2)
+    # Lower bound is the FLIP hash (hash2, the first post-advance scene), STRICTLY
+    # after hash1 — a draw at hash1 is pre-transition (hash1 is captured before the
+    # ArrowRight advance) and must not count (Codex r3 F1). Fall back to n1+1 if
+    # hash2 is unparseable so the bound is never looser than "after hash1".
+    lower = n2 if n2 is not None else (n1 + 1 if n1 is not None else None)
     # restart_min_hash may be a bare int (SLIDE3_MIN_HASH) or a "#N" hash string.
     n_restart = restart_min_hash if isinstance(restart_min_hash, int) else _hash_num(restart_min_hash)
     draw_hits: list[dict] = []
@@ -457,7 +472,7 @@ def _score_feed_engaged(
             hn = _hash_num(d.get("sceneHash"))
         if hn is None:
             continue
-        if n1 is not None and hn < n1:
+        if lower is not None and hn < lower:
             continue
         if n_restart is not None and hn >= n_restart:
             continue

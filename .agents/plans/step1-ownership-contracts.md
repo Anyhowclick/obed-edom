@@ -8,6 +8,18 @@
   tag to distinguish redundant storage of ONE boundary (legitimate, must resolve) from two
   distinct boundaries. Not observed on the current deck (one occurrence). Revisit if a deck
   triggers it.
+- **`#6` cut work vs `#6` restart (Codex r3 completeness).** The engagement window is
+  `[num(hash2), SLIDE3_MIN_HASH)` = `[2, 6)`. The 2→3 restart fires at `#6`, and the 1→2 cut's
+  own late prepaint also occurs at `#6`, at the same hash. Excluding `>= 6` is fail-CLOSED (a
+  restart draw can't prove Finding 1) but would also reject a genuine incoming repair that
+  engages only at `#6`. Distinguishing pre-restart cut work from restart work at `#6` needs a
+  transition-phase marker or event ordering — a Step 2 concern. `#4` (the observed cut sub-step)
+  is inside the window.
+- **JS-level "one decoder feeds" (Codex r3 F4, gate-enforced only).** `startTextureFeed` still
+  starts per authored decoder, so two sibling decoders (one per slot) could each feed their own
+  canvas. The GATE is fail-closed against this: `footprintOwnerDecoderId` returns null on an
+  equal-overlap tie between distinct decoders, so `stableDecoder` fails and the finding cannot
+  green. Enforcing a single feeder in the JS itself is deferred to Step 2.
 - **Footprint magic-move contents swap of a non-movie raster.** Selection is a footprint-sized
   `contents` crossfade (`from != to`) under an `apple:magic-move-*` transition. A non-movie
   raster/image of the exact footprint size that magic-moves with a `contents` texture swap and

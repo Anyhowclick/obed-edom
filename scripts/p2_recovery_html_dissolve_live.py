@@ -470,10 +470,14 @@ PRESERVE_SCRIPT = r"""
      */
     footprintOwnerDecoderId: function(rect) {
       const wantKey = footprintKeyForRect(rect);
-      let best = null, bestOverlap = 0, bestKey = null, bestCanvas = null;
+      let best = null, bestOverlap = 0, bestKey = null, bestCanvas = null, ambiguous = false;
       // Iterate live canvases and read the ELEMENT-keyed authored binding (F4):
       // a rebuilt canvas reusing a retired id is a distinct element with no
-      // WeakMap entry, so it can never surface a stale decoder here.
+      // WeakMap entry, so it can never surface a stale decoder here. If TWO
+      // DISTINCT decoders own footprint canvases with (near-)equal overlap — e.g.
+      // sibling D1 drew outgoing and D2 drew incoming, stacked at the same rect —
+      // the owner is AMBIGUOUS: return null so the scorer fails closed rather than
+      // silently picking one by DOM order (Codex r3 F4).
       document.querySelectorAll('canvas').forEach(function(c) {
         const v = authoredDecoderByCanvas.get(c);
         if (!v) return;
@@ -482,12 +486,17 @@ PRESERVE_SCRIPT = r"""
         const r = c.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
         const ov = rectOverlapArea(r, rect);
-        if (ov > bestOverlap) { bestOverlap = ov; best = v; bestKey = key; bestCanvas = c; }
+        const tol = Math.max(1, bestOverlap * 0.05);
+        if (ov > bestOverlap + tol) {
+          bestOverlap = ov; best = v; bestKey = key; bestCanvas = c; ambiguous = false;
+        } else if (best != null && v !== best && ov >= bestOverlap - tol) {
+          ambiguous = true; // a different decoder ties the footprint owner
+        }
       });
-      if (best != null) {
+      if (best != null && !ambiguous) {
         return {elId: best.__obedElId, key: bestKey, via: 'player-draw', contextType: recordedCtxType(bestCanvas)};
       }
-      return {elId: null, key: null, via: 'none', contextType: null};
+      return {elId: null, key: null, via: ambiguous ? 'ambiguous' : 'none', contextType: null};
     },
     textureFeedStatus: function() {
       const out = [];

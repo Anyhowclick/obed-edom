@@ -233,6 +233,27 @@ def test_f2_loose_magic_move_substring_name_is_not_a_transition(tmp_path):
     assert result.get("warning")
 
 
+def test_f2_magic_move_name_on_non_transition_node_is_rejected(tmp_path):
+    """A non-transition node bearing the accepted `apple:magic-move-*` name must
+    NOT mark its crossfade as a Magic Move (Codex r3 F2). Only `type=='transition'`
+    plus the name prefix qualifies.
+    """
+    group_with_mm_name = {
+        "type": "group",  # NOT a transition
+        "name": "apple:magic-move-implied-motion-path",
+        "layers": [_crossfade("P", "Q")],
+    }
+    slides = [
+        ("slide1", [_video_layer("obj-m1", "A")]),
+        ("slide2", [_video_layer("obj-m1", "B"), group_with_mm_name]),
+    ]
+    result = p2._derive_movie_texids(_write_player(tmp_path, slides))
+
+    assert result["decoderKey"] is None
+    assert result["outgoing"] == [] and result["incoming"] == []
+    assert result.get("warning")
+
+
 def test_f5_unidentified_owner_folds_no_steady(tmp_path):
     """If the boundary endpoint's owner cannot be identified (id-less layer),
     fold no steady — keep just the crossfade from/to.
@@ -522,6 +543,25 @@ def test_feed_engaged_rejects_draw_at_or_after_restart_boundary():
     an unrelated later hash like #99 — must not satisfy Finding 1 (Codex r2 F1)."""
     late = _incoming_draw(hash_num=99)
     assert "incomingFeedDraw" in _engaged([late], restart_min_hash=6)["failed"]
-    # A draw inside [hash1, restart) with everything else valid DOES count.
+    # A draw inside [hash2, restart) with everything else valid DOES count.
     good = _incoming_draw(hash_num=4)
     assert _engaged([good], restart_min_hash=6)["ok"] is True
+
+
+def test_feed_engaged_rejects_draw_at_pre_advance_hash1():
+    """hash1 is captured BEFORE the ArrowRight advance; a player-authored draw at
+    hash1 (#1) is pre-transition and must NOT count — the window starts at the
+    flip (hash2), strictly after hash1 (Codex r3 F1)."""
+    at_hash1 = _incoming_draw(hash_num=1)  # num(hash1) == 1, num(hash2) == 2
+    verdict = p2._score_feed_engaged(
+        _valid_texids(), {"ok": True}, _post_flip_samples(), [at_hash1], "#1", "#2",
+        restart_min_hash=6,
+    )
+    assert verdict["ok"] is False
+    assert "incomingFeedDraw" in verdict["failed"]
+    # The same draw one hash later (at the flip) counts.
+    at_flip = _incoming_draw(hash_num=2)
+    assert p2._score_feed_engaged(
+        _valid_texids(), {"ok": True}, _post_flip_samples(), [at_flip], "#1", "#2",
+        restart_min_hash=6,
+    )["ok"] is True
