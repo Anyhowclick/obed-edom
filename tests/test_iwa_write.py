@@ -1635,6 +1635,17 @@ def test_autosize_text_reposition_on_zerofilled_seed_hard_misses():
     assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
 
 
+def test_autosize_text_reposition_x_without_y_needs_no_seed():
+    # pos_x is absolute and never reads the seed, so an x-move that carries no y is written
+    # even with no live seed row -- the seed gate applies only when the spec bears y.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "w": 113.4, "h": 40.0, "role": "other"}]
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported={}, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15)}}
+
+
 def test_autosize_text_reposition_on_size_only_spec_still_misses():
     # Flag ON but the spec bears only w (no x/y): nothing to reposition, so it still defers
     # to the fallback and keeps tagging text-autosize for the histogram.
