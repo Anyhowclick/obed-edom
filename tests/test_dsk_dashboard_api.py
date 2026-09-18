@@ -1925,3 +1925,131 @@ def test_dsk_export_propose_quits_the_keynote_it_launched(tmp_path, monkeypatch)
     job = _wait(client, started.json()["id"])
     assert job["status"] == "done", job.get("error")
     assert [q[:2] for q in quits] == [("hand_built_DSK", "hand_built_DSK.key")]
+
+
+def test_dsk_apply_writes_deck_into_chosen_workspace(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    workspace = tmp_path / "sunday"
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    classes = {1: _cls(1, "static")}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    monkeypatch.setattr(app_mod, "export_slide_clips", lambda *_a, **_k: [])
+
+    def fake_assemble(fw, out_path, **kwargs):
+        from obed_edom.dsk_assemble import AssembleResult
+
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("deck")
+        return AssembleResult(
+            path=out_path,
+            slides_kept=(1,),
+            ordinals={1: 1},
+            fits={},
+            clips_inserted={},
+            stroke={},
+            zorder={},
+            builds={},
+            size_bytes=10,
+            source_size_bytes=20,
+            wall_s=1.0,
+            warnings=(),
+            movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply", json={"exportDir": str(workspace)})
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["exportDir"] == str(workspace.resolve())
+    assert Path(job["result"]["deckPath"]) == workspace.resolve() / "GW_DSK.key"
+    assert (workspace / "GW_DSK.key").is_file()
+    assert not (tmp_path / "output" / "GW" / "dsk" / "GW_DSK.key").exists()
+
+
+def test_dsk_export_writes_assets_to_chosen_dir_and_cleans_deck_src(tmp_path, monkeypatch):
+    """A chosen export folder receives the playback assets; Generator src/ next to
+    the deck is still cleaned up."""
+    import obed_edom.web.app as app_mod
+
+    folder = tmp_path / "Sermon (GW)" / "dsk"
+    src_dir = folder / "src"
+    src_dir.mkdir(parents=True)
+    deck = folder / "Sermon (GW)_DSK.key"
+    deck.write_text("placeholder")
+    (src_dir / "Sermon (GW)_DSK.002.01.src.mov").write_bytes(b"mov")
+    (folder / "manifest.json").write_text(json.dumps({
+        "deck": str(deck),
+        "geometry": {"width": 1920, "height": 1080},
+        "slides": {
+            "2": {"category": "movie", "source_slide": 32, "srcClips": ["src/Sermon (GW)_DSK.002.01.src.mov"]},
+        },
+    }))
+    export_dir = tmp_path / "playback"
+    seen = {}
+
+    def fake_export_stage_pngs(deck_path, slides, out_dir, **kwargs):
+        seen["export"] = (deck_path, list(slides), Path(out_dir))
+        from obed_edom.dsk_stage_export import StageAsset
+
+        return [
+            StageAsset(
+                slide=n, stage_index=1, path=Path(out_dir) / f"{n:04d}.001.png",
+                width=1920, height=1080, alpha_ok=True, bg_alpha_max=0,
+                content_alpha_frac=1.0, transparent_frac=0.0, source_name="x",
+            )
+            for n in slides
+        ]
+
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _dsk_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "stage_counts", lambda *_a, **_k: {1: 1})
+    monkeypatch.setattr(app_mod, "export_stage_pngs", fake_export_stage_pngs)
+    monkeypatch.setattr(app_mod, "export_dsk_slide_clips", _fake_clip_exporter(seen.setdefault("clips", [])))
+
+    client = TestClient(app)
+    started = client.post("/api/dsk/export", data={"path": str(deck), "export_dir": str(export_dir)})
+    job = _wait(client, started.json()["id"])
+    assert job["result"]["exportDir"] == str(export_dir.resolve())
+    job = _wait(client, client.post(f"/api/dsk/export/{job['id']}/apply").json()["id"])
+    assert job["status"] == "done", job.get("error")
+    result = job["result"]
+    assert result["pngDir"] == str(export_dir.resolve())
+    assert result["exportDir"] == str(export_dir.resolve())
+    assert seen["export"][2] == export_dir.resolve()
+    assert seen["clips"] == [[2]]
+    assert (export_dir / "Sermon (GW)_DSK.002.mov").is_file()
+    export_manifest = json.loads((export_dir / "manifest.json").read_text())
+    assert export_manifest["slides"]["2"]["clip"] == "Sermon (GW)_DSK.002.mov"
+    deck_manifest = json.loads((folder / "manifest.json").read_text())
+    assert "srcClips" not in deck_manifest["slides"]["2"]
+    assert deck_manifest["slides"]["2"]["source_slide"] == 32
+    assert not (src_dir / "Sermon (GW)_DSK.002.01.src.mov").exists()
+
+
+def test_dsk_export_rejects_private_root_export_dir(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+    from obed_edom.paths import output_root
+
+    deck = tmp_path / "hand_built_DSK.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _dsk_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/dsk/export",
+        data={"path": str(deck), "export_dir": str(output_root() / ".watercolour")},
+    )
+    assert response.status_code == 400

@@ -59,9 +59,10 @@ export async function chooseKeynote(prompt: string): Promise<ChosenFile> {
   return res.json();
 }
 
-export async function chooseFolder(prompt: string): Promise<ChosenFile> {
+export async function chooseFolder(prompt: string, defaultLocation?: string): Promise<ChosenFile> {
   const body = new FormData();
   body.set("prompt", prompt);
+  if (defaultLocation) body.set("default_location", defaultLocation);
   const res = await fetch("/api/choose-folder", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -337,11 +338,14 @@ export async function saveDskDecisions(jobId: string, decisions: DskDecision[]):
   return res.json();
 }
 
-export async function applyDsk(jobId: string, decisions?: DskDecision[]): Promise<Job> {
+export async function applyDsk(jobId: string, decisions?: DskDecision[], exportDir?: string): Promise<Job> {
+  const body: { decisions?: DskDecision[]; exportDir?: string } = {};
+  if (decisions) body.decisions = decisions;
+  if (exportDir) body.exportDir = exportDir;
   const res = await fetch(`/api/dsk/${jobId}/apply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(decisions ? { decisions } : {}),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -354,13 +358,14 @@ export function dskThumbUrl(jobId: string, filename: string): string {
 /** `POST /api/dsk/export` — propose; the exporter always stages PNGs (any 1920×1080 DSK deck). */
 export async function startDskExport(
   path: string,
-  opts?: { rangeFrom?: number; rangeTo?: number; slides?: number[] }
+  opts?: { rangeFrom?: number; rangeTo?: number; slides?: number[]; exportDir?: string }
 ): Promise<Job> {
   const body = new FormData();
   body.set("path", path);
   if (opts?.slides?.length) body.set("slides", opts.slides.join(","));
   if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
   if (opts?.rangeTo != null) body.set("range_to", String(opts.rangeTo));
+  if (opts?.exportDir) body.set("export_dir", opts.exportDir);
   const res = await fetch("/api/dsk/export", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -855,4 +860,12 @@ export async function fetchWatercolourOriginal(jobId: string, itemId: string, na
 
 export function watercolourDownloadUrl(jobId: string): string {
   return `/api/watercolour/${jobId}/download`;
+}
+
+export async function exportWatercolour(jobId: string, exportDir?: string): Promise<Job> {
+  const body = new FormData();
+  if (exportDir) body.set("export_dir", exportDir);
+  const res = await fetch(`/api/watercolour/${jobId}/export`, { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }

@@ -118,6 +118,27 @@ def test_batch_export_dir_collision_suffixes_the_name(tmp_path):
     assert exported_path.name == "00-good-watercolour-2.png"
     assert (export_dir / "00-good-watercolour.png").read_bytes() == b"existing"
 
+def test_export_endpoint_copies_done_results_to_chosen_dir(tmp_path):
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    response = client.post(
+        '/api/watercolour',
+        files=[('files', ('good.png', png((90, 140, 210, 255)), 'image/png'))],
+    )
+    assert response.status_code == 200, response.text
+    job = _run_batch_wait(client, response.json()['id'])
+    assert job['status'] == 'done', job.get('error')
+    export_dir = tmp_path / "later-exports"
+    exported = client.post(f"/api/watercolour/{job['id']}/export", data={'export_dir': str(export_dir)})
+    assert exported.status_code == 200, exported.text
+    body = exported.json()
+    assert body['result']['exportDir'] == str(export_dir.resolve())
+    copied = body['result']['exportedResults']
+    assert len(copied) == 1
+    assert Path(copied[0]).parent == export_dir.resolve()
+    assert Path(copied[0]).is_file()
+
 def test_batch_rejects_private_root_export_dir():
     from obed_edom.paths import output_root
     from obed_edom.web.app import app

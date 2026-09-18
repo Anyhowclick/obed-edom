@@ -1,12 +1,12 @@
 import { useState } from "react";
 import {
   applyDskExport,
+  chooseFolder,
   chooseKeynote,
   pollJob,
   reveal,
   startDskExport,
   type ChosenFile,
-  type DskPage,
   type DskSkip,
   type Job,
 } from "../../api";
@@ -14,7 +14,14 @@ import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
 import { LoadingOverlay } from "../../components/PreviewGrid";
 import { JobName } from "../../components/JobName";
+import { DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath } from "../../prefs";
 import { renameAndApply } from "../../sessions";
+
+function parentDir(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const index = trimmed.lastIndexOf("/");
+  return index > 0 ? trimmed.slice(0, index) : "";
+}
 
 function parseSlideSpec(raw: string): number[] | undefined {
   const trimmed = raw.trim();
@@ -40,13 +47,12 @@ type ExportResult = {
   path?: string;
   isStageDeck?: boolean;
   isFwDeck?: boolean;
-  pages?: DskPage[];
-  skipped?: DskSkip[];
   pngDir?: string;
   pngs?: string[];
   clips?: Record<string, string>;
   sequence?: string[];
   exportedClips?: number[];
+  skipped?: DskSkip[];
 };
 
 export function DskExporter() {
@@ -56,6 +62,8 @@ export function DskExporter() {
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useSessionPath(DSK_WORKSPACE_KEY);
+  const defaultExportDir = useDefaultExportDir();
 
   const result = (job?.result || undefined) as ExportResult | undefined;
 
@@ -70,30 +78,44 @@ export function DskExporter() {
     return done;
   }
 
-  async function propose() {
+  async function exportDeck() {
     if (!keynote) {
       setError("Choose a DSK deck (1920×1080) to export from.");
       return;
     }
     setError(null);
-    setBusy(true);
+    let chosen;
     try {
-      const created = await startDskExport(keynote.path, { slides: parseSlideSpec(range) });
-      await track(created);
+      chosen = await chooseFolder(
+        "DSK workspace",
+        parentDir(keynote.path) || workspace || defaultExportDir || undefined
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
+      const message = err instanceof Error ? err.message : String(err);
+      if (/cancel/i.test(message)) return;
+      setError(message);
+      return;
     }
-  }
-
-  async function apply() {
-    if (!job) return;
-    setError(null);
+    setWorkspace(chosen.path);
     setBusy(true);
     try {
-      const created = await applyDskExport(job.id);
-      await track(created);
+      const created = await startDskExport(keynote.path, {
+        slides: parseSlideSpec(range),
+        exportDir: chosen.path,
+      });
+      const proposed = await track(created);
+      if (proposed.status === "error") return;
+      const next = (proposed.result || {}) as ExportResult;
+      if (next.phase === "done") return;
+      if (!next.isStageDeck) {
+        setError(
+          next.isFwDeck
+            ? `${keynote.name} looks like an FW wall deck, not a 1920×1080 DSK deck — stage PNG export needs a DSK-sized deck.`
+            : `${keynote.name} is not a 1920×1080 DSK deck; stage PNG export needs a DSK-sized deck.`
+        );
+        return;
+      }
+      await track(await applyDskExport(proposed.id));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -136,48 +158,10 @@ export function DskExporter() {
         />
       </label>
       <div className="actions">
-        <button className="btn" type="button" disabled={!keynote || busy} onClick={propose}>
-          Propose
+        <button className="btn" type="button" disabled={!keynote || busy} onClick={() => void exportDeck()}>
+          Export
         </button>
       </div>
-      {result?.phase === "review" && (
-        <>
-          {result.isFwDeck && !result.isStageDeck && (
-            <p className="note">
-              {keynote?.name} looks like an FW wall deck, not a 1920×1080 DSK deck — stage PNG
-              export needs a DSK-sized deck.
-            </p>
-          )}
-          <table className="dsk-review-table">
-            <thead>
-              <tr>
-                <th>Slide</th>
-                <th>Category</th>
-                <th>Output</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(result.pages || []).map((page) => (
-                <tr key={page.slide}>
-                  <td>{page.slide}</td>
-                  <td>{page.category}</td>
-                  <td>{page.needsClip ? "clip (.mov)" : "stage PNG(s)"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {(result.skipped || []).length > 0 && (
-            <p className="note">
-              skipped: {result.skipped!.map((s) => `${s.slide} (${s.reason})`).join(", ")}
-            </p>
-          )}
-          <div className="actions">
-            <button className="btn" type="button" disabled={busy || !result.isStageDeck} onClick={apply}>
-              Export
-            </button>
-          </div>
-        </>
-      )}
       <ErrorNotice message={error} onDismiss={() => setError(null)} />
       {busy && <LoadingOverlay title="Exporting…" logs={logs} />}
       {result?.phase === "done" && result.pngDir && (

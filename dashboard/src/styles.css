@@ -83,6 +83,8 @@
   --job-resize:      var(--aud-cg);
   --job-maps:        var(--accent-primary);
   --job-watercolour: #7FA9FF;
+  --job-watercolour-tint: rgba(127, 169, 255, 0.14);
+  --job-watercolour-line: rgba(127, 169, 255, 0.45);
 
   /* Maps object kind. */
   --obj-dot:      var(--status-info);
@@ -293,10 +295,14 @@ h3 {
 }
 .well.document.over { border-color: rgba(0, 229, 255, 0.6); background: rgba(0, 229, 255, 0.14); }
 .well.document strong { color: var(--status-info); }
+.well.photo { border-color: var(--job-watercolour-line); background: var(--job-watercolour-tint); }
+.well.photo.over { border-color: var(--job-watercolour); background: rgba(127, 169, 255, 0.22); }
+.well.photo strong { color: var(--job-watercolour); }
 .well-tone-lw .btn.secondary { border-color: var(--aud-lw-line); color: var(--aud-lw); }
 .well-tone-cg .btn.secondary { border-color: var(--aud-cg-line); color: var(--aud-cg); }
 .well-tone-dsk .btn.secondary { border-color: var(--aud-dsk-line); color: var(--aud-dsk); }
 .well-tone-document .btn.secondary { border-color: rgba(0, 229, 255, 0.4); color: var(--status-info); }
+.well-tone-photo .btn.secondary { border-color: var(--job-watercolour-line); color: var(--job-watercolour); }
 
 .btn {
   display: inline-flex;
