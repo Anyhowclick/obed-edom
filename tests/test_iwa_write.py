@@ -1029,24 +1029,44 @@ def test_is_origin_anchored_mask_predicate():
 
 
 def test_masked_media_fields_origin_crop_gated_by_flag():
-    # Origin crop: refused without the flag (ok=False), written with it. The transform
-    # scales mask+image by target/mask and pins the composed rect at the target.
+    # Origin crop, ANISOTROPIC target (sx=2, sy=3) to catch a broken image formula:
+    # refused without the flag, written with it. mask@(0,0,80,40), image@(300,100,120,60),
+    # target (400,200,160,120) => sx=160/80=2, sy=120/40=3.
     objects = {
         "231": {"_pbtype": "TSD.MaskArchive", **_mask_super(0, 0, 80, 40)},
         "230": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "231"},
                 "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}},
     }
     rec = {"id": "230", "kind": "image", "kindIndex": 0}
-    spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0}
+    spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0}
     reported = [300.0, 100.0, 120.0, 60.0]
     off_ops, off_mask, off_ok = _masked_media_fields(rec, objects["230"], objects, spec, reported)
     assert off_ok is False and off_ops == [] and off_mask == "231"  # refused, flag off
     on_ops, on_mask, on_ok = _masked_media_fields(
         rec, objects["230"], objects, spec, reported, allow_origin_crop=True)
-    assert on_ok is True and on_mask == "231" and len(on_ops) == 2  # mask + image writes
-    fields = dict(on_ops)
-    assert fields["231"]["size_w"] == pytest.approx(160.0)  # mask scaled to target (mask@origin)
-    assert fields["231"]["size_h"] == pytest.approx(80.0)
+    assert on_ok is True and on_mask == "231"
+    f = dict(on_ops)
+    # mask: origin (mask_pos*s = 0), sized to the target.
+    assert (f["231"]["pos_x"], f["231"]["pos_y"]) == pytest.approx((0.0, 0.0))
+    assert (f["231"]["size_w"], f["231"]["size_h"]) == pytest.approx((160.0, 120.0))
+    assert (f["231"]["natural_w"], f["231"]["natural_h"]) == pytest.approx((160.0, 120.0))
+    # image: pos = target - mask_pos*s = target; size = frame * s (120*2, 60*3).
+    assert (f["230"]["pos_x"], f["230"]["pos_y"]) == pytest.approx((400.0, 200.0))
+    assert (f["230"]["size_w"], f["230"]["size_h"]) == pytest.approx((240.0, 180.0))
+    assert (f["230"]["natural_w"], f["230"]["natural_h"]) == pytest.approx((240.0, 180.0))
+
+
+def test_is_origin_anchored_mask_rejects_degenerate():
+    # Hardening (Codex): NaN, non-positive frame/mask, mask overhang past the frame, and a
+    # tiny mask whose sub-px offset would explode the scale are all refused.
+    assert _is_origin_anchored_mask(float("nan"), 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 0.0) is False
+    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 0.0, 40.0, 0.0) is False   # mw=0
+    assert _is_origin_anchored_mask(0.0, 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 0.0) is False     # fw=0
+    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 200.0, 40.0, 0.0) is False  # overhang mw>fw
+    # tiny mask, offset 0.9 passes the frame's 1px abs tol but not the mask-relative tol.
+    assert _is_origin_anchored_mask(3840.0, 1080.0, 0.0, 0.9, 0.0, 0.001, 40.0, 0.0) is False
+    # a small, in-tolerance nonzero offset is still accepted.
+    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.3, 0.15, 80.0, 40.0, 0.0) is True
 
 
 def test_slide_edits_origin_crop_missed_off_written_on(tmp_path):
@@ -1058,6 +1078,9 @@ def test_slide_edits_origin_crop_missed_off_written_on(tmp_path):
     assert off.missed == 1 and off.applied == 0 and off.missed_specs == specs
     on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
     assert on.applied and not on.refused and on.value_clean and set(on.edited_ids) == {"230", "231"}
+    # composed visible rect lands on the target crop (read-back through compose_geometry).
+    after = _composed(deck)
+    assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
 
 
 def test_slide_edits_offset_crop_refused_even_with_maskcrop(tmp_path):

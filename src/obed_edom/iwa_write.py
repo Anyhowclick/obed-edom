@@ -413,29 +413,42 @@ def _is_identity_mask(fw: float, fh: float, fa: float, mx: float, my: float,
 
 def _is_origin_anchored_mask(fw: float, fh: float, fa: float, mx: float, my: float,
                              mw: float, mh: float, ma: float) -> bool:
-    """Axis-aligned mask pinned at the image origin (offset ~0), possibly a CROP (mask
-    smaller than the frame). Superset of the identity case. The ``_masked_media_fields``
-    transform is exact for it (image pos = target - mask_pos*s ~ target, since mask_pos~0);
-    a live reopen was shown to render origin H/HV/V crops at target. An OFFSET crop
-    (mask_pos != 0) still needs an unproven crop redistribution and stays refused."""
-    if _is_rotated(fa) or _is_rotated(ma) or mw <= 0.0 or mh <= 0.0:
+    """Axis-aligned mask pinned at the image origin (offset ~0), a genuine sub-window of the
+    frame (a CROP: mask smaller than, and inside, the frame). Superset of the identity case.
+    The ``_masked_media_fields`` transform is exact for it (image pos = target - mask_pos*s ~
+    target, since mask_pos~0); a live reopen was shown to render origin H/HV/V crops at target.
+    Refused (unproven redistribution / degenerate geometry): rotations, an OFFSET crop
+    (mask_pos != 0), mask overhang past the frame, and any non-finite/non-positive dimension.
+    The offset is bounded both absolutely (min 1px / 0.5% of frame) AND relative to the mask,
+    so a tiny mask cannot inherit the frame's looser absolute tolerance and blow up ``s``."""
+    if not all(math.isfinite(v) for v in (fw, fh, mx, my, mw, mh)):
+        return False
+    if _is_rotated(fa) or _is_rotated(ma):
+        return False
+    if fw <= 0.0 or fh <= 0.0 or mw <= 0.0 or mh <= 0.0:
         return False
     tol_x = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fw, 1.0))
     tol_y = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fh, 1.0))
-    return abs(mx) <= tol_x and abs(my) <= tol_y
+    if abs(mx) > tol_x or abs(my) > tol_y:  # origin-anchored, absolute
+        return False
+    if abs(mx) > _MASK_IDENTITY_REL * mw or abs(my) > _MASK_IDENTITY_REL * mh:  # and relative to mask
+        return False
+    return mw <= fw + tol_x and mh <= fh + tol_y  # the crop window lies within the frame
 
 
 def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: dict,
                          reported: list[float], *, allow_origin_crop: bool = False,
                          ) -> tuple[list[tuple[str, dict]], str | None, bool]:
-    """Place a masked image/movie whose mask is an IDENTITY window; REFUSE any real crop.
+    """Place a masked image/movie. Always writes an IDENTITY window (no crop); under
+    ``allow_origin_crop`` also writes an ORIGIN-anchored axis-aligned crop. REFUSE an offset
+    crop or a rotation.
 
     Production never displaces a mask: the IMAGE frame moves and the mask stays put (325/325
     masks have naturalSize == their own size; the composed rect is image_pos + mask_pos).
-    The transform below is exact for ANY mask -- image pos = target - mask_pos*s, both sizes
-    scaled by s = target/mask -- but for a real crop we cannot prove offline that Keynote
-    redistributes it this way, so only the identity case (no crop, 100 %/0 % split, verified
-    against 70 production objects) is written. ok=False => hard miss.
+    The transform below is exact for ANY axis-aligned mask -- image pos = target - mask_pos*s,
+    both sizes scaled by s = target/mask. For an OFFSET crop we cannot prove offline that
+    Keynote redistributes it this way, so it stays refused; the origin-anchored crop (mask_pos
+    ~0) was shown to render at target across a Keynote reopen (H/HV/V). ok=False => hard miss.
     """
     mask_ref = (obj.get("mask") or {}).get("identifier")
     if mask_ref is None:
