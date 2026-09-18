@@ -29,6 +29,7 @@ import {
   type Job,
 } from "../api";
 import { ArtifactActions } from "../components/ArtifactActions";
+import { useConfirm } from "../components/ConfirmDialog";
 import { ErrorNotice } from "../components/ErrorNotice";
 import {
   IconArrowLeft,
@@ -325,6 +326,7 @@ const SAVE_STATUS_LABEL: Record<MapsSaveStatus, string> = {
 export function MapsTab() {
   const { openRun, clearOpenRun } = useRunNav();
   const { job: opened, error: openError } = useCurrentJob("maps");
+  const [askConfirm, confirmDialog] = useConfirm();
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveConflict, setSaveConflict] = useState<{ paths: string[] } | null>(null);
@@ -1124,15 +1126,27 @@ export function MapsTab() {
     setDropIndicator(null);
   }
 
-  function removeSlide() {
+  async function removeSlide() {
     flushPendingOverride();
     const current = docRef.current;
-    if (!current || !active || current.slides.length < 2 || locked) return;
-    if (!window.confirm(`Remove slide “${active.title}”?`)) return;
-    const slidesNext = current.slides.filter((s) => s.id !== active.id);
-    const { links, retired } = restitch(slidesNext, current.links, current.retiredLinks);
-    const fallback = slidesNext[Math.max(0, activeIndex - 1)] || slidesNext[0];
-    const next: MapsDocument = { ...current, slides: slidesNext, links };
+    if (!current || locked) return;
+    const slide = current.slides.find((s) => s.id === activeRef.current) || active;
+    if (!slide || current.slides.length < 2) return;
+    const ok = await askConfirm({
+      title: `Remove slide “${slide.title}”?`,
+      confirmLabel: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
+    const latest = docRef.current;
+    if (!latest || locked || latest.slides.length < 2) return;
+    const still = latest.slides.find((s) => s.id === slide.id);
+    if (!still) return;
+    const slidesNext = latest.slides.filter((s) => s.id !== still.id);
+    const { links, retired } = restitch(slidesNext, latest.links, latest.retiredLinks);
+    const removedIndex = latest.slides.findIndex((s) => s.id === still.id);
+    const fallback = slidesNext[Math.max(0, removedIndex - 1)] || slidesNext[0];
+    const next: MapsDocument = { ...latest, slides: slidesNext, links };
     if (retired.length) next.retiredLinks = retired;
     else delete next.retiredLinks;
     patchDoc(next);
@@ -1453,11 +1467,20 @@ export function MapsTab() {
     });
   }
 
-  function deleteSelectedPins() {
+  async function deleteSelectedPins() {
     if (!activeView || selectedPins.length === 0 || locked) return;
-    if (!window.confirm(`Remove ${selectedPins.length} selected object${selectedPins.length === 1 ? "" : "s"}?`)) return;
     const selected = new Set(selectedPins);
-    const churches = activeView.churches.filter((church) => !selected.has(church.id));
+    const ok = await askConfirm({
+      title: `Remove ${selected.size} selected object${selected.size === 1 ? "" : "s"}?`,
+      confirmLabel: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
+    const latest = docRef.current;
+    const slide = latest?.slides.find((s) => s.id === activeRef.current);
+    if (!latest || !slide || locked) return;
+    const view = slideForAudience(slide, activeAudienceRef.current);
+    const churches = view.churches.filter((church) => !selected.has(church.id));
     updateActive({ churches, ...revealMovieGuard(churches) });
     if (selectedPin && selected.has(selectedPin)) setSelectedPin(null);
     setSelectedPins([]);
@@ -2506,6 +2529,7 @@ export function MapsTab() {
             logs={logs}
           />
         ) : null}
+        {confirmDialog}
       </div>
     );
   }
@@ -2587,10 +2611,18 @@ export function MapsTab() {
               <button
                 type="button"
                 onClick={() => {
-                  if (!window.confirm("Replace the whole deck from a CSV? Existing slides will be discarded.")) return;
-                  setAddMenuOpen(false);
-                  csvMode.current = "replace";
-                  csvInput.current?.click();
+                  void (async () => {
+                    setAddMenuOpen(false);
+                    const ok = await askConfirm({
+                      title: "Replace the whole deck from a CSV?",
+                      body: "Existing slides will be discarded.",
+                      confirmLabel: "Replace",
+                      danger: true,
+                    });
+                    if (!ok) return;
+                    csvMode.current = "replace";
+                    csvInput.current?.click();
+                  })();
                 }}
               >
                 Replace deck from CSV
@@ -2624,9 +2656,16 @@ export function MapsTab() {
               <button
                 type="button"
                 onClick={() => {
-                  if (!window.confirm("Load a saved map session? The current deck will be replaced; cached tiles from the session will be added to this cache.")) return;
-                  setSessionMenuOpen(false);
-                  sessionInput.current?.click();
+                  void (async () => {
+                    setSessionMenuOpen(false);
+                    const ok = await askConfirm({
+                      title: "Load a saved map session?",
+                      body: "The current deck will be replaced; cached tiles from the session will be added to this cache.",
+                      confirmLabel: "Load",
+                    });
+                    if (!ok) return;
+                    sessionInput.current?.click();
+                  })();
                 }}
               >
                 Load session + cache…
@@ -2893,7 +2932,7 @@ export function MapsTab() {
             <button className="btn maps-duplicate" type="button" onClick={duplicateSlide} disabled={locked} title="Duplicate slide" aria-label="Duplicate slide">
               <IconCopy />
             </button>
-            <button className="btn maps-delete" type="button" onClick={removeSlide} disabled={locked || slides.length < 2} title="Delete slide" aria-label="Delete slide">
+            <button className="btn maps-delete" type="button" onClick={() => void removeSlide()} disabled={locked || slides.length < 2} title="Delete slide" aria-label="Delete slide">
               <IconTrash />
             </button>
           </div>
@@ -3657,7 +3696,7 @@ export function MapsTab() {
                         <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => setPastePickerOpen(true)} title="Paste to slides" aria-label="Paste to slides">
                           <IconPasteSlides />
                         </button>
-                        <button className="btn maps-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
+                        <button className="btn maps-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={() => void deleteSelectedPins()} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>
@@ -4119,6 +4158,7 @@ export function MapsTab() {
           onCancel={exporting && !sessionBusy ? () => { exportAbort.current = true; } : undefined}
         />
       )}
+      {confirmDialog}
     </div>
   );
 }
