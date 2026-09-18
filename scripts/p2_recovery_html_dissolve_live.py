@@ -470,10 +470,14 @@ PRESERVE_SCRIPT = r"""
      */
     footprintOwnerDecoderId: function(rect) {
       const wantKey = footprintKeyForRect(rect);
+      // Unresolved footprint key -> fail closed, never admit any movie key
+      // (Codex r5 F2): the helper must not own a rect it cannot identify.
+      if (wantKey == null) return {elId: null, key: null, via: 'unknown-key', contextType: null};
       // Read the ELEMENT-keyed authored binding (F4): a rebuilt canvas reusing a
       // retired id is a distinct element with no WeakMap entry, so it can never
-      // surface a stale decoder here. Collect ALL footprint-overlapping authored
-      // canvases first, THEN decide ownership from the global maximum overlap —
+      // surface a stale decoder here. Collect the authored canvases that ACTUALLY
+      // OVERLAP the footprint (Codex r5 F1: a zero-overlap remote canvas must not
+      // become the owner), THEN decide ownership from the global maximum overlap —
       // a single-pass running flag mis-handles a later-best clearing an earlier
       // tie (Codex r4 F4), so this is order-independent.
       const cands = [];
@@ -481,10 +485,12 @@ PRESERVE_SCRIPT = r"""
         const v = authoredDecoderByCanvas.get(c);
         if (!v) return;
         const key = movieAssetKey(v.currentSrc || v.src || '');
-        if (wantKey != null && key !== wantKey) return;
+        if (key !== wantKey) return;
         const r = c.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
-        cands.push({v: v, ov: rectOverlapArea(r, rect), key: key, canvas: c});
+        const ov = rectOverlapArea(r, rect);
+        if (!(ov > 0)) return; // no footprint overlap -> not an owner candidate
+        cands.push({v: v, ov: ov, key: key, canvas: c});
       });
       if (!cands.length) return {elId: null, key: null, via: 'none', contextType: null};
       let bestOverlap = 0;
