@@ -1150,17 +1150,20 @@ def score_motion_across_flip(
     pair_eps: float = 2.0,
     identical_eps: float = 0.01,
     max_still_run: int = 4,
+    expected_key: object | None = None,
 ) -> dict[str, Any]:
     """Tie visible movie motion to the actual scene-hash flip instant.
 
-    ``samples`` are ``{roi, sceneHash, captureOffsetS, decoderId?, w?}`` in
-    capture order. A continuously-playing movie that satisfies pre-navigation
+    ``samples`` are ``{roi, sceneHash, captureOffsetS, decoderId?, w?, movieKey?}``
+    in capture order. A continuously-playing movie that satisfies pre-navigation
     motion plus a late navigation must not pass: motion is required before,
     across, and after ``flipIndex`` (the first sample whose scene hash differs
     from ``start_hash``), with no mid-window stall longer than ``max_still_run``
     and a decoded movie present in the flip neighbourhood. The crossing frames
     must also share one stable ``decoderId`` — a switch to a different decoder
-    at the flip is not the target movie progressing.
+    at the flip is not the target movie progressing. When ``expected_key`` is
+    given, the crossing frames' ``movieKey`` must also match it — a stable
+    decoder that is feeding the wrong movie's footprint must not pass either.
     """
     n = len(samples)
     if n < 3:
@@ -1235,12 +1238,19 @@ def score_motion_across_flip(
     flip_neighbourhood = [i for i in (f - 1, f, f + 1) if 0 <= i < n]
     decoder_ids_across_flip = [samples[i].get("decoderId") for i in flip_neighbourhood]
 
+    crossing_movie_keys = [samples[f - 1].get("movieKey"), samples[f].get("movieKey")]
+    crossing_key_ok = bool(
+        expected_key is None
+        or (crossing_movie_keys[0] == expected_key and crossing_movie_keys[1] == expected_key)
+    )
+
     ok = bool(
         before_ok
         and across_ok
         and after_ok
         and crossing_decoded
         and crossing_decoder_stable
+        and crossing_key_ok
         and still_ok
     )
     reason = None
@@ -1255,6 +1265,8 @@ def score_motion_across_flip(
             reason = "crossing frame not decoded"
         elif not crossing_decoder_stable:
             reason = "crossing decoder switched"
+        elif not crossing_key_ok:
+            reason = "crossing movie key mismatch"
         else:
             reason = "still run exceeds max across flip"
 
@@ -1272,6 +1284,8 @@ def score_motion_across_flip(
         "crossingDecoded": crossing_decoded,
         "crossingDecoderStable": crossing_decoder_stable,
         "crossingDecoderIds": crossing_decoder_ids,
+        "crossingKeyOk": crossing_key_ok,
+        "crossingMovieKeys": crossing_movie_keys,
         "decoderIdsAcrossFlip": decoder_ids_across_flip,
         "firstLastMae": first_last,
         "maxPairMae": max(pair) if pair else 0.0,

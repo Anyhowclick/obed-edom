@@ -68,9 +68,19 @@ DENSE_FPS = 20
 POST_SETTLE_S = 0.6
 
 # Slide shape ROIs from inventory (1920×1080). Inset past white border.
-BLACK_ROI_S1 = (401 + 20, 578 + 20, 174 - 40, 154 - 40)
+# Slide-1 (pre) positions on the owner-revised deck (measured): black sentinel canvas
+# ~[975,722,266,236], green square ~[636,723,178,157]; both sampled ABOVE the movie top
+# (~791) so black reads opaque and green reads its authored partial alpha (translucent).
+BLACK_ROI_S1 = (1010, 740, 180, 45)
 BLACK_ROI_S2 = (545 + 20, 724 + 20, 174 - 40, 154 - 40)
-GREEN_ROI_S1 = (790 + 10, 675 + 10, 174 - 20, 154 - 20)
+GREEN_ROI_S1 = (660, 735, 150, 45)
+# Owner-authored z-order (front->back): green square -> larger movie -> black square
+# -> smaller movie. So relative to the LARGER movie the green square is IN FRONT and
+# the black sentinel is BEHIND. Black sentinel canvas ~[542,721,181,161], larger movie
+# ~[105,791,960,276], green square ~[789,673,353,313] (measured on the exported deck).
+BLACK_ABOVE_ROI = (560, 730, 140, 50)    # black sentinel above the movie -> opaque black present
+BLACK_BEHIND_ROI = (560, 800, 140, 70)   # black sentinel ∩ movie -> the MOVIE must show (black behind)
+GREEN_FRONT_ROI = (820, 810, 160, 120)   # green square ∩ movie -> translucent green IN FRONT
 EMPTY_CORNERS = ((1864, 8, 48, 48), (1864, 1024, 48, 48))  # right side stays emptier after MM
 # Large continuing movie footprint on slide 1 (inventory). Center is unobscured.
 MOVIE_ROI = (109, 795, 952, 268)
@@ -565,21 +575,27 @@ async def _footprint_target(chrome: ChromeCdp, media: dict, roi: tuple[int, int,
     owner = await chrome.evaluate(
         "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId "
         f"? window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId({{x:{x}, y:{y}, w:{w}, h:{h}}}) "
-        ": {elId: null, via: 'unavailable'}"
-    ) or {"elId": None, "via": "unavailable"}
+        ": {elId: null, key: null, via: 'unavailable'}"
+    ) or {"elId": None, "key": None, "via": "unavailable"}
     decoder_id = owner.get("elId")
     resolved = _resolve_target_media(media, decoder_id)
     if resolved is not None:
-        return {"decoderId": decoder_id, "w": resolved.get("w"), "via": owner.get("via")}
+        return {
+            "decoderId": decoder_id,
+            "w": resolved.get("w"),
+            "movieKey": owner.get("key"),
+            "via": owner.get("via"),
+        }
     # PRESERVE_SCRIPT missing/stale or nothing positioned yet — fall back.
     fallback = _pick_decoded_video(media)
     if fallback is not None:
         return {
             "decoderId": fallback.get("decoderId"),
             "w": fallback.get("w"),
+            "movieKey": _movie_key(fallback.get("src") or ""),
             "via": "fallback-first-decoded",
         }
-    return {"decoderId": None, "w": None, "via": owner.get("via", "none")}
+    return {"decoderId": None, "w": None, "movieKey": None, "via": owner.get("via", "none")}
 
 
 async def _pre_advance_frames(
@@ -613,6 +629,7 @@ async def _pre_advance_frames(
                 "captureOffsetS": capture_wall - click_wall,
                 "decoderId": target.get("decoderId"),
                 "w": target.get("w"),
+                "movieKey": target.get("movieKey"),
                 "targetVia": target.get("via"),
             }
         )
@@ -660,6 +677,7 @@ async def _dense_after_click(
                     "captureOffsetS": capture_wall - click_wall,
                     "decoderId": target.get("decoderId"),
                     "w": target.get("w"),
+                    "movieKey": target.get("movieKey"),
                     "targetVia": target.get("via"),
                 }
             )
@@ -938,6 +956,10 @@ async def _run(player: Path) -> dict:
             "black": _score_black_auto(mid),
             "blackFixedRoi": _score_black(mid, BLACK_ROI_S2),
             "green": _score_green(mid, GREEN_ROI_S1),
+            # New z-order composition (green front, movie, black behind).
+            "blackAbove": _score_black(mid, BLACK_ABOVE_ROI),
+            "blackBehind": _score_black(mid, BLACK_BEHIND_ROI),
+            "greenFront": _score_green(mid, GREEN_FRONT_ROI),
         }
 
         cont = score_playback_continuity(
@@ -961,9 +983,12 @@ async def _run(player: Path) -> dict:
                     "captureOffsetS": f.get("captureOffsetS"),
                     "decoderId": f.get("decoderId"),
                     "w": f.get("w"),
+                    "movieKey": f.get("movieKey"),
                 }
             )
-        motion_across_flip = score_motion_across_flip(flip_samples, start_hash=hash1)
+        motion_across_flip = score_motion_across_flip(
+            flip_samples, start_hash=hash1, expected_key=EXPECTED_MOVIE_KEYS[0]
+        )
         decoder_motion: dict = {"ok": False, "n": 0, "attempts": len(decoder_frames)}
         ok_frames = [d for d in decoder_frames if d.get("path")]
         if len(ok_frames) >= 2:
@@ -1222,17 +1247,43 @@ async def _run(player: Path) -> dict:
                 progression_wall_s=PROGRESSION_WALL_S,
                 progression_media_s=PROGRESSION_MEDIA_S,
             )
-            # presentedMotionOk: footprint-ROI pixel motion OR rVFC-presented
-            # mediaTime advancement for the movie's own restart decoder.
+            # presentedMotionOk: the TARGET decoder's own rVFC mediaTime progression
+            # is mandatory (a frozen restart decoder must not pass just because some
+            # OTHER movie/animation moves the shared ROI); footprint-ROI pixel motion
+            # is required too, but only as corroboration — it alone is not enough.
             restart_decoder_id = per_movie_boundary[key].get("restartDecoderId")
             presented_rvfc = _presented_time_advances(samples_b, restart_decoder_id, SLIDE3_MIN_HASH)
             per_movie_boundary[key]["presentedMotionOk"] = bool(
-                restart_pixel_motion.get("ok") or presented_rvfc.get("ok")
+                presented_rvfc.get("ok") and restart_pixel_motion.get("ok")
             )
             per_movie_boundary[key]["presentedMotionDetail"] = {
                 "pixelMotion": restart_pixel_motion,
                 "rvfcAdvance": presented_rvfc,
             }
+        # Tie the guard/retire evidence to the SPECIFIC decoder that earned the
+        # restart score — a reuse-skip-boundary/retire for the target key that
+        # happened to some OTHER decoder does not prove this decoder is genuine.
+        target_restart_decoder_id = per_movie_boundary.get(target_key, {}).get("restartDecoderId")
+        reuse_skip_boundary_matching_restart = [
+            e
+            for e in reuse_skip_boundary_for_target
+            if (e.get("detail") or {}).get("newElId") == target_restart_decoder_id
+        ]
+        # Belt-and-suspenders on top of reuse_after_boundary's blanket ban: explicitly
+        # forbid a reuse-decoder for the target key at/after the boundary that either
+        # supplies the exact element we scored as the restart, or looks like a
+        # near-zero decoder being handed off (not a genuine fresh createElement).
+        reuse_decoder_events = [e for e in preserve_events if e.get("kind") == "reuse-decoder"]
+        reuse_stitched_restart = [
+            e
+            for e in reuse_decoder_events
+            if _movie_key((e.get("detail") or {}).get("key") or "") == target_key
+            and (_hash_num((e.get("detail") or {}).get("sceneHash")) or -1) >= SLIDE3_MIN_HASH
+            and (
+                (e.get("detail") or {}).get("newElId") == target_restart_decoder_id
+                or abs(float((e.get("detail") or {}).get("preservedT") or 0.0)) < 0.35
+            )
+        ]
         boundary = score_restart_at_slide_boundary(
             reached_slide=reached_slide3,
             per_movie=per_movie_boundary,
@@ -1309,16 +1360,27 @@ async def _run(player: Path) -> dict:
         },
         {
             "id": "overlappingArtworkComposedAfter1to2",
-            "pass": bool(mid_scores["blackFixedRoi"]["ok"] and mid_scores["green"]["ok"]),
+            "pass": bool(
+                mid_scores["blackAbove"]["ok"]
+                and mid_scores["blackBehind"]["rgbMean"] > 40
+                and not mid_scores["blackBehind"]["ok"]
+                and mid_scores["greenFront"]["greenish"]
+            ),
             "detail": {
-                "blackFixedRoi": mid_scores["blackFixedRoi"],
+                "blackAbove": mid_scores["blackAbove"],
+                "blackBehind": mid_scores["blackBehind"],
+                "greenFront": mid_scores["greenFront"],
                 "blackAuto": mid_scores["black"],
-                "green": mid_scores["green"],
             },
             "note": (
-                "Must hold at the FIXED authored ROIs (BLACK_ROI_S2, GREEN_ROI_S1) — "
-                "black-anywhere (_score_black_auto) is satisfied by the movie's own "
-                "test pattern and does not prove the overlay is unoccluding artwork."
+                "Authored z-order front->back: green square, larger movie, black sentinel, "
+                "smaller movie. Verifies the composition against the LARGER movie: the black "
+                "sentinel is opaque above the movie (blackAbove ok), is OCCLUDED by the movie "
+                "where they overlap (blackBehind shows the movie, rgbMean>40, not opaque black), "
+                "and the green square is IN FRONT of the movie (greenFront greenish; the composite "
+                "over the opaque movie is alpha 255, so green's translucency is proven separately by "
+                "greenTranslucentPre on slide 1). A root-level overlay on top would fail blackBehind "
+                "(black would show) or greenFront (movie/orange would show, not green)."
             ),
         },
         {
@@ -1388,28 +1450,36 @@ async def _run(player: Path) -> dict:
             "pass": bool(
                 restart_playback_ok
                 and clear_i is None
-                and len(reuse_skip_boundary_for_target) >= 1
+                and target_restart_decoder_id is not None
+                and len(reuse_skip_boundary_matching_restart) >= 1
                 and len(retire_events_for_target) >= 1
                 and len(reuse_after_boundary) == 0
+                and len(reuse_stitched_restart) == 0
             ),
             "verdict": restart_verdict if restart_playback_ok or restart_inconclusive else "fail",
             "note": (
                 "decoder-preserve must not stitch a deliberate Start Movie restart. "
-                "Requires: no manual pool-cleared event at all, at least one "
-                "reuse-skip-boundary AND one retire-on-start-movie event for the "
-                "target key, and zero reuse-decoder events ON/AFTER the boundary "
-                "(pre-boundary 1→2 reuse is the legitimate continue) — the boundary "
-                "guard + retirement, not a manual clear, keeps the restart fresh."
+                "Requires: no manual pool-cleared event at all, a reuse-skip-boundary "
+                "whose newElId IS the decoder that earned deliberateRestart2to3 "
+                "(not just any target-key event), a retire-on-start-movie for the "
+                "target key, zero reuse-decoder events ON/AFTER the boundary "
+                "(pre-boundary 1→2 reuse is the legitimate continue), and no "
+                "reuse-decoder for the target key that supplies the same restart "
+                "element or a near-zero-then-reset preservedT — the fresh restart "
+                "element must be a genuine createElement, not a reused decoder."
             ),
             "detail": {
                 "targetKey": target_key,
+                "targetRestartDecoderId": target_restart_decoder_id,
                 "poolCleared": clear_i is not None,
                 "reuseSkipBoundaryForTargetN": len(reuse_skip_boundary_for_target),
+                "reuseSkipBoundaryMatchingRestartN": len(reuse_skip_boundary_matching_restart),
                 "retireEventsForTargetN": len(retire_events_for_target),
                 "reuseAfterBoundary": reuse_after_boundary[:6],
                 "reuseAfterBoundaryScenes": [
                     (e.get("detail") or {}).get("sceneHash") for e in reuse_after_boundary[:6]
                 ],
+                "reuseStitchedRestart": reuse_stitched_restart[:6],
                 "reuseSkipBoundaryEvents": reuse_skip_boundary_events[:6],
                 "retireEvents": retire_events[:6],
             },

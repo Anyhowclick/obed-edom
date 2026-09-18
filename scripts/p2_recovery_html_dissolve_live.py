@@ -458,24 +458,35 @@ PRESERVE_SCRIPT = r"""
       }
     },
     /** Which decoder currently owns a screen rect (active texture-feed first, else DOM position). */
+    /**
+     * Which decoder owns a screen rect — asset/layer-bound: a candidate must
+     * match the SAME movie key the rect's footprint corresponds to (never
+     * "whichever decoder happens to overlap"), so movie2 cannot be reported
+     * as the owner of movie1's footprint or vice versa.
+     */
     footprintOwnerDecoderId: function(rect) {
-      let best = null, bestOverlap = 0, bestVia = 'none';
+      const wantKey = footprintKeyForRect(rect);
+      let best = null, bestOverlap = 0, bestVia = 'none', bestKey = null;
       textureFeed.forEach(function(state, elId) {
-        if (!state.active || !state.canvas) return;
+        if (!state.active || !state.canvas || !state.v) return;
+        const key = movieAssetKey(state.v.currentSrc || state.v.src || '');
+        if (wantKey != null && key !== wantKey) return;
         const r = state.canvas.getBoundingClientRect();
         const ov = rectOverlapArea(r, rect);
-        if (ov > bestOverlap) { bestOverlap = ov; best = elId; bestVia = 'texture-feed'; }
+        if (ov > bestOverlap) { bestOverlap = ov; best = elId; bestVia = 'texture-feed'; bestKey = key; }
       });
-      if (best != null) return {elId: best, via: bestVia};
+      if (best != null) return {elId: best, key: bestKey, via: bestVia};
       let bestVOverlap = 0;
       document.querySelectorAll('video').forEach(function(v) {
         if (!(v.videoWidth > 0)) return;
+        const key = movieAssetKey(v.currentSrc || v.src || '');
+        if (wantKey != null && key !== wantKey) return;
         const r = v.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
         const ov = rectOverlapArea(r, rect);
-        if (ov > bestVOverlap) { bestVOverlap = ov; best = v.__obedElId; bestVia = 'position'; }
+        if (ov > bestVOverlap) { bestVOverlap = ov; best = v.__obedElId; bestVia = 'position'; bestKey = key; }
       });
-      return {elId: best, via: best != null ? bestVia : 'none'};
+      return {elId: best, key: best != null ? bestKey : null, via: best != null ? bestVia : 'none'};
     },
     textureFeedStatus: function() {
       const out = [];
@@ -647,53 +658,69 @@ PRESERVE_SCRIPT = r"""
       }
     }
     if (!candidates.length) return null;
-    let best = candidates[0];
-    for (let i = 1; i < candidates.length; i++) {
-      const cand = candidates[i];
-      if (cand.dist < best.dist - 0.01) {
-        best = cand;
-        continue;
-      }
-      if (Math.abs(cand.dist - best.dist) > 0.01) continue;
-      // Tie: prefer the candidate whose nearest [id^="layer"] ancestor
-      // matches the video's own authored layer; else the later DOM-order one.
-      const candMatches = !!(v && v.__obedLayer && nearestLayer(cand.c.parentElement) === v.__obedLayer);
-      const bestMatches = !!(v && v.__obedLayer && nearestLayer(best.c.parentElement) === v.__obedLayer);
-      if (candMatches && !bestMatches) {
-        best = cand;
-      } else if (candMatches === bestMatches && cand.order > best.order) {
-        best = cand;
-      }
-    }
-    return best.c;
+    const minDist = candidates.reduce((m, c) => Math.min(m, c.dist), Infinity);
+    const tied = candidates.filter((c) => Math.abs(c.dist - minDist) <= 0.01);
+    if (tied.length === 1) return tied[0].c;
+    // Distance tie: try to resolve by the video's own authored layer.
+    const layerMatches = tied.filter(
+      (c) => v && v.__obedLayer && nearestLayer(c.c.parentElement) === v.__obedLayer
+    );
+    if (layerMatches.length === 1) return layerMatches[0].c;
+    // Still ambiguous (0 or >=2 equally-good candidates) — do not guess.
+    note('remount-canvas-ambiguous', {
+      elId: v && v.__obedElId,
+      box: box,
+      candidateN: tied.length,
+      layerMatchN: layerMatches.length
+    });
+    return null;
   }
   // Robust canvas match for the TEXTURE FEED: the movie's own canvas overlaps
   // its footprint strongly even while Magic Move animates its geometry, so a
   // strict pos/size tolerance (findMovieCanvas) misses it mid-cut. Match by
   // strong overlap with the video's own footprint instead. Kept separate from
   // findMovieCanvas so the remount insertion stays strict per Codex uniqueness.
+  // Bound to the video's own ASSET IDENTITY, never elId parity (which lets a
+  // second movie alias onto the wrong movie's canvas). Fixed authored
+  // footprints with position tolerance, NOT v.__obedRect (which MM can leave
+  // stale/0,0) — empirically this matches the settled movie canvas across
+  // the cut where an overlap-vs-__obedRect test did not.
+  function movieAssetKey(src) {
+    const s = String(src || '').toLowerCase();
+    if (s.indexOf('untitled.mov') >= 0) return 'movie1';
+    if (s.indexOf('wa0125') >= 0) return 'movie2';
+    return null;
+  }
+  const MOVIE_FOOTPRINTS_BY_KEY = {
+    movie1: {x: 109, y: 795, w: 952, h: 268},
+    movie2: {x: 109, y: 500, w: 663, h: 186}
+  };
+  function footprintKeyForRect(rect) {
+    let bestKey = null, bestDist = Infinity;
+    for (const k in MOVIE_FOOTPRINTS_BY_KEY) {
+      const fp = MOVIE_FOOTPRINTS_BY_KEY[k];
+      const dx = Math.abs(fp.x - rect.x), dy = Math.abs(fp.y - rect.y);
+      const dw = Math.abs(fp.w - rect.w), dh = Math.abs(fp.h - rect.h);
+      if (dx <= 20 && dy <= 20 && dw <= 30 && dh <= 30) {
+        const dist = dx + dy + dw + dh;
+        if (dist < bestDist) { bestDist = dist; bestKey = k; }
+      }
+    }
+    return bestKey;
+  }
   function feedCanvasFor(v) {
-    // Proven matcher: fixed authored footprints with position tolerance, NOT
-    // v.__obedRect (which MM can leave stale/0,0). Prefer this video's own
-    // footprint, then the other. Empirically this matches the settled movie
-    // canvas across the cut where an overlap-vs-__obedRect test did not.
-    const fps = [
-      {x: 109, y: 795, w: 952, h: 268},
-      {x: 109, y: 500, w: 663, h: 186}
-    ];
-    const idx = ((v.__obedElId || 1) - 1) % fps.length;
-    const ordered = [fps[idx], fps[(idx + 1) % fps.length]];
+    const key = movieAssetKey(v.currentSrc || v.src || '');
+    const box = key ? MOVIE_FOOTPRINTS_BY_KEY[key] : null;
+    // Unknown asset, or no footprint for it — never guess the other movie's slot.
+    if (!box) return null;
     const canvases = document.querySelectorAll('canvas');
-    for (let b = 0; b < ordered.length; b++) {
-      const box = ordered[b];
-      for (let i = 0; i < canvases.length; i++) {
-        const c = canvases[i];
-        const r = c.getBoundingClientRect();
-        if (!(r.width > 1 && r.height > 1)) continue;
-        if (Math.abs(r.left - box.x) <= 20 && Math.abs(r.top - box.y) <= 20 &&
-            Math.abs(r.width - box.w) <= 30 && Math.abs(r.height - box.h) <= 30) {
-          return c;
-        }
+    for (let i = 0; i < canvases.length; i++) {
+      const c = canvases[i];
+      const r = c.getBoundingClientRect();
+      if (!(r.width > 1 && r.height > 1)) continue;
+      if (Math.abs(r.left - box.x) <= 20 && Math.abs(r.top - box.y) <= 20 &&
+          Math.abs(r.width - box.w) <= 30 && Math.abs(r.height - box.h) <= 30) {
+        return c;
       }
     }
     return null;
@@ -725,7 +752,7 @@ PRESERVE_SCRIPT = r"""
     }
     const existing = textureFeed.get(v.__obedElId);
     if (existing && existing.active) return;
-    const state = {active: true, drawn: 0, matched: 0, fails: 0, canvas: null, canvasId: null};
+    const state = {active: true, drawn: 0, matched: 0, fails: 0, canvas: null, canvasId: null, v: v};
     textureFeed.set(v.__obedElId, state);
     function onHash() {
       const hn = currentHashNum();
@@ -758,9 +785,13 @@ PRESERVE_SCRIPT = r"""
           }
         } else {
           state.fails++;
+          state.canvas = null;
+          state.canvasId = null;
         }
       } else {
         state.fails++;
+        state.canvas = null;
+        state.canvasId = null;
       }
       try {
         v.requestVideoFrameCallback(tick);
@@ -1115,7 +1146,7 @@ PRESERVE_SCRIPT = r"""
         if (hn != null && hn >= boundary && q && q.length) {
           // On/after the restart boundary this is the authored fresh Start
           // Movie — never stitch a preserved decoder onto it.
-          note('reuse-skip-boundary', {key: key, hashNum: hn, boundary: boundary, queueLen: q.length});
+          note('reuse-skip-boundary', {key: key, newElId: el.__obedElId, hashNum: hn, boundary: boundary, queueLen: q.length});
           // Retire the old decoders for THIS key only so they stop remounting
           // over the restart movie and polluting slide-3 clock scoring. A
           // continuing movie under a different key is never touched.

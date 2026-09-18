@@ -881,7 +881,14 @@ def test_restart_movie_accepts_backward_reset_that_leads_directly_in():
     assert scored["ok"] is True
 
 
-def _motion_sample(value: int, scene_hash: str, offset: float, w: int = 1920, decoder_id=1):
+def _motion_sample(
+    value: int,
+    scene_hash: str,
+    offset: float,
+    w: int = 1920,
+    decoder_id=1,
+    movie_key="movie1.mov",
+):
     roi = np.full((20, 20, 3), value % 256, dtype=np.uint8)
     return {
         "roi": roi,
@@ -889,6 +896,7 @@ def _motion_sample(value: int, scene_hash: str, offset: float, w: int = 1920, de
         "captureOffsetS": offset,
         "decoderId": decoder_id,
         "w": w,
+        "movieKey": movie_key,
     }
 
 
@@ -912,6 +920,53 @@ def test_motion_across_flip_accepts_motion_before_across_and_after():
     assert scored["afterOk"] is True
     assert scored["crossingDecoded"] is True
     assert scored["crossingDecoderStable"] is True
+
+
+def test_motion_across_flip_accepts_matching_expected_key_at_crossing():
+    """A stable decoder feeding the expected movie's footprint across the
+    crossing passes when expected_key is given (positive control).
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, movie_key="movie1.mov"),
+        _motion_sample(80, "#6", 0.4, movie_key="movie1.mov"),
+        _motion_sample(100, "#6", 0.5, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["ok"] is True
+    assert scored["crossingKeyOk"] is True
+    assert scored["crossingMovieKeys"] == ["movie1.mov", "movie1.mov"]
+
+
+def test_motion_across_flip_rejects_wrong_movie_key_at_crossing():
+    """A stable decoder can still be feeding the WRONG movie's footprint
+    across the crossing (e.g. two same-file decoders) — movieKey must match
+    expected_key or the crossing must not pass.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=1, movie_key="movie2.mov"),
+        _motion_sample(80, "#6", 0.4, decoder_id=1, movie_key="movie2.mov"),
+        _motion_sample(100, "#6", 0.5, decoder_id=1, movie_key="movie2.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoded"] is True
+    assert scored["crossingDecoderStable"] is True
+    assert scored["crossingKeyOk"] is False
+    assert scored["crossingMovieKeys"] == ["movie1.mov", "movie2.mov"]
+    assert scored["ok"] is False
+    assert scored["reason"] == "crossing movie key mismatch"
 
 
 def test_motion_across_flip_rejects_decoder_switch_at_crossing():
