@@ -1722,6 +1722,139 @@ def test_match_character_style_uses_colour_when_face_matches():
     assert picked["color"] == white
 
 
+def test_match_character_style_colour_tie_falls_back_to_size():
+    """map-label-colour-tie: a near-white 25pt sample must not beat a 40/35pt
+    sample whose colour is a few 0.0001s off pure white — colours within
+    STYLE_COLOR_TIE are a tie and size decides. Old behaviour (colour first,
+    no tolerance) would always pick the 25pt sample here."""
+    from obed_edom.map_remap import match_character_style
+
+    styles = [
+        {"font": "Amplitude-Bold", "size": 40.0, "color": [0.99989, 1, 0.99985], "text": "CHC Kuching"},
+        {"font": "Amplitude-Bold", "size": 25.0, "color": [0.99998, 1, 1], "text": "Myanmar"},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": [0.99989, 1, 0.99985], "text": "CHC Foshan"},
+    ]
+    white = [1.0, 1.0, 1.0]
+    label_35 = _item(kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=35, color=white)
+    picked_35 = match_character_style(label_35, styles, size_ratio=1.0)
+    assert picked_35["size"] == 35.0  # old code: 25.0
+    label_40 = _item(kind="text", text="CHC Kuching", font="Amplitude-Bold", size=40, color=white)
+    picked_40 = match_character_style(label_40, styles, size_ratio=1.0)
+    assert picked_40["size"] == 40.0  # colour tie between 40/35, size decides  # old code: 25.0
+
+
+def test_match_character_style_prefer_slide_restricts_the_pool():
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    styles = [
+        {"font": "Amplitude-Bold", "size": 40.0, "color": white, "text": "CHC Kuching", "slides": [3]},
+        {"font": "Amplitude-Bold", "size": 25.0, "color": white, "text": "Myanmar", "slides": [4]},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": white, "text": "CHC Foshan", "slides": [5]},
+    ]
+    label = _item(kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=40, color=white)
+    # slide 5 only has a 35pt sample; it wins even though 40pt is nearer in size.
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=5)["size"] == 35.0
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=4)["size"] == 25.0
+    # No Amplitude-Bold sample on slide 9 -> falls back to the whole pool.
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=9)["size"] == 40.0
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=None)["size"] == 40.0
+
+
+def test_match_character_style_prefer_slide_needs_a_colour_match():
+    """The mapped slide only overrides the pool with a sample of the SAME colour: a red
+    sample on the mapped slide must not size a white label when a white sample exists
+    elsewhere."""
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    red = [0.987, 0.222, 0.201]
+    styles = [
+        {"font": "Amplitude-Bold", "size": 20.0, "color": red, "text": "CHC Aaliana", "slides": [5]},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": white, "text": "CHC Foshan", "slides": [3]},
+    ]
+    label = _item(kind="text", text="CHC Fu Chang", font="Amplitude-Bold", size=35, color=white)
+    picked = match_character_style(label, styles, size_ratio=1.0, prefer_slide=5)
+    assert picked["size"] == 35.0 and picked["color"] == white
+
+
+def test_match_character_style_prefer_slide_ignores_uncoloured_samples():
+    """`color_distance` reads a missing colour as 0.0, which must NOT count as a colour
+    match for the mapped-slide preference: an uncoloured 25pt sample on the mapped slide
+    may not beat a white 35pt sample elsewhere."""
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    styles = [
+        {"font": "Amplitude-Bold", "size": 25.0, "text": "Myanmar", "slides": [5]},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": white, "text": "CHC Foshan", "slides": [3]},
+    ]
+    label = _item(kind="text", text="CHC Fu Chang", font="Amplitude-Bold", size=35, color=white)
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=5)["size"] == 35.0
+    uncoloured_label = _item(kind="text", text="CHC Fu Chang", font="Amplitude-Bold", size=35)
+    assert match_character_style(uncoloured_label, styles, size_ratio=1.0, prefer_slide=5)["size"] == 35.0
+
+
+def test_match_character_style_prefer_slide_with_several_samples_lets_size_decide():
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    styles = [
+        {"font": "Amplitude-Bold", "size": 40.0, "color": white, "text": "CHC Kuching", "slides": [3]},
+        {"font": "Amplitude-Bold", "size": 60.0, "color": white, "text": "Malaysia", "slides": [3]},
+        {"font": "Amplitude-Bold", "size": 58.0, "color": white, "text": "Elsewhere", "slides": [7]},
+    ]
+    label = _item(kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=40, color=white)
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=3)["size"] == 40.0
+    title = _item(kind="text", text="Malaysia", font="Amplitude-Bold", size=57, color=white)
+    # 58pt elsewhere is nearer, but the mapped slide's own 60pt sample wins.
+    assert match_character_style(title, styles, size_ratio=1.0, prefer_slide=3)["size"] == 60.0
+
+
+def test_match_character_style_colour_tolerance_does_not_hide_real_colour():
+    """A genuinely different colour (red sample) must still lose to a white
+    sample for white wall text, even when the red sample is closer in size."""
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    red = [0.987, 0.222, 0.201]
+    styles = [
+        {"font": "Amplitude-Regular", "size": 20.0, "color": red, "text": "CHC Aaliana"},
+        {"font": "Amplitude-Regular", "size": 32.0, "color": white, "text": "UPDATE"},
+    ]
+    label = _item(kind="text", text="UPDATE", font="Amplitude-Regular", size=21, color=white)
+    picked = match_character_style(label, styles, size_ratio=1.0)
+    assert picked["color"] == white
+
+
+def test_template_character_styles_records_slide_numbers():
+    from obed_edom.map_remap import template_character_styles
+
+    slides = [
+        {
+            "number": 3,
+            "items": [_item(kind="text", text="CHC Kuching", font="Amplitude-Bold", size=40, color=[1, 1, 1])],
+        },
+        {
+            "number": 4,
+            "items": [_item(kind="text", text="Myanmar", font="Amplitude-Bold", size=25, color=[1, 1, 1])],
+        },
+        {
+            "number": 5,
+            "items": [
+                _item(kind="text", text="CHC Foshan", font="Amplitude-Bold", size=35, color=[1, 1, 1]),
+                _item(kind="text", text="CHC Kuching again", font="Amplitude-Bold", size=40, color=[1, 1, 1]),
+            ],
+        },
+    ]
+    styles = template_character_styles(slides)
+    by_size = {s["size"]: s for s in styles}
+    assert by_size[40.0]["slides"] == [3, 5]  # deduped: one record, two slides
+    assert by_size[25.0]["slides"] == [4]
+    assert by_size[35.0]["slides"] == [5]
+    assert len(styles) == 3
+
+
 def _preadd_chain_wall(*, slide2_extra, slide3_items, groupChildText2=None):
     """A base slide (map+40 pins) plus 4 junk shapes that donor search always sheds
     by slide 2 — without the junk, a reuse target 2 slides down ties slide 1 and
@@ -3156,6 +3289,34 @@ def test_demoted_label_takes_the_swatch_matching_its_ridden_affine():
     label_t = next(t for t in out if t.kind == "text" and t.kind_index == 40)
     assert label_t.role == "other"
     assert label_t.font_size == 40.0
+
+
+def test_demoted_label_prefers_its_mapped_template_slides_sample():
+    """End to end through plan_slide_transforms: with a colour tie across the
+    whole pool, the label must take the sample tagged with its own recipe's
+    templateSlide, not the globally nearest-size sample from another slide."""
+    label = _item(
+        kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=40,
+        x=4200, y=300, w=235, h=52, kindIndex=40, color=[1.0, 1.0, 1.0],
+    )
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+            label,
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, _map_and_swatch_template())
+    white = [1.0, 1.0, 1.0]
+    recipe["templateSlide"] = 5
+    recipe["characterStyles"] = [
+        {"font": "Amplitude-Bold", "size": 40.0, "color": white, "text": "CHC Kuching", "slides": [3]},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": white, "text": "CHC Foshan", "slides": [5]},
+    ]
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    label_t = next(t for t in out if t.kind == "text" and t.kind_index == 40)
+    assert label_t.font_size == 35.0  # slide 5's own sample, not the nearer-size 40pt from slide 3
 
 
 def test_preview_wanted_covers_roster_keep_slides_without_the_whitelist():
