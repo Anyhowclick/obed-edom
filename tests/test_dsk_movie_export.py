@@ -2550,6 +2550,41 @@ def test_movie_order_stacked_refuses_unbuilt_movie_without_z_order():
         dme.movie_order(rects, {("movie", 0): 0})
 
 
+def test_stack_mode_refuses_a_partial_stack():
+    # Two movies cover each other, a third sits beside them: visual order and build order
+    # each govern part of the slide, so there is no single order to derive.
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+        ("movie", 2): Rect(5760, 0, 1920, 1080),
+    }
+    with pytest.raises(ValueError, match="partially overlap"):
+        dme.stack_mode(rects)
+    with pytest.raises(ValueError, match="partially overlap"):
+        dme.movie_order(rects, {("movie", 0): 0, ("movie", 1): 1, ("movie", 2): 2})
+
+
+def test_visible_movie_rects_decide_the_mode_the_full_rects_would_miss():
+    # Codex r1: full item rects barely clip (2.5% of the smaller), but what the clip
+    # actually shows -- the centre-panel crop -- is a stack. One predicate, one mode.
+    rects = {("movie", 0): Rect(0, 0, 4000, 1080), ("movie", 1): Rect(3900, 0, 4100, 1080)}
+    assert dme.stack_mode(rects) == "visual"
+
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert dme.stack_mode(visible) == "stacked"
+    # the caller's already-decided mode wins over re-deriving it from the rects passed in
+    order = dme.movie_order(rects, {("movie", 0): 1, ("movie", 1): 0}, mode="stacked")
+    assert order == [("movie", 1), ("movie", 0)]
+
+
+def test_visible_movie_rects_clip_to_the_crop_and_zero_outside_it():
+    rects = {("movie", 0): Rect(1920, 0, 3840, 1080), ("movie", 1): Rect(0, 0, 100, 1080)}
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert (visible[("movie", 0)].x, visible[("movie", 0)].w) == (1920.0, 3840.0)
+    assert visible[("movie", 1)].w == 0.0
+    assert dme.stack_mode(visible) == "visual"
+
+
 def test_movie_build_order_takes_the_lowest_chunk_per_movie():
     records = [
         {"kind": "movie", "kindIndex": 0, "chunkOrder": [3, 1]},

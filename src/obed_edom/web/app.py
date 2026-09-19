@@ -50,9 +50,10 @@ from obed_edom.dsk_movie_export import (
     export_dsk_slide_clips,
     export_slide_clips,
     movies_stacked,
+    visible_movie_rects,
 )
 from obed_edom.dsk_plan import ItemId, classify_deck
-from obed_edom.map_remap import Rect, item_rect
+from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, item_rect
 from obed_edom.dsk_stage_export import (
     export_stage_pngs,
     read_manifest,
@@ -1803,7 +1804,7 @@ def _dsk_videos_only_flags(cls: Any, slide: dict[str, Any] | None) -> tuple[bool
         for item in (slide or {}).get("items") or []
         if (item.get("kind"), item.get("kindIndex")) in movie_ids
     }
-    return True, movies_stacked(rects)
+    return True, movies_stacked(visible_movie_rects(rects, CENTRE_PANEL_RECT))
 
 
 def _dsk_keep_side_from_result(result: dict[str, Any]) -> set[int]:

@@ -153,12 +153,29 @@ def plan_movie_autoplay(deck: Path, targets: list[dict]) -> dict:
     return {"refused": False, "reason": None, "ids": match["ids"]}
 
 
+def _set_field(obj: dict, field: str, value: Any) -> str | None:
+    """Set a plain or dotted ``field`` on an archive object dict. Returns the dotted
+    prefix of the first parent that is not an existing message, or ``None`` on success."""
+    *parents, leaf = field.split(".")
+    target = obj
+    for i, part in enumerate(parents):
+        child = target.get(part)
+        if not isinstance(child, dict):
+            return ".".join(parents[: i + 1])
+        target = child
+    target[leaf] = value
+    return None
+
+
 def _patch_archive_fields(deck: Path, patches: list[tuple[str, str, dict[str, Any]]]) -> dict:
     """Patch ``field: value`` pairs onto each named archive in place. ``patches`` is a
     list of ``(archive_id, pbtype, {field: value})``; the same archive id may not
-    appear twice. Refuses (deck untouched) unless every id resolves to a same-member
-    archive of the stated ``pbtype`` and, per member, the re-encode changed exactly
-    the intended archive(s) -- the same self-check gate as `iwa_write.patch_slide_builds`.
+    appear twice. A dotted ``field`` walks into the archive's EXISTING nested messages
+    (``attributes.animationAttributes.effect``); a missing or non-dict parent refuses
+    rather than minting one. Refuses (deck untouched) unless every id resolves to a
+    same-member archive of the stated ``pbtype`` and, per member, the re-encode changed
+    exactly the intended archive(s) -- the same self-check gate as
+    `iwa_write.patch_slide_builds`.
     """
     deck = Path(deck)
     if not patches:
@@ -196,7 +213,14 @@ def _patch_archive_fields(deck: Path, patches: list[tuple[str, str, dict[str, An
                         continue
                     for o in arch.get("objects") or []:
                         for field, value in fields_by_id[aid].items():
-                            o[field] = value
+                            missing = _set_field(o, field, value)
+                            if missing is not None:
+                                return {
+                                    "refused": True,
+                                    "reason": f"{aid} has no {missing} message to patch {field} into",
+                                    "touched": [],
+                                    "applied": 0,
+                                }
                         touched += 1
 
             if touched != len(wanted):
@@ -256,12 +280,19 @@ def _movie_slide(objects: dict, movie_id: str) -> str | None:
     return owners[0] if len(owners) == 1 else None
 
 
-def _movie_build_chunk(objects: dict, id_to_file: dict, movie_id: str) -> tuple[str | None, str | None]:
+_MOVIE_START = ("apple:movie-start",)
+
+
+def _movie_build_chunk(
+    objects: dict, id_to_file: dict, movie_id: str, effects: Sequence[str] = _MOVIE_START
+) -> tuple[str | None, str | None]:
     """Resolve the single ``KN.BuildChunkArchive`` for ``movie_id``'s
     ``apple:movie-start`` build, THROUGH the owning slide's own ``builds``/
     ``buildChunks`` timeline -- this repo deliberately leaves orphaned build/chunk
     archives in place (``iwa_write.patch_slide_builds``), so a global search could
-    patch an archive Keynote never plays. Returns ``(chunk_id, error)``; refuses
+    patch an archive Keynote never plays. ``effects`` widens the accepted build
+    effect, so a clip whose movie-start build has already had a build-in effect
+    written onto it still resolves. Returns ``(chunk_id, error)``; refuses
     (``chunk_id`` ``None``) rather than guess.
     """
     slide_id = _movie_slide(objects, movie_id)
@@ -284,31 +315,36 @@ def _movie_build_chunk(objects: dict, id_to_file: dict, movie_id: str) -> tuple[
             continue
         if str((build.get("drawable") or {}).get("identifier")) != movie_id:
             continue
-        if ((build.get("attributes") or {}).get("animationAttributes") or {}).get("effect") != "apple:movie-start":
+        if ((build.get("attributes") or {}).get("animationAttributes") or {}).get("effect") not in effects:
             continue
         if id_to_file.get(build_id) != id_to_file.get(movie_id):
             return None, f"movie {movie_id} build {build_id} lives in another member"
         chunks.append(chunk_id)
 
     if len(chunks) != 1:
-        return None, f"movie {movie_id} has {len(chunks)} listed apple:movie-start build chunk(s) on slide {slide_id}"
+        return None, (
+            f"movie {movie_id} has {len(chunks)} listed {'/'.join(effects)} build chunk(s) on slide {slide_id}"
+        )
     chunk_id = chunks[0]
     if id_to_file.get(chunk_id) != id_to_file.get(movie_id):
         return None, f"movie {movie_id} chunk {chunk_id} lives in another member"
     return chunk_id, None
 
 
-def movie_autoplay_state(deck: Path, ids: list[str]) -> dict[str, dict[str, Any]]:
+def movie_autoplay_state(
+    deck: Path, ids: list[str], effects: Mapping[str, Sequence[str]] | None = None
+) -> dict[str, dict[str, Any]]:
     """Read back each movie's ``playsAcrossSlides`` and its ``apple:movie-start`` build
     chunk's ``automatic``/``referent``/``delay``/``chunkPos`` (0-based index into the
     owning slide's ``buildChunks``), for verify-mode logging after `patch_movie_autoplay`
-    and `patch_clip_start_timing`."""
+    and `patch_clip_start_timing`. ``effects`` widens the accepted build effect per movie
+    (a clip that now carries a written build-in)."""
     deck = Path(deck)
     objects, id_to_file, _file_ids = _load_deck(deck)
     out: dict[str, dict[str, Any]] = {}
     for oid in ids:
         obj = objects.get(oid) or {}
-        chunk_id, _error = _movie_build_chunk(objects, id_to_file, oid)
+        chunk_id, _error = _movie_build_chunk(objects, id_to_file, oid, (effects or {}).get(oid, _MOVIE_START))
         chunk = objects.get(chunk_id) if chunk_id else None
         chunk_pos = None
         if chunk_id is not None:
@@ -363,22 +399,64 @@ def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:
 @dataclass(frozen=True)
 class ClipTiming:
     """One inserted DSK clip's start timing, per owner rule
-    (see ``.agents/briefs/dsk-clip-timing.md`` rule 2)."""
+    (see ``.agents/briefs/dsk-clip-timing.md`` rule 2). ``build_in`` (with
+    ``build_in_duration``) additionally rewrites the clip's own auto-created
+    ``apple:movie-start`` build to the SOURCE build-in effect -- a stacked upper clip
+    that must dissolve in over the clip below (plan §4 item 28)."""
 
     movie_id: str
-    mode: Literal["after_transition", "with_build_1", "after_previous"]
+    mode: Literal["after_transition", "with_build_1", "with_previous", "after_previous", "on_click"]
+    delay: float = 0.0
+    build_in: str | None = None
+    build_in_duration: float | None = None
 
 
 _CLIP_TIMING_FLAGS: dict[str, dict[str, Any]] = {
-    "after_transition": {"automatic": True, "referent": True, "delay": 0.0},
-    "with_build_1": {"automatic": True, "referent": False, "delay": 0.0},
-    "after_previous": {"automatic": True, "referent": True, "delay": 0.0},
+    "after_transition": {"automatic": True, "referent": True},
+    "with_build_1": {"automatic": True, "referent": False},
+    "with_previous": {"automatic": True, "referent": False},
+    "after_previous": {"automatic": True, "referent": True},
+    "on_click": {"automatic": False, "referent": True},
 }
 
 # Category rank within a slide's build-chunk order: every ``after_transition`` entry
-# (chunk position 0) first, then every ``with_build_1`` entry (right after chunk 0),
-# then every ``after_previous`` entry (cascade), each group keeping its given order.
-_CLIP_TIMING_RANK = {"after_transition": 0, "with_build_1": 1, "after_previous": 2}
+# (chunk position 0) first, then every "with" entry (right after chunk 0), then every
+# chain entry (cascade), each group keeping its given order. A slide carrying a
+# ``build_in`` entry ignores this and keeps the plan's own (source build) order.
+_CLIP_TIMING_RANK = {
+    "after_transition": 0, "with_build_1": 1, "with_previous": 1, "after_previous": 2, "on_click": 2,
+}
+
+_CLIP_MODE_BY_FLAGS = {(True, False): "with_previous", (True, True): "after_previous", (False, True): "on_click"}
+
+# A source build-in this writer may rewrite onto a clip's movie-start build. Measured on
+# FRC Wall slide 50 (plan §3): the two KN.BuildArchives differ in `effect` alone.
+_BUILD_IN_EFFECTS = frozenset({"apple:dissolve"})
+
+
+def clip_timing_mode(automatic: Any, referent: Any) -> str | None:
+    """The `ClipTiming.mode` reproducing a SOURCE build chunk's start flags, or ``None``
+    when the pair is not one this writer expresses (plan §3 "Build-chunk flag encoding";
+    After Transition is a position-0 After Previous, so it is never returned here)."""
+    return _CLIP_MODE_BY_FLAGS.get((bool(automatic), bool(referent)))
+
+
+def _clip_build(objects: dict, slide_id: str, movie_id: str) -> tuple[str | None, str | None]:
+    """The single build LISTED on ``slide_id`` whose drawable is ``movie_id``. Returns
+    ``(build_id, error)``; a clip carrying a second build is refused, not guessed."""
+    owned = [
+        bid
+        for bid in (str((ref or {}).get("identifier")) for ref in (objects.get(slide_id) or {}).get("builds") or [])
+        if (objects.get(bid) or {}).get("_pbtype") == "KN.BuildArchive"
+        and str(((objects.get(bid) or {}).get("drawable") or {}).get("identifier")) == movie_id
+    ]
+    if len(owned) != 1:
+        return None, f"movie {movie_id} has {len(owned)} listed build(s) on slide {slide_id}, expected exactly one"
+    return owned[0], None
+
+
+def _anim(objects: dict, build_id: str) -> dict:
+    return ((objects.get(build_id) or {}).get("attributes") or {}).get("animationAttributes") or {}
 
 
 def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]]) -> dict:
@@ -393,10 +471,23 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
     to carry only movie-start chunks (the gold decks' overlays are static); a build
     chunk not named in the plan means the retiming is undefined, so the write is refused
     (``ValueError``) rather than silently moving it. Requires exactly one after_transition
-    entry and only known modes. Never touches chunk ``duration``, delivery, or ids.
-    Re-reads and verifies ``(automatic, referent, delay, chunkPos)`` per movie and
-    ``playsAcrossSlides is False``, raising ``ValueError`` on any mismatch. Returns the
-    verified state per slide: ``{slideId: {movieId: {...}}}``.
+    entry and only known modes. Never touches chunk ``duration``, delivery, or ids --
+    the single exception is a ``build_in`` entry whose ``build_in_duration`` differs from
+    the clip's current build duration, where both the build's and the chunk's ``duration``
+    are written so the rewritten effect plays for the source's time.
+
+    A ``build_in`` entry additionally rewrites the clip's own auto-created build effect to
+    the source build-in (plan §4 item 28) and keeps the slide's chunk order EXACTLY as
+    planned (the source build order), instead of the mode ranking. It is refused unless the
+    effect is in ``_BUILD_IN_EFFECTS``, the clip owns exactly one listed build, and that
+    build is an ``In`` whose effect is ``apple:movie-start`` (or already the planned
+    build-in, so a second run is a no-op rather than a refusal).
+
+    Re-reads and verifies ``(automatic, referent, delay, chunkPos)`` per movie,
+    ``playsAcrossSlides is False`` and, for a ``build_in`` entry, the build's
+    ``effect``/``animationType``/``duration`` and the chunk's ``duration``, raising
+    ``ValueError`` on any mismatch. Returns the verified state per slide:
+    ``{slideId: {movieId: {...}}}``.
     """
     deck = Path(deck)
     plans = {str(k): list(v) for k, v in plans.items()}
@@ -408,6 +499,8 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
     field_patches: list[tuple[str, str, dict[str, Any]]] = []
     build_plans: dict[str, dict[str, Any]] = {}
     expected_pos: dict[str, dict[str, int]] = {}
+    accepted_effects: dict[str, tuple[str, ...]] = {}
+    build_checks: dict[str, dict[str, dict[str, Any]]] = {}
 
     for slide_id, entries in plans.items():
         if not entries:
@@ -426,11 +519,20 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
             )
 
         chunk_by_movie: dict[str, str] = {}
-        for movie_id in movie_ids:
+        for entry in entries:
+            movie_id = str(entry.movie_id)
             obj = objects.get(movie_id)
             if obj is None or obj.get("_pbtype") != "TSD.MovieArchive":
                 raise ValueError(f"{movie_id} does not resolve to a TSD.MovieArchive")
-            chunk_id, error = _movie_build_chunk(objects, id_to_file, movie_id)
+            if entry.build_in is not None:
+                if entry.build_in not in _BUILD_IN_EFFECTS:
+                    raise ValueError(
+                        f"slide {slide_id} movie {movie_id}: build-in effect {entry.build_in!r} is not supported"
+                    )
+                accepted_effects[movie_id] = (*_MOVIE_START, entry.build_in)
+            chunk_id, error = _movie_build_chunk(
+                objects, id_to_file, movie_id, accepted_effects.get(movie_id, _MOVIE_START)
+            )
             if error:
                 raise ValueError(error)
             chunk_by_movie[movie_id] = chunk_id
@@ -439,12 +541,45 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
         if len(owning_slides) != 1 or slide_id not in owning_slides:
             raise ValueError(f"slide {slide_id}: plan movies do not all resolve to that slide")
 
+        for entry in entries:
+            if entry.build_in is None:
+                continue
+            movie_id = str(entry.movie_id)
+            build_id, error = _clip_build(objects, slide_id, movie_id)
+            if error:
+                raise ValueError(error)
+            anim = _anim(objects, build_id)
+            if anim.get("effect") not in (*_MOVIE_START, entry.build_in):
+                raise ValueError(
+                    f"slide {slide_id} movie {movie_id}: build {build_id} carries effect "
+                    f"{anim.get('effect')!r}, expected an apple:movie-start build to rewrite"
+                )
+            if anim.get("animationType") != "In":
+                raise ValueError(
+                    f"slide {slide_id} movie {movie_id}: build {build_id} animationType "
+                    f"{anim.get('animationType')!r}, expected In"
+                )
+            chunk = objects.get(chunk_by_movie[movie_id]) or {}
+            want_duration = float(anim.get("duration") or 0.0)
+            want_chunk_duration = float(chunk.get("duration") or 0.0)
+            write_duration = entry.build_in_duration is not None and float(entry.build_in_duration) != want_duration
+            if write_duration:
+                want_duration = want_chunk_duration = float(entry.build_in_duration)
+            build_checks.setdefault(slide_id, {})[movie_id] = {
+                "buildId": build_id,
+                "effect": entry.build_in,
+                "duration": want_duration,
+                "chunkDuration": want_chunk_duration,
+                "writeDuration": write_duration,
+            }
+
         slide = objects.get(slide_id) or {}
         current_chunk_ids = [str((ref or {}).get("identifier")) for ref in slide.get("buildChunks") or []]
 
-        ordered = sorted(
-            range(len(entries)), key=lambda i: (_CLIP_TIMING_RANK[entries[i].mode], i)
-        )
+        if slide_id in build_checks:
+            ordered = list(range(len(entries)))
+        else:
+            ordered = sorted(range(len(entries)), key=lambda i: (_CLIP_TIMING_RANK[entries[i].mode], i))
         target_order = [chunk_by_movie[movie_ids[i]] for i in ordered]
 
         target_set = set(target_order)
@@ -472,8 +607,15 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
         for entry in entries:
             movie_id = str(entry.movie_id)
             chunk_id = chunk_by_movie[movie_id]
-            flags = _CLIP_TIMING_FLAGS[entry.mode]
-            field_patches.append((chunk_id, "KN.BuildChunkArchive", dict(flags)))
+            chunk_fields = dict(_CLIP_TIMING_FLAGS[entry.mode], delay=float(entry.delay))
+            check = (build_checks.get(slide_id) or {}).get(movie_id)
+            if check is not None:
+                build_fields: dict[str, Any] = {"attributes.animationAttributes.effect": check["effect"]}
+                if check["writeDuration"]:
+                    build_fields["attributes.animationAttributes.duration"] = check["duration"]
+                    chunk_fields["duration"] = check["chunkDuration"]
+                field_patches.append((check["buildId"], "KN.BuildArchive", build_fields))
+            field_patches.append((chunk_id, "KN.BuildChunkArchive", chunk_fields))
             field_patches.append((movie_id, "TSD.MovieArchive", {"playsAcrossSlides": False}))
 
     if build_plans:
@@ -487,7 +629,8 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
             raise ValueError(result["reason"])
 
     all_movie_ids = sorted({str(e.movie_id) for entries in plans.values() for e in entries})
-    state = movie_autoplay_state(deck, all_movie_ids)
+    state = movie_autoplay_state(deck, all_movie_ids, accepted_effects)
+    after_objects, after_i2f, _after_fi = _load_deck(deck) if build_checks else ({}, {}, {})
 
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for slide_id, entries in plans.items():
@@ -502,11 +645,38 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
             if (
                 got["automatic"] != want_flags["automatic"]
                 or got["referent"] != want_flags["referent"]
-                or got["delay"] != want_flags["delay"]
+                or got["delay"] != float(entry.delay)
                 or got["chunkPos"] != want_pos
                 or got["playsAcrossSlides"] is not False
             ):
-                raise ValueError(f"slide {slide_id} movie {movie_id}: verify mismatch, got {got}, want {want_flags} at chunkPos {want_pos}")
+                raise ValueError(
+                    f"slide {slide_id} movie {movie_id}: verify mismatch, got {got}, want {want_flags} "
+                    f"delay {float(entry.delay)} at chunkPos {want_pos}"
+                )
+            check = (build_checks.get(slide_id) or {}).get(movie_id)
+            if check is not None:
+                anim = _anim(after_objects, check["buildId"])
+                chunk_id, error = _movie_build_chunk(
+                    after_objects, after_i2f, movie_id, accepted_effects[movie_id]
+                )
+                chunk = after_objects.get(chunk_id) or {}
+                got_build = {
+                    "effect": anim.get("effect"),
+                    "animationType": anim.get("animationType"),
+                    "duration": float(anim.get("duration") or 0.0),
+                    "chunkDuration": float(chunk.get("duration") or 0.0),
+                }
+                if error or got_build != {
+                    "effect": check["effect"],
+                    "animationType": "In",
+                    "duration": check["duration"],
+                    "chunkDuration": check["chunkDuration"],
+                }:
+                    raise ValueError(
+                        f"slide {slide_id} movie {movie_id}: build-in verify mismatch, got {error or got_build}, "
+                        f"want effect {check['effect']!r} In duration {check['duration']} "
+                        f"chunk duration {check['chunkDuration']}"
+                    )
             slide_state[movie_id] = got
         out[slide_id] = slide_state
     return out
