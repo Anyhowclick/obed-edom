@@ -2485,6 +2485,8 @@ async def _run(player: Path) -> dict:
             "atScene": SLIDE4_MIN_HASH,
             "action": "bridge",
             "movieKey": MOVIE1_KEY,
+            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
+            "durationSeconds": TRANS_S,
             "rect": dict(zip(("x", "y", "w", "h"), SLIDE4_MOVIE_RECT)),
         })
     plan_inject = inject_continuity_plan(player_dir, continuity_plan)

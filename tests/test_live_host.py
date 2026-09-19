@@ -22,6 +22,7 @@ class FakeCdp:
         self.visible = False
         self.index = 0
         self.keys: list[str] = []
+        self.clicks = 0
         self.busy = False
         self.revision = 0
         self.revision_on_enter = True
@@ -42,7 +43,13 @@ class FakeCdp:
             if self.revision_on_enter:
                 self.revision += 1
             self.busy = self.busy_on_enter
+    def click_stage(self):
+        self.clicks += 1
+        self.revision += 1
+        self.busy = self.busy_on_enter
     def evaluate(self, expression):
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            return {"ready": False, "info": {"installed": False, "reason": live_host._CONTINUITY_VIEWPORT_REASON}}
         if "__obedLive" in expression:
             return {"exportedSlideIndex": self.index, "sceneId": self.index, "buildIndex": None, "revision": self.revision, "canAdvance": self.can_advance, "canGoTo": not self.busy, "ready": not self.busy, "busy": self.busy}
         if ".hide()" in expression: self.visible = False; return None
@@ -109,7 +116,7 @@ def test_same_slide_go_to_requires_a_new_runtime_observation(tmp_path, monkeypat
     output.observe()
     FakeCdp.instances[0].revision_on_enter = False
     output.timeout_s = 0.05
-    with pytest.raises(live_host.LiveHostError, match="did not acknowledge"):
+    with pytest.raises(live_host.PlayerCommandRejected, match="did not acknowledge digit/Enter key input"):
         output.execute("goTo", 1)
 
 
@@ -769,8 +776,7 @@ def test_session_logger_writes_jsonl_and_swallows_failures(tmp_path):
     assert len(lines) == 1
     record = __import__("json").loads(lines[0])
     assert record["kind"] == "start" and record["mode"] == "hdmi"
-    broken = live_host._SessionLogger(tmp_path / "nonexistent" / "dir" / "x")
-    broken._file = None
+    broken = live_host._SessionLogger(path / "not-a-directory")
     broken.log("start")
     broken.close()
 
@@ -815,7 +821,7 @@ def write_one_movie_export(root: Path) -> None:
     (assets_dir / "s2" / "s2.jsonp").write_text("local_slide(" + json.dumps({"json": {"events": events_s2}}) + ")")
 
 
-def host_with_continuity(tmp_path, monkeypatch, *, attach: bool = False) -> live_host.LiveOutputHost:
+def host_with_continuity(tmp_path, monkeypatch, *, attach: bool = False, continuity: str = "auto") -> live_host.LiveOutputHost:
     export_root = tmp_path / "export"
     write_one_movie_export(export_root)
     (export_root / "assets" / "player").mkdir(parents=True, exist_ok=True)
@@ -834,7 +840,7 @@ def host_with_continuity(tmp_path, monkeypatch, *, attach: bool = False) -> live
     kwargs = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
     return live_host.LiveOutputHost(
         export_root, slides_with_uuid(), headless=True, transport_factory=FakeCdp,
-        server_factory=FakeServer, resolver=continuity_resolver(export_root), **kwargs,
+        server_factory=FakeServer, resolver=continuity_resolver(export_root), continuity=continuity, **kwargs,
     )
 
 
@@ -885,7 +891,7 @@ def test_continuity_qualified_when_page_confirms_install(tmp_path, monkeypatch):
 
     def evaluate(self, expression):
         if "__OBED_P2_PRESERVE__" in expression and "clear" not in expression:
-            return True
+            return {"ready": True, "info": {"installed": True}}
         return real_evaluate(self, expression)
 
     monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
@@ -905,7 +911,7 @@ def test_continuity_go_to_clears_runtime_only_when_qualified(tmp_path, monkeypat
             calls.append(expression)
             return None
         if "__OBED_P2_PRESERVE__" in expression:
-            return True
+            return {"ready": True, "info": {"installed": True}}
         return real_evaluate(self, expression)
 
     monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
@@ -998,3 +1004,181 @@ def test_observe_logs_only_on_change(tmp_path, monkeypatch):
     output.execute("goTo", 2)
     observation_logs = [entry for entry in seen if entry[0] == "observation"]
     assert len(observation_logs) == 1
+
+
+@pytest.mark.parametrize("mode", ["key", "click"])
+def test_advance_mode_is_resolved_once_at_start_and_logged(tmp_path, monkeypatch, mode):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = host(tmp_path, monkeypatch)
+    monkeypatch.setenv(live_host.ADVANCE_ENV, mode)
+    output.start()
+    monkeypatch.setenv(live_host.ADVANCE_ENV, "key" if mode == "click" else "click")
+    observed = output.execute("advance")
+    fake = FakeCdp.instances[0]
+    assert observed.revision == 1
+    assert fake.clicks == (1 if mode == "click" else 0)
+    assert fake.keys == ([] if mode == "click" else [" "])
+    output.stop()
+    records = [json.loads(line) for line in output._log_path.read_text().splitlines()]
+    assert next(record for record in records if record["kind"] == "start")["advanceMode"] == mode
+
+
+def test_invalid_advance_mode_refuses_before_starting_resources(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    monkeypatch.setenv(live_host.ADVANCE_ENV, "tap")
+    with pytest.raises(live_host.LiveHostError, match="must be key or click"):
+        output.start()
+    assert not FakeCdp.instances
+    assert output._server is None
+
+
+def test_click_mode_go_to_still_uses_keys_and_refuses_missing_ack(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.ADVANCE_ENV, "click")
+    output = host(tmp_path, monkeypatch)
+    output.start()
+    fake = FakeCdp.instances[0]
+    fake.revision_on_enter = False
+    output.timeout_s = .01
+    with pytest.raises(live_host.PlayerCommandRejected, match="Click advance cannot select a slide"):
+        output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]
+    assert fake.clicks == 0
+
+
+def test_click_stage_dispatches_press_and_release_at_measured_centre(tmp_path, monkeypatch):
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, None)
+    expressions, calls = [], []
+    def evaluate(expression):
+        expressions.append(expression)
+        return [812.5, 406.25]
+    monkeypatch.setattr(transport, "evaluate", evaluate)
+    monkeypatch.setattr(transport, "call", lambda method, **params: calls.append((method, params)))
+    transport.click_stage()
+    assert "getElementById('stage')" in expressions[0]
+    assert "getBoundingClientRect" in expressions[0]
+    assert calls == [
+        ("Input.dispatchMouseEvent", {"type": kind, "x": 812.5, "y": 406.25, "button": "left", "clickCount": 1})
+        for kind in ("mousePressed", "mouseReleased")
+    ]
+
+
+@pytest.mark.parametrize("point", [None, [], [1], [True, 2], [float("nan"), 2], [1, float("inf")]])
+def test_click_stage_refuses_missing_or_invalid_geometry(tmp_path, monkeypatch, point):
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, None)
+    monkeypatch.setattr(transport, "evaluate", lambda _: point)
+    with pytest.raises(live_host.PlayerCommandRejected, match="no usable centre"):
+        transport.click_stage()
+
+
+@pytest.mark.parametrize("readback", [None, {}, {"ready": False, "info": {"installed": True}}, {"ready": True, "info": None}])
+def test_continuity_runtime_failure_is_distinct_from_viewport_mismatch(tmp_path, monkeypatch, readback):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    real_evaluate = FakeCdp.evaluate
+    def evaluate(self, expression):
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            assert ".ready" in expression
+            return readback
+        return real_evaluate(self, expression)
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    output.start()
+    assert output.output["continuity"]["mode"] == "unsupported"
+    assert output.output["continuity"]["reason"] == "runtime failed to install"
+
+
+def test_pick_target_does_not_match_across_url_title_boundary(tmp_path):
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, None, attach_match="programsource")
+    pages = [{"type": "page", "url": "http://localhost/program", "title": "source", "webSocketDebuggerUrl": "ws://localhost"}]
+    with pytest.raises(live_host.LiveHostError, match="did not select exactly one"):
+        transport._pick_target(pages)
+
+
+def test_logger_full_queue_close_drains_and_never_closes_a_busy_writer(tmp_path, monkeypatch):
+    writing, release = threading.Event(), threading.Event()
+    class SlowFile:
+        def __init__(self): self.closed = False; self.lines = []
+        def write(self, line):
+            writing.set()
+            assert release.wait(3)
+            assert not self.closed
+            self.lines.append(line)
+        def flush(self): pass
+        def close(self): self.closed = True
+    file = SlowFile()
+    monkeypatch.setattr(Path, "open", lambda *_a, **_k: file)
+    monkeypatch.setattr(live_host._SessionLogger, "_QUEUE_MAXSIZE", 1)
+    logger = live_host._SessionLogger(tmp_path / "slow.jsonl")
+    logger.log("first")
+    assert writing.wait(1)
+    logger.log("second")
+    logger.log("dropped")
+    assert logger.dropped == 1
+    writer = logger._writer
+    real_join = writer.join
+    monkeypatch.setattr(writer, "join", lambda timeout=None: real_join(timeout=.01))
+    try:
+        logger.close()
+        assert not file.closed
+        logger.log("after-close")
+    finally:
+        release.set()
+        real_join(timeout=1)
+    assert not writer.is_alive()
+    assert file.closed
+    assert [json.loads(line)["kind"] for line in file.lines] == ["first", "second"]
+
+
+@pytest.mark.parametrize("mode", ["off", "unsupported"])
+@pytest.mark.parametrize("alpha,expected_sha", [
+    (False, "214fe86209b3b88fa2ff129674f108b5b99d2023bf061321b98f7c9bbdea5a99"),
+    (True, "747ae7b38e5c724cad51f1b4be9c5893e7cebdd556435c5a72671bf05b83cafc"),
+])
+def test_continuity_inactive_html_is_byte_identical_to_pre_i2(tmp_path, monkeypatch, mode, alpha, expected_sha):
+    # Hashes generated from _AssetServer._program_html at 1ff9f89 (before I2),
+    # using this fixture's exact index.html; include blank lines in the contract.
+    if mode == "off":
+        monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    else:
+        monkeypatch.setattr(live_host, "derive_plan", lambda *_a, **_k: live_host.Unsupported("unsupported fixture"))
+    output = host_with_continuity(tmp_path, monkeypatch, attach=alpha)
+    output.start()
+    assert output._continuity_mode == mode
+    server = live_host._AssetServer(output.export_root, b"", resolver=output.resolver, alpha=alpha, continuity_script=output._server.continuity_script)
+    assert hashlib.sha256(server._program_html()).hexdigest() == expected_sha
+
+
+@pytest.mark.parametrize("endpoint", ["http://127.0.0.1:wrong", "http://127.0.0.1:65536", "http://[::1"])
+def test_attach_endpoint_rejects_invalid_ports_and_brackets_with_host_error(endpoint):
+    with pytest.raises(live_host.LiveHostError, match="valid http loopback"):
+        live_host._validate_loopback_endpoint(endpoint)
+
+
+@pytest.mark.parametrize("url", ["ws://user@127.0.0.1:9222/page", "ws://127.0.0.1:9222/page#fragment", "ws://127.0.0.1:bad/page"])
+def test_target_websocket_rejects_credentials_fragments_and_invalid_ports(url):
+    with pytest.raises(live_host.LiveHostError):
+        live_host._validate_target_ws_url(url, "http://127.0.0.1:9222")
+
+
+def test_failed_attach_discovery_can_be_stopped_without_an_unowned_target(tmp_path, monkeypatch):
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, None, attach_endpoint="http://127.0.0.1:9222")
+    monkeypatch.setattr(transport, "_list_targets", lambda: [])
+    with pytest.raises(live_host.LiveHostError, match="Ambiguous"):
+        transport.start()
+    transport.stop()
+    transport.stop()
+    assert transport._blanked
+
+
+def test_continuity_session_opt_out_installs_nothing(tmp_path, monkeypatch):
+    monkeypatch.delenv(live_host.CONTINUITY_ENV, raising=False)
+    output = host_with_continuity(tmp_path, monkeypatch, continuity="off")
+    output.observe()
+    assert output.output["continuity"]["mode"] == "off"
+    assert output._server.continuity_script == ""
+
+
+def test_continuity_auto_cannot_override_environment_opt_out(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    output = host_with_continuity(tmp_path, monkeypatch, continuity="auto")
+    output.observe()
+    assert output.output["continuity"]["mode"] == "off"
+    assert output._server.continuity_script == ""

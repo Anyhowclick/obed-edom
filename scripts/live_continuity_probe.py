@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -98,8 +99,8 @@ SAMPLER_JS = r"""
   var samples = [];
   var MAX_SAMPLES = 20000;
   function idFor(v){ if (v.__obedProbeId == null) v.__obedProbeId = nextId++; return v.__obedProbeId; }
-  function sceneOf(){
-    try { return window.__obedLive ? window.__obedLive.snapshot().sceneId : null; } catch (e) { return null; }
+  function stateOf(){
+    try { return window.__obedLive ? window.__obedLive.snapshot() : {}; } catch (e) { return {}; }
   }
   // footprintOwnerDecoderId classifies a rect against a FIXED footprint table
   // (the static 1->2 slot) when no rect.key is given -- a rect away from that
@@ -134,7 +135,7 @@ SAMPLER_JS = r"""
   }
   function tick(){
     var t = performance.now();
-    var scene = sceneOf();
+    var state = stateOf();
     var videos = [];
     document.querySelectorAll('video').forEach(function(v){
       var r = v.getBoundingClientRect();
@@ -153,7 +154,7 @@ SAMPLER_JS = r"""
         footprintOwner: ownerOf(rect, v.currentSrc || v.src || '')
       });
     });
-    samples.push({t: t, scene: scene, videos: videos});
+    samples.push({t: t, scene: state.sceneId, playerState: state.playerState, busy: state.busy, videos: videos});
     if (samples.length > MAX_SAMPLES) samples.shift();
     window.__obedContinuityProbe__.raf = requestAnimationFrame(tick);
   }
@@ -335,6 +336,8 @@ def track_by_id(samples: list[dict[str, Any]], asset_substr: str) -> dict[int, l
                 row = dict(video)
                 row["t"] = sample.get("t")
                 row["scene"] = sample.get("scene")
+                row["playerState"] = sample.get("playerState")
+                row["busy"] = sample.get("busy")
                 tracks.setdefault(video["id"], []).append(row)
     return tracks
 
@@ -351,6 +354,70 @@ def rect_matches(rect: dict[str, float] | None, expected: dict[str, float], tole
     if not isinstance(rect, dict):
         return False
     return all(abs(rect.get(key, 1e9) - expected[key]) <= tolerance for key in ("x", "y", "w", "h"))
+
+
+def path_progress(
+    rect: dict[str, float] | None, src: dict[str, float], dst: dict[str, float], tolerance: float
+) -> float | None:
+    if not isinstance(rect, dict):
+        return None
+    keys = ("x", "y", "w", "h")
+    if any(not isinstance(rect.get(key), (int, float)) or not math.isfinite(rect[key]) for key in keys):
+        return None
+    deltas = {key: dst[key] - src[key] for key in keys}
+    length_squared = sum(delta * delta for delta in deltas.values())
+    if not length_squared:
+        return None
+    progress = sum((rect[key] - src[key]) * deltas[key] for key in keys) / length_squared
+    progress = min(1.0, max(0.0, progress))
+    expected = {key: src[key] + progress * deltas[key] for key in keys}
+    return progress if rect_matches(rect, expected, tolerance) else None
+
+
+def is_move_sample(row: dict[str, Any], transition_scene: float | None) -> bool:
+    return (
+        transition_scene is not None
+        and row.get("scene") == transition_scene
+        and row.get("playerState") == "Playing"
+        and row.get("busy") is True
+    )
+
+
+def is_move_complete(row: dict[str, Any], transition_scene: float | None) -> bool:
+    return (
+        transition_scene is not None
+        and row.get("scene") == transition_scene
+        and row.get("playerState") == "IdleAtFinalState"
+    )
+
+
+def score_motion(
+    rows: list[dict[str, Any]], src: dict[str, float], dst: dict[str, float], tolerance: float
+) -> dict[str, Any]:
+    progress = [path_progress(row.get("rect"), src, dst, tolerance) for row in rows]
+    errors = []
+    if not rows:
+        errors.append("moving transition not observed")
+    elif any(value is None for value in progress):
+        errors.append("transition rectangle leaves the shared source-to-destination path")
+    else:
+        jitter = tolerance / max(abs(dst[key] - src[key]) for key in src)
+        if progress[0] > 0.1:
+            errors.append("transition begins away from the source")
+        if progress[-1] < 0.9:
+            errors.append("transition does not approach the destination")
+        peak = progress[0]
+        for value in progress[1:]:
+            if value < peak - jitter:
+                errors.append("transition progress reverses")
+                break
+            peak = max(peak, value)
+        if any(b - a > 0.25 for a, b in zip([0.0, *progress], [*progress, 1.0])):
+            errors.append("transition jumps over the path")
+        interior = [value for value in progress if 0.1 < value < 0.9]
+        if len(interior) < 3 or min(interior, default=1.0) > 0.25 or max(interior, default=0.0) < 0.75:
+            errors.append("transition lacks meaningful interior samples")
+    return {"sampleCount": len(rows), "progress": progress, "errors": errors}
 
 
 def find_boundary_window(
@@ -418,14 +485,17 @@ def score_continuity(
     max_drop_s: float = MAX_DROP_S,
     rect_tolerance: float = RECT_TOLERANCE_PX,
     pad_s: float = WINDOW_PAD_S,
+    transition_scene: float | None = None,
 ) -> dict[str, Any]:
     """Pure: samples in, verdict dict out. Scores continuity of ONE tracked decoder
     across `boundary_scene`, evaluated only within the crossing window (reviewer
     finding #1), requiring (all within the window):
-      - the same element id present with scene < boundary AND scene >= boundary;
+      - the same element id present in every sampled frame in the window;
       - when `runtime_installed`, every after-cut sample reports that element (by
         the continuity runtime's own `footprintOwnerDecoderId`) as footprint owner;
-      - connected and on-screen at `src_rect` before / `dst_rect` after (3px);
+      - connected at the authored source before / destination after (3px);
+      - only a specified Playing transition scene may use a monotonic shared
+        source-to-destination path; its IdleAtFinalState must be at destination;
       - a monotonic clock (no drop beyond float jitter);
       - the longest zero-advance run at or under `max_stall_s`;
       - total clock advance within the window at least `min_advance_s`.
@@ -436,6 +506,10 @@ def score_continuity(
     window = find_boundary_window(samples, boundary_scene, pad_s=pad_s)
     if window is None:
         return {"verdict": False, "reason": "boundary crossing not observed in samples"}
+    if transition_scene is not None:
+        move_window = find_boundary_window(samples, transition_scene, pad_s=pad_s)
+        if move_window is not None:
+            window["start"] = min(window["start"], move_window["start"])
     windowed = {
         element_id: [r for r in rows if window["start"] <= r["t"] <= window["end"]]
         for element_id, rows in tracks.items()
@@ -452,24 +526,33 @@ def score_continuity(
             "afterIds": sorted(after_ids),
             "window": window,
         }
-    def _rect_score(rows: list[dict[str, Any]]) -> int:
-        # The fixture can have more than one same-asset <video> live at once (e.g.
-        # an incoming Magic Move instance already parked at its destination while
-        # the outgoing one is still on-screen elsewhere) -- "most samples in the
-        # window" is not a reliable way to pick which one is the tracked
-        # continuity decoder. Prefer whichever candidate is actually AT the
-        # expected footprint before/after, same as the runtime's own
-        # footprint-owner resolution does by IoU rather than by longevity.
-        before = [r for r in rows if r["scene"] is not None and r["scene"] < boundary_scene]
-        after = [r for r in rows if r["scene"] is not None and r["scene"] >= boundary_scene]
-        return sum(1 for r in before if rect_matches(r.get("rect"), src_rect, rect_tolerance)) + sum(
-            1 for r in after if rect_matches(r.get("rect"), dst_rect, rect_tolerance)
-        )
+    def _at_expected_rect(row: dict[str, Any]) -> bool:
+        if is_move_sample(row, transition_scene):
+            return path_progress(row.get("rect"), src_rect, dst_rect, rect_tolerance) is not None
+        scene = row.get("scene")
+        expected = dst_rect if is_move_complete(row, transition_scene) or (scene is not None and scene >= boundary_scene) else src_rect
+        return rect_matches(row.get("rect"), expected, rect_tolerance)
 
-    element_id = max(common, key=lambda i: (_rect_score(windowed[i]), len(windowed[i])))
+    def _candidate_score(rows: list[dict[str, Any]]) -> tuple[int, int, int]:
+        owned = 0
+        if runtime_installed:
+            for row in rows:
+                owner = row.get("footprintOwner")
+                if isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == row.get("elId"):
+                    owned += 1
+        return owned, sum(1 for row in rows if _at_expected_rect(row)), len(rows)
+
+    element_id = max(sorted(common), key=lambda i: _candidate_score(windowed[i]))
     rows = sorted(windowed[element_id], key=lambda r: r["t"])
     before_rows = [r for r in rows if r["scene"] is not None and r["scene"] < boundary_scene]
     after_rows = [r for r in rows if r["scene"] is not None and r["scene"] >= boundary_scene]
+
+    missing_samples = [
+        {"t": sample["t"], "scene": sample.get("scene"), "playerState": sample.get("playerState")}
+        for sample in samples
+        if window["start"] <= sample["t"] <= window["end"]
+        and not any(video.get("id") == element_id for video in sample.get("videos") or [])
+    ]
 
     max_drop = 0.0
     for a, b in zip(rows, rows[1:]):
@@ -479,9 +562,17 @@ def score_continuity(
     stall = _longest_stall_run(rows, max_stall_s)
     advance = rows[-1]["currentTime"] - rows[0]["currentTime"]
 
+    move_rows = [r for r in before_rows if is_move_sample(r, transition_scene)]
+    completed_move_rows = [r for r in before_rows if is_move_complete(r, transition_scene)]
+    motion = score_motion(move_rows, src_rect, dst_rect, rect_tolerance) if transition_scene is not None else None
+    if motion is not None and not any(
+        r.get("busy") is False and not is_move_complete(r, transition_scene) for r in before_rows
+    ):
+        motion["errors"].append("settled source not observed")
+
     owner_mismatches: list[dict[str, Any]] = []
     if runtime_installed:
-        for r in after_rows:
+        for r in [*move_rows, *completed_move_rows, *after_rows]:
             owner = r.get("footprintOwner")
             owned = isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == r.get("elId")
             if not owned:
@@ -489,7 +580,7 @@ def score_continuity(
 
     rect_mismatches: list[dict[str, Any]] = []
     for r in before_rows:
-        if not (r.get("isConnected") and rect_matches(r.get("rect"), src_rect, rect_tolerance)):
+        if not (r.get("isConnected") and _at_expected_rect(r)):
             rect_mismatches.append({"t": r["t"], "phase": "before", "rect": r.get("rect"), "isConnected": r.get("isConnected")})
     for r in after_rows:
         if not (r.get("isConnected") and rect_matches(r.get("rect"), dst_rect, rect_tolerance)):
@@ -501,6 +592,8 @@ def score_continuity(
         and not stall["stalled"]
         and not owner_mismatches
         and not rect_mismatches
+        and not missing_samples
+        and (motion is None or not motion["errors"])
     )
     return {
         "verdict": ok,
@@ -512,6 +605,8 @@ def score_continuity(
         "finalRect": rows[-1]["rect"],
         "ownerMismatches": owner_mismatches,
         "rectMismatches": rect_mismatches,
+        "missingSamples": missing_samples,
+        "motion": motion,
         "window": window,
     }
 
@@ -547,7 +642,10 @@ def score_boundaries(samples: list[dict[str, Any]], facts: dict[str, Any], runti
     asset = facts["asset"]
     v12 = score_continuity(samples, asset, facts["onset1to2"], facts["pinRect"], facts["pinRect"], runtime_installed)
     v23 = score_restart(samples, asset, facts["restartScene"])
-    v34 = score_continuity(samples, asset, facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], runtime_installed)
+    v34 = score_continuity(
+        samples, asset, facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], runtime_installed,
+        transition_scene=facts["bridgeScene"] - 1,
+    )
     return {"continue1to2": v12, "restart2to3": v23, "continue3to4": v34}
 
 
@@ -577,6 +675,7 @@ def run_arm(name: str, export_root: Path, slides: list[dict[str, Any]], facts: d
         player.start()
         result["continuity"] = player.output["continuity"]
         samples = drive_and_sample(player)
+        result["samples"] = samples
         result["sampleCount"] = len(samples)
         runtime_installed = result["continuity"].get("mode") == "qualified"
         result.update(score_boundaries(samples, facts, runtime_installed))
@@ -664,6 +763,7 @@ def run_attach_arm(export_root: Path, slides: list[dict[str, Any]], facts: dict[
                 computed_background = transport.evaluate("getComputedStyle(document.documentElement).backgroundColor")
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
                 samples = drive_and_sample(player)
+                result["samples"] = samples
                 result["sampleCount"] = len(samples)
                 runtime_installed = result["continuity"].get("mode") == "qualified"
                 result.update(score_boundaries(samples, facts, runtime_installed))

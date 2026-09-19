@@ -109,3 +109,116 @@ one headless run of `scripts/live_host_probe.py` with the env set.
 ## Report back (in your final message + a commit on your branch updating this file)
 Commits, what is green (exact gate outputs), what you deliberately left, and anything the owner must know
 before pressing Show tomorrow.
+
+---
+
+## Codex PAUSE checkpoint — 2026-09-19, owner requested pause at ~16:32 UTC
+
+**WIP, NOT a green/demo-ready checkpoint.** Owner saw weekly balance go from 10% to 5%,
+then explicitly requested “pause, prep handover now.” Do not continue automatically.
+
+### Resume location
+
+- Branch: `codex/live-continuity-deferred`, based on `d16119c` (includes the handover itself).
+- Worktree: `/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/live-continuity-deferred`.
+- Main checkout and Claude presenter worktree were not edited. No Keynote or visible browser was
+  launched. No PR/merge/force-push. Only disposable headless test browsers were used.
+- All test processes finished; final `pgrep` for owned live Chrome / host probe / P2 probe was empty.
+- No dashboard server was restarted; production assets are built, but serving the new UI requires
+  restarting the intended dashboard from this worktree when the owner resumes.
+
+### Implemented, pending final qualification
+
+1. **P0-a motion fallback:** shared runtime version 2 now moves/scales the preserved movie during
+   scene 7, using `srcRect` and `durationSeconds` derived from the export. Real DOM diagnosis showed
+   every movie-sized poster canvas remains static throughout the move; animation is inside WebGL,
+   so no unambiguous moving DOM rect was available. Used the handover-approved **linear interpolation
+   over exported duration** fallback. This does **not** prove exact Keynote easing or movie/poster
+   compositing parity. Source `(198,797,952,268)` → destination `(327,709,1266,356)` in 1.5s.
+   Headless trace confirms intermediate positions/scales, one owner, monotonic clock, exact landing.
+   Repeated detach initially reset the motion: independent review caught it; fixed by retaining the
+   per-generation/boundary start time and reattaching before the active-loop return. Node behavioral
+   regressions cover both detach timings and clear-generation cancellation.
+2. **P0-b OBS fallback:** `OBED_LIVE_ADVANCE=click` resolved/logged at start, CDP stage-centre mouse
+   press/release. Go-to still uses digit/Enter and reports a clear missing-ack refusal.
+   **Required click-mode real headless host probe has NOT run yet.**
+3. **P1:** final runtime `ready` marker + strict readback; install failure distinguished from viewport
+   refusal; direct-child-only movie geometry; bridge needs source/destination/finite positive export
+   duration; reject repeat bridges, bridge-before-restart and actionable boundaries after bridge.
+   Review caught mixed bridge+pin silently disappearing into an allowlisted plan; rejected now with
+   regression coverage. Updated allowlist signature:
+   `ec4b0cb3eeaf393ec00a7313d1c68b640a90282c80d408767c99984b710800cf`.
+   Fixture transition duration metadata restored from real export, full fixture/real comparison kept.
+4. **Host hardening review:** fixed full-log-queue close (event-signalled drain, writer owns file
+   close), failed attach discovery cleanup, URL/title concatenation matching, malformed endpoint
+   ports and websocket userinfo/fragment rejection. Off/unsupported HTML already matched pre-I2;
+   added byte-hash regression tests for HDMI and alpha.
+5. **I6 UI:** continuity badge and exact reason above Show; pre-start checkbox defaults enabled.
+   Unchecked sends `continuity: "off"`; API permits `auto|off`; host obeys request off OR environment
+   off (UI cannot override environment). Applies to next session, not a live hot-toggle.
+   Qualified label explicitly limited to 1920×1080. Targeted UI tests and build pass.
+
+### Verification and evidence (local, ignored)
+
+All paths below are relative to this worktree's `output/live-continuity-deferred/`:
+
+- `unit.log`: **378 passed in 2.33s** for the full handover unit command (including host suite).
+- UI: **20 live-presenter tests passed**, UI typecheck and production build passed. Package lock
+  unchanged. `git diff --check` passed.
+- `p2-fast.log`, `p2-fast-initial.json`, `p2-fast-initial-sha.json`: initial fast P2 run
+  **success: True; all 14 findings True; source unchanged**. IMPORTANT: Python imported the shared
+  runtime BEFORE the repeated-detach fix. This is NOT qualification of final runtime bytes.
+- `diagnose.py`, `diagnose.json`, `events.json`: disposable headless DOM trace. Movie moves through
+  approximately x207/236/265/293/322 then lands x327. This diagnostic predates the repeated-detach
+  correction; final host run below includes it.
+- `host-gate.json` (~4.3 MB raw sampled evidence), `host-gate.log`: final current-runtime strict
+  host run **status: fail**. Runtime SHA in run is
+  `cc09d246a89391ccff65bb9555878be4a65d91c93713ad6745301eaac0bac8bd`.
+  A and attach: 1→2 TRUE, deliberate restart TRUE, 3→4 FALSE. B and C are correctly RED at 3→4;
+  C remains GREEN at 1→2. Cleanup fields empty.
+- `run_p2_gates.py`: prepared helper for final fast / bridge-off / slow, saving each report and
+  fingerprints before next run overwrites bank. **Not run.** It is a convenience wrapper, not a gate
+  replacement: inspect exact findings and runtime SHA, not merely process return code.
+
+### Immediate next work: root-cause strict host probe failures using saved samples FIRST
+
+Motion itself has **97 sampled frames, monotonic shared-scalar path, no motion errors**, no owner
+mismatches. Strict host failure exposes two measurement/state issues; no gates were loosened:
+
+- A has 105 `missingSamples`, attach 106. Expanded motion window starts ~9577/9611 ms and includes
+  **scene 5 before the intentional scene-6 decoder restart**. Naturally the continuing slide-3
+  decoder did not exist yet. Window must be grounded at the settled slide-3/source phase while
+  still including the ENTIRE scene-7 move; it must not silently ignore absence within that window.
+- A has 14 `rectMismatches`, attach 15. First examples ~13311/13345 ms are scene 7,
+  `playerState: WaitingToJump`, busy true, movie ALREADY at destination `(327,709,1266,356)`.
+  Scorer currently recognizes destination-before-scene8 only for `IdleAtFinalState`, and incorrectly
+  expects source again during post-animation WaitingToJump. Model observed transition phases and
+  assert the ordering (Playing → final → WaitingToJump), rather than blanket allowing arbitrary
+  pre-cut destination rects. Keep early-jump/stationary-snap/backwards/off-path controls RED.
+
+Probe review already fixed two OTHER issues: prioritise phase-correct true ownership over a
+same-asset stationary ghost when choosing candidate; fail any sampled disappearance of selected
+movie. 54 probe tests passed before latest combined 378-test run. Preserve those checks.
+
+After fixing/re-scoring saved host samples with meaningful regressions:
+1. Run fresh full host gate A/B/C/attach, require overall PASS; don't substitute re-score for live gate.
+2. Run final P2 fast + slow; run bridge-off and require RED **only**
+   `continueThroughMovingMagicMove3to4`. Initial fast pass is stale relative to final shared bytes.
+3. Run `scripts/live_host_probe.py` with `OBED_LIVE_ADVANCE=click`, explicit absolute fixture/original
+   index paths and artifact destination. No visible browser.
+4. Review final source diff and targeted tests; only then mark a green checkpoint.
+5. Owner must eyeball output at the receiver: fallback easing is approximate; OBS/DeckLink fill/key
+   and real CEF input remain unqualified. Ask before using the external monitor.
+
+### Deliberately untouched / pending
+
+- I3 scaled-stage mapping: still unsupported outside authored 1920×1080. Monitor at 2560×1440 needs
+  later work or a supported 1920×1080 output; the UI now exposes the refusal.
+- I5 codec reporting, HDMI/receiver verification, actual OBS click/go-to behavior, native easing
+  parity, audio/notes remain deferred.
+- `scripts/p2_alpha_spike.py` still has `nativeVirtualKeyCode`; did not alter that unrelated payload.
+- No extra full maps test runs; known baseline map failures remain outside scope.
+
+P2 export-bank symlink in this worktree points at Claude's
+`pr158-handover-findings-4366b9/output/p2-recovery/html-adversarial` (as original handover prescribed).
+P2 reruns overwrite its disposable player/reports: coordinate serial access and retain copied evidence.

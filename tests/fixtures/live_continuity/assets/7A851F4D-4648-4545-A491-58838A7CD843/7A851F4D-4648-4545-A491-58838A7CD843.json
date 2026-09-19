@@ -260,7 +260,8 @@
       "animations": [],
       "layers": []
      },
-     "effects": []
+     "effects": [],
+     "duration": 1.5
     }
    ]
   }

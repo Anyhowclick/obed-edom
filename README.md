@@ -146,6 +146,11 @@ format matching your switcher's key input.
 - `OBED_LIVE_ATTACH_MATCH` — optional substring to disambiguate the target
   page when OBS has more than one Browser Source open; without it, exactly
   one open page is required.
+- `OBED_LIVE_ADVANCE=click` — use a CDP mouse press/release at the player stage
+  centre for Advance if OBS does not accept Space. The default is `key`; the
+  choice is captured and logged when the session starts. Go-to still uses
+  digits and Enter, and refuses with a clear error if the player does not
+  acknowledge those keys before the command timeout.
 
 In this mode the reported output transport is `fill-key` with `alpha: true`.
 **Hide is transparent, not black**: the program page keeps its background

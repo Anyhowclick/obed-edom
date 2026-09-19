@@ -27,6 +27,7 @@ from obed_edom.live_session import LiveSessionService
 class StartBody(BaseModel):
     previewJobId: str = Field(min_length=1, max_length=200)
     displayId: str | None = None
+    continuity: Literal["auto", "off"] = "auto"
 
 
 class CommandBody(BaseModel):
@@ -128,7 +129,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None) -> AP
                 slides = [dict(row) for row in result.get("slides", [])]
                 if any(row.get("unsupportedMedia") for row in slides):
                     raise ValueError("This deck contains unsupported media.")
-                host = make_host(root, slides, display_id=int(body.displayId) if body.displayId else None)
+                host = make_host(root, slides, display_id=int(body.displayId) if body.displayId else None, continuity=body.continuity)
                 identity = {
                     "sourceDigest": result["sourceDigest"],
                     "playerDigest": digest,

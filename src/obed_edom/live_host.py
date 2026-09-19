@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import mimetypes
 import os
 import queue
@@ -36,6 +37,7 @@ from .live_session import PlayerCommandRejected, PlayerObservation
 
 ATTACH_ENV = "OBED_LIVE_ATTACH"
 ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
+ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
 _CONTINUITY_VIEWPORT_REASON = "viewport is not the authored size (scaled-stage mapping pending)"
 _UNSET = object()
@@ -107,7 +109,11 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _validate_loopback_endpoint(endpoint: str) -> str:
-    parts = urlsplit(endpoint)
+    try:
+        parts = urlsplit(endpoint)
+        parts.port
+    except ValueError as exc:
+        raise LiveHostError("OBED_LIVE_ATTACH must be a valid http loopback endpoint.") from exc
     if parts.scheme != "http":
         raise LiveHostError("OBED_LIVE_ATTACH must be an http loopback endpoint.")
     if parts.username is not None or parts.password is not None:
@@ -123,7 +129,13 @@ def _validate_loopback_endpoint(endpoint: str) -> str:
 
 
 def _validate_target_ws_url(ws_url: str, endpoint: str) -> str:
-    parts = urlsplit(ws_url)
+    try:
+        parts = urlsplit(ws_url)
+        parts.port
+    except ValueError as exc:
+        raise LiveHostError("CDP target websocket URL is invalid.") from exc
+    if parts.username is not None or parts.password is not None or parts.fragment:
+        raise LiveHostError("CDP target websocket URL must not contain userinfo or a fragment.")
     if parts.scheme != "ws":
         raise LiveHostError(f"CDP target websocket URL has an unexpected scheme: {ws_url}")
     host = parts.hostname
@@ -150,7 +162,9 @@ class _SessionLogger:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._file: Any = None
-        self._queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
+        self._queue: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
+        self._closing = threading.Event()
+        self._state_lock = threading.Lock()
         self._dropped = 0
         self._writer: threading.Thread | None = None
         try:
@@ -167,41 +181,38 @@ class _SessionLogger:
         return self._dropped
 
     def _drain(self) -> None:
-        while True:
-            item = self._queue.get()
-            if item is None:
-                return
-            try:
-                self._file.write(json.dumps(item, default=str) + "\n")
-                self._file.flush()
-            except Exception:
-                pass
+        file = self._file
+        try:
+            while not self._closing.is_set() or not self._queue.empty():
+                try:
+                    item = self._queue.get(timeout=.1)
+                except queue.Empty:
+                    continue
+                try:
+                    file.write(json.dumps(item, default=str) + "\n")
+                    file.flush()
+                except Exception:
+                    pass
+        finally:
+            try: file.close()
+            except Exception: pass
+            self._file = None
 
     def log(self, kind: str, **fields: Any) -> None:
-        if self._file is None:
-            return
-        record = {"ts": time.time(), "kind": kind, **fields}
-        try:
-            self._queue.put_nowait(record)
-        except queue.Full:
-            self._dropped += 1
+        with self._state_lock:
+            if self._file is None or self._closing.is_set():
+                return
+            record = {"ts": time.time(), "kind": kind, **fields}
+            try:
+                self._queue.put_nowait(record)
+            except queue.Full:
+                self._dropped += 1
 
     def close(self) -> None:
-        if self._file is None:
-            return
+        with self._state_lock:
+            self._closing.set()
         if self._writer is not None:
-            try:
-                self._queue.put_nowait(None)
-            except queue.Full:
-                pass
             self._writer.join(timeout=2.0)
-            self._writer = None
-        try:
-            self._file.close()
-        except Exception:
-            pass
-        finally:
-            self._file = None
 
 
 def _new_log_path() -> Path:
@@ -506,7 +517,7 @@ class ChromeCdp:
     def _pick_target(self, targets: list[dict[str, Any]]) -> dict[str, Any]:
         pages = [item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")]
         if self.attach_match:
-            matched = [item for item in pages if self.attach_match in (item.get("url", "") + item.get("title", ""))]
+            matched = [item for item in pages if any(self.attach_match in item.get(field, "") for field in ("url", "title"))]
             if len(matched) != 1:
                 raise LiveHostError(
                     f"CDP attach match {self.attach_match!r} did not select exactly one page target; "
@@ -562,6 +573,21 @@ class ChromeCdp:
         values = {"key": key, "code": code, "windowsVirtualKeyCode": vk}
         self.call("Input.dispatchKeyEvent", type="keyDown", **values)
         self.call("Input.dispatchKeyEvent", type="keyUp", **values)
+
+    def click_stage(self) -> None:
+        point = self.evaluate(
+            "(()=>{var stage=document.getElementById('stage');if(!stage)return null;"
+            "var r=stage.getBoundingClientRect();if(r.width<=0||r.height<=0)return null;"
+            "return [r.left+r.width/2,r.top+r.height/2];})()"
+        )
+        if not isinstance(point, list) or len(point) != 2 or not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            for value in point
+        ):
+            raise PlayerCommandRejected("Click advance is unavailable: the player stage has no usable centre.")
+        values = {"x": point[0], "y": point[1], "button": "left", "clickCount": 1}
+        self.call("Input.dispatchMouseEvent", type="mousePressed", **values)
+        self.call("Input.dispatchMouseEvent", type="mouseReleased", **values)
 
     def goto(self, url: str) -> None:
         self.call("Page.navigate", url=url)
@@ -627,6 +653,9 @@ class ChromeCdp:
         with self._stop_lock:
             self._stopped = True
             if self.attach_endpoint:
+                if self.ws is None and self._target_ws_url is None:
+                    self._blanked = True
+                    return
                 if self.ws is None and self._blanked: return
                 errors: list[Exception] = []
                 if self.ws is not None:
@@ -672,7 +701,10 @@ class ChromeCdp:
 
 
 class LiveOutputHost:
-    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None) -> None:
+    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto") -> None:
+        if continuity not in ("auto", "off"):
+            raise LiveHostError("Continuity must be auto or off.")
+        self._continuity_preference = continuity
         self.export_root, self.slides = export_root, slides
         if attach_endpoint is _UNSET:
             attach_endpoint = os.environ.get(ATTACH_ENV) or None
@@ -703,6 +735,7 @@ class LiveOutputHost:
         self._logger: _SessionLogger | None = None
         self._log_path: Path | None = None
         self._last_logged_observation: tuple[Any, ...] | None = None
+        self._advance_mode = "key"
         self._continuity_mode: str = "off"
         self._continuity_reason: str | None = None
         self._continuity_runtime_plan: dict[str, Any] | None = None
@@ -711,7 +744,7 @@ class LiveOutputHost:
         """Resolve continuity mode from the export alone, before the browser starts.
         `pending` means a runtime plan was derived and must still be confirmed truthfully
         from the page (the viewport-authored-size check only the page can perform)."""
-        if os.environ.get(CONTINUITY_ENV) == "off":
+        if self._continuity_preference == "off" or os.environ.get(CONTINUITY_ENV) == "off":
             return "off", None, None
         try:
             plan = derive_plan(self.export_root, self.slides, resolver=self.resolver)
@@ -759,6 +792,9 @@ class LiveOutputHost:
             raise LiveHostError("Program player has been stopped.")
         if self._transport:
             return self.observe()
+        self._advance_mode = os.environ.get(ADVANCE_ENV, "key").strip().lower()
+        if self._advance_mode not in ("key", "click"):
+            raise LiveHostError("OBED_LIVE_ADVANCE must be key or click.")
         self._log_path = _new_log_path()
         self._logger = _SessionLogger(self._log_path)
         self._logger.log(
@@ -766,7 +802,7 @@ class LiveOutputHost:
             exportRoot=str(self.export_root), runtimeVersion=RUNTIME_VERSION,
             display=(self.display.display_id if self.display else None),
             attachEndpoint=self._attach_endpoint, attachMatch=self._attach_match,
-            headless=self.headless,
+            headless=self.headless, advanceMode=self._advance_mode,
         )
         try:
             self._validate_export()
@@ -797,11 +833,17 @@ class LiveOutputHost:
             self._logger.log("browserVersion", result=version)
             self._transport.goto(url)
             if self._continuity_mode == "pending":
-                installed = bool(self._transport.evaluate("!!window.__OBED_P2_PRESERVE__"))
-                if installed:
+                installed = self._transport.evaluate(
+                    "({ready:!!(window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.ready),"
+                    "info:window.__OBED_CONTINUITY_INFO__||null})"
+                )
+                info = installed.get("info") if isinstance(installed, dict) else None
+                if isinstance(info, dict) and info.get("installed") is True and installed.get("ready") is True:
                     self._continuity_mode, self._continuity_reason = "qualified", None
-                else:
+                elif isinstance(info, dict) and info.get("installed") is False and info.get("reason") == _CONTINUITY_VIEWPORT_REASON:
                     self._continuity_mode, self._continuity_reason = "unsupported", _CONTINUITY_VIEWPORT_REASON
+                else:
+                    self._continuity_mode, self._continuity_reason = "unsupported", "runtime failed to install"
             self._logger.log(
                 "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
                 runtimePlan=self._continuity_runtime_plan,
@@ -978,7 +1020,9 @@ class LiveOutputHost:
             raise PlayerCommandRejected("Player is busy.")
         if operation in ("advance", "goTo"):
             transport.evaluate("window.focus();document.body.focus()")
-        if operation == "advance": transport.key(" ", "Space", 32)
+        if operation == "advance":
+            if self._advance_mode == "click": transport.click_stage()
+            else: transport.key(" ", "Space", 32)
         elif operation == "goTo":
             if slide is None: raise PlayerCommandRejected("A slide number is required.")
             player_index = next((int(s["playerIndex"]) for s in self.slides if s.get("originalOrdinal") == slide and not s.get("skipped")), None)
@@ -992,9 +1036,9 @@ class LiveOutputHost:
         else: raise LiveHostError("Unsupported player operation.")
         if operation in ("hide", "show"):
             return self.observe()
-        return self._wait_for_ack(before_revision)
+        return self._wait_for_ack(before_revision, operation=operation)
 
-    def _wait_for_ack(self, previous_revision: int | None) -> PlayerObservation:
+    def _wait_for_ack(self, previous_revision: int | None, *, operation: str | None = None) -> PlayerObservation:
         """Wait for actual input delivery, without treating it as scene completion."""
         deadline = time.monotonic() + self.timeout_s
         while time.monotonic() < deadline:
@@ -1002,6 +1046,8 @@ class LiveOutputHost:
             if self._runtime_revision != previous_revision:
                 return observed
             time.sleep(.05)
+        if operation == "goTo":
+            raise PlayerCommandRejected("Go-to unavailable: the player did not acknowledge digit/Enter key input before the timeout. Click advance cannot select a slide.")
         raise LiveHostError("Player did not acknowledge the command before the timeout.")
 
     def _wait_settled(self, expected_slide: int | None = None, previous_scene: str | None = None, previous_revision: int | None = None) -> PlayerObservation:

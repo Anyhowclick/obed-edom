@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan
+from obed_edom.live_continuity import ContinuityPlan, MovieContinuity, Rect, Unsupported, derive_plan
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 REAL_EXPORT_ROOT = Path(
@@ -97,6 +98,7 @@ def test_boundary_3_to_4_bridges_the_moving_scaling_movie():
     plan = _plan()
     boundary = _boundary(plan, 2)
     assert boundary["toPlayerIndex"] == 3
+    assert boundary["durationSeconds"] == 1.5
     movies = {m["asset"]: m for m in boundary["movies"]}
     # WA0125 does not appear on slide 4: it must not be treated as continuing.
     assert set(movies) == {"untitled.mov"}
@@ -217,6 +219,32 @@ def test_refuses_non_identity_affine_transform():
     assert isinstance(plan, Unsupported)
 
 
+@pytest.mark.parametrize("ancestor_change", [None, "position", "rotation", "animation"])
+def test_refuses_video_below_an_intermediate_layer(ancestor_change):
+    def nest_video(node):
+        base = node["baseLayer"]
+        for index, layer in enumerate(base["layers"]):
+            if not layer.get("isVideoLayer"):
+                continue
+            ancestor = {
+                "initialState": copy.deepcopy(base["initialState"]),
+                "layers": [layer],
+                "animations": [],
+            }
+            if ancestor_change == "position":
+                ancestor["initialState"]["position"]["pointX"] += 80
+            elif ancestor_change == "rotation":
+                ancestor["initialState"]["rotation"] = 30
+            elif ancestor_change == "animation":
+                ancestor["animations"] = [{"property": "position", "duration": 1.5}]
+            base["layers"][index] = ancestor
+
+    tmp = _mutate_slide(SLIDE1, lambda data: _map_movie_nodes(data, nest_video))
+    plan = _plan(tmp)
+    assert isinstance(plan, Unsupported)
+    assert "not a direct child" in plan.reason
+
+
 def test_refuses_two_geometry_changing_movies_on_one_boundary():
     tmp = _copy_fixture_tree()
 
@@ -311,6 +339,7 @@ def test_real_export_matches_trimmed_fixture_plan():
 # y=797.1 vs P2's screen-measured 795 is a known ~2.1px discrepancy).
 P2_MOVIE1_FOOTPRINT = {"x": 109, "y": 795, "w": 952, "h": 268}
 P2_SLIDE3_MIN_HASH = 6
+P2_SLIDE3_MOVIE_RECT = {"x": 198, "y": 797, "w": 952, "h": 268}
 P2_SLIDE4_MIN_HASH = 8
 P2_SLIDE4_MOVIE_RECT = {"x": 327, "y": 709, "w": 1266, "h": 356}
 
@@ -339,6 +368,8 @@ def test_to_runtime_matches_p2_injected_plan():
     bridge = boundaries[P2_SLIDE4_MIN_HASH]
     assert bridge["action"] == "bridge"
     assert bridge["movieKey"] == "movie1"
+    assert bridge["srcRect"] == P2_SLIDE3_MOVIE_RECT
+    assert bridge["durationSeconds"] == 1.5
     assert _rect_close(bridge["rect"], P2_SLIDE4_MOVIE_RECT)
 
 
@@ -346,6 +377,87 @@ def test_to_runtime_refuses_when_no_boundaries():
     plan = ContinuityPlan(canvas={"width": 1, "height": 1}, scene_index_by_player={0: 0}, slide_rects={}, boundaries=())
     result = plan.to_runtime()
     assert isinstance(result, Unsupported)
+
+
+def test_to_runtime_refuses_bridge_without_source_rect():
+    plan = _plan()
+    bridge = replace(
+        plan.boundaries[2],
+        movies=tuple(replace(movie, src_rect=None) for movie in plan.boundaries[2].movies),
+    )
+    result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "no source rect" in result.reason
+
+
+@pytest.mark.parametrize("duration", [None, 0, -1, True, "1.5", float("nan"), float("inf")])
+def test_to_runtime_refuses_bridge_without_positive_export_duration(duration):
+    def change_duration(data):
+        for event in data["events"]:
+            for effect in event["effects"]:
+                if effect.get("type") == "transition":
+                    if duration is None:
+                        effect.pop("duration")
+                    else:
+                        effect["duration"] = duration
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE3, change_duration))
+    assert isinstance(plan, ContinuityPlan)
+    result = plan.to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "no finite positive export duration" in result.reason
+
+
+def test_to_runtime_refuses_unqualified_export_duration():
+    plan = _plan()
+    bridge = replace(plan.boundaries[2], transition_duration=2.5)
+    result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "not yet qualified" in result.reason
+
+
+@pytest.mark.parametrize("action", ["bridge", "restart", "pin"])
+def test_to_runtime_refuses_actionable_boundaries_after_bridge(action):
+    plan = _plan()
+    bridge = plan.boundaries[2]
+    following = replace(
+        bridge,
+        from_player_index=3,
+        to_player_index=4,
+        movies=tuple(replace(movie, action=action) for movie in bridge.movies),
+    )
+    result = replace(
+        plan,
+        scene_index_by_player={**plan.scene_index_by_player, 4: 10},
+        boundaries=(*plan.boundaries[:3], following),
+    ).to_runtime()
+    assert isinstance(result, Unsupported)
+    expected = "more than one bridge" if action == "bridge" else "actionable boundary follows a bridge"
+    assert expected in result.reason
+
+
+@pytest.mark.parametrize("include_later_restart", [False, True])
+def test_to_runtime_refuses_bridge_before_restart(include_later_restart):
+    plan = _plan()
+    boundaries = (plan.boundaries[0], plan.boundaries[2])
+    if include_later_restart:
+        boundaries += (plan.boundaries[1],)
+    result = replace(plan, boundaries=boundaries).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "precedes the first restart" in result.reason
+
+
+def test_to_runtime_allows_empty_boundary_after_bridge():
+    plan = _plan()
+    empty = replace(plan.boundaries[3], to_player_index=4, movies=())
+    result = replace(
+        plan,
+        scene_index_by_player={**plan.scene_index_by_player, 4: 10},
+        boundaries=(*plan.boundaries[:3], empty),
+    ).to_runtime()
+    assert isinstance(result, dict)
+    assert result == plan.to_runtime()
 
 
 # --- fixture mutation helpers -------------------------------------------------------------
@@ -455,3 +567,12 @@ def test_only_p2_measured_plans_are_qualified():
     unmeasured = replace(plan, boundaries=tuple(boundaries)).to_runtime()
     assert isinstance(unmeasured, Unsupported)
     assert "not yet qualified" in unmeasured.reason
+
+
+def test_mixed_bridge_and_pin_cannot_bypass_qualified_plan():
+    plan = _plan()
+    extra = MovieContinuity('second.mov', 'pin', Rect(0, 0, 100, 100), Rect(0, 0, 100, 100))
+    bridge = replace(plan.boundaries[2], movies=(*plan.boundaries[2].movies, extra))
+    result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert 'pin action follows' in result.reason

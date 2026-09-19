@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,7 +33,7 @@ class _Refuse(Exception):
     """Internal control-flow only: carries the reason for an `Unsupported` result."""
 
 
-QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset({"1ae051937c071fcc41647979eae99db35d78eadede0060ddd67241e28b8dff0c"})
+QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset({"ec4b0cb3eeaf393ec00a7313d1c68b640a90282c80d408767c99984b710800cf"})
 
 
 def plan_signature(runtime: dict[str, Any]) -> str:
@@ -82,12 +83,14 @@ class SlideBoundary:
     from_player_index: int
     to_player_index: int | None
     movies: tuple[MovieContinuity, ...] = field(default_factory=tuple)
+    transition_duration: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "fromPlayerIndex": self.from_player_index,
             "toPlayerIndex": self.to_player_index,
             "movies": [m.as_dict() for m in self.movies],
+            "durationSeconds": self.transition_duration,
         }
 
 
@@ -113,11 +116,12 @@ class ContinuityPlan:
         """Translate this plan into the shape `PRESERVE_CORE_JS` reads as
         `window.__OBED_CONTINUITY__` (see `live_continuity_js` module docstring).
         Fails closed whenever the derived plan says something the runtime cannot
-        express today: more than one distinct bridging asset, a bridge asset with
+        express today: more than one bridge, a bridge asset with
         no resolvable footprint on the deck's first slide, more than one bridge
-        movie at a single boundary, a bridge with no destination rect, or a `pin`
-        action recurring after a `restart`/`bridge` boundary has already been
-        emitted (the runtime only models the pre-first-boundary zone as pinned).
+        movie at a single boundary, a bridge with no source/destination rect or
+        positive export duration, or a `pin`
+        action recurring after a `restart` boundary, a bridge before a restart,
+        or any actionable boundary after a bridge.
         """
         if not self.boundaries:
             return Unsupported("no boundaries to translate")
@@ -159,18 +163,37 @@ class ContinuityPlan:
 
         runtime_boundaries: list[dict[str, Any]] = []
         emitted_cut = False
+        emitted_bridge = False
         for boundary in self.boundaries:
             if boundary.to_player_index is None:
                 continue
             actions = {m.action for m in boundary.movies}
+            if emitted_bridge and "bridge" in actions:
+                return Unsupported("more than one bridge boundary")
+            if emitted_bridge and actions & {"pin", "restart"}:
+                return Unsupported("an actionable boundary follows a bridge")
+            if emitted_cut and "pin" in actions:
+                return Unsupported("a pin action follows a restart or bridge boundary")
             scene = self.scene_index_by_player.get(boundary.to_player_index)
             if scene is None:
                 return Unsupported(f"missing scene index for player index {boundary.to_player_index}")
             if "bridge" in actions:
+                if not emitted_cut:
+                    return Unsupported("a bridge boundary precedes the first restart")
                 bridges = [m for m in boundary.movies if m.action == "bridge"]
                 if len(bridges) != 1:
                     return Unsupported("more than one bridge movie at a boundary")
                 movie = bridges[0]
+                duration = boundary.transition_duration
+                if (
+                    isinstance(duration, bool)
+                    or not isinstance(duration, (int, float))
+                    or not math.isfinite(duration)
+                    or duration <= 0
+                ):
+                    return Unsupported("bridge transition has no finite positive export duration")
+                if movie.src_rect is None:
+                    return Unsupported(f"bridge movie '{movie.asset}' has no source rect")
                 if movie.dst_rect is None:
                     return Unsupported(f"bridge movie '{movie.asset}' has no destination rect")
                 key = movie_keys.get(movie.asset)
@@ -181,10 +204,13 @@ class ContinuityPlan:
                         "atScene": scene,
                         "action": "bridge",
                         "movieKey": key,
+                        "srcRect": _rect_ints(movie.src_rect.as_dict()),
+                        "durationSeconds": duration,
                         "rect": _rect_ints(movie.dst_rect.as_dict()),
                     }
                 )
                 emitted_cut = True
+                emitted_bridge = True
             elif "restart" in actions:
                 runtime_boundaries.append({"atScene": scene, "action": "restart"})
                 emitted_cut = True
@@ -266,6 +292,8 @@ def _movie_rect(node: dict[str, Any], slide_name: str) -> Rect:
             f"movie node on slide {slide_name} has {len(video_layers)} video sub-layers, expected 1"
         )
     video_layer = video_layers[0]
+    if not any(video_layer is child for child in base_layer.get("layers") or []):
+        raise _Refuse(f"video sub-layer on slide {slide_name} is not a direct child of its movie layer")
     video_state = video_layer["initialState"]
     if not _identity_transform(video_state) or not _center_anchor(video_state):
         raise _Refuse(
@@ -305,13 +333,13 @@ def _slide_movie_instances(
     return instances
 
 
-def _boundary_transition_name(events: list[Any], slide_name: str) -> str | None:
-    names: list[str] = []
+def _boundary_transition(events: list[Any], slide_name: str) -> dict[str, Any] | None:
+    transitions: list[dict[str, Any]] = []
 
     def walk(obj: Any) -> None:
         if isinstance(obj, dict):
             if obj.get("type") == "transition":
-                names.append(obj.get("name"))
+                transitions.append(obj)
             for value in obj.values():
                 walk(value)
         elif isinstance(obj, list):
@@ -319,9 +347,9 @@ def _boundary_transition_name(events: list[Any], slide_name: str) -> str | None:
                 walk(item)
 
     walk(events)
-    if len(names) > 1:
+    if len(transitions) > 1:
         raise _Refuse(f"slide {slide_name} declares more than one transition effect")
-    return names[0] if names else None
+    return transitions[0] if transitions else None
 
 
 def _resolve_continuation(
@@ -398,9 +426,12 @@ def derive_plan(
     boundaries: list[SlideBoundary] = []
     for index, (player_index, uuid) in enumerate(ordered):
         try:
-            transition_name = _boundary_transition_name(events_by_player[player_index], uuid)
+            transition = _boundary_transition(events_by_player[player_index], uuid)
         except _Refuse as exc:
             return Unsupported(str(exc))
+
+        transition_name = transition.get("name") if transition else None
+        transition_duration = transition.get("duration") if transition else None
 
         to_player_index = ordered[index + 1][0] if index + 1 < len(ordered) else None
         outgoing = instances_by_player[player_index]
@@ -414,7 +445,7 @@ def derive_plan(
                 )
                 for asset, rects in sorted(outgoing.items())
             )
-            boundaries.append(SlideBoundary(player_index, None, movies))
+            boundaries.append(SlideBoundary(player_index, None, movies, transition_duration))
             continue
 
         if transition_name is not None and transition_name.startswith("apple:magic-move"):
@@ -443,7 +474,7 @@ def derive_plan(
                 bridge_count += 1
         if bridge_count > 1:
             return Unsupported(f"more than one movie changes geometry at {boundary_desc}")
-        boundaries.append(SlideBoundary(player_index, to_player_index, tuple(movies)))
+        boundaries.append(SlideBoundary(player_index, to_player_index, tuple(movies), transition_duration))
 
     return ContinuityPlan(
         canvas=canvas,
