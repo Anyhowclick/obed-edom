@@ -1,0 +1,268 @@
+{
+ "assets": {
+  "Untitled.mov-0.0000-46.0333": {
+   "type": "video",
+   "index": 0,
+   "url": {
+    "web": "assets/Untitled.mov-0.0000-46.0333.mov",
+    "native": "assets/Untitled.mov-0.0000-46.0333.mov"
+   },
+   "width": 1920,
+   "height": 540
+  }
+ },
+ "events": [
+  {
+   "effects": [
+    {
+     "name": "apple:movie-start",
+     "type": "buildIn",
+     "beginTime": 0,
+     "baseLayer": {
+      "initialState": {
+       "affineTransform": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+       ],
+       "masksToBounds": false,
+       "rotation": 0,
+       "scale": 1,
+       "position": {
+        "pointX": 961.2545776367188,
+        "pointY": 888.0181884765625
+       },
+       "width": 1274,
+       "sublayerTransform": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+       ],
+       "contentsRect": {
+        "y": 0,
+        "x": 0,
+        "width": 1,
+        "height": 1
+       },
+       "opacity": 1,
+       "edgeAntialiasingMask": 251658240,
+       "height": 364,
+       "hidden": false,
+       "anchorPoint": {
+        "pointX": 0.5,
+        "pointY": 0.5
+       }
+      },
+      "animations": [],
+      "layers": []
+     },
+     "effects": [
+      {
+       "name": "renderMovie",
+       "type": "buildIn",
+       "beginTime": 0,
+       "movie": {
+        "startTime": 0,
+        "volume": 1,
+        "endTime": 46.03333282470703,
+        "isStreaming": false,
+        "isAudioOnly": false,
+        "asset": "Untitled.mov-0.0000-46.0333"
+       },
+       "baseLayer": {
+        "initialState": {
+         "affineTransform": [
+          1,
+          0,
+          0,
+          1,
+          0,
+          0
+         ],
+         "masksToBounds": false,
+         "rotation": 0,
+         "scale": 1,
+         "position": {
+          "pointX": 960,
+          "pointY": 886.6184539794922
+         },
+         "width": 1271.4908447265625,
+         "sublayerTransform": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1
+         ],
+         "contentsRect": {
+          "y": 0,
+          "x": 0,
+          "width": 1,
+          "height": 1
+         },
+         "opacity": 1,
+         "edgeAntialiasingMask": 251658240,
+         "height": 361.2005310058594,
+         "hidden": false,
+         "anchorPoint": {
+          "pointX": 0.5,
+          "pointY": 0.5
+         }
+        },
+        "animations": [],
+        "layers": [
+         {
+          "initialState": {
+           "affineTransform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+           ],
+           "masksToBounds": false,
+           "rotation": 0,
+           "scale": 1,
+           "position": {
+            "pointX": 635.7454223632812,
+            "pointY": 180.6002655029297
+           },
+           "width": 1266.4908447265625,
+           "sublayerTransform": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1
+           ],
+           "contentsRect": {
+            "y": 0,
+            "x": 0,
+            "width": 1,
+            "height": 1
+           },
+           "opacity": 1,
+           "edgeAntialiasingMask": 251658240,
+           "height": 356.2005310058594,
+           "hidden": false,
+           "anchorPoint": {
+            "pointX": 0.5,
+            "pointY": 0.5
+           }
+          },
+          "isVideoLayer": true,
+          "animations": []
+         }
+        ]
+       },
+       "effects": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "effects": [
+    {
+     "name": "apple:dissolve",
+     "type": "transition",
+     "beginTime": 0,
+     "baseLayer": {
+      "initialState": {
+       "affineTransform": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+       ],
+       "masksToBounds": false,
+       "rotation": 0,
+       "scale": 1,
+       "position": {
+        "pointX": 960,
+        "pointY": 540
+       },
+       "width": 1920,
+       "sublayerTransform": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+       ],
+       "contentsRect": {
+        "y": 0,
+        "x": 0,
+        "width": 1,
+        "height": 1
+       },
+       "opacity": 1,
+       "edgeAntialiasingMask": 251658240,
+       "height": 1080,
+       "hidden": false,
+       "anchorPoint": {
+        "pointX": 0.5,
+        "pointY": 0.5
+       }
+      },
+      "animations": [],
+      "layers": []
+     },
+     "effects": []
+    }
+   ]
+  }
+ ]
+}
