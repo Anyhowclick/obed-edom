@@ -958,20 +958,35 @@ def test_freeze_control_dead_loop_is_inconclusive():
     assert "loopLive" in verdict["integrityFailed"]
 
 
-def test_freeze_control_black_cover_is_inconclusive():
-    """The exact bug this control was hardened against: a black/unrendered cover (patch
-    mean outside the [16,235] alphabet) decodes as a frozen counter for the WRONG reason.
-    It must be INCONCLUSIVE (the control did not deliver the stimulus), never a verdict."""
+def test_freeze_control_unrendered_frame_is_inconclusive():
+    """The bug this control was hardened against: a t~0 unrendered frame draws BLACK and
+    would decode as a frozen counter for the WRONG reason. Distinguished by playback time
+    (currentTime < MIN_STALE_TIME_S) + the trigger error, it must be INCONCLUSIVE (the
+    control did not deliver a real stale frame), never a verdict."""
     b = _freeze_b_snap()
-    b["indexSequence"] = [37, 38, 39, 0, 0, 0, 0, 0, 0, 0]  # black cover -> decodes 0
+    b["indexSequence"] = [37, 38, 39, 0, 0, 0, 0, 0, 0, 0]  # unrendered black -> decodes 0
     b["nullControl"] = {
-        **b["nullControl"], "coverPatchMean": 1.5,
-        "coverPatchStart": {"sum": 10, "mean": 1.5}, "coverPatchEnd": {"sum": 10, "mean": 1.5},
-        "error": "cover-content-out-of-alphabet:1.5",
+        **b["nullControl"], "staleCurrentTime": 0.0, "coverPatchMean": 1.0,
+        "error": "owner-video-not-ready-at-trigger:rs=4,t=0.01",
     }
     verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
     assert verdict["verdict"] == "inconclusive"
-    assert {"coverContentInAlphabet", "noControlError"} & set(verdict["integrityFailed"])
+    assert {"staleFrameFromPlayback", "noControlError"} & set(verdict["integrityFailed"])
+
+
+def test_freeze_control_valid_dark_counter_not_rejected():
+    """Regression (Codex 2026-09-19): a valid counter near the DARK end of its cycle
+    decodes to RGB ~0 (tv-range luma 16 -> full-range RGB ~0). It must NOT be rejected as
+    'black' — a genuinely frozen dark frame from live playback still PASSES. The old
+    [16,235] luma range-check on a decoded-RGB mean wrongly failed this."""
+    b = _freeze_b_snap()
+    b["indexSequence"] = [5, 4, 3, 3, 3, 3, 3, 3, 3, 3]  # frozen at a dark counter value
+    b["nullControl"] = {
+        **b["nullControl"], "staleCurrentTime": 7.33, "coverPatchMean": 3.0,
+        "coverPatchStart": {"sum": 1, "mean": 3.0}, "coverPatchEnd": {"sum": 1, "mean": 3.0},
+    }
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "pass", verdict["failed"]
 
 
 def test_freeze_control_owner_not_ready_is_inconclusive():

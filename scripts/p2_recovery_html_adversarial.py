@@ -148,6 +148,7 @@ RVFC_MIN_ADVANCE_S = 0.5    # the decoder must run >=0.5s through the hold (0.05
 MAX_RAF_GAP_MS = 100.0      # a per-rAF hold-log gap beyond this => INCONCLUSIVE, not a verdict
 STALE_INDEX_TOL = 2         # +/- yuv rounding on the decoded frozen counter
 COVER_MATCH_TOL = 6.0       # frozen decode mean must match the cover's painted patch mean
+MIN_STALE_TIME_S = 0.3      # the stale frame must be from genuine playback (not a t=0 unrendered black)
 HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event
 
 # The Arm-A composited-freeze control, injected into the live page BEFORE the advance
@@ -295,17 +296,22 @@ NULL_CONTROL_JS = r"""
     scratch = document.createElement('canvas');  // ID-LESS: recorder stays inert
     scratch.width = Math.max(1, Math.round(fp.w * dpr));
     scratch.height = Math.max(1, Math.round(fp.h * dpr));
-    // readyState>=2 (HAVE_CURRENT_DATA): videoWidth>0 alone does NOT guarantee a
-    // DECODED frame — an unrendered <video> draws BLACK, which then reads as a frozen
-    // counter (index 0) for the wrong reason. Require a real frame or fail integrity.
-    if (real && real.readyState >= 2 && real.videoWidth > 0) {
+    // readyState>=2 (HAVE_CURRENT_DATA) AND currentTime>=0.3: videoWidth>0 alone does
+    // NOT guarantee a DECODED frame, and a video at t~0 draws BLACK (an unrendered first
+    // frame), which reads as a frozen counter (index 0) for the wrong reason. The
+    // continuing 1->2 movie is always ~1.5s at the flip, so require genuine playback.
+    // (Do NOT range-check the drawn luma: getImageData returns full-range RGB while the
+    // counter is encoded in tv-range [16,235] luma, so a valid dark/bright counter frame
+    // is not black — distinguish unrendered by readiness/time, not pixel bounds.)
+    if (real && real.readyState >= 2 && real.videoWidth > 0 && real.currentTime >= 0.3) {
       try {
         scratch.getContext('2d').drawImage(real, 0, 0, scratch.width, scratch.height);
         st.staleCurrentTime = real.currentTime;
         st.staleIndexExpected = 16 + (Math.round(real.currentTime * 30) % 220);
       } catch (e) { st.error = 'scratch-draw:' + String(e && e.message || e); }
     } else {
-      st.error = 'owner-video-not-ready-at-trigger:rs=' + (real ? real.readyState : 'none');
+      st.error = 'owner-video-not-ready-at-trigger:rs=' + (real ? real.readyState : 'none')
+        + ',t=' + (real ? real.currentTime : 'none');
     }
 
     var sr = subRect(fp);
@@ -330,12 +336,11 @@ NULL_CONTROL_JS = r"""
     st.coverPatchStart = counterPatchPixels();
     st.coverPatchMean = (st.coverPatchStart && st.coverPatchStart.mean != null)
       ? st.coverPatchStart.mean : null;
-    // A correctly-delivered stale counter patch is a flat mid-gray inside the legal
-    // tv-range [16,235]; a black (unrendered) or clipped cover falls outside it and
-    // must fail integrity (INCONCLUSIVE), never score as a frozen counter.
-    if (!st.error && (st.coverPatchMean == null || st.coverPatchMean < 16 || st.coverPatchMean > 235)) {
-      st.error = 'cover-content-out-of-alphabet:' + st.coverPatchMean;
-    }
+    // coverPatchMean is a DIAGNOSTIC only (a decoded-RGB mean): it is NOT range-checked,
+    // because a valid dark/bright counter frame decodes near 0/255 in RGB. The
+    // unrendered-black case is caught by the readiness+currentTime guard above; the
+    // scorer's everyInHoldStale then requires the composited decodes to be CONSTANT and
+    // to MATCH this cover mean (both RGB) — a genuine same-space comparison.
     loop();
   }
 
@@ -2199,8 +2204,12 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     checks["ownerReadyAtTrigger"] = bool(
         nc.get("ownerReadyState") is not None and nc.get("ownerReadyState") >= 2
     )
-    checks["coverContentInAlphabet"] = bool(
-        cover_mean is not None and 16 <= cover_mean <= 235
+    # The stale frame must come from genuine playback (currentTime >= MIN_STALE_TIME_S),
+    # NOT a t~0 unrendered black frame. NB: do NOT range-check cover_mean against [16,235]
+    # — that is tv-range LUMA, while cover_mean is decoded RGB (a valid dark/bright counter
+    # is not "out of alphabet"). everyInHoldStale ties the composite to cover_mean (both RGB).
+    checks["staleFrameFromPlayback"] = bool(
+        nc.get("staleCurrentTime") is not None and nc.get("staleCurrentTime") >= MIN_STALE_TIME_S
     )
     checks["loopLive"] = len(raf_ts) >= 10
 
@@ -2228,7 +2237,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # freeze, RED isolated to the counter) — PASS/FAIL only once integrity holds.
     integrity_keys = (
         "firedAfterAdvance", "holdWithinHashchange", "firstInHoldEarly", "noControlError",
-        "ownerReadyAtTrigger", "paintedOnce", "coverContentInAlphabet", "coverPatchStable",
+        "ownerReadyAtTrigger", "paintedOnce", "staleFrameFromPlayback", "coverPatchStable",
         "coverHitTest100", "loopLive", "everyInHoldStale", "flipIndexPresent",
         "flipWindowDecodable", "enoughAfterFlip", "releaseAfterLastCapture",
     )
