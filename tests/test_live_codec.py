@@ -34,9 +34,13 @@ def sample_entry(fourcc: bytes) -> bytes:
     return box(fourcc, b"\x00" * 78)
 
 
+def stsd_payload(entry: bytes, *, entry_count: int = 1) -> bytes:
+    """`stsd` payload: version+flags(4) entry_count(4) then the sample entry boxes."""
+    return b"\x00" * 4 + entry_count.to_bytes(4, "big") + entry
+
+
 def stsd(fourcc: bytes) -> bytes:
-    payload = b"\x00" * 4 + (1).to_bytes(4, "big") + sample_entry(fourcc)
-    return box(b"stsd", payload)
+    return box(b"stsd", stsd_payload(sample_entry(fourcc)))
 
 
 def stbl(fourcc: bytes) -> bytes:
@@ -70,6 +74,12 @@ def movie_with_video(fourcc: bytes, *, extra_traks: bytes = b"") -> bytes:
 def movie_audio_only() -> bytes:
     moov = box(b"moov", trak(b"soun", None))
     return ftyp() + moov
+
+
+def movie_with_stsd_payload(payload: bytes) -> bytes:
+    """A video trak whose `stsd` payload is written verbatim, for malformed-entry cases."""
+    mdia_body = hdlr(b"vide") + box(b"minf", box(b"stbl", box(b"stsd", payload)))
+    return ftyp() + box(b"moov", box(b"trak", box(b"mdia", mdia_body)))
 
 
 # --- movie_codec ----------------------------------------------------------------------------
@@ -178,6 +188,43 @@ def test_zero_size_box_that_is_not_last_is_treated_as_extending_to_eof(tmp_path)
     assert movie_codec(path) is None
 
 
+# --- malformed stsd -------------------------------------------------------------------------
+
+
+def test_stsd_declaring_zero_entries_returns_none(tmp_path):
+    # The trailing bytes still spell a well-formed `avc1` sample entry: a zero entry count
+    # must not let them be read as the track's codec.
+    path = tmp_path / "movie.mov"
+    path.write_bytes(movie_with_stsd_payload(stsd_payload(sample_entry(b"avc1"), entry_count=0)))
+    assert movie_codec(path) is None
+
+
+def test_sample_entry_larger_than_the_stsd_box_returns_none(tmp_path):
+    oversized = (400).to_bytes(4, "big") + b"avc1" + b"\x00" * 78
+    path = tmp_path / "movie.mov"
+    path.write_bytes(movie_with_stsd_payload(stsd_payload(oversized)))
+    assert movie_codec(path) is None
+
+
+def test_sample_entry_smaller_than_a_box_header_returns_none(tmp_path):
+    undersized = (4).to_bytes(4, "big") + b"avc1" + b"\x00" * 78
+    path = tmp_path / "movie.mov"
+    path.write_bytes(movie_with_stsd_payload(stsd_payload(undersized)))
+    assert movie_codec(path) is None
+
+
+def test_sample_entry_with_a_non_printable_fourcc_returns_none(tmp_path):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(movie_with_stsd_payload(stsd_payload(sample_entry(b"\x00\x01\x02\xff"))))
+    assert movie_codec(path) is None
+
+
+def test_stsd_too_short_to_hold_an_entry_returns_none(tmp_path):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(movie_with_stsd_payload(b"\x00" * 4 + (1).to_bytes(4, "big")))
+    assert movie_codec(path) is None
+
+
 # --- codec_family -----------------------------------------------------------------------------
 
 
@@ -190,10 +237,14 @@ def test_zero_size_box_that_is_not_last_is_treated_as_extending_to_eof(tmp_path)
         ("hev1", "hevc"),
         ("apch", "prores"),
         ("apcn", "prores"),
+        ("apcs", "prores"),
+        ("apco", "prores"),
         ("ap4h", "prores"),
+        ("ap4x", "prores"),
         ("av01", "av1"),
         ("vp09", "vp9"),
-        ("vp08", "vp9"),
+        # vp08 is VP8, not VP9: it is unsupported either way, but must not be mislabelled.
+        ("vp08", "other"),
         ("mp4v", "other"),
         (None, "other"),
     ],

@@ -612,15 +612,38 @@ PRESERVE_CORE_JS = r"""
     return document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
   }
   /**
+   * Is a bridged decoder still ours to hold? Liveness is
+   * `__obedGen === preserveGeneration`, not `__obedRemountEpoch` (bridgeTo34
+   * sets that to -1 as its own sentinel): clear()/disable() bump the generation
+   * and retire-on-start-movie stamps -1, so both end the pin.
+   */
+  function slotLive(real) {
+    if (disabled) return false;
+    return (real.__obedGen == null ? 0 : real.__obedGen) === preserveGeneration;
+  }
+  /**
+   * End a slot pin whose decoder is no longer live. The node may still be
+   * connected (clear() bumped the generation but missed or failed to remove it),
+   * in which case leaving it would keep the slide-4 overlay painting after a
+   * go-to/retire, so pause it and take it out of the DOM as well.
+   */
+  function retireSlot(real) {
+    try { real.pause(); } catch (e) {}
+    try {
+      if (real.parentNode) {
+        beginMove(real);
+        real.parentNode.removeChild(real);
+      }
+    } catch (e) {}
+    delete real.dataset.obedRemounted;
+    note('bridge-slot-retired', {elId: real.__obedElId});
+  }
+  /**
    * Re-attach a bridged decoder the player detached while slide 4 is still up.
    * stash() ignores bridged decoders, so nothing else would bring it back.
-   * Liveness is `__obedGen === preserveGeneration`, not `__obedRemountEpoch`
-   * (bridgeTo34 sets that to -1 as its own sentinel): clear()/disable() bump the
-   * generation and retire-on-start-movie stamps -1, so both end the pin.
    */
   function reattachToSlot(real) {
-    if (real.ended || disabled) return false;
-    if ((real.__obedGen == null ? 0 : real.__obedGen) !== preserveGeneration) return false;
+    if (real.ended || !slotLive(real)) return false;
     const stage = bridgeStage();
     let failure = stage ? null : 'no-stage';
     if (!failure) {
@@ -650,6 +673,10 @@ PRESERVE_CORE_JS = r"""
     function frame() {
       const hn = currentHashNum();
       if (real.ended || (s4 != null && hn != null && hn < s4)) {
+        real.__obedSlotPinning = false; return;
+      }
+      if (!slotLive(real)) {
+        retireSlot(real);
         real.__obedSlotPinning = false; return;
       }
       if (!document.contains(real) && !reattachToSlot(real)) {

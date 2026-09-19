@@ -16,9 +16,9 @@ _MAX_BOXES = 20_000
 
 _H264_FOURCCS = frozenset({"avc1", "avc3"})
 _HEVC_FOURCCS = frozenset({"hvc1", "hev1"})
-_PRORES_FOURCCS = frozenset({"apch", "apcn", "ap4h", "ap4x", "apco", "aps0"})
+_PRORES_FOURCCS = frozenset({"apch", "apcn", "apcs", "apco", "ap4h", "ap4x"})
 _AV1_FOURCCS = frozenset({"av01"})
-_VP9_FOURCCS = frozenset({"vp09", "vp08"})
+_VP9_FOURCCS = frozenset({"vp09"})
 
 
 def _read_box_header(f: BinaryIO, start: int, end: int) -> tuple[bytes, int, int] | None:
@@ -93,17 +93,22 @@ def _hdlr_is_video(f: BinaryIO, start: int, end: int) -> bool:
 
 
 def _first_sample_fourcc(f: BinaryIO, start: int, end: int) -> str | None:
+    """`stsd` payload: version+flags(4) entry_count(4) then the sample entries, each a
+    box of its own -- so the first entry's fourcc counts only when the count is at least
+    one and the entry's declared box fits inside the `stsd` payload."""
     if end - start < 16:
         return None
-    f.seek(start + 8)
-    entry = f.read(8)
-    if len(entry) != 8:
+    f.seek(start + 4)
+    head = f.read(12)
+    if len(head) != 12 or int.from_bytes(head[:4], "big") < 1:
         return None
-    fourcc = entry[4:8]
-    try:
-        return fourcc.decode("ascii").lower()
-    except UnicodeDecodeError:
+    entry_size = int.from_bytes(head[4:8], "big")
+    if entry_size < _HEADER_SIZE or start + 8 + entry_size > end:
         return None
+    fourcc = head[8:12]
+    if not all(32 <= byte < 127 for byte in fourcc):
+        return None
+    return fourcc.decode("ascii").lower()
 
 
 def _video_fourcc_in_trak(f: BinaryIO, start: int, end: int, budget: list[int]) -> str | None:

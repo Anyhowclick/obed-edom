@@ -821,7 +821,10 @@ def hevc_movie_bytes() -> bytes:
     return _movie_bytes(b"hvc1")
 
 
-def write_one_movie_export(root: Path, *, movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None) -> None:
+def write_one_movie_export(
+    root: Path, *, movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None,
+    movie_bytes_by_slide: dict[str, bytes] | None = None,
+) -> None:
     assets_dir = root / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     (assets_dir / "header.json").write_text(json.dumps({"slideWidth": 1920, "slideHeight": 1080, "showMode": 0, "slideList": ["s1", "s2"]}))
@@ -853,9 +856,13 @@ def write_one_movie_export(root: Path, *, movie_bytes: bytes | None = None, extr
                 ],
             },
         }
+    # Like a real HTML export, each slide folder holds its own copy of the movie file;
+    # `movie_bytes_by_slide` makes those copies differ.
+    default_bytes = movie_bytes if movie_bytes is not None else h264_movie_bytes()
     for uuid in ("s1", "s2"):
         (assets_dir / uuid / "assets").mkdir(parents=True, exist_ok=True)
-        (assets_dir / uuid / "assets" / "movie.mov").write_bytes(movie_bytes if movie_bytes is not None else h264_movie_bytes())
+        per_slide = (movie_bytes_by_slide or {}).get(uuid, default_bytes)
+        (assets_dir / uuid / "assets" / "movie.mov").write_bytes(per_slide)
     # The extra movie is unplanned: single-instance only on slide 2 (not slide 1), so
     # ContinuityPlan.to_runtime()'s movie table -- built from slide 1's footprints --
     # never includes it, even though codec_report must still enumerate it.
@@ -872,9 +879,13 @@ def write_one_movie_export(root: Path, *, movie_bytes: bytes | None = None, extr
 def host_with_continuity(
     tmp_path, monkeypatch, *, attach: bool = False, continuity: str = "auto", headless: bool = True,
     movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None,
+    movie_bytes_by_slide: dict[str, bytes] | None = None,
 ) -> live_host.LiveOutputHost:
     export_root = tmp_path / "export"
-    write_one_movie_export(export_root, movie_bytes=movie_bytes, extra_movie_bytes=extra_movie_bytes)
+    write_one_movie_export(
+        export_root, movie_bytes=movie_bytes, extra_movie_bytes=extra_movie_bytes,
+        movie_bytes_by_slide=movie_bytes_by_slide,
+    )
     (export_root / "assets" / "player").mkdir(parents=True, exist_ok=True)
     (export_root / "assets" / "player" / "main.js").write_bytes(player_bytes())
     (export_root / "index.html").write_text('<html><head></head><body><div id="stage"></div></body></html>')
@@ -1456,7 +1467,8 @@ def test_h264_movie_qualifies_with_no_codec_warning(tmp_path, monkeypatch):
     output.observe()
     assert output._continuity_mode == "qualified"
     assert output.output["codecWarnings"] == []
-    assert output.output["codecs"] == [{"asset": "movie.mov", "codec": "avc1", "family": "h264"}]
+    # both slide folders hold their own copy of the movie, and both are probed.
+    assert output.output["codecs"] == [{"asset": "movie.mov", "codec": "avc1", "family": "h264", "files": 2}]
 
 
 def test_unplanned_hevc_movie_does_not_block_continuity_but_warns(tmp_path, monkeypatch):
@@ -1500,6 +1512,33 @@ def test_unreadable_planned_movie_is_unsupported(tmp_path, monkeypatch):
     output.observe()
     assert output._continuity_mode == "unsupported"
     assert output.output["continuity"]["reason"] == "movie codec is not playable in this output: movie.mov (unreadable)"
+
+
+def test_planned_movie_whose_slide_copies_disagree_is_unsupported_even_headful(tmp_path, monkeypatch):
+    # Slide 1's copy is H.264 and slide 2's is HEVC under the same logical key, so the key
+    # cannot be called playable: headful launch, where plain HEVC would qualify, must not.
+    output = host_with_continuity(
+        tmp_path, monkeypatch, headless=False, movie_bytes_by_slide={"s2": hevc_movie_bytes()},
+    )
+    output._codec_report, output._codec_warnings = output._resolve_codecs()
+    assert output._codec_report == [
+        {"asset": "movie.mov", "codec": None, "family": "other", "files": 2, "mixed": True},
+    ]
+    assert output._codec_warnings == ["movie.mov (mixed codecs) may not play in this output"]
+    mode, reason, runtime = output._resolve_continuity_static()
+    assert mode == "unsupported"
+    assert reason == "movie codec is not playable in this output: movie.mov (mixed codecs)"
+    assert runtime is None
+
+
+def test_planned_movie_with_one_unreadable_slide_copy_is_unsupported(tmp_path, monkeypatch):
+    output = host_with_continuity(
+        tmp_path, monkeypatch, movie_bytes_by_slide={"s2": b"not a real movie file, just garbage"},
+    )
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "movie codec is not playable in this output: movie.mov (unreadable)"
+    assert output._server.continuity_script == ""
 
 
 def test_codecs_recorded_in_session_log(tmp_path, monkeypatch):

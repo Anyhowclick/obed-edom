@@ -325,7 +325,7 @@ def _run_slot_and_bridge34_in_node(*, stage: dict) -> dict:
         + core[bridge_start:bridge_end]
     )
     harness = f"""
-let connected = false, preserveGeneration = 0;
+let connected = false, preserveGeneration = 0, disabled = false;
 const frames = [];
 const boundary = {{
   atScene: 8, movieKey: 'movie1', durationSeconds: 1.5,
@@ -394,13 +394,16 @@ def _run_slot_detach_in_node(
     mutate: str = "",
     append_throws: bool = False,
     append_noop: bool = False,
+    detach: bool = True,
 ) -> dict:
     """Drive `keepAtSlot` across a DETACH of the bridged video.
 
     Frame 1 runs while attached (the pin converges on the mapped slide-4 rect);
-    `mutate` then runs, the video is detached, and frame 2 exercises the
-    re-attach path. The fake video's rect is derived from its own inline style,
-    so a converged pin is a fixed point (a static rect would double every frame).
+    the video is then detached (unless `detach=False`, which keeps it connected
+    so the every-frame liveness check is exercised on a live node), `mutate`
+    runs, and frame 2 exercises the re-attach / retire path. The fake video's
+    rect is derived from its own inline style, so a converged pin is a fixed
+    point (a static rect would double every frame).
     """
     node = shutil.which("node")
     if not node:
@@ -426,6 +429,10 @@ const stage = {{
     if ({str(append_throws).lower()}) throw new Error('append failed');
     v.parentNode = stage;
     if (!{str(append_noop).lower()}) connected = true;
+  }},
+  removeChild(v) {{
+    v.parentNode = null;
+    connected = false;
   }}
 }};
 const stageMapEl = {{
@@ -445,9 +452,10 @@ const performance = {{now: () => 0}};
 {fragment}
 const real = {{
   style: {{left: '0px', top: '0px', width: '10px', height: '10px'}},
-  dataset: {{}}, parentNode: stage, ended: false, paused: true,
+  dataset: {{obedRemounted: '1'}}, parentNode: stage, ended: false, paused: true,
   __obedElId: 7, __obedGen: 0,
   play() {{ this.paused = false; return {{catch(){{}}}}; }},
+  pause() {{ this.paused = true; }},
   getBoundingClientRect() {{
     return {{
       left: parseFloat(this.style.left) || 0, top: parseFloat(this.style.top) || 0,
@@ -461,10 +469,12 @@ const rect = () => Object.fromEntries(
 keepAtSlot(real);
 frames.shift()();                 // attached frame: the pin converges
 const pinned = rect();
-connected = false;
-real.parentNode = null;
+if ({str(detach).lower()}) {{
+  connected = false;
+  real.parentNode = null;
+}}
 {mutate}
-frames.shift()();                 // detached frame: re-attach or end
+frames.shift()();                 // next frame: re-attach, retire, or end
 const afterDetach = rect();
 const notesAfterDetach = notes.length;
 if (frames.length) frames.shift()();   // a following (re-attached) frame
@@ -472,8 +482,10 @@ console.log(JSON.stringify({{
   pinned, afterDetach, connected, moves,
   reattachNotes: notes.filter(n => n.kind === 'bridge-slot-reattach').length,
   failureNotes: notes.filter(n => n.kind === 'bridge-slot-reattach-failed'),
+  retiredNotes: notes.filter(n => n.kind === 'bridge-slot-retired'),
   notesAfterDetach,
   resumed: real.paused === false,
+  stillRemounted: real.dataset.obedRemounted === '1',
   pinning: !!real.__obedSlotPinning,
   pendingFrames: frames.length,
 }}));
@@ -534,6 +546,48 @@ def test_slot_pin_does_not_reattach_when_disabled():
     assert result["reattachNotes"] == 0
     assert result["pinning"] is False
     assert result["pendingFrames"] == 0
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        "preserveGeneration += 1;",   # clear() bumped the generation but missed the element
+        "real.__obedGen = -1;",       # a per-element retire stamped it while still connected
+        "disabled = true;",
+    ],
+    ids=["clear-missed-the-element", "per-element-retire", "disabled"],
+)
+def test_slot_pin_retires_a_connected_decoder_that_is_no_longer_live(mutate):
+    """Codex r1 major: liveness used to be read only on the DETACHED path, so a
+    `clear()` that bumped the generation without removing the element (or a
+    retire that stamped `__obedGen = -1` on a still-connected node) left the pin
+    restyling and re-queuing frames forever — the slide-4 overlay survived the
+    go-to/retire. The loop must now end on the very next frame and stop the
+    overlay painting: pause, remove from the DOM, clear `obedRemounted`."""
+    result = _run_slot_detach_in_node(detach=False, mutate=mutate)
+    assert result["pinning"] is False
+    assert result["pendingFrames"] == 0          # nothing re-queued
+    assert result["connected"] is False          # taken out of the DOM
+    assert result["resumed"] is False            # paused
+    assert result["stillRemounted"] is False
+    assert [n["detail"] for n in result["retiredNotes"]] == [{"elId": 7}]
+    assert result["reattachNotes"] == 0
+    assert result["failureNotes"] == []
+    assert result["moves"] == 1                  # beginMove() before the removal
+
+
+def test_slot_pin_keeps_holding_a_connected_live_decoder():
+    """The always-connected, live-generation path is untouched by the liveness
+    gate: the pin keeps the mapped rect and keeps looping."""
+    result = _run_slot_detach_in_node(detach=False)
+    assert result["afterDetach"] == pytest.approx(result["pinned"])
+    assert result["connected"] is True
+    assert result["pinning"] is True
+    assert result["pendingFrames"] == 1
+    assert result["retiredNotes"] == []
+    assert result["reattachNotes"] == 0
+    assert result["stillRemounted"] is True
+    assert result["moves"] == 0
 
 
 def test_slot_pin_does_not_reattach_outside_the_bridge_zone():

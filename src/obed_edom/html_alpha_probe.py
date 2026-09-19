@@ -1684,6 +1684,9 @@ def score_no_stray_movie(
 
     Expected rects are dilated by ``dilate_px`` before subtraction; any remaining
     8-connected component of at least ``min_area_px`` fails the slide.
+
+    Limitation: pixels inside an expected rect cannot reveal a second movie there
+    (the probe's DOM instance check covers that case).
     """
     height, width = mask.shape[:2]
     work = np.asarray(mask).astype(np.uint8).copy()

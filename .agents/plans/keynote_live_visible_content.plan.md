@@ -118,3 +118,53 @@ be in front of everything or invisible.
  the destination slide, refuse otherwise; keep (b) as research. The fixture's slide 2 then becomes a REFUSAL
  fixture, and a second fixture without the overlap is needed as the positive control.
 Evidence (ignored): `output/live-visible-content/diag/` (12 screenshots, `diag.json`, `diag2.json`).
+
+## 6. Owner decision 2026-09-20: BASELINE first, then the WebGL SPIKE
+**Baseline = D3 (c)+(a) + mask refusal** (fail-closed; small):
+1. `derive_plan` refusals (⇒ `continuity: unsupported` + reason, raw player): (i) on a continuing boundary's
+   DESTINATION slide, any later-authored object (higher z than the movie) whose rect intersects the movie rect
+   ⇒ `artwork overlaps the carried movie`; (ii) a movie node carrying a shape mask (anything beyond its own
+   bounds rect) ⇒ `masked movie`. How the export encodes a movie mask is UNMEASURED — the fixture has none
+   (only the generic `masksToBounds` layer flag); needs an owner-authored fixture: one masked movie crossing a
+   Magic Move. Until the encoding is known, refuse on any mask-like key rather than guess.
+2. Runtime S5 per §3: visible-target remount (paint test = `checkVisibility({checkOpacity,checkVisibilityCSS})`
+   AND ancestor-opacity product — NOT `elementsFromPoint`), else the stage/body-level overlay; retire the
+   same-asset second instance by plan geometry in `stash()`; key the footprint fallback by movie, not modulo.
+3. The current fixture's 1→2 becomes a REFUSAL fixture under (i) (green square + black box overlap the movie on
+   slide 2). A positive control needs a deck whose destination slide has nothing over the movie — owner-authored
+   (agents never touch Keynote). The allowlist signature changes with the plan ⇒ new entry + P2 injected plan.
+4. S3: P2 Finding 1 gains `footprintFullyLive`; Finding 2 is re-scoped to slides where the authored layer paints.
+5. Full re-qualification from the gate worktree (P2 ×3, host ×3 viewports incl. V/Voff), Codex review.
+
+**Spike = D3 (b), time-boxed research in a disposable worktree, no product code, headless only.** Ordered questions,
+stop at the first "no":
+ Q1 Does the player keep a render loop while a Magic-Move-settled slide rests on the stage-wide WebGL canvas
+    (`#0-canvas`)? Measure: wrap `WebGLRenderingContext.prototype.drawArrays/drawElements` + `requestAnimationFrame`
+    and count calls per second at rest on slide 2 (+1 s … +14 s).
+ Q2 If not: can a redraw be forced cleanly (a public player hook / re-dispatching the event that made it render)
+    without replaying draw calls or reaching into minified internals per build? If only by internals ⇒ DEAD.
+ Q3 Can the movie's texture be identified robustly (intercept `texImage2D` uploads: source element/size/poster
+    asset) including two instances of one asset, and swapped per frame with `texImage2D(video)`; cost at
+    2560×1440 with two movies; behaviour in OBS's CEF (Chrome 127).
+ Success is scored by the existing visible-content gate (full rect live on slide 2) AND P2 Finding 2 (green square
+ still in front). Payoff if it works: correct z-order, masks, opacity, and the player's own 3→4 motion/easing.
+
+## 7. Spike result 2026-09-20 (headless, raw player and continuity on — identical WebGL numbers)
+**Q1: the player does NOT render at rest.** `#0-canvas` (WebGL1) is created when the 1→2 Magic Move starts, draws
+195–255 `drawElements`/s for ~2 s, then ZERO draw / clear / bind / upload calls for the 13 s the settled slide 2
+rested; it just retains its last frame. It is gone again on slide 3. During the move the player makes exactly 6
+`texImage2D` uploads in one burst, all from unnamed `HTMLCanvasElement` copies (big-movie poster = 960×276, small
+instance = 671×195); it never uses an `HTMLVideoElement` as a texture source — there is no video-texture path.
+**Q2: no clean forced redraw.** 9 triggers produced zero draw calls (window `resize`, the player's
+`StageSizeDidChangeEvent`, `webkitfullscreenchange`, `visibilitychange`, `orientationchange`, `scroll`, a style touch,
+and a REAL viewport resize via CDP and back); no player object or redraw hook is reachable from `window`.
+Micro-experiment: `texImage2D(video)` into the movie's texture succeeds (GL error 0, state restored) and the screen
+does not change — byte-identical screenshots. **Verdict: option (b) is DEAD at Q2** under the stop rule, unless the
+owner wants the minified player opened per build, or its ~250 draw calls replayed (both previously ruled out).
+Still true and useful: a settled Magic-Move slide is a STATIC image, so whatever sits over the movie there is static.
+Unexplored idea for the owner, NOT started: keep the stage-level `<video>` overlay (baseline (a)) and lay a static
+2D-canvas "occluder cut-out" over it — the pixels of the settled WebGL frame inside the movie rect that differ from
+the poster the player uploaded (both are readable) — restoring opaque artwork-in-front without touching the player.
+Translucent artwork and anything animated by a later build would not be reproduced. It would turn the baseline's
+overlap REFUSAL into a carry for the common opaque case; needs its own plan and gate (visible-content + Finding 2).
+Evidence (ignored): `output/live-visible-content/spike/`.

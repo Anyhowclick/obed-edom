@@ -91,6 +91,14 @@ def _codec_supported(family: str, *, attach: bool, headless: bool) -> bool:
     return False
 
 
+def _codec_display(entry: dict[str, Any] | None) -> str:
+    if entry is None:
+        return "unreadable"
+    if entry.get("mixed"):
+        return "mixed codecs"
+    return entry["codec"] or "unreadable"
+
+
 class LiveHostError(RuntimeError):
     """The owned browser cannot provide an observed player state."""
 
@@ -775,7 +783,7 @@ class LiveOutputHost:
             return [], []
         attach = self._attach_endpoint is not None
         warnings = [
-            f"{entry['asset']} ({entry['codec'] or 'unreadable'}) may not play in this output"
+            f"{entry['asset']} ({_codec_display(entry)}) may not play in this output"
             for entry in report
             if not _codec_supported(entry["family"], attach=attach, headless=self.headless)
         ]
@@ -804,8 +812,8 @@ class LiveOutputHost:
             entry = codec_by_asset.get(asset)
             family = entry["family"] if entry is not None else "other"
             if not _codec_supported(family, attach=attach, headless=self.headless):
-                codec_display = (entry["codec"] if entry is not None else None) or "unreadable"
-                return "unsupported", f"movie codec is not playable in this output: {asset} ({codec_display})", None
+                display = _codec_display(entry)
+                return "unsupported", f"movie codec is not playable in this output: {asset} ({display})", None
         if self._attach_endpoint:
             runtime = {**runtime, "transparentBackground": True}
         return "pending", None, runtime

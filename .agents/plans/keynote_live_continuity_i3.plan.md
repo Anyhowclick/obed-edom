@@ -88,7 +88,7 @@ rounding at s = 4/3 against the 0.5 px deadband (watch for per-frame jitter in t
 `getBoundingClientRect` on `#stage` adds one layout read per pinned video per frame.
 **Out of scope**: I5 codec, DeckLink/HEVC, native easing parity, relaxing the allowlist.
 
-## 7. Status — DONE 2026-09-19 (uncommitted on `claude/keynote-live-continuity-next`; no push / PR)
+## 7. Status — DONE 2026-09-19 (commit `ee97861`; PR #175 onto #158 after merging the presenter tip, `dfd1c13`)
 Runtime `CONTINUITY_VERSION` 3, sha `54db9b0f65474bdb20ff110b5d1c715d93a845fb7275a4b67f3cbffe45428a3f`;
 plan object and allowlist signature unchanged. Final gates on those bytes:
 - P2 fast 14/14 · slow 14/14 · `--disable-bridge34` RED only on `continueThroughMovingMagicMove3to4`.
@@ -106,8 +106,11 @@ Lesson kept as a test: a DETACHED video reports literal viewport (0,0), not the 
 "unpositioned" check is `nearZero || nearStageOrigin` (the stage-origin-only variant passed review and unit
 tests but failed the live letterboxed gate).
 
-**Deferred (P2 owner, pre-existing in v2, Codex r1 major #4):** `keepAtSlot` stops when the bridged video
-leaves the document and `stash()` rejects `__obedBridged34`, so a later player cleanup at the slide-4
-boundary would drop the continuing decoder for good. Not reproduced on the fixture (all gates green).
+**Codex r1 major #4 (`keepAtSlot` re-detach):** driven on the real player through slide 4's second build to the end
+of the deck — NOT reproduced (the bridged video is a `<body>` child the player never touches). Hardened anyway in
+`073546d` (re-attach while the bridge generation is live).
+After the merge the runtime sha is `7288246d…ceff` (adds `stash()` plan-named filter); gates re-run green from a clean
+pinned worktree. **Superseding finding:** the carried movie is invisible on the fixture's slide 2 — see
+`keynote_live_visible_content.plan.md`.
 **Still open:** HDMI run on the 2560×1440 monitor with the owner watching 1→2 and 3→4 (ask first); real OBS
 re-run; I5 codec; DeckLink/HEVC; native easing parity.

@@ -99,6 +99,9 @@ BURST_OFFSETS_MS = (0, 130, 290, 500, 770)
 CONTROL_PATCH_PX = 40
 CONTROL_INSET_PX = 4
 VISIBLE_SETTLE_TIMEOUT_S = 10.0
+# A painting `<video>` claims an expected instance rect at the same IoU the
+# runtime's own owner resolution uses.
+INSTANCE_IOU_MIN = 0.75
 
 # In headless Chrome, --window-size=W,H yields innerHeight H-32 (chrome window
 # chrome persists even headless) -- reuse live_host_probe's measured compensation
@@ -126,6 +129,45 @@ STAGE_MAP_FN_JS = r"""
 STAGE_MAP_JS = "(function(){" + STAGE_MAP_FN_JS + "return stageMapOf();})()"
 
 SCENE_ID_JS = "window.__obedLive ? window.__obedLive.snapshot().sceneId : null"
+
+# Independent instance evidence for the visible-content pass: pixels inside one
+# expected rect cannot separate two live movies, so the DOM is asked which
+# `<video>` elements can actually PAINT. A Magic-Move-settled slide paints
+# through a stage-wide WebGL canvas with the DOM layer tree at opacity 0 -- such
+# a video fails the paint test and is deliberately not listed, and an expected
+# rect with no painting video is not an error (the player may be drawing it in
+# WebGL; pixel liveness judges that). A browser without `checkVisibility` cannot
+# answer this at all: it returns an error object, never a short list.
+PAINTING_VIDEOS_JS = r"""
+(function(){
+  if (typeof Element.prototype.checkVisibility !== 'function') {
+    return {error: 'checkVisibility is unavailable in this browser'};
+  }
+  function opacityProduct(el){
+    var product = 1;
+    for (var node = el; node && node.nodeType === 1; node = node.parentElement) {
+      var value = parseFloat(window.getComputedStyle(node).opacity);
+      product *= (isFinite(value) ? value : 1);
+    }
+    return product;
+  }
+  var out = [];
+  document.querySelectorAll('video').forEach(function(v){
+    if (!v.isConnected || !(v.readyState >= 2) || !(v.videoWidth > 0)) return;
+    if (!v.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return;
+    if (!(opacityProduct(v) > 0.02)) return;
+    var r = v.getBoundingClientRect();
+    if (!(r.width > 1 && r.height > 1)) return;
+    if (r.right <= 0 || r.bottom <= 0 || r.left >= window.innerWidth || r.top >= window.innerHeight) return;
+    out.push({
+      src: String(v.currentSrc || v.src || '').split('/').pop(),
+      elId: (v.__obedElId != null ? v.__obedElId : null),
+      rect: {x: r.left, y: r.top, w: r.width, h: r.height}
+    });
+  });
+  return out;
+})()
+"""
 
 SAMPLER_JS = r"""
 (function(){
@@ -1087,6 +1129,76 @@ def expected_screen_rects(
     return rects
 
 
+def rect_iou(a: dict[str, float], b: dict[str, float]) -> float:
+    overlap_w = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+    overlap_h = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+    if overlap_w <= 0 or overlap_h <= 0:
+        return 0.0
+    intersection = overlap_w * overlap_h
+    union = a["w"] * a["h"] + b["w"] * b["h"] - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def painting_videos(raw: Any, stage_map: dict[str, Any]) -> list[dict[str, Any]]:
+    """`PAINTING_VIDEOS_JS`'s result in authored px. Anything but a list of
+    well-formed rows is an instrument error, never an empty (and therefore
+    silently clean) list."""
+    if not isinstance(raw, list):
+        raise VisiblePassError(f"painting-video probe returned {raw!r}")
+    videos: list[dict[str, Any]] = []
+    for row in raw:
+        rect = row.get("rect") if isinstance(row, dict) else None
+        if not isinstance(rect, dict) or not all(
+            isinstance(rect.get(key), (int, float)) and math.isfinite(rect[key]) for key in ("x", "y", "w", "h")
+        ):
+            raise VisiblePassError(f"painting-video probe returned an unusable row: {row!r}")
+        screen = {key: float(rect[key]) for key in ("x", "y", "w", "h")}
+        videos.append({
+            "src": row.get("src"), "elId": row.get("elId"),
+            "screen": screen, "authored": to_authored_rect(screen, stage_map),
+        })
+    return videos
+
+
+def match_painting_videos(videos: list[dict[str, Any]], expected: list[dict[str, Any]]) -> dict[str, Any]:
+    """Every painting `<video>` must claim exactly one expected instance rect,
+    and no rect may be claimed twice -- the only evidence that separates two
+    live movies sharing one rect, which pixels alone cannot."""
+    claims: dict[str, list[dict[str, Any]]] = {}
+    unexpected: list[dict[str, Any]] = []
+    for video in videos:
+        scores = [(rect_iou(video["authored"], item["authored"]), item["label"]) for item in expected]
+        best_iou, best_label = max(scores, default=(0.0, None))
+        if best_iou >= INSTANCE_IOU_MIN:
+            claims.setdefault(best_label, []).append(video)
+        else:
+            unexpected.append({**video, "bestIou": best_iou, "bestLabel": best_label})
+    duplicates = [
+        {"label": label, "videos": claimants} for label, claimants in claims.items() if len(claimants) > 1
+    ]
+    reason = None
+    if unexpected:
+        reason = f"{len(unexpected)} painting video(s) match no expected movie instance"
+    elif duplicates:
+        reason = f"{len(duplicates)} expected movie instance(s) are painted by more than one video"
+    return {
+        "verdict": not unexpected and not duplicates, "painting": videos,
+        "unexpectedVideos": unexpected, "duplicateVideos": duplicates, "reason": reason,
+    }
+
+
+def clipped_rect_labels(expected: list[dict[str, Any]], viewport: tuple[int, int], tolerance: float = 0.5) -> list[str]:
+    """Expected rects that do not lie wholly inside the screenshot. Scoring one
+    would measure a truncated rect, so it is an instrument error, not a red."""
+    width, height = viewport
+    return [
+        item["label"] for item in expected
+        if item["screen"]["x"] < -tolerance or item["screen"]["y"] < -tolerance
+        or item["screen"]["x"] + item["screen"]["w"] > width + tolerance
+        or item["screen"]["y"] + item["screen"]["h"] > height + tolerance
+    ]
+
+
 def wait_until_settled(
     host: Any, *, timeout_s: float = VISIBLE_SETTLE_TIMEOUT_S, now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -1141,14 +1253,17 @@ def visible_slide_record(
 ) -> dict[str, Any]:
     """One settled slide, scored from a screenshot burst. Every way of not knowing
     -- unsettled player, a scene that moved under the burst, a screenshot that is
-    not the forced viewport, an untrustworthy stage map, missing ground truth --
-    ends as `verdict: None`, never as a pass and never as the RED that the `Voff`
-    control has to earn."""
+    not the forced viewport, an untrustworthy stage map, an expected rect that
+    clips off the screenshot, missing ground truth -- ends as `verdict: None`,
+    never as a pass and never as the RED that the `Voff` control has to earn.
+    Pixel liveness is scored alongside independent DOM instance evidence: a
+    slide whose pixels pass but whose painting `<video>` elements do not match
+    the expected instances one-for-one is RED."""
     transport = host._require_transport()
     record: dict[str, Any] = {
         "playerIndex": int(slide["playerIndex"]), "originalOrdinal": slide.get("originalOrdinal"),
         "sceneId": None, "expectedRects": [], "perRect": [], "stray": None, "noiseFloor": None,
-        "shotOffsetsMs": [], "stageMap": None, "status": "error", "verdict": None,
+        "shotOffsetsMs": [], "stageMap": None, "instanceCheck": None, "status": "error", "verdict": None,
     }
     if not wait_until_settled(host, now=now, sleep=sleep):
         record.update(status="inconclusive", reason="player never settled before the burst")
@@ -1156,9 +1271,11 @@ def visible_slide_record(
 
     frames: list[np.ndarray] | None = None
     stage_map: Any = None
+    painting_raw: Any = None
     for attempt in (1, 2):
         scene_before = transport.evaluate(SCENE_ID_JS)
         stage_map = transport.evaluate(STAGE_MAP_JS)
+        painting_raw = transport.evaluate(PAINTING_VIDEOS_JS)
         try:
             shots, offsets = capture_burst(transport, offsets_ms=offsets_ms, now=now, sleep=sleep)
         except VisiblePassError as exc:
@@ -1181,16 +1298,25 @@ def visible_slide_record(
         return record
     try:
         expected = expected_screen_rects(instances, record["playerIndex"], stage_map)
+        painting = painting_videos(painting_raw, stage_map)
     except VisiblePassError as exc:
         record.update(reason=str(exc))
         return record
+    record["expectedRects"] = expected
+    clipped = clipped_rect_labels(expected, viewport)
+    if clipped:
+        record.update(reason=f"expected rect(s) {clipped} clip outside the {viewport[0]}x{viewport[1]} screenshot")
+        return record
 
+    instance_check = match_painting_videos(painting, expected)
     control = control_region(stage_screen_rect(stage_map), viewport)
     scored = scorer(frames, [{**item["screen"], "label": item["label"]} for item in expected], control)
     record.update(
-        expectedRects=expected, control=control, perRect=scored.get("perRect"), stray=scored.get("stray"),
+        control=control, instanceCheck=instance_check, perRect=scored.get("perRect"), stray=scored.get("stray"),
         noiseFloor=scored.get("noiseFloor"), verdict=scored.get("verdict"), status=scored.get("status"),
     )
+    if record["verdict"] is True and not instance_check["verdict"]:
+        record.update(verdict=False, status="fail", reason=instance_check["reason"])
     if evidence is not None and record["verdict"] is not True:
         record["evidence"] = evidence(record, frames)
     return record
@@ -1215,6 +1341,17 @@ def run_visible_slides(
             scorer=scorer, evidence=evidence, offsets_ms=offsets_ms, now=now, sleep=sleep,
         ))
     return records
+
+
+def visible_stage_samples(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each slide's burst-time stage map as a `score_stage_fit` sample, so a
+    visible pass is gated on the same fit the arms are: V and Voff run in
+    separate sessions, and a shifted or cropped Voff could otherwise report an
+    off-image expected rect as an ordinary red."""
+    return [
+        {"stageMap": slide.get("stageMap"), "stageMapValid": stage_map_valid(slide.get("stageMap"))}
+        for slide in slides
+    ]
 
 
 def visible_stage_summary(slides: list[dict[str, Any]], expected: dict[str, float]) -> dict[str, Any]:
@@ -1260,6 +1397,7 @@ def run_visible_pass(
             result["stopError"] = str(exc)
     scored = result.get("slides") or []
     result["stageMap"] = visible_stage_summary(scored, expected_stage)
+    result["stageFit"] = score_stage_fit(visible_stage_samples(scored), expected_stage)
     result["verdict"] = bool(scored) and all(slide.get("verdict") is True for slide in scored)
     return result
 
@@ -1327,15 +1465,22 @@ def visible_slides_of(entry: Any) -> list[dict[str, Any]]:
 
 def visible_pass_reasons(entry: Any, label: str, expected_mode: str) -> list[str]:
     """Fail-closed, in the style of `stage_fit_reason`: a pass that is absent,
-    errored, ran the wrong mechanism, or scored nothing is not evidence."""
+    errored, ran the wrong mechanism, was not fitted as expected on every
+    slide's burst, leaked its browser, or scored nothing is not evidence -- and
+    when it is not, its slide verdicts are not consulted at all."""
     if not isinstance(entry, dict):
         return [f"visible pass {label} missing"]
     if entry.get("status") == "error" or entry.get("error"):
         return [f"visible pass {label} errored: {entry.get('error')}"]
+    if not stage_fit_ok(entry):
+        missing = not isinstance(entry.get("stageFit"), dict)
+        return [f"visible pass {label} stage fit {'missing' if missing else 'failed'}"]
     reasons: list[str] = []
     mode = continuity_mode(entry)
     if mode != expected_mode:
         reasons.append(f"visible pass {label} continuity.mode={mode!r}, expected {expected_mode!r}")
+    if entry.get("stopError"):
+        reasons.append(f"visible pass {label} player.stop() failed: {entry.get('stopError')}")
     if not visible_slides_of(entry):
         reasons.append(f"visible pass {label} scored no slides")
     return reasons
@@ -1352,12 +1497,13 @@ def visible_reasons(result: dict[str, Any]) -> list[str]:
     on, off = visible.get("V"), visible.get("Voff")
 
     reasons = visible_pass_reasons(on, "V", "qualified")
-    for slide in visible_slides_of(on):
-        if slide.get("verdict") is not True:
-            reasons.append(
-                f"visible pass V slide {slide.get('originalOrdinal')} is not fully live "
-                f"(status={slide.get('status')!r})"
-            )
+    if not reasons:
+        for slide in visible_slides_of(on):
+            if slide.get("verdict") is not True:
+                reasons.append(
+                    f"visible pass V slide {slide.get('originalOrdinal')} is not fully live "
+                    f"(status={slide.get('status')!r})"
+                )
 
     off_reasons = visible_pass_reasons(off, "Voff", "off")
     if not off_reasons:
@@ -1517,6 +1663,7 @@ def main() -> None:
         result["visible"]["V"] = run_visible_pass(
             "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir
         )
+        result["leftoverChromeAfterVisibleV"] = check_no_leftover_chrome()
         save()
 
         export_voff = prepare_export(args.fixture, args.original_index, "visible-voff")

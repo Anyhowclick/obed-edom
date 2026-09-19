@@ -516,8 +516,11 @@ def _resolve_movie_path(
 
 def _referenced_movies(
     export_root: Path, slides: list[dict[str, Any]], *, resolver: Callable[[Path, str], Path]
-) -> dict[str, Path | None]:
-    found: dict[str, Path | None] = {}
+) -> dict[str, list[Path | None]]:
+    """Every distinct file each logical asset key resolves to: an HTML export stores a
+    separate copy of the same movie under each slide's folder, so one key covers several
+    files that need not share a codec."""
+    found: dict[str, list[Path | None]] = {}
     for slide in slides:
         if slide.get("skipped"):
             continue
@@ -537,9 +540,10 @@ def _referenced_movies(
             if not isinstance(asset_id, str) or not asset_id:
                 continue
             key = _normalize_asset_key(assets_table, asset_id)
-            if key in found:
-                continue
-            found[key] = _resolve_movie_path(export_root, uuid, asset_id, assets_table, resolver)
+            path = _resolve_movie_path(export_root, uuid, asset_id, assets_table, resolver)
+            paths = found.setdefault(key, [])
+            if path not in paths:
+                paths.append(path)
     return found
 
 
@@ -553,10 +557,21 @@ def codec_report(
     """Codec of every movie asset any non-skipped slide's events reference, independent
     of whether the deck qualifies for continuity (a rotated or ambiguous movie's codec
     is still worth reporting). Unreadable slides or assets are skipped, never raised:
-    this report must stay available even when `derive_plan` refuses."""
+    this report must stay available even when `derive_plan` refuses.
+
+    Each entry covers all `files` the key resolves to: it reports a codec only when they
+    all agree, and otherwise fails closed to an unreadable (`codec: None`, family
+    `other`) entry, flagged `mixed` when the disagreement is between readable codecs."""
     assets = _referenced_movies(export_root, slides, resolver=resolver)
     report = []
-    for asset, path in sorted(assets.items()):
-        fourcc = probe(path) if path is not None else None
-        report.append({"asset": asset, "codec": fourcc, "family": codec_family(fourcc)})
+    for asset, paths in sorted(assets.items()):
+        fourccs = {probe(path) if path is not None else None for path in paths}
+        mixed = len(fourccs) > 1 and None not in fourccs
+        fourcc = fourccs.pop() if len(fourccs) == 1 else None
+        entry: dict[str, Any] = {
+            "asset": asset, "codec": fourcc, "family": codec_family(fourcc), "files": len(paths),
+        }
+        if mixed:
+            entry["mixed"] = True
+        report.append(entry)
     return report

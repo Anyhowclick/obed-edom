@@ -399,11 +399,13 @@ class TestOverallStatusTruthTable:
             "visible": {
                 "V": {
                     "pass": "V", "status": "ok", "continuity": {"mode": "qualified"},
+                    "stageFit": verdict(True),
                     "slides": [visible_slide(n, True) for n in (1, 2, 3, 4)],
                     "verdict": True,
                 },
                 "Voff": {
                     "pass": "Voff", "status": "ok", "continuity": {"mode": "off"},
+                    "stageFit": verdict(True),
                     "slides": [
                         visible_slide(1, True), visible_slide(2, False),
                         visible_slide(3, True), visible_slide(4, True),
@@ -973,6 +975,8 @@ class FakeTransport:
             return self.host.next_scene_id()
         if js == probe.STAGE_MAP_JS:
             return self.host.stage_map
+        if js == probe.PAINTING_VIDEOS_JS:
+            return self.host.painting
         return True
 
     def call(self, method: str, **params: Any) -> dict[str, Any]:
@@ -985,16 +989,25 @@ class FakeTransport:
 
 class FakeHost:
     """A host-like object for the slide loop: scripted `sceneId` reads (two per
-    burst attempt: before and after), scripted `busy`, and a fixed screenshot."""
+    burst attempt: before and after), scripted `busy`, a fixed screenshot, and a
+    scripted `PAINTING_VIDEOS_JS` result.
+
+    `painting` defaults to `[]` -- the shape of a Magic-Move-settled slide, whose
+    movies are painted by the stage-wide WebGL canvas while the DOM layer tree
+    sits at opacity 0, so no `<video>` passes the paint test. That is not an
+    error: pixel liveness judges such a slide.
+    """
 
     def __init__(
         self, *, scene_ids: list[Any], busy: list[bool] | bool = False,
         shot: str | None = None, shots: list[str] | None = None, stage_map: Any = _UNSET,
+        painting: Any = _UNSET,
     ) -> None:
         self.scene_ids = list(scene_ids)
         self.busy = busy
         self.shots = shots if shots is not None else [shot if shot is not None else png_b64(*VISIBLE_VIEWPORT)]
         self.stage_map = dict(FULL_BLEED_STAGE_MAP) if stage_map is _UNSET else stage_map
+        self.painting: Any = [] if painting is _UNSET else painting
         self.transport = FakeTransport(self)
         self.observations = 0
 
@@ -1499,3 +1512,343 @@ class TestOverallStatusVisible:
         assert status == "fail"
         assert any("arm A stageFit failed" in reason for reason in reasons)
         assert any("visible pass V slide 1" in reason for reason in reasons)
+
+
+# --------------------------------------------------------------------------
+# Independent DOM instance evidence (Codex R1, probe MAJOR #1)
+# --------------------------------------------------------------------------
+
+PAINT_VIEWPORT = (1000, 400)
+# The defect actually measured on the deck: a 663x186 duplicate movie overlay
+# sitting at the top-left corner of the expected 952x268 movie rect. Wholly
+# INSIDE the expected rect, so `score_no_stray_movie` erases it from the stray
+# mask and no amount of pixel evidence can report it.
+EXPECTED_SCREEN_RECT = {"x": 20.0, "y": 70.0, "w": 952.0, "h": 268.0}
+DUPLICATE_SCREEN_RECT = {"x": 20.0, "y": 70.0, "w": 663.0, "h": 186.0}
+DUPLICATE_IOU = (663.0 * 186.0) / (952.0 * 268.0)
+
+PAINT_STAGE_MAPS = {
+    "full-bleed": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1000.0, "offsetHeight": 400.0},
+    "scaled-4-3": {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 750.0, "offsetHeight": 300.0},
+    "letterboxed-origin-0-50": {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 50.0, "offsetWidth": 1000.0, "offsetHeight": 300.0},
+}
+
+
+def painting_video(rect: dict[str, float], *, src: str = "Untitled.mov", el_id: Any = None) -> dict[str, Any]:
+    """One row as `PAINTING_VIDEOS_JS` returns it: screen px, already filtered by
+    the in-page paint test."""
+    return {"src": src, "elId": el_id, "rect": dict(rect)}
+
+
+class TestPaintingVideoPaintTest:
+    """The paint test itself runs in the page, so these assert the contract of
+    the expression the probe evaluates -- a refactor that drops one of its terms
+    (and so starts counting videos the player is not painting, or stops counting
+    ones it is) fails a named test."""
+
+    def test_the_expression_tests_connectedness_decode_and_size(self) -> None:
+        assert "v.isConnected" in probe.PAINTING_VIDEOS_JS
+        assert "v.readyState >= 2" in probe.PAINTING_VIDEOS_JS
+        assert "v.videoWidth > 0" in probe.PAINTING_VIDEOS_JS
+        assert "r.width > 1 && r.height > 1" in probe.PAINTING_VIDEOS_JS
+
+    def test_the_expression_tests_visibility_and_the_ancestor_opacity_product(self) -> None:
+        """A Magic-Move-settled slide paints through a stage-wide WebGL canvas
+        with the DOM layer tree at opacity 0: those videos must NOT be listed."""
+        assert "checkVisibility({checkOpacity: true, checkVisibilityCSS: true})" in probe.PAINTING_VIDEOS_JS
+        assert "opacityProduct(v) > 0.02" in probe.PAINTING_VIDEOS_JS
+        assert "node.parentElement" in probe.PAINTING_VIDEOS_JS
+
+    def test_the_expression_tests_viewport_intersection(self) -> None:
+        assert "r.left >= window.innerWidth" in probe.PAINTING_VIDEOS_JS
+        assert "r.top >= window.innerHeight" in probe.PAINTING_VIDEOS_JS
+
+    def test_a_browser_without_check_visibility_answers_with_an_error_not_a_short_list(self) -> None:
+        assert "checkVisibility is unavailable" in probe.PAINTING_VIDEOS_JS
+
+
+class TestRectIou:
+    def test_identical_rects_are_one_and_disjoint_rects_are_zero(self) -> None:
+        rect = {"x": 10.0, "y": 10.0, "w": 100.0, "h": 50.0}
+        assert probe.rect_iou(rect, rect) == 1.0
+        assert probe.rect_iou(rect, {"x": 500.0, "y": 500.0, "w": 100.0, "h": 50.0}) == 0.0
+
+    def test_the_measured_duplicate_is_well_below_the_claim_threshold(self) -> None:
+        assert probe.rect_iou(DUPLICATE_SCREEN_RECT, EXPECTED_SCREEN_RECT) == pytest.approx(DUPLICATE_IOU, abs=1e-6)
+        assert DUPLICATE_IOU < probe.INSTANCE_IOU_MIN
+
+    def test_a_slightly_offset_video_still_claims_its_rect(self) -> None:
+        """The threshold is the runtime's own owner-resolution IoU, not an exact
+        match: sub-pixel layout drift must not read as a stray instance."""
+        expected = {"x": 100.0, "y": 100.0, "w": 200.0, "h": 100.0}
+        assert probe.rect_iou({"x": 101.0, "y": 101.0, "w": 200.0, "h": 100.0}, expected) >= probe.INSTANCE_IOU_MIN
+
+
+class TestPaintingVideoInstanceCheck:
+    """Pixels inside one expected rect cannot separate two live movies, so the
+    slide also has to match the DOM's painting `<video>` elements one-for-one
+    against the expected instances."""
+
+    def _record(
+        self, stage_map: dict[str, Any], painting: Any, *, instances: Any = None,
+        scorer: Any = passing_scorer, shots: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if instances is None:
+            instances = {0: {"Untitled.mov": [probe.to_authored_rect(EXPECTED_SCREEN_RECT, stage_map)]}}
+        host = FakeHost(
+            scene_ids=["s", "s"], stage_map=dict(stage_map), painting=painting,
+            shot=png_b64(*PAINT_VIEWPORT), shots=shots,
+        )
+        clock = FakeClock()
+        return probe.visible_slide_record(
+            host, VISIBLE_SLIDE, instances, PAINT_VIEWPORT,
+            scorer=scorer, now=clock.now, sleep=clock.sleep,
+        )
+
+    def _live_shots(self) -> list[str]:
+        """Real pixels: the whole expected rect is live in every frame, so the
+        pixel scorers alone would call this slide green."""
+        rng = np.random.default_rng(7)
+        rect = EXPECTED_SCREEN_RECT
+        shots = []
+        for _ in probe.BURST_OFFSETS_MS:
+            frame = np.zeros((PAINT_VIEWPORT[1], PAINT_VIEWPORT[0], 3), dtype=np.uint8)
+            y, x, h, w = int(rect["y"]), int(rect["x"]), int(rect["h"]), int(rect["w"])
+            frame[y:y + h, x:x + w] = rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+            ok, buffer = cv2.imencode(".png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            assert ok
+            shots.append(base64.b64encode(buffer.tobytes()).decode("ascii"))
+        return shots
+
+    def test_todays_duplicate_is_red_even_though_the_pixels_are_fully_live(self) -> None:
+        """The exact shape the gate could not see before: a 663x186 second movie
+        wholly inside the expected 952x268 rect, with a full-size live overlay on
+        top of it, so coverage passes and the stray mask is erased. Scored here
+        through the REAL pixel scorers -- the red can only come from the DOM."""
+        from obed_edom.html_alpha_probe import score_visible_slide
+
+        stage_map = PAINT_STAGE_MAPS["full-bleed"]
+        pixels_only = self._record(stage_map, [], scorer=score_visible_slide, shots=self._live_shots())
+        assert pixels_only["verdict"] is True
+
+        record = self._record(
+            stage_map, [painting_video(DUPLICATE_SCREEN_RECT, el_id=9)],
+            scorer=score_visible_slide, shots=self._live_shots(),
+        )
+        assert record["verdict"] is False
+        assert record["status"] == "fail"
+        unexpected = record["instanceCheck"]["unexpectedVideos"]
+        assert len(unexpected) == 1
+        assert unexpected[0]["elId"] == 9
+        assert unexpected[0]["screen"] == DUPLICATE_SCREEN_RECT
+        assert unexpected[0]["bestIou"] == pytest.approx(DUPLICATE_IOU, abs=1e-6)
+        assert unexpected[0]["bestLabel"] == "Untitled.mov#1"
+
+    @pytest.mark.parametrize("stage_map", list(PAINT_STAGE_MAPS.values()), ids=list(PAINT_STAGE_MAPS))
+    def test_one_correctly_placed_painting_video_is_green(self, stage_map: dict[str, Any]) -> None:
+        record = self._record(stage_map, [painting_video(EXPECTED_SCREEN_RECT)])
+        assert record["verdict"] is True
+        assert record["instanceCheck"]["verdict"] is True
+        assert record["instanceCheck"]["unexpectedVideos"] == []
+        assert record["instanceCheck"]["duplicateVideos"] == []
+
+    @pytest.mark.parametrize("stage_map", list(PAINT_STAGE_MAPS.values()), ids=list(PAINT_STAGE_MAPS))
+    def test_the_duplicate_shape_is_unexpected_under_every_stage_map(self, stage_map: dict[str, Any]) -> None:
+        """Screen-to-authored conversion uses the probe's own per-burst stage
+        map, so a scaled or letterboxed stage neither hides the duplicate nor
+        turns a correct instance into a stray."""
+        record = self._record(stage_map, [painting_video(DUPLICATE_SCREEN_RECT)])
+        assert record["verdict"] is False
+        assert len(record["instanceCheck"]["unexpectedVideos"]) == 1
+        assert record["instanceCheck"]["unexpectedVideos"][0]["bestIou"] == pytest.approx(DUPLICATE_IOU, abs=1e-6)
+
+    @pytest.mark.parametrize("stage_map", list(PAINT_STAGE_MAPS.values()), ids=list(PAINT_STAGE_MAPS))
+    def test_two_painting_videos_claiming_one_rect_are_a_duplicate_red(self, stage_map: dict[str, Any]) -> None:
+        """A retired overlay that still paints at the same place as its
+        replacement: both match the one expected instance, which is exactly the
+        defect pixels cannot report."""
+        record = self._record(stage_map, [
+            painting_video(EXPECTED_SCREEN_RECT, el_id=1),
+            painting_video(EXPECTED_SCREEN_RECT, el_id=2),
+        ])
+        assert record["verdict"] is False
+        assert record["status"] == "fail"
+        assert record["instanceCheck"]["unexpectedVideos"] == []
+        duplicates = record["instanceCheck"]["duplicateVideos"]
+        assert [entry["label"] for entry in duplicates] == ["Untitled.mov#1"]
+        assert [video["elId"] for video in duplicates[0]["videos"]] == [1, 2]
+
+    def test_a_video_the_paint_test_filtered_out_is_ignored(self) -> None:
+        """On a Magic-Move-settled slide the player paints with a stage-wide
+        WebGL canvas and the DOM layer tree sits at opacity 0. The in-page paint
+        test drops those videos, so the probe sees an empty list -- and an empty
+        list is not a duplicate, a stray, or an error."""
+        record = self._record(PAINT_STAGE_MAPS["full-bleed"], [])
+        assert record["verdict"] is True
+        assert record["instanceCheck"] == {
+            "verdict": True, "painting": [], "unexpectedVideos": [], "duplicateVideos": [], "reason": None,
+        }
+
+    def test_an_expected_rect_with_no_painting_video_but_live_pixels_is_green(self) -> None:
+        """Two expected instances, only one of them painted by a DOM video: the
+        other may be drawn by the player in WebGL, and pixel liveness -- not this
+        check -- is its judge."""
+        stage_map = PAINT_STAGE_MAPS["full-bleed"]
+        second = {"x": 20.0, "y": 350.0, "w": 100.0, "h": 40.0}
+        instances = {0: {"Untitled.mov": [
+            probe.to_authored_rect(EXPECTED_SCREEN_RECT, stage_map),
+            probe.to_authored_rect(second, stage_map),
+        ]}}
+        record = self._record(stage_map, [painting_video(second)], instances=instances)
+        assert record["verdict"] is True
+        assert record["instanceCheck"]["verdict"] is True
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            True,
+            None,
+            {"error": "checkVisibility is unavailable in this browser"},
+            [{"src": "Untitled.mov"}],
+            [{"src": "Untitled.mov", "rect": {"x": 0.0, "y": 0.0, "w": float("nan"), "h": 10.0}}],
+        ],
+        ids=["true", "null", "error-object", "row-without-a-rect", "non-finite-rect"],
+    )
+    def test_a_malformed_painting_result_is_an_instrument_error_never_a_verdict(self, raw: Any) -> None:
+        record = self._record(PAINT_STAGE_MAPS["full-bleed"], raw)
+        assert record["status"] == "error"
+        assert record["verdict"] is None
+        assert "painting-video probe" in record["reason"]
+
+    def test_an_instance_failure_does_not_promote_an_inconclusive_slide_to_red(self) -> None:
+        """An unusable noise floor means the instrument is not trusted at all --
+        the `Voff` control's required RED must never be earned that way."""
+        def inconclusive_scorer(frames: Any, rects: Any, control: Any) -> dict[str, Any]:
+            return {"verdict": None, "status": "inconclusive", "perRect": [], "stray": None, "noiseFloor": {}}
+
+        record = self._record(
+            PAINT_STAGE_MAPS["full-bleed"], [painting_video(DUPLICATE_SCREEN_RECT)], scorer=inconclusive_scorer,
+        )
+        assert record["verdict"] is None
+        assert record["status"] == "inconclusive"
+        assert record["instanceCheck"]["verdict"] is False
+
+
+class TestExpectedRectClipping:
+    """Codex R1 (probe MAJOR #2, second half): an expected rect that falls off
+    the screenshot is a measurement the probe cannot make, not an ordinary red --
+    scoring it would measure a truncated rect, and `Voff` would accept that as
+    its required RED without ever seeing the raw-export defect."""
+
+    def _record(self, authored: dict[str, float]) -> dict[str, Any]:
+        host = FakeHost(scene_ids=["s", "s"])
+        clock = FakeClock()
+        return probe.visible_slide_record(
+            host, VISIBLE_SLIDE, {0: {"Untitled.mov": [authored]}}, VISIBLE_VIEWPORT,
+            scorer=passing_scorer, now=clock.now, sleep=clock.sleep,
+        )
+
+    @pytest.mark.parametrize(
+        "authored",
+        [
+            {"x": 40.0, "y": 10.0, "w": 40.0, "h": 10.0},
+            {"x": -5.0, "y": 10.0, "w": 20.0, "h": 10.0},
+            {"x": 10.0, "y": 25.0, "w": 20.0, "h": 20.0},
+            {"x": 10.0, "y": -1.0, "w": 20.0, "h": 10.0},
+        ],
+        ids=["off-right", "off-left", "off-bottom", "off-top"],
+    )
+    def test_a_rect_that_clips_off_the_screenshot_is_an_instrument_error(self, authored: dict[str, float]) -> None:
+        record = self._record(authored)
+        assert record["status"] == "error"
+        assert record["verdict"] is None
+        assert "clip outside" in record["reason"]
+        assert record["expectedRects"], "the offending rect is still recorded as evidence"
+
+    def test_a_rect_flush_with_the_screenshot_edges_is_scored_normally(self) -> None:
+        record = self._record({"x": 0.0, "y": 0.0, "w": 64.0, "h": 32.0})
+        assert record["verdict"] is True
+
+
+class TestVisiblePassStageFitGate:
+    """Codex R1 (probe MAJOR #2): V and Voff run in separate sessions, so a pass
+    whose stage was shifted or cropped is not evidence -- and its slide verdicts
+    must not be consulted at all."""
+
+    def _base_result(self) -> dict[str, Any]:
+        return TestOverallStatusTruthTable()._base_result()
+
+    EXPECTED_FIT = {"x": 0.0, "y": 0.0, "width": 64.0, "height": 32.0}
+
+    def _slides(self, *stage_maps: Any) -> list[dict[str, Any]]:
+        return [{"stageMap": stage_map} for stage_map in stage_maps]
+
+    def test_every_slides_burst_map_is_a_stage_fit_sample(self) -> None:
+        samples = probe.visible_stage_samples(self._slides(FULL_BLEED_STAGE_MAP, FULL_BLEED_STAGE_MAP))
+        result = probe.score_stage_fit(samples, self.EXPECTED_FIT)
+        assert result["verdict"] is True
+        assert result["sampleCount"] == 2
+
+    def test_one_shifted_slide_fails_the_whole_pass(self) -> None:
+        shifted = {**FULL_BLEED_STAGE_MAP, "ox": 12.0}
+        samples = probe.visible_stage_samples(self._slides(FULL_BLEED_STAGE_MAP, shifted))
+        result = probe.score_stage_fit(samples, self.EXPECTED_FIT)
+        assert result["verdict"] is False
+        assert result["mismatchCount"] == 1
+
+    def test_a_slide_that_never_recorded_a_map_fails_the_pass(self) -> None:
+        samples = probe.visible_stage_samples(self._slides(FULL_BLEED_STAGE_MAP, None))
+        result = probe.score_stage_fit(samples, self.EXPECTED_FIT)
+        assert result["verdict"] is False
+        assert result["invalidCount"] == 1
+
+    def test_a_pass_that_scored_nothing_has_no_stage_evidence_either(self) -> None:
+        assert probe.score_stage_fit(probe.visible_stage_samples([]), self.EXPECTED_FIT)["verdict"] is False
+
+    @pytest.mark.parametrize("name", ["V", "Voff"])
+    def test_a_failed_stage_fit_fails_the_pass_and_hides_its_slide_verdicts(self, name: str) -> None:
+        result = self._base_result()
+        result["visible"][name]["stageFit"] = {"verdict": False}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any(f"visible pass {name} stage fit failed" in reason for reason in reasons)
+        assert not any(f"visible pass {name} slide" in reason for reason in reasons)
+
+    @pytest.mark.parametrize("name", ["V", "Voff"])
+    def test_a_missing_stage_fit_fails_closed(self, name: str) -> None:
+        result = self._base_result()
+        del result["visible"][name]["stageFit"]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any(f"visible pass {name} stage fit missing" in reason for reason in reasons)
+
+    def test_a_cropped_voff_cannot_supply_the_required_red(self) -> None:
+        """The whole point: with a shifted stage, the expected rect can fall off
+        the image and come back as an ordinary red that Voff would accept."""
+        result = self._base_result()
+        result["visible"]["Voff"]["stageFit"] = {"verdict": False}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("visible pass Voff stage fit failed" in reason for reason in reasons)
+        assert not any("blind" in reason for reason in reasons)
+
+
+class TestVisiblePassStopError:
+    """Codex R1 (probe MINOR): a `player.stop()` failure can leak Chrome into the
+    next pass, so it fails the pass it happened in."""
+
+    def _base_result(self) -> dict[str, Any]:
+        return TestOverallStatusTruthTable()._base_result()
+
+    @pytest.mark.parametrize("name", ["V", "Voff"])
+    def test_a_stop_failure_fails_the_pass_and_is_reported(self, name: str) -> None:
+        result = self._base_result()
+        result["visible"][name]["stopError"] = "websocket closed"
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any(f"visible pass {name} player.stop() failed: websocket closed" in reason for reason in reasons)
+
+    def test_a_clean_pass_reports_no_stop_reason(self) -> None:
+        status, reasons = probe.overall_status(self._base_result())
+        assert status == "pass"
+        assert reasons == []

@@ -592,10 +592,10 @@ def test_codec_report_lists_every_referenced_movie_not_only_planned_ones():
     assert assets == {"untitled.mov", "vid-20250608-wa0125.mp4"}
 
 
-def test_codec_report_entries_are_shaped_asset_codec_family():
+def test_codec_report_entries_are_shaped_asset_codec_family_files():
     report = codec_report(FIXTURE_ROOT, SLIDES, resolver=_resolver)
     for entry in report:
-        assert set(entry) == {"asset", "codec", "family"}
+        assert set(entry) == {"asset", "codec", "family", "files"}
 
 
 def test_codec_report_reports_none_for_a_movie_file_the_fixture_does_not_ship():
@@ -615,6 +615,81 @@ def test_codec_report_skips_slides_it_cannot_read_instead_of_raising():
     assets = {entry["asset"] for entry in report}
     # slide 1 is unreadable and contributes nothing, but the other slides still do.
     assert "vid-20250608-wa0125.mp4" in assets
+
+
+def _tree_with_movie_files() -> Path:
+    """The fixture ships no .mov bytes. An HTML export stores a separate copy of the movie
+    under every slide folder that uses it, so write a placeholder for each: the codec of
+    each copy is then supplied by an injected probe."""
+    tmp = _copy_fixture_tree()
+    for uuid in (SLIDE1, SLIDE2, SLIDE3, SLIDE4):
+        data = json.loads((tmp / "assets" / uuid / f"{uuid}.json").read_text())
+        for entry in data["assets"].values():
+            path = tmp / "assets" / uuid / entry["url"]["web"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"")
+    return tmp
+
+
+def _probe_by_slide(codecs: dict[str, str | None]):
+    """Report a codec per slide folder: a path resolves to assets/<uuid>/assets/<file>."""
+    return lambda path: codecs.get(path.parent.parent.name)
+
+
+def _entry(report: list[dict], asset: str) -> dict:
+    return next(entry for entry in report if entry["asset"] == asset)
+
+
+def test_codec_report_aggregates_every_slide_folders_copy_of_one_asset():
+    tmp = _tree_with_movie_files()
+    probe = _probe_by_slide(dict.fromkeys((SLIDE1, SLIDE2, SLIDE3, SLIDE4), "avc1"))
+    report = codec_report(tmp, SLIDES, resolver=_resolver, probe=probe)
+    assert _entry(report, "untitled.mov") == {
+        "asset": "untitled.mov", "codec": "avc1", "family": "h264", "files": 4,
+    }
+
+
+def test_codec_report_fails_closed_when_one_slide_folders_copy_is_a_different_codec():
+    # Slide 1's copy is H.264 but slide 3's separate file is HEVC: keeping only the first
+    # would report the key playable while a fresh decoder on slide 3 cannot play it.
+    tmp = _tree_with_movie_files()
+    probe = _probe_by_slide({SLIDE1: "avc1", SLIDE2: "avc1", SLIDE3: "hvc1", SLIDE4: "avc1"})
+    report = codec_report(tmp, SLIDES, resolver=_resolver, probe=probe)
+    assert _entry(report, "untitled.mov") == {
+        "asset": "untitled.mov", "codec": None, "family": "other", "files": 4, "mixed": True,
+    }
+
+
+def test_codec_report_key_is_unreadable_when_any_of_its_files_is_unreadable():
+    tmp = _tree_with_movie_files()
+    probe = _probe_by_slide({SLIDE1: "avc1", SLIDE2: "avc1", SLIDE3: None, SLIDE4: "avc1"})
+    report = codec_report(tmp, SLIDES, resolver=_resolver, probe=probe)
+    # unreadable, not "mixed": the key's codec is simply unknown.
+    assert _entry(report, "untitled.mov") == {
+        "asset": "untitled.mov", "codec": None, "family": "other", "files": 4,
+    }
+
+
+def test_codec_report_keeps_two_different_assets_independent():
+    tmp = _tree_with_movie_files()
+    report = codec_report(
+        tmp, SLIDES, resolver=_resolver,
+        probe=lambda path: "hvc1" if path.name.startswith("VID-") else "avc1",
+    )
+    assert _entry(report, "untitled.mov") == {
+        "asset": "untitled.mov", "codec": "avc1", "family": "h264", "files": 4,
+    }
+    assert _entry(report, "vid-20250608-wa0125.mp4") == {
+        "asset": "vid-20250608-wa0125.mp4", "codec": "hvc1", "family": "hevc", "files": 1,
+    }
+
+
+def test_codec_report_counts_one_file_for_two_instances_of_the_same_movie_on_a_slide():
+    # Slide 1 authors Untitled.mov twice; both instances are the same file on disk.
+    tmp = _tree_with_movie_files()
+    slides = [SLIDES[0]]
+    report = codec_report(tmp, slides, resolver=_resolver, probe=lambda _path: "avc1")
+    assert _entry(report, "untitled.mov")["files"] == 1
 
 
 def test_codec_report_on_slides_with_no_movies_is_empty():
@@ -774,3 +849,6 @@ def test_real_export_movies_report_h264():
     for entry in report:
         assert entry["codec"] == "avc1"
         assert entry["family"] == "h264"
+    # the export stores its own copy of Untitled.mov under each of the four slide folders,
+    # and every one of them is probed.
+    assert next(entry for entry in report if entry["asset"] == "untitled.mov")["files"] == 4
