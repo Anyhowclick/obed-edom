@@ -142,8 +142,13 @@ if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-t
     echo "Not updating: you're on branch $branch, not main."
   elif [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
     echo "Not updating: you have your own changes here."
-  elif git_with_timeout 10 git -C "$ROOT" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 -c merge.overwriteIgnore=false pull --ff-only; then
+  elif before="$(git -C "$ROOT" rev-parse HEAD)" && git_with_timeout 10 git -C "$ROOT" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 -c merge.overwriteIgnore=false pull --ff-only; then
     echo "Updated to the latest version."
+    # this run is still reading the pre-pull script, so restart once on the new one
+    if [[ "$(git -C "$ROOT" rev-parse HEAD)" != "$before" && -z "${OBED_EDOM_RELAUNCHED:-}" ]]; then
+      export OBED_EDOM_RELAUNCHED=1
+      exec /bin/bash "$ROOT/$(basename "$0")" "$@"
+    fi
   else
     echo "Couldn't check for updates just now — carrying on with the version you have."
   fi
@@ -169,7 +174,7 @@ echo "Installing Obed-Edom into that folder…"
 "$VENV/bin/python" -m pip install -q --upgrade pip || fail "Could not update pip in the private Python folder. Try deleting the .venv folder next to this file and running this again."
 "$VENV/bin/python" -m pip install -q -e "$ROOT[iwa]" || fail "Could not install Obed-Edom into the private Python folder. Try deleting the .venv folder next to this file and running this again."
 
-if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf' >/dev/null 2>&1; then
+if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf, keynote_parser' >/dev/null 2>&1; then
   echo "The first install attempt didn't take. Trying again…"
   export PATH="$HOME/.local/bin:$PATH"
   if command -v uv >/dev/null 2>&1; then
@@ -177,7 +182,7 @@ if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf' >/dev/null 2>&1; 
   else
     "$VENV/bin/python" -m pip install --force-reinstall -e "$ROOT[iwa]" || true
   fi
-  if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf' >/dev/null 2>&1; then
+  if ! "$VENV/bin/python" -c 'import obed_edom, google.protobuf, keynote_parser' >/dev/null 2>&1; then
     fail "Obed-Edom could not be installed into its private Python folder. Try deleting the .venv folder next to this file and running this again."
   fi
 fi
@@ -189,17 +194,25 @@ dashboard_needs_rebuild() {
   [[ -f "$ROOT/dashboard/vite.config.ts" ]] && paths+=("$ROOT/dashboard/vite.config.ts")
   [[ -f "$ROOT/dashboard/tsconfig.json" ]] && paths+=("$ROOT/dashboard/tsconfig.json")
   [[ -d "$ROOT/dashboard/public" ]] && paths+=("$ROOT/dashboard/public")
+  # dist is committed and git checkouts don't keep mtimes, so trust it while the sources match HEAD
+  if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [[ -z "$(git -C "$ROOT" status --porcelain -- "${paths[@]}" 2>/dev/null)" ]]; then
+    return 1
+  fi
   local hit
   hit="$(find "${paths[@]}" -type f -newer "$stamp" -print -quit 2>/dev/null || true)"
   [[ -n "$hit" ]]
 }
 
 if dashboard_needs_rebuild; then
-  echo "Dashboard UI is out of date. Rebuilding…"
-  if ! command -v npm >/dev/null 2>&1; then
-    fail "The dashboard UI needs a rebuild, but npm (Node.js) was not found. Install Node from https://nodejs.org/ then run this again."
+  if command -v npm >/dev/null 2>&1; then
+    echo "Dashboard UI is out of date. Rebuilding…"
+    (cd "$ROOT/dashboard" && npm install && npm run build) || fail "Could not rebuild the dashboard UI."
+  elif [[ -f "$ROOT/dashboard/dist/index.html" ]]; then
+    echo "Dashboard UI may be out of date, but npm (Node.js) was not found — using the UI already here."
+  else
+    fail "The dashboard UI needs a build, but npm (Node.js) was not found. Install Node from https://nodejs.org/ then run this again."
   fi
-  (cd "$ROOT/dashboard" && npm install && npm run build) || fail "Could not rebuild the dashboard UI."
 fi
 
 if [[ ! -f "$ROOT/dashboard/dist/index.html" ]]; then

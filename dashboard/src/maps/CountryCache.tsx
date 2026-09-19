@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { clearMapsTileCache, mapsTileCacheStats } from "../api";
+import { useConfirm } from "../components/ConfirmDialog";
 import { loadAdmin0 } from "./overlays";
 import { IconCaret, IconTiles, IconTrash } from "../components/icons";
 
@@ -40,6 +41,7 @@ export function CountryCachePicker({
   const [rows, setRows] = useState<CountryRow[]>([]);
   const [cacheBytes, setCacheBytes] = useState<number | null>(null);
   const [cacheBusy, setCacheBusy] = useState(false);
+  const [askConfirm, confirmDialog] = useConfirm();
   const root = useRef<HTMLDivElement | null>(null);
   const picked = useMemo(() => new Set(selected.map((code) => code.toUpperCase())), [selected]);
 
@@ -98,7 +100,12 @@ export function CountryCachePicker({
 
   async function onClearCache() {
     if (cacheBusy) return;
-    if (!window.confirm("Delete cached map tiles?")) return;
+    const ok = await askConfirm({
+      title: "Delete cached map tiles?",
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     setCacheBusy(true);
     try {
       const stats = await clearMapsTileCache();
@@ -176,6 +183,7 @@ export function CountryCachePicker({
           ))}
         </div>
       )}
+      {confirmDialog}
     </div>
   );
 }

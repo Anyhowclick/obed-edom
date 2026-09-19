@@ -1,6 +1,7 @@
 import { act, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMapsTab, tick } from "./renderMapsTab";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeCamera, makeDoc, makeJob } from "./fakes/doc";
 
@@ -28,11 +29,12 @@ describe("conflict freeze", () => {
       stateRevision: 5,
     });
 
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
     await tick(0);
 
     expect(screen.getByRole("alert")).toHaveTextContent("This map was changed elsewhere");
     expect(mapFake.getLatestProps().camera).toEqual(localCamera);
+    mapsApiScript.postMapsPng.calls.splice(0);
 
     // onToggleCountry reaches applyLocalDoc directly, with no `locked` gate of its own —
     // this is what actually proves applyLocalDoc's freeze early-return, not just the
@@ -68,7 +70,7 @@ describe("conflict freeze", () => {
       stateRevision: 5,
     });
 
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
     await tick(0);
 
     expect(screen.getByRole("alert")).toBeInTheDocument();

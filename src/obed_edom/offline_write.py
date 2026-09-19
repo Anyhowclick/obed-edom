@@ -132,6 +132,37 @@ def _reported_from_bulk_rows(
     return out
 
 
+def _drop_unreadable_seed_rows(
+    reported_by_slide: dict[int, dict[tuple[str, int], list[float]]],
+    errors: list[dict[str, Any]] | None,
+    *, say: Callable[[str], None] | None = None,
+) -> dict[int, dict[tuple[str, int], list[float]]]:
+    """Drop seed rows whose live per-item read failed. `bulk_geometry.js` zero-fills a
+    failed item read (a [0, 0, …] row -- a bogus 0 position) and records an `item:<i>`
+    error; such a row is an untrustworthy seed, so remove it -> the caller sees it as
+    absent (`have_reported` False) and defers to the AppleScript fallback rather than
+    repositioning off a bad seed. `errors` is `inspect.LAST_BULK_ERRORS`, whose `slide` is
+    the 0-based document index (the seed is keyed 1-based) and `where` is `item:<row>`
+    (the row index == kindIndex). Non-item errors (whole collection/count/bulk) already
+    null the kind's rows, so there is nothing to drop for those."""
+    dropped = 0
+    for entry in errors or []:
+        where = str(entry.get("where") or "")
+        if not where.startswith("item:"):
+            continue
+        try:
+            idx = int(where.split(":", 1)[1])
+            slide1 = int(entry["slide"]) + 1
+        except (TypeError, ValueError, KeyError):
+            continue
+        row_map = reported_by_slide.get(slide1)
+        if row_map is not None and row_map.pop((str(entry.get("kind") or ""), idx), None) is not None:
+            dropped += 1
+    if dropped and say:
+        say(f"Offline-write soft seed: dropped {dropped} unreadable live row(s) → AppleScript fallback.")
+    return reported_by_slide
+
+
 def _fallback_specs_by_slide(
     offline_slides: set[int],
     specs_by_slide: dict[int, list[dict[str, Any]]],
@@ -332,6 +363,9 @@ def _patch_offline_slides(
     specs_by_slide: dict[int, list[dict[str, Any]]],
     wall: dict[str, Any],
     say: Callable[[str], None],
+    *,
+    text_reposition: bool = False,
+    mask_crop: bool = False,
 ) -> dict[int, Any]:
     """Patch every offline slide in ONE zip rewrite. Empty result ⇒ caller falls the whole
     run back to AppleScript (never patch text without a live seed).
@@ -348,10 +382,12 @@ def _patch_offline_slides(
     reported_by_slide: dict[int, dict] | None = None
     if soft_slides:
         try:
-            from obed_edom.inspect import bulk_geometry  # noqa: PLC0415
+            from obed_edom import inspect as _inspect  # noqa: PLC0415
 
-            bulk = bulk_geometry(dest, slides=sorted(soft_slides), log=say)
+            bulk = _inspect.bulk_geometry(dest, slides=sorted(soft_slides), log=say)
             reported_by_slide = _reported_from_bulk_rows(bulk)
+            reported_by_slide = _drop_unreadable_seed_rows(
+                reported_by_slide, _inspect.LAST_BULK_ERRORS, say=say)
         except Exception as exc:  # noqa: BLE001 — never patch soft classes blind
             say(
                 f"Offline-write soft seed unavailable ({type(exc).__name__}: {exc}); "
@@ -376,6 +412,8 @@ def _patch_offline_slides(
             reported_by_slide=reported_by_slide,
             source_counts_by_slide=counts,
             require_reconcile=True,
+            text_reposition=text_reposition,
+            mask_crop=mask_crop,
         )
     except OfflineWriteCorrupted as exc:
         tmp_path = Path(dest).parent / f".{Path(dest).name}.obedwrite.tmp"
@@ -873,6 +911,12 @@ def _say_verify_report(
         overall = overall and status == "PASS"
         if say:
             say(f"{title}: {kind} max Δ{max_delta:.2f}px (n={n}) {status} @ {kind_tol}px")
+            if status == "FAIL" and _worst5:
+                def _row(w: dict[str, Any]) -> str:
+                    ki = w.get("kindIndex")
+                    ki_str = f" ki{ki}" if ki is not None else ""  # multiset rows carry no kindIndex
+                    return f"slide {w.get('slide')}{ki_str} Δ{float(w.get('delta', 0.0)):.1f}"
+                say(f"{title}: {kind} worst: {'; '.join(_row(w) for w in _worst5[:5])}")
     if say:
         say(f"{title}: overall {'PASS' if overall else 'FAIL'}.")
     return overall
@@ -886,6 +930,9 @@ def run_offline_write(
     wall: dict[str, Any],
     child_resize: list[dict[str, Any]],
     say: Callable[[str], None],
+    *,
+    text_reposition: bool = False,
+    mask_crop: bool = False,
 ) -> dict[str, Any] | None:
     """The whole offline-write execution phase for one remap: patch every offline slide,
     AppleScript-fallback whatever was refused or individually missed, verify (offline,
@@ -902,7 +949,10 @@ def run_offline_write(
         n: [t for t in transform_dicts if int(t.get("slide", -1)) == n] for n in offline_slides
     }
     say(f"Offline-write ({mode}): patching {len(offline_slides)} slide(s) in place…")
-    patch_results = _patch_offline_slides(dest, offline_slides, specs_by_slide, wall, say)
+    patch_results = _patch_offline_slides(
+        dest, offline_slides, specs_by_slide, wall, say,
+        text_reposition=text_reposition, mask_crop=mask_crop,
+    )
     fallback_by_slide = _fallback_specs_by_slide(offline_slides, specs_by_slide, patch_results)
     fallback_reasons, fallback_reasons_by_slide = _fallback_reason_histogram(
         offline_slides, specs_by_slide, patch_results

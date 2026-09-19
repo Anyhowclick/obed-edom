@@ -332,20 +332,23 @@ def test_times_bound_decoder_absent_is_none_not_sibling_clock():
 
 
 # --------------------------------------------------------------------------- #
-# `_derive_movie_texids` — corrected model relabels the crossfade as 2->3.
+# `_derive_movie_texids` — corrected model (2026-09-19): the resolved footprint
+# magic-move `contents` poster swap is a MOTION-PATH Magic Move (1->2 or 3->4
+# under outgoing-slide storage), NOT the 2->3 boundary (which is an apple:dissolve,
+# not a Magic Move). A successful resolve is tagged `boundary == "motion-path-mm"`.
 # --------------------------------------------------------------------------- #
-def test_derive_movie_texids_labels_boundary_as_2to3(tmp_path):
-    """The resolved footprint magic-move `contents` crossfade is the 2->3
-    restart-side boundary (Keynote stores the transition under incoming slide #3),
-    not 1->2, so a successful resolve is tagged `boundary == "2to3"` (handover
-    CORRECTION 2026-09-18)."""
+def test_derive_movie_texids_labels_boundary_as_motion_path_mm(tmp_path):
+    """Keynote stores a transition under its OUTGOING slide, so the only footprint
+    magic-move `contents` poster swap is a motion-path Magic Move (1->2 or 3->4),
+    not the 2->3 dissolve. A successful resolve is tagged
+    `boundary == "motion-path-mm"` (provenance-only; no gate consumes it)."""
     slides = [
         ("slide1", [_video_layer("obj-m1", "S")]),
         ("slide2", [_video_layer("obj-m1", "S"), _magic_move([_crossfade("P", "R")])]),
     ]
     result = p2._derive_movie_texids(_write_player(tmp_path, slides))
     assert result["decoderKey"] == "movie1"
-    assert result["boundary"] == "2to3"
+    assert result["boundary"] == "motion-path-mm"
     assert result["outgoing"] == ["P"]
     assert result["incoming"] == ["R"]
 
@@ -730,3 +733,331 @@ def test_live_continuity_accepts_null_context_type():
     )
     assert verdict["ok"] is True
     assert verdict["failed"] == []
+
+
+# --------------------------------------------------------------------------- #
+# `movingContinuity3to4` — fail-closed positive control for the 3->4 moving
+# Magic Move (playback continuity the export breaks, the PRESERVE bridge repairs).
+#
+# The owner authored 3->4 as continuity ("Play movie across slides"); the HTML
+# export RESTARTS movie1 on a fresh decoder at the grown slide-4 footprint. The
+# gate passes iff ALL of:
+#   - boundaryValid: hash3/hash4 parse, num(hash4) > num(hash3), and
+#     num(hash4) >= slide4_min_hash;
+#   - stableSlide4Owner: exactly one non-null footprint owner across the after
+#     window (hn >= num(hash4)), covering >=70%, no ambiguous frame;
+#   - crossingIdentity: that owner IS the slide-3 movie decoder (anti-restart);
+#   - rvfcMonotonic: that decoder's presentedMediaTime advances >0.05, no rewind.
+# The export's fresh restart decoder differs from the slide-3 decoder and fails
+# crossingIdentity -> RED, so the gate is honest, never a false pass.
+# --------------------------------------------------------------------------- #
+S4MIN = 8  # SLIDE4_MIN_HASH
+
+
+def _owner_samples_34(decoder_id=4, ambiguous=False):
+    """Owner samples in the slide-4 after-window (hn #8,#9 >= num(hash4)=8)."""
+    return [
+        {"sceneHash": "#8", "decoderId": decoder_id, "ownerAmbiguous": ambiguous},
+        {"sceneHash": "#9", "decoderId": decoder_id, "ownerAmbiguous": ambiguous},
+    ]
+
+
+def _presented_34(decoder_id=4):
+    """Media snapshots whose slide-4 owner's presentedMediaTime advances >0.05."""
+    return [
+        {"sceneHash": "#8", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 1.6}]},
+        {"sceneHash": "#9", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 2.4}]},
+    ]
+
+
+def test_moving_continuity_passes_when_bridged_decoder_continues():
+    """Positive control: the slide-3 decoder (4) owns the slide-4 footprint with a
+    monotonic clock => ok, no failures. Proves the gate is not wired to always-fail."""
+    verdict = p2.movingContinuity3to4(
+        _owner_samples_34(4), _presented_34(4), 4, "#7", "#8", S4MIN
+    )
+    assert verdict["ok"] is True
+    assert verdict["failed"] == []
+    assert verdict["slide4Owner"] == 4
+    assert verdict["rvfcMonotonic"]["ok"] is True
+
+
+def test_moving_continuity_fails_closed_on_export_restart():
+    """The export's fresh autoplay-from-0 element is a DIFFERENT decoder (6) than
+    the slide-3 decoder (4): crossingIdentity fails => RED. This is the honest
+    RED-without-the-bridge case."""
+    verdict = p2.movingContinuity3to4(
+        _owner_samples_34(6), _presented_34(6), 4, "#7", "#8", S4MIN
+    )
+    assert verdict["ok"] is False
+    assert "crossingIdentity" in verdict["failed"]
+
+
+def test_moving_continuity_fails_closed_when_no_slide4_owner():
+    """No decoder owns the slide-4 footprint (all null — e.g. the restart element
+    drifted off the slot): stableSlide4Owner + crossingIdentity + rvfcMonotonic all
+    cascade closed."""
+    null_owner = [
+        {"sceneHash": "#8", "decoderId": None, "ownerAmbiguous": False},
+        {"sceneHash": "#9", "decoderId": None, "ownerAmbiguous": False},
+    ]
+    verdict = p2.movingContinuity3to4(null_owner, [], 4, "#7", "#8", S4MIN)
+    assert verdict["ok"] is False
+    assert "stableSlide4Owner" in verdict["failed"]
+    assert "crossingIdentity" in verdict["failed"]
+    assert "rvfcMonotonic" in verdict["failed"]
+
+
+def test_moving_continuity_fails_closed_on_ambiguous_owner():
+    """An ambiguous frame (two decoders at the slot — a handoff in flight) must not
+    be tolerated: stableSlide4Owner fails closed."""
+    verdict = p2.movingContinuity3to4(
+        _owner_samples_34(4, ambiguous=True), _presented_34(4), 4, "#7", "#8", S4MIN
+    )
+    assert verdict["ok"] is False
+    assert "stableSlide4Owner" in verdict["failed"]
+
+
+def test_moving_continuity_fails_closed_when_not_reaching_slide4():
+    """If the after hash never reaches slide 4 (num(hash4) < slide4_min_hash), the
+    boundary is invalid and the gate fails closed (never pass by absence)."""
+    verdict = p2.movingContinuity3to4(
+        _owner_samples_34(4), _presented_34(4), 4, "#7", "#7", S4MIN
+    )
+    assert verdict["ok"] is False
+    assert "boundaryValid" in verdict["failed"]
+
+
+def test_moving_continuity_fails_closed_on_rvfc_rewind():
+    """The bound decoder is stable and identity matches, but its presentedMediaTime
+    RESETS/rewinds (a restart signature even under the same reported id) => the
+    rvfcMonotonic check fails closed."""
+    rewind = [
+        {"sceneHash": "#8", "videos": [{"decoderId": 4, "presentedMediaTime": 2.4}]},
+        {"sceneHash": "#9", "videos": [{"decoderId": 4, "presentedMediaTime": 0.05}]},
+    ]
+    verdict = p2.movingContinuity3to4(_owner_samples_34(4), rewind, 4, "#7", "#8", S4MIN)
+    assert verdict["ok"] is False
+    assert "rvfcMonotonic" in verdict["failed"]
+# `_score_freeze_control` — Phase-2 A-B-A composited-freeze verdict (pure logic).
+#
+# Arm A holds a stale cover over the burnt-in counter for the middle run only, so
+# index_run goes RED ("freeze run at cut") while the live-<video> decoder + rVFC
+# stay green. PASS requires the RED to be exactly the injected freeze AND every
+# other sub-verdict identical across the two bracketing positives. A hold that
+# never fired is INCONCLUSIVE (never PASS/FAIL): a silently-unfired hold would
+# masquerade as a passing positive and be misread as "the counter gate is vacuous".
+# --------------------------------------------------------------------------- #
+def _positive_snap() -> dict:
+    return {
+        "hash1": "#1", "hash2": "#2", "flipIndex": 3,
+        "continueThroughMagicMove1to2Pass": True,
+        "continuesThroughDissolve": True,
+        "indexRun": {"ok": True, "reason": None, "freezeRunAtCut": 0, "negativeAnomaly": False},
+        "liveContinuity": {
+            "ok": True, "failed": [], "boundDecoderId": 7,
+            "rvfcAdvance": {"ok": True, "advance": 1.2},
+            "crossingIdentity": {"ok": True},
+            "stableFootprintDecoder": {"ok": True},
+            "boundaryValid": {"ok": True},
+        },
+        "playerBuildErrors": [],
+        "composition": {"blackAboveOk": True, "blackBehindShowsMovie": True, "greenFrontGreenish": True},
+        "indexSequence": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+        "captureOffsets": [-0.1, 0.0, 0.05, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        "ownerDecoderId": 7, "nullControl": None, "perfNowAtClick": None,
+    }
+
+
+def _freeze_b_snap(**overrides) -> dict:
+    raf = [{"t": 1120.0 + 20.0 * i, "elementFromPointIsCover": True, "ownerResolved": True}
+           for i in range(45)]
+    snap = {
+        "hash1": "#1", "hash2": "#2", "flipIndex": 3,
+        "continueThroughMagicMove1to2Pass": False,  # the freeze flips this RED
+        "continuesThroughDissolve": True,
+        "indexRun": {"ok": False, "reason": "freeze run at cut", "freezeRunAtCut": 8,
+                     "negativeAnomaly": False},
+        "liveContinuity": {
+            "ok": True, "failed": [], "boundDecoderId": 7,
+            "rvfcAdvance": {"ok": True, "advance": 1.1},
+            "crossingIdentity": {"ok": True},
+            "stableFootprintDecoder": {"ok": True},
+            "boundaryValid": {"ok": True},
+        },
+        "playerBuildErrors": [],
+        "composition": {"blackAboveOk": True, "blackBehindShowsMovie": True, "greenFrontGreenish": True},
+        "indexSequence": [37, 38, 39, 40, 40, 40, 40, 40, 40, 40],
+        "captureOffsets": [-0.1, 0.0, 0.05, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        "ownerDecoderId": 7,
+        "perfNowAtClick": 1000.0,
+        "nullControl": {
+            "status": "released", "holdStartedAt": 1120.0, "hashchangeEventAt": 1100.0,
+            "releaseAt": 2000.0, "staleIndexExpected": 40, "staleCurrentTime": 1.33,
+            "ownerReadyState": 4, "coverPatchMean": 40.0,
+            "paintCount": 1, "coverPatchStart": {"sum": 12345, "mean": 40.0},
+            "coverPatchEnd": {"sum": 12345, "mean": 40.0},
+            "ownerAmbiguousInWindow": False, "boundDecoderId": 7, "armedElId": 7,
+            "fellBackToArmOwner": False, "firedVia": "hashchange", "rafLog": raf, "error": None,
+        },
+    }
+    snap.update(overrides)
+    return snap
+
+
+def test_freeze_control_passes_on_clean_bracket():
+    """Positive control for the instrument: a correctly-fired freeze turns the
+    counter RED for the right reason while the decoder stays live, both bracketing
+    positives are green, and every invariant sub-verdict is equal across A1/B/A2."""
+    verdict = p2._score_freeze_control(_positive_snap(), _freeze_b_snap(), _positive_snap())
+    assert verdict["ok"] is True, verdict["failed"]
+    assert verdict["verdict"] == "pass"
+    assert verdict["isolationDiffs"] == {}
+
+
+def test_freeze_control_never_fired_hold_is_inconclusive_not_pass():
+    """A hold that silently never fired (holdStartedAt null) leaves index_run GREEN
+    in B, which looks exactly like a passing positive. It MUST be INCONCLUSIVE, not
+    PASS and not a plain FAIL — otherwise it would be misread as 'gate vacuous'."""
+    b = _freeze_b_snap()
+    b["nullControl"] = {**b["nullControl"], "status": "armed", "holdStartedAt": None}
+    # With no freeze, B's counter would actually be green in a real run:
+    b["indexRun"] = {"ok": True, "reason": None, "freezeRunAtCut": 0, "negativeAnomaly": False}
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "inconclusive"
+    assert verdict["ok"] is False
+
+
+def test_freeze_control_raf_gap_alone_is_not_disqualifying():
+    """A per-rAF gap is NOT a verdict gate: on the static footprint the position:fixed
+    cover persists through a main-thread stall — and the stall is caused by the very CDP
+    screenshots that OBSERVE the frozen counter. A healthy loop (enough frames, all on
+    cover) with a large gap still PASSES (Fable reframe 2026-09-19)."""
+    b = _freeze_b_snap()
+    raf = b["nullControl"]["rafLog"]
+    spiked = raf[:20] + [
+        {"t": raf[19]["t"] + 380.0 + 20.0 * i, "elementFromPointIsCover": True, "ownerResolved": True}
+        for i in range(20)
+    ]  # a 380ms gap mid-loop, loop otherwise healthy
+    b["nullControl"] = {**b["nullControl"], "rafLog": spiked}
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "pass", verdict["failed"]
+
+
+def test_freeze_control_dead_loop_is_inconclusive():
+    """But a loop that barely ran (too few rAF frames) cannot attest the cover stayed on
+    top over the hold => INCONCLUSIVE, never a verdict."""
+    b = _freeze_b_snap()
+    b["nullControl"] = {
+        **b["nullControl"],
+        "rafLog": [{"t": 1120.0, "elementFromPointIsCover": True},
+                   {"t": 1140.0, "elementFromPointIsCover": True}],  # 2 frames < loopLive floor
+    }
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "inconclusive"
+    assert "loopLive" in verdict["integrityFailed"]
+
+
+def test_freeze_control_unrendered_frame_is_inconclusive():
+    """The bug this control was hardened against: a t~0 unrendered frame draws BLACK and
+    would decode as a frozen counter for the WRONG reason. Distinguished by playback time
+    (currentTime < MIN_STALE_TIME_S) + the trigger error, it must be INCONCLUSIVE (the
+    control did not deliver a real stale frame), never a verdict."""
+    b = _freeze_b_snap()
+    b["indexSequence"] = [37, 38, 39, 0, 0, 0, 0, 0, 0, 0]  # unrendered black -> decodes 0
+    b["nullControl"] = {
+        **b["nullControl"], "staleCurrentTime": 0.0, "coverPatchMean": 1.0,
+        "error": "owner-video-not-ready-at-trigger:rs=4,t=0.01",
+    }
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "inconclusive"
+    assert {"staleFrameFromPlayback", "noControlError"} & set(verdict["integrityFailed"])
+
+
+def test_freeze_control_valid_dark_counter_not_rejected():
+    """Regression (Codex 2026-09-19): a valid counter near the DARK end of its cycle
+    decodes to RGB ~0 (tv-range luma 16 -> full-range RGB ~0). It must NOT be rejected as
+    'black' — a genuinely frozen dark frame from live playback still PASSES. The old
+    [16,235] luma range-check on a decoded-RGB mean wrongly failed this."""
+    b = _freeze_b_snap()
+    b["indexSequence"] = [5, 4, 3, 3, 3, 3, 3, 3, 3, 3]  # frozen at a dark counter value
+    b["nullControl"] = {
+        **b["nullControl"], "staleCurrentTime": 7.33, "coverPatchMean": 3.0,
+        "coverPatchStart": {"sum": 1, "mean": 3.0}, "coverPatchEnd": {"sum": 1, "mean": 3.0},
+    }
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "pass", verdict["failed"]
+
+
+def test_freeze_control_owner_not_ready_is_inconclusive():
+    """If the footprint owner was not a decoded video at trigger (readyState < 2), the
+    stale frame was not captured from a real frame => INCONCLUSIVE."""
+    b = _freeze_b_snap()
+    b["nullControl"] = {**b["nullControl"], "ownerReadyState": 0}
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "inconclusive"
+    assert "ownerReadyAtTrigger" in verdict["integrityFailed"]
+
+
+def test_freeze_control_fired_before_advance_is_inconclusive():
+    """A trigger that fired BEFORE the advance (e.g. on the boot/settle hashchange) held
+    a pre-cut frame, not the cut => INCONCLUSIVE (boot/arm-integrity guard)."""
+    b = _freeze_b_snap()
+    b["nullControl"] = {**b["nullControl"], "holdStartedAt": 900.0}  # < perfNowAtClick 1000
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "inconclusive"
+    assert "firedAfterAdvance" in verdict["integrityFailed"]
+
+
+def test_freeze_control_fails_if_counter_did_not_go_red():
+    """If the injected freeze did NOT turn the counter RED (index_run still ok),
+    the control fails: the gate did not catch the freeze."""
+    b = _freeze_b_snap()
+    b["indexRun"] = {"ok": True, "reason": None, "freezeRunAtCut": 0, "negativeAnomaly": False}
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["ok"] is False
+    assert verdict["verdict"] == "fail"
+    assert "indexRunRed" in verdict["failed"]
+
+
+def test_freeze_control_fails_on_weak_freeze_margin():
+    """A freeze run barely over the gate's tolerance (3, not >= 6) is indistinguishable
+    from coarse-capture jitter and must not qualify the instrument."""
+    b = _freeze_b_snap()
+    b["indexRun"] = {**b["indexRun"], "freezeRunAtCut": 3}
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["ok"] is False
+    assert "freezeRunMargin" in verdict["failed"]
+
+
+def test_freeze_control_fails_when_freeze_leaked_into_liveness():
+    """The RED must be ISOLATED to the counter: if a sub-verdict that should be
+    invariant (here liveContinuity) differs in B, the freeze was not clean =>
+    fail on isolation, never a spurious pass."""
+    b = _freeze_b_snap()
+    b["liveContinuity"] = {**b["liveContinuity"], "ok": False, "failed": ["rvfcAdvance"]}
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["ok"] is False
+    assert "isolationEqual" in verdict["failed"] or "liveContinuityOk" in verdict["failed"]
+
+
+def test_freeze_control_fails_when_bound_decoder_is_not_cover_owner():
+    """The gate's after-window owner must be the SAME decoder the cover froze;
+    otherwise the freeze proved nothing about the decoder under test."""
+    b = _freeze_b_snap()
+    b["nullControl"] = {**b["nullControl"], "boundDecoderId": 99}  # cover bound a different el
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["ok"] is False
+    assert "boundDecoderIsCoverOwner" in verdict["failed"]
+
+
+def test_freeze_control_fails_when_positive_bracket_not_green():
+    """If a bracketing positive is not green, there is no baseline to isolate the
+    RED against => fail (the bracket is not trustworthy)."""
+    a_bad = _positive_snap()
+    a_bad["indexRun"] = {"ok": False, "reason": "freeze run at cut", "freezeRunAtCut": 7,
+                         "negativeAnomaly": False}
+    a_bad["continueThroughMagicMove1to2Pass"] = False
+    verdict = p2._score_freeze_control(a_bad, _freeze_b_snap(), _positive_snap())
+    assert verdict["ok"] is False
+    assert "positivesGreen" in verdict["failed"]
