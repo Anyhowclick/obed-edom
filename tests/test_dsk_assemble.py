@@ -31,6 +31,7 @@ from obed_edom.dsk_assemble import (
 )
 import obed_edom.dsk_plan as dsk_plan
 from obed_edom.dsk_plan import Band, CropRefusal, classify_slide, line_count, resolve_font_path
+from obed_edom.iwa_builds import deck_builds
 from obed_edom.map_remap import Rect
 
 BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
@@ -12047,6 +12048,7 @@ def test_generic_post_pass_exception_keeps_staging_deck_as_failed_key(tmp_path, 
 
 _GOLD_DECK = Path.home() / "Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key"
 _needs_gold_deck = pytest.mark.skipif(not _GOLD_DECK.exists(), reason="local gold deck only")
+_FRC_WALL_DECK = Path.home() / "Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key"
 
 # Step 0 measurement table (plan §1.4/report): source badge text, pinned mask width, and
 # the width law's residual (mask - shaped_width - VERSE_BADGE_PAD_PT) for each gold slide.
@@ -12166,15 +12168,15 @@ def test_clip_timing_fw_dsk_order_mismatch_refuses(monkeypatch):
     clips = {1: {("movie", 0): Path("/tmp/clip0.mov"), ("movie", 1): Path("/tmp/clip1.mov")}}
 
     calls = {"n": 0}
-    real_order = dsa.visual_movie_order
+    real_order = dsa.movie_order
 
-    def fake_order(rects):
+    def fake_order(rects, build_order=None, z_order=None, mode=None):
         calls["n"] += 1
-        order = real_order(rects)
+        order = real_order(rects, build_order, z_order, mode)
         # Flip the second (DSK-space) call's result so it disagrees with the first.
         return list(reversed(order)) if calls["n"] == 2 else order
 
-    monkeypatch.setattr(dsa, "visual_movie_order", fake_order)
+    monkeypatch.setattr(dsa, "movie_order", fake_order)
 
     with pytest.raises(AssemblyRefusal, match="does not match"):
         plan_assembly(payload, classes, decisions=decisions, band=BAND, clips=clips)
@@ -12351,3 +12353,428 @@ def test_verify_builds_tolerates_two_reordered_clip_movie_starts_and_transition(
     assert {s["identity"] for s in builds["tolerated_surplus"]} == {
         ("movie", "clip0.mov"), ("movie", "clip1.mov"),
     }
+
+
+# --------------------------------------------------------------------------
+# STANDARD_VIDEO_BAND + SlideDecision.videos_only
+# --------------------------------------------------------------------------
+def test_standard_video_band_constants():
+    band = dsa.STANDARD_VIDEO_BAND
+    assert (band.bottom, band.height) == (1065.0, 395.0)
+    # Symmetric about the canvas centre (960), unlike DEFAULT_BAND's 43..1892, so a
+    # centred clip lands on the gold's x.
+    assert (band.x_min, band.x_max) == (43.0, 1877.0)
+    assert (band.x_min + band.x_max) / 2.0 == 960.0
+
+
+def test_standard_video_band_fits_a_panel_aspect_clip_to_the_gold_size():
+    # Hand-made gold `Alpha_DSK.key` slide 4: a 3840x1080 centre-panel clip placed at
+    # (258, 670) 1405x395. The fit is height-bound, so the size matches to a rounding
+    # tick, and the band is symmetric about 960 so x matches the gold's 257.8 too.
+    movie = _movie_item(0, x=1920, y=0, w=3840, h=1080)
+    fit = dsk_plan.fit_slide(
+        [movie], dsa.STANDARD_VIDEO_BAND, kept=[("movie", 0)], anchor="centre"
+    )
+    rect = fit[("movie", 0)]
+    assert rect.h == pytest.approx(395.0)
+    assert rect.w == pytest.approx(1404.44, abs=0.6)
+    assert rect.y == pytest.approx(670.0)
+    assert rect.x == pytest.approx(257.78, abs=0.3)
+
+
+@pytest.mark.parametrize("band", [dsa.DEFAULT_BAND, dsa.STANDARD_VIDEO_BAND])
+def test_left_and_right_anchors_land_flush_to_the_band_margins(band):
+    movie = _movie_item(0, x=1920, y=0, w=3840, h=1080)
+    left = dsk_plan.fit_slide([movie], band, kept=[("movie", 0)], anchor="left")[("movie", 0)]
+    right = dsk_plan.fit_slide([movie], band, kept=[("movie", 0)], anchor="right")[("movie", 0)]
+    assert left.x == pytest.approx(band.x_min)
+    assert right.x + right.w == pytest.approx(band.x_max)
+    assert left.w == pytest.approx(right.w)
+
+
+def _videos_only_slide():
+    """A mixed slide whose 2-item content union would auto-anchor RIGHT without
+    `videos_only`: a small movie with an image overlapping it."""
+    movie = _movie_item(0, x=2000, y=300, w=400, h=300)
+    image = _image_item(0, x=2100, y=350, w=300, h=200)
+    return _slide(1, [movie, image])
+
+
+def test_videos_only_keeps_only_the_movie_and_deletes_the_rest():
+    slide = _videos_only_slide()
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    assert classes[0].category == "movie"
+    decisions = {1: SlideDecision(1, "both", anchor="auto", videos_only=True)}
+    clips = {1: {("movie", 0): Path("/tmp/clip0.mov")}}
+
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips=clips)
+
+    assert set(plan.fits[1]) == {("movie", 0)}
+    assert ("image", 0) in plan.deletes[1]
+    assert ("movie", 0) in plan.deletes[1]
+    assert plan.anchors[1] == "centre"
+
+    rect = plan.fits[1][("movie", 0)]
+    # 400x300 into the 1834x395 standard video band is height-bound: 526.67x395 at y 670.
+    assert (rect.w, rect.h) == pytest.approx((526.667, 395.0), abs=0.01)
+    assert rect.y == pytest.approx(670.0)
+    assert rect.x == pytest.approx(960.0 - rect.w / 2.0)
+
+
+def test_same_slide_without_videos_only_keeps_the_image_and_auto_anchors_right():
+    slide = _videos_only_slide()
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "both", anchor="auto")}
+    clips = {1: {("movie", 0): Path("/tmp/clip0.mov")}}
+
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips=clips)
+
+    assert set(plan.fits[1]) == {("movie", 0), ("image", 0)}
+    assert ("image", 0) not in plan.deletes[1]
+    assert plan.anchors[1] == "right"
+
+
+def test_videos_only_explicit_anchor_wins():
+    slide = _videos_only_slide()
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "both", anchor="left", videos_only=True)}
+    clips = {1: {("movie", 0): Path("/tmp/clip0.mov")}}
+
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips=clips)
+
+    assert plan.anchors[1] == "left"
+    assert plan.fits[1][("movie", 0)].x == pytest.approx(dsa.STANDARD_VIDEO_BAND.x_min)
+
+
+def test_videos_only_clip_rect_lands_at_the_fitted_rect():
+    slide = _videos_only_slide()
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "both", videos_only=True)}
+    clip = Path("/tmp/clip0.mov")
+    clips = {1: {("movie", 0): clip}}
+    # The exported crop is the movie's own rect, so the clip rect IS the fitted rect.
+    crops = {1: {("movie", 0): Rect(2000.0, 300.0, 400.0, 300.0)}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips,
+        clip_crops=crops, clip_sizes={str(clip): (400.0, 300.0)},
+    )
+
+    fitted = plan.fits[1][("movie", 0)]
+    placed = plan.clip_rects[1][("movie", 0)]
+    assert (placed.x, placed.y, placed.w, placed.h) == pytest.approx(
+        (fitted.x, fitted.y, fitted.w, fitted.h)
+    )
+
+
+def test_videos_only_chain_head_hands_its_followers_the_planned_centre():
+    # Codex r1: the head's own content anchor is RIGHT, but videos_only drops that
+    # content -- the magic-move follower must inherit the centre the head is planned at.
+    head = _videos_only_slide()
+    tail = _slide(2, [_movie_item(0, x=2000, y=300, w=400, h=300)])
+    payload = _payload([head, tail])
+    classes = [_classify(head), _classify(tail)]
+    decisions = {
+        1: SlideDecision(1, "both", videos_only=True),
+        2: SlideDecision(2, "both", anchor="auto"),
+    }
+    clips = {1: {("movie", 0): Path("/tmp/c0.mov")}, 2: {("movie", 0): Path("/tmp/c1.mov")}}
+    builds = {
+        1: {"slideId": "s1", "builds": [], "transition": _magic_move_transition()},
+        2: {"slideId": "s2", "builds": [], "transition": None},
+    }
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        all_classes=classes,
+    )
+
+    assert plan.chain_head[2] == 1
+    assert plan.anchors[1] == "centre"
+    assert plan.anchors[2] == "centre"
+
+
+def test_videos_only_chain_head_with_an_explicit_anchor_hands_that_anchor_on():
+    head = _videos_only_slide()
+    tail = _slide(2, [_movie_item(0, x=2000, y=300, w=400, h=300)])
+    payload = _payload([head, tail])
+    classes = [_classify(head), _classify(tail)]
+    decisions = {
+        1: SlideDecision(1, "both", anchor="left", videos_only=True),
+        2: SlideDecision(2, "both", anchor="auto"),
+    }
+    clips = {1: {("movie", 0): Path("/tmp/c0.mov")}, 2: {("movie", 0): Path("/tmp/c1.mov")}}
+    builds = {
+        1: {"slideId": "s1", "builds": [], "transition": _magic_move_transition()},
+        2: {"slideId": "s2", "builds": [], "transition": None},
+    }
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        all_classes=classes,
+    )
+
+    assert plan.anchors[1] == "left"
+    assert plan.anchors[2] == "left"
+
+
+def test_videos_only_refuses_without_a_kept_top_level_movie():
+    slide = _slide(1, [_image_item(0, x=2000, y=300, w=400, h=300)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "in_deck", videos_only=True)}
+
+    with pytest.raises(AssemblyRefusal, match="needs a kept top-level movie"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+
+def test_videos_only_refuses_on_a_text_slide():
+    movie = _movie_item(0, x=2000, y=300, w=400, h=300)
+    verse = _text_item(0, x=2000, y=700, w=900, h=200)
+    verse["text"] = " ".join(f"word{i}" for i in range(20))
+    slide = _slide(1, [movie, verse])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    assert classes[0].is_text
+    decisions = {1: SlideDecision(1, "both", videos_only=True)}
+    clips = {1: {("movie", 0): Path("/tmp/clip0.mov")}}
+
+    with pytest.raises(AssemblyRefusal, match="videos_only on a text slide"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips=clips)
+
+
+# --------------------------------------------------------------------------
+# Stacked movies follow the SOURCE BUILD ORDER
+# --------------------------------------------------------------------------
+def _slide_50_shape():
+    """`Full_Report_Card_Wall.key` slide 50: two 3840x2160 movies stacked on the centre
+    panel. Movie 0 (x 1920, y -1079) carries the `apple:movie-start` build at chunk 0;
+    movie 1 (x 1915, y -163) carries an `apple:dissolve` In at chunk 1 -- movie 0 plays,
+    then movie 1 dissolves in on top. Plain visual order would sort movie 1 first."""
+    m0 = _movie_item(0, x=1920, y=-1079, w=3840, h=2160)
+    m0["index"] = 0
+    m1 = _movie_item(1, x=1915, y=-163, w=3840, h=2160)
+    m1["index"] = 1
+    slide = _slide(50, [m0, m1])
+    builds = {
+        50: {
+            "builds": [
+                {"kind": "movie", "kindIndex": 0, "chunkOrder": [0], "chunkReferent": [True],
+                 "chunkAutomatic": [True], "chunkDelay": [0.0],
+                 "effect": "apple:movie-start", "animationType": "In", "duration": 0.0},
+                {"kind": "movie", "kindIndex": 1, "chunkOrder": [1], "chunkReferent": [False],
+                 "chunkAutomatic": [True], "chunkDelay": [8.0],
+                 "effect": "apple:dissolve", "animationType": "In", "duration": 0.5},
+            ],
+            "transition": None,
+        }
+    }
+    return slide, builds
+
+
+def test_stacked_movies_order_and_time_by_source_build_order():
+    slide, builds = _slide_50_shape()
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert list(plan.clips[50]) == [("movie", 0), ("movie", 1)]
+    # Movie 1's source chunk is `automatic True, referent False, delay 8.0` -- With
+    # Build 1, 8 s after movie 0 starts -- so the upper clip takes with_previous.
+    assert plan.clip_timing[50] == (
+        (("movie", 0), "after_transition"),
+        (("movie", 1), "with_previous"),
+    )
+    assert plan.clip_build_in[50] == {
+        ("movie", 1): dsa.ClipBuildIn(
+            effect="apple:dissolve", duration=0.5, automatic=True, referent=False, delay=8.0
+        ),
+    }
+    assert any(
+        "stacked movies" in w and "apple:dissolve 0.50s with_previous delay 8.00s" in w
+        for w in plan.warnings
+    )
+    assert not any("need a build-in" in w for w in plan.warnings)
+
+
+def test_stacked_movies_warn_when_the_source_build_in_is_unsupported():
+    slide, builds = _slide_50_shape()
+    builds[50]["builds"][1]["effect"] = "apple:move-in"
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert 50 not in plan.clip_build_in
+    assert plan.clip_timing[50] == (
+        (("movie", 0), "after_transition"),
+        (("movie", 1), "after_previous"),
+    )
+    assert any("movie 1 (apple:move-in In)" in w and "need a build-in" in w for w in plan.warnings)
+
+
+def test_stacked_movies_warn_when_the_upper_clips_only_build_is_an_out():
+    # An Out build is not a build-IN: the clip still covers the one below from t=0.
+    slide, builds = _slide_50_shape()
+    builds[50]["builds"][1]["animationType"] = "Out"
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert 50 not in plan.clip_build_in
+    assert any("movie 1 (apple:dissolve Out)" in w and "need a build-in" in w for w in plan.warnings)
+
+
+def test_stacked_upper_clip_takes_the_in_build_beside_a_movie_start_build():
+    # `builds` is an unordered set: a movie carrying BOTH its movie-start trigger and a
+    # dissolve In must resolve to the dissolve whatever order the records arrive in.
+    slide, builds = _slide_50_shape()
+    dissolve = builds[50]["builds"][1]
+    trigger = {**builds[50]["builds"][0], "kindIndex": 1, "chunkOrder": [2], "chunkDelay": [0.0],
+               "chunkReferent": [True]}
+    builds[50]["builds"] = [trigger, builds[50]["builds"][0], dissolve]
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert plan.clip_build_in[50][("movie", 1)].effect == "apple:dissolve"
+    assert plan.clip_build_in[50][("movie", 1)].delay == 8.0
+
+
+def test_stacked_movies_refuse_on_ambiguous_build_in_candidates():
+    slide, builds = _slide_50_shape()
+    second = {**builds[50]["builds"][1], "effect": "apple:move-in", "chunkOrder": [2], "chunkDelay": [0.0]}
+    builds[50]["builds"].append(second)
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    with pytest.raises(AssemblyRefusal, match="refusing to guess which one the stacked clip needs"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        )
+
+
+@pytest.mark.skipif(not _FRC_WALL_DECK.exists(), reason="local wall deck only")
+def test_frc_wall_slide_50_build_records_carry_the_chunk_start_flags():
+    """Read-only positive control on the owner's 6.7 GB source deck (plan §3 FRC 50):
+    movie 1's `apple:dissolve` In is With Build 1, 8 s after movie 0 starts."""
+    records = deck_builds(_FRC_WALL_DECK)[50]["builds"]
+    by_index = {rec["kindIndex"]: rec for rec in records if rec["kind"] == "movie"}
+
+    assert by_index[0]["effect"] == "apple:movie-start"
+    assert by_index[1]["effect"] == "apple:dissolve"
+    assert by_index[1]["animationType"] == "In"
+    assert by_index[1]["duration"] == 0.5
+    assert by_index[1]["chunkOrder"] == [1]
+    assert by_index[1]["chunkAutomatic"] == [True]
+    assert by_index[1]["chunkReferent"] == [False]
+    assert by_index[1]["chunkDelay"] == [8.0]
+
+
+def test_stacked_movies_refuse_when_the_build_order_ties():
+    slide, builds = _slide_50_shape()
+    builds[50]["builds"][1]["chunkOrder"] = [0]
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    with pytest.raises(AssemblyRefusal, match="tie at build order"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        )
+
+
+def test_movies_stacked_only_inside_the_centre_panel_take_the_build_order():
+    # Codex r1: the FULL item rects clip by 2.5% of the smaller (unstacked), the rects the
+    # clips actually show -- centre-panel-cropped -- by 5.4% (stacked). The mode is decided
+    # once on the visible rects, so the FW/DSK cross-check cannot refuse this slide.
+    m0 = _movie_item(0, x=0, y=0, w=4000, h=1080)
+    m0["index"] = 0
+    m1 = _movie_item(1, x=3900, y=0, w=4100, h=1080)
+    m1["index"] = 1
+    slide = _slide(1, [m0, m1])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "both")}
+    clips = {1: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+    builds = {
+        1: {
+            "builds": [
+                {"kind": "movie", "kindIndex": 1, "chunkOrder": [0], "chunkReferent": [True],
+                 "chunkAutomatic": [True], "chunkDelay": [0.0],
+                 "effect": "apple:movie-start", "animationType": "In", "duration": 0.5},
+                {"kind": "movie", "kindIndex": 0, "chunkOrder": [1], "chunkReferent": [False],
+                 "chunkAutomatic": [True], "chunkDelay": [2.0],
+                 "effect": "apple:dissolve", "animationType": "In", "duration": 0.5},
+            ],
+            "transition": None,
+        }
+    }
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert list(plan.clips[1]) == [("movie", 1), ("movie", 0)]
+    assert plan.clip_build_in[1][("movie", 0)].delay == 2.0
+
+
+def test_partially_stacked_movies_refuse_rather_than_guess_an_order():
+    # Two movies cover each other and a third sits beside them: neither visual nor build
+    # order governs the whole slide.
+    m0 = _movie_item(0, x=2000, y=0, w=1800, h=1080)
+    m1 = _movie_item(1, x=2010, y=0, w=1800, h=1080)
+    m2 = _movie_item(2, x=4200, y=0, w=1400, h=1080)
+    slide = _slide(1, [m0, m1, m2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "both")}
+    clips = {
+        1: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov"),
+            ("movie", 2): Path("/tmp/c2.mov")},
+    }
+
+    with pytest.raises(AssemblyRefusal, match="partially overlap"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips=clips)
+
+
+def test_side_by_side_movies_keep_the_visual_order_and_carry_no_build_in():
+    left = _movie_item(0, x=1920, y=0, w=1920, h=1080)
+    right = _movie_item(1, x=3840, y=0, w=1920, h=1080)
+    slide = _slide(1, [left, right])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {1: SlideDecision(1, "both")}
+    clips = {1: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips=clips)
+
+    assert list(plan.clips[1]) == [("movie", 0), ("movie", 1)]
+    assert 1 not in plan.clip_build_in
+    assert not any("stacked movies" in w for w in plan.warnings)

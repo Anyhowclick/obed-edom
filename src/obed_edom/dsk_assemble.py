@@ -86,7 +86,7 @@ from obed_edom.iwa_geometry import (
     compose_geometry,
 )
 from obed_edom import iwa_movies
-from obed_edom.dsk_movie_export import visual_movie_order
+from obed_edom.dsk_movie_export import movie_build_order, movie_order, stack_mode, visible_movie_rects
 from obed_edom.iwa_kindindex import _memberships, derive_kind_index
 from obed_edom.iwa_runs import (
     _SIG_JOIN,
@@ -114,6 +114,10 @@ from obed_edom.offline_inspect import (
 from obed_edom.remap_keynote import _AS_KIND_NAMES, _as_num, _delete_or_hide_placeholder_lines, copy_keynote
 
 DEFAULT_BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
+# Measured from the hand-made gold `Alpha_DSK.key` slide 4: a 3840x1080 centre-panel clip
+# sits at (258, 670) 1405x395, centred on 960. `SlideDecision.videos_only` fits its movies
+# into this band instead of the text band; the x margins are symmetric about 960.
+STANDARD_VIDEO_BAND = Band(1065.0, 395.0, 43.0, 1877.0, 1)
 DEFAULT_MIN_TEXT_PT = 24.0
 _TEXT_STACK_GAP = _TEXT_GAP_PT
 
@@ -318,13 +322,16 @@ class AssemblyRefusal(ValueError):
 
 @dataclass(frozen=True)
 class SlideDecision:
-    """One slide's operator decision for the DSK assembly review page."""
+    """One slide's operator decision for the DSK assembly review page. ``videos_only``
+    ignores every non-movie object on a movie/mixed slide (they are deleted exactly like
+    excluded items) and places the kept top-level movies in ``STANDARD_VIDEO_BAND``."""
 
     slide: int
     action: str
     anchor: str = "centre"
     keep_side: bool = False
     overlay_bake: bool = True
+    videos_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -349,13 +356,30 @@ class SplitPart:
 
 
 @dataclass(frozen=True)
+class ClipBuildIn:
+    """A stacked upper clip's SOURCE build-in: the effect and duration to rewrite onto
+    the inserted clip's auto-created ``apple:movie-start`` build, plus the source build
+    chunk's own start flags and delay (plan §4 item 28)."""
+
+    effect: str
+    duration: float
+    automatic: bool
+    referent: bool
+    delay: float
+
+
+@dataclass(frozen=True)
 class AssemblyPlan:
     """For a slide in ``splits``, ``fits[number]`` holds only the short items' part-0
     row rects -- each part's own long-box rect lives in ``splits[number][part].fits``.
     ``layout_names`` (finding 2/§3 L3) is the base layout resolved DURING planning for
     every verse/point single-long-text-box slide (split or not); when set, that slide's
     ``fits``/``text_sizes``/``run_sizes``/``stack_bands``/``short_fit`` are all already
-    derived from that layout's slot -- ``resolve_slide_layouts`` just reads it back."""
+    derived from that layout's slot -- ``resolve_slide_layouts`` just reads it back.
+    ``clip_build_in[number][movie_id]`` is a stacked-movie slide's SOURCE build-in per
+    UPPER clip whose source build-in this writer supports -- the instruction the offline
+    build patch rewrites onto the inserted clip (an unsupported one is warned about
+    instead, see the matching ``warnings`` entry)."""
 
     kept: tuple[int, ...]
     ordinals: dict[int, int]
@@ -391,6 +415,7 @@ class AssemblyPlan:
     chain_head: dict[int, int] = field(default_factory=dict)
     clip_rects: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
     clip_timing: dict[int, tuple[tuple[ItemId, str], ...]] = field(default_factory=dict)
+    clip_build_in: dict[int, dict[ItemId, ClipBuildIn]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -1304,14 +1329,66 @@ def _content_anchor(
     return "right" if len(rects) <= 2 else "centre"
 
 
+_CLIP_BUILD_IN_EFFECTS = frozenset({"apple:dissolve"})
+
+
+def _build_in_candidates(recs: Sequence[Mapping]) -> list[Mapping]:
+    """The source build records that could define a movie's build-IN, earliest chunk
+    first. ``builds`` is an unordered set (iwa_builds D8), so a movie with several builds
+    must be resolved by chunk order, never by list position; ``apple:movie-start`` (the
+    play trigger) and non-``In`` builds are not build-ins."""
+    return sorted(
+        (
+            rec
+            for rec in recs
+            if rec.get("animationType") == "In" and rec.get("effect") != "apple:movie-start" and rec.get("chunkOrder")
+        ),
+        key=lambda rec: min(rec["chunkOrder"]),
+    )
+
+
+def _describe_builds(recs: Sequence[Mapping]) -> str:
+    return ", ".join(f"{rec.get('effect') or 'no effect'} {rec.get('animationType')}" for rec in recs) or "no source build"
+
+
+def _source_build_in(rec: Mapping) -> ClipBuildIn | None:
+    """A source build record's build-in, or ``None`` when this writer cannot reproduce it
+    -- an effect outside the allow-list, a non-``In`` animation, a chunkless build, or
+    start flags with no `iwa_movies.ClipTiming` mode. The caller warns instead."""
+    if rec.get("effect") not in _CLIP_BUILD_IN_EFFECTS or rec.get("animationType") != "In":
+        return None
+    automatic = rec.get("chunkAutomatic") or []
+    referent = rec.get("chunkReferent") or []
+    delay = rec.get("chunkDelay") or []
+    if not (automatic and referent and delay):
+        return None
+    if iwa_movies.clip_timing_mode(automatic[0], referent[0]) is None:
+        return None
+    return ClipBuildIn(
+        effect=str(rec["effect"]),
+        duration=float(rec.get("duration") or 0.0),
+        automatic=bool(automatic[0]),
+        referent=bool(referent[0]),
+        delay=float(delay[0]),
+    )
+
+
 def _clip_timing_for_slide(
-    order: Sequence[ItemId], plays_across: Mapping[ItemId, bool]
+    order: Sequence[ItemId],
+    plays_across: Mapping[ItemId, bool],
+    build_in: Mapping[ItemId, ClipBuildIn] = {},
 ) -> tuple[tuple[ItemId, str], ...]:
     """Brief rule 2: a single clip is always After Transition; among source-continuity
     clips (`playsAcrossSlides` True) the leftmost is After Transition and the rest are
     With Build 1; distinct-movie clips (flag False) cascade After Previous, in visual
     order, after the continuity group -- or after their own leftmost clip when there is
-    no continuity group on this slide."""
+    no continuity group on this slide. A clip carrying a SOURCE build-in takes that
+    build's own chunk mode instead of the cascade."""
+    if build_in:
+        modes = dict(_clip_timing_for_slide(order, plays_across))
+        for iid, source in build_in.items():
+            modes[iid] = iwa_movies.clip_timing_mode(source.automatic, source.referent)
+        return tuple((iid, modes[iid]) for iid in order)
     if len(order) == 1:
         return ((order[0], "after_transition"),)
     continuity = [iid for iid in order if plays_across.get(iid, False)]
@@ -1407,6 +1484,7 @@ def plan_assembly(
     clip_rects_out: dict[int, dict[ItemId, Rect]] = {}
     clip_dissolve_out: dict[int, float] = {}
     clip_timing_out: dict[int, tuple[tuple[ItemId, str], ...]] = {}
+    clip_build_in_out: dict[int, dict[ItemId, ClipBuildIn]] = {}
     text_sizes: dict[int, dict[ItemId, float]] = {}
     autosize: dict[int, frozenset[ItemId]] = {}
     group_scale: dict[int, float] = {}
@@ -1443,6 +1521,14 @@ def plan_assembly(
     def _chain_source_anchor(n: int) -> str | None:
         if n in chain_auto_anchor:
             return chain_auto_anchor[n]
+        decision_n = decisions.get(n)
+        if decision_n is not None and decision_n.videos_only:
+            # A videos-only slide keeps only its movies, so its source content anchor is
+            # derived from objects the DSK slide no longer has. A follower inherits the
+            # anchor the head is actually PLANNED at: centre, or the operator's own.
+            planned = "centre" if decision_n.anchor in (None, "auto") else decision_n.anchor
+            chain_auto_anchor[n] = planned
+            return planned
         cls_n = full_classes_by_number.get(n)
         slide_n = slides_by_number.get(n)
         if cls_n is None or slide_n is None:
@@ -1470,6 +1556,15 @@ def plan_assembly(
             group_children_geo = slide.get("groupChildren") or {}
             group_child_runs_map = slide.get("groupChildRuns") or {}
             warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
+
+            videos_only_ids: tuple[ItemId, ...] = ()
+            if decision.videos_only:
+                if cls.is_text:
+                    raise AssemblyRefusal(f"slide {number}: videos_only on a text slide is unsupported")
+                videos_only_ids = tuple(iid for iid in cls.kept if iid[0] == "movie")
+                if not videos_only_ids:
+                    raise AssemblyRefusal(f"slide {number}: videos_only needs a kept top-level movie")
+                cls = _dc_replace(cls, kept=videos_only_ids, long_text_ids=(), dropped_media_text=())
 
             text_group_kis = {iid[1] for iid in cls.long_text_ids if iid[0] == "groupchild"}
             for group_ki in text_group_kis:
@@ -1507,10 +1602,12 @@ def plan_assembly(
                             "(piece D1 handles autosize group text only)"
                         )
 
-            own_content_anchor = None if no_auto_anchor else _chain_source_anchor(number)
+            own_content_anchor = (
+                None if (no_auto_anchor or decision.videos_only) else _chain_source_anchor(number)
+            )
 
             if decision.anchor in (None, "auto"):
-                if no_auto_anchor:
+                if no_auto_anchor or decision.videos_only:
                     anchor = "centre"
                 else:
                     head = chain_head_map.get(number)
@@ -1524,19 +1621,28 @@ def plan_assembly(
                 anchor = decision.anchor
             anchors_out[number] = anchor
 
-            fit = fit_slide(
-                items,
-                band,
-                include_side=decision.keep_side,
-                anchor=anchor,
-                wall=wall,
-                group_child_text=group_child_text,
-                group_child_words=group_child_words,
-                group_children=group_children_geo,
-                text_slide_words=text_slide_words,
-                no_dedupe=no_dedupe,
-                no_drop_panel_backdrop=no_drop_panel_backdrop,
-            )
+            if decision.videos_only:
+                fit = fit_slide(
+                    items,
+                    STANDARD_VIDEO_BAND,
+                    kept=videos_only_ids,
+                    include_side=decision.keep_side,
+                    anchor=anchor,
+                )
+            else:
+                fit = fit_slide(
+                    items,
+                    band,
+                    include_side=decision.keep_side,
+                    anchor=anchor,
+                    wall=wall,
+                    group_child_text=group_child_text,
+                    group_child_words=group_child_words,
+                    group_children=group_children_geo,
+                    text_slide_words=text_slide_words,
+                    no_dedupe=no_dedupe,
+                    no_drop_panel_backdrop=no_drop_panel_backdrop,
+                )
             fits[number] = fit
 
             id_by_item: dict[ItemId, str] | None = None
@@ -2341,6 +2447,8 @@ def plan_assembly(
                             f"slide {number}: clip mapping missing kept movie item(s) {sorted(missing)}"
                         )
 
+                src_build_recs = ((builds or {}).get(number) or {}).get("builds") or ()
+                stacked = False
                 if len(item_clips) > 1:
                     fw_rects: dict[ItemId, Rect] = {}
                     dsk_rects: dict[ItemId, Rect] = {}
@@ -2353,23 +2461,77 @@ def plan_assembly(
                         if rect is None:
                             raise AssemblyRefusal(f"slide {number} movie {iid[1]}: no fitted rect for clip")
                         dsk_rects[iid] = rect
+                    crop = Rect(0.0, 0.0, *wall) if decision.keep_side else CENTRE_PANEL_RECT
                     try:
-                        fw_order = visual_movie_order(fw_rects)
-                        dsk_order = visual_movie_order(dsk_rects)
+                        mode = stack_mode(visible_movie_rects(fw_rects, crop))
+                    except ValueError as exc:
+                        raise AssemblyRefusal(f"slide {number}: {exc}") from exc
+                    stacked = mode == "stacked"
+                    build_order = z_order = None
+                    if stacked:
+                        build_order = movie_build_order(src_build_recs, fw_rects)
+                        z_order = {iid: int(items_by_id[iid].get("index") or 0) for iid in fw_rects}
+                    try:
+                        fw_order = movie_order(fw_rects, build_order, z_order, mode)
+                        dsk_order = movie_order(dsk_rects, build_order, z_order, mode)
                     except ValueError as exc:
                         raise AssemblyRefusal(f"slide {number}: {exc}") from exc
                     if fw_order != dsk_order:
                         raise AssemblyRefusal(
-                            f"slide {number}: FW visual movie order {fw_order} does not match "
-                            f"DSK visual order {dsk_order}"
+                            f"slide {number}: FW movie order {fw_order} does not match "
+                            f"DSK order {dsk_order}"
                         )
                     visual_order = fw_order
                 else:
                     visual_order = list(item_clips)
                 item_clips = {iid: item_clips[iid] for iid in visual_order}
 
+                if stacked:
+                    build_in: dict[ItemId, ClipBuildIn] = {}
+                    unsupported: list[str] = []
+                    recs_by_item: dict[ItemId, list[Mapping]] = {}
+                    for rec in src_build_recs:
+                        iid = (rec["kind"], rec["kindIndex"])
+                        if iid in item_clips:
+                            recs_by_item.setdefault(iid, []).append(rec)
+                    for iid in visual_order[1:]:
+                        recs = recs_by_item.get(iid) or []
+                        candidates = _build_in_candidates(recs)
+                        if len(candidates) > 1:
+                            raise AssemblyRefusal(
+                                f"slide {number} movie {iid[1]}: {len(candidates)} source build-in "
+                                f"candidate(s) [{_describe_builds(candidates)}] -- refusing to guess "
+                                "which one the stacked clip needs"
+                            )
+                        source = _source_build_in(candidates[0]) if candidates else None
+                        if source is None:
+                            unsupported.append(f"movie {iid[1]} ({_describe_builds(recs)})")
+                        else:
+                            build_in[iid] = source
+                    if build_in:
+                        clip_build_in_out[number] = build_in
+                        written = ", ".join(
+                            f"movie {iid[1]} {source.effect} {source.duration:.2f}s "
+                            f"{iwa_movies.clip_timing_mode(source.automatic, source.referent)} "
+                            f"delay {source.delay:.2f}s"
+                            for iid, source in build_in.items()
+                        )
+                        warnings.append(
+                            f"slide {number}: stacked movies -- the source build-in is written "
+                            f"offline onto the upper clip(s) [{written}]; pending live verification"
+                        )
+                    if unsupported:
+                        warnings.append(
+                            f"slide {number}: stacked movies -- the upper clip(s) "
+                            f"[{', '.join(unsupported)}] need a build-in Keynote cannot create from "
+                            "AppleScript and this writer does not support; they cover the clip below "
+                            "from the start until the operator adds it by hand"
+                        )
+
                 if len(item_clips) == 1:
                     plays_across = {visual_order[0]: False}
+                elif stacked:
+                    plays_across = {iid: False for iid in item_clips}
                 elif objects_graph is None:
                     # Planning-only fallback: a live apply always has fw_deck set, so
                     # plan_assembly loads objects_graph itself and never reaches this
@@ -2393,7 +2555,9 @@ def plan_assembly(
                                 f"slide {number} movie {iid[1]}: source movie object not found for timing"
                             )
                         plays_across[iid] = bool(obj.get("playsAcrossSlides") or False)
-                clip_timing_out[number] = _clip_timing_for_slide(visual_order, plays_across)
+                clip_timing_out[number] = _clip_timing_for_slide(
+                    visual_order, plays_across, clip_build_in_out.get(number, {})
+                )
 
                 slide_clip_rects: dict[ItemId, Rect] = {}
                 slide_clip_crops = (clip_crops or {}).get(number, {})
@@ -2589,6 +2753,7 @@ def plan_assembly(
         layout_names=layout_names,
         clip_dissolve=clip_dissolve_out,
         clip_timing=clip_timing_out,
+        clip_build_in=clip_build_in_out,
         chain_head=chain_head_applied,
         clip_rects=clip_rects_out,
     )
@@ -4501,9 +4666,10 @@ def _restore_clip_timing(staging_path: Path, plan: AssemblyPlan, log: Callable[[
     """Post-pass (between ``_restore_clip_zorder`` and ``_verify_builds``): resolves each
     inserted clip to its staged ``TSD.MovieArchive`` id via ``_resolve_clip_out_ids`` --
     the SAME identity the z-order pass established -- builds
-    ``{slideId: [ClipTiming(...), ...]}`` from ``plan.clip_timing`` and writes it offline
-    via ``iwa_movies.patch_clip_start_timing``. Any ``ValueError`` (unresolvable chunk,
-    ambiguous match, rejected write) is a refusal, never a guess."""
+    ``{slideId: [ClipTiming(...), ...]}`` from ``plan.clip_timing`` (carrying
+    ``plan.clip_build_in``'s source build-in for a stacked upper clip) and writes it
+    offline via ``iwa_movies.patch_clip_start_timing``. Any ``ValueError`` (unresolvable
+    chunk, ambiguous match, rejected write) is a refusal, never a guess."""
     result: dict[int, dict] = {}
     if not plan.clips:
         return result
@@ -4541,7 +4707,20 @@ def _restore_clip_timing(staging_path: Path, plan: AssemblyPlan, log: Callable[[
                 if ref.get("identifier") is not None
             ]
             resolved = _resolve_clip_out_ids(number, item_clips, out_objects, out_data_index, out_z)
-            plans[out_slide_id] = [iwa_movies.ClipTiming(resolved[mid], mode) for mid, mode in timing]
+            slide_build_in = plan.clip_build_in.get(number) or {}
+            entries = []
+            for mid, mode in timing:
+                source = slide_build_in.get(mid)
+                if source is None:
+                    entries.append(iwa_movies.ClipTiming(resolved[mid], mode))
+                else:
+                    entries.append(
+                        iwa_movies.ClipTiming(
+                            resolved[mid], mode,
+                            delay=source.delay, build_in=source.effect, build_in_duration=source.duration,
+                        )
+                    )
+            plans[out_slide_id] = entries
             number_by_slide_id[out_slide_id] = number
     except ValueError as exc:
         raise AssemblyRefusal(f"slide clip timing resolve refused: {exc}") from exc

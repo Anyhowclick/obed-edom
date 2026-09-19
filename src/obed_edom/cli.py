@@ -150,6 +150,11 @@ def main(argv: list[str] | None = None) -> int:
         "--include-side", help="Slides to keep with side content, e.g. 8 or 8,10."
     )
     dsk_assemble.add_argument(
+        "--videos-only",
+        help="Slides to build from their movies alone, e.g. 32 or 32,50: every non-movie "
+        "object is deleted and the movie(s) go in the standard video band.",
+    )
+    dsk_assemble.add_argument(
         "--anchor",
         action="append",
         default=[],
@@ -437,11 +442,18 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
     try:
         slide_numbers = sorted(parse_slide_spec(args.slides) or ())
         include_side = set(parse_slide_spec(args.include_side) or ()) if args.include_side else set()
+        videos_only = set(parse_slide_spec(args.videos_only) or ()) if args.videos_only else set()
     except ValueError as err:
         print(str(err), file=sys.stderr)
         return 1
     if not slide_numbers:
         print("No slides given (--slides).", file=sys.stderr)
+        return 1
+    if not videos_only <= set(slide_numbers):
+        print(
+            f"Bad --videos-only; {sorted(videos_only - set(slide_numbers))} not in --slides.",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -581,7 +593,8 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
 
     decisions = {
         n: SlideDecision(
-            n, "both" if n in clips else "in_deck", anchor=anchors.get(n, "auto"), keep_side=n in include_side
+            n, "both" if n in clips else "in_deck", anchor=anchors.get(n, "auto"),
+            keep_side=n in include_side, videos_only=n in videos_only,
         )
         for n in slide_numbers
     }

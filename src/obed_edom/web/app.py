@@ -45,9 +45,15 @@ from obed_edom.dsk_assemble import (
     assemble_dsk_deck,
 )
 from obed_edom.dsk_live import guard_out_dir, keynote_running, quit_and_wait_for_exit
-from obed_edom.dsk_movie_export import _ffprobe, export_dsk_slide_clips, export_slide_clips
+from obed_edom.dsk_movie_export import (
+    _ffprobe,
+    export_dsk_slide_clips,
+    export_slide_clips,
+    movies_stacked,
+    visible_movie_rects,
+)
 from obed_edom.dsk_plan import ItemId, classify_deck
-from obed_edom.map_remap import Rect
+from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, item_rect
 from obed_edom.dsk_stage_export import (
     export_stage_pngs,
     read_manifest,
@@ -158,7 +164,7 @@ class FramingsBody(BaseModel):
 
 
 class DskDecisionsBody(BaseModel):
-    """`{slide, include, action, anchor, keepSide, clip}` per proposed page."""
+    """`{slide, include, action, anchor, keepSide, clip, videosOnly}` per proposed page."""
 
     decisions: list[dict[str, Any]] | None = None
     exportDir: str | None = None
@@ -1762,6 +1768,7 @@ def _dsk_decision_defaults(page: dict[str, Any], content_only: bool) -> dict[str
         "anchor": "auto",
         "keepSide": False,
         "clip": None,
+        "videosOnly": False,
     }
 
 
@@ -1781,7 +1788,23 @@ def _apply_dsk_decisions(result: dict[str, Any], decisions: list[dict[str, Any]]
             current = _dsk_decision_defaults(page, content_only)
         if content_only and page.get("isText"):
             current["include"] = False
+        current["videosOnly"] = bool(current.get("videosOnly")) and bool(page.get("canVideosOnly"))
         page["decision"] = current
+
+
+def _dsk_videos_only_flags(cls: Any, slide: dict[str, Any] | None) -> tuple[bool, bool]:
+    """`(canVideosOnly, stackedMovies)` for one proposed page. A slide can go
+    videos-only when every movie it counts is a kept top-level item — a movie nested in
+    a group is out of reach. Stacked follows the assembler's own `movies_stacked`."""
+    movie_ids = {item for item in cls.kept if item[0] == "movie"}
+    if cls.is_text or not movie_ids or cls.movie_count != len(movie_ids):
+        return False, False
+    rects = {
+        (item["kind"], item["kindIndex"]): item_rect(item)
+        for item in (slide or {}).get("items") or []
+        if (item.get("kind"), item.get("kindIndex")) in movie_ids
+    }
+    return True, movies_stacked(visible_movie_rects(rects, CENTRE_PANEL_RECT))
 
 
 def _dsk_keep_side_from_result(result: dict[str, Any]) -> set[int]:
@@ -1816,6 +1839,7 @@ def _run_dsk_propose(
     classes = {c.number: c for c in classify_deck(path, payload=payload, text_slide_words=words)}
     thumbs = _dsk_preview_thumbs(job, path, payload)
     thumb_dir = wall_thumb_dir(deck_digest(path))
+    slides_by_number = {int(s["number"]): s for s in payload["slides"]}
     pages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for number in numbers:
@@ -1829,6 +1853,7 @@ def _run_dsk_propose(
         if is_text:
             skipped.append({"slide": number, "reason": "text"})
             job.log(f"slide {number}: skipped (text slide; content-only)")
+        can_videos_only, stacked_movies = _dsk_videos_only_flags(cls, slides_by_number.get(number))
         page = {
             "slide": number,
             "thumb": thumbs.get(number),
@@ -1838,6 +1863,8 @@ def _run_dsk_propose(
             "isText": is_text,
             "skipReason": "text" if is_text else None,
             "needsClip": cls.category in {"movie", "mixed"},
+            "canVideosOnly": can_videos_only,
+            "stackedMovies": stacked_movies,
         }
         page["decision"] = _dsk_decision_defaults(page, content_only)
         pages.append(page)
@@ -1877,6 +1904,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             action=action,
             anchor=str(decision.get("anchor") or "auto"),
             keep_side=number in include_side,
+            videos_only=bool(decision.get("videosOnly")) and bool(page.get("canVideosOnly")),
         )
     raw_export = str(proposal.get("exportDir") or "").strip()
     if raw_export:

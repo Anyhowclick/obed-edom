@@ -450,11 +450,14 @@ def _timing_movie(ident, frame, *, plays_across_slides):
     )
 
 
-def _timing_build_chunk(movie_ident, build_ident, chunk_ident, *, automatic, referent):
+def _timing_build_chunk(
+    movie_ident, build_ident, chunk_ident, *, automatic, referent,
+    effect="apple:movie-start", animation_type="In",
+):
     build = _arch(
         build_ident, "KN.BuildArchive",
         {"drawable": {"identifier": movie_ident}, "delivery": "All at Once", "duration": 0.0,
-         "attributes": _build_effect("apple:movie-start"), "chunkIdSeed": 1},
+         "attributes": _build_effect(effect, animation_type), "chunkIdSeed": 1},
     )
     chunk = _arch(
         chunk_ident, "KN.BuildChunkArchive",
@@ -466,12 +469,18 @@ def _timing_build_chunk(movie_ident, build_ident, chunk_ident, *, automatic, ref
     return build, chunk
 
 
-def _build_timing_deck(path, n_clips, *, initial_chunk_order=None, no_chunk_for=None, dup_chunk_for=None):
+def _build_timing_deck(
+    path, n_clips, *, initial_chunk_order=None, no_chunk_for=None, dup_chunk_for=None,
+    animation_types=None, extra_build_for=None,
+):
     """``n_clips`` inserted DSK clips (300, 301, ...), each with its own not-yet-timed
     ``apple:movie-start`` build/chunk (initial flags ``automatic False, referent True``,
     same as Keynote's own non-deterministic auto-add). ``initial_chunk_order`` -- indices
     into range(n_clips) -- scrambles the slide's starting ``buildChunks`` order so a
-    reorder test can prove `patch_clip_start_timing` actually moves them."""
+    reorder test can prove `patch_clip_start_timing` actually moves them.
+    ``animation_types`` (index -> e.g. ``"Out"``) overrides a clip build's
+    ``animationType``; ``extra_build_for`` lists a SECOND, chunkless build for that clip
+    on the slide."""
     frame = (400.0, 300.0, 60.0, 80.0)
     archives = []
     zorder = []
@@ -488,11 +497,22 @@ def _build_timing_deck(path, n_clips, *, initial_chunk_order=None, no_chunk_for=
             continue
         build_ident = 900 + i * 20
         chunk_ident = 910 + i * 20
-        build, chunk = _timing_build_chunk(movie_ident, build_ident, chunk_ident, automatic=False, referent=True)
+        build, chunk = _timing_build_chunk(
+            movie_ident, build_ident, chunk_ident, automatic=False, referent=True,
+            animation_type=(animation_types or {}).get(i, "In"),
+        )
         archives.append(build)
         archives.append(chunk)
         build_refs.append({"identifier": build_ident})
         chunk_refs_by_index[i] = chunk_ident
+        if extra_build_for == i:
+            extra_build = _arch(
+                build_ident + 5, "KN.BuildArchive",
+                {"drawable": {"identifier": movie_ident}, "delivery": "All at Once", "duration": 0.0,
+                 "attributes": _build_effect("apple:dissolve"), "chunkIdSeed": 1},
+            )
+            archives.append(extra_build)
+            build_refs.append({"identifier": build_ident + 5})
         if dup_chunk_for == i:
             dup_chunk_ident = chunk_ident + 1
             dup_chunk = _arch(
@@ -679,6 +699,111 @@ def test_clip_timing_refuses_unknown_mode(tmp_path):
     plan = [ClipTiming(movie_ids[0], "sideways")]
     with pytest.raises(ValueError, match="unknown clip timing mode"):
         patch_clip_start_timing(deck, {"100": plan})
+    assert deck.read_bytes() == before
+
+
+# --------------------------------------------------------------------------
+# Stacked upper clip: the SOURCE build-in rewritten onto its movie-start build
+# (plan §4 item 28; FRC Wall slide 50 = apple:dissolve In 0.5s, With Build 1 + 8s)
+# --------------------------------------------------------------------------
+def _frc50_plan(movie_ids, *, duration=0.5):
+    return [
+        ClipTiming(movie_ids[0], "after_transition"),
+        ClipTiming(
+            movie_ids[1], "with_previous", delay=8.0, build_in="apple:dissolve", build_in_duration=duration
+        ),
+    ]
+
+
+def test_clip_timing_writes_the_source_build_in_on_the_upper_clip(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2)
+    state = patch_clip_start_timing(deck, {"100": _frc50_plan(movie_ids)})
+
+    assert state["100"][movie_ids[0]] == {
+        "playsAcrossSlides": False, "automatic": True, "referent": True, "delay": 0.0, "chunkPos": 0,
+    }
+    assert state["100"][movie_ids[1]] == {
+        "playsAcrossSlides": False, "automatic": True, "referent": False, "delay": 8.0, "chunkPos": 1,
+    }
+    objects, _, _ = _load_deck(deck)
+    anim = objects["920"]["attributes"]["animationAttributes"]
+    assert anim["effect"] == "apple:dissolve"
+    assert anim["animationType"] == "In"
+    # source duration == the archive's own, so neither duration was written
+    assert anim["duration"] == 0.5
+    assert objects["930"]["duration"] == 0.5
+    # the lower clip's own build is left a plain movie-start
+    assert objects["900"]["attributes"]["animationAttributes"]["effect"] == "apple:movie-start"
+
+
+def test_clip_timing_build_in_writes_both_durations_when_the_source_differs(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2)
+    patch_clip_start_timing(deck, {"100": _frc50_plan(movie_ids, duration=1.25)})
+
+    objects, _, _ = _load_deck(deck)
+    assert objects["920"]["attributes"]["animationAttributes"]["duration"] == 1.25
+    assert objects["930"]["duration"] == 1.25
+    # the untouched clip keeps Keynote's own chunk duration
+    assert objects["910"]["duration"] == 0.5
+
+
+def test_clip_timing_build_in_slide_keeps_the_plan_chunk_order(tmp_path):
+    # Plan order IS the source build order on a stacked slide. The mode ranking would
+    # sort the with_previous clip before the after_previous one; it must not.
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 3, initial_chunk_order=[2, 1, 0])
+    plan = [
+        ClipTiming(movie_ids[0], "after_transition"),
+        ClipTiming(movie_ids[1], "after_previous"),
+        ClipTiming(
+            movie_ids[2], "with_previous", delay=8.0, build_in="apple:dissolve", build_in_duration=0.5
+        ),
+    ]
+    state = patch_clip_start_timing(deck, {"100": plan})
+
+    assert [state["100"][m]["chunkPos"] for m in movie_ids] == [0, 1, 2]
+    objects, _, _ = _load_deck(deck)
+    chunk_refs = [str((r or {}).get("identifier")) for r in objects["100"].get("buildChunks") or []]
+    assert chunk_refs == ["910", "930", "950"]
+
+
+def test_clip_timing_build_in_is_idempotent(tmp_path):
+    # The second run resolves the clip's chunk through a build that is no longer an
+    # apple:movie-start -- it must still be found, and rewritten to the same effect.
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2)
+    first = patch_clip_start_timing(deck, {"100": _frc50_plan(movie_ids)})
+    second = patch_clip_start_timing(deck, {"100": _frc50_plan(movie_ids)})
+
+    assert second == first
+    objects, _, _ = _load_deck(deck)
+    assert objects["920"]["attributes"]["animationAttributes"]["effect"] == "apple:dissolve"
+    assert objects["930"]["duration"] == 0.5
+
+
+def test_clip_timing_refuses_an_unsupported_build_in_effect(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2)
+    before = deck.read_bytes()
+    plan = [
+        ClipTiming(movie_ids[0], "after_transition"),
+        ClipTiming(movie_ids[1], "with_previous", build_in="apple:move-in", build_in_duration=0.5),
+    ]
+    with pytest.raises(ValueError, match="is not supported"):
+        patch_clip_start_timing(deck, {"100": plan})
+    assert deck.read_bytes() == before
+
+
+def test_clip_timing_refuses_a_build_in_on_a_build_that_is_not_an_in(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2, animation_types={1: "Out"})
+    before = deck.read_bytes()
+    with pytest.raises(ValueError, match="animationType 'Out', expected In"):
+        patch_clip_start_timing(deck, {"100": _frc50_plan(movie_ids)})
+    assert deck.read_bytes() == before
+
+
+def test_clip_timing_refuses_a_build_in_when_a_second_build_targets_the_clip(tmp_path):
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2, extra_build_for=1)
+    before = deck.read_bytes()
+    with pytest.raises(ValueError, match="has 2 listed build"):
+        patch_clip_start_timing(deck, {"100": _frc50_plan(movie_ids)})
     assert deck.read_bytes() == before
 
 

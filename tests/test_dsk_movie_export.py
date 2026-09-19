@@ -2465,3 +2465,132 @@ def test_derive_pure_video_delete_ids_orders_fw12_group_last_within_its_class():
         by_kind.setdefault(kind, []).append(kind_index)
     for kind_indexes in by_kind.values():
         assert kind_indexes == sorted(kind_indexes, reverse=True)
+
+
+# --------------------------------------------------------------------------
+# movie_order -- visual for side-by-side rows, SOURCE BUILD ORDER when stacked
+# --------------------------------------------------------------------------
+def test_movies_stacked_false_for_side_by_side_panels():
+    # Two centre/right panels that merely abut share an edge but no area: they stay
+    # "unstacked" and keep the plain left-to-right visual order.
+    rects = {("movie", 0): Rect(0, 0, 3840, 1080), ("movie", 1): Rect(3840, 0, 3840, 1080)}
+    assert not dme.movies_stacked(rects)
+    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
+
+
+def test_movies_stacked_false_for_hairline_clip():
+    # A sliver of overlap (well under the 5% fraction of the smaller rect) is a layout
+    # hairline, not a stack.
+    rects = {("movie", 0): Rect(0, 0, 1000, 1000), ("movie", 1): Rect(990, 0, 1000, 1000)}
+    assert not dme.movies_stacked(rects)
+    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
+
+
+def test_movies_stacked_true_for_slide_50_shape():
+    # Full_Report_Card_Wall.key slide 50: two 3840x2160 movies on the centre panel,
+    # movie 0 at (1920, -1079) and movie 1 at (1915, -163).
+    rects = {
+        ("movie", 0): Rect(1920, -1079, 3840, 2160),
+        ("movie", 1): Rect(1915, -163, 3840, 2160),
+    }
+    assert dme.movies_stacked(rects)
+
+
+def test_movie_order_stacked_follows_source_build_order_not_x():
+    # Visually movie 1 sorts first (x 1915 < 1920), but movie 0 carries the
+    # apple:movie-start build at chunk 0 and movie 1 the apple:dissolve In at chunk 1:
+    # movie 0 plays, then movie 1 dissolves in on top.
+    rects = {
+        ("movie", 0): Rect(1920, -1079, 3840, 2160),
+        ("movie", 1): Rect(1915, -163, 3840, 2160),
+    }
+    assert dme.visual_movie_order(rects) == [("movie", 1), ("movie", 0)]
+    order = dme.movie_order(rects, {("movie", 0): 0, ("movie", 1): 1})
+    assert order == [("movie", 0), ("movie", 1)]
+
+
+def test_movie_order_stacked_movie_without_build_sorts_first_by_z():
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+        ("movie", 2): Rect(1920, 0, 3840, 1080),
+    }
+    order = dme.movie_order(
+        rects,
+        {("movie", 1): 3},
+        {("movie", 0): 7, ("movie", 2): 2},
+    )
+    assert order == [("movie", 2), ("movie", 0), ("movie", 1)]
+
+
+def test_movie_order_stacked_refuses_without_build_order():
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+    }
+    with pytest.raises(ValueError, match="stacked"):
+        dme.movie_order(rects)
+
+
+def test_movie_order_stacked_refuses_on_build_order_tie():
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+    }
+    with pytest.raises(ValueError, match="tie at build order"):
+        dme.movie_order(rects, {("movie", 0): 1, ("movie", 1): 1})
+
+
+def test_movie_order_stacked_refuses_unbuilt_movie_without_z_order():
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+    }
+    with pytest.raises(ValueError, match="no build and no z-order"):
+        dme.movie_order(rects, {("movie", 0): 0})
+
+
+def test_stack_mode_refuses_a_partial_stack():
+    # Two movies cover each other, a third sits beside them: visual order and build order
+    # each govern part of the slide, so there is no single order to derive.
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+        ("movie", 2): Rect(5760, 0, 1920, 1080),
+    }
+    with pytest.raises(ValueError, match="partially overlap"):
+        dme.stack_mode(rects)
+    with pytest.raises(ValueError, match="partially overlap"):
+        dme.movie_order(rects, {("movie", 0): 0, ("movie", 1): 1, ("movie", 2): 2})
+
+
+def test_visible_movie_rects_decide_the_mode_the_full_rects_would_miss():
+    # Codex r1: full item rects barely clip (2.5% of the smaller), but what the clip
+    # actually shows -- the centre-panel crop -- is a stack. One predicate, one mode.
+    rects = {("movie", 0): Rect(0, 0, 4000, 1080), ("movie", 1): Rect(3900, 0, 4100, 1080)}
+    assert dme.stack_mode(rects) == "visual"
+
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert dme.stack_mode(visible) == "stacked"
+    # the caller's already-decided mode wins over re-deriving it from the rects passed in
+    order = dme.movie_order(rects, {("movie", 0): 1, ("movie", 1): 0}, mode="stacked")
+    assert order == [("movie", 1), ("movie", 0)]
+
+
+def test_visible_movie_rects_clip_to_the_crop_and_zero_outside_it():
+    rects = {("movie", 0): Rect(1920, 0, 3840, 1080), ("movie", 1): Rect(0, 0, 100, 1080)}
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert (visible[("movie", 0)].x, visible[("movie", 0)].w) == (1920.0, 3840.0)
+    assert visible[("movie", 1)].w == 0.0
+    assert dme.stack_mode(visible) == "visual"
+
+
+def test_movie_build_order_takes_the_lowest_chunk_per_movie():
+    records = [
+        {"kind": "movie", "kindIndex": 0, "chunkOrder": [3, 1]},
+        {"kind": "movie", "kindIndex": 1, "chunkOrder": [2]},
+        {"kind": "movie", "kindIndex": 2, "chunkOrder": []},
+        {"kind": "image", "kindIndex": 0, "chunkOrder": [0]},
+    ]
+    order = dme.movie_build_order(records, [("movie", 0), ("movie", 1), ("movie", 2)])
+    assert order == {("movie", 0): 1, ("movie", 1): 2}
