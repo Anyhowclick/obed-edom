@@ -1549,3 +1549,15 @@ def test_codecs_recorded_in_session_log(tmp_path, monkeypatch):
     assets = {entry["asset"] for entry in codecs_record["report"]}
     assert assets == {"movie.mov", "extra-movie.mov"}
     assert codecs_record["warnings"] == ["extra-movie.mov (hvc1) may not play in this output"]
+
+
+def test_cdp_sockets_accept_messages_larger_than_the_websockets_default():
+    # websockets caps an incoming message at 1 MiB by default. A 2560x1440 PNG from
+    # Page.captureScreenshot is 0.4-0.7 MB and ~33% larger as base64, so a busy frame
+    # crossed the cap, the library closed the socket (1009) and the host reported
+    # "Program browser CDP connection failed." about one session in four at that size.
+    import inspect
+
+    source = inspect.getsource(live_host.ChromeCdp)
+    assert live_host._CDP_MAX_MESSAGE_BYTES >= 32 * 1024 * 1024
+    assert source.count("max_size=_CDP_MAX_MESSAGE_BYTES") == 2

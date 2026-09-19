@@ -1040,11 +1040,12 @@ VISIBLE_SLIDE = {"playerIndex": 0, "originalOrdinal": 1, "skipped": False}
 
 class TestBurstScheduling:
     def test_deadlines_are_absolute_offsets_from_the_burst_start(self) -> None:
-        assert probe.burst_deadlines(100.0) == [100.0, 100.13, 100.29, 100.5, 100.77]
+        assert probe.burst_deadlines(100.0, (0, 130, 290, 500, 770)) == [100.0, 100.13, 100.29, 100.5, 100.77]
+        assert probe.burst_deadlines(100.0) == [100.0 + ms / 1000 for ms in probe.BURST_OFFSETS_MS]
 
     def test_offsets_are_unequal_so_a_periodic_animation_cannot_alias(self) -> None:
         gaps = [b - a for a, b in zip(probe.BURST_OFFSETS_MS, probe.BURST_OFFSETS_MS[1:])]
-        assert gaps == [130, 160, 210, 270]
+        assert gaps[:4] == [130, 160, 210, 270]
         assert len(set(gaps)) == len(gaps)
 
     def test_capture_burst_records_actual_offsets_and_captures_every_shot(self) -> None:
@@ -1072,7 +1073,7 @@ class TestBurstScheduling:
         _, offsets = probe.capture_burst(host.transport, now=clock.now, sleep=clock.sleep)
         assert offsets[0] == 0.0
         assert offsets[1] == 200.0  # the overrun itself is reported, never hidden
-        assert offsets[2:] == [290.0, 500.0, 770.0]
+        assert offsets[2:] == [float(ms) for ms in probe.BURST_OFFSETS_MS[2:]]
 
 
 class TestPngDecode:
@@ -2349,3 +2350,15 @@ class TestDeadExpectationEndToEndInARecord:
         )
         assert record["verdict"] is False and record["status"] == "fail"
         assert record["instanceCheck"]["unexpectedVideos"][0]["bestExpect"] == "dead"
+
+
+def test_burst_is_long_enough_that_a_two_state_movie_cannot_plausibly_alias():
+    # The fixture movie is a two-state grating that flips every video frame. With n
+    # shots at effectively independent phases, P(every shot lands on the same state)
+    # = 2 * 0.5**n. The original 5-shot burst gave 6.25 % per live rect - measured:
+    # 2 dead reads in 24 healthy live-expected rects at 2560x1440 - which is a false
+    # RED about once per gate chain. 12 shots put it at ~0.05 %.
+    shots = len(probe.BURST_OFFSETS_MS)
+    assert 2 * 0.5 ** shots < 0.001
+    gaps = [b - a for a, b in zip(probe.BURST_OFFSETS_MS, probe.BURST_OFFSETS_MS[1:])]
+    assert len(set(gaps)) == len(gaps)
