@@ -99,6 +99,14 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   re-renders movie/mixed slides (never reuses) and deletes the `src/` intermediates after a
   successful run. The DSK deck is retained. Supersedes the "one baked clip" rule above and the
   #138 reuse rule.
+- 2026-09-19 (owner, Generator review step — IN PROGRESS on
+  `claude/dsk-generator-alignment-options-97c5aa`): each slide takes an explicit left / centre /
+  right alignment (the existing `anchor`, with bulk controls), and a slide with kept top-level
+  movies may be set **videos only**: every non-movie object is dropped and the movie(s) are fitted
+  to the STANDARD video band instead of `DEFAULT_BAND`, auto-anchored centre (no content/chain-head
+  anchor). Movies STACKED on one another in the source (dissolving over each other; FRC Wall slide
+  50) follow the SOURCE BUILD ORDER, not visual order. The review list follows the CG resizer's
+  classification flow (grouped by category, bulk per group).
 - Keynote hands-off rule: work on a copy under `~/Desktop` or repo `output/` (never
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
 - Owner's open design item besides the band placeholder: the "editing phase" (d6b) — per-slide
@@ -157,6 +165,16 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   Left block is vertically CENTRED on the right block (deltas ±14 pt vs ±51 pt bottom-aligned).
 - Heading-only gold slides are 60 pt FLAT with a 46 pt badge; 2-line headings put the badge
   above centred on x=960, 1-line inline-left (pair centred on 960 either way).
+
+- STANDARD video band (measured 2026-09-20 from the hand-made gold `Alpha_DSK.key` slide 4, a
+  3840×1080 centre-panel clip at (258, 670) 1405×395): bottom 1065.0, height 395.0, centred on 960
+  → `dsk_assemble.STANDARD_VIDEO_BAND`; x range reuses the band's 43.0…1892.0 for left/right flush
+  (UNMEASURED for left/right — gold 6/7/10 sit at x 198/181/181 with overlays; owner to confirm).
+  Gold 16:9 clips keep the same ~1065–1066 bottom (slides 7–9) at hand-picked heights 327–463.
+- FRC Wall slide 50 (stacked-movie reference): two 3840×2160 movies on the centre panel — movie 0
+  (1920, −1079) `apple:movie-start` chunkOrder 0 referent True; movie 1 (1915, −163)
+  `apple:dissolve` In chunkOrder 1 referent False; class `mixed`, 4 side `map BG.png` dropped.
+  Visual order would put movie 1 first (x 1915 < 1920) — hence build order for overlapping movies.
 
 ### Pill mask law (`dsk_pill.write_pills`)
 - The pill image drawable's own geometry NEVER varies with width (byte-identical across all 8
@@ -399,6 +417,15 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     forced (`--split`) splits. Next slice: cap the joint-fit measurement and route a failed joint
     slot candidate to per-box splitting (slot-authoritative 45pt) instead of `fit_text_stack`; it
     moves the acceptance decks and needs a live text run. Pre-existing; beyond item 12's scope.
+
+28. **Stacked clips need a build-IN (OPEN, needs a live round).** A later stacked clip sits on top
+    and covers the first from the start unless it carries the source's build-in (`apple:dissolve`
+    on FRC 50). Builds cannot be created via AppleScript; candidate = an offline `iwa_movies` patch
+    rewriting the inserted clip's auto-created `apple:movie-start` build attributes to the source
+    build's effect/duration, fail-closed with read-back (slide 50 itself holds both archive shapes
+    to diff). Fallback if Keynote rejects it: one DSK slide per stacked movie with a dissolve
+    between. Until then the plan WARNS per stacked slide. Also unverified live: videos-only
+    geometry vs gold slide 4, and left/right flush margins for the standard band.
 
 ## 5. Live-run recipe
 
