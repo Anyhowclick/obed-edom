@@ -29,6 +29,34 @@ worktree — run everything from here) · `PY=/Users/anyhowclick/Desktop/work/ob
 - Keep a running note of every observation with the time; at the end append a dated section to
   `keynote-live-continuity-2026-09-19.md` (results, settings that won, log file names) and commit it.
 
+## Hardware is unidentified — peer: start from the owner's photos
+The owner does not know the models (DeckLink/UltraStudio, the "ScanConverter", the mixer) and will send
+photos in the morning. From the photos (front/back labels, port legends) establish, and write down:
+1. **Output device**: model; how many **SDI OUT**s (two = external fill+key possible; one = not); any SDI/HDMI
+   IN (needed for its INTERNAL keyer); Thunderbolt vs PCIe. Cross-check in Desktop Video Setup on the Mac.
+2. **Scan converter**: model; inputs (HDMI/DVI/VGA) → outputs (SDI/HDMI); does it scale / frame-rate convert;
+   does it advertise a fixed format. It is a **fill-only** path (HDMI has no alpha) — it can never supply a key.
+3. **Mixer**: model; its video standard (must match every source); which keyers it has (ATEM: Upstream
+   Luma/Linear key with separate Fill + Key sources, DSK with Pre-Multiplied toggle); free inputs.
+Then pick the route — in this order of preference:
+- **A. External key (the plan above)**: output device has 2 SDI outs → OBS Decklink Output, Keyer = External.
+- **B. Internal key**: device has 1 SDI out + an SDI in → feed program/camera into the device, OBS Keyer =
+  Internal, device output goes to air/mixer. Alpha is still true alpha. Note added latency on the camera path.
+- **C. Scan converter + luma key (fallback, no DeckLink/OBS needed)**: host in normal HDMI mode →
+  converter → mixer input → **luma key** (black = transparent). Costs: opaque black content vanishes, dark
+  translucent elements do not key; bright graphics over black are fine. Steps (needs the OWNER'S GO — it
+  opens a fullscreen Chrome window on that display): plug the converter into a native HDMI/Thunderbolt port
+  (not the Anker hub); System Settings → Displays: it should appear as a **1920×1080** display — pick 50 or
+  59.94/60 Hz to match the mixer if offered; run the field tool or dashboard **without** `OBED_LIVE_ATTACH`
+  (field tool: add `--display <id>`; ids via
+  `PYTHONPATH=$W/src $PY -c "from obed_edom.live_host import list_displays; print(list_displays())"`);
+  confirm it prints `transport=hdmi`, viewport **1920×1080**, continuity **qualified** (any other viewport ⇒
+  `unsupported`, raw player). In HDMI mode Hide = black = transparent under a luma key, which is what you want.
+- Do NOT try to build fill+key from two HDMI outputs/two converters: a browser cannot emit a synchronised
+  alpha matte of a page with live video (that is the future native-sender project; ProPresenter does it natively).
+If route A or B works, still spend 5 minutes on route C if time allows — the A-vs-C comparison on real
+graphics is useful to the owner.
+
 ## 0. Hardware + OBS setup (owner)
 - Blackmagic **Desktop Video** installed; device on a **native Thunderbolt port** (the Anker hub capped
   the monitor at 30 Hz — avoid it). Desktop Video Setup: device visible, note the model, set the output
