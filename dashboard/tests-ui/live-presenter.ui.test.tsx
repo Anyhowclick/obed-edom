@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePresenter } from "../src/live/LivePresenter";
-import type { LiveClient, LiveCommand, LiveResult, LiveSnapshot } from "../src/live/api";
+import { liveClient, type LiveClient, type LiveCommand, type LiveContinuity, type LiveResult, type LiveSnapshot } from "../src/live/api";
 
 function state(overrides: Partial<LiveSnapshot> = {}): LiveSnapshot {
   return {
@@ -50,9 +50,45 @@ describe("LivePresenter", () => {
     const api = client();
     render(<LivePresenter client={api} pollMs={60_000} />);
     await screen.findByRole("option", { name: /Sunday service/ });
+    expect(screen.getByRole("checkbox", { name: "Enable movie continuity when qualified" })).toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
     await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2"));
     expect(screen.queryByTitle(/player|preview/i)).not.toBeInTheDocument();
+  });
+
+  it("turns continuity off for the next session without changing a running session", async () => {
+    const api = client({ start: vi.fn(async () => state({ continuity: { mode: "off" } })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByRole("option", { name: /Sunday service/ });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Enable movie continuity when qualified" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2", "off"));
+    expect(await screen.findByText("Movie continuity · Off")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Enable movie continuity when qualified" })).not.toBeInTheDocument();
+    expect(api.command).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["qualified", "Qualified", "Enabled for this deck at 1920 × 1080."],
+    ["unsupported", "Unsupported", "Continuity requires the authored 1920 × 1080 viewport."],
+    ["off", "Off", "Using the deck’s native movie playback."],
+    ["pending", "Checking", "Checking this deck and output size."],
+  ] as const)("shows observed %s continuity before Show output", async (mode, label, detail) => {
+    const continuity: LiveContinuity = { mode, ...(mode === "unsupported" ? { reason: detail } : {}) };
+    const api = client({ state: vi.fn(async () => state({ outputVisible: false, continuity })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const badge = await screen.findByText(`Movie continuity · ${label}`);
+    expect(screen.getByText(detail)).toBeInTheDocument();
+    const show = screen.getByRole("button", { name: "Show output" });
+    expect(badge.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("does not claim qualification when the host omits continuity status", async () => {
+    const api = client({ state: vi.fn(async () => state()) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    expect(await screen.findByText("Movie continuity · Unavailable")).toBeInTheDocument();
+    expect(screen.getByText("This session has not reported movie continuity status.")).toBeInTheDocument();
+    expect(screen.queryByText("Movie continuity · Qualified")).not.toBeInTheDocument();
   });
 
   it("does not move the presenter until a delayed command returns observed state", async () => {
@@ -173,7 +209,7 @@ describe("LivePresenter", () => {
     render(<LivePresenter client={api} pollMs={60_000} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Output window closed");
     expect(screen.getByRole("button", { name: "Stop session" })).toBeEnabled();
-    expect(screen.getByText("Native HTML playback only; alpha and movie continuity are not qualified.")).toBeInTheDocument();
+    expect(screen.getByText("Movie continuity is available only for qualified decks at 1920 × 1080. Alpha output is not qualified.")).toBeInTheDocument();
   });
 
   it("allows output hiding while the player is busy but blocks navigation", async () => {
@@ -213,5 +249,20 @@ describe("LivePresenter", () => {
     fireEvent.keyDown(window, { key: " " });
     expect(await screen.findByRole("alert")).toHaveTextContent("Player is busy");
     expect(api.command).not.toHaveBeenCalled();
+  });
+});
+
+describe("live start request", () => {
+  it.each([undefined, "off"] as const)("sends only the requested continuity override (%s)", async (continuity) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(state()), { status: 200 }));
+    try {
+      await liveClient.start("prepared-1", "screen-2", continuity);
+      expect(fetch).toHaveBeenCalledWith("/api/live", expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ previewJobId: "prepared-1", displayId: "screen-2", ...(continuity ? { continuity } : {}) }),
+      }));
+    } finally {
+      fetch.mockRestore();
+    }
   });
 });

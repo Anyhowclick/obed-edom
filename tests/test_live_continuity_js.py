@@ -21,7 +21,7 @@ from obed_edom import live_continuity_js
 
 
 def test_continuity_version_is_pinned_int():
-    assert live_continuity_js.CONTINUITY_VERSION == 1
+    assert live_continuity_js.CONTINUITY_VERSION == 2
     assert isinstance(live_continuity_js.CONTINUITY_VERSION, int)
 
 
@@ -52,7 +52,7 @@ def test_p2_dissolve_live_reexports_the_same_object():
     assert mod.PRESERVE_SCRIPT is live_continuity_js.PRESERVE_CORE_JS
 
 
-def _run_core_in_node(*, plan) -> dict:
+def _run_core_in_node(*, plan, fail_install=False) -> dict:
     """Execute PRESERVE_CORE_JS in a minimal DOM-less sandbox and report what
     it installed. `plan` is JSON-serialisable or None (no plan injected)."""
     node = shutil.which("node")
@@ -82,17 +82,19 @@ const Element = {{ prototype: {{ removeAttribute() {{}} }} }};
 const Document = {{ prototype: {{ createElement: el }} }};
 const location = {{ hash: '' }};
 const performance = {{ now() {{ return 0; }} }};
-const MutationObserver = function() {{ this.observe = function() {{}}; }};
+const MutationObserver = function() {{
+  this.observe = function() {{ if ({str(fail_install).lower()}) throw new Error('install failed'); }};
+}};
 const requestAnimationFrame = function() {{}};
 const setInterval = function() {{}};
 const setTimeout = function() {{}};
 try {{
 {live_continuity_js.PRESERVE_CORE_JS}
 }} catch (e) {{
-  console.log(JSON.stringify({{threw: String(e && e.message || e)}}));
+  console.log(JSON.stringify({{threw: String(e && e.message || e), ready: !!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.ready)}}));
   process.exit(0);
 }}
-console.log(JSON.stringify({{installed: !!window.__OBED_P2_PRESERVE__}}));
+console.log(JSON.stringify({{installed: !!window.__OBED_P2_PRESERVE__, ready: !!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.ready)}}));
 """
     result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -102,7 +104,7 @@ def test_no_plan_guard_leaves_page_untouched():
     """Fail-closed: with no `window.__OBED_CONTINUITY__`, the core must install
     nothing (never even reach the `__OBED_P2_PRESERVE__` idempotency object)."""
     out = _run_core_in_node(plan=None)
-    assert out == {"installed": False}
+    assert out == {"installed": False, "ready": False}
 
 
 def test_with_plan_installs_the_preserve_object():
@@ -111,7 +113,7 @@ def test_with_plan_installs_the_preserve_object():
         "boundaries": [{"atScene": 6, "action": "restart"}],
     }
     out = _run_core_in_node(plan=plan)
-    assert out == {"installed": True}
+    assert out == {"installed": True, "ready": True}
 
 
 def test_transparent_chrome_gated_by_plan_flag():
@@ -132,3 +134,82 @@ def test_preserve_core_js_source_declares_the_fail_closed_guard():
     preserve_idx = js.index("__OBED_P2_PRESERVE__ = {")
     assert guard_idx < preserve_idx
     assert "if (!OBED_PLAN) return;" in js
+
+
+def test_partial_install_never_sets_ready():
+    out = _run_core_in_node(plan={"movies": {}, "boundaries": []}, fail_install=True)
+    assert out == {"threw": "install failed", "ready": False}
+
+
+def _run_bridge_motion_in_node(*, stop_before_retry: bool = False) -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to exercise the JS core")
+    core = live_continuity_js.PRESERVE_CORE_JS
+    start = core.index("  function keepThroughBridge(v) {")
+    end = core.index("  function keepAtSlot", start)
+    motion = core[start:end]
+    harness = f"""
+let now = 0, connected = false, preserveGeneration = 0;
+const frames = [];
+const boundary = {{
+  atScene: 8, movieKey: 'movie1', durationSeconds: 1.5,
+  srcRect: {{x: 198, y: 797, w: 952, h: 268}},
+  rect: {{x: 327, y: 709, w: 1266, h: 356}},
+}};
+const bridgeBoundary = () => boundary;
+const currentHashNum = () => 7;
+const movieAssetKey = () => 'movie1';
+const beginMove = () => {{}};
+const note = () => {{}};
+const stage = {{appendChild(v) {{connected = true; v.parentNode = stage;}}}};
+const document = {{getElementById: () => stage, body: stage, contains: () => connected}};
+const performance = {{now: () => now}};
+const requestAnimationFrame = frame => frames.push(frame);
+const video = {{style: {{}}, dataset: {{}}, parentNode: null, __obedRemountEpoch: 0}};
+{motion}
+keepThroughBridge(video);
+now = 500;
+frames.shift()();
+const beforeDetach = parseFloat(video.style.left);
+connected = false;
+video.parentNode = null;
+if ({str(stop_before_retry).lower()}) frames.shift()();
+now = 550;
+keepThroughBridge(video);
+const reattached = connected;
+frames.shift()();
+const afterRetry = Object.fromEntries(
+  ['left', 'top', 'width', 'height'].map(key => [key, parseFloat(video.style[key])])
+);
+const beforeClear = JSON.stringify(video.style);
+preserveGeneration += 1;
+now = 900;
+frames.shift()();
+console.log(JSON.stringify({{
+  beforeDetach, reattached, afterRetry,
+  unchangedAfterClear: JSON.stringify(video.style) === beforeClear,
+  pendingFramesAfterClear: frames.length,
+  pinningAfterClear: video.__obedMotionPinning,
+}}));
+"""
+    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("stop_before_retry", [False, True])
+def test_bridge_redetach_reconnects_without_rewinding_motion(stop_before_retry):
+    result = _run_bridge_motion_in_node(stop_before_retry=stop_before_retry)
+    assert result["beforeDetach"] == pytest.approx(241)
+    assert result["reattached"] is True
+    assert result["afterRetry"] == pytest.approx({
+        "left": 245.3, "top": 764.7333333333,
+        "width": 1067.1333333333, "height": 300.2666666667,
+    })
+
+
+def test_clear_generation_stops_bridge_motion_callbacks():
+    result = _run_bridge_motion_in_node()
+    assert result["unchangedAfterClear"] is True
+    assert result["pendingFramesAfterClear"] == 0
+    assert result["pinningAfterClear"] is False

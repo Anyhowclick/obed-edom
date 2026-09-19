@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { liveClient, type LiveClient, type LiveDisplay, type LiveOperation, type LivePreparedDeck, type LiveSlide, type LiveSnapshot } from "./api";
+import { liveClient, type LiveClient, type LiveContinuity, type LiveDisplay, type LiveOperation, type LivePreparedDeck, type LiveSlide, type LiveSnapshot } from "./api";
 import "./live.css";
 
 function Still({ slide, label }: { slide?: LiveSlide; label: string }) {
@@ -7,6 +7,22 @@ function Still({ slide, label }: { slide?: LiveSlide; label: string }) {
     <figcaption>{label}{slide ? ` · Slide ${slide.originalOrdinal}` : ""} · Still preview</figcaption>
     {slide?.thumbnailUrl ? <img src={slide.thumbnailUrl} alt={`Slide ${slide.originalOrdinal} still`} /> : <div className="live-placeholder">{slide ? "Still unavailable" : "No slide"}</div>}
   </figure>;
+}
+
+function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
+  const mode = continuity?.mode;
+  const label = mode === "qualified" ? "Qualified" : mode === "unsupported" ? "Unsupported" : mode === "off" ? "Off" : mode === "pending" ? "Checking" : "Unavailable";
+  const detail = continuity?.reason || (mode === "qualified"
+    ? "Enabled for this deck at 1920 × 1080."
+    : mode === "unsupported" || mode === "off"
+      ? "Using the deck’s native movie playback."
+      : mode === "pending"
+        ? "Checking this deck and output size."
+        : "This session has not reported movie continuity status.");
+  return <div className="live-continuity" aria-live="polite">
+    <span className="live-continuity-badge" data-mode={mode || "unknown"}>Movie continuity · {label}</span>
+    <p className="note">{detail}</p>
+  </div>;
 }
 
 export function LivePresenter({ client = liveClient, previewJobId = "", pollMs = 1000 }: { client?: LiveClient; previewJobId?: string; pollMs?: number }) {
@@ -26,6 +42,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const [displays, setDisplays] = useState<LiveDisplay[]>([]);
   const [jobId, setJobId] = useState(previewJobId);
   const [displayId, setDisplayId] = useState("");
+  const [continuityEnabled, setContinuityEnabled] = useState(true);
   const [target, setTarget] = useState("");
   const [digits, setDigits] = useState("");
   const [upcomingCount, setUpcomingCount] = useState(3);
@@ -162,7 +179,9 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     const epoch = ++generation.current;
     setMessage("");
     try {
-      const next = await client.start(jobId, displayId || undefined);
+      const next = continuityEnabled
+        ? await client.start(jobId, displayId || undefined)
+        : await client.start(jobId, displayId || undefined, "off");
       if (mounted.current && epoch === generation.current) accept(next);
     } catch (error) {
       if (mounted.current) setMessage(error instanceof Error ? error.message : String(error));
@@ -178,7 +197,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   return <section className="live-presenter" aria-label="Live presenter">
     <h1>Alpha Keynote</h1>
     <p className="lede">Experimental silent HDMI output. The picture is 16:9 within the detected display. DeckLink fill + key is not qualified.</p>
-    <p className="note">Native HTML playback only; alpha and movie continuity are not qualified.</p>
+    <p className="note">Movie continuity is available only for qualified decks at 1920 × 1080. Alpha output is not qualified.</p>
     <p role="status">{connected ? snapshot ? `Player ${snapshot.status} · Output ${snapshot.outputVisible ? "visible" : "hidden"}` : "No active session" : connectionError ? "Disconnected · Reconnecting…" : "Connecting…"}</p>
     {connectionError && <p role="alert">{connectionError}. Existing output may still be running; commands are disabled until reconnected.</p>}
     {(message || awaitingObservation || snapshot?.error) && <p role="alert">{message || (awaitingObservation ? "Command accepted; waiting for observed player state." : snapshot?.error)}</p>}
@@ -193,9 +212,15 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
           {displays.length ? displays.map((display) => <option key={display.id} value={display.id}>{display.name} · {display.width} × {display.height}{display.primary ? " · Primary" : ""}</option>) : <option value="">No display detected</option>}
         </select>
       </label>
+      <label className="live-continuity-choice">
+        <input type="checkbox" checked={continuityEnabled} disabled={pending} onChange={(event) => setContinuityEnabled(event.target.checked)} />
+        Enable movie continuity when qualified
+      </label>
+      <p className="note live-continuity-help">Applies to the next session. Check its continuity status before showing output.</p>
       {!decks.length && <p className="note">Prepare a deck in Sermon Checker with Build Preview first. Live output never creates a new export.</p>}
       <button className="btn" disabled={!connected || pending || !jobId || !displays.length}>Start output session</button>
     </form>}
+    {active && <ContinuityStatus continuity={snapshot.continuity} />}
     {snapshot && <>
       <p className="note">Slide {snapshot.originalSlide ?? "unknown"} · Build {snapshot.buildIndex ?? "unknown"} · Display {snapshot.output.width} × {snapshot.output.height} · Audio off</p>
       <Still slide={current} label="Current" />

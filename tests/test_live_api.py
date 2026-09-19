@@ -16,6 +16,7 @@ class Adapter:
     output = {'width': 1920, 'height': 1080}
 
     def __init__(self, *args, **kwargs):
+        self.continuity = kwargs.get("continuity", "auto")
         self.visible = False
         self.clicks = 0
         self.wait: Event | None = None
@@ -234,7 +235,7 @@ def test_live_api_attach_mode_starts_without_consulting_displays(tmp_path, monke
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
     service = LiveSessionService()
 
-    def host_factory(export_root, slides, *, display_id=None):
+    def host_factory(export_root, slides, *, display_id=None, continuity="auto"):
         return LiveOutputHost(export_root, slides, transport_factory=FakeAttachCdp, server_factory=FakeAttachServer)
 
     app = FastAPI()
@@ -248,3 +249,17 @@ def test_live_api_attach_mode_starts_without_consulting_displays(tmp_path, monke
     assert state['output']['transport'] == 'fill-key', state
     assert state['output']['alpha'] is True
     assert 'displayId' not in state['output']
+
+
+def test_live_start_forwards_per_session_continuity_opt_out(tmp_path, monkeypatch):
+    client, _, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+    response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': 'off'})
+    assert response.status_code == 200
+    assert adapters[-1].continuity == 'off'
+
+
+def test_live_start_rejects_unknown_continuity_mode(tmp_path, monkeypatch):
+    client, _, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+    response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': 'force'})
+    assert response.status_code == 422
+    assert not adapters

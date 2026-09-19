@@ -7,5 +7,12 @@
 .live-upcoming { display: flex; gap: 16px; }
 .live-upcoming .live-still { flex: 1; }
 .live-notes { white-space: pre-wrap; }
+.live-continuity { margin: 16px 0; }
+.live-continuity-badge { display: inline-flex; padding: 4px 10px; border: 1px solid currentColor; border-radius: 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.live-continuity-badge[data-mode="qualified"] { color: var(--ok); }
+.live-continuity-badge[data-mode="unsupported"] { color: var(--warn); }
+.live-continuity .note { margin: 8px 0 0; overflow-wrap: anywhere; }
+.live-continuity-choice, .live-continuity-help { flex-basis: 100%; }
+.live-continuity-help { margin: 0; }
 .live-deck { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; }
 @media (max-width: 650px) { .live-upcoming { flex-wrap: wrap; } .live-upcoming .live-still { flex-basis: 40%; } }

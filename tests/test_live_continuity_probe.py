@@ -420,3 +420,173 @@ class TestOverallStatusTruthTable:
         result["arms"]["B"]["continue3to4"] = {"verdict": True}  # should have been False
         status, _ = probe.overall_status(result)
         assert status == "fail"
+
+
+def moving_boundary_samples() -> list[dict[str, Any]]:
+    samples = []
+    phases = (
+        [(6, "IdleAtFinalState", False, 0.0)] * 10
+        + [(7, "Playing", True, index / 30) for index in range(31)]
+        + [(7, "IdleAtFinalState", False, 1.0)] * 5
+        + [(8, "IdleAtInitialState", False, 1.0)] * 20
+    )
+    for index, (scene, state, busy, progress) in enumerate(phases):
+        t = index * 50.0
+        rect = {key: SRC_RECT[key] + progress * (DST_RECT[key] - SRC_RECT[key]) for key in SRC_RECT}
+        row = sample(t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=rect))
+        row.update(playerState=state, busy=busy)
+        samples.append(row)
+    return samples
+
+
+def score_moving_boundary(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    return probe.score_continuity(
+        samples, ASSET, 8, SRC_RECT, DST_RECT, runtime_installed=True, transition_scene=7,
+    )
+
+
+class TestMovingBoundary:
+    def test_shared_scalar_motion_then_destination_at_idle_final_passes(self) -> None:
+        result = score_moving_boundary(moving_boundary_samples())
+        assert result["verdict"] is True
+        assert result["motion"]["errors"] == []
+        assert result["motion"]["sampleCount"] == 31
+
+    @pytest.mark.parametrize("defect", ["old-footprint", "stationary-snap", "early-destination", "backward", "off-path"])
+    def test_movement_null_controls_fail(self, defect: str) -> None:
+        samples = moving_boundary_samples()
+        moving = [row for row in samples if row["playerState"] == "Playing"]
+        for index, row in enumerate(moving):
+            rect = row["videos"][0]["rect"]
+            if defect == "old-footprint":
+                rect.update(SRC_RECT, x=109.0)
+            elif defect == "stationary-snap":
+                rect.update(SRC_RECT)
+            elif defect == "early-destination":
+                rect.update(DST_RECT)
+            elif defect == "backward" and 10 <= index < 20:
+                progress = (30 - index) / 30
+                rect.update({key: SRC_RECT[key] + progress * (DST_RECT[key] - SRC_RECT[key]) for key in SRC_RECT})
+            elif defect == "off-path":
+                rect["y"] = SRC_RECT["y"]
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert result["motion"]["errors"]
+
+    @pytest.mark.parametrize("field,value", [("scene", 6), ("playerState", "SettingUpScene"), ("busy", False)])
+    def test_path_allowance_requires_actual_playing_transition(self, field: str, value: Any) -> None:
+        samples = moving_boundary_samples()
+        for row in samples:
+            if row["playerState"] == "Playing":
+                row[field] = value
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert result["rectMismatches"]
+
+    def test_settled_source_must_remain_at_source(self) -> None:
+        samples = moving_boundary_samples()
+        for row in samples:
+            if row["scene"] == 6:
+                row["videos"][0]["rect"] = dict(DST_RECT)
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert result["rectMismatches"]
+
+    def test_idle_final_transition_scene_must_already_be_at_destination(self) -> None:
+        samples = moving_boundary_samples()
+        for row in samples:
+            if row["scene"] == 7 and row["playerState"] == "IdleAtFinalState":
+                row["videos"][0]["rect"] = dict(SRC_RECT)
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert result["rectMismatches"]
+
+    def test_owner_must_match_during_motion_too(self) -> None:
+        samples = moving_boundary_samples()
+        samples[20]["videos"][0]["footprintOwner"]["elId"] = 999
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert result["ownerMismatches"]
+
+    def test_motion_does_not_weaken_clock_gate(self) -> None:
+        samples = moving_boundary_samples()
+        for row in samples[20:]:
+            row["videos"][0]["currentTime"] -= 1.0
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert result["maxDropS"] > probe.MAX_DROP_S
+
+    def test_path_allowance_is_opt_in(self) -> None:
+        result = probe.score_continuity(moving_boundary_samples(), ASSET, 8, SRC_RECT, DST_RECT, True)
+        assert result["verdict"] is False
+        assert result["rectMismatches"]
+
+    def test_sampler_preserves_phase_evidence_in_track(self) -> None:
+        samples = moving_boundary_samples()
+        tracked = probe.track_by_id(samples, ASSET)[1]
+        assert tracked[10]["playerState"] == "Playing"
+        assert tracked[10]["busy"] is True
+
+    def test_nonfinite_rect_never_passes_path_gate(self) -> None:
+        samples = moving_boundary_samples()
+        samples[20]["videos"][0]["rect"]["x"] = float("nan")
+        assert score_moving_boundary(samples)["verdict"] is False
+
+    def test_wait_after_motion_does_not_clip_transition_out_of_window(self) -> None:
+        samples = moving_boundary_samples()
+        insert_at = next(index for index, row in enumerate(samples) if row["scene"] == 8)
+        waiting = samples[insert_at - 1]
+        samples[insert_at:insert_at] = [
+            {**waiting, "videos": [dict(waiting["videos"][0])]} for _ in range(80)
+        ]
+        for index, row in enumerate(samples):
+            row["t"] = index * 50.0
+            row["videos"][0]["currentTime"] = 5.0 + index * 0.05
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is True
+        assert result["motion"]["sampleCount"] == 31
+        assert result["window"]["start"] <= samples[10]["t"]
+
+    def test_cumulative_backward_drift_cannot_hide_below_per_frame_jitter(self) -> None:
+        values = (
+            [index / 20 for index in range(11)]
+            + [0.5 - index * 0.005 for index in range(1, 11)]
+            + [0.45 + index * 0.05 for index in range(1, 12)]
+        )
+        rows = [{"rect": {key: SRC_RECT[key] + progress * (DST_RECT[key] - SRC_RECT[key]) for key in SRC_RECT}} for progress in values]
+        result = probe.score_motion(rows, SRC_RECT, DST_RECT, probe.RECT_TOLERANCE_PX)
+        assert "transition progress reverses" in result["errors"]
+
+    def test_transition_without_settled_source_evidence_fails(self) -> None:
+        samples = [row for row in moving_boundary_samples() if row["scene"] >= 7]
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert "settled source not observed" in result["motion"]["errors"]
+
+    def test_static_same_asset_ghost_cannot_displace_actual_moving_owner(self) -> None:
+        samples = moving_boundary_samples()
+        for row in samples:
+            ghost_rect = SRC_RECT if row["scene"] < 7 or row["playerState"] == "Playing" else DST_RECT
+            row["videos"].append(video(
+                id=2, el_id=2, t=row["t"], scene=row["scene"], current_time=5.0 + row["t"] / 1000,
+                rect=dict(ghost_rect), owner_el_id=1,
+            ))
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is True
+        assert result["elementId"] == 1
+
+    @pytest.mark.parametrize("missing_indices", [range(20, 25), range(5, 6), range(60, 61)])
+    def test_selected_decoder_must_exist_in_every_window_frame(self, missing_indices: range) -> None:
+        samples = moving_boundary_samples()
+        for index in missing_indices:
+            samples[index]["videos"] = []
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert [row["t"] for row in result["missingSamples"]] == [samples[index]["t"] for index in missing_indices]
+
+    def test_static_boundary_also_rejects_temporarily_missing_decoder(self) -> None:
+        samples = rows_around_boundary()
+        samples[25]["videos"] = []
+        result = probe.score_continuity(samples, ASSET, 2, SRC_RECT, DST_RECT, True)
+        assert result["verdict"] is False
+        assert result["missingSamples"][0]["t"] == samples[25]["t"]

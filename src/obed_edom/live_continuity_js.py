@@ -16,7 +16,9 @@ Plan object (`window.__OBED_CONTINUITY__`, set before this script runs; absent
       "boundaries": [
         {"atScene": <scene index>, "action": "restart" | "bridge",
          "rect": {"x": int, "y": int, "w": int, "h": int},   // "bridge" only
-         "movieKey": "<movieKey>"}                            // "bridge" only
+         "movieKey": "<movieKey>",
+         "srcRect": {"x": int, "y": int, "w": int, "h": int},
+         "durationSeconds": <positive exported duration>}                            // "bridge" only
       ],
       "transparentBackground": <bool, optional, default false>
     }
@@ -30,13 +32,16 @@ action is "pin" (the movie continues across the cut at a static footprint —
 the existing 1->2 handling, which needs no boundary entry). "restart" retires
 the preserved decoder so the export's fresh element plays; "bridge" carries
 the preserved decoder to `rect`, suppressing the export's fresh element. A
-later increment derives this plan from export data instead of a fixture.
+plan is derived from export data and restricted to the measured allowlist.
+The bridge moves during the preceding transition scene using linear interpolation
+over the exported duration. This is a fallback for WebGL movie geometry with no
+unambiguous animated DOM rectangle; it does not attest native Keynote easing.
 """
 from __future__ import annotations
 
 import hashlib
 
-CONTINUITY_VERSION = 1
+CONTINUITY_VERSION = 2
 
 PRESERVE_CORE_JS = r"""
 (function(){
@@ -475,6 +480,51 @@ PRESERVE_CORE_JS = r"""
     if (r && typeof r === 'object' && r.w > 1 && r.h > 1) return r;
     return null;
   }
+  function keepThroughBridge(v) {
+    const boundary = bridgeBoundary();
+    const hn = currentHashNum();
+    if (!boundary || hn !== boundary.atScene - 1
+        || movieAssetKey(v.currentSrc || v.src || '') !== boundary.movieKey
+        || !boundary.srcRect || !(boundary.durationSeconds > 0)) return false;
+    const generation = preserveGeneration;
+    if (!v.__obedMotion || v.__obedMotion.generation !== generation
+        || v.__obedMotion.boundary !== boundary) {
+      v.__obedMotion = {started: performance.now(), generation: generation, boundary: boundary};
+    }
+    const started = v.__obedMotion.started;
+    const src = boundary.srcRect, dest = boundary.rect;
+    const stage = document.getElementById('body') || document.body;
+    if (v.parentNode !== stage) {
+      beginMove(v);
+      stage.appendChild(v);
+    }
+    if (v.__obedMotionPinning) return true;
+    v.__obedMotionPinning = true;
+    v.style.position = 'absolute';
+    v.style.visibility = 'visible';
+    v.style.display = 'block';
+    v.style.opacity = '1';
+    v.style.pointerEvents = 'none';
+    v.dataset.obedRemounted = '1';
+    function frame() {
+      const scene = currentHashNum();
+      if (generation !== preserveGeneration || v.__obedRemountEpoch === -1
+          || v.ended || !document.contains(v) || scene !== boundary.atScene - 1) {
+        v.__obedMotionPinning = false;
+        return;
+      }
+      const progress = Math.min(1, Math.max(0, (performance.now() - started) / (1000 * boundary.durationSeconds)));
+      v.style.left = (src.x + (dest.x - src.x) * progress) + 'px';
+      v.style.top = (src.y + (dest.y - src.y) * progress) + 'px';
+      v.style.width = (src.w + (dest.w - src.w) * progress) + 'px';
+      v.style.height = (src.h + (dest.h - src.h) * progress) + 'px';
+      requestAnimationFrame(frame);
+    }
+    frame();
+    note('bridge-motion-start', {elId: v.__obedElId, durationSeconds: boundary.durationSeconds,
+      srcRect: src, rect: dest, geometrySource: 'export-duration-interpolation'});
+    return true;
+  }
   function keepAtSlot(real, stub) {
     if (real.__obedSlotPinning) return;
     real.__obedSlotPinning = true;
@@ -695,6 +745,7 @@ PRESERVE_CORE_JS = r"""
       return;
     }
     if (v.__obedRemountEpoch === -1 || v.ended) return;
+    if (keepThroughBridge(v)) return;
     if (v.__obedParent && document.contains(v.__obedParent)) {
       try {
         const anchor = (v.__obedNextSibling && v.__obedNextSibling.parentNode === v.__obedParent)
@@ -1113,6 +1164,7 @@ PRESERVE_CORE_JS = r"""
     };
     return el;
   };
+  window.__OBED_P2_PRESERVE__.ready = true;
 })();
 """.strip()
 
