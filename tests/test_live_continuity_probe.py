@@ -13,6 +13,7 @@ by file path, mirroring `tests/test_p2_adversarial.py`.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
@@ -42,6 +43,25 @@ probe = _load_probe_module()
 ASSET = "untitled.mov"
 SRC_RECT = {"x": 100.0, "y": 100.0, "w": 200.0, "h": 100.0}
 DST_RECT = {"x": 300.0, "y": 300.0, "w": 260.0, "h": 130.0}
+
+IDENTITY_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+SCALED_STAGE_MAP_4_3 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+LETTERBOXED_STAGE_MAP_5_6 = {"s": 5 / 6, "sy": 5 / 6, "ox": 0.0, "oy": 50.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+
+_UNSET = object()
+
+
+def _screen_rect(authored: dict[str, float], stage_map: dict[str, Any]) -> dict[str, float]:
+    """Test-only inverse of `probe.to_authored_rect`: build the on-screen rect a
+    real sampler would have observed for a given authored rect under a given
+    stage map."""
+    s = stage_map["s"]
+    return {
+        "x": authored["x"] * s + stage_map["ox"],
+        "y": authored["y"] * s + stage_map["oy"],
+        "w": authored["w"] * s,
+        "h": authored["h"] * s,
+    }
 
 
 def video(
@@ -84,8 +104,9 @@ def video(
     }
 
 
-def sample(t: float, scene: float | None, *videos: dict[str, Any]) -> dict[str, Any]:
-    return {"t": t, "scene": scene, "videos": list(videos)}
+def sample(t: float, scene: float | None, *videos: dict[str, Any], stage_map: Any = _UNSET) -> dict[str, Any]:
+    resolved = IDENTITY_STAGE_MAP if stage_map is _UNSET else stage_map
+    return {"t": t, "scene": scene, "videos": list(videos), "stageMap": resolved}
 
 
 def rows_around_boundary(
@@ -102,18 +123,31 @@ def rows_around_boundary(
     owner_mismatch_after: bool = False,
     off_rect_after: bool = False,
     disconnected_after: bool = False,
+    stage_map: Any = _UNSET,
+    rect_stage_map: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """A clean, carrying decoder (id=1/elId=1) that spans `boundary_scene` with a
-    steadily advancing clock, optionally injected with one specific defect."""
+    steadily advancing clock, optionally injected with one specific defect.
+    `stage_map` is what the sample RECORDS (the probe's own reading, `None`
+    meaning "no `#stage`"); `rect_stage_map` is the map actually used to place
+    the sampled `<video>` rects on screen -- it defaults to the recorded map
+    (a correctly-mapped stage) but a test can diverge them to build a
+    scale/offset defect. Defaults to identity if not given."""
     src_rect = src_rect or SRC_RECT
     dst_rect = dst_rect or DST_RECT
+    stage_map = IDENTITY_STAGE_MAP if stage_map is _UNSET else stage_map
+    rect_stage_map = rect_stage_map or (stage_map if stage_map else IDENTITY_STAGE_MAP)
     samples: list[dict[str, Any]] = []
     t = 0.0
     current_time = start_time
     stall_frames = int(round((stall_run_s * 1000.0) / dt_ms)) if stall_run_s else 0
     stalled_so_far = 0
     for i in range(n_before):
-        samples.append(sample(t, boundary_scene - 1, video(id=1, el_id=1, t=t, scene=boundary_scene - 1, current_time=current_time, rect=dict(src_rect))))
+        samples.append(sample(
+            t, boundary_scene - 1,
+            video(id=1, el_id=1, t=t, scene=boundary_scene - 1, current_time=current_time, rect=_screen_rect(src_rect, rect_stage_map)),
+            stage_map=stage_map,
+        ))
         t += dt_ms
         current_time += dt_ms / 1000.0
     if clock_drop:
@@ -121,9 +155,10 @@ def rows_around_boundary(
     for i in range(n_after):
         scene = boundary_scene
         owner = 999 if owner_mismatch_after else "SELF"
-        rect = dict(dst_rect)
+        authored_rect = dict(dst_rect)
         if off_rect_after:
-            rect["x"] += 50
+            authored_rect["x"] += 50
+        rect = _screen_rect(authored_rect, rect_stage_map)
         connected = not disconnected_after
         advance = 0.0 if stalled_so_far < stall_frames else dt_ms / 1000.0
         samples.append(
@@ -133,6 +168,7 @@ def rows_around_boundary(
                     id=1, el_id=1, t=t, scene=scene, current_time=current_time,
                     rect=rect, owner_el_id=owner, is_connected=connected,
                 ),
+                stage_map=stage_map,
             )
         )
         current_time += advance
@@ -352,20 +388,24 @@ class TestOverallStatusTruthTable:
                 "A": {
                     "continuity": {"mode": "qualified"},
                     "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(True),
+                    "stageFit": verdict(True),
                 },
                 "B": {
                     "continuity": {"mode": "off"},
                     "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
+                    "stageFit": verdict(True),
                 },
                 "C": {
                     "continuity": {"mode": "qualified"},
                     "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(False),
+                    "stageFit": verdict(True),
                 },
             },
             "attach": {
                 "continuity": {"mode": "qualified"},
                 "transparentBackground": {"computedBackground": "rgba(0, 0, 0, 0)"},
                 "continue1to2": verdict(True), "restart2to3": verdict(True), "continue3to4": verdict(True),
+                "stageFit": verdict(True),
             },
         }
 
@@ -635,3 +675,226 @@ class TestMovingBoundary:
         result = score_moving_boundary(samples)
         assert result["verdict"] is False
         assert result["rectMismatches"]
+
+
+class TestStageMapIdentityConversion:
+    def test_identity_stage_map_conversion_is_a_noop(self) -> None:
+        """(a) rows at 1:1 with a recorded stage map of s=1 must score exactly
+        as they did before I3 -- the conversion pipeline is a true no-op at
+        identity."""
+        samples = rows_around_boundary()
+        converted, invalid_count = probe.convert_samples_to_authored(samples)
+        assert invalid_count == 0
+        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
+        assert verdict["verdict"] is True
+        assert verdict["stageMapInvalid"] == []
+
+
+class TestStageMapScaledConversion:
+    @pytest.mark.parametrize(
+        "stage_map",
+        [SCALED_STAGE_MAP_4_3, LETTERBOXED_STAGE_MAP_5_6],
+        ids=["scaled-4-3-origin-0-0", "letterboxed-5-6-origin-0-50"],
+    )
+    def test_correctly_recorded_scaled_stage_passes(self, stage_map: dict[str, Any]) -> None:
+        """(b) the same authored trajectory expressed in SCREEN px at a scaled
+        and at a letterboxed (non-zero origin) stage map, correctly recorded,
+        converts back to the authored numbers and scores green."""
+        samples = rows_around_boundary(stage_map=stage_map, rect_stage_map=stage_map)
+        converted, invalid_count = probe.convert_samples_to_authored(samples)
+        assert invalid_count == 0
+        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
+        assert verdict["verdict"] is True
+        assert verdict["rectMismatches"] == []
+
+    def test_wrongly_assumed_identity_map_is_a_null_control(self) -> None:
+        """(c) NULL CONTROL: rects genuinely sampled on a 4/3-scaled stage, but
+        the sample wrongly RECORDS an identity map -- the instrument must see
+        the scale error, not silently accept the raw screen numbers."""
+        samples = rows_around_boundary(stage_map=IDENTITY_STAGE_MAP, rect_stage_map=SCALED_STAGE_MAP_4_3)
+        converted, invalid_count = probe.convert_samples_to_authored(samples)
+        assert invalid_count == 0
+        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
+        assert verdict["verdict"] is False
+        assert verdict["rectMismatches"]
+
+    def test_unmapped_runtime_control(self) -> None:
+        """(d) UNMAPPED RUNTIME control: the stage map is correctly recorded as
+        4/3-scaled, but the sampled `<video>` rects sit at the raw unscaled
+        authored numbers -- what an old v2 runtime that never applied the
+        scale to its screen writes would produce. Must be red."""
+        samples = rows_around_boundary(stage_map=SCALED_STAGE_MAP_4_3, rect_stage_map=IDENTITY_STAGE_MAP)
+        converted, invalid_count = probe.convert_samples_to_authored(samples)
+        assert invalid_count == 0
+        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
+        assert verdict["verdict"] is False
+        assert verdict["rectMismatches"]
+
+    def test_missing_letterbox_origin_control(self) -> None:
+        """(e) offset bug control: the stage map is correctly recorded with the
+        letterboxed +50 y-origin, but the sampled rects were actually placed
+        as if the origin were 0 (the bug this arm exists to catch). Must be
+        red."""
+        buggy_rect_map = {**LETTERBOXED_STAGE_MAP_5_6, "oy": 0.0}
+        samples = rows_around_boundary(stage_map=LETTERBOXED_STAGE_MAP_5_6, rect_stage_map=buggy_rect_map)
+        converted, invalid_count = probe.convert_samples_to_authored(samples)
+        assert invalid_count == 0
+        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
+        assert verdict["verdict"] is False
+        assert verdict["rectMismatches"]
+
+
+class TestStageMapInvalid:
+    @pytest.mark.parametrize(
+        "stage_map",
+        [
+            None,
+            {"s": 0.0, "sy": 0.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 0.0, "offsetHeight": 0.0},
+            {"s": 1.0, "sy": 1.2, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0},
+        ],
+        ids=["no-stage-element", "zero-box", "non-uniform-scale"],
+    )
+    def test_invalid_stage_map_is_never_silently_skipped(self, stage_map: dict[str, Any] | None) -> None:
+        """(f) a missing/invalid stage map is a scoring FAILURE, reported under
+        `stageMapInvalid`, never a silently-skipped sample."""
+        samples = rows_around_boundary(stage_map=stage_map, rect_stage_map=IDENTITY_STAGE_MAP)
+        converted, invalid_count = probe.convert_samples_to_authored(samples)
+        assert invalid_count == len(samples)
+        verdict = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
+        assert verdict["verdict"] is False
+        assert verdict["stageMapInvalid"]
+
+
+class TestStageFit:
+    def test_matching_fit_passes(self) -> None:
+        """(g) the observed stage map matching the expected aspect-fit of the
+        authored canvas into the viewport scores green."""
+        expected = probe.expected_stage_fit({"width": 1920, "height": 1080}, {"width": 2560, "height": 1440})
+        samples = rows_around_boundary(stage_map=SCALED_STAGE_MAP_4_3, rect_stage_map=SCALED_STAGE_MAP_4_3)
+        converted, _ = probe.convert_samples_to_authored(samples)
+        result = probe.score_stage_fit(converted, expected)
+        assert result["verdict"] is True
+        assert result["mismatchCount"] == 0
+        assert result["invalidCount"] == 0
+
+    def test_wrong_origin_fails(self) -> None:
+        """(g) a stage that reports the expected scale but the wrong origin
+        must fail -- the mapping is only meaningful against a correctly fitted
+        stage."""
+        expected = probe.expected_stage_fit({"width": 1920, "height": 1080}, {"width": 2560, "height": 1440})
+        wrong_map = {**SCALED_STAGE_MAP_4_3, "ox": 200.0}
+        samples = rows_around_boundary(stage_map=wrong_map, rect_stage_map=wrong_map)
+        converted, _ = probe.convert_samples_to_authored(samples)
+        result = probe.score_stage_fit(converted, expected)
+        assert result["verdict"] is False
+        assert result["mismatchCount"] > 0
+
+    def test_no_valid_samples_fails(self) -> None:
+        expected = probe.expected_stage_fit({"width": 1920, "height": 1080}, {"width": 2560, "height": 1440})
+        samples = rows_around_boundary(stage_map=None, rect_stage_map=IDENTITY_STAGE_MAP)
+        converted, _ = probe.convert_samples_to_authored(samples)
+        result = probe.score_stage_fit(converted, expected)
+        assert result["verdict"] is False
+        assert result["invalidCount"] == len(samples)
+
+    def test_zero_samples_fails_no_evidence_is_not_a_pass(self) -> None:
+        expected = probe.expected_stage_fit({"width": 1920, "height": 1080}, {"width": 2560, "height": 1440})
+        result = probe.score_stage_fit([], expected)
+        assert result["verdict"] is False
+
+    def test_one_invalid_sample_outside_the_scored_window_still_fails_the_arm(self) -> None:
+        """Codex review finding: boundary scoring only ever inspects the
+        selected decoder's crossing windows, so a missing/non-uniform
+        stage-map sample sitting OUTSIDE every such window was previously
+        invisible to `stageFit` (it only looked at the samples that happened
+        to be valid). Add one such sample, well past the padded window, with
+        an invalid (missing) stage map: the boundary verdict must stay green
+        (it genuinely never sees this sample) while `stageFit` -- scored over
+        the WHOLE arm -- must still catch it and fail."""
+        expected = probe.expected_stage_fit({"width": 1920, "height": 1080}, {"width": 2560, "height": 1440})
+        samples = rows_around_boundary(stage_map=SCALED_STAGE_MAP_4_3, rect_stage_map=SCALED_STAGE_MAP_4_3)
+        far_t = samples[-1]["t"] + probe.WINDOW_PAD_S * 1000.0 + 500.0
+        samples = samples + [
+            sample(
+                far_t, 2.0,
+                video(id=1, el_id=1, t=far_t, scene=2.0, current_time=99.0, rect={"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}),
+                stage_map=None,
+            )
+        ]
+        converted, invalid_count = probe.convert_samples_to_authored(samples)
+        assert invalid_count == 1
+
+        boundary = probe.score_continuity(converted, ASSET, 2.0, SRC_RECT, DST_RECT, runtime_installed=True)
+        assert boundary["verdict"] is True
+        assert boundary["stageMapInvalid"] == []
+
+        result = probe.score_stage_fit(converted, expected)
+        assert result["verdict"] is False
+        assert result["invalidCount"] == 1
+
+
+class TestOverallStatusStageFit:
+    """Fail-closed: `stage_fit_ok` passes only on an explicit truthy verdict.
+    `_base_result` (shared with `TestOverallStatusTruthTable`) now carries a
+    passing `stageFit` on every arm and on attach, so these tests exercise
+    deviations from that baseline rather than an absent field."""
+
+    def _base_result(self) -> dict[str, Any]:
+        return TestOverallStatusTruthTable()._base_result()
+
+    def test_arm_a_stage_fit_failure_fails_even_if_boundaries_are_green(self) -> None:
+        result = self._base_result()
+        result["arms"]["A"]["stageFit"] = {"verdict": False}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("arm A stageFit failed" in r for r in reasons)
+
+    def test_attach_stage_fit_failure_fails(self) -> None:
+        result = self._base_result()
+        result["attach"]["stageFit"] = {"verdict": False}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("attach stageFit failed" in r for r in reasons)
+
+    @pytest.mark.parametrize(
+        ("path", "label"),
+        [
+            (("arms", "A"), "arm A"),
+            (("arms", "B"), "arm B"),
+            (("arms", "C"), "arm C"),
+            (("attach",), "attach"),
+        ],
+    )
+    def test_missing_stage_fit_fails_closed(self, path: tuple[str, ...], label: str) -> None:
+        """A `stageFit` key that is simply absent -- an arm that crashed before
+        scoring it, or a caller that never set it -- must fail, not pass, and
+        must be distinguishable (by reason text) from an explicit False
+        verdict."""
+        result = self._base_result()
+        entry = result
+        for key in path[:-1]:
+            entry = entry[key]
+        del entry[path[-1]]["stageFit"]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any(f"{label} stageFit missing" in r for r in reasons)
+
+
+class TestViewportParsing:
+    def test_parses_valid_viewport(self) -> None:
+        assert probe.parse_viewport_arg("2560x1440") == (2560, 1440)
+
+    def test_default_viewport_is_1920x1080(self) -> None:
+        args = probe.parse_args([])
+        assert args.viewport == (probe.VIEWPORT_WIDTH, probe.VIEWPORT_HEIGHT)
+
+    def test_viewport_flag_overrides_default(self) -> None:
+        args = probe.parse_args(["--viewport", "1600x1000"])
+        assert args.viewport == (1600, 1000)
+
+    @pytest.mark.parametrize(
+        "value", ["", "1920", "1920xabc", "0x1080", "1920x0", "-100x1080", "1920,1080"]
+    )
+    def test_rejects_bad_viewport(self, value: str) -> None:
+        with pytest.raises(argparse.ArgumentTypeError):
+            probe.parse_viewport_arg(value)

@@ -49,7 +49,7 @@ class FakeCdp:
         self.busy = self.busy_on_enter
     def evaluate(self, expression):
         if "__OBED_CONTINUITY_INFO__" in expression:
-            return {"ready": False, "info": {"installed": False, "reason": live_host._CONTINUITY_VIEWPORT_REASON}}
+            return {"ready": False, "present": False, "info": {"installed": True}, "stage": None}
         if "__obedLive" in expression:
             return {"exportedSlideIndex": self.index, "sceneId": self.index, "buildIndex": None, "revision": self.revision, "canAdvance": self.can_advance, "canGoTo": not self.busy, "ready": not self.busy, "busy": self.busy}
         if ".hide()" in expression: self.visible = False; return None
@@ -877,41 +877,221 @@ def test_continuity_unsupported_from_to_runtime(tmp_path, monkeypatch):
     assert output._server.continuity_script == ""
 
 
-def test_continuity_unsupported_viewport_mismatch(tmp_path, monkeypatch):
+def stage_geometry(offset_width, offset_height, left, top, width, height):
+    return {"offsetWidth": offset_width, "offsetHeight": offset_height, "rect": {"left": left, "top": top, "width": width, "height": height}}
+
+
+def continuity_ready_evaluate(real_evaluate, stages):
+    """A FakeCdp.evaluate replacement that reports the runtime ready and returns
+    successive stage readings from `stages` for the continuity readback (the last
+    value repeats once exhausted, simulating a stage that settles after N polls);
+    everything else falls through to `real_evaluate`."""
+    remaining = list(stages)
+
+    def evaluate(self, expression):
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            current = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+            return {"ready": True, "info": {"installed": True}, "stage": current}
+        return real_evaluate(self, expression)
+
+    return evaluate
+
+
+def test_continuity_qualified_at_1to1(tmp_path, monkeypatch):
     output = host_with_continuity(tmp_path, monkeypatch)
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]))
     output.observe()
-    assert output._continuity_mode == "unsupported"
-    assert "viewport is not the authored size" in output.output["continuity"]["reason"]
+    assert output._continuity_mode == "qualified"
+    assert "reason" not in output.output["continuity"]
+    assert output.output["continuity"]["scale"] == 1.0
     assert output._server.continuity_script != ""
 
 
-def test_continuity_qualified_when_page_confirms_install(tmp_path, monkeypatch):
+def test_continuity_qualified_at_scaled_stage(tmp_path, monkeypatch):
     output = host_with_continuity(tmp_path, monkeypatch)
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 2560, 1440)]))
+    output.observe()
+    assert output._continuity_mode == "qualified"
+    assert output.output["continuity"]["scale"] == pytest.approx(1.3333, abs=1e-4)
+
+
+def test_continuity_qualified_letterboxed(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 50, 1600, 900)]))
+    output.observe()
+    assert output._continuity_mode == "qualified"
+    assert output.output["continuity"]["scale"] == pytest.approx(1600 / 1920, abs=1e-4)
+
+
+def test_continuity_stage_settles_after_a_few_polls(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.timeout_s = 2.0
+    monkeypatch.setattr(
+        FakeCdp, "evaluate",
+        continuity_ready_evaluate(FakeCdp.evaluate, [None, None, stage_geometry(1920, 1080, 0, 0, 1920, 1080)]),
+    )
+    output.observe()
+    assert output._continuity_mode == "qualified"
+
+
+def test_continuity_stage_offset_size_mismatch_disables_runtime(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.timeout_s = .05
     real_evaluate = FakeCdp.evaluate
+    disable_calls = []
 
     def evaluate(self, expression):
-        if "__OBED_P2_PRESERVE__" in expression and "clear" not in expression:
-            return {"ready": True, "info": {"installed": True}}
+        if "disable" in expression:
+            disable_calls.append(expression)
+            return True
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            return {"ready": True, "info": {"installed": True}, "stage": stage_geometry(1024, 768, 0, 0, 1024, 768)}
         return real_evaluate(self, expression)
 
     monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
     output.observe()
-    assert output._continuity_mode == "qualified"
-    assert "reason" not in output.output["continuity"]
-    assert output._server.continuity_script != ""
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "stage is not the authored size"
+    assert disable_calls
+
+
+def test_continuity_non_uniform_scale_disables_runtime(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.timeout_s = .05
+    real_evaluate = FakeCdp.evaluate
+    disable_calls = []
+
+    def evaluate(self, expression):
+        if "disable" in expression:
+            disable_calls.append(expression)
+            return True
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            return {"ready": True, "info": {"installed": True}, "stage": stage_geometry(1920, 1080, 0, 0, 2560, 1000)}
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "stage scale is non-uniform"
+    assert disable_calls
+
+
+def test_continuity_stage_gate_deadline_expiry_disables_runtime(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.timeout_s = .12
+    real_evaluate = FakeCdp.evaluate
+    disable_calls = []
+
+    def evaluate(self, expression):
+        if "disable" in expression:
+            disable_calls.append(expression)
+            return True
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            return {"ready": True, "info": {"installed": True}, "stage": None}
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "stage is not the authored size"
+    assert disable_calls
+
+
+def test_continuity_disable_not_confirmed_raises(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.timeout_s = .05
+    real_evaluate = FakeCdp.evaluate
+
+    def evaluate(self, expression):
+        if "disable" in expression:
+            return False
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            return {"ready": True, "info": {"installed": True}, "stage": None}
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    with pytest.raises(live_host.LiveHostError, match="could not be confirmed disabled"):
+        output.observe()
+
+
+def test_continuity_runtime_never_present_is_immediate_no_polling_no_disable(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.timeout_s = 5.0  # would hang for seconds if the gate incorrectly polled this case
+    real_evaluate = FakeCdp.evaluate
+    calls, disable_calls = [], []
+
+    def evaluate(self, expression):
+        if "disable" in expression:
+            disable_calls.append(expression)
+            return True
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            calls.append(expression)
+            return {"ready": False, "present": False, "info": {"installed": True}, "stage": None}
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    start = time.monotonic()
+    output.observe()
+    elapsed = time.monotonic() - start
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "runtime failed to install"
+    assert len(calls) == 1
+    assert disable_calls == []
+    assert elapsed < 1.0
+
+
+def test_continuity_partial_install_never_ready_disables_runtime(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.timeout_s = 5.0  # would hang for seconds if the gate incorrectly polled this case
+    real_evaluate = FakeCdp.evaluate
+    calls, disable_calls = [], []
+
+    def evaluate(self, expression):
+        if "disable" in expression:
+            disable_calls.append(expression)
+            return True
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            calls.append(expression)
+            return {"ready": False, "present": True, "info": {"installed": True}, "stage": None}
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    start = time.monotonic()
+    output.observe()
+    elapsed = time.monotonic() - start
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "runtime failed to install"
+    assert len(calls) == 1
+    assert len(disable_calls) == 1
+    assert elapsed < 1.0
+
+
+def test_continuity_partial_install_disable_unconfirmed_raises(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.timeout_s = 5.0
+    real_evaluate = FakeCdp.evaluate
+
+    def evaluate(self, expression):
+        if "disable" in expression:
+            return False
+        if "__OBED_CONTINUITY_INFO__" in expression:
+            return {"ready": False, "present": True, "info": {"installed": True}, "stage": None}
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    with pytest.raises(live_host.LiveHostError, match="could not be confirmed disabled"):
+        output.observe()
 
 
 def test_continuity_go_to_clears_runtime_only_when_qualified(tmp_path, monkeypatch):
     output = host_with_continuity(tmp_path, monkeypatch)
-    real_evaluate = FakeCdp.evaluate
+    real_evaluate = continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)])
     calls = []
 
     def evaluate(self, expression):
         if "clear" in expression:
             calls.append(expression)
             return None
-        if "__OBED_P2_PRESERVE__" in expression:
-            return {"ready": True, "info": {"installed": True}}
         return real_evaluate(self, expression)
 
     monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
@@ -985,7 +1165,7 @@ def test_continuity_output_shape(tmp_path, monkeypatch):
     output = host_with_continuity(tmp_path, monkeypatch)
     output.observe()
     continuity = output.output["continuity"]
-    assert set(continuity) <= {"mode", "reason", "version", "sha256"}
+    assert set(continuity) <= {"mode", "reason", "version", "sha256", "scale"}
     assert continuity["mode"] == "unsupported"
     assert continuity["version"] == live_host.CONTINUITY_VERSION
     assert isinstance(continuity["sha256"], str) and len(continuity["sha256"]) == 64
@@ -1070,8 +1250,8 @@ def test_click_stage_refuses_missing_or_invalid_geometry(tmp_path, monkeypatch, 
         transport.click_stage()
 
 
-@pytest.mark.parametrize("readback", [None, {}, {"ready": False, "info": {"installed": True}}, {"ready": True, "info": None}])
-def test_continuity_runtime_failure_is_distinct_from_viewport_mismatch(tmp_path, monkeypatch, readback):
+@pytest.mark.parametrize("readback", [None, {}, {"ready": False, "present": False, "info": {"installed": True}, "stage": None}])
+def test_continuity_runtime_failure_is_distinct_from_stage_gate_failure(tmp_path, monkeypatch, readback):
     output = host_with_continuity(tmp_path, monkeypatch)
     real_evaluate = FakeCdp.evaluate
     def evaluate(self, expression):

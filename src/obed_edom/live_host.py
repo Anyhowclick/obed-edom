@@ -39,27 +39,33 @@ ATTACH_ENV = "OBED_LIVE_ATTACH"
 ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
 ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
-_CONTINUITY_VIEWPORT_REASON = "viewport is not the authored size (scaled-stage mapping pending)"
 _UNSET = object()
+_CONTINUITY_STAGE_GATE_EXPR = (
+    "(()=>{var s=document.getElementById('stage');var r=s?s.getBoundingClientRect():null;"
+    "return {ready:!!(window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.ready===true),"
+    "present:!!window.__OBED_P2_PRESERVE__,"
+    "info:window.__OBED_CONTINUITY_INFO__||null,"
+    "stage:s?{offsetWidth:s.offsetWidth,offsetHeight:s.offsetHeight,"
+    "rect:{left:r.left,top:r.top,width:r.width,height:r.height}}:null};})()"
+)
 
 
 def _continuity_plan_script(plan: dict[str, Any], canvas: dict[str, int]) -> str:
-    """Embed the runtime plan as `window.__OBED_CONTINUITY__`, installed only when
-    the page's own viewport matches the authored canvas (footprints are authored-size
-    pixels; scaled-stage mapping is a later increment). `</` and U+2028/2029 are
-    escaped so an embedded asset filename cannot break out of the script tag."""
+    """Embed the runtime plan as `window.__OBED_CONTINUITY__`, always installed:
+    footprints are authored-size pixels and the shared runtime maps authored to
+    screen itself from `#stage`; whether the on-screen stage is actually the
+    authored size is confirmed later by the host, once the player has laid it
+    out. `</` and U+2028/2029 are escaped so an embedded asset filename cannot
+    break out of the script tag."""
     payload = json.dumps(plan).replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     width, height = int(canvas["width"]), int(canvas["height"])
     return (
         '<script id="obed-continuity-plan">(function(){'
         f"var plan={payload};var w={width},h={height};"
         "window.__OBED_CONTINUITY_INFO__={authoredWidth:w,authoredHeight:h,"
-        "viewportWidth:window.innerWidth,viewportHeight:window.innerHeight};"
-        "if(window.innerWidth===w&&window.innerHeight===h){"
-        "window.__OBED_CONTINUITY__=plan;window.__OBED_CONTINUITY_INFO__.installed=true;"
-        "}else{window.__OBED_CONTINUITY_INFO__.installed=false;"
-        f"window.__OBED_CONTINUITY_INFO__.reason={json.dumps(_CONTINUITY_VIEWPORT_REASON)};"
-        "}})();</script>\n"
+        "viewportWidth:window.innerWidth,viewportHeight:window.innerHeight,installed:true};"
+        "window.__OBED_CONTINUITY__=plan;"
+        "})();</script>\n"
     )
 
 
@@ -739,11 +745,13 @@ class LiveOutputHost:
         self._continuity_mode: str = "off"
         self._continuity_reason: str | None = None
         self._continuity_runtime_plan: dict[str, Any] | None = None
+        self._continuity_scale: float | None = None
 
     def _resolve_continuity_static(self) -> tuple[str, str | None, dict[str, Any] | None]:
         """Resolve continuity mode from the export alone, before the browser starts.
         `pending` means a runtime plan was derived and must still be confirmed truthfully
-        from the page (the viewport-authored-size check only the page can perform)."""
+        from the page (the stage gate check only the page can perform, once the player has
+        laid the stage out)."""
         if self._continuity_preference == "off" or os.environ.get(CONTINUITY_ENV) == "off":
             return "off", None, None
         try:
@@ -759,10 +767,66 @@ class LiveOutputHost:
             runtime = {**runtime, "transparentBackground": True}
         return "pending", None, runtime
 
+    def _stage_gate_outcome(self, stage: Any) -> tuple[str, str | None, float | None]:
+        """Fail-closed judgement of one stage-geometry reading against the authored canvas."""
+        if not isinstance(stage, dict):
+            return "unsupported", "stage is not the authored size", None
+        offset_width, offset_height, rect = stage.get("offsetWidth"), stage.get("offsetHeight"), stage.get("rect")
+        def numeric(value: Any) -> bool: return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not (
+            numeric(offset_width) and numeric(offset_height)
+            and int(offset_width) == self._canvas["width"] and int(offset_height) == self._canvas["height"]
+            and isinstance(rect, dict)
+        ):
+            return "unsupported", "stage is not the authored size", None
+        width, height = rect.get("width"), rect.get("height")
+        if not (numeric(width) and numeric(height) and width > 1 and height > 1):
+            return "unsupported", "stage is not the authored size", None
+        scale_x, scale_y = width / offset_width, height / offset_height
+        if abs(scale_x - scale_y) > 0.001 * ((scale_x + scale_y) / 2):
+            return "unsupported", "stage scale is non-uniform", None
+        return "qualified", None, scale_x
+
+    def _disable_continuity_runtime(self) -> bool:
+        result = self._transport.evaluate(
+            "(()=>{var p=window.__OBED_P2_PRESERVE__;if(p&&p.disable)p.disable();"
+            "return !!(p&&p.disabled===true);})()"
+        )
+        return result is True
+
+    def _resolve_continuity_pending(self) -> tuple[str, str | None, dict[str, Any] | None, float | None]:
+        """Confirm the `pending` runtime plan once the page has run: the shared runtime
+        must have installed, then the host's own JS gates the on-screen `#stage` against
+        the authored canvas (poll: the player lays the stage out asynchronously, after
+        `goto` returns). Any unsupported outcome that finds a preserve object already
+        present disables it, even when it never reached `ready` (a core can install
+        partial hooks/observers and then throw before setting `ready`), so a half- or
+        never-qualified continuity session never plays silently."""
+        deadline = time.monotonic() + self.timeout_s
+        readback = self._transport.evaluate(_CONTINUITY_STAGE_GATE_EXPR)
+        ready = isinstance(readback, dict) and readback.get("ready") is True
+        present = isinstance(readback, dict) and readback.get("present") is True
+        stage = readback.get("stage") if isinstance(readback, dict) else None
+        if not ready:
+            if present and not self._disable_continuity_runtime():
+                raise LiveHostError("Continuity runtime could not be confirmed disabled after an unsupported stage gate.")
+            return "unsupported", "runtime failed to install", stage, None
+        mode, reason, scale = self._stage_gate_outcome(stage)
+        while mode != "qualified" and time.monotonic() < deadline:
+            time.sleep(.05)
+            readback = self._transport.evaluate(_CONTINUITY_STAGE_GATE_EXPR)
+            stage = readback.get("stage") if isinstance(readback, dict) else None
+            mode, reason, scale = self._stage_gate_outcome(stage)
+        if mode != "qualified" and not self._disable_continuity_runtime():
+            raise LiveHostError("Continuity runtime could not be confirmed disabled after an unsupported stage gate.")
+        return mode, reason, stage, scale
+
     def _continuity_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {"mode": self._continuity_mode, "version": CONTINUITY_VERSION, "sha256": js_sha256()}
         if self._continuity_reason is not None:
             info["reason"] = self._continuity_reason
+        if self._continuity_mode == "qualified" and self._continuity_scale is not None:
+            info["scale"] = round(self._continuity_scale, 4)
         return info
 
     @property
@@ -832,21 +896,14 @@ class LiveOutputHost:
             except Exception: version = None
             self._logger.log("browserVersion", result=version)
             self._transport.goto(url)
+            stage_geometry: dict[str, Any] | None = None
             if self._continuity_mode == "pending":
-                installed = self._transport.evaluate(
-                    "({ready:!!(window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.ready),"
-                    "info:window.__OBED_CONTINUITY_INFO__||null})"
+                self._continuity_mode, self._continuity_reason, stage_geometry, self._continuity_scale = (
+                    self._resolve_continuity_pending()
                 )
-                info = installed.get("info") if isinstance(installed, dict) else None
-                if isinstance(info, dict) and info.get("installed") is True and installed.get("ready") is True:
-                    self._continuity_mode, self._continuity_reason = "qualified", None
-                elif isinstance(info, dict) and info.get("installed") is False and info.get("reason") == _CONTINUITY_VIEWPORT_REASON:
-                    self._continuity_mode, self._continuity_reason = "unsupported", _CONTINUITY_VIEWPORT_REASON
-                else:
-                    self._continuity_mode, self._continuity_reason = "unsupported", "runtime failed to install"
             self._logger.log(
                 "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
-                runtimePlan=self._continuity_runtime_plan,
+                runtimePlan=self._continuity_runtime_plan, stage=stage_geometry, scale=self._continuity_scale,
             )
             observed = self._wait_settled()
             try: dpr = self._transport.evaluate("window.devicePixelRatio")

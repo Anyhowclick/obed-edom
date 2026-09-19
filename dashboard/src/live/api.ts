@@ -3,7 +3,7 @@ export type LiveCapability = { supported: boolean; reason?: string };
 export type LiveSlide = { originalOrdinal: number; skipped: boolean; thumbnailUrl?: string; notes?: string };
 export type LivePreparedDeck = { previewJobId: string; name: string; slides: number; sourceDigest: string };
 export type LiveDisplay = { id: string; name: string; width: number; height: number; x: number; y: number; primary: boolean };
-export type LiveContinuity = { mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string };
+export type LiveContinuity = { mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string; scale?: number };
 export type LiveSnapshot = {
   sessionId: string;
   revision: number;

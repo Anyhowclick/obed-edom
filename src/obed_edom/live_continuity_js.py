@@ -36,12 +36,27 @@ plan is derived from export data and restricted to the measured allowlist.
 The bridge moves during the preceding transition scene using linear interpolation
 over the exported duration. This is a fallback for WebGL movie geometry with no
 unambiguous animated DOM rectangle; it does not attest native Keynote easing.
+
+Scaled-stage mapping (I3): the player scales `#stage` with a CSS transform, so
+`#stage.offsetWidth/Height` (authored px, transform-blind) and
+`#stage.getBoundingClientRect()` (on-screen px) diverge whenever the viewport
+is not the authored canvas size. `stageMap()` reads both live (no caching) and
+returns `{s, ox, oy, authoredWidth, authoredHeight}`, `null` when `#stage` is
+missing, degenerate, or non-uniformly scaled. Plan rects (`movies[k].footprint`,
+boundary `rect`/`srcRect`) are authored px; `getBoundingClientRect()`
+measurements are screen px. Stage-level overlays (appended to `document.body`)
+write screen px via `toScreen()`; in-layer remounts (inside `#stage`) divide by
+`s`. `disable()` clears preserved state and makes every hook a pass-through
+for the host to fall back to the raw player without a reload, but only before
+anything has ever been preserved — once a video has been stashed it returns
+`false` and does nothing, since a later disable cannot unwind a live facade,
+bridge or suppress loop.
 """
 from __future__ import annotations
 
 import hashlib
 
-CONTINUITY_VERSION = 2
+CONTINUITY_VERSION = 3
 
 PRESERVE_CORE_JS = r"""
 (function(){
@@ -50,11 +65,21 @@ PRESERVE_CORE_JS = r"""
   var OBED_PLAN = window.__OBED_CONTINUITY__;
   if (!OBED_PLAN) return;
   if (window.__OBED_P2_PRESERVE__) return;
+  let disabled = false;
+  let everPreserved = false;
   window.__OBED_P2_PRESERVE__ = {
-    version: 6,
+    version: 7,
     mode: 'decoder-preserve',
     events: [],
     poolKeys: [],
+    stageMap: function() { return stageMap(); },
+    disable: function() {
+      if (everPreserved) return false;
+      disabled = true;
+      try { window.__OBED_P2_PRESERVE__.clear(); } catch (e) {}
+      window.__OBED_P2_PRESERVE__.disabled = true;
+      return true;
+    },
     remountAll: function() {
       let n = 0;
       pool.forEach(function(q) {
@@ -185,7 +210,7 @@ PRESERVE_CORE_JS = r"""
         return {ok: false, reason: 'draw-failed', message: String(e && e.message || e), elId: elId, where: where};
       }
     },
-    /** Which live decoder owns a screen rect's movie footprint. */
+    /** Which live decoder owns an authored rect's movie footprint. */
     /**
      * Corrected 1->2 model (Step 2): the continuing movie is a live `<video>` at
      * the footprint, never fed into a 2D canvas, so a canvas-authored resolution
@@ -196,6 +221,10 @@ PRESERVE_CORE_JS = r"""
      * them — the off-footprint sibling has zero overlap. Fail closed on an unknown
      * footprint, zero overlap, or a distinct-decoder tie in the top overlap band.
      * A `<video>` has no 2D context stamp, so contextType is null.
+     *
+     * `rect` is AUTHORED px (I3): classify the key against the plan footprint
+     * table in the same authored space (no scaling needed), then map to screen
+     * px once before comparing against `getBoundingClientRect()`.
      */
     footprintOwnerDecoderId: function(rect) {
       // The caller may pin the asset key directly (rect.key) when it queries a
@@ -206,6 +235,9 @@ PRESERVE_CORE_JS = r"""
       // Unresolved footprint key -> fail closed, never admit any movie key
       // (Codex r5 F2): the helper must not own a rect it cannot identify.
       if (wantKey == null) return {elId: null, key: null, via: 'unknown-key', contextType: null};
+      const map = stageMap();
+      if (!map) return {elId: null, key: null, via: 'no-stage-map', contextType: null};
+      const screenRect = toScreen(rect, map);
       // Collect the positioned movie <video>s (DOM + pool, deduped) whose rendered
       // rect closely MATCHES the footprint, THEN decide ownership from the global
       // maximum overlap — order-independent so a later-best cannot mis-clear an
@@ -214,7 +246,7 @@ PRESERVE_CORE_JS = r"""
       // remount rendering smaller than the authored box) AND a too-large one (a
       // giant surface that merely contains the footprint), so only a <video>
       // rendered at ~the footprint geometry can own it (fail closed otherwise).
-      const fpArea = Math.max(1, rect.w * rect.h);
+      const fpArea = Math.max(1, screenRect.w * screenRect.h);
       const cands = [];
       const seen = [];
       function consider(v) {
@@ -230,7 +262,7 @@ PRESERVE_CORE_JS = r"""
         if (!isCompositing(v)) return;
         const r = v.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
-        const ov = rectOverlapArea(r, rect);
+        const ov = rectOverlapArea(r, screenRect);
         if (!(ov > 0)) return;
         const union = (r.width * r.height) + fpArea - ov;
         const iou = union > 0 ? ov / union : 0;
@@ -268,6 +300,31 @@ PRESERVE_CORE_JS = r"""
   // clear() bumps this so pre-clear decoders cannot re-enter the pool / remount.
   // Videos created after clear get the new generation and remount normally.
   let preserveGeneration = 0;
+  const stageMapWarned = {};
+  // Plan rects are AUTHORED px; getBoundingClientRect() and <body>-level overlays
+  // are SCREEN px; inline styles inside the transform-scaled #stage are AUTHORED px.
+  function stageMap() {
+    const stage = document.getElementById('stage');
+    if (!stage) return null;
+    const ow = stage.offsetWidth, oh = stage.offsetHeight;
+    if (!(ow > 1 && oh > 1)) return null;
+    const r = stage.getBoundingClientRect();
+    if (!(r.width > 1 && r.height > 1)) return null;
+    const sx = r.width / ow, sy = r.height / oh;
+    const avg = (sx + sy) / 2;
+    if (!(avg > 0) || Math.abs(sx - sy) / avg > 0.001) return null;
+    return {s: sx, ox: r.left, oy: r.top, authoredWidth: ow, authoredHeight: oh};
+  }
+  function toScreen(rect, map) {
+    const m = map || stageMap();
+    if (!m) return null;
+    return {x: rect.x * m.s + m.ox, y: rect.y * m.s + m.oy, w: rect.w * m.s, h: rect.h * m.s};
+  }
+  function noteStageMapUnavailable(kind) {
+    if (stageMapWarned[kind]) return;
+    stageMapWarned[kind] = true;
+    note('stage-map-unavailable', {consumer: kind});
+  }
   function assetKey(src) {
     const s = String(src || '');
     const tail = (s.split('/').pop() || s).split('?')[0];
@@ -325,6 +382,7 @@ PRESERVE_CORE_JS = r"""
     return v.__obedElId;
   }
   function stash(v, why) {
+    if (disabled) return;
     if (!(v instanceof HTMLVideoElement)) return;
     // Our own remount moves briefly detach the node; that self-triggered detach
     // must not re-stash and re-schedule a remount (exponential reschedule blowup).
@@ -352,6 +410,7 @@ PRESERVE_CORE_JS = r"""
     if (!pool.has(key)) pool.set(key, []);
     const q = pool.get(key);
     if (q.indexOf(v) < 0) q.push(v);
+    everPreserved = true;
     v.dataset.obedPreserved = '1';
     // Remember layout so we can remount as a visible overlay after Magic Move
     // tears the video layer down and leaves only the WebGL/poster texture.
@@ -395,6 +454,7 @@ PRESERVE_CORE_JS = r"""
    * colour frames cover the poster (same path handleMovieDidStart uses).
    */
   function scheduleRemount(v, why) {
+    if (disabled) return;
     if (suppressRemount) {
       note('remount-suppressed', {elId: v && v.__obedElId, why: why});
       return;
@@ -451,8 +511,16 @@ PRESERVE_CORE_JS = r"""
         if (cur.width > 1 && cur.height > 1) {
           const dx = tx - cur.left, dy = ty - cur.top;
           if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-            v.style.left = ((parseFloat(v.style.left) || 0) + dx) + 'px';
-            v.style.top = ((parseFloat(v.style.top) || 0) + dy) + 'px';
+            const stageEl = document.getElementById('stage');
+            const inStage = !!(stageEl && stageEl.contains(v));
+            const map = inStage ? stageMap() : null;
+            if (inStage && !map) {
+              noteStageMapUnavailable('keepAtFootprint');
+            } else {
+              const divisor = map ? map.s : 1;
+              v.style.left = ((parseFloat(v.style.left) || 0) + dx / divisor) + 'px';
+              v.style.top = ((parseFloat(v.style.top) || 0) + dy / divisor) + 'px';
+            }
           }
         }
       }
@@ -514,10 +582,21 @@ PRESERVE_CORE_JS = r"""
         return;
       }
       const progress = Math.min(1, Math.max(0, (performance.now() - started) / (1000 * boundary.durationSeconds)));
-      v.style.left = (src.x + (dest.x - src.x) * progress) + 'px';
-      v.style.top = (src.y + (dest.y - src.y) * progress) + 'px';
-      v.style.width = (src.w + (dest.w - src.w) * progress) + 'px';
-      v.style.height = (src.h + (dest.h - src.h) * progress) + 'px';
+      const authored = {
+        x: src.x + (dest.x - src.x) * progress,
+        y: src.y + (dest.y - src.y) * progress,
+        w: src.w + (dest.w - src.w) * progress,
+        h: src.h + (dest.h - src.h) * progress
+      };
+      const screenRect = toScreen(authored);
+      if (!screenRect) {
+        noteStageMapUnavailable('keepThroughBridge');
+      } else {
+        v.style.left = screenRect.x + 'px';
+        v.style.top = screenRect.y + 'px';
+        v.style.width = screenRect.w + 'px';
+        v.style.height = screenRect.h + 'px';
+      }
       requestAnimationFrame(frame);
     }
     frame();
@@ -539,7 +618,9 @@ PRESERVE_CORE_JS = r"""
       // holds through the containing layer's magic-move transform). Defeats a
       // re-detach's fresh scheduleRemount/footprint-fallback from dragging the
       // bridged decoder off the slide-4 slot at the #8->#9 boundary.
-      const dest = slide4Rect();
+      const destAuthored = slide4Rect();
+      const dest = destAuthored ? toScreen(destAuthored) : null;
+      if (destAuthored && !dest) noteStageMapUnavailable('keepAtSlot');
       const cur = real.getBoundingClientRect();
       if (dest && cur.width > 1 && cur.height > 1) {
         const dx = dest.x - cur.left, dy = dest.y - cur.top;
@@ -589,7 +670,9 @@ PRESERVE_CORE_JS = r"""
     v.__obedBridged34 = true;
     v.__obedRemountEpoch = -1;   // cancel any pending 1->2 remount for v
     v.__obedPinning = false;
-    const dest = slide4Rect();
+    const destAuthored = slide4Rect();
+    const dest = destAuthored ? toScreen(destAuthored) : null;
+    if (destAuthored && !dest) noteStageMapUnavailable('bridgeTo34');
     const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
     try {
       if (stage && v.parentNode !== stage) {
@@ -650,7 +733,9 @@ PRESERVE_CORE_JS = r"""
   function findMovieCanvas(box, v) {
     if (!(box && box.w > 1 && box.h > 1)) return null;
     const maxArea = box.w * box.h * 1.5;
-    const posTol = 10, sizeTol = 16;
+    const mapTol = stageMap();
+    const tolScale = mapTol ? mapTol.s : 1;
+    const posTol = 10 * tolScale, sizeTol = 16 * tolScale;
     const candidates = [];
     const canvases = document.querySelectorAll('canvas');
     for (let i = 0; i < canvases.length; i++) {
@@ -739,6 +824,7 @@ PRESERVE_CORE_JS = r"""
     setTimeout(function(){ v.__obedRemounting = false; }, 0);
   }
   function tryRemount(v, epoch) {
+    if (disabled) return;
     if (!v || suppressRemount) return;
     if (epoch != null && epoch !== remountEpoch) {
       note('remount-stale', {elId: v.__obedElId, epoch: epoch, current: remountEpoch});
@@ -785,12 +871,25 @@ PRESERVE_CORE_JS = r"""
     }
     if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
     let box = v.__obedRect || {};
-    // Detach can leave getBoundingClientRect at 0,0 relative to a parent that is already gone.
-    // Fall back to the authored movie footprint (its real on-screen slot) — never overlay at 0,0.
-    if (!(box.w > 1 && box.h > 1) || (Math.abs(box.x) < 2 && Math.abs(box.y) < 2)) {
+    const boxMap = stageMap();
+    const nearZero = Math.abs(box.x) < 2 && Math.abs(box.y) < 2;
+    const nearStageOrigin = !!boxMap && Math.abs(box.x - boxMap.ox) < 2 && Math.abs(box.y - boxMap.oy) < 2;
+    // Detach can leave getBoundingClientRect at the literal viewport origin (no
+    // layout box) or at the live stage origin (a zero-layout attached parent).
+    // Fall back to the authored movie footprint (its real on-screen slot).
+    if (!(box.w > 1 && box.h > 1) || nearZero || nearStageOrigin) {
       const movies = planMovies();
       const fps = Object.keys(movies).map(function(k) { return movies[k].footprint; }).filter(Boolean);
-      const fp = fps.length ? fps[((v.__obedElId || 1) - 1) % fps.length] : {x: 0, y: 0, w: box.w, h: box.h};
+      let fp;
+      if (fps.length) {
+        if (!boxMap) {
+          noteStageMapUnavailable('remount-footprint-rect');
+          return;
+        }
+        fp = toScreen(fps[((v.__obedElId || 1) - 1) % fps.length], boxMap);
+      } else {
+        fp = {x: 0, y: 0, w: box.w, h: box.h};
+      }
       box = {x: fp.x, y: fp.y, w: (box.w > 1 ? box.w : fp.w), h: (box.h > 1 ? box.h : fp.h)};
       note('remount-footprint-rect', {elId: v.__obedElId, rect: box});
     }
@@ -805,9 +904,17 @@ PRESERVE_CORE_JS = r"""
           beginMove(v);
           posterCanvas.parentNode.insertBefore(v, posterCanvas.nextSibling);
         }
+        const stageEl = document.getElementById('stage');
+        const inStage = !!(stageEl && stageEl.contains(v));
+        const map = inStage ? stageMap() : null;
+        if (inStage && !map) {
+          noteStageMapUnavailable('remount-into-authored-layer');
+          return;
+        }
+        const divisor = map ? map.s : 1;
         v.style.position = 'absolute';
-        v.style.width = box.w + 'px';
-        v.style.height = box.h + 'px';
+        v.style.width = (box.w / divisor) + 'px';
+        v.style.height = (box.h / divisor) + 'px';
         // The poster canvas's parent (its authored MM layer) may carry a
         // Magic-Move transform, so box.x/box.y (the ON-SCREEN footprint) are NOT
         // valid raw left/top in that containing block — writing them raw
@@ -820,8 +927,8 @@ PRESERVE_CORE_JS = r"""
         v.style.left = '0px';
         v.style.top = '0px';
         const cur = v.getBoundingClientRect();
-        v.style.left = (box.x - cur.left) + 'px';
-        v.style.top = (box.y - cur.top) + 'px';
+        v.style.left = ((box.x - cur.left) / divisor) + 'px';
+        v.style.top = ((box.y - cur.top) / divisor) + 'px';
         v.style.visibility = 'visible';
         v.style.display = 'block';
         v.style.opacity = '1';
@@ -993,13 +1100,18 @@ PRESERVE_CORE_JS = r"""
       const mw = /width:\s*([\d.]+)px/i.exec(st);
       const mh = /height:\s*([\d.]+)px/i.exec(st);
       if (mw && mh && parseFloat(mw[1]) > 1 && parseFloat(mh[1]) > 1) {
+        const map = stageMap();
+        if (!map) {
+          noteStageMapUnavailable('captureLayout');
+          return false;
+        }
         const parent = v.parentElement;
         const pr = parent ? parent.getBoundingClientRect() : {left: 0, top: 0};
         v.__obedRect = {
           x: pr.left || 0,
           y: pr.top || 0,
-          w: parseFloat(mw[1]),
-          h: parseFloat(mh[1])
+          w: parseFloat(mw[1]) * map.s,
+          h: parseFloat(mh[1]) * map.s
         };
         return v.__obedRect.w > 1;
       }
@@ -1010,6 +1122,7 @@ PRESERVE_CORE_JS = r"""
   // Detached decoders often pause; keep pooled clocks alive through Magic Move.
   // Refresh layout while videos are still attached (detach often zeroes the box).
   setInterval(function(){
+    if (disabled) return;
     document.querySelectorAll('video').forEach(function(v){ captureLayout(v); });
     pool.forEach(function(q){
       (q || []).forEach(function(v){
@@ -1033,7 +1146,7 @@ PRESERVE_CORE_JS = r"""
       configurable: true, enumerable: desc.enumerable, get: desc.get,
       set: function(val) {
         const empty = val === '' || val == null;
-        if (empty && this instanceof HTMLVideoElement) {
+        if (!disabled && empty && this instanceof HTMLVideoElement) {
           stash(this, 'preserve-skip-clear');
           // Skip clearing so the decoder stays attached to its resource.
           return;
@@ -1048,7 +1161,7 @@ PRESERVE_CORE_JS = r"""
 
   const origRemove = Element.prototype.removeAttribute;
   Element.prototype.removeAttribute = function(name) {
-    if (String(name).toLowerCase() === 'src' && this instanceof HTMLVideoElement) {
+    if (!disabled && String(name).toLowerCase() === 'src' && this instanceof HTMLVideoElement) {
       stash(this, 'preserve-skip-removeAttribute');
       return;
     }
@@ -1076,7 +1189,7 @@ PRESERVE_CORE_JS = r"""
     note('createElement-video', {elId: el.__obedElId, gen: preserveGeneration});
     const origSA = el.setAttribute.bind(el);
     el.setAttribute = function(attr, value) {
-      if (String(attr).toLowerCase() === 'src') {
+      if (!disabled && String(attr).toLowerCase() === 'src') {
         const key = assetKey(value);
         const hn = currentHashNum();
         const boundary = restartMinHash();

@@ -69,8 +69,8 @@ describe("LivePresenter", () => {
   });
 
   it.each([
-    ["qualified", "Qualified", "Enabled for this deck at 1920 × 1080."],
-    ["unsupported", "Unsupported", "Continuity requires the authored 1920 × 1080 viewport."],
+    ["qualified", "Qualified", "Enabled for this deck."],
+    ["unsupported", "Unsupported", "stage is not the authored size"],
     ["off", "Off", "Using the deck’s native movie playback."],
     ["pending", "Checking", "Checking this deck and output size."],
   ] as const)("shows observed %s continuity before Show output", async (mode, label, detail) => {
@@ -81,6 +81,18 @@ describe("LivePresenter", () => {
     expect(screen.getByText(detail)).toBeInTheDocument();
     const show = screen.getByRole("button", { name: "Show output" });
     expect(badge.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([
+    [undefined, "Enabled for this deck."],
+    [1, "Enabled for this deck."],
+    [1.3333, "Enabled for this deck (stage scaled ×1.33)."],
+  ] as const)("shows scale %s in the qualified continuity detail", async (scale, detail) => {
+    const continuity: LiveContinuity = { mode: "qualified", ...(scale === undefined ? {} : { scale }) };
+    const api = client({ state: vi.fn(async () => state({ outputVisible: false, continuity })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Movie continuity · Qualified");
+    expect(screen.getByText(detail)).toBeInTheDocument();
   });
 
   it("does not claim qualification when the host omits continuity status", async () => {
@@ -209,7 +221,7 @@ describe("LivePresenter", () => {
     render(<LivePresenter client={api} pollMs={60_000} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Output window closed");
     expect(screen.getByRole("button", { name: "Stop session" })).toBeEnabled();
-    expect(screen.getByText("Movie continuity is available only for qualified decks at 1920 × 1080. Alpha output is not qualified.")).toBeInTheDocument();
+    expect(screen.getByText("Movie continuity is available only for qualified decks. Alpha output is not qualified.")).toBeInTheDocument();
   });
 
   it("allows output hiding while the player is busy but blocks navigation", async () => {

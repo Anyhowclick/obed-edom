@@ -84,18 +84,22 @@ the runtime's version and sha256):
   built.
 - `unsupported` — the plan could not be derived or installed, with a `reason`
   (rotated/animated movie geometry, more than one movie changing across one cut,
-  an unreadable export, or the viewport limitation below); the raw export plays
-  untouched.
-- `qualified` — the runtime installed and confirmed itself from the page.
+  an unreadable export, the stage isn't the authored size, the stage scale is
+  non-uniform, or the runtime failed to install); the raw export plays untouched.
+- `qualified` — the runtime installed and confirmed itself from the page. When
+  qualified, `output.continuity` also carries `scale` (the uniform factor applied
+  to the authored stage, e.g. `1.3333`).
 
 Set `OBED_LIVE_CONTINUITY=off` before starting the dashboard server to disable it
 outright.
 
-**Viewport limitation**: footprints are derived in authored-canvas pixels, so the
-runtime only installs when the page's own viewport exactly matches the deck's
-authored size (e.g. 1920x1080 for a 1080p HDMI display or an OBS browser source at
-that size) — otherwise it reports `unsupported` with a viewport reason. Mapping
-authored footprints onto a scaled stage is a later increment.
+**Scaled stage**: footprints are derived in authored-canvas pixels and mapped
+through the player's own `#stage` scale each frame, so continuity qualifies
+whenever the stage is the authored size under a uniform scale — a 2560x1440
+display, or a non-16:9 display where the stage is letterboxed — not only an
+exact 1:1 match. It still reports `unsupported` when the stage isn't the
+authored size or its scale is non-uniform. The OBS Browser Source (below) stays
+fixed at 1920x1080.
 
 **Qualification**: `scripts/live_continuity_probe.py` drives `LiveOutputHost`
 itself (not a bare page) through a known fixture's Magic Move and dissolve

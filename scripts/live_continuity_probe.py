@@ -125,17 +125,33 @@ SAMPLER_JS = r"""
     } catch (e) {}
     return null;
   }
-  function ownerOf(rect, src){
+  function ownerOf(rect, src, map){
     try {
       if (!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId)) return null;
+      if (!map) return null;
+      var q = {x: (rect.x - map.ox) / map.s, y: (rect.y - map.oy) / map.s, w: rect.w / map.s, h: rect.h / map.s};
       var key = movieKeyFor(src);
-      var q = key ? {x: rect.x, y: rect.y, w: rect.w, h: rect.h, key: key} : rect;
+      if (key) q.key = key;
       return window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId(q);
     } catch (e) { return null; }
+  }
+  // The probe's OWN read of the stage map, independent of the runtime's --
+  // `#stage.offsetWidth/Height` is the transform-blind authored size,
+  // `getBoundingClientRect()` is the on-screen (post-transform) rect. Every
+  // sampled video rect is converted from screen to authored space in Python
+  // using this per-sample map, never the runtime's own `stageMap()`.
+  function stageMapOf(){
+    var el = document.getElementById('stage');
+    if (!el) return null;
+    var r = el.getBoundingClientRect();
+    var ow = el.offsetWidth, oh = el.offsetHeight;
+    if (!ow || !oh || !r.width || !r.height) return null;
+    return {s: r.width / ow, sy: r.height / oh, ox: r.left, oy: r.top, offsetWidth: ow, offsetHeight: oh};
   }
   function tick(){
     var t = performance.now();
     var state = stateOf();
+    var map = stageMapOf();
     var videos = [];
     document.querySelectorAll('video').forEach(function(v){
       var r = v.getBoundingClientRect();
@@ -151,10 +167,10 @@ SAMPLER_JS = r"""
         videoWidth: v.videoWidth,
         isConnected: document.contains(v),
         rect: rect,
-        footprintOwner: ownerOf(rect, v.currentSrc || v.src || '')
+        footprintOwner: ownerOf(rect, v.currentSrc || v.src || '', map)
       });
     });
-    samples.push({t: t, scene: state.sceneId, playerState: state.playerState, busy: state.busy, videos: videos});
+    samples.push({t: t, scene: state.sceneId, playerState: state.playerState, busy: state.busy, videos: videos, stageMap: map});
     if (samples.length > MAX_SAMPLES) samples.shift();
     window.__obedContinuityProbe__.raf = requestAnimationFrame(tick);
   }
@@ -170,12 +186,29 @@ ENSURE_PLAYING_JS = (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_viewport_arg(value: str) -> tuple[int, int]:
+    """Launch-mode arms run at this viewport (the attach arm ignores it -- see
+    `run_attach_arm`, fixed at `VIEWPORT_WIDTH`/`VIEWPORT_HEIGHT` by the live
+    host's own attach contract)."""
+    try:
+        width, height = live_host_probe.parse_viewport(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid --viewport {value!r}: expected WxH") from exc
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(f"invalid --viewport {value!r}: expected WxH") from None
+    return width, height
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
     parser.add_argument("--original-index", type=Path, default=ORIGINAL_INDEX)
     parser.add_argument("--artifact", type=Path, default=ARTIFACT)
-    return parser.parse_args()
+    parser.add_argument(
+        "--viewport", type=parse_viewport_arg, default=(VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
+        help="Forced headless viewport for the launch-mode arms, e.g. 2560x1440 (default 1920x1080)",
+    )
+    return parser.parse_args(argv)
 
 
 def prepare_export(fixture: Path, original_index: Path, tag: str) -> Path:
@@ -246,6 +279,7 @@ def ground_truth_facts(plan: ContinuityPlan) -> dict[str, Any]:
         "pinRect": pin_rect.as_dict(),
         "bridgeSrcRect": bridge_movie.src_rect.as_dict(),
         "destRect": bridge_movie.dst_rect.as_dict(),
+        "canvas": dict(plan.canvas),
     }
 
 
@@ -348,6 +382,114 @@ def decoded_anywhere(tracks: dict[int, list[dict[str, Any]]]) -> bool:
         for rows in tracks.values()
         for row in rows
     )
+
+
+def stage_map_valid(stage_map: dict[str, Any] | None) -> bool:
+    """Fail-closed: missing `#stage`, a zero box, or a non-uniform scale (`|s -
+    sy| / s` over 0.1%) is invalid, never silently treated as identity."""
+    if not isinstance(stage_map, dict):
+        return False
+    s, sy = stage_map.get("s"), stage_map.get("sy")
+    ow, oh = stage_map.get("offsetWidth"), stage_map.get("offsetHeight")
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0 for v in (s, sy, ow, oh)):
+        return False
+    return abs(s - sy) / s <= 0.001
+
+
+def to_authored_rect(rect: dict[str, float], stage_map: dict[str, Any]) -> dict[str, float]:
+    s = stage_map["s"]
+    return {
+        "x": (rect["x"] - stage_map["ox"]) / s,
+        "y": (rect["y"] - stage_map["oy"]) / s,
+        "w": rect["w"] / s,
+        "h": rect["h"] / s,
+    }
+
+
+def convert_samples_to_authored(samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Convert every sampled `<video>` rect from screen to AUTHORED space using
+    that sample's own recorded stage map, before any scoring runs -- so every
+    existing threshold and red control (all authored) applies unchanged. The
+    raw screen rect is kept under `rectScreen` for evidence; a missing/invalid
+    stage map leaves `rect` as None, a scoring failure (see `stageMapInvalid`
+    in `score_continuity`), never a silent skip."""
+    converted: list[dict[str, Any]] = []
+    invalid_count = 0
+    for entry in samples:
+        stage_map = entry.get("stageMap")
+        valid = stage_map_valid(stage_map)
+        if not valid:
+            invalid_count += 1
+        new_entry = dict(entry)
+        new_videos = []
+        for video_row in entry.get("videos") or []:
+            new_video = dict(video_row)
+            screen_rect = video_row.get("rect")
+            new_video["rectScreen"] = screen_rect
+            new_video["rect"] = to_authored_rect(screen_rect, stage_map) if valid and isinstance(screen_rect, dict) else None
+            new_video["stageMapValid"] = valid
+            new_videos.append(new_video)
+        new_entry["videos"] = new_videos
+        new_entry["stageMapValid"] = valid
+        converted.append(new_entry)
+    return converted, invalid_count
+
+
+def expected_stage_fit(canvas: dict[str, Any], viewport: dict[str, Any]) -> dict[str, float]:
+    """Aspect-fit of the authored `canvas` into `viewport` -- the stage map the
+    player's own `adjustStageToFit` should have produced."""
+    fit = live_host_probe.expected_fit(canvas, viewport)
+    scale = min(viewport["width"] / canvas["width"], viewport["height"] / canvas["height"])
+    return {**fit, "scale": scale}
+
+
+def stage_screen_rect(stage_map: dict[str, Any]) -> dict[str, float]:
+    return {
+        "x": stage_map["ox"], "y": stage_map["oy"],
+        "width": stage_map["offsetWidth"] * stage_map["s"], "height": stage_map["offsetHeight"] * stage_map["sy"],
+    }
+
+
+def stage_fit_matches(observed: dict[str, float], expected: dict[str, float], tol_px: float = 1.0, tol_rel: float = 0.001) -> bool:
+    return all(
+        abs(observed[key] - expected[key]) <= max(tol_px, abs(expected[key]) * tol_rel)
+        for key in ("x", "y", "width", "height")
+    )
+
+
+def score_stage_fit(samples: list[dict[str, Any]], expected: dict[str, float]) -> dict[str, Any]:
+    """A wrong stage fit fails the arm outright: the authored conversion is
+    only meaningful against a correctly fitted stage. Boundary scoring only
+    ever looks inside the selected decoder's crossing windows, so a
+    missing/non-uniform stage-map sample OUTSIDE those windows would
+    otherwise never be noticed -- require zero invalid samples across the
+    WHOLE arm, not just the fitted ones, and zero samples at all is "no
+    evidence", never a pass."""
+    valid_maps = [entry["stageMap"] for entry in samples if entry.get("stageMapValid")]
+    invalid_count = sum(1 for entry in samples if not entry.get("stageMapValid"))
+    if not samples or not valid_maps:
+        return {
+            "verdict": False, "reason": "no valid stage map samples",
+            "sampleCount": len(valid_maps), "invalidCount": invalid_count, "expected": expected,
+        }
+    mismatches = [stage_screen_rect(m) for m in valid_maps if not stage_fit_matches(stage_screen_rect(m), expected)]
+    return {
+        "verdict": not mismatches and invalid_count == 0,
+        "sampleCount": len(valid_maps), "mismatchCount": len(mismatches), "invalidCount": invalid_count,
+        "expected": expected,
+    }
+
+
+def stage_map_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_maps = [entry["stageMap"] for entry in samples if entry.get("stageMapValid")]
+    if not valid_maps:
+        return {"sampleCount": 0}
+    return {
+        "sampleCount": len(valid_maps),
+        "sMin": min(m["s"] for m in valid_maps), "sMax": max(m["s"] for m in valid_maps),
+        "oxMin": min(m["ox"] for m in valid_maps), "oxMax": max(m["ox"] for m in valid_maps),
+        "oyMin": min(m["oy"] for m in valid_maps), "oyMax": max(m["oy"] for m in valid_maps),
+    }
 
 
 def rect_matches(rect: dict[str, float] | None, expected: dict[str, float], tolerance: float = RECT_TOLERANCE_PX) -> bool:
@@ -608,6 +750,14 @@ def score_continuity(
         if not (r.get("isConnected") and rect_matches(r.get("rect"), dst_rect, rect_tolerance)):
             rect_mismatches.append({"t": r["t"], "phase": "after", "rect": r.get("rect"), "isConnected": r.get("isConnected")})
 
+    stage_map_invalid: list[dict[str, Any]] = []
+    for r in before_rows:
+        if r.get("stageMapValid") is False:
+            stage_map_invalid.append({"t": r["t"], "phase": "before"})
+    for r in after_rows:
+        if r.get("stageMapValid") is False:
+            stage_map_invalid.append({"t": r["t"], "phase": "after"})
+
     ok = (
         max_drop <= max_drop_s
         and advance >= min_advance_s
@@ -615,6 +765,7 @@ def score_continuity(
         and not owner_mismatches
         and not rect_mismatches
         and not missing_samples
+        and not stage_map_invalid
         and (motion is None or not motion["errors"])
     )
     return {
@@ -628,6 +779,7 @@ def score_continuity(
         "ownerMismatches": owner_mismatches,
         "rectMismatches": rect_mismatches,
         "missingSamples": missing_samples,
+        "stageMapInvalid": stage_map_invalid,
         "motion": motion,
         "window": window,
     }
@@ -689,16 +841,23 @@ def env_override(overrides: dict[str, str | None]) -> Iterator[None]:
                 os.environ[key] = value
 
 
-def run_arm(name: str, export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any]) -> dict[str, Any]:
-    force_viewport(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+def run_arm(
+    name: str, export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any],
+    viewport: tuple[int, int], expected_stage: dict[str, float],
+) -> dict[str, Any]:
+    force_viewport(*viewport)
     player = LiveOutputHost(export_root, slides, headless=True)
     result: dict[str, Any] = {"arm": name}
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
-        samples = drive_and_sample(player)
+        raw_samples = drive_and_sample(player)
+        samples, invalid_count = convert_samples_to_authored(raw_samples)
         result["samples"] = samples
         result["sampleCount"] = len(samples)
+        result["stageMapInvalidCount"] = invalid_count
+        result["stageMap"] = stage_map_summary(samples)
+        result["stageFit"] = score_stage_fit(samples, expected_stage)
         runtime_installed = result["continuity"].get("mode") == "qualified"
         result.update(score_boundaries(samples, facts, runtime_installed))
     finally:
@@ -761,13 +920,18 @@ def force_exact_viewport(port: int, width: int, height: int) -> None:
         ws.close()
 
 
-def run_attach_arm(export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any], scratch: Path) -> dict[str, Any]:
+def run_attach_arm(
+    export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any], scratch: Path,
+    expected_stage: dict[str, float],
+) -> dict[str, Any]:
+    # The live host forces attach mode to 1920x1080 by contract regardless of
+    # `--viewport`; the attach arm stays pinned to that, never the CLI value.
     port = free_port()
     profile = scratch / "attach-chrome-profile"
     if profile.exists():
         shutil.rmtree(profile)
     chrome_proc = launch_attach_chrome(port, profile)
-    result: dict[str, Any] = {"arm": "attach"}
+    result: dict[str, Any] = {"arm": "attach", "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT}}
     try:
         wait_for_cdp(port)
         force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
@@ -784,9 +948,13 @@ def run_attach_arm(export_root: Path, slides: list[dict[str, Any]], facts: dict[
                 )
                 computed_background = transport.evaluate("getComputedStyle(document.documentElement).backgroundColor")
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
-                samples = drive_and_sample(player)
+                raw_samples = drive_and_sample(player)
+                samples, invalid_count = convert_samples_to_authored(raw_samples)
                 result["samples"] = samples
                 result["sampleCount"] = len(samples)
+                result["stageMapInvalidCount"] = invalid_count
+                result["stageMap"] = stage_map_summary(samples)
+                result["stageFit"] = score_stage_fit(samples, expected_stage)
                 runtime_installed = result["continuity"].get("mode") == "qualified"
                 result.update(score_boundaries(samples, facts, runtime_installed))
             finally:
@@ -842,6 +1010,24 @@ def background_alpha(css: str | None) -> float:
         return 1.0
 
 
+def stage_fit_ok(entry: dict[str, Any]) -> bool:
+    """Fail-closed: only an explicit truthy `stageFit.verdict` passes. A missing
+    `stageFit` (an arm that crashed before scoring it, or a caller that never
+    set the key) is not evidence of a correct fit and must not pass."""
+    stage_fit = entry.get("stageFit")
+    if not isinstance(stage_fit, dict):
+        return False
+    return bool(stage_fit.get("verdict"))
+
+
+def stage_fit_reason(entry: dict[str, Any], label: str) -> str | None:
+    if stage_fit_ok(entry):
+        return None
+    if not isinstance(entry.get("stageFit"), dict):
+        return f"{label} stageFit missing"
+    return f"{label} stageFit failed"
+
+
 def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     """Pure: the assembled result dict in, (status, reasons) out. Reviewer finding
     #3: a green boundary verdict does not by itself prove the RIGHT mechanism was
@@ -868,16 +1054,28 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     if a_mode != "qualified":
         a_ok = False
         reasons.append(f"arm A continuity.mode={a_mode!r}, expected 'qualified'")
+    reason = stage_fit_reason(a, "arm A")
+    if reason:
+        a_ok = False
+        reasons.append(reason)
 
     b_ok = boundary_verdict(b, "continue3to4") is False
     if b_mode != "off":
         b_ok = False
         reasons.append(f"arm B continuity.mode={b_mode!r}, expected 'off'")
+    reason = stage_fit_reason(b, "arm B")
+    if reason:
+        b_ok = False
+        reasons.append(reason)
 
     c_ok = boundary_verdict(c, "continue3to4") is False and boundary_verdict(c, "continue1to2") is True
     if c_mode != "qualified":
         c_ok = False
         reasons.append(f"arm C continuity.mode={c_mode!r}, expected 'qualified'")
+    reason = stage_fit_reason(c, "arm C")
+    if reason:
+        c_ok = False
+        reasons.append(reason)
 
     attach_ok = (
         bool(boundary_verdict(attach, "continue1to2"))
@@ -891,6 +1089,10 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     if alpha != 0:
         attach_ok = False
         reasons.append(f"attach background alpha={alpha}, expected 0")
+    reason = stage_fit_reason(attach, "attach")
+    if reason:
+        attach_ok = False
+        reasons.append(reason)
 
     ok = a_ok and b_ok and c_ok and attach_ok
     if not ok and not reasons:
@@ -906,11 +1108,14 @@ def main() -> None:
         raise SystemExit(f"original index is unavailable: {args.original_index}")
     artifact = args.artifact
     artifact.parent.mkdir(parents=True, exist_ok=True)
+    viewport = args.viewport
     result: dict[str, Any] = {
         "kind": "live-continuity-probe",
         "fixture": str(args.fixture),
         "originalIndex": str(args.original_index),
         "status": "running",
+        "viewport": {"width": viewport[0], "height": viewport[1]},
+        "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
     }
 
     def save() -> None:
@@ -924,29 +1129,33 @@ def main() -> None:
         facts = ground_truth_facts(plan)
         result["groundTruth"] = {
             key: facts[key]
-            for key in ("asset", "onset1to2", "restartScene", "bridgeScene", "pinRect", "bridgeSrcRect", "destRect")
+            for key in ("asset", "onset1to2", "restartScene", "bridgeScene", "pinRect", "bridgeSrcRect", "destRect", "canvas")
         }
+        expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
+        attach_expected_stage = expected_stage_fit(facts["canvas"], {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT})
+        result["expectedStage"] = expected_stage
+        result["attachExpectedStage"] = attach_expected_stage
         save()
 
         result["arms"] = {}
-        result["arms"]["A"] = run_arm("A", export_a, slides_a, facts)
+        result["arms"]["A"] = run_arm("A", export_a, slides_a, facts, viewport, expected_stage)
         save()
 
         export_b = prepare_export(args.fixture, args.original_index, "arm-b")
         with env_override({CONTINUITY_ENV: "off"}):
-            result["arms"]["B"] = run_arm("B", export_b, load_slides(export_b), facts)
+            result["arms"]["B"] = run_arm("B", export_b, load_slides(export_b), facts, viewport, expected_stage)
         save()
 
         export_c = prepare_export(args.fixture, args.original_index, "arm-c")
         with bridge_disabled():
-            result["arms"]["C"] = run_arm("C", export_c, load_slides(export_c), facts)
+            result["arms"]["C"] = run_arm("C", export_c, load_slides(export_c), facts, viewport, expected_stage)
         save()
 
         result["leftoverChromeAfterArms"] = check_no_leftover_chrome()
         save()
 
         export_attach = prepare_export(args.fixture, args.original_index, "attach")
-        result["attach"] = run_attach_arm(export_attach, load_slides(export_attach), facts, artifact.parent)
+        result["attach"] = run_attach_arm(export_attach, load_slides(export_attach), facts, artifact.parent, attach_expected_stage)
         result["leftoverChromeAfterAttach"] = check_no_leftover_chrome()
         save()
 

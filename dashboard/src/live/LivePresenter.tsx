@@ -13,7 +13,7 @@ function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   const mode = continuity?.mode;
   const label = mode === "qualified" ? "Qualified" : mode === "unsupported" ? "Unsupported" : mode === "off" ? "Off" : mode === "pending" ? "Checking" : "Unavailable";
   const detail = continuity?.reason || (mode === "qualified"
-    ? "Enabled for this deck at 1920 × 1080."
+    ? (continuity?.scale && continuity.scale !== 1 ? `Enabled for this deck (stage scaled ×${continuity.scale.toFixed(2)}).` : "Enabled for this deck.")
     : mode === "unsupported" || mode === "off"
       ? "Using the deck’s native movie playback."
       : mode === "pending"
@@ -197,7 +197,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   return <section className="live-presenter" aria-label="Live presenter">
     <h1>Alpha Keynote</h1>
     <p className="lede">Experimental silent HDMI output. The picture is 16:9 within the detected display. DeckLink fill + key is not qualified.</p>
-    <p className="note">Movie continuity is available only for qualified decks at 1920 × 1080. Alpha output is not qualified.</p>
+    <p className="note">Movie continuity is available only for qualified decks. Alpha output is not qualified.</p>
     <p role="status">{connected ? snapshot ? `Player ${snapshot.status} · Output ${snapshot.outputVisible ? "visible" : "hidden"}` : "No active session" : connectionError ? "Disconnected · Reconnecting…" : "Connecting…"}</p>
     {connectionError && <p role="alert">{connectionError}. Existing output may still be running; commands are disabled until reconnected.</p>}
     {(message || awaitingObservation || snapshot?.error) && <p role="alert">{message || (awaitingObservation ? "Command accepted; waiting for observed player state." : snapshot?.error)}</p>}
