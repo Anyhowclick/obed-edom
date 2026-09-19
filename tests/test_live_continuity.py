@@ -305,6 +305,49 @@ def test_real_export_matches_trimmed_fixture_plan():
     assert real_plan.as_dict() == fixture_plan.as_dict()
 
 
+# P2's injected fixture plan (scripts/p2_recovery_html_adversarial.py MOVIE_ROI /
+# SLIDE3_MIN_HASH / SLIDE4_MIN_HASH / SLIDE4_MOVIE_RECT), the equivalence target
+# for `to_runtime()`. Scenes exact; rects within 3px (the documented slide-3
+# y=797.1 vs P2's screen-measured 795 is a known ~2.1px discrepancy).
+P2_MOVIE1_FOOTPRINT = {"x": 109, "y": 795, "w": 952, "h": 268}
+P2_SLIDE3_MIN_HASH = 6
+P2_SLIDE4_MIN_HASH = 8
+P2_SLIDE4_MOVIE_RECT = {"x": 327, "y": 709, "w": 1266, "h": 356}
+
+
+def _rect_close(a: dict, b: dict, tol: float = 3.0) -> bool:
+    return all(abs(a[k] - b[k]) <= tol for k in ("x", "y", "w", "h"))
+
+
+def test_to_runtime_matches_p2_injected_plan():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+
+    # The fixture's WA0125 instance is only single (unambiguous) on player index 2,
+    # not the first slide, so it does not enter the movie table -- it never
+    # continues across a boundary, so the runtime does not need to classify it.
+    assert "movie1" in runtime["movies"]
+    movie1 = runtime["movies"]["movie1"]
+    assert movie1["assetKeys"] == ["untitled.mov"]
+    assert _rect_close(movie1["footprint"], P2_MOVIE1_FOOTPRINT)
+
+    boundaries = {b["atScene"]: b for b in runtime["boundaries"]}
+    assert set(boundaries) == {P2_SLIDE3_MIN_HASH, P2_SLIDE4_MIN_HASH}
+    assert boundaries[P2_SLIDE3_MIN_HASH]["action"] == "restart"
+    bridge = boundaries[P2_SLIDE4_MIN_HASH]
+    assert bridge["action"] == "bridge"
+    assert bridge["movieKey"] == "movie1"
+    assert _rect_close(bridge["rect"], P2_SLIDE4_MOVIE_RECT)
+
+
+def test_to_runtime_refuses_when_no_boundaries():
+    plan = ContinuityPlan(canvas={"width": 1, "height": 1}, scene_index_by_player={0: 0}, slide_rects={}, boundaries=())
+    result = plan.to_runtime()
+    assert isinstance(result, Unsupported)
+
+
 # --- fixture mutation helpers -------------------------------------------------------------
 
 

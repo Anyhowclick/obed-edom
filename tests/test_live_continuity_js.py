@@ -114,6 +114,16 @@ def test_with_plan_installs_the_preserve_object():
     assert out == {"installed": True}
 
 
+def test_transparent_chrome_gated_by_plan_flag():
+    """`forceTransparentChrome` must run only when the plan opts in (owner
+    decision 2a: off for HDMI, on for alpha/attach and the P2 fixtures)."""
+    js = live_continuity_js.PRESERVE_CORE_JS
+    assert "if (OBED_PLAN.transparentBackground === true) {" in js
+    call_idx = js.index("forceTransparentChrome();")
+    gate_idx = js.index("if (OBED_PLAN.transparentBackground === true) {")
+    assert gate_idx < call_idx
+
+
 def test_preserve_core_js_source_declares_the_fail_closed_guard():
     """String-level guard check: the very first executable statements read the
     plan and bail before creating any state, regardless of runtime behaviour."""

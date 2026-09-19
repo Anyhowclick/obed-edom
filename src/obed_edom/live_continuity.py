@@ -98,10 +98,104 @@ class ContinuityPlan:
     def to_json(self) -> str:
         return json.dumps(self.as_dict())
 
+    def to_runtime(self) -> "dict[str, Any] | Unsupported":
+        """Translate this plan into the shape `PRESERVE_CORE_JS` reads as
+        `window.__OBED_CONTINUITY__` (see `live_continuity_js` module docstring).
+        Fails closed whenever the derived plan says something the runtime cannot
+        express today: more than one distinct bridging asset, a bridge asset with
+        no resolvable footprint on the deck's first slide, more than one bridge
+        movie at a single boundary, a bridge with no destination rect, or a `pin`
+        action recurring after a `restart`/`bridge` boundary has already been
+        emitted (the runtime only models the pre-first-boundary zone as pinned).
+        """
+        if not self.boundaries:
+            return Unsupported("no boundaries to translate")
+
+        bridge_asset: str | None = None
+        for boundary in self.boundaries:
+            for movie in boundary.movies:
+                if movie.action != "bridge":
+                    continue
+                if bridge_asset is not None and bridge_asset != movie.asset:
+                    return Unsupported(
+                        f"more than one distinct bridging asset: '{bridge_asset}' and '{movie.asset}'"
+                    )
+                bridge_asset = movie.asset
+
+        first_player = min(self.slide_rects) if self.slide_rects else None
+        if first_player is None:
+            return Unsupported("no slide footprint data to build movie definitions")
+        initial_rects: dict[str, dict[str, float]] = dict(self.slide_rects.get(first_player, {}))
+
+        first_boundary = self.boundaries[0]
+        for movie in first_boundary.movies:
+            if movie.action in ("pin", "bridge") and movie.src_rect is not None:
+                initial_rects[movie.asset] = movie.src_rect.as_dict()
+
+        if bridge_asset is not None and bridge_asset not in initial_rects:
+            return Unsupported(f"bridging asset '{bridge_asset}' has no footprint on the first slide")
+        if not initial_rects:
+            return Unsupported("no single-instance movie footprints on the first slide")
+
+        ordered_assets = ([bridge_asset] if bridge_asset else []) + sorted(
+            asset for asset in initial_rects if asset != bridge_asset
+        )
+        movie_keys = {asset: f"movie{i + 1}" for i, asset in enumerate(ordered_assets)}
+        movies = {
+            key: {"assetKeys": [asset.lower()], "footprint": _rect_ints(initial_rects[asset])}
+            for asset, key in movie_keys.items()
+        }
+
+        runtime_boundaries: list[dict[str, Any]] = []
+        emitted_cut = False
+        for boundary in self.boundaries:
+            if boundary.to_player_index is None:
+                continue
+            actions = {m.action for m in boundary.movies}
+            scene = self.scene_index_by_player.get(boundary.to_player_index)
+            if scene is None:
+                return Unsupported(f"missing scene index for player index {boundary.to_player_index}")
+            if "bridge" in actions:
+                bridges = [m for m in boundary.movies if m.action == "bridge"]
+                if len(bridges) != 1:
+                    return Unsupported("more than one bridge movie at a boundary")
+                movie = bridges[0]
+                if movie.dst_rect is None:
+                    return Unsupported(f"bridge movie '{movie.asset}' has no destination rect")
+                key = movie_keys.get(movie.asset)
+                if key is None:
+                    return Unsupported(f"bridging asset '{movie.asset}' is not in the movie table")
+                runtime_boundaries.append(
+                    {
+                        "atScene": scene,
+                        "action": "bridge",
+                        "movieKey": key,
+                        "rect": _rect_ints(movie.dst_rect.as_dict()),
+                    }
+                )
+                emitted_cut = True
+            elif "restart" in actions:
+                runtime_boundaries.append({"atScene": scene, "action": "restart"})
+                emitted_cut = True
+            elif "pin" in actions:
+                if emitted_cut:
+                    return Unsupported(
+                        f"a 'pin' boundary recurs after a restart/bridge cut at player index "
+                        f"{boundary.from_player_index}, which the runtime cannot express"
+                    )
+            else:
+                continue
+
+        return {"movies": movies, "boundaries": runtime_boundaries}
+
 
 @dataclass(frozen=True)
 class Unsupported:
     reason: str
+
+
+def _rect_ints(rect: dict[str, float]) -> dict[str, int]:
+    return {k: round(v) for k, v in rect.items()}
 
 
 def _identity_transform(state: dict[str, Any]) -> bool:

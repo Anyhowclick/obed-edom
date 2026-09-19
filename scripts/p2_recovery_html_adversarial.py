@@ -2476,6 +2476,7 @@ async def _run(player: Path) -> dict:
             },
         },
         "boundaries": [{"atScene": SLIDE3_MIN_HASH, "action": "restart"}],
+        "transparentBackground": True,
     }
     if bridge34:
         # Engage the 3->4 magic-move bridge: PRESERVE keeps the movie1 decoder

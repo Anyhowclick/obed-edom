@@ -17,8 +17,13 @@ Plan object (`window.__OBED_CONTINUITY__`, set before this script runs; absent
         {"atScene": <scene index>, "action": "restart" | "bridge",
          "rect": {"x": int, "y": int, "w": int, "h": int},   // "bridge" only
          "movieKey": "<movieKey>"}                            // "bridge" only
-      ]
+      ],
+      "transparentBackground": <bool, optional, default false>
     }
+`transparentBackground` gates `forceTransparentChrome()`: true for the
+alpha/attach output and for the P2 scripts (their fixed black background is
+the runtime's, not the player's), false for HDMI where the player's own black
+background must show through untouched (owner decision 2a).
 A scene index at or after a boundary's `atScene` (and before any later
 boundary) is in that boundary's zone; before the first boundary the implicit
 action is "pin" (the movie continues across the cut at a static footprint —
@@ -911,10 +916,12 @@ PRESERVE_CORE_JS = r"""
       }
     } catch (e) {}
   }
-  forceTransparentChrome();
-  new MutationObserver(forceTransparentChrome).observe(document.documentElement, {
-    attributes: true, subtree: true, attributeFilter: ['style', 'bgcolor', 'class']
-  });
+  if (OBED_PLAN.transparentBackground === true) {
+    forceTransparentChrome();
+    new MutationObserver(forceTransparentChrome).observe(document.documentElement, {
+      attributes: true, subtree: true, attributeFilter: ['style', 'bgcolor', 'class']
+    });
+  }
 
   function captureLayout(v) {
     if (!(v instanceof HTMLVideoElement)) return false;

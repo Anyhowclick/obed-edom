@@ -894,6 +894,7 @@ def main() -> int:
                 "movie2": {"assetKeys": [MOVIE2_TOKEN.lower()], "footprint": {"x": 109, "y": 500, "w": 663, "h": 186}},
             },
             "boundaries": [],
+            "transparentBackground": True,
         }
         inject_info["continuityPlan"] = inject_continuity_plan(player, continuity_plan)
         write_json(OUT / "continuity-plan-inject.json", inject_info["continuityPlan"])
