@@ -1875,6 +1875,58 @@ def test_autosize_text_reposition_unlaidout_now_repositions():
     assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
 
 
+def _grow_height_text_objects(*, stored_w: float = 58.9):
+    # Grow-height box: a REAL stored width with the autosize-height sentinel (h == 0.0).
+    # stored_w mirrors the 2026-09-18 full deck ("CHC Kuching": 235.5 wall -> 58.9 after
+    # pass 1's 0.25x canvas scale).
+    text_super = _shape_super(700, 374, stored_w, 0.0, nw=stored_w, nh=0.0)
+    text_super["style"] = {"identifier": "9"}
+    return {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "super": text_super},
+        "9": {"_pbtype": "TSWP.ShapeStyleArchive", "shapeProperties": {"verticalAlignment": 1}},
+    }
+
+
+def test_grow_height_text_width_change_misses_to_fallback():
+    # The live box still holds pass 1's 58.9 width but the spec wants 120: a position-only
+    # write would leave it per-character wrapped ("CHC / Kuc / hin / g"), so it must reach
+    # the AppleScript fallback, which writes the width.
+    objects = _grow_height_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 120.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 58.9, 140.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-grow-height-width"] and edits == {}
+
+
+@pytest.mark.parametrize("spec_w", [None, 58.9, 59.3])
+def test_grow_height_text_width_kept_still_repositions(spec_w):
+    # No width in the spec, or one within 0.5px of the live width: nothing to regrow, so the
+    # position-only reposition stays offline.
+    objects = _grow_height_text_objects()
+    spec = {"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}
+    if spec_w is not None:
+        spec["w"] = spec_w
+    reported = {("text", 0): [700.0, 344.0, 58.9, 140.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, [spec], objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+
+
+def test_grow_both_text_ignores_spec_width():
+    # A grow-BOTH box (stored w == 0.0) autosizes its width from the text, so a differing
+    # spec width is not a regrow and must not send it to the fallback.
+    objects = _autosize_text_objects(valign=1)
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, _rr = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert not missed_specs and miss_reasons == [] and "1" in edits
+
+
 def test_autosize_text_reposition_zero_natural_height_now_repositions():
     # naturalSize (width>0, height==0) is the same benign post-pass-1 state; no laid-out gate,
     # so it repositions too (with a good seed).
