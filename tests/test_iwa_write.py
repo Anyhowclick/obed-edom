@@ -1901,10 +1901,26 @@ def test_grow_height_text_width_change_misses_to_fallback():
     assert missed_specs == specs and miss_reasons == ["text-grow-height-width"] and edits == {}
 
 
-@pytest.mark.parametrize("spec_w", [None, 58.9, 59.3])
+def test_grow_width_only_text_is_not_captured_by_the_width_gate():
+    # Theoretical grow-WIDTH-only box (stored w == 0.0, real h): no such box exists on the
+    # production deck, but the gate keys on a real stored width, so it stays position-only.
+    text_super = _shape_super(700, 374, 0.0, 46.0, nw=0.0, nh=46.0)
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "super": text_super},
+    }
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 120.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 58.9, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, _rr = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+
+
+@pytest.mark.parametrize("spec_w", [None, 58.9, 59.3, 59.4])
 def test_grow_height_text_width_kept_still_repositions(spec_w):
-    # No width in the spec, or one within 0.5px of the live width: nothing to regrow, so the
-    # position-only reposition stays offline.
+    # No width in the spec, or one within 0.5px of the live width (59.4 is the inclusive
+    # boundary): nothing to regrow, so the position-only reposition stays offline.
     objects = _grow_height_text_objects()
     spec = {"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}
     if spec_w is not None:
