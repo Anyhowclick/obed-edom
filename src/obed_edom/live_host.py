@@ -40,6 +40,7 @@ ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
 ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
 _UNSET = object()
+_CDP_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 _CONTINUITY_STAGE_GATE_EXPR = (
     "(()=>{var s=document.getElementById('stage');var r=s?s.getBoundingClientRect():null;"
     "return {ready:!!(window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.ready===true),"
@@ -477,7 +478,7 @@ class ChromeCdp:
             target = self._pick_target(targets)
             ws_url = _validate_target_ws_url(target["webSocketDebuggerUrl"], self.attach_endpoint)
             try:
-                self.ws = connect(ws_url, open_timeout=5)
+                self.ws = connect(ws_url, open_timeout=5, max_size=_CDP_MAX_MESSAGE_BYTES)
             except Exception as exc:
                 raise LiveHostError(f"Could not attach to CDP target: {exc}") from exc
             self._target_ws_url = ws_url
@@ -515,7 +516,7 @@ class ChromeCdp:
                 with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list", timeout=.3) as response: targets = json.loads(response.read())
                 target = next((item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")), None)
                 if target:
-                    self.ws = connect(target["webSocketDebuggerUrl"], open_timeout=2)
+                    self.ws = connect(target["webSocketDebuggerUrl"], open_timeout=2, max_size=_CDP_MAX_MESSAGE_BYTES)
                     break
             except Exception: time.sleep(.05)
         if not self.ws:

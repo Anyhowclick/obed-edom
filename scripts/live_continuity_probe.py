@@ -95,7 +95,7 @@ WINDOW_PAD_S = 2.0
 # Visible-content pass (see the module docstring). Deliberately unequal gaps
 # (130/160/210/270 ms) so a periodic two-state animation cannot alias into
 # "static" the way an evenly spaced burst can.
-BURST_OFFSETS_MS = (0, 130, 290, 500, 770)
+BURST_OFFSETS_MS = (0, 130, 290, 500, 770, 1000, 1190, 1430, 1650, 1910, 2110, 2360)
 CONTROL_PATCH_PX = 40
 CONTROL_INSET_PX = 4
 VISIBLE_SETTLE_TIMEOUT_S = 10.0
