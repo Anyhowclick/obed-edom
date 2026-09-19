@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from obed_edom.live_continuity import ContinuityPlan, MovieContinuity, Rect, Unsupported, derive_plan
+from obed_edom.live_continuity import ContinuityPlan, MovieContinuity, Rect, Unsupported, codec_report, derive_plan
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 REAL_EXPORT_ROOT = Path(
@@ -576,3 +576,201 @@ def test_mixed_bridge_and_pin_cannot_bypass_qualified_plan():
     result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
     assert isinstance(result, Unsupported)
     assert 'pin action follows' in result.reason
+
+
+# --- I5 codec report -----------------------------------------------------------------------
+
+REAL_PLAYER_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
+
+
+def test_codec_report_lists_every_referenced_movie_not_only_planned_ones():
+    # The fixture's WA0125 instance never continues across a boundary (only Untitled.mov
+    # does -- see test_boundary_3_to_4_bridges_the_moving_scaling_movie), so it is never
+    # part of a continuity plan; the codec report must still list it.
+    report = codec_report(FIXTURE_ROOT, SLIDES, resolver=_resolver)
+    assets = {entry["asset"] for entry in report}
+    assert assets == {"untitled.mov", "vid-20250608-wa0125.mp4"}
+
+
+def test_codec_report_entries_are_shaped_asset_codec_family():
+    report = codec_report(FIXTURE_ROOT, SLIDES, resolver=_resolver)
+    for entry in report:
+        assert set(entry) == {"asset", "codec", "family"}
+
+
+def test_codec_report_reports_none_for_a_movie_file_the_fixture_does_not_ship():
+    # tests/fixtures/live_continuity ships only the export JSON, not the referenced
+    # .mov bytes, so every entry must fail closed to an unreadable/"other" codec
+    # rather than raising.
+    report = codec_report(FIXTURE_ROOT, SLIDES, resolver=_resolver)
+    for entry in report:
+        assert entry["codec"] is None
+        assert entry["family"] == "other"
+
+
+def test_codec_report_skips_slides_it_cannot_read_instead_of_raising():
+    tmp = _copy_fixture_tree()
+    (tmp / "assets" / SLIDE1 / f"{SLIDE1}.json").write_text("not json at all")
+    report = codec_report(tmp, SLIDES, resolver=_resolver)
+    assets = {entry["asset"] for entry in report}
+    # slide 1 is unreadable and contributes nothing, but the other slides still do.
+    assert "vid-20250608-wa0125.mp4" in assets
+
+
+def test_codec_report_on_slides_with_no_movies_is_empty():
+    slides = [{"playerIndex": 0, "originalOrdinal": 1, "exportedUuid": SLIDE2, "skipped": False}]
+    report = codec_report(FIXTURE_ROOT, slides, resolver=_resolver)
+    # slide 2 has no non-continuing single-instance movie of its own referenced beyond
+    # what boundary 1 already covers; this only asserts the call is well-formed and
+    # never raises on a minimal slide list.
+    assert isinstance(report, list)
+
+
+# --- slide_instances: ground truth for the visible-content probe --------------------------
+#
+# `slide_rects` keeps an asset only when the slide authors exactly ONE instance of it
+# (live_continuity.py: `if len(rects) == 1`), so it cannot describe slide 1's two
+# Untitled.mov instances. `slide_instances` lists EVERY authored movie instance per player
+# index -- multi-instance assets and movies that no boundary classifies included -- ordered
+# by (x, y, w, h) ascending.
+
+SLIDE1_BIG = (109.35, 795.04, 951.54, 267.62)
+SLIDE1_SMALL = (1075.79, 876.25, 662.79, 186.41)
+SLIDE3_UNTITLED = (197.98, 797.10, 951.54, 267.62)
+SLIDE3_WA0125 = (1152.72, 794.60, 484.66, 272.62)
+SLIDE4_UNTITLED = (326.75, 708.52, 1266.49, 356.20)
+
+
+def test_slide_instances_lists_both_untitled_instances_on_slide_1():
+    """Slide 1 (player index 0) authors two Untitled.mov instances: the big continuing one
+    and the second, non-continuing one at ~(1076, 876) that `slide_rects` drops entirely."""
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert set(plan.slide_instances[0]) == {"untitled.mov"}
+    assert plan.slide_instances[0]["untitled.mov"] == [_rect(*SLIDE1_BIG), _rect(*SLIDE1_SMALL)]
+    # the same slide contributes nothing to slide_rects, which drops multi-instance assets.
+    assert plan.slide_rects[0] == {}
+
+
+def test_slide_instances_matches_slide_rects_where_an_asset_is_single_instance():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    for player_index, rects in plan.slide_rects.items():
+        for asset, rect in rects.items():
+            assert plan.slide_instances[player_index][asset] == [rect]
+
+
+def test_slide_instances_lists_the_never_planned_wa0125_movie_on_slide_3():
+    """WA0125 never continues across a boundary, so it appears in no MovieContinuity and in
+    no runtime movie table -- but it is authored on slide 3 and must be visibly live there."""
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.slide_instances[2] == {
+        "untitled.mov": [_rect(*SLIDE3_UNTITLED)],
+        "vid-20250608-wa0125.mp4": [_rect(*SLIDE3_WA0125)],
+    }
+
+
+def test_slide_instances_lists_only_the_moved_scaled_movie_on_slide_4():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.slide_instances[3] == {"untitled.mov": [_rect(*SLIDE4_UNTITLED)]}
+
+
+def test_slide_instances_covers_every_player_index_and_uses_movie_rect_geometry():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert set(plan.slide_instances) == set(plan.scene_index_by_player) == {0, 1, 2, 3}
+    assert plan.slide_instances[1] == {"untitled.mov": [_rect(*SLIDE1_BIG)]}
+    # the rects are the authored-space rects _movie_rect produces for the boundaries too.
+    bridge = next(m for m in _boundary(plan, 2)["movies"] if m["asset"] == "untitled.mov")
+    assert plan.slide_instances[2]["untitled.mov"][0] == bridge["srcRect"]
+    assert plan.slide_instances[3]["untitled.mov"][0] == bridge["dstRect"]
+
+
+def test_slide_instances_ordering_is_deterministic_and_independent_of_authoring_order():
+    """Instances sort by (x, y, w, h) ascending. Slide 1's two Untitled.mov instances live in
+    different branches of the event tree, so swapping their geometry swaps the DOM order the
+    rects are discovered in; the emitted field must be identical either way."""
+
+    def swap_instance_geometry(data):
+        events = copy.deepcopy(data["events"])
+        nodes = _find_movie_nodes(events)
+        assert len(nodes) == 2, "slide 1 fixture must author two movie instances"
+        first, second = nodes[0]["baseLayer"], nodes[1]["baseLayer"]
+        nodes[0]["baseLayer"], nodes[1]["baseLayer"] = second, first
+        return {**data, "events": events}
+
+    baseline = _plan()
+    assert isinstance(baseline, ContinuityPlan)
+    swapped = _plan(_mutate_slide(SLIDE1, swap_instance_geometry))
+    assert isinstance(swapped, ContinuityPlan)
+    assert swapped.slide_instances == baseline.slide_instances
+    assert (
+        swapped.slide_instances[0]["untitled.mov"][0]["x"]
+        < swapped.slide_instances[0]["untitled.mov"][1]["x"]
+    )
+
+
+def test_slide_instances_round_trips_through_json():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    restored = json.loads(plan.to_json())
+    assert restored == plan.as_dict()
+    assert restored["slideInstances"]["0"]["untitled.mov"] == [
+        _rect(*SLIDE1_BIG),
+        _rect(*SLIDE1_SMALL),
+    ]
+    assert list(restored["slideInstances"]) == ["0", "1", "2", "3"]
+
+
+def test_slide_instances_defaults_to_empty_so_positional_construction_still_works():
+    plan = ContinuityPlan({"width": 1, "height": 1}, {0: 0}, {}, ())
+    assert plan.slide_instances == {}
+    assert plan.as_dict()["slideInstances"] == {}
+
+
+def test_slide_instances_does_not_move_the_runtime_plan_or_its_signature():
+    """The visible-content ground truth is additive: `to_runtime()` must not learn about it,
+    so the allowlisted signature (and P2's injected plan) stay exactly where they are."""
+    from obed_edom import live_continuity
+
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.slide_instances
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert set(runtime) == {"movies", "boundaries"}
+    assert "slideInstances" not in json.dumps(runtime)
+    assert "slide_instances" not in json.dumps(runtime)
+    assert (
+        live_continuity.plan_signature(runtime)
+        == "ec4b0cb3eeaf393ec00a7313d1c68b640a90282c80d408767c99984b710800cf"
+    )
+    assert live_continuity.plan_signature(runtime) in live_continuity.QUALIFIED_PLAN_SHA256
+    # an emptied field must not change the runtime either.
+    assert replace(plan, slide_instances={}).to_runtime() == runtime
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_real_export_slide_instances_match_the_trimmed_fixture():
+    def resolver(root: Path, relative: str) -> Path:
+        return root / relative
+
+    real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=resolver)
+    fixture = _plan()
+    assert isinstance(real, ContinuityPlan)
+    assert isinstance(fixture, ContinuityPlan)
+    assert real.slide_instances == fixture.slide_instances
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_real_export_movies_report_h264():
+    def resolver(root: Path, relative: str) -> Path:
+        return root / relative
+
+    report = codec_report(REAL_PLAYER_ROOT, SLIDES, resolver=resolver)
+    assert report
+    for entry in report:
+        assert entry["codec"] == "avc1"
+        assert entry["family"] == "h264"

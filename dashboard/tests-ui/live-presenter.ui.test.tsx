@@ -103,6 +103,45 @@ describe("LivePresenter", () => {
     expect(screen.queryByText("Movie continuity · Qualified")).not.toBeInTheDocument();
   });
 
+  it("says nothing about codecs when the host omits the fields", async () => {
+    const api = client({ state: vi.fn(async () => state()) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByRole("button", { name: "Advance" });
+    expect(screen.queryByText("Some movies may not play in this output")).not.toBeInTheDocument();
+  });
+
+  it("says nothing about codecs when the host reports no warnings", async () => {
+    const output = { ...state().output, codecs: [{ asset: "clip.mov", codec: "avc1", family: "h264" as const }], codecWarnings: [] };
+    const api = client({ state: vi.fn(async () => state({ output })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByRole("button", { name: "Advance" });
+    expect(screen.queryByText("Some movies may not play in this output")).not.toBeInTheDocument();
+    expect(screen.queryByText(/more$/)).not.toBeInTheDocument();
+  });
+
+  it("warns about every unplayable movie above Show output", async () => {
+    const codecWarnings = ["clip.mov (hvc1) may not play in this output", "sting.mov (apcn) may not play in this output"];
+    const output = { ...state().output, codecWarnings };
+    const api = client({ state: vi.fn(async () => state({ outputVisible: false, output })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const heading = await screen.findByText("Some movies may not play in this output");
+    for (const warning of codecWarnings) expect(screen.getByText(warning)).toBeInTheDocument();
+    expect(screen.queryByText(/^\+\d+ more$/)).not.toBeInTheDocument();
+    const show = screen.getByRole("button", { name: "Show output" });
+    expect(heading.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("caps the codec warning list at five and counts the rest", async () => {
+    const codecWarnings = Array.from({ length: 7 }, (_, index) => `clip-${index + 1}.mov (hvc1) may not play in this output`);
+    const output = { ...state().output, codecWarnings };
+    const api = client({ state: vi.fn(async () => state({ output })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Some movies may not play in this output");
+    for (const warning of codecWarnings.slice(0, 5)) expect(screen.getByText(warning)).toBeInTheDocument();
+    for (const warning of codecWarnings.slice(5)) expect(screen.queryByText(warning)).not.toBeInTheDocument();
+    expect(screen.getByText("+2 more")).toBeInTheDocument();
+  });
+
   it("does not move the presenter until a delayed command returns observed state", async () => {
     let resolve!: (value: LiveResult) => void;
     const command = vi.fn(() => new Promise<LiveResult>((done) => { resolve = done; }));

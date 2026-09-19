@@ -794,7 +794,34 @@ def continuity_resolver(root: Path):
     return resolve
 
 
-def write_one_movie_export(root: Path) -> None:
+def _mp4_box(fourcc: bytes, payload: bytes = b"") -> bytes:
+    return (8 + len(payload)).to_bytes(4, "big") + fourcc + payload
+
+
+def _movie_bytes(fourcc: bytes) -> bytes:
+    """A minimal synthetic ISO-BMFF file whose sole video track reports `fourcc`:
+    see tests/test_live_codec.py for the box-tree format this builds."""
+    hdlr = _mp4_box(b"hdlr", b"\x00" * 8 + b"vide" + b"\x00" * 12 + b"Handler\x00")
+    entry = _mp4_box(fourcc, b"\x00" * 78)
+    stsd = _mp4_box(b"stsd", b"\x00" * 4 + (1).to_bytes(4, "big") + entry)
+    stbl = _mp4_box(b"stbl", stsd)
+    minf = _mp4_box(b"minf", stbl)
+    mdia = _mp4_box(b"mdia", hdlr + minf)
+    trak = _mp4_box(b"trak", mdia)
+    moov = _mp4_box(b"moov", trak)
+    ftyp = _mp4_box(b"ftyp", b"isom\x00\x00\x02\x00isomiso2avc1mp41")
+    return ftyp + moov
+
+
+def h264_movie_bytes() -> bytes:
+    return _movie_bytes(b"avc1")
+
+
+def hevc_movie_bytes() -> bytes:
+    return _movie_bytes(b"hvc1")
+
+
+def write_one_movie_export(root: Path, *, movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None) -> None:
     assets_dir = root / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     (assets_dir / "header.json").write_text(json.dumps({"slideWidth": 1920, "slideHeight": 1080, "showMode": 0, "slideList": ["s1", "s2"]}))
@@ -811,19 +838,43 @@ def write_one_movie_export(root: Path) -> None:
             ],
         },
     }
+    extra_movie_node = None
+    if extra_movie_bytes is not None:
+        assets["extra-movie-asset"] = {"url": {"web": "assets/extra-movie.mov"}}
+        extra_movie_node = {
+            "movie": {"asset": "extra-movie-asset"},
+            "baseLayer": {
+                "initialState": {"position": {"pointX": 600.0, "pointY": 600.0}, "width": 50.0, "height": 50.0},
+                "layers": [
+                    {
+                        "isVideoLayer": True,
+                        "initialState": {"position": {"pointX": 25.0, "pointY": 25.0}, "width": 50.0, "height": 50.0},
+                    }
+                ],
+            },
+        }
     for uuid in ("s1", "s2"):
-        (assets_dir / uuid).mkdir(parents=True, exist_ok=True)
+        (assets_dir / uuid / "assets").mkdir(parents=True, exist_ok=True)
+        (assets_dir / uuid / "assets" / "movie.mov").write_bytes(movie_bytes if movie_bytes is not None else h264_movie_bytes())
+    # The extra movie is unplanned: single-instance only on slide 2 (not slide 1), so
+    # ContinuityPlan.to_runtime()'s movie table -- built from slide 1's footprints --
+    # never includes it, even though codec_report must still enumerate it.
+    if extra_movie_node is not None:
+        (assets_dir / "s2" / "assets" / "extra-movie.mov").write_bytes(extra_movie_bytes)
     events_s1 = [movie_node, {"type": "transition", "name": "apple:magic-move"}]
-    events_s2 = [movie_node]
+    events_s2 = [movie_node] + ([extra_movie_node] if extra_movie_node is not None else [])
     (assets_dir / "s1" / "s1.json").write_text(json.dumps({"events": events_s1, "assets": assets}))
     (assets_dir / "s2" / "s2.json").write_text(json.dumps({"events": events_s2, "assets": assets}))
     (assets_dir / "s1" / "s1.jsonp").write_text("local_slide(" + json.dumps({"json": {"events": events_s1}}) + ")")
     (assets_dir / "s2" / "s2.jsonp").write_text("local_slide(" + json.dumps({"json": {"events": events_s2}}) + ")")
 
 
-def host_with_continuity(tmp_path, monkeypatch, *, attach: bool = False, continuity: str = "auto") -> live_host.LiveOutputHost:
+def host_with_continuity(
+    tmp_path, monkeypatch, *, attach: bool = False, continuity: str = "auto", headless: bool = True,
+    movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None,
+) -> live_host.LiveOutputHost:
     export_root = tmp_path / "export"
-    write_one_movie_export(export_root)
+    write_one_movie_export(export_root, movie_bytes=movie_bytes, extra_movie_bytes=extra_movie_bytes)
     (export_root / "assets" / "player").mkdir(parents=True, exist_ok=True)
     (export_root / "assets" / "player" / "main.js").write_bytes(player_bytes())
     (export_root / "index.html").write_text('<html><head></head><body><div id="stage"></div></body></html>')
@@ -839,7 +890,7 @@ def host_with_continuity(tmp_path, monkeypatch, *, attach: bool = False, continu
     FakeCdp.instances.clear()
     kwargs = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
     return live_host.LiveOutputHost(
-        export_root, slides_with_uuid(), headless=True, transport_factory=FakeCdp,
+        export_root, slides_with_uuid(), headless=headless, transport_factory=FakeCdp,
         server_factory=FakeServer, resolver=continuity_resolver(export_root), continuity=continuity, **kwargs,
     )
 
@@ -1384,3 +1435,78 @@ def test_attach_stop_restores_the_blank_url_the_target_had_so_a_match_string_sti
         transport.stop()
         assert blank_ws.sent[0]["params"]["url"] == expected
         assert transport._blanked
+
+
+# --- I5 codec report -------------------------------------------------------------------------
+
+
+def test_codecs_output_present_even_when_continuity_off(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    output = host_with_continuity(tmp_path, monkeypatch, extra_movie_bytes=hevc_movie_bytes())
+    output.observe()
+    assert output.output["continuity"]["mode"] == "off"
+    assets = {entry["asset"] for entry in output.output["codecs"]}
+    assert assets == {"movie.mov", "extra-movie.mov"}
+    assert output.output["codecWarnings"] == ["extra-movie.mov (hvc1) may not play in this output"]
+
+
+def test_h264_movie_qualifies_with_no_codec_warning(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]))
+    output.observe()
+    assert output._continuity_mode == "qualified"
+    assert output.output["codecWarnings"] == []
+    assert output.output["codecs"] == [{"asset": "movie.mov", "codec": "avc1", "family": "h264"}]
+
+
+def test_unplanned_hevc_movie_does_not_block_continuity_but_warns(tmp_path, monkeypatch):
+    # The extra movie only appears (single-instance) on slide 2, so it never enters the
+    # runtime's movie table; the planned movie is still plain h264, so continuity must
+    # still qualify. The unplanned movie's HEVC still shows up as an advisory warning.
+    output = host_with_continuity(tmp_path, monkeypatch, extra_movie_bytes=hevc_movie_bytes())
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]))
+    output.observe()
+    assert output._continuity_mode == "qualified"
+    assert output.output["codecWarnings"] == ["extra-movie.mov (hvc1) may not play in this output"]
+
+
+def test_planned_hevc_headless_launch_is_unsupported_with_no_continuity_script(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch, movie_bytes=hevc_movie_bytes())
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "movie codec is not playable in this output: movie.mov (hvc1)"
+    assert output._server.continuity_script == ""
+
+
+def test_planned_hevc_headful_launch_still_qualifies_statically(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch, headless=False, movie_bytes=hevc_movie_bytes())
+    output._codec_report, output._codec_warnings = output._resolve_codecs()
+    mode, reason, runtime = output._resolve_continuity_static()
+    assert mode == "pending"
+    assert reason is None
+    assert runtime is not None
+
+
+def test_planned_hevc_attach_mode_is_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = host_with_continuity(tmp_path, monkeypatch, attach=True, movie_bytes=hevc_movie_bytes())
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "movie codec is not playable in this output: movie.mov (hvc1)"
+
+
+def test_unreadable_planned_movie_is_unsupported(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch, movie_bytes=b"not a real movie file, just garbage bytes here")
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "movie codec is not playable in this output: movie.mov (unreadable)"
+
+
+def test_codecs_recorded_in_session_log(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch, extra_movie_bytes=hevc_movie_bytes())
+    output.start()
+    records = [json.loads(line) for line in output._log_path.read_text().splitlines()]
+    codecs_record = next(record for record in records if record["kind"] == "codecs")
+    assets = {entry["asset"] for entry in codecs_record["report"]}
+    assert assets == {"movie.mov", "extra-movie.mov"}
+    assert codecs_record["warnings"] == ["extra-movie.mov (hvc1) may not play in this output"]

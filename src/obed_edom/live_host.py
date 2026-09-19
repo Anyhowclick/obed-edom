@@ -30,7 +30,7 @@ from typing import Any, Callable
 from websockets.sync.client import connect
 
 from .html_preview import preview_root, safe_export_file
-from .live_continuity import Unsupported, derive_plan
+from .live_continuity import Unsupported, codec_report, derive_plan
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
 from .live_runtime import RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
 from .live_session import PlayerCommandRejected, PlayerObservation
@@ -76,6 +76,19 @@ def _continuity_core_script() -> str:
 
 def _continuity_scripts(plan: dict[str, Any], canvas: dict[str, int]) -> str:
     return _continuity_plan_script(plan, canvas) + _continuity_core_script()
+
+
+def _codec_supported(family: str, *, attach: bool, headless: bool) -> bool:
+    """h264 decodes everywhere. HEVC is attempted only in headful launch mode: OBS's
+    CEF (attach) and headless Chrome are not assumed to decode HEVC (untested either
+    way on the owner's Mac, so both fail closed rather than guessing). ProRes never
+    plays in Chrome; av1/vp9 decode support here is unverified, so they are kept
+    conservative and fail closed like any other unproven codec."""
+    if family == "h264":
+        return True
+    if family == "hevc":
+        return not attach and not headless
+    return False
 
 
 class LiveHostError(RuntimeError):
@@ -749,6 +762,24 @@ class LiveOutputHost:
         self._continuity_reason: str | None = None
         self._continuity_runtime_plan: dict[str, Any] | None = None
         self._continuity_scale: float | None = None
+        self._codec_report: list[dict[str, Any]] = []
+        self._codec_warnings: list[str] = []
+
+    def _resolve_codecs(self) -> tuple[list[dict[str, Any]], list[str]]:
+        """Codec of every movie the export's slides reference, independent of continuity:
+        this must stay populated even when continuity is off or unsupported. A failure to
+        probe never blocks the session -- an unreadable codec is just reported as such."""
+        try:
+            report = codec_report(self.export_root, self.slides, resolver=self.resolver)
+        except Exception:  # noqa: BLE001 - fail closed, never let codec probing crash the host
+            return [], []
+        attach = self._attach_endpoint is not None
+        warnings = [
+            f"{entry['asset']} ({entry['codec'] or 'unreadable'}) may not play in this output"
+            for entry in report
+            if not _codec_supported(entry["family"], attach=attach, headless=self.headless)
+        ]
+        return report, warnings
 
     def _resolve_continuity_static(self) -> tuple[str, str | None, dict[str, Any] | None]:
         """Resolve continuity mode from the export alone, before the browser starts.
@@ -766,6 +797,15 @@ class LiveOutputHost:
         runtime = plan.to_runtime()
         if isinstance(runtime, Unsupported):
             return "unsupported", runtime.reason, None
+        codec_by_asset = {entry["asset"]: entry for entry in self._codec_report}
+        attach = self._attach_endpoint is not None
+        for movie in runtime["movies"].values():
+            asset = movie["assetKeys"][0]
+            entry = codec_by_asset.get(asset)
+            family = entry["family"] if entry is not None else "other"
+            if not _codec_supported(family, attach=attach, headless=self.headless):
+                codec_display = (entry["codec"] if entry is not None else None) or "unreadable"
+                return "unsupported", f"movie codec is not playable in this output: {asset} ({codec_display})", None
         if self._attach_endpoint:
             runtime = {**runtime, "transparentBackground": True}
         return "pending", None, runtime
@@ -852,6 +892,8 @@ class LiveOutputHost:
         if self._log_path is not None:
             result["logPath"] = str(self._log_path)
         result["continuity"] = self._continuity_info()
+        result["codecs"] = list(self._codec_report)
+        result["codecWarnings"] = list(self._codec_warnings)
         return result
 
     def start(self) -> PlayerObservation:
@@ -874,6 +916,8 @@ class LiveOutputHost:
         try:
             self._validate_export()
             self._expected_scene_count = self._authored_scene_count()
+            self._codec_report, self._codec_warnings = self._resolve_codecs()
+            self._logger.log("codecs", report=self._codec_report, warnings=self._codec_warnings)
             self._continuity_mode, self._continuity_reason, self._continuity_runtime_plan = self._resolve_continuity_static()
             player = self.resolver(self.export_root, "assets/player/main.js").read_bytes()
             try: patched = patch_player(player)

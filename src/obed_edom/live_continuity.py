@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from obed_edom.html_preview import safe_export_file
+from obed_edom.live_codec import codec_family, movie_codec
 
 _GEOMETRY_TOLERANCE = 0.5
 _TRIM_SUFFIX_RE = re.compile(r"^(?P<name>.+)-\d+\.\d+-\d+\.\d+(?P<ext>\.[A-Za-z0-9]+)$")
@@ -100,6 +101,12 @@ class ContinuityPlan:
     scene_index_by_player: dict[int, int]
     slide_rects: dict[int, dict[str, dict[str, float]]]
     boundaries: tuple[SlideBoundary, ...]
+    slide_instances: dict[int, dict[str, list[dict[str, float]]]] = field(default_factory=dict)
+    """Every authored movie instance per player index, including multi-instance assets and
+    movies no boundary classifies -- ground truth for what should be visibly live on a slide,
+    unlike `slide_rects`, which keeps only single-instance assets. Rects are `_movie_rect`'s
+    authored-space rects, ordered by (x, y, w, h) ascending. Not part of `to_runtime()`, so
+    the runtime plan signature is unaffected."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +114,7 @@ class ContinuityPlan:
             "sceneIndexByPlayer": {str(k): v for k, v in self.scene_index_by_player.items()},
             "slideRects": {str(k): v for k, v in self.slide_rects.items()},
             "boundaries": [b.as_dict() for b in self.boundaries],
+            "slideInstances": {str(k): v for k, v in self.slide_instances.items()},
         }
 
     def to_json(self) -> str:
@@ -423,6 +431,14 @@ def derive_plan(
         for player_index, instances in instances_by_player.items()
     }
 
+    slide_instances = {
+        player_index: {
+            asset: [rect.as_dict() for rect in sorted(rects, key=lambda r: (r.x, r.y, r.w, r.h))]
+            for asset, rects in sorted(instances.items())
+        }
+        for player_index, instances in instances_by_player.items()
+    }
+
     boundaries: list[SlideBoundary] = []
     for index, (player_index, uuid) in enumerate(ordered):
         try:
@@ -481,4 +497,66 @@ def derive_plan(
         scene_index_by_player=scene_index_by_player,
         slide_rects=slide_rects,
         boundaries=tuple(boundaries),
+        slide_instances=slide_instances,
     )
+
+
+def _resolve_movie_path(
+    export_root: Path, uuid: str, asset_id: str, assets_table: dict[str, Any], resolver: Callable[[Path, str], Path]
+) -> Path | None:
+    entry = assets_table.get(asset_id) or {}
+    url = (entry.get("url") or {}).get("web") or (entry.get("url") or {}).get("native")
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        return resolver(export_root, f"assets/{uuid}/{url}")
+    except Exception:  # noqa: BLE001 - an unresolvable asset reports as unreadable, not fatal
+        return None
+
+
+def _referenced_movies(
+    export_root: Path, slides: list[dict[str, Any]], *, resolver: Callable[[Path, str], Path]
+) -> dict[str, Path | None]:
+    found: dict[str, Path | None] = {}
+    for slide in slides:
+        if slide.get("skipped"):
+            continue
+        uuid = slide.get("exportedUuid")
+        if not isinstance(uuid, str) or not uuid:
+            continue
+        try:
+            data = json.loads(resolver(export_root, f"assets/{uuid}/{uuid}.json").read_text())
+            events = data["events"]
+            assets_table = data["assets"]
+        except Exception:  # noqa: BLE001 - a report entry is best-effort, never fatal
+            continue
+        if not isinstance(events, list):
+            continue
+        for node in _find_movie_nodes(events):
+            asset_id = node["movie"].get("asset")
+            if not isinstance(asset_id, str) or not asset_id:
+                continue
+            key = _normalize_asset_key(assets_table, asset_id)
+            if key in found:
+                continue
+            found[key] = _resolve_movie_path(export_root, uuid, asset_id, assets_table, resolver)
+    return found
+
+
+def codec_report(
+    export_root: Path,
+    slides: list[dict[str, Any]],
+    *,
+    resolver: Callable[[Path, str], Path] = safe_export_file,
+    probe: Callable[[Path], str | None] = movie_codec,
+) -> list[dict[str, Any]]:
+    """Codec of every movie asset any non-skipped slide's events reference, independent
+    of whether the deck qualifies for continuity (a rotated or ambiguous movie's codec
+    is still worth reporting). Unreadable slides or assets are skipped, never raised:
+    this report must stay available even when `derive_plan` refuses."""
+    assets = _referenced_movies(export_root, slides, resolver=resolver)
+    report = []
+    for asset, path in sorted(assets.items()):
+        fourcc = probe(path) if path is not None else None
+        report.append({"asset": asset, "codec": fourcc, "family": codec_family(fourcc)})
+    return report

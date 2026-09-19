@@ -14,5 +14,7 @@
 .live-continuity .note { margin: 8px 0 0; overflow-wrap: anywhere; }
 .live-continuity-choice, .live-continuity-help { flex-basis: 100%; }
 .live-continuity-help { margin: 0; }
+.live-codecs { margin: 16px 0; }
+.live-codecs .note { margin: 8px 0 0; padding-left: 20px; overflow-wrap: anywhere; }
 .live-deck { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; }
 @media (max-width: 650px) { .live-upcoming { flex-wrap: wrap; } .live-upcoming .live-still { flex-basis: 40%; } }

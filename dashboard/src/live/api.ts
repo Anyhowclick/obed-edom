@@ -3,7 +3,8 @@ export type LiveCapability = { supported: boolean; reason?: string };
 export type LiveSlide = { originalOrdinal: number; skipped: boolean; thumbnailUrl?: string; notes?: string };
 export type LivePreparedDeck = { previewJobId: string; name: string; slides: number; sourceDigest: string };
 export type LiveDisplay = { id: string; name: string; width: number; height: number; x: number; y: number; primary: boolean };
-export type LiveContinuity = { mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string; scale?: number };
+export type LiveCodec = { asset: string; codec: string | null; family: "h264" | "hevc" | "prores" | "av1" | "vp9" | "other" };
+export type LiveContinuity ={ mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string; scale?: number };
 export type LiveSnapshot = {
   sessionId: string;
   revision: number;
@@ -20,7 +21,7 @@ export type LiveSnapshot = {
   capabilities: Record<Exclude<LiveOperation, "stop">, LiveCapability>;
   slides: LiveSlide[];
   error?: string;
-  output: { transport: "hdmi"; width: number; height: number; alpha: false; audio: false };
+  output: { transport: "hdmi"; width: number; height: number; alpha: false; audio: false; codecs?: LiveCodec[]; codecWarnings?: string[] };
 };
 export type LiveCommand = { requestId: string; operation: LiveOperation; slide?: number };
 export type LiveResult = {

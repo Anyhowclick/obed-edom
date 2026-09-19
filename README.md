@@ -107,6 +107,15 @@ boundaries, in three arms — continuity on, `OBED_LIVE_CONTINUITY=off`, and
 continuity on with the bridging boundary disabled — plus one attach-mode run, and
 scores decoder identity + playback-clock continuity at each cut.
 
+### Codec report
+
+Every session probes each movie the export references (reading its box tree
+directly, no ffprobe) and reports it on `output.codecs`; `output.codecWarnings`
+flags any that may not play in the current output. HEVC (`hvc1`/`hev1`) is only
+attempted in headful launch mode — never headless launch, never the OBS attach
+output — and a deck's continuity plan reports `unsupported` if a movie it needs
+is not playable this way. The original movie file is never transcoded.
+
 ### DeckLink fill/key via OBS (experimental, UNQUALIFIED)
 
 Instead of driving its own Chrome window, the host can attach to a page already
@@ -172,6 +181,21 @@ configuration, browser version, measured viewport, every command with its
 outcome and timing, every observed state change, slow or timed-out CDP calls,
 page console errors/warnings, and a per-command snapshot of any `<video>`
 elements — useful for diagnosing a bad run after the fact without OBS open.
+
+### Local security posture
+
+In launch mode the host picks a free port by binding `127.0.0.1:0`, closes that
+socket, and passes the number to Chrome (`--remote-debugging-port` with
+`--remote-debugging-address=127.0.0.1`); in the gap another local process could
+claim it, and the host only checks that something serves a usable page target
+there within 15s — it fails closed (`Chrome CDP did not start.`) if nothing does,
+but does not prove the responder is the Chrome it launched. CDP and the asset
+server (also loopback, on a random port) are unauthenticated, so while a session
+runs any local process or user can list targets, drive the output, or read the
+prepared deck. Attach mode takes its endpoint from `OBED_LIVE_ATTACH`, requiring
+`http`, a loopback host, and no userinfo, path, query or fragment, and requires
+the target websocket to be `ws` on a loopback host at the same port — loopback,
+not identity. Run this on a single-user operator machine, not a shared host.
 
 ## Important checks
 

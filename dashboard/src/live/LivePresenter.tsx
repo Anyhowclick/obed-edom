@@ -25,6 +25,19 @@ function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
   </div>;
 }
 
+function CodecWarnings({ warnings }: { warnings?: string[] }) {
+  if (!warnings?.length) return null;
+  const visible = warnings.slice(0, 5);
+  const hidden = warnings.length - visible.length;
+  return <div className="live-codecs" aria-live="polite">
+    <span className="live-continuity-badge" data-mode="unsupported">Some movies may not play in this output</span>
+    <ul className="note">
+      {visible.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}
+      {hidden > 0 && <li>+{hidden} more</li>}
+    </ul>
+  </div>;
+}
+
 export function LivePresenter({ client = liveClient, previewJobId = "", pollMs = 1000 }: { client?: LiveClient; previewJobId?: string; pollMs?: number }) {
   const [snapshot, setSnapshot] = useState<LiveSnapshot | null>(null);
   const observed = useRef<LiveSnapshot | null>(null);
@@ -221,6 +234,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
       <button className="btn" disabled={!connected || pending || !jobId || !displays.length}>Start output session</button>
     </form>}
     {active && <ContinuityStatus continuity={snapshot.continuity} />}
+    {active && <CodecWarnings warnings={snapshot.output.codecWarnings} />}
     {snapshot && <>
       <p className="note">Slide {snapshot.originalSlide ?? "unknown"} · Build {snapshot.buildIndex ?? "unknown"} · Display {snapshot.output.width} × {snapshot.output.height} · Audio off</p>
       <Still slide={current} label="Current" />
