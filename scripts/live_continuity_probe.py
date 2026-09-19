@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -74,6 +75,16 @@ CLICK_DELAY_S = 1.5
 POST_ADVANCE_SETTLE_S = 1.8
 VIDEO_DECODE_TIMEOUT_S = 8.0
 MAX_ADVANCE_STEPS = 40
+# Window discipline (reviewer finding #1/#2): a "sometime before, sometime after"
+# check on the whole run cannot see a multi-second freeze or an owner handoff
+# that only holds outside the window actually being cut. Every continuity verdict
+# is instead scored over a WINDOW: [last settled sample before the boundary scene,
+# first settled sample at/after it] padded by WINDOW_PAD_S on each side. 2.0s (well
+# over the spec's ">= 0.5s" floor) so the window comfortably covers the preserve
+# runtime's own documented remount-retry schedule (delays up to 2000ms in
+# `live_continuity_js.py`'s `scheduleRemount`) -- a freeze inside that retry
+# window is exactly the failure mode this instrument exists to catch.
+WINDOW_PAD_S = 2.0
 
 # In headless Chrome, --window-size=W,H yields innerHeight H-32 (chrome window
 # chrome persists even headless) -- reuse live_host_probe's measured compensation
@@ -90,10 +101,35 @@ SAMPLER_JS = r"""
   function sceneOf(){
     try { return window.__obedLive ? window.__obedLive.snapshot().sceneId : null; } catch (e) { return null; }
   }
-  function ownerOf(rect){
+  // footprintOwnerDecoderId classifies a rect against a FIXED footprint table
+  // (the static 1->2 slot) when no rect.key is given -- a rect away from that
+  // slot (e.g. the moving/scaling 3->4 destination) is then unclassifiable and
+  // returns via:'unknown-key', per its own documented contract ("the caller may
+  // pin the asset key directly (rect.key) when it queries a rect the fixed
+  // footprint table does not classify"). Resolve the key ourselves from the
+  // already-public plan object (window.__OBED_CONTINUITY__, never mutated here)
+  // the same way the runtime's own movieAssetKey() does, so ownership can be
+  // asked about ANY on-screen position, not just the static footprint.
+  function movieKeyFor(src){
     try {
-      return (window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId)
-        ? window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId(rect) : null;
+      var plan = window.__OBED_CONTINUITY__;
+      var movies = (plan && plan.movies) || {};
+      var s = String(src || '').toLowerCase();
+      for (var k in movies) {
+        var keys = (movies[k] && movies[k].assetKeys) || [];
+        for (var i = 0; i < keys.length; i++) {
+          if (s.indexOf(String(keys[i]).toLowerCase()) >= 0) return k;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+  function ownerOf(rect, src){
+    try {
+      if (!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId)) return null;
+      var key = movieKeyFor(src);
+      var q = key ? {x: rect.x, y: rect.y, w: rect.w, h: rect.h, key: key} : rect;
+      return window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId(q);
     } catch (e) { return null; }
   }
   function tick(){
@@ -103,16 +139,18 @@ SAMPLER_JS = r"""
     document.querySelectorAll('video').forEach(function(v){
       var r = v.getBoundingClientRect();
       var rect = {x: r.left, y: r.top, w: r.width, h: r.height};
+      var src = String(v.currentSrc || v.src || '').split('/').pop();
       videos.push({
         id: idFor(v),
-        src: String(v.currentSrc || v.src || '').split('/').pop(),
+        elId: (v.__obedElId != null ? v.__obedElId : null),
+        src: src,
         currentTime: v.currentTime,
         paused: v.paused,
         readyState: v.readyState,
         videoWidth: v.videoWidth,
         isConnected: document.contains(v),
         rect: rect,
-        footprintOwner: ownerOf(rect)
+        footprintOwner: ownerOf(rect, v.currentSrc || v.src || '')
       });
     });
     samples.push({t: t, scene: scene, videos: videos});
@@ -176,24 +214,37 @@ def ground_truth_plan(export_root: Path, slides: list[dict[str, Any]]) -> Contin
 def ground_truth_facts(plan: ContinuityPlan) -> dict[str, Any]:
     """Independent, offline ground truth (never injected into the host): the
     bridging asset, the scene onset of each of the three boundaries under test, and
-    the authored slide-4 destination rect the bridged decoder must land on."""
+    the authored rects the tracked decoder must be on-screen at either side of each
+    boundary (reviewer finding #1: "same id existed sometime before/after" is not
+    enough -- it must be at the RIGHT rect, not merely present somewhere)."""
     bridge = None
+    pin = None
     for boundary in plan.boundaries:
         for movie in boundary.movies:
             if movie.action == "bridge":
                 bridge = (boundary, movie)
+            elif movie.action == "pin" and pin is None:
+                pin = (boundary, movie)
     if bridge is None:
         raise SystemExit("fixture has no bridge boundary (expected the 3->4 moving Magic Move)")
-    boundary, movie = bridge
+    if pin is None:
+        raise SystemExit("fixture has no pin boundary (expected the 1->2 static Magic Move)")
+    _, bridge_movie = bridge
+    _, pin_movie = pin
     ordered_players = sorted(plan.scene_index_by_player)
     if len(ordered_players) < 4:
         raise SystemExit("fixture must have at least 4 slides")
+    pin_rect = (pin_movie.dst_rect or pin_movie.src_rect)
+    if pin_rect is None or bridge_movie.src_rect is None or bridge_movie.dst_rect is None:
+        raise SystemExit("fixture's continuity plan is missing a required rect")
     return {
-        "asset": movie.asset,
+        "asset": bridge_movie.asset,
         "onset1to2": plan.scene_index_by_player[ordered_players[1]],
         "restartScene": plan.scene_index_by_player[ordered_players[2]],
         "bridgeScene": plan.scene_index_by_player[ordered_players[3]],
-        "destRect": movie.dst_rect.as_dict(),
+        "pinRect": pin_rect.as_dict(),
+        "bridgeSrcRect": bridge_movie.src_rect.as_dict(),
+        "destRect": bridge_movie.dst_rect.as_dict(),
     }
 
 
@@ -296,52 +347,182 @@ def decoded_anywhere(tracks: dict[int, list[dict[str, Any]]]) -> bool:
     )
 
 
-def rect_matches(rect: dict[str, float], expected: dict[str, float], tolerance: float = RECT_TOLERANCE_PX) -> bool:
+def rect_matches(rect: dict[str, float] | None, expected: dict[str, float], tolerance: float = RECT_TOLERANCE_PX) -> bool:
+    if not isinstance(rect, dict):
+        return False
     return all(abs(rect.get(key, 1e9) - expected[key]) <= tolerance for key in ("x", "y", "w", "h"))
 
 
+def find_boundary_window(
+    samples: list[dict[str, Any]], boundary_scene: float, *, pad_s: float = WINDOW_PAD_S
+) -> dict[str, float] | None:
+    """The window a continuity verdict is scored over: from the last settled sample
+    with `scene < boundary_scene` to the first settled sample with `scene >=
+    boundary_scene`, padded by `pad_s` on each side and clipped to the samples
+    actually collected. Returns None if the crossing never happened (both sides of
+    the boundary must be represented and ordered)."""
+    times = [s["t"] for s in samples if s.get("t") is not None]
+    if not times:
+        return None
+    before_times = [s["t"] for s in samples if s.get("scene") is not None and s["scene"] < boundary_scene]
+    after_times = [s["t"] for s in samples if s.get("scene") is not None and s["scene"] >= boundary_scene]
+    if not before_times or not after_times:
+        return None
+    last_before = max(before_times)
+    first_after = min(after_times)
+    if last_before >= first_after:
+        return None
+    lo, hi = min(times), max(times)
+    return {
+        "start": max(last_before - pad_s * 1000.0, lo),
+        "end": min(first_after + pad_s * 1000.0, hi),
+        "lastBeforeT": last_before,
+        "firstAfterT": first_after,
+    }
+
+
+def _longest_stall_run(rows: list[dict[str, Any]], max_stall_s: float) -> dict[str, Any]:
+    """Accumulate the duration of CONSECUTIVE samples where the unpaused decoder's
+    clock did not advance (reviewer finding #2: comparing only consecutive ~16ms
+    rAF samples against the threshold never sees a multi-second freeze spread over
+    many non-advancing samples). Returns the longest such accumulated run and
+    whether it exceeds `max_stall_s`."""
+    longest_s = 0.0
+    longest_end_ms: float | None = None
+    run_s = 0.0
+    for a, b in zip(rows, rows[1:]):
+        dt_wall = (b["t"] - a["t"]) / 1000.0
+        d_clock = b["currentTime"] - a["currentTime"]
+        frozen = d_clock <= 1e-3 and not b.get("paused")
+        if frozen:
+            run_s += dt_wall
+            if run_s > longest_s:
+                longest_s = run_s
+                longest_end_ms = b["t"]
+        else:
+            run_s = 0.0
+    stalled = longest_s > max_stall_s
+    return {"longestStallS": round(longest_s, 3), "stalled": stalled, "longestStallEndMs": longest_end_ms}
+
+
 def score_continuity(
-    tracks: dict[int, list[dict[str, Any]]],
+    samples: list[dict[str, Any]],
+    asset_substr: str,
     boundary_scene: float,
+    src_rect: dict[str, float],
+    dst_rect: dict[str, float],
+    runtime_installed: bool,
     *,
     min_advance_s: float = MIN_ADVANCE_S,
     max_stall_s: float = MAX_STALL_S,
     max_drop_s: float = MAX_DROP_S,
+    rect_tolerance: float = RECT_TOLERANCE_PX,
+    pad_s: float = WINDOW_PAD_S,
 ) -> dict[str, Any]:
+    """Pure: samples in, verdict dict out. Scores continuity of ONE tracked decoder
+    across `boundary_scene`, evaluated only within the crossing window (reviewer
+    finding #1), requiring (all within the window):
+      - the same element id present with scene < boundary AND scene >= boundary;
+      - when `runtime_installed`, every after-cut sample reports that element (by
+        the continuity runtime's own `footprintOwnerDecoderId`) as footprint owner;
+      - connected and on-screen at `src_rect` before / `dst_rect` after (3px);
+      - a monotonic clock (no drop beyond float jitter);
+      - the longest zero-advance run at or under `max_stall_s`;
+      - total clock advance within the window at least `min_advance_s`.
+    """
+    tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
-    before_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
-    after_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
+    window = find_boundary_window(samples, boundary_scene, pad_s=pad_s)
+    if window is None:
+        return {"verdict": False, "reason": "boundary crossing not observed in samples"}
+    windowed = {
+        element_id: [r for r in rows if window["start"] <= r["t"] <= window["end"]]
+        for element_id, rows in tracks.items()
+    }
+    windowed = {element_id: rows for element_id, rows in windowed.items() if rows}
+    before_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
+    after_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
     common = before_ids & after_ids
     if not common:
-        return {"verdict": False, "reason": "no decoder id spans the boundary", "beforeIds": sorted(before_ids), "afterIds": sorted(after_ids)}
-    element_id = max(common, key=lambda i: len(tracks[i]))
-    rows = sorted(tracks[element_id], key=lambda r: r["t"])
+        return {
+            "verdict": False,
+            "reason": "no decoder id spans the boundary within the window",
+            "beforeIds": sorted(before_ids),
+            "afterIds": sorted(after_ids),
+            "window": window,
+        }
+    def _rect_score(rows: list[dict[str, Any]]) -> int:
+        # The fixture can have more than one same-asset <video> live at once (e.g.
+        # an incoming Magic Move instance already parked at its destination while
+        # the outgoing one is still on-screen elsewhere) -- "most samples in the
+        # window" is not a reliable way to pick which one is the tracked
+        # continuity decoder. Prefer whichever candidate is actually AT the
+        # expected footprint before/after, same as the runtime's own
+        # footprint-owner resolution does by IoU rather than by longevity.
+        before = [r for r in rows if r["scene"] is not None and r["scene"] < boundary_scene]
+        after = [r for r in rows if r["scene"] is not None and r["scene"] >= boundary_scene]
+        return sum(1 for r in before if rect_matches(r.get("rect"), src_rect, rect_tolerance)) + sum(
+            1 for r in after if rect_matches(r.get("rect"), dst_rect, rect_tolerance)
+        )
+
+    element_id = max(common, key=lambda i: (_rect_score(windowed[i]), len(windowed[i])))
+    rows = sorted(windowed[element_id], key=lambda r: r["t"])
+    before_rows = [r for r in rows if r["scene"] is not None and r["scene"] < boundary_scene]
+    after_rows = [r for r in rows if r["scene"] is not None and r["scene"] >= boundary_scene]
+
     max_drop = 0.0
-    stalls: list[dict[str, Any]] = []
     for a, b in zip(rows, rows[1:]):
-        dt_wall = (b["t"] - a["t"]) / 1000.0
         d_clock = b["currentTime"] - a["currentTime"]
         if d_clock < 0:
             max_drop = max(max_drop, -d_clock)
-        elif d_clock <= 1e-3 and not b["paused"] and dt_wall > max_stall_s:
-            stalls.append({"atMs": b["t"], "gapS": round(dt_wall, 3)})
+    stall = _longest_stall_run(rows, max_stall_s)
     advance = rows[-1]["currentTime"] - rows[0]["currentTime"]
-    ok = max_drop <= max_drop_s and advance >= min_advance_s and not stalls
+
+    owner_mismatches: list[dict[str, Any]] = []
+    if runtime_installed:
+        for r in after_rows:
+            owner = r.get("footprintOwner")
+            owned = isinstance(owner, dict) and owner.get("elId") is not None and owner.get("elId") == r.get("elId")
+            if not owned:
+                owner_mismatches.append({"t": r["t"], "footprintOwner": owner, "elId": r.get("elId")})
+
+    rect_mismatches: list[dict[str, Any]] = []
+    for r in before_rows:
+        if not (r.get("isConnected") and rect_matches(r.get("rect"), src_rect, rect_tolerance)):
+            rect_mismatches.append({"t": r["t"], "phase": "before", "rect": r.get("rect"), "isConnected": r.get("isConnected")})
+    for r in after_rows:
+        if not (r.get("isConnected") and rect_matches(r.get("rect"), dst_rect, rect_tolerance)):
+            rect_mismatches.append({"t": r["t"], "phase": "after", "rect": r.get("rect"), "isConnected": r.get("isConnected")})
+
+    ok = (
+        max_drop <= max_drop_s
+        and advance >= min_advance_s
+        and not stall["stalled"]
+        and not owner_mismatches
+        and not rect_mismatches
+    )
     return {
         "verdict": ok,
         "elementId": element_id,
-        "advanceS": round(advance, 3),
+        "windowAdvanceS": round(advance, 3),
         "maxDropS": round(max_drop, 3),
-        "stalls": stalls,
+        "longestStallS": stall["longestStallS"],
         "sampleCount": len(rows),
         "finalRect": rows[-1]["rect"],
+        "ownerMismatches": owner_mismatches,
+        "rectMismatches": rect_mismatches,
+        "window": window,
     }
 
 
 def score_restart(
-    tracks: dict[int, list[dict[str, Any]]], boundary_scene: float, *, max_start_s: float = RESTART_MAX_START_S
+    samples: list[dict[str, Any]], asset_substr: str, boundary_scene: float, *, max_start_s: float = RESTART_MAX_START_S
 ) -> dict[str, Any]:
+    """Pure: samples in, verdict dict out. A restart is a genuinely NEW decoder id
+    (never seen anywhere with `scene < boundary_scene`, at any time in the run, not
+    just within a window) whose own clock starts near zero shortly after the cut."""
+    tracks = track_by_id(samples, asset_substr)
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
     before_ids = {i for i, rows in tracks.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
@@ -361,13 +542,12 @@ def score_restart(
     return {"verdict": ok, "elementId": element_id, "startTimeS": start_time, "freshIds": sorted(fresh_ids)}
 
 
-def score_boundaries(samples: list[dict[str, Any]], facts: dict[str, Any]) -> dict[str, Any]:
-    tracks = track_by_id(samples, facts["asset"])
-    v12 = score_continuity(tracks, facts["onset1to2"])
-    v23 = score_restart(tracks, facts["restartScene"])
-    v34 = score_continuity(tracks, facts["bridgeScene"])
-    if v34.get("verdict") and not rect_matches(v34["finalRect"], facts["destRect"]):
-        v34 = {**v34, "verdict": False, "reason": "final rect does not match the derived slide-4 destination", "expectedRect": facts["destRect"]}
+def score_boundaries(samples: list[dict[str, Any]], facts: dict[str, Any], runtime_installed: bool) -> dict[str, Any]:
+    """Pure: samples + ground truth in, the three boundary verdicts out."""
+    asset = facts["asset"]
+    v12 = score_continuity(samples, asset, facts["onset1to2"], facts["pinRect"], facts["pinRect"], runtime_installed)
+    v23 = score_restart(samples, asset, facts["restartScene"])
+    v34 = score_continuity(samples, asset, facts["bridgeScene"], facts["bridgeSrcRect"], facts["destRect"], runtime_installed)
     return {"continue1to2": v12, "restart2to3": v23, "continue3to4": v34}
 
 
@@ -398,7 +578,8 @@ def run_arm(name: str, export_root: Path, slides: list[dict[str, Any]], facts: d
         result["continuity"] = player.output["continuity"]
         samples = drive_and_sample(player)
         result["sampleCount"] = len(samples)
-        result.update(score_boundaries(samples, facts))
+        runtime_installed = result["continuity"].get("mode") == "qualified"
+        result.update(score_boundaries(samples, facts, runtime_installed))
     finally:
         try:
             player.stop()
@@ -484,7 +665,8 @@ def run_attach_arm(export_root: Path, slides: list[dict[str, Any]], facts: dict[
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
                 samples = drive_and_sample(player)
                 result["sampleCount"] = len(samples)
-                result.update(score_boundaries(samples, facts))
+                runtime_installed = result["continuity"].get("mode") == "qualified"
+                result.update(score_boundaries(samples, facts, runtime_installed))
             finally:
                 try:
                     player.stop()
@@ -515,7 +697,36 @@ def boundary_verdict(entry: dict[str, Any], key: str) -> bool | None:
     return value.get("verdict") if isinstance(value, dict) else None
 
 
-def overall_status(result: dict[str, Any]) -> str:
+def continuity_mode(entry: dict[str, Any]) -> str | None:
+    continuity = entry.get("continuity")
+    return continuity.get("mode") if isinstance(continuity, dict) else None
+
+
+def background_alpha(css: str | None) -> float:
+    """Parse a CSS `rgb()`/`rgba()` color's alpha channel. An `rgb()` string has no
+    alpha channel at all, which computed-style renders as fully opaque -- treat
+    that as alpha 1.0, never as "unknown => pass"."""
+    if not css:
+        return 1.0
+    match = re.match(r"rgba?\(([^)]*)\)", css.strip())
+    if not match:
+        return 1.0
+    parts = [p.strip() for p in match.group(1).split(",")]
+    if len(parts) != 4:
+        return 1.0
+    try:
+        return float(parts[3])
+    except ValueError:
+        return 1.0
+
+
+def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Pure: the assembled result dict in, (status, reasons) out. Reviewer finding
+    #3: a green boundary verdict does not by itself prove the RIGHT mechanism was
+    active -- arms A/C must actually have qualified continuity installed, arm B
+    must actually have it off, and the attach arm's page must actually be
+    transparent, or the verdict is not trustworthy even if the boundary math
+    passed."""
     arms = result.get("arms", {})
     attach = result.get("attach", {})
     a, b, c = arms.get("A", {}), arms.get("B", {}), arms.get("C", {})
@@ -526,16 +737,43 @@ def overall_status(result: dict[str, Any]) -> str:
         boundary_verdict(attach, "continue1to2"), boundary_verdict(attach, "restart2to3"), boundary_verdict(attach, "continue3to4"),
     ]
     if any(v is None for v in all_gated):
-        return "inconclusive"
+        return "inconclusive", ["at least one gated boundary verdict is inconclusive (movie never decoded)"]
+
+    reasons: list[str] = []
+
+    a_mode, b_mode, c_mode, attach_mode = continuity_mode(a), continuity_mode(b), continuity_mode(c), continuity_mode(attach)
     a_ok = bool(boundary_verdict(a, "continue1to2")) and bool(boundary_verdict(a, "restart2to3")) and bool(boundary_verdict(a, "continue3to4"))
+    if a_mode != "qualified":
+        a_ok = False
+        reasons.append(f"arm A continuity.mode={a_mode!r}, expected 'qualified'")
+
     b_ok = boundary_verdict(b, "continue3to4") is False
+    if b_mode != "off":
+        b_ok = False
+        reasons.append(f"arm B continuity.mode={b_mode!r}, expected 'off'")
+
     c_ok = boundary_verdict(c, "continue3to4") is False and boundary_verdict(c, "continue1to2") is True
+    if c_mode != "qualified":
+        c_ok = False
+        reasons.append(f"arm C continuity.mode={c_mode!r}, expected 'qualified'")
+
     attach_ok = (
         bool(boundary_verdict(attach, "continue1to2"))
         and bool(boundary_verdict(attach, "restart2to3"))
         and bool(boundary_verdict(attach, "continue3to4"))
     )
-    return "pass" if (a_ok and b_ok and c_ok and attach_ok) else "fail"
+    if attach_mode != "qualified":
+        attach_ok = False
+        reasons.append(f"attach continuity.mode={attach_mode!r}, expected 'qualified'")
+    alpha = background_alpha((attach.get("transparentBackground") or {}).get("computedBackground"))
+    if alpha != 0:
+        attach_ok = False
+        reasons.append(f"attach background alpha={alpha}, expected 0")
+
+    ok = a_ok and b_ok and c_ok and attach_ok
+    if not ok and not reasons:
+        reasons.append("a boundary verdict did not match the expected pattern for its arm")
+    return ("pass" if ok else "fail"), reasons
 
 
 def main() -> None:
@@ -562,7 +800,10 @@ def main() -> None:
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
         facts = ground_truth_facts(plan)
-        result["groundTruth"] = {key: facts[key] for key in ("asset", "onset1to2", "restartScene", "bridgeScene", "destRect")}
+        result["groundTruth"] = {
+            key: facts[key]
+            for key in ("asset", "onset1to2", "restartScene", "bridgeScene", "pinRect", "bridgeSrcRect", "destRect")
+        }
         save()
 
         result["arms"] = {}
@@ -587,7 +828,7 @@ def main() -> None:
         result["leftoverChromeAfterAttach"] = check_no_leftover_chrome()
         save()
 
-        result["status"] = overall_status(result)
+        result["status"], result["statusReasons"] = overall_status(result)
     except Exception as exc:  # noqa: BLE001 - always leave a readable artifact behind
         result["status"] = "error"
         result["error"] = str(exc)
@@ -596,6 +837,7 @@ def main() -> None:
 
     summary = {
         "status": result.get("status"),
+        "statusReasons": result.get("statusReasons"),
         "arms": {
             name: {key: boundary_verdict(entry, key) for key in ("continue1to2", "restart2to3", "continue3to4")}
             for name, entry in result.get("arms", {}).items()
