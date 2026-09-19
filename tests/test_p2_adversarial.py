@@ -1061,3 +1061,328 @@ def test_freeze_control_fails_when_positive_bracket_not_green():
     verdict = p2._score_freeze_control(a_bad, _freeze_b_snap(), _positive_snap())
     assert verdict["ok"] is False
     assert "positivesGreen" in verdict["failed"]
+
+
+# --------------------------------------------------------------------------- #
+# I4 — the 1->2 carry is REFUSED: gates under the baseline plan.
+# --------------------------------------------------------------------------- #
+def _refusal_events() -> list[dict]:
+    """The two positive notes the retire zone may emit for movie1."""
+    return [
+        {
+            "kind": "retire-boundary",
+            "detail": {"key": "movie1", "elIds": [1], "atScene": 2, "sceneHash": "#1"},
+        },
+        {
+            "kind": "preserve-refused",
+            "detail": {"key": "movie1", "scene": 2, "via": "stash", "sceneHash": "#2"},
+        },
+    ]
+
+
+def _clean_lingering() -> dict:
+    return {"count": 0, "elIds": [], "preservedCount": 0, "paintingCount": 0, "paintingElIds": []}
+
+
+def _frozen_index_samples(index: int = 41, n: int = 8) -> list[dict]:
+    """A flip at sample 1, then a counter that never advances (raw-export slide 2)."""
+    return [{"index": index - 1, "sceneHash": "#1"}] + [
+        {"index": index, "sceneHash": "#2"} for _ in range(n)
+    ]
+
+
+def _refused_args(**overrides):
+    args = {
+        "injected_plan": p2.build_continuity_plan(True),
+        "preserve_events": _refusal_events(),
+        "lingering": _clean_lingering(),
+        "index_samples": _frozen_index_samples(),
+        "flip_index": 1,
+        "hash1": "#1",
+        "hash2": "#2",
+        "player_build_errors": [],
+    }
+    args.update(overrides)
+    return args
+
+
+def _refused(**overrides) -> dict:
+    return p2.refusedCarry1to2(**_refused_args(**overrides))
+
+
+def test_refused_carry_passes_when_every_clause_holds():
+    verdict = _refused()
+    assert verdict["ok"] is True
+    assert verdict["reasons"] == []
+    assert verdict["planRetire"]["atScene"] == p2.SLIDE2_MIN_HASH
+    assert verdict["frozenIndex"]["frozen"] is True
+
+
+def test_refused_carry_fails_without_plan_retire_boundary():
+    """(a) The plan must actually retire the key — an un-retired plan cannot be
+    'honoured' by silence."""
+    plan = p2.build_continuity_plan(True)
+    plan["boundaries"] = [b for b in plan["boundaries"] if b.get("action") != "retire"]
+    verdict = _refused(injected_plan=plan)
+    assert verdict["ok"] is False
+    assert "injected plan has no retire boundary for the target key" in verdict["reasons"]
+
+
+def test_refused_carry_fails_without_a_positive_refusal_event():
+    """(b) Refusal is asserted by an event, never by silence."""
+    verdict = _refused(preserve_events=[])
+    assert verdict["ok"] is False
+    assert "no preserve-refused/retire-boundary event in the retire zone" in verdict["reasons"]
+
+
+def test_refused_carry_ignores_a_refusal_event_before_the_retire_scene():
+    early = [
+        {"kind": "preserve-refused", "detail": {"key": "movie1", "scene": 1, "via": "stash"}},
+    ]
+    verdict = _refused(preserve_events=early)
+    assert verdict["ok"] is False
+    assert verdict["refusalEventsN"] == 0
+
+
+def test_refused_carry_fails_on_a_remount_inside_the_retire_zone():
+    """(c) Any remount/reuse/dom-swap for movie1 in [2, 6) means the carry happened."""
+    events = _refusal_events() + [
+        {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#3"}},
+    ]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 1
+    assert "the movie was carried inside the retire zone" in verdict["reasons"]
+
+
+def test_refused_carry_fails_on_a_keyless_dom_swap_of_a_known_movie1_element():
+    """dom-swap carries no key — it is matched by the element id the retire
+    boundary already attributed to movie1."""
+    events = _refusal_events() + [
+        {"kind": "dom-swap", "detail": {"elId": 1, "t": 4.0, "sceneHash": "#4"}},
+    ]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 1
+
+
+def test_refused_carry_allows_carry_events_outside_the_retire_zone():
+    """The 3->4 bridge remounts at scene 8 — outside [2, 6) and not this gate's business."""
+    events = _refusal_events() + [
+        {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#8"}},
+        {"kind": "remount-done", "detail": {"elId": 9, "key": "movie2", "sceneHash": "#3"}},
+    ]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is True
+    assert verdict["carryEventsInRetireZoneN"] == 0
+
+
+def test_refused_carry_fails_on_a_lingering_overlay_on_slide2():
+    """(d) A remounted leftover over the slide-1/2 footprints."""
+    verdict = _refused(lingering={**_clean_lingering(), "count": 1, "elIds": [1]})
+    assert verdict["ok"] is False
+    assert "a preserved/remounted/painting <video> lingers on slide 2" in verdict["reasons"]
+
+
+def test_refused_carry_fails_on_a_painting_video_over_the_footprint():
+    """(d) A <video> that actually paints there — the player composites slide 2
+    in WebGL, so anything painting is ours."""
+    verdict = _refused(lingering={**_clean_lingering(), "paintingCount": 1})
+    assert verdict["ok"] is False
+    assert "a preserved/remounted/painting <video> lingers on slide 2" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_when_the_slide2_query_did_not_run():
+    verdict = _refused(lingering={"error": "evaluate returned nothing"})
+    assert verdict["ok"] is False
+
+
+def test_refused_carry_fails_when_the_counter_keeps_advancing():
+    """(e) A marching counter on slide 2 means the movie was carried after all."""
+    samples = [{"index": 10, "sceneHash": "#1"}] + [
+        {"index": 11 + i, "sceneHash": "#2"} for i in range(6)
+    ]
+    verdict = _refused(index_samples=samples)
+    assert verdict["ok"] is False
+    assert "counter advanced on the refused slide" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_when_the_counter_is_undecodable():
+    samples = [{"index": 10, "sceneHash": "#1"}] + [
+        {"index": None, "sceneHash": "#2"} for _ in range(6)
+    ]
+    verdict = _refused(index_samples=samples)
+    assert verdict["ok"] is False
+    assert "insufficient decodable samples after the flip" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_an_observed_flip():
+    verdict = _refused(flip_index=None)
+    assert verdict["ok"] is False
+    assert "no scene-hash flip observed" in verdict["reasons"]
+
+
+def test_refused_carry_fails_when_the_scene_hash_did_not_change():
+    verdict = _refused(hash2="#1")
+    assert verdict["ok"] is False
+    assert "no valid forward 1->2 boundary" in verdict["reasons"]
+
+
+def test_refused_carry_fails_on_a_player_build_error():
+    """(f) An uncaught player exception fails the finding outright."""
+    verdict = _refused(player_build_errors=[{"kind": "player-build-error"}])
+    assert verdict["ok"] is False
+    assert "player build error" in verdict["reasons"]
+
+
+# --------------------------------------------------------------------------- #
+# preserveDidNotBlockRestart — the two positive-evidence routes.
+# --------------------------------------------------------------------------- #
+def test_never_pooled_evidence_is_the_refusal_route():
+    """Refused + nothing pooled in the retire zone => the pool was EMPTY at the
+    2->3 boundary, which is why the reuse-skip/retire pair cannot fire."""
+    evidence = p2.neverPooledEvidence(_refusal_events())
+    assert evidence["ok"] is True
+    assert evidence["refusalEventsN"] == 2
+    assert evidence["carryEventsInRetireZoneN"] == 0
+
+
+def test_never_pooled_evidence_requires_a_positive_refusal_event():
+    """Silence is not evidence: no refusal note => no substitute route."""
+    assert p2.neverPooledEvidence([])["ok"] is False
+
+
+def test_never_pooled_evidence_dies_on_a_stash_consumed_in_the_retire_zone():
+    events = _refusal_events() + [
+        {"kind": "reuse-decoder", "detail": {"key": "movie1", "newElId": 3, "sceneHash": "#4"}},
+    ]
+    evidence = p2.neverPooledEvidence(events)
+    assert evidence["ok"] is False
+    assert evidence["carryEventsInRetireZoneN"] == 1
+
+
+def test_never_pooled_evidence_ignores_another_movies_reuse():
+    events = _refusal_events() + [
+        {"kind": "reuse-decoder", "detail": {"key": "movie2", "newElId": 7, "sceneHash": "#4"}},
+    ]
+    assert p2.neverPooledEvidence(events)["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# footprintFullyLive — wiring only; thresholds are imported, never re-tuned.
+# --------------------------------------------------------------------------- #
+def _burst(rect, *, live_frac: float = 1.0, control_noise: bool = False, n: int = 6):
+    """A synthetic settled-slide burst: static grey everywhere, except a live
+    band inside `rect` (the left `live_frac` of it) that alternates every frame."""
+    import numpy as np
+
+    x, y, w, h = rect
+    frames = []
+    for i in range(n):
+        frame = np.full((1080, 1920, 3), 60, dtype=np.uint8)
+        lw = max(1, int(w * live_frac))
+        frame[y:y + h, x:x + lw] = 30 if i % 2 else 220
+        if control_noise:
+            c = p2.SLIDE4_CONTROL_RECT
+            frame[c["y"]:c["y"] + c["h"], c["x"]:c["x"] + c["w"]] = 30 if i % 2 else 220
+        frames.append(frame)
+    return frames
+
+
+def test_footprint_fully_live_green_on_a_fully_painting_footprint():
+    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT))
+    assert verdict["ok"] is True
+    assert verdict["verdict"] is True
+    assert verdict["perRect"][0]["label"] == "slide4Movie"
+
+
+def test_footprint_fully_live_red_on_a_half_dead_footprint():
+    """Half the destination rect frozen => the carry is not visibly correct."""
+    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, live_frac=0.5))
+    assert verdict["ok"] is False
+    assert verdict["verdict"] is False
+
+
+def test_footprint_fully_live_inconclusive_is_a_failure():
+    """A noise floor above threshold yields verdict None — anything but True fails."""
+    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, control_noise=True))
+    assert verdict["verdict"] is None
+    assert verdict["status"] == "inconclusive"
+    assert verdict["ok"] is False
+
+
+def test_footprint_fully_live_fails_closed_on_a_truncated_burst():
+    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, n=1))
+    assert verdict["ok"] is False
+    assert verdict["status"] == "inconclusive"
+
+
+def test_burst_offsets_come_from_the_probe():
+    """One burst cadence for both instruments — never a re-tuned local copy."""
+    import live_continuity_probe
+
+    assert p2.BURST_OFFSETS_MS == live_continuity_probe.BURST_OFFSETS_MS
+    assert len(set(p2.BURST_OFFSETS_MS)) == len(p2.BURST_OFFSETS_MS)
+
+
+# --------------------------------------------------------------------------- #
+# Injected plan shape + the findings inventory.
+# --------------------------------------------------------------------------- #
+def test_injected_plan_retires_movie1_before_the_restart_and_bridges_3to4():
+    plan = p2.build_continuity_plan(True)
+    boundaries = plan["boundaries"]
+    assert [b["action"] for b in boundaries] == ["retire", "restart", "bridge"]
+    assert boundaries[0] == {
+        "atScene": p2.SLIDE2_MIN_HASH, "action": "retire", "movieKey": p2.MOVIE1_KEY,
+    }
+    assert boundaries[1]["atScene"] == p2.SLIDE3_MIN_HASH
+    assert boundaries[2]["atScene"] == p2.SLIDE4_MIN_HASH
+    assert boundaries[0]["atScene"] < boundaries[1]["atScene"] < boundaries[2]["atScene"]
+
+
+def test_disable_bridge34_removes_only_the_bridge():
+    plan = p2.build_continuity_plan(False)
+    assert [b["action"] for b in plan["boundaries"]] == ["retire", "restart"]
+    assert plan["movies"] == p2.build_continuity_plan(True)["movies"]
+    assert plan["transparentBackground"] is True
+
+
+def test_injected_plan_matches_the_derived_runtime_plan_boundaries():
+    """The P2 injection must stay equal to `derive_plan(...).to_runtime()` for the
+    fixture (tests/test_live_continuity.py pins the other direction)."""
+    import re
+
+    expected = re.search(
+        r"EXPECTED_RUNTIME_PLAN = (\{.*?\n\})",
+        (REPO / "tests" / "test_live_continuity.py").read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert expected, "EXPECTED_RUNTIME_PLAN literal not found"
+    derived = eval(expected.group(1))  # noqa: S307 - repo-local literal
+    assert p2.build_continuity_plan(True)["boundaries"] == derived["boundaries"]
+
+
+def test_findings_inventory_is_still_fourteen_and_renamed():
+    import re
+
+    ids = re.findall(
+        r'"id": "(\w+)"',
+        (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text(encoding="utf-8"),
+    )
+    assert len(ids) == 14
+    assert "refusedCarry1to2" in ids
+    assert "continueThroughMagicMove1to2" not in ids
+    assert "freezeControlCaughtByCounter" in ids
+
+
+def test_refused_carry_ignores_a_suppressed_or_errored_remount():
+    """A remount that was suppressed / went stale / errored is the OPPOSITE of a
+    carry and must not turn the refusal red."""
+    events = _refusal_events() + [
+        {"kind": "remount-suppressed", "detail": {"elId": 1, "why": "mm", "sceneHash": "#3"}},
+        {"kind": "remount-stale", "detail": {"elId": 1, "epoch": 2, "sceneHash": "#3"}},
+        {"kind": "remount-error", "detail": {"elId": 1, "message": "x", "sceneHash": "#4"}},
+    ]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is True
+    assert verdict["carryEventsInRetireZoneN"] == 0
