@@ -50,6 +50,16 @@ Python: `/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python`, always `PY
 - 6 maps Python tests + 6 maps UI tests are red on pristine `origin/main` — not yours.
 - Export slide-3 movie rect is y=797.1; P2's constant says 795 (on-screen measurement, within tolerance).
 
+## UPDATE 2026-09-19 late — attach mode verified against REAL OBS 32.2.2 (CEF = Chrome/127.0.6533.120)
+Read-only run by Claude at `d16119c`, fixture (H.264) deck, `OBED_LIVE_ATTACH=http://127.0.0.1:9222`,
+`OBED_LIVE_ATTACH_MATCH=about:blank#program`: exactly-one-target match OK · page viewport exactly
+1920×1080, dpr 1, html/body background `rgba(0,0,0,0)` · continuity **qualified** · **CDP Space/digits/Enter
+DO reach the CEF page** (5 advances settle 1.3–2.3 s; goTo 1 in 0.34 s) ⇒ **P0-b click fallback is now
+LOW priority** · both H.264 movies decode (readyState 4, 0–3 dropped of ~60 frames) · hide ⇒ not visible
+and both movie clocks keep advancing (+1.5 s in 1.5 s) · CDP screenshot of slide 3 has real alpha (81 %
+alpha 0, 18.9 % opaque) · stop ⇒ page at `about:blank`, OBS still running, log written. Not yet seen:
+DeckLink output itself, HEVC originals in CEF, the 3→4 in-move artifact through OBS (expected, same bytes).
+
 ## Deferred items — priority order
 ### P0-a · 3→4 in-move position (owner WILL see this tomorrow)
 With continuity on, the movie is carried through the 3→4 moving Magic Move on one decoder (clock
