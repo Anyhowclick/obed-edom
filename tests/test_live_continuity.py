@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -1110,6 +1111,50 @@ def test_a_malformed_slot_above_the_movie_is_unsupported_not_an_exception(tamper
 def test_a_malformed_movie_layer_is_unsupported_not_an_exception(tamper):
     plan = _plan(_mutate_slide(SLIDE1, lambda data: _map_movie_nodes(data, lambda n: tamper(n["baseLayer"]))))
     assert isinstance(plan, Unsupported)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(lambda state: state.__setitem__("affineTransform", None), id="null-affine"),
+        pytest.param(lambda state: state.__setitem__("affineTransform", [1, 0, 0, 1]), id="short-affine"),
+        pytest.param(lambda state: state.__setitem__("affineTransform", "identity"), id="text-affine"),
+        pytest.param(
+            lambda state: state.__setitem__("affineTransform", [1, 0, 0, 1, 0, float("nan")]),
+            id="nan-affine-element",
+        ),
+        pytest.param(
+            lambda state: state.__setitem__("affineTransform", [1, 0, 0, 1, 0, "0"]), id="text-affine-element",
+        ),
+        pytest.param(lambda state: state.__setitem__("anchorPoint", []), id="list-anchorPoint"),
+        pytest.param(lambda state: state.__setitem__("anchorPoint", None), id="null-anchorPoint"),
+        pytest.param(lambda state: state["anchorPoint"].pop("pointX"), id="no-pointX"),
+        pytest.param(
+            lambda state: state["anchorPoint"].__setitem__("pointY", float("inf")), id="inf-pointY",
+        ),
+        pytest.param(lambda state: state.__setitem__("rotation", float("nan")), id="nan-rotation"),
+        pytest.param(lambda state: state.__setitem__("rotation", "0"), id="text-rotation"),
+        pytest.param(lambda state: state.__setitem__("scale", float("nan")), id="nan-scale"),
+        pytest.param(
+            lambda state: state["contentsRect"].__setitem__("width", float("nan")), id="nan-contentsRect",
+        ),
+        pytest.param(
+            lambda state: state["contentsRect"].__setitem__("width", float("inf")), id="inf-contentsRect",
+        ),
+    ],
+)
+def test_a_malformed_transform_or_anchor_is_unsupported_not_an_exception(tamper):
+    """Python's `json` parses NaN and Infinity, and a NaN compares false against every bound, so
+    a plain `abs(value - unit) > tol` check would wave it straight through. Every number in the
+    geometry path is read as a finite number or not at all."""
+    plan = _plan(
+        _mutate_slide(SLIDE1, lambda data: _map_movie_nodes(data, lambda n: tamper(n["baseLayer"]["initialState"])))
+    )
+    assert isinstance(plan, Unsupported)
+
+
+def test_python_json_really_does_accept_nan_so_the_guard_is_not_theoretical():
+    assert math.isnan(json.loads('{"width": NaN}')["width"])
 
 
 def test_a_non_list_layers_on_a_draw_slot_is_unsupported_not_an_exception():

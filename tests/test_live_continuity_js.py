@@ -1524,3 +1524,165 @@ console.log(JSON.stringify({
     assert result["retire"] == 0      # the sweep never ran inside the zone here
     assert result["refusalsAtSix"] == 0
     assert result["remountedAtSix"] >= 1
+
+
+# Codex r2 MAJOR 1: identity must also go STALE correctly. An element given a
+# different asset is no longer the movie it was pooled as, so the stamp and the
+# pool membership must follow the new source — otherwise the retire sweep
+# pauses and removes what is now an unplanned clip.
+
+#: Pool a movie1 decoder at `#0`, then re-assign `__NEXT__` to that very
+#: element (both the `.src` setter and `setAttribute` are exercised).
+_REASSIGN = r"""
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1;
+v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(0);
+detach(v);
+// `P.poolKeys` is only refreshed by `note()`, so read the live census.
+const poolNow = () => P.snapshot().filter(x => !x.fromDom).map(x => x.key);
+const pooledBefore = poolNow();
+__ASSIGN__
+const report = () => ({
+  pooledBefore,
+  poolKeys: poolNow(),
+  stamp: v.__obedMovieKey === undefined ? 'unset' : v.__obedMovieKey,
+  preserved: v.dataset.obedPreserved || null,
+});
+"""
+
+
+def _reassign(via: str, url: str, tail: str) -> dict:
+    assign = (
+        f"v.src = '{url}';" if via == "setter" else f"v.setAttribute('src', '{url}');"
+    )
+    return _run_retire(_REASSIGN.replace("__ASSIGN__", assign) + tail)
+
+
+_SWEEP_TAIL = r"""
+location.hash = '#1';
+tick();
+console.log(JSON.stringify(Object.assign(report(), {
+  paused: v.paused,
+  inDocument: document.contains(v),
+  gen: v.__obedGen === undefined ? 'unset' : v.__obedGen,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => e.detail),
+})));
+"""
+
+
+@pytest.mark.parametrize("via", ["setter", "setAttribute"])
+def test_reassigning_an_unplanned_asset_drops_pool_membership_and_the_stamp(via):
+    """The deliberately unplanned WA0125 clip: the element leaves the pool,
+    loses `obedPreserved` and its stamp is CLEARED — so a later in-zone sweep
+    must not pause or detach it."""
+    result = _reassign(via, "https://host/WA0125-unplanned.mov", _SWEEP_TAIL)
+    assert result["pooledBefore"] == ["untitled.mov"]
+    assert result["poolKeys"] == []
+    assert result["stamp"] is None
+    assert result["preserved"] is None
+    assert result["retire"] == []
+    assert result["paused"] is False
+    assert result["inDocument"] is True
+    assert result["gen"] == 0
+
+
+def test_reassigning_the_same_asset_leaves_the_pool_untouched():
+    """The reuse/facade path re-assigns the SAME src on a live decoder (via the
+    `.src` setter — `bindFacade` forwards onto `real.src`), and that must not
+    disturb pool membership or the preserved mark. Only the setter path is
+    asserted here: `setAttribute('src')` on an ALREADY-pooled element drains
+    its queue through the pre-existing reuse lookup, which is unrelated to
+    re-identification and is not a path the player takes."""
+    result = _reassign("setter", "https://host/untitled.mov", r"""
+console.log(JSON.stringify(report()));
+""")
+    assert result["poolKeys"] == ["untitled.mov"]
+    assert result["stamp"] == "movie1"
+    assert result["preserved"] == "1"
+
+
+@pytest.mark.parametrize("via", ["setter", "setAttribute"])
+def test_reassigning_another_planned_key_moves_the_stamp(via):
+    """A second PLANNED movie: the stamp follows the new key and the old pool
+    membership is dropped (it is not that movie any more)."""
+    result = _reassign(via, "https://host/WA0125.mov", r"""
+console.log(JSON.stringify(report()));
+""")
+    assert result["poolKeys"] == []
+    assert result["stamp"] == "movie2"
+    assert result["preserved"] is None
+
+
+def test_bind_facade_src_forward_does_not_evict_the_reused_decoder():
+    """`bindFacade` forwards `stub.src = url` onto the real decoder; with the
+    same asset that must be a no-op for identity (Codex r2: do not break the
+    reuse path)."""
+    script = r"""
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(0);
+detach(v);
+const fresh = document.createElement('video');
+fresh.setAttribute('src', 'https://host/untitled.mov');
+const reused = P.events.filter(e => e.kind === 'reuse-decoder').length;
+fresh.src = 'https://host/untitled.mov';   // facade forward onto the real decoder
+console.log(JSON.stringify({
+  reused,
+  facade: fresh.dataset.obedFacade || null,
+  realStamp: v.__obedMovieKey,
+  realPreserved: v.dataset.obedPreserved || null,
+}));
+"""
+    result = _run_retire(script)
+    assert result["reused"] == 1
+    assert result["facade"] == "1"
+    assert result["realStamp"] == "movie1"
+    assert result["realPreserved"] == "1"
+
+
+# Codex r2 MAJOR 2 (runtime half): the P2 pool census must be able to attribute
+# a preserved decoder whose src was really cleared inside the retire zone.
+
+
+def test_snapshot_reports_a_movie_key_for_a_cleared_src_preserved_element():
+    script = r"""
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(0);
+detach(v);
+const pooled = P.snapshot().filter(x => !x.fromDom);
+location.hash = '#1';
+v.src = '';
+const dom = P.snapshot().filter(x => x.fromDom);
+console.log(JSON.stringify({
+  srcAfterClear: v.src || '',
+  pooledKeys: pooled.map(x => [x.key, x.movieKey]),
+  domKeys: dom.map(x => [x.key, x.movieKey]),
+}));
+"""
+    result = _run_retire(script)
+    assert result["srcAfterClear"] == ""
+    assert result["pooledKeys"] == [["untitled.mov", "movie1"]]
+    # `key` stays as-is (back-compat, now empty); `movieKey` still attributes it.
+    assert result["domKeys"] == [["", "movie1"]]
+
+
+def test_snapshot_movie_key_is_null_for_an_unplanned_preserved_element():
+    """`movieKey` is a claim, not a guess: an element the plan does not name
+    must report null rather than borrowing a neighbouring key."""
+    script = r"""
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(0);
+detach(v);
+v.src = 'https://host/WA0125-unplanned.mov';
+v.dataset.obedPreserved = '1';
+console.log(JSON.stringify(P.snapshot().map(x => [x.key, x.movieKey, !!x.fromDom])));
+"""
+    result = _run_retire(script)
+    assert result == [["wa0125-unplanned.mov", None, True]]

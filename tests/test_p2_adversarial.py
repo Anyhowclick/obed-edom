@@ -1126,12 +1126,34 @@ def _motion_across_flip(after=(0.0, 0.0, 0.0, 0.0), before=(218.0, 0.85, 110.0),
     }
 
 
+def _poster_roi(level: int = 120):
+    """A settled slide-2 composite: the export's poster, well above the script's
+    opaque-black level."""
+    import numpy as np
+
+    roi = np.full((20, 40, 4), 255, dtype=np.uint8)
+    roi[:, :, :3] = level
+    return roi
+
+
+def _flip_rois(after=None, *, flip_index: int = 4, n: int = 9):
+    """ROI crops in capture order: moving before the flip, then the still
+    post-flip window (the settled poster unless `after` overrides it)."""
+    import numpy as np
+
+    before = [_poster_roi(30 + 40 * (i % 2)) for i in range(flip_index)]
+    tail = after if after is not None else _poster_roi()
+    return before + [np.array(tail, copy=True) for _ in range(n - flip_index)]
+
+
 def _refused_args(**overrides):
     args = {
         "injected_plan": p2.build_continuity_plan(True),
         "preserve_events": _refusal_events(),
         "lingering": _clean_lingering(),
         "motion_across_flip": _motion_across_flip(),
+        "flip_rois": _flip_rois(),
+        "settled_slide2_roi": _poster_roi(),
         "index_samples": _frozen_index_samples(),
         "flip_index": 1,
         "hash1": "#1",
@@ -1571,3 +1593,81 @@ def test_never_pooled_route_is_invalid_when_the_census_left_the_retire_zone():
     )
     assert evidence["ok"] is False
     assert evidence["poolCensus"]["reason"] == "pool census taken outside the retire zone"
+
+
+# --------------------------------------------------------------------------- #
+# Codex r2 — a still ROI must also be the RIGHT still ROI, and the hash must
+# actually move forward.
+# --------------------------------------------------------------------------- #
+def test_refused_carry_fails_when_the_post_flip_roi_went_black():
+    """Four zero MAEs also describe an ROI that died after the cut."""
+    verdict = _refused(flip_rois=_flip_rois(after=_poster_roi(0)),
+                       settled_slide2_roi=_poster_roi(0))
+    assert verdict["ok"] is False
+    assert "post-flip ROI is blank/black" in verdict["reasons"]
+
+
+def test_refused_carry_fails_when_the_post_flip_roi_is_not_what_slide2_rests_on():
+    """Frozen on something the settled slide does not show = a dead/stale surface
+    that recovered later, not the refused poster."""
+    verdict = _refused(flip_rois=_flip_rois(after=_poster_roi(200)),
+                       settled_slide2_roi=_poster_roi(120))
+    assert verdict["ok"] is False
+    assert "post-flip ROI does not match the settled slide-2 composite" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_a_settled_roi():
+    verdict = _refused(settled_slide2_roi=None)
+    assert verdict["ok"] is False
+    assert "no settled slide-2 ROI" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_post_flip_roi_frames():
+    verdict = _refused(flip_rois=[])
+    assert verdict["ok"] is False
+    assert "no post-flip ROI frames" in verdict["reasons"]
+
+
+def test_refused_carry_green_on_the_live_shape():
+    """After-pair MAE 0, non-blank, equal to the settled composite, #1 -> #2."""
+    verdict = _refused()
+    assert verdict["ok"] is True
+    assert verdict["frozenComposite"]["content"]["ok"] is True
+
+
+def test_refused_carry_requires_strictly_forward_hash_movement():
+    """`#5 -> #2` is not a forward 1->2 boundary."""
+    verdict = _refused(hash1="#5", hash2="#2")
+    assert verdict["ok"] is False
+    assert "no valid forward 1->2 boundary" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_on_an_unparseable_hash():
+    for pair in (("#1", "#2x"), ("boot", "#2"), ("#1", None)):
+        verdict = _refused(hash1=pair[0], hash2=pair[1])
+        assert verdict["ok"] is False
+        assert "no valid forward 1->2 boundary" in verdict["reasons"]
+
+
+# --------------------------------------------------------------------------- #
+# Codex r2 — pool census attribution: a cleared src reports an EMPTY key.
+# --------------------------------------------------------------------------- #
+def test_pool_census_attributes_by_the_stamped_movie_key():
+    """A preserved decoder whose src was really cleared has key "" — the stamped
+    identity is what says it is movie1."""
+    census = _pool_census([{"key": "", "movieKey": "movie1", "elId": 1}])
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["entriesForTargetN"] == 1
+
+
+def test_pool_census_is_invalid_on_an_unattributable_entry():
+    census = _pool_census([{"key": "", "movieKey": None, "elId": 1}])
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["reason"] == "pool census holds an unattributable entry"
+
+
+def test_pool_census_tolerates_a_provably_different_asset():
+    census = _pool_census([{"key": "vid-2024-01-01-wa0125.mp4", "movieKey": None, "elId": 9}])
+    assert p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)["ok"] is True

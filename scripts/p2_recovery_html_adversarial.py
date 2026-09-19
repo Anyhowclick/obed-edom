@@ -91,6 +91,9 @@ GREEN_ROI_S1 = (660, 735, 150, 45)
 # -> smaller movie. So relative to the LARGER movie the green square is IN FRONT and
 # the black sentinel is BEHIND. Black sentinel canvas ~[542,721,181,161], larger movie
 # ~[105,791,960,276], green square ~[789,673,353,313] (measured on the exported deck).
+# The script's one "this ROI is opaque black" level: `_score_black` calls a patch
+# black at rgbMean <= this, and blackBehind calls the movie visible above it.
+BLACK_RGB_MEAN_MAX = 40.0
 BLACK_ABOVE_ROI = (560, 730, 140, 50)    # black sentinel above the movie -> opaque black present
 BLACK_BEHIND_ROI = (560, 800, 140, 70)   # black sentinel ∩ movie -> the MOVIE must show (black behind)
 GREEN_FRONT_ROI = (820, 810, 160, 120)   # green square ∩ movie -> translucent green IN FRONT
@@ -985,7 +988,13 @@ def poolCensusVerdict(
 ) -> dict:
     """The real pool on settled slide 2: zero pooled AND zero `fromDom`
     preserved entries for the target's asset. A census that is missing,
-    malformed or taken outside the retire zone is NOT evidence."""
+    malformed or taken outside the retire zone is NOT evidence.
+
+    Entries are attributed by the stamped `movieKey` first, then by `key`. A
+    preserved decoder whose src was really cleared reports an EMPTY key, so an
+    entry with neither is unattributable and invalidates the whole census — a
+    non-empty key that maps to no plan movie is provably another asset and is
+    tolerated."""
     if not isinstance(census, dict) or not isinstance(census.get("entries"), list):
         return {"ok": False, "reason": "pool census missing or malformed", "census": census}
     scene = _hash_num(census.get("sceneHash"))
@@ -995,11 +1004,32 @@ def poolCensusVerdict(
             "reason": "pool census taken outside the retire zone",
             "sceneHash": census.get("sceneHash"),
         }
-    mine = [
-        e
-        for e in census["entries"]
-        if isinstance(e, dict) and _movie_key(str(e.get("key") or "")) == target_key
-    ]
+    mine = []
+    unattributable = []
+    for e in census["entries"]:
+        if not isinstance(e, dict):
+            unattributable.append(e)
+            continue
+        stamped = e.get("movieKey")
+        raw = str(e.get("key") or "")
+        if isinstance(stamped, str) and stamped:
+            attributed = _movie_key(stamped)
+        elif raw:
+            attributed = _movie_key(raw)
+        else:
+            unattributable.append(e)
+            continue
+        if attributed == target_key:
+            mine.append(e)
+    if unattributable:
+        return {
+            "ok": False,
+            "reason": "pool census holds an unattributable entry",
+            "sceneHash": census.get("sceneHash"),
+            "entriesN": len(census["entries"]),
+            "unattributable": unattributable[:6],
+            "unattributableN": len(unattributable),
+        }
     return {
         "ok": not mine,
         "reason": None if not mine else "the target movie is still pooled on slide 2",
@@ -1012,15 +1042,27 @@ def poolCensusVerdict(
 
 
 def frozenCompositeAfterFlip(
-    motion_across_flip: object, *, min_after_pairs: int = 4
+    motion_across_flip: object,
+    flip_rois: object = None,
+    settled_roi: object = None,
+    *,
+    min_after_pairs: int = 4,
+    min_rgb_mean: float = BLACK_RGB_MEAN_MAX,
 ) -> dict:
     """Clause (e): the movie ROI must be PIXEL-FROZEN for the whole post-flip
     window and have been LIVE before it — the raw export's own behaviour once
     the carry is refused (a carried movie shows after-pair MAE >> eps).
 
+    Stillness alone is not enough: an ROI that went dead/all-black after the cut
+    and recovered later is also "still". The post-flip frames must therefore also
+    be CONTENT-VALID — not blank (rgbMean above the script's own opaque-black
+    level) and equal, within the same `pairEps`, to the composite the slide-2
+    settle point actually rests on.
+
     The burnt-in counter cannot serve here: on the refused slide the patch ROI
     shows the export's poster photo, so it never decodes. Fails closed when the
-    scored window is absent, short or malformed.
+    scored window, the post-flip ROIs or the settled ROI are absent, short or
+    malformed.
     """
     m = motion_across_flip if isinstance(motion_across_flip, dict) else {}
     after = m.get("afterPairMae")
@@ -1038,14 +1080,40 @@ def frozenCompositeAfterFlip(
         }
     still = all(float(v) <= float(eps) for v in after)
     live_before = bool(m.get("beforeOk"))
+    flip_index = m.get("flipIndex")
+    rois = list(flip_rois or [])
+    content = {"ok": False, "reason": "no post-flip ROI frames"}
+    if isinstance(flip_index, int) and 0 <= flip_index < len(rois) and settled_roi is not None:
+        after_rois = rois[flip_index:]
+        means = [float(np.asarray(r)[..., :3].mean()) for r in after_rois]
+        settled_maes = [_mae_rgb(np.asarray(r), np.asarray(settled_roi)) for r in after_rois]
+        blank = [v for v in means if v <= float(min_rgb_mean)]
+        off = [v for v in settled_maes if v > float(eps)]
+        content = {
+            "ok": bool(after_rois and not blank and not off),
+            "reason": (
+                "post-flip ROI is blank/black" if blank
+                else "post-flip ROI does not match the settled slide-2 composite" if off
+                else None
+            ),
+            "n": len(after_rois),
+            "rgbMeans": means,
+            "settledMae": settled_maes,
+            "minRgbMean": float(min_rgb_mean),
+        }
+    elif settled_roi is None:
+        content = {"ok": False, "reason": "no settled slide-2 ROI"}
     reason = None
     if not still:
         reason = "composite kept moving on the refused slide"
     elif not live_before:
         reason = "no motion before the flip — the instrument is blind"
+    elif not content["ok"]:
+        reason = content["reason"]
     return {
-        "frozen": bool(still and live_before),
+        "frozen": bool(still and live_before and content["ok"]),
         "reason": reason,
+        "content": content,
         "n": len(after),
         "afterPairMae": after,
         "beforePairMae": m.get("beforePairMae"),
@@ -1090,6 +1158,8 @@ def refusedCarry1to2(
     preserve_events: list[dict],
     lingering: dict,
     motion_across_flip: object,
+    flip_rois: object,
+    settled_slide2_roi: object,
     index_samples: list[dict],
     flip_index: int | None,
     hash1: object,
@@ -1136,9 +1206,13 @@ def refusedCarry1to2(
         and lingering.get("preservedCount", 1) == 0
         and lingering.get("paintingCount", 1) == 0
     )
-    frozen = frozenCompositeAfterFlip(motion_across_flip)
+    frozen = frozenCompositeAfterFlip(motion_across_flip, flip_rois, settled_slide2_roi)
     index_diagnostic = frozenIndexAfterFlip(index_samples, flip_index)
-    hash_changed = bool(hash1 != hash2 and (_hash_num(hash2) or -1) >= retire_scene)
+    from_n = _strict_hash_num(hash1)
+    to_n = _strict_hash_num(hash2)
+    hash_changed = bool(
+        from_n is not None and to_n is not None and to_n > from_n and to_n >= retire_scene
+    )
     ok = bool(
         plan_retire
         and refusals
@@ -1501,7 +1575,7 @@ def _score_black(arr: np.ndarray, roi: tuple[int, int, int, int]) -> dict:
     a = patch[:, :, 3].astype(np.float64)
     rgb = patch[:, :, :3].astype(np.float64)
     return {
-        "ok": bool(a.mean() >= 240 and rgb.mean() <= 40),
+        "ok": bool(a.mean() >= 240 and rgb.mean() <= BLACK_RGB_MEAN_MAX),
         "alphaMean": float(a.mean()),
         "rgbMean": float(rgb.mean()),
         "shape": list(patch.shape[:2]),
@@ -2559,7 +2633,7 @@ async def _capture_1to2_snapshot(
         "ownerDecoderId": owner_decoder_id,
         "composition": {
             "blackAboveOk": bool(_score_black(mid, BLACK_ABOVE_ROI)["ok"]),
-            "blackBehindShowsMovie": bool(bb["rgbMean"] > 40 and not bb["ok"]),
+            "blackBehindShowsMovie": bool(bb["rgbMean"] > BLACK_RGB_MEAN_MAX and not bb["ok"]),
             "greenFrontGreenish": bool(_score_green(mid, GREEN_FRONT_ROI)["greenish"]),
         },
         "nullControl": null_status,
@@ -3181,6 +3255,7 @@ async def _run(player: Path) -> dict:
         motion_across_flip = score_motion_across_flip(
             flip_samples, start_hash=hash1, expected_key=EXPECTED_MOVIE_KEYS[0]
         )
+        flip_rois = [s["roi"] for s in flip_samples]
         # Composited-freeze check: decode the frame-index patch off every dense
         # capture and confirm it keeps progressing across the MM cut, rather than
         # sticking on the newborn canvas's stale poster frame for 1-2 frames.
@@ -3227,6 +3302,9 @@ async def _run(player: Path) -> dict:
         # 2→3 restart must come from the authored Start Movie (PRESERVE_SCRIPT's
         # boundary guard), not a manual pool clear.
         await asyncio.sleep(wait_profile["postMmSettleS"])
+        settled2 = await chrome.screenshot()
+        Image.fromarray(settled2).save(run_dir / "settled-slide2.png")
+        settled_slide2_roi = _crop(settled2, MOVIE_ROI)
         lingering_on_slide2 = await chrome.evaluate(
             LINGERING_MOVIE_OVERLAYS_JS
         ) or {"error": "evaluate returned nothing"}
@@ -3610,6 +3688,8 @@ async def _run(player: Path) -> dict:
         preserve_events,
         lingering_on_slide2,
         motion_across_flip,
+        flip_rois,
+        settled_slide2_roi,
         index_samples,
         flip_index,
         hash1,
@@ -3717,7 +3797,7 @@ async def _run(player: Path) -> dict:
             "id": "overlappingArtworkComposedAfter1to2",
             "pass": bool(
                 mid_scores["blackAbove"]["ok"]
-                and mid_scores["blackBehind"]["rgbMean"] > 40
+                and mid_scores["blackBehind"]["rgbMean"] > BLACK_RGB_MEAN_MAX
                 and not mid_scores["blackBehind"]["ok"]
                 and mid_scores["greenFront"]["greenish"]
             ),

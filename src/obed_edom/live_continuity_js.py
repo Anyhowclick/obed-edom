@@ -136,6 +136,7 @@ PRESERVE_CORE_JS = r"""
         (q || []).forEach(function(v) {
           out.push({
             key: key,
+            movieKey: movieAssetKey(key) || v.__obedMovieKey || null,
             elId: v.__obedElId,
             currentTime: v.currentTime,
             paused: v.paused,
@@ -148,8 +149,11 @@ PRESERVE_CORE_JS = r"""
         });
       });
       document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
+        const src = v.currentSrc || v.src || '';
         out.push({
-          key: assetKey(v.currentSrc || v.src || ''),
+          key: assetKey(src),
+          // A really-cleared src leaves `key` empty; the stamp still attributes it.
+          movieKey: movieKeyFor(v, src),
           elId: v.__obedElId,
           currentTime: v.currentTime,
           paused: v.paused,
@@ -408,6 +412,32 @@ PRESERVE_CORE_JS = r"""
   // `__obedMovieKey` the first time the key is resolvable; read it back here.
   function movieKeyFor(v, src) {
     return movieAssetKey(src) || (v && v.__obedMovieKey) || null;
+  }
+  /**
+   * Re-identify a <video> on a non-empty source assignment. An element given a
+   * DIFFERENT asset is no longer the movie it was pooled as, so drop its pool
+   * membership and preserved mark before restamping — and the stamp becomes
+   * null when the new asset is not in the plan, or the retire sweep would take
+   * an element that is now an unplanned clip. Assigning the SAME asset changes
+   * nothing: the reuse/facade path re-assigns src on a live decoder.
+   */
+  function reidentify(v, value) {
+    const next = assetKey(value);
+    if (!next) return;
+    const prev = v.__obedAssetKey != null ? v.__obedAssetKey : assetKey(v.currentSrc || v.src || '');
+    v.__obedAssetKey = next;
+    if (prev === next) return;
+    if (prev) {
+      const empties = [];
+      pool.forEach(function(q, key) {
+        const left = (q || []).filter(function(x) { return x !== v; });
+        if (left.length === (q || []).length) return;
+        if (left.length) pool.set(key, left); else empties.push(key);
+      });
+      empties.forEach(function(key) { pool.delete(key); });
+      delete v.dataset.obedPreserved;
+    }
+    v.__obedMovieKey = movieAssetKey(value);
   }
   /** May this movie be preserved at the current scene? False only in a retire zone. */
   function preserveAllowedFor(v, src) {
@@ -1340,9 +1370,7 @@ PRESERVE_CORE_JS = r"""
       configurable: true, enumerable: desc.enumerable, get: desc.get,
       set: function(val) {
         const empty = val === '' || val == null;
-        if (!empty && this instanceof HTMLVideoElement && movieAssetKey(val)) {
-          this.__obedMovieKey = movieAssetKey(val);
-        }
+        if (!empty && this instanceof HTMLVideoElement) reidentify(this, val);
         if (!disabled && empty && this instanceof HTMLVideoElement) {
           const cur = this.currentSrc || desc.get.call(this) || '';
           if (preserveAllowedFor(this, cur)) {
@@ -1396,7 +1424,7 @@ PRESERVE_CORE_JS = r"""
     const origSA = el.setAttribute.bind(el);
     el.setAttribute = function(attr, value) {
       const isSrc = !disabled && String(attr).toLowerCase() === 'src';
-      if (isSrc && movieAssetKey(value)) el.__obedMovieKey = movieAssetKey(value);
+      if (isSrc) reidentify(el, value);
       if (isSrc && preserveAllowedFor(el, value)) {
         const key = assetKey(value);
         const hn = currentHashNum();

@@ -321,16 +321,32 @@ def _movie_table(
     return movie_keys, movies
 
 
-def _identity_transform(state: dict[str, Any]) -> bool:
-    transform = list(state.get("affineTransform", [1, 0, 0, 1, 0, 0]))
-    return state.get("rotation", 0) == 0 and transform == [1, 0, 0, 1, 0, 0]
+_IDENTITY_AFFINE = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
 
 
-def _center_anchor(state: dict[str, Any]) -> bool:
-    anchor = state.get("anchorPoint", {})
+def _identity_transform(state: dict[str, Any], where: str, slide_name: str) -> bool:
+    """Whether the layer is drawn untransformed. `scale` counts: it is part of the same claim,
+    and every measured movie layer carries 1."""
+    for name, neutral in (("rotation", 0.0), ("scale", 1.0)):
+        if name in state and _number(state, name, where=where, slide_name=slide_name) != neutral:
+            return False
+    if "affineTransform" not in state:
+        return True
+    transform = state["affineTransform"]
+    if not isinstance(transform, list) or len(transform) != len(_IDENTITY_AFFINE):
+        raise _Refuse(f"{where} on slide {slide_name} has an unreadable affineTransform")
+    return [_finite(v, "affineTransform", where, slide_name) for v in transform] == _IDENTITY_AFFINE
+
+
+def _center_anchor(state: dict[str, Any], where: str, slide_name: str) -> bool:
+    if "anchorPoint" not in state:
+        return True
+    anchor = state["anchorPoint"]
+    if not isinstance(anchor, dict):
+        raise _Refuse(f"{where} on slide {slide_name} has an unreadable anchorPoint")
     return (
-        abs(anchor.get("pointX", 0.5) - 0.5) < 1e-6
-        and abs(anchor.get("pointY", 0.5) - 0.5) < 1e-6
+        abs(_number(anchor, "pointX", where=where, slide_name=slide_name) - 0.5) < 1e-6
+        and abs(_number(anchor, "pointY", where=where, slide_name=slide_name) - 0.5) < 1e-6
     )
 
 
@@ -381,7 +397,12 @@ def _check_clipping(state: dict[str, Any], path: str, slide_name: str) -> None:
         raise _encoding_refusal(slide_name, f"{path}.contentsRect")
     for name, unit in _UNIT_CONTENTS_RECT:
         value = contents[name]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(value - unit) > 1e-6:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or abs(value - unit) > 1e-6
+        ):
             raise _encoding_refusal(slide_name, f"{path}.contentsRect.{name}")
 
 
@@ -422,15 +443,19 @@ def _object_state(layer: Any, where: str, slide_name: str) -> dict[str, Any]:
     return state
 
 
+def _finite(value: Any, name: str, where: str, slide_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise _Refuse(f"{where} on slide {slide_name} has a non-numeric '{name}'")
+    return float(value)
+
+
 def _number(state: dict[str, Any], *keys: str, where: str, slide_name: str) -> float:
     value: Any = state
     for key in keys:
         if not isinstance(value, dict) or key not in value:
             raise _Refuse(f"{where} on slide {slide_name} is missing '{key}'")
         value = value[key]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise _Refuse(f"{where} on slide {slide_name} has a non-numeric '{keys[-1]}'")
-    return float(value)
+    return _finite(value, keys[-1], where, slide_name)
 
 
 def _state_rect(state: dict[str, Any], where: str, slide_name: str) -> Rect:
@@ -446,7 +471,9 @@ def _movie_rect(node: dict[str, Any], slide_name: str) -> Rect:
     _check_movie_encoding(node, slide_name)
     base_layer = node["baseLayer"]
     parent_state = _object_state(base_layer, "movie layer", slide_name)
-    if not _identity_transform(parent_state) or not _center_anchor(parent_state):
+    if not _identity_transform(parent_state, "movie layer", slide_name) or not _center_anchor(
+        parent_state, "movie layer", slide_name
+    ):
         raise _Refuse(
             f"movie layer on slide {slide_name} has a rotated, transformed, or off-center anchor"
         )
@@ -459,7 +486,9 @@ def _movie_rect(node: dict[str, Any], slide_name: str) -> Rect:
     if not any(video_layer is child for child in base_layer.get("layers") or []):
         raise _Refuse(f"video sub-layer on slide {slide_name} is not a direct child of its movie layer")
     video_state = _object_state(video_layer, "video sub-layer", slide_name)
-    if not _identity_transform(video_state) or not _center_anchor(video_state):
+    if not _identity_transform(video_state, "video sub-layer", slide_name) or not _center_anchor(
+        video_state, "video sub-layer", slide_name
+    ):
         raise _Refuse(
             f"video sub-layer on slide {slide_name} has a rotated, transformed, or off-center anchor"
         )
