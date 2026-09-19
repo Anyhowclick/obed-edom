@@ -388,6 +388,188 @@ def test_keep_at_slot_and_bridge_to_34_map_the_authored_dest_rect(stage):
     assert result["bridgeDest"] == pytest.approx(expected)
 
 
+def _run_slot_detach_in_node(
+    *,
+    stage: dict = _IDENTITY_STAGE,
+    mutate: str = "",
+    append_throws: bool = False,
+    append_noop: bool = False,
+) -> dict:
+    """Drive `keepAtSlot` across a DETACH of the bridged video.
+
+    Frame 1 runs while attached (the pin converges on the mapped slide-4 rect);
+    `mutate` then runs, the video is detached, and frame 2 exercises the
+    re-attach path. The fake video's rect is derived from its own inline style,
+    so a converged pin is a fixed point (a static rect would double every frame).
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to exercise the JS core")
+    core = live_continuity_js.PRESERVE_CORE_JS
+    start = core.index("  function slide4Rect() {")
+    end = core.index("  function rectOverlapArea(r, rect) {", start)
+    fragment = _stage_map_fragment() + core[start:end]
+    harness = f"""
+let connected = true, disabled = false, preserveGeneration = 0, hash = 9, moves = 0;
+const notes = [], frames = [];
+const boundary = {{
+  atScene: 8, movieKey: 'movie1', durationSeconds: 1.5,
+  rect: {{x: 327, y: 709, w: 1266, h: 356}},
+}};
+const bridgeBoundary = () => boundary;
+const currentHashNum = () => hash;
+const slide4MinHash = () => 8;
+const beginMove = () => {{ moves += 1; }};
+const note = (kind, detail) => notes.push({{kind: kind, detail: detail}});
+const stage = {{
+  appendChild(v) {{
+    if ({str(append_throws).lower()}) throw new Error('append failed');
+    v.parentNode = stage;
+    if (!{str(append_noop).lower()}) connected = true;
+  }}
+}};
+const stageMapEl = {{
+  offsetWidth: {json.dumps(stage["ow"])}, offsetHeight: {json.dumps(stage["oh"])},
+  getBoundingClientRect: () => ({{
+    left: {json.dumps(stage["ox"])}, top: {json.dumps(stage["oy"])},
+    width: {json.dumps(stage["ow"])} * {json.dumps(stage["s"])},
+    height: {json.dumps(stage["oh"])} * {json.dumps(stage["s"])}
+  }})
+}};
+const document = {{
+  getElementById: (id) => id === 'stage' ? stageMapEl : stage,
+  querySelector: () => null, body: stage, contains: () => connected
+}};
+const requestAnimationFrame = frame => frames.push(frame);
+const performance = {{now: () => 0}};
+{fragment}
+const real = {{
+  style: {{left: '0px', top: '0px', width: '10px', height: '10px'}},
+  dataset: {{}}, parentNode: stage, ended: false, paused: true,
+  __obedElId: 7, __obedGen: 0,
+  play() {{ this.paused = false; return {{catch(){{}}}}; }},
+  getBoundingClientRect() {{
+    return {{
+      left: parseFloat(this.style.left) || 0, top: parseFloat(this.style.top) || 0,
+      width: parseFloat(this.style.width) || 0, height: parseFloat(this.style.height) || 0,
+    }};
+  }},
+}};
+const rect = () => Object.fromEntries(
+  ['left', 'top', 'width', 'height'].map(key => [key, parseFloat(real.style[key])])
+);
+keepAtSlot(real);
+frames.shift()();                 // attached frame: the pin converges
+const pinned = rect();
+connected = false;
+real.parentNode = null;
+{mutate}
+frames.shift()();                 // detached frame: re-attach or end
+const afterDetach = rect();
+const notesAfterDetach = notes.length;
+if (frames.length) frames.shift()();   // a following (re-attached) frame
+console.log(JSON.stringify({{
+  pinned, afterDetach, connected, moves,
+  reattachNotes: notes.filter(n => n.kind === 'bridge-slot-reattach').length,
+  failureNotes: notes.filter(n => n.kind === 'bridge-slot-reattach-failed'),
+  notesAfterDetach,
+  resumed: real.paused === false,
+  pinning: !!real.__obedSlotPinning,
+  pendingFrames: frames.length,
+}}));
+"""
+    result = subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True)
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    "stage", [_IDENTITY_STAGE, _LETTERBOXED_STAGE], ids=["identity", "letterboxed"]
+)
+def test_slot_pin_reattaches_a_detached_bridged_video(stage):
+    """Codex r1 major #4: `keepAtSlot` used to end for good the moment the
+    bridged video left the document, and `stash()` refuses `__obedBridged34`,
+    so a player cleanup on slide 4 dropped the carried movie permanently. The
+    pin must now re-attach it to the bridge stage and keep holding the mapped
+    destination rect."""
+    result = _run_slot_detach_in_node(stage=stage)
+    expected = {
+        "left": 327 * stage["s"] + stage["ox"], "top": 709 * stage["s"] + stage["oy"],
+        "width": 1266 * stage["s"], "height": 356 * stage["s"],
+    }
+    assert result["pinned"] == pytest.approx(expected)
+    assert result["afterDetach"] == pytest.approx(expected)
+    assert result["connected"] is True
+    assert result["pinning"] is True
+    assert result["pendingFrames"] == 1      # still looping after the re-attach
+    assert result["reattachNotes"] == 1      # exactly once per detach
+    assert result["notesAfterDetach"] == 1   # the following attached frame adds none
+    assert result["resumed"] is True
+    assert result["moves"] == 1              # beginMove() before the append
+
+
+def test_slot_pin_does_not_reattach_after_clear():
+    """`clear()` / `disable()` bump `preserveGeneration` and stamp
+    `__obedGen = -1`; a detach after that must end the loop, not resurrect a
+    retired decoder."""
+    result = _run_slot_detach_in_node(mutate="preserveGeneration += 1; real.__obedGen = -1;")
+    assert result["reattachNotes"] == 0
+    assert result["failureNotes"] == []
+    assert result["connected"] is False
+    assert result["pinning"] is False
+    assert result["pendingFrames"] == 0
+
+
+def test_slot_pin_does_not_reattach_after_a_per_element_retire():
+    """`retire-on-start-movie` stamps `__obedGen = -1` WITHOUT bumping the
+    generation — liveness must be read off the element, not a generation
+    captured at engage time."""
+    result = _run_slot_detach_in_node(mutate="real.__obedGen = -1;")
+    assert result["reattachNotes"] == 0
+    assert result["pinning"] is False
+    assert result["pendingFrames"] == 0
+
+
+def test_slot_pin_does_not_reattach_when_disabled():
+    result = _run_slot_detach_in_node(mutate="disabled = true;")
+    assert result["reattachNotes"] == 0
+    assert result["pinning"] is False
+    assert result["pendingFrames"] == 0
+
+
+def test_slot_pin_does_not_reattach_outside_the_bridge_zone():
+    """Scene left the bridge zone (hash < s4): the loop ends as it always did,
+    before the re-attach path is even considered."""
+    result = _run_slot_detach_in_node(mutate="hash = 7;")
+    assert result["reattachNotes"] == 0
+    assert result["failureNotes"] == []
+    assert result["connected"] is False
+    assert result["pinning"] is False
+    assert result["pendingFrames"] == 0
+
+
+def test_slot_pin_does_not_reattach_an_ended_decoder():
+    result = _run_slot_detach_in_node(mutate="real.ended = true;")
+    assert result["reattachNotes"] == 0
+    assert result["pinning"] is False
+    assert result["pendingFrames"] == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs,reason",
+    [({"append_throws": True}, "append failed"), ({"append_noop": True}, "still-detached")],
+    ids=["throws", "still-detached"],
+)
+def test_slot_pin_reattach_failure_ends_the_loop_without_spinning(kwargs, reason):
+    """A re-attach that throws — or that leaves the node still detached — must
+    end the loop with one failure note, never re-queue a frame (hot loop)."""
+    result = _run_slot_detach_in_node(**kwargs)
+    assert result["reattachNotes"] == 0
+    assert [n["detail"]["reason"] for n in result["failureNotes"]] == [reason]
+    assert result["failureNotes"][0]["detail"]["elId"] == 7
+    assert result["pinning"] is False
+    assert result["pendingFrames"] == 0
+
+
 # --- Full-core (real DOM hooks) harness ---------------------------------
 #
 # The remaining I3 checks (footprint fallback, in-layer measure-and-correct

@@ -608,20 +608,57 @@ PRESERVE_CORE_JS = r"""
       srcRect: src, rect: dest, geometrySource: 'export-duration-interpolation'});
     return true;
   }
+  function bridgeStage() {
+    return document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
+  }
+  /**
+   * Re-attach a bridged decoder the player detached while slide 4 is still up.
+   * stash() ignores bridged decoders, so nothing else would bring it back.
+   * Liveness is `__obedGen === preserveGeneration`, not `__obedRemountEpoch`
+   * (bridgeTo34 sets that to -1 as its own sentinel): clear()/disable() bump the
+   * generation and retire-on-start-movie stamps -1, so both end the pin.
+   */
+  function reattachToSlot(real) {
+    if (real.ended || disabled) return false;
+    if ((real.__obedGen == null ? 0 : real.__obedGen) !== preserveGeneration) return false;
+    const stage = bridgeStage();
+    let failure = stage ? null : 'no-stage';
+    if (!failure) {
+      try {
+        beginMove(real);
+        stage.appendChild(real);
+      } catch (e) {
+        failure = String(e && e.message || e);
+      }
+    }
+    if (!failure && !document.contains(real)) failure = 'still-detached';
+    if (failure) {
+      note('bridge-slot-reattach-failed', {elId: real.__obedElId, reason: failure});
+      return false;
+    }
+    note('bridge-slot-reattach', {elId: real.__obedElId});
+    if (real.paused && !real.ended) {
+      const p = real.play();
+      if (p && p.catch) p.catch(function(){});
+    }
+    return true;
+  }
   function keepAtSlot(real, stub) {
     if (real.__obedSlotPinning) return;
     real.__obedSlotPinning = true;
     const s4 = slide4MinHash();
     function frame() {
       const hn = currentHashNum();
-      if (real.ended || !document.contains(real)
-          || (s4 != null && hn != null && hn < s4)) {
+      if (real.ended || (s4 != null && hn != null && hn < s4)) {
+        real.__obedSlotPinning = false; return;
+      }
+      if (!document.contains(real) && !reattachToSlot(real)) {
         real.__obedSlotPinning = false; return;
       }
       // Pin to the authored slide-4 destination rect (measure-and-correct so it
-      // holds through the containing layer's magic-move transform). Defeats a
-      // re-detach's fresh scheduleRemount/footprint-fallback from dragging the
-      // bridged decoder off the slide-4 slot at the #8->#9 boundary.
+      // holds through the containing layer's magic-move transform), so neither
+      // the layer's transform nor a re-detach drags the bridged decoder off the
+      // slide-4 slot at the #8->#9 boundary.
       const destAuthored = slide4Rect();
       const dest = destAuthored ? toScreen(destAuthored) : null;
       if (destAuthored && !dest) noteStageMapUnavailable('keepAtSlot');
@@ -677,7 +714,7 @@ PRESERVE_CORE_JS = r"""
     const destAuthored = slide4Rect();
     const dest = destAuthored ? toScreen(destAuthored) : null;
     if (destAuthored && !dest) noteStageMapUnavailable('bridgeTo34');
-    const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
+    const stage = bridgeStage();
     try {
       if (stage && v.parentNode !== stage) {
         beginMove(v);

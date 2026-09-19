@@ -89,3 +89,32 @@ Throwaway headless session, continuity ON, advance to slide 2, then, in order:
 - /Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/friendly-sammet-32dab4/src/obed_edom/live_continuity_js.py
 - /Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/friendly-sammet-32dab4/src/obed_edom/live_continuity.py
 - /Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/friendly-sammet-32dab4/scripts/p2_recovery_html_adversarial.py
+
+## 5. Diagnosis result (§2, measured 2026-09-19 night, headless, clean `dfd1c13`) — OWNER DECISION NEEDED before the fix
+**Root cause:** on settled slide 2 the player paints the WHOLE slide with one stage-wide WebGL canvas (`#0-canvas`,
+child of `#stage`); the only DOM layer tree (`#layer30`) is at computed `opacity: 0` from settle to at least +14 s.
+`findMovieCanvas` matches the poster canvas inside that hidden tree, so the remounted decoder (elId 1) is mounted
+where nothing can paint: `checkVisibility()` false, ancestor-opacity product 0, while its decoder is live
+(151→169 frames in 600 ms, rVFC firing). Not a stacking problem: hiding the poster canvas, a max z-index and a
+translateZ bump are all measured no-ops (the poster the viewer sees is WebGL). `elementsFromPoint` is useless as a
+paint oracle (it never returns the video, even on slide 3 where it is plainly visible). Slide 3 is healthy (no WebGL
+canvas, layer tree opacity 1, full grating visible, green square correctly in front). Poster canvas ids are reused
+across scenes, so `findMovieCanvas` silently re-targets a different tree at each boundary. The stray small copy is
+an independent defect (modulo footprint fallback), not the cause.
+**What works:** mounting the decoder at stage/body level at its footprint shows the full 952×268 movie — and paints
+it OVER the lower-left of the slide's green square, i.e. P2 Finding 2 ("green square in front of the movie") goes
+RED on slide 2. So fix (a2) and (a3) are dead; (a1) works with that trade.
+**Decision D3 (owner):** on a Magic-Move-settled slide that the player composites in WebGL, a DOM `<video>` can only
+be in front of everything or invisible.
+ (a) accept "movie in front of later-authored artwork on such slides" (visible-target test = `checkVisibility` +
+     ancestor-opacity product, else body-level overlay); Finding 2 is then re-scoped to slides where the authored
+     layer paints (slide 3) — simple, ships the visible carry, wrong z-order where artwork overlaps the movie;
+ (b) restore z-order by feeding the live decoder INTO the player's WebGL texture for that movie (the canvas
+     texture-feed approach P2 abandoned and I0 removed as dead code) — correct compositing, large and risky;
+ (c) refuse: report `continuity: unsupported` for a boundary whose destination slide overlaps the movie with
+     later-authored artwork, carry only where nothing overlaps (derivable from the export) — fail-closed, and
+     combinable with (a) for the non-overlapping case.
+ Recommendation: (c)+(a) — carry with a body-level overlay when no later-authored object overlaps the movie rect on
+ the destination slide, refuse otherwise; keep (b) as research. The fixture's slide 2 then becomes a REFUSAL
+ fixture, and a second fixture without the overlap is needed as the positive control.
+Evidence (ignored): `output/live-visible-content/diag/` (12 screenshots, `diag.json`, `diag2.json`).
