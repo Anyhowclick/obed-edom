@@ -1514,3 +1514,74 @@ def test_index_progression_tolerates_short_stall():
     assert scored["longestStallRun"] <= 2
 
 
+# ---------------------------------------------------------------------------
+# footprint_at / index_patch_roi_for — moving-footprint helpers (3->4 MM)
+# ---------------------------------------------------------------------------
+def test_footprint_at_endpoints_and_midpoint():
+    from obed_edom.html_alpha_probe import footprint_at
+
+    s = (198.0, 795.0, 952.0, 268.0)
+    d = (327.0, 709.0, 1266.0, 356.0)
+    assert footprint_at(0.0, s, d) == s
+    assert footprint_at(1.0, s, d) == d
+    mid = footprint_at(0.5, s, d)
+    assert mid == (262.5, 752.0, 1109.0, 312.0)
+
+
+def test_footprint_at_clamps_progress():
+    from obed_edom.html_alpha_probe import footprint_at
+
+    s = (0.0, 0.0, 100.0, 100.0)
+    d = (10.0, 10.0, 200.0, 200.0)
+    assert footprint_at(-5.0, s, d) == s
+    assert footprint_at(9.0, s, d) == d
+
+
+def test_footprint_at_static_boundary_is_constant():
+    """When src == dst (a static boundary like 1->2) it returns the constant rect
+    at any progress, so callers can wire it uniformly."""
+    from obed_edom.html_alpha_probe import footprint_at
+
+    r = (109.0, 795.0, 952.0, 268.0)
+    assert footprint_at(0.0, r, r) == r
+    assert footprint_at(0.37, r, r) == r
+    assert footprint_at(1.0, r, r) == r
+
+
+def test_index_patch_roi_for_backcompat_with_movie_roi():
+    """Back-compat: mapping MOVIE_ROI must reproduce the adversarial probe's
+    INDEX_PATCH_ROI exactly."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    movie_roi = (109, 795, 952, 268)
+    expected = (
+        movie_roi[0] + 2,
+        movie_roi[1],
+        max(1, round(movie_roi[2] * 120 / 1920) - 18),
+        max(1, round(movie_roi[3] * 48 / 540) - 10),
+    )
+    assert index_patch_roi_for(movie_roi) == expected == (111, 795, 42, 14)
+
+
+def test_index_patch_roi_for_scales_with_footprint():
+    """A larger (slide-4) footprint yields a proportionally larger patch ROI whose
+    inset stays inside the mapped patch (w<=round(w*120/1920), positive dims)."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    s4 = (327.0, 709.0, 1266.0, 356.0)
+    x, y, w, h = index_patch_roi_for(s4)
+    assert (x, y) == (329, 709)
+    assert 0 < w <= round(s4[2] * 120 / 1920)
+    assert 0 < h <= round(s4[3] * 48 / 540)
+    # larger footprint -> wider ROI than the slide-1/2 one
+    assert w > index_patch_roi_for((109, 795, 952, 268))[2]
+
+
+def test_index_patch_roi_for_clamps_to_min_one():
+    """A tiny footprint never yields a zero/negative ROI dimension."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    x, y, w, h = index_patch_roi_for((10.0, 20.0, 30.0, 12.0))
+    assert w >= 1 and h >= 1
+
+
