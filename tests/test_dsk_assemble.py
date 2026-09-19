@@ -5886,6 +5886,102 @@ def test_verify_builds_refuses_surplus_not_matching_the_clip_filename(monkeypatc
         dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
 
 
+# --------------------------------------------------------------------------
+# A stacked upper clip's build is REWRITTEN to the source build-in (plan §4 item
+# 28), so the surplus `_verify_builds` sees on that clip carries the planned
+# effect, not `apple:movie-start` (Codex r2 BLOCKER: FRC 50 would always refuse).
+# --------------------------------------------------------------------------
+def _stacked_build_in_plan(monkeypatch, *, surplus_effect, surplus_count=1):
+    from obed_edom import iwa_builds
+
+    plan = AssemblyPlan(
+        kept=(50,), ordinals={50: 1}, fits={50: {}},
+        deletes={50: (("movie", 0), ("movie", 1))},
+        clips={50: {("movie", 0): Path("/tmp/d.050.01.mov"), ("movie", 1): Path("/tmp/d.050.02.mov")}},
+        text_sizes={}, autosize={}, warnings=(),
+        clip_build_in={50: {("movie", 1): dsa.ClipBuildIn(
+            effect="apple:dissolve", duration=0.5, automatic=True, referent=False, delay=8.0,
+        )}},
+    )
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: {50: {"slideId": "s", "builds": [], "transition": None}}
+        if "fw" in str(path) else {1: {"slideId": "o", "builds": [], "transition": _dissolve_transition(0.5)}},
+    )
+    monkeypatch.setattr(
+        iwa_builds, "verify_builds",
+        lambda src_by_number, out_by_number, slides=None: {
+            "surplus": [
+                {
+                    "slide": 50, "effect": "apple:movie-start", "animationType": "In",
+                    "identity": ("movie", "d.050.01.mov"), "count": 1,
+                },
+                {
+                    "slide": 50, "effect": surplus_effect, "animationType": "In",
+                    "identity": ("movie", "d.050.02.mov"), "count": surplus_count,
+                },
+            ],
+            "missing": [], "transitions": [], "order": [],
+        },
+    )
+    return plan
+
+
+def test_verify_builds_tolerates_the_planned_build_in_on_a_stacked_upper_clip(monkeypatch):
+    """FRC 50: the lower clip keeps its auto movie-start, the upper clip's build was
+    rewritten to the planned `apple:dissolve` -- both are one-per-clip surpluses."""
+    plan = _stacked_build_in_plan(monkeypatch, surplus_effect="apple:dissolve")
+    warnings: list[str] = []
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert builds["tolerated_surplus"] == [
+        {
+            "slide": 50, "effect": "apple:movie-start", "animationType": "In",
+            "identity": ("movie", "d.050.01.mov"), "count": 1,
+        },
+        {
+            "slide": 50, "effect": "apple:dissolve", "animationType": "In",
+            "identity": ("movie", "d.050.02.mov"), "count": 1,
+        },
+    ]
+
+
+def test_verify_builds_refuses_a_second_build_in_surplus_on_the_same_stacked_clip(monkeypatch):
+    plan = _stacked_build_in_plan(monkeypatch, surplus_effect="apple:dissolve", surplus_count=2)
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+def test_verify_builds_refuses_an_effect_the_clip_was_not_planned_to_carry(monkeypatch):
+    """Tolerance is per clip and per PLANNED effect: the upper clip was planned an
+    `apple:dissolve`, so an `apple:move-in` surplus on it is still a real surplus."""
+    plan = _stacked_build_in_plan(monkeypatch, surplus_effect="apple:move-in")
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+def test_verify_builds_refuses_a_build_in_effect_on_a_clip_with_no_planned_build_in(monkeypatch):
+    """The LOWER clip was planned no build-in, so a dissolve surplus on it is refused
+    even though its stack-mate legitimately carries one."""
+    from obed_edom import iwa_builds
+
+    plan = _stacked_build_in_plan(monkeypatch, surplus_effect="apple:dissolve")
+    monkeypatch.setattr(
+        iwa_builds, "verify_builds",
+        lambda src_by_number, out_by_number, slides=None: {
+            "surplus": [{
+                "slide": 50, "effect": "apple:dissolve", "animationType": "In",
+                "identity": ("movie", "d.050.01.mov"), "count": 1,
+            }],
+            "missing": [], "transitions": [], "order": [],
+        },
+    )
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal, match="builds verify surplus"):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
 def test_verify_builds_refuses_clip_slide_whose_transition_write_silently_failed(monkeypatch):
     # Codex r1 finding 10 (round 2): a failed transition write leaves the source
     # magic-move transition untouched, which produces NO diff in `report["transitions"]`
@@ -12606,6 +12702,71 @@ def test_stacked_movies_order_and_time_by_source_build_order():
     assert not any("need a build-in" in w for w in plan.warnings)
 
 
+def test_stacked_movies_warn_when_the_relative_build_ins_predecessor_is_dropped():
+    """Codex r2: `automatic True, referent False` means "with the PRECEDING chunk". Here
+    a non-movie build sits at chunk 1 between the two movies, so the source means "With
+    Build 2" (the image) -- compacting the timeline would silently re-point it at the
+    lower movie. Refuse to guess: no build-in, a warning naming the dropped predecessor,
+    plain cascade."""
+    slide, builds = _slide_50_shape()
+    slide["items"].append(_image_item(0, x=2000, y=100, w=400, h=300))
+    builds[50]["builds"][1]["chunkOrder"] = [2]
+    builds[50]["builds"].append(
+        {"kind": "image", "kindIndex": 0, "chunkOrder": [1], "chunkReferent": [True],
+         "chunkAutomatic": [True], "chunkDelay": [0.0],
+         "effect": "apple:dissolve", "animationType": "In", "duration": 0.5}
+    )
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert 50 not in plan.clip_build_in
+    assert plan.clip_timing[50] == (
+        (("movie", 0), "after_transition"),
+        (("movie", 1), "after_previous"),
+    )
+    assert any(
+        "movie 1 (apple:dissolve starts relative to a dropped image 0)" in w and "need a build-in" in w
+        for w in plan.warnings
+    )
+
+
+def test_stacked_movies_keep_the_build_in_when_the_predecessor_is_the_kept_lower_movie():
+    """The FRC 50 shape itself: the upper clip's relative flag points at the movie below,
+    which this slide keeps, so the compacted timeline means the same thing."""
+    slide, builds = _slide_50_shape()
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert plan.clip_build_in[50][("movie", 1)].referent is False
+    assert not any("need a build-in" in w for w in plan.warnings)
+
+
+def test_source_chunk_predecessor_names_the_item_one_chunk_earlier():
+    recs = [
+        {"kind": "movie", "kindIndex": 0, "chunkOrder": [0]},
+        {"kind": "image", "kindIndex": 0, "chunkOrder": [1]},
+        {"kind": "movie", "kindIndex": 1, "chunkOrder": [2]},
+    ]
+    assert dsa._source_chunk_predecessor(recs, recs[2]) == ("image", 0)
+    assert dsa._source_chunk_predecessor(recs, recs[1]) == ("movie", 0)
+    # nothing precedes chunk 0 -- a relative flag there has no referent to carry
+    assert dsa._source_chunk_predecessor(recs, recs[0]) is None
+    # a chunk whose build does not resolve to an item is not a predecessor either
+    assert dsa._source_chunk_predecessor(recs[:1] + recs[2:], recs[2]) is None
+
+
 def test_stacked_movies_warn_when_the_source_build_in_is_unsupported():
     slide, builds = _slide_50_shape()
     builds[50]["builds"][1]["effect"] = "apple:move-in"
@@ -12711,12 +12872,13 @@ def test_stacked_movies_refuse_when_the_build_order_ties():
 
 
 def test_movies_stacked_only_inside_the_centre_panel_take_the_build_order():
-    # Codex r1: the FULL item rects clip by 2.5% of the smaller (unstacked), the rects the
-    # clips actually show -- centre-panel-cropped -- by 5.4% (stacked). The mode is decided
-    # once on the visible rects, so the FW/DSK cross-check cannot refuse this slide.
-    m0 = _movie_item(0, x=0, y=0, w=4000, h=1080)
+    # Codex r1: the FULL item rects only clip, by a third of the smaller (unstacked); the
+    # rects the clips actually show -- centre-panel-cropped, which cuts movie 0 down to the
+    # sliver movie 1 covers -- layer by 93% (stacked). The mode is decided once on the
+    # visible rects, so the FW/DSK cross-check cannot refuse this slide.
+    m0 = _movie_item(0, x=0, y=0, w=3000, h=1080)
     m0["index"] = 0
-    m1 = _movie_item(1, x=3900, y=0, w=4100, h=1080)
+    m1 = _movie_item(1, x=2000, y=0, w=3000, h=1080)
     m1["index"] = 1
     slide = _slide(1, [m0, m1])
     payload = _payload([slide])

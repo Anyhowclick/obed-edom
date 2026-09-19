@@ -63,6 +63,7 @@ from obed_edom.dsk_live import (
 )
 from obed_edom.dsk_plan import ItemId, SlideClass, _delete_order, classify_deck, visible_union
 from obed_edom.iwa_builds import deck_builds
+from obed_edom.iwa_movies import bare_source_build_ins
 from obed_edom.iwa_runs import attach_group_content_signature
 from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, is_lw_wall, item_rect
 from obed_edom.maps_movie import ffmpeg_exe
@@ -165,6 +166,7 @@ class _SlideJob:
     tmp: Path
     delete_ids: tuple[ItemId, ...] = ()
     movie_id: ItemId | None = None
+    bare: bool = False
 
 
 def clip_name(stem: str, slide: int, movie_index: int | None = None) -> str:
@@ -191,10 +193,12 @@ def visual_movie_order(rects: Mapping[ItemId, Rect]) -> list[ItemId]:
     return [ids[0] for _, ids in sorted(keys.items())]
 
 
-_MOVIE_STACK_OVERLAP = 0.05
+_MOVIE_STACK_OVERLAP = 0.5
 
 
 def _rects_stack(a: Rect, b: Rect) -> bool:
+    """True when the intersection covers more than `_MOVIE_STACK_OVERLAP` of the smaller
+    rect's area, i.e. the two really layer rather than clip along an edge."""
     ix = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
     iy = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
     if ix <= 0 or iy <= 0:
@@ -204,9 +208,9 @@ def _rects_stack(a: Rect, b: Rect) -> bool:
 
 
 def movies_stacked(rects: Mapping[ItemId, Rect]) -> bool:
-    """True when two movie rects overlap by more than `_MOVIE_STACK_OVERLAP` of the smaller
-    one's area, i.e. one movie covers another. Side-by-side panels that merely touch, or
-    clip by a hairline, stay unstacked and keep the visual order."""
+    """True when two movie rects really layer -- their intersection covers more than half
+    the smaller one's area -- i.e. one movie covers another. Row neighbours that merely
+    touch, or clip into each other by less than that, keep the visual order."""
     ids = list(rects)
     return any(
         _rects_stack(rects[a], rects[b])
@@ -231,9 +235,11 @@ def visible_movie_rects(rects: Mapping[ItemId, Rect], crop: Rect) -> dict[ItemId
 
 def stack_mode(rects: Mapping[ItemId, Rect]) -> Literal["visual", "stacked"]:
     """The one ordering mode for a slide's VISIBLE movie rects: ``"stacked"`` (source
-    build order) when every pair covers another, ``"visual"`` when no pair does. A PARTIAL
-    stack -- three movies where two cover each other and one sits beside them -- has no
-    single order, so it raises ``ValueError`` rather than guess one."""
+    build order) when every pair really layers -- each intersection covering more than half
+    the smaller rect -- ``"visual"`` when no pair does, so an ordinary row whose neighbours
+    clip into each other stays visual. A PARTIAL stack -- three movies where two cover each
+    other and one sits beside them -- has no single order, so it raises ``ValueError``
+    rather than guess one."""
     ids = list(rects)
     pairs = [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:]]
     stacked = [pair for pair in pairs if _rects_stack(rects[pair[0]], rects[pair[1]])]
@@ -1005,6 +1011,33 @@ def _derive_pure_video_delete_ids(items: Sequence[dict], movie_id: ItemId) -> tu
     return _delete_order([iid for iid in all_ids if iid != movie_id])
 
 
+def _bare_pure_video_movies(
+    scratch: Path, source: Path, jobs: Sequence[_SlideJob], log: Callable[[str], None]
+) -> None:
+    """Bare each per-movie job's retained movie on the SCRATCH copy before the Keynote
+    export (`iwa_movies.bare_source_build_ins`). Without this an upper stacked movie's
+    source build-in -- its dissolve and its delay -- is baked into the intermediate AND
+    re-created by the assembler on the inserted clip, so the delay would be applied twice
+    (plan §4 item 28). Only `bare` jobs -- the upper clips of a STACKED slide, the ones the
+    assembler writes a build-in for -- are touched; every other export is unchanged."""
+    if scratch.resolve() == source.resolve():
+        raise RuntimeError(f"refusing to bare source build-ins on the source deck {source}")
+    targets: dict[int, list[ItemId]] = {}
+    for job in jobs:
+        if job.bare and job.movie_id is not None:
+            targets.setdefault(job.slide, []).append(job.movie_id)
+    if not targets:
+        return
+    result = bare_source_build_ins(scratch, targets)
+    if result["refused"]:
+        raise RuntimeError(f"pure-video intermediate: {result['reason']}")
+    if result["applied"]:
+        log(
+            f"pure-video intermediate: bared {result['applied']} source build-in(s) on the "
+            "scratch copy; the DSK deck's own build-in owns that timing"
+        )
+
+
 def export_slide_clips(
     fw_deck: Path,
     slides: Sequence[int],
@@ -1131,6 +1164,7 @@ def export_slide_clips(
                             tmp=require_m4v(work / f"tmp.{n:04d}.{movie_index:02d}.m4v"),
                             delete_ids=del_ids,
                             movie_id=movie_id,
+                            bare=mode == "stacked" and movie_index > 1,
                         )
                     )
         else:
@@ -1204,6 +1238,7 @@ def export_slide_clips(
         while True:
             attempts += 1
             copy_keynote(fw_deck, scratch)
+            _bare_pure_video_movies(scratch, fw_deck, per_slide, log)
             proc = _run_osascript(script_path, register_proc=register_proc, on_progress=on_progress)
             if proc.returncode == 0 or "-1712" not in (proc.stderr or "") or attempts >= 2:
                 break

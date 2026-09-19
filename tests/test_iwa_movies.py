@@ -19,6 +19,8 @@ from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
 from obed_edom.iwa_movies import (  # noqa: E402
     ClipTiming,
+    _patch_archive_fields,
+    bare_source_build_ins,
     movie_archives,
     movie_autoplay_state,
     patch_clip_start_timing,
@@ -326,6 +328,23 @@ def test_patch_empty_posters_is_a_noop(deck):
     assert result == {"refused": False, "reason": None, "touched": [], "applied": 0}
 
 
+def test_patch_archive_fields_refuses_two_patches_for_one_archive(deck):
+    # The docstring's "the same archive id may not appear twice" is enforced: a second
+    # patch for the same id would otherwise silently replace the first one's fields.
+    before = deck.read_bytes()
+    result = _patch_archive_fields(
+        deck,
+        [
+            ("300", "TSD.MovieArchive", {"posterTime": 1.5}),
+            ("300", "TSD.MovieArchive", {"startTime": 2.5}),
+        ],
+    )
+    assert result == {
+        "refused": True, "reason": "300 appears in more than one patch", "touched": [], "applied": 0,
+    }
+    assert deck.read_bytes() == before
+
+
 def _autoplay_target(frame, name="reveal", slide_index=1):
     x, y, w, h = frame
     return {"x": x, "y": y, "w": w, "h": h, "name": name, "slideIndex": slide_index}
@@ -452,7 +471,7 @@ def _timing_movie(ident, frame, *, plays_across_slides):
 
 def _timing_build_chunk(
     movie_ident, build_ident, chunk_ident, *, automatic, referent,
-    effect="apple:movie-start", animation_type="In",
+    effect="apple:movie-start", animation_type="In", chunk_duration=0.5,
 ):
     build = _arch(
         build_ident, "KN.BuildArchive",
@@ -461,7 +480,7 @@ def _timing_build_chunk(
     )
     chunk = _arch(
         chunk_ident, "KN.BuildChunkArchive",
-        {"build": {"identifier": build_ident}, "delay": 0.0, "duration": 0.5,
+        {"build": {"identifier": build_ident}, "delay": 0.0, "duration": chunk_duration,
          "automatic": automatic, "referent": referent,
          "buildChunkIdentifier": {"buildId": {"lower": str(build_ident), "upper": "1"}, "buildChunkId": 1},
          "buildId": {"lower": str(build_ident), "upper": "1"}},
@@ -471,7 +490,8 @@ def _timing_build_chunk(
 
 def _build_timing_deck(
     path, n_clips, *, initial_chunk_order=None, no_chunk_for=None, dup_chunk_for=None,
-    animation_types=None, extra_build_for=None,
+    animation_types=None, extra_build_for=None, chunk_durations=None, effects=None,
+    chunk_delays=None,
 ):
     """``n_clips`` inserted DSK clips (300, 301, ...), each with its own not-yet-timed
     ``apple:movie-start`` build/chunk (initial flags ``automatic False, referent True``,
@@ -480,7 +500,8 @@ def _build_timing_deck(
     reorder test can prove `patch_clip_start_timing` actually moves them.
     ``animation_types`` (index -> e.g. ``"Out"``) overrides a clip build's
     ``animationType``; ``extra_build_for`` lists a SECOND, chunkless build for that clip
-    on the slide."""
+    on the slide; ``chunk_durations`` (index -> seconds) overrides a clip chunk's own
+    ``duration`` (Keynote auto-creates it at 0.0 even when the build carries 0.5)."""
     frame = (400.0, 300.0, 60.0, 80.0)
     archives = []
     zorder = []
@@ -499,8 +520,11 @@ def _build_timing_deck(
         chunk_ident = 910 + i * 20
         build, chunk = _timing_build_chunk(
             movie_ident, build_ident, chunk_ident, automatic=False, referent=True,
+            effect=(effects or {}).get(i, "apple:movie-start"),
             animation_type=(animation_types or {}).get(i, "In"),
+            chunk_duration=(chunk_durations or {}).get(i, 0.5),
         )
+        chunk["objects"][0]["delay"] = (chunk_delays or {}).get(i, 0.0)
         archives.append(build)
         archives.append(chunk)
         build_refs.append({"identifier": build_ident})
@@ -747,6 +771,24 @@ def test_clip_timing_build_in_writes_both_durations_when_the_source_differs(tmp_
     assert objects["910"]["duration"] == 0.5
 
 
+def test_clip_timing_build_in_writes_the_chunk_duration_the_build_already_matches(tmp_path):
+    # Keynote auto-creates the upper clip's chunk at duration 0.0 while its build already
+    # carries 0.5. The source build-in is 0.5 too, so ONLY the chunk differs: comparing
+    # the build alone would leave the chunk at 0.0 and verify that wrong value.
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2, chunk_durations={1: 0.0})
+    objects_before, _, _ = _load_deck(deck)
+    assert objects_before["920"]["attributes"]["animationAttributes"]["duration"] == 0.5
+    assert objects_before["930"]["duration"] == 0.0
+
+    patch_clip_start_timing(deck, {"100": _frc50_plan(movie_ids, duration=0.5)})
+
+    objects, _, _ = _load_deck(deck)
+    assert objects["920"]["attributes"]["animationAttributes"]["duration"] == 0.5
+    assert objects["930"]["duration"] == 0.5
+    # the lower clip's chunk keeps Keynote's own duration
+    assert objects["910"]["duration"] == 0.5
+
+
 def test_clip_timing_build_in_slide_keeps_the_plan_chunk_order(tmp_path):
     # Plan order IS the source build order on a stacked slide. The mode ranking would
     # sort the with_previous clip before the after_previous one; it must not.
@@ -929,3 +971,77 @@ def test_plan_autoplay_identical_full_frames_collide_without_per_slide_match(tmp
     plan = plan_movie_autoplay(deck, [{"x": x, "y": y, "w": w, "h": h, "name": "fly"}])
     assert plan["refused"] is True
     assert "no slide identity" in plan["reason"]
+
+
+# --------------------------------------------------------------------------
+# bare_source_build_ins: the pure-video INTERMEDIATE must carry no source
+# build-in, or the DSK deck's own build-in would apply the delay twice
+# (Codex r2 BLOCKER; plan §4 item 28).
+# --------------------------------------------------------------------------
+def test_bare_source_build_ins_rewrites_a_dissolve_into_a_bare_movie_start(tmp_path):
+    deck, _movie_ids = _build_timing_deck(
+        tmp_path / "frc50.key", 2,
+        effects={1: "apple:dissolve"}, chunk_delays={1: 8.0},
+    )
+    result = bare_source_build_ins(deck, {1: [("movie", 1)]})
+
+    assert result["refused"] is False
+    assert result["applied"] == 1
+    assert result["touched"] == [(1, ("movie", 1))]
+    objects, _, _ = _load_deck(deck)
+    anim = objects["920"]["attributes"]["animationAttributes"]
+    assert anim["effect"] == "apple:movie-start"
+    assert anim["animationType"] == "In"
+    chunk = objects["930"]
+    assert (bool(chunk["automatic"]), bool(chunk["referent"]), float(chunk["delay"])) == (True, True, 0.0)
+    # the lower movie's own movie-start build is untouched
+    assert objects["900"]["attributes"]["animationAttributes"]["effect"] == "apple:movie-start"
+    assert bool(objects["910"]["automatic"]) is False
+
+
+def test_bare_source_build_ins_leaves_an_ordinary_movie_start_clip_byte_identical(tmp_path):
+    deck, _movie_ids = _build_timing_deck(tmp_path / "plain.key", 2)
+    before = deck.read_bytes()
+    result = bare_source_build_ins(deck, {1: [("movie", 0), ("movie", 1)]})
+    assert result == {"refused": False, "reason": None, "touched": [], "applied": 0}
+    assert deck.read_bytes() == before
+
+
+def test_bare_source_build_ins_ignores_a_movie_with_no_build(tmp_path):
+    deck, _movie_ids = _build_timing_deck(tmp_path / "nobuild.key", 2, no_chunk_for=1)
+    before = deck.read_bytes()
+    result = bare_source_build_ins(deck, {1: [("movie", 1)]})
+    assert result["applied"] == 0
+    assert deck.read_bytes() == before
+
+
+def test_bare_source_build_ins_leaves_a_movie_with_two_movie_start_builds_untouched(tmp_path):
+    """Byte-neutrality for the ordinary clip path: the "exactly one build" refusal only
+    applies to a movie that actually carries a source build-in."""
+    deck = _build_movies_deck(tmp_path / "twostarts.key", extra_build_for_landmark=True)
+    before = deck.read_bytes()
+    result = bare_source_build_ins(deck, {1: [("movie", 0)]})
+    assert result["applied"] == 0
+    assert deck.read_bytes() == before
+
+
+def test_bare_source_build_ins_refuses_an_out_build(tmp_path):
+    deck, _movie_ids = _build_timing_deck(
+        tmp_path / "out.key", 2, effects={1: "apple:dissolve"}, animation_types={1: "Out"},
+    )
+    before = deck.read_bytes()
+    result = bare_source_build_ins(deck, {1: [("movie", 1)]})
+    assert result["refused"] is True
+    assert "expected In" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_bare_source_build_ins_refuses_a_movie_carrying_two_builds(tmp_path):
+    deck, _movie_ids = _build_timing_deck(
+        tmp_path / "two.key", 2, effects={1: "apple:dissolve"}, extra_build_for=1,
+    )
+    before = deck.read_bytes()
+    result = bare_source_build_ins(deck, {1: [("movie", 1)]})
+    assert result["refused"] is True
+    assert "expected exactly one" in result["reason"]
+    assert deck.read_bytes() == before

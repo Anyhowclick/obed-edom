@@ -14,6 +14,7 @@ from typing import Any, Literal, Mapping, Sequence
 
 from keynote_parser.codec import IWAFile
 
+from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import compose_geometry
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.iwa_write import OfflineWriteCorrupted, _archive_diff, _rewrite_members, patch_slide_builds
@@ -184,6 +185,8 @@ def _patch_archive_fields(deck: Path, patches: list[tuple[str, str, dict[str, An
     objects, id_to_file, _file_ids = _load_deck(deck)
     fields_by_id: dict[str, dict[str, Any]] = {}
     for oid, pbtype, fields in patches:
+        if oid in fields_by_id:
+            return {"refused": True, "reason": f"{oid} appears in more than one patch", "touched": [], "applied": 0}
         obj = objects.get(oid)
         if obj is None or obj.get("_pbtype") != pbtype:
             return {"refused": True, "reason": f"{oid} does not resolve to a {pbtype}", "touched": [], "applied": 0}
@@ -396,6 +399,82 @@ def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:
     return {"refused": False, "reason": None, "touched": ids, "applied": len(ids)}
 
 
+def bare_source_build_ins(deck: Path, targets: Mapping[int, Sequence[tuple[str, int]]]) -> dict:
+    """Make the named movies BARE on a SCRATCH copy before a pure-video intermediate
+    export: a movie whose single listed build is a non-``apple:movie-start`` ``In`` has that
+    build's effect rewritten to ``apple:movie-start`` and its chunk set to After Transition
+    with no delay, so the source build-in's effect and delay are not baked into the clip --
+    the DSK deck's own build-in (`patch_clip_start_timing`) owns that timing (plan §4 item
+    28). ``targets`` maps 1-based slide number to the movie ``(kind, kindIndex)`` items whose
+    intermediate is being exported; a movie already carrying only a movie-start build is left
+    untouched, so an ordinary clip export stays byte-neutral. Refuses (deck untouched) unless
+    every such movie owns exactly one listed build with exactly one listed chunk, and raises
+    ``OfflineWriteCorrupted`` if the read-back disagrees.
+    """
+    deck = Path(deck)
+    recs_by_slide = deck_builds(deck)
+
+    patches: list[tuple[str, str, dict[str, Any]]] = []
+    rewritten: list[tuple[int, tuple[str, int], str, str]] = []
+    for number in sorted(targets):
+        slide_recs = (recs_by_slide.get(number) or {}).get("builds") or []
+        for item_id in targets[number]:
+            owned = [rec for rec in slide_recs if (rec["kind"], rec["kindIndex"]) == tuple(item_id)]
+            if all(rec["effect"] in _MOVIE_START for rec in owned):
+                continue
+            reason = None
+            if len(owned) != 1:
+                reason = f"{len(owned)} listed build(s), expected exactly one"
+            elif owned[0]["animationType"] != "In":
+                reason = f"build {owned[0]['effect']} is an {owned[0]['animationType']}, expected In"
+            elif len(owned[0]["chunkIds"]) != 1:
+                reason = f"build {owned[0]['effect']} has {len(owned[0]['chunkIds'])} listed chunk(s), expected one"
+            if reason is not None:
+                return {
+                    "refused": True,
+                    "reason": f"slide {number} movie {item_id[1]}: {reason}",
+                    "touched": [],
+                    "applied": 0,
+                }
+            rec = owned[0]
+            patches.append(
+                (rec["buildId"], "KN.BuildArchive", {"attributes.animationAttributes.effect": _MOVIE_START[0]})
+            )
+            patches.append(
+                (rec["chunkIds"][0], "KN.BuildChunkArchive", {"automatic": True, "referent": True, "delay": 0.0})
+            )
+            rewritten.append((number, tuple(item_id), rec["buildId"], rec["chunkIds"][0]))
+
+    if not patches:
+        return {"refused": False, "reason": None, "touched": [], "applied": 0}
+
+    result = _patch_archive_fields(deck, patches)
+    if result["refused"]:
+        return {"refused": True, "reason": result["reason"], "touched": [], "applied": 0}
+
+    after, _id_to_file, _file_ids = _load_deck(deck)
+    for number, item_id, build_id, chunk_id in rewritten:
+        anim = _anim(after, build_id)
+        chunk = after.get(chunk_id) or {}
+        got = (
+            anim.get("effect"),
+            anim.get("animationType"),
+            bool(chunk.get("automatic")),
+            bool(chunk.get("referent")),
+            float(chunk.get("delay") or 0.0),
+        )
+        if got != (_MOVIE_START[0], "In", True, True, 0.0):
+            raise OfflineWriteCorrupted(
+                f"slide {number} movie {item_id[1]}: bare-movie verify mismatch, got {got}"
+            )
+    return {
+        "refused": False,
+        "reason": None,
+        "touched": [(number, item_id) for number, item_id, _b, _c in rewritten],
+        "applied": len(rewritten),
+    }
+
+
 @dataclass(frozen=True)
 class ClipTiming:
     """One inserted DSK clip's start timing, per owner rule
@@ -471,10 +550,11 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
     to carry only movie-start chunks (the gold decks' overlays are static); a build
     chunk not named in the plan means the retiming is undefined, so the write is refused
     (``ValueError``) rather than silently moving it. Requires exactly one after_transition
-    entry and only known modes. Never touches chunk ``duration``, delivery, or ids --
-    the single exception is a ``build_in`` entry whose ``build_in_duration`` differs from
-    the clip's current build duration, where both the build's and the chunk's ``duration``
-    are written so the rewritten effect plays for the source's time.
+    entry and only known modes. Never touches chunk ``duration``, delivery, or ids -- the
+    single exception is a ``build_in`` entry carrying a ``build_in_duration``, where the
+    build's and the chunk's ``duration`` are compared against it INDEPENDENTLY (Keynote
+    auto-creates the chunk at 0.0) and each field that differs is written, so the rewritten
+    effect plays for the source's time.
 
     A ``build_in`` entry additionally rewrites the clip's own auto-created build effect to
     the source build-in (plan §4 item 28) and keeps the slide's chunk order EXACTLY as
@@ -562,15 +642,19 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
             chunk = objects.get(chunk_by_movie[movie_id]) or {}
             want_duration = float(anim.get("duration") or 0.0)
             want_chunk_duration = float(chunk.get("duration") or 0.0)
-            write_duration = entry.build_in_duration is not None and float(entry.build_in_duration) != want_duration
-            if write_duration:
-                want_duration = want_chunk_duration = float(entry.build_in_duration)
+            write_build_duration = write_chunk_duration = False
+            if entry.build_in_duration is not None:
+                source_duration = float(entry.build_in_duration)
+                write_build_duration = source_duration != want_duration
+                write_chunk_duration = source_duration != want_chunk_duration
+                want_duration = want_chunk_duration = source_duration
             build_checks.setdefault(slide_id, {})[movie_id] = {
                 "buildId": build_id,
                 "effect": entry.build_in,
                 "duration": want_duration,
                 "chunkDuration": want_chunk_duration,
-                "writeDuration": write_duration,
+                "writeBuildDuration": write_build_duration,
+                "writeChunkDuration": write_chunk_duration,
             }
 
         slide = objects.get(slide_id) or {}
@@ -611,8 +695,9 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
             check = (build_checks.get(slide_id) or {}).get(movie_id)
             if check is not None:
                 build_fields: dict[str, Any] = {"attributes.animationAttributes.effect": check["effect"]}
-                if check["writeDuration"]:
+                if check["writeBuildDuration"]:
                     build_fields["attributes.animationAttributes.duration"] = check["duration"]
+                if check["writeChunkDuration"]:
                     chunk_fields["duration"] = check["chunkDuration"]
                 field_patches.append((check["buildId"], "KN.BuildArchive", build_fields))
             field_patches.append((chunk_id, "KN.BuildChunkArchive", chunk_fields))

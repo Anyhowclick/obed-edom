@@ -1347,6 +1347,24 @@ def _build_in_candidates(recs: Sequence[Mapping]) -> list[Mapping]:
     )
 
 
+_RELATIVE_CLIP_MODES = frozenset({"with_previous", "after_previous"})
+
+
+def _source_chunk_predecessor(recs: Sequence[Mapping], rec: Mapping) -> ItemId | None:
+    """The item whose source build chunk sits immediately BEFORE ``rec``'s earliest chunk
+    in the slide's own ``buildChunks``; ``None`` when ``rec`` starts the timeline or that
+    chunk's build does not resolve to an item. A relative start flag ("With Build N" /
+    "After Build N") means THAT item, so it only survives compaction when the output keeps
+    the same predecessor."""
+    pos = min(rec["chunkOrder"]) - 1
+    if pos < 0:
+        return None
+    for other in recs:
+        if pos in (other.get("chunkOrder") or ()):
+            return (other["kind"], other["kindIndex"])
+    return None
+
+
 def _describe_builds(recs: Sequence[Mapping]) -> str:
     return ", ".join(f"{rec.get('effect') or 'no effect'} {rec.get('animationType')}" for rec in recs) or "no source build"
 
@@ -2504,8 +2522,19 @@ def plan_assembly(
                                 "which one the stacked clip needs"
                             )
                         source = _source_build_in(candidates[0]) if candidates else None
+                        reason = None
                         if source is None:
-                            unsupported.append(f"movie {iid[1]} ({_describe_builds(recs)})")
+                            reason = _describe_builds(recs)
+                        elif iwa_movies.clip_timing_mode(source.automatic, source.referent) in _RELATIVE_CLIP_MODES:
+                            predecessor = _source_chunk_predecessor(src_build_recs, candidates[0])
+                            if predecessor not in item_clips:
+                                reason = f"{source.effect} starts relative to " + (
+                                    "no source build chunk" if predecessor is None
+                                    else f"a dropped {predecessor[0]} {predecessor[1]}"
+                                )
+                                source = None
+                        if reason is not None:
+                            unsupported.append(f"movie {iid[1]} ({reason})")
                         else:
                             build_in[iid] = source
                     if build_in:
@@ -5072,10 +5101,12 @@ def _verify_builds(
     attributable to a deletion, on a transition change unexplained by a clip insert, or
     on any reveal-order mismatch. A missing build is tolerated only when it matches (by
     kind/kindIndex, via the source build records) an item this slide's plan actually
-    deleted. A surplus `apple:movie-start`/`In` on an inserted clip is tolerated up to
-    ONE per inserted clip identity (Keynote auto-attaches a movie-start build to a freshly
-    imported movie); any surplus beyond that one, for that same clip identity, is refused
-    like any other."""
+    deleted. A surplus `In` build on an inserted clip is tolerated up to ONE per inserted
+    clip identity, and only when its effect is that clip's own expected one -- the source
+    build-in `plan.clip_build_in` rewrote onto it, else `apple:movie-start` (Keynote
+    auto-attaches a movie-start build to a freshly imported movie). Any surplus beyond that
+    one, for that same clip identity, or carrying another effect, is refused like any
+    other."""
     from obed_edom.iwa_builds import deck_builds, verify_builds
 
     builds: dict = {}
@@ -5120,19 +5151,24 @@ def _verify_builds(
     report = verify_builds(src_by_number, out_by_number, slides=plan.kept)
     builds["report"] = report
 
+    clip_build_effects: dict[int, dict[str, str]] = {}
+    for number, item_clips in plan.clips.items():
+        slide_build_in = plan.clip_build_in.get(number) or {}
+        clip_build_effects[number] = {
+            path.name: slide_build_in[movie_id].effect if movie_id in slide_build_in else "apple:movie-start"
+            for movie_id, path in item_clips.items()
+        }
+
     tolerated_surplus: list[dict] = []
     real_surplus: list[dict] = []
     for s in report["surplus"]:
-        item_clips = plan.clips.get(s["slide"])
-        clip_names = {p.name for p in item_clips.values()} if item_clips else set()
-        is_clip_movie_start = (
-            item_clips
-            and s["effect"] == "apple:movie-start"
-            and s["animationType"] == "In"
+        clip_effects = clip_build_effects.get(s["slide"]) or {}
+        is_clip_build = (
+            s["animationType"] == "In"
             and s["identity"][0] == "movie"
-            and s["identity"][1] in clip_names
+            and clip_effects.get(s["identity"][1]) == s["effect"]
         )
-        if is_clip_movie_start:
+        if is_clip_build:
             tolerated_count = min(s["count"], 1)
             tolerated_surplus.append({**s, "count": tolerated_count})
             if s["count"] > tolerated_count:
