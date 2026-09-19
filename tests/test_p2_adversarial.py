@@ -894,7 +894,9 @@ def _freeze_b_snap(**overrides) -> dict:
         "nullControl": {
             "status": "released", "holdStartedAt": 1120.0, "hashchangeEventAt": 1100.0,
             "releaseAt": 2000.0, "staleIndexExpected": 40, "staleCurrentTime": 1.33,
-            "paintCount": 1, "coverPatchStart": {"sum": 12345}, "coverPatchEnd": {"sum": 12345},
+            "ownerReadyState": 4, "coverPatchMean": 40.0,
+            "paintCount": 1, "coverPatchStart": {"sum": 12345, "mean": 40.0},
+            "coverPatchEnd": {"sum": 12345, "mean": 40.0},
             "ownerAmbiguousInWindow": False, "boundDecoderId": 7, "armedElId": 7,
             "fellBackToArmOwner": False, "firedVia": "hashchange", "rafLog": raf, "error": None,
         },
@@ -926,17 +928,70 @@ def test_freeze_control_never_fired_hold_is_inconclusive_not_pass():
     assert verdict["ok"] is False
 
 
-def test_freeze_control_raf_gap_is_inconclusive():
-    """An unobserved hold interval (per-rAF log gap > 100ms) cannot ground a
-    verdict either way => INCONCLUSIVE."""
+def test_freeze_control_raf_gap_alone_is_not_disqualifying():
+    """A per-rAF gap is NOT a verdict gate: on the static footprint the position:fixed
+    cover persists through a main-thread stall — and the stall is caused by the very CDP
+    screenshots that OBSERVE the frozen counter. A healthy loop (enough frames, all on
+    cover) with a large gap still PASSES (Fable reframe 2026-09-19)."""
+    b = _freeze_b_snap()
+    raf = b["nullControl"]["rafLog"]
+    spiked = raf[:20] + [
+        {"t": raf[19]["t"] + 380.0 + 20.0 * i, "elementFromPointIsCover": True, "ownerResolved": True}
+        for i in range(20)
+    ]  # a 380ms gap mid-loop, loop otherwise healthy
+    b["nullControl"] = {**b["nullControl"], "rafLog": spiked}
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "pass", verdict["failed"]
+
+
+def test_freeze_control_dead_loop_is_inconclusive():
+    """But a loop that barely ran (too few rAF frames) cannot attest the cover stayed on
+    top over the hold => INCONCLUSIVE, never a verdict."""
     b = _freeze_b_snap()
     b["nullControl"] = {
         **b["nullControl"],
         "rafLog": [{"t": 1120.0, "elementFromPointIsCover": True},
-                   {"t": 1500.0, "elementFromPointIsCover": True}],  # 380ms gap
+                   {"t": 1140.0, "elementFromPointIsCover": True}],  # 2 frames < loopLive floor
     }
     verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
     assert verdict["verdict"] == "inconclusive"
+    assert "loopLive" in verdict["integrityFailed"]
+
+
+def test_freeze_control_black_cover_is_inconclusive():
+    """The exact bug this control was hardened against: a black/unrendered cover (patch
+    mean outside the [16,235] alphabet) decodes as a frozen counter for the WRONG reason.
+    It must be INCONCLUSIVE (the control did not deliver the stimulus), never a verdict."""
+    b = _freeze_b_snap()
+    b["indexSequence"] = [37, 38, 39, 0, 0, 0, 0, 0, 0, 0]  # black cover -> decodes 0
+    b["nullControl"] = {
+        **b["nullControl"], "coverPatchMean": 1.5,
+        "coverPatchStart": {"sum": 10, "mean": 1.5}, "coverPatchEnd": {"sum": 10, "mean": 1.5},
+        "error": "cover-content-out-of-alphabet:1.5",
+    }
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "inconclusive"
+    assert {"coverContentInAlphabet", "noControlError"} & set(verdict["integrityFailed"])
+
+
+def test_freeze_control_owner_not_ready_is_inconclusive():
+    """If the footprint owner was not a decoded video at trigger (readyState < 2), the
+    stale frame was not captured from a real frame => INCONCLUSIVE."""
+    b = _freeze_b_snap()
+    b["nullControl"] = {**b["nullControl"], "ownerReadyState": 0}
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "inconclusive"
+    assert "ownerReadyAtTrigger" in verdict["integrityFailed"]
+
+
+def test_freeze_control_fired_before_advance_is_inconclusive():
+    """A trigger that fired BEFORE the advance (e.g. on the boot/settle hashchange) held
+    a pre-cut frame, not the cut => INCONCLUSIVE (boot/arm-integrity guard)."""
+    b = _freeze_b_snap()
+    b["nullControl"] = {**b["nullControl"], "holdStartedAt": 900.0}  # < perfNowAtClick 1000
+    verdict = p2._score_freeze_control(_positive_snap(), b, _positive_snap())
+    assert verdict["verdict"] == "inconclusive"
+    assert "firedAfterAdvance" in verdict["integrityFailed"]
 
 
 def test_freeze_control_fails_if_counter_did_not_go_red():

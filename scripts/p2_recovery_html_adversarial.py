@@ -147,6 +147,7 @@ FREEZE_MIN_AFTER = 6         # samples after the flip (n - flip_index) needed to
 RVFC_MIN_ADVANCE_S = 0.5    # the decoder must run >=0.5s through the hold (0.05 is too weak)
 MAX_RAF_GAP_MS = 100.0      # a per-rAF hold-log gap beyond this => INCONCLUSIVE, not a verdict
 STALE_INDEX_TOL = 2         # +/- yuv rounding on the decoded frozen counter
+COVER_MATCH_TOL = 6.0       # frozen decode mean must match the cover's painted patch mean
 HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event
 
 # The Arm-A composited-freeze control, injected into the live page BEFORE the advance
@@ -190,6 +191,8 @@ NULL_CONTROL_JS = r"""
     paintCount: 0,
     coverPatchStart: null,
     coverPatchEnd: null,
+    coverPatchMean: null,
+    ownerReadyState: null,
     ownerAmbiguousInWindow: false,
     holdFrames: 0,
     rafLog: [],
@@ -199,6 +202,7 @@ NULL_CONTROL_JS = r"""
   var scratch = null;
   var rafId = null;
   var retryStartedAt = null;
+  var triggerDeadline = null;
 
   // Local footprint shim: the CURRENT footprint rect. On 1->2 the footprint is
   // static (MOVIE_ROI == armedRect); when the owner <video> is resolved we prefer
@@ -238,9 +242,9 @@ NULL_CONTROL_JS = r"""
       var ctx = cover.getContext('2d', {alpha: false});
       var w = Math.min(cover.width, 60), h = Math.min(cover.height, 24);
       var d = ctx.getImageData(0, 0, w, h).data;
-      var s = 0;
-      for (var i = 0; i < d.length; i += 4) s = (s + d[i] + d[i + 1] + d[i + 2]) % 2147483647;
-      return {sum: s, w: w, h: h};
+      var s = 0, n = 0;
+      for (var i = 0; i < d.length; i += 4) { s = (s + d[i] + d[i + 1] + d[i + 2]) % 2147483647; n += 3; }
+      return {sum: s, w: w, h: h, mean: n ? s / n : null};
     } catch (e) { return {error: String(e && e.message || e)}; }
   }
 
@@ -266,23 +270,42 @@ NULL_CONTROL_JS = r"""
     st.status = 'holding';
     st.firedVia = via;
     st.holdStartedAt = performance.now();
+    // At the 1->2 flip the movie is briefly mid-remount (PRESERVE detaches/reattaches
+    // the <video>), so the footprint owner can be transiently null AT the trigger
+    // instant. Retry owner resolution for <=150ms before capturing the stale frame —
+    // capturing against a null/unready owner paints BLACK (a wrong-reason freeze).
+    triggerDeadline = st.holdStartedAt + 150;
+    beginHold();
+  }
 
+  function beginHold() {
+    if (st.status !== 'holding') return;
     var ownerEl = resolveOwnerEl();
-    if (!ownerEl) retryStartedAt = st.holdStartedAt;
-    var real = ownerEl ? (ownerEl.__obedFacadeFor || ownerEl) : null;
+    var probe = ownerEl ? (ownerEl.__obedFacadeFor || ownerEl) : null;
+    var ready = !!(probe && probe.readyState >= 2 && probe.videoWidth > 0);
+    if (!ready && performance.now() < triggerDeadline) {
+      retryStartedAt = retryStartedAt || st.holdStartedAt;
+      requestAnimationFrame(beginHold);
+      return;
+    }
+    var real = probe;
     var fp = footprintNow(ownerEl);
 
+    st.ownerReadyState = real ? (real.readyState || 0) : null;
     scratch = document.createElement('canvas');  // ID-LESS: recorder stays inert
     scratch.width = Math.max(1, Math.round(fp.w * dpr));
     scratch.height = Math.max(1, Math.round(fp.h * dpr));
-    if (real && real.videoWidth > 0) {
+    // readyState>=2 (HAVE_CURRENT_DATA): videoWidth>0 alone does NOT guarantee a
+    // DECODED frame — an unrendered <video> draws BLACK, which then reads as a frozen
+    // counter (index 0) for the wrong reason. Require a real frame or fail integrity.
+    if (real && real.readyState >= 2 && real.videoWidth > 0) {
       try {
         scratch.getContext('2d').drawImage(real, 0, 0, scratch.width, scratch.height);
         st.staleCurrentTime = real.currentTime;
         st.staleIndexExpected = 16 + (Math.round(real.currentTime * 30) % 220);
       } catch (e) { st.error = 'scratch-draw:' + String(e && e.message || e); }
     } else {
-      st.error = 'no-owner-video-at-trigger';
+      st.error = 'owner-video-not-ready-at-trigger:rs=' + (real ? real.readyState : 'none');
     }
 
     var sr = subRect(fp);
@@ -305,6 +328,14 @@ NULL_CONTROL_JS = r"""
 
     paintCover();  // ONCE
     st.coverPatchStart = counterPatchPixels();
+    st.coverPatchMean = (st.coverPatchStart && st.coverPatchStart.mean != null)
+      ? st.coverPatchStart.mean : null;
+    // A correctly-delivered stale counter patch is a flat mid-gray inside the legal
+    // tv-range [16,235]; a black (unrendered) or clipped cover falls outside it and
+    // must fail integrity (INCONCLUSIVE), never score as a frozen counter.
+    if (!st.error && (st.coverPatchMean == null || st.coverPatchMean < 16 || st.coverPatchMean > 235)) {
+      st.error = 'cover-content-out-of-alphabet:' + st.coverPatchMean;
+    }
     loop();
   }
 
@@ -358,7 +389,9 @@ NULL_CONTROL_JS = r"""
         holdStartedAt: st.holdStartedAt, releaseAt: st.releaseAt,
         staleCurrentTime: st.staleCurrentTime, staleIndexExpected: st.staleIndexExpected,
         paintCount: st.paintCount, coverPatchStart: st.coverPatchStart,
-        coverPatchEnd: st.coverPatchEnd, ownerAmbiguousInWindow: st.ownerAmbiguousInWindow,
+        coverPatchEnd: st.coverPatchEnd, coverPatchMean: st.coverPatchMean,
+        ownerReadyState: st.ownerReadyState,
+        ownerAmbiguousInWindow: st.ownerAmbiguousInWindow,
         holdFrames: st.holdFrames, rafLog: st.rafLog, error: st.error
       };
     },
@@ -1838,6 +1871,19 @@ async def _capture_1to2_snapshot(
             "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
         )
     )
+    # On the 2nd/3rd same-session boot (the A-B-A bracket) the player's route hash
+    # transiently reads '' even after boot — reading hash1 then arms the null-control on
+    # '' and triggers on the player's ''->#N settle (before the advance). Wait for a
+    # clean #<digits> so hash1 is a real slide-1 boundary anchor.
+    _h1_deadline = time.monotonic() + 3.0
+    while _strict_hash_num(hash1) is None and time.monotonic() < _h1_deadline:
+        await asyncio.sleep(0.1)
+        await _ensure_videos_playing(chrome)
+        hash1 = _norm_hash(
+            await chrome.evaluate(
+                "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+            )
+        )
 
     perf_now_at_click: float | None = None
     if inject_null:
@@ -2042,15 +2088,13 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     max_gap_ms = max(
         (raf_ts[i + 1] - raf_ts[i] for i in range(len(raf_ts) - 1)), default=0.0
     )
-    if len(raf_ts) < 2 or max_gap_ms > MAX_RAF_GAP_MS:
-        return {
-            "ok": False,
-            "verdict": "inconclusive",
-            "reason": f"per-rAF hold log gap {max_gap_ms:.1f}ms > {MAX_RAF_GAP_MS}ms (unobserved hold interval)",
-            "maxRafGapMs": max_gap_ms,
-            "rafFrames": len(raf_ts),
-            "checks": checks,
-        }
+    # A per-rAF gap is NOT itself disqualifying. On the static 1->2 footprint the cover
+    # is a position:fixed canvas painted ONCE, so a rAF stall — caused by the very CDP
+    # screenshots that OBSERVE the frozen counter (index_run) — cannot lift it. Observation
+    # continuity is proven by the composite screenshots + coverPatchStable + 100%
+    # elementFromPoint-on-cover over the frames that DID log + loopLive. max_gap_ms is kept
+    # as a diagnostic only. (A MOVING footprint (3->4) would instead need per-screenshot
+    # cover attestation — see the Fable consult 2026-09-19.)
 
     perf_click = b.get("perfNowAtClick")
     release_at = nc.get("releaseAt")
@@ -2072,10 +2116,20 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     ]
     first_in_hold = min(in_hold_positions) if in_hold_positions else None
     in_hold_decodes = [seq[i] for i in in_hold_positions]
+    _decoded = [v for v in in_hold_decodes if v is not None]
+    # "Frozen" = the in-hold composite decodes are CONSTANT and match the cover's ACTUAL
+    # painted content (coverPatchMean) — NOT the currentTime-derived staleIndexExpected,
+    # which runs ahead of the presented frame by the video's presentation lag (~9 frames
+    # observed). Tying the frozen composite to the cover's own pixels is lag-immune and
+    # stronger (it proves the composite shows the cover); the decoder staying live
+    # (rvfcRanThroughHold) proves the counter WOULD advance if it were not covered.
+    cover_mean = nc.get("coverPatchMean")
     stale_ok = bool(
-        stale is not None
-        and in_hold_decodes
-        and all(v is not None and abs(v - stale) <= STALE_INDEX_TOL for v in in_hold_decodes)
+        in_hold_decodes
+        and len(_decoded) == len(in_hold_decodes)
+        and (max(_decoded) - min(_decoded)) <= STALE_INDEX_TOL
+        and cover_mean is not None
+        and abs(sum(_decoded) / len(_decoded) - cover_mean) <= COVER_MATCH_TOL
     )
 
     idx = b.get("indexRun") or {}
@@ -2136,6 +2190,19 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and offsets
         and release_offset_s >= max(o for o in offsets if o is not None)
     )
+    # Integrity additions (Fable 2026-09-19): the control must have fired at the ADVANCE
+    # (not the boot settle), painted a REAL decoded frame (not black), and the rAF loop
+    # must have actually run (not empty). Any of these failing => the stimulus was not
+    # delivered => INCONCLUSIVE, never a counter verdict.
+    checks["firedAfterAdvance"] = bool(hold_offset_s is not None and hold_offset_s >= -0.05)
+    checks["noControlError"] = nc.get("error") is None
+    checks["ownerReadyAtTrigger"] = bool(
+        nc.get("ownerReadyState") is not None and nc.get("ownerReadyState") >= 2
+    )
+    checks["coverContentInAlphabet"] = bool(
+        cover_mean is not None and 16 <= cover_mean <= 235
+    )
+    checks["loopLive"] = len(raf_ts) >= 10
 
     # --- Bracketing positives are GREEN ----------------------------------------
     checks["positivesGreen"] = bool(
@@ -2154,14 +2221,41 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     }
     checks["isolationEqual"] = isolation_diffs == {}
 
-    ok = all(bool(v) for v in checks.values())
-    failed = [k for k, v in checks.items() if not v]
+    # Two tiers (Fable 2026-09-19): tier-1 hold INTEGRITY (the control delivered the
+    # stimulus and was observed) — any failure is INCONCLUSIVE, because a control that
+    # did not fire/hold correctly makes B look like a passing positive and would be
+    # misread as "the gate is vacuous". tier-2 is the VERDICT (the counter caught the
+    # freeze, RED isolated to the counter) — PASS/FAIL only once integrity holds.
+    integrity_keys = (
+        "firedAfterAdvance", "holdWithinHashchange", "firstInHoldEarly", "noControlError",
+        "ownerReadyAtTrigger", "paintedOnce", "coverContentInAlphabet", "coverPatchStable",
+        "coverHitTest100", "loopLive", "everyInHoldStale", "flipIndexPresent",
+        "flipWindowDecodable", "enoughAfterFlip", "releaseAfterLastCapture",
+    )
+    verdict_keys = (
+        "indexRunRed", "reasonFreezeRunAtCut", "freezeRunMargin", "noNegativeAnomaly",
+        "liveContinuityOk", "liveContinuityFailedEmpty", "boundDecoderIsCoverOwner",
+        "noOwnerAmbiguousInWindow", "rvfcRanThroughHold", "continuityClockGreen",
+        "playerBuildErrorsEmpty", "positivesGreen", "isolationEqual",
+    )
+    integrity_failed = [k for k in integrity_keys if not checks.get(k)]
+    verdict_failed = [k for k in verdict_keys if not checks.get(k)]
+    if integrity_failed:
+        ok, verdict, reason = False, "inconclusive", f"hold integrity failed: {integrity_failed}"
+    elif not verdict_failed:
+        ok, verdict, reason = True, "pass", None
+    else:
+        ok, verdict, reason = False, "fail", f"gate checks failed: {verdict_failed}"
+    failed = integrity_failed + verdict_failed
     return {
         "ok": ok,
-        "verdict": "pass" if ok else "fail",
-        "reason": None if ok else f"failed checks: {failed}",
+        "verdict": verdict,
+        "reason": reason,
         "checks": checks,
+        "integrityFailed": integrity_failed,
+        "verdictFailed": verdict_failed,
         "failed": failed,
+        "maxRafGapMs": max_gap_ms,
         "isolationDiffs": isolation_diffs,
         "freeze": {
             "holdStartedAt": hold_started,
@@ -2181,6 +2275,8 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
             "fellBackToArmOwner": nc.get("fellBackToArmOwner"),
             "boundDecoderId": nc.get("boundDecoderId"),
             "armedElId": nc.get("armedElId"),
+            "coverPatchMean": cover_mean,
+            "ownerReadyState": nc.get("ownerReadyState"),
             "error": nc.get("error"),
         },
         "isolationViews": {"a1": iv_a1, "b": iv_b, "a2": iv_a2},
@@ -2213,20 +2309,27 @@ async def _run_freeze_bracket(
     if bdir.exists():
         shutil.rmtree(bdir)
     bdir.mkdir()
-    chrome = ChromeCdp(CHROME, bdir / "chrome-profile")
-    await chrome.start()
+    # A FRESH Chrome per run: the player's SPA hash routing only establishes location
+    # on a FIRST navigation — re-navigating the same session (2nd/3rd boot) leaves the
+    # route hash '' indefinitely, which armed the null-control on '' and triggered on
+    # the boot settle. Each run being a first-load gives a real #1 boundary. The A-B-A
+    # comparison is unaffected (same code + fixture; the isolation check is per-snapshot).
     snaps: dict[str, dict] = {}
     try:
         for label, inject in (("a1", False), ("b", True), ("a2", False)):
             rd = bdir / label
             rd.mkdir()
-            await _boot(chrome, base)
-            await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
-            snaps[label] = await _capture_1to2_snapshot(
-                chrome, rd, "mm12", wait_profile, inject_null=inject
-            )
+            chrome = ChromeCdp(CHROME, bdir / f"chrome-profile-{label}")
+            await chrome.start()
+            try:
+                await _boot(chrome, base)
+                await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
+                snaps[label] = await _capture_1to2_snapshot(
+                    chrome, rd, "mm12", wait_profile, inject_null=inject
+                )
+            finally:
+                await chrome.close()
     finally:
-        await chrome.close()
         httpd.shutdown()
 
     verdict = _score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
@@ -2236,26 +2339,44 @@ async def _run_freeze_bracket(
 
 
 async def _boot(chrome: ChromeCdp, base: str) -> dict:
-    await chrome.goto("about:blank")
-    await asyncio.sleep(0.05)
-    await chrome.goto(f"{base}?currentSlide=1")
-    ready = await _wait_ready(chrome)
-    live_hash = await _wait_hash_clean(chrome)
-    await _ensure_videos_playing(chrome)
-    media = {}
-    for _ in range(60):
-        media = await _media_snapshot(chrome)
-        vids = media.get("videos") or []
-        playing = [
-            v
-            for v in vids
-            if (v.get("readyState") or 0) >= 2 and not v.get("paused") and (v.get("currentTime") or 0) > 0.05
-        ]
-        if playing:
-            break
+    # Re-navigation in the SAME session (the freeze A-B-A bracket boots 3x) can leave
+    # the player's route hash unsettled — `_wait_hash_clean` returns '' on timeout and
+    # the boot used to proceed anyway. A caller that then arms the null-control on that
+    # '' hash triggers on the player's own ''->#1 settle (BEFORE the advance), painting
+    # a cover before the movie has a decoded frame. Retry the whole boot until BOTH the
+    # hash is clean (#<digits>) AND a movie is genuinely playing.
+    ready = None
+    live_hash = None
+    media: dict = {}
+    for attempt in range(3):
+        await chrome.goto("about:blank")
+        await asyncio.sleep(0.05)
+        await chrome.goto(f"{base}?currentSlide=1")
+        ready = await _wait_ready(chrome)
+        live_hash = await _wait_hash_clean(chrome)
         await _ensure_videos_playing(chrome)
-        await asyncio.sleep(0.1)
-    return {"ready": ready, "liveHash": live_hash, "media": media}
+        playing: list = []
+        for _ in range(60):
+            media = await _media_snapshot(chrome)
+            vids = media.get("videos") or []
+            playing = [
+                v
+                for v in vids
+                if (v.get("readyState") or 0) >= 2 and not v.get("paused") and (v.get("currentTime") or 0) > 0.05
+            ]
+            if playing:
+                break
+            await _ensure_videos_playing(chrome)
+            await asyncio.sleep(0.1)
+        cur = _norm_hash(
+            await chrome.evaluate(
+                "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+            )
+        )
+        if _strict_hash_num(cur) is not None and playing:
+            return {"ready": ready, "liveHash": cur, "media": media, "attempts": attempt + 1}
+        live_hash = cur
+    return {"ready": ready, "liveHash": live_hash, "media": media, "attempts": 3, "bootDegraded": True}
 
 
 async def _run(player: Path) -> dict:
