@@ -16,6 +16,7 @@ import {
   type TabId,
 } from "./nav";
 import { IconChevronLeft } from "./components/icons";
+import { LivePresenter } from "./live/LivePresenter";
 
 const MapsTab = lazy(() => import("./tabs/MapsTab").then((m) => ({ default: m.MapsTab })));
 
@@ -23,6 +24,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "generate", label: "Sermon Base Generator" },
   { id: "check", label: "Sermon Checker" },
   { id: "dsk", label: "DSK" },
+  { id: "alpha-keynote", label: "Alpha Keynote" },
   { id: "resize", label: "CG resizer" },
   { id: "maps", label: "Maps" },
   { id: "watercolour", label: "Watercolour" },
@@ -117,6 +119,7 @@ export function App() {
           <div className={tab === "dsk" ? "pane" : "pane off"}>
             <DskTab />
           </div>
+          {tab === "alpha-keynote" && <div className="pane"><LivePresenter /></div>}
           <div className={tab === "resize" ? "pane" : "pane off"}>
             <ResizeTab />
           </div>

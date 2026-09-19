@@ -206,6 +206,9 @@ class SpaStaticFiles(StaticFiles):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Obed-Edom dashboard")
+    from obed_edom.web.live import live_router
+
+    app.include_router(live_router(RUNNER))
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
