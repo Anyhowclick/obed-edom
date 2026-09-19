@@ -130,8 +130,8 @@ todos:
 
 # Offline groups — seeded translate + the masked-media residue
 
-Actionable record in the todos above. Census of record: this session's scratchpad
-`groups_census.md` (tables + reproducible scripts). Canonical resizer plan:
+Actionable record in the todos above. Census of record:
+`.agents/reviews/groups-census-2026-09-19/groups_census.md` (tables + reproducible scripts beside it). Canonical resizer plan:
 `cg_resizer.plan.md`. The pattern this mirrors — extend an already-exact transform behind an
 opt-in flag, gate it live with the right oracle, promote only on a PASS — is
 `offline_text_middle_anchor.plan.md` and `offline_maskcrop_offset.plan.md`.
