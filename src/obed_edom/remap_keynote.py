@@ -188,39 +188,17 @@ def offline_maskcrop_enabled(
     explicit: str | None = None, *, offline_mode: str | None = None,
     say: Callable[[str], None] | None = None,
 ) -> bool:
-    """Offline write of origin-anchored masked-media CROPs (default OFF). Env
-    `OBED_OFFLINE_MASKCROP` (`1`/`true`/`yes`/`on`). Today the surgical writer only writes
-    an IDENTITY mask (no crop) and hard-misses every real crop; when ON it also writes an
-    origin-anchored axis-aligned crop (mask offset ~0) via the existing
-    `_masked_media_fields` transform. Offset/rotated crops stay refused. Forced OFF when
-    `offline_mode` is `off`."""
+    """Offline write of masked-media CROPs (default OFF). Env `OBED_OFFLINE_MASKCROP`
+    (`1`/`true`/`yes`/`on`). Today the surgical writer only writes an IDENTITY mask (no crop)
+    and hard-misses every real crop; when ON it also writes ANY axis-aligned within-frame crop
+    (offset included) via the existing `_masked_media_fields` transform. Rotated and
+    cross-member crops stay refused. Forced OFF when `offline_mode` is `off`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_MASKCROP", "")).strip().lower()
     if raw not in {"1", "true", "yes", "on"}:
         return False
     if offline_mode == "off":
         if say:
             say("OBED_OFFLINE_MASKCROP needs OBED_OFFLINE_WRITE on; no offline slides to write.")
-        return False
-    return True
-
-
-def offline_maskcrop_offset_enabled(
-    explicit: str | None = None, *, mask_crop: bool = False,
-    say: Callable[[str], None] | None = None,
-) -> bool:
-    """EXPERIMENT ARM (default OFF). Env `OBED_OFFLINE_MASKCROP_OFFSET` (`1`/`true`/`yes`/`on`).
-    Extends the masked-media crop writer from origin-anchored to ANY axis-aligned crop within
-    the frame (offset included) -- the majority of real crops. The `_masked_media_fields`
-    transform is exact for it, but Keynote's offset-crop redistribution across a reopen is
-    unproven, so this admits offset crops to measure/validate them in an owner-gated live run.
-    Only consulted when `OBED_OFFLINE_MASKCROP` is on."""
-    raw = (explicit if explicit is not None
-           else os.environ.get("OBED_OFFLINE_MASKCROP_OFFSET", "")).strip().lower()
-    if raw not in {"1", "true", "yes", "on"}:
-        return False
-    if not mask_crop:
-        if say:
-            say("OBED_OFFLINE_MASKCROP_OFFSET needs OBED_OFFLINE_MASKCROP on; ignoring.")
         return False
     return True
 
@@ -1538,10 +1516,9 @@ def remap_keynote(
     _debug_snapshot_pass1(dest, say)
     text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
     mask_crop = offline_maskcrop_enabled(offline_mode=offline_mode, say=say)
-    offset_crop = offline_maskcrop_offset_enabled(mask_crop=mask_crop, say=say)
     offline_write_info = offline_write.run_offline_write(
         dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say,
-        text_reposition=text_reposition, mask_crop=mask_crop, offset_crop=offset_crop,
+        text_reposition=text_reposition, mask_crop=mask_crop,
     )
     zorder_mode = zorder_write_mode(offline_mode=offline_mode, say=say)
     zorder_refused = set((offline_write_info or {}).get("refused") or [])

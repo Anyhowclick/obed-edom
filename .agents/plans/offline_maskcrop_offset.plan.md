@@ -11,6 +11,8 @@ overview: >-
   `OBED_OFFLINE_MASKCROP`), pending a live experiment whose PASS bar is a PIXEL check, not just
   a frame match. Mirrors the middle-anchor text pattern (`offline_text_middle_anchor.plan.md`).
   Live runbook: this session's scratchpad `offset_crop_experiment_runbook.md`.
+  PROMOTED to the default OBED_OFFLINE_MASKCROP path 2026-09-19 (flag OBED_OFFLINE_MASKCROP_OFFSET
+  removed; git keeps the arm).
 todos:
   - id: increment-built
     content: >-
@@ -48,7 +50,9 @@ todos:
       Then the masked-media misses shrink to rotated + cross-member masks only. Wall-time lever:
       offset crops are one half of the 277 non-text specs keeping the AppleScript fallback pass
       alive; groups (89, need live layout) are the other half — deleting the pass needs both.
-    status: pending
+      DONE 2026-09-19: `_is_axis_aligned_crop` folded into the default `OBED_OFFLINE_MASKCROP`
+      path; `OBED_OFFLINE_MASKCROP_OFFSET` and `_is_origin_anchored_mask` removed.
+    status: completed
 ---
 
 # Offline masked-media — axis-aligned OFFSET crops

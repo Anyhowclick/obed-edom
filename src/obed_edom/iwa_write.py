@@ -413,66 +413,41 @@ def _is_identity_mask(fw: float, fh: float, fa: float, mx: float, my: float,
     return (abs(mx) <= tol_x and abs(my) <= tol_y and abs(mw - fw) <= tol_x and abs(mh - fh) <= tol_y)
 
 
-def _is_origin_anchored_mask(fw: float, fh: float, fa: float, mx: float, my: float,
-                             mw: float, mh: float, ma: float) -> bool:
-    """Axis-aligned mask pinned at the image origin (offset ~0), a genuine sub-window of the
-    frame (a CROP: mask smaller than, and inside, the frame). Superset of the identity case.
-    The ``_masked_media_fields`` transform is exact for it (image pos = target - mask_pos*s ~
-    target, since mask_pos~0); a live reopen was shown to render origin H/HV/V crops at target.
-    Refused (unproven redistribution / degenerate geometry): rotations, an OFFSET crop
-    (mask_pos != 0), mask overhang past the frame, and any non-finite/non-positive dimension.
-    The offset is bounded both absolutely (min 1px / 0.5% of frame) AND relative to the mask,
-    so a tiny mask cannot inherit the frame's looser absolute tolerance and blow up ``s``."""
-    if not all(math.isfinite(v) for v in (fw, fh, mx, my, mw, mh)):
-        return False
-    if _is_rotated(fa) or _is_rotated(ma):
-        return False
-    if fw <= 0.0 or fh <= 0.0 or mw <= 0.0 or mh <= 0.0:
-        return False
-    tol_x = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fw, 1.0))
-    tol_y = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fh, 1.0))
-    if abs(mx) > tol_x or abs(my) > tol_y:  # origin-anchored, absolute
-        return False
-    if abs(mx) > _MASK_IDENTITY_REL * mw or abs(my) > _MASK_IDENTITY_REL * mh:  # and relative to mask
-        return False
-    return mw <= fw + tol_x and mh <= fh + tol_y  # the crop window lies within the frame
-
-
 def _is_axis_aligned_crop(fw: float, fh: float, fa: float, mx: float, my: float,
                           mw: float, mh: float, ma: float) -> bool:
-    """Axis-aligned mask that is a genuine sub-window fully within the image frame at ANY
-    offset -- a superset of the origin-anchored case. ``_masked_media_fields`` is exact for it
-    (image pos = target - mask_pos*s), but whether Keynote redistributes an OFFSET crop that
-    way across a reopen is unproven, so it is gated behind its own opt-in
-    (OBED_OFFLINE_MASKCROP_OFFSET) pending live validation. Refused: rotations, non-finite or
-    non-positive dimensions, and a mask window that spills past the frame."""
+    """Axis-aligned mask that is a genuine sub-window within the image frame's boundary
+    tolerance at ANY offset. ``_masked_media_fields`` is exact for it (image pos =
+    target - mask_pos*s); live validation (2026-09-18) confirmed Keynote redistributes an
+    OFFSET crop the same way across a reopen (frame Delta 0.48px, per-region pixel check
+    <=1px). Refused: rotations, non-finite or non-positive dimensions, and a mask window that
+    spills past the frame. The boundary-overhang tolerance is bounded relative to BOTH the
+    frame AND the mask, so a tiny mask cannot inherit the frame's looser absolute tolerance
+    and blow up the derived scale (a fully-interior tiny mask stays legal)."""
     if not all(math.isfinite(v) for v in (fw, fh, mx, my, mw, mh)):
         return False
     if _is_rotated(fa) or _is_rotated(ma):
         return False
     if fw <= 0.0 or fh <= 0.0 or mw <= 0.0 or mh <= 0.0:
         return False
-    tol_x = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fw, 1.0))
-    tol_y = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fh, 1.0))
+    tol_x = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fw, 1.0), _MASK_IDENTITY_REL * mw)
+    tol_y = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fh, 1.0), _MASK_IDENTITY_REL * mh)
     return (mx >= -tol_x and my >= -tol_y
             and mx + mw <= fw + tol_x and my + mh <= fh + tol_y)
 
 
 def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: dict,
-                         reported: list[float], *, allow_origin_crop: bool = False,
-                         allow_offset_crop: bool = False,
+                         reported: list[float], *, allow_crop: bool = False,
                          ) -> tuple[list[tuple[str, dict]], str | None, bool]:
     """Place a masked image/movie. Always writes an IDENTITY window (no crop); under
-    ``allow_origin_crop`` also an ORIGIN-anchored axis-aligned crop; under ``allow_offset_crop``
-    ANY axis-aligned crop within the frame (offset included). REFUSE a rotation always.
+    ``allow_crop`` also ANY axis-aligned crop within the frame's boundary tolerance (offset
+    included). REFUSE a rotation always.
 
     Production never displaces a mask: the IMAGE frame moves and the mask stays put (325/325
     masks have naturalSize == their own size; the composed rect is image_pos + mask_pos).
     The transform below is exact for ANY axis-aligned mask -- image pos = target - mask_pos*s,
-    both sizes scaled by s = target/mask. The origin-anchored crop (mask_pos ~0) was shown to
-    render at target across a Keynote reopen (H/HV/V); an OFFSET crop uses the same exact
-    transform but its redistribution across a reopen is unproven, so it stays behind
-    ``allow_offset_crop`` until a live gate validates it. ok=False => hard miss.
+    both sizes scaled by s = target/mask. Live validation confirmed the same transform holds
+    for an OFFSET crop across a Keynote reopen. ok=False => hard miss; a non-finite derived
+    field (degenerate mask/target dims blowing up s) is refused the same way.
     """
     mask_ref = (obj.get("mask") or {}).get("identifier")
     if mask_ref is None:
@@ -483,13 +458,10 @@ def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: d
         return ([], None, False)
     _fx, _fy, fw, fh, fa = _xywha(_geom_dict(obj))
     mx, my, mw, mh, ma = _xywha(_geom_dict(mask_obj))
-    # Identity (no crop) is always written; an origin-anchored crop only under
-    # `allow_origin_crop` (live-validated for H/HV/V); any within-frame axis-aligned crop
-    # (offset included) under `allow_offset_crop` (same exact transform, redistribution
-    # pending live validation). Rotations always refused -> hard miss to the fallback.
+    # Identity (no crop) is always written; any within-frame axis-aligned crop (offset
+    # included) under `allow_crop`. Rotations always refused -> hard miss to the fallback.
     if not (_is_identity_mask(fw, fh, fa, mx, my, mw, mh, ma)
-            or (allow_origin_crop and _is_origin_anchored_mask(fw, fh, fa, mx, my, mw, mh, ma))
-            or (allow_offset_crop and _is_axis_aligned_crop(fw, fh, fa, mx, my, mw, mh, ma))):
+            or (allow_crop and _is_axis_aligned_crop(fw, fh, fa, mx, my, mw, mh, ma))):
         return ([], mask_id, False)
     if not _natural_writable(mask_obj, both_axes=True) or not _natural_writable(obj, both_axes=True):
         return ([], mask_id, False)
@@ -498,12 +470,13 @@ def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: d
     tw = float(spec["w"]) if spec.get("w") is not None else mw
     th = float(spec["h"]) if spec.get("h") is not None else mh
     sx, sy = tw / mw, th / mh
-    return ([
-        (mask_id, {"pos_x": mx * sx, "pos_y": my * sy, "size_w": tw, "size_h": th,
-                   "natural_w": tw, "natural_h": th}),
-        (rec["id"], {"pos_x": tx - mx * sx, "pos_y": ty - my * sy, "size_w": fw * sx, "size_h": fh * sy,
-                     "natural_w": fw * sx, "natural_h": fh * sy}),
-    ], mask_id, True)
+    mask_fields = {"pos_x": mx * sx, "pos_y": my * sy, "size_w": tw, "size_h": th,
+                   "natural_w": tw, "natural_h": th}
+    rec_fields = {"pos_x": tx - mx * sx, "pos_y": ty - my * sy, "size_w": fw * sx, "size_h": fh * sy,
+                 "natural_w": fw * sx, "natural_h": fh * sy}
+    if not all(math.isfinite(v) for v in (*mask_fields.values(), *rec_fields.values())):
+        return ([], mask_id, False)
+    return ([(mask_id, mask_fields), (rec["id"], rec_fields)], mask_id, True)
 
 
 def _apply_geom_fields(archive_obj: dict, fields: dict) -> None:
@@ -610,7 +583,6 @@ def _slide_edits(
     require_reconcile: bool = False,
     text_reposition: bool = False,
     mask_crop: bool = False,
-    offset_crop: bool = False,
 ) -> tuple[str | None, dict[str, dict], int, list[dict], list[str], str | None]:
     """Pure, no-I/O resolution of one slide's edits against an already-loaded deck.
 
@@ -752,9 +724,8 @@ def _slide_edits(
         elif kind in ("image", "movie"):
             if masked:
                 ops, mask_id, ok = _masked_media_fields(
-                    rec, obj, objects, spec, rep, allow_origin_crop=mask_crop,
-                    allow_offset_crop=offset_crop)
-                # Cropped, rotated, unresolved or cross-member mask: miss, never mis-write.
+                    rec, obj, objects, spec, rep, allow_crop=mask_crop)
+                # Disallowed crop, rotated, unresolved or cross-member mask: miss, never mis-write.
                 if not ok or mask_id is None or id_to_file.get(mask_id) != target_member:
                     _miss("masked-media")
                     continue
@@ -971,7 +942,6 @@ def patch_deck_geometry(
     extra_member_edits: dict[str, bytes] | None = None,
     text_reposition: bool = False,
     mask_crop: bool = False,
-    offset_crop: bool = False,
 ) -> dict[int, PatchResult]:
     """Patch every slide in ``specs_by_slide`` with exactly ONE zip rewrite.
 
@@ -1002,7 +972,6 @@ def patch_deck_geometry(
             require_reconcile=require_reconcile,
             text_reposition=text_reposition,
             mask_crop=mask_crop,
-            offset_crop=offset_crop,
         )
         if not refuse_reason and target_member is not None and edits:
             owner = member_owner.get(target_member)

@@ -53,7 +53,6 @@ from obed_edom.iwa_write import (  # noqa: E402
     _group_fields,
     _is_axis_aligned_crop,
     _is_identity_mask,
-    _is_origin_anchored_mask,
     _masked_media_fields,
     _natural_unwritable,
     _natural_writable,
@@ -1020,18 +1019,6 @@ def test_is_identity_mask_boundaries():
     assert _is_identity_mask(11.8, 20.9, 0.0, 0.07, 0.0, 11.8, 20.9, 0.0) is False
 
 
-def test_is_origin_anchored_mask_predicate():
-    # Origin-anchored CROP (offset ~0, mask smaller than frame): admitted.
-    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 0.0) is True
-    # Identity (offset 0, mask == frame) is a subset: also origin-anchored.
-    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 120.0, 60.0, 0.0) is True
-    # OFFSET crop (mask displaced): not origin-anchored -> stays refused.
-    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 5.0, 5.0, 80.0, 40.0, 0.0) is False
-    # Rotated frame or mask: never.
-    assert _is_origin_anchored_mask(120.0, 60.0, 90.0, 0.0, 0.0, 80.0, 40.0, 0.0) is False
-    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 12.0) is False
-
-
 def test_masked_media_fields_origin_crop_gated_by_flag():
     # Origin crop, ANISOTROPIC target (sx=2, sy=3) to catch a broken image formula:
     # refused without the flag, written with it. mask@(0,0,80,40), image@(300,100,120,60),
@@ -1047,7 +1034,7 @@ def test_masked_media_fields_origin_crop_gated_by_flag():
     off_ops, off_mask, off_ok = _masked_media_fields(rec, objects["230"], objects, spec, reported)
     assert off_ok is False and off_ops == [] and off_mask == "231"  # refused, flag off
     on_ops, on_mask, on_ok = _masked_media_fields(
-        rec, objects["230"], objects, spec, reported, allow_origin_crop=True)
+        rec, objects["230"], objects, spec, reported, allow_crop=True)
     assert on_ok is True and on_mask == "231"
     f = dict(on_ops)
     # mask: origin (mask_pos*s = 0), sized to the target.
@@ -1058,19 +1045,6 @@ def test_masked_media_fields_origin_crop_gated_by_flag():
     assert (f["230"]["pos_x"], f["230"]["pos_y"]) == pytest.approx((400.0, 200.0))
     assert (f["230"]["size_w"], f["230"]["size_h"]) == pytest.approx((240.0, 180.0))
     assert (f["230"]["natural_w"], f["230"]["natural_h"]) == pytest.approx((240.0, 180.0))
-
-
-def test_is_origin_anchored_mask_rejects_degenerate():
-    # Hardening (Codex): NaN, non-positive frame/mask, mask overhang past the frame, and a
-    # tiny mask whose sub-px offset would explode the scale are all refused.
-    assert _is_origin_anchored_mask(float("nan"), 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 0.0) is False
-    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 0.0, 40.0, 0.0) is False   # mw=0
-    assert _is_origin_anchored_mask(0.0, 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 0.0) is False     # fw=0
-    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.0, 0.0, 200.0, 40.0, 0.0) is False  # overhang mw>fw
-    # tiny mask, offset 0.9 passes the frame's 1px abs tol but not the mask-relative tol.
-    assert _is_origin_anchored_mask(3840.0, 1080.0, 0.0, 0.9, 0.0, 0.001, 40.0, 0.0) is False
-    # a small, in-tolerance nonzero offset is still accepted.
-    assert _is_origin_anchored_mask(120.0, 60.0, 0.0, 0.3, 0.15, 80.0, 40.0, 0.0) is True
 
 
 def test_is_axis_aligned_crop_predicate():
@@ -1088,10 +1062,37 @@ def test_is_axis_aligned_crop_predicate():
     assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 20.0, 10.0, 0.0, 40.0, 0.0) is False
 
 
-def test_masked_media_fields_offset_crop_gated_by_offset_flag():
-    # OFFSET crop, anisotropic target: refused under mask_crop-only (origin flag), written
-    # under allow_offset_crop. mask@(20,10,80,40), image@(300,100,120,60),
-    # target (400,200,160,120) => sx=2, sy=3; image pos = target - mask_pos*s.
+def test_is_axis_aligned_crop_boundary_tolerance_bounded_by_mask_too():
+    # Codex finding: a sub-pixel mask mostly OUTSIDE the frame must not be admitted just
+    # because the frame-relative tolerance (0.5% of 3840 = 19.2px) is wide. The tolerance is
+    # also bounded relative to the MASK (0.5% of 0.001 ~ 0), so a -0.9px overhang on a
+    # 0.001px-wide mask is refused (it would otherwise blow sx up to 160000+).
+    assert _is_axis_aligned_crop(3840.0, 1080.0, 0.0, -0.9, 0.0, 0.001, 40.0, 0.0) is False
+    # A fully-interior tiny mask (no overhang at all) stays legal -- zooming a lot is fine.
+    assert _is_axis_aligned_crop(3840.0, 1080.0, 0.0, 100.0, 100.0, 0.001, 40.0, 0.0) is True
+
+
+def test_masked_media_fields_refuses_non_finite_derived_fields():
+    # A degenerate mask (near-zero width, origin-anchored so the predicate admits it) drives
+    # sx = target_w / mask_w to +inf; the non-finite guard in _masked_media_fields is the
+    # last line of defense the boundary-tolerance fix does not cover.
+    objects = {
+        "231": {"_pbtype": "TSD.MaskArchive", **_mask_super(0.0, 0.0, 1e-320, 40.0)},
+        "230": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "231"},
+                "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}},
+    }
+    rec = {"id": "230", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0}
+    reported = [300.0, 100.0, 120.0, 60.0]
+    ops, mask_id, ok = _masked_media_fields(
+        rec, objects["230"], objects, spec, reported, allow_crop=True)
+    assert ok is False and ops == [] and mask_id == "231"
+
+
+def test_masked_media_fields_offset_crop_gated_by_crop_flag():
+    # OFFSET crop, anisotropic target: refused with the flag off, written under allow_crop.
+    # mask@(20,10,80,40), image@(300,100,120,60), target (400,200,160,120) => sx=2, sy=3;
+    # image pos = target - mask_pos*s.
     objects = {
         "231": {"_pbtype": "TSD.MaskArchive", **_mask_super(20, 10, 80, 40)},
         "230": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "231"},
@@ -1100,13 +1101,10 @@ def test_masked_media_fields_offset_crop_gated_by_offset_flag():
     rec = {"id": "230", "kind": "image", "kindIndex": 0}
     spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0}
     reported = [300.0, 100.0, 120.0, 60.0]
-    # origin flag alone refuses an offset crop.
-    origin_ops, _m, origin_ok = _masked_media_fields(
-        rec, objects["230"], objects, spec, reported, allow_origin_crop=True)
-    assert origin_ok is False and origin_ops == []
-    # offset flag writes it via the same exact transform.
+    off_ops, _m, off_ok = _masked_media_fields(rec, objects["230"], objects, spec, reported)
+    assert off_ok is False and off_ops == []
     on_ops, on_mask, on_ok = _masked_media_fields(
-        rec, objects["230"], objects, spec, reported, allow_offset_crop=True)
+        rec, objects["230"], objects, spec, reported, allow_crop=True)
     assert on_ok is True and on_mask == "231"
     f = dict(on_ops)
     assert (f["231"]["pos_x"], f["231"]["pos_y"]) == pytest.approx((40.0, 30.0))  # mask_pos*s = (20*2,10*3)
@@ -1117,7 +1115,7 @@ def test_masked_media_fields_offset_crop_gated_by_offset_flag():
 
 def test_slide_edits_origin_crop_missed_off_written_on(tmp_path):
     # End-to-end through _slide_edits: an origin-crop image hard-misses masked-media with the
-    # flag off, and is written (no miss) with mask_crop on. Offset crops stay refused either way.
+    # flag off, and is written (no miss) with mask_crop on.
     deck = _build_origin_crop_deck(tmp_path / "origin.key")
     specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
     off = patch_deck_geometry(deck, {1: specs}, require_reconcile=False)[1]
@@ -1129,18 +1127,16 @@ def test_slide_edits_origin_crop_missed_off_written_on(tmp_path):
     assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
 
 
-def test_slide_edits_offset_crop_refused_under_maskcrop_written_under_offset_flag(tmp_path):
-    # An OFFSET crop (mask displaced) is not origin-anchored: refused with mask_crop alone
-    # (origin flag), but written under the opt-in offset_crop flag (same exact transform,
-    # redistribution pending live validation).
+def test_slide_edits_offset_crop_missed_off_written_on(tmp_path):
+    # An OFFSET crop (mask displaced) is written under mask_crop (live-validated, same exact
+    # transform), still refused with the flag off.
     deck = _build_origin_crop_deck(tmp_path / "offset.key", mask_xy=(5, 5))
     original = deck.read_bytes()
     specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
-    refused = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    refused = patch_deck_geometry(deck, {1: specs}, require_reconcile=False)[1]
     assert refused.missed == 1 and refused.applied == 0 and refused.missed_specs == specs
-    assert deck.read_bytes() == original  # mask_crop alone leaves it byte-identical
-    on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False,
-                             mask_crop=True, offset_crop=True)[1]
+    assert deck.read_bytes() == original  # flag off leaves it byte-identical
+    on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
     assert on.applied and not on.refused and on.value_clean and set(on.edited_ids) == {"230", "231"}
     after = _composed(deck)
     assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
@@ -1276,9 +1272,12 @@ def test_soft_fallbacks_ignores_hard_classes(deck):
 # Hardening 3: rotated masked image / mask is a MISS, never mis-written.
 # --------------------------------------------------------------------------
 def _build_rotated_mask_deck(path, *, img_angle=0.0, mask_angle=0.0):
-    mask = _arch(231, "TSD.MaskArchive", {"super": _geom(5, 5, 80, 40, angle=mask_angle)})
+    # naturalSize/originalSize present so `_natural_writable` passes: the ONLY thing
+    # refusing this fixture is the rotation guard (an unrotated variant is written).
+    mask = _arch(231, "TSD.MaskArchive", _mask_super(5, 5, 80, 40, angle=mask_angle))
     img = _arch(230, "TSD.ImageArchive",
-                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=img_angle)})
+                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=img_angle),
+                 "originalSize": {"width": 120.0, "height": 60.0}})
     slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}]})
     show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
     node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
@@ -1301,6 +1300,60 @@ def test_rotated_masked_image_missed_not_written(tmp_path, img_angle, mask_angle
     assert res.missed == 1 and res.applied == 0
     assert res.missed_specs == specs
     assert deck.read_bytes() == original  # rotated masked image left untouched
+
+
+@pytest.mark.parametrize("img_angle,mask_angle", [(90.0, 0.0), (0.0, 45.0)])
+def test_masked_media_rotated_refused_under_mask_crop(tmp_path, img_angle, mask_angle):
+    # Same rotated fixture, but through patch_deck_geometry with mask_crop=True -- the
+    # PROMOTED path, which patch_slide_geometry cannot exercise (it has no mask_crop param).
+    # A rotated frame or mask is refused regardless of the flag.
+    deck = _build_rotated_mask_deck(tmp_path / "rot_maskcrop.key", img_angle=img_angle, mask_angle=mask_angle)
+    original = deck.read_bytes()
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    res = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert res.missed == 1 and res.applied == 0 and res.missed_specs == specs
+    assert res.miss_reasons == ["masked-media"]
+    assert deck.read_bytes() == original
+
+
+def test_masked_media_rotated_fixture_written_when_unrotated(tmp_path):
+    # Control for the rotated test above: the same fixture with both angles at 0 is an
+    # offset crop the promoted path WRITES, proving the rotation guard alone refuses it.
+    deck = _build_rotated_mask_deck(tmp_path / "unrot_maskcrop.key")
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    res = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert res.missed == 0 and res.miss_reasons == []
+    assert sorted(res.edited_ids) == ["230", "231"]
+
+
+def _build_cross_member_mask_deck(path):
+    """The image (230) and slide live in ``Index/Slide-100.iwa``; its mask (231) is written
+    into a SEPARATE member -- ``id_to_file[mask] != target_member``, a cross-member mask
+    that must miss even though the crop geometry itself is a legal axis-aligned OFFSET."""
+    mask = _arch(231, "TSD.MaskArchive", _mask_super(20, 10, 80, 40))
+    img = _arch(230, "TSD.ImageArchive",
+                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60),
+                 "originalSize": {"width": 120.0, "height": 60.0}})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, img]))
+        z.writestr("Index/Slide-101.iwa", _member([mask]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_masked_media_cross_member_mask_refused_under_mask_crop(tmp_path):
+    deck = _build_cross_member_mask_deck(tmp_path / "cross_member.key")
+    original = deck.read_bytes()
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0, "role": "other"}]
+    res = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert res.missed == 1 and res.applied == 0 and res.missed_specs == specs
+    assert res.miss_reasons == ["masked-media"]
+    assert deck.read_bytes() == original
 
 
 # --------------------------------------------------------------------------
