@@ -384,10 +384,16 @@ def is_move_sample(row: dict[str, Any], transition_scene: float | None) -> bool:
 
 
 def is_move_complete(row: dict[str, Any], transition_scene: float | None) -> bool:
+    """The move has finished but the player has not yet cut to the next scene:
+    still `transition_scene`, but no longer the `Playing`+busy move sample. Real
+    traces show the player pass through more than one such state before the cut
+    (`IdleAtFinalState`, then `WaitingToJump`, then `SettingUpScene`) -- the movie
+    is already parked at the destination rect throughout all of them, so every one
+    of them is a "move complete" sample, not only the first."""
     return (
         transition_scene is not None
         and row.get("scene") == transition_scene
-        and row.get("playerState") == "IdleAtFinalState"
+        and not is_move_sample(row, transition_scene)
     )
 
 
@@ -507,9 +513,25 @@ def score_continuity(
     if window is None:
         return {"verdict": False, "reason": "boundary crossing not observed in samples"}
     if transition_scene is not None:
-        move_window = find_boundary_window(samples, transition_scene, pad_s=pad_s)
-        if move_window is not None:
-            window["start"] = min(window["start"], move_window["start"])
+        # Ground the window's start at the first SETTLED sample of the from-slide's
+        # own scene (transition_scene - 1), not a blind pad_s before the crossing
+        # into transition_scene: a deliberate decoder restart can sit right before
+        # the move, and padding further back reaches into the PRIOR scene, before
+        # that restart, where the continuing decoder cannot exist yet -- any
+        # missing sample there would be a false failure, not evidence of anything.
+        # Grounding here still covers the entire move (which starts later, inside
+        # transition_scene) and the settled source phase that precedes it.
+        settled_source_times = [
+            s["t"]
+            for s in samples
+            if s.get("scene") == transition_scene - 1 and s.get("busy") is False
+        ]
+        if settled_source_times:
+            window["start"] = min(window["start"], min(settled_source_times))
+        else:
+            move_window = find_boundary_window(samples, transition_scene, pad_s=pad_s)
+            if move_window is not None:
+                window["start"] = min(window["start"], move_window["start"])
     windowed = {
         element_id: [r for r in rows if window["start"] <= r["t"] <= window["end"]]
         for element_id, rows in tracks.items()

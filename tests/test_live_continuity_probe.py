@@ -590,3 +590,48 @@ class TestMovingBoundary:
         result = probe.score_continuity(samples, ASSET, 2, SRC_RECT, DST_RECT, True)
         assert result["verdict"] is False
         assert result["missingSamples"][0]["t"] == samples[25]["t"]
+
+    def test_window_does_not_reach_back_past_restart_into_prior_scene(self) -> None:
+        """Real host-gate evidence: with a deliberate decoder restart right before
+        the move (from_scene = transition_scene - 1), a blind pad_s before the
+        from_scene/transition_scene crossing can reach BEFORE that restart, into a
+        scene where the continuing decoder cannot exist -- producing spurious
+        `missingSamples` that are not evidence of any real defect. The window must
+        instead ground at the first settled sample of from_scene, not a scene
+        earlier where the tracked decoder id is legitimately absent."""
+        samples = moving_boundary_samples()
+        prior_scene = [
+            {"t": samples[0]["t"] - probe.WINDOW_PAD_S * 1000.0 - 200.0 + i * 50.0, "scene": 5,
+             "playerState": "SettingUpScene", "busy": True, "videos": []}
+            for i in range(4)
+        ]
+        result = score_moving_boundary(prior_scene + samples)
+        assert result["verdict"] is True
+        assert result["missingSamples"] == []
+        assert result["window"]["start"] >= samples[0]["t"]
+
+    def test_waiting_to_jump_already_at_destination_is_move_complete_not_a_mismatch(self) -> None:
+        """Real host-gate evidence: after the move finishes, the player passes
+        through `IdleAtFinalState`, then `WaitingToJump`, then `SettingUpScene`
+        before cutting to the next scene -- the movie is parked at the destination
+        throughout ALL of them, not only the first. The scorer must not expect the
+        source rect again during the later post-move states."""
+        samples = moving_boundary_samples()
+        for row in samples:
+            if row["scene"] == 7 and row["playerState"] == "IdleAtFinalState":
+                row["playerState"] = "WaitingToJump"
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is True
+        assert result["rectMismatches"] == []
+
+    def test_waiting_to_jump_at_source_rect_is_still_a_mismatch(self) -> None:
+        """The relaxation above is phase-specific, not a blanket allowance: a
+        WaitingToJump sample that is NOT yet at the destination must still fail."""
+        samples = moving_boundary_samples()
+        for row in samples:
+            if row["scene"] == 7 and row["playerState"] == "IdleAtFinalState":
+                row["playerState"] = "WaitingToJump"
+                row["videos"][0]["rect"] = dict(SRC_RECT)
+        result = score_moving_boundary(samples)
+        assert result["verdict"] is False
+        assert result["rectMismatches"]
