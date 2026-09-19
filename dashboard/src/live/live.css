@@ -1,0 +1,11 @@
+.live-presenter { max-width: 1100px; }
+.live-presenter label { display: inline-flex; gap: 8px; align-items: center; }
+.live-still { margin: 16px 0; max-width: 640px; min-width: 0; }
+.live-still figcaption { margin-bottom: 8px; font-size: 13px; }
+.live-still img, .live-placeholder { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #17191d; border-radius: 8px; }
+.live-placeholder { display: grid; place-items: center; color: #b8bdc5; }
+.live-upcoming { display: flex; gap: 16px; }
+.live-upcoming .live-still { flex: 1; }
+.live-notes { white-space: pre-wrap; }
+.live-deck { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; }
+@media (max-width: 650px) { .live-upcoming { flex-wrap: wrap; } .live-upcoming .live-still { flex-basis: 40%; } }

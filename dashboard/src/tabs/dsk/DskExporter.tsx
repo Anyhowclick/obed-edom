@@ -12,6 +12,7 @@ import {
 } from "../../api";
 import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
+import { BuildPreview } from "../../components/BuildPreview";
 import { LoadingOverlay } from "../../components/PreviewGrid";
 import { JobName } from "../../components/JobName";
 import { DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath } from "../../prefs";
@@ -183,6 +184,7 @@ export function DskExporter() {
               Open folder
             </button>
           </div>
+          <BuildPreview path={result.path || keynote?.path} disabled={busy} />
         </>
       )}
     </div>

@@ -381,6 +381,57 @@ export async function saveDskExportDecisions(jobId: string, decisions: DskDecisi
   return res.json();
 }
 
+export type HtmlPreviewSlide = {
+  originalOrdinal: number;
+  originalSlideId?: string;
+  skipped: boolean;
+  exportedUuid?: string | null;
+  playerIndex?: number | null;
+  playerHash?: string | null;
+  unsupportedMedia?: string[];
+};
+
+export type HtmlPreviewResult = {
+  phase?: "review" | "ready" | "cleaned";
+  path?: string;
+  sourceDigest?: string;
+  exportKey?: string;
+  exportRoot?: string | null;
+  canvas?: { width: number; height: number };
+  slides?: HtmlPreviewSlide[];
+  needsExport?: boolean;
+  reused?: boolean;
+  bytes?: number;
+  hashIndexBase?: number;
+  cleanup?: { deleted?: boolean; retained?: boolean; otherClaims?: string[] };
+};
+
+export async function startHtmlPreview(path: string, expectedDigest?: string): Promise<Job> {
+  const body = new FormData();
+  body.set("path", path);
+  if (expectedDigest) body.set("expected_digest", expectedDigest);
+  const res = await fetch("/api/html-preview", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function applyHtmlPreview(jobId: string): Promise<Job> {
+  const res = await fetch(`/api/html-preview/${jobId}/apply`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function cleanupHtmlPreview(jobId: string): Promise<Job> {
+  const res = await fetch(`/api/html-preview/${jobId}/cleanup`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function htmlPreviewPlayerUrl(jobId: string, relPath = "index.html", hash?: string | null): string {
+  const suffix = hash ? (hash.startsWith("#") ? hash : `#${hash}`) : "";
+  return `/api/html-preview/${jobId}/player/${relPath.split("/").map(encodeURIComponent).join("/")}${suffix}`;
+}
+
 export async function applyDskExport(jobId: string, decisions?: DskDecision[]): Promise<Job> {
   const res = await fetch(`/api/dsk/export/${jobId}/apply`, {
     method: "POST",

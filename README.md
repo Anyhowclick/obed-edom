@@ -16,6 +16,7 @@ If macOS blocks the launcher, Control-click it and choose **Open**.
 
 - **Sermon Base Generator** — create LW and DSK decks, an operator-cued Word outline, previews, and a review PDF.
 - **Sermon Checker** — check an outline, one deck, or an LW/DSK pair for cue, wording, layout, photo, and house-style issues. Checks do not alter the source files.
+- **Alpha Keynote** — experimental presenter for a prepared 16:9 Keynote HTML export, with current/upcoming stills, slide-number navigation, and a separate silent display output. Native HTML alpha and movie continuity are not qualified; DeckLink fill/key is not available yet.
 - **CG Resizer** — turn a finalised wide-wall deck into a 16:9 CG deck and review any framing choices.
 - **Maps** — build and export map slides for LW, DSK, and CG.
 - **Watercolour** — turn photos into pencil-and-wash artwork and add them to maps.
@@ -49,6 +50,22 @@ Put cues in square brackets in the Word outline to tell the generator what to bu
 | `[FILLER-QR]` / `[GIVING-OPTIONS]` | Offering slides |
 
 The generator writes one operator cue for every generated slide into the `_CUED.docx` file. Notes such as `[Pray]` or `[Instructions]` remain stage directions and do not create slides.
+
+## Alpha Keynote experiment
+
+Prepare a deck using **Sermon Checker → Build Preview**, then select that prepared
+deck and a detected display in **Alpha Keynote**. Starting creates one hidden
+output session; **Show output** makes it visible. The 16:9 picture fits inside
+the display without stretching. HDMI hiding produces black and leaves playback
+running. Type an original slide number and press Enter to restart that slide at
+its initial state. Skipped slides are unavailable.
+
+Switching tabs or closing the presenter does not stop output. **Stop session**
+ends it. Keep the dashboard server running; restarting the server does not restore
+a movie position. Current/upcoming pictures are still previews, and presenter
+notes are unavailable in the current HTML preparation path. Audio is disabled.
+Only the recognised Keynote player version and manual presentation mode are
+accepted. This experiment does not enable the separate DSK animation-file exporter.
 
 ## Important checks
 

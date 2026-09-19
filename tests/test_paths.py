@@ -101,7 +101,7 @@ def test_validate_export_dir_rejects_file(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "root_name",
-    [".maps", ".watercolour", ".resize", ".diff", ".outline", ".inspect", ".uploads", ".sessions", ".geocode"],
+    [".maps", ".watercolour", ".resize", ".diff", ".outline", ".inspect", ".uploads", ".sessions", ".geocode", ".html-preview"],
 )
 def test_validate_export_dir_rejects_private_roots(root_name: str):
     with pytest.raises(ValueError, match="cannot be inside"):

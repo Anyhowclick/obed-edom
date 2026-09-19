@@ -1,0 +1,1610 @@
+"""Offline P2 probe tests. Do not launch Keynote or a browser."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from obed_edom.html_alpha_probe import (
+    LINEDRAW,
+    LINEDRAW_FOR_LINE,
+    PLAYER_RAF_ASSIGN,
+    ProbeStructureError,
+    analyze_rgba,
+    black_content_ok,
+    capability_row,
+    color_key_near_black,
+    decoded_alpha_report,
+    iwa_click_groups,
+    kpf_operator_events,
+    leftover_object_layers,
+    make_black_content_fixture,
+    merge_linedraw_companions,
+    page_websocket_url,
+    current_slide_query_url,
+    painted_identity,
+    patch_index_html,
+    progress_metric,
+    source_has_genuine_alpha,
+    timing_repeatability,
+)
+
+
+def test_linedraw_companion_is_one_click():
+    groups = [
+        [{"effect": LINEDRAW, "automatic": False, "referent": True}],
+        [{"effect": LINEDRAW_FOR_LINE, "automatic": True, "referent": True}],
+    ]
+    merged = merge_linedraw_companions(groups)
+    assert len(merged) == 1
+    assert [item["effect"] for item in merged[0]] == [LINEDRAW, LINEDRAW_FOR_LINE]
+
+
+def test_iwa_click_groups_folds_automatic_companions():
+    objects = {
+        "c1": {
+            "_pbtype": "KN.BuildChunkArchive",
+            "referent": True,
+            "automatic": False,
+            "delay": 0,
+            "build": {"identifier": "b1"},
+        },
+        "c2": {
+            "_pbtype": "KN.BuildChunkArchive",
+            "referent": True,
+            "automatic": True,
+            "delay": 0,
+            "build": {"identifier": "b2"},
+        },
+        "c3": {
+            "_pbtype": "KN.BuildChunkArchive",
+            "referent": True,
+            "automatic": True,
+            "delay": 0,
+            "build": {"identifier": "b3"},
+        },
+        "b1": {"attributes": {"animationAttributes": {"effect": LINEDRAW, "animationType": "In"}}},
+        "b2": {"attributes": {"animationAttributes": {"effect": LINEDRAW_FOR_LINE, "animationType": "In"}}},
+        "b3": {"attributes": {"animationAttributes": {"effect": "apple:dissolve", "animationType": "In"}}},
+    }
+    slide = {
+        "buildChunks": [
+            {"identifier": "c1"},
+            {"identifier": "c2"},
+            {"identifier": "c3"},
+        ]
+    }
+    groups = iwa_click_groups(objects, slide)
+    assert groups["operatorClickCount"] == 1
+    assert groups["settledStateCount"] == 2
+    assert [item["effect"] for item in groups["operatorClicks"][0]] == [
+        LINEDRAW,
+        LINEDRAW_FOR_LINE,
+        "apple:dissolve",
+    ]
+    assert groups["automaticOnShow"] == []
+
+
+def test_kpf_nested_linedraw_is_one_event():
+    payload = {
+        "events": [
+            {
+                "automaticPlay": False,
+                "effects": [
+                    {
+                        "type": "buildIn",
+                        "name": LINEDRAW,
+                        "effects": [
+                            {"type": "buildIn", "name": LINEDRAW_FOR_LINE, "effects": [
+                                {"type": "buildIn", "name": "apple:dissolve", "effects": []}
+                            ]}
+                        ],
+                    }
+                ],
+            },
+            {"automaticPlay": False, "effects": [{"type": "transition", "name": "none", "effects": []}]},
+        ]
+    }
+    clicks = kpf_operator_events(payload)
+    assert len(clicks) == 1
+    names = [item["name"] for item in clicks[0]["effects"]]
+    assert names == [LINEDRAW, LINEDRAW_FOR_LINE, "apple:dissolve"]
+
+
+def test_black_content_rejects_color_key():
+    fixture = make_black_content_fixture(size=(1920, 1080))
+    assert black_content_ok(fixture)
+    report = analyze_rgba(fixture, content_rects=[{"x": 200, "y": 200, "width": 600, "height": 200}])
+    assert report["pass"]
+    assert report["transparentFrac"] >= 0.05
+    keyed = color_key_near_black(fixture)
+    assert not black_content_ok(keyed)
+    # A global alpha_min==0 check would still "pass" after colour-keying.
+    assert int(keyed[:, :, 3].min()) == 0
+
+
+def test_alpha_min_zero_alone_is_not_a_pass():
+    arr = np.full((1080, 1920, 4), 255, dtype=np.uint8)
+    arr[0, 0, 3] = 0
+    report = analyze_rgba(arr)
+    assert report["alphaMin"] == 0
+    assert not report["pass"]
+    assert any("alpha_min==0" in reason or "transparent_frac" in reason for reason in report["failReasons"])
+
+
+def test_patch_refuses_unknown_player():
+    html = (
+        '<html><body id="body" bgcolor="black">'
+        '<div id="stageArea"></div><div id="stage"></div>'
+        '<script src="assets/player/main.js"></script></body></html>'
+    )
+    with pytest.raises(ProbeStructureError, match="requestAnimFrame"):
+        patch_index_html(html, "function unrelated(){}")
+
+
+def test_patch_injects_versioned_probe():
+    html = (
+        '<html><body id="body" bgcolor="black">'
+        '<div id="stageArea"></div><div id="stage"></div>'
+        '<script src="assets/player/main.js"></script></body></html>'
+    )
+    js = f"prefix;{PLAYER_RAF_ASSIGN};suffix"
+    patched = patch_index_html(html, js)
+    assert 'bgcolor="black"' not in patched
+    assert 'data-obed-p2-probe="4"' in patched
+    assert "window.requestAnimationFrame" in patched
+    assert "jumpToSlide(" not in patched
+    assert 'src="assets/player/main.js"' in patched
+
+
+def test_capability_refuses_magic_move_and_skipped():
+    skipped = capability_row(
+        ordinal=2,
+        skipped=True,
+        magic_move=False,
+        has_character=False,
+        has_build_out=False,
+        has_movie=False,
+        has_line_draw=False,
+        iwa_clicks=0,
+        kpf_clicks=None,
+        capture=None,
+        alpha=None,
+    )
+    assert skipped["refusals"]
+    assert not skipped["supportedStaticAlpha"]
+    magic = capability_row(
+        ordinal=11,
+        skipped=False,
+        magic_move=True,
+        has_character=False,
+        has_build_out=False,
+        has_movie=True,
+        has_line_draw=False,
+        iwa_clicks=0,
+        kpf_clicks=None,
+        capture=None,
+        alpha=None,
+        canvas=(7680.0, 1080.0),
+    )
+    assert any("Magic Move" in item for item in magic["refusals"])
+    assert any("7680" in item for item in magic["refusals"])
+    assert not magic["supportedAnimatedAlpha"]
+
+
+def test_timing_repeatability_uses_declared_tolerance():
+    frame = make_black_content_fixture(size=(64, 64))
+    run_a = [(i / 30, frame) for i in range(4)]
+    run_b = [(i / 30, frame) for i in range(4)]
+    holds = timing_repeatability(run_a, run_b)
+    assert not holds["pass"]
+    assert holds["motionSampled"] is False
+    assert holds["declaredMaeMax"] == 0.02
+    other = np.zeros_like(frame)
+    other[10:20, 10:20] = (255, 255, 255, 255)
+    motion_a = [(0.0, frame), (1 / 30, other), (2 / 30, other), (3 / 30, other)]
+    motion_b = [(0.0, frame), (1 / 30, other), (2 / 30, other), (3 / 30, other)]
+    report = timing_repeatability(motion_a, motion_b)
+    assert report["motionSampled"]
+    assert report["pass"]
+    drifted_b = [(i / 30, other) for i in range(4)]
+    assert progress_metric(frame) != progress_metric(other)
+    assert not timing_repeatability(motion_a, drifted_b)["pass"]
+
+
+def test_page_websocket_url_ignores_browser_target():
+    browser = {"type": "browser", "webSocketDebuggerUrl": "ws://127.0.0.1:1/browser"}
+    page = {"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:1/page"}
+    assert page_websocket_url([browser]) is None
+    assert page_websocket_url([browser, page]) == "ws://127.0.0.1:1/page"
+
+def _solid_plate(rgb, size=(64, 48)):
+    arr = np.zeros((size[1], size[0], 4), dtype=np.uint8)
+    arr[:, :, :3] = rgb
+    arr[:, :, 3] = 255
+    return arr
+
+
+def test_painted_identity_rejects_leftover_matthew_as_genesis():
+    matthew = _solid_plate((40, 20, 80))
+    genesis = _solid_plate((10, 90, 30))
+    photo = _solid_plate((200, 120, 90))
+    rasters = {1: [matthew], 3: [genesis], 4: [photo]}
+    leftover = painted_identity(
+        matthew,
+        ordinal=3,
+        expected_hash="#1",
+        live_hash="#1",
+        rasters_by_ordinal=rasters,
+        previous_plates={1: matthew},
+    )
+    assert not leftover["pass"]
+    assert any("near-duplicate of slide 1" in r for r in leftover["reasons"])
+
+    genuine = painted_identity(
+        genesis,
+        ordinal=3,
+        expected_hash="#1",
+        live_hash="#1",
+        rasters_by_ordinal=rasters,
+        previous_plates={1: matthew},
+    )
+    assert genuine["pass"]
+
+
+def test_painted_identity_empty_slide_must_match_own_raster():
+    genesis = _solid_plate((10, 90, 30))
+    photo = _solid_plate((200, 120, 90))
+    rasters = {3: [genesis], 4: [photo]}
+    stale = painted_identity(
+        genesis,
+        ordinal=4,
+        expected_hash="#2",
+        live_hash="#2",
+        rasters_by_ordinal=rasters,
+        previous_plates={3: genesis},
+    )
+    assert not stale["pass"]
+    own = painted_identity(
+        photo,
+        ordinal=4,
+        expected_hash="#2",
+        live_hash="#2",
+        rasters_by_ordinal=rasters,
+        previous_plates={3: genesis},
+    )
+    assert own["pass"]
+
+
+def test_painted_identity_hash_mismatch():
+    plate = _solid_plate((1, 2, 3))
+    landed = painted_identity(
+        plate,
+        ordinal=1,
+        live_hash="#1",
+        rasters_by_ordinal={1: [plate]},
+        previous_plates={},
+        expected_starting_scene=0,
+        require_starting_scene=True,
+    )
+    assert not landed["pass"]
+    assert any("starting scene" in r for r in landed["reasons"])
+    same_slide_next_scene = painted_identity(
+        plate,
+        ordinal=1,
+        live_hash="#1",
+        rasters_by_ordinal={1: [plate]},
+        previous_plates={},
+        expected_starting_scene=0,
+        require_starting_scene=False,
+    )
+    assert same_slide_next_scene["pass"]
+
+
+
+def test_painted_identity_fails_when_own_raster_evidence_weak():
+    """Own MAE above useful max must fail — must not skip near-dup checks."""
+    plate = _solid_plate((10, 90, 30))
+    weak_own = _solid_plate((200, 10, 10))  # far from plate
+    other = _solid_plate((40, 20, 80))
+    got = painted_identity(
+        plate,
+        ordinal=3,
+        live_hash="#1",
+        rasters_by_ordinal={3: [weak_own], 1: [other]},
+        previous_plates={1: other},
+    )
+    assert not got["pass"]
+    assert any("exceeds useful max" in r or "insufficient" in r for r in got["reasons"])
+
+def test_current_slide_query_strips_hash():
+    url = current_slide_query_url("http://127.0.0.1:9/index.html#1", 3)
+    assert url == "http://127.0.0.1:9/index.html?currentSlide=3"
+    assert "#" not in url
+
+
+def test_leftover_object_layers_match_previous_slide():
+    layers = [{"used": True, "w": 400, "h": 80, "x": 10.0, "y": 900.0}]
+    assert leftover_object_layers(layers, {3: layers}) == "object layers match leftover slide 3"
+    assert leftover_object_layers(layers, {3: [{"used": True, "w": 10, "h": 10, "x": 0, "y": 0}]}) is None
+
+
+def test_capability_refuses_identity_miss_and_object_composite():
+    miss = capability_row(
+        ordinal=3,
+        skipped=False,
+        magic_move=False,
+        has_character=False,
+        has_build_out=False,
+        has_movie=False,
+        has_line_draw=True,
+        iwa_clicks=1,
+        kpf_clicks=1,
+        capture={"identity": {"pass": False, "reasons": ["near-duplicate of slide 1"]}},
+        alpha={"pass": True, "source": "page-screenshot"},
+    )
+    assert miss["identity"] is False
+    assert not miss["supportedStaticAlpha"]
+    assert any("identity:" in item for item in miss["refusals"])
+    obj = capability_row(
+        ordinal=4,
+        skipped=False,
+        magic_move=False,
+        has_character=False,
+        has_build_out=False,
+        has_movie=False,
+        has_line_draw=False,
+        iwa_clicks=0,
+        kpf_clicks=0,
+        capture={"identity": {"pass": True, "reasons": []}},
+        alpha={"pass": True, "source": "object-canvases"},
+    )
+    assert any("object-composite" in item for item in obj["refusals"])
+    assert not obj["supportedStaticAlpha"]
+
+
+def test_decoded_alpha_opaque_source_is_not_a_pass(tmp_path):
+    opaque = np.full((8, 8, 4), 255, dtype=np.uint8)
+    opaque[:, :, :3] = 10
+    assert not source_has_genuine_alpha([opaque, opaque])
+    from PIL import Image
+
+    paths = []
+    for i in range(2):
+        path = tmp_path / f"f{i}.png"
+        Image.fromarray(opaque, "RGBA").save(path)
+        paths.append(path)
+    report = decoded_alpha_report([opaque, opaque], paths)
+    assert report["maxAlphaMae"] == 0
+    assert report["sourceHasGenuineAlpha"] is False
+    assert report["pass"] is False
+
+
+def test_frozen_clock_does_not_continue_through_dissolve():
+    from obed_edom.html_alpha_probe import score_playback_continuity
+
+    # Review counterexample: 44 identical timestamps at 3.0s after a matching handoff.
+    times = [3.0] + [3.0] * 43
+    scored = score_playback_continuity(times, click_i=0, dissolve_s=1.5)
+    assert scored["positionContinuous"] is True
+    assert scored["frozenClock"] is True
+    assert scored["mediaProgressing"] is False
+    assert scored["continuesThroughDissolve"] is False
+    assert scored["advancingPairs"] == 0
+    assert scored["dissolveAdvanceS"] == 0.0
+
+
+def test_advancing_handoff_continues_through_dissolve():
+    from obed_edom.html_alpha_probe import score_playback_continuity
+
+    # Pre at 3.0; post-click samples advance ~1 media-second across dissolve.
+    times = [3.0] + [3.0 + i * 0.05 for i in range(1, 31)]
+    caps = [None] + [i * 0.05 for i in range(1, 31)]
+    scored = score_playback_continuity(
+        times, click_i=0, capture_offsets=caps, dissolve_s=1.5, min_advance_ratio=0.35
+    )
+    assert scored["positionContinuous"] is True
+    assert scored["frozenClock"] is False
+    assert scored["mediaProgressing"] is True
+    assert scored["continuesThroughDissolve"] is True
+    assert scored["remountRestart"] is False
+
+
+def test_frozen_bound_clock_fails_despite_sibling_higher_clock():
+    """Stream-C binding guard: the scorer must see ONLY the bound decoder's
+    own clock. A max-of-same-key reduction would have merged a sibling
+    decoder's higher clock over this frozen sequence and read it as progress;
+    because the bound clock is the sole input, a stall on it cannot be masked.
+
+    Here the bound decoder is frozen at 3.0s through the whole window (both the
+    ``currentTime`` samples and the presented-frame samples). No sibling clock
+    is passed — that is the point: the public signature admits one movie's
+    times, so a sibling advancing elsewhere is structurally excluded and can
+    never rescue this verdict.
+    """
+    from obed_edom.html_alpha_probe import score_playback_continuity
+
+    frozen = [3.0] * 32
+    caps = [i * 0.05 for i in range(len(frozen))]
+    scored = score_playback_continuity(
+        frozen,
+        click_i=0,
+        capture_offsets=caps,
+        presented_times=list(frozen),
+        dissolve_s=1.5,
+    )
+    assert scored["frozenClock"] is True
+    assert scored["advancingPairs"] == 0
+    assert scored["dissolveAdvanceS"] == 0.0
+    assert scored["mediaProgressing"] is False
+    assert scored["continuesThroughDissolve"] is False
+
+
+def test_presented_all_none_falls_back_to_current_time():
+    from obed_edom.html_alpha_probe import score_playback_continuity
+
+    times = [3.0] + [3.0 + i * 0.05 for i in range(1, 31)]
+    presented = [None] * len(times)
+    scored = score_playback_continuity(
+        times, click_i=0, presented_times=presented, dissolve_s=1.5
+    )
+    assert scored["continuesThroughDissolve"] is True
+
+
+def test_strip_pdf_page_bg_fill_solo_and_inline():
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import DecodedStreamObject, NameObject
+
+    from obed_edom.html_alpha_probe import strip_pdf_page_bg_fill
+
+    solo = b"q Q q /Cs1 cs 0 0 0 sc 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f Q"
+    inline = (
+        b"q Q q /Cs1 cs 0 0 0 sc 0 1080 m 1920 1080 l 1920 0 l 0 0 l h f "
+        b"/Perceptual\nri q 1 0 0 1 0 0 cm /Im1 Do Q Q"
+    )
+    other = b"q Q q /Perceptual ri q 1 0 0 1 0 0 cm /Im1 Do Q Q"
+
+    def page_with(raw: bytes):
+        w = PdfWriter()
+        w.add_blank_page(width=1920, height=1080)
+        stream = DecodedStreamObject()
+        stream.set_data(raw)
+        w.pages[0][NameObject("/Contents")] = stream
+        import io
+
+        buf = io.BytesIO()
+        w.write(buf)
+        return PdfReader(io.BytesIO(buf.getvalue())).pages[0]
+
+    s = strip_pdf_page_bg_fill(page_with(solo))
+    assert s["stripped"] is True and s["kind"] == "solo"
+    i = strip_pdf_page_bg_fill(page_with(inline))
+    assert i["stripped"] is True and i["kind"] == "inline"
+    n = strip_pdf_page_bg_fill(page_with(other))
+    assert n["stripped"] is False
+
+
+def test_remount_at_zero_fails_continuity():
+    from obed_edom.html_alpha_probe import score_playback_continuity
+
+    times = [4.5] + [0.01 + i * 0.05 for i in range(30)]
+    scored = score_playback_continuity(times, click_i=0, dissolve_s=1.5)
+    assert scored["remountRestart"] is True
+    assert scored["positionContinuous"] is False
+    assert scored["continuesThroughDissolve"] is False
+
+
+def test_mid_transition_jump_fails_continuity():
+    """Review counterexample: smooth start then a seek jump must not pass."""
+    from obed_edom.html_alpha_probe import score_playback_continuity
+
+    # 3.0, 3.05, 3.10, 5.0, 5.05, ...
+    times = [3.0, 3.05, 3.10] + [5.0 + i * 0.05 for i in range(28)]
+    caps = [i * 0.05 for i in range(len(times))]
+    scored = score_playback_continuity(
+        times, click_i=0, capture_offsets=caps, dissolve_s=1.5
+    )
+    assert scored["noJump"] is False
+    assert scored["rateInconsistentPairs"] >= 1
+    assert scored["continuesThroughDissolve"] is False
+
+
+def test_sparse_capture_wall_paced_not_jump():
+    """Large media Δ with matching capture Δ is undersampling, not a seek."""
+    from obed_edom.html_alpha_probe import score_playback_continuity
+
+    times = [3.0]
+    caps: list[float | None] = [None]
+    t = 3.0
+    c = 0.0
+    # ~20fps intent, but a few 1.0s capture stalls where media keeps pace.
+    for i in range(30):
+        if i in (4, 8, 12):
+            t += 1.0
+            c += 1.0
+        else:
+            t += 0.05
+            c += 0.05
+        times.append(t)
+        caps.append(c)
+    scored = score_playback_continuity(
+        times, click_i=0, capture_offsets=caps, dissolve_s=1.5
+    )
+    assert scored["jumpsAfterClick"] == 0
+    assert scored["rateInconsistentPairs"] == 0
+    assert scored["noJump"] is True
+    assert scored["mediaProgressing"] is True
+    assert scored["continuesThroughDissolve"] is True
+
+
+def test_visible_movie_motion_rejects_single_mid_window_cut():
+    """22 stills with one change halfway must fail — not continuous playback."""
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    a = np.zeros((80, 160, 3), dtype=np.uint8)
+    b = np.full((80, 160, 3), 80, dtype=np.uint8)
+    frames = [a.copy() for _ in range(11)] + [b.copy() for _ in range(11)]
+    scored = score_visible_movie_motion(frames)
+    assert scored["identicalPairFrac"] >= 20 / 21
+    assert scored["changingPairs"] == 1
+    assert scored["ok"] is False
+
+
+def test_visible_movie_motion_requires_early_and_late_change():
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    frames = []
+    for i in range(12):
+        arr = np.zeros((40, 80, 3), dtype=np.uint8)
+        arr[:, :] = (i * 20) % 200
+        frames.append(arr)
+    scored = score_visible_movie_motion(frames, min_changing_frac=0.45)
+    assert scored["ok"] is True
+    assert scored["earlyMaxPairMae"] >= 2.0
+    assert scored["lateMaxPairMae"] >= 2.0
+
+
+def test_visible_movie_motion_rejects_frozen_sequence():
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    frames = [np.zeros((40, 80, 3), dtype=np.uint8) for _ in range(10)]
+    scored = score_visible_movie_motion(frames)
+    assert scored["ok"] is False
+    assert scored["changingPairs"] == 0
+
+
+def test_visible_movie_motion_rejects_empty_crops():
+    """Empty / zero-sized crops must not pass via infinite MAE."""
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    empty = np.zeros((0, 80, 3), dtype=np.uint8)
+    frames = [empty for _ in range(22)]
+    scored = score_visible_movie_motion(frames)
+    assert scored["ok"] is False
+    assert scored["reason"] == "empty crop"
+
+    # Mismatched shapes previously yielded inf MAE → false motion.
+    a = np.zeros((40, 80, 3), dtype=np.uint8)
+    b = np.zeros((0, 80, 3), dtype=np.uint8)
+    scored2 = score_visible_movie_motion([a, b, a, b, a, b])
+    assert scored2["ok"] is False
+    assert scored2["reason"] in ("empty crop", "mismatched crop shapes")
+
+
+def test_restart_boundary_rejects_preboundary_only():
+    """Restart during drain without slide-3 media must not pass."""
+    from obed_edom.html_alpha_probe import score_restart_at_slide_boundary
+
+    # Reached slide 3 but no observations for the intended movie.
+    scored = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 0,
+                "earliest": None,
+                "nearZeroAtBoundary": False,
+                "progressedAfterRestart": False,
+                "decodedWidthAtBoundary": False,
+                "ok": False,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored["ok"] is False
+    assert scored["verdict"] == "inconclusive"
+    assert scored["missingSlide3Media"] == ["untitled.mov"]
+
+    # Expected key absent from per_movie entirely.
+    scored_missing = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov", "other.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 1920},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": True,
+                "ok": True,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored_missing["ok"] is False
+    assert "other.mov" in scored_missing["missingSlide3Media"]
+
+    # Audio-only (no decoded width) must not pass.
+    scored_audio = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 0},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": False,
+                "ok": True,  # even if caller set ok, width gate catches it
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored_audio["ok"] is False
+    assert scored_audio["missingDecodedWidth"] == ["untitled.mov"]
+
+    # Drain-time restart signal alone (empty expected) must fail.
+    scored2 = score_restart_at_slide_boundary(
+        reached_slide=True, expected_keys=[], per_movie={}, canvas_all_identical=False
+    )
+    assert scored2["ok"] is False
+    assert scored2["verdict"] == "fail"
+
+    # Observed-key fallback is gone — empty expected cannot pass via per_movie keys.
+    scored_obs = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=[],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 1920},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": True,
+                "ok": True,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored_obs["ok"] is False
+    assert scored_obs["expectedKeys"] == []
+
+    # Proper boundary: near-zero + progression + decoded width + presented motion.
+    scored3 = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 1920},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": True,
+                "presentedMotionOk": True,
+                "ok": True,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored3["ok"] is True
+    assert scored3["verdict"] == "pass"
+
+    # currentTime + width progression alone (no presented-frame motion attested)
+    # must not pass — another movie could satisfy whole-canvas non-identity.
+    scored_no_presented_motion = score_restart_at_slide_boundary(
+        reached_slide=True,
+        expected_keys=["untitled.mov"],
+        per_movie={
+            "untitled.mov": {
+                "slide3ObsN": 4,
+                "earliest": {"t": 0.05, "w": 1920},
+                "nearZeroAtBoundary": True,
+                "progressedAfterRestart": True,
+                "decodedWidthAtBoundary": True,
+                "presentedMotionOk": False,
+                "ok": True,
+            }
+        },
+        canvas_all_identical=False,
+    )
+    assert scored_no_presented_motion["ok"] is False
+    assert scored_no_presented_motion["missingPresentedMotion"] == ["untitled.mov"]
+
+
+def test_restart_movie_rejects_preboundary_near_zero_that_continues():
+    """A decoder near-zero at an earlier scene that merely continues onto the
+    target slide (clock already far past near_zero_max_s once on-slide) is a
+    continue-clock, not a restart — it must not masquerade as one (null control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        # Continued remount overlays from slide 1/2.
+        {"t": 14.0, "w": 1920, "captureOffsetS": 4.0, "sceneHash": "#4", "decoderId": 1},
+        {"t": 14.5, "w": 1920, "captureOffsetS": 4.5, "sceneHash": "#5", "decoderId": 1},
+        {"t": 15.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#6", "decoderId": 1},
+        # Decoder near-zero at an earlier scene (#4/#5), not the target slide (#6):
+        # it merely continues onto #6 with a clock already past near_zero_max_s.
+        {"t": 0.02, "w": 1920, "captureOffsetS": 4.1, "sceneHash": "#4", "decoderId": 3},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 4.4, "sceneHash": "#5", "decoderId": 3},
+        {"t": 1.90, "w": 1920, "captureOffsetS": 6.1, "sceneHash": "#6", "decoderId": 3},
+        # Null-width duplicate of the pre-boundary near-zero sample.
+        {"t": 0.02, "w": None, "captureOffsetS": 4.1, "sceneHash": "#4", "decoderId": 3},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["nearZeroAtBoundary"] is False
+    assert scored["ok"] is False
+
+    # Sub-ms duplicate samples do not count as progression.
+    scored_fast = score_restart_movie_from_observations(
+        [
+            {"t": 0.02, "w": 1920, "captureOffsetS": 1.0, "sceneHash": "#6", "decoderId": 1},
+            {"t": 0.25, "w": 1920, "captureOffsetS": 1.0005, "sceneHash": "#6", "decoderId": 1},
+        ],
+        slide_min_hash=6,
+    )
+    assert scored_fast["nearZeroAtBoundary"] is True
+    assert scored_fast["progressedAfterRestart"] is False
+    assert scored_fast["ok"] is False
+
+
+def test_restart_movie_accepts_near_zero_observed_on_boundary_slide():
+    """A decoder whose near-zero clock is observed while already on the target
+    slide, then progresses, is a genuine restart (positive control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        # Continued remount overlays from slide 1/2 — must not be picked.
+        {"t": 14.0, "w": 1920, "captureOffsetS": 4.0, "sceneHash": "#4", "decoderId": 1},
+        {"t": 14.5, "w": 1920, "captureOffsetS": 4.5, "sceneHash": "#5", "decoderId": 1},
+        {"t": 15.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#6", "decoderId": 1},
+        # Fresh decoder: near-zero clock observed already on the target slide.
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 3},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 3},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 3
+    assert scored["nearZeroAtBoundary"] is True
+    assert scored["progressedAfterRestart"] is True
+    assert scored["decodedWidthAtBoundary"] is True
+    assert scored["ok"] is True
+    assert scored["slide3ObsN"] >= 1
+
+
+def test_restart_movie_prefers_progressing_decoder_over_stalled_first():
+    """A stalled boundary decoder listed first must not mask a genuine restart in
+    another decoder that near-zeros and progresses (competing-candidate control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        # Decoder 1: near-zero on the boundary but stalls (single sample, no progression).
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 1},
+        # Decoder 2: near-zero on the boundary and progresses with wall/media spacing.
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 2},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.4, "sceneHash": "#6", "decoderId": 2},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 2
+    assert scored["progressedAfterRestart"] is True
+    assert scored["ok"] is True
+
+
+def test_restart_movie_idless_rows_do_not_mix_into_a_pass():
+    """Without decoderId, a stalled near-zero row and a different continued row must
+    not be stitched into a single restart+progression (id-less null control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 0.02, "w": 1920, "captureOffsetS": 1.0, "sceneHash": "#6"},
+        {"t": 12.0, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6"},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["nearZeroAtBoundary"] is True
+    assert scored["progressedAfterRestart"] is False
+    assert scored["ok"] is False
+
+
+def test_restart_movie_rejects_preexisting_decoder_continuing_near_zero():
+    """A decoder observed just before the boundary (not reset from a high
+    clock) that happens to read near-zero right at the flip and then
+    progresses is a continuing clock, not a restart (Codex repro).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 0.01, "w": 1920, "captureOffsetS": 5.9, "sceneHash": "#5", "decoderId": 7},
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 7},
+        {"t": 0.35, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 7},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 7
+    assert scored["nearZeroAtBoundary"] is True
+    assert scored["progressedAfterRestart"] is True
+    assert scored["firstSeenAtBoundary"] is False
+    assert scored["backwardReset"] is False
+    assert scored["ok"] is False
+
+
+def test_restart_movie_accepts_genuine_fresh_decoder_first_seen_at_boundary():
+    """A decoder with no observations before the boundary that near-zeros and
+    progresses is a genuine restart (positive control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 9},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 9},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["firstSeenAtBoundary"] is True
+    assert scored["backwardReset"] is False
+    assert scored["ok"] is True
+
+
+def test_restart_movie_accepts_genuine_backward_reset_decoder():
+    """A decoder seen well before the boundary with a clock clearly above
+    near_zero_max_s, then near-zero at the boundary and progressing, proves an
+    actual reset rather than a coincidental near-zero read (positive control).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 12.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#5", "decoderId": 11},
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 11},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 11},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["firstSeenAtBoundary"] is False
+    assert scored["backwardReset"] is True
+    assert scored["ok"] is True
+
+
+def test_restart_movie_rejects_backward_reset_that_was_already_near_zero():
+    """A decoder seen far from zero at some earlier point does not get a free
+    pass on backwardReset if it was ALSO already near-zero before the
+    boundary — that pre-boundary near-zero read is the real continuing clock,
+    and the later high-t sample does not erase it (Codex repro:
+    12@#4 -> 0.01@#5 -> 0.02@#6 -> 0.35@#6).
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 12.0, "w": 1920, "captureOffsetS": 4.0, "sceneHash": "#4", "decoderId": 12},
+        {"t": 0.01, "w": 1920, "captureOffsetS": 5.9, "sceneHash": "#5", "decoderId": 12},
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 12},
+        {"t": 0.35, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 12},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["restartDecoderId"] == 12
+    assert scored["firstSeenAtBoundary"] is False
+    assert scored["backwardReset"] is False
+    assert scored["ok"] is False
+
+
+def test_restart_movie_accepts_backward_reset_that_leads_directly_in():
+    """A genuine backward reset with no pre-boundary near-zero read leads
+    directly into the boundary candidate and must still pass.
+    """
+    from obed_edom.html_alpha_probe import score_restart_movie_from_observations
+
+    obs = [
+        {"t": 12.0, "w": 1920, "captureOffsetS": 5.0, "sceneHash": "#5", "decoderId": 13},
+        {"t": 0.02, "w": 1920, "captureOffsetS": 6.0, "sceneHash": "#6", "decoderId": 13},
+        {"t": 0.30, "w": 1920, "captureOffsetS": 6.3, "sceneHash": "#6", "decoderId": 13},
+    ]
+    scored = score_restart_movie_from_observations(obs, slide_min_hash=6)
+    assert scored["firstSeenAtBoundary"] is False
+    assert scored["backwardReset"] is True
+    assert scored["ok"] is True
+
+
+def _motion_sample(
+    value: int,
+    scene_hash: str,
+    offset: float,
+    w: int = 1920,
+    decoder_id=1,
+    movie_key="movie1.mov",
+):
+    roi = np.full((20, 20, 3), value % 256, dtype=np.uint8)
+    return {
+        "roi": roi,
+        "sceneHash": scene_hash,
+        "captureOffsetS": offset,
+        "decoderId": decoder_id,
+        "w": w,
+        "movieKey": movie_key,
+    }
+
+
+def test_motion_across_flip_accepts_motion_before_across_and_after():
+    """Positive control: motion in all three segments, flip mid-window."""
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(40, "#5", 0.2),
+        _motion_sample(60, "#6", 0.3),
+        _motion_sample(80, "#6", 0.4),
+        _motion_sample(100, "#6", 0.5),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is True
+    assert scored["flipIndex"] == 3
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoded"] is True
+    assert scored["crossingDecoderStable"] is True
+
+
+def test_motion_across_flip_accepts_matching_expected_key_at_crossing():
+    """A stable decoder feeding the expected movie's footprint across the
+    crossing passes when expected_key is given (positive control).
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, movie_key="movie1.mov"),
+        _motion_sample(80, "#6", 0.4, movie_key="movie1.mov"),
+        _motion_sample(100, "#6", 0.5, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["ok"] is True
+    assert scored["crossingKeyOk"] is True
+    assert scored["crossingMovieKeys"] == ["movie1.mov", "movie1.mov"]
+    assert scored["windowKeyOk"] is True
+    assert scored["afterDecoderStable"] is True
+
+
+def test_motion_across_flip_rejects_decoder_handoff_later_in_after_window():
+    """The crossing itself is a stable, correctly-keyed decoder, but it hands
+    off to a different decoder later within the after-window (same movieKey
+    throughout) — this must not pass as continuous target-decoder motion
+    (Round-4 Codex repro: decoderId sequence [1,1,1,1,2,2] around the flip).
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(80, "#6", 0.4, decoder_id=2, movie_key="movie1.mov"),
+        _motion_sample(100, "#6", 0.5, decoder_id=2, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoderStable"] is True
+    assert scored["crossingKeyOk"] is True
+    assert scored["windowKeyOk"] is True
+    assert scored["afterDecoderIds"] == [1, 2, 2]
+    assert scored["afterDecoderStable"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "after-flip decoder switched"
+
+
+def test_motion_across_flip_rejects_wrong_movie_key_at_crossing():
+    """A stable decoder can still be feeding the WRONG movie's footprint
+    across the crossing (e.g. two same-file decoders) — movieKey must match
+    expected_key or the crossing must not pass.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=1, movie_key="movie2.mov"),
+        _motion_sample(80, "#6", 0.4, decoder_id=1, movie_key="movie2.mov"),
+        _motion_sample(100, "#6", 0.5, decoder_id=1, movie_key="movie2.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoded"] is True
+    assert scored["crossingDecoderStable"] is True
+    assert scored["crossingKeyOk"] is False
+    assert scored["crossingMovieKeys"] == ["movie1.mov", "movie2.mov"]
+    assert scored["ok"] is False
+    assert scored["reason"] == "crossing movie key mismatch"
+
+
+def test_motion_across_flip_rejects_decoder_switch_at_crossing():
+    """A decoder handoff exactly at the flip (1 -> 2) must not pass as the
+    target movie progressing — decoderId across the crossing must be stable.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1),
+        _motion_sample(20, "#5", 0.1, decoder_id=1),
+        _motion_sample(40, "#5", 0.2, decoder_id=1),
+        _motion_sample(60, "#6", 0.3, decoder_id=2),
+        _motion_sample(80, "#6", 0.4, decoder_id=2),
+        _motion_sample(100, "#6", 0.5, decoder_id=2),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoded"] is True
+    assert scored["crossingDecoderStable"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "crossing decoder switched"
+
+
+def test_motion_across_flip_rejects_frozen_crossing():
+    """Frozen-crossing control: before and after both move, but the single
+    frame-pair straddling the flip itself is frozen — must not pass via the
+    first post-flip pair moving instead.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(20, "#6", 0.2),
+        _motion_sample(40, "#6", 0.3),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["flipIndex"] == 2
+    assert scored["beforeOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["acrossOk"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "frozen crossing"
+
+
+def test_motion_across_flip_rejects_poster_frame_at_crossing():
+    """Poster-frame control: the crossing pair moves (bars swap in) but the
+    post-flip frame has no decoded movie width — must not pass on MAE alone.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(200, "#6", 0.2, w=0),
+        _motion_sample(220, "#6", 0.3),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["crossingDecoded"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "crossing frame not decoded"
+
+
+def test_motion_across_flip_rejects_flip_at_first_sample():
+    """No pre-flip frame exists to prove before-motion."""
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#6", 0.0),
+        _motion_sample(20, "#6", 0.1),
+        _motion_sample(40, "#6", 0.2),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is False
+    assert scored["reason"] == "flip at first sample"
+    assert scored["flipIndex"] == 0
+
+
+def test_motion_across_flip_rejects_late_navigation():
+    """Late-navigation control: motion only before the flip, frozen after — a
+    continuously-playing movie plus a late navigation must not pass.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(40, "#5", 0.2),
+        _motion_sample(60, "#6", 0.3),
+        _motion_sample(60, "#6", 0.4),
+        _motion_sample(60, "#6", 0.5),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is False
+    assert scored["afterOk"] is False
+
+
+def test_motion_across_flip_rejects_mid_transition_disappearance():
+    """Disappearance control: before/across/after each contain one moving
+    pair, but frames freeze for a run longer than max_still_run spanning the
+    flip — must fail on the still-run gate even though the per-segment motion
+    checks alone would pass.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(20, "#5", 0.2),
+        _motion_sample(40, "#6", 0.3),
+        _motion_sample(40, "#6", 0.4),
+        _motion_sample(40, "#6", 0.5),
+        _motion_sample(40, "#6", 0.6),
+        _motion_sample(40, "#6", 0.7),
+        _motion_sample(40, "#6", 0.8),
+        _motion_sample(60, "#6", 0.9),
+        _motion_sample(80, "#6", 1.0),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", max_still_run=4)
+    assert scored["beforeOk"] is True
+    assert scored["acrossOk"] is True
+    assert scored["afterOk"] is True
+    assert scored["maxStillRun"] > 4
+    assert scored["ok"] is False
+    assert scored["reason"] == "still run exceeds max across flip"
+
+
+def test_motion_across_flip_no_flip_observed():
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [_motion_sample(i * 20, "#5", i * 0.1) for i in range(5)]
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is False
+    assert scored["reason"] == "no flip observed"
+
+
+def test_motion_across_flip_rejects_empty_crop():
+    """Empty crops are hard rejects — must not count as motion via infinite MAE."""
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0),
+        _motion_sample(20, "#5", 0.1),
+        _motion_sample(40, "#6", 0.2),
+    ]
+    samples[1]["roi"] = np.zeros((0, 20, 3), dtype=np.uint8)
+    scored = score_motion_across_flip(samples, start_hash="#5")
+    assert scored["ok"] is False
+    assert scored["reason"] == "empty crop"
+
+
+def test_motion_across_flip_rejects_same_key_handoff_at_flip():
+    """Stream-C (a), at-the-flip half: a handoff exactly at the flip where both
+    decoders carry the SAME movieKey must not pass. Identity is bound to one
+    decoder across the crossing, so a same-key swap at the boundary is caught by
+    the crossing-decoder check even though every movieKey matches expected_key.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=2, movie_key="movie1.mov"),
+        _motion_sample(80, "#6", 0.4, decoder_id=2, movie_key="movie1.mov"),
+        _motion_sample(100, "#6", 0.5, decoder_id=2, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["windowKeyOk"] is True
+    assert scored["crossingKeyOk"] is True
+    assert scored["crossingDecoderStable"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "crossing decoder switched"
+
+
+def test_motion_across_flip_rejects_single_late_restart_in_after_window():
+    """Stream-C (a), restart-later half: a lone fresh decoder appearing only on
+    the FINAL after-window sample (decoderId [1,1,1,1,1,2], one movieKey) must
+    fail. The binding is unanimous, not a majority vote — a single late restart
+    breaks the shared-decoder requirement even though the crossing and every
+    movieKey are clean.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(80, "#6", 0.4, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(100, "#6", 0.5, decoder_id=2, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["crossingDecoderStable"] is True
+    assert scored["crossingKeyOk"] is True
+    assert scored["windowKeyOk"] is True
+    assert scored["afterDecoderIds"] == [1, 1, 2]
+    assert scored["afterDecoderStable"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "after-flip decoder switched"
+
+
+def test_motion_across_flip_rejects_frozen_bound_decoder_despite_stable_identity():
+    """Stream-C (b): the bound decoder is frozen after the flip (its ROI does
+    not change) while its identity stays perfectly stable — one decoderId, one
+    movieKey. A max-of-same-key clock would let a sibling decoder's progress
+    stand in for this stall; the scorer, bound to this decoder's own crop, must
+    report no motion after the flip. Intact identity does not rescue a frozen
+    bound decoder.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    samples = [
+        _motion_sample(0, "#5", 0.0, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(20, "#5", 0.1, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(40, "#5", 0.2, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.3, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.4, decoder_id=1, movie_key="movie1.mov"),
+        _motion_sample(60, "#6", 0.5, decoder_id=1, movie_key="movie1.mov"),
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["afterDecoderStable"] is True
+    assert scored["windowKeyOk"] is True
+    assert scored["afterOk"] is False
+    assert scored["ok"] is False
+    assert scored["reason"] == "no motion after flip"
+
+
+def test_motion_across_flip_accepts_continuous_single_decoder_long_window():
+    """Stream-C (c) regression guard: a legitimately continuous single decoder,
+    one movieKey, motion before/across/after over a longer window, still passes
+    with expected_key bound — the tightened identity gate must not reject the
+    honest positive case.
+    """
+    from obed_edom.html_alpha_probe import score_motion_across_flip
+
+    hashes = ["#5", "#5", "#5", "#6", "#6", "#6", "#6", "#6"]
+    samples = [
+        _motion_sample(i * 20, h, i * 0.1, decoder_id=7, movie_key="movie1.mov")
+        for i, h in enumerate(hashes)
+    ]
+    scored = score_motion_across_flip(samples, start_hash="#5", expected_key="movie1.mov")
+    assert scored["ok"] is True
+    assert scored["flipIndex"] == 3
+    assert scored["windowKeyOk"] is True
+    assert scored["afterDecoderStable"] is True
+    assert scored["afterDecoderIds"] == [7, 7, 7, 7, 7]
+    assert scored["reason"] is None
+
+
+def test_visible_movie_motion_max_still_run_gate():
+    """Documents the old gap: unset max_still_run passes a long mid-window
+    stall; setting it small rejects the same sequence.
+    """
+    from obed_edom.html_alpha_probe import score_visible_movie_motion
+
+    frames = []
+    for i in range(6):
+        frames.append(np.full((20, 20, 3), i * 30, dtype=np.uint8))
+    still = np.full((20, 20, 3), frames[-1][0, 0, 0], dtype=np.uint8)
+    frames += [still.copy() for _ in range(6)]
+    for i in range(6):
+        frames.append(np.full((20, 20, 3), 200 - i * 30, dtype=np.uint8))
+
+    scored_unset = score_visible_movie_motion(frames, min_changing_frac=0.3)
+    assert scored_unset["ok"] is True
+
+    scored_gated = score_visible_movie_motion(
+        frames, min_changing_frac=0.3, max_still_run=4
+    )
+    assert scored_gated["ok"] is False
+    assert scored_gated["maxStillRun"] > 4
+
+
+def _index_sample(index, scene_hash: str, offset: float = 0.0):
+    return {"index": index, "sceneHash": scene_hash, "captureOffsetS": offset}
+
+
+def test_composited_index_run_accepts_monotonic_advance_across_flip():
+    """Positive control: decoded index advances steadily through the cut."""
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(10, "#5", 0.0),
+        _index_sample(11, "#5", 0.1),
+        _index_sample(12, "#5", 0.2),
+        _index_sample(13, "#6", 0.3),
+        _index_sample(14, "#6", 0.4),
+        _index_sample(15, "#6", 0.5),
+    ]
+    scored = score_composited_index_run(samples, flip_index=3)
+    assert scored["ok"] is True
+    assert scored["freezeRunAtCut"] <= 2
+    assert scored["negativeAnomaly"] is False
+
+
+def test_composited_index_run_rejects_freeze_at_cut():
+    """A poster freeze straddling the cut must fail even though the sequence
+    advances cleanly before and after it.
+    """
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(18, "#5", 0.0),
+        _index_sample(19, "#5", 0.1),
+        _index_sample(20, "#5", 0.2),
+        _index_sample(21, "#5", 0.3),
+        _index_sample(21, "#6", 0.4),
+        _index_sample(21, "#6", 0.5),
+        _index_sample(21, "#6", 0.6),
+        _index_sample(22, "#6", 0.7),
+        _index_sample(23, "#6", 0.8),
+    ]
+    scored = score_composited_index_run(samples, flip_index=4)
+    assert scored["ok"] is False
+    assert scored["freezeRunAtCut"] > 2
+    assert scored["reason"] == "freeze run at cut"
+
+
+def test_composited_index_run_accepts_wraparound():
+    """A mod-``modulo`` wrap is forward progress, not a negative anomaly."""
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(252, "#5", 0.0),
+        _index_sample(253, "#5", 0.1),
+        _index_sample(254, "#5", 0.2),
+        _index_sample(255, "#5", 0.3),
+        _index_sample(0, "#6", 0.4),
+        _index_sample(1, "#6", 0.5),
+    ]
+    scored = score_composited_index_run(samples, flip_index=4)
+    assert scored["ok"] is True
+    assert scored["negativeAnomaly"] is False
+
+
+def test_composited_index_run_rejects_negative_anomaly():
+    """A drop beyond half the modulo is a restart/poster-swap, not a wrap."""
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(38, "#5", 0.0),
+        _index_sample(39, "#5", 0.1),
+        _index_sample(40, "#5", 0.2),
+        _index_sample(41, "#5", 0.3),
+        _index_sample(5, "#6", 0.4),
+        _index_sample(6, "#6", 0.5),
+        _index_sample(7, "#6", 0.6),
+        _index_sample(8, "#6", 0.7),
+    ]
+    scored = score_composited_index_run(samples, flip_index=2)
+    assert scored["ok"] is False
+    assert scored["negativeAnomaly"] is True
+    assert scored["reason"] == "negative delta anomaly"
+
+
+def test_composited_index_run_rejects_none_in_flip_window():
+    """An undecodable sample inside the flip window must fail closed."""
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(10, "#5", 0.0),
+        _index_sample(11, "#5", 0.1),
+        _index_sample(None, "#6", 0.2),
+        _index_sample(13, "#6", 0.3),
+        _index_sample(14, "#6", 0.4),
+        _index_sample(15, "#6", 0.5),
+    ]
+    scored = score_composited_index_run(samples, flip_index=2)
+    assert scored["ok"] is False
+    assert scored["reason"] == "undecodable in flip window"
+
+
+def test_composited_index_run_baseline_freeze_does_not_gate_clean_cut():
+    """Only the cut window gates: a freeze elsewhere in the run must not fail
+    a sequence that is clean across the flip itself.
+    """
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    samples = [
+        _index_sample(5, "#5", 0.0),
+        _index_sample(5, "#5", 0.1),
+        _index_sample(5, "#5", 0.2),
+        _index_sample(5, "#5", 0.3),
+        _index_sample(5, "#5", 0.4),
+        _index_sample(6, "#5", 0.5),
+        _index_sample(7, "#5", 0.6),
+        _index_sample(8, "#5", 0.7),
+        _index_sample(9, "#6", 0.8),
+        _index_sample(10, "#6", 0.9),
+        _index_sample(11, "#6", 1.0),
+    ]
+    scored = score_composited_index_run(samples, flip_index=8)
+    assert scored["ok"] is True
+    assert scored["freezeRunBaseline"] > 2
+    assert scored["freezeRunAtCut"] <= 2
+
+
+def test_composited_index_run_injected_stale_freeze_has_strong_margin():
+    """The Phase-2 composited-freeze control (Arm A) holds a stale cover from the
+    flip through the whole capture, so the decoded counter FREEZES for the entire
+    after-window. The gate must go RED with reason 'freeze run at cut' AND a strong
+    margin (freezeRunAtCut >= 6), so the RED is unmistakably the injected freeze,
+    not coarse-capture jitter (which the gate's max_freeze_run==2 already tolerates).
+    """
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    # Advancing before the flip, then a stale hold at index 40 for 8 samples.
+    samples = [
+        _index_sample(37, "#1", 0.0),
+        _index_sample(38, "#1", 0.05),
+        _index_sample(39, "#1", 0.1),
+        _index_sample(40, "#2", 0.15),
+    ] + [_index_sample(40, "#2", 0.2 + 0.05 * i) for i in range(8)]
+    scored = score_composited_index_run(samples, flip_index=3)
+    assert scored["ok"] is False
+    assert scored["reason"] == "freeze run at cut"
+    assert scored["freezeRunAtCut"] >= 6
+    assert scored["negativeAnomaly"] is False
+
+
+# --------------------------------------------------------------------------- #
+# score_index_progression — parity-immune restart corroboration (2->3 flake fix)
+# --------------------------------------------------------------------------- #
+def test_index_progression_accepts_real_slide3_counter():
+    """The real slide-3 burnt-in counter (measured from the restart frames)
+    marches forward with 1-4 steps and passes — this is what a MAE motion check
+    aliased to a ~1/3 coin flip under the two-state grating."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    real = [None, 2, 6, 8, 12, 13, 16, 20, 22, 25, 28, 30, 34, 36, 39, 42, 45, 47, 50, 54, 55, 59]
+    scored = score_index_progression(real)
+    assert scored["ok"] is True
+    assert scored["nDecodable"] == 21 and scored["nDistinct"] == 21
+
+
+def test_index_progression_rejects_frozen_counter():
+    """A stuck poster (counter frozen) has a long stall run => fail closed."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([5, 5, 5, 5, 5, 5, 5, 5])
+    assert scored["ok"] is False
+    assert scored["reason"] in ("stall run too long", "too few distinct indices")
+
+
+def test_index_progression_rejects_insufficient_decodable():
+    """A wrong/occluded ROI decodes few flat patches => fail closed, never a
+    false pass from absence of data."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([1, None, None, 4, None, None])
+    assert scored["ok"] is False
+    assert scored["reason"] == "insufficient decodable samples"
+
+
+def test_index_progression_rejects_backward_jump():
+    """A drop beyond half the modulo (restart/glitch) within the window fails."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([2, 6, 10, 200, 14, 18, 22, 26])
+    assert scored["ok"] is False
+    assert scored["reason"] == "implausible index jump (reset/occlusion)"
+
+
+def test_index_progression_rejects_sparse_tail():
+    """Advances briefly then loses the ROI for the rest of the window => fail
+    closed on coverage; None-drop must not let a short good prefix carry it
+    (Codex flake-review F1)."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([2, 6, 10, 14, 18, 22] + [None] * 16)
+    assert scored["ok"] is False
+    assert scored["reason"] == "sparse decodable coverage"
+
+
+def test_index_progression_rejects_large_raw_drop_as_forward():
+    """A raw 200->14 read (modular +70) is not a plausible single-capture step
+    and must be rejected, not counted as forward progress (Codex flake-review F3);
+    real per-capture steps are 1-4."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([200, 14, 18, 22, 26, 30, 34, 38])
+    assert scored["ok"] is False
+    assert scored["reason"] == "implausible index jump (reset/occlusion)"
+
+
+def test_index_progression_accepts_modulo_wraparound():
+    """Forward wraparound past the modulo is normal progress, not a backward jump."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    assert score_index_progression([250, 254, 2, 6, 10, 14, 18, 22])["ok"] is True
+
+
+def test_index_progression_tolerates_short_stall():
+    """A short stall (<=max_stall_run repeats, e.g. 30fps sampled faster) still
+    passes as long as the counter overall advances."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    scored = score_index_progression([2, 2, 6, 10, 10, 14, 18, 22, 26])
+    assert scored["ok"] is True
+    assert scored["longestStallRun"] <= 2
+
+
+# ---------------------------------------------------------------------------
+# footprint_at / index_patch_roi_for — moving-footprint helpers (3->4 MM)
+# ---------------------------------------------------------------------------
+def test_footprint_at_endpoints_and_midpoint():
+    from obed_edom.html_alpha_probe import footprint_at
+
+    s = (198.0, 795.0, 952.0, 268.0)
+    d = (327.0, 709.0, 1266.0, 356.0)
+    assert footprint_at(0.0, s, d) == s
+    assert footprint_at(1.0, s, d) == d
+    mid = footprint_at(0.5, s, d)
+    assert mid == (262.5, 752.0, 1109.0, 312.0)
+
+
+def test_footprint_at_clamps_progress():
+    from obed_edom.html_alpha_probe import footprint_at
+
+    s = (0.0, 0.0, 100.0, 100.0)
+    d = (10.0, 10.0, 200.0, 200.0)
+    assert footprint_at(-5.0, s, d) == s
+    assert footprint_at(9.0, s, d) == d
+
+
+def test_footprint_at_static_boundary_is_constant():
+    """When src == dst (a static boundary like 1->2) it returns the constant rect
+    at any progress, so callers can wire it uniformly."""
+    from obed_edom.html_alpha_probe import footprint_at
+
+    r = (109.0, 795.0, 952.0, 268.0)
+    assert footprint_at(0.0, r, r) == r
+    assert footprint_at(0.37, r, r) == r
+    assert footprint_at(1.0, r, r) == r
+
+
+def test_index_patch_roi_for_backcompat_with_movie_roi():
+    """Back-compat: mapping MOVIE_ROI must reproduce the adversarial probe's
+    INDEX_PATCH_ROI exactly."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    movie_roi = (109, 795, 952, 268)
+    expected = (
+        movie_roi[0] + 2,
+        movie_roi[1],
+        max(1, round(movie_roi[2] * 120 / 1920) - 18),
+        max(1, round(movie_roi[3] * 48 / 540) - 10),
+    )
+    assert index_patch_roi_for(movie_roi) == expected == (111, 795, 42, 14)
+
+
+def test_index_patch_roi_for_scales_with_footprint():
+    """A larger (slide-4) footprint yields a proportionally larger patch ROI whose
+    inset stays inside the mapped patch (w<=round(w*120/1920), positive dims)."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    s4 = (327.0, 709.0, 1266.0, 356.0)
+    x, y, w, h = index_patch_roi_for(s4)
+    assert (x, y) == (329, 709)
+    assert 0 < w <= round(s4[2] * 120 / 1920)
+    assert 0 < h <= round(s4[3] * 48 / 540)
+    # larger footprint -> wider ROI than the slide-1/2 one
+    assert w > index_patch_roi_for((109, 795, 952, 268))[2]
+
+
+def test_index_patch_roi_for_clamps_to_min_one():
+    """A tiny footprint never yields a zero/negative ROI dimension."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    x, y, w, h = index_patch_roi_for((10.0, 20.0, 30.0, 12.0))
+    assert w >= 1 and h >= 1
+
+
