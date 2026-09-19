@@ -28,7 +28,7 @@ Python: `/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python`, always `PY
 (the venv is an editable install of the MAIN checkout). Node (dashboard only): prepend
 `/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin` to PATH.
 - Unit: `… -m pytest tests/test_live_api.py tests/test_live_session.py tests/test_live_host.py tests/test_live_runtime.py tests/test_live_continuity.py tests/test_live_continuity_js.py tests/test_live_continuity_probe.py tests/test_p2_adversarial.py tests/test_html_alpha_probe.py -q` (all green now).
-- Fixture (read-only): `F=/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/output/p2-recovery/html-adversarial` → `--fixture $F/html-player --original-index $F/html-unmodified/index.html`.
+- Fixture (read-only; the `keynote-parser-module-error-*` worktree was removed 2026-09-19 — use the presenter worktree's copy): `F=/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/pr158-handover-findings-4366b9/output/p2-recovery/html-adversarial` → `--fixture $F/html-player --original-index $F/html-unmodified/index.html`.
 - Host gate: `… -u scripts/live_continuity_probe.py --fixture … --original-index … --artifact <scratch>.json` (3 arms + attach arm, ~3 min).
 - **P2 gate (the oracle for ANY change to `live_continuity_js.py` or the P2 scripts):**
   `… scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --wait-profile fast` → must print
@@ -222,3 +222,55 @@ After fixing/re-scoring saved host samples with meaningful regressions:
 P2 export-bank symlink in this worktree points at Claude's
 `pr158-handover-findings-4366b9/output/p2-recovery/html-adversarial` (as original handover prescribed).
 P2 reruns overwrite its disposable player/reports: coordinate serial access and retain copied evidence.
+
+---
+
+## STATE AT CLOSE — 2026-09-19 late night (Claude). Read this first when resuming.
+
+**Branch** `claude/keynote-live-planning-handover-4e550b`, pushed; **code frozen at `62e1ab7`**, later commits
+are docs. Contains Codex's `codex/live-continuity-deferred` (`2dd7b7c`, merged) — that branch needs nothing
+more. NOT in PR #158 (`feat/keynote-alpha-p2-html-mm` @ `6236ffe`) and not in `main`; fast-forwarding #158
+to this tip is the owner's call (it fast-forwards cleanly). No merges were made.
+
+**Tomorrow (2026-09-20 morning): first DeckLink fill/key contact via OBS.** Operator doc for the owner and the
+standby peer: [`decklink-field-test-runbook.md`](decklink-field-test-runbook.md) — hardware is unidentified
+(owner sends photos), routes A external key / B internal key / C scan converter + luma key, test-card alpha
+verdict, field tool, triage table, log reader, what to bring back. Fallback build `9dab02c`.
+
+**What exists now**
+- Live host: owned Chrome over HDMI (stage fitted to any display) OR attach to an OBS Browser Source over
+  CDP (`OBED_LIVE_ATTACH`, `_MATCH`), transparent background + transparent hide on the alpha path, Stop
+  blanks back to the target's original blank URL and never kills OBS, exactly-one-target + real loopback
+  checks, queued JSONL session log, absolute CDP deadlines, `OBED_LIVE_ADVANCE=click` fallback.
+- Session service: per-session state holder, Stop always possible/terminal, bounded request cache.
+- Continuity: ONE shared runtime (`live_continuity_js.py`, v2, sha `4946708d…`) re-exported by the P2
+  scripts; `derive_plan` → `to_runtime` (fail-closed) → in-page viewport gate → `ready` read-back;
+  modes `qualified | unsupported(reason) | off` in the snapshot, the log and a UI badge; pre-start
+  checkbox / `OBED_LIVE_CONTINUITY=off`. Only plan-named movies are preserved. 3→4 motion = linear
+  src→dst over the export's duration.
+- Instruments: P2 gate (oracle for the shared bytes), `scripts/live_continuity_probe.py` (3 arms + attach,
+  windowed phase-ordered scoring, red controls), `scripts/live_host_probe.py` (`--viewport`, stage fit),
+  `scripts/live_alpha_testcard.html`, `scripts/live_fixture_session.py`.
+- Verified on the final bytes: P2 fast 14/14 · slow 14/14 · `--disable-bridge34` RED only on
+  `continueThroughMovingMagicMove3to4` · host gate PASS · host probe pass (key + click) · 381 unit tests ·
+  real OBS 32.2.2 (Chromium 127): attach, alpha, keys, H.264 decode, hide-keeps-playing, 3→4 travel, one
+  movie on slide 4, re-attach after Stop.
+
+**Known limits / open work (priority order)**
+1. **Generalisation beyond the fixture** — allowlist `QUALIFIED_PLAN_SHA256` is an interim narrowing of owner
+   decision 3a. Brief for a peer: [`../plans/keynote_live_continuity_generalisation.md`](../plans/keynote_live_continuity_generalisation.md)
+   (boundary-specific runtime, instance identity by geometry, stray-movie check in both gates, qualification decks).
+2. **I3 scaled-stage mapping** — continuity only qualifies at a 1920×1080 viewport (owner's monitor is 2560×1440).
+3. 3→4 easing is linear (Keynote's is not; WebGL animation exposes no DOM rect) — owner to judge at the receiver.
+4. **I5 codec report** — fresh exports carry HEVC; OBS's Chromium may not decode it (untested). Fixture is H.264.
+5. Native DeckLink sender (OBS is only the bridge); audio; presenter notes; HDMI receiver qualification.
+6. Housekeeping: fixture export now lives ONLY in the presenter worktree's ignored
+   `output/p2-recovery/html-adversarial/` (P2 runs rewrite `html-player`) — make a durable copy;
+   `scripts/p2_alpha_spike.py:260` still sends `nativeVirtualKeyCode`; 6 maps Python + 6 maps UI tests are
+   red on pristine `main`; owner has ~3 % Codex left — a final review of `9dab02c..62e1ab7` was not run.
+
+**Lessons worth keeping**: real OBS found two defects that every headless gate passed (stray pooled clip;
+Stop breaking the next attach) — a gate proves only what it asks, so assert absence too and always do a
+pass on the real target · tightening a scorer turned a green red and that was the finding · zsh does not
+word-split `$var` (a "gate run" silently did nothing) · verify a subagent actually did the work (one
+delegated and returned; one stopped after the easy parts) · stage + commit in ONE shell (rerere/watcher).
