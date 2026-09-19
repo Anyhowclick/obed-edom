@@ -347,6 +347,10 @@ PRESERVE_CORE_JS = r"""
     const src = v.currentSrc || v.src || '';
     const key = assetKey(src);
     if (!key) return;
+    // Only movies the plan names are preserved. Anything else (e.g. a movie that simply
+    // ends with its slide) is left to the player; pooling it remounted it at the fallback
+    // footprint on later slides (seen on slide 4 in OBS, 2026-09-19).
+    if (!movieAssetKey(src)) return;
     if (!(v.readyState >= 2 || v.currentTime > 0.05)) return;
     tag(v);
     if (!pool.has(key)) pool.set(key, []);

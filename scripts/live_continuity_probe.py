@@ -53,14 +53,8 @@ from obed_edom.live_host import ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, Outp
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 
-FIXTURE = Path(
-    "/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/"
-    "output/p2-recovery/html-adversarial/html-player"
-)
-ORIGINAL_INDEX = Path(
-    "/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/"
-    "output/p2-recovery/html-adversarial/html-unmodified/index.html"
-)
+FIXTURE = REPO / "output/p2-recovery/html-adversarial/html-player"
+ORIGINAL_INDEX = REPO / "output/p2-recovery/html-adversarial/html-unmodified/index.html"
 ARTIFACT = Path("output/keynote-live-planning-2026-09-19/live-continuity-probe.json")
 PROBE_DIGEST = "b" * 64
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")

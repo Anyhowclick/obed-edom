@@ -436,6 +436,7 @@ class ChromeCdp:
         self._stop_lock = threading.Lock()
         self._stopped = False
         self._target_ws_url: str | None = None
+        self._blank_url = "about:blank"
         self._blanked = False
 
     def _log(self, kind: str, **fields: Any) -> None:
@@ -453,6 +454,8 @@ class ChromeCdp:
             except Exception as exc:
                 raise LiveHostError(f"Could not attach to CDP target: {exc}") from exc
             self._target_ws_url = ws_url
+            attached_url = str(target.get("url") or "")
+            self._blank_url = attached_url if attached_url.startswith("about:blank") else "about:blank"
             self._blanked = False
             self.call("Runtime.enable")
             self.call("Page.enable")
@@ -610,13 +613,13 @@ class ChromeCdp:
         except Exception as exc:
             raise LiveHostError(f"Could not reconnect to blank the CDP target: {exc}") from exc
         try:
-            blank_ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": "about:blank"}}))
+            blank_ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": self._blank_url}}))
             self._recv_matching(blank_ws, 1, deadline)
             blank_ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {"expression": "location.href", "returnByValue": True}}))
             result = self._recv_matching(blank_ws, 2, deadline)
             value = (result.get("result") or {}).get("value")
-            if value != "about:blank":
-                raise LiveHostError(f"CDP target did not confirm about:blank (saw {value!r}).")
+            if value != self._blank_url:
+                raise LiveHostError(f"CDP target did not confirm {self._blank_url} (saw {value!r}).")
         finally:
             try: blank_ws.close()
             except Exception: pass

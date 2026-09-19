@@ -28,7 +28,7 @@ Python: `/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python`, always `PY
 (the venv is an editable install of the MAIN checkout). Node (dashboard only): prepend
 `/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin` to PATH.
 - Unit: `… -m pytest tests/test_live_api.py tests/test_live_session.py tests/test_live_host.py tests/test_live_runtime.py tests/test_live_continuity.py tests/test_live_continuity_js.py tests/test_live_continuity_probe.py tests/test_p2_adversarial.py tests/test_html_alpha_probe.py -q` (all green now).
-- Fixture (read-only): `F=/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/keynote-parser-module-error-46801c/output/p2-recovery/html-adversarial` → `--fixture $F/html-player --original-index $F/html-unmodified/index.html`.
+- Fixture (read-only; the `keynote-parser-module-error-*` worktree was removed 2026-09-19 — use the presenter worktree's copy): `F=/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/pr158-handover-findings-4366b9/output/p2-recovery/html-adversarial` → `--fixture $F/html-player --original-index $F/html-unmodified/index.html`.
 - Host gate: `… -u scripts/live_continuity_probe.py --fixture … --original-index … --artifact <scratch>.json` (3 arms + attach arm, ~3 min).
 - **P2 gate (the oracle for ANY change to `live_continuity_js.py` or the P2 scripts):**
   `… scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --wait-profile fast` → must print

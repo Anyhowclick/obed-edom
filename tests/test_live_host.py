@@ -1182,3 +1182,25 @@ def test_continuity_auto_cannot_override_environment_opt_out(tmp_path, monkeypat
     output.observe()
     assert output.output["continuity"]["mode"] == "off"
     assert output._server.continuity_script == ""
+
+
+def test_attach_stop_restores_the_blank_url_the_target_had_so_a_match_string_still_works(tmp_path, monkeypatch):
+    # Found against real OBS 32.2.2: the browser source was `about:blank#program` and the
+    # operator matched on that; blanking to bare `about:blank` made the NEXT session's
+    # OBED_LIVE_ATTACH_MATCH select nothing. A non-blank original URL still blanks to about:blank.
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    for original, expected in (("about:blank#program", "about:blank#program"), ("https://example.invalid/x", "about:blank")):
+        transport = live_host.ChromeCdp(
+            Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222", attach_match="program" if "#" in original else None,
+        )
+        target = {"type": "page", "id": "abc", "url": original, "title": original, "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/abc"}
+        monkeypatch.setattr(transport, "_list_targets", lambda target=target: [target])
+        attach_ws = BlockingWs()
+        blank_ws = FakeBlankWs(confirmed_url=expected)
+        sockets = iter([attach_ws, blank_ws])
+        monkeypatch.setattr(live_host, "connect", lambda *a, **k: next(sockets))
+        monkeypatch.setattr(transport, "call", lambda *a, **k: {})
+        transport.start()
+        transport.stop()
+        assert blank_ws.sent[0]["params"]["url"] == expected
+        assert transport._blanked
