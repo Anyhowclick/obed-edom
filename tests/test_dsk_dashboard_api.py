@@ -2053,3 +2053,207 @@ def test_dsk_export_rejects_private_root_export_dir(tmp_path, monkeypatch):
         data={"path": str(deck), "export_dir": str(output_root() / ".watercolour")},
     )
     assert response.status_code == 400
+
+
+def _movie_cls(number, *, movie_ids, movie_count=None, category="movie", is_text=False):
+    """A class whose `kept` carries real top-level movie ids — what `canVideosOnly` reads.
+    `movie_count` defaults to len(movie_ids); pass a larger number to model a movie
+    hidden inside a group, which must disqualify the slide."""
+    return SlideClass(
+        number=number,
+        category=category,
+        build_count=0,
+        movie_count=len(movie_ids) if movie_count is None else movie_count,
+        kept=tuple(movie_ids) + (("shape", 0),),
+        dropped_side=(),
+        dropped_backdrop=(),
+        transition=None,
+        is_text=is_text,
+    )
+
+
+def _movie_item(kind_index, x, y, w=1000, h=600):
+    return {"kind": "movie", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h}
+
+
+def _fw_payload_with_items(items_by_slide, count=4):
+    payload = _fw_payload(count)
+    for slide in payload["slides"]:
+        slide["items"] = list(items_by_slide.get(slide["number"], []))
+    return payload
+
+
+def test_dsk_propose_emits_can_videos_only_and_stacked_movies(tmp_path, monkeypatch):
+    """canVideosOnly needs every counted movie to be a kept TOP-LEVEL item; stackedMovies
+    means two kept movies overlap across more than half of the smaller one."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    items = {
+        # 2: one movie, nothing to stack with.
+        2: [_movie_item(0, 2000, 100)],
+        # 3: two movies dissolving over one another.
+        3: [_movie_item(0, 2000, 100), _movie_item(1, 2100, 150)],
+        # 4: a second movie lives inside a group, so movie_count outruns the kept ids.
+        4: [_movie_item(0, 2000, 100)],
+    }
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload_with_items(items))
+    classes = {
+        1: _cls(1, "static"),
+        2: _movie_cls(2, movie_ids=(("movie", 0),)),
+        3: _movie_cls(3, movie_ids=(("movie", 0), ("movie", 1))),
+        4: _movie_cls(4, movie_ids=(("movie", 0),), movie_count=2, category="mixed"),
+    }
+    _patch_common(monkeypatch, app_mod, classes=classes)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    pages = {p["slide"]: p for p in job["result"]["pages"]}
+    assert (pages[1]["canVideosOnly"], pages[1]["stackedMovies"]) == (False, False)
+    assert (pages[2]["canVideosOnly"], pages[2]["stackedMovies"]) == (True, False)
+    assert (pages[3]["canVideosOnly"], pages[3]["stackedMovies"]) == (True, True)
+    assert (pages[4]["canVideosOnly"], pages[4]["stackedMovies"]) == (False, False)
+    assert all(p["decision"]["videosOnly"] is False for p in pages.values())
+
+
+def test_dsk_propose_does_not_stack_movies_that_merely_touch(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    items = {1: [_movie_item(0, 2000, 100, w=800), _movie_item(1, 4000, 100, w=800)]}
+    monkeypatch.setattr(
+        app_mod, "offline_wall_payload", lambda _p: _fw_payload_with_items(items, count=1)
+    )
+    classes = {1: _movie_cls(1, movie_ids=(("movie", 0), ("movie", 1)))}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    job = _wait(client, job_id)
+    pages = {p["slide"]: p for p in job["result"]["pages"]}
+    assert pages[1]["canVideosOnly"] is True
+    assert pages[1]["stackedMovies"] is False
+
+
+def test_dsk_decisions_roundtrip_videos_only_and_force_false_where_unavailable(
+    tmp_path, monkeypatch
+):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    items = {2: [_movie_item(0, 2000, 100)]}
+    monkeypatch.setattr(
+        app_mod, "offline_wall_payload", lambda _p: _fw_payload_with_items(items, count=2)
+    )
+    classes = {1: _cls(1, "static"), 2: _movie_cls(2, movie_ids=(("movie", 0),))}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    res = client.post(
+        f"/api/dsk/{job_id}/decisions",
+        json={
+            "decisions": [
+                {"slide": 1, "videosOnly": True},
+                {"slide": 2, "videosOnly": True, "anchor": "left"},
+            ]
+        },
+    )
+    assert res.status_code == 200
+    pages = {p["slide"]: p for p in res.json()["result"]["pages"]}
+    # Slide 1 has no movies at all, so the server pins it false.
+    assert pages[1]["decision"]["videosOnly"] is False
+    assert pages[2]["decision"]["videosOnly"] is True
+    assert pages[2]["decision"]["anchor"] == "left"
+
+
+def test_dsk_apply_passes_videos_only_through_to_the_assembler(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    items = {2: [_movie_item(0, 2000, 100)]}
+    monkeypatch.setattr(
+        app_mod, "offline_wall_payload", lambda _p: _fw_payload_with_items(items, count=2)
+    )
+    classes = {1: _cls(1, "static"), 2: _movie_cls(2, movie_ids=(("movie", 0),))}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    seen = {}
+
+    def fake_export_clips(fw, slides, out_dir, **kwargs):
+        from obed_edom.dsk_movie_export import ClipResult
+
+        dest = Path(out_dir) / "clip.001.mov"
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        dest.write_text("movie")
+        return [
+            ClipResult(
+                slide=2, movie_id=("movie", 0), path=dest, crop_rect=None,
+                width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+            )
+        ]
+
+    def fake_assemble(fw, out_path, *, decisions, clips, **kwargs):
+        seen["decisions"] = decisions
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path,
+            slides_kept=(1, 2),
+            ordinals={1: 1, 2: 2},
+            fits={},
+            clips_inserted={2: dict(clips[2])},
+            stroke={},
+            zorder={},
+            builds={},
+            size_bytes=10,
+            source_size_bytes=20,
+            wall_s=1.0,
+            warnings=(),
+            movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    client.post(
+        f"/api/dsk/{job_id}/decisions",
+        json={
+            "decisions": [
+                {"slide": 1, "videosOnly": True},
+                {"slide": 2, "videosOnly": True, "anchor": "right"},
+            ]
+        },
+    )
+    client.post(f"/api/dsk/{job_id}/apply")
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert seen["decisions"][2].videos_only is True
+    assert seen["decisions"][2].anchor == "right"
+    # Slide 1 cannot take it, so the flag never reaches the assembler as True.
+    assert seen["decisions"][1].videos_only is False
+
+
+def test_dsk_export_propose_pages_default_videos_only_false(tmp_path, monkeypatch):
+    """Exporter pages carry no `canVideosOnly`, so the shared decision plumbing must
+    treat them as incapable rather than crash or let the flag through."""
+    import obed_edom.web.app as app_mod
+
+    result = {
+        "contentOnly": False,
+        "pages": [{"slide": 1, "category": "movie", "isText": False, "needsClip": True}],
+    }
+    app_mod._apply_dsk_decisions(result, [{"slide": 1, "videosOnly": True}])
+    assert result["pages"][0]["decision"]["videosOnly"] is False
