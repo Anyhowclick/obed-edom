@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import time
 from pathlib import Path
@@ -50,7 +51,8 @@ class FakeCdp:
 
 
 class FakeServer:
-    def __init__(self, *_, alpha=False): self.stopped = False; self.alpha = alpha
+    def __init__(self, *_, alpha=False, continuity_script=""):
+        self.stopped = False; self.alpha = alpha; self.continuity_script = continuity_script
     def start(self): return "http://program.test/program.html"
     def stop(self): self.stopped = True
 
@@ -578,6 +580,212 @@ def test_session_logger_writes_jsonl_and_swallows_failures(tmp_path):
     broken._file = None
     broken.log("start")
     broken.close()
+
+
+def slides_with_uuid():
+    return [
+        {"originalOrdinal": 1, "playerIndex": 0, "exportedUuid": "s1", "skipped": False},
+        {"originalOrdinal": 2, "playerIndex": 1, "exportedUuid": "s2", "skipped": False},
+    ]
+
+
+def continuity_resolver(root: Path):
+    def resolve(_root: Path, relative: str) -> Path:
+        return root / relative
+    return resolve
+
+
+def write_one_movie_export(root: Path) -> None:
+    assets_dir = root / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    (assets_dir / "header.json").write_text(json.dumps({"slideWidth": 1920, "slideHeight": 1080, "showMode": 0, "slideList": ["s1", "s2"]}))
+    assets = {"movie-asset": {"url": {"web": "assets/movie.mov"}}}
+    movie_node = {
+        "movie": {"asset": "movie-asset"},
+        "baseLayer": {
+            "initialState": {"position": {"pointX": 200.0, "pointY": 200.0}, "width": 100.0, "height": 100.0},
+            "layers": [
+                {
+                    "isVideoLayer": True,
+                    "initialState": {"position": {"pointX": 50.0, "pointY": 50.0}, "width": 100.0, "height": 100.0},
+                }
+            ],
+        },
+    }
+    for uuid in ("s1", "s2"):
+        (assets_dir / uuid).mkdir(parents=True, exist_ok=True)
+    events_s1 = [movie_node, {"type": "transition", "name": "apple:magic-move"}]
+    events_s2 = [movie_node]
+    (assets_dir / "s1" / "s1.json").write_text(json.dumps({"events": events_s1, "assets": assets}))
+    (assets_dir / "s2" / "s2.json").write_text(json.dumps({"events": events_s2, "assets": assets}))
+    (assets_dir / "s1" / "s1.jsonp").write_text("local_slide(" + json.dumps({"json": {"events": events_s1}}) + ")")
+    (assets_dir / "s2" / "s2.jsonp").write_text("local_slide(" + json.dumps({"json": {"events": events_s2}}) + ")")
+
+
+def host_with_continuity(tmp_path, monkeypatch, *, attach: bool = False) -> live_host.LiveOutputHost:
+    export_root = tmp_path / "export"
+    write_one_movie_export(export_root)
+    (export_root / "assets" / "player").mkdir(parents=True, exist_ok=True)
+    (export_root / "assets" / "player" / "main.js").write_bytes(player_bytes())
+    (export_root / "index.html").write_text('<html><head></head><body><div id="stage"></div></body></html>')
+    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player_bytes()).hexdigest())
+    monkeypatch.setattr(live_host, "choose_display", lambda *_a, **_k: live_host.OutputDisplay(1, 0, 0, 1920, 1080, True))
+    # The fake CDP transport does not model authored scene counts; this fixture is
+    # only exercising continuity resolution, not the build-renderer fallback check.
+    monkeypatch.setattr(live_host.LiveOutputHost, "_authored_scene_count", lambda self: None)
+    FakeCdp.instances.clear()
+    kwargs = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
+    return live_host.LiveOutputHost(
+        export_root, slides_with_uuid(), headless=True, transport_factory=FakeCdp,
+        server_factory=FakeServer, resolver=continuity_resolver(export_root), **kwargs,
+    )
+
+
+def test_continuity_off_env_installs_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.observe()
+    assert output._continuity_mode == "off"
+    assert output.output["continuity"]["mode"] == "off"
+    assert output._server.continuity_script == ""
+    assert not FakeCdp.instances[0].keys
+
+
+def test_continuity_unsupported_from_derive(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    monkeypatch.setattr(live_host, "derive_plan", lambda *a, **k: live_host.Unsupported("bad export"))
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "bad export"
+    assert output._server.continuity_script == ""
+
+
+def test_continuity_unsupported_from_to_runtime(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+
+    class FakePlan:
+        def to_runtime(self):
+            return live_host.Unsupported("cannot translate")
+
+    monkeypatch.setattr(live_host, "derive_plan", lambda *a, **k: FakePlan())
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "cannot translate"
+    assert output._server.continuity_script == ""
+
+
+def test_continuity_unsupported_viewport_mismatch(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert "viewport is not the authored size" in output.output["continuity"]["reason"]
+    assert output._server.continuity_script != ""
+
+
+def test_continuity_qualified_when_page_confirms_install(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    real_evaluate = FakeCdp.evaluate
+
+    def evaluate(self, expression):
+        if "__OBED_P2_PRESERVE__" in expression and "clear" not in expression:
+            return True
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    output.observe()
+    assert output._continuity_mode == "qualified"
+    assert "reason" not in output.output["continuity"]
+    assert output._server.continuity_script != ""
+
+
+def test_continuity_go_to_clears_runtime_only_when_qualified(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    real_evaluate = FakeCdp.evaluate
+    calls = []
+
+    def evaluate(self, expression):
+        if "clear" in expression:
+            calls.append(expression)
+            return None
+        if "__OBED_P2_PRESERVE__" in expression:
+            return True
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    output.observe()
+    assert output._continuity_mode == "qualified"
+    output.execute("goTo", 2)
+    assert len(calls) == 1
+    assert FakeCdp.instances[0].keys[-3:] == ["clear-noop", "2", "Enter"] or FakeCdp.instances[0].keys == ["2", "Enter"]
+
+
+def test_continuity_go_to_never_clears_when_not_qualified(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    calls = []
+    real_evaluate = FakeCdp.evaluate
+
+    def evaluate(self, expression):
+        if "clear" in expression:
+            calls.append(expression)
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    output.execute("goTo", 2)
+    assert calls == []
+
+
+def test_continuity_transparent_background_only_in_attach_mode(tmp_path, monkeypatch):
+    hdmi = host_with_continuity(tmp_path, monkeypatch, attach=False)
+    hdmi.observe()
+    assert hdmi._continuity_runtime_plan is not None
+    assert not hdmi._continuity_runtime_plan.get("transparentBackground")
+
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    attach = host_with_continuity(tmp_path, monkeypatch, attach=True)
+    attach.observe()
+    assert attach._continuity_runtime_plan is not None
+    assert attach._continuity_runtime_plan["transparentBackground"] is True
+
+
+def test_continuity_scripts_injection_order_and_safe_json_embedding(tmp_path):
+    (tmp_path / "index.html").write_text('<html><head></head><body><div id="stage"></div></body></html>')
+    plan = {"movies": {"movie1": {"assetKeys": ["</script><script>alert(1)</script>"], "footprint": {"x": 0, "y": 0, "w": 1, "h": 1}}}, "boundaries": []}
+    script = live_host._continuity_scripts(plan, {"width": 1920, "height": 1080})
+    assert "</script><script>alert(1)" not in script
+    server = live_host._AssetServer(tmp_path, b"", resolver=resolver_for(tmp_path), continuity_script=script)
+    document = server._program_html().decode()
+    body = document[document.index("<body"):]
+    assert (
+        body.index('id="obed-output-black"')
+        < body.index('id="obed-continuity-plan"')
+        < body.index('id="obed-continuity-core"')
+        < body.index('id="obed-output-fit"')
+        < body.index('id="stage"')
+    )
+    # A naive close of the script tag inside the embedded plan would truncate the
+    # document before the core/fit scripts; both must still be present intact.
+    assert document.count('id="obed-continuity-core"') == 1
+    assert document.count('id="obed-output-fit"') == 1
+
+
+def test_nothing_continuity_related_injected_when_off(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.observe()
+    document = output._server.continuity_script
+    assert document == ""
+
+
+def test_continuity_output_shape(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    output.observe()
+    continuity = output.output["continuity"]
+    assert set(continuity) <= {"mode", "reason", "version", "sha256"}
+    assert continuity["mode"] == "unsupported"
+    assert continuity["version"] == live_host.CONTINUITY_VERSION
+    assert isinstance(continuity["sha256"], str) and len(continuity["sha256"]) == 64
 
 
 def test_observe_logs_only_on_change(tmp_path, monkeypatch):

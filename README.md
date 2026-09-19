@@ -67,6 +67,42 @@ notes are unavailable in the current HTML preparation path. Audio is disabled.
 Only the recognised Keynote player version and manual presentation mode are
 accepted. This experiment does not enable the separate DSK animation-file exporter.
 
+### Movie continuity (experimental)
+
+When a deck plays the same movie across a Magic Move or continues it into a
+following slide, the exported player can lose that continuity (restarting the
+movie from a fresh decoder, or breaking authored "Play across slides"). The host
+derives a per-deck continuity plan from the export and injects a small runtime
+that carries the live decoder through those cuts, instead of letting the export's
+own transitions reset it.
+
+Every session reports its continuity `mode` (also on `output.continuity`, next to
+the runtime's version and sha256):
+
+- `off` — disabled for this session (see below); nothing continuity-related is
+  injected, and the served page is identical to a session with continuity never
+  built.
+- `unsupported` — the plan could not be derived or installed, with a `reason`
+  (rotated/animated movie geometry, more than one movie changing across one cut,
+  an unreadable export, or the viewport limitation below); the raw export plays
+  untouched.
+- `qualified` — the runtime installed and confirmed itself from the page.
+
+Set `OBED_LIVE_CONTINUITY=off` before starting the dashboard server to disable it
+outright.
+
+**Viewport limitation**: footprints are derived in authored-canvas pixels, so the
+runtime only installs when the page's own viewport exactly matches the deck's
+authored size (e.g. 1920x1080 for a 1080p HDMI display or an OBS browser source at
+that size) — otherwise it reports `unsupported` with a viewport reason. Mapping
+authored footprints onto a scaled stage is a later increment.
+
+**Qualification**: `scripts/live_continuity_probe.py` drives `LiveOutputHost`
+itself (not a bare page) through a known fixture's Magic Move and dissolve
+boundaries, in three arms — continuity on, `OBED_LIVE_CONTINUITY=off`, and
+continuity on with the bridging boundary disabled — plus one attach-mode run, and
+scores decoder identity + playback-clock continuity at each cut.
+
 ### DeckLink fill/key via OBS (experimental, UNQUALIFIED)
 
 Instead of driving its own Chrome window, the host can attach to a page already

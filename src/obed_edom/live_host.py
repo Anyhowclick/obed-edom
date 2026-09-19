@@ -25,12 +25,45 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .html_preview import preview_root, safe_export_file
+from .live_continuity import Unsupported, derive_plan
+from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
 from .live_runtime import RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
 from .live_session import PlayerCommandRejected, PlayerObservation
 
 ATTACH_ENV = "OBED_LIVE_ATTACH"
 ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
+CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
+_CONTINUITY_VIEWPORT_REASON = "viewport is not the authored size (scaled-stage mapping pending)"
 _UNSET = object()
+
+
+def _continuity_plan_script(plan: dict[str, Any], canvas: dict[str, int]) -> str:
+    """Embed the runtime plan as `window.__OBED_CONTINUITY__`, installed only when
+    the page's own viewport matches the authored canvas (footprints are authored-size
+    pixels; scaled-stage mapping is a later increment). `</` and U+2028/2029 are
+    escaped so an embedded asset filename cannot break out of the script tag."""
+    payload = json.dumps(plan).replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    width, height = int(canvas["width"]), int(canvas["height"])
+    return (
+        '<script id="obed-continuity-plan">(function(){'
+        f"var plan={payload};var w={width},h={height};"
+        "window.__OBED_CONTINUITY_INFO__={authoredWidth:w,authoredHeight:h,"
+        "viewportWidth:window.innerWidth,viewportHeight:window.innerHeight};"
+        "if(window.innerWidth===w&&window.innerHeight===h){"
+        "window.__OBED_CONTINUITY__=plan;window.__OBED_CONTINUITY_INFO__.installed=true;"
+        "}else{window.__OBED_CONTINUITY_INFO__.installed=false;"
+        f"window.__OBED_CONTINUITY_INFO__.reason={json.dumps(_CONTINUITY_VIEWPORT_REASON)};"
+        "}})();</script>\n"
+    )
+
+
+def _continuity_core_script() -> str:
+    core = PRESERVE_CORE_JS.replace("</script", "<\\/script")
+    return f'<script id="obed-continuity-core">{core}</script>\n'
+
+
+def _continuity_scripts(plan: dict[str, Any], canvas: dict[str, int]) -> str:
+    return _continuity_plan_script(plan, canvas) + _continuity_core_script()
 
 
 class LiveHostError(RuntimeError):
@@ -149,8 +182,9 @@ def choose_display(display_id: int | None, displays: list[OutputDisplay] | None 
 
 
 class _AssetServer:
-    def __init__(self, root: Path, patched_player: bytes, resolver: Callable[[Path, str], Path] = safe_export_file, *, alpha: bool = False) -> None:
+    def __init__(self, root: Path, patched_player: bytes, resolver: Callable[[Path, str], Path] = safe_export_file, *, alpha: bool = False, continuity_script: str = "") -> None:
         self.root, self.patched_player, self.resolver, self.alpha = root, patched_player, resolver, alpha
+        self.continuity_script = continuity_script
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
@@ -244,7 +278,7 @@ class _AssetServer:
 """
             overlay = """
 <script>(function(){var hidden=true;function apply(){var el=document.getElementById('body');if(!el)return;el.style.setProperty('background','transparent','important');el.style.setProperty('opacity',hidden?'0':'1','important');}window.__obedOutput={show(){hidden=false;apply();},hide(){hidden=true;apply();}};var target=document.getElementById('body');if(target){new MutationObserver(apply).observe(target,{attributes:true,attributeFilter:['style','class']});}document.addEventListener('DOMContentLoaded',apply);apply();})();</script>
-""" + fit_script
+"""
         else:
             style = """
 <style id="obed-output-overlay">#obed-output-black{position:fixed;inset:0;background:#000;z-index:2147483647}#slideshowNavigator,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
@@ -252,7 +286,7 @@ class _AssetServer:
             overlay = """
 <div id="obed-output-black"></div>
 <script>window.__obedOutput={show(){document.getElementById('obed-output-black').style.display='none'},hide(){document.getElementById('obed-output-black').style.display='block'}};</script>
-""" + fit_script
+"""
         head = re.search(r"<head[^>]*>", source, flags=re.IGNORECASE)
         body = re.search(r"<body[^>]*>", source, flags=re.IGNORECASE)
         if not head or not body:
@@ -260,7 +294,8 @@ class _AssetServer:
         source = source[: head.end()] + style + source[head.end() :]
         body = re.search(r"<body[^>]*>", source, flags=re.IGNORECASE)
         assert body is not None
-        return (source[: body.end()] + overlay + source[body.end() :]).encode()
+        body_inject = overlay + self.continuity_script + fit_script
+        return (source[: body.end()] + body_inject + source[body.end() :]).encode()
 
     def stop(self) -> None:
         errors: list[Exception] = []
@@ -507,6 +542,34 @@ class LiveOutputHost:
         self._logger: _SessionLogger | None = None
         self._log_path: Path | None = None
         self._last_logged_observation: tuple[Any, ...] | None = None
+        self._continuity_mode: str = "off"
+        self._continuity_reason: str | None = None
+        self._continuity_runtime_plan: dict[str, Any] | None = None
+
+    def _resolve_continuity_static(self) -> tuple[str, str | None, dict[str, Any] | None]:
+        """Resolve continuity mode from the export alone, before the browser starts.
+        `pending` means a runtime plan was derived and must still be confirmed truthfully
+        from the page (the viewport-authored-size check only the page can perform)."""
+        if os.environ.get(CONTINUITY_ENV) == "off":
+            return "off", None, None
+        try:
+            plan = derive_plan(self.export_root, self.slides, resolver=self.resolver)
+        except Exception as exc:  # noqa: BLE001 - fail closed, never let derivation crash the host
+            return "unsupported", str(exc), None
+        if isinstance(plan, Unsupported):
+            return "unsupported", plan.reason, None
+        runtime = plan.to_runtime()
+        if isinstance(runtime, Unsupported):
+            return "unsupported", runtime.reason, None
+        if self._attach_endpoint:
+            runtime = {**runtime, "transparentBackground": True}
+        return "pending", None, runtime
+
+    def _continuity_info(self) -> dict[str, Any]:
+        info: dict[str, Any] = {"mode": self._continuity_mode, "version": CONTINUITY_VERSION, "sha256": js_sha256()}
+        if self._continuity_reason is not None:
+            info["reason"] = self._continuity_reason
+        return info
 
     @property
     def output(self) -> dict[str, Any]:
@@ -527,6 +590,7 @@ class LiveOutputHost:
             }
         if self._log_path is not None:
             result["logPath"] = str(self._log_path)
+        result["continuity"] = self._continuity_info()
         return result
 
     def start(self) -> PlayerObservation:
@@ -545,12 +609,21 @@ class LiveOutputHost:
         )
         self._validate_export()
         self._expected_scene_count = self._authored_scene_count()
+        self._continuity_mode, self._continuity_reason, self._continuity_runtime_plan = self._resolve_continuity_static()
         player = self.resolver(self.export_root, "assets/player/main.js").read_bytes()
         try: patched = patch_player(player)
         except LiveRuntimeUnsupported as exc: raise LiveHostError(str(exc)) from exc
         self._profile = Path(tempfile.mkdtemp(prefix="obed-live-chrome-"))
         try:
-            self._server = self.server_factory(self.export_root, patched, self.resolver, alpha=bool(self._attach_endpoint))
+            continuity_script = (
+                _continuity_scripts(self._continuity_runtime_plan, self._canvas)
+                if self._continuity_runtime_plan is not None
+                else ""
+            )
+            self._server = self.server_factory(
+                self.export_root, patched, self.resolver, alpha=bool(self._attach_endpoint),
+                continuity_script=continuity_script,
+            )
             url = self._server.start()
             self._transport = self.transport_factory(
                 self.chrome_path, self._profile, self.display, headless=self.headless,
@@ -562,6 +635,16 @@ class LiveOutputHost:
             except Exception: version = None
             self._logger.log("browserVersion", result=version)
             self._transport.goto(url)
+            if self._continuity_mode == "pending":
+                installed = bool(self._transport.evaluate("!!window.__OBED_P2_PRESERVE__"))
+                if installed:
+                    self._continuity_mode, self._continuity_reason = "qualified", None
+                else:
+                    self._continuity_mode, self._continuity_reason = "unsupported", _CONTINUITY_VIEWPORT_REASON
+            self._logger.log(
+                "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
+                runtimePlan=self._continuity_runtime_plan,
+            )
             observed = self._wait_settled()
             try: dpr = self._transport.evaluate("window.devicePixelRatio")
             except Exception: dpr = None
@@ -736,6 +819,8 @@ class LiveOutputHost:
             if slide is None: raise PlayerCommandRejected("A slide number is required.")
             player_index = next((int(s["playerIndex"]) for s in self.slides if s.get("originalOrdinal") == slide and not s.get("skipped")), None)
             if player_index is None: raise PlayerCommandRejected("Original slide is unavailable or skipped.")
+            if self._continuity_mode == "qualified":
+                transport.evaluate("window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.clear && window.__OBED_P2_PRESERVE__.clear()")
             for digit in str(player_index + 1): transport.key(digit, "Digit" + digit, ord(digit))
             transport.key("Enter", "Enter", 13)
         elif operation == "hide": transport.evaluate("window.__obedOutput.hide()")
