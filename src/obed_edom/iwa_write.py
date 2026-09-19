@@ -273,6 +273,9 @@ def _line_fields(rec: dict, obj: dict, spec: dict) -> list[tuple[str, dict]]:
     })]
 
 
+_TEXT_WIDTH_KEEP_PX = 0.5
+
+
 def _text_fields(rec: dict, spec: dict, reported: list[float],
                  stored: tuple[float, float, float, float, float],
                  *, position_only: bool = False) -> list[tuple[str, dict]]:
@@ -703,13 +706,18 @@ def _slide_edits(
                 # frame is not the live anchor. There is NO laid-out gate -- pass 1 zeroes
                 # naturalSize on every autosize box, and admitting those is live-validated
                 # (2026-09-18: 137 boxes, 136/136 un-laid-out post-pass-1, verify text max
-                # 0.98px; see .agents/plans/offline_text_middle_anchor.plan.md). Grow-height
-                # boxes reposition but keep pass-1's narrow width (no width write here) -> they
-                # narrow-wrap; that width write is the separate OBED_OFFLINE_TEXT_REGROW
-                # increment, not this path.
+                # 0.98px; see .agents/plans/offline_text_middle_anchor.plan.md).
                 seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
                 if not text_reposition or not seed_ok:
                     _miss("text-autosize")
+                    continue
+                # A grow-height box (real stored width, autosize height) holds pass 1's
+                # canvas-scaled width; a position-only write would leave it there and the
+                # text re-wraps per character (2026-09-18 full deck: 102 boxes at 0.25x).
+                # Only the live width write fixes that, so it misses to the fallback.
+                if (stored[2] != 0.0 and spec.get("w") is not None
+                        and abs(float(spec["w"]) - rep[2]) > _TEXT_WIDTH_KEEP_PX):
+                    _miss("text-grow-height-width")
                     continue
                 ops = _text_fields(rec, spec, rep, stored, position_only=True)
                 if not ops or not ops[0][1]:  # nothing to reposition (spec bore only w/h)
