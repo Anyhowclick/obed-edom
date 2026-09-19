@@ -1,4 +1,4 @@
-# Handover — Alpha Keynote live continuity, state at 2026-09-20 ~01:30 (Mac powers off 02:00)
+# Handover — Alpha Keynote live continuity, state at 2026-09-20 ~02:15 (Mac powers off 03:00)
 
 Owner rules (AGENTS.md wins): accuracy and code quality over speed · plan first for anything complex · never
 weaken a gate · minimal natspec, no inline comments in src · no merge / auto-merge without an explicit owner
@@ -10,7 +10,8 @@ agent runs. Roster this round: Opus plans AND implements (owner, 2026-09-19), Co
   (`feat/keynote-alpha-p2-html-mm`), head `claude/keynote-live-continuity-next`. It contains the presenter branch
   (incl. the other session's real-OBS fixes, DeckLink runbook, generalisation brief), Codex's deferred work and I3.
   Not merged; do not merge without the owner's go.
-- Worktree for this branch: `.claude/worktrees/friendly-sammet-32dab4`.
+- **Stacked branch `claude/keynote-live-baseline`** (pushed, NOT in the PR yet) = PR tip + the baseline increment
+  (see below). It is what `.claude/worktrees/friendly-sammet-32dab4` has checked out now.
 - **Gate worktree** `.claude/worktrees/gate-runner` (detached, own 198 MB copy of the P2 export bank under
   `output/p2-recovery/html-adversarial`). ALL browser gates run from there, pinned to a commit, so implementers
   editing the branch worktree cannot change the bytes under test. Runner:
@@ -26,51 +27,76 @@ agent runs. Roster this round: Opus plans AND implements (owner, 2026-09-19), Co
   + the `live-continuity-deferred` worktree; its evidence → `output/live-continuity-deferred-evidence/`).
   Main checkout is now on `main` (the venv is an editable install of it ⇒ ALWAYS `PYTHONPATH=<worktree>/src`).
 
-## Commits on top of the presenter tip `e25912e`
-`ee97861` I3 scaled-stage mapping (runtime v3) · `dfd1c13` merge of the presenter tip · `3245a17` I5 codec report +
-UI codec warnings + README security posture + `ContinuityPlan.slide_instances` · `05cd26a` pure liveness scorers +
-plan · `a8bab1d` probe visible-content passes V/Voff · `073546d` `keepAtSlot` re-attach hardening + diagnosis.
+## Two lines of work
+**A. PR #175 tip `74e0a59`** (runtime v3, sha `fb9e771e…602d`) — I3 scaled stage · I5 codec report + UI warnings ·
+visible-content gate (V/Voff, 12-shot burst, DOM instance evidence) · `keepAtSlot` re-attach + per-frame liveness ·
+CDP sockets accept large screenshots · README security posture. Gates from the clean worktree: P2 fast 14/14 · slow
+14/14 · bridge-off red only on `continueThroughMovingMagicMove3to4` (run at `6bee983`, same runtime + P2 bytes);
+host gate @1920×1080 / 2560×1440 / 1600×1000 = every arm in pattern, `stageFit` green, **V slide 2 RED at every
+viewport — a TRUE red by design** (the carried movie is invisible there). Codex: I3 r1→r3 PASS; follow-ups r1 FAIL → r2 PASS.
 
-## Gates
-- `dfd1c13` (runtime `7288246d…ceff`), clean worktree: P2 fast 14/14 · slow 14/14 · bridge-off RED only on
-  `continueThroughMovingMagicMove3to4`; host gate PASS @1920×1080, 2560×1440, letterboxed 1600×1000; red controls
-  in pattern. New probe vs the v2 runtime @2560×1440 = RED (I3 red-without-the-fix).
-- `a8bab1d` (same runtime bytes) with the NEW visible-content passes @1920×1080: arms A/B/C/attach unchanged-green,
-  **V slide 2 RED** (`untitled.mov#1` liveFrac 0.484, dead column bands 12–15, dead row bands 6–7), V slides 1/3/4
-  green, no strays; Voff slide 1 green, slide 2 fully dead, 3/4 green ⇒ the instrument sees both the defect and the
-  raw-export defect and is not always-red. Overall probe status is therefore `fail` — **a true red, by design**.
-- `073546d` (hardening, new runtime bytes): see "State at close" below.
+**B. Baseline branch `claude/keynote-live-baseline`** (runtime v4) — owner decision 2026-09-20 "baseline, then spike".
+Plan: `.agents/plans/keynote_live_baseline.plan.md`. Implemented I1–I5: `derive_plan` reads the destination slide's
+draw slots and refuses PER BOUNDARY when later-authored artwork is drawn above the carried movie (runtime action
+`retire`; the fixture's 1→2 is refused — green square, draw slot 6; allowlist signature `bafe26ca…`), refuses the
+WHOLE deck on unreadable slot shapes or a possible movie mask (deep closed vocabulary measured from the real export;
+the mask encoding itself is still UNMEASURED); runtime retire zone `[atScene−1, next restart/bridge)` with
+`preserve-refused` / `retire-boundary` notes; probe expectations derived from the plan (`refusedXtoY` positive verdict,
+live/dead rects); host + presenter surface `notCarried`; P2 re-scope (`refusedCarry1to2`, never-pooled evidence with a
+real pool census, `footprintFullyLive` at 3→4). NOT done on purpose: I6/S5b (visible-target remount, instance
+admission by plan geometry, keyed footprint fallback) — unprovable on pixels until the owner authors a no-overlap deck.
+**Gates at the tip `3a17401`** (clean worktree, runtime v4 sha `f3d0c5e4…3f2e`; identical verdicts at `a4f455d`): host gate **PASS** @1920×1080 / 2560×1440 / 1600×1000 —
+arms A/C/attach `continue1to2` False + `refused1to2` True, 2→3 restart green, 3→4 carried (C red at 3→4 only), V and
+Voff green on every slide (slide 2 "dead, as expected"; slides 1/3/4 live). P2 fast and slow: **13 of 14 True**, the only
+not-True is the parked `freezeControlCaughtByCounter` (inconclusive ⇒ `success` False); `--disable-bridge34` additionally
+reds ONLY `continueThroughMovingMagicMove3to4`. 914 unit tests. Codex baseline r1 FAIL (1 blocker, 3 majors) → fixed →
+r2 FAIL (3 narrower majors: stale movie identity on asset re-assignment, frozen-composite content validity, census
+attribution) → fixed → **r3 PASS** (`.agents/reviews/live-baseline/`). Evidence (ignored): `output/live-baseline/`.
 
-## THE open problem — the carried movie is invisible on the fixture's slide 2 (owner decision D3)
-Plan + diagnosis: `.agents/plans/keynote_live_visible_content.plan.md` (§5). On a Magic-Move-settled slide the
-player paints the whole slide with ONE stage-wide WebGL canvas and leaves the DOM layer tree at opacity 0; the
-runtime remounts the continuing `<video>` into that tree, where it decodes but cannot paint. Every older gate was
-green because they check geometry / identity / clock, never pixels; the burnt-in counter P2 reads was coming from a
-stray 663×186 copy of the second `Untitled.mov` instance (a separate defect: modulo footprint fallback). Hiding the
-poster, z-index and translateZ are measured no-ops. Mounting at stage/body level works but paints the movie over the
-slide's green square (P2 Finding 2 would go red on slide 2). **Owner decided 2026-09-20: BASELINE first, then the SPIKE** (plan §6).
-Baseline = refuse (fail-closed) when later-authored artwork overlaps the carried movie on the destination slide or
-the movie is masked, otherwise carry with a visible-target remount / stage-level overlay; retire the same-asset
-second instance by plan geometry. The current fixture's 1→2 becomes a refusal fixture; a positive-control deck (no
-overlap) and a masked-movie deck must be authored by the owner — how the export encodes a movie mask is unmeasured.
-Spike = feed the live decoder into the player's WebGL texture (correct z-order, masks, easing), research only,
-first question: does the player redraw at rest on a settled WebGL slide? **Nothing of either is started.**
-Then, per the plan: S3 (gate P2 Finding 1 on `footprintFullyLive`), S5 (visible-target remount + retire the
-same-asset second instance by plan geometry + key the footprint fallback), full re-qualification, Codex.
-Evidence (ignored, branch worktree): `output/live-visible-content/` (screenshots, `diag*.json`, RED artifact).
+## What the owner needs to do / decide
+1. Review `.agents/plans/keynote_live_baseline.plan.md` and the baseline branch; say whether to fold it into PR #175.
+2. Author (agents never touch Keynote) the decks specified in that plan §5: (i) positive control — a movie continuing
+   through a geometry-static Magic Move, a moving/scaling Magic Move and a dissolve with NOTHING drawn above it on the
+   destination slides; (ii) a masked movie crossing a Magic Move (to measure the mask encoding); (iii) optional
+   overlap-after-build. Use the existing grating-with-counter test movie.
+3. `freezeControlCaughtByCounter` must be re-bracketed at the 3→4 boundary (its 1→2 premise died with the refusal). It is
+   reported `inconclusive`, which keeps P2 `success` False on the baseline branch — honest, not a regression.
+4. Spike verdict: feeding the decoder into the player's WebGL texture is DEAD at Q2 (no render at rest, no clean forced
+   redraw). Unexplored alternative noted in `keynote_live_visible_content.plan.md` §7: a static "occluder cut-out"
+   canvas over the stage-level overlay, which could turn the overlap refusal into a carry for opaque artwork.
+
+## Paid-for facts (measured on the real player — do not re-derive)
+- A Magic-Move-settled slide is painted by ONE stage-wide WebGL canvas (`#0-canvas`); the DOM layer tree is at opacity 0,
+  so an in-layer `<video>` decodes but cannot paint. After a dissolve the DOM tree paints normally. The WebGL canvas
+  draws only during the move (≈250 `drawElements`/s) and never at rest; it is gone on the next dissolve slide.
+- The player NEVER fires `hashchange`. During a transition the hash equals `atScene − 1` for the whole move and the
+  slide's videos are detached THERE; the hash reaches `atScene` only ~2 s later.
+- `elementsFromPoint` never returns the video (pointer-events none) — useless as a paint oracle. Use
+  `checkVisibility({checkOpacity,checkVisibilityCSS})` + the ancestor-opacity product.
+- A detached `<video>` reports literal viewport (0,0), not the stage origin. 2560×1440 has stage origin (0,0) and cannot
+  reveal offset bugs — always include the letterboxed 1600×1000 arm.
+- `websockets` caps a message at 1 MiB: 2560×1440 PNG screenshots crossed it ⇒ "Program browser CDP connection failed"
+  ~1 session in 4 (fixed: 64 MiB). The fixture movie flips state every frame ⇒ an n-shot liveness burst reads a healthy
+  movie dead with p = 2·0.5ⁿ (5 shots 6 %, measured; now 12).
+- The export's draw order is exact: each event's `baseLayer.layers` is back-to-front, one wrapper per object; the movie's
+  `objectID` equals its slot child's. A Keynote HTML export stores one copy of each movie per slide folder.
+- P2's harness injected a plan naming the slide-3-only clip; that alone made the runtime pool and remount it on slide 4.
+  The injected plan must equal `derive_plan(...).to_runtime()` in full.
 
 ## Other open items
-- `scripts/p2_alpha_spike.py:260` still sends `nativeVirtualKeyCode` (stalls macOS Chrome's UI thread). The P2 gate
-  drives keys through it, so change it only together with a P2 gate run; do not mix with a runtime change.
-- "Dead advance-rejection branch" is NOT dead (end-of-deck state; proven, left alone) — closed.
-- Owner HDMI eyeball at 2560×1440 (ask first) · real-OBS re-run on runtime v3 · DeckLink fill/key + HEVC at the
-  receiver (codec report now warns) · native easing parity for the 3→4 move · generalisation
-  (`.agents/plans/keynote_live_continuity_generalisation.md`).
+- `scripts/p2_alpha_spike.py:260` still sends `nativeVirtualKeyCode` (stalls macOS Chrome's UI thread). The P2 gate drives
+  keys through it, so change it only together with a P2 gate run; do not mix with a runtime change.
+- The pre-existing `onHash` retry inside `scheduleRemount` is dead code (the player never fires `hashchange`); harmless,
+  left alone. `P.poolKeys` is only refreshed inside `note()` and can lag after an eviction (read `snapshot()` instead).
+- Owner HDMI eyeball at 2560×1440 (ask first) · real-OBS re-run on runtime v3/v4 · DeckLink fill/key + HEVC at the
+  receiver (the codec report now warns) · native easing parity for the 3→4 move · generalisation
+  (`.agents/plans/keynote_live_continuity_generalisation.md`; `retire` is its first slice).
 - 6 maps Python tests + 6 maps UI tests are red on pristine `main` — not this work.
+- The 03:00 power-off was scheduled twice: the owner's `pmset` event and a detached timer started by this session.
 
 ## Commands
 `PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python`, always `PYTHONPATH=<worktree>/src`.
 Unit: `$PY -m pytest tests/test_live_api.py tests/test_live_session.py tests/test_live_host.py tests/test_live_runtime.py tests/test_live_continuity.py tests/test_live_continuity_js.py tests/test_live_continuity_probe.py tests/test_live_codec.py tests/test_p2_adversarial.py tests/test_html_alpha_probe.py -q`.
-Gates: `git -C .claude/worktrees/gate-runner checkout --detach <sha>` then `run_gates.sh` (≈45 min: host ×3
-viewports incl. V/Voff, then P2 fast / bridge-off / slow). After every browser run `pgrep -fl obed-live-chrome`
+Gates: `git -C .claude/worktrees/gate-runner checkout --detach <sha>` then `run_gates.sh` (≈13 min: host ×3
+viewports incl. V/Voff ≈ 2 min each, then P2 fast / bridge-off / slow ≈ 2 min each). After every browser run `pgrep -fl obed-live-chrome`
 must be empty; kill only what you started.
