@@ -7,14 +7,16 @@ is orthogonal. Auto rows are omitted unless they whitelist side content.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from obed_edom.baseline import index_map, pairing_path
-from obed_edom.map_remap import DEFAULT_CARD_STROKE, frame_affine
+from obed_edom.baseline import DIGEST_LEN, index_map, pairing_path
+from obed_edom.map_remap import DEFAULT_CARD_STROKE, frame_affine, item_rect
+from obed_edom.text_diff import fingerprint
 
 FRAMING_VERSION = 1
 FRAMING_KIND = "framing"
@@ -54,6 +56,7 @@ class FramingReuse:
     resurfaced: list[int] = field(default_factory=list)
     carried: int = 0
     dropped: int = 0
+    unpinned: int = 0
 
     def overrides(self) -> dict[int, int]:
         """Pinned wall-number → template-number. Auto/deferred do not pin."""
@@ -98,6 +101,45 @@ def normalize_decision(raw: dict[str, Any]) -> Decision | None:
     )
 
 
+def _item_token(item: dict[str, Any]) -> tuple[str, float, float, float, float, str, str]:
+    """One top-level item's identity: kind, half-pixel-rounded frame, its own
+    (unfolded, not recursive) text and media filename. A sortable, None-safe key."""
+    rect = item_rect(item)
+    return (
+        str(item.get("kind") or ""),
+        round(rect.x * 2) / 2,
+        round(rect.y * 2) / 2,
+        round(rect.w * 2) / 2,
+        round(rect.h * 2) / 2,
+        fingerprint(str(item.get("text") or "")),
+        str(item.get("fileName") or ""),
+    )
+
+
+def template_framing_digests(payload: dict[str, Any]) -> list[str]:
+    """Per-slide fingerprint for template slides: each top-level item's kind, frame,
+    own text and own media filename, hashed together with the slide's ``skipped``
+    flag -- the geometry IS the framing on the template side, unlike ``slide_digest``.
+    Content and position are tokenized per item, not as separate multisets, so two
+    items swapping positions changes the digest (a materially different framing, since
+    recipe learning pairs images before deriving a transform). Tokens are sorted
+    (deterministic, not payload order) because Keynote can reorder items within a kind
+    on save with no other change (see ``iwa_zorder.py``). Recursion into group
+    children is skipped -- template group-child inspection is best-effort and can drop
+    to an empty list between runs with nothing in the group itself having changed; a
+    group's own frame already reflects its children. The 0.5px rounding means jitter
+    right at a bucket edge can refuse a match on an untouched slide; that is the safe
+    direction (a re-offered pin, never a mis-pinned one)."""
+    out: list[str] = []
+    for slide in payload.get("slides") or []:
+        skipped = "1" if slide.get("skipped") else "0"
+        tokens = sorted(_item_token(item) for item in slide.get("items") or [])
+        items = "|".join(f"{k}:{x}:{y}:{w}:{h}:{t}:{i}" for k, x, y, w, h, t, i in tokens)
+        blob = f"{skipped}|{items}"
+        out.append(hashlib.sha256(blob.encode("utf-8")).hexdigest()[:DIGEST_LEN])
+    return out
+
+
 def framing_path(wall: Path | str, template: Path | str, root: Path | None = None) -> Path:
     return pairing_path(FRAMING_KIND, wall, template, root)
 
@@ -124,6 +166,7 @@ def save_framings(
     template_digest: str,
     decisions: list[Decision] | list[dict[str, Any]],
     *,
+    template_digests: list[str] | None = None,
     job_id: str = "",
     root: Path | None = None,
 ) -> dict:
@@ -141,6 +184,7 @@ def save_framings(
         "templatePath": str(Path(template).expanduser()),
         "wallDigests": list(wall_digests),
         "templateDigest": str(template_digest),
+        "templateDigests": list(template_digests) if template_digests is not None else [],
         "decisions": rows,
         "jobId": job_id,
         "savedAt": time.time(),
@@ -151,17 +195,42 @@ def save_framings(
     return record
 
 
+def _matched_template_slide(
+    saved_digests: list[str], current_digests: list[str], template_slide: int
+) -> int | None:
+    """1-based old slide -> 1-based new slide, by digest identity only (never by position):
+    the saved slide's digest must be unique in both lists, or the match is refused."""
+    old_index = template_slide - 1
+    if old_index < 0 or old_index >= len(saved_digests):
+        return None
+    digest = saved_digests[old_index]
+    if saved_digests.count(digest) != 1 or current_digests.count(digest) != 1:
+        return None
+    return current_digests.index(digest) + 1
+
+
 def reuse_framings(
     record: dict | None,
     wall_digests: list[str],
     template_digest: str,
+    template_digests: list[str] | None = None,
 ) -> FramingReuse:
-    """Carry saved decisions by wall digest. Content change drops the decision."""
+    """Carry saved decisions by wall digest. Content change drops the decision.
+
+    When the template changed, a pinned ``template_slide`` is matched by the
+    template's own per-slide framing digest, by identity only -- an ambiguous
+    (repeated) digest, a missing one, or a legacy record with no
+    ``templateDigests`` all refuse the match. A refused pin that also keeps
+    side content survives unpinned so that answer is not lost; otherwise it
+    is dropped and the page is re-offered.
+    """
     out = FramingReuse()
     if not record:
         return out
     out.template_changed = str(record.get("templateDigest") or "") != str(template_digest)
     mapping = index_map(list(record.get("wallDigests") or []), list(wall_digests))
+    saved_template_digests = list(record.get("templateDigests") or [])
+    current_template_digests = list(template_digests or [])
     for raw in record.get("decisions") or []:
         decision = normalize_decision(raw)
         if decision is None:
@@ -170,10 +239,34 @@ def reuse_framings(
         if new_index is None:
             out.dropped += 1
             continue
+        template_slide = decision.template_slide
+        state = decision.state
+        if out.template_changed and template_slide is not None:
+            new_template_slide = (
+                _matched_template_slide(
+                    saved_template_digests, current_template_digests, template_slide
+                )
+                if saved_template_digests
+                else None
+            )
+            if new_template_slide is None:
+                if not decision.keep_side_content:
+                    out.dropped += 1
+                    continue
+                template_slide, state = None, AUTO
+                out.unpinned += 1
+                out.decisions[new_index] = Decision(
+                    wall_index=new_index,
+                    state=state,
+                    template_slide=template_slide,
+                    keep_side_content=decision.keep_side_content,
+                )
+                continue
+            template_slide = new_template_slide
         out.decisions[new_index] = Decision(
             wall_index=new_index,
-            state=decision.state,
-            template_slide=decision.template_slide,
+            state=state,
+            template_slide=template_slide,
             keep_side_content=decision.keep_side_content,
         )
         out.carried += 1
@@ -461,6 +554,7 @@ def propose_framings(
         "templatePath": str(template_path),
         "wallDigests": deck_slide_digests(full_wall_data),
         "templateDigest": deck_digest(template_path),
+        "templateDigests": template_framing_digests(template_data),
         "wallThumbDir": str(wall_thumb_dir(deck_digest(wall_path))),
         "templateThumbDir": str(wall_thumb_dir(deck_digest(template_path))),
         "templateThumbs": {str(k): v for k, v in sorted(template_thumbs.items())},

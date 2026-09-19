@@ -26,11 +26,31 @@ from obed_edom.framing import (
     planned_rects,
     reuse_framings,
     save_framings,
+    template_framing_digests,
 )
 from obed_edom.map_remap import ItemTransform, Rect, frame_affine
 
 WALL = "/tmp/Wall.key"
 TEMPLATE = "/tmp/Base_CG_Assets.key"
+
+
+def _img_slide(number: int, x: float, y: float, w: float, h: float, name: str = "pic.png") -> dict:
+    return {
+        "number": number,
+        "items": [{"kind": "image", "fileName": name, "x": x, "y": y, "w": w, "h": h}],
+    }
+
+
+def _tmpl_digests(*slides: dict) -> list[str]:
+    return template_framing_digests({"slides": list(slides)})
+
+
+def _image(name: str, x: float, y: float, w: float, h: float) -> dict:
+    return {"kind": "image", "fileName": name, "x": x, "y": y, "w": w, "h": h}
+
+
+def _text(text: str, x: float, y: float, w: float, h: float) -> dict:
+    return {"kind": "text", "text": text, "x": x, "y": y, "w": w, "h": h}
 
 
 def test_round_trip(tmp_path: Path):
@@ -93,12 +113,16 @@ def test_deferred_pages_resurface_only_when_the_template_changes(tmp_path: Path)
     same = reuse_framings(record, ["a", "b"], "tmpl-1")
     assert same.template_changed is False
     assert same.resurfaced == []
+    assert same.decisions[1].template_slide == 2
 
+    # This record predates templateDigests, so once the template changes the saved
+    # pin's number is untrustworthy and is dropped, not carried "stays answered".
     changed = reuse_framings(record, ["a", "b"], "tmpl-2")
     assert changed.template_changed is True
-    # Only the deferred page: the pinned one was answered and stays answered.
     assert changed.resurfaced == [0]
     assert changed.decisions[0].state == DEFERRED
+    assert 1 not in changed.decisions
+    assert changed.dropped == 1
 
 
 def test_deferred_and_auto_do_not_pin_anything(tmp_path: Path):
@@ -109,6 +133,292 @@ def test_deferred_and_auto_do_not_pin_anything(tmp_path: Path):
     record = load_framings(WALL, TEMPLATE, root=tmp_path)
     reuse = reuse_framings(record, ["a", "b"], "t")
     assert reuse.overrides() == {2: 4}
+
+
+def test_template_framing_digest_is_stable_under_sub_bucket_jitter():
+    """Sub-pixel float jitter that stays within the same 0.5px bucket must not change
+    the digest. (A jitter that straddles a bucket edge is a separate, accepted
+    refusal case -- not claimed stable here.)"""
+    steady = _tmpl_digests(_img_slide(1, 100.10, 100.10, 400.10, 300.10))
+    jittered = _tmpl_digests(_img_slide(1, 100.12, 100.08, 400.11, 300.09))
+    assert steady == jittered
+
+
+def test_template_framing_digest_is_insensitive_to_item_order():
+    """Keynote can reorder items within a kind on save with nothing else changed
+    (see iwa_zorder.py); the same slide with its items listed in a different order
+    must produce the same digest."""
+    slide = {
+        "number": 1,
+        "items": [
+            {"kind": "image", "fileName": "a.png", "x": 0, "y": 0, "w": 50, "h": 50},
+            {"kind": "image", "fileName": "b.png", "x": 200, "y": 0, "w": 60, "h": 60},
+        ],
+    }
+    reordered = {
+        "number": 1,
+        "items": list(reversed(slide["items"])),
+    }
+    assert template_framing_digests({"slides": [slide]}) == template_framing_digests(
+        {"slides": [reordered]}
+    )
+
+
+def test_template_framing_digest_is_insensitive_to_text_item_order():
+    """Two unchanged top-level text items listed in reversed order must not change
+    the digest -- text comes from the item itself, not a payload-ordered traversal."""
+    slide = {
+        "number": 1,
+        "items": [
+            _text("Left caption", 0, 0, 50, 50),
+            _text("Right caption", 200, 0, 60, 60),
+        ],
+    }
+    reordered = {"number": 1, "items": list(reversed(slide["items"]))}
+    assert template_framing_digests({"slides": [slide]}) == template_framing_digests(
+        {"slides": [reordered]}
+    )
+
+
+def test_template_framing_digest_ignores_group_children():
+    """Group-child inspection is best-effort and can silently come back empty between
+    runs with the group itself unchanged; only top-level items count -- with a group
+    that has neither, a text, nor an image child."""
+    def _group(children: list[dict]) -> dict:
+        return {"number": 1, "items": [{"kind": "group", "x": 0, "y": 0, "w": 300, "h": 200, "children": children}]}
+
+    no_children = template_framing_digests({"slides": [_group([])]})
+    with_shape_child = template_framing_digests(
+        {"slides": [_group([{"kind": "shape", "x": 10, "y": 10, "w": 50, "h": 50}])]}
+    )
+    with_text_child = template_framing_digests(
+        {"slides": [_group([_text("caption", 10, 10, 50, 50)])]}
+    )
+    with_image_child = template_framing_digests(
+        {"slides": [_group([_image("c.png", 10, 10, 50, 50)])]}
+    )
+    assert no_children == with_shape_child == with_text_child == with_image_child
+
+
+def test_template_framing_digest_changes_when_two_images_swap_positions(tmp_path: Path):
+    """Content identity and position are tokenized together, not as independent
+    multisets: a.png-left/b.png-right must differ from the swap, and a saved pin
+    for the original arrangement must not be carried onto the swapped one."""
+    original = {"number": 1, "items": [_image("a.png", 0, 0, 50, 50), _image("b.png", 200, 0, 60, 60)]}
+    swapped = {"number": 1, "items": [_image("a.png", 200, 0, 60, 60), _image("b.png", 0, 0, 50, 50)]}
+    original_digest = template_framing_digests({"slides": [original]})
+    swapped_digest = template_framing_digests({"slides": [swapped]})
+    assert original_digest != swapped_digest
+
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 1)],
+        template_digests=original_digest, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    reuse = reuse_framings(record, ["a"], "t2", swapped_digest)
+    assert reuse.dropped == 1
+    assert reuse.decisions == {}
+
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 1, keep_side_content=True)],
+        template_digests=original_digest, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    reuse = reuse_framings(record, ["a"], "t2", swapped_digest)
+    assert reuse.dropped == 0
+    assert reuse.unpinned == 1
+    assert reuse.decisions[0].template_slide is None
+    assert reuse.decisions[0].keep_side_content is True
+
+
+def test_template_framing_digest_changes_when_two_movies_swap_positions(tmp_path: Path):
+    """Movies are paired into the learned recipe like images, so their filename is
+    identity too: a.mov/b.mov swapping frames must change the digest and drop the pin."""
+    def movie(name: str, x: float, y: float, w: float, h: float) -> dict:
+        return {"kind": "movie", "fileName": name, "x": x, "y": y, "w": w, "h": h}
+
+    original = {"number": 1, "items": [movie("a.mov", 0, 0, 50, 50), movie("b.mov", 200, 0, 60, 60)]}
+    swapped = {"number": 1, "items": [movie("a.mov", 200, 0, 60, 60), movie("b.mov", 0, 0, 50, 50)]}
+    original_digest = template_framing_digests({"slides": [original]})
+    swapped_digest = template_framing_digests({"slides": [swapped]})
+    assert original_digest != swapped_digest
+
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 1)],
+        template_digests=original_digest, root=tmp_path,
+    )
+    reuse = reuse_framings(load_framings(WALL, TEMPLATE, root=tmp_path), ["a"], "t2", swapped_digest)
+    assert reuse.dropped == 1 and reuse.decisions == {}
+
+
+def test_template_framing_digest_changes_when_two_text_items_swap_positions():
+    original = {"number": 1, "items": [_text("Left caption", 0, 0, 50, 50), _text("Right caption", 200, 0, 60, 60)]}
+    swapped = {"number": 1, "items": [_text("Left caption", 200, 0, 60, 60), _text("Right caption", 0, 0, 50, 50)]}
+    assert template_framing_digests({"slides": [original]}) != template_framing_digests({"slides": [swapped]})
+
+
+def test_template_framing_digest_is_geometry_sensitive():
+    """Same text and image identity, moved -- the digest must differ; this is the
+    framing itself, unlike the geometry-blind wall digest."""
+    moved = _tmpl_digests(_img_slide(1, 100, 100, 400, 300), _img_slide(2, 0, 0, 500, 500))
+    original = _tmpl_digests(_img_slide(1, 100, 100, 400, 300), _img_slide(2, 10, 10, 500, 500))
+    assert moved[0] == original[0]
+    assert moved[1] != original[1]
+
+
+def test_pinned_template_slide_follows_an_insertion(tmp_path: Path):
+    """A new slide lands before the pinned template page, so its number moves too."""
+    saved = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100))
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 2)],
+        template_digests=saved, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    current = _tmpl_digests(
+        _img_slide(1, 500, 500, 50, 50), _img_slide(2, 0, 0, 100, 100), _img_slide(3, 200, 0, 100, 100)
+    )
+    reuse = reuse_framings(record, ["a"], "t2", current)
+    assert reuse.template_changed is True
+    assert reuse.dropped == 0
+    assert reuse.decisions[0].template_slide == 3
+
+
+def test_pinned_template_slide_dropped_when_deleted(tmp_path: Path):
+    saved = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100))
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 2)],
+        template_digests=saved, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    current = _tmpl_digests(_img_slide(1, 0, 0, 100, 100))
+    reuse = reuse_framings(record, ["a"], "t2", current)
+    assert reuse.template_changed is True
+    assert reuse.dropped == 1
+    assert reuse.decisions == {}
+
+
+def test_pinned_template_slide_dropped_when_its_content_changed(tmp_path: Path):
+    saved = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100))
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 2)],
+        template_digests=saved, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    current = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 250, 0, 100, 100))
+    reuse = reuse_framings(record, ["a"], "t2", current)
+    assert reuse.dropped == 1
+    assert reuse.decisions == {}
+
+
+def test_pinned_template_slide_follows_a_reorder(tmp_path: Path):
+    saved = _tmpl_digests(
+        _img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100), _img_slide(3, 400, 0, 100, 100)
+    )
+    save_framings(
+        WALL, TEMPLATE, ["a", "b"], "t1",
+        [Decision(0, PINNED, 1), Decision(1, PINNED, 3)],
+        template_digests=saved, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    current = _tmpl_digests(
+        _img_slide(1, 400, 0, 100, 100), _img_slide(2, 0, 0, 100, 100), _img_slide(3, 200, 0, 100, 100)
+    )
+    reuse = reuse_framings(record, ["a", "b"], "t2", current)
+    assert reuse.dropped == 0
+    assert reuse.decisions[0].template_slide == 2
+    assert reuse.decisions[1].template_slide == 1
+
+
+def test_legacy_record_without_template_digests_drops_pins_on_template_change(tmp_path: Path):
+    """No templateDigests means the old numbers are untrustworthy once the template moved."""
+    save_framings(WALL, TEMPLATE, ["a", "b"], "t1", [Decision(0, PINNED, 2), Decision(1, DEFERRED)], root=tmp_path)
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    assert "templateDigests" not in record or not record["templateDigests"]
+    current = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100))
+    reuse = reuse_framings(record, ["a", "b"], "t2", current)
+    assert reuse.template_changed is True
+    assert reuse.dropped == 1
+    assert 0 not in reuse.decisions
+    assert reuse.decisions[1].state == DEFERRED
+
+
+def test_legacy_record_with_kept_side_content_survives_unpinned(tmp_path: Path):
+    """A legacy pinned decision that also whitelists side content must not lose that
+    answer just because its (untrustworthy) template number cannot be trusted."""
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1",
+        [Decision(0, PINNED, 2, keep_side_content=True)], root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    current = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100))
+    reuse = reuse_framings(record, ["a"], "t2", current)
+    assert reuse.dropped == 0
+    assert reuse.unpinned == 1
+    # Unpinned is not "carried" -- the pinned answer did not survive, only the
+    # independent side-content whitelist did.
+    assert reuse.carried == 0
+    assert reuse.decisions[0].state == AUTO
+    assert reuse.decisions[0].template_slide is None
+    assert reuse.decisions[0].keep_side_content is True
+    assert reuse.side_content_slides() == {1}
+
+
+def test_legacy_record_without_template_digests_is_unaffected_when_template_unchanged(tmp_path: Path):
+    save_framings(WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 2)], root=tmp_path)
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    reuse = reuse_framings(record, ["a"], "t1")
+    assert reuse.template_changed is False
+    assert reuse.dropped == 0
+    assert reuse.decisions[0].template_slide == 2
+
+
+def test_ambiguous_template_digest_drops_the_pin_never_mispins(tmp_path: Path):
+    """Two slides share a digest in the saved record: the pin cannot be trusted
+    even though the identical-looking pair is still there in the current template."""
+    saved = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 0, 0, 100, 100))
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 1)],
+        template_digests=saved, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    current = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 0, 0, 100, 100))
+    reuse = reuse_framings(record, ["a"], "t2", current)
+    assert reuse.template_changed is True
+    assert reuse.dropped == 1
+    assert reuse.decisions == {}
+
+
+def test_ambiguous_template_digest_with_a_front_insertion_never_mispins(tmp_path: Path):
+    """Codex's exact case: ["dup", "dup"] -> ["dup", "dup", "dup"] with the insertion at
+    the front. A positional (SequenceMatcher) map would silently shift the pin by one;
+    identity matching must refuse it instead, because the digest is not unique."""
+    saved = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 0, 0, 100, 100))
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 1)],
+        template_digests=saved, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    current = _tmpl_digests(
+        _img_slide(1, 500, 500, 20, 20), _img_slide(2, 0, 0, 100, 100), _img_slide(3, 0, 0, 100, 100)
+    )
+    reuse = reuse_framings(record, ["a"], "t2", current)
+    assert reuse.template_changed is True
+    assert reuse.dropped == 1
+    assert reuse.decisions == {}
+
+
+def test_save_load_reuse_round_trip_includes_template_digests(tmp_path: Path):
+    saved = _tmpl_digests(_img_slide(1, 0, 0, 100, 100), _img_slide(2, 200, 0, 100, 100))
+    save_framings(
+        WALL, TEMPLATE, ["a"], "t1", [Decision(0, PINNED, 2)],
+        template_digests=saved, root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    assert record is not None
+    assert record["templateDigests"] == saved
+    reuse = reuse_framings(record, ["a"], "t1", saved)
+    assert reuse.template_changed is False
+    assert reuse.decisions[0].template_slide == 2
 
 
 def test_a_pin_with_no_slide_is_rejected(tmp_path: Path):
