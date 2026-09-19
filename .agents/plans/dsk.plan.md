@@ -175,6 +175,12 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   (1920, −1079) `apple:movie-start` chunkOrder 0 referent True; movie 1 (1915, −163)
   `apple:dissolve` In chunkOrder 1 referent False; class `mixed`, 4 side `map BG.png` dropped.
   Visual order would put movie 1 first (x 1915 < 1920) — hence build order for overlapping movies.
+  Archive diff (offline, 2026-09-20): the two `KN.BuildArchive`s are IDENTICAL except
+  `attributes.animationAttributes.effect` (`apple:movie-start` vs `apple:dissolve`) and the random
+  seed — same `animationType In`, `duration 0.5`, `delivery All at Once`, `eventTrigger 1`. Movie
+  1's chunk is `automatic True, referent False, delay 8.0` (With Build 1, 8 s after movie 0
+  starts). So a build-in is a ONE-FIELD effect rewrite of the clip's auto movie-start build plus
+  the source chunk `delay` — no build creation needed (unverified live).
 
 ### Pill mask law (`dsk_pill.write_pills`)
 - The pill image drawable's own geometry NEVER varies with width (byte-identical across all 8
@@ -421,9 +427,9 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 28. **Stacked clips need a build-IN (OPEN, needs a live round).** A later stacked clip sits on top
     and covers the first from the start unless it carries the source's build-in (`apple:dissolve`
     on FRC 50). Builds cannot be created via AppleScript; candidate = an offline `iwa_movies` patch
-    rewriting the inserted clip's auto-created `apple:movie-start` build attributes to the source
-    build's effect/duration, fail-closed with read-back (slide 50 itself holds both archive shapes
-    to diff). Fallback if Keynote rejects it: one DSK slide per stacked movie with a dissolve
+    rewriting the inserted clip's auto-created `apple:movie-start` build `effect` to the source
+    build's (one-field diff, §3 FRC 50) and carrying the source chunk mode + `delay` (With Build 1,
+    8.0 s) through `ClipTiming`, fail-closed with read-back via `_patch_archive_fields`. Fallback if Keynote rejects it: one DSK slide per stacked movie with a dissolve
     between. Until then the plan WARNS per stacked slide. Also unverified live: videos-only
     geometry vs gold slide 4, and left/right flush margins for the standard band.
 
