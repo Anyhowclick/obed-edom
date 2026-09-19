@@ -86,7 +86,7 @@ from obed_edom.iwa_geometry import (
     compose_geometry,
 )
 from obed_edom import iwa_movies
-from obed_edom.dsk_movie_export import visual_movie_order
+from obed_edom.dsk_movie_export import movie_build_order, movie_order, movies_stacked
 from obed_edom.iwa_kindindex import _memberships, derive_kind_index
 from obed_edom.iwa_runs import (
     _SIG_JOIN,
@@ -114,6 +114,10 @@ from obed_edom.offline_inspect import (
 from obed_edom.remap_keynote import _AS_KIND_NAMES, _as_num, _delete_or_hide_placeholder_lines, copy_keynote
 
 DEFAULT_BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
+# Measured from the hand-made gold `Alpha_DSK.key` slide 4: a 3840x1080 centre-panel clip
+# sits at (258, 670) 1405x395, centred on 960. `SlideDecision.videos_only` fits its movies
+# into this band instead of the text band; the x margins are symmetric about 960.
+STANDARD_VIDEO_BAND = Band(1065.0, 395.0, 43.0, 1877.0, 1)
 DEFAULT_MIN_TEXT_PT = 24.0
 _TEXT_STACK_GAP = _TEXT_GAP_PT
 
@@ -318,13 +322,16 @@ class AssemblyRefusal(ValueError):
 
 @dataclass(frozen=True)
 class SlideDecision:
-    """One slide's operator decision for the DSK assembly review page."""
+    """One slide's operator decision for the DSK assembly review page. ``videos_only``
+    ignores every non-movie object on a movie/mixed slide (they are deleted exactly like
+    excluded items) and places the kept top-level movies in ``STANDARD_VIDEO_BAND``."""
 
     slide: int
     action: str
     anchor: str = "centre"
     keep_side: bool = False
     overlay_bake: bool = True
+    videos_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -355,7 +362,10 @@ class AssemblyPlan:
     ``layout_names`` (finding 2/§3 L3) is the base layout resolved DURING planning for
     every verse/point single-long-text-box slide (split or not); when set, that slide's
     ``fits``/``text_sizes``/``run_sizes``/``stack_bands``/``short_fit`` are all already
-    derived from that layout's slot -- ``resolve_slide_layouts`` just reads it back."""
+    derived from that layout's slot -- ``resolve_slide_layouts`` just reads it back.
+    ``clip_build_in[number][movie_id]`` is a stacked-movie slide's SOURCE build-in
+    ``(effect, duration)`` per movie -- input for the offline build patch that the
+    upper clip still needs (see the matching ``warnings`` entry)."""
 
     kept: tuple[int, ...]
     ordinals: dict[int, int]
@@ -391,6 +401,7 @@ class AssemblyPlan:
     chain_head: dict[int, int] = field(default_factory=dict)
     clip_rects: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
     clip_timing: dict[int, tuple[tuple[ItemId, str], ...]] = field(default_factory=dict)
+    clip_build_in: dict[int, dict[ItemId, tuple[str, float]]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -1407,6 +1418,7 @@ def plan_assembly(
     clip_rects_out: dict[int, dict[ItemId, Rect]] = {}
     clip_dissolve_out: dict[int, float] = {}
     clip_timing_out: dict[int, tuple[tuple[ItemId, str], ...]] = {}
+    clip_build_in_out: dict[int, dict[ItemId, tuple[str, float]]] = {}
     text_sizes: dict[int, dict[ItemId, float]] = {}
     autosize: dict[int, frozenset[ItemId]] = {}
     group_scale: dict[int, float] = {}
@@ -1471,6 +1483,15 @@ def plan_assembly(
             group_child_runs_map = slide.get("groupChildRuns") or {}
             warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
+            videos_only_ids: tuple[ItemId, ...] = ()
+            if decision.videos_only:
+                if cls.is_text:
+                    raise AssemblyRefusal(f"slide {number}: videos_only on a text slide is unsupported")
+                videos_only_ids = tuple(iid for iid in cls.kept if iid[0] == "movie")
+                if not videos_only_ids:
+                    raise AssemblyRefusal(f"slide {number}: videos_only needs a kept top-level movie")
+                cls = _dc_replace(cls, kept=videos_only_ids, long_text_ids=(), dropped_media_text=())
+
             text_group_kis = {iid[1] for iid in cls.long_text_ids if iid[0] == "groupchild"}
             for group_ki in text_group_kis:
                 for child in group_children_geo.get(group_ki, ()):
@@ -1507,10 +1528,12 @@ def plan_assembly(
                             "(piece D1 handles autosize group text only)"
                         )
 
-            own_content_anchor = None if no_auto_anchor else _chain_source_anchor(number)
+            own_content_anchor = (
+                None if (no_auto_anchor or decision.videos_only) else _chain_source_anchor(number)
+            )
 
             if decision.anchor in (None, "auto"):
-                if no_auto_anchor:
+                if no_auto_anchor or decision.videos_only:
                     anchor = "centre"
                 else:
                     head = chain_head_map.get(number)
@@ -1524,19 +1547,28 @@ def plan_assembly(
                 anchor = decision.anchor
             anchors_out[number] = anchor
 
-            fit = fit_slide(
-                items,
-                band,
-                include_side=decision.keep_side,
-                anchor=anchor,
-                wall=wall,
-                group_child_text=group_child_text,
-                group_child_words=group_child_words,
-                group_children=group_children_geo,
-                text_slide_words=text_slide_words,
-                no_dedupe=no_dedupe,
-                no_drop_panel_backdrop=no_drop_panel_backdrop,
-            )
+            if decision.videos_only:
+                fit = fit_slide(
+                    items,
+                    STANDARD_VIDEO_BAND,
+                    kept=videos_only_ids,
+                    include_side=decision.keep_side,
+                    anchor=anchor,
+                )
+            else:
+                fit = fit_slide(
+                    items,
+                    band,
+                    include_side=decision.keep_side,
+                    anchor=anchor,
+                    wall=wall,
+                    group_child_text=group_child_text,
+                    group_child_words=group_child_words,
+                    group_children=group_children_geo,
+                    text_slide_words=text_slide_words,
+                    no_dedupe=no_dedupe,
+                    no_drop_panel_backdrop=no_drop_panel_backdrop,
+                )
             fits[number] = fit
 
             id_by_item: dict[ItemId, str] | None = None
@@ -2341,6 +2373,8 @@ def plan_assembly(
                             f"slide {number}: clip mapping missing kept movie item(s) {sorted(missing)}"
                         )
 
+                src_build_recs = ((builds or {}).get(number) or {}).get("builds") or ()
+                stacked = False
                 if len(item_clips) > 1:
                     fw_rects: dict[ItemId, Rect] = {}
                     dsk_rects: dict[ItemId, Rect] = {}
@@ -2353,23 +2387,48 @@ def plan_assembly(
                         if rect is None:
                             raise AssemblyRefusal(f"slide {number} movie {iid[1]}: no fitted rect for clip")
                         dsk_rects[iid] = rect
+                    stacked = movies_stacked(fw_rects)
+                    build_order = z_order = None
+                    if stacked:
+                        build_order = movie_build_order(src_build_recs, fw_rects)
+                        z_order = {iid: int(items_by_id[iid].get("index") or 0) for iid in fw_rects}
                     try:
-                        fw_order = visual_movie_order(fw_rects)
-                        dsk_order = visual_movie_order(dsk_rects)
+                        fw_order = movie_order(fw_rects, build_order, z_order)
+                        dsk_order = movie_order(dsk_rects, build_order, z_order)
                     except ValueError as exc:
                         raise AssemblyRefusal(f"slide {number}: {exc}") from exc
                     if fw_order != dsk_order:
                         raise AssemblyRefusal(
-                            f"slide {number}: FW visual movie order {fw_order} does not match "
-                            f"DSK visual order {dsk_order}"
+                            f"slide {number}: FW movie order {fw_order} does not match "
+                            f"DSK order {dsk_order}"
                         )
                     visual_order = fw_order
                 else:
                     visual_order = list(item_clips)
                 item_clips = {iid: item_clips[iid] for iid in visual_order}
 
+                if stacked:
+                    build_in: dict[ItemId, tuple[str, float]] = {}
+                    for rec in src_build_recs:
+                        iid = (rec["kind"], rec["kindIndex"])
+                        if iid in item_clips and rec.get("effect") is not None:
+                            build_in[iid] = (str(rec["effect"]), float(rec.get("duration") or 0.0))
+                    clip_build_in_out[number] = build_in
+                    upper = ", ".join(
+                        f"movie {iid[1]} {build_in[iid][0]} {build_in[iid][1]:.2f}s"
+                        if iid in build_in else f"movie {iid[1]} (no source build)"
+                        for iid in visual_order[1:]
+                    )
+                    warnings.append(
+                        f"slide {number}: stacked movies -- the upper clip(s) [{upper}] need a "
+                        "build-in Keynote cannot create from AppleScript; until an offline build "
+                        "patch lands they cover the clip below from the start"
+                    )
+
                 if len(item_clips) == 1:
                     plays_across = {visual_order[0]: False}
+                elif stacked:
+                    plays_across = {iid: False for iid in item_clips}
                 elif objects_graph is None:
                     # Planning-only fallback: a live apply always has fw_deck set, so
                     # plan_assembly loads objects_graph itself and never reaches this
@@ -2589,6 +2648,7 @@ def plan_assembly(
         layout_names=layout_names,
         clip_dissolve=clip_dissolve_out,
         clip_timing=clip_timing_out,
+        clip_build_in=clip_build_in_out,
         chain_head=chain_head_applied,
         clip_rects=clip_rects_out,
     )

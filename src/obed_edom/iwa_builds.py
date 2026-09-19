@@ -51,6 +51,12 @@ def _build_effect_animtype(build_obj: dict) -> tuple[Any, Any]:
     return effect, animation_type
 
 
+def _build_duration(build_obj: dict) -> Any:
+    attrs = build_obj.get("attributes") or {}
+    anim = attrs.get("animationAttributes") or {}
+    return anim.get("duration") if anim.get("duration") is not None else attrs.get("databaseDuration")
+
+
 def _transition_effect_duration(transition: dict | None) -> tuple[Any, Any] | None:
     """Lifted from output/probe-builds/verify_builds.py::slide_transition."""
     if not transition:
@@ -78,7 +84,7 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
     """``{slide number (1-based): {"slideId", "builds": [...], "transition": dict|None}}``.
 
     Each build record: ``{"buildId", "chunkIds", "chunkOrder", "chunkReferent",
-    "kind", "kindIndex", "effect", "animationType", "identity"}``. ``chunkIds`` is
+    "kind", "kindIndex", "effect", "animationType", "duration", "identity"}``. ``chunkIds`` is
     ascending by the slide's own ``buildChunks`` position; ``chunkOrder`` carries
     that same position per chunk and ``chunkReferent`` each chunk's ``referent``
     flag. ``buildChunks`` is Keynote's render timeline; ``builds`` is an unordered
@@ -152,6 +158,7 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
                     "kindIndex": kind_index,
                     "effect": effect,
                     "animationType": animation_type,
+                    "duration": _build_duration(build),
                     "identity": build_identity(kind, text, file_name, child_sig),
                 }
             )

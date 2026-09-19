@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +61,7 @@ from obed_edom.dsk_live import (
     run_osascript,
 )
 from obed_edom.dsk_plan import ItemId, SlideClass, _delete_order, classify_deck, visible_union
+from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_runs import attach_group_content_signature
 from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, is_lw_wall, item_rect
 from obed_edom.maps_movie import ffmpeg_exe
@@ -187,6 +188,75 @@ def visual_movie_order(rects: Mapping[ItemId, Rect]) -> list[ItemId]:
         if len(ids) > 1:
             raise ValueError(f"Movie items {sorted(ids)} tie at position {key}; cannot derive visual order")
     return [ids[0] for _, ids in sorted(keys.items())]
+
+
+_MOVIE_STACK_OVERLAP = 0.05
+
+
+def _rects_stack(a: Rect, b: Rect) -> bool:
+    ix = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
+    iy = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
+    if ix <= 0 or iy <= 0:
+        return False
+    smallest = min(a.w * a.h, b.w * b.h)
+    return smallest > 0 and (ix * iy) / smallest > _MOVIE_STACK_OVERLAP
+
+
+def movies_stacked(rects: Mapping[ItemId, Rect]) -> bool:
+    """True when two movie rects overlap by more than `_MOVIE_STACK_OVERLAP` of the smaller
+    one's area, i.e. one movie covers another. Side-by-side panels that merely touch, or
+    clip by a hairline, stay unstacked and keep the visual order."""
+    ids = list(rects)
+    return any(
+        _rects_stack(rects[a], rects[b])
+        for i, a in enumerate(ids)
+        for b in ids[i + 1:]
+    )
+
+
+def movie_build_order(build_records: Sequence[Mapping], movie_ids: Iterable[ItemId]) -> dict[ItemId, int]:
+    """Each movie item's lowest `buildChunks` position, from `iwa_builds.deck_builds`
+    records; a movie with no build of its own is absent."""
+    wanted = set(movie_ids)
+    order: dict[ItemId, int] = {}
+    for rec in build_records:
+        item_id: ItemId = (rec["kind"], rec["kindIndex"])
+        if item_id not in wanted or not rec.get("chunkOrder"):
+            continue
+        pos = min(rec["chunkOrder"])
+        if item_id not in order or pos < order[item_id]:
+            order[item_id] = pos
+    return order
+
+
+def movie_order(
+    rects: Mapping[ItemId, Rect],
+    build_order: Mapping[ItemId, int] | None = None,
+    z_order: Mapping[ItemId, int] | None = None,
+) -> list[ItemId]:
+    """The one movie order every consumer uses (plan §2, 2026-09-17): `visual_movie_order`
+    unless the movies are STACKED (`movies_stacked`), where left-to-right is meaningless and
+    the SOURCE deck's build-chunk order decides instead -- a movie with no build of its own
+    plays from the start, so it sorts first, among such movies by `z_order` (payload
+    `index`). Raises ValueError on a tie or when the stacked inputs are missing."""
+    if not movies_stacked(rects):
+        return visual_movie_order(rects)
+    if build_order is None:
+        raise ValueError(f"Movie items {sorted(rects)} are stacked; source build order is required")
+    keys: dict[tuple[int, int], list[ItemId]] = {}
+    for item_id in rects:
+        pos = build_order.get(item_id)
+        if pos is None:
+            if z_order is None or item_id not in z_order:
+                raise ValueError(f"Stacked movie item {item_id} has no build and no z-order; cannot derive order")
+            key = (0, z_order[item_id])
+        else:
+            key = (1, pos)
+        keys.setdefault(key, []).append(item_id)
+    for key, tied in keys.items():
+        if len(tied) > 1:
+            raise ValueError(f"Stacked movie items {sorted(tied)} tie at build order {key}; cannot derive order")
+    return [tied[0] for _key, tied in sorted(keys.items())]
 
 
 def _rect_intersect(a: Rect, b: Rect) -> Rect:
@@ -984,6 +1054,7 @@ def export_slide_clips(
         ordinals = ordinal_map(keep)
         per_slide: list[_SlideJob] = []
         if per_movie:
+            deck_build_recs: dict[int, dict] | None = None
             for n in keep:
                 slide = slides_by_number[n]
                 items = slide.get("items") or []
@@ -993,7 +1064,16 @@ def export_slide_clips(
                 if not kept_movie_ids:
                     raise ValueError(f"Slide {n} has no kept movie items; per_movie export requires at least one")
                 movie_rects = {iid: item_rect(items_by_id[iid]) for iid in kept_movie_ids}
-                ordered_movie_ids = visual_movie_order(movie_rects)
+                if movies_stacked(movie_rects):
+                    if deck_build_recs is None:
+                        deck_build_recs = deck_builds(fw_deck)
+                    ordered_movie_ids = movie_order(
+                        movie_rects,
+                        movie_build_order((deck_build_recs.get(n) or {}).get("builds") or (), kept_movie_ids),
+                        {iid: int(items_by_id[iid].get("index") or 0) for iid in kept_movie_ids},
+                    )
+                else:
+                    ordered_movie_ids = movie_order(movie_rects)
                 base_crop = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
                 for movie_index, movie_id in enumerate(ordered_movie_ids, start=1):
                     movie_item = items_by_id[movie_id]
