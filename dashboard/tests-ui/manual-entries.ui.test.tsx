@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMapsTab, tick } from "./renderMapsTab";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeCamera, makeDoc, makeJob, makeSlide } from "./fakes/doc";
 import type { Job } from "../src/api";
@@ -85,7 +86,7 @@ describe("manual entry forms", () => {
 
     mapFake.emit.cameraCommit(makeCamera({ zoom: 15 }));
     await tick(0);
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
     await tick(0);
 
     const saves = mapsApiScript.saveMapsState.calls;

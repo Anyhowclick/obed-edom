@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   applyDsk,
+  chooseFolder,
   chooseKeynote,
   pollJob,
   reveal,
@@ -16,6 +17,7 @@ import { BuildPreview } from "../../components/BuildPreview";
 import { LoadingOverlay, Lightbox } from "../../components/PreviewGrid";
 import { buildDecisionsMap, toDecisionsPayload, type DecisionsMap } from "../../dsk/decisions";
 import { SlideReviewList } from "./SlideReviewList";
+import { DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath } from "../../prefs";
 import { useCurrentJob } from "../../sessions";
 import { JobName } from "../../components/JobName";
 
@@ -44,6 +46,7 @@ type DskResult = {
   pages?: DskPage[];
   skipped?: DskSkip[];
   deckPath?: string;
+  exportDir?: string;
   slidesKept?: number[];
   warnings?: string[];
   overflows?: string[];
@@ -61,6 +64,8 @@ export function DskGenerator() {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useSessionPath(DSK_WORKSPACE_KEY);
+  const defaultExportDir = useDefaultExportDir();
 
   const result = (job?.result || undefined) as DskResult | undefined;
   const pages = result?.pages || [];
@@ -121,10 +126,20 @@ export function DskGenerator() {
   async function run() {
     if (!job) return;
     setError(null);
+    let chosen;
+    try {
+      chosen = await chooseFolder("DSK workspace", workspace || defaultExportDir || undefined);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/cancel/i.test(message)) return;
+      setError(message);
+      return;
+    }
+    setWorkspace(chosen.path);
     setBusy(true);
     try {
       await saveDskDecisions(job.id, toDecisionsPayload(decisions));
-      const created = await applyDsk(job.id, toDecisionsPayload(decisions));
+      const created = await applyDsk(job.id, toDecisionsPayload(decisions), chosen.path);
       upsert(created);
       await track(created);
     } catch (err) {

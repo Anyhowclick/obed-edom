@@ -169,6 +169,7 @@ class DskDecisionsBody(BaseModel):
     """`{slide, include, action, anchor, keepSide, clip}` per proposed page."""
 
     decisions: list[dict[str, Any]] | None = None
+    exportDir: str | None = None
 
 
 class SettingsBody(BaseModel):
@@ -260,11 +261,17 @@ def create_app() -> FastAPI:
         return {"path": path, "name": Path(path).name}
 
     @app.post("/api/choose-folder")
-    def choose_folder(prompt: str = Form("Select the output folder")) -> dict:
-        script = (
-            f'set theFolder to choose folder with prompt "{_as_escape(prompt)}"\n'
-            "POSIX path of theFolder"
-        )
+    def choose_folder(
+        prompt: str = Form("Select the output folder"),
+        default_location: str = Form(""),
+    ) -> dict:
+        cmd = f'set theFolder to choose folder with prompt "{_as_escape(prompt)}"'
+        loc = default_location.strip()
+        if loc:
+            candidate = Path(loc).expanduser()
+            if candidate.is_dir() and candidate.is_absolute():
+                cmd += f' default location (POSIX file "{_as_escape(str(candidate))}")'
+        script = f"{cmd}\nPOSIX path of theFolder"
         proc = subprocess.run(
             ["osascript", "-"],
             input=script,
@@ -756,6 +763,14 @@ def create_app() -> FastAPI:
             save_dsk_decisions(job_id, payload)
         job = RUNNER.get(job_id)
         result = dict((job.result if job else None) or {})
+        if payload and payload.exportDir is not None and payload.exportDir.strip():
+            try:
+                result["exportDir"] = str(validate_export_dir(payload.exportDir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            seeded = RUNNER.update_result(job_id, result)
+            if seeded:
+                result = dict(seeded.result or result)
         key = Path(str(result.get("path") or "")).expanduser()
         if not key.exists():
             raise HTTPException(400, "The FW deck has moved since proposing.")
@@ -775,6 +790,7 @@ def create_app() -> FastAPI:
         range_from: int | None = Form(None),
         range_to: int | None = Form(None),
         slides: str = Form(""),
+        export_dir: str = Form(""),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
@@ -783,9 +799,15 @@ def create_app() -> FastAPI:
             sel = resolve_slides(spec=slides or None, range_from=range_from, range_to=range_to)
         except ValueError as err:
             raise HTTPException(400, str(err))
+        resolved_export_dir = ""
+        if export_dir.strip():
+            try:
+                resolved_export_dir = str(validate_export_dir(export_dir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         job = RUNNER.submit(
             "dsk-export",
-            lambda j, p=key, sl=sel: _run_dsk_export_propose(j, p, sl),
+            lambda j, p=key, sl=sel, ed=resolved_export_dir: _run_dsk_export_propose(j, p, sl, ed),
             feature="dsk-export",
         )
         return job.to_dict()
@@ -1993,8 +2015,15 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             anchor=str(decision.get("anchor") or "auto"),
             keep_side=number in include_side,
         )
-    out_dir = _dsk_output_dir(path)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_export = str(proposal.get("exportDir") or "").strip()
+    if raw_export:
+        try:
+            out_dir = validate_export_dir(raw_export)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+    else:
+        out_dir = _dsk_output_dir(path)
+        out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{path.stem}_DSK.key"
     src_dir = out_dir / "src"
 
@@ -2120,6 +2149,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         "wallS": result.wall_s,
         "pages": pages,
         "contentOnly": content_only,
+        **({"exportDir": str(out_dir)} if raw_export else {}),
     }
 
 
@@ -2286,7 +2316,7 @@ def _dsk_export_action(category: str) -> str:
 
 
 def _run_dsk_export_propose(
-    job: Job, path: Path, slide_range: frozenset[int] | None
+    job: Job, path: Path, slide_range: frozenset[int] | None, export_dir: str = ""
 ) -> dict[str, Any]:
     job.log(f"Reading {path.name} for the DSK exporter…")
     payload = offline_wall_payload(path)
@@ -2337,6 +2367,7 @@ def _run_dsk_export_propose(
         "thumbDir": str(thumb_dir),
         "pages": pages,
         "skipped": skipped,
+        **({"exportDir": export_dir} if export_dir else {}),
     }
 
 
@@ -2350,14 +2381,22 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"{path.name} is not a 1920x1080 DSK deck; stage PNG export needs a DSK-sized deck."
         )
-    out_dir = path.parent
-    src_dir = out_dir / "src"
+    deck_dir = path.parent
+    raw_export = str(proposal.get("exportDir") or "").strip()
+    if raw_export:
+        try:
+            out_dir = validate_export_dir(raw_export)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+    else:
+        out_dir = deck_dir
+    src_dir = deck_dir / "src"
     categories = {int(p["slide"]): str(p.get("category") or "") for p in included}
     clip_slides = sorted(
         int(p["slide"]) for p in included if _dsk_export_action(categories[int(p["slide"])]) == "clip"
     )
     stage_slides = sorted(int(p["slide"]) for p in included if int(p["slide"]) not in set(clip_slides))
-    existing = read_manifest(out_dir, deck=path)
+    existing = read_manifest(deck_dir, deck=path)
 
     clips: dict[int, Path] = {}
     if clip_slides:
@@ -2381,6 +2420,7 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             log=job.log,
         )
         job.log(f"Exported {len(assets)} stage PNG(s).")
+    deck_dir_real = deck_dir.resolve()
     out_dir_real = out_dir.resolve()
     to_delete: list[Path] = []
     seen: set[Path] = set()
@@ -2399,16 +2439,27 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
                     continue
                 try:
                     candidate_real = candidate.resolve()
-                    candidate_real.relative_to(out_dir_real)
+                    candidate_real.relative_to(deck_dir_real)
                 except ValueError:
-                    job.log(f"Skipping {rel!r}: resolves outside the output directory")
+                    job.log(f"Skipping {rel!r}: resolves outside the deck directory")
                     continue
                 if candidate.is_file() and candidate_real not in seen:
                     seen.add(candidate_real)
                     to_delete.append(candidate)
+    same_dir = out_dir_real == deck_dir_real
     write_manifest(
-        out_dir, path, assets, categories=categories, clips=clips, existing=existing, drop_src=True
+        out_dir,
+        path,
+        assets,
+        categories=categories,
+        clips=clips,
+        existing=existing if same_dir else None,
+        drop_src=True,
     )
+    if not same_dir:
+        write_manifest(
+            deck_dir, path, [], categories=categories, existing=existing, drop_src=True
+        )
     if to_delete:
         deleted: list[Path] = []
         for f in to_delete:
@@ -2435,6 +2486,7 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         "sequence": sequence,
         "skipped": proposal.get("skipped") or [],
         "exportedClips": clip_slides,
+        **({"exportDir": str(out_dir)} if raw_export else {}),
     }
 
 

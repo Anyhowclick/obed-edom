@@ -1,6 +1,7 @@
 import { act, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMapsTab, tick } from "./renderMapsTab";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeDoc, makeJob } from "./fakes/doc";
 
@@ -26,7 +27,7 @@ describe("credits slide toggle in the Export inspector tab", () => {
     await act(async () => {
       fireEvent.click(checkbox);
     });
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);
@@ -48,7 +49,7 @@ describe("credits slide toggle in the Export inspector tab", () => {
     await act(async () => {
       fireEvent.click(checkbox);
     });
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);

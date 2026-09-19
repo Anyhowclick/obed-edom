@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMapsTab, tick } from "./renderMapsTab";
 import type { Job } from "../src/api";
 import { makeCamera, makeDoc, makeJob } from "./fakes/doc";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 import { mapsApiScript } from "./fakes/mapsApi";
 
 beforeEach(() => {
@@ -46,13 +47,17 @@ describe("save-status pill", () => {
     await tick(0);
     expect(pillState()).toBe("Unsaved (maps-save-status-unsaved)");
 
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
     expect(pillState()).toBe("Saving… (maps-save-status-saving)");
 
     resolveSave(makeJob({ id: job.id, result: { ...doc, stateRevision: 2 } }));
     await tick(0);
     expect(pillState()).toBe("Saved (maps-save-status-saved)");
     expect(pill()).toHaveAttribute("aria-live", "polite");
+    expect(JSON.parse(sessionStorage.getItem("obed-edom.maps.saveStatus") || "")).toEqual({
+      jobId: job.id,
+      status: "saved",
+    });
   });
 
   it("moves to Paused on a scripted conflict", async () => {
@@ -68,7 +73,7 @@ describe("save-status pill", () => {
       stateRevision: 5,
     });
 
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
     await tick(0);
 
     expect(pillState()).toBe("Paused (maps-save-status-paused)");

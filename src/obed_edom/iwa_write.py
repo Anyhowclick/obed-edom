@@ -31,7 +31,13 @@ from google.protobuf.json_format import MessageToDict, ParseDict
 from keynote_parser.codec import IWAFile, import_version
 
 from obed_edom.iwa_builds import _contains_identifier
-from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _path_source, _xywha, compose_geometry
+from obed_edom.iwa_geometry import (
+    _geom_dict,
+    _is_rotated,
+    _path_source,
+    _xywha,
+    compose_geometry,
+)
 from obed_edom.iwa_kindindex import (
     derive_kind_index,
     derived_kind_counts,
@@ -267,16 +273,37 @@ def _line_fields(rec: dict, obj: dict, spec: dict) -> list[tuple[str, dict]]:
     })]
 
 
+_TEXT_WIDTH_KEEP_PX = 0.5
+
+
 def _text_fields(rec: dict, spec: dict, reported: list[float],
-                 stored: tuple[float, float, float, float, float]) -> list[tuple[str, dict]]:
-    """A stored width or height of ``0.0`` never reaches this function (the caller hard-misses
+                 stored: tuple[float, float, float, float, float],
+                 *, position_only: bool = False) -> list[tuple[str, dict]]:
+    """A stored width or height of ``0.0`` reaches this function only under
+    ``position_only`` (the autosize reposition path); otherwise the caller hard-misses
     it to the AppleScript fallback -- ``naturalSize`` is Keynote's render cache and only a
-    live write refreshes it). ``naturalSize`` tracks ``geometry.size`` on both axes.
+    live write refreshes it. ``naturalSize`` tracks ``geometry.size`` on both axes.
+
+    ``position_only`` emits ``pos_x``/``pos_y`` alone (never a size on either axis): an
+    autosize box was already regrown to its final size by pass 1, so the offline pass only
+    re-seats it. BOTH axes are a delta off the live ``reported`` frame; because the stored
+    origin is the box's alignment anchor (left/centre/right on x, top/middle/bottom on y),
+    the delta cancels the anchor and the stale ``naturalSize``, so the reposition is
+    anchor-agnostic when the box's width/height are unchanged -- which a position-only move
+    guarantees (it changes no layout input, so Keynote re-lays the box out identically).
+    The fixed-frame path keeps ``pos_x`` absolute (a fixed-width box is left-anchored) and
+    writes the size deltas.
     """
     fields: dict[str, float] = {}
-    if spec.get("x") is not None:  # left-aligned autosize x is exact absolute
+    if position_only:
+        if spec.get("x") is not None:
+            fields["pos_x"] = stored[0] + (float(spec["x"]) - reported[0])
+        if spec.get("y") is not None:
+            fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
+        return [(rec["id"], fields)] if fields else []
+    if spec.get("x") is not None:  # fixed frame: x is exact absolute (left-anchored)
         fields["pos_x"] = float(spec["x"])
-    if spec.get("y") is not None:  # stored y is the vertical centre: move it by the delta
+    if spec.get("y") is not None:
         fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
     if spec.get("w") is not None and stored[2] != 0.0:  # autosize width has no writable frame
         fields["size_w"] = stored[2] + (float(spec["w"]) - reported[2])
@@ -389,16 +416,41 @@ def _is_identity_mask(fw: float, fh: float, fa: float, mx: float, my: float,
     return (abs(mx) <= tol_x and abs(my) <= tol_y and abs(mw - fw) <= tol_x and abs(mh - fh) <= tol_y)
 
 
+def _is_axis_aligned_crop(fw: float, fh: float, fa: float, mx: float, my: float,
+                          mw: float, mh: float, ma: float) -> bool:
+    """Axis-aligned mask that is a genuine sub-window within the image frame's boundary
+    tolerance at ANY offset. ``_masked_media_fields`` is exact for it (image pos =
+    target - mask_pos*s); live validation (2026-09-18) confirmed Keynote redistributes an
+    OFFSET crop the same way across a reopen (frame Delta 0.48px, per-region pixel check
+    <=1px). Refused: rotations, non-finite or non-positive dimensions, and a mask window that
+    spills past the frame. The boundary-overhang tolerance is bounded relative to BOTH the
+    frame AND the mask, so a tiny mask cannot inherit the frame's looser absolute tolerance
+    and blow up the derived scale (a fully-interior tiny mask stays legal)."""
+    if not all(math.isfinite(v) for v in (fw, fh, mx, my, mw, mh)):
+        return False
+    if _is_rotated(fa) or _is_rotated(ma):
+        return False
+    if fw <= 0.0 or fh <= 0.0 or mw <= 0.0 or mh <= 0.0:
+        return False
+    tol_x = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fw, 1.0), _MASK_IDENTITY_REL * mw)
+    tol_y = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fh, 1.0), _MASK_IDENTITY_REL * mh)
+    return (mx >= -tol_x and my >= -tol_y
+            and mx + mw <= fw + tol_x and my + mh <= fh + tol_y)
+
+
 def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: dict,
-                         reported: list[float]) -> tuple[list[tuple[str, dict]], str | None, bool]:
-    """Place a masked image/movie whose mask is an IDENTITY window; REFUSE any real crop.
+                         reported: list[float], *, allow_crop: bool = False,
+                         ) -> tuple[list[tuple[str, dict]], str | None, bool]:
+    """Place a masked image/movie. Always writes an IDENTITY window (no crop); under
+    ``allow_crop`` also ANY axis-aligned crop within the frame's boundary tolerance (offset
+    included). REFUSE a rotation always.
 
     Production never displaces a mask: the IMAGE frame moves and the mask stays put (325/325
     masks have naturalSize == their own size; the composed rect is image_pos + mask_pos).
-    The transform below is exact for ANY mask -- image pos = target - mask_pos*s, both sizes
-    scaled by s = target/mask -- but for a real crop we cannot prove offline that Keynote
-    redistributes it this way, so only the identity case (no crop, 100 %/0 % split, verified
-    against 70 production objects) is written. ok=False => hard miss.
+    The transform below is exact for ANY axis-aligned mask -- image pos = target - mask_pos*s,
+    both sizes scaled by s = target/mask. Live validation confirmed the same transform holds
+    for an OFFSET crop across a Keynote reopen. ok=False => hard miss; a non-finite derived
+    field (degenerate mask/target dims blowing up s) is refused the same way.
     """
     mask_ref = (obj.get("mask") or {}).get("identifier")
     if mask_ref is None:
@@ -409,7 +461,10 @@ def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: d
         return ([], None, False)
     _fx, _fy, fw, fh, fa = _xywha(_geom_dict(obj))
     mx, my, mw, mh, ma = _xywha(_geom_dict(mask_obj))
-    if not _is_identity_mask(fw, fh, fa, mx, my, mw, mh, ma):
+    # Identity (no crop) is always written; any within-frame axis-aligned crop (offset
+    # included) under `allow_crop`. Rotations always refused -> hard miss to the fallback.
+    if not (_is_identity_mask(fw, fh, fa, mx, my, mw, mh, ma)
+            or (allow_crop and _is_axis_aligned_crop(fw, fh, fa, mx, my, mw, mh, ma))):
         return ([], mask_id, False)
     if not _natural_writable(mask_obj, both_axes=True) or not _natural_writable(obj, both_axes=True):
         return ([], mask_id, False)
@@ -418,12 +473,13 @@ def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: d
     tw = float(spec["w"]) if spec.get("w") is not None else mw
     th = float(spec["h"]) if spec.get("h") is not None else mh
     sx, sy = tw / mw, th / mh
-    return ([
-        (mask_id, {"pos_x": mx * sx, "pos_y": my * sy, "size_w": tw, "size_h": th,
-                   "natural_w": tw, "natural_h": th}),
-        (rec["id"], {"pos_x": tx - mx * sx, "pos_y": ty - my * sy, "size_w": fw * sx, "size_h": fh * sy,
-                     "natural_w": fw * sx, "natural_h": fh * sy}),
-    ], mask_id, True)
+    mask_fields = {"pos_x": mx * sx, "pos_y": my * sy, "size_w": tw, "size_h": th,
+                   "natural_w": tw, "natural_h": th}
+    rec_fields = {"pos_x": tx - mx * sx, "pos_y": ty - my * sy, "size_w": fw * sx, "size_h": fh * sy,
+                 "natural_w": fw * sx, "natural_h": fh * sy}
+    if not all(math.isfinite(v) for v in (*mask_fields.values(), *rec_fields.values())):
+        return ([], mask_id, False)
+    return ([(mask_id, mask_fields), (rec["id"], rec_fields)], mask_id, True)
 
 
 def _apply_geom_fields(archive_obj: dict, fields: dict) -> None:
@@ -528,6 +584,8 @@ def _slide_edits(
     address: str = "positional",
     source_counts: dict[str, int] | None = None,
     require_reconcile: bool = False,
+    text_reposition: bool = False,
+    mask_crop: bool = False,
 ) -> tuple[str | None, dict[str, dict], int, list[dict], list[str], str | None]:
     """Pure, no-I/O resolution of one slide's edits against an already-loaded deck.
 
@@ -628,19 +686,54 @@ def _slide_edits(
                 ops = ops + child_ops
         elif kind == "text":
             # An autosize width or height (the 0.0 sentinel on either axis) is a Keynote
-            # render cache only the live app refreshes -- hard miss to the AppleScript fallback.
+            # render cache only the live app refreshes, so a size write is impossible offline.
+            # With `text_reposition` we still re-seat the box (position only, never a size --
+            # pass 1 already regrew it); without the flag it hard-misses to the AppleScript
+            # fallback, unchanged.
             if stored[2] == 0.0 or stored[3] == 0.0:
-                _miss("text-autosize")
-                continue
-            wants_h = spec.get("h") is not None
-            if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
-                _miss("text-resize-unwritable")
-                continue
-            ops = _text_fields(rec, spec, rep, stored)
+                # Autosize sentinel (0.0 width or height): reposition only -- pass 1 already
+                # regrew the box, and naturalSize is Keynote's render cache no offline write
+                # refreshes. `_text_fields(position_only)` moves BOTH axes by a delta off the
+                # live `reported` frame, which is anchor-agnostic: stored x/y is the alignment
+                # anchor, and the delta cancels it and any stale naturalSize when the size is
+                # unchanged (a position-only move guarantees that). Middle/bottom-anchored and
+                # un-laid-out boxes reposition correctly too -- the old "middle drifts ~174px" +
+                # "un-laid-out mis-renders" refusals were one mis-diagnosis (the 174 was a
+                # right-anchored box under an absolute pos_x, now a delta).
+                #
+                # The one remaining gate is a TRUSTWORTHY live seed: the delta reads
+                # reported[x, y]; a failed bulk read zero-fills to [0, 0, 0, 0] and the composed
+                # frame is not the live anchor. There is NO laid-out gate -- pass 1 zeroes
+                # naturalSize on every autosize box, and admitting those is live-validated
+                # (2026-09-18: 137 boxes, 136/136 un-laid-out post-pass-1, verify text max
+                # 0.98px; see .agents/plans/offline_text_middle_anchor.plan.md).
+                seed_ok = have_reported and rep[2] > 0.0 and rep[3] > 0.0
+                if not text_reposition or not seed_ok:
+                    _miss("text-autosize")
+                    continue
+                # A grow-height box (real stored width, autosize height) holds pass 1's
+                # canvas-scaled width; a position-only write would leave it there and the
+                # text re-wraps per character (2026-09-18 full deck: 102 boxes at 0.25x).
+                # Only the live width write fixes that, so it misses to the fallback.
+                if (stored[2] != 0.0 and spec.get("w") is not None
+                        and abs(float(spec["w"]) - rep[2]) > _TEXT_WIDTH_KEEP_PX):
+                    _miss("text-grow-height-width")
+                    continue
+                ops = _text_fields(rec, spec, rep, stored, position_only=True)
+                if not ops or not ops[0][1]:  # nothing to reposition (spec bore only w/h)
+                    _miss("text-autosize")
+                    continue
+            else:
+                wants_h = spec.get("h") is not None
+                if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
+                    _miss("text-resize-unwritable")
+                    continue
+                ops = _text_fields(rec, spec, rep, stored)
         elif kind in ("image", "movie"):
             if masked:
-                ops, mask_id, ok = _masked_media_fields(rec, obj, objects, spec, rep)
-                # Cropped, rotated, unresolved or cross-member mask: miss, never mis-write.
+                ops, mask_id, ok = _masked_media_fields(
+                    rec, obj, objects, spec, rep, allow_crop=mask_crop)
+                # Disallowed crop, rotated, unresolved or cross-member mask: miss, never mis-write.
                 if not ok or mask_id is None or id_to_file.get(mask_id) != target_member:
                     _miss("masked-media")
                     continue
@@ -653,11 +746,16 @@ def _slide_edits(
             _miss(f"unsupported-kind:{kind}")
             continue
 
-        # Soft class used the reported frame: count for the 0-fallback gate. Masked
-        # images only fall back to `reported` for x/y (never w/h — those read the mask).
-        used_reported = kind == "text" or (
-            masked and (spec.get("x") is None or spec.get("y") is None)
-        )
+        # Soft class used the reported frame: count for the 0-fallback gate. An autosize
+        # position-only move now reads `reported` for both pos_x and pos_y, but it is gated
+        # on a present seed (have_reported) above, so it can never be a MISSING-seed soft
+        # fallback; keying the text predicate off the pos_y/size deltas therefore still holds
+        # (the fixed-frame path is the only text path that falls back to the composed frame).
+        # Masked images only fall back to `reported` for x/y (never w/h).
+        used_reported = (
+            kind == "text"
+            and any(k in f for _oid, f in ops for k in ("pos_y", "size_w", "size_h"))
+        ) or (masked and (spec.get("x") is None or spec.get("y") is None))
         if used_reported and not have_reported and ops:
             soft_fallbacks += 1
 
@@ -850,6 +948,8 @@ def patch_deck_geometry(
     address: str = "positional",
     require_reconcile: bool = True,
     extra_member_edits: dict[str, bytes] | None = None,
+    text_reposition: bool = False,
+    mask_crop: bool = False,
 ) -> dict[int, PatchResult]:
     """Patch every slide in ``specs_by_slide`` with exactly ONE zip rewrite.
 
@@ -878,6 +978,8 @@ def patch_deck_geometry(
             address=address,
             source_counts=source_counts_by_slide.get(n),
             require_reconcile=require_reconcile,
+            text_reposition=text_reposition,
+            mask_crop=mask_crop,
         )
         if not refuse_reason and target_member is not None and edits:
             owner = member_owner.get(target_member)

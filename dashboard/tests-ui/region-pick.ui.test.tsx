@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushMicrotasks, loadAdmin0Stub, loadAdmin1Stub, renderMapsTab, tick } from "./renderMapsTab";
 import { MAPS_PICK_MODE_KEY } from "../src/prefs";
 import { makeCamera, makeDoc, makeJob, makeSlide } from "./fakes/doc";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 import { mapsApiScript } from "./fakes/mapsApi";
 import type { MapsIsolate } from "../src/maps/types";
 
@@ -261,7 +262,7 @@ describe("Isolate toggle label", () => {
     await act(async () => {
       fireEvent.click(screen.getByTitle("Remove highlight"));
     });
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     expect(screen.queryByRole("checkbox", { name: /Isolate/ })).not.toBeInTheDocument();
     const calls = mapsApiScript.saveMapsState.calls;
@@ -308,7 +309,7 @@ describe("Isolate toggle label", () => {
     await act(async () => {
       fireEvent.click(screen.getByTitle("Remove highlight"));
     });
-    await tick(500);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     expect(screen.queryByRole("checkbox", { name: /Isolate/ })).not.toBeInTheDocument();
     const calls2 = mapsApiScript.saveMapsState.calls;

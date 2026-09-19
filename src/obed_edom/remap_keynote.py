@@ -165,6 +165,62 @@ def zorder_write_mode(
     return mode
 
 
+def offline_text_reposition_enabled(
+    explicit: str | None = None, *, offline_mode: str | None = None,
+    say: Callable[[str], None] | None = None,
+) -> bool:
+    """Offline reposition of autosize text boxes (default OFF). Env `OBED_OFFLINE_TEXT`
+    (`1`/`true`/`yes`/`on` enables). An autosize box's `naturalSize` is Keynote's render
+    cache, unwritable offline, so today it hard-misses to the AppleScript fallback; when ON
+    the offline writer re-seats it (position only, no size -- pass 1 already regrew it).
+    Forced OFF when `offline_mode` is `off` (no offline slides to patch)."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_TEXT", "")).strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    if offline_mode == "off":
+        if say:
+            say("OBED_OFFLINE_TEXT needs OBED_OFFLINE_WRITE on; no offline slides to reposition.")
+        return False
+    return True
+
+
+def offline_maskcrop_enabled(
+    explicit: str | None = None, *, offline_mode: str | None = None,
+    say: Callable[[str], None] | None = None,
+) -> bool:
+    """Offline write of masked-media CROPs (default OFF). Env `OBED_OFFLINE_MASKCROP`
+    (`1`/`true`/`yes`/`on`). Today the surgical writer only writes an IDENTITY mask (no crop)
+    and hard-misses every real crop; when ON it also writes ANY axis-aligned within-frame crop
+    (offset included) via the existing `_masked_media_fields` transform. Rotated and
+    cross-member crops stay refused. Forced OFF when `offline_mode` is `off`."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_MASKCROP", "")).strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    if offline_mode == "off":
+        if say:
+            say("OBED_OFFLINE_MASKCROP needs OBED_OFFLINE_WRITE on; no offline slides to write.")
+        return False
+    return True
+
+
+def _debug_snapshot_pass1(dest: Path, say: Callable[[str], None] | None = None) -> None:
+    """Diagnostic: when `OBED_DEBUG_PASS1_SNAPSHOT` is a path, copy the pass-1-saved deck
+    there for an offline `naturalSize` census (the owner-gated text experiment's conversion
+    ceiling). No-op otherwise; never fails the run."""
+    target = os.environ.get("OBED_DEBUG_PASS1_SNAPSHOT", "").strip()
+    if not target:
+        return
+    try:
+        import shutil  # noqa: PLC0415
+
+        shutil.copy2(dest, target)
+        if say:
+            say(f"Pass-1 snapshot written to {target}.")
+    except Exception as exc:  # noqa: BLE001 — diagnostic only, never break the run
+        if say:
+            say(f"Pass-1 snapshot failed ({type(exc).__name__}: {exc}); continuing.")
+
+
 def _spec_addr(spec: dict[str, Any]) -> tuple:
     return (int(spec.get("slide", -1)), str(spec.get("kind")), int(spec.get("kindIndex", -1)))
 
@@ -1457,8 +1513,12 @@ def remap_keynote(
             f"{len(applied_layouts)} slide(s)."
         )
     _require_pass1_saved_closed(jxa)
+    _debug_snapshot_pass1(dest, say)
+    text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)
+    mask_crop = offline_maskcrop_enabled(offline_mode=offline_mode, say=say)
     offline_write_info = offline_write.run_offline_write(
-        dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say
+        dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say,
+        text_reposition=text_reposition, mask_crop=mask_crop,
     )
     zorder_mode = zorder_write_mode(offline_mode=offline_mode, say=say)
     zorder_refused = set((offline_write_info or {}).get("refused") or [])

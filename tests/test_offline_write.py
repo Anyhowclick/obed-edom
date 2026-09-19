@@ -24,6 +24,7 @@ from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.paths import find_repo_root
 from obed_edom.offline_write import (
     OFFLINE_VERIFY_TOL,
+    _drop_unreadable_seed_rows,
     _fallback_bodies,
     _fallback_specs_by_slide,
     _offline_write_slides,
@@ -43,7 +44,11 @@ from obed_edom.offline_write import (
     verify_live_frames_multiset,
     verify_offline_frames,
 )
-from obed_edom.remap_keynote import offline_write_mode
+from obed_edom.remap_keynote import (
+    offline_maskcrop_enabled,
+    offline_text_reposition_enabled,
+    offline_write_mode,
+)
 from scripts.offline_write_ab import (
     CARD_REF_FLOOR,
     Tolerances,
@@ -128,6 +133,89 @@ def test_offline_write_mode_forced_off_without_as_geometry(monkeypatch):
     said = []
     assert offline_write_mode(say=said.append) == "off"
     assert said and "OBED_AS_GEOMETRY" in said[0]
+
+
+# --- _drop_unreadable_seed_rows ----------------------------------------------
+
+
+def test_drop_unreadable_seed_rows_drops_only_errored_item():
+    # Error slide is 0-based (doc index); the seed is keyed 1-based. where=item:<row>,
+    # row == kindIndex. Only the (text, 0) row on slide 5 is dropped.
+    reported = {
+        5: {("text", 0): [0.0, 0.0, 174.0, 77.0], ("text", 1): [100.0, 200.0, 50.0, 20.0]},
+        6: {("text", 0): [10.0, 20.0, 30.0, 40.0]},
+    }
+    errors = [{"slide": 4, "kind": "text", "where": "item:0", "error": "position unreadable"}]
+    out = _drop_unreadable_seed_rows(reported, errors)
+    assert ("text", 0) not in out[5]
+    assert out[5][("text", 1)] == [100.0, 200.0, 50.0, 20.0]  # sibling untouched
+    assert out[6][("text", 0)] == [10.0, 20.0, 30.0, 40.0]    # other slide untouched
+
+
+def test_drop_unreadable_seed_rows_ignores_non_item_errors():
+    # Whole-collection / bulk / count errors carry no row index; they already null the
+    # kind's rows upstream, so there is nothing to drop here.
+    reported = {1: {("image", 0): [1.0, 2.0, 3.0, 4.0]}}
+    errors = [
+        {"slide": 0, "kind": "image", "where": "collection", "error": "x"},
+        {"slide": 0, "kind": "image", "where": "bulk:position", "error": "y"},
+        {"slide": None, "kind": "text", "where": "item:0", "error": "z"},  # no slide -> skip
+    ]
+    out = _drop_unreadable_seed_rows(reported, errors)
+    assert out[1][("image", 0)] == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_drop_unreadable_seed_rows_handles_empty_and_missing():
+    reported = {2: {("movie", 3): [0.0, 0.0, 0.0, 0.0]}}
+    assert _drop_unreadable_seed_rows(reported, None) == reported  # no errors -> unchanged
+    # error for a (kind, idx)/slide not present in the seed is a no-op, not an error
+    out = _drop_unreadable_seed_rows(reported, [{"slide": 99, "kind": "movie", "where": "item:3"}])
+    assert out[2][("movie", 3)] == [0.0, 0.0, 0.0, 0.0]
+
+
+# --- offline_text_reposition_enabled -----------------------------------------
+
+
+def test_offline_text_reposition_defaults_off(monkeypatch):
+    monkeypatch.delenv("OBED_OFFLINE_TEXT", raising=False)
+    assert offline_text_reposition_enabled() is False
+
+
+def test_offline_text_reposition_parses_truthy_tokens(monkeypatch):
+    for tok in ("1", "true", "yes", "on", "ON"):
+        monkeypatch.setenv("OBED_OFFLINE_TEXT", tok)
+        assert offline_text_reposition_enabled() is True
+    for tok in ("0", "off", "no", "bogus", ""):
+        monkeypatch.setenv("OBED_OFFLINE_TEXT", tok)
+        assert offline_text_reposition_enabled() is False
+
+
+def test_offline_text_reposition_forced_off_when_offline_write_off(monkeypatch):
+    monkeypatch.setenv("OBED_OFFLINE_TEXT", "on")
+    said = []
+    assert offline_text_reposition_enabled(offline_mode="off", say=said.append) is False
+    assert said and "OBED_OFFLINE_WRITE" in said[0]
+
+
+# --- offline_maskcrop_enabled ------------------------------------------------
+
+
+def test_offline_maskcrop_defaults_off_and_parses_tokens(monkeypatch):
+    monkeypatch.delenv("OBED_OFFLINE_MASKCROP", raising=False)
+    assert offline_maskcrop_enabled() is False
+    for tok in ("1", "true", "yes", "on", "ON"):
+        monkeypatch.setenv("OBED_OFFLINE_MASKCROP", tok)
+        assert offline_maskcrop_enabled() is True
+    for tok in ("0", "off", "no", "bogus", ""):
+        monkeypatch.setenv("OBED_OFFLINE_MASKCROP", tok)
+        assert offline_maskcrop_enabled() is False
+
+
+def test_offline_maskcrop_forced_off_when_offline_write_off(monkeypatch):
+    monkeypatch.setenv("OBED_OFFLINE_MASKCROP", "on")
+    said = []
+    assert offline_maskcrop_enabled(offline_mode="off", say=said.append) is False
+    assert said and "OBED_OFFLINE_WRITE" in said[0]
 
 
 # --- probe_iwa_extra (BLOCKER item 1) -----------------------------------------

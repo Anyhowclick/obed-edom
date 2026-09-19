@@ -51,6 +51,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     _apply_geom_fields,
     _group_child_scale_ops,
     _group_fields,
+    _is_axis_aligned_crop,
     _is_identity_mask,
     _masked_media_fields,
     _natural_unwritable,
@@ -239,6 +240,25 @@ def _build_cropped_mask_deck(path):
     """One masked image whose mask is a REAL crop (mask size < image size): the
     identity-mask write must refuse this rather than guess a redistribution."""
     mask = _arch(231, "TSD.MaskArchive", _mask_super(5, 5, 80, 40))
+    img = _arch(230, "TSD.ImageArchive",
+                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60),
+                 "originalSize": {"width": 120.0, "height": 60.0}})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, img, mask]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def _build_origin_crop_deck(path, *, mask_xy=(0, 0)):
+    """One masked image whose mask is an ORIGIN-anchored crop (offset ~0, smaller than the
+    image frame). Offset the mask to make it an OFFSET crop instead."""
+    mx, my = mask_xy
+    mask = _arch(231, "TSD.MaskArchive", _mask_super(mx, my, 80, 40))
     img = _arch(230, "TSD.ImageArchive",
                 {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60),
                  "originalSize": {"width": 120.0, "height": 60.0}})
@@ -675,6 +695,32 @@ def test_text_fields_fixed_height_also_writes_natural_h():
     assert fields["size_h"] == fields["natural_h"] == pytest.approx(90.0)
 
 
+def test_text_fields_position_only_emits_position_no_size():
+    # The autosize reposition path: even a spec asking for w/h on a box whose stored width
+    # is a real (non-sentinel) frame writes position ALONE -- pass 1 already sized the box.
+    # Both axes are anchor-cancelling deltas: stored x 800 is the centre (seed left 700 +
+    # w/2), so pos_x = 800 + (760 - 700) = 860 seats the centre so Keynote's re-layout lands
+    # the left edge at spec.x = 760.
+    rec = {"id": "9", "kind": "text", "kindIndex": 0}
+    stored = (800.0, 374.0, 200.0, 0.0, 0.0)  # sentinel height; stored x is the centre
+    reported = [700.0, 344.0, 200.0, 46.0]
+    spec = {"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 250.0, "h": 90.0}
+    (obj_id, fields), = _text_fields(rec, spec, reported, stored, position_only=True)
+    assert obj_id == "9"
+    assert fields["pos_x"] == pytest.approx(860.0)  # 800 + (760 - 700), anchor-cancelling delta
+    assert fields["pos_y"] == pytest.approx(434.0)  # 374 + (404 - 344)
+    assert not any(k in fields for k in ("size_w", "size_h", "natural_w", "natural_h"))
+
+
+def test_text_fields_position_only_size_only_spec_writes_nothing():
+    # No x/y in the spec: position-only has nothing to write (never a size), so it defers.
+    rec = {"id": "9", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 0.0, 0.0, 0.0)
+    reported = [700.0, 344.0, 452.0, 136.0]
+    spec = {"kind": "text", "kindIndex": 0, "w": 113.0}
+    assert _text_fields(rec, spec, reported, stored, position_only=True) == []
+
+
 def test_shape_fields_size_writes_geometry_and_naturalsize():
     rec = {"id": "5", "kind": "shape", "kindIndex": 0}
     spec = {"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0}
@@ -973,6 +1019,129 @@ def test_is_identity_mask_boundaries():
     assert _is_identity_mask(11.8, 20.9, 0.0, 0.07, 0.0, 11.8, 20.9, 0.0) is False
 
 
+def test_masked_media_fields_origin_crop_gated_by_flag():
+    # Origin crop, ANISOTROPIC target (sx=2, sy=3) to catch a broken image formula:
+    # refused without the flag, written with it. mask@(0,0,80,40), image@(300,100,120,60),
+    # target (400,200,160,120) => sx=160/80=2, sy=120/40=3.
+    objects = {
+        "231": {"_pbtype": "TSD.MaskArchive", **_mask_super(0, 0, 80, 40)},
+        "230": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "231"},
+                "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}},
+    }
+    rec = {"id": "230", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0}
+    reported = [300.0, 100.0, 120.0, 60.0]
+    off_ops, off_mask, off_ok = _masked_media_fields(rec, objects["230"], objects, spec, reported)
+    assert off_ok is False and off_ops == [] and off_mask == "231"  # refused, flag off
+    on_ops, on_mask, on_ok = _masked_media_fields(
+        rec, objects["230"], objects, spec, reported, allow_crop=True)
+    assert on_ok is True and on_mask == "231"
+    f = dict(on_ops)
+    # mask: origin (mask_pos*s = 0), sized to the target.
+    assert (f["231"]["pos_x"], f["231"]["pos_y"]) == pytest.approx((0.0, 0.0))
+    assert (f["231"]["size_w"], f["231"]["size_h"]) == pytest.approx((160.0, 120.0))
+    assert (f["231"]["natural_w"], f["231"]["natural_h"]) == pytest.approx((160.0, 120.0))
+    # image: pos = target - mask_pos*s = target; size = frame * s (120*2, 60*3).
+    assert (f["230"]["pos_x"], f["230"]["pos_y"]) == pytest.approx((400.0, 200.0))
+    assert (f["230"]["size_w"], f["230"]["size_h"]) == pytest.approx((240.0, 180.0))
+    assert (f["230"]["natural_w"], f["230"]["natural_h"]) == pytest.approx((240.0, 180.0))
+
+
+def test_is_axis_aligned_crop_predicate():
+    # Superset of origin: an OFFSET mask fully inside the frame is accepted.
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 20.0, 10.0, 80.0, 40.0, 0.0) is True
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 0.0, 0.0, 80.0, 40.0, 0.0) is True   # origin too
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 40.0, 20.0, 80.0, 40.0, 0.0) is True  # flush to edge
+    # Refused: mask spills past the frame (offset + size > frame).
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 60.0, 10.0, 80.0, 40.0, 0.0) is False  # 60+80 > 120
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, -5.0, 10.0, 80.0, 40.0, 0.0) is False  # negative offset
+    # Refused: rotation on frame or mask; degenerate/non-finite dims.
+    assert _is_axis_aligned_crop(120.0, 60.0, 90.0, 20.0, 10.0, 80.0, 40.0, 0.0) is False
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 20.0, 10.0, 80.0, 40.0, 12.0) is False
+    assert _is_axis_aligned_crop(float("nan"), 60.0, 0.0, 20.0, 10.0, 80.0, 40.0, 0.0) is False
+    assert _is_axis_aligned_crop(120.0, 60.0, 0.0, 20.0, 10.0, 0.0, 40.0, 0.0) is False
+
+
+def test_is_axis_aligned_crop_boundary_tolerance_bounded_by_mask_too():
+    # Codex finding: a sub-pixel mask mostly OUTSIDE the frame must not be admitted just
+    # because the frame-relative tolerance (0.5% of 3840 = 19.2px) is wide. The tolerance is
+    # also bounded relative to the MASK (0.5% of 0.001 ~ 0), so a -0.9px overhang on a
+    # 0.001px-wide mask is refused (it would otherwise blow sx up to 160000+).
+    assert _is_axis_aligned_crop(3840.0, 1080.0, 0.0, -0.9, 0.0, 0.001, 40.0, 0.0) is False
+    # A fully-interior tiny mask (no overhang at all) stays legal -- zooming a lot is fine.
+    assert _is_axis_aligned_crop(3840.0, 1080.0, 0.0, 100.0, 100.0, 0.001, 40.0, 0.0) is True
+
+
+def test_masked_media_fields_refuses_non_finite_derived_fields():
+    # A degenerate mask (near-zero width, origin-anchored so the predicate admits it) drives
+    # sx = target_w / mask_w to +inf; the non-finite guard in _masked_media_fields is the
+    # last line of defense the boundary-tolerance fix does not cover.
+    objects = {
+        "231": {"_pbtype": "TSD.MaskArchive", **_mask_super(0.0, 0.0, 1e-320, 40.0)},
+        "230": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "231"},
+                "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}},
+    }
+    rec = {"id": "230", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0}
+    reported = [300.0, 100.0, 120.0, 60.0]
+    ops, mask_id, ok = _masked_media_fields(
+        rec, objects["230"], objects, spec, reported, allow_crop=True)
+    assert ok is False and ops == [] and mask_id == "231"
+
+
+def test_masked_media_fields_offset_crop_gated_by_crop_flag():
+    # OFFSET crop, anisotropic target: refused with the flag off, written under allow_crop.
+    # mask@(20,10,80,40), image@(300,100,120,60), target (400,200,160,120) => sx=2, sy=3;
+    # image pos = target - mask_pos*s.
+    objects = {
+        "231": {"_pbtype": "TSD.MaskArchive", **_mask_super(20, 10, 80, 40)},
+        "230": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "231"},
+                "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}},
+    }
+    rec = {"id": "230", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0}
+    reported = [300.0, 100.0, 120.0, 60.0]
+    off_ops, _m, off_ok = _masked_media_fields(rec, objects["230"], objects, spec, reported)
+    assert off_ok is False and off_ops == []
+    on_ops, on_mask, on_ok = _masked_media_fields(
+        rec, objects["230"], objects, spec, reported, allow_crop=True)
+    assert on_ok is True and on_mask == "231"
+    f = dict(on_ops)
+    assert (f["231"]["pos_x"], f["231"]["pos_y"]) == pytest.approx((40.0, 30.0))  # mask_pos*s = (20*2,10*3)
+    assert (f["231"]["size_w"], f["231"]["size_h"]) == pytest.approx((160.0, 120.0))
+    assert (f["230"]["pos_x"], f["230"]["pos_y"]) == pytest.approx((360.0, 170.0))  # target - mask_pos*s
+    assert (f["230"]["size_w"], f["230"]["size_h"]) == pytest.approx((240.0, 180.0))  # frame * s
+
+
+def test_slide_edits_origin_crop_missed_off_written_on(tmp_path):
+    # End-to-end through _slide_edits: an origin-crop image hard-misses masked-media with the
+    # flag off, and is written (no miss) with mask_crop on.
+    deck = _build_origin_crop_deck(tmp_path / "origin.key")
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    off = patch_deck_geometry(deck, {1: specs}, require_reconcile=False)[1]
+    assert off.missed == 1 and off.applied == 0 and off.missed_specs == specs
+    on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert on.applied and not on.refused and on.value_clean and set(on.edited_ids) == {"230", "231"}
+    # composed visible rect lands on the target crop (read-back through compose_geometry).
+    after = _composed(deck)
+    assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
+
+
+def test_slide_edits_offset_crop_missed_off_written_on(tmp_path):
+    # An OFFSET crop (mask displaced) is written under mask_crop (live-validated, same exact
+    # transform), still refused with the flag off.
+    deck = _build_origin_crop_deck(tmp_path / "offset.key", mask_xy=(5, 5))
+    original = deck.read_bytes()
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    refused = patch_deck_geometry(deck, {1: specs}, require_reconcile=False)[1]
+    assert refused.missed == 1 and refused.applied == 0 and refused.missed_specs == specs
+    assert deck.read_bytes() == original  # flag off leaves it byte-identical
+    on = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert on.applied and not on.refused and on.value_clean and set(on.edited_ids) == {"230", "231"}
+    after = _composed(deck)
+    assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
+
+
 def test_value_clean_allows_noop_edit_below_edit_count(deck):
     # A no-op masked-image edit: spec == the CURRENT composed crop (the identity fixture's
     # own frame, 300,100,120,60) with scale 1.0, so the written mask+image values EQUAL the
@@ -1103,9 +1272,12 @@ def test_soft_fallbacks_ignores_hard_classes(deck):
 # Hardening 3: rotated masked image / mask is a MISS, never mis-written.
 # --------------------------------------------------------------------------
 def _build_rotated_mask_deck(path, *, img_angle=0.0, mask_angle=0.0):
-    mask = _arch(231, "TSD.MaskArchive", {"super": _geom(5, 5, 80, 40, angle=mask_angle)})
+    # naturalSize/originalSize present so `_natural_writable` passes: the ONLY thing
+    # refusing this fixture is the rotation guard (an unrotated variant is written).
+    mask = _arch(231, "TSD.MaskArchive", _mask_super(5, 5, 80, 40, angle=mask_angle))
     img = _arch(230, "TSD.ImageArchive",
-                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=img_angle)})
+                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=img_angle),
+                 "originalSize": {"width": 120.0, "height": 60.0}})
     slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}]})
     show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
     node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
@@ -1128,6 +1300,60 @@ def test_rotated_masked_image_missed_not_written(tmp_path, img_angle, mask_angle
     assert res.missed == 1 and res.applied == 0
     assert res.missed_specs == specs
     assert deck.read_bytes() == original  # rotated masked image left untouched
+
+
+@pytest.mark.parametrize("img_angle,mask_angle", [(90.0, 0.0), (0.0, 45.0)])
+def test_masked_media_rotated_refused_under_mask_crop(tmp_path, img_angle, mask_angle):
+    # Same rotated fixture, but through patch_deck_geometry with mask_crop=True -- the
+    # PROMOTED path, which patch_slide_geometry cannot exercise (it has no mask_crop param).
+    # A rotated frame or mask is refused regardless of the flag.
+    deck = _build_rotated_mask_deck(tmp_path / "rot_maskcrop.key", img_angle=img_angle, mask_angle=mask_angle)
+    original = deck.read_bytes()
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    res = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert res.missed == 1 and res.applied == 0 and res.missed_specs == specs
+    assert res.miss_reasons == ["masked-media"]
+    assert deck.read_bytes() == original
+
+
+def test_masked_media_rotated_fixture_written_when_unrotated(tmp_path):
+    # Control for the rotated test above: the same fixture with both angles at 0 is an
+    # offset crop the promoted path WRITES, proving the rotation guard alone refuses it.
+    deck = _build_rotated_mask_deck(tmp_path / "unrot_maskcrop.key")
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    res = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert res.missed == 0 and res.miss_reasons == []
+    assert sorted(res.edited_ids) == ["230", "231"]
+
+
+def _build_cross_member_mask_deck(path):
+    """The image (230) and slide live in ``Index/Slide-100.iwa``; its mask (231) is written
+    into a SEPARATE member -- ``id_to_file[mask] != target_member``, a cross-member mask
+    that must miss even though the crop geometry itself is a legal axis-aligned OFFSET."""
+    mask = _arch(231, "TSD.MaskArchive", _mask_super(20, 10, 80, 40))
+    img = _arch(230, "TSD.ImageArchive",
+                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60),
+                 "originalSize": {"width": 120.0, "height": 60.0}})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, img]))
+        z.writestr("Index/Slide-101.iwa", _member([mask]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_masked_media_cross_member_mask_refused_under_mask_crop(tmp_path):
+    deck = _build_cross_member_mask_deck(tmp_path / "cross_member.key")
+    original = deck.read_bytes()
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 120.0, "role": "other"}]
+    res = patch_deck_geometry(deck, {1: specs}, require_reconcile=False, mask_crop=True)[1]
+    assert res.missed == 1 and res.applied == 0 and res.missed_specs == specs
+    assert res.miss_reasons == ["masked-media"]
+    assert deck.read_bytes() == original
 
 
 # --------------------------------------------------------------------------
@@ -1554,6 +1780,254 @@ def test_autosize_height_text_hard_misses_to_the_fallback():
     assert missed_specs == specs
     assert miss_reasons == ["text-autosize"]
     assert edits == {}
+
+
+def _autosize_text_objects(*, valign: int = 0, nw: float = 300.3, nh: float = 83.0):
+    # valign: TSWP VerticalAlignmentType (0=Top, 1=Middle, 2=Bottom). A position-only
+    # reposition is anchor-agnostic (both axes are a delta off the live seed), so every
+    # alignment repositions; the tests exercise Top, Middle and Bottom.
+    # nw==0.0 is the un-laid-out sentinel (no valid rendered frame in the saved deck).
+    text_super = _shape_super(700, 374, 0.0, 0.0, nw=nw, nh=nh)
+    text_super["style"] = {"identifier": "9"}
+    return {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "super": text_super},
+        "9": {"_pbtype": "TSWP.ShapeStyleArchive", "shapeProperties": {"verticalAlignment": valign}},
+    }
+
+
+def test_autosize_text_reposition_off_still_hard_misses():
+    # text_reposition defaults OFF: the autosize box hard-misses exactly as before.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_autosize_text_reposition_on_writes_position_only():
+    # With the flag ON, the same box is repositioned (position only, never a size), so it
+    # is no longer a miss.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+    assert not any(k in edits["1"] for k in ("size_w", "size_h", "natural_w", "natural_h"))
+
+
+def test_autosize_text_reposition_middle_anchored_writes_position_only():
+    # Middle-anchored autosize box: stored y is the CENTRE, but the position-only delta off
+    # the live seed cancels the anchor, so it repositions correctly (no Δh drift -- a
+    # position-only move changes no layout input). pos_y = stored 374 + (404 - 344) = 434;
+    # pos_x = stored 700 + (107.15 - 700) = 107.15 (left-anchored seed here).
+    objects = _autosize_text_objects(valign=1)  # kFrameAlignMiddle
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+    assert not any(k in edits["1"] for k in ("size_w", "size_h", "natural_w", "natural_h"))
+
+
+def test_autosize_text_reposition_bottom_anchored_writes_position_only():
+    # Bottom-anchored (stored y is the visual BOTTOM): the delta cancels the anchor exactly
+    # as for middle/top, so it repositions correctly too.
+    objects = _autosize_text_objects(valign=2)  # kFrameAlignBottom
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+
+
+def test_autosize_text_reposition_centre_anchored_x_is_a_delta():
+    # A centre-aligned box stores x as the CENTRE (seed left 700, width 300.3 -> centre
+    # 850.15). The delta writes pos_x = 850.15 + (107.15 - 700) = 257.30 so Keynote's
+    # centre-anchored re-layout lands the left edge at spec.x; an absolute pos_x would land
+    # it w/2 to the left. y-less spec, so only pos_x is written.
+    objects = _autosize_text_objects(valign=1)
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [850.15, 344.0, 300.3, 46.0]}  # seed x = stored centre
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(700.0 + (107.15 - 850.15))}}
+
+
+def test_autosize_text_reposition_unlaidout_now_repositions():
+    # Un-laid-out box (naturalSize 0 on both axes): pass 1 zeroes naturalSize on EVERY autosize
+    # box, so there is no laid-out gate -- with a good live seed the box repositions off the
+    # seed (live-validated 2026-09-18: 136/136 un-laid-out converted at ≤0.98px). pos_x delta =
+    # 700 + (107.15 - 700) = 107.15; pos_y = 374 + (404 - 344) = 434.
+    objects = _autosize_text_objects(valign=1, nw=0.0, nh=0.0)  # middle, un-laid-out
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}  # live read HAS a frame
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+
+
+def _grow_height_text_objects(*, stored_w: float = 58.9):
+    # Grow-height box: a REAL stored width with the autosize-height sentinel (h == 0.0).
+    # stored_w mirrors the 2026-09-18 full deck ("CHC Kuching": 235.5 wall -> 58.9 after
+    # pass 1's 0.25x canvas scale).
+    text_super = _shape_super(700, 374, stored_w, 0.0, nw=stored_w, nh=0.0)
+    text_super["style"] = {"identifier": "9"}
+    return {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "super": text_super},
+        "9": {"_pbtype": "TSWP.ShapeStyleArchive", "shapeProperties": {"verticalAlignment": 1}},
+    }
+
+
+def test_grow_height_text_width_change_misses_to_fallback():
+    # The live box still holds pass 1's 58.9 width but the spec wants 120: a position-only
+    # write would leave it per-character wrapped ("CHC / Kuc / hin / g"), so it must reach
+    # the AppleScript fallback, which writes the width.
+    objects = _grow_height_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 120.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 58.9, 140.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-grow-height-width"] and edits == {}
+
+
+def test_grow_width_only_text_is_not_captured_by_the_width_gate():
+    # Theoretical grow-WIDTH-only box (stored w == 0.0, real h): no such box exists on the
+    # production deck, but the gate keys on a real stored width, so it stays position-only.
+    text_super = _shape_super(700, 374, 0.0, 46.0, nw=0.0, nh=46.0)
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "super": text_super},
+    }
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 120.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 58.9, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, _rr = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+
+
+@pytest.mark.parametrize("spec_w", [None, 58.9, 59.3, 59.4])
+def test_grow_height_text_width_kept_still_repositions(spec_w):
+    # No width in the spec, or one within 0.5px of the live width (59.4 is the inclusive
+    # boundary): nothing to regrow, so the position-only reposition stays offline.
+    objects = _grow_height_text_objects()
+    spec = {"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}
+    if spec_w is not None:
+        spec["w"] = spec_w
+    reported = {("text", 0): [700.0, 344.0, 58.9, 140.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, [spec], objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+
+
+def test_grow_both_text_ignores_spec_width():
+    # A grow-BOTH box (stored w == 0.0) autosizes its width from the text, so a differing
+    # spec width is not a regrow and must not send it to the fallback.
+    objects = _autosize_text_objects(valign=1)
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, _rr = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert not missed_specs and miss_reasons == [] and "1" in edits
+
+
+def test_autosize_text_reposition_zero_natural_height_now_repositions():
+    # naturalSize (width>0, height==0) is the same benign post-pass-1 state; no laid-out gate,
+    # so it repositions too (with a good seed).
+    objects = _autosize_text_objects(valign=0, nw=174.0, nh=0.0)
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 174.0, 77.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15), "pos_y": pytest.approx(434.0)}}
+
+
+def test_autosize_text_reposition_on_missing_seed_hard_misses():
+    # No live seed row for this (text, kindIndex): the composed frame is not an autosize
+    # box's live top-left, so a reposition would be wrong. Hard-miss instead.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported={}, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_autosize_text_reposition_on_zerofilled_seed_hard_misses():
+    # A failed per-item bulk read zero-fills the row to [0, 0, 0, 0] (bulk_geometry.js
+    # withItemFallback); that reported y=0 is garbage, so the reposition must refuse it
+    # rather than write pos_y off a bogus seed. Degenerate w/h (<=0) is the tell.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "y": 404.0, "role": "other"}]
+    reported = {("text", 0): [0.0, 0.0, 0.0, 0.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_autosize_text_reposition_x_without_y_now_needs_seed():
+    # pos_x is now a delta off the live seed (anchor-agnostic), so an x-only move needs a
+    # trustworthy seed too: with none it defers to the AppleScript fallback.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "w": 113.4, "h": 40.0, "role": "other"}]
+    _tm, edits, soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported={}, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+    assert soft == 0  # refused before any write, so nothing counts
+
+
+def test_autosize_text_reposition_x_only_writes_delta_with_seed():
+    # x-only WITH a seed writes the anchor-cancelling delta and nothing else.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "x": 107.15, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and miss_reasons == []
+    assert edits == {"1": {"pos_x": pytest.approx(107.15)}}  # 700 + (107.15 - 700)
+
+
+def test_autosize_text_reposition_on_size_only_spec_still_misses():
+    # Flag ON but the spec bears only w (no x/y): nothing to reposition, so it still defers
+    # to the fallback and keeps tagging text-autosize for the histogram.
+    objects = _autosize_text_objects()
+    specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 300.3, 46.0]}
+    _tm, edits, _soft, missed_specs, miss_reasons, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None
+    assert missed_specs == specs and miss_reasons == ["text-autosize"] and edits == {}
+
+
+def test_fixed_frame_text_unaffected_by_reposition_flag():
+    # A non-autosize (fixed-frame) text box takes the normal soft-class path regardless of
+    # the flag: the reposition flag only diverts the sentinel-size branch.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 200.0, 60.0, nw=200.0, nh=60.0)},
+    }
+    specs = [{"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 250.0, "h": 90.0, "role": "other"}]
+    reported = {("text", 0): [700.0, 344.0, 200.0, 60.0]}
+    _tm, edits, _soft, missed_specs, _mr, refuse_reason = _slide_edits(
+        1, specs, objects, {"1": "M"}, [("100", False)], reported=reported, text_reposition=True)
+    assert refuse_reason is None and not missed_specs and len(edits) == 1
+    assert edits["1"]["size_h"] == pytest.approx(90.0)  # full soft-class write, size included
 
 
 def test_autosize_width_text_hard_misses_to_the_fallback():

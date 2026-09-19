@@ -1,11 +1,9 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { cancelWatercolour, fetchWatercolourPreview, pollJob, startWatercolour } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
-import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { FileWell } from "../components/FileWell";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { WatercolourResultView } from "../components/WatercolourResultView";
-import { useDefaultExportDir, useSessionPath } from "../prefs";
 import { useCurrentJob } from "../sessions";
 import { floodFill } from "../watercolour/floodFill";
 import { sobelMagnitude, snapToEdge } from "../watercolour/edges";
@@ -957,8 +955,6 @@ export function WatercolourTab() {
   const [open, setOpen] = useState<string | null>(null);
   const cancelRef = useRef(false);
   const landmarkMaskRef = useRef<LandmarkMaskHandle | null>(null);
-  const [exportDir, setExportDir] = useSessionPath("obed-edom.watercolour.exportDir");
-  const defaultExportDir = useDefaultExportDir();
 
   async function selectFiles(next: File[]) {
     const resolved = await Promise.all(next.map(toSupported));
@@ -993,7 +989,6 @@ export function WatercolourTab() {
         washSoftness: wash,
         inkAmount: ink,
         masks: selectedMasks,
-        exportDir: exportDir || undefined,
       });
       upsert(created);
       setFiles([]);
@@ -1027,17 +1022,12 @@ export function WatercolourTab() {
       <div className="row">
         <FileWell
           label="Photos"
+          tone="photo"
           hint="Drop photos here or choose files on this Mac"
           accept="image/png,image/jpeg,image/webp,image/avif,image/heic"
           multiple
           onFiles={selectFiles}
           browseLabel="Choose on this Mac"
-        />
-        <ExportDestinationRow
-          value={exportDir}
-          onChange={setExportDir}
-          defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
-          onError={setError}
         />
       </div>
       {files.length > 0 && <p className="note">{files.map((file) => file.name).join(", ")}</p>}
@@ -1092,6 +1082,7 @@ export function WatercolourTab() {
           job={job}
           onOpen={setOpen}
           onError={setError}
+          onExported={upsert}
           onRename={rename}
           onEdit={(p) => {
             setFiles(p.files);
