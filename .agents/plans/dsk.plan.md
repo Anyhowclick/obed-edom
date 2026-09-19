@@ -445,6 +445,22 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     videos-only geometry vs gold slide 4 and the standard band's left/right flush margins
     (43 / 1877, symmetric about 960 — owner to confirm). Reviews `.agents/reviews/dsk-videos-only/`.
 
+29. **Stacked-clip intermediates are exported BARE (2026-09-20, Codex r2).** The upper stacked
+    clip's pure-video scratch copy has its source build-in flipped to a plain `apple:movie-start`
+    / After Transition / delay 0 (`iwa_movies.bare_source_build_ins`, scratch only, `_SlideJob.bare`)
+    so the dissolve + delay is not baked into the clip AND re-created on the inserted clip. The
+    build is FLIPPED, not removed — it is that movie's only play trigger. LIVE CHECK: FRC 50 movie
+    1's intermediate starts at t=0, plays, and is ~8 s shorter; if a bared movie exports frozen,
+    fall back to "assembler skips the build-in + warns".
+30. **Deferred from Codex r2 (offline writer hardening).** (a) `patch_clip_start_timing` refuses when
+    a build/chunk lives in a different IWA member than its movie/slide (fail-closed, but violates
+    "resolve the owning member"); (b) the write is not transactional — `patch_slide_builds` lands
+    before the field patches, so a later refusal leaves the chunk order rewritten (pre-existing
+    shape of the shipped timing writer; needs one preflight + a single `_rewrite_members`
+    commit); (c) the review's `stackedMovies` chip is always centre-panel based and can disagree
+    with the assembler once `keepSide` is on. Stack threshold 0.5 (intersection > half the
+    smaller visible rect) is a judgement call — eyeball real decks for pairs between 0.05 and 0.5.
+
 ## 5. Live-run recipe
 
 1. Run from the pinned detached worktree `.claude/worktrees/dsk-gen` (branch `feat/dsk-gen`);
