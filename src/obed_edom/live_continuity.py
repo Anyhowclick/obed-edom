@@ -32,21 +32,40 @@ _GEOMETRY_TOLERANCE = 0.5
 _OVERLAP_MIN_PX = 1.0
 _TRIM_SUFFIX_RE = re.compile(r"^(?P<name>.+)-\d+\.\d+-\d+\.\d+(?P<ext>\.[A-Za-z0-9]+)$")
 
-_MOVIE_NODE_KEYS = frozenset(
-    {"attributes", "baseLayer", "beginTime", "duration", "effects", "movie", "name", "objectID", "type"}
-)
-_MOVIE_LAYER_KEYS = frozenset(
-    {"animations", "initialState", "isVideoLayer", "layers", "objectID", "texture", "texturedRectangle"}
-)
-_MOVIE_LAYER_STATE_KEYS = frozenset(
-    {
-        "affineTransform", "anchorPoint", "contentsRect", "edgeAntialiasingMask", "height", "hidden",
-        "masksToBounds", "opacity", "position", "rotation", "scale", "sublayerTransform", "width",
-    }
-)
-"""The complete key vocabulary measured across every movie node of the qualified export. A key
-outside it may encode a mask this module cannot map, so it fails closed until a masked deck is
-exported and the real encoding is measured."""
+_MOVIE_SUBTREE_KEYS: dict[str, frozenset[str]] = {
+    "<movie node>": frozenset(
+        {"attributes", "baseLayer", "beginTime", "duration", "effects", "movie", "name", "objectID", "type"}
+    ),
+    "movie": frozenset({"asset", "endTime", "isAudioOnly", "isStreaming", "startTime", "volume"}),
+    "attributes": frozenset({"direction"}),
+    "baseLayer": frozenset({"animations", "initialState", "layers", "objectID"}),
+    "layers": frozenset(
+        {"animations", "initialState", "isVideoLayer", "layers", "texture", "texturedRectangle"}
+    ),
+    "initialState": frozenset(
+        {
+            "affineTransform", "anchorPoint", "contentsRect", "edgeAntialiasingMask", "height", "hidden",
+            "masksToBounds", "opacity", "position", "rotation", "scale", "sublayerTransform", "width",
+        }
+    ),
+    "position": frozenset({"pointX", "pointY"}),
+    "anchorPoint": frozenset({"pointX", "pointY"}),
+    "contentsRect": frozenset({"x", "y", "width", "height"}),
+    "texturedRectangle": frozenset(
+        {
+            "isBackgroundTexture", "isVerticalText", "singleTextureOpacity", "textBaseline",
+            "textXHeight", "textureType",
+        }
+    ),
+}
+"""Every object that occurs anywhere under a movie node of the qualified export, keyed by the
+key that holds it, with the complete set of keys measured for it. Keys holding no object at all
+(`effects` and `animations` are always empty lists, `texture` is a string, the transforms are
+flat number lists) are deliberately absent: an object appearing under one is unmeasured, and an
+unmeasured object may be the mask this module cannot map."""
+
+_MASKING_NAME_FRAGMENTS = ("mask", "clip", "shapepath")
+_BENIGN_MASK_KEYS = frozenset({"masksToBounds", "edgeAntialiasingMask"})
 
 
 class _Refuse(Exception):
@@ -349,53 +368,84 @@ def _encoding_refusal(slide_name: str, detail: str) -> _Refuse:
     )
 
 
-def _contains_key(obj: Any, key: str) -> bool:
-    if isinstance(obj, dict):
-        return key in obj or any(_contains_key(value, key) for value in obj.values())
-    if isinstance(obj, list):
-        return any(_contains_key(item, key) for item in obj)
-    return False
+_UNIT_CONTENTS_RECT = (("x", 0.0), ("y", 0.0), ("width", 1.0), ("height", 1.0))
+
+
+def _check_clipping(state: dict[str, Any], path: str, slide_name: str) -> None:
+    if "masksToBounds" in state and state["masksToBounds"] is not False:
+        raise _encoding_refusal(slide_name, f"{path}.masksToBounds")
+    if "contentsRect" not in state:
+        return
+    contents = state["contentsRect"]
+    if not isinstance(contents, dict) or set(contents) != {name for name, _ in _UNIT_CONTENTS_RECT}:
+        raise _encoding_refusal(slide_name, f"{path}.contentsRect")
+    for name, unit in _UNIT_CONTENTS_RECT:
+        value = contents[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(value - unit) > 1e-6:
+            raise _encoding_refusal(slide_name, f"{path}.contentsRect.{name}")
 
 
 def _check_movie_encoding(node: dict[str, Any], slide_name: str) -> None:
-    """Interim mask rule: this export family encodes no mask at all, so anything outside the
-    measured vocabulary -- or any clipping knob that is not at its neutral value -- may be one."""
-    if _contains_key(node, "shapePath"):
-        raise _encoding_refusal(slide_name, "shapePath")
-    unknown = sorted(set(node) - _MOVIE_NODE_KEYS)
-    if unknown:
-        raise _encoding_refusal(slide_name, unknown[0])
+    """Interim mask rule: this export family encodes no mask at all, so the whole movie subtree
+    is checked against the measured vocabulary -- an object where none was ever measured, a key
+    outside its object's set, a name that reads like clipping, or a clipping knob off its neutral
+    value may all BE the mask, and each fails closed until a masked deck is exported."""
+    _walk_movie_subtree(node, "<movie node>", "<movie node>", slide_name)
 
-    def walk(layer: Any) -> None:
-        if not isinstance(layer, dict):
-            raise _encoding_refusal(slide_name, "a layer that is not an object")
-        unknown = sorted(set(layer) - _MOVIE_LAYER_KEYS)
-        if unknown:
-            raise _encoding_refusal(slide_name, unknown[0])
-        state = layer.get("initialState")
-        if not isinstance(state, dict):
-            raise _encoding_refusal(slide_name, "initialState")
-        unknown = sorted(set(state) - _MOVIE_LAYER_STATE_KEYS)
-        if unknown:
-            raise _encoding_refusal(slide_name, unknown[0])
-        if state.get("masksToBounds"):
-            raise _encoding_refusal(slide_name, "masksToBounds")
-        contents = state.get("contentsRect") or {}
-        if any(
-            abs(contents.get(name, default) - default) > 1e-6
-            for name, default in (("x", 0.0), ("y", 0.0), ("width", 1.0), ("height", 1.0))
-        ):
-            raise _encoding_refusal(slide_name, "contentsRect")
-        for child in layer.get("layers") or []:
-            walk(child)
 
-    walk(node["baseLayer"])
+def _walk_movie_subtree(value: Any, kind: str, path: str, slide_name: str) -> None:
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _walk_movie_subtree(item, kind, f"{path}[{index}]", slide_name)
+        return
+    if not isinstance(value, dict):
+        return
+    allowed = _MOVIE_SUBTREE_KEYS.get(kind)
+    if allowed is None:
+        raise _encoding_refusal(slide_name, path)
+    for key, child in value.items():
+        child_path = f"{path}.{key}"
+        lowered = key.lower()
+        if key not in _BENIGN_MASK_KEYS and any(f in lowered for f in _MASKING_NAME_FRAGMENTS):
+            raise _encoding_refusal(slide_name, child_path)
+        if key not in allowed:
+            raise _encoding_refusal(slide_name, child_path)
+        _walk_movie_subtree(child, key, child_path, slide_name)
+    if kind == "initialState":
+        _check_clipping(value, path, slide_name)
+
+
+def _object_state(layer: Any, where: str, slide_name: str) -> dict[str, Any]:
+    state = layer.get("initialState") if isinstance(layer, dict) else None
+    if not isinstance(state, dict):
+        raise _Refuse(f"{where} on slide {slide_name} has no readable initialState")
+    return state
+
+
+def _number(state: dict[str, Any], *keys: str, where: str, slide_name: str) -> float:
+    value: Any = state
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            raise _Refuse(f"{where} on slide {slide_name} is missing '{key}'")
+        value = value[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise _Refuse(f"{where} on slide {slide_name} has a non-numeric '{keys[-1]}'")
+    return float(value)
+
+
+def _state_rect(state: dict[str, Any], where: str, slide_name: str) -> Rect:
+    """The authored rect of one object: centre-anchored position with its own width/height."""
+    width = _number(state, "width", where=where, slide_name=slide_name)
+    height = _number(state, "height", where=where, slide_name=slide_name)
+    center_x = _number(state, "position", "pointX", where=where, slide_name=slide_name)
+    center_y = _number(state, "position", "pointY", where=where, slide_name=slide_name)
+    return Rect(center_x - width / 2, center_y - height / 2, width, height)
 
 
 def _movie_rect(node: dict[str, Any], slide_name: str) -> Rect:
     _check_movie_encoding(node, slide_name)
     base_layer = node["baseLayer"]
-    parent_state = base_layer["initialState"]
+    parent_state = _object_state(base_layer, "movie layer", slide_name)
     if not _identity_transform(parent_state) or not _center_anchor(parent_state):
         raise _Refuse(
             f"movie layer on slide {slide_name} has a rotated, transformed, or off-center anchor"
@@ -408,7 +458,7 @@ def _movie_rect(node: dict[str, Any], slide_name: str) -> Rect:
     video_layer = video_layers[0]
     if not any(video_layer is child for child in base_layer.get("layers") or []):
         raise _Refuse(f"video sub-layer on slide {slide_name} is not a direct child of its movie layer")
-    video_state = video_layer["initialState"]
+    video_state = _object_state(video_layer, "video sub-layer", slide_name)
     if not _identity_transform(video_state) or not _center_anchor(video_state):
         raise _Refuse(
             f"video sub-layer on slide {slide_name} has a rotated, transformed, or off-center anchor"
@@ -416,13 +466,9 @@ def _movie_rect(node: dict[str, Any], slide_name: str) -> Rect:
     if base_layer.get("animations") or video_layer.get("animations"):
         raise _Refuse(f"movie layer on slide {slide_name} has animated geometry")
 
-    parent_x = parent_state["position"]["pointX"] - parent_state["width"] / 2
-    parent_y = parent_state["position"]["pointY"] - parent_state["height"] / 2
-    child_w, child_h = video_state["width"], video_state["height"]
-    abs_center_x = parent_x + video_state["position"]["pointX"]
-    abs_center_y = parent_y + video_state["position"]["pointY"]
-    rect = Rect(abs_center_x - child_w / 2, abs_center_y - child_h / 2, child_w, child_h)
-    base_rect = Rect(parent_x, parent_y, parent_state["width"], parent_state["height"])
+    base_rect = _state_rect(parent_state, "movie layer", slide_name)
+    relative = _state_rect(video_state, "video sub-layer", slide_name)
+    rect = Rect(base_rect.x + relative.x, base_rect.y + relative.y, relative.w, relative.h)
     if not _contains(base_rect, rect):
         raise _encoding_refusal(slide_name, "the video sub-layer is not contained in its movie layer")
     return rect
@@ -441,13 +487,6 @@ def _overlaps(a: Rect, b: Rect) -> bool:
     width = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
     height = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
     return width > _OVERLAP_MIN_PX and height > _OVERLAP_MIN_PX
-
-
-def _slot_rect(state: dict[str, Any]) -> Rect:
-    width, height = state["width"], state["height"]
-    return Rect(
-        state["position"]["pointX"] - width / 2, state["position"]["pointY"] - height / 2, width, height
-    )
 
 
 def _draw_slots(event: Any, slide_name: str) -> list[Any]:
@@ -490,12 +529,14 @@ def _overlap_refusal(
             continue
         drawn = True
         for index in range(movie_slot + 1, len(slots)):
+            where = f"draw slot {index}"
             children = slots[index]["layers"]
             if len(children) != 1 or not isinstance(children[0], dict):
                 raise _Refuse(
-                    f"unrecognised slide layer shape on slide {slide_name} (draw slot {index})"
+                    f"unrecognised slide layer shape on slide {slide_name} ({where})"
                 )
-            if _overlaps(_slot_rect(children[0]["initialState"]), instance.rect):
+            state = _object_state(children[0], where, slide_name)
+            if _overlaps(_state_rect(state, where, slide_name), instance.rect):
                 return (
                     f"later-authored artwork overlaps the carried '{asset}' on the destination "
                     f"slide (player index {to_player_index}, draw slot {index})"

@@ -1095,16 +1095,49 @@ def _frozen_index_samples(index: int = 41, n: int = 8) -> list[dict]:
     ]
 
 
+def _carry_census(total: int = 0, sample=None) -> dict:
+    """The in-page carry census: `total` is counted over the FULL event log,
+    filtered to movie1, before the sample is sliced."""
+    return {
+        "key": "movie1",
+        "total": total,
+        "sample": sample if sample is not None else [],
+        "loScene": 1,
+        "hiScene": 6,
+        "eventsSeen": 400,
+    }
+
+
+def _pool_census(entries=None, scene_hash: str = "#2") -> dict:
+    return {"entries": entries if entries is not None else [], "sceneHash": scene_hash}
+
+
+def _motion_across_flip(after=(0.0, 0.0, 0.0, 0.0), before=(218.0, 0.85, 110.0), eps=2.0):
+    """`score_motion_across_flip`'s window as the live run reports it on the
+    REFUSED slide: live before the cut, pixel-frozen after it."""
+    return {
+        "ok": False,
+        "reason": "no motion after flip",
+        "flipIndex": 4,
+        "beforeOk": any(m >= eps for m in before),
+        "pairEps": eps,
+        "beforePairMae": list(before),
+        "afterPairMae": list(after),
+    }
+
+
 def _refused_args(**overrides):
     args = {
         "injected_plan": p2.build_continuity_plan(True),
         "preserve_events": _refusal_events(),
         "lingering": _clean_lingering(),
+        "motion_across_flip": _motion_across_flip(),
         "index_samples": _frozen_index_samples(),
         "flip_index": 1,
         "hash1": "#1",
         "hash2": "#2",
         "player_build_errors": [],
+        "carry_census": _carry_census(),
     }
     args.update(overrides)
     return args
@@ -1119,7 +1152,7 @@ def test_refused_carry_passes_when_every_clause_holds():
     assert verdict["ok"] is True
     assert verdict["reasons"] == []
     assert verdict["planRetire"]["atScene"] == p2.SLIDE2_MIN_HASH
-    assert verdict["frozenIndex"]["frozen"] is True
+    assert verdict["frozenComposite"]["frozen"] is True
 
 
 def test_refused_carry_fails_without_plan_retire_boundary():
@@ -1166,10 +1199,10 @@ def test_refused_carry_fails_on_a_remount_during_the_transition_scene():
     events = _refusal_events() + [
         {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#1"}},
     ]
-    verdict = _refused(preserve_events=events)
+    verdict = _refused(preserve_events=events, carry_census=_carry_census(1, events[-1:]))
     assert verdict["ok"] is False
     assert verdict["carryEventsInRetireZoneN"] == 1
-    assert "the movie was carried inside the retire zone" in verdict["reasons"]
+    assert "carry notes inside the retire zone" in verdict["reasons"]
 
 
 def test_refused_carry_fails_on_a_remount_inside_the_retire_zone():
@@ -1177,10 +1210,10 @@ def test_refused_carry_fails_on_a_remount_inside_the_retire_zone():
     events = _refusal_events() + [
         {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#3"}},
     ]
-    verdict = _refused(preserve_events=events)
+    verdict = _refused(preserve_events=events, carry_census=_carry_census(1, events[-1:]))
     assert verdict["ok"] is False
     assert verdict["carryEventsInRetireZoneN"] == 1
-    assert "the movie was carried inside the retire zone" in verdict["reasons"]
+    assert "carry notes inside the retire zone" in verdict["reasons"]
 
 
 def test_refused_carry_fails_on_a_keyless_dom_swap_of_a_known_movie1_element():
@@ -1189,7 +1222,7 @@ def test_refused_carry_fails_on_a_keyless_dom_swap_of_a_known_movie1_element():
     events = _refusal_events() + [
         {"kind": "dom-swap", "detail": {"elId": 1, "t": 4.0, "sceneHash": "#4"}},
     ]
-    verdict = _refused(preserve_events=events)
+    verdict = _refused(preserve_events=events, carry_census=_carry_census(1, events[-1:]))
     assert verdict["ok"] is False
     assert verdict["carryEventsInRetireZoneN"] == 1
 
@@ -1225,29 +1258,43 @@ def test_refused_carry_fails_closed_when_the_slide2_query_did_not_run():
     assert verdict["ok"] is False
 
 
-def test_refused_carry_fails_when_the_counter_keeps_advancing():
-    """(e) A marching counter on slide 2 means the movie was carried after all."""
-    samples = [{"index": 10, "sceneHash": "#1"}] + [
-        {"index": 11 + i, "sceneHash": "#2"} for i in range(6)
+def test_refused_carry_fails_when_the_composite_keeps_moving_after_the_flip():
+    """(e) A moving ROI on slide 2 means the movie was carried after all."""
+    verdict = _refused(motion_across_flip=_motion_across_flip(after=(0.0, 31.0, 28.0, 25.0)))
+    assert verdict["ok"] is False
+    assert "composite kept moving on the refused slide" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_when_nothing_moved_before_the_flip():
+    """A dead instrument reads 'frozen' everywhere — that is not evidence."""
+    verdict = _refused(motion_across_flip=_motion_across_flip(before=(0.0, 0.1, 0.0)))
+    assert verdict["ok"] is False
+    assert "no motion before the flip — the instrument is blind" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_on_too_few_after_pairs():
+    verdict = _refused(motion_across_flip=_motion_across_flip(after=(0.0, 0.0)))
+    assert verdict["ok"] is False
+    assert "insufficient after-pairs to judge a freeze" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_a_scored_flip_window():
+    for bad in (None, {}, {"reason": "no flip observed", "n": 3}):
+        verdict = _refused(motion_across_flip=bad)
+        assert verdict["ok"] is False
+        assert "no scored flip window" in verdict["reasons"]
+
+
+def test_refused_carry_does_not_gate_on_the_undecodable_counter():
+    """On the refused slide the patch ROI shows the export's POSTER, so the
+    burnt-in counter never decodes — it stays a labelled diagnostic."""
+    samples = [{"index": None, "sceneHash": "#1"}] + [
+        {"index": None, "sceneHash": "#2"} for _ in range(4)
     ]
-    verdict = _refused(index_samples=samples)
-    assert verdict["ok"] is False
-    assert "counter advanced on the refused slide" in verdict["reasons"]
-
-
-def test_refused_carry_fails_closed_when_the_counter_is_undecodable():
-    samples = [{"index": 10, "sceneHash": "#1"}] + [
-        {"index": None, "sceneHash": "#2"} for _ in range(6)
-    ]
-    verdict = _refused(index_samples=samples)
-    assert verdict["ok"] is False
-    assert "insufficient decodable samples after the flip" in verdict["reasons"]
-
-
-def test_refused_carry_fails_closed_without_an_observed_flip():
-    verdict = _refused(flip_index=None)
-    assert verdict["ok"] is False
-    assert "no scene-hash flip observed" in verdict["reasons"]
+    verdict = _refused(index_samples=samples, flip_index=1)
+    assert verdict["ok"] is True
+    assert verdict["frozenIndexNonGating"]["frozen"] is False
+    assert verdict["frozenComposite"]["frozen"] is True
 
 
 def test_refused_carry_fails_when_the_scene_hash_did_not_change():
@@ -1269,7 +1316,9 @@ def test_refused_carry_fails_on_a_player_build_error():
 def test_never_pooled_evidence_is_the_refusal_route():
     """Refused + nothing pooled in the retire zone => the pool was EMPTY at the
     2->3 boundary, which is why the reuse-skip/retire pair cannot fire."""
-    evidence = p2.neverPooledEvidence(_refusal_events())
+    evidence = p2.neverPooledEvidence(
+        _refusal_events(), _carry_census(), _pool_census()
+    )
     assert evidence["ok"] is True
     assert evidence["refusalEventsN"] == 2
     assert evidence["carryEventsInRetireZoneN"] == 0
@@ -1277,14 +1326,16 @@ def test_never_pooled_evidence_is_the_refusal_route():
 
 def test_never_pooled_evidence_requires_a_positive_refusal_event():
     """Silence is not evidence: no refusal note => no substitute route."""
-    assert p2.neverPooledEvidence([])["ok"] is False
+    assert p2.neverPooledEvidence([], _carry_census(), _pool_census())["ok"] is False
 
 
 def test_never_pooled_evidence_dies_on_a_stash_consumed_in_the_retire_zone():
     events = _refusal_events() + [
         {"kind": "reuse-decoder", "detail": {"key": "movie1", "newElId": 3, "sceneHash": "#4"}},
     ]
-    evidence = p2.neverPooledEvidence(events)
+    evidence = p2.neverPooledEvidence(
+        events, _carry_census(1, events[-1:]), _pool_census()
+    )
     assert evidence["ok"] is False
     assert evidence["carryEventsInRetireZoneN"] == 1
 
@@ -1293,7 +1344,7 @@ def test_never_pooled_evidence_ignores_another_movies_reuse():
     events = _refusal_events() + [
         {"kind": "reuse-decoder", "detail": {"key": "movie2", "newElId": 7, "sceneHash": "#4"}},
     ]
-    assert p2.neverPooledEvidence(events)["ok"] is True
+    assert p2.neverPooledEvidence(events, _carry_census(), _pool_census())["ok"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -1368,6 +1419,14 @@ def test_injected_plan_retires_movie1_before_the_restart_and_bridges_3to4():
     assert boundaries[0]["atScene"] < boundaries[1]["atScene"] < boundaries[2]["atScene"]
 
 
+def test_injected_plan_names_movie1_only():
+    """Naming the slide-3-only WA0125 clip admits it to the runtime's stash()
+    plan-name filter, which pools it at the 3->4 detach and remounts it at the
+    fallback footprint — the slide-4 stray."""
+    for bridge in (True, False):
+        assert list(p2.build_continuity_plan(bridge)["movies"]) == ["movie1"]
+
+
 def test_disable_bridge34_removes_only_the_bridge():
     plan = p2.build_continuity_plan(False)
     assert [b["action"] for b in plan["boundaries"]] == ["retire", "restart"]
@@ -1387,7 +1446,10 @@ def test_injected_plan_matches_the_derived_runtime_plan_boundaries():
     )
     assert expected, "EXPECTED_RUNTIME_PLAN literal not found"
     derived = eval(expected.group(1))  # noqa: S307 - repo-local literal
-    assert p2.build_continuity_plan(True)["boundaries"] == derived["boundaries"]
+    injected = p2.build_continuity_plan(True)
+    assert injected["boundaries"] == derived["boundaries"]
+    assert injected["movies"] == derived["movies"]
+    assert {k: v for k, v in injected.items() if k != "transparentBackground"} == derived
 
 
 def test_findings_inventory_is_still_fourteen_and_renamed():
@@ -1421,8 +1483,91 @@ def test_never_pooled_evidence_covers_the_transition_scene():
     events = _refusal_events() + [
         {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#1"}},
     ]
-    assert p2.neverPooledEvidence(events)["ok"] is False
+    assert p2.neverPooledEvidence(
+        events, _carry_census(1, events[-1:]), _pool_census()
+    )["ok"] is False
 
 
 def test_retire_zone_starts_one_scene_before_the_destination():
     assert p2.RETIRE_ZONE_MIN_HASH == p2.SLIDE2_MIN_HASH - 1
+
+
+# --------------------------------------------------------------------------- #
+# Codex r1 — the census routes: counted in the page, and the pool read for real.
+# --------------------------------------------------------------------------- #
+def test_refused_carry_fails_on_a_census_total_the_sample_cannot_show():
+    """The bounded sample is not the evidence: a positive TOTAL is red even when
+    the sample that came back is empty."""
+    verdict = _refused(carry_census=_carry_census(3, []))
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 3
+    assert "carry notes inside the retire zone" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_a_carry_census():
+    verdict = _refused(carry_census=None)
+    assert verdict["ok"] is False
+    assert "carry census missing or malformed" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_on_a_malformed_carry_census():
+    verdict = _refused(carry_census={"key": "movie1", "sample": []})
+    assert verdict["ok"] is False
+    assert "carry census missing or malformed" in verdict["reasons"]
+
+
+def test_carry_census_survives_other_movies_crowding_the_sample():
+    """25 routine movie2 notes plus ONE movie1 note: the page filters to movie1
+    BEFORE slicing, so the total is 1 and the finding is red even though the
+    fetched event list is dominated by the other movie."""
+    noise = [
+        {"kind": "remount-done", "detail": {"elId": 50 + i, "key": "movie2", "sceneHash": "#3"}}
+        for i in range(25)
+    ]
+    offender = {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#3"}}
+    events = _refusal_events() + noise + [offender]
+    verdict = _refused(preserve_events=events, carry_census=_carry_census(1, [offender]))
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 1
+    assert verdict["carryInRetireZone"]["localMatchesN"] == 1
+
+
+def test_never_pooled_route_dies_when_a_decoder_is_still_pooled_on_slide2():
+    """A detached movie1 decoder sitting in the pool through slide 2 is never
+    reused or remounted — only the census can see it."""
+    census = _pool_census([
+        {"key": "movie1", "elId": 1, "inDocument": False, "currentTime": 4.0},
+    ])
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["entriesForTargetN"] == 1
+
+
+def test_never_pooled_route_dies_on_a_preserved_from_dom_entry():
+    census = _pool_census([
+        {"key": "untitled.mov", "elId": 1, "fromDom": True, "inDocument": True},
+    ])
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["fromDomForTargetN"] == 1
+
+
+def test_never_pooled_route_tolerates_another_movie_in_the_pool():
+    census = _pool_census([{"key": "movie2", "elId": 9, "inDocument": False}])
+    assert p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)["ok"] is True
+
+
+def test_never_pooled_route_is_invalid_without_a_pool_census():
+    for bad in (None, {}, {"entries": "nope", "sceneHash": "#2"}):
+        evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), bad)
+        assert evidence["ok"] is False
+        assert evidence["poolCensus"]["reason"] == "pool census missing or malformed"
+
+
+def test_never_pooled_route_is_invalid_when_the_census_left_the_retire_zone():
+    """A census taken on slide 3 says nothing about slide 2."""
+    evidence = p2.neverPooledEvidence(
+        _refusal_events(), _carry_census(), _pool_census([], scene_hash="#6")
+    )
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["reason"] == "pool census taken outside the retire zone"

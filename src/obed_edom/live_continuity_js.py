@@ -402,14 +402,21 @@ PRESERVE_CORE_JS = r"""
     if (hn == null) return false;
     return hn >= b.atScene - 1 && hn < retireZoneEnd(b);
   }
+  // Identity must survive a real src clear: inside the zone the hooks let the
+  // player's clear through, so `movieAssetKey(src)` goes null on a decoder we
+  // already know. `stash()` and the createElement src hook stamp
+  // `__obedMovieKey` the first time the key is resolvable; read it back here.
+  function movieKeyFor(v, src) {
+    return movieAssetKey(src) || (v && v.__obedMovieKey) || null;
+  }
   /** May this movie be preserved at the current scene? False only in a retire zone. */
-  function preserveAllowed(src) {
+  function preserveAllowedFor(v, src) {
     const b = retireBoundary();
-    if (!b || movieAssetKey(src) !== b.movieKey) return true;
+    if (!b || movieKeyFor(v, src) !== b.movieKey) return true;
     return !inRetireZone(b);
   }
-  function noteRefused(src, via) {
-    const key = movieAssetKey(src);
+  function noteRefused(v, src, via) {
+    const key = movieKeyFor(v, src);
     const seen = key + '|' + via;
     if (refusedNoted[seen]) return;
     refusedNoted[seen] = true;
@@ -461,8 +468,9 @@ PRESERVE_CORE_JS = r"""
     // ends with its slide) is left to the player; pooling it remounted it at the fallback
     // footprint on later slides (seen on slide 4 in OBS, 2026-09-19).
     if (!movieAssetKey(src)) return;
-    if (!preserveAllowed(src)) {
-      noteRefused(src, 'stash');
+    v.__obedMovieKey = movieAssetKey(src);
+    if (!preserveAllowedFor(v, src)) {
+      noteRefused(v, src, 'stash');
       return;
     }
     if (!(v.readyState >= 2 || v.currentTime > 0.05)) return;
@@ -516,8 +524,8 @@ PRESERVE_CORE_JS = r"""
   function scheduleRemount(v, why) {
     if (disabled) return;
     const scheduleSrc = v ? (v.currentSrc || v.src || '') : '';
-    if (!preserveAllowed(scheduleSrc)) {
-      noteRefused(scheduleSrc, 'remount');
+    if (!preserveAllowedFor(v, scheduleSrc)) {
+      noteRefused(v, scheduleSrc, 'remount');
       return;
     }
     if (suppressRemount) {
@@ -978,11 +986,18 @@ PRESERVE_CORE_JS = r"""
     const b = retireBoundary();
     if (!b || !inRetireZone(b)) return;
     const victims = [];
-    function consider(v) {
-      if (movieAssetKey(v.currentSrc || v.src || '') === b.movieKey && victims.indexOf(v) < 0) victims.push(v);
+    function take(v) {
+      if (victims.indexOf(v) < 0) victims.push(v);
     }
-    pool.forEach(function(q) { (q || []).forEach(consider); });
-    document.querySelectorAll('video[data-obed-preserved="1"]').forEach(consider);
+    // By the POOL'S key (an asset filename the plan maps the same way a src is
+    // mapped), never the live src — a real in-zone clear empties that.
+    pool.forEach(function(q, key) {
+      if (movieAssetKey(key) !== b.movieKey) return;
+      (q || []).forEach(take);
+    });
+    document.querySelectorAll('video[data-obed-preserved="1"]').forEach(function(v) {
+      if (movieKeyFor(v, v.currentSrc || v.src || '') === b.movieKey) take(v);
+    });
     if (!victims.length) return;
     const elIds = victims.map(function(v) {
       beginMove(v);
@@ -1000,8 +1015,8 @@ PRESERVE_CORE_JS = r"""
     if (disabled) return;
     if (!v || suppressRemount) return;
     const remountSrc = v.currentSrc || v.src || '';
-    if (!preserveAllowed(remountSrc)) {
-      noteRefused(remountSrc, 'remount');
+    if (!preserveAllowedFor(v, remountSrc)) {
+      noteRefused(v, remountSrc, 'remount');
       return;
     }
     if (epoch != null && epoch !== remountEpoch) {
@@ -1325,15 +1340,18 @@ PRESERVE_CORE_JS = r"""
       configurable: true, enumerable: desc.enumerable, get: desc.get,
       set: function(val) {
         const empty = val === '' || val == null;
+        if (!empty && this instanceof HTMLVideoElement && movieAssetKey(val)) {
+          this.__obedMovieKey = movieAssetKey(val);
+        }
         if (!disabled && empty && this instanceof HTMLVideoElement) {
           const cur = this.currentSrc || desc.get.call(this) || '';
-          if (preserveAllowed(cur)) {
+          if (preserveAllowedFor(this, cur)) {
             stash(this, 'preserve-skip-clear');
             // Skip clearing so the decoder stays attached to its resource.
             return;
           }
           // Retired: the real clear must happen, or the movie still deviates from raw.
-          noteRefused(cur, 'src-clear');
+          noteRefused(this, cur, 'src-clear');
         }
         return desc.set.call(this, val);
       }
@@ -1347,11 +1365,11 @@ PRESERVE_CORE_JS = r"""
   Element.prototype.removeAttribute = function(name) {
     if (!disabled && String(name).toLowerCase() === 'src' && this instanceof HTMLVideoElement) {
       const cur = this.currentSrc || this.src || '';
-      if (preserveAllowed(cur)) {
+      if (preserveAllowedFor(this, cur)) {
         stash(this, 'preserve-skip-removeAttribute');
         return;
       }
-      noteRefused(cur, 'removeAttribute');
+      noteRefused(this, cur, 'removeAttribute');
     }
     return origRemove.call(this, name);
   };
@@ -1377,7 +1395,9 @@ PRESERVE_CORE_JS = r"""
     note('createElement-video', {elId: el.__obedElId, gen: preserveGeneration});
     const origSA = el.setAttribute.bind(el);
     el.setAttribute = function(attr, value) {
-      if (!disabled && String(attr).toLowerCase() === 'src' && preserveAllowed(value)) {
+      const isSrc = !disabled && String(attr).toLowerCase() === 'src';
+      if (isSrc && movieAssetKey(value)) el.__obedMovieKey = movieAssetKey(value);
+      if (isSrc && preserveAllowedFor(el, value)) {
         const key = assetKey(value);
         const hn = currentHashNum();
         const boundary = restartMinHash();

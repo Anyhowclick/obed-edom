@@ -691,7 +691,10 @@ const Document = { prototype: { createElement(name) {
   return {style: {setProperty(){}}, getContext(){ return {drawImage(){}}; }, toDataURL(){ return ''; }};
 } } };
 const removedAttrs = [];
-const Element = { prototype: { removeAttribute(name) { removedAttrs.push(name); } } };
+const Element = { prototype: { removeAttribute(name) {
+  removedAttrs.push(name);
+  if (String(name).toLowerCase() === 'src') srcStore.set(this, '');
+} } };
 function elStub() {
   return {style: {setProperty(){}}, addEventListener(){}, removeEventListener(){}, getAttribute(){ return null; }};
 }
@@ -1408,3 +1411,116 @@ def test_null_hash_is_allowed():
     assert result["pooled"] == 1
     assert result["preserved"] == "1"
     assert result["refusals"] == []
+
+
+# Codex r1 MAJOR: inside the zone the hooks let a REAL `src` clear through, so
+# a decoder pooled before the zone loses its src-derived identity exactly when
+# the refusal needs it. Identity is stamped (`__obedMovieKey`) and the sweep
+# selects from the POOL's key, so an empty-src decoder is still recognised.
+
+#: Pool a movie1 decoder at `#0`, enter the zone, then let the player REALLY
+#: clear the src (the in-zone hooks no longer swallow it). `__CLEAR__` is the
+#: clearing call under test.
+_CLEARED_IN_ZONE = r"""
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1;
+v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(0);
+detach(v);
+const elId = v.__obedElId;
+const pooledBefore = P.snapshot().filter(x => !x.fromDom).length;
+location.hash = '#1';
+__CLEAR__
+const srcAfterClear = v.src || '';
+"""
+
+
+def _cleared_in_zone(clear: str, tail: str) -> dict:
+    return _run_retire(_CLEARED_IN_ZONE.replace("__CLEAR__", clear) + tail)
+
+
+@pytest.mark.parametrize(
+    "clear", ["v.src = '';", "v.removeAttribute('src');"], ids=["src-clear", "removeAttribute"],
+)
+def test_sweep_retires_a_pooled_decoder_whose_src_was_really_cleared(clear):
+    """`movieAssetKey('')` is null, but the pool still knows the asset key —
+    the sweep must select by it, not by the (now empty) live src."""
+    tail = r"""
+tick();
+console.log(JSON.stringify({
+  elId, pooledBefore, srcAfterClear,
+  pooledAfter: P.snapshot().filter(x => !x.fromDom).length,
+  poolKeys: P.poolKeys,
+  paused: v.paused,
+  inDocument: document.contains(v),
+  preserved: v.dataset.obedPreserved || null,
+  gen: v.__obedGen,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => e.detail),
+}));
+"""
+    result = _cleared_in_zone(clear, tail)
+    assert result["pooledBefore"] == 1
+    assert result["srcAfterClear"] == ""
+    assert result["pooledAfter"] == 0
+    assert result["poolKeys"] == []
+    assert result["paused"] is True
+    assert result["inDocument"] is False
+    assert result["preserved"] is None
+    assert result["gen"] == -1
+    assert result["retire"] == [
+        {"key": "movie1", "elIds": [result["elId"]], "atScene": 2, "sceneHash": "#1"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "clear", ["v.src = '';", "v.removeAttribute('src');"], ids=["src-clear", "removeAttribute"],
+)
+def test_pending_remount_of_an_empty_src_decoder_is_refused_in_zone(clear):
+    """A retry scheduled before the zone reaches `tryRemount` after the clear:
+    with identity read only off the src it would be allowed to remount. The
+    stamped key must refuse it, with a `preserve-refused` via `remount`."""
+    tail = r"""
+const styleBefore = JSON.stringify(v.style);
+P.remountAll();
+console.log(JSON.stringify({
+  srcAfterClear,
+  styleUntouched: JSON.stringify(v.style) === styleBefore,
+  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#1').length,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
+}));
+"""
+    result = _cleared_in_zone(clear, tail)
+    assert result["srcAfterClear"] == ""
+    assert result["styleUntouched"] is True
+    assert result["remountedInZone"] == 0
+    assert {"key": "movie1", "scene": 1, "via": "remount", "sceneHash": "#1"} in result["refusals"]
+
+
+@pytest.mark.parametrize(
+    "clear", ["v.src = '';", "v.removeAttribute('src');"], ids=["src-clear", "removeAttribute"],
+)
+def test_a_stamped_empty_src_decoder_is_free_again_past_the_zone_end(clear):
+    """Companion control that the stamp does not over-reach: the SAME
+    really-cleared, still-stamped decoder, carried past the zone without the
+    interval ever firing inside it, must at the zone end (`#6`, the restart
+    scene — not `#7`, where the bridge motion legitimately takes over) be
+    neither swept nor refused, and may remount again."""
+    tail = r"""
+location.hash = '#6';
+tick();
+P.remountAll();
+console.log(JSON.stringify({
+  srcAfterClear,
+  stamped: v.__obedMovieKey,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').length,
+  refusalsAtSix: P.events.filter(e => e.kind === 'preserve-refused' && e.detail.sceneHash === '#6').length,
+  remountedAtSix: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#6').length,
+}));
+"""
+    result = _cleared_in_zone(clear, tail)
+    assert result["srcAfterClear"] == ""
+    assert result["stamped"] == "movie1"
+    assert result["retire"] == 0      # the sweep never ran inside the zone here
+    assert result["refusalsAtSix"] == 0
+    assert result["remountedAtSix"] >= 1

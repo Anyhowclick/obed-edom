@@ -98,7 +98,8 @@ EMPTY_CORNERS = ((1864, 8, 48, 48), (1864, 1024, 48, 48))  # right side stays em
 # Large continuing movie footprint on slide 1 (inventory). Center is unobscured.
 MOVIE_ROI = (109, 795, 952, 268)
 # Second movie (WA0125) footprint on slide 1/2 — feeds the continuity plan's
-# movie2 entry (PRESERVE_CORE_JS no longer hardcodes this).
+# movie2 entry. Probe-side ONLY (the leftover-overlay census): naming it in the
+# injected continuity plan is what let the runtime pool and remount it.
 MOVIE2_ROI = (109, 500, 663, 186)
 # The disposable movie's frame-index stimulus patch occupies the top-left
 # 120x48 of its 1920x540 source; map it to screen space via the movie's own
@@ -177,6 +178,62 @@ CARRY_EVENT_KINDS = frozenset({
     "dom-swap",
     "facade-block-clear",
 })
+
+# Carry-note census for the retire zone, counted in the page: the target's
+# elements are resolved and the window applied BEFORE the sample is sliced, so
+# `total` is authoritative however many routine notes other movies produced.
+CARRY_CENSUS_JS = r"""(() => {
+  const p = window.__OBED_P2_PRESERVE__;
+  if (!p || !p.events) return null;
+  const KEY = '__KEY__';
+  const TOKEN = '__TOKEN__';
+  const KINDS = __CARRY_KINDS__;
+  const LO = __ZONE_LO__;
+  const HI = __ZONE_HI__;
+  function mineByKey(e) {
+    const k = String((e.detail && e.detail.key) || '').toLowerCase();
+    return k === KEY || (!!k && k.indexOf(TOKEN) >= 0);
+  }
+  const ids = {};
+  p.events.forEach((e) => {
+    if (!mineByKey(e)) return;
+    const d = e.detail || {};
+    [d.elId, d.newElId].forEach((i) => { if (i !== undefined && i !== null) ids[String(i)] = 1; });
+    (d.elIds || []).forEach((i) => { ids[String(i)] = 1; });
+  });
+  const hits = p.events.filter((e) => {
+    if (KINDS.indexOf(e.kind) < 0) return false;
+    const d = e.detail || {};
+    const mine = mineByKey(e) || ids[String(d.elId)] === 1 || ids[String(d.newElId)] === 1;
+    if (!mine) return false;
+    const m = /^#(\d+)/.exec(String(d.sceneHash || ''));
+    const n = m ? parseInt(m[1], 10) : -1;
+    return n >= LO && n < HI;
+  });
+  return {
+    key: KEY,
+    total: hits.length,
+    sample: hits.slice(0, 20),
+    loScene: LO,
+    hiScene: HI,
+    eventsSeen: p.events.length
+  };
+})()""".replace(
+    "__CARRY_KINDS__", json.dumps(sorted(CARRY_EVENT_KINDS))
+).replace("__KEY__", MOVIE1_KEY).replace(
+    "__TOKEN__", MOVIE1_TOKEN.lower()
+).replace("__ZONE_LO__", str(RETIRE_ZONE_MIN_HASH)).replace(
+    "__ZONE_HI__", str(SLIDE3_MIN_HASH)
+)
+
+# Pool census on settled slide 2: `snapshot()` lists every pooled decoder AND
+# every `data-obed-preserved` element still in the DOM, so "nothing was ever
+# pooled" can be read off the real pool instead of inferred from silence.
+POOL_CENSUS_JS = """(() => {
+  const p = window.__OBED_P2_PRESERVE__;
+  if (!p || !p.snapshot) return null;
+  return {entries: p.snapshot(), sceneHash: String(location.hash || '')};
+})()"""
 
 # Leftover-overlay query over the slide-1/2 movie footprints. `count` is OUR
 # remount overlays only (a fresh authored movie legitimately (re)starting in the
@@ -789,8 +846,14 @@ def _derive_movie_texids(
 
 
 def build_continuity_plan(bridge34: bool) -> dict:
-    """The runtime plan injected into the player — `derive_plan(...).to_runtime()`
-    for this fixture, plus the P2-only `movie2` entry and transparent background.
+    """The runtime plan injected into the player — equal to
+    `derive_plan(...).to_runtime()` for this fixture, plus the transparent
+    background the P2 export needs.
+
+    `movies` names movie1 ONLY: naming the slide-3-only WA0125 clip admits it to
+    the runtime's `stash()` plan-name filter, which pools it at the 3->4 detach
+    and remounts it at the fallback footprint (the stray 62e1ab7 fixed for the
+    product by not naming it). `MOVIE2_ROI` stays a probe-side constant.
 
     `bridge34=False` removes the 3->4 bridge ONLY; the 1->2 retire and the 2->3
     restart stay, so `--disable-bridge34` turns exactly one finding red.
@@ -800,10 +863,6 @@ def build_continuity_plan(bridge34: bool) -> dict:
             "movie1": {
                 "assetKeys": [MOVIE1_TOKEN.lower()],
                 "footprint": dict(zip(("x", "y", "w", "h"), MOVIE_ROI)),
-            },
-            "movie2": {
-                "assetKeys": [MOVIE2_TOKEN.lower()],
-                "footprint": dict(zip(("x", "y", "w", "h"), MOVIE2_ROI)),
             },
         },
         "boundaries": [
@@ -893,6 +952,109 @@ def carryEvents(events: list[dict], target_key: str, lo_scene: int, hi_scene: in
     return out
 
 
+def carryCensusVerdict(
+    census: object, events: list[dict], target_key: str, lo_scene: int, hi_scene: int
+) -> dict:
+    """Clause (c)'s count. The in-page census is authoritative (`total` is taken
+    before any slicing); the fetched notes are a belt. A missing or malformed
+    census fails closed — absence cannot be proven from a bounded sample."""
+    local = carryEvents(events, target_key, lo_scene, hi_scene)
+    if not isinstance(census, dict) or not isinstance(census.get("total"), int):
+        return {
+            "ok": False,
+            "total": None,
+            "reason": "carry census missing or malformed",
+            "census": census,
+            "localMatches": local[:6],
+            "localMatchesN": len(local),
+        }
+    total = int(census["total"])
+    return {
+        "ok": total == 0 and not local,
+        "total": total,
+        "reason": None if (total == 0 and not local) else "carry notes inside the retire zone",
+        "census": {k: v for k, v in census.items() if k != "sample"},
+        "sample": (census.get("sample") or [])[:6],
+        "localMatches": local[:6],
+        "localMatchesN": len(local),
+    }
+
+
+def poolCensusVerdict(
+    census: object, target_key: str, lo_scene: int, hi_scene: int
+) -> dict:
+    """The real pool on settled slide 2: zero pooled AND zero `fromDom`
+    preserved entries for the target's asset. A census that is missing,
+    malformed or taken outside the retire zone is NOT evidence."""
+    if not isinstance(census, dict) or not isinstance(census.get("entries"), list):
+        return {"ok": False, "reason": "pool census missing or malformed", "census": census}
+    scene = _hash_num(census.get("sceneHash"))
+    if scene is None or not (lo_scene <= scene < hi_scene):
+        return {
+            "ok": False,
+            "reason": "pool census taken outside the retire zone",
+            "sceneHash": census.get("sceneHash"),
+        }
+    mine = [
+        e
+        for e in census["entries"]
+        if isinstance(e, dict) and _movie_key(str(e.get("key") or "")) == target_key
+    ]
+    return {
+        "ok": not mine,
+        "reason": None if not mine else "the target movie is still pooled on slide 2",
+        "sceneHash": census.get("sceneHash"),
+        "entriesN": len(census["entries"]),
+        "entriesForTarget": mine[:6],
+        "entriesForTargetN": len(mine),
+        "fromDomForTargetN": sum(1 for e in mine if e.get("fromDom")),
+    }
+
+
+def frozenCompositeAfterFlip(
+    motion_across_flip: object, *, min_after_pairs: int = 4
+) -> dict:
+    """Clause (e): the movie ROI must be PIXEL-FROZEN for the whole post-flip
+    window and have been LIVE before it — the raw export's own behaviour once
+    the carry is refused (a carried movie shows after-pair MAE >> eps).
+
+    The burnt-in counter cannot serve here: on the refused slide the patch ROI
+    shows the export's poster photo, so it never decodes. Fails closed when the
+    scored window is absent, short or malformed.
+    """
+    m = motion_across_flip if isinstance(motion_across_flip, dict) else {}
+    after = m.get("afterPairMae")
+    eps = m.get("pairEps")
+    if not isinstance(after, list) or not isinstance(eps, (int, float)):
+        return {"frozen": False, "reason": "no scored flip window", "n": 0}
+    if any(not isinstance(v, (int, float)) for v in after):
+        return {"frozen": False, "reason": "non-numeric pair mae", "n": len(after)}
+    if len(after) < min_after_pairs:
+        return {
+            "frozen": False,
+            "reason": "insufficient after-pairs to judge a freeze",
+            "n": len(after),
+            "afterPairMae": after,
+        }
+    still = all(float(v) <= float(eps) for v in after)
+    live_before = bool(m.get("beforeOk"))
+    reason = None
+    if not still:
+        reason = "composite kept moving on the refused slide"
+    elif not live_before:
+        reason = "no motion before the flip — the instrument is blind"
+    return {
+        "frozen": bool(still and live_before),
+        "reason": reason,
+        "n": len(after),
+        "afterPairMae": after,
+        "beforePairMae": m.get("beforePairMae"),
+        "pairEps": eps,
+        "liveBeforeFlip": live_before,
+        "flipIndex": m.get("flipIndex"),
+    }
+
+
 def frozenIndexAfterFlip(
     index_samples: list[dict], flip_index: int | None, *, min_samples: int = 4
 ) -> dict:
@@ -927,11 +1089,13 @@ def refusedCarry1to2(
     injected_plan: dict,
     preserve_events: list[dict],
     lingering: dict,
+    motion_across_flip: object,
     index_samples: list[dict],
     flip_index: int | None,
     hash1: object,
     hash2: object,
     player_build_errors: list,
+    carry_census: object = None,
     *,
     target_key: str = MOVIE1_KEY,
     retire_scene: int = SLIDE2_MIN_HASH,
@@ -947,9 +1111,9 @@ def refusedCarry1to2(
     `retire_scene - 1`); (c) zero carry notes for that movie anywhere in the
     retire zone `[zone_scene, restart_scene)`, the transition scene included;
     (d) no lingering preserved/remounted overlay and nothing painting over the
-    slide-1/2 footprints on settled slide 2; (e) the composited counter frozen
-    across the slide-2 window with a real 1->2 hash change; (f) no player build
-    error.
+    slide-1/2 footprints on settled slide 2; (e) the composite in the movie ROI
+    pixel-FROZEN across the post-flip window (live before it) with a real 1->2
+    hash change; (f) no player build error.
     """
     boundaries = (injected_plan or {}).get("boundaries") or []
     plan_retire = next(
@@ -963,19 +1127,22 @@ def refusedCarry1to2(
         None,
     )
     refusals = refusalEvents(preserve_events, target_key, zone_scene)
-    carried = carryEvents(preserve_events, target_key, zone_scene, restart_scene)
+    carried = carryCensusVerdict(
+        carry_census, preserve_events, target_key, zone_scene, restart_scene
+    )
     lingering = lingering or {}
     no_lingering = bool(
         lingering.get("count", 1) == 0
         and lingering.get("preservedCount", 1) == 0
         and lingering.get("paintingCount", 1) == 0
     )
-    frozen = frozenIndexAfterFlip(index_samples, flip_index)
+    frozen = frozenCompositeAfterFlip(motion_across_flip)
+    index_diagnostic = frozenIndexAfterFlip(index_samples, flip_index)
     hash_changed = bool(hash1 != hash2 and (_hash_num(hash2) or -1) >= retire_scene)
     ok = bool(
         plan_retire
         and refusals
-        and not carried
+        and carried["ok"]
         and no_lingering
         and frozen["frozen"]
         and hash_changed
@@ -986,12 +1153,12 @@ def refusedCarry1to2(
         reasons.append("injected plan has no retire boundary for the target key")
     if not refusals:
         reasons.append("no preserve-refused/retire-boundary event in the retire zone")
-    if carried:
-        reasons.append("the movie was carried inside the retire zone")
+    if not carried["ok"]:
+        reasons.append(carried["reason"] or "the movie was carried inside the retire zone")
     if not no_lingering:
         reasons.append("a preserved/remounted/painting <video> lingers on slide 2")
     if not frozen["frozen"]:
-        reasons.append(frozen.get("reason") or "counter not frozen")
+        reasons.append(frozen.get("reason") or "composite not frozen")
     if not hash_changed:
         reasons.append("no valid forward 1->2 boundary")
     if player_build_errors:
@@ -1001,10 +1168,11 @@ def refusedCarry1to2(
         "planRetire": plan_retire,
         "refusalEvents": refusals[:6],
         "refusalEventsN": len(refusals),
-        "carryEventsInRetireZone": carried[:6],
-        "carryEventsInRetireZoneN": len(carried),
+        "carryInRetireZone": carried,
+        "carryEventsInRetireZoneN": carried["total"],
         "lingering": lingering,
-        "frozenIndex": frozen,
+        "frozenComposite": frozen,
+        "frozenIndexNonGating": index_diagnostic,
         "hash": f"{hash1}->{hash2}",
         "hashChanged": hash_changed,
         "playerBuildErrors": player_build_errors,
@@ -1014,6 +1182,8 @@ def refusedCarry1to2(
 
 def neverPooledEvidence(
     preserve_events: list[dict],
+    carry_census: object = None,
+    pool_census: object = None,
     *,
     target_key: str = MOVIE1_KEY,
     zone_scene: int = RETIRE_ZONE_MIN_HASH,
@@ -1022,18 +1192,24 @@ def neverPooledEvidence(
     """"Nothing was ever pooled" — the stronger substitute for the
     reuse-skip/retire pair once the target key is retired before the restart.
 
-    The runtime emits no positive stash note, so "no later stash before the
-    restart scene" is read off the absence of every pool-CONSUMING note
-    (`remount-*`, `reuse-decoder`, `dom-swap`, `facade-block-clear`) for that
-    key inside the retire zone.
+    Requires a positive refusal note, zero carry notes in the retire zone, AND a
+    well-formed pool census taken on settled slide 2 that holds no pooled or
+    `fromDom` preserved entry for the key — a detached decoder can sit in the
+    pool through slide 2 without ever being reused, so silence is not evidence.
+    An invalid census invalidates the route (the original positive pair is then
+    required).
     """
     refusals = refusalEvents(preserve_events, target_key, zone_scene)
-    carried = carryEvents(preserve_events, target_key, zone_scene, restart_scene)
+    carried = carryCensusVerdict(
+        carry_census, preserve_events, target_key, zone_scene, restart_scene
+    )
+    pooled = poolCensusVerdict(pool_census, target_key, zone_scene, restart_scene)
     return {
-        "ok": bool(refusals and not carried),
+        "ok": bool(refusals and carried["ok"] and pooled["ok"]),
         "refusalEventsN": len(refusals),
-        "carryEventsInRetireZoneN": len(carried),
-        "carryEventsInRetireZone": carried[:6],
+        "carryInRetireZone": carried,
+        "carryEventsInRetireZoneN": carried["total"],
+        "poolCensus": pooled,
     }
 
 
@@ -3054,6 +3230,11 @@ async def _run(player: Path) -> dict:
         lingering_on_slide2 = await chrome.evaluate(
             LINGERING_MOVIE_OVERLAYS_JS
         ) or {"error": "evaluate returned nothing"}
+        # The real pool, on settled slide 2 and inside the retire zone: the only
+        # proof that nothing of movie1 is sitting detached in it.
+        pool_census_s2 = await chrome.evaluate(POOL_CENSUS_JS) or {
+            "error": "pool census unavailable"
+        }
         await _ensure_videos_playing(chrome)
         media_mid = await _media_snapshot_with_pool(chrome)
         h_mid = _norm_hash(
@@ -3207,21 +3388,15 @@ async def _run(player: Path) -> dict:
               const remountAll = p.events.filter((e) => e.kind === 'remount-done');
               const remounts = remountAll.slice(0, 12).concat(remountAll.slice(12).slice(-20));
               const moNoTexids = p.events.filter((e) => e.kind === 'mo-no-texids').slice(-5);
-              // Every carry note inside the RETIRE ZONE, bounded: the refusal gate
-              // must see one if it happened, and a blanket keep-list would pull in
-              // the hundreds of routine remounts from the other slides.
-              const carryKinds = __CARRY_KINDS__;
-              const inZone = p.events.filter((e) => {
-                if (carryKinds.indexOf(e.kind) < 0) return false;
-                const m = /^#(\d+)/.exec(String((e.detail && e.detail.sceneHash) || ''));
-                const n = m ? parseInt(m[1], 10) : -1;
-                return n >= __ZONE_LO__ && n < __ZONE_HI__;
-              }).slice(0, 20);
-              return important.concat(remounts).concat(moNoTexids).concat(inZone);
-            })()""".replace("__CARRY_KINDS__", json.dumps(sorted(CARRY_EVENT_KINDS)))
-            .replace("__ZONE_LO__", str(RETIRE_ZONE_MIN_HASH))
-            .replace("__ZONE_HI__", str(SLIDE3_MIN_HASH))
+              return important.concat(remounts).concat(moNoTexids);
+            })()"""
         ) or []
+        # Carry census: counted IN THE PAGE over the full event log and filtered
+        # to movie1 BEFORE any slicing, so a bounded sample can never hide an
+        # offending note behind another movie's routine ones.
+        carry_census = await chrome.evaluate(CARRY_CENSUS_JS) or {
+            "error": "carry census unavailable"
+        }
         clear_i = next(
             (i for i, e in enumerate(preserve_events) if e.get("kind") == "pool-cleared"),
             None,
@@ -3434,15 +3609,17 @@ async def _run(player: Path) -> dict:
         continuity_plan,
         preserve_events,
         lingering_on_slide2,
+        motion_across_flip,
         index_samples,
         flip_index,
         hash1,
         hash2,
         player_build_errors,
+        carry_census,
     )
     # With movie1 never pooled, the reuse-skip/retire pair at the 2->3 boundary
     # cannot fire; "nothing was ever pooled" is the stronger substitute.
-    never_pooled = neverPooledEvidence(preserve_events)
+    never_pooled = neverPooledEvidence(preserve_events, carry_census, pool_census_s2)
 
     findings = [
         {"id": "sourceUnchanged", "pass": after.as_dict() == before.as_dict()},
@@ -3456,6 +3633,7 @@ async def _run(player: Path) -> dict:
             "detail": {
                 "refusedCarry1to2": refused_carry,
                 "lingeringOnSlide2": lingering_on_slide2,
+                "poolCensusOnSlide2": pool_census_s2,
                 "injectedBoundaries": continuity_plan["boundaries"],
                 "diagnosticsNonGating": [
                     "continues", "noJump", "remountRestart", "pre", "firstAfter", "post",
@@ -3506,12 +3684,19 @@ async def _run(player: Path) -> dict:
                     f"anywhere in the retire zone [{RETIRE_ZONE_MIN_HASH}, {SLIDE3_MIN_HASH}) — "
                     "the transition scene INCLUDED, since the player detaches the slide-1 videos "
                     "while still on it and a remount there is what leaves a decoder painting on "
-                    "slide 2; "
+                    "slide 2. The carry notes are counted IN THE PAGE over the whole event log, "
+                    "filtered to movie1 before any slicing, and the gate reads that total (a "
+                    "missing or malformed census fails closed); "
                     "(d) on settled slide 2, zero preserved/remounted leftovers AND zero PAINTING "
                     "<video>s over the slide-1/2 footprints (the player composites slide 2 in "
                     "WebGL with its layer tree at opacity 0, so the paint test is opacity-aware); "
-                    "(e) the composited frame-index counter FROZEN across the slide-2 window — the "
-                    "raw export's own behaviour — with a real forward 1->2 hash change; (f) no "
+                    "(e) the composite in the movie ROI PIXEL-FROZEN across the whole post-flip "
+                    "window (every after-pair MAE <= the scorer's own pairEps, >= 4 after-pairs) "
+                    "while it was LIVE before the flip — the raw export's own behaviour, and a "
+                    "carried movie would show after-pair MAE far above eps — with a real forward "
+                    "1->2 hash change. The burnt-in counter CANNOT serve here: on the refused "
+                    "slide the patch ROI shows the export's poster photo, not the grating, so it "
+                    "never decodes; frozenIndexNonGating keeps it as a diagnostic. (f) no "
                     "player-build-error. The former continuity evidence (continues/indexRun/"
                     "liveContinuity1to2/motionAcrossFlip/movieTexids) is all false BY DESIGN now "
                     "and is kept as NON-GATING diagnostics only."
@@ -3662,9 +3847,13 @@ async def _run(player: Path) -> dict:
                 "the pool was EMPTY at the boundary, so neither event CAN fire. That is "
                 "a strengthening, not a weakening — 'nothing was ever pooled' beats 'the "
                 "pool was skipped', and it is carried by a positive event. The runtime "
-                "emits no stash note, so 'no later stash of that key' is read off the "
-                "absence of every pool-consuming note inside the retire zone "
-                f"[{RETIRE_ZONE_MIN_HASH}, {SLIDE3_MIN_HASH})."
+                "emits no stash note, so the route additionally requires a POOL CENSUS "
+                "taken on settled slide 2, inside the retire zone "
+                f"[{RETIRE_ZONE_MIN_HASH}, {SLIDE3_MIN_HASH}), holding zero pooled and zero "
+                "fromDom preserved entries for the key — a detached decoder can sit in the "
+                "pool through slide 2 without ever being reused, so absence-of-notes alone is "
+                "not evidence. A census that is missing, malformed or taken outside the zone "
+                "invalidates the route, and the original positive pair is required instead."
             ),
             "detail": {
                 "targetKey": target_key,

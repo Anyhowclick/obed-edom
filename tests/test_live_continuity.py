@@ -15,6 +15,8 @@ REAL_EXPORT_ROOT = Path(
     "keynote-parser-module-error-46801c/output/p2-recovery/html-adversarial/html-unmodified"
 )
 
+REAL_PLAYER_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
+
 SLIDE1 = "08C861A1-CB39-4832-B189-6DF95B7F3396"
 SLIDE2 = "0C652BEB-F445-48CF-BFD0-4194C6B7A438"
 SLIDE3 = "D4D95253-4C37-40CF-A4A4-62D8DE24EF2A"
@@ -242,7 +244,10 @@ def test_refuses_video_below_an_intermediate_layer(ancestor_change):
     tmp = _mutate_slide(SLIDE1, lambda data: _map_movie_nodes(data, nest_video))
     plan = _plan(tmp)
     assert isinstance(plan, Unsupported)
-    assert "not a direct child" in plan.reason
+    # the export's `animations` lists are always empty, so an animation entry is an object the
+    # mask vocabulary has never measured and is refused before the nesting is even reached.
+    expected = "possible mask" if ancestor_change == "animation" else "not a direct child"
+    assert expected in plan.reason
 
 
 def test_refuses_two_geometry_changing_movies_on_one_boundary():
@@ -924,7 +929,7 @@ def test_a_non_unit_contents_rect_is_refused_as_a_possible_crop():
         node["baseLayer"]["layers"][0]["initialState"]["contentsRect"]["width"] = 0.5
 
     plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, crop))
-    assert plan.reason.endswith("contentsRect")
+    assert plan.reason.endswith("contentsRect.width")
 
 
 def test_a_contents_rect_within_the_measurement_tolerance_is_not_refused():
@@ -935,12 +940,186 @@ def test_a_contents_rect_within_the_measurement_tolerance_is_not_refused():
     assert isinstance(plan, ContinuityPlan)
 
 
-def test_a_shape_path_anywhere_in_the_movie_subtree_is_refused():
+def test_a_shape_path_inside_an_unmeasured_container_is_refused():
+    """`effects` is always an empty list under a movie node, so an object inside one is an
+    encoding this module has never seen -- the mask could hide there without touching a single
+    checked key, which is exactly the hole a shallow key check leaves open."""
+
     def shape(node):
         node["effects"] = [{"shapePath": {"elements": []}}]
 
     plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, shape))
-    assert plan.reason.endswith("shapePath")
+    assert plan.reason.endswith("<movie node>.effects[0]")
+
+
+def test_a_shape_path_key_in_a_measured_container_is_refused_by_name():
+    def shape(node):
+        node["baseLayer"]["initialState"]["shapePath"] = {"elements": []}
+
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, shape))
+    assert plan.reason.endswith("initialState.shapePath")
+
+
+# Every container the walk can reach, and the shape of the object that must not appear in it.
+@pytest.mark.parametrize(
+    "place, expected",
+    [
+        pytest.param(
+            lambda node: node.__setitem__("effects", [{"maskLayer": {"opacity": 1}}]),
+            "<movie node>.effects[0]",
+            id="effects-entry",
+        ),
+        pytest.param(
+            lambda node: node["baseLayer"].__setitem__("animations", [{"property": "bounds"}]),
+            "<movie node>.baseLayer.animations[0]",
+            id="animations-entry",
+        ),
+        pytest.param(
+            lambda node: node["baseLayer"]["layers"][0].__setitem__("texture", {"mask": "m"}),
+            "<movie node>.baseLayer.layers[0].texture",
+            id="texture-object",
+        ),
+        pytest.param(
+            lambda node: node["baseLayer"]["initialState"].__setitem__("affineTransform", [{"a": 1}]),
+            "<movie node>.baseLayer.initialState.affineTransform[0]",
+            id="transform-entry",
+        ),
+    ],
+)
+def test_an_object_where_none_was_measured_is_refused(place, expected):
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, place))
+    assert plan.reason.endswith(expected)
+
+
+def test_a_mask_object_on_the_bridge_movie_cannot_qualify(monkeypatch):
+    """Codex r1's blocker, verbatim: `effects: [{"maskLayer": ...}]` on slide 4's bridge movie
+    moves no checked key and no geometry, so a shallow rule leaves the runtime plan -- and its
+    allowlisted signature -- intact, and the runtime carries and paints the full UNMASKED video.
+    It must be `Unsupported` even with the signature check disabled entirely."""
+    from obed_edom import live_continuity
+
+    def mask(node):
+        node["effects"] = [{"maskLayer": {"opacity": 1}}]
+
+    monkeypatch.setattr(
+        live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256))
+    )
+    plan = _plan(_mutate_slide(SLIDE4, lambda data: _map_movie_nodes(data, mask)))
+    assert isinstance(plan, Unsupported)
+    assert "possible mask" in plan.reason
+
+
+def test_an_unknown_key_deep_inside_a_measured_container_is_refused():
+    """`texturedRectangle` is a leaf object the geometry rules never read, so a shallow check
+    would let anything through it."""
+
+    def tamper(node):
+        node["baseLayer"]["layers"][0]["texturedRectangle"] = {"textureType": 0, "cornerRadius": 8}
+
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, tamper))
+    assert plan.reason.endswith("texturedRectangle.cornerRadius")
+
+
+@pytest.mark.parametrize("name", ["maskLayer", "maskPath", "clipRect", "shouldClip", "shapePathRef"])
+def test_a_key_that_reads_like_clipping_is_refused_wherever_it_appears(name):
+    """Belt and braces over the vocabulary: even if a future measurement widens a key set, a
+    name containing mask/clip/shapepath must never pass silently."""
+
+    def tamper(node):
+        node["movie"][name] = 1
+
+    _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, tamper))
+
+
+def test_the_only_mask_named_keys_exempted_are_ones_the_export_really_carries():
+    """Two measured keys contain 'mask' benignly; exempting anything else would reopen the hole
+    the name rule closes."""
+    from obed_edom import live_continuity
+
+    measured = _measured_subtree_vocabulary(FIXTURE_ROOT)["initialState"]
+    assert live_continuity._BENIGN_MASK_KEYS <= measured
+    assert _plan().refusals[0]["toPlayer"] == 1, "the fixture still derives, exemptions included"
+
+
+@pytest.mark.parametrize("value", [[], None, 0, "x", [0, 0, 1, 1], {"x": 0, "y": 0, "width": 1}])
+def test_a_contents_rect_that_is_not_the_unit_object_is_refused(value):
+    """A falsey or wrongly-shaped `contentsRect` must not be read as 'no crop': that is how a
+    malformed export would slip a crop past the rule."""
+
+    def tamper(node):
+        node["baseLayer"]["layers"][0]["initialState"]["contentsRect"] = value
+
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, tamper))
+    assert plan.reason.endswith("initialState.contentsRect")
+
+
+@pytest.mark.parametrize("value", [True, False, 1, 0, "false", None])
+def test_masks_to_bounds_must_be_exactly_false(value):
+    def tamper(node):
+        node["baseLayer"]["initialState"]["masksToBounds"] = value
+
+    if value is False:
+        plan = _plan(_mutate_slide(SLIDE1, lambda data: _map_movie_nodes(data, tamper)))
+        assert isinstance(plan, ContinuityPlan)
+        return
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, tamper))
+    assert plan.reason.endswith("initialState.masksToBounds")
+
+
+# --- malformed shapes fail closed, they never raise ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(lambda state: state.pop("initialState"), id="no-initialState"),
+        pytest.param(lambda state: state["initialState"].pop("width"), id="no-width"),
+        pytest.param(lambda state: state["initialState"].pop("height"), id="no-height"),
+        pytest.param(lambda state: state["initialState"].pop("position"), id="no-position"),
+        pytest.param(lambda state: state["initialState"]["position"].pop("pointY"), id="no-pointY"),
+        pytest.param(lambda state: state["initialState"].__setitem__("width", "wide"), id="text-width"),
+        pytest.param(lambda state: state["initialState"].__setitem__("width", None), id="null-width"),
+        pytest.param(lambda state: state["initialState"].__setitem__("height", True), id="bool-height"),
+        pytest.param(
+            lambda state: state["initialState"]["position"].__setitem__("pointX", float("nan")),
+            id="nan-pointX",
+        ),
+        pytest.param(lambda state: state.__setitem__("initialState", []), id="list-initialState"),
+    ],
+)
+def test_a_malformed_slot_above_the_movie_is_unsupported_not_an_exception(tamper):
+    def break_the_green_square(data):
+        tamper(_slot_object(data, 0, SLIDE2_GREEN_SLOT))
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, break_the_green_square))
+    assert isinstance(plan, Unsupported)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(lambda layer: layer.pop("initialState"), id="no-initialState"),
+        pytest.param(lambda layer: layer["initialState"].pop("width"), id="no-width"),
+        pytest.param(lambda layer: layer["initialState"].__setitem__("height", "tall"), id="text-height"),
+        pytest.param(lambda layer: layer["initialState"].pop("position"), id="no-position"),
+        pytest.param(lambda layer: layer.__setitem__("initialState", []), id="list-initialState"),
+        pytest.param(lambda layer: layer.__setitem__("layers", "not a list"), id="text-layers"),
+    ],
+)
+def test_a_malformed_movie_layer_is_unsupported_not_an_exception(tamper):
+    plan = _plan(_mutate_slide(SLIDE1, lambda data: _map_movie_nodes(data, lambda n: tamper(n["baseLayer"]))))
+    assert isinstance(plan, Unsupported)
+
+
+def test_a_non_list_layers_on_a_draw_slot_is_unsupported_not_an_exception():
+    def tamper(data):
+        _draw_slots(data, 0)[SLIDE2_MOVIE_SLOT]["layers"] = "not a list"
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, tamper))
+    assert isinstance(plan, Unsupported)
+    assert "unrecognised slide layer shape" in plan.reason
 
 
 @pytest.mark.parametrize(
@@ -961,29 +1140,54 @@ def test_any_key_outside_the_measured_vocabulary_is_refused(place):
     _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, place))
 
 
+def _measured_subtree_vocabulary(root: Path) -> dict[str, set[str]]:
+    """Every object under every movie node of an export, keyed by the key that holds it."""
+    measured: dict[str, set[str]] = {}
+
+    def walk(value, kind):
+        if isinstance(value, list):
+            for item in value:
+                walk(item, kind)
+        elif isinstance(value, dict):
+            measured.setdefault(kind, set()).update(value)
+            for key, child in value.items():
+                walk(child, key)
+
+    uuids = json.loads((root / "assets" / "header.json").read_text())["slideList"]
+    for uuid in uuids:
+        data = json.loads((root / "assets" / uuid / f"{uuid}.json").read_text())
+        for node in _find_movie_nodes(data["events"]):
+            walk(node, "<movie node>")
+    return measured
+
+
 def test_the_measured_vocabulary_does_not_refuse_todays_fixture():
-    """The allowlist is only honest if it is a measurement: every key the fixture actually uses
-    must be in it, or the rule would refuse the deck P2 qualified."""
+    """The allowlist is only honest if it is a measurement: every object the fixture actually
+    contains, at every depth, must be in the table, or the rule would refuse the deck P2
+    qualified."""
     from obed_edom import live_continuity
 
-    node_keys, layer_keys, state_keys = set(), set(), set()
+    measured = _measured_subtree_vocabulary(FIXTURE_ROOT)
+    for kind, keys in measured.items():
+        assert kind in live_continuity._MOVIE_SUBTREE_KEYS, kind
+        assert keys <= live_continuity._MOVIE_SUBTREE_KEYS[kind], (kind, keys)
+    assert "objectID" in measured["<movie node>"], "the overlap rule needs the movie objectIDs"
 
-    def walk(layer):
-        layer_keys.update(layer)
-        state_keys.update(layer["initialState"])
-        for child in layer.get("layers") or []:
-            walk(child)
 
-    for uuid in (SLIDE1, SLIDE2, SLIDE3, SLIDE4):
-        data = json.loads((FIXTURE_ROOT / "assets" / uuid / f"{uuid}.json").read_text())
-        for node in _find_movie_nodes(data["events"]):
-            node_keys.update(node)
-            walk(node["baseLayer"])
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_the_measured_vocabulary_is_the_real_exports_and_nothing_more():
+    """The table is measured from the REAL export, which carries containers the trim dropped
+    (`attributes`, `texture`, `texturedRectangle`, `baseLayer.objectID`). It must cover the real
+    export exactly -- no gaps, and no entry invented beyond what was measured."""
+    from obed_edom import live_continuity
 
-    assert node_keys <= live_continuity._MOVIE_NODE_KEYS
-    assert layer_keys <= live_continuity._MOVIE_LAYER_KEYS
-    assert state_keys <= live_continuity._MOVIE_LAYER_STATE_KEYS
-    assert "objectID" in node_keys, "the overlap rule needs the fixture's movie objectIDs"
+    measured = _measured_subtree_vocabulary(REAL_PLAYER_ROOT)
+    assert set(measured) == set(live_continuity._MOVIE_SUBTREE_KEYS)
+    for kind, keys in measured.items():
+        assert keys == set(live_continuity._MOVIE_SUBTREE_KEYS[kind]), kind
+    # the containers that never hold an object are deliberately absent from the table.
+    for never_an_object in ("effects", "animations", "texture", "affineTransform", "sublayerTransform"):
+        assert never_an_object not in live_continuity._MOVIE_SUBTREE_KEYS
 
 
 def test_a_video_sub_layer_outside_its_movie_layer_is_refused():
@@ -1076,9 +1280,6 @@ def test_the_retire_precedes_the_restart_and_the_bridge_in_the_emitted_order():
 
 
 # --- I5 codec report -----------------------------------------------------------------------
-
-REAL_PLAYER_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
-
 
 def test_codec_report_lists_every_referenced_movie_not_only_planned_ones():
     # The fixture's WA0125 instance never continues across a boundary (only Untitled.mov
