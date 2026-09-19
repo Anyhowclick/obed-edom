@@ -14,11 +14,14 @@ by file path, mirroring `tests/test_p2_adversarial.py`.
 from __future__ import annotations
 
 import argparse
+import base64
 import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
@@ -383,7 +386,31 @@ class TestOverallStatusTruthTable:
         def verdict(v: bool) -> dict[str, Any]:
             return {"verdict": v}
 
+        def visible_slide(ordinal: int, verdict: bool | None) -> dict[str, Any]:
+            return {
+                "playerIndex": ordinal - 1, "originalOrdinal": ordinal, "verdict": verdict,
+                "status": "pass" if verdict is True else "fail",
+            }
+
         return {
+            # The 1->2 destination slide, derived by the probe from the plan (never
+            # hardcoded as "slide 2"): the slide the Voff control must be RED on.
+            "groundTruth": {"boundaryPlayerIndex": 1},
+            "visible": {
+                "V": {
+                    "pass": "V", "status": "ok", "continuity": {"mode": "qualified"},
+                    "slides": [visible_slide(n, True) for n in (1, 2, 3, 4)],
+                    "verdict": True,
+                },
+                "Voff": {
+                    "pass": "Voff", "status": "ok", "continuity": {"mode": "off"},
+                    "slides": [
+                        visible_slide(1, True), visible_slide(2, False),
+                        visible_slide(3, True), visible_slide(4, True),
+                    ],
+                    "verdict": False,
+                },
+            },
             "arms": {
                 "A": {
                     "continuity": {"mode": "qualified"},
@@ -898,3 +925,577 @@ class TestViewportParsing:
     def test_rejects_bad_viewport(self, value: str) -> None:
         with pytest.raises(argparse.ArgumentTypeError):
             probe.parse_viewport_arg(value)
+
+
+# --------------------------------------------------------------------------
+# Visible-content pass (V / Voff)
+# --------------------------------------------------------------------------
+
+VISIBLE_VIEWPORT = (64, 32)
+FULL_BLEED_STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 64.0, "offsetHeight": 32.0}
+
+
+class FakeClock:
+    """Monotonic clock whose only way to move is a `sleep` -- so a burst's
+    scheduling can be asserted exactly, with no wall-clock time spent."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.sleeps: list[float] = []
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, duration: float) -> None:
+        self.sleeps.append(duration)
+        self.t += max(0.0, duration)
+
+
+def png_b64(width: int, height: int, fill: int = 7) -> str:
+    image = np.full((height, width, 3), fill, dtype=np.uint8)
+    ok, buffer = cv2.imencode(".png", image)
+    assert ok
+    return base64.b64encode(buffer.tobytes()).decode("ascii")
+
+
+class FakeObservation:
+    def __init__(self, busy: bool) -> None:
+        self.busy = busy
+
+
+class FakeTransport:
+    def __init__(self, host: "FakeHost") -> None:
+        self.host = host
+        self.captures = 0
+
+    def evaluate(self, js: str) -> Any:
+        if js == probe.SCENE_ID_JS:
+            return self.host.next_scene_id()
+        if js == probe.STAGE_MAP_JS:
+            return self.host.stage_map
+        return True
+
+    def call(self, method: str, **params: Any) -> dict[str, Any]:
+        assert method == "Page.captureScreenshot"
+        assert params == {"format": "png"}
+        data = self.host.shot_for(self.captures)
+        self.captures += 1
+        return {"data": data}
+
+
+class FakeHost:
+    """A host-like object for the slide loop: scripted `sceneId` reads (two per
+    burst attempt: before and after), scripted `busy`, and a fixed screenshot."""
+
+    def __init__(
+        self, *, scene_ids: list[Any], busy: list[bool] | bool = False,
+        shot: str | None = None, shots: list[str] | None = None, stage_map: Any = _UNSET,
+    ) -> None:
+        self.scene_ids = list(scene_ids)
+        self.busy = busy
+        self.shots = shots if shots is not None else [shot if shot is not None else png_b64(*VISIBLE_VIEWPORT)]
+        self.stage_map = dict(FULL_BLEED_STAGE_MAP) if stage_map is _UNSET else stage_map
+        self.transport = FakeTransport(self)
+        self.observations = 0
+
+    def shot_for(self, index: int) -> str:
+        return self.shots[index % len(self.shots)]
+
+    def next_scene_id(self) -> Any:
+        return self.scene_ids.pop(0) if self.scene_ids else "exhausted"
+
+    def observe(self) -> FakeObservation:
+        busy = self.busy if isinstance(self.busy, bool) else (self.busy.pop(0) if self.busy else False)
+        self.observations += 1
+        return FakeObservation(busy)
+
+    def _require_transport(self) -> FakeTransport:
+        return self.transport
+
+
+def passing_scorer(frames: list[Any], rects: list[dict[str, Any]], control: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "verdict": True, "status": "pass",
+        "perRect": [{"label": rect.get("label"), "verdict": True} for rect in rects],
+        "stray": {"components": []}, "noiseFloor": {"p99": 0},
+    }
+
+
+VISIBLE_INSTANCES = {0: {"Untitled.mov": [{"x": 10.0, "y": 10.0, "w": 20.0, "h": 10.0}]}}
+VISIBLE_SLIDE = {"playerIndex": 0, "originalOrdinal": 1, "skipped": False}
+
+
+class TestBurstScheduling:
+    def test_deadlines_are_absolute_offsets_from_the_burst_start(self) -> None:
+        assert probe.burst_deadlines(100.0) == [100.0, 100.13, 100.29, 100.5, 100.77]
+
+    def test_offsets_are_unequal_so_a_periodic_animation_cannot_alias(self) -> None:
+        gaps = [b - a for a, b in zip(probe.BURST_OFFSETS_MS, probe.BURST_OFFSETS_MS[1:])]
+        assert gaps == [130, 160, 210, 270]
+        assert len(set(gaps)) == len(gaps)
+
+    def test_capture_burst_records_actual_offsets_and_captures_every_shot(self) -> None:
+        host = FakeHost(scene_ids=[])
+        clock = FakeClock()
+        frames, offsets = probe.capture_burst(host.transport, now=clock.now, sleep=clock.sleep)
+        assert len(frames) == len(probe.BURST_OFFSETS_MS)
+        assert host.transport.captures == len(probe.BURST_OFFSETS_MS)
+        assert offsets == [float(value) for value in probe.BURST_OFFSETS_MS]
+
+    def test_a_slow_capture_does_not_drift_the_later_offsets(self) -> None:
+        """Scheduling is against a fixed start, not accumulated per shot: a shot
+        that overruns its slot is recorded late but the NEXT shot still lands at
+        its own absolute offset."""
+        host = FakeHost(scene_ids=[])
+        clock = FakeClock()
+        real_call = host.transport.call
+
+        def slow_call(method: str, **params: Any) -> dict[str, Any]:
+            if host.transport.captures == 0:
+                clock.t += 0.2
+            return real_call(method, **params)
+
+        host.transport.call = slow_call  # type: ignore[method-assign]
+        _, offsets = probe.capture_burst(host.transport, now=clock.now, sleep=clock.sleep)
+        assert offsets[0] == 0.0
+        assert offsets[1] == 200.0  # the overrun itself is reported, never hidden
+        assert offsets[2:] == [290.0, 500.0, 770.0]
+
+
+class TestPngDecode:
+    def test_png_round_trip_returns_rgb_pixels(self) -> None:
+        image = np.zeros((3, 5, 3), dtype=np.uint8)
+        image[0, 0] = (255, 0, 0)  # RGB red
+        ok, buffer = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        assert ok
+        decoded = probe.decode_png(base64.b64encode(buffer.tobytes()).decode("ascii"))
+        assert decoded.shape == (3, 5, 3)
+        assert decoded.dtype == np.uint8
+        assert tuple(decoded[0, 0]) == (255, 0, 0)
+
+    def test_undecodable_data_raises_rather_than_returning_a_blank_frame(self) -> None:
+        with pytest.raises(probe.VisiblePassError):
+            probe.decode_png(base64.b64encode(b"not a png").decode("ascii"))
+
+
+class TestAuthoredToScreenConversion:
+    @pytest.mark.parametrize(
+        "stage_map",
+        [IDENTITY_STAGE_MAP, SCALED_STAGE_MAP_4_3, LETTERBOXED_STAGE_MAP_5_6],
+        ids=["identity", "scaled-4-3", "letterboxed-origin-0-50"],
+    )
+    def test_screen_conversion_is_the_inverse_of_the_authored_conversion(self, stage_map: dict[str, Any]) -> None:
+        screen = probe.to_screen_rect(SRC_RECT, stage_map)
+        assert screen == _screen_rect(SRC_RECT, stage_map)
+        back = probe.to_authored_rect(screen, stage_map)
+        assert all(abs(back[key] - SRC_RECT[key]) < 1e-9 for key in ("x", "y", "w", "h"))
+
+    def test_letterbox_origin_is_applied_to_position_but_not_to_size(self) -> None:
+        screen = probe.to_screen_rect({"x": 0.0, "y": 0.0, "w": 120.0, "h": 60.0}, LETTERBOXED_STAGE_MAP_5_6)
+        assert screen == {"x": 0.0, "y": 50.0, "w": 100.0, "h": 50.0}
+
+    def test_expected_rects_label_every_instance_of_a_multi_instance_asset(self) -> None:
+        instances = {0: {"Untitled.mov": [
+            {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
+            {"x": 40.0, "y": 0.0, "w": 5.0, "h": 5.0},
+        ]}}
+        rects = probe.expected_screen_rects(instances, 0, SCALED_STAGE_MAP_4_3)
+        assert [rect["label"] for rect in rects] == ["Untitled.mov#1", "Untitled.mov#2"]
+        assert rects[1]["screen"] == pytest.approx({"x": 40 * 4 / 3, "y": 0.0, "w": 5 * 4 / 3, "h": 5 * 4 / 3})
+
+    def test_a_slide_the_plan_never_described_fails_closed(self) -> None:
+        with pytest.raises(probe.VisiblePassError):
+            probe.expected_screen_rects({0: {}}, 3, IDENTITY_STAGE_MAP)
+
+
+class TestSlideInstancesGroundTruth:
+    def test_missing_slide_instances_fails_closed_with_no_fallback_to_slide_rects(self) -> None:
+        """`slide_rects` drops multi-instance assets, so it cannot stand in as
+        ground truth: a plan without `slide_instances` is no ground truth at
+        all."""
+        class PlanWithoutInstances:
+            slide_rects = {0: {"Untitled.mov": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}}}
+
+        with pytest.raises(probe.VisiblePassError, match="slide_instances"):
+            probe.slide_instances_of(PlanWithoutInstances())
+
+    def test_empty_slide_instances_fails_closed(self) -> None:
+        class PlanWithEmptyInstances:
+            slide_instances: dict[int, dict[str, list[dict[str, float]]]] = {}
+
+        with pytest.raises(probe.VisiblePassError, match="slide_instances"):
+            probe.slide_instances_of(PlanWithEmptyInstances())
+
+    def test_present_slide_instances_are_returned_as_is(self) -> None:
+        class Plan:
+            slide_instances = VISIBLE_INSTANCES
+
+        assert probe.slide_instances_of(Plan()) == VISIBLE_INSTANCES
+
+
+class TestControlRegion:
+    def test_letterboxed_stage_uses_the_bar_above_it(self) -> None:
+        stage = {"x": 0.0, "y": 180.0, "width": 1920.0, "height": 720.0}
+        control = probe.control_region(stage, (1920, 1080))
+        assert control["source"] == "letterbox-top"
+        assert (control["y"], control["w"], control["h"]) == (0, 40, 40)
+
+    def test_pillarboxed_stage_uses_the_bar_beside_it(self) -> None:
+        stage = {"x": 240.0, "y": 0.0, "width": 1440.0, "height": 1080.0}
+        control = probe.control_region(stage, (1920, 1080))
+        assert control["source"] == "letterbox-left"
+        assert (control["x"], control["w"], control["h"]) == (0, 40, 40)
+
+    def test_full_bleed_stage_falls_back_to_the_inset_stage_corner(self) -> None:
+        stage = {"x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0}
+        control = probe.control_region(stage, (1920, 1080))
+        assert control["source"] == "stage-corner"
+        assert (control["x"], control["y"]) == (probe.CONTROL_INSET_PX, probe.CONTROL_INSET_PX)
+
+    def test_a_bar_thinner_than_the_patch_is_not_used_as_the_control(self) -> None:
+        """A 20px bar cannot hold a 40x40 patch -- falling back to the stage
+        corner is correct; sampling off the end of the bar would put half the
+        control inside the stage."""
+        stage = {"x": 0.0, "y": 20.0, "width": 1920.0, "height": 1040.0}
+        control = probe.control_region(stage, (1920, 1080))
+        assert control["source"] == "stage-corner"
+        assert control["y"] == 20 + probe.CONTROL_INSET_PX
+
+
+class TestVisibleSlideRecord:
+    def _record(self, host: FakeHost, **kwargs: Any) -> dict[str, Any]:
+        clock = FakeClock()
+        return probe.visible_slide_record(
+            host, VISIBLE_SLIDE, VISIBLE_INSTANCES, VISIBLE_VIEWPORT,
+            scorer=kwargs.pop("scorer", passing_scorer), now=clock.now, sleep=clock.sleep, **kwargs,
+        )
+
+    def test_stable_scene_scores_on_the_first_attempt(self) -> None:
+        host = FakeHost(scene_ids=["scene-1", "scene-1"])
+        record = self._record(host)
+        assert record["verdict"] is True
+        assert record["status"] == "pass"
+        assert record["attempts"] == 1
+        assert record["sceneId"] == "scene-1"
+        assert record["shotOffsetsMs"] == [float(v) for v in probe.BURST_OFFSETS_MS]
+        assert [rect["label"] for rect in record["expectedRects"]] == ["Untitled.mov#1"]
+        assert record["control"]["source"] == "stage-corner"
+
+    def test_scene_change_during_the_burst_is_retried_once_and_then_passes(self) -> None:
+        host = FakeHost(scene_ids=["scene-1", "scene-2", "scene-2", "scene-2"])
+        record = self._record(host)
+        assert record["verdict"] is True
+        assert record["attempts"] == 2
+        assert record["sceneId"] == "scene-2"
+
+    def test_scene_changing_under_both_attempts_is_inconclusive_never_a_pass_or_a_red(self) -> None:
+        host = FakeHost(scene_ids=["scene-1", "scene-2", "scene-3", "scene-4"])
+        record = self._record(host)
+        assert record["status"] == "inconclusive"
+        assert record["verdict"] is None
+        assert record["attempts"] == 2
+
+    def test_player_going_busy_during_the_burst_is_inconclusive(self) -> None:
+        # observe(): settle check, then the post-burst check of each attempt.
+        host = FakeHost(scene_ids=["s", "s", "s", "s"], busy=[False, True, True])
+        record = self._record(host)
+        assert record["status"] == "inconclusive"
+        assert record["verdict"] is None
+
+    def test_busy_that_never_clears_is_a_bounded_wait_then_inconclusive(self) -> None:
+        host = FakeHost(scene_ids=["s", "s"], busy=True)
+        record = self._record(host)
+        assert record["status"] == "inconclusive"
+        assert record["verdict"] is None
+        assert "never settled" in record["reason"]
+        assert host.transport.captures == 0
+
+    def test_screenshot_that_is_not_the_forced_viewport_fails_closed(self) -> None:
+        host = FakeHost(scene_ids=["s", "s"], shot=png_b64(VISIBLE_VIEWPORT[0] - 1, VISIBLE_VIEWPORT[1]))
+        record = self._record(host)
+        assert record["status"] == "error"
+        assert record["verdict"] is None
+        assert "expected 64x32" in record["reason"]
+
+    def test_untrustworthy_stage_map_fails_closed(self) -> None:
+        host = FakeHost(scene_ids=["s", "s"], stage_map=None)
+        record = self._record(host)
+        assert record["status"] == "error"
+        assert record["verdict"] is None
+        assert "stage map" in record["reason"]
+
+    def test_a_slide_missing_from_the_ground_truth_fails_closed(self) -> None:
+        host = FakeHost(scene_ids=["s", "s"])
+        clock = FakeClock()
+        record = probe.visible_slide_record(
+            host, {"playerIndex": 9, "originalOrdinal": 10}, VISIBLE_INSTANCES, VISIBLE_VIEWPORT,
+            scorer=passing_scorer, now=clock.now, sleep=clock.sleep,
+        )
+        assert record["status"] == "error"
+        assert record["verdict"] is None
+
+    def test_a_failing_slide_writes_mask_and_first_shot_evidence(self, tmp_path: Path) -> None:
+        written: list[tuple[dict[str, Any], int]] = []
+
+        def evidence(record: dict[str, Any], frames: list[Any]) -> dict[str, str]:
+            written.append((record, len(frames)))
+            return {"mask": str(tmp_path / "mask.png")}
+
+        def failing_scorer(frames: Any, rects: Any, control: Any) -> dict[str, Any]:
+            return {"verdict": False, "status": "fail", "perRect": [], "stray": {}, "noiseFloor": {}}
+
+        host = FakeHost(scene_ids=["s", "s"])
+        record = self._record(host, scorer=failing_scorer, evidence=evidence)
+        assert record["verdict"] is False
+        assert written and written[0][1] == len(probe.BURST_OFFSETS_MS)
+        assert record["evidence"]["mask"].endswith("mask.png")
+
+    def test_a_passing_slide_writes_no_evidence(self) -> None:
+        def evidence(record: dict[str, Any], frames: list[Any]) -> dict[str, str]:
+            raise AssertionError("evidence must only be written for a failing or inconclusive slide")
+
+        host = FakeHost(scene_ids=["s", "s"])
+        assert self._record(host, evidence=evidence)["verdict"] is True
+
+
+class TestVisibleSlideLoop:
+    def test_slide_one_is_scored_before_any_advance_and_the_rest_after_one_each(self) -> None:
+        advanced: list[int] = []
+        host = FakeHost(scene_ids=["s"] * 8)
+        clock = FakeClock()
+        slides = [
+            {"playerIndex": index, "originalOrdinal": index + 1, "skipped": False}
+            for index in range(4)
+        ]
+        instances = {index: {"Untitled.mov": [{"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]} for index in range(4)}
+        records = probe.run_visible_slides(
+            host, slides, instances, VISIBLE_VIEWPORT, scorer=passing_scorer,
+            advance=lambda _host, target: advanced.append(target), now=clock.now, sleep=clock.sleep,
+        )
+        assert advanced == [2, 3, 4]
+        assert [record["originalOrdinal"] for record in records] == [1, 2, 3, 4]
+        assert all(record["verdict"] is True for record in records)
+
+    def test_skipped_slides_are_never_scored(self) -> None:
+        host = FakeHost(scene_ids=["s"] * 8)
+        clock = FakeClock()
+        slides = [
+            {"playerIndex": 0, "originalOrdinal": 1, "skipped": False},
+            {"playerIndex": 1, "originalOrdinal": 2, "skipped": True},
+        ]
+        records = probe.run_visible_slides(
+            host, slides, VISIBLE_INSTANCES, VISIBLE_VIEWPORT, scorer=passing_scorer,
+            advance=lambda *_a: None, now=clock.now, sleep=clock.sleep,
+        )
+        assert [record["originalOrdinal"] for record in records] == [1]
+
+
+class TestVisibleScorerContract:
+    """End-to-end over the REAL shared scorers (still no browser): synthetic
+    screenshots in, a verdict out, proving the probe hands S2's composer the
+    shapes it documents."""
+
+    VIEWPORT = (320, 200)
+    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 320.0, "offsetHeight": 200.0}
+    INSTANCES = {0: {"Untitled.mov": [{"x": 40.0, "y": 60.0, "w": 200.0, "h": 100.0}]}}
+
+    def test_the_shared_pure_scorers_are_importable_under_their_agreed_names(self) -> None:
+        """S1 codes against S2's published API; a rename is a contract break the
+        gate must see as a failure, not work around."""
+        from obed_edom.html_alpha_probe import (  # noqa: F401
+            liveness_mask,
+            score_live_coverage,
+            score_no_stray_movie,
+            score_noise_floor,
+            score_visible_slide,
+        )
+
+    def _shots(self, live_width: int) -> list[str]:
+        rng = np.random.default_rng(1234)
+        shots = []
+        for _ in probe.BURST_OFFSETS_MS:
+            frame = np.zeros((self.VIEWPORT[1], self.VIEWPORT[0], 3), dtype=np.uint8)
+            frame[60:160, 40:40 + live_width] = rng.integers(0, 255, (100, live_width, 3), dtype=np.uint8)
+            ok, buffer = cv2.imencode(".png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            assert ok
+            shots.append(base64.b64encode(buffer.tobytes()).decode("ascii"))
+        return shots
+
+    def _record(self, live_width: int) -> dict[str, Any]:
+        from obed_edom.html_alpha_probe import score_visible_slide
+
+        host = FakeHost(scene_ids=["s", "s"], shots=self._shots(live_width), stage_map=dict(self.STAGE_MAP))
+        clock = FakeClock()
+        return probe.visible_slide_record(
+            host, VISIBLE_SLIDE, self.INSTANCES, self.VIEWPORT,
+            scorer=score_visible_slide, now=clock.now, sleep=clock.sleep,
+        )
+
+    def test_a_fully_live_authored_rect_passes(self) -> None:
+        record = self._record(live_width=200)
+        assert record["verdict"] is True
+        assert record["status"] == "pass"
+        assert record["perRect"] and record["perRect"][0]["label"] == "Untitled.mov#1"
+        assert record["noiseFloor"] is not None
+
+    def test_a_control_region_that_is_not_static_makes_the_slide_inconclusive(self) -> None:
+        """Documented limitation of the stage-corner fallback: if a movie is
+        authored under the corner patch, the noise floor is not a floor. The
+        slide must then be INCONCLUSIVE -- never a pass, and never the RED the
+        Voff control has to earn."""
+        from obed_edom.html_alpha_probe import score_visible_slide
+
+        instances = {0: {"Untitled.mov": [{"x": 0.0, "y": 0.0, "w": 200.0, "h": 100.0}]}}
+        rng = np.random.default_rng(99)
+        shots = []
+        for _ in probe.BURST_OFFSETS_MS:
+            frame = np.zeros((self.VIEWPORT[1], self.VIEWPORT[0], 3), dtype=np.uint8)
+            frame[0:100, 0:200] = rng.integers(0, 255, (100, 200, 3), dtype=np.uint8)
+            ok, buffer = cv2.imencode(".png", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            assert ok
+            shots.append(base64.b64encode(buffer.tobytes()).decode("ascii"))
+        host = FakeHost(scene_ids=["s", "s"], shots=shots, stage_map=dict(self.STAGE_MAP))
+        clock = FakeClock()
+        record = probe.visible_slide_record(
+            host, VISIBLE_SLIDE, instances, self.VIEWPORT,
+            scorer=score_visible_slide, now=clock.now, sleep=clock.sleep,
+        )
+        assert record["verdict"] is None
+        assert record["status"] == "inconclusive"
+
+    def test_a_half_dead_authored_rect_is_red(self) -> None:
+        """Today's evidence shape: only part of the authored rect paints a live
+        movie, the rest is a static poster."""
+        record = self._record(live_width=100)
+        assert record["verdict"] is False
+        assert record["status"] == "fail"
+
+
+class TestOverallStatusVisible:
+    def _base_result(self) -> dict[str, Any]:
+        return TestOverallStatusTruthTable()._base_result()
+
+    def test_v_all_live_and_voff_red_at_the_boundary_slide_passes(self) -> None:
+        status, reasons = probe.overall_status(self._base_result())
+        assert status == "pass"
+        assert reasons == []
+
+    def test_v_with_one_dead_slide_fails(self) -> None:
+        result = self._base_result()
+        result["visible"]["V"]["slides"][2]["verdict"] = False
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("visible pass V slide 3" in reason for reason in reasons)
+
+    def test_v_with_one_inconclusive_slide_fails_it_is_never_a_pass(self) -> None:
+        result = self._base_result()
+        result["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive")
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("inconclusive" in reason for reason in reasons)
+
+    def test_v_in_the_wrong_continuity_mode_fails_even_if_every_slide_is_live(self) -> None:
+        result = self._base_result()
+        result["visible"]["V"]["continuity"]["mode"] = "unsupported"
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("visible pass V continuity.mode" in reason for reason in reasons)
+
+    def test_voff_in_the_wrong_continuity_mode_fails(self) -> None:
+        result = self._base_result()
+        result["visible"]["Voff"]["continuity"]["mode"] = "qualified"
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("visible pass Voff continuity.mode" in reason for reason in reasons)
+
+    def test_voff_live_everywhere_fails_because_the_instrument_is_blind(self) -> None:
+        result = self._base_result()
+        result["visible"]["Voff"]["slides"][1]["verdict"] = True
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("blind" in reason for reason in reasons)
+
+    def test_voff_red_on_slide_one_fails_because_the_instrument_is_always_red(self) -> None:
+        """Movies do play before any transition, so slide 1 with continuity OFF
+        must still be live -- a red there means the instrument reds out on
+        anything, and its boundary red proves nothing."""
+        result = self._base_result()
+        result["visible"]["Voff"]["slides"][0]["verdict"] = False
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("always-red" in reason for reason in reasons)
+
+    def test_voff_inconclusive_at_the_boundary_slide_is_not_the_required_red(self) -> None:
+        result = self._base_result()
+        result["visible"]["Voff"]["slides"][1].update(verdict=None, status="inconclusive")
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("blind" in reason for reason in reasons)
+
+    @pytest.mark.parametrize("name", ["V", "Voff"])
+    def test_a_missing_pass_fails_with_its_own_reason(self, name: str) -> None:
+        result = self._base_result()
+        del result["visible"][name]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any(f"visible pass {name} missing" in reason for reason in reasons)
+
+    def test_a_missing_visible_block_fails_both_passes(self) -> None:
+        result = self._base_result()
+        del result["visible"]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("visible pass V missing" in reason for reason in reasons)
+        assert any("visible pass Voff missing" in reason for reason in reasons)
+
+    @pytest.mark.parametrize("name", ["V", "Voff"])
+    def test_an_errored_pass_fails_with_the_recorded_reason(self, name: str) -> None:
+        result = self._base_result()
+        result["visible"][name].update(status="error", error="plan has no slide_instances")
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("plan has no slide_instances" in reason for reason in reasons)
+
+    @pytest.mark.parametrize("name", ["V", "Voff"])
+    def test_a_pass_that_scored_no_slides_fails(self, name: str) -> None:
+        result = self._base_result()
+        result["visible"][name]["slides"] = []
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any(f"visible pass {name} scored no slides" in reason for reason in reasons)
+
+    def test_the_expected_red_slide_is_taken_from_the_plan_not_hardcoded(self) -> None:
+        """A deck whose first continuing boundary lands on player index 2 must be
+        scored there -- with slide 2 green and slide 3 red, the same artifact
+        that fails under a hardcoded "slide 2" must pass."""
+        result = self._base_result()
+        result["groundTruth"]["boundaryPlayerIndex"] = 2
+        slides = result["visible"]["Voff"]["slides"]
+        slides[1]["verdict"] = True
+        slides[2]["verdict"] = False
+        status, reasons = probe.overall_status(result)
+        assert status == "pass"
+        assert reasons == []
+
+    def test_an_unknown_expected_red_slide_fails_closed(self) -> None:
+        result = self._base_result()
+        del result["groundTruth"]["boundaryPlayerIndex"]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("expected-red slide is unknown" in reason for reason in reasons)
+
+    def test_an_expected_red_slide_that_was_never_scored_fails_closed(self) -> None:
+        result = self._base_result()
+        result["groundTruth"]["boundaryPlayerIndex"] = 7
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("never scored the expected-red slide" in reason for reason in reasons)
+
+    def test_visible_failures_do_not_mask_arm_failures(self) -> None:
+        result = self._base_result()
+        result["arms"]["A"]["stageFit"] = {"verdict": False}
+        result["visible"]["V"]["slides"][0]["verdict"] = False
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("arm A stageFit failed" in reason for reason in reasons)
+        assert any("visible pass V slide 1" in reason for reason in reasons)

@@ -16,6 +16,13 @@ Then one ATTACH-mode run (arm A only): the host attaches over CDP to a headless
 Chrome this script launches itself, confirms `qualified`, all three verdicts, and a
 transparent page background, then kills that Chrome by pid.
 
+Finally two VISIBLE-CONTENT passes in their own host sessions (no sampler: a
+screenshot burst would perturb the rAF sampler's clock, so they are never run
+inside an arm) -- `V` (continuity on, every settled slide must be live) and
+`Voff` (continuity off, the raw export's defect must show as RED at the 1->2
+destination slide while slide 1 stays live, proving the instrument is neither
+blind nor always-red).
+
 Verdicts are decoder-identity + playback-clock based (a stable element id, a
 monotonic non-decreasing `video.currentTime`, and -- when continuity is installed --
 the runtime's own `footprintOwnerDecoderId`), never a screenshot MAE and never a
@@ -27,6 +34,7 @@ Does not qualify HDMI, alpha compositing, or audio. Offline/local Chrome only.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import math
 import os
@@ -39,7 +47,10 @@ import time
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
+
+import cv2
+import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -81,10 +92,40 @@ MAX_ADVANCE_STEPS = 40
 # window is exactly the failure mode this instrument exists to catch.
 WINDOW_PAD_S = 2.0
 
+# Visible-content pass (see the module docstring). Deliberately unequal gaps
+# (130/160/210/270 ms) so a periodic two-state animation cannot alias into
+# "static" the way an evenly spaced burst can.
+BURST_OFFSETS_MS = (0, 130, 290, 500, 770)
+CONTROL_PATCH_PX = 40
+CONTROL_INSET_PX = 4
+VISIBLE_SETTLE_TIMEOUT_S = 10.0
+
 # In headless Chrome, --window-size=W,H yields innerHeight H-32 (chrome window
 # chrome persists even headless) -- reuse live_host_probe's measured compensation
 # rather than re-deriving it.
 _HEIGHT_PAD = live_host_probe.HEADLESS_CHROME_HEIGHT_PAD
+
+# The probe's OWN read of the stage map, independent of the runtime's --
+# `#stage.offsetWidth/Height` is the transform-blind authored size,
+# `getBoundingClientRect()` is the on-screen (post-transform) rect. Every
+# sampled video rect is converted from screen to authored space in Python
+# using this per-sample map, never the runtime's own `stageMap()`. Shared
+# verbatim with the visible-content pass (`STAGE_MAP_JS`), which reads it
+# once per burst instead of once per frame.
+STAGE_MAP_FN_JS = r"""
+  function stageMapOf(){
+    var el = document.getElementById('stage');
+    if (!el) return null;
+    var r = el.getBoundingClientRect();
+    var ow = el.offsetWidth, oh = el.offsetHeight;
+    if (!ow || !oh || !r.width || !r.height) return null;
+    return {s: r.width / ow, sy: r.height / oh, ox: r.left, oy: r.top, offsetWidth: ow, offsetHeight: oh};
+  }
+"""
+
+STAGE_MAP_JS = "(function(){" + STAGE_MAP_FN_JS + "return stageMapOf();})()"
+
+SCENE_ID_JS = "window.__obedLive ? window.__obedLive.snapshot().sceneId : null"
 
 SAMPLER_JS = r"""
 (function(){
@@ -129,19 +170,7 @@ SAMPLER_JS = r"""
       return window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId(q);
     } catch (e) { return null; }
   }
-  // The probe's OWN read of the stage map, independent of the runtime's --
-  // `#stage.offsetWidth/Height` is the transform-blind authored size,
-  // `getBoundingClientRect()` is the on-screen (post-transform) rect. Every
-  // sampled video rect is converted from screen to authored space in Python
-  // using this per-sample map, never the runtime's own `stageMap()`.
-  function stageMapOf(){
-    var el = document.getElementById('stage');
-    if (!el) return null;
-    var r = el.getBoundingClientRect();
-    var ow = el.offsetWidth, oh = el.offsetHeight;
-    if (!ow || !oh || !r.width || !r.height) return null;
-    return {s: r.width / ow, sy: r.height / oh, ox: r.left, oy: r.top, offsetWidth: ow, offsetHeight: oh};
-  }
+""" + STAGE_MAP_FN_JS + r"""
   function tick(){
     var t = performance.now();
     var state = stateOf();
@@ -268,6 +297,7 @@ def ground_truth_facts(plan: ContinuityPlan) -> dict[str, Any]:
     return {
         "asset": bridge_movie.asset,
         "onset1to2": plan.scene_index_by_player[ordered_players[1]],
+        "boundaryPlayerIndex": ordered_players[1],
         "restartScene": plan.scene_index_by_player[ordered_players[2]],
         "bridgeScene": plan.scene_index_by_player[ordered_players[3]],
         "pinRect": pin_rect.as_dict(),
@@ -968,6 +998,272 @@ def run_attach_arm(
     return result
 
 
+class VisiblePassError(RuntimeError):
+    """A visible-content pass could not be scored at all (no ground truth, an
+    unreadable screenshot, a stage map the probe refuses to trust). Never a
+    verdict: the pass records it as `status: "error"` and the overall status
+    fails on it."""
+
+
+def _scorers() -> tuple[Callable[..., Any], Callable[..., Any]]:
+    from obed_edom.html_alpha_probe import liveness_mask, score_visible_slide
+
+    return liveness_mask, score_visible_slide
+
+
+def decode_png(data: str) -> np.ndarray:
+    """Base64 PNG (as `Page.captureScreenshot` returns it) to an RGB uint8 array."""
+    buffer = np.frombuffer(base64.b64decode(data), dtype=np.uint8)
+    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if image is None:
+        raise VisiblePassError("screenshot did not decode as a PNG")
+    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def burst_deadlines(start: float, offsets_ms: tuple[int, ...] = BURST_OFFSETS_MS) -> list[float]:
+    """Absolute monotonic deadlines for one burst -- scheduled against `start`,
+    never accumulated per shot, so a slow capture cannot drift the later offsets."""
+    return [start + offset / 1000.0 for offset in offsets_ms]
+
+
+def to_screen_rect(rect: dict[str, float], stage_map: dict[str, Any]) -> dict[str, float]:
+    """Inverse of `to_authored_rect`: authored px to on-screen px."""
+    s = stage_map["s"]
+    return {
+        "x": rect["x"] * s + stage_map["ox"],
+        "y": rect["y"] * s + stage_map["oy"],
+        "w": rect["w"] * s,
+        "h": rect["h"] * s,
+    }
+
+
+def control_region(
+    stage: dict[str, float], viewport: tuple[int, int], *, size: int = CONTROL_PATCH_PX, inset: int = CONTROL_INSET_PX
+) -> dict[str, Any]:
+    """A patch that is provably static: a letterbox bar when the fitted stage does
+    not fill the viewport, else the stage's own top-left corner inset by `inset`
+    px. Records which was used -- a noise floor measured over the wrong region is
+    not evidence."""
+    width, height = viewport
+    if stage["y"] >= size:
+        return {"x": max(0, int(width / 2 - size / 2)), "y": 0, "w": size, "h": size, "source": "letterbox-top"}
+    if stage["x"] >= size:
+        return {"x": 0, "y": max(0, int(height / 2 - size / 2)), "w": size, "h": size, "source": "letterbox-left"}
+    return {"x": int(stage["x"]) + inset, "y": int(stage["y"]) + inset, "w": size, "h": size, "source": "stage-corner"}
+
+
+def _authored_rect(rect: Any) -> dict[str, float]:
+    source = rect.as_dict() if hasattr(rect, "as_dict") else rect
+    if not isinstance(source, dict) or not all(key in source for key in ("x", "y", "w", "h")):
+        raise VisiblePassError(f"unusable authored rect in slide_instances: {rect!r}")
+    return {key: float(source[key]) for key in ("x", "y", "w", "h")}
+
+
+def slide_instances_of(plan: ContinuityPlan) -> dict[int, dict[str, list[Any]]]:
+    """Every movie instance the export authors on each slide. `slide_rects` drops
+    multi-instance assets, so it cannot stand in here: an absent or empty
+    `slide_instances` is no ground truth at all, never a fallback."""
+    instances = getattr(plan, "slide_instances", None)
+    if not isinstance(instances, dict) or not instances:
+        raise VisiblePassError("plan has no slide_instances")
+    return instances
+
+
+def expected_screen_rects(
+    instances: dict[int, dict[str, list[Any]]], player_index: int, stage_map: dict[str, Any]
+) -> list[dict[str, Any]]:
+    by_asset = instances.get(player_index)
+    if by_asset is None:
+        raise VisiblePassError(f"plan has no slide_instances for player index {player_index}")
+    rects: list[dict[str, Any]] = []
+    for asset in sorted(by_asset):
+        for index, rect in enumerate(by_asset[asset], start=1):
+            authored = _authored_rect(rect)
+            rects.append({
+                "label": f"{asset}#{index}",
+                "authored": authored,
+                "screen": to_screen_rect(authored, stage_map),
+            })
+    return rects
+
+
+def wait_until_settled(
+    host: Any, *, timeout_s: float = VISIBLE_SETTLE_TIMEOUT_S, now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Bounded: a player that never clears `busy` makes the slide INCONCLUSIVE, it
+    does not hang the pass."""
+    deadline = now() + timeout_s
+    while now() < deadline:
+        if not host.observe().busy:
+            return True
+        sleep(0.05)
+    return False
+
+
+def capture_burst(
+    transport: Any, *, offsets_ms: tuple[int, ...] = BURST_OFFSETS_MS,
+    now: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+) -> tuple[list[np.ndarray], list[float]]:
+    start = now()
+    frames: list[np.ndarray] = []
+    actual_ms: list[float] = []
+    for deadline in burst_deadlines(start, offsets_ms):
+        remaining = deadline - now()
+        if remaining > 0:
+            sleep(remaining)
+        actual_ms.append(round((now() - start) * 1000.0, 1))
+        frames.append(decode_png(transport.call("Page.captureScreenshot", format="png")["data"]))
+    return frames, actual_ms
+
+
+def visible_evidence_writer(directory: Path, pass_name: str) -> Callable[[dict[str, Any], list[np.ndarray]], dict[str, str]]:
+    liveness_mask, _ = _scorers()
+
+    def write(record: dict[str, Any], frames: list[np.ndarray]) -> dict[str, str]:
+        directory.mkdir(parents=True, exist_ok=True)
+        stem = f"{pass_name}-slide{record.get('originalOrdinal')}"
+        mask_path = directory / f"{stem}-mask.png"
+        shot_path = directory / f"{stem}-shot0.png"
+        mask = np.asarray(liveness_mask(frames)).astype(np.uint8) * 255
+        cv2.imwrite(str(mask_path), mask)
+        cv2.imwrite(str(shot_path), cv2.cvtColor(frames[0], cv2.COLOR_RGB2BGR))
+        return {"mask": str(mask_path), "shot0": str(shot_path)}
+
+    return write
+
+
+def visible_slide_record(
+    host: Any, slide: dict[str, Any], instances: dict[int, dict[str, list[Any]]], viewport: tuple[int, int], *,
+    scorer: Callable[..., Any], evidence: Callable[[dict[str, Any], list[np.ndarray]], dict[str, str]] | None = None,
+    offsets_ms: tuple[int, ...] = BURST_OFFSETS_MS, now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """One settled slide, scored from a screenshot burst. Every way of not knowing
+    -- unsettled player, a scene that moved under the burst, a screenshot that is
+    not the forced viewport, an untrustworthy stage map, missing ground truth --
+    ends as `verdict: None`, never as a pass and never as the RED that the `Voff`
+    control has to earn."""
+    transport = host._require_transport()
+    record: dict[str, Any] = {
+        "playerIndex": int(slide["playerIndex"]), "originalOrdinal": slide.get("originalOrdinal"),
+        "sceneId": None, "expectedRects": [], "perRect": [], "stray": None, "noiseFloor": None,
+        "shotOffsetsMs": [], "stageMap": None, "status": "error", "verdict": None,
+    }
+    if not wait_until_settled(host, now=now, sleep=sleep):
+        record.update(status="inconclusive", reason="player never settled before the burst")
+        return record
+
+    frames: list[np.ndarray] | None = None
+    stage_map: Any = None
+    for attempt in (1, 2):
+        scene_before = transport.evaluate(SCENE_ID_JS)
+        stage_map = transport.evaluate(STAGE_MAP_JS)
+        try:
+            shots, offsets = capture_burst(transport, offsets_ms=offsets_ms, now=now, sleep=sleep)
+        except VisiblePassError as exc:
+            record.update(reason=str(exc))
+            return record
+        record.update(sceneId=scene_before, shotOffsetsMs=offsets, stageMap=stage_map, attempts=attempt)
+        if transport.evaluate(SCENE_ID_JS) == scene_before and not host.observe().busy:
+            frames = shots
+            break
+    if frames is None:
+        record.update(status="inconclusive", reason="scene changed or the player went busy during the burst")
+        return record
+
+    if not stage_map_valid(stage_map):
+        record.update(reason="stage map is missing or untrustworthy at burst time")
+        return record
+    wrong = next((frame for frame in frames if (frame.shape[1], frame.shape[0]) != viewport), None)
+    if wrong is not None:
+        record.update(reason=f"screenshot is {wrong.shape[1]}x{wrong.shape[0]}, expected {viewport[0]}x{viewport[1]}")
+        return record
+    try:
+        expected = expected_screen_rects(instances, record["playerIndex"], stage_map)
+    except VisiblePassError as exc:
+        record.update(reason=str(exc))
+        return record
+
+    control = control_region(stage_screen_rect(stage_map), viewport)
+    scored = scorer(frames, [{**item["screen"], "label": item["label"]} for item in expected], control)
+    record.update(
+        expectedRects=expected, control=control, perRect=scored.get("perRect"), stray=scored.get("stray"),
+        noiseFloor=scored.get("noiseFloor"), verdict=scored.get("verdict"), status=scored.get("status"),
+    )
+    if evidence is not None and record["verdict"] is not True:
+        record["evidence"] = evidence(record, frames)
+    return record
+
+
+def run_visible_slides(
+    host: Any, slides: list[dict[str, Any]], instances: dict[int, dict[str, list[Any]]], viewport: tuple[int, int], *,
+    scorer: Callable[..., Any] | None = None, evidence: Callable[..., dict[str, str]] | None = None,
+    advance: Callable[..., None] = advance_until_original_slide, offsets_ms: tuple[int, ...] = BURST_OFFSETS_MS,
+    now: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+) -> list[dict[str, Any]]:
+    """Every original slide in order: slide 1 as the player opens it, the rest
+    reached with the same advance-and-settle discipline the arms use."""
+    if scorer is None:
+        scorer = _scorers()[1]
+    records: list[dict[str, Any]] = []
+    for slide in sorted((s for s in slides if not s.get("skipped")), key=lambda s: s["originalOrdinal"]):
+        if slide["originalOrdinal"] != 1:
+            advance(host, slide["originalOrdinal"])
+        records.append(visible_slide_record(
+            host, slide, instances, viewport,
+            scorer=scorer, evidence=evidence, offsets_ms=offsets_ms, now=now, sleep=sleep,
+        ))
+    return records
+
+
+def visible_stage_summary(slides: list[dict[str, Any]], expected: dict[str, float]) -> dict[str, Any]:
+    valid = [slide["stageMap"] for slide in slides if stage_map_valid(slide.get("stageMap"))]
+    if not valid:
+        return {"sampleCount": 0, "expected": expected, "matches": False}
+    observed = [stage_screen_rect(stage_map) for stage_map in valid]
+    return {
+        "sampleCount": len(valid), "expected": expected, "observed": observed[0],
+        "matches": all(stage_fit_matches(rect, expected) for rect in observed),
+    }
+
+
+def run_visible_pass(
+    name: str, export_root: Path, slides: list[dict[str, Any]], plan: ContinuityPlan,
+    viewport: tuple[int, int], expected_stage: dict[str, float], evidence_dir: Path,
+) -> dict[str, Any]:
+    """One visible-content pass in its own host session. No `SAMPLER_JS`: the
+    burst's captures would perturb the rAF sampler's clock, which is why this is
+    a separate pass and not an arm."""
+    force_viewport(*viewport)
+    result: dict[str, Any] = {"pass": name, "status": "ok", "viewport": {"width": viewport[0], "height": viewport[1]}}
+    player = LiveOutputHost(export_root, slides, headless=True)
+    try:
+        instances = slide_instances_of(plan)
+        player.start()
+        result["continuity"] = player.output["continuity"]
+        player.execute("show")
+        transport = player._require_transport()
+        transport.evaluate(ENSURE_PLAYING_JS)
+        wait_for_decode(player)
+        time.sleep(CLICK_DELAY_S)
+        result["slides"] = run_visible_slides(
+            player, slides, instances, viewport, evidence=visible_evidence_writer(evidence_dir, name)
+        )
+    except Exception as exc:  # noqa: BLE001 - a pass that cannot be scored is an error, never a verdict
+        result["status"] = "error"
+        result["error"] = str(exc)
+    finally:
+        try:
+            player.stop()
+        except Exception as exc:  # noqa: BLE001 - record, never mask an earlier failure
+            result["stopError"] = str(exc)
+    scored = result.get("slides") or []
+    result["stageMap"] = visible_stage_summary(scored, expected_stage)
+    result["verdict"] = bool(scored) and all(slide.get("verdict") is True for slide in scored)
+    return result
+
+
 def check_no_leftover_chrome() -> str:
     try:
         completed = subprocess.run(["pgrep", "-fl", "obed-live-chrome"], capture_output=True, text=True)
@@ -1020,6 +1316,67 @@ def stage_fit_reason(entry: dict[str, Any], label: str) -> str | None:
     if not isinstance(entry.get("stageFit"), dict):
         return f"{label} stageFit missing"
     return f"{label} stageFit failed"
+
+
+def visible_slides_of(entry: Any) -> list[dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return []
+    slides = entry.get("slides")
+    return [slide for slide in slides if isinstance(slide, dict)] if isinstance(slides, list) else []
+
+
+def visible_pass_reasons(entry: Any, label: str, expected_mode: str) -> list[str]:
+    """Fail-closed, in the style of `stage_fit_reason`: a pass that is absent,
+    errored, ran the wrong mechanism, or scored nothing is not evidence."""
+    if not isinstance(entry, dict):
+        return [f"visible pass {label} missing"]
+    if entry.get("status") == "error" or entry.get("error"):
+        return [f"visible pass {label} errored: {entry.get('error')}"]
+    reasons: list[str] = []
+    mode = continuity_mode(entry)
+    if mode != expected_mode:
+        reasons.append(f"visible pass {label} continuity.mode={mode!r}, expected {expected_mode!r}")
+    if not visible_slides_of(entry):
+        reasons.append(f"visible pass {label} scored no slides")
+    return reasons
+
+
+def visible_reasons(result: dict[str, Any]) -> list[str]:
+    """`V` must be live on every settled slide. `Voff` is the instrument's own
+    control and must be BOTH red where the raw export breaks (the 1->2
+    destination slide, derived from the plan -- movies do keep playing before any
+    transition) AND live on slide 1: red everywhere would mean an always-red
+    instrument, live everywhere a blind one."""
+    visible = result.get("visible")
+    visible = visible if isinstance(visible, dict) else {}
+    on, off = visible.get("V"), visible.get("Voff")
+
+    reasons = visible_pass_reasons(on, "V", "qualified")
+    for slide in visible_slides_of(on):
+        if slide.get("verdict") is not True:
+            reasons.append(
+                f"visible pass V slide {slide.get('originalOrdinal')} is not fully live "
+                f"(status={slide.get('status')!r})"
+            )
+
+    off_reasons = visible_pass_reasons(off, "Voff", "off")
+    if not off_reasons:
+        slides = visible_slides_of(off)
+        first = next((slide for slide in slides if slide.get("originalOrdinal") == 1), None)
+        if first is None or first.get("verdict") is not True:
+            off_reasons.append("visible pass Voff slide 1 is not live, so the instrument is simply always-red")
+        expected_red = (result.get("groundTruth") or {}).get("boundaryPlayerIndex")
+        red = next((slide for slide in slides if slide.get("playerIndex") == expected_red), None)
+        if not isinstance(expected_red, int) or isinstance(expected_red, bool):
+            off_reasons.append("visible pass Voff expected-red slide is unknown (no groundTruth.boundaryPlayerIndex)")
+        elif red is None:
+            off_reasons.append(f"visible pass Voff never scored the expected-red slide (playerIndex {expected_red})")
+        elif red.get("verdict") is not False:
+            off_reasons.append(
+                f"visible pass Voff slide {red.get('originalOrdinal')} is not RED "
+                f"(verdict={red.get('verdict')!r}), so the instrument is blind to the raw-export defect"
+            )
+    return reasons + off_reasons
 
 
 def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
@@ -1088,7 +1445,10 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         attach_ok = False
         reasons.append(reason)
 
-    ok = a_ok and b_ok and c_ok and attach_ok
+    visible = visible_reasons(result)
+    reasons.extend(visible)
+
+    ok = a_ok and b_ok and c_ok and attach_ok and not visible
     if not ok and not reasons:
         reasons.append("a boundary verdict did not match the expected pattern for its arm")
     return ("pass" if ok else "fail"), reasons
@@ -1123,7 +1483,10 @@ def main() -> None:
         facts = ground_truth_facts(plan)
         result["groundTruth"] = {
             key: facts[key]
-            for key in ("asset", "onset1to2", "restartScene", "bridgeScene", "pinRect", "bridgeSrcRect", "destRect", "canvas")
+            for key in (
+                "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",
+                "pinRect", "bridgeSrcRect", "destRect", "canvas",
+            )
         }
         expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
         attach_expected_stage = expected_stage_fit(facts["canvas"], {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT})
@@ -1148,6 +1511,22 @@ def main() -> None:
         result["leftoverChromeAfterArms"] = check_no_leftover_chrome()
         save()
 
+        evidence_dir = artifact.parent / "visible"
+        export_v = prepare_export(args.fixture, args.original_index, "visible-v")
+        result["visible"] = {}
+        result["visible"]["V"] = run_visible_pass(
+            "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir
+        )
+        save()
+
+        export_voff = prepare_export(args.fixture, args.original_index, "visible-voff")
+        with env_override({CONTINUITY_ENV: "off"}):
+            result["visible"]["Voff"] = run_visible_pass(
+                "Voff", export_voff, load_slides(export_voff), plan, viewport, expected_stage, evidence_dir
+            )
+        result["leftoverChromeAfterVisible"] = check_no_leftover_chrome()
+        save()
+
         export_attach = prepare_export(args.fixture, args.original_index, "attach")
         result["attach"] = run_attach_arm(export_attach, load_slides(export_attach), facts, artifact.parent, attach_expected_stage)
         result["leftoverChromeAfterAttach"] = check_no_leftover_chrome()
@@ -1168,6 +1547,13 @@ def main() -> None:
             for name, entry in result.get("arms", {}).items()
         },
         "attach": {key: boundary_verdict(result.get("attach", {}), key) for key in ("continue1to2", "restart2to3", "continue3to4")},
+        "visible": {
+            name: {
+                "verdict": entry.get("verdict"),
+                "slides": [slide.get("verdict") for slide in visible_slides_of(entry)],
+            }
+            for name, entry in (result.get("visible") or {}).items()
+        },
     }
     print(json.dumps(summary, indent=2))
 
