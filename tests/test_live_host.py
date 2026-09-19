@@ -5,6 +5,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -821,18 +822,32 @@ def hevc_movie_bytes() -> bytes:
     return _movie_bytes(b"hvc1")
 
 
+def _draw_slot(object_id: str | None, x: float, y: float, w: float, h: float) -> dict[str, Any]:
+    """One slide draw slot, as the real export encodes it: a wrapper layer holding a single
+    object whose `initialState` carries the slide-space centre and size."""
+    child: dict[str, Any] = {"initialState": {"position": {"pointX": x, "pointY": y}, "width": w, "height": h}}
+    if object_id is not None:
+        child["objectID"] = object_id
+    return {"layers": [child]}
+
+
 def write_one_movie_export(
     root: Path, *, movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None,
     movie_bytes_by_slide: dict[str, bytes] | None = None,
+    artwork_above_on_s2: bool = False, masked: bool = False,
 ) -> None:
     assets_dir = root / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     (assets_dir / "header.json").write_text(json.dumps({"slideWidth": 1920, "slideHeight": 1080, "showMode": 0, "slideList": ["s1", "s2"]}))
     assets = {"movie-asset": {"url": {"web": "assets/movie.mov"}}}
+    movie_state: dict[str, Any] = {"position": {"pointX": 200.0, "pointY": 200.0}, "width": 100.0, "height": 100.0}
+    if masked:
+        movie_state["masksToBounds"] = True
     movie_node = {
+        "objectID": "movie-object",
         "movie": {"asset": "movie-asset"},
         "baseLayer": {
-            "initialState": {"position": {"pointX": 200.0, "pointY": 200.0}, "width": 100.0, "height": 100.0},
+            "initialState": movie_state,
             "layers": [
                 {
                     "isVideoLayer": True,
@@ -841,10 +856,13 @@ def write_one_movie_export(
             ],
         },
     }
+    movie_slot = _draw_slot("movie-object", 200.0, 200.0, 100.0, 100.0)
     extra_movie_node = None
+    extra_slot = None
     if extra_movie_bytes is not None:
         assets["extra-movie-asset"] = {"url": {"web": "assets/extra-movie.mov"}}
         extra_movie_node = {
+            "objectID": "extra-movie-object",
             "movie": {"asset": "extra-movie-asset"},
             "baseLayer": {
                 "initialState": {"position": {"pointX": 600.0, "pointY": 600.0}, "width": 50.0, "height": 50.0},
@@ -856,6 +874,7 @@ def write_one_movie_export(
                 ],
             },
         }
+        extra_slot = _draw_slot("extra-movie-object", 600.0, 600.0, 50.0, 50.0)
     # Like a real HTML export, each slide folder holds its own copy of the movie file;
     # `movie_bytes_by_slide` makes those copies differ.
     default_bytes = movie_bytes if movie_bytes is not None else h264_movie_bytes()
@@ -868,8 +887,18 @@ def write_one_movie_export(
     # never includes it, even though codec_report must still enumerate it.
     if extra_movie_node is not None:
         (assets_dir / "s2" / "assets" / "extra-movie.mov").write_bytes(extra_movie_bytes)
-    events_s1 = [movie_node, {"type": "transition", "name": "apple:magic-move"}]
-    events_s2 = [movie_node] + ([extra_movie_node] if extra_movie_node is not None else [])
+    background = _draw_slot(None, 960.0, 540.0, 1920.0, 1080.0)
+    slots_s2 = [background] + ([extra_slot] if extra_slot is not None else []) + [movie_slot]
+    if artwork_above_on_s2:
+        slots_s2.append(_draw_slot(None, 200.0, 200.0, 80.0, 80.0))
+    events_s1 = [{
+        "baseLayer": {"layers": [background, movie_slot]},
+        "effects": [movie_node, {"type": "transition", "name": "apple:magic-move"}],
+    }]
+    events_s2 = [{
+        "baseLayer": {"layers": slots_s2},
+        "effects": [movie_node] + ([extra_movie_node] if extra_movie_node is not None else []),
+    }]
     (assets_dir / "s1" / "s1.json").write_text(json.dumps({"events": events_s1, "assets": assets}))
     (assets_dir / "s2" / "s2.json").write_text(json.dumps({"events": events_s2, "assets": assets}))
     (assets_dir / "s1" / "s1.jsonp").write_text("local_slide(" + json.dumps({"json": {"events": events_s1}}) + ")")
@@ -880,11 +909,13 @@ def host_with_continuity(
     tmp_path, monkeypatch, *, attach: bool = False, continuity: str = "auto", headless: bool = True,
     movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None,
     movie_bytes_by_slide: dict[str, bytes] | None = None,
+    artwork_above_on_s2: bool = False, masked: bool = False,
 ) -> live_host.LiveOutputHost:
     export_root = tmp_path / "export"
     write_one_movie_export(
         export_root, movie_bytes=movie_bytes, extra_movie_bytes=extra_movie_bytes,
         movie_bytes_by_slide=movie_bytes_by_slide,
+        artwork_above_on_s2=artwork_above_on_s2, masked=masked,
     )
     (export_root / "assets" / "player").mkdir(parents=True, exist_ok=True)
     (export_root / "assets" / "player" / "main.js").write_bytes(player_bytes())
@@ -936,6 +967,45 @@ def test_continuity_unsupported_from_to_runtime(tmp_path, monkeypatch):
     output.observe()
     assert output._continuity_mode == "unsupported"
     assert output.output["continuity"]["reason"] == "cannot translate"
+    assert output._server.continuity_script == ""
+
+
+def test_artwork_above_the_movie_retires_that_boundary_without_losing_continuity(tmp_path, monkeypatch):
+    """Later-authored artwork on the destination slide declines ONE cut: the session still
+    installs continuity (mode pending, then qualified), the runtime plan retires the movie at
+    that scene, and the snapshot names the boundary in operator slide numbers."""
+    output = host_with_continuity(tmp_path, monkeypatch, artwork_above_on_s2=True)
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]))
+    output.observe()
+    assert output._continuity_mode == "qualified"
+    assert output._server.continuity_script != ""
+    retires = [b for b in output._continuity_runtime_plan["boundaries"] if b["action"] == "retire"]
+    assert len(retires) == 1
+    assert retires[0]["movieKey"] == "movie1"
+    not_carried = output.output["continuity"]["notCarried"]
+    assert len(not_carried) == 1
+    entry = not_carried[0]
+    assert entry["fromSlide"] == 1
+    assert entry["toSlide"] == 2
+    assert entry["asset"] == "movie.mov"
+    assert "later-authored artwork overlaps" in entry["reason"]
+
+
+def test_continuity_without_refusals_reports_no_not_carried(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]))
+    output.observe()
+    assert output._continuity_mode == "qualified"
+    assert "notCarried" not in output.output["continuity"]
+
+
+def test_possibly_masked_movie_is_unsupported_with_no_continuity_script(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch, masked=True)
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert "possible mask" in output.output["continuity"]["reason"]
+    assert "masksToBounds" in output.output["continuity"]["reason"]
+    assert "notCarried" not in output.output["continuity"]
     assert output._server.continuity_script == ""
 
 

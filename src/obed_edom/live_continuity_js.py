@@ -14,7 +14,7 @@ Plan object (`window.__OBED_CONTINUITY__`, set before this script runs; absent
                         "footprint": {"x": int, "y": int, "w": int, "h": int}}
       },
       "boundaries": [
-        {"atScene": <scene index>, "action": "restart" | "bridge",
+        {"atScene": <scene index>, "action": "restart" | "bridge" | "retire",
          "rect": {"x": int, "y": int, "w": int, "h": int},   // "bridge" only
          "movieKey": "<movieKey>",
          "srcRect": {"x": int, "y": int, "w": int, "h": int},
@@ -33,6 +33,16 @@ the existing 1->2 handling, which needs no boundary entry). "restart" retires
 the preserved decoder so the export's fresh element plays; "bridge" carries
 the preserved decoder to `rect`, suppressing the export's fresh element. A
 plan is derived from export data and restricted to the measured allowlist.
+
+"retire" (at most one, before the first restart and any bridge) is a
+per-boundary REFUSAL: from `atScene` until the next restart/bridge boundary
+(the end of the deck when there is none), `movieKey` is handed back to the raw
+player. Inside that zone nothing is pooled, remounted, facaded or reused, and
+the `src` clear / `removeAttribute('src')` the hooks normally swallow really
+runs, so the movie behaves exactly as the unmodified export does. Every
+declining hook notes `preserve-refused` (once per key+via) and a `hashchange`
+sweep retires decoders already pooled before the zone, noting
+`retire-boundary` — refusal is asserted by a positive event, never by silence.
 The bridge moves during the preceding transition scene using linear interpolation
 over the exported duration. This is a fallback for WebGL movie geometry with no
 unambiguous animated DOM rectangle; it does not attest native Keynote easing.
@@ -56,7 +66,7 @@ from __future__ import annotations
 
 import hashlib
 
-CONTINUITY_VERSION = 3
+CONTINUITY_VERSION = 4
 
 PRESERVE_CORE_JS = r"""
 (function(){
@@ -68,7 +78,7 @@ PRESERVE_CORE_JS = r"""
   let disabled = false;
   let everPreserved = false;
   window.__OBED_P2_PRESERVE__ = {
-    version: 7,
+    version: 8,
     mode: 'decoder-preserve',
     events: [],
     poolKeys: [],
@@ -301,6 +311,7 @@ PRESERVE_CORE_JS = r"""
   // Videos created after clear get the new generation and remount normally.
   let preserveGeneration = 0;
   const stageMapWarned = {};
+  const refusedNoted = {};
   // Plan rects are AUTHORED px; getBoundingClientRect() and <body>-level overlays
   // are SCREEN px; inline styles inside the transform-scaled #stage are AUTHORED px.
   function stageMap() {
@@ -363,6 +374,42 @@ PRESERVE_CORE_JS = r"""
     if (!bridges.length) return null;
     return bridges.reduce(function(a, b) { return b.atScene < a.atScene ? b : a; });
   }
+  // The plan may carry at most one 'retire' boundary (a per-boundary refusal).
+  function retireBoundary() {
+    const retires = boundariesByAction('retire');
+    if (!retires.length) return null;
+    return retires.reduce(function(a, b) { return b.atScene < a.atScene ? b : a; });
+  }
+  // The refusal ends where the movie's next flow starts: the smallest restart /
+  // bridge atScene above the retire (the export itself plays whatever that
+  // boundary creates), Infinity when there is none.
+  function retireZoneEnd(b) {
+    let end = Infinity;
+    ['restart', 'bridge'].forEach(function(action) {
+      boundariesByAction(action).forEach(function(x) {
+        if (x.atScene > b.atScene && x.atScene < end) end = x.atScene;
+      });
+    });
+    return end;
+  }
+  function inRetireZone(b) {
+    const hn = currentHashNum();
+    if (hn == null) return false;
+    return hn >= b.atScene && hn < retireZoneEnd(b);
+  }
+  /** May this movie be preserved at the current scene? False only in a retire zone. */
+  function preserveAllowed(src) {
+    const b = retireBoundary();
+    if (!b || movieAssetKey(src) !== b.movieKey) return true;
+    return !inRetireZone(b);
+  }
+  function noteRefused(src, via) {
+    const key = movieAssetKey(src);
+    const seen = key + '|' + via;
+    if (refusedNoted[seen]) return;
+    refusedNoted[seen] = true;
+    note('preserve-refused', {key: key, scene: currentHashNum(), via: via});
+  }
   function nearestLayer(el) {
     let n = el;
     while (n) {
@@ -409,6 +456,10 @@ PRESERVE_CORE_JS = r"""
     // ends with its slide) is left to the player; pooling it remounted it at the fallback
     // footprint on later slides (seen on slide 4 in OBS, 2026-09-19).
     if (!movieAssetKey(src)) return;
+    if (!preserveAllowed(src)) {
+      noteRefused(src, 'stash');
+      return;
+    }
     if (!(v.readyState >= 2 || v.currentTime > 0.05)) return;
     tag(v);
     if (!pool.has(key)) pool.set(key, []);
@@ -459,6 +510,11 @@ PRESERVE_CORE_JS = r"""
    */
   function scheduleRemount(v, why) {
     if (disabled) return;
+    const scheduleSrc = v ? (v.currentSrc || v.src || '') : '';
+    if (!preserveAllowed(scheduleSrc)) {
+      noteRefused(scheduleSrc, 'remount');
+      return;
+    }
     if (suppressRemount) {
       note('remount-suppressed', {elId: v && v.__obedElId, why: why});
       return;
@@ -891,9 +947,58 @@ PRESERVE_CORE_JS = r"""
     v.__obedRemounting = true;
     setTimeout(function(){ v.__obedRemounting = false; }, 0);
   }
+  /**
+   * Hand one preserved decoder back to the player: pause it, take it out of the
+   * DOM and mark it dead so nothing re-pools, re-reuses or re-remounts it.
+   * Shared by the `retire-on-start-movie` branch and the retire-zone sweep.
+   */
+  function retireDecoder(v) {
+    try { v.pause(); } catch (e) {}
+    try {
+      if (v.parentNode) v.parentNode.removeChild(v);
+    } catch (e) {}
+    delete v.dataset.obedPreserved;
+    delete v.dataset.obedRemounted;
+    v.__obedRemountEpoch = -1;
+    v.__obedGen = -1;
+    return v.__obedElId;
+  }
+  /**
+   * Retire every decoder of the retired movie once the hash enters the zone.
+   * The 1->2 detach can fire while the hash is still 1, so a decoder pooled
+   * before the boundary would otherwise survive into the refused scenes.
+   */
+  function sweepRetireZone() {
+    const b = retireBoundary();
+    if (!b || !inRetireZone(b)) return;
+    const victims = [];
+    function consider(v) {
+      if (movieAssetKey(v.currentSrc || v.src || '') === b.movieKey && victims.indexOf(v) < 0) victims.push(v);
+    }
+    pool.forEach(function(q) { (q || []).forEach(consider); });
+    document.querySelectorAll('video[data-obed-preserved="1"]').forEach(consider);
+    if (!victims.length) return;
+    const elIds = victims.map(function(v) {
+      beginMove(v);
+      return retireDecoder(v);
+    });
+    const empties = [];
+    pool.forEach(function(q, key) {
+      const left = (q || []).filter(function(v) { return victims.indexOf(v) < 0; });
+      if (left.length) pool.set(key, left); else empties.push(key);
+    });
+    empties.forEach(function(key) { pool.delete(key); });
+    note('retire-boundary', {key: b.movieKey, elIds: elIds, atScene: b.atScene});
+  }
+  window.addEventListener('hashchange', sweepRetireZone);
   function tryRemount(v, epoch) {
     if (disabled) return;
     if (!v || suppressRemount) return;
+    const remountSrc = v.currentSrc || v.src || '';
+    if (!preserveAllowed(remountSrc)) {
+      noteRefused(remountSrc, 'remount');
+      return;
+    }
     if (epoch != null && epoch !== remountEpoch) {
       note('remount-stale', {elId: v.__obedElId, epoch: epoch, current: remountEpoch});
       return;
@@ -1215,9 +1320,14 @@ PRESERVE_CORE_JS = r"""
       set: function(val) {
         const empty = val === '' || val == null;
         if (!disabled && empty && this instanceof HTMLVideoElement) {
-          stash(this, 'preserve-skip-clear');
-          // Skip clearing so the decoder stays attached to its resource.
-          return;
+          const cur = this.currentSrc || desc.get.call(this) || '';
+          if (preserveAllowed(cur)) {
+            stash(this, 'preserve-skip-clear');
+            // Skip clearing so the decoder stays attached to its resource.
+            return;
+          }
+          // Retired: the real clear must happen, or the movie still deviates from raw.
+          noteRefused(cur, 'src-clear');
         }
         return desc.set.call(this, val);
       }
@@ -1230,8 +1340,12 @@ PRESERVE_CORE_JS = r"""
   const origRemove = Element.prototype.removeAttribute;
   Element.prototype.removeAttribute = function(name) {
     if (!disabled && String(name).toLowerCase() === 'src' && this instanceof HTMLVideoElement) {
-      stash(this, 'preserve-skip-removeAttribute');
-      return;
+      const cur = this.currentSrc || this.src || '';
+      if (preserveAllowed(cur)) {
+        stash(this, 'preserve-skip-removeAttribute');
+        return;
+      }
+      noteRefused(cur, 'removeAttribute');
     }
     return origRemove.call(this, name);
   };
@@ -1257,7 +1371,7 @@ PRESERVE_CORE_JS = r"""
     note('createElement-video', {elId: el.__obedElId, gen: preserveGeneration});
     const origSA = el.setAttribute.bind(el);
     el.setAttribute = function(attr, value) {
-      if (!disabled && String(attr).toLowerCase() === 'src') {
+      if (!disabled && String(attr).toLowerCase() === 'src' && preserveAllowed(value)) {
         const key = assetKey(value);
         const hn = currentHashNum();
         const boundary = restartMinHash();
@@ -1278,16 +1392,7 @@ PRESERVE_CORE_JS = r"""
           // continuing movie under a different key is never touched.
           const elIds = [];
           while (q.length) {
-            const old = q.shift();
-            elIds.push(old.__obedElId);
-            try { old.pause(); } catch (e) {}
-            try {
-              if (old.parentNode) old.parentNode.removeChild(old);
-            } catch (e) {}
-            delete old.dataset.obedPreserved;
-            delete old.dataset.obedRemounted;
-            old.__obedRemountEpoch = -1;
-            old.__obedGen = -1;
+            elIds.push(retireDecoder(q.shift()));
           }
           pool.delete(key);
           note('retire-on-start-movie', {key: key, elIds: elIds, hashNum: hn});

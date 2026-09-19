@@ -4,7 +4,8 @@ export type LiveSlide = { originalOrdinal: number; skipped: boolean; thumbnailUr
 export type LivePreparedDeck = { previewJobId: string; name: string; slides: number; sourceDigest: string };
 export type LiveDisplay = { id: string; name: string; width: number; height: number; x: number; y: number; primary: boolean };
 export type LiveCodec = { asset: string; codec: string | null; family: "h264" | "hevc" | "prores" | "av1" | "vp9" | "other" };
-export type LiveContinuity ={ mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string; scale?: number };
+export type LiveNotCarried = { fromSlide: number; toSlide: number; asset: string; reason: string };
+export type LiveContinuity ={ mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string; scale?: number; notCarried?: LiveNotCarried[] };
 export type LiveSnapshot = {
   sessionId: string;
   revision: number;

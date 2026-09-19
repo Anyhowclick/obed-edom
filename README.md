@@ -90,6 +90,14 @@ the runtime's version and sha256):
   qualified, `output.continuity` also carries `scale` (the uniform factor applied
   to the authored stage, e.g. `1.3333`).
 
+A qualified session can still decline individual cuts: when the destination slide
+draws artwork above the carried movie, that boundary retires the movie (it
+restarts or freezes there) while the rest of the deck stays continuous. Declined
+cuts appear on `output.continuity.notCarried` and under the presenter's
+continuity badge, one line per cut. A movie whose layers do not read as an
+unmasked rectangle — an unreadable layer shape, or a possible mask — makes the
+whole deck `unsupported` instead.
+
 Set `OBED_LIVE_CONTINUITY=off` before starting the dashboard server to disable it
 outright.
 

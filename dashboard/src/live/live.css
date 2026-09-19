@@ -12,6 +12,7 @@
 .live-continuity-badge[data-mode="qualified"] { color: var(--ok); }
 .live-continuity-badge[data-mode="unsupported"] { color: var(--warn); }
 .live-continuity .note { margin: 8px 0 0; overflow-wrap: anywhere; }
+.live-continuity-not-carried { padding-left: 20px; }
 .live-continuity-choice, .live-continuity-help { flex-basis: 100%; }
 .live-continuity-help { margin: 0; }
 .live-codecs { margin: 16px 0; }

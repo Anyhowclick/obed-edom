@@ -21,7 +21,7 @@ from obed_edom import live_continuity_js
 
 
 def test_continuity_version_is_pinned_int():
-    assert live_continuity_js.CONTINUITY_VERSION == 3
+    assert live_continuity_js.CONTINUITY_VERSION == 4
     assert isinstance(live_continuity_js.CONTINUITY_VERSION, int)
 
 
@@ -690,7 +690,8 @@ const Document = { prototype: { createElement(name) {
   if (String(name).toLowerCase() === 'video') return makeVideo();
   return {style: {setProperty(){}}, getContext(){ return {drawImage(){}}; }, toDataURL(){ return ''; }};
 } } };
-const Element = { prototype: { removeAttribute(name) {} } };
+const removedAttrs = [];
+const Element = { prototype: { removeAttribute(name) { removedAttrs.push(name); } } };
 function elStub() {
   return {style: {setProperty(){}}, addEventListener(){}, removeEventListener(){}, getAttribute(){ return null; }};
 }
@@ -706,6 +707,7 @@ const stageEl = STAGE_CFG && {
 };
 const bodyEl = elStub();
 bodyEl.appendChild = function(v) { v.parentNode = bodyEl; v.__inStage = false; };
+bodyEl.removeChild = function(v) { v.parentNode = null; };
 const document = {
   documentElement: elStub(), body: bodyEl,
   getElementById(id) {
@@ -739,9 +741,28 @@ function getComputedStyle(el) {
     zIndex: el.style.zIndex != null && el.style.zIndex !== '' ? el.style.zIndex : 'auto',
   };
 }
-const window = {__OBED_CONTINUITY__: __PLAN__, addEventListener(){}, removeEventListener(){}};
-function MutationObserver(cb) { this.observe = function(){}; this.disconnect = function(){}; }
+const hashListeners = [];
+const window = {
+  __OBED_CONTINUITY__: __PLAN__,
+  addEventListener(type, fn) { if (type === 'hashchange') hashListeners.push(fn); },
+  removeEventListener(){},
+};
+const moCallbacks = [];
+function MutationObserver(cb) {
+  moCallbacks.push(cb);
+  this.observe = function(){}; this.disconnect = function(){};
+}
 const location = {hash: '#1'};
+/** Move the player to scene `n` and run the core's hashchange listeners. */
+function goToScene(n) {
+  location.hash = '#' + n;
+  hashListeners.slice().forEach((fn) => fn());
+}
+/** Drive the core's detach MutationObserver as the player's teardown would. */
+function detach(v) {
+  v.parentNode = null;
+  moCallbacks.slice().forEach((cb) => cb([{removedNodes: [v]}]));
+}
 const performance = {now: () => 0};
 const requestAnimationFrame = () => 0;
 const setTimeout = () => 0;
@@ -1022,3 +1043,334 @@ console.log(JSON.stringify({
 """
     result = _run_full_core_in_node(plan=_MOVIE_PLAN, stage=_IDENTITY_STAGE, script=script)
     assert result == {"disableReturned": False, "disabled": False}
+
+
+# --- I2: the retire zone (per-boundary refusal) -------------------------
+#
+# Contract: one `{"atScene": N, "action": "retire", "movieKey": K}` boundary
+# hands K back to the raw player for scenes [N, <next restart/bridge atScene>).
+# Inside that zone the runtime must be INVISIBLE: nothing pooled, remounted,
+# facaded or reused, and the `src` clear / `removeAttribute('src')` the hooks
+# normally swallow must really happen. Every decline notes `preserve-refused`
+# (once per key+via); the hashchange sweep notes `retire-boundary`.
+
+#: The fixture's shape: retire movie1 at scene 2, restart at 6 (zone end),
+#: bridge at 8 — so scenes 2..5 are refused and 6+ preserve again.
+_RETIRE_PLAN = {
+    "movies": {
+        "movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 100, "y": 200, "w": 300, "h": 150}},
+        "movie2": {"assetKeys": ["wa0125.mov"], "footprint": {"x": 900, "y": 500, "w": 200, "h": 100}},
+    },
+    "boundaries": [
+        {"atScene": 2, "action": "retire", "movieKey": "movie1"},
+        {"atScene": 6, "action": "restart"},
+        {
+            "atScene": 8, "action": "bridge", "movieKey": "movie1",
+            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
+            "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
+            "durationSeconds": 1.5,
+        },
+    ],
+}
+#: Same plan with the retire entry removed — the "behaves exactly as today" control.
+_NO_RETIRE_PLAN = {
+    "movies": _RETIRE_PLAN["movies"],
+    "boundaries": [b for b in _RETIRE_PLAN["boundaries"] if b["action"] != "retire"],
+}
+
+#: Pool a live `movie1` decoder by driving the player's real teardown path
+#: (detach -> the core's MutationObserver -> `stash`). `__SCENE__`/`__SRC__`
+#: are substituted per test.
+_MAKE_AND_DETACH = r"""
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1;
+v.parentNode = bodyEl;
+v.src = '__SRC__';
+__SCENE__
+detach(v);
+"""
+
+
+def _refusals(events: list[dict]) -> list[dict]:
+    return [e["detail"] for e in events if e["kind"] == "preserve-refused"]
+
+
+def _run_retire(script: str, *, plan: dict = _RETIRE_PLAN) -> dict:
+    return _run_full_core_in_node(plan=plan, stage=_IDENTITY_STAGE, script=script)
+
+
+def _detach_script(*, scene: str, src: str = "https://host/untitled.mov") -> str:
+    return _MAKE_AND_DETACH.replace("__SCENE__", scene).replace("__SRC__", src)
+
+
+_POOL_REPORT = r"""
+console.log(JSON.stringify({
+  poolKeys: P.poolKeys,
+  pooled: P.snapshot().filter(x => !x.fromDom).length,
+  preserved: v.dataset.obedPreserved || null,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
+  kinds: P.events.map(e => e.kind),
+}));
+"""
+
+
+def test_retire_zone_stash_declines_and_notes_once():
+    """In-zone detach: `stash` must refuse (nothing pooled, no remount
+    scheduled) and note `preserve-refused` exactly once per (key, via) even
+    though the player tears the movie down repeatedly."""
+    script = _detach_script(scene="goToScene(3);") + r"""
+detach(v);
+detach(v);
+""" + _POOL_REPORT
+    result = _run_retire(script)
+    assert result["poolKeys"] == []
+    assert result["pooled"] == 0
+    assert result["preserved"] is None
+    assert result["refusals"] == [{"key": "movie1", "scene": 3, "via": "stash", "sceneHash": "#3"}]
+    assert "remount-scheduled" not in result["kinds"]
+    assert not [k for k in result["kinds"] if k.startswith("remount-")]
+
+
+def test_retire_zone_src_clear_really_clears():
+    """The src hook swallows the clear unconditionally today; inside the zone
+    the REAL setter must run, or the refused movie still deviates from raw."""
+    script = r"""
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1;
+v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(4);
+v.src = '';
+console.log(JSON.stringify({
+  src: v.src,
+  pooled: P.snapshot().filter(x => !x.fromDom).length,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
+}));
+"""
+    result = _run_retire(script)
+    assert result["src"] == ""
+    assert result["pooled"] == 0
+    assert result["refusals"] == [{"key": "movie1", "scene": 4, "via": "src-clear", "sceneHash": "#4"}]
+
+
+def test_retire_zone_remove_attribute_really_removes():
+    script = r"""
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1;
+v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+goToScene(5);
+v.removeAttribute('src');
+v.removeAttribute('src');
+console.log(JSON.stringify({
+  removedAttrs,
+  pooled: P.snapshot().filter(x => !x.fromDom).length,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
+}));
+"""
+    result = _run_retire(script)
+    assert result["removedAttrs"] == ["src", "src"]
+    assert result["pooled"] == 0
+    assert result["refusals"] == [{"key": "movie1", "scene": 5, "via": "removeAttribute", "sceneHash": "#5"}]
+
+
+def test_retire_zone_blocks_remount_of_a_decoder_pooled_before_the_boundary():
+    """`remountAll()` on a decoder pooled at scene 1 must do nothing once the
+    scene is in the zone (the hash here is set WITHOUT the sweep, so this
+    isolates `tryRemount`'s own guard)."""
+    script = _detach_script(scene="") + r"""
+const pooledBefore = P.snapshot().filter(x => !x.fromDom).length;
+location.hash = '#4';
+const before = JSON.stringify(v.style);
+P.remountAll();
+console.log(JSON.stringify({
+  pooledBefore,
+  styleUntouched: JSON.stringify(v.style) === before,
+  remountedAfter: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#4').length,
+  refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
+}));
+"""
+    result = _run_retire(script)
+    assert result["pooledBefore"] == 1
+    assert result["styleUntouched"] is True
+    assert result["remountedAfter"] == 0
+    assert result["refusals"] == [{"key": "movie1", "scene": 4, "via": "remount", "sceneHash": "#4"}]
+
+
+def test_retire_zone_create_element_does_not_facade_or_reuse():
+    """A fresh element created inside the zone plays natively: no facade, no
+    `reuse-decoder`, and its own `setAttribute('src')` reaches the element."""
+    script = _detach_script(scene="") + r"""
+location.hash = '#4';
+const fresh = document.createElement('video');
+fresh.setAttribute('src', 'https://host/untitled.mov');
+console.log(JSON.stringify({
+  facade: fresh.dataset.obedFacade || null,
+  facadeFor: fresh.__obedFacadeFor ? 1 : 0,
+  styleAttr: fresh.__styleAttr === undefined,
+  reuse: P.events.filter(e => e.kind === 'reuse-decoder' || e.kind === 'bridge-3to4').length,
+  kinds: P.events.map(e => e.kind),
+}));
+"""
+    result = _run_retire(script)
+    assert result["facade"] is None
+    assert result["facadeFor"] == 0
+    assert result["reuse"] == 0
+    assert "retire-on-start-movie" not in result["kinds"]
+
+
+def test_retire_zone_sweep_retires_a_decoder_pooled_before_the_boundary():
+    """The 1->2 detach fires while the hash is still 1, so the decoder is
+    legitimately pooled; entering the zone must retire it (pause, out of the
+    DOM, dead for reuse) and say so with `retire-boundary`."""
+    script = _detach_script(scene="") + r"""
+const elId = v.__obedElId;
+const pooledBefore = P.snapshot().filter(x => !x.fromDom).length;
+goToScene(2);
+console.log(JSON.stringify({
+  elId, pooledBefore,
+  pooledAfter: P.snapshot().filter(x => !x.fromDom).length,
+  poolKeys: P.poolKeys,
+  paused: v.paused,
+  inDocument: document.contains(v),
+  preserved: v.dataset.obedPreserved || null,
+  remounted: v.dataset.obedRemounted || null,
+  gen: v.__obedGen,
+  epoch: v.__obedRemountEpoch,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').map(e => e.detail),
+}));
+"""
+    result = _run_retire(script)
+    assert result["pooledBefore"] == 1
+    assert result["pooledAfter"] == 0
+    assert result["poolKeys"] == []
+    assert result["paused"] is True
+    assert result["inDocument"] is False
+    assert result["preserved"] is None
+    assert result["remounted"] is None
+    assert result["gen"] == -1
+    assert result["epoch"] == -1
+    assert result["retire"] == [
+        {"key": "movie1", "elIds": [result["elId"]], "atScene": 2, "sceneHash": "#2"}
+    ]
+
+
+def test_retire_sweep_is_silent_outside_the_zone():
+    """No decoder of the retired key, or a scene past the zone end: the sweep
+    must emit nothing (a `retire-boundary` note is a positive claim)."""
+    script = r"""
+goToScene(3);
+goToScene(7);
+const v = document.createElement('video');
+v.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;
+v.src = 'https://host/untitled.mov';
+detach(v);
+goToScene(7);
+console.log(JSON.stringify({
+  retire: P.events.filter(e => e.kind === 'retire-boundary').length,
+  pooled: P.snapshot().filter(x => !x.fromDom).length,
+}));
+"""
+    result = _run_retire(script)
+    assert result["retire"] == 0
+    assert result["pooled"] == 1
+
+
+@pytest.mark.parametrize("scene", ["", "goToScene(0);", "goToScene(1);"], ids=["initial", "scene0", "scene1"])
+def test_before_the_retire_zone_preservation_is_unchanged(scene):
+    result = _run_retire(_detach_script(scene=scene) + _POOL_REPORT)
+    assert result["poolKeys"] == ["untitled.mov"]
+    assert result["pooled"] == 1
+    assert result["preserved"] == "1"
+    assert result["refusals"] == []
+    assert "remount-scheduled" in result["kinds"]
+
+
+@pytest.mark.parametrize("scene", [6, 7], ids=["zone-end", "after-zone-end"])
+def test_after_the_zone_end_preservation_works_again(scene):
+    """The restart at scene 6 creates a fresh element the export itself plays;
+    from 6 on the runtime may preserve it again (that is what the 3->4 bridge
+    carries)."""
+    result = _run_retire(_detach_script(scene=f"goToScene({scene});") + _POOL_REPORT)
+    assert result["poolKeys"] == ["untitled.mov"]
+    assert result["pooled"] == 1
+    assert result["preserved"] == "1"
+    assert result["refusals"] == []
+
+
+def test_bridge_still_engages_at_scene_8_for_the_retired_key():
+    """End to end on the fixture's shape: refused at 2..5, pooled again at 7,
+    bridged at 8 — the retire must not poison the later bridge."""
+    script = r"""
+const doomed = document.createElement('video');
+doomed.readyState = 4; doomed.currentTime = 1; doomed.parentNode = bodyEl;
+doomed.src = 'https://host/untitled.mov';
+detach(doomed);
+goToScene(2);
+goToScene(4);
+const refused = document.createElement('video');
+refused.readyState = 4; refused.currentTime = 1; refused.parentNode = bodyEl;
+refused.src = 'https://host/untitled.mov';
+detach(refused);
+goToScene(7);
+const fresh = document.createElement('video');
+fresh.readyState = 4; fresh.currentTime = 2; fresh.parentNode = bodyEl;
+fresh.src = 'https://host/untitled.mov';
+detach(fresh);
+const pooledAtSeven = P.snapshot().filter(x => !x.fromDom).length;
+goToScene(8);
+const bridged = document.createElement('video');
+bridged.setAttribute('src', 'https://host/untitled.mov');
+console.log(JSON.stringify({
+  pooledAtSeven,
+  retire: P.events.filter(e => e.kind === 'retire-boundary').length,
+  refusalVias: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail.via),
+  bridge: P.events.filter(e => e.kind === 'bridge-3to4').map(e => e.detail.oldElId),
+  suppressed: !!bridged.__obedSuppressed34,
+  freshElId: fresh.__obedElId,
+}));
+"""
+    result = _run_retire(script)
+    assert result["pooledAtSeven"] == 1
+    assert result["retire"] == 1
+    assert result["refusalVias"] == ["stash"]
+    assert result["bridge"] == [result["freshElId"]]
+    assert result["suppressed"] is True
+
+
+def test_retire_zone_does_not_touch_another_movie_key():
+    """The refusal is per-movie: a movie the plan does not retire keeps being
+    preserved inside the zone, and the sweep never takes it."""
+    script = _detach_script(scene="goToScene(3);", src="https://host/WA0125.mov") + r"""
+goToScene(4);
+""" + _POOL_REPORT
+    result = _run_retire(script)
+    assert result["poolKeys"] == ["wa0125.mov"]
+    assert result["pooled"] == 1
+    assert result["preserved"] == "1"
+    assert result["refusals"] == []
+
+
+@pytest.mark.parametrize("scene", [2, 3, 5], ids=["boundary", "mid", "last"])
+def test_plan_without_a_retire_behaves_exactly_as_today(scene):
+    """Same scenes, same teardown, retire entry removed: every scene in what
+    WOULD be the zone preserves as before."""
+    result = _run_full_core_in_node(
+        plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE,
+        script=_detach_script(scene=f"goToScene({scene});") + _POOL_REPORT,
+    )
+    assert result["poolKeys"] == ["untitled.mov"]
+    assert result["pooled"] == 1
+    assert result["preserved"] == "1"
+    assert result["refusals"] == []
+    assert "remount-scheduled" in result["kinds"]
+
+
+def test_null_hash_is_allowed():
+    """No scene index in the hash: nothing places the player in the zone, so
+    preservation stays allowed (unchanged from today)."""
+    script = _detach_script(scene="location.hash = '';") + _POOL_REPORT
+    result = _run_retire(script)
+    assert result["pooled"] == 1
+    assert result["preserved"] == "1"
+    assert result["refusals"] == []

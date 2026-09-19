@@ -142,6 +142,41 @@ describe("LivePresenter", () => {
     expect(screen.getByText("+2 more")).toBeInTheDocument();
   });
 
+  it("says nothing about declined cuts when the host reports none", async () => {
+    const api = client({ state: vi.fn(async () => state({ continuity: { mode: "qualified" } })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Movie continuity · Qualified");
+    expect(screen.queryByText(/movie not carried/)).not.toBeInTheDocument();
+  });
+
+  it("names a cut continuity declines under the continuity badge", async () => {
+    const continuity: LiveContinuity = {
+      mode: "qualified",
+      notCarried: [{ fromSlide: 3, toSlide: 4, asset: "clip.mov", reason: "artwork overlaps the carried movie" }],
+    };
+    const api = client({ state: vi.fn(async () => state({ continuity })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Movie continuity · Qualified");
+    expect(screen.getByText("Slide 3 → 4: movie not carried — artwork overlaps the carried movie")).toBeInTheDocument();
+    expect(screen.queryByText(/^\+\d+ more$/)).not.toBeInTheDocument();
+  });
+
+  it("caps the declined-cut list at three and counts the rest", async () => {
+    const notCarried = Array.from({ length: 5 }, (_, index) => ({
+      fromSlide: index + 1, toSlide: index + 2, asset: `clip-${index + 1}.mov`, reason: `reason ${index + 1}`,
+    }));
+    const api = client({ state: vi.fn(async () => state({ continuity: { mode: "qualified", notCarried } })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Movie continuity · Qualified");
+    for (const entry of notCarried.slice(0, 3)) {
+      expect(screen.getByText(`Slide ${entry.fromSlide} → ${entry.toSlide}: movie not carried — ${entry.reason}`)).toBeInTheDocument();
+    }
+    for (const entry of notCarried.slice(3)) {
+      expect(screen.queryByText(`Slide ${entry.fromSlide} → ${entry.toSlide}: movie not carried — ${entry.reason}`)).not.toBeInTheDocument();
+    }
+    expect(screen.getByText("+2 more")).toBeInTheDocument();
+  });
+
   it("does not move the presenter until a delayed command returns observed state", async () => {
     let resolve!: (value: LiveResult) => void;
     const command = vi.fn(() => new Promise<LiveResult>((done) => { resolve = done; }));

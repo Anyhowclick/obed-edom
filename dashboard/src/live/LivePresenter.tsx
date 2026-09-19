@@ -19,9 +19,16 @@ function ContinuityStatus({ continuity }: { continuity?: LiveContinuity }) {
       : mode === "pending"
         ? "Checking this deck and output size."
         : "This session has not reported movie continuity status.");
+  const notCarried = continuity?.notCarried ?? [];
+  const visible = notCarried.slice(0, 3);
+  const hidden = notCarried.length - visible.length;
   return <div className="live-continuity" aria-live="polite">
     <span className="live-continuity-badge" data-mode={mode || "unknown"}>Movie continuity · {label}</span>
     <p className="note">{detail}</p>
+    {notCarried.length > 0 && <ul className="note live-continuity-not-carried">
+      {visible.map((entry, index) => <li key={`${index}-${entry.asset}`}>Slide {entry.fromSlide} → {entry.toSlide}: movie not carried — {entry.reason}</li>)}
+      {hidden > 0 && <li>+{hidden} more</li>}
+    </ul>}
   </div>;
 }
 

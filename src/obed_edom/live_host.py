@@ -30,7 +30,7 @@ from typing import Any, Callable
 from websockets.sync.client import connect
 
 from .html_preview import preview_root, safe_export_file
-from .live_continuity import Unsupported, codec_report, derive_plan
+from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_plan
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
 from .live_runtime import RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
 from .live_session import PlayerCommandRejected, PlayerObservation
@@ -771,6 +771,7 @@ class LiveOutputHost:
         self._continuity_reason: str | None = None
         self._continuity_runtime_plan: dict[str, Any] | None = None
         self._continuity_scale: float | None = None
+        self._continuity_not_carried: list[dict[str, Any]] = []
         self._codec_report: list[dict[str, Any]] = []
         self._codec_warnings: list[str] = []
 
@@ -815,9 +816,28 @@ class LiveOutputHost:
             if not _codec_supported(family, attach=attach, headless=self.headless):
                 display = _codec_display(entry)
                 return "unsupported", f"movie codec is not playable in this output: {asset} ({display})", None
+        self._continuity_not_carried = self._not_carried(plan)
         if self._attach_endpoint:
             runtime = {**runtime, "transparentBackground": True}
         return "pending", None, runtime
+
+    def _not_carried(self, plan: ContinuityPlan) -> list[dict[str, Any]]:
+        """Boundaries continuity declines to carry, in operator terms: original slide
+        ordinals rather than the plan's player indices."""
+        ordinals = {
+            slide.get("playerIndex"): slide.get("originalOrdinal")
+            for slide in self.slides
+            if not slide.get("skipped")
+        }
+        return [
+            {
+                "fromSlide": ordinals.get(refusal["fromPlayer"]),
+                "toSlide": ordinals.get(refusal["toPlayer"]),
+                "asset": refusal["asset"],
+                "reason": refusal["reason"],
+            }
+            for refusal in plan.refusals
+        ]
 
     def _stage_gate_outcome(self, stage: Any) -> tuple[str, str | None, float | None]:
         """Fail-closed judgement of one stage-geometry reading against the authored canvas."""
@@ -879,6 +899,8 @@ class LiveOutputHost:
             info["reason"] = self._continuity_reason
         if self._continuity_mode == "qualified" and self._continuity_scale is not None:
             info["scale"] = round(self._continuity_scale, 4)
+        if self._continuity_not_carried:
+            info["notCarried"] = [dict(entry) for entry in self._continuity_not_carried]
         return info
 
     @property
@@ -960,6 +982,7 @@ class LiveOutputHost:
             self._logger.log(
                 "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
                 runtimePlan=self._continuity_runtime_plan, stage=stage_geometry, scale=self._continuity_scale,
+                notCarried=self._continuity_not_carried,
             )
             observed = self._wait_settled()
             try: dpr = self._transport.evaluate("window.devicePixelRatio")
