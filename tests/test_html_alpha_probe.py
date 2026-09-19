@@ -1432,6 +1432,29 @@ def test_composited_index_run_baseline_freeze_does_not_gate_clean_cut():
     assert scored["freezeRunAtCut"] <= 2
 
 
+def test_composited_index_run_injected_stale_freeze_has_strong_margin():
+    """The Phase-2 composited-freeze control (Arm A) holds a stale cover from the
+    flip through the whole capture, so the decoded counter FREEZES for the entire
+    after-window. The gate must go RED with reason 'freeze run at cut' AND a strong
+    margin (freezeRunAtCut >= 6), so the RED is unmistakably the injected freeze,
+    not coarse-capture jitter (which the gate's max_freeze_run==2 already tolerates).
+    """
+    from obed_edom.html_alpha_probe import score_composited_index_run
+
+    # Advancing before the flip, then a stale hold at index 40 for 8 samples.
+    samples = [
+        _index_sample(37, "#1", 0.0),
+        _index_sample(38, "#1", 0.05),
+        _index_sample(39, "#1", 0.1),
+        _index_sample(40, "#2", 0.15),
+    ] + [_index_sample(40, "#2", 0.2 + 0.05 * i) for i in range(8)]
+    scored = score_composited_index_run(samples, flip_index=3)
+    assert scored["ok"] is False
+    assert scored["reason"] == "freeze run at cut"
+    assert scored["freezeRunAtCut"] >= 6
+    assert scored["negativeAnomaly"] is False
+
+
 # --------------------------------------------------------------------------- #
 # score_index_progression — parity-immune restart corroboration (2->3 flake fix)
 # --------------------------------------------------------------------------- #
