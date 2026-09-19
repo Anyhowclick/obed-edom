@@ -428,3 +428,30 @@ def _clone_second_instance_onto_slide2(data):
         {"movie": stray["movie"], "baseLayer": stray["baseLayer"], "effects": []}
     ]
     return {**data, "events": events}
+
+
+def test_only_p2_measured_plans_are_qualified():
+    # Codex (2026-09-19): the runtime keeps every decoded movie, honours only the first
+    # restart and the first bridge, and picks same-asset instances in DOM order. Until it
+    # is boundary-specific a deck is trusted only if its runtime plan is byte-for-byte one
+    # the P2 gate measured. The fixture is; the same deck with a different slide-4
+    # destination is a different, unmeasured plan and must fall back to the raw player.
+    from dataclasses import replace
+
+    from obed_edom import live_continuity
+
+    plan = _plan()
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert live_continuity.plan_signature(runtime) in live_continuity.QUALIFIED_PLAN_SHA256
+
+    boundaries = list(plan.boundaries)
+    index = next(i for i, b in enumerate(boundaries) if any(m.action == "bridge" for m in b.movies))
+    moved = tuple(
+        replace(m, dst_rect=replace(m.dst_rect, x=m.dst_rect.x + 40)) if m.action == "bridge" else m
+        for m in boundaries[index].movies
+    )
+    boundaries[index] = replace(boundaries[index], movies=moved)
+    unmeasured = replace(plan, boundaries=tuple(boundaries)).to_runtime()
+    assert isinstance(unmeasured, Unsupported)
+    assert "not yet qualified" in unmeasured.reason

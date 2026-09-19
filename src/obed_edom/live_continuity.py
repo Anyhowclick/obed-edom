@@ -15,6 +15,7 @@ instead of guessing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -29,6 +30,16 @@ _TRIM_SUFFIX_RE = re.compile(r"^(?P<name>.+)-\d+\.\d+-\d+\.\d+(?P<ext>\.[A-Za-z0
 
 class _Refuse(Exception):
     """Internal control-flow only: carries the reason for an `Unsupported` result."""
+
+
+QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset({"1ae051937c071fcc41647979eae99db35d78eadede0060ddd67241e28b8dff0c"})
+
+
+def plan_signature(runtime: dict[str, Any]) -> str:
+    """The runtime honours only the first restart and first bridge, keeps every decoded
+    movie, and picks same-asset instances in DOM order, so a plan is trusted only when
+    it is one the P2 gate actually measured."""
+    return hashlib.sha256(json.dumps(runtime, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -186,7 +197,10 @@ class ContinuityPlan:
             else:
                 continue
 
-        return {"movies": movies, "boundaries": runtime_boundaries}
+        runtime = {"movies": movies, "boundaries": runtime_boundaries}
+        if plan_signature(runtime) not in QUALIFIED_PLAN_SHA256:
+            return Unsupported("deck shape is not yet qualified for continuity (only P2-measured plans are)")
+        return runtime
 
 
 @dataclass(frozen=True)
