@@ -122,6 +122,244 @@ WAIT_PROFILES = {
     "slow": {"clickDelayS": 3.5, "preAdvanceFrames": 10, "preAdvanceGapS": 0.2, "postMmSettleS": 1.5},
 }
 
+# --- Phase 2: composited-freeze negative control (Arm A) thresholds ---------- #
+# The freeze control proves the COUNTER gate (`score_composited_index_run`) is not
+# vacuous: it injects a persistent VISIBLE stale cover over the burnt-in counter so
+# `index_run` goes RED ("freeze run at cut") while the live-<video> decoder + rVFC
+# stay green. A strong margin (not just >max_freeze_run==2) is required so the RED is
+# unmistakably the injected freeze, not coarse-capture jitter.
+FREEZE_MIN_RUN = 6            # freezeRunAtCut must reach this (margin over the gate's 2)
+FREEZE_MIN_AFTER = 6         # samples after the flip (n - flip_index) needed to form the run
+RVFC_MIN_ADVANCE_S = 0.5    # the decoder must run >=0.5s through the hold (0.05 is too weak)
+MAX_RAF_GAP_MS = 100.0      # a per-rAF hold-log gap beyond this => INCONCLUSIVE, not a verdict
+STALE_INDEX_TOL = 2         # +/- yuv rounding on the decoded frozen counter
+HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event
+
+# The Arm-A composited-freeze control, injected into the live page BEFORE the advance
+# click. `window.__OBED_NULL_CTRL__` = {arm(rect, hash1), status(), release()}.
+#   - arm(): resolve the footprint owner (footprintOwnerDecoderId), record the armed
+#     hash, and start BOTH a `hashchange` listener AND a per-rAF `location.hash` poll.
+#   - trigger (first of the two to fire): capture the owner <video>'s CURRENT frame
+#     synchronously into an ID-LESS scratch canvas (so the player's drawImage recorder,
+#     which only records draws into a canvas WITH an id, stays inert), then paint the
+#     left-fraction sub-region ONCE onto an ID-LESS fixed top-z opaque cover canvas.
+#   - hold: per-rAF re-resolve the owner by elId, re-measure its rect, retrack the
+#     cover's left-fraction sub-rect, re-append if detached, and log whether the counter
+#     patch center hit-tests to the cover. The cover is PARTIAL (left ~40% of the owner
+#     rect) so it covers the counter patch (x~111-153) but NOT BLACK_BEHIND_ROI (x>=560)
+#     or GREEN_FRONT_ROI (x>=820) — a full cover would paint over the green square.
+#   - release(): remove the cover, stop the loop, snapshot the frozen-patch checksum and
+#     wall time. Capture is AT THE TRIGGER (never at arm()): an early capture makes the
+#     first in-hold decode step BACKWARD -> a wrong-reason negative anomaly.
+NULL_CONTROL_JS = r"""
+(function () {
+  if (window.__OBED_NULL_CTRL__) return;
+  var P = window.__OBED_P2_PRESERVE__;
+  var dpr = window.devicePixelRatio || 1;
+  var LEFT_FRAC = 0.4;
+
+  var st = {
+    arm: 'A',
+    status: 'idle',
+    armedHash: null,
+    armedRect: null,
+    armedElId: null,
+    armedAt: null,
+    boundDecoderId: null,
+    fellBackToArmOwner: false,
+    firedVia: null,
+    hashchangeEventAt: null,
+    holdStartedAt: null,
+    releaseAt: null,
+    staleCurrentTime: null,
+    staleIndexExpected: null,
+    paintCount: 0,
+    coverPatchStart: null,
+    coverPatchEnd: null,
+    ownerAmbiguousInWindow: false,
+    holdFrames: 0,
+    rafLog: [],
+    error: null
+  };
+  var cover = null;
+  var scratch = null;
+  var rafId = null;
+  var retryStartedAt = null;
+
+  // Local footprint shim: the CURRENT footprint rect. On 1->2 the footprint is
+  // static (MOVIE_ROI == armedRect); when the owner <video> is resolved we prefer
+  // its LIVE getBoundingClientRect. This is the single seam for the 3->4 moving
+  // footprint (where footprint_at()/index_patch_roi_for() would map it) — a drop-in.
+  function footprintNow(ownerEl) {
+    if (ownerEl) {
+      var r = ownerEl.getBoundingClientRect();
+      if (r.width > 1 && r.height > 1) return {x: r.left, y: r.top, w: r.width, h: r.height};
+    }
+    return st.armedRect;
+  }
+
+  function resolveOwnerEl() {
+    var elId = null;
+    try {
+      var res = (P && P.footprintOwnerDecoderId) ? P.footprintOwnerDecoderId(st.armedRect) : null;
+      if (res) {
+        if (res.via === 'ambiguous') st.ownerAmbiguousInWindow = true;
+        if (res.elId != null) elId = res.elId;
+      }
+    } catch (e) { /* fall through to the arm() owner */ }
+    if (elId == null) { st.fellBackToArmOwner = true; elId = st.armedElId; }
+    if (elId == null) return null;
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      if (vids[i].__obedElId === elId) { st.boundDecoderId = elId; return vids[i]; }
+    }
+    return null;
+  }
+
+  function subRect(fp) { return {x: fp.x, y: fp.y, w: fp.w * LEFT_FRAC, h: fp.h}; }
+
+  function counterPatchPixels() {
+    if (!cover) return null;
+    try {
+      var ctx = cover.getContext('2d', {alpha: false});
+      var w = Math.min(cover.width, 60), h = Math.min(cover.height, 24);
+      var d = ctx.getImageData(0, 0, w, h).data;
+      var s = 0;
+      for (var i = 0; i < d.length; i += 4) s = (s + d[i] + d[i + 1] + d[i + 2]) % 2147483647;
+      return {sum: s, w: w, h: h};
+    } catch (e) { return {error: String(e && e.message || e)}; }
+  }
+
+  function paintCover() {
+    if (!cover || !scratch) return;
+    try {
+      var ctx = cover.getContext('2d', {alpha: false});
+      // canvas -> canvas (source is a <canvas>, not a <video>) so the player's
+      // drawImage recorder is inert. Paint the left-fraction sub-region.
+      var sw = Math.max(1, Math.round(scratch.width * LEFT_FRAC));
+      ctx.drawImage(scratch, 0, 0, sw, scratch.height, 0, 0, cover.width, cover.height);
+      st.paintCount += 1;
+    } catch (e) { st.error = 'paint:' + String(e && e.message || e); }
+  }
+
+  function patchCenter(fp) {
+    // Center of the burnt-in counter patch (top-left of the footprint), in CSS px.
+    return {x: fp.x + Math.min(fp.w * LEFT_FRAC * 0.5, 22), y: fp.y + 8};
+  }
+
+  function trigger(via) {
+    if (st.status !== 'armed') return;
+    st.status = 'holding';
+    st.firedVia = via;
+    st.holdStartedAt = performance.now();
+
+    var ownerEl = resolveOwnerEl();
+    if (!ownerEl) retryStartedAt = st.holdStartedAt;
+    var real = ownerEl ? (ownerEl.__obedFacadeFor || ownerEl) : null;
+    var fp = footprintNow(ownerEl);
+
+    scratch = document.createElement('canvas');  // ID-LESS: recorder stays inert
+    scratch.width = Math.max(1, Math.round(fp.w * dpr));
+    scratch.height = Math.max(1, Math.round(fp.h * dpr));
+    if (real && real.videoWidth > 0) {
+      try {
+        scratch.getContext('2d').drawImage(real, 0, 0, scratch.width, scratch.height);
+        st.staleCurrentTime = real.currentTime;
+        st.staleIndexExpected = 16 + (Math.round(real.currentTime * 30) % 220);
+      } catch (e) { st.error = 'scratch-draw:' + String(e && e.message || e); }
+    } else {
+      st.error = 'no-owner-video-at-trigger';
+    }
+
+    var sr = subRect(fp);
+    cover = document.createElement('canvas');  // ID-LESS
+    cover.setAttribute('data-obed-null-control', '1');
+    cover.width = Math.max(1, Math.round(sr.w * dpr));
+    cover.height = Math.max(1, Math.round(sr.h * dpr));
+    cover.style.position = 'fixed';
+    cover.style.left = sr.x + 'px';
+    cover.style.top = sr.y + 'px';
+    cover.style.width = sr.w + 'px';
+    cover.style.height = sr.h + 'px';
+    cover.style.zIndex = '2147483647';
+    cover.style.opacity = '1';
+    cover.style.filter = 'none';
+    cover.style.pointerEvents = 'auto';
+    cover.style.margin = '0';
+    cover.style.padding = '0';
+    document.body.appendChild(cover);
+
+    paintCover();  // ONCE
+    st.coverPatchStart = counterPatchPixels();
+    loop();
+  }
+
+  function loop() {
+    if (st.status !== 'holding') return;
+    var now = performance.now();
+    var ownerEl = resolveOwnerEl();
+    if (ownerEl) retryStartedAt = null;
+    var fp = footprintNow(ownerEl);
+    var sr = subRect(fp);
+    if (cover) {
+      if (!cover.isConnected) document.body.appendChild(cover);  // re-append if detached
+      cover.style.left = sr.x + 'px';
+      cover.style.top = sr.y + 'px';
+      cover.style.width = sr.w + 'px';
+      cover.style.height = sr.h + 'px';
+    }
+    var pc = patchCenter(fp);
+    var top = document.elementFromPoint(pc.x, pc.y);
+    st.rafLog.push({t: now, elementFromPointIsCover: top === cover, ownerResolved: !!ownerEl});
+    st.holdFrames += 1;
+    rafId = requestAnimationFrame(loop);
+  }
+
+  window.__OBED_NULL_CTRL__ = {
+    arm: function (rect, hash1) {
+      st.armedRect = rect;
+      st.armedHash = String(hash1);
+      st.armedAt = performance.now();
+      var ownerEl = resolveOwnerEl();
+      st.armedElId = ownerEl ? ownerEl.__obedElId : st.armedElId;
+      st.boundDecoderId = null;  // the TRIGGER owner is what binds the cover
+      st.fellBackToArmOwner = false;
+      st.status = 'armed';
+      window.addEventListener('hashchange', function () {
+        if (st.hashchangeEventAt == null) st.hashchangeEventAt = performance.now();
+        if (st.status === 'armed') trigger('hashchange');
+      });
+      (function poll() {
+        if (st.status !== 'armed') return;
+        if (String(location.hash) !== st.armedHash) { trigger('poll'); }
+        else { requestAnimationFrame(poll); }
+      })();
+      return {ok: true, armedElId: st.armedElId, armedHash: st.armedHash};
+    },
+    status: function () {
+      return {
+        arm: st.arm, status: st.status, armedHash: st.armedHash, armedElId: st.armedElId,
+        boundDecoderId: st.boundDecoderId, fellBackToArmOwner: st.fellBackToArmOwner,
+        firedVia: st.firedVia, hashchangeEventAt: st.hashchangeEventAt,
+        holdStartedAt: st.holdStartedAt, releaseAt: st.releaseAt,
+        staleCurrentTime: st.staleCurrentTime, staleIndexExpected: st.staleIndexExpected,
+        paintCount: st.paintCount, coverPatchStart: st.coverPatchStart,
+        coverPatchEnd: st.coverPatchEnd, ownerAmbiguousInWindow: st.ownerAmbiguousInWindow,
+        holdFrames: st.holdFrames, rafLog: st.rafLog, error: st.error
+      };
+    },
+    release: function () {
+      if (st.status === 'holding') st.coverPatchEnd = counterPatchPixels();
+      st.status = 'released';
+      st.releaseAt = performance.now();
+      if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
+      if (cover && cover.parentNode) cover.parentNode.removeChild(cover);
+      return this.status();
+    }
+  };
+})();
+"""
+
 
 def _arg_value(name: str, default: str) -> str:
     argv = sys.argv[1:]
@@ -200,9 +438,10 @@ def _extract_movie_layers(
         (`from == to`) tween is a background/opacity animation, not a crossfade.
 
     This function never unions across slides. The caller
-    (`_derive_movie_texids`) resolves the single footprint magic-move crossfade
-    (the 2->3 restart boundary under the corrected model) from these per-slide
-    pieces and preserves each occurrence's provenance.
+    (`_derive_movie_texids`) resolves the single footprint motion-path Magic Move
+    `contents` crossfade (a poster swap on the 1->2 or 3->4 motion-path MM — NOT
+    the 2->3 boundary, which is an `apple:dissolve`, not a Magic Move) from these
+    per-slide pieces and preserves each occurrence's provenance.
     """
     steady_by_owner: dict[str | None, set[str]] = {}
     crossfades: list[dict] = []
@@ -275,12 +514,14 @@ def _derive_movie_texids(
     emit Contract-1's `{decoderKey, outgoing, incoming}` (see
     `.agents/plans/step1-ownership-contracts.md`).
 
-    CORRECTED MODEL (handover CORRECTION 2026-09-18): this crossfade is the
-    **2->3** restart-side boundary, NOT 1->2. Keynote stores a Magic Move
-    transition under its INCOMING slide (#3), so the only footprint magic-move
-    `contents` crossfade in the deck is the 2->3 restart crossfade — its posters
-    (`0885 -> A223`) surface only at scene #6, OUTSIDE the 1->2 gate window. The
-    output is tagged `"boundary": "2to3"`. The 1->2 movie is a live `<video>`
+    CORRECTED MODEL (2026-09-19): Keynote stores a transition under its OUTGOING
+    slide (a transition authored on slide N applies N->N+1). The deck's footprint
+    Magic Moves are the motion-path MMs at 1->2 and 3->4; the 2->3 boundary is an
+    `apple:dissolve` (a movie RESTART, NOT a Magic Move) and owns no `contents`
+    poster crossfade. So the single footprint magic-move `contents` poster swap
+    this resolves is a MOTION-PATH Magic Move (1->2 or 3->4) — tagged
+    `"boundary": "motion-path-mm"`, NOT the earlier (wrong) "2to3". It is
+    provenance-only: no gate consumes it. The 1->2 movie is a live `<video>`
     (no canvas feed), so this crossfade is NOT injected for a 1->2 feed anymore;
     `movie-texids.json` is kept for provenance only.
 
@@ -387,7 +628,7 @@ def _derive_movie_texids(
     # binding, so the static hint need not (and must not) guess the steady canvas.
     return {
         "decoderKey": decoder_key,
-        "boundary": "2to3",
+        "boundary": "motion-path-mm",
         "outgoing": [frm],
         "incoming": [to],
         "boundaryCrossfade": {"from": frm, "to": to},
@@ -411,7 +652,8 @@ def liveContinuity1to2(
     footprint, NOT a fed 2D canvas, so the old deck-texid / canvas-feed checks
     (`bothSidedTexids`, `contextType2d`, `incomingFeedDraw`) are DROPPED entirely:
     they assumed a 2D-canvas surface that does not exist for 1->2, and the deck
-    texids they keyed off are the 2->3 crossfade (never in-window here). A live
+    texids they keyed off are the provenance-only motion-path Magic Move poster
+    swap (a 1->2 or 3->4 crossfade, never a fed surface in-window here). A live
     `<video>` owner reports `contextType=null`, so this gate requires NO 2D
     context and NO texid membership.
 
@@ -1357,6 +1599,428 @@ async def _dense_after_click(
     return samples, frames, decoder_frames
 
 
+async def _capture_1to2_snapshot(
+    chrome: ChromeCdp,
+    run_dir: Path,
+    prefix: str,
+    wait_profile: dict,
+    *,
+    inject_null: bool,
+) -> dict:
+    """Capture + score ONE 1->2 Magic Move boundary and return a comparable
+    findings snapshot (reuses the Transition-A capture primitives).
+
+    When `inject_null`, installs the Arm-A composited-freeze control
+    (`window.__OBED_NULL_CTRL__`), arms it BEFORE the advance, holds a partial
+    stale cover over the burnt-in counter through the whole capture, and releases
+    AFTER the last 1->2 capture — so `index_run` goes RED ("freeze run at cut")
+    while the live-<video> decoder (footprintOwnerDecoderId + rVFC) stays green,
+    isolating the RED to the counter. The cover is partial (left ~40% of the owner
+    rect) so the composition ROIs (black-behind, green-front) are untouched.
+    """
+    await asyncio.sleep(wait_profile["clickDelayS"])
+    hash1 = _norm_hash(
+        await chrome.evaluate(
+            "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+        )
+    )
+
+    perf_now_at_click: float | None = None
+    if inject_null:
+        await chrome.evaluate(NULL_CONTROL_JS)
+        x, y, w, h = MOVIE_ROI
+        await chrome.evaluate(
+            f"window.__OBED_NULL_CTRL__.arm({{x:{x}, y:{y}, w:{w}, h:{h}}}, {json.dumps(hash1)})"
+        )
+
+    click_wall = time.monotonic()
+    if inject_null:
+        perf_now_at_click = await chrome.evaluate("performance.now()")
+    pre_frames = await _pre_advance_frames(
+        chrome, run_dir, prefix, click_wall,
+        wait_profile["preAdvanceFrames"], wait_profile["preAdvanceGapS"],
+    )
+    await chrome.key("ArrowRight", "ArrowRight", 39)
+    dense, frames, _ = await _dense_after_click(chrome, run_dir, prefix, click_wall)
+    hash2 = _norm_hash(
+        await chrome.evaluate(
+            "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+        )
+    )
+    if hash2 == hash1:
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline and hash2 == hash1:
+            await asyncio.sleep(0.05)
+            hash2 = _norm_hash(
+                await chrome.evaluate(
+                    "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+                )
+            )
+
+    # Composition frame (the partial cover must NOT disturb these ROIs) — captured
+    # DURING the hold so the isolation comparison is against the covered state.
+    mid = await chrome.screenshot()
+    Image.fromarray(mid).save(run_dir / f"{prefix}-mid.png")
+    media_for_owner = await _media_snapshot_with_pool(chrome)
+    owner_target = await _footprint_target(chrome, media_for_owner, MOVIE_ROI)
+    owner_decoder_id = owner_target.get("decoderId")
+
+    null_status: dict | None = None
+    if inject_null:
+        null_status = await chrome.evaluate("window.__OBED_NULL_CTRL__.status()")
+        released = await chrome.evaluate("window.__OBED_NULL_CTRL__.release()")
+        null_status = released or null_status
+
+    samples_a = list(dense)
+    target_times = (
+        _times(samples_a, EXPECTED_MOVIE_KEYS[0], decoder_id=owner_decoder_id)
+        if owner_decoder_id is not None
+        else [None] * len(samples_a)
+    )
+    cont = score_playback_continuity(
+        target_times, click_i=0, capture_offsets=_caps(samples_a),
+        dissolve_s=TRANS_S, position_eps=1.25,
+    )
+    mm_paths = sorted(run_dir.glob(f"{prefix}-t*.png"))
+    visible_motion = _score_visible_movie_motion(mm_paths, MOVIE_ROI)
+
+    flip_samples = []
+    for f in [*pre_frames, *frames]:
+        if f.get("sceneHash") is None:
+            continue
+        farr = np.array(Image.open(run_dir / f["name"]))
+        flip_samples.append(
+            {
+                "roi": _crop(farr, MOVIE_ROI),
+                "sceneHash": f["sceneHash"],
+                "captureOffsetS": f.get("captureOffsetS"),
+                "decoderId": f.get("decoderId"),
+                "w": f.get("w"),
+                "movieKey": f.get("movieKey"),
+                "contextType": f.get("contextType"),
+                "ownerAmbiguous": f.get("ownerAmbiguous"),
+            }
+        )
+    motion_across_flip = score_motion_across_flip(
+        flip_samples, start_hash=hash1, expected_key=EXPECTED_MOVIE_KEYS[0]
+    )
+    index_samples = [
+        {"index": f.get("index"), "sceneHash": f.get("sceneHash"),
+         "captureOffsetS": f.get("captureOffsetS")}
+        for f in [*pre_frames, *frames]
+    ]
+    flip_index = next(
+        (i for i, s in enumerate(index_samples)
+         if s["sceneHash"] is not None and s["sceneHash"] != hash1),
+        None,
+    )
+    if flip_index is None:
+        index_run = {"ok": False, "reason": "no scene-hash flip observed in dense window"}
+    else:
+        index_run = score_composited_index_run(index_samples, flip_index=flip_index)
+    live_continuity = liveContinuity1to2(
+        motion_across_flip, flip_samples, samples_a, hash1, hash2,
+        restart_min_hash=SLIDE3_MIN_HASH,
+    )
+    player_build_errors = await chrome.evaluate(
+        "(window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"
+        ".filter(function (e) { return e.kind === 'player-build-error'; }) : [])"
+    ) or []
+
+    bb = _score_black(mid, BLACK_BEHIND_ROI)
+    composited_pass = bool(
+        cont.get("continuesThroughDissolve")
+        and hash1 != hash2
+        and index_run.get("ok", False)
+        and live_continuity.get("ok", False)
+        and not player_build_errors
+    )
+    return {
+        "hash1": hash1,
+        "hash2": hash2,
+        "flipIndex": flip_index,
+        "continuesThroughDissolve": bool(cont.get("continuesThroughDissolve")),
+        "indexRun": index_run,
+        "liveContinuity": live_continuity,
+        "motionAcrossFlipOk": bool(motion_across_flip.get("ok")),
+        "visibleMotionOk": bool(visible_motion.get("ok")),
+        "playerBuildErrors": player_build_errors,
+        "continueThroughMagicMove1to2Pass": composited_pass,
+        "indexSequence": [s.get("index") for s in index_samples],
+        "captureOffsets": [s.get("captureOffsetS") for s in index_samples],
+        "ownerDecoderId": owner_decoder_id,
+        "composition": {
+            "blackAboveOk": bool(_score_black(mid, BLACK_ABOVE_ROI)["ok"]),
+            "blackBehindShowsMovie": bool(bb["rgbMean"] > 40 and not bb["ok"]),
+            "greenFrontGreenish": bool(_score_green(mid, GREEN_FRONT_ROI)["greenish"]),
+        },
+        "nullControl": null_status,
+        "perfNowAtClick": perf_now_at_click,
+    }
+
+
+# Sub-verdicts that MUST be invariant across A1/B/A2 (the freeze must change ONLY
+# the counter): decoder liveness/identity + composition, none of which the partial
+# left-cover touches. continueThroughMagicMove1to2 and index_run are DELIBERATELY
+# excluded — they are what the freeze flips RED in B.
+_ISOLATION_KEYS = (
+    "liveContinuityOk",
+    "liveContinuityFailedEmpty",
+    "rvfcAdvanceOk",
+    "crossingIdentityOk",
+    "stableFootprintOk",
+    "boundaryValidOk",
+    "continuityClockOk",
+    "playerBuildErrorsEmpty",
+    "blackAboveOk",
+    "blackBehindShowsMovie",
+    "greenFrontGreenish",
+)
+
+
+def _isolation_view(snap: dict) -> dict:
+    """The invariant booleans extracted from a 1->2 snapshot for A1==B==A2 checks."""
+    lc = snap.get("liveContinuity") or {}
+    comp = snap.get("composition") or {}
+    return {
+        "liveContinuityOk": bool(lc.get("ok")),
+        "liveContinuityFailedEmpty": (lc.get("failed") == []),
+        "rvfcAdvanceOk": bool((lc.get("rvfcAdvance") or {}).get("ok")),
+        "crossingIdentityOk": bool((lc.get("crossingIdentity") or {}).get("ok")),
+        "stableFootprintOk": bool((lc.get("stableFootprintDecoder") or {}).get("ok")),
+        "boundaryValidOk": bool((lc.get("boundaryValid") or {}).get("ok")),
+        "continuityClockOk": bool(snap.get("continuesThroughDissolve")),
+        "playerBuildErrorsEmpty": (snap.get("playerBuildErrors") == []),
+        "blackAboveOk": bool(comp.get("blackAboveOk")),
+        "blackBehindShowsMovie": bool(comp.get("blackBehindShowsMovie")),
+        "greenFrontGreenish": bool(comp.get("greenFrontGreenish")),
+    }
+
+
+def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
+    """Pure A-B-A verdict for `freezeControlCaughtByCounter`.
+
+    Passes IFF the injected freeze turns the counter RED for the right reason
+    while every other sub-verdict stays green in ALL three runs. Returns
+    `{"ok", "verdict", "reason", "checks", ...}` where `verdict` is one of
+    "pass" / "fail" / "inconclusive".
+
+    A hold that never fired (or a per-rAF hold-log with a gap > MAX_RAF_GAP_MS) is
+    INCONCLUSIVE, never PASS/FAIL: a silently-unfired hold makes B look exactly
+    like a passing positive (index_run green), which must NOT be read as "the gate
+    is vacuous". So holdStartedAt is checked BEFORE the verdict is interpreted.
+    """
+    nc = b.get("nullControl") or {}
+    checks: dict[str, object] = {}
+
+    # --- Guard: the hold must have fired, and continuously (else INCONCLUSIVE) ---
+    hold_started = nc.get("holdStartedAt")
+    if hold_started is None or nc.get("status") not in ("holding", "released"):
+        return {
+            "ok": False,
+            "verdict": "inconclusive",
+            "reason": "freeze hold never fired (holdStartedAt is null) — cannot judge the counter",
+            "nullControlStatus": nc.get("status"),
+            "checks": checks,
+        }
+    raf_log = nc.get("rafLog") or []
+    raf_ts = [r.get("t") for r in raf_log if isinstance(r.get("t"), (int, float))]
+    max_gap_ms = max(
+        (raf_ts[i + 1] - raf_ts[i] for i in range(len(raf_ts) - 1)), default=0.0
+    )
+    if len(raf_ts) < 2 or max_gap_ms > MAX_RAF_GAP_MS:
+        return {
+            "ok": False,
+            "verdict": "inconclusive",
+            "reason": f"per-rAF hold log gap {max_gap_ms:.1f}ms > {MAX_RAF_GAP_MS}ms (unobserved hold interval)",
+            "maxRafGapMs": max_gap_ms,
+            "rafFrames": len(raf_ts),
+            "checks": checks,
+        }
+
+    perf_click = b.get("perfNowAtClick")
+    release_at = nc.get("releaseAt")
+    hold_offset_s = (hold_started - perf_click) / 1000.0 if perf_click is not None else None
+    release_offset_s = (
+        (release_at - perf_click) / 1000.0
+        if (perf_click is not None and release_at is not None)
+        else None
+    )
+    offsets = b.get("captureOffsets") or []
+    seq = b.get("indexSequence") or []
+    flip_index = b.get("flipIndex")
+    stale = nc.get("staleIndexExpected")
+
+    in_hold_positions = [
+        i for i, off in enumerate(offsets)
+        if off is not None and hold_offset_s is not None and off >= hold_offset_s
+        and (release_offset_s is None or off <= release_offset_s)
+    ]
+    first_in_hold = min(in_hold_positions) if in_hold_positions else None
+    in_hold_decodes = [seq[i] for i in in_hold_positions]
+    stale_ok = bool(
+        stale is not None
+        and in_hold_decodes
+        and all(v is not None and abs(v - stale) <= STALE_INDEX_TOL for v in in_hold_decodes)
+    )
+
+    idx = b.get("indexRun") or {}
+    flip_window_decodable = False
+    if isinstance(flip_index, int) and seq:
+        lo, hi = max(0, flip_index - 1), min(len(seq) - 1, flip_index + 3)
+        flip_window_decodable = all(seq[i] is not None for i in range(lo, hi + 1))
+
+    b_lc = b.get("liveContinuity") or {}
+    hashchange_at = nc.get("hashchangeEventAt")
+    within_hashchange = (
+        hashchange_at is None
+        or abs(hold_started - hashchange_at) <= HOLD_HASHCHANGE_TOL_MS
+    )
+    all_cover = bool(raf_log) and all(r.get("elementFromPointIsCover") for r in raf_log)
+    n_after = (len(seq) - flip_index) if isinstance(flip_index, int) else 0
+
+    # --- The counter went RED for exactly the injected freeze -------------------
+    checks["indexRunRed"] = idx.get("ok") is False
+    checks["reasonFreezeRunAtCut"] = idx.get("reason") == "freeze run at cut"
+    checks["freezeRunMargin"] = bool((idx.get("freezeRunAtCut") or 0) >= FREEZE_MIN_RUN)
+    checks["noNegativeAnomaly"] = idx.get("negativeAnomaly") is False
+    checks["flipWindowDecodable"] = flip_window_decodable
+    checks["flipIndexPresent"] = isinstance(flip_index, int)
+    checks["enoughAfterFlip"] = n_after >= FREEZE_MIN_AFTER
+
+    # --- The decoder stayed LIVE through the freeze (RED isolated to counter) ----
+    checks["liveContinuityOk"] = bool(b_lc.get("ok"))
+    checks["liveContinuityFailedEmpty"] = (b_lc.get("failed") == [])
+    checks["boundDecoderIsCoverOwner"] = (
+        b_lc.get("boundDecoderId") is not None
+        and b_lc.get("boundDecoderId") == nc.get("boundDecoderId")
+    )
+    checks["noOwnerAmbiguousInWindow"] = nc.get("ownerAmbiguousInWindow") is False
+    checks["rvfcRanThroughHold"] = bool(
+        (b_lc.get("rvfcAdvance") or {}).get("advance") is not None
+        and (b_lc.get("rvfcAdvance") or {}).get("advance") >= RVFC_MIN_ADVANCE_S
+    )
+    checks["continuityClockGreen"] = bool(b.get("continuesThroughDissolve"))
+    checks["playerBuildErrorsEmpty"] = (b.get("playerBuildErrors") == [])
+
+    # --- The freeze fired correctly --------------------------------------------
+    checks["holdWithinHashchange"] = bool(within_hashchange)
+    checks["firstInHoldEarly"] = bool(
+        first_in_hold is not None
+        and isinstance(flip_index, int)
+        and first_in_hold <= flip_index + 1
+    )
+    checks["paintedOnce"] = nc.get("paintCount") == 1
+    checks["coverPatchStable"] = bool(
+        nc.get("coverPatchStart") is not None
+        and nc.get("coverPatchStart") == nc.get("coverPatchEnd")
+    )
+    checks["coverHitTest100"] = all_cover
+    checks["everyInHoldStale"] = stale_ok
+    checks["releaseAfterLastCapture"] = bool(
+        release_offset_s is not None
+        and offsets
+        and release_offset_s >= max(o for o in offsets if o is not None)
+    )
+
+    # --- Bracketing positives are GREEN ----------------------------------------
+    checks["positivesGreen"] = bool(
+        a1.get("continueThroughMagicMove1to2Pass")
+        and a2.get("continueThroughMagicMove1to2Pass")
+        and (a1.get("indexRun") or {}).get("ok")
+        and (a2.get("indexRun") or {}).get("ok")
+    )
+
+    # --- Isolation: every invariant sub-verdict equal across A1, B, A2 ----------
+    iv_a1, iv_b, iv_a2 = _isolation_view(a1), _isolation_view(b), _isolation_view(a2)
+    isolation_diffs = {
+        k: {"a1": iv_a1[k], "b": iv_b[k], "a2": iv_a2[k]}
+        for k in _ISOLATION_KEYS
+        if not (iv_a1[k] == iv_b[k] == iv_a2[k])
+    }
+    checks["isolationEqual"] = isolation_diffs == {}
+
+    ok = all(bool(v) for v in checks.values())
+    failed = [k for k, v in checks.items() if not v]
+    return {
+        "ok": ok,
+        "verdict": "pass" if ok else "fail",
+        "reason": None if ok else f"failed checks: {failed}",
+        "checks": checks,
+        "failed": failed,
+        "isolationDiffs": isolation_diffs,
+        "freeze": {
+            "holdStartedAt": hold_started,
+            "holdOffsetS": hold_offset_s,
+            "releaseOffsetS": release_offset_s,
+            "staleIndexExpected": stale,
+            "inHoldPositions": in_hold_positions,
+            "inHoldDecodes": in_hold_decodes,
+            "firstInHold": first_in_hold,
+            "flipIndex": flip_index,
+            "nAfterFlip": n_after,
+            "maxRafGapMs": max_gap_ms,
+            "rafFrames": len(raf_ts),
+            "coverHitTestAll": all_cover,
+            "paintCount": nc.get("paintCount"),
+            "firedVia": nc.get("firedVia"),
+            "fellBackToArmOwner": nc.get("fellBackToArmOwner"),
+            "boundDecoderId": nc.get("boundDecoderId"),
+            "armedElId": nc.get("armedElId"),
+            "error": nc.get("error"),
+        },
+        "isolationViews": {"a1": iv_a1, "b": iv_b, "a2": iv_a2},
+    }
+
+
+async def _run_freeze_bracket(
+    player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str
+) -> dict:
+    """A-B-A composited-freeze bracket on the 1->2 boundary: positive ->
+    freeze-control -> positive, one re-navigated Chrome (same session/profile),
+    its own HTTP server. Returns the `_score_freeze_control` verdict + the three
+    snapshots (Phase 2)."""
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(player_dir), **k)
+
+        def log_message(self, fmt, *args):  # noqa: A003
+            return
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}/index.html"
+
+    bdir = runs_dir / "freeze-bracket"
+    if bdir.exists():
+        shutil.rmtree(bdir)
+    bdir.mkdir()
+    chrome = ChromeCdp(CHROME, bdir / "chrome-profile")
+    await chrome.start()
+    snaps: dict[str, dict] = {}
+    try:
+        for label, inject in (("a1", False), ("b", True), ("a2", False)):
+            rd = bdir / label
+            rd.mkdir()
+            await _boot(chrome, base)
+            await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
+            snaps[label] = await _capture_1to2_snapshot(
+                chrome, rd, "mm12", wait_profile, inject_null=inject
+            )
+    finally:
+        await chrome.close()
+        httpd.shutdown()
+
+    verdict = _score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict["waitProfile"] = wait_profile_name
+    verdict["snapshots"] = snaps
+    return verdict
+
+
 async def _boot(chrome: ChromeCdp, base: str) -> dict:
     await chrome.goto("about:blank")
     await asyncio.sleep(0.05)
@@ -1471,10 +2135,11 @@ async def _run(player: Path) -> dict:
         boot = await _boot(chrome, base)
         await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
         # Derive the footprint movie's Magic Move crossfade texture ids. Under
-        # the corrected model this is the 2->3 restart-side crossfade (see
-        # `_derive_movie_texids`), so it is written for provenance only and is
-        # NO LONGER injected as `window.__OBED_MOVIE_TEXIDS__`: the 1->2 movie is
-        # a live `<video>`, not a fed 2D canvas, so that canvas-feed is gone.
+        # the corrected model this is a motion-path Magic Move poster swap (1->2
+        # or 3->4 under outgoing-slide storage; the 2->3 boundary is a dissolve,
+        # not a Magic Move) — see `_derive_movie_texids`. Written for provenance
+        # only and NO LONGER injected as `window.__OBED_MOVIE_TEXIDS__`: the 1->2
+        # movie is a live `<video>`, not a fed 2D canvas, so the canvas-feed is gone.
         texids_info = _derive_movie_texids(player_dir)
         write_json(OUT / "movie-texids.json", texids_info)
         await asyncio.sleep(wait_profile["clickDelayS"])
@@ -2060,7 +2725,8 @@ async def _run(player: Path) -> dict:
                     "gated (it aliases on the grating); its crossing IDENTITY fields ARE. "
                     "The 1->2 movie is a live <video> at the footprint (not a fed 2D "
                     "canvas), so the old deck-texid/canvas-feed checks are dropped; the deck "
-                    "crossfade texids are the 2->3 restart boundary, kept as provenance only. "
+                    "crossfade texids are a motion-path Magic Move poster swap (1->2 or 3->4; "
+                    "the 2->3 boundary is a dissolve, not a Magic Move), kept as provenance only. "
                     "indexRun means the composited frame-index patch keeps progressing across "
                     "the MM cut, i.e. the canvas is not stuck on the newborn poster frame. "
                     "motionAcrossFlip is kept as corroboration, not gating: it scores "
@@ -2219,8 +2885,49 @@ async def _run(player: Path) -> dict:
             },
         },
     ]
-    # Restart inconclusive must not count as overall success.
-    success = all(f["pass"] for f in findings) and not restart_inconclusive
+
+    # Phase 2 — composited-freeze negative control (Arm A), A-B-A bracket on the
+    # STATIC 1->2 boundary. Proves the COUNTER gate (index_run) is not vacuous: an
+    # injected persistent VISIBLE stale cover turns index_run RED ("freeze run at
+    # cut") in B while the live-<video> decoder + rVFC stay green, and every other
+    # sub-verdict is identical across the two bracketing positives. Runs on fresh
+    # boots (its own server + re-navigated Chrome), so it never perturbs the main
+    # pass above.
+    freeze_control = await _run_freeze_bracket(player, runs, wait_profile, wait_profile_name)
+    findings.append(
+        {
+            "id": "freezeControlCaughtByCounter",
+            "pass": bool(freeze_control.get("ok")),
+            "verdict": freeze_control.get("verdict"),
+            "detail": freeze_control,
+            "note": (
+                "Negative control (Arm A: decoder LIVE, composite FROZEN). An A-B-A "
+                "bracket on the 1->2 boundary injects a partial (left ~40% of the owner "
+                "rect) stale cover over the burnt-in counter for the middle run only. "
+                "PASS requires: index_run RED with reason 'freeze run at cut' and "
+                f"freezeRunAtCut >= {FREEZE_MIN_RUN} (margin, no negative anomaly, flip "
+                "window decodable); the live-<video> gate STILL green in B (liveContinuity "
+                "ok, bound decoder == the cover's owner, rVFC advance >= "
+                f"{RVFC_MIN_ADVANCE_S}s, continuity clock green, no player-build-error); the "
+                "freeze provably fired (holdStartedAt within 50ms of hashchange, painted "
+                "once, cover patch pixels identical hold-start vs release, elementFromPoint "
+                "== cover for 100% of hold frames, every in-hold decode == expected stale "
+                "index +/-2, released after the last capture); BOTH bracketing positives "
+                "green; and every invariant sub-verdict equal across A1/B/A2. A hold that "
+                "never fired, or a per-rAF log gap > 100ms, is INCONCLUSIVE, never PASS/FAIL "
+                "(an unfired hold would masquerade as a passing positive)."
+            ),
+        }
+    )
+
+    # Restart inconclusive must not count as overall success. An inconclusive
+    # freeze bracket (hold never fired / unobserved interval) also blocks success:
+    # it means the counter gate could not be qualified this run.
+    success = (
+        all(f["pass"] for f in findings)
+        and not restart_inconclusive
+        and freeze_control.get("verdict") != "inconclusive"
+    )
     report = {
         "probe": "p2_recovery_html_adversarial",
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2249,6 +2956,7 @@ async def _run(player: Path) -> dict:
         "hashes": {"h1": hash1, "h2": hash2, "h3": hash3},
         "preserveEvents": preserve_events,
         "findings": findings,
+        "freezeControl": freeze_control,
         "success": success,
         "p3": "still unwired",
         "rois": {
