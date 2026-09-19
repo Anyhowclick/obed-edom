@@ -1396,7 +1396,11 @@ def remap_keynote(
             if rgb and len(rgb) >= 3:
                 bit += f" rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})"
             bits.append(bit)
-        say("Unpaired text picks the closest CG character style: " + "; ".join(bits) + ".")
+        say(
+            "Unpaired text picks a CG character style, its framing slide's own "
+            "matching-colour sample first, "
+            "else the closest of: " + "; ".join(bits) + "."
+        )
     origin_pins = [
         t for t in transforms if t.role == "pin" and abs(t.x) < 2 and abs(t.y) < 2
     ]

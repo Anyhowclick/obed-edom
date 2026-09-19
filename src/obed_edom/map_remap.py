@@ -553,11 +553,17 @@ def split_font(name: str) -> tuple[str, str]:
     return raw.lower(), ""
 
 
+# Colour distances below this (0..1, same units as color_distance) are a tie; size then decides.
+STYLE_COLOR_TIE = 0.02
+
+
 def template_character_styles(slides: list[dict]) -> list[dict[str, Any]]:
-    """Deduped (font, size, colour) palette from the template's sample text."""
+    """Deduped (font, size, colour) palette from the template's sample text, tagged with the
+    template slide number(s) each style was sampled from."""
     styles: list[dict[str, Any]] = []
-    seen: set[tuple[str, float, tuple[float, ...] | None]] = set()
+    seen: dict[tuple[str, float, tuple[float, ...] | None], dict[str, Any]] = {}
     for slide in slides:
+        number = _slide_number_of(slide)
         for item in slide.get("items") or []:
             if not is_style_sample(item):
                 continue
@@ -565,16 +571,20 @@ def template_character_styles(slides: list[dict]) -> list[dict[str, Any]]:
             size = round(_f(item.get("size")), 2)
             rgb = item_rgb(item)
             key = (font.lower(), size, tuple(round(c, 3) for c in rgb) if rgb else None)
-            if key in seen:
+            existing = seen.get(key)
+            if existing is not None:
+                if number not in existing["slides"]:
+                    existing["slides"].append(number)
                 continue
-            seen.add(key)
             rec: dict[str, Any] = {
                 "font": font,
                 "size": size,
                 "text": (item.get("text") or "").strip()[:40],
+                "slides": [number],
             }
             if rgb:
                 rec["color"] = [round(c, 4) for c in rgb]
+            seen[key] = rec
             styles.append(rec)
     return styles
 
@@ -584,8 +594,11 @@ def match_character_style(
     styles: list[dict[str, Any]],
     *,
     size_ratio: float = 0.5,
+    prefer_slide: int | None = None,
 ) -> dict[str, Any] | None:
-    """CG swatch only when family+weight match; colour then size break ties. No swatch → keep wall face."""
+    """CG swatch only when family+weight match; colour then size break ties, colour within
+    STYLE_COLOR_TIE counts as a match. Candidates from `prefer_slide` whose colour is known and
+    matches win over the rest of the pool when any exist. No swatch → keep wall face."""
     if not styles:
         return None
     family, weight = split_font(item.get("font") or "")
@@ -605,10 +618,23 @@ def match_character_style(
     if not candidates:
         return None
 
+    def colour_of(style: dict[str, Any]) -> float:
+        distance = color_distance(wall_rgb, norm_rgb(style.get("color")))
+        return 0.0 if distance < STYLE_COLOR_TIE else distance
+
+    if prefer_slide is not None and wall_rgb is not None:
+        preferred = [
+            s for s in candidates
+            if prefer_slide in (s.get("slides") or [])
+            and norm_rgb(s.get("color")) is not None
+            and colour_of(s) == 0.0
+        ]
+        if preferred:
+            candidates = preferred
+
     def penalty(style: dict[str, Any]) -> tuple[float, float]:
-        colour = color_distance(wall_rgb, norm_rgb(style.get("color")))
         size_pen = abs(_f(style.get("size")) - predicted) if predicted else 0.0
-        return (colour, size_pen)
+        return (colour_of(style), size_pen)
 
     return min(candidates, key=penalty)
 
@@ -2650,7 +2676,8 @@ def plan_slide_transforms(
             # Predict with the affine the text rides: the 0.5 prior made the
             # template's 35pt swatch beat its 40pt one on every colour tie.
             style = match_character_style(
-                item, styles, size_ratio=aff.s if aff is not None else 0.5
+                item, styles, size_ratio=aff.s if aff is not None else 0.5,
+                prefer_slide=recipe.get("templateSlide"),
             )
             mapped, font, _face, _colour = _style_text_box(item, aff, style)
             if id(item) in overlay_ids and body_final_size is not None:
