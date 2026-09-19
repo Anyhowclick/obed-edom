@@ -1608,3 +1608,395 @@ def test_index_patch_roi_for_clamps_to_min_one():
     assert w >= 1 and h >= 1
 
 
+
+
+# --- visible-content gate: liveness mask, band coverage, strays, noise floor ---
+#
+# Geometry mirrors the measured fixture: the big movie's screen rect on slide 2 is
+# 952x268 at (109, 795) in a 1920x1080 stage, and today's defect paints only a
+# 663x186 copy at its top-left.
+BIG_RECT = {"x": 109, "y": 795, "w": 952, "h": 268}
+DEFECT_OVERLAY = (109, 795, 663, 186)
+CONTROL_RECT = {"x": 0, "y": 0, "w": 40, "h": 40}
+
+
+def _static_burst(n=5, height=1080, width=1920, channels=3, value=40):
+    """A burst of identical frames — nothing in it is live."""
+    return [np.full((height, width, channels), value, dtype=np.uint8) for _ in range(n)]
+
+
+def _paint_live(frames, box, base=10, step=40):
+    """Make a box move across the burst (delta = step * (n-1) >> DELTA_MIN)."""
+    x, y, w, h = (int(round(v)) for v in box)
+    for i, frame in enumerate(frames):
+        frame[y : y + h, x : x + w, :3] = base + i * step
+
+
+def _paint_static(frames, box, value=200):
+    """An opaque, unmoving occluder."""
+    x, y, w, h = (int(round(v)) for v in box)
+    for frame in frames:
+        frame[y : y + h, x : x + w, :3] = value
+
+
+def _rect_box(rect):
+    return (rect["x"], rect["y"], rect["w"], rect["h"])
+
+
+def test_liveness_mask_flags_only_the_moving_box():
+    """A pixel is live iff max-min over the burst, maximised over RGB, >= delta_min."""
+    from obed_edom.html_alpha_probe import liveness_mask
+
+    frames = _static_burst(height=100, width=200)
+    _paint_live(frames, (20, 10, 50, 30))
+    mask = liveness_mask(frames)
+    assert mask.dtype == np.bool_ and mask.shape == (100, 200)
+    assert mask[10:40, 20:70].all()
+    assert not mask[0:10, :].any()
+    assert float(mask.mean()) == pytest.approx(50 * 30 / (100 * 200))
+
+
+def test_liveness_mask_ignores_low_amplitude_noise():
+    """Compression/dither noise of delta 3 everywhere is not motion."""
+    from obed_edom.html_alpha_probe import liveness_mask
+
+    frames = _static_burst(height=60, width=80)
+    for i, frame in enumerate(frames):
+        frame[:, :, :3] = 40 + (i % 2) * 3
+    assert not liveness_mask(frames).any()
+
+
+def test_liveness_mask_ignores_alpha_channel():
+    """RGBA input is accepted; a moving alpha with static RGB is not live."""
+    from obed_edom.html_alpha_probe import liveness_mask
+
+    frames = _static_burst(height=40, width=40, channels=4)
+    for i, frame in enumerate(frames):
+        frame[:, :, 3] = 10 + i * 50
+    assert not liveness_mask(frames).any()
+    _paint_live(frames, (5, 5, 10, 10))
+    assert liveness_mask(frames)[5:15, 5:15].all()
+
+
+def test_liveness_mask_rejects_short_or_mismatched_bursts():
+    """Fail loudly rather than score a burst that cannot carry a verdict."""
+    from obed_edom.html_alpha_probe import liveness_mask
+
+    with pytest.raises(ValueError):
+        liveness_mask(_static_burst(n=1, height=20, width=20))
+    with pytest.raises(ValueError):
+        liveness_mask([np.zeros((20, 20, 3), np.uint8), np.zeros((21, 20, 3), np.uint8)])
+    with pytest.raises(ValueError):
+        liveness_mask([np.zeros((20, 20), np.uint8), np.zeros((20, 20), np.uint8)])
+
+
+def test_live_coverage_passes_a_fully_live_rect():
+    """The healthy shape: the whole authored movie rect moves."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    scored = score_live_coverage(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is True
+    assert scored["liveFrac"] == pytest.approx(1.0)
+    assert scored["deadColumnBands"] == [] and scored["deadRowBands"] == []
+    assert scored["rect"] == {"x": 111, "y": 797, "w": 948, "h": 264}
+    assert scored["reason"] is None
+
+
+def test_live_coverage_reds_on_todays_663x186_sub_rect():
+    """Today's real defect: only a 663x186 copy paints at the rect's top-left, so
+    the right-hand column bands AND the bottom row bands are dead."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    _paint_live(frames, DEFECT_OVERLAY)
+    scored = score_live_coverage(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is False
+    assert scored["reason"] == "dead bands"
+    assert scored["deadColumnBands"] and max(scored["deadColumnBands"]) == 15
+    assert min(scored["deadColumnBands"]) >= 11
+    assert scored["deadRowBands"] == [6, 7]
+    # the bands are what catch it: 48.6% of the rect is live, which a whole-rect
+    # fraction test at 0.35 would have passed
+    assert scored["liveFrac"] == pytest.approx(0.486, abs=0.01)
+
+
+def test_live_coverage_passes_an_interior_opaque_box():
+    """P2's 134x114 black ROI inside the 952x268 rect never blanks a whole band."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    _paint_static(frames, (400, 870, 134, 114))
+    scored = score_live_coverage(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is True
+    assert scored["deadColumnBands"] == [] and scored["deadRowBands"] == []
+    assert 0.9 < scored["liveFrac"] < 1.0
+
+
+def test_live_coverage_passes_the_green_square_geometry():
+    """The fixture's square covers the top 70% of the right 28% of the rect; the
+    live strip left under it keeps every band alive."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    block_w = round(BIG_RECT["w"] * 0.28)
+    block_h = round(BIG_RECT["h"] * 0.70)
+    _paint_static(frames, (BIG_RECT["x"] + BIG_RECT["w"] - block_w, BIG_RECT["y"], block_w, block_h))
+    scored = score_live_coverage(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is True
+    assert scored["deadColumnBands"] == [] and scored["deadRowBands"] == []
+
+
+def test_live_coverage_reds_on_a_full_height_opaque_stripe():
+    """A full-height occluder blanks whole column bands — fail closed (documented
+    false-RED direction, §1.3)."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    _paint_static(frames, (500, BIG_RECT["y"], 200, BIG_RECT["h"]))
+    scored = score_live_coverage(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is False
+    assert scored["deadColumnBands"] and scored["deadRowBands"] == []
+
+
+def test_live_coverage_reds_on_a_full_width_opaque_stripe():
+    """The row-band mirror of the stripe case."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    _paint_static(frames, (BIG_RECT["x"], 900, BIG_RECT["w"], 70))
+    scored = score_live_coverage(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is False
+    assert scored["deadRowBands"] and scored["deadColumnBands"] == []
+
+
+def test_live_coverage_reds_on_an_all_static_rect():
+    """A poster / frozen decoder: nothing moves, every band dead."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    scored = score_live_coverage(liveness_mask(_static_burst()), BIG_RECT)
+    assert scored["verdict"] is False
+    assert scored["liveFrac"] == 0.0
+    assert len(scored["deadColumnBands"]) == 16 and len(scored["deadRowBands"]) == 8
+
+
+def test_live_coverage_sees_a_two_state_pattern_when_the_burst_catches_both():
+    """A periodic two-state grating is live as soon as the burst holds >=2 distinct
+    states — this is why the shot gaps are unequal (§1.3)."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    for i, frame in enumerate(frames):
+        state = 30 if i % 2 else 220
+        x, y, w, h = _rect_box(BIG_RECT)
+        frame[y : y + h, x : x + w, :3] = state
+    scored = score_live_coverage(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is True
+
+
+def test_live_coverage_aliases_when_every_shot_catches_the_same_state():
+    """Documented failure mode: equally-spaced shots that land on one phase of the
+    grating read as static => RED. The instrument cannot see through aliasing; the
+    caller's unequal gaps are what avoid it."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    for frame in frames:
+        x, y, w, h = _rect_box(BIG_RECT)
+        frame[y : y + h, x : x + w, :3] = 220
+    scored = score_live_coverage(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is False
+    assert scored["liveFrac"] == 0.0
+
+
+def test_live_coverage_clips_a_rect_that_runs_off_the_image():
+    """A rect hanging off the right edge is clipped and still scored."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst(height=200, width=300)
+    _paint_live(frames, (100, 50, 200, 100))
+    scored = score_live_coverage(liveness_mask(frames), {"x": 100, "y": 50, "w": 400, "h": 100})
+    assert scored["rect"] == {"x": 102, "y": 52, "w": 198, "h": 96}
+    assert scored["verdict"] is True
+
+
+def test_live_coverage_rejects_a_rect_outside_or_too_small():
+    """Off-image or sub-band-grid rects can carry no verdict — never a pass."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    mask = liveness_mask(_static_burst(height=200, width=300))
+    off = score_live_coverage(mask, {"x": 400, "y": 400, "w": 50, "h": 50})
+    assert off["verdict"] is False
+    assert off["reason"] == "rect outside image or too small"
+    assert off["rect"] is None
+    tiny = score_live_coverage(mask, {"x": 10, "y": 10, "w": 14, "h": 20})
+    assert tiny["verdict"] is False
+    assert tiny["reason"] == "rect outside image or too small"
+
+
+def test_live_coverage_accepts_float_rects():
+    """Screen rects arrive as floats from the stage map; they round, not truncate."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_live_coverage
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    floated = {"x": 108.6, "y": 795.4, "w": 952.2, "h": 267.8}
+    scored = score_live_coverage(liveness_mask(frames), floated)
+    assert scored["verdict"] is True
+    assert scored["rect"] == {"x": 111, "y": 797, "w": 948, "h": 264}
+
+
+def test_no_stray_movie_reds_on_a_45x45_blob_outside_every_rect():
+    """A second instance painting outside the authored rects is a stray (>=2000 px)."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_no_stray_movie
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    _paint_live(frames, (1400, 200, 45, 45))
+    scored = score_no_stray_movie(liveness_mask(frames), [BIG_RECT])
+    assert scored["verdict"] is False
+    assert len(scored["strays"]) == 1
+    assert scored["strays"][0]["bbox"] == {"x": 1400, "y": 200, "w": 45, "h": 45}
+    assert scored["strays"][0]["area"] == 45 * 45
+
+
+def test_no_stray_movie_passes_a_20x20_blob():
+    """Below the area floor: cursor/AA specks do not fail a slide."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_no_stray_movie
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    _paint_live(frames, (1400, 200, 20, 20))
+    assert score_no_stray_movie(liveness_mask(frames), [BIG_RECT])["verdict"] is True
+
+
+def test_no_stray_movie_sorts_strays_by_area_descending():
+    from obed_edom.html_alpha_probe import liveness_mask, score_no_stray_movie
+
+    frames = _static_burst()
+    _paint_live(frames, (100, 100, 50, 50))
+    _paint_live(frames, (400, 100, 90, 90))
+    strays = score_no_stray_movie(liveness_mask(frames), [])["strays"]
+    assert [s["area"] for s in strays] == [90 * 90, 50 * 50]
+
+
+def test_no_stray_movie_tolerates_a_blob_hugging_a_rect_edge():
+    """AA/rounding spill just outside a rect is absorbed by the 6 px dilation: the
+    residue falls under the area floor, while dilate_px=0 would call it a stray."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_no_stray_movie
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    right = BIG_RECT["x"] + BIG_RECT["w"]
+    _paint_live(frames, (right + 3, 800, 45, 45))
+    mask = liveness_mask(frames)
+    assert score_no_stray_movie(mask, [BIG_RECT])["verdict"] is True
+    undilated = score_no_stray_movie(mask, [BIG_RECT], dilate_px=0)
+    assert undilated["verdict"] is False
+    assert undilated["strays"][0]["area"] == 45 * 45
+
+
+def test_no_stray_movie_honours_ignore_rects():
+    """A caller-declared animated non-movie region is excused explicitly."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_no_stray_movie
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    _paint_live(frames, (1400, 200, 45, 45))
+    mask = liveness_mask(frames)
+    ignore = [{"x": 1390, "y": 190, "w": 70, "h": 70}]
+    assert score_no_stray_movie(mask, [BIG_RECT], ignore_rects=ignore)["verdict"] is True
+    assert score_no_stray_movie(mask, [BIG_RECT])["verdict"] is False
+
+
+def test_noise_floor_passes_a_static_control_region():
+    from obed_edom.html_alpha_probe import score_noise_floor
+
+    frames = _static_burst(height=200, width=200)
+    _paint_live(frames, (100, 100, 50, 50))
+    scored = score_noise_floor(frames, CONTROL_RECT)
+    assert scored["verdict"] is True and scored["p99"] == 0.0
+
+
+def test_noise_floor_fails_at_p99_of_eight():
+    """A control region jittering by 8 is above the < 6 bar."""
+    from obed_edom.html_alpha_probe import score_noise_floor
+
+    frames = _static_burst(height=200, width=200)
+    for i, frame in enumerate(frames):
+        frame[0:40, 0:40, :3] = 40 + (i % 2) * 8
+    scored = score_noise_floor(frames, CONTROL_RECT)
+    assert scored["verdict"] is False
+    assert scored["p99"] == pytest.approx(8.0)
+    assert scored["reason"] == "noise floor above threshold"
+
+
+def test_noise_floor_fails_closed_on_an_off_image_control_rect():
+    from obed_edom.html_alpha_probe import score_noise_floor
+
+    scored = score_noise_floor(_static_burst(height=100, width=100), {"x": 500, "y": 5, "w": 40, "h": 40})
+    assert scored["verdict"] is False
+    assert scored["p99"] is None
+    assert scored["reason"] == "control rect outside image"
+
+
+def test_visible_slide_passes_a_healthy_slide():
+    """Every expected rect fully live, nothing live outside them."""
+    from obed_edom.html_alpha_probe import score_visible_slide
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    scored = score_visible_slide(frames, [dict(BIG_RECT, label="movie1")], CONTROL_RECT)
+    assert scored["verdict"] is True and scored["status"] == "pass"
+    assert scored["perRect"][0]["label"] == "movie1"
+    assert scored["perRect"][0]["maxDelta"] == 160
+    assert scored["stray"]["verdict"] is True
+    assert scored["noiseFloor"]["verdict"] is True
+
+
+def test_visible_slide_fails_on_todays_slide_two_shape():
+    """The deliverable RED: a 663x186 live patch plus a stray elsewhere."""
+    from obed_edom.html_alpha_probe import score_visible_slide
+
+    frames = _static_burst()
+    _paint_live(frames, DEFECT_OVERLAY)
+    _paint_live(frames, (1500, 300, 60, 60))
+    scored = score_visible_slide(frames, [dict(BIG_RECT, label="movie1")], CONTROL_RECT)
+    assert scored["verdict"] is False and scored["status"] == "fail"
+    assert scored["perRect"][0]["verdict"] is False
+    assert scored["perRect"][0]["deadRowBands"] == [6, 7]
+    assert scored["stray"]["verdict"] is False
+    assert scored["stray"]["strays"][0]["area"] == 60 * 60
+
+
+def test_visible_slide_is_inconclusive_when_the_noise_floor_fails():
+    """INCONCLUSIVE is never a pass: verdict is None, callers must treat anything
+    but True as failure."""
+    from obed_edom.html_alpha_probe import score_visible_slide
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    for i, frame in enumerate(frames):
+        frame[0:40, 0:40, :3] = 40 + (i % 2) * 8
+    scored = score_visible_slide(frames, [BIG_RECT], CONTROL_RECT)
+    assert scored["verdict"] is None
+    assert scored["status"] == "inconclusive"
+    assert scored["perRect"] == [] and scored["stray"] is None
+    assert scored["noiseFloor"]["p99"] == pytest.approx(8.0)
+
+
+def test_visible_slide_records_max_delta_for_a_static_rect():
+    """A genuinely static movie segment reads RED; maxDelta is recorded so the
+    artifact can distinguish it from a mislocated rect (§1.3)."""
+    from obed_edom.html_alpha_probe import score_visible_slide
+
+    frames = _static_burst()
+    scored = score_visible_slide(frames, [BIG_RECT], CONTROL_RECT)
+    assert scored["verdict"] is False
+    assert scored["perRect"][0]["maxDelta"] == 0
+    assert "label" not in scored["perRect"][0]

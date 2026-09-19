@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -63,6 +64,16 @@ IDENTITY_NEAR_DUP_MAE_MAX = 3.0
 IDENTITY_OWN_CLOSER_MARGIN = 2.0
 IDENTITY_CONTENT_MIN = 0.02
 IDENTITY_RASTER_USEFUL_MAX = 20.0
+# Visible-content gate: a pixel is live when it moves across a settle burst (plan §1.3).
+LIVE_DELTA_MIN = 12
+LIVE_BAND_COLS = 16
+LIVE_BAND_ROWS = 8
+LIVE_BAND_MIN_FRAC = 0.05
+LIVE_RECT_MIN_FRAC = 0.35
+LIVE_RECT_INSET_PX = 2
+STRAY_DILATE_PX = 6
+STRAY_MIN_AREA_PX = 2000
+NOISE_FLOOR_P99_MAX = 6
 PLAYER_RAF_ASSIGN = "window.requestAnimFrame=window.requestAnimationFrame"
 LINEDRAW = "com.apple.iWork.Keynote.LineDraw"
 LINEDRAW_FOR_LINE = "com.apple.iWork.Keynote.LineDrawForLine"
@@ -1552,6 +1563,249 @@ def score_composited_index_run(
         "firstIndex": indices[0],
         "lastIndex": indices[-1],
         "negativeAnomaly": negative_anomaly,
+    }
+
+
+def _max_delta_map(frames: Sequence[np.ndarray]) -> np.ndarray:
+    """Per-pixel max-minus-min across a burst, maximised over RGB. HxW int16."""
+    if len(frames) < 2:
+        raise ValueError(f"need >=2 frames, got {len(frames)}")
+    shapes = {tuple(getattr(f, "shape", ())) for f in frames}
+    if len(shapes) != 1:
+        raise ValueError(f"mismatched frame shapes: {sorted(shapes)}")
+    shape = next(iter(shapes))
+    if len(shape) != 3 or shape[2] not in (3, 4) or shape[0] == 0 or shape[1] == 0:
+        raise ValueError(f"expected HxWx3|4 frames, got {shape}")
+    stack = np.stack([np.asarray(f)[:, :, :3] for f in frames]).astype(np.int16)
+    return (stack.max(axis=0) - stack.min(axis=0)).max(axis=2)
+
+
+def _clip_rect(
+    rect: dict[str, float],
+    height: int,
+    width: int,
+    *,
+    inset_px: int = 0,
+) -> tuple[int, int, int, int] | None:
+    """Inset a {x,y,w,h} screen rect and clip it to the image; None when empty."""
+    x0 = int(round(float(rect.get("x", 0)) + inset_px))
+    y0 = int(round(float(rect.get("y", 0)) + inset_px))
+    x1 = int(round(float(rect.get("x", 0)) + float(rect.get("w", 0)) - inset_px))
+    y1 = int(round(float(rect.get("y", 0)) + float(rect.get("h", 0)) - inset_px))
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(width, x1), min(height, y1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def liveness_mask(frames: Sequence[np.ndarray], delta_min: int = LIVE_DELTA_MIN) -> np.ndarray:
+    """Pixels that moved across a settle burst: max-min over RGB >= ``delta_min``.
+
+    ``frames`` are >=2 same-shape HxWx3|4 uint8 screenshots (alpha ignored);
+    posters, frozen video and opaque occluders are not live. Returns HxW bool.
+    """
+    return _max_delta_map(frames) >= int(delta_min)
+
+
+def score_live_coverage(
+    mask: np.ndarray,
+    rect: dict[str, float],
+    *,
+    cols: int = LIVE_BAND_COLS,
+    rows: int = LIVE_BAND_ROWS,
+    band_live_frac: float = LIVE_BAND_MIN_FRAC,
+    min_live_frac: float = LIVE_RECT_MIN_FRAC,
+    inset_px: int = LIVE_RECT_INSET_PX,
+) -> dict[str, Any]:
+    """Require every column AND row band of a movie rect to be live (plan §1.2.1).
+
+    Bands beat a whole-rect fraction: an interior opaque occluder never blanks a
+    full band, while a sub-rect live patch blanks the bands it does not reach.
+    """
+    height, width = mask.shape[:2]
+    clipped = _clip_rect(rect, height, width, inset_px=inset_px)
+    if clipped is None or clipped[2] < cols or clipped[3] < rows:
+        out_rect = (
+            {"x": clipped[0], "y": clipped[1], "w": clipped[2], "h": clipped[3]}
+            if clipped
+            else None
+        )
+        return {
+            "verdict": False,
+            "liveFrac": 0.0,
+            "deadColumnBands": [],
+            "deadRowBands": [],
+            "rect": out_rect,
+            "reason": "rect outside image or too small",
+        }
+
+    x, y, w, h = clipped
+    sub = mask[y : y + h, x : x + w]
+    live_frac = float(sub.mean())
+    col_edges = [round(i * w / cols) for i in range(cols + 1)]
+    row_edges = [round(i * h / rows) for i in range(rows + 1)]
+    dead_cols = [
+        i
+        for i in range(cols)
+        if float(sub[:, col_edges[i] : col_edges[i + 1]].mean()) < band_live_frac
+    ]
+    dead_rows = [
+        i
+        for i in range(rows)
+        if float(sub[row_edges[i] : row_edges[i + 1], :].mean()) < band_live_frac
+    ]
+    verdict = not dead_cols and not dead_rows and live_frac >= min_live_frac
+    reason = None
+    if not verdict:
+        if dead_cols or dead_rows:
+            reason = "dead bands"
+        else:
+            reason = "live fraction below threshold"
+    return {
+        "verdict": bool(verdict),
+        "liveFrac": live_frac,
+        "deadColumnBands": dead_cols,
+        "deadRowBands": dead_rows,
+        "rect": {"x": x, "y": y, "w": w, "h": h},
+        "reason": reason,
+    }
+
+
+def score_no_stray_movie(
+    mask: np.ndarray,
+    expected_rects: Sequence[dict[str, float]],
+    *,
+    dilate_px: int = STRAY_DILATE_PX,
+    min_area_px: int = STRAY_MIN_AREA_PX,
+    ignore_rects: Sequence[dict[str, float]] = (),
+) -> dict[str, Any]:
+    """Live pixels outside every expected movie rect: a stray second instance.
+
+    Expected rects are dilated by ``dilate_px`` before subtraction; any remaining
+    8-connected component of at least ``min_area_px`` fails the slide.
+    """
+    height, width = mask.shape[:2]
+    work = np.asarray(mask).astype(np.uint8).copy()
+    for rect, inset in [(r, -dilate_px) for r in expected_rects] + [(r, 0) for r in ignore_rects]:
+        clipped = _clip_rect(rect, height, width, inset_px=inset)
+        if clipped is None:
+            continue
+        x, y, w, h = clipped
+        work[y : y + h, x : x + w] = 0
+
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(work, 8)
+    strays = [
+        {
+            "bbox": {
+                "x": int(stats[i, cv2.CC_STAT_LEFT]),
+                "y": int(stats[i, cv2.CC_STAT_TOP]),
+                "w": int(stats[i, cv2.CC_STAT_WIDTH]),
+                "h": int(stats[i, cv2.CC_STAT_HEIGHT]),
+            },
+            "area": int(stats[i, cv2.CC_STAT_AREA]),
+        }
+        for i in range(1, count)
+        if int(stats[i, cv2.CC_STAT_AREA]) >= min_area_px
+    ]
+    strays.sort(key=lambda s: s["area"], reverse=True)
+    return {"verdict": not strays, "strays": strays}
+
+
+def score_noise_floor(
+    frames: Sequence[np.ndarray],
+    control_rect: dict[str, float],
+    *,
+    max_p99: int = NOISE_FLOOR_P99_MAX,
+) -> dict[str, Any]:
+    """99th-percentile burst delta over a known-static control region (plan §1.2.3)."""
+    delta = _max_delta_map(frames)
+    clipped = _clip_rect(control_rect, delta.shape[0], delta.shape[1])
+    if clipped is None:
+        return {"verdict": False, "p99": None, "rect": None, "reason": "control rect outside image"}
+    x, y, w, h = clipped
+    p99 = float(np.percentile(delta[y : y + h, x : x + w], 99))
+    return {
+        "verdict": bool(p99 < max_p99),
+        "p99": p99,
+        "rect": {"x": x, "y": y, "w": w, "h": h},
+        "reason": None if p99 < max_p99 else "noise floor above threshold",
+    }
+
+
+def score_visible_slide(
+    frames: Sequence[np.ndarray],
+    expected_rects: Sequence[dict[str, Any]],
+    control_rect: dict[str, float],
+    *,
+    delta_min: int = LIVE_DELTA_MIN,
+    cols: int = LIVE_BAND_COLS,
+    rows: int = LIVE_BAND_ROWS,
+    band_live_frac: float = LIVE_BAND_MIN_FRAC,
+    min_live_frac: float = LIVE_RECT_MIN_FRAC,
+    inset_px: int = LIVE_RECT_INSET_PX,
+    dilate_px: int = STRAY_DILATE_PX,
+    min_area_px: int = STRAY_MIN_AREA_PX,
+    ignore_rects: Sequence[dict[str, float]] = (),
+    max_p99: int = NOISE_FLOOR_P99_MAX,
+) -> dict[str, Any]:
+    """One settled slide's visible-content verdict: coverage per rect + no strays.
+
+    A failed noise floor yields ``verdict None`` / ``status "inconclusive"``;
+    callers must treat anything but ``verdict is True`` as a failure.
+    """
+    noise = score_noise_floor(frames, control_rect, max_p99=max_p99)
+    if not noise["verdict"]:
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "perRect": [],
+            "stray": None,
+            "noiseFloor": noise,
+            "reason": noise.get("reason") or "noise floor above threshold",
+        }
+
+    delta = _max_delta_map(frames)
+    mask = delta >= int(delta_min)
+    per_rect: list[dict[str, Any]] = []
+    for rect in expected_rects:
+        scored = score_live_coverage(
+            mask,
+            rect,
+            cols=cols,
+            rows=rows,
+            band_live_frac=band_live_frac,
+            min_live_frac=min_live_frac,
+            inset_px=inset_px,
+        )
+        clipped = scored["rect"]
+        max_delta = 0
+        if clipped:
+            patch = delta[
+                clipped["y"] : clipped["y"] + clipped["h"],
+                clipped["x"] : clipped["x"] + clipped["w"],
+            ]
+            max_delta = int(patch.max()) if patch.size else 0
+        entry = {**scored, "maxDelta": max_delta}
+        if "label" in rect:
+            entry["label"] = rect["label"]
+        per_rect.append(entry)
+
+    stray = score_no_stray_movie(
+        mask,
+        expected_rects,
+        dilate_px=dilate_px,
+        min_area_px=min_area_px,
+        ignore_rects=ignore_rects,
+    )
+    verdict = bool(all(r["verdict"] for r in per_rect) and stray["verdict"])
+    return {
+        "verdict": verdict,
+        "status": "pass" if verdict else "fail",
+        "perRect": per_rect,
+        "stray": stray,
+        "noiseFloor": noise,
+        "reason": None,
     }
 
 
