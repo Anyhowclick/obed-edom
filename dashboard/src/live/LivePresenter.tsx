@@ -14,7 +14,9 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const observed = useRef<LiveSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [pending, setPending] = useState(false);
+  const [stopPending, setStopPending] = useState(false);
   const inFlight = useRef(false);
+  const stopInFlight = useRef(false);
   const generation = useRef(0);
   const mounted = useRef(false);
   const [connectionError, setConnectionError] = useState("");
@@ -93,19 +95,23 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
   const disabledReason = useCallback((operation: LiveOperation): string => {
     if (!connected) return "Waiting for connection to output host";
     if (!snapshot || snapshot.status === "stopped") return "No active session";
-    if (pending) return "Waiting for command acknowledgment";
-    if (operation === "stop") return "";
+    if (operation === "stop") return stopPending ? "Waiting for command acknowledgment" : "";
+    if (pending || stopPending) return "Waiting for command acknowledgment";
     if ((operation === "advance" || operation === "goTo") && snapshot.status !== "ready") return `Player is ${snapshot.status}`;
     if ((operation === "hide" || operation === "show") && snapshot.status !== "ready" && snapshot.status !== "busy") return `Player is ${snapshot.status}`;
     const capability = snapshot.capabilities?.[operation] || { supported: false, reason: "Not available in this player state" };
     return capability.supported ? "" : capability.reason || "Not supported by this player";
-  }, [connected, snapshot, pending]);
+  }, [connected, snapshot, pending, stopPending]);
 
   const send = useCallback(async (operation: LiveOperation, slide?: number) => {
     const current = observed.current;
-    if (!current || inFlight.current || disabledReason(operation)) return;
-    inFlight.current = true;
-    setPending(true);
+    if (!current) return;
+    const isStop = operation === "stop";
+    const reason = disabledReason(operation);
+    if (reason) { setMessage(reason); return; }
+    if (isStop ? stopInFlight.current : inFlight.current) return;
+    if (isStop) { stopInFlight.current = true; setStopPending(true); }
+    else { inFlight.current = true; setPending(true); }
     const epoch = ++generation.current;
     setMessage("");
     try {
@@ -121,8 +127,8 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
         setConnectionError(error instanceof Error ? error.message : String(error));
       }
     } finally {
-      inFlight.current = false;
-      if (mounted.current) setPending(false);
+      if (isStop) { stopInFlight.current = false; if (mounted.current) setStopPending(false); }
+      else { inFlight.current = false; if (mounted.current) setPending(false); }
     }
   }, [accept, client, disabledReason]);
 

@@ -42,7 +42,8 @@ function client(overrides: Partial<LiveClient> = {}): LiveClient {
 
 describe("LivePresenter", () => {
   beforeEach(() => {
-    vi.stubGlobal("crypto", { randomUUID: () => "request-1" });
+    let nextRequestId = 0;
+    vi.stubGlobal("crypto", { randomUUID: () => `request-${++nextRequestId}` });
   });
 
   it("starts only a prepared deck on the selected detected display", async () => {
@@ -180,5 +181,37 @@ describe("LivePresenter", () => {
     render(<LivePresenter client={api} pollMs={60_000} />);
     expect(await screen.findByRole("button", { name: "Hide output" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Advance" })).toBeDisabled();
+  });
+
+  it("keeps Stop enabled and sendable while another command is pending, but ignores a second stop click", async () => {
+    let resolveAdvance!: (value: LiveResult) => void;
+    const command = vi.fn((_sessionId: string, cmd: LiveCommand): Promise<LiveResult> => {
+      if (cmd.operation === "advance") return new Promise<LiveResult>((done) => { resolveAdvance = done; });
+      return Promise.resolve({ requestId: cmd.requestId, outcome: "completed", state: state({ status: "stopped" }) });
+    });
+    const api = client({ state: vi.fn(async () => state()), command });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByRole("button", { name: "Advance" });
+    fireEvent.click(screen.getByRole("button", { name: "Advance" }));
+    expect(screen.getByRole("button", { name: "Advance" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop session" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("live-1", expect.objectContaining({ operation: "stop" })));
+    const stopCalls = command.mock.calls.filter((call) => call[1].operation === "stop");
+    expect(stopCalls).toHaveLength(1);
+    const advanceRequestId = command.mock.calls.find((call) => call[1].operation === "advance")![1].requestId;
+    const stopRequestId = stopCalls[0][1].requestId;
+    expect(stopRequestId).not.toBe(advanceRequestId);
+    await act(async () => resolveAdvance({ requestId: advanceRequestId, outcome: "completed", state: state({ originalSlide: 3, revision: 2, sceneId: "scene-3" }) }));
+  });
+
+  it("shows the disabled reason and sends nothing when a shortcut fires while blocked", async () => {
+    const api = client({ state: vi.fn(async () => state({ status: "busy" })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByRole("button", { name: "Hide output" });
+    fireEvent.keyDown(window, { key: " " });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Player is busy");
+    expect(api.command).not.toHaveBeenCalled();
   });
 });
