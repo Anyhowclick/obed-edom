@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import RLock
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -30,7 +31,7 @@ class StartBody(BaseModel):
 
 class CommandBody(BaseModel):
     requestId: str = Field(min_length=1, max_length=200)
-    operation: str
+    operation: Literal["advance", "goTo", "hide", "show", "stop"]
     slide: int | None = Field(default=None, strict=True)
 
 
@@ -154,7 +155,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None) -> AP
             current = sessions.state()
             if not current or current["sessionId"] != session_id or current["status"] == "stopped":
                 raise HTTPException(404, "Session is no longer current.")
-            slide = next((row for row in current["slides"] if row["originalOrdinal"] == ordinal), None)
+            slide = next((row for row in current["slides"] if row.get("originalOrdinal") == ordinal), None)
             if not slide or slide.get("skipped") or not slide.get("exportedUuid"):
                 raise HTTPException(404, "Slide thumbnail is unavailable.")
             try:

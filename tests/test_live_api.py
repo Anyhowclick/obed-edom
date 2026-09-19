@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -15,6 +16,9 @@ class Adapter:
     def __init__(self, *args, **kwargs):
         self.visible = False
         self.clicks = 0
+        self.wait: Event | None = None
+        self.release: Event | None = None
+        self.stopped = False
 
     def capabilities(self):
         return {op: {'supported': True} for op in ('advance', 'goTo', 'hide', 'show')}
@@ -23,6 +27,12 @@ class Adapter:
         return PlayerObservation(original_slide=1 + self.clicks, scene_id=str(self.clicks), output_visible=self.visible)
 
     def execute(self, operation, slide=None):
+        if self.wait:
+            self.wait.set()
+            assert self.release
+            self.release.wait(2)
+            if self.stopped:
+                raise RuntimeError('player stopped')
         if operation == 'advance':
             self.clicks += 1
         elif operation in ('hide', 'show'):
@@ -30,7 +40,9 @@ class Adapter:
         return self.observe()
 
     def stop(self):
-        pass
+        self.stopped = True
+        if self.release:
+            self.release.set()
 
 
 def client_for(tmp_path, monkeypatch):
@@ -49,14 +61,21 @@ def client_for(tmp_path, monkeypatch):
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
     claims, releases = [], []
     service = LiveSessionService(claim=lambda *args: claims.append(args), release=lambda *args: releases.append(args))
+    adapters = []
+
+    def host_factory(*args, **kwargs):
+        adapter = Adapter(*args, **kwargs)
+        adapters.append(adapter)
+        return adapter
+
     app = FastAPI()
-    app.include_router(live.live_router(runner, service=service, host_factory=Adapter,
+    app.include_router(live.live_router(runner, service=service, host_factory=host_factory,
         displays=lambda: [OutputDisplay(42, 1920, 0, 2560, 1440, False)]))
-    return TestClient(app, base_url='http://127.0.0.1'), claims, releases, job
+    return TestClient(app, base_url='http://127.0.0.1'), claims, releases, job, adapters, service
 
 
 def test_live_api_session_survives_presenter_and_rejects_duplicate_start(tmp_path, monkeypatch):
-    client, claims, releases, _ = client_for(tmp_path, monkeypatch)
+    client, claims, releases, _, _adapters, _service = client_for(tmp_path, monkeypatch)
     assert client.get('/api/live').json() is None
     assert client.get('/api/live/displays').json()[0]['id'] == '42'
     assert client.get('/api/live/decks').json()[0]['previewJobId'] == 'prepared'
@@ -77,7 +96,7 @@ def test_live_api_session_survives_presenter_and_rejects_duplicate_start(tmp_pat
 
 
 def test_live_api_refuses_unqualified_export_and_cross_origin(tmp_path, monkeypatch):
-    client, claims, _, job = client_for(tmp_path, monkeypatch)
+    client, claims, _, job, _adapters, _service = client_for(tmp_path, monkeypatch)
     assert client.post('/api/live', headers={'origin': 'https://evil.example'}, json={'previewJobId': 'prepared'}).status_code == 403
     job.result['manifest']['playerDigest'] = 'changed'
     response = client.post('/api/live', json={'previewJobId': 'prepared'})
@@ -86,8 +105,48 @@ def test_live_api_refuses_unqualified_export_and_cross_origin(tmp_path, monkeypa
 
 
 def test_live_api_rejects_non_integer_go_to(tmp_path, monkeypatch):
-    client, _, _, _ = client_for(tmp_path, monkeypatch)
-    assert client.post('/api/live/stale/commands', json={'requestId': 'x', 'operation': 'goTo', 'slide': True}).status_code == 422
+    client, _, _, _, _adapters, _service = client_for(tmp_path, monkeypatch)
+    state = client.post('/api/live', json={'previewJobId': 'prepared'}).json()
+    session = state['sessionId']
+    response = client.post(f'/api/live/{session}/commands', json={'requestId': 'x', 'operation': 'goTo', 'slide': True})
+    assert response.status_code == 422
+
+
+def test_live_api_rejects_unknown_operation(tmp_path, monkeypatch):
+    client, _, _, _, _adapters, _service = client_for(tmp_path, monkeypatch)
+    state = client.post('/api/live', json={'previewJobId': 'prepared'}).json()
+    session = state['sessionId']
+    response = client.post(f'/api/live/{session}/commands', json={'requestId': 'x', 'operation': 'bogus'})
+    assert response.status_code == 422
+
+
+def test_thumbnail_missing_original_ordinal_key_returns_404(tmp_path, monkeypatch):
+    client, _, _, _, _adapters, service = client_for(tmp_path, monkeypatch)
+    state = client.post('/api/live', json={'previewJobId': 'prepared'}).json()
+    session = state['sessionId']
+    service._session.state['slides'] = [{'skipped': False, 'exportedUuid': 'x'}]
+    response = client.get(f'/api/live/{session}/thumbnail/1')
+    assert response.status_code == 404
+
+
+def test_dashboard_shutdown_stops_session_with_command_in_flight(tmp_path, monkeypatch):
+    client, _claims, releases, _, adapters, _service = client_for(tmp_path, monkeypatch)
+    with client:
+        assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 200
+        adapter = adapters[-1]
+        adapter.wait = Event()
+        adapter.release = Event()
+        session = client.get('/api/live').json()['sessionId']
+        responses = []
+        thread = Thread(target=lambda: responses.append(
+            client.post(f'/api/live/{session}/commands', json={'requestId': 'a', 'operation': 'advance'}).json()
+        ))
+        thread.start()
+        assert adapter.wait.wait(1)
+    thread.join(2)
+    assert not thread.is_alive()
+    assert len(releases) == 1
+    assert responses[0]['outcome'] == 'rejected'
 
 
 def test_review_cleanup_retains_active_program_assets(tmp_path, monkeypatch):
@@ -114,7 +173,7 @@ def test_review_cleanup_retains_active_program_assets(tmp_path, monkeypatch):
 
 
 def test_dashboard_shutdown_stops_owned_session(tmp_path, monkeypatch):
-    client, claims, releases, _ = client_for(tmp_path, monkeypatch)
+    client, claims, releases, _, _adapters, _service = client_for(tmp_path, monkeypatch)
     with client:
         assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 200
         assert len(claims) == 1 and not releases
@@ -122,7 +181,7 @@ def test_dashboard_shutdown_stops_owned_session(tmp_path, monkeypatch):
 
 
 def test_live_api_rejects_foreign_host_even_when_origin_matches(tmp_path, monkeypatch):
-    client, claims, _, _ = client_for(tmp_path, monkeypatch)
+    client, claims, _, _, _adapters, _service = client_for(tmp_path, monkeypatch)
     response = client.post('/api/live', headers={'host': 'evil.example', 'origin': 'http://evil.example'},
                            json={'previewJobId': 'prepared'})
     assert response.status_code == 403
