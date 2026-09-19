@@ -2000,3 +2000,115 @@ def test_visible_slide_records_max_delta_for_a_static_rect():
     assert scored["verdict"] is False
     assert scored["perRect"][0]["maxDelta"] == 0
     assert "label" not in scored["perRect"][0]
+
+
+# --- dead-expected rects (baseline refusal, I3) ---
+#
+# A boundary the plan REFUSES to carry hands its movie back to the raw player, so
+# the destination slide's movie rect must read FROZEN. The verdict is inverted, and
+# a rect that cannot be measured is never evidence of deadness.
+
+
+def test_dead_rect_passes_a_frozen_movie_rect():
+    """The refusal's own green: the whole rect holds still across the burst."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_dead_rect
+
+    frames = _static_burst()
+    scored = score_dead_rect(liveness_mask(frames), BIG_RECT)
+    assert scored["verdict"] is True
+    assert scored["liveFrac"] == pytest.approx(0.0)
+    assert scored["rect"] == {"x": 111, "y": 797, "w": 948, "h": 264}
+    assert scored["reason"] is None
+
+
+def test_dead_rect_fails_on_ten_percent_live():
+    """Well above DEAD_RECT_MAX_LIVE_FRAC: a carried decoder still painting there."""
+    from obed_edom.html_alpha_probe import DEAD_RECT_MAX_LIVE_FRAC, liveness_mask, score_dead_rect
+
+    frames = _static_burst()
+    _paint_live(frames, (BIG_RECT["x"], BIG_RECT["y"], BIG_RECT["w"], round(BIG_RECT["h"] * 0.1)))
+    scored = score_dead_rect(liveness_mask(frames), BIG_RECT)
+    assert scored["liveFrac"] > DEAD_RECT_MAX_LIVE_FRAC
+    assert scored["verdict"] is False
+    assert scored["reason"] == "live pixels in a rect the plan expects to be frozen"
+
+
+def test_dead_rect_tolerates_a_sub_threshold_seam():
+    """An AA seam of a few per cent is not a live movie."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_dead_rect
+
+    frames = _static_burst()
+    _paint_live(frames, (BIG_RECT["x"], BIG_RECT["y"], BIG_RECT["w"], 6))
+    scored = score_dead_rect(liveness_mask(frames), BIG_RECT)
+    assert 0 < scored["liveFrac"] <= 0.05
+    assert scored["verdict"] is True
+
+
+def test_dead_rect_that_cannot_be_measured_is_not_evidence_of_deadness():
+    """Fail-closed, exactly like the live scorer: an unmeasurable rect is False."""
+    from obed_edom.html_alpha_probe import liveness_mask, score_dead_rect
+
+    mask = liveness_mask(_static_burst(height=100, width=100))
+    scored = score_dead_rect(mask, {"x": 500, "y": 5, "w": 40, "h": 40})
+    assert scored["verdict"] is False
+    assert scored["liveFrac"] is None
+    assert scored["reason"] == "rect outside image or too small"
+
+
+def test_visible_slide_scores_a_dead_expected_rect_with_the_inverted_verdict():
+    """The baseline's slide 2: the movie rect is frozen and that is GREEN, while
+    whatever the player paints there is ignored by the stray check."""
+    from obed_edom.html_alpha_probe import score_visible_slide
+
+    frames = _static_burst()
+    dead = dict(BIG_RECT, label="movie1#1", expect="dead")
+    scored = score_visible_slide(frames, [dead], CONTROL_RECT)
+    assert scored["verdict"] is True and scored["status"] == "pass"
+    assert scored["perRect"][0]["expect"] == "dead"
+    assert scored["perRect"][0]["verdict"] is True
+    assert scored["perRect"][0]["maxDelta"] == 0
+    assert scored["stray"]["verdict"] is True
+
+
+def test_visible_slide_reds_when_a_dead_expected_rect_is_live():
+    """The runtime ignored the refusal and carried the movie anyway."""
+    from obed_edom.html_alpha_probe import score_visible_slide
+
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(BIG_RECT))
+    scored = score_visible_slide(frames, [dict(BIG_RECT, label="movie1#1", expect="dead")], CONTROL_RECT)
+    assert scored["verdict"] is False and scored["status"] == "fail"
+    assert scored["perRect"][0]["verdict"] is False
+
+
+def test_visible_slide_dead_rect_is_inconclusive_when_the_noise_floor_fails():
+    """A dead expectation is not a licence to score a burst the control rejects."""
+    from obed_edom.html_alpha_probe import score_visible_slide
+
+    frames = _static_burst()
+    for i, frame in enumerate(frames):
+        frame[0:40, 0:40, :3] = 40 + (i % 2) * 8
+    scored = score_visible_slide(frames, [dict(BIG_RECT, expect="dead")], CONTROL_RECT)
+    assert scored["verdict"] is None
+    assert scored["status"] == "inconclusive"
+    assert scored["perRect"] == []
+
+
+def test_visible_slide_scores_live_and_dead_rects_side_by_side():
+    """One slide may state both expectations; each rect is judged on its own, and
+    a live patch inside the DEAD rect does not count as a stray."""
+    from obed_edom.html_alpha_probe import score_visible_slide
+
+    live_rect = {"x": 200, "y": 200, "w": 400, "h": 200}
+    frames = _static_burst()
+    _paint_live(frames, _rect_box(live_rect))
+    _paint_live(frames, (BIG_RECT["x"], BIG_RECT["y"], 200, 100))
+    scored = score_visible_slide(
+        frames,
+        [dict(live_rect, label="live#1"), dict(BIG_RECT, label="dead#1", expect="dead")],
+        CONTROL_RECT,
+    )
+    assert [rect["expect"] for rect in scored["perRect"]] == ["live", "dead"]
+    assert scored["perRect"][0]["verdict"] is True
+    assert scored["perRect"][1]["verdict"] is False
+    assert scored["stray"]["verdict"] is True

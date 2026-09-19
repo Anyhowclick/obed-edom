@@ -266,10 +266,19 @@ def test_refuses_two_geometry_changing_movies_on_one_boundary():
         state = clone["baseLayer"]["initialState"]
         state["position"]["pointX"] += 80
         state["position"]["pointY"] += 80
+        clone_id = "CLONE-WA0125"
         events[0]["effects"][0]["effects"] = events[0]["effects"][0].get("effects", []) + [
-            {"movie": clone["movie"], "baseLayer": clone["baseLayer"], "effects": []}
+            {
+                "objectID": clone_id, "movie": clone["movie"],
+                "baseLayer": clone["baseLayer"], "effects": [],
+            }
         ]
         data = {**data, "events": events}
+        # the overlap rule reads the destination slide's draw order, so the clone needs a slot
+        # of its own; put it BELOW the existing movie so it adds no overlap of its own.
+        rect = (state["position"]["pointX"] - state["width"] / 2,
+                state["position"]["pointY"] - state["height"] / 2, state["width"], state["height"])
+        _draw_slots(data, 0).insert(1, _authored_slot(*rect, object_id=clone_id))
         data["assets"] = {
             **data["assets"],
             "VID-20250608-WA0125.mp4-0.0000-45.1381": {
@@ -342,6 +351,29 @@ P2_SLIDE3_MIN_HASH = 6
 P2_SLIDE3_MOVIE_RECT = {"x": 198, "y": 797, "w": 952, "h": 268}
 P2_SLIDE4_MIN_HASH = 8
 P2_SLIDE4_MOVIE_RECT = {"x": 327, "y": 709, "w": 1266, "h": 356}
+# The 1->2 Magic Move destination: refused (slide 2 draws the green square OVER the carried
+# movie), so the runtime is told to hand the movie back to the player at that scene.
+P2_SLIDE2_MIN_HASH = 2
+
+# `derive_plan` on the fixture must produce exactly this runtime plan (plan section 1's "After").
+EXPECTED_RUNTIME_PLAN = {
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}},
+    "boundaries": [
+        {"atScene": 2, "action": "retire", "movieKey": "movie1"},
+        {"atScene": 6, "action": "restart"},
+        {
+            "atScene": 8, "action": "bridge", "movieKey": "movie1",
+            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
+            "durationSeconds": 1.5,
+            "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
+        },
+    ],
+}
+EXPECTED_PLAN_SHA256 = "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e"
+
+# The green square is slide 2's draw slot 6; the movie is slot 5.
+SLIDE2_GREEN_SLOT = 6
+SLIDE2_MOVIE_SLOT = 5
 
 
 def _rect_close(a: dict, b: dict, tol: float = 3.0) -> bool:
@@ -363,7 +395,10 @@ def test_to_runtime_matches_p2_injected_plan():
     assert _rect_close(movie1["footprint"], P2_MOVIE1_FOOTPRINT)
 
     boundaries = {b["atScene"]: b for b in runtime["boundaries"]}
-    assert set(boundaries) == {P2_SLIDE3_MIN_HASH, P2_SLIDE4_MIN_HASH}
+    assert set(boundaries) == {P2_SLIDE2_MIN_HASH, P2_SLIDE3_MIN_HASH, P2_SLIDE4_MIN_HASH}
+    assert boundaries[P2_SLIDE2_MIN_HASH] == {
+        "atScene": P2_SLIDE2_MIN_HASH, "action": "retire", "movieKey": "movie1",
+    }
     assert boundaries[P2_SLIDE3_MIN_HASH]["action"] == "restart"
     bridge = boundaries[P2_SLIDE4_MIN_HASH]
     assert bridge["action"] == "bridge"
@@ -529,6 +564,50 @@ def _set_affine(node, matrix):
     node["baseLayer"]["initialState"]["affineTransform"] = matrix
 
 
+def _draw_slots(data, event_index: int) -> list:
+    """The destination slide's back-to-front draw order for one event: a flat list of wrapper
+    slots, each holding exactly one object node (see plan section 0)."""
+    return data["events"][event_index]["baseLayer"]["layers"]
+
+
+def _slot_object(data, event_index: int, slot_index: int) -> dict:
+    return _draw_slots(data, event_index)[slot_index]["layers"][0]
+
+
+def _slot_rect(node: dict) -> tuple[float, float, float, float]:
+    state = node["initialState"]
+    return (
+        state["position"]["pointX"] - state["width"] / 2,
+        state["position"]["pointY"] - state["height"] / 2,
+        state["width"],
+        state["height"],
+    )
+
+
+def _authored_slot(x, y, w, h, object_id: str | None = None) -> dict:
+    node: dict = {}
+    if object_id is not None:
+        node["objectID"] = object_id
+    node["initialState"] = {
+        "position": {"pointX": x + w / 2, "pointY": y + h / 2}, "width": w, "height": h,
+    }
+    return {"layers": [node]}
+
+
+def _events_drawing(data, object_id: str) -> list[int]:
+    """Indices of the events whose draw order contains `object_id` -- slide 2's flattened
+    transition event (a single canvas-sized slot) is not one of them."""
+    return [
+        index
+        for index, _event in enumerate(data["events"])
+        if any(
+            slot["layers"][0].get("objectID") == object_id
+            for slot in _draw_slots(data, index)
+            if len(slot["layers"]) == 1
+        )
+    ]
+
+
 def _clone_second_instance_onto_slide2(data):
     """Give slide 2 the same non-continuing 'movie2' rect that slide 1 authors, in addition
     to its real continuing instance, so two geometry-equal pin pairs exist and pinning
@@ -576,6 +655,424 @@ def test_mixed_bridge_and_pin_cannot_bypass_qualified_plan():
     result = replace(plan, boundaries=(*plan.boundaries[:2], bridge, plan.boundaries[3])).to_runtime()
     assert isinstance(result, Unsupported)
     assert 'pin action follows' in result.reason
+
+
+# --- per-boundary refusal: overlapping artwork on the destination slide -------------------
+#
+# The destination slide's draw order is explicit in the export: every event carries
+# `baseLayer.layers`, a flat back-to-front list of one wrapper slot per authored object, and the
+# movie node's `objectID` names its own slot exactly. A Magic Move may carry a live movie across
+# a boundary only when NOTHING authored above it overlaps its painted rect on the far side --
+# otherwise the carried <video> would paint over artwork the author put in front of it.
+#
+# On the fixture's slide 2 that is the green square (draw slot 6, above the movie's slot 5). The
+# black box at (543, 722, 181, 161) overlaps the movie geometrically too, but it is slot 1 --
+# BEHIND -- and must not refuse; the rule reads z-order, not rects alone.
+
+
+def test_fixture_refuses_only_the_1_to_2_boundary_and_names_the_green_squares_slot():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.refusals == (
+        {
+            "fromPlayer": 0,
+            "toPlayer": 1,
+            "atScene": P2_SLIDE2_MIN_HASH,
+            "asset": "untitled.mov",
+            "movieKey": "movie1",
+            "reason": (
+                "later-authored artwork overlaps the carried 'untitled.mov' on the destination "
+                f"slide (player index 1, draw slot {SLIDE2_GREEN_SLOT})"
+            ),
+        },
+    )
+    # the refusal lives on the boundary's own MovieContinuity too, and `action` still says pin.
+    pinned = plan.boundaries[0].movies[0]
+    assert pinned.action == "pin"
+    assert pinned.refusal == plan.refusals[0]["reason"]
+    # the 3->4 bridge's destination has nothing above the movie, so it is not refused.
+    assert all(m.refusal is None for m in plan.boundaries[2].movies)
+
+
+def test_fixture_runtime_plan_is_the_baseline_after_json():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def test_refusals_are_not_part_of_the_runtime_plan():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert set(runtime) == {"movies", "boundaries"}
+    assert "refusal" not in json.dumps(runtime)
+    assert plan.as_dict()["refusals"] == [dict(r) for r in plan.refusals]
+    assert json.loads(plan.to_json())["refusals"] == plan.as_dict()["refusals"]
+
+
+def test_slide_instances_are_unchanged_by_the_refusal():
+    """The refusal is a carry decision, not a geometry one: every authored instance is still
+    ground truth for what must be visibly live on its slide."""
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.slide_instances == {
+        0: {"untitled.mov": [_rect(*SLIDE1_BIG), _rect(*SLIDE1_SMALL)]},
+        1: {"untitled.mov": [_rect(*SLIDE1_BIG)]},
+        2: {
+            "untitled.mov": [_rect(*SLIDE3_UNTITLED)],
+            "vid-20250608-wa0125.mp4": [_rect(*SLIDE3_WA0125)],
+        },
+        3: {"untitled.mov": [_rect(*SLIDE4_UNTITLED)]},
+    }
+
+
+def _move_green_square_below_the_movie(data):
+    """Swap slide 2's draw slots 5 and 6 so the green square is authored BEHIND the movie."""
+    for index in range(len(data["events"])):
+        slots = _draw_slots(data, index)
+        if len(slots) <= SLIDE2_GREEN_SLOT:
+            continue
+        slots[SLIDE2_MOVIE_SLOT], slots[SLIDE2_GREEN_SLOT] = (
+            slots[SLIDE2_GREEN_SLOT], slots[SLIDE2_MOVIE_SLOT],
+        )
+    return data
+
+
+def _plan_with_green_square_below() -> ContinuityPlan:
+    plan = _plan(_mutate_slide(SLIDE2, _move_green_square_below_the_movie))
+    assert isinstance(plan, ContinuityPlan)
+    return plan
+
+
+def test_green_square_authored_below_the_movie_does_not_refuse():
+    """The same overlapping rect one draw slot lower is behind the movie, which is exactly the
+    black box's situation on the real fixture -- it must be carried, not refused."""
+    plan = _plan_with_green_square_below()
+    assert plan.refusals == ()
+    assert all(m.refusal is None for b in plan.boundaries for m in b.movies)
+
+
+def test_no_retire_is_emitted_when_nothing_is_refused(monkeypatch):
+    from obed_edom import live_continuity
+
+    plan = _plan_with_green_square_below()
+    # that plan is the pre-baseline shape, which the allowlist no longer carries; the assertion
+    # here is about the derived boundaries, not about qualification.
+    monkeypatch.setattr(
+        live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256))
+    )
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    assert [b["action"] for b in runtime["boundaries"]] == ["restart", "bridge"]
+
+
+def test_overlap_in_a_later_event_only_still_refuses():
+    """An object that builds in on click sits in the slot list from event 0, so this is the
+    conservative case the export cannot distinguish: artwork in ANY event of the destination
+    slide refuses, not only in its first."""
+
+    def build_in_over_the_movie(data):
+        data = _move_green_square_below_the_movie(data)
+        movie_id = _slot_object(data, 0, SLIDE2_GREEN_SLOT)["objectID"]
+        assert movie_id == "F9AFED1B-E2D7-47D4-942E-14992C808383"
+        last = _events_drawing(data, movie_id)[-1]
+        _draw_slots(data, last).append(_authored_slot(*_rect_of_movie_on_slide2(), object_id="BUILT-IN"))
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, build_in_over_the_movie))
+    assert isinstance(plan, ContinuityPlan)
+    assert len(plan.refusals) == 1
+    assert "draw slot 7" in plan.refusals[0]["reason"]
+
+
+def _rect_of_movie_on_slide2() -> tuple[float, float, float, float]:
+    """The painted (video sub-layer) rect the overlap rule compares against, to full authored
+    precision -- `SLIDE1_BIG` is rounded, which matters at a 1px threshold."""
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    rect = plan.slide_instances[1]["untitled.mov"][0]
+    return rect["x"], rect["y"], rect["w"], rect["h"]
+
+
+@pytest.mark.parametrize("gap", [0.0, 0.5, 1.0])
+def test_artwork_touching_the_movies_edge_does_not_refuse(gap):
+    """`_OVERLAP_MIN_PX` is 1.0 authored px and the intersection must be wider AND taller than
+    it, so abutting edges and anti-aliasing seams are not a refusal."""
+    x, y, w, _h = _rect_of_movie_on_slide2()
+
+    def touch_only(data):
+        data = _move_green_square_below_the_movie(data)
+        _draw_slots(data, 0).append(_authored_slot(x + w - gap, y, 400.0, 400.0, object_id="TOUCH"))
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, touch_only))
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.refusals == ()
+
+
+def test_artwork_overlapping_by_more_than_the_minimum_refuses():
+    x, y, w, _h = _rect_of_movie_on_slide2()
+
+    def overlap_slightly(data):
+        data = _move_green_square_below_the_movie(data)
+        _draw_slots(data, 0).append(_authored_slot(x + w - 1.6, y, 400.0, 400.0, object_id="OVER"))
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, overlap_slightly))
+    assert isinstance(plan, ContinuityPlan)
+    assert len(plan.refusals) == 1
+
+
+def test_movie_slot_absent_in_one_event_is_skipped_not_refused():
+    """Slide 2's last event is the flattened transition frame: a single canvas-sized slot with
+    no objectID at all. It carries no draw order for the movie and must simply be skipped."""
+
+    def drop_the_movie_slot_from_the_first_event(data):
+        data = _move_green_square_below_the_movie(data)
+        movie_id = _slot_object(data, 0, SLIDE2_GREEN_SLOT)["objectID"]
+        drawn = _events_drawing(data, movie_id)
+        assert len(drawn) < len(data["events"]), "the flattened event must already lack the movie"
+        del _draw_slots(data, drawn[0])[SLIDE2_GREEN_SLOT]
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, drop_the_movie_slot_from_the_first_event))
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.refusals == ()
+
+
+def test_movie_slot_absent_in_every_event_is_refused():
+    def drop_every_movie_slot(data):
+        data = _move_green_square_below_the_movie(data)
+        movie_id = _slot_object(data, 0, SLIDE2_GREEN_SLOT)["objectID"]
+        for index in _events_drawing(data, movie_id):
+            del _draw_slots(data, index)[SLIDE2_GREEN_SLOT]
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, drop_every_movie_slot))
+    assert isinstance(plan, Unsupported)
+    assert "no draw slot" in plan.reason
+
+
+def test_a_slot_above_the_movie_with_more_than_one_child_is_refused():
+    def double_child(data):
+        slot = _draw_slots(data, 0)[SLIDE2_GREEN_SLOT]
+        slot["layers"] = slot["layers"] * 2
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, double_child))
+    assert isinstance(plan, Unsupported)
+    assert "unrecognised slide layer shape" in plan.reason
+
+
+def test_a_slide_with_no_draw_order_at_all_is_refused():
+    def strip_base_layer(data):
+        for event in data["events"]:
+            event.pop("baseLayer")
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE2, strip_base_layer))
+    assert isinstance(plan, Unsupported)
+    assert "no readable draw order" in plan.reason
+
+
+def test_movie_node_without_an_object_id_is_refused():
+    """Without an objectID the movie cannot be located in the draw order at all, so its
+    z-position is unknown and nothing may be carried across the boundary."""
+
+    def drop_object_id(data):
+        return _map_movie_nodes(data, lambda node: node.pop("objectID"))
+
+    plan = _plan(_mutate_slide(SLIDE2, drop_object_id))
+    assert isinstance(plan, Unsupported)
+    assert "no object id" in plan.reason
+
+
+# --- interim mask rule ---------------------------------------------------------------------
+#
+# This export family encodes no mask at all: `masksToBounds` is false, `contentsRect` is the unit
+# rect, there is no `shapePath`, and the movie node's subtree uses a closed key vocabulary (plan
+# section 0). Until a masked deck is exported and the real encoding is measured, anything outside
+# that vocabulary may BE the mask -- and a masked movie must not even supply a `slide_instances`
+# rect, so the rule lives in `_movie_rect` and applies to every movie node.
+
+
+def _mask_reason_plan(uuid: str, transform) -> Unsupported:
+    plan = _plan(_mutate_slide(uuid, transform))
+    assert isinstance(plan, Unsupported), plan
+    assert "possible mask" in plan.reason, plan.reason
+    return plan
+
+
+def test_masks_to_bounds_is_refused_as_a_possible_mask():
+    def clip(node):
+        node["baseLayer"]["initialState"]["masksToBounds"] = True
+
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, clip))
+    assert plan.reason.endswith("masksToBounds")
+
+
+def test_masks_to_bounds_on_the_video_sub_layer_is_refused_too():
+    def clip(node):
+        node["baseLayer"]["layers"][0]["initialState"]["masksToBounds"] = True
+
+    _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, clip))
+
+
+def test_a_non_unit_contents_rect_is_refused_as_a_possible_crop():
+    def crop(node):
+        node["baseLayer"]["layers"][0]["initialState"]["contentsRect"]["width"] = 0.5
+
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, crop))
+    assert plan.reason.endswith("contentsRect")
+
+
+def test_a_contents_rect_within_the_measurement_tolerance_is_not_refused():
+    def jitter(node):
+        node["baseLayer"]["layers"][0]["initialState"]["contentsRect"]["width"] = 1 - 5e-7
+
+    plan = _plan(_mutate_slide(SLIDE1, lambda data: _map_movie_nodes(data, jitter)))
+    assert isinstance(plan, ContinuityPlan)
+
+
+def test_a_shape_path_anywhere_in_the_movie_subtree_is_refused():
+    def shape(node):
+        node["effects"] = [{"shapePath": {"elements": []}}]
+
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, shape))
+    assert plan.reason.endswith("shapePath")
+
+
+@pytest.mark.parametrize(
+    "place",
+    [
+        pytest.param(lambda node: node.__setitem__("maskLayer", {}), id="node"),
+        pytest.param(lambda node: node["baseLayer"].__setitem__("mask", {}), id="layer"),
+        pytest.param(
+            lambda node: node["baseLayer"]["initialState"].__setitem__("cornerRadius", 8),
+            id="initialState",
+        ),
+        pytest.param(
+            lambda node: node["baseLayer"]["layers"][0].__setitem__("mask", {}), id="video-layer",
+        ),
+    ],
+)
+def test_any_key_outside_the_measured_vocabulary_is_refused(place):
+    _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, place))
+
+
+def test_the_measured_vocabulary_does_not_refuse_todays_fixture():
+    """The allowlist is only honest if it is a measurement: every key the fixture actually uses
+    must be in it, or the rule would refuse the deck P2 qualified."""
+    from obed_edom import live_continuity
+
+    node_keys, layer_keys, state_keys = set(), set(), set()
+
+    def walk(layer):
+        layer_keys.update(layer)
+        state_keys.update(layer["initialState"])
+        for child in layer.get("layers") or []:
+            walk(child)
+
+    for uuid in (SLIDE1, SLIDE2, SLIDE3, SLIDE4):
+        data = json.loads((FIXTURE_ROOT / "assets" / uuid / f"{uuid}.json").read_text())
+        for node in _find_movie_nodes(data["events"]):
+            node_keys.update(node)
+            walk(node["baseLayer"])
+
+    assert node_keys <= live_continuity._MOVIE_NODE_KEYS
+    assert layer_keys <= live_continuity._MOVIE_LAYER_KEYS
+    assert state_keys <= live_continuity._MOVIE_LAYER_STATE_KEYS
+    assert "objectID" in node_keys, "the overlap rule needs the fixture's movie objectIDs"
+
+
+def test_a_video_sub_layer_outside_its_movie_layer_is_refused():
+    def push_out(node):
+        node["baseLayer"]["layers"][0]["initialState"]["position"]["pointX"] += 200
+
+    plan = _mask_reason_plan(SLIDE1, lambda data: _map_movie_nodes(data, push_out))
+    assert plan.reason.endswith("the video sub-layer is not contained in its movie layer")
+
+
+# --- `retire` in the runtime plan -----------------------------------------------------------
+
+
+def _refused_pin(plan: ContinuityPlan, boundary_index: int, **changes):
+    boundary = plan.boundaries[boundary_index]
+    return replace(
+        boundary,
+        movies=tuple(replace(m, refusal="synthetic refusal") for m in boundary.movies),
+        **changes,
+    )
+
+
+def test_a_refused_bridge_is_a_whole_deck_refusal():
+    """`retire` is the only refusal the runtime can express, and only before the first cut. A
+    bridge the destination slide covers is untested generality, so the whole deck falls back."""
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    refused_bridge = _refused_pin(plan, 2)
+    result = replace(plan, boundaries=(*plan.boundaries[:2], refused_bridge, plan.boundaries[3])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "cannot retire" in result.reason
+    assert "synthetic refusal" in result.reason
+
+
+def test_a_refused_bridge_derived_from_the_export_is_a_whole_deck_refusal():
+    """The same thing end to end: put an object over the movie on slide 4, the 3->4 bridge's
+    destination, and the deck stops qualifying altogether."""
+
+    def cover_the_movie(data):
+        movie_id = _slot_object(data, 0, 1)["objectID"]
+        assert movie_id == "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC"
+        _draw_slots(data, 0).append(_authored_slot(*SLIDE4_UNTITLED, object_id="COVER"))
+        return data
+
+    plan = _plan(_mutate_slide(SLIDE4, cover_the_movie))
+    assert isinstance(plan, ContinuityPlan)
+    assert [r["toPlayer"] for r in plan.refusals] == [1, 3]
+    result = plan.to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "cannot retire" in result.reason
+
+
+def test_a_refusal_on_a_restart_boundary_is_a_whole_deck_refusal():
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    refused_restart = _refused_pin(plan, 1)
+    result = replace(plan, boundaries=(plan.boundaries[0], refused_restart, *plan.boundaries[2:])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "cannot retire" in result.reason
+
+
+def test_two_refused_pin_boundaries_are_a_whole_deck_refusal():
+    """The runtime honours one retire zone; a second is a shape it has never been measured on."""
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    second = _refused_pin(plan, 0, from_player_index=1, to_player_index=2)
+    result = replace(plan, boundaries=(plan.boundaries[0], second, *plan.boundaries[2:])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "more than one retire boundary" in result.reason
+
+
+def test_a_retire_after_a_restart_is_a_whole_deck_refusal():
+    """The retire zone starts at the implicit pin zone, so it cannot open after a cut has
+    already handed the movie back."""
+    plan = _plan()
+    assert isinstance(plan, ContinuityPlan)
+    carried = replace(
+        plan.boundaries[0], movies=tuple(replace(m, refusal=None) for m in plan.boundaries[0].movies)
+    )
+    late = _refused_pin(plan, 0, from_player_index=2, to_player_index=3)
+    result = replace(plan, boundaries=(carried, plan.boundaries[1], late)).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "follows a restart" in result.reason
+
+
+def test_the_retire_precedes_the_restart_and_the_bridge_in_the_emitted_order():
+    runtime = _plan().to_runtime()
+    assert isinstance(runtime, dict)
+    assert [b["action"] for b in runtime["boundaries"]] == ["retire", "restart", "bridge"]
 
 
 # --- I5 codec report -----------------------------------------------------------------------
@@ -818,10 +1315,7 @@ def test_slide_instances_does_not_move_the_runtime_plan_or_its_signature():
     assert set(runtime) == {"movies", "boundaries"}
     assert "slideInstances" not in json.dumps(runtime)
     assert "slide_instances" not in json.dumps(runtime)
-    assert (
-        live_continuity.plan_signature(runtime)
-        == "ec4b0cb3eeaf393ec00a7313d1c68b640a90282c80d408767c99984b710800cf"
-    )
+    assert live_continuity.plan_signature(runtime) == EXPECTED_PLAN_SHA256
     assert live_continuity.plan_signature(runtime) in live_continuity.QUALIFIED_PLAN_SHA256
     # an emptied field must not change the runtime either.
     assert replace(plan, slide_instances={}).to_runtime() == runtime
@@ -852,3 +1346,15 @@ def test_real_export_movies_report_h264():
     # the export stores its own copy of Untitled.mov under each of the four slide folders,
     # and every one of them is probed.
     assert next(entry for entry in report if entry["asset"] == "untitled.mov")["files"] == 4
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_real_export_yields_the_same_runtime_plan_and_refusal():
+    """The trimmed fixture gained the draw-slot data the overlap rule reads; this is the check
+    that it was copied faithfully, not authored to suit the rule."""
+    real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=lambda root, relative: root / relative)
+    assert isinstance(real, ContinuityPlan)
+    assert real.to_runtime() == EXPECTED_RUNTIME_PLAN
+    fixture = _plan()
+    assert isinstance(fixture, ContinuityPlan)
+    assert real.refusals == fixture.refusals

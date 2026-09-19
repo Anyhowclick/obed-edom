@@ -71,6 +71,9 @@ LIVE_BAND_ROWS = 8
 LIVE_BAND_MIN_FRAC = 0.05
 LIVE_RECT_MIN_FRAC = 0.35
 LIVE_RECT_INSET_PX = 2
+# A rect the plan expects to be FROZEN (a boundary the plan refuses to carry, or a
+# geometry-static Magic Move under the raw player) may keep only this much live.
+DEAD_RECT_MAX_LIVE_FRAC = 0.05
 STRAY_DILATE_PX = 6
 STRAY_MIN_AREA_PX = 2000
 NOISE_FLOOR_P99_MAX = 6
@@ -1672,6 +1675,38 @@ def score_live_coverage(
     }
 
 
+def score_dead_rect(
+    mask: np.ndarray,
+    rect: dict[str, float],
+    *,
+    max_live_frac: float = DEAD_RECT_MAX_LIVE_FRAC,
+    inset_px: int = LIVE_RECT_INSET_PX,
+) -> dict[str, Any]:
+    """The inverted verdict: a rect the plan expects to be frozen must read dead.
+
+    A rect that cannot be measured (outside the image, or emptied by the inset) is
+    not evidence of deadness and fails.
+    """
+    height, width = mask.shape[:2]
+    clipped = _clip_rect(rect, height, width, inset_px=inset_px)
+    if clipped is None:
+        return {
+            "verdict": False,
+            "liveFrac": None,
+            "rect": None,
+            "reason": "rect outside image or too small",
+        }
+    x, y, w, h = clipped
+    live_frac = float(mask[y : y + h, x : x + w].mean())
+    verdict = live_frac <= float(max_live_frac)
+    return {
+        "verdict": bool(verdict),
+        "liveFrac": live_frac,
+        "rect": {"x": x, "y": y, "w": w, "h": h},
+        "reason": None if verdict else "live pixels in a rect the plan expects to be frozen",
+    }
+
+
 def score_no_stray_movie(
     mask: np.ndarray,
     expected_rects: Sequence[dict[str, float]],
@@ -1749,11 +1784,15 @@ def score_visible_slide(
     inset_px: int = LIVE_RECT_INSET_PX,
     dilate_px: int = STRAY_DILATE_PX,
     min_area_px: int = STRAY_MIN_AREA_PX,
+    dead_max_live_frac: float = DEAD_RECT_MAX_LIVE_FRAC,
     ignore_rects: Sequence[dict[str, float]] = (),
     max_p99: int = NOISE_FLOOR_P99_MAX,
 ) -> dict[str, Any]:
-    """One settled slide's visible-content verdict: coverage per rect + no strays.
+    """One settled slide's visible-content verdict: every rect meets its stated
+    expectation (``expect: "live" | "dead"``, live when unstated) + no strays.
 
+    A dead-expected rect is scored by ``score_dead_rect`` and joins ``ignore_rects``
+    for the stray check, which cannot judge whatever the player paints there.
     A failed noise floor yields ``verdict None`` / ``status "inconclusive"``;
     callers must treat anything but ``verdict is True`` as a failure.
     """
@@ -1772,15 +1811,21 @@ def score_visible_slide(
     mask = delta >= int(delta_min)
     per_rect: list[dict[str, Any]] = []
     for rect in expected_rects:
-        scored = score_live_coverage(
-            mask,
-            rect,
-            cols=cols,
-            rows=rows,
-            band_live_frac=band_live_frac,
-            min_live_frac=min_live_frac,
-            inset_px=inset_px,
-        )
+        expect = "dead" if rect.get("expect") == "dead" else "live"
+        if expect == "dead":
+            scored = score_dead_rect(
+                mask, rect, max_live_frac=dead_max_live_frac, inset_px=inset_px
+            )
+        else:
+            scored = score_live_coverage(
+                mask,
+                rect,
+                cols=cols,
+                rows=rows,
+                band_live_frac=band_live_frac,
+                min_live_frac=min_live_frac,
+                inset_px=inset_px,
+            )
         clipped = scored["rect"]
         max_delta = 0
         if clipped:
@@ -1789,17 +1834,17 @@ def score_visible_slide(
                 clipped["x"] : clipped["x"] + clipped["w"],
             ]
             max_delta = int(patch.max()) if patch.size else 0
-        entry = {**scored, "maxDelta": max_delta}
+        entry = {**scored, "maxDelta": max_delta, "expect": expect}
         if "label" in rect:
             entry["label"] = rect["label"]
         per_rect.append(entry)
 
     stray = score_no_stray_movie(
         mask,
-        expected_rects,
+        [rect for rect in expected_rects if rect.get("expect") != "dead"],
         dilate_px=dilate_px,
         min_area_px=min_area_px,
-        ignore_rects=ignore_rects,
+        ignore_rects=[*ignore_rects, *(r for r in expected_rects if r.get("expect") == "dead")],
     )
     verdict = bool(all(r["verdict"] for r in per_rect) and stray["verdict"])
     return {

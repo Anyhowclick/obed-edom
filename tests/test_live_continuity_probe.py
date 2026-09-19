@@ -1852,3 +1852,500 @@ class TestVisiblePassStopError:
         status, reasons = probe.overall_status(self._base_result())
         assert status == "pass"
         assert reasons == []
+
+
+# --------------------------------------------------------------------------
+# Baseline refusal (I3): plan-derived expectations, `refused*`, live/dead rects
+#
+# `.agents/plans/keynote_live_baseline.plan.md` §1/§4: a boundary the plan
+# RETIRES hands its movie back to the raw player. Nothing below is hard-wired to
+# "slide 2" -- every expectation is derived from the plan the host installs, and a
+# plan WITHOUT a retire must reproduce the pre-refusal model exactly.
+# --------------------------------------------------------------------------
+
+BIG_ASSET = "Untitled.mov"
+OTHER_ASSET = "WA0125.mov"
+BIG_INSTANCE = {"x": 109.0, "y": 795.0, "w": 952.0, "h": 268.0}
+SMALL_INSTANCE = {"x": 1076.0, "y": 876.0, "w": 663.0, "h": 186.0}
+OTHER_INSTANCE = {"x": 300.0, "y": 100.0, "w": 400.0, "h": 200.0}
+
+# The measured fixture's scene onsets: slide 1 opens at scene 0, the 1->2 magic
+# move lands at 2, the 2->3 restart at 6, the 3->4 bridge at 8.
+SCENE_INDEX_BY_PLAYER = {0: 0, 1: 2, 2: 6, 3: 8}
+SLIDE_INSTANCES = {
+    0: {BIG_ASSET: [BIG_INSTANCE], OTHER_ASSET: [OTHER_INSTANCE]},
+    1: {BIG_ASSET: [BIG_INSTANCE]},
+    2: {BIG_ASSET: [BIG_INSTANCE, SMALL_INSTANCE]},
+    3: {BIG_ASSET: [BIG_INSTANCE]},
+}
+
+RUNTIME_MOVIES = {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}}
+RESTART_BOUNDARY = {"atScene": 6, "action": "restart"}
+BRIDGE_BOUNDARY = {
+    "atScene": 8, "action": "bridge", "movieKey": "movie1",
+    "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268}, "durationSeconds": 1.5,
+    "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
+}
+RETIRE_BOUNDARY = {"atScene": 2, "action": "retire", "movieKey": "movie1"}
+
+CARRIED_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+RETIRED_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+BRIDGE_ONLY_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [BRIDGE_BOUNDARY]}
+
+BOUNDARY_KEYS = {2: "continue1to2", 6: "restart2to3", 8: "continue3to4"}
+
+
+def synthetic_plan(
+    scene_index: dict[int, int] | None = None, instances: dict[int, Any] | None = None
+) -> Any:
+    """A `ContinuityPlan` carrying only what the expectation model reads: the scene
+    onset of each slide and every authored movie instance on it."""
+    return probe.ContinuityPlan(
+        canvas={"width": 1920, "height": 1080},
+        scene_index_by_player=dict(SCENE_INDEX_BY_PLAYER if scene_index is None else scene_index),
+        slide_rects={},
+        boundaries=(),
+        slide_instances=dict(SLIDE_INSTANCES if instances is None else instances),
+    )
+
+
+class TestRectExpectationModel:
+    """The whole live/dead table, derived from the plan alone (plan §4, "V/Voff
+    expectation model")."""
+
+    def test_a_plan_without_a_retire_is_todays_model_unchanged(self) -> None:
+        """V live everywhere; Voff dead only at the geometry-static pin's
+        destination, which is exactly the slide today's hardcoded control reds on."""
+        plan = synthetic_plan()
+        on = probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=True)
+        off = probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=False)
+        assert on == {
+            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
+            1: {BIG_ASSET: "live"},
+            2: {BIG_ASSET: "live"},
+            3: {BIG_ASSET: "live"},
+        }
+        assert off == {
+            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
+            1: {BIG_ASSET: "dead"},
+            2: {BIG_ASSET: "live"},
+            3: {BIG_ASSET: "live"},
+        }
+
+    def test_the_fixture_plan_with_a_retire_at_scene_two_is_dead_in_both_passes(self) -> None:
+        """V: s1 live, s2 dead, s3 live, s4 live -- and Voff the same, because a
+        refused boundary leaves the destination looking exactly like the raw export."""
+        plan = synthetic_plan()
+        expected = {
+            0: {BIG_ASSET: "live", OTHER_ASSET: "live"},
+            1: {BIG_ASSET: "dead"},
+            2: {BIG_ASSET: "live"},
+            3: {BIG_ASSET: "live"},
+        }
+        assert probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=True) == expected
+        assert probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=False) == expected
+
+    def test_a_bridge_only_plan_keeps_every_uncut_boundary_implicitly_pinned(self) -> None:
+        """No restart and no retire: the bridge destination is live in both passes,
+        every other destination is a carried pin."""
+        plan = synthetic_plan()
+        on = probe.rect_expectations(plan, BRIDGE_ONLY_RUNTIME, continuity_on=True)
+        off = probe.rect_expectations(plan, BRIDGE_ONLY_RUNTIME, continuity_on=False)
+        assert [on[i][BIG_ASSET] for i in (0, 1, 2, 3)] == ["live", "live", "live", "live"]
+        assert [off[i][BIG_ASSET] for i in (0, 1, 2, 3)] == ["live", "dead", "dead", "live"]
+
+    def test_only_the_retired_asset_goes_dead_on_a_refused_destination(self) -> None:
+        """A second movie on the same destination slide follows its own (carried)
+        expectation -- the refusal is per movie, not per slide."""
+        instances = dict(SLIDE_INSTANCES)
+        instances[1] = {BIG_ASSET: [BIG_INSTANCE], OTHER_ASSET: [OTHER_INSTANCE]}
+        on = probe.rect_expectations(synthetic_plan(instances=instances), RETIRED_RUNTIME, continuity_on=True)
+        assert on[1] == {BIG_ASSET: "dead", OTHER_ASSET: "live"}
+
+    def test_both_passes_are_derived_in_one_call(self) -> None:
+        plan = synthetic_plan()
+        both = probe.visible_expectations(plan, RETIRED_RUNTIME)
+        assert both["V"] == probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=True)
+        assert both["Voff"] == probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=False)
+
+
+class TestRetireFact:
+    def test_no_retire_is_none_so_nothing_downstream_changes(self) -> None:
+        assert probe.retire_fact(synthetic_plan(), CARRIED_RUNTIME, BOUNDARY_KEYS) is None
+
+    def test_the_retire_resolves_to_its_boundary_slide_asset_keys_and_rects(self) -> None:
+        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        assert retire["boundaryKey"] == "continue1to2"
+        assert retire["verdictKey"] == "refused1to2"
+        assert retire["playerIndex"] == 1 and retire["originalOrdinal"] == 2
+        assert retire["assetKeys"] == ["untitled.mov"]
+        assert retire["rects"] == [BIG_INSTANCE]
+
+    def test_a_retire_at_a_scene_no_boundary_under_test_owns_fails_closed(self) -> None:
+        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [{"atScene": 4, "action": "retire", "movieKey": "movie1"}]}
+        with pytest.raises(SystemExit):
+            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+
+    def test_a_retire_naming_an_undefined_movie_key_fails_closed(self) -> None:
+        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [dict(RETIRE_BOUNDARY, movieKey="movie9")]}
+        with pytest.raises(SystemExit):
+            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+
+    def test_more_than_one_retire_is_outside_the_contract_and_fails_closed(self) -> None:
+        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [RETIRE_BOUNDARY, dict(RETIRE_BOUNDARY, atScene=6)]}
+        with pytest.raises(SystemExit):
+            probe.retire_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+
+
+class TestRefusalScoring:
+    """The POSITIVE half: "did not continue" alone is vacuous, so the refusal has
+    to be shown on the destination slide's DOM."""
+
+    STAGE_MAP = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+    RETIRE = {"assetKeys": ["untitled.mov"], "rects": [BIG_INSTANCE]}
+
+    def _sample(self, painting: Any = None, snapshot: Any = None, stage_map: Any = _UNSET) -> dict[str, Any]:
+        return {
+            "stageMap": dict(self.STAGE_MAP) if stage_map is _UNSET else stage_map,
+            "painting": [] if painting is None else painting,
+            "poolSnapshot": [] if snapshot is None else snapshot,
+        }
+
+    def test_a_clean_refusal_is_green(self) -> None:
+        scored = probe.score_refusal(self._sample(), self.RETIRE, True)
+        assert scored["verdict"] is True
+        assert scored["paintingOverRect"] == [] and scored["pooled"] == []
+        assert scored["reason"] is None
+
+    def test_a_painting_video_over_the_retired_rect_is_red(self) -> None:
+        scored = probe.score_refusal(
+            self._sample(painting=[painting_video(BIG_INSTANCE)]), self.RETIRE, True
+        )
+        assert scored["verdict"] is False
+        assert "overlap the retired movie" in scored["reason"]
+
+    def test_a_painting_video_elsewhere_on_the_slide_does_not_refute_the_refusal(self) -> None:
+        elsewhere = {"x": 1200.0, "y": 100.0, "w": 300.0, "h": 200.0}
+        scored = probe.score_refusal(self._sample(painting=[painting_video(elsewhere)]), self.RETIRE, True)
+        assert scored["verdict"] is True
+
+    def test_an_edge_touching_video_is_not_an_overlap(self) -> None:
+        touching = {"x": BIG_INSTANCE["x"] + BIG_INSTANCE["w"], "y": BIG_INSTANCE["y"], "w": 200.0, "h": 100.0}
+        scored = probe.score_refusal(self._sample(painting=[painting_video(touching)]), self.RETIRE, True)
+        assert scored["verdict"] is True
+
+    def test_a_pooled_decoder_for_the_retired_asset_is_red(self) -> None:
+        scored = probe.score_refusal(
+            self._sample(snapshot=[{"key": "untitled.mov", "elId": 1}]), self.RETIRE, True
+        )
+        assert scored["verdict"] is False
+        assert "pooled/preserved" in scored["reason"]
+
+    def test_another_assets_pooled_decoder_is_irrelevant(self) -> None:
+        scored = probe.score_refusal(self._sample(snapshot=[{"key": "wa0125.mov"}]), self.RETIRE, True)
+        assert scored["verdict"] is True
+
+    def test_the_pool_is_not_consulted_when_no_runtime_is_installed(self) -> None:
+        scored = probe.score_refusal(self._sample(snapshot=None), self.RETIRE, False)
+        assert scored["verdict"] is True
+
+    def test_an_unreadable_pool_census_is_red_never_a_silently_clean_one(self) -> None:
+        scored = probe.score_refusal(self._sample(snapshot={"error": "boom"}), self.RETIRE, True)
+        assert scored["verdict"] is False
+        assert "preserve snapshot is unreadable" in scored["reason"]
+
+    def test_a_missing_sample_is_red_not_a_free_pass(self) -> None:
+        scored = probe.score_refusal(None, self.RETIRE, True)
+        assert scored["verdict"] is False
+        assert "no refusal evidence" in scored["reason"]
+
+    @pytest.mark.parametrize("stage_map", [None, {"s": 0, "sy": 0, "offsetWidth": 0, "offsetHeight": 0}])
+    def test_an_untrustworthy_stage_map_is_red(self, stage_map: Any) -> None:
+        scored = probe.score_refusal(self._sample(stage_map=stage_map), self.RETIRE, True)
+        assert scored["verdict"] is False
+        assert "stage map" in scored["reason"]
+
+    def test_a_malformed_painting_result_is_red(self) -> None:
+        scored = probe.score_refusal(self._sample(painting={"error": "no checkVisibility"}), self.RETIRE, True)
+        assert scored["verdict"] is False
+
+    def test_score_refusals_is_keyed_by_the_plans_own_boundary(self) -> None:
+        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        scored = probe.score_refusals({"refused1to2": self._sample()}, {"retire": retire}, True)
+        assert list(scored) == ["refused1to2"]
+        assert scored["refused1to2"]["verdict"] is True
+
+    def test_a_plan_without_a_retire_scores_no_refusal_at_all(self) -> None:
+        assert probe.score_refusals({}, {"retire": None}, True) == {}
+
+
+class TestRefusedArmTable:
+    """The arm expectations, derived from the plan rather than hard-wired."""
+
+    def _result(self) -> dict[str, Any]:
+        """The base artifact, re-expressed for a plan that RETIRES the 1->2
+        boundary: the carry verdict goes False and the positive verdict carries the
+        refusal. Arm B is continuity-off and keeps today's expectations."""
+        result = TestOverallStatusTruthTable()._base_result()
+        result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
+        for entry in (result["arms"]["A"], result["arms"]["C"], result["attach"]):
+            entry["continue1to2"] = {"verdict": False}
+            entry["refused1to2"] = {"verdict": True, "reason": None}
+        return result
+
+    def test_a_retired_boundary_that_did_not_carry_and_proved_it_passes(self) -> None:
+        status, reasons = probe.overall_status(self._result())
+        assert status == "pass"
+        assert reasons == []
+
+    @pytest.mark.parametrize("arm", ["A", "C", "attach"])
+    def test_carrying_a_retired_boundary_fails_the_arm(self, arm: str) -> None:
+        """The runtime ignored the refusal: the movie crossed the boundary anyway."""
+        result = self._result()
+        entry = result["attach"] if arm == "attach" else result["arms"][arm]
+        entry["continue1to2"] = {"verdict": True}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("expected False (the plan retires this boundary)" in reason for reason in reasons)
+
+    @pytest.mark.parametrize("arm", ["A", "C", "attach"])
+    def test_a_false_positive_half_fails_the_arm_with_its_reason(self, arm: str) -> None:
+        """A painting video still over the rect, or a pooled decoder for the key."""
+        result = self._result()
+        entry = result["attach"] if arm == "attach" else result["arms"][arm]
+        entry["refused1to2"] = {"verdict": False, "reason": "1 painting video(s) still overlap the retired movie"}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("still overlap the retired movie" in reason for reason in reasons)
+
+    @pytest.mark.parametrize("arm", ["A", "C", "attach"])
+    def test_a_missing_positive_half_fails_with_its_own_reason(self, arm: str) -> None:
+        """"Did not continue" without the positive half is vacuous -- and it must
+        not read as inconclusive either, which would hide it behind the sampler."""
+        result = self._result()
+        entry = result["attach"] if arm == "attach" else result["arms"][arm]
+        del entry["refused1to2"]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("has no refused1to2 verdict, so the refusal is unproven" in reason for reason in reasons)
+
+    def test_an_inconclusive_carry_verdict_still_reads_inconclusive(self) -> None:
+        result = self._result()
+        result["arms"]["A"]["continue1to2"] = {"verdict": None}
+        status, _ = probe.overall_status(result)
+        assert status == "inconclusive"
+
+    def test_arm_b_keeps_todays_expectations_under_a_refusal(self) -> None:
+        """Continuity is off there, so the retire says nothing about it."""
+        result = self._result()
+        assert result["arms"]["B"]["continue1to2"] == {"verdict": True}
+        assert probe.overall_status(result)[0] == "pass"
+
+    def test_without_a_retire_a_carried_boundary_must_still_be_true(self) -> None:
+        result = TestOverallStatusTruthTable()._base_result()
+        result["arms"]["A"]["continue1to2"] = {"verdict": False}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("expected True (the plan carries this boundary)" in reason for reason in reasons)
+
+    def test_an_unknown_refused_boundary_name_is_ignored_rather_than_trusted(self) -> None:
+        result = TestOverallStatusTruthTable()._base_result()
+        result["groundTruth"]["refusedBoundaries"] = ["continue9to10"]
+        assert probe.overall_status(result)[0] == "pass"
+
+
+def expectation_slide(ordinal: int, rects: list[tuple[str, str, bool | None]], status: str | None = None) -> dict[str, Any]:
+    """One visible-pass record as the scorer leaves it: each rect carries the
+    expectation the plan stated and the verdict it earned against that expectation."""
+    verdict = all(met is True for _, _, met in rects)
+    return {
+        "playerIndex": ordinal - 1, "originalOrdinal": ordinal,
+        "verdict": verdict, "status": status or ("pass" if verdict else "fail"),
+        "perRect": [{"label": label, "expect": expect, "verdict": met} for label, expect, met in rects],
+    }
+
+
+class TestVisibleExpectationModel:
+    """Plan §4: both passes are scored against the plan's own per-rect
+    expectations, and each proves itself two-sided from the inside."""
+
+    LIVE_OK = (f"{BIG_ASSET}#1", "live", True)
+    LIVE_RED = (f"{BIG_ASSET}#1", "live", False)
+    DEAD_OK = (f"{BIG_ASSET}#1", "dead", True)
+    DEAD_RED = (f"{BIG_ASSET}#1", "dead", False)
+
+    def _result(self) -> dict[str, Any]:
+        """The baseline artifact: slide 2 is dead-expected in BOTH passes because
+        the plan refuses to carry the 1->2 boundary."""
+        result = TestOverallStatusTruthTable()._base_result()
+        result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
+        result["groundTruth"]["rectExpectations"] = probe.visible_expectations(
+            synthetic_plan(), RETIRED_RUNTIME
+        )
+        for entry in (result["arms"]["A"], result["arms"]["C"], result["attach"]):
+            entry["continue1to2"] = {"verdict": False}
+            entry["refused1to2"] = {"verdict": True, "reason": None}
+        slides = [
+            expectation_slide(1, [self.LIVE_OK]), expectation_slide(2, [self.DEAD_OK]),
+            expectation_slide(3, [self.LIVE_OK]), expectation_slide(4, [self.LIVE_OK]),
+        ]
+        for name in ("V", "Voff"):
+            result["visible"][name]["slides"] = [dict(slide) for slide in slides]
+            result["visible"][name]["verdict"] = True
+        return result
+
+    def test_both_passes_meeting_every_expectation_pass(self) -> None:
+        status, reasons = probe.overall_status(self._result())
+        assert status == "pass"
+        assert reasons == []
+
+    def test_v_slide_two_live_where_dead_was_expected_fails(self) -> None:
+        """The carried movie is still painting on the refused destination."""
+        result = self._result()
+        result["visible"]["V"]["slides"][1] = expectation_slide(2, [self.DEAD_RED])
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("visible pass V slide 2 does not meet its per-rect expectations" in r for r in reasons)
+
+    def test_v_slide_four_dead_where_live_was_expected_fails(self) -> None:
+        """The surviving carry must still be visibly live -- a refusal elsewhere is
+        no licence for a dead bridge destination."""
+        result = self._result()
+        result["visible"]["V"]["slides"][3] = expectation_slide(4, [self.LIVE_RED])
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("visible pass V slide 4 does not meet its per-rect expectations" in r for r in reasons)
+
+    def test_voff_slide_two_live_where_dead_was_expected_fails(self) -> None:
+        result = self._result()
+        result["visible"]["Voff"]["slides"][1] = expectation_slide(2, [self.DEAD_RED])
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("visible pass Voff slide 2" in r for r in reasons)
+
+    def test_a_pass_with_no_live_read_rect_is_always_red_and_fails(self) -> None:
+        """Every rect dead-expected and dead: the slides all "pass", but the pass
+        has proved nothing about an instrument that reds out on anything."""
+        result = self._result()
+        result["visible"]["V"]["slides"] = [
+            expectation_slide(ordinal, [self.DEAD_OK]) for ordinal in (1, 2, 3, 4)
+        ]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("no live-expected rect that read live" in r for r in reasons)
+
+    def test_a_pass_that_never_read_its_dead_rect_dead_is_blind_and_fails(self) -> None:
+        """Slide 2's dead expectation is the only proof the pass can see a frozen
+        movie at all; an inconclusive slide 2 does not supply it."""
+        result = self._result()
+        result["visible"]["V"]["slides"][1] = {
+            "playerIndex": 1, "originalOrdinal": 2, "verdict": None, "status": "inconclusive", "perRect": [],
+        }
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("blind to a frozen movie" in r for r in reasons)
+
+    def test_an_inconclusive_slide_never_counts_as_meeting_an_expectation(self) -> None:
+        slide = expectation_slide(2, [self.DEAD_OK], status="inconclusive")
+        counts = probe.visible_rect_expectation_counts({"slides": [slide]})
+        assert counts == {"liveTotal": 0, "liveMet": 0, "deadTotal": 0, "deadMet": 0}
+
+    def test_a_pass_without_stated_expectations_keeps_todays_rules_exactly(self) -> None:
+        """A record with no per-rect expectations at all (the pre-refusal shape) is
+        still scored by the V-live-everywhere / Voff-red-at-the-boundary rules."""
+        result = TestOverallStatusTruthTable()._base_result()
+        assert probe.overall_status(result) == ("pass", [])
+        result["visible"]["Voff"]["slides"][1]["verdict"] = True
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("blind to the raw-export defect" in r for r in reasons)
+
+    def test_counts_are_two_sided_and_per_pass(self) -> None:
+        counts = probe.visible_rect_expectation_counts(self._result()["visible"]["V"])
+        assert counts == {"liveTotal": 3, "liveMet": 3, "deadTotal": 1, "deadMet": 1}
+
+
+class TestExpectedRectsCarryTheirExpectation:
+    def test_an_asset_the_plan_calls_dead_is_labelled_dead(self) -> None:
+        expectations = {1: {BIG_ASSET: "dead"}}
+        rects = probe.expected_screen_rects({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, IDENTITY_STAGE_MAP, expectations)
+        assert [rect["expect"] for rect in rects] == ["dead"]
+
+    def test_an_unmentioned_asset_is_expected_live_which_is_the_stricter_reading(self) -> None:
+        rects = probe.expected_screen_rects({1: {BIG_ASSET: [BIG_INSTANCE]}}, 1, IDENTITY_STAGE_MAP, {1: {}})
+        assert [rect["expect"] for rect in rects] == ["live"]
+
+    def test_without_expectations_every_rect_is_live_exactly_as_before(self) -> None:
+        rects = probe.expected_screen_rects(VISIBLE_INSTANCES, 0, IDENTITY_STAGE_MAP)
+        assert [rect["expect"] for rect in rects] == ["live"]
+
+    def test_every_instance_of_a_dead_asset_is_dead(self) -> None:
+        rects = probe.expected_screen_rects(
+            {2: {BIG_ASSET: [BIG_INSTANCE, SMALL_INSTANCE]}}, 2, IDENTITY_STAGE_MAP, {2: {BIG_ASSET: "dead"}}
+        )
+        assert [rect["expect"] for rect in rects] == ["dead", "dead"]
+
+
+class TestPaintingVideoOnADeadRect:
+    """A dead-expected rect must have NO painting `<video>` matched to it: the plan
+    says that movie is back under the raw player, so a `<video>` there is a defect
+    however live its pixels look."""
+
+    def _expected(self, expect: str) -> list[dict[str, Any]]:
+        return [{"label": "movie1#1", "authored": dict(EXPECTED_SCREEN_RECT), "expect": expect}]
+
+    def test_a_video_on_a_dead_expected_rect_is_unexpected(self) -> None:
+        videos = [{"src": "Untitled.mov", "elId": 1, "authored": dict(EXPECTED_SCREEN_RECT)}]
+        scored = probe.match_painting_videos(videos, self._expected("dead"))
+        assert scored["verdict"] is False
+        assert len(scored["unexpectedVideos"]) == 1
+        assert scored["unexpectedVideos"][0]["bestExpect"] == "dead"
+        assert scored["duplicateVideos"] == []
+
+    def test_the_same_video_on_a_live_expected_rect_claims_it(self) -> None:
+        videos = [{"src": "Untitled.mov", "elId": 1, "authored": dict(EXPECTED_SCREEN_RECT)}]
+        assert probe.match_painting_videos(videos, self._expected("live"))["verdict"] is True
+
+    def test_a_dead_expected_rect_with_no_painting_video_is_green(self) -> None:
+        assert probe.match_painting_videos([], self._expected("dead"))["verdict"] is True
+
+
+class TestDeadExpectationEndToEndInARecord:
+    """The wiring from the plan's expectation to the real scorer and the DOM
+    instance check, which the per-function tests above cannot see."""
+
+    STAGE_MAP = PAINT_STAGE_MAPS["full-bleed"]
+
+    def _record(self, expectations: Any, painting: Any = None) -> dict[str, Any]:
+        from obed_edom.html_alpha_probe import score_visible_slide
+
+        host = FakeHost(
+            scene_ids=["s", "s"], stage_map=dict(self.STAGE_MAP),
+            painting=[] if painting is None else painting, shot=png_b64(*PAINT_VIEWPORT),
+        )
+        clock = FakeClock()
+        instances = {0: {"Untitled.mov": [probe.to_authored_rect(EXPECTED_SCREEN_RECT, self.STAGE_MAP)]}}
+        return probe.visible_slide_record(
+            host, VISIBLE_SLIDE, instances, PAINT_VIEWPORT, scorer=score_visible_slide,
+            expectations=expectations, now=clock.now, sleep=clock.sleep,
+        )
+
+    def test_a_frozen_rect_the_plan_expects_dead_is_green(self) -> None:
+        record = self._record({0: {"Untitled.mov": "dead"}})
+        assert record["verdict"] is True and record["status"] == "pass"
+        assert record["expectedRects"][0]["expect"] == "dead"
+        assert record["perRect"][0]["expect"] == "dead"
+
+    def test_the_same_frozen_rect_is_red_when_the_plan_expects_it_live(self) -> None:
+        record = self._record({0: {"Untitled.mov": "live"}})
+        assert record["verdict"] is False
+        assert record["perRect"][0]["expect"] == "live"
+
+    def test_a_painting_video_on_a_dead_expected_rect_reds_the_slide(self) -> None:
+        """Pixels alone call this slide green -- only the DOM can see that the
+        refused movie still has a `<video>` on its rect."""
+        record = self._record(
+            {0: {"Untitled.mov": "dead"}}, painting=[painting_video(EXPECTED_SCREEN_RECT)]
+        )
+        assert record["verdict"] is False and record["status"] == "fail"
+        assert record["instanceCheck"]["unexpectedVideos"][0]["bestExpect"] == "dead"

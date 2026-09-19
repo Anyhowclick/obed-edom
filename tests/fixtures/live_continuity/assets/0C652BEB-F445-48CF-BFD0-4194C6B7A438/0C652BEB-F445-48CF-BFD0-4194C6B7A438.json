@@ -20,7 +20,113 @@
      "beginTime": 0,
      "effects": []
     }
-   ]
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 633.6908569335938,
+          "pointY": 802.8660278320312
+         },
+         "width": 181,
+         "height": 161
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "8A48DE94-6ECC-43F5-AE5A-570F6693C0BA",
+        "initialState": {
+         "position": {
+          "pointX": 1386.494384765625,
+          "pointY": 781.62939453125
+         },
+         "width": 354,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "2D39A412-82DB-4A01-B4A3-22753631E07D",
+        "initialState": {
+         "position": {
+          "pointX": 1464.5096435546875,
+          "pointY": 290.78968811035156
+         },
+         "width": 354,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "E432435C-ACB6-4EAE-A3C1-64AAA3FA4E61",
+        "initialState": {
+         "position": {
+          "pointX": 917.5210571289062,
+          "pointY": 348.19427490234375
+         },
+         "width": 353,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "F9AFED1B-E2D7-47D4-942E-14992C808383",
+        "initialState": {
+         "position": {
+          "pointX": 586.8517074584961,
+          "pointY": 930.5361938476562
+         },
+         "width": 960,
+         "height": 276
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 966.6526489257812,
+          "pointY": 831.400390625
+         },
+         "width": 353,
+         "height": 313
+        }
+       }
+      ]
+     }
+    ]
+   }
   },
   {
    "effects": [
@@ -30,7 +136,113 @@
      "beginTime": 0,
      "effects": []
     }
-   ]
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 633.6908569335938,
+          "pointY": 802.8660278320312
+         },
+         "width": 181,
+         "height": 161
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "8A48DE94-6ECC-43F5-AE5A-570F6693C0BA",
+        "initialState": {
+         "position": {
+          "pointX": 1386.494384765625,
+          "pointY": 781.62939453125
+         },
+         "width": 354,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "2D39A412-82DB-4A01-B4A3-22753631E07D",
+        "initialState": {
+         "position": {
+          "pointX": 1464.5096435546875,
+          "pointY": 290.78968811035156
+         },
+         "width": 354,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "E432435C-ACB6-4EAE-A3C1-64AAA3FA4E61",
+        "initialState": {
+         "position": {
+          "pointX": 917.5210571289062,
+          "pointY": 348.19427490234375
+         },
+         "width": 353,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "F9AFED1B-E2D7-47D4-942E-14992C808383",
+        "initialState": {
+         "position": {
+          "pointX": 586.8517074584961,
+          "pointY": 930.5361938476562
+         },
+         "width": 960,
+         "height": 276
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 966.6526489257812,
+          "pointY": 831.400390625
+         },
+         "width": 353,
+         "height": 313
+        }
+       }
+      ]
+     }
+    ]
+   }
   },
   {
    "effects": [
@@ -273,13 +485,120 @@
            }
           ]
          },
-         "effects": []
+         "effects": [],
+         "objectID": "F9AFED1B-E2D7-47D4-942E-14992C808383"
         }
        ]
       }
      ]
     }
-   ]
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 633.6908569335938,
+          "pointY": 802.8660278320312
+         },
+         "width": 181,
+         "height": 161
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "8A48DE94-6ECC-43F5-AE5A-570F6693C0BA",
+        "initialState": {
+         "position": {
+          "pointX": 1386.494384765625,
+          "pointY": 781.62939453125
+         },
+         "width": 354,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "2D39A412-82DB-4A01-B4A3-22753631E07D",
+        "initialState": {
+         "position": {
+          "pointX": 1464.5096435546875,
+          "pointY": 290.78968811035156
+         },
+         "width": 354,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "E432435C-ACB6-4EAE-A3C1-64AAA3FA4E61",
+        "initialState": {
+         "position": {
+          "pointX": 917.5210571289062,
+          "pointY": 348.19427490234375
+         },
+         "width": 353,
+         "height": 313
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "F9AFED1B-E2D7-47D4-942E-14992C808383",
+        "initialState": {
+         "position": {
+          "pointX": 586.8517074584961,
+          "pointY": 930.5361938476562
+         },
+         "width": 960,
+         "height": 276
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 966.6526489257812,
+          "pointY": 831.400390625
+         },
+         "width": 353,
+         "height": 313
+        }
+       }
+      ]
+     }
+    ]
+   }
   },
   {
    "effects": [
@@ -344,7 +663,25 @@
      "effects": [],
      "duration": 1.5
     }
-   ]
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     }
+    ]
+   }
   }
  ]
 }

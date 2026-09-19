@@ -194,7 +194,8 @@
          }
         ]
        },
-       "effects": []
+       "effects": [],
+       "objectID": "6BB39942-6C61-4763-839D-777C09E7E594"
       },
       {
        "name": "apple:movie-start",
@@ -376,13 +377,90 @@
            }
           ]
          },
-         "effects": []
+         "effects": [],
+         "objectID": "CBACAF27-B918-47C2-AB45-3ED71B6B394B"
         }
        ]
       }
      ]
     }
-   ]
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "CBACAF27-B918-47C2-AB45-3ED71B6B394B",
+        "initialState": {
+         "position": {
+          "pointX": 1408.7864990234375,
+          "pointY": 971.2469482421875
+         },
+         "width": 671,
+         "height": 195
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 1109.0152587890625,
+          "pointY": 841.4172973632812
+         },
+         "width": 266,
+         "height": 236
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "6BB39942-6C61-4763-839D-777C09E7E594",
+        "initialState": {
+         "position": {
+          "pointX": 586.8517074584961,
+          "pointY": 930.5361938476562
+         },
+         "width": 960,
+         "height": 276
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 726.633544921875,
+          "pointY": 802.8660278320312
+         },
+         "width": 178,
+         "height": 157
+        }
+       }
+      ]
+     }
+    ]
+   }
   },
   {
    "effects": [
@@ -447,7 +525,81 @@
      "effects": [],
      "duration": 1.5
     }
-   ]
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 333.8968811035156,
+          "pointY": 95.70537567138672
+         },
+         "width": 671,
+         "height": 195
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 131.77650451660156,
+          "pointY": 116.69591522216797
+         },
+         "width": 266,
+         "height": 236
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 478.271484375,
+          "pointY": 136.31072998046875
+         },
+         "width": 960,
+         "height": 276
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 87.22805786132812,
+          "pointY": 77.09178161621094
+         },
+         "width": 178,
+         "height": 157
+        }
+       }
+      ]
+     }
+    ]
+   }
   }
  ]
 }

@@ -194,11 +194,45 @@
          }
         ]
        },
-       "effects": []
+       "effects": [],
+       "objectID": "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC"
       }
      ]
     }
-   ]
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "E4728E7D-2032-4D7F-83D6-8BE0EFB7B7BC",
+        "initialState": {
+         "position": {
+          "pointX": 961.2545776367188,
+          "pointY": 888.0181884765625
+         },
+         "width": 1274,
+         "height": 364
+        }
+       }
+      ]
+     }
+    ]
+   }
   },
   {
    "effects": [
@@ -263,7 +297,25 @@
      "effects": [],
      "duration": 1.5
     }
-   ]
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     }
+    ]
+   }
   }
  ]
 }

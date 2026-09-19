@@ -4,24 +4,32 @@ identity and playback clock through the same boundaries P2 proved offline (offli
 in `scripts/p2_recovery_html_adversarial.py`), when driven through `LiveOutputHost`
 instead of a bare page?
 
-Three arms in one artifact:
-  A. continuity on -> continue1to2, restart2to3, continue3to4 all TRUE.
+Three arms in one artifact, each boundary's expectation DERIVED from the installed
+plan, never hard-wired: a boundary the plan carries must read TRUE; a boundary the
+plan RETIRES must read FALSE and also earn the positive `refused*` verdict (no
+painting `<video>` over the movie's rect on the settled destination slide, and
+nothing pooled or preserved for its asset), because "did not continue" on its own
+asserts nothing.
+  A. continuity on -> every carried boundary TRUE, every retired one refused.
   B. OBED_LIVE_CONTINUITY=off -> raw player; continue3to4 expected FALSE (the
      Keynote HTML-export bug the continuity runtime repairs); 1->2 is reported as
      measured, not assumed.
   C. continuity on, but the bridge boundary is stripped by a PROBE-ONLY monkeypatch
      of `ContinuityPlan.to_runtime` (no product switch) -> continue3to4 FALSE while
-     continue1to2 stays TRUE (isolates the repair to the 3->4 boundary).
+     the 1->2 boundary keeps arm A's expectation (isolates the repair to the 3->4
+     boundary).
 Then one ATTACH-mode run (arm A only): the host attaches over CDP to a headless
 Chrome this script launches itself, confirms `qualified`, all three verdicts, and a
 transparent page background, then kills that Chrome by pid.
 
 Finally two VISIBLE-CONTENT passes in their own host sessions (no sampler: a
 screenshot burst would perturb the rAF sampler's clock, so they are never run
-inside an arm) -- `V` (continuity on, every settled slide must be live) and
-`Voff` (continuity off, the raw export's defect must show as RED at the 1->2
-destination slide while slide 1 stays live, proving the instrument is neither
-blind nor always-red).
+inside an arm) -- `V` (continuity on) and `Voff` (continuity off, the raw
+export's reference). Every authored movie rect carries a plan-derived
+expectation, live or dead, and both are scored: each pass must meet all of them
+and must itself contain a live-expected rect that read live and (when the plan
+states one) a dead-expected rect that read dead, proving the instrument neither
+blind nor always-red from the inside.
 
 Verdicts are decoder-identity + playback-clock based (a stable element id, a
 monotonic non-decreasing `video.currentTime`, and -- when continuity is installed --
@@ -47,7 +55,7 @@ import time
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
 
 import cv2
 import numpy as np
@@ -102,6 +110,18 @@ VISIBLE_SETTLE_TIMEOUT_S = 10.0
 # A painting `<video>` claims an expected instance rect at the same IoU the
 # runtime's own owner resolution uses.
 INSTANCE_IOU_MIN = 0.75
+
+# Per-rect expectations the plan states for a settled slide (see
+# `rect_expectations`), and the positive verdict each refused boundary must earn.
+LIVE, DEAD = "live", "dead"
+REFUSAL_VERDICT_KEY = {
+    "continue1to2": "refused1to2",
+    "restart2to3": "refused2to3",
+    "continue3to4": "refused3to4",
+}
+# A painting `<video>` overlaps a retired movie's rect when it does so by more
+# than this in authored px -- edge-touching and AA seams are not an overlap.
+REFUSAL_OVERLAP_MIN_PX = 1.0
 
 # In headless Chrome, --window-size=W,H yields innerHeight H-32 (chrome window
 # chrome persists even headless) -- reuse live_host_probe's measured compensation
@@ -166,6 +186,18 @@ PAINTING_VIDEOS_JS = r"""
     });
   });
   return out;
+})()
+"""
+
+# The runtime's own pool/preserve census, read once at settle. A runtime that is
+# not installed answers `null`; anything else that is not a list is an error
+# object, never a silently clean census.
+PRESERVE_SNAPSHOT_JS = r"""
+(function(){
+  try {
+    if (!(window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.snapshot)) return null;
+    return window.__OBED_P2_PRESERVE__.snapshot();
+  } catch (e) { return {error: String(e)}; }
 })()
 """
 
@@ -310,6 +342,122 @@ def ground_truth_plan(export_root: Path, slides: list[dict[str, Any]]) -> Contin
     return plan
 
 
+def runtime_of(plan: ContinuityPlan) -> dict[str, Any]:
+    """The runtime plan the host will install -- the probe's own source of truth for
+    what each boundary is supposed to do. A plan that does not translate cannot be
+    scored against any expectation at all."""
+    runtime = plan.to_runtime()
+    if isinstance(runtime, Unsupported):
+        raise SystemExit(f"fixture's plan does not translate to a runtime plan: {runtime.reason}")
+    return runtime
+
+
+def matches_asset_keys(asset: Any, asset_keys: Sequence[str]) -> bool:
+    """The runtime's own `movieAssetKey` test: an asset key is a lowercase substring
+    of the source."""
+    lowered = str(asset or "").lower()
+    return any(key and str(key).lower() in lowered for key in asset_keys)
+
+
+def runtime_asset_keys(runtime: dict[str, Any], movie_key: Any) -> list[str]:
+    movie = (runtime.get("movies") or {}).get(movie_key)
+    keys = movie.get("assetKeys") if isinstance(movie, dict) else None
+    return [str(key).lower() for key in keys] if isinstance(keys, list) else []
+
+
+def retire_fact(
+    plan: ContinuityPlan, runtime: dict[str, Any], boundary_keys: dict[int, str]
+) -> dict[str, Any] | None:
+    """The one `retire` a runtime plan may carry, resolved to the boundary verdict it
+    refuses, the destination slide it lands on, and the asset keys and authored rects
+    its positive check needs. No retire => None, and every expectation below stays
+    exactly what it was before refusals existed."""
+    entries = [
+        boundary for boundary in runtime.get("boundaries") or []
+        if isinstance(boundary, dict) and boundary.get("action") == "retire"
+    ]
+    if not entries:
+        return None
+    if len(entries) > 1:
+        raise SystemExit("runtime plan carries more than one retire boundary")
+    entry = entries[0]
+    scene, movie_key = entry.get("atScene"), entry.get("movieKey")
+    boundary_key = boundary_keys.get(scene)
+    if boundary_key is None:
+        raise SystemExit(f"retire boundary at scene {scene!r} is not one of the boundaries under test")
+    asset_keys = runtime_asset_keys(runtime, movie_key)
+    if not asset_keys:
+        raise SystemExit(f"retire boundary names movie key {movie_key!r}, which the plan does not define")
+    player_index = next((p for p, s in plan.scene_index_by_player.items() if s == scene), None)
+    if player_index is None:
+        raise SystemExit(f"retire boundary at scene {scene} has no destination slide")
+    rects = [
+        _authored_rect(rect)
+        for asset, instances in (plan.slide_instances.get(player_index) or {}).items()
+        if matches_asset_keys(asset, asset_keys)
+        for rect in instances
+    ]
+    if not rects:
+        raise SystemExit(f"retired movie {movie_key!r} has no authored instance on player index {player_index}")
+    return {
+        "movieKey": movie_key,
+        "atScene": scene,
+        "boundaryKey": boundary_key,
+        "verdictKey": REFUSAL_VERDICT_KEY[boundary_key],
+        "playerIndex": player_index,
+        "originalOrdinal": player_index + 1,
+        "assetKeys": asset_keys,
+        "rects": rects,
+    }
+
+
+def rect_expectations(
+    plan: ContinuityPlan, runtime: dict[str, Any], *, continuity_on: bool
+) -> dict[int, dict[str, str]]:
+    """Per slide, per asset: live or dead, derived from the plan alone.
+
+    The first slide is live. The destination of a restart or a bridge is live in
+    both passes (the export starts a fresh element there). The destination of a
+    RETIRED boundary is dead in both. The destination of a carried (implicit pin)
+    boundary is live with the runtime installed and dead without it -- a
+    geometry-static Magic Move leaves the raw player's movie frozen.
+    """
+    retired_by_scene: dict[Any, list[str]] = {}
+    action_by_scene: dict[Any, str] = {}
+    for boundary in runtime.get("boundaries") or []:
+        if not isinstance(boundary, dict):
+            continue
+        scene = boundary.get("atScene")
+        if boundary.get("action") == "retire":
+            retired_by_scene.setdefault(scene, []).extend(runtime_asset_keys(runtime, boundary.get("movieKey")))
+        else:
+            action_by_scene[scene] = str(boundary.get("action"))
+    expectations: dict[int, dict[str, str]] = {}
+    for position, player_index in enumerate(sorted(plan.scene_index_by_player)):
+        scene = plan.scene_index_by_player[player_index]
+        action = action_by_scene.get(scene)
+        retired = retired_by_scene.get(scene) or []
+        per_asset: dict[str, str] = {}
+        for asset in plan.slide_instances.get(player_index) or {}:
+            if position == 0:
+                per_asset[asset] = LIVE
+            elif matches_asset_keys(asset, retired):
+                per_asset[asset] = DEAD
+            elif action in ("restart", "bridge"):
+                per_asset[asset] = LIVE
+            else:
+                per_asset[asset] = LIVE if continuity_on else DEAD
+        expectations[player_index] = per_asset
+    return expectations
+
+
+def visible_expectations(plan: ContinuityPlan, runtime: dict[str, Any]) -> dict[str, dict[int, dict[str, str]]]:
+    return {
+        "V": rect_expectations(plan, runtime, continuity_on=True),
+        "Voff": rect_expectations(plan, runtime, continuity_on=False),
+    }
+
+
 def ground_truth_facts(plan: ContinuityPlan) -> dict[str, Any]:
     """Independent, offline ground truth (never injected into the host): the
     bridging asset, the scene onset of each of the three boundaries under test, and
@@ -336,7 +484,7 @@ def ground_truth_facts(plan: ContinuityPlan) -> dict[str, Any]:
     pin_rect = (pin_movie.dst_rect or pin_movie.src_rect)
     if pin_rect is None or bridge_movie.src_rect is None or bridge_movie.dst_rect is None:
         raise SystemExit("fixture's continuity plan is missing a required rect")
-    return {
+    facts = {
         "asset": bridge_movie.asset,
         "onset1to2": plan.scene_index_by_player[ordered_players[1]],
         "boundaryPlayerIndex": ordered_players[1],
@@ -347,6 +495,17 @@ def ground_truth_facts(plan: ContinuityPlan) -> dict[str, Any]:
         "destRect": bridge_movie.dst_rect.as_dict(),
         "canvas": dict(plan.canvas),
     }
+    runtime = runtime_of(plan)
+    retire = retire_fact(plan, runtime, {
+        facts["onset1to2"]: "continue1to2",
+        facts["restartScene"]: "restart2to3",
+        facts["bridgeScene"]: "continue3to4",
+    })
+    facts["retire"] = retire
+    facts["refusedBoundaries"] = [retire["boundaryKey"]] if retire else []
+    facts["refusals"] = [dict(item) for item in getattr(plan, "refusals", ()) if isinstance(item, dict)]
+    facts["rectExpectations"] = visible_expectations(plan, runtime)
+    return facts
 
 
 @contextmanager
@@ -413,15 +572,21 @@ def advance_until_original_slide(
         raise RuntimeError(f"did not reach slide {target}; stopped at {observed.original_slide}")
 
 
-def drive_and_sample(player: LiveOutputHost) -> list[dict[str, Any]]:
+def drive_and_sample(
+    player: LiveOutputHost, *, observer: Callable[[int], None] | None = None
+) -> list[dict[str, Any]]:
+    """Slide 2 is the 1->2 magic move, 3 the dissolve (which may straddle slide-2
+    builds), 4 the 3->4 magic move. `observer` is called once on each settled slide
+    -- the only hook the refusal evidence needs, and never a screenshot."""
     transport = player._require_transport()
     transport.evaluate(SAMPLER_JS)
     transport.evaluate(ENSURE_PLAYING_JS)
     wait_for_decode(player)
     time.sleep(CLICK_DELAY_S)
-    advance_until_original_slide(player, 2)  # 1->2 magic move
-    advance_until_original_slide(player, 3)  # 2->3 dissolve (may straddle slide-2 builds)
-    advance_until_original_slide(player, 4)  # 3->4 magic move
+    for ordinal in (2, 3, 4):
+        advance_until_original_slide(player, ordinal)
+        if observer is not None:
+            observer(ordinal)
     time.sleep(POST_ADVANCE_SETTLE_S)
     samples = transport.evaluate("window.__obedContinuityProbe__.samples")
     return samples if isinstance(samples, list) else []
@@ -889,6 +1054,83 @@ def score_boundaries(samples: list[dict[str, Any]], facts: dict[str, Any], runti
     return {"continue1to2": v12, "restart2to3": v23, "continue3to4": v34}
 
 
+def rects_overlap(a: dict[str, float], b: dict[str, float], min_px: float = REFUSAL_OVERLAP_MIN_PX) -> bool:
+    return (
+        min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]) > min_px
+        and min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"]) > min_px
+    )
+
+
+def refusal_evidence(transport: Any) -> dict[str, Any]:
+    """One lightweight triple of `evaluate`s on a settled slide -- never per rAF and
+    never a screenshot, either of which would perturb the arms' sampler clock."""
+    return {
+        "stageMap": transport.evaluate(STAGE_MAP_JS),
+        "painting": transport.evaluate(PAINTING_VIDEOS_JS),
+        "poolSnapshot": transport.evaluate(PRESERVE_SNAPSHOT_JS),
+    }
+
+
+def refusal_observer(
+    player: Any, facts: dict[str, Any], out: dict[str, Any]
+) -> Callable[[int], None] | None:
+    retire = facts.get("retire")
+    if not retire:
+        return None
+
+    def observe(ordinal: int) -> None:
+        if ordinal != retire["originalOrdinal"]:
+            return
+        wait_until_settled(player)
+        out[retire["verdictKey"]] = refusal_evidence(player._require_transport())
+
+    return observe
+
+
+def score_refusal(sample: Any, retire: dict[str, Any], runtime_installed: bool) -> dict[str, Any]:
+    """The POSITIVE half of a refused boundary: on the settled destination slide the
+    retired movie is back under the raw player -- no painting `<video>` over its
+    authored rect, and nothing pooled or preserved for its asset. "Did not continue"
+    on its own is vacuous, so every way of not knowing is a False here, never a pass."""
+    if not isinstance(sample, dict):
+        return {"verdict": False, "reason": "no refusal evidence was sampled on the destination slide"}
+    stage_map = sample.get("stageMap")
+    if not stage_map_valid(stage_map):
+        return {"verdict": False, "reason": "stage map is missing or untrustworthy at the refusal sample"}
+    try:
+        videos = painting_videos(sample.get("painting"), stage_map)
+    except VisiblePassError as exc:
+        return {"verdict": False, "reason": str(exc)}
+    over = [video for video in videos if any(rects_overlap(video["authored"], rect) for rect in retire["rects"])]
+    pooled: list[dict[str, Any]] = []
+    if runtime_installed:
+        snapshot = sample.get("poolSnapshot")
+        if not isinstance(snapshot, list):
+            return {"verdict": False, "reason": f"preserve snapshot is unreadable: {snapshot!r}"}
+        pooled = [
+            entry for entry in snapshot
+            if isinstance(entry, dict) and matches_asset_keys(entry.get("key"), retire["assetKeys"])
+        ]
+    reason = None
+    if over:
+        reason = f"{len(over)} painting video(s) still overlap the retired movie on its destination slide"
+    elif pooled:
+        reason = f"{len(pooled)} pooled/preserved decoder(s) still hold the retired movie's asset"
+    return {
+        "verdict": not over and not pooled, "paintingOverRect": over, "pooled": pooled, "reason": reason,
+    }
+
+
+def score_refusals(
+    evidence: dict[str, Any], facts: dict[str, Any], runtime_installed: bool
+) -> dict[str, Any]:
+    retire = facts.get("retire")
+    if not retire:
+        return {}
+    key = retire["verdictKey"]
+    return {key: score_refusal(evidence.get(key), retire, runtime_installed)}
+
+
 @contextmanager
 def env_override(overrides: dict[str, str | None]) -> Iterator[None]:
     previous = {key: os.environ.get(key) for key in overrides}
@@ -917,7 +1159,8 @@ def run_arm(
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
-        raw_samples = drive_and_sample(player)
+        evidence: dict[str, Any] = {}
+        raw_samples = drive_and_sample(player, observer=refusal_observer(player, facts, evidence))
         samples, invalid_count = convert_samples_to_authored(raw_samples)
         result["samples"] = samples
         result["sampleCount"] = len(samples)
@@ -926,6 +1169,7 @@ def run_arm(
         result["stageFit"] = score_stage_fit(samples, expected_stage)
         runtime_installed = result["continuity"].get("mode") == "qualified"
         result.update(score_boundaries(samples, facts, runtime_installed))
+        result.update(score_refusals(evidence, facts, runtime_installed))
     finally:
         try:
             player.stop()
@@ -1014,7 +1258,8 @@ def run_attach_arm(
                 )
                 computed_background = transport.evaluate("getComputedStyle(document.documentElement).backgroundColor")
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
-                raw_samples = drive_and_sample(player)
+                evidence: dict[str, Any] = {}
+                raw_samples = drive_and_sample(player, observer=refusal_observer(player, facts, evidence))
                 samples, invalid_count = convert_samples_to_authored(raw_samples)
                 result["samples"] = samples
                 result["sampleCount"] = len(samples)
@@ -1023,6 +1268,7 @@ def run_attach_arm(
                 result["stageFit"] = score_stage_fit(samples, expected_stage)
                 runtime_installed = result["continuity"].get("mode") == "qualified"
                 result.update(score_boundaries(samples, facts, runtime_installed))
+                result.update(score_refusals(evidence, facts, runtime_installed))
             finally:
                 try:
                     player.stop()
@@ -1112,11 +1358,16 @@ def slide_instances_of(plan: ContinuityPlan) -> dict[int, dict[str, list[Any]]]:
 
 
 def expected_screen_rects(
-    instances: dict[int, dict[str, list[Any]]], player_index: int, stage_map: dict[str, Any]
+    instances: dict[int, dict[str, list[Any]]], player_index: int, stage_map: dict[str, Any],
+    expectations: dict[int, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Each authored instance rect plus the expectation the plan states for it. An
+    asset the expectations do not mention is expected LIVE -- the stricter reading
+    in both passes, and what every rect was before refusals existed."""
     by_asset = instances.get(player_index)
     if by_asset is None:
         raise VisiblePassError(f"plan has no slide_instances for player index {player_index}")
+    stated = (expectations or {}).get(player_index) or {}
     rects: list[dict[str, Any]] = []
     for asset in sorted(by_asset):
         for index, rect in enumerate(by_asset[asset], start=1):
@@ -1125,6 +1376,7 @@ def expected_screen_rects(
                 "label": f"{asset}#{index}",
                 "authored": authored,
                 "screen": to_screen_rect(authored, stage_map),
+                "expect": DEAD if stated.get(asset) == DEAD else LIVE,
             })
     return rects
 
@@ -1161,18 +1413,23 @@ def painting_videos(raw: Any, stage_map: dict[str, Any]) -> list[dict[str, Any]]
 
 
 def match_painting_videos(videos: list[dict[str, Any]], expected: list[dict[str, Any]]) -> dict[str, Any]:
-    """Every painting `<video>` must claim exactly one expected instance rect,
+    """Every painting `<video>` must claim exactly one LIVE-expected instance rect,
     and no rect may be claimed twice -- the only evidence that separates two
-    live movies sharing one rect, which pixels alone cannot."""
+    live movies sharing one rect, which pixels alone cannot. A video painting a
+    DEAD-expected rect claims nothing: the plan says that movie is back under the
+    raw player, so a `<video>` there is unexpected however live its pixels are."""
     claims: dict[str, list[dict[str, Any]]] = {}
     unexpected: list[dict[str, Any]] = []
     for video in videos:
-        scores = [(rect_iou(video["authored"], item["authored"]), item["label"]) for item in expected]
-        best_iou, best_label = max(scores, default=(0.0, None))
-        if best_iou >= INSTANCE_IOU_MIN:
+        scores = [
+            (rect_iou(video["authored"], item["authored"]), item["label"], item.get("expect", LIVE))
+            for item in expected
+        ]
+        best_iou, best_label, best_expect = max(scores, default=(0.0, None, LIVE))
+        if best_iou >= INSTANCE_IOU_MIN and best_expect != DEAD:
             claims.setdefault(best_label, []).append(video)
         else:
-            unexpected.append({**video, "bestIou": best_iou, "bestLabel": best_label})
+            unexpected.append({**video, "bestIou": best_iou, "bestLabel": best_label, "bestExpect": best_expect})
     duplicates = [
         {"label": label, "videos": claimants} for label, claimants in claims.items() if len(claimants) > 1
     ]
@@ -1248,6 +1505,7 @@ def visible_evidence_writer(directory: Path, pass_name: str) -> Callable[[dict[s
 def visible_slide_record(
     host: Any, slide: dict[str, Any], instances: dict[int, dict[str, list[Any]]], viewport: tuple[int, int], *,
     scorer: Callable[..., Any], evidence: Callable[[dict[str, Any], list[np.ndarray]], dict[str, str]] | None = None,
+    expectations: dict[int, dict[str, str]] | None = None,
     offsets_ms: tuple[int, ...] = BURST_OFFSETS_MS, now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
@@ -1297,7 +1555,7 @@ def visible_slide_record(
         record.update(reason=f"screenshot is {wrong.shape[1]}x{wrong.shape[0]}, expected {viewport[0]}x{viewport[1]}")
         return record
     try:
-        expected = expected_screen_rects(instances, record["playerIndex"], stage_map)
+        expected = expected_screen_rects(instances, record["playerIndex"], stage_map, expectations)
         painting = painting_videos(painting_raw, stage_map)
     except VisiblePassError as exc:
         record.update(reason=str(exc))
@@ -1310,7 +1568,11 @@ def visible_slide_record(
 
     instance_check = match_painting_videos(painting, expected)
     control = control_region(stage_screen_rect(stage_map), viewport)
-    scored = scorer(frames, [{**item["screen"], "label": item["label"]} for item in expected], control)
+    scored = scorer(
+        frames,
+        [{**item["screen"], "label": item["label"], "expect": item["expect"]} for item in expected],
+        control,
+    )
     record.update(
         control=control, instanceCheck=instance_check, perRect=scored.get("perRect"), stray=scored.get("stray"),
         noiseFloor=scored.get("noiseFloor"), verdict=scored.get("verdict"), status=scored.get("status"),
@@ -1325,6 +1587,7 @@ def visible_slide_record(
 def run_visible_slides(
     host: Any, slides: list[dict[str, Any]], instances: dict[int, dict[str, list[Any]]], viewport: tuple[int, int], *,
     scorer: Callable[..., Any] | None = None, evidence: Callable[..., dict[str, str]] | None = None,
+    expectations: dict[int, dict[str, str]] | None = None,
     advance: Callable[..., None] = advance_until_original_slide, offsets_ms: tuple[int, ...] = BURST_OFFSETS_MS,
     now: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
 ) -> list[dict[str, Any]]:
@@ -1337,8 +1600,8 @@ def run_visible_slides(
         if slide["originalOrdinal"] != 1:
             advance(host, slide["originalOrdinal"])
         records.append(visible_slide_record(
-            host, slide, instances, viewport,
-            scorer=scorer, evidence=evidence, offsets_ms=offsets_ms, now=now, sleep=sleep,
+            host, slide, instances, viewport, scorer=scorer, evidence=evidence,
+            expectations=expectations, offsets_ms=offsets_ms, now=now, sleep=sleep,
         ))
     return records
 
@@ -1368,10 +1631,12 @@ def visible_stage_summary(slides: list[dict[str, Any]], expected: dict[str, floa
 def run_visible_pass(
     name: str, export_root: Path, slides: list[dict[str, Any]], plan: ContinuityPlan,
     viewport: tuple[int, int], expected_stage: dict[str, float], evidence_dir: Path,
+    expectations: dict[int, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """One visible-content pass in its own host session. No `SAMPLER_JS`: the
-    burst's captures would perturb the rAF sampler's clock, which is why this is
-    a separate pass and not an arm."""
+    """One visible-content pass in its own host session, scored against the plan's
+    own per-rect expectations for this mode. No `SAMPLER_JS`: the burst's captures
+    would perturb the rAF sampler's clock, which is why this is a separate pass and
+    not an arm."""
     force_viewport(*viewport)
     result: dict[str, Any] = {"pass": name, "status": "ok", "viewport": {"width": viewport[0], "height": viewport[1]}}
     player = LiveOutputHost(export_root, slides, headless=True)
@@ -1385,7 +1650,8 @@ def run_visible_pass(
         wait_for_decode(player)
         time.sleep(CLICK_DELAY_S)
         result["slides"] = run_visible_slides(
-            player, slides, instances, viewport, evidence=visible_evidence_writer(evidence_dir, name)
+            player, slides, instances, viewport,
+            evidence=visible_evidence_writer(evidence_dir, name), expectations=expectations,
         )
     except Exception as exc:  # noqa: BLE001 - a pass that cannot be scored is an error, never a verdict
         result["status"] = "error"
@@ -1486,43 +1752,149 @@ def visible_pass_reasons(entry: Any, label: str, expected_mode: str) -> list[str
     return reasons
 
 
+def visible_rect_expectation_counts(entry: Any) -> dict[str, int]:
+    """How many per-rect expectations a pass stated, and how many it met. Only
+    slides that were actually scored count: an inconclusive or errored slide proves
+    nothing in either direction."""
+    counts = {"liveTotal": 0, "liveMet": 0, "deadTotal": 0, "deadMet": 0}
+    for slide in visible_slides_of(entry):
+        if slide.get("status") not in ("pass", "fail"):
+            continue
+        for rect in slide.get("perRect") or []:
+            if not isinstance(rect, dict) or rect.get("expect") not in (LIVE, DEAD):
+                continue
+            prefix = LIVE if rect.get("expect") == LIVE else DEAD
+            counts[f"{prefix}Total"] += 1
+            if rect.get("verdict") is True:
+                counts[f"{prefix}Met"] += 1
+    return counts
+
+
+def plan_states_dead(result: dict[str, Any], name: str) -> bool:
+    """Whether the PLAN states any dead expectation for a pass -- read from the
+    plan, not from the records, so a slide that went inconclusive cannot quietly
+    drop the dead half of the two-sided proof."""
+    expectations = (result.get("groundTruth") or {}).get("rectExpectations")
+    per_pass = expectations.get(name) if isinstance(expectations, dict) else None
+    if not isinstance(per_pass, dict):
+        return False
+    return any(
+        expect == DEAD for slide in per_pass.values() if isinstance(slide, dict)
+        for expect in slide.values()
+    )
+
+
+def visible_expectation_reasons(entry: Any, label: str, *, requires_dead: bool = False) -> list[str]:
+    """A pass that states per-rect expectations is scored against them: every slide
+    must meet its own, and the pass must prove the instrument two-sided FROM THE
+    INSIDE -- at least one live-expected rect that read live, and, when the plan
+    states any dead expectation, at least one dead-expected rect that read dead."""
+    reasons = [
+        f"visible pass {label} slide {slide.get('originalOrdinal')} does not meet its per-rect "
+        f"expectations (status={slide.get('status')!r})"
+        for slide in visible_slides_of(entry) if slide.get("verdict") is not True
+    ]
+    counts = visible_rect_expectation_counts(entry)
+    if not counts["liveMet"]:
+        reasons.append(
+            f"visible pass {label} has no live-expected rect that read live, so the instrument is simply always-red"
+        )
+    if (requires_dead or counts["deadTotal"]) and not counts["deadMet"]:
+        reasons.append(
+            f"visible pass {label} has no dead-expected rect that read dead, so the instrument is blind to a frozen movie"
+        )
+    return reasons
+
+
+def visible_live_everywhere_reasons(entry: Any) -> list[str]:
+    """`V` without stated expectations: live on every settled slide."""
+    return [
+        f"visible pass V slide {slide.get('originalOrdinal')} is not fully live (status={slide.get('status')!r})"
+        for slide in visible_slides_of(entry) if slide.get("verdict") is not True
+    ]
+
+
+def visible_control_reasons(entry: Any, result: dict[str, Any]) -> list[str]:
+    """`Voff` without stated expectations: the instrument's own control, which must
+    be BOTH red where the raw export breaks (the 1->2 destination slide, derived
+    from the plan -- movies do keep playing before any transition) AND live on
+    slide 1: red everywhere would mean an always-red instrument, live everywhere a
+    blind one."""
+    reasons: list[str] = []
+    slides = visible_slides_of(entry)
+    first = next((slide for slide in slides if slide.get("originalOrdinal") == 1), None)
+    if first is None or first.get("verdict") is not True:
+        reasons.append("visible pass Voff slide 1 is not live, so the instrument is simply always-red")
+    expected_red = (result.get("groundTruth") or {}).get("boundaryPlayerIndex")
+    red = next((slide for slide in slides if slide.get("playerIndex") == expected_red), None)
+    if not isinstance(expected_red, int) or isinstance(expected_red, bool):
+        reasons.append("visible pass Voff expected-red slide is unknown (no groundTruth.boundaryPlayerIndex)")
+    elif red is None:
+        reasons.append(f"visible pass Voff never scored the expected-red slide (playerIndex {expected_red})")
+    elif red.get("verdict") is not False:
+        reasons.append(
+            f"visible pass Voff slide {red.get('originalOrdinal')} is not RED "
+            f"(verdict={red.get('verdict')!r}), so the instrument is blind to the raw-export defect"
+        )
+    return reasons
+
+
 def visible_reasons(result: dict[str, Any]) -> list[str]:
-    """`V` must be live on every settled slide. `Voff` is the instrument's own
-    control and must be BOTH red where the raw export breaks (the 1->2
-    destination slide, derived from the plan -- movies do keep playing before any
-    transition) AND live on slide 1: red everywhere would mean an always-red
-    instrument, live everywhere a blind one."""
+    """Both passes are scored against the plan's per-rect expectations when they
+    state any; a pass whose records carry none at all falls back to the rules that
+    predate refusals, which is exactly what a plan without a retire produces."""
     visible = result.get("visible")
     visible = visible if isinstance(visible, dict) else {}
     on, off = visible.get("V"), visible.get("Voff")
 
     reasons = visible_pass_reasons(on, "V", "qualified")
     if not reasons:
-        for slide in visible_slides_of(on):
-            if slide.get("verdict") is not True:
-                reasons.append(
-                    f"visible pass V slide {slide.get('originalOrdinal')} is not fully live "
-                    f"(status={slide.get('status')!r})"
-                )
+        counts = visible_rect_expectation_counts(on)
+        reasons = (
+            visible_expectation_reasons(on, "V", requires_dead=plan_states_dead(result, "V"))
+            if counts["liveTotal"] or counts["deadTotal"]
+            else visible_live_everywhere_reasons(on)
+        )
 
     off_reasons = visible_pass_reasons(off, "Voff", "off")
     if not off_reasons:
-        slides = visible_slides_of(off)
-        first = next((slide for slide in slides if slide.get("originalOrdinal") == 1), None)
-        if first is None or first.get("verdict") is not True:
-            off_reasons.append("visible pass Voff slide 1 is not live, so the instrument is simply always-red")
-        expected_red = (result.get("groundTruth") or {}).get("boundaryPlayerIndex")
-        red = next((slide for slide in slides if slide.get("playerIndex") == expected_red), None)
-        if not isinstance(expected_red, int) or isinstance(expected_red, bool):
-            off_reasons.append("visible pass Voff expected-red slide is unknown (no groundTruth.boundaryPlayerIndex)")
-        elif red is None:
-            off_reasons.append(f"visible pass Voff never scored the expected-red slide (playerIndex {expected_red})")
-        elif red.get("verdict") is not False:
-            off_reasons.append(
-                f"visible pass Voff slide {red.get('originalOrdinal')} is not RED "
-                f"(verdict={red.get('verdict')!r}), so the instrument is blind to the raw-export defect"
-            )
+        counts = visible_rect_expectation_counts(off)
+        off_reasons = (
+            visible_expectation_reasons(off, "Voff", requires_dead=plan_states_dead(result, "Voff"))
+            if counts["liveTotal"] or counts["deadTotal"]
+            else visible_control_reasons(off, result)
+        )
     return reasons + off_reasons
+
+
+def refused_boundaries(result: dict[str, Any]) -> list[str]:
+    ground = result.get("groundTruth")
+    keys = ground.get("refusedBoundaries") if isinstance(ground, dict) else None
+    return [key for key in keys if key in REFUSAL_VERDICT_KEY] if isinstance(keys, list) else []
+
+
+def boundary_expectation_reasons(
+    entry: dict[str, Any], label: str, key: str, refused: Sequence[str]
+) -> list[str]:
+    """One continuity boundary's arm expectation, derived from the plan: a boundary
+    the plan CARRIES must read True; one the plan RETIRES must read False and also
+    carry its positive `refused*` verdict, without which "did not continue" asserts
+    nothing at all."""
+    verdict = boundary_verdict(entry, key)
+    if key not in refused:
+        return [] if verdict is True else [f"{label} {key}={verdict!r}, expected True (the plan carries this boundary)"]
+    reasons: list[str] = []
+    if verdict is not False:
+        reasons.append(f"{label} {key}={verdict!r}, expected False (the plan retires this boundary)")
+    positive = REFUSAL_VERDICT_KEY[key]
+    value = boundary_verdict(entry, positive)
+    if value is None:
+        reasons.append(f"{label} has no {positive} verdict, so the refusal is unproven")
+    elif value is not True:
+        scored = entry.get(positive)
+        detail = scored.get("reason") if isinstance(scored, dict) else None
+        reasons.append(f"{label} {positive}={value!r}: {detail}")
+    return reasons
 
 
 def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
@@ -1545,9 +1917,12 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         return "inconclusive", ["at least one gated boundary verdict is inconclusive (movie never decoded)"]
 
     reasons: list[str] = []
+    refused = refused_boundaries(result)
 
     a_mode, b_mode, c_mode, attach_mode = continuity_mode(a), continuity_mode(b), continuity_mode(c), continuity_mode(attach)
-    a_ok = bool(boundary_verdict(a, "continue1to2")) and bool(boundary_verdict(a, "restart2to3")) and bool(boundary_verdict(a, "continue3to4"))
+    a_boundary_reasons = boundary_expectation_reasons(a, "arm A", "continue1to2", refused)
+    reasons.extend(a_boundary_reasons)
+    a_ok = not a_boundary_reasons and bool(boundary_verdict(a, "restart2to3")) and bool(boundary_verdict(a, "continue3to4"))
     if a_mode != "qualified":
         a_ok = False
         reasons.append(f"arm A continuity.mode={a_mode!r}, expected 'qualified'")
@@ -1565,7 +1940,9 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         b_ok = False
         reasons.append(reason)
 
-    c_ok = boundary_verdict(c, "continue3to4") is False and boundary_verdict(c, "continue1to2") is True
+    c_boundary_reasons = boundary_expectation_reasons(c, "arm C", "continue1to2", refused)
+    reasons.extend(c_boundary_reasons)
+    c_ok = boundary_verdict(c, "continue3to4") is False and not c_boundary_reasons
     if c_mode != "qualified":
         c_ok = False
         reasons.append(f"arm C continuity.mode={c_mode!r}, expected 'qualified'")
@@ -1574,8 +1951,10 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
         c_ok = False
         reasons.append(reason)
 
+    attach_boundary_reasons = boundary_expectation_reasons(attach, "attach", "continue1to2", refused)
+    reasons.extend(attach_boundary_reasons)
     attach_ok = (
-        bool(boundary_verdict(attach, "continue1to2"))
+        not attach_boundary_reasons
         and bool(boundary_verdict(attach, "restart2to3"))
         and bool(boundary_verdict(attach, "continue3to4"))
     )
@@ -1632,6 +2011,7 @@ def main() -> None:
             for key in (
                 "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",
                 "pinRect", "bridgeSrcRect", "destRect", "canvas",
+                "retire", "refusedBoundaries", "refusals", "rectExpectations",
             )
         }
         expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
@@ -1661,7 +2041,8 @@ def main() -> None:
         export_v = prepare_export(args.fixture, args.original_index, "visible-v")
         result["visible"] = {}
         result["visible"]["V"] = run_visible_pass(
-            "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir
+            "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir,
+            facts["rectExpectations"]["V"],
         )
         result["leftoverChromeAfterVisibleV"] = check_no_leftover_chrome()
         save()
@@ -1669,7 +2050,8 @@ def main() -> None:
         export_voff = prepare_export(args.fixture, args.original_index, "visible-voff")
         with env_override({CONTINUITY_ENV: "off"}):
             result["visible"]["Voff"] = run_visible_pass(
-                "Voff", export_voff, load_slides(export_voff), plan, viewport, expected_stage, evidence_dir
+                "Voff", export_voff, load_slides(export_voff), plan, viewport, expected_stage, evidence_dir,
+                facts["rectExpectations"]["Voff"],
             )
         result["leftoverChromeAfterVisible"] = check_no_leftover_chrome()
         save()
@@ -1686,14 +2068,17 @@ def main() -> None:
     finally:
         save()
 
+    verdict_keys = ("continue1to2", "restart2to3", "continue3to4") + tuple(
+        REFUSAL_VERDICT_KEY[key] for key in refused_boundaries(result)
+    )
     summary = {
         "status": result.get("status"),
         "statusReasons": result.get("statusReasons"),
         "arms": {
-            name: {key: boundary_verdict(entry, key) for key in ("continue1to2", "restart2to3", "continue3to4")}
+            name: {key: boundary_verdict(entry, key) for key in verdict_keys}
             for name, entry in result.get("arms", {}).items()
         },
-        "attach": {key: boundary_verdict(result.get("attach", {}), key) for key in ("continue1to2", "restart2to3", "continue3to4")},
+        "attach": {key: boundary_verdict(result.get("attach", {}), key) for key in verdict_keys},
         "visible": {
             name: {
                 "verdict": entry.get("verdict"),

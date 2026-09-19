@@ -10,7 +10,9 @@ Geometry is derived from the export's authored layer tree (`renderMovie` node ba
 `isVideoLayer` sub-layer, centre-anchored), never measured on screen. Anything the export
 encodes in a way this module cannot map exactly (rotation, animated geometry, an unknown
 transition kind, ambiguous ownership of a continuing asset) fails closed to `Unsupported`
-instead of guessing.
+instead of guessing. A boundary that is structurally carryable but whose destination slide
+draws something over the movie is refused on its own, as a `retire`: the movie goes back to
+the player at that scene and the rest of the deck stays as authored.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,14 +29,31 @@ from obed_edom.html_preview import safe_export_file
 from obed_edom.live_codec import codec_family, movie_codec
 
 _GEOMETRY_TOLERANCE = 0.5
+_OVERLAP_MIN_PX = 1.0
 _TRIM_SUFFIX_RE = re.compile(r"^(?P<name>.+)-\d+\.\d+-\d+\.\d+(?P<ext>\.[A-Za-z0-9]+)$")
+
+_MOVIE_NODE_KEYS = frozenset(
+    {"attributes", "baseLayer", "beginTime", "duration", "effects", "movie", "name", "objectID", "type"}
+)
+_MOVIE_LAYER_KEYS = frozenset(
+    {"animations", "initialState", "isVideoLayer", "layers", "objectID", "texture", "texturedRectangle"}
+)
+_MOVIE_LAYER_STATE_KEYS = frozenset(
+    {
+        "affineTransform", "anchorPoint", "contentsRect", "edgeAntialiasingMask", "height", "hidden",
+        "masksToBounds", "opacity", "position", "rotation", "scale", "sublayerTransform", "width",
+    }
+)
+"""The complete key vocabulary measured across every movie node of the qualified export. A key
+outside it may encode a mask this module cannot map, so it fails closed until a masked deck is
+exported and the real encoding is measured."""
 
 
 class _Refuse(Exception):
     """Internal control-flow only: carries the reason for an `Unsupported` result."""
 
 
-QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset({"ec4b0cb3eeaf393ec00a7313d1c68b640a90282c80d408767c99984b710800cf"})
+QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset({"bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e"})
 
 
 def plan_signature(runtime: dict[str, Any]) -> str:
@@ -69,6 +88,9 @@ class MovieContinuity:
     action: str
     src_rect: Rect | None
     dst_rect: Rect | None
+    refusal: str | None = None
+    """Why this boundary cannot carry the movie, when `action` says it structurally could.
+    Last field with a default so positional construction keeps working."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +129,9 @@ class ContinuityPlan:
     unlike `slide_rects`, which keeps only single-instance assets. Rects are `_movie_rect`'s
     authored-space rects, ordered by (x, y, w, h) ascending. Not part of `to_runtime()`, so
     the runtime plan signature is unaffected."""
+    refusals: tuple[dict[str, Any], ...] = ()
+    """One entry per boundary a movie structurally continues across but must not be carried
+    over. Additive and not part of `to_runtime()`, like `slide_instances`."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +140,7 @@ class ContinuityPlan:
             "slideRects": {str(k): v for k, v in self.slide_rects.items()},
             "boundaries": [b.as_dict() for b in self.boundaries],
             "slideInstances": {str(k): v for k, v in self.slide_instances.items()},
+            "refusals": [dict(r) for r in self.refusals],
         }
 
     def to_json(self) -> str:
@@ -129,49 +155,21 @@ class ContinuityPlan:
         movie at a single boundary, a bridge with no source/destination rect or
         positive export duration, or a `pin`
         action recurring after a `restart` boundary, a bridge before a restart,
-        or any actionable boundary after a bridge.
+        or any actionable boundary after a bridge. A boundary carrying a `refusal` becomes a
+        `retire` -- at most one, and only before the first restart and any bridge.
         """
         if not self.boundaries:
             return Unsupported("no boundaries to translate")
 
-        bridge_asset: str | None = None
-        for boundary in self.boundaries:
-            for movie in boundary.movies:
-                if movie.action != "bridge":
-                    continue
-                if bridge_asset is not None and bridge_asset != movie.asset:
-                    return Unsupported(
-                        f"more than one distinct bridging asset: '{bridge_asset}' and '{movie.asset}'"
-                    )
-                bridge_asset = movie.asset
-
-        first_player = min(self.slide_rects) if self.slide_rects else None
-        if first_player is None:
-            return Unsupported("no slide footprint data to build movie definitions")
-        initial_rects: dict[str, dict[str, float]] = dict(self.slide_rects.get(first_player, {}))
-
-        first_boundary = self.boundaries[0]
-        for movie in first_boundary.movies:
-            if movie.action in ("pin", "bridge") and movie.src_rect is not None:
-                initial_rects[movie.asset] = movie.src_rect.as_dict()
-
-        if bridge_asset is not None and bridge_asset not in initial_rects:
-            return Unsupported(f"bridging asset '{bridge_asset}' has no footprint on the first slide")
-        if not initial_rects:
-            return Unsupported("no single-instance movie footprints on the first slide")
-
-        ordered_assets = ([bridge_asset] if bridge_asset else []) + sorted(
-            asset for asset in initial_rects if asset != bridge_asset
-        )
-        movie_keys = {asset: f"movie{i + 1}" for i, asset in enumerate(ordered_assets)}
-        movies = {
-            key: {"assetKeys": [asset.lower()], "footprint": _rect_ints(initial_rects[asset])}
-            for asset, key in movie_keys.items()
-        }
+        table = _movie_table(self)
+        if isinstance(table, Unsupported):
+            return table
+        movie_keys, movies = table
 
         runtime_boundaries: list[dict[str, Any]] = []
         emitted_cut = False
         emitted_bridge = False
+        emitted_retire = False
         for boundary in self.boundaries:
             if boundary.to_player_index is None:
                 continue
@@ -180,11 +178,27 @@ class ContinuityPlan:
                 return Unsupported("more than one bridge boundary")
             if emitted_bridge and actions & {"pin", "restart"}:
                 return Unsupported("an actionable boundary follows a bridge")
-            if emitted_cut and "pin" in actions:
-                return Unsupported("a pin action follows a restart or bridge boundary")
             scene = self.scene_index_by_player.get(boundary.to_player_index)
             if scene is None:
                 return Unsupported(f"missing scene index for player index {boundary.to_player_index}")
+
+            refused = [m for m in boundary.movies if m.refusal]
+            if refused:
+                movie = refused[0]
+                if len(refused) > 1 or movie.action != "pin":
+                    return Unsupported(f"a refusal the runtime cannot retire: {movie.refusal}")
+                if emitted_retire:
+                    return Unsupported(f"more than one retire boundary: {movie.refusal}")
+                if emitted_cut:
+                    return Unsupported(f"a retire boundary follows a restart or bridge cut: {movie.refusal}")
+                key = movie_keys.get(movie.asset)
+                if key is None:
+                    return Unsupported(f"refused asset '{movie.asset}' is not in the movie table")
+                runtime_boundaries.append({"atScene": scene, "action": "retire", "movieKey": key})
+                emitted_retire = True
+
+            if emitted_cut and "pin" in actions:
+                return Unsupported("a pin action follows a restart or bridge boundary")
             if "bridge" in actions:
                 if not emitted_cut:
                     return Unsupported("a bridge boundary precedes the first restart")
@@ -246,6 +260,48 @@ def _rect_ints(rect: dict[str, float]) -> dict[str, int]:
     return {k: round(v) for k, v in rect.items()}
 
 
+def _movie_table(
+    plan: ContinuityPlan,
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]] | Unsupported:
+    """The runtime's `movies` table and the asset -> movie key mapping it implies: the bridging
+    asset is `movie1`, the rest follow in asset order."""
+    bridge_asset: str | None = None
+    for boundary in plan.boundaries:
+        for movie in boundary.movies:
+            if movie.action != "bridge":
+                continue
+            if bridge_asset is not None and bridge_asset != movie.asset:
+                return Unsupported(
+                    f"more than one distinct bridging asset: '{bridge_asset}' and '{movie.asset}'"
+                )
+            bridge_asset = movie.asset
+
+    first_player = min(plan.slide_rects) if plan.slide_rects else None
+    if first_player is None:
+        return Unsupported("no slide footprint data to build movie definitions")
+    initial_rects: dict[str, dict[str, float]] = dict(plan.slide_rects.get(first_player, {}))
+
+    if plan.boundaries:
+        for movie in plan.boundaries[0].movies:
+            if movie.action in ("pin", "bridge") and movie.src_rect is not None:
+                initial_rects[movie.asset] = movie.src_rect.as_dict()
+
+    if bridge_asset is not None and bridge_asset not in initial_rects:
+        return Unsupported(f"bridging asset '{bridge_asset}' has no footprint on the first slide")
+    if not initial_rects:
+        return Unsupported("no single-instance movie footprints on the first slide")
+
+    ordered_assets = ([bridge_asset] if bridge_asset else []) + sorted(
+        asset for asset in initial_rects if asset != bridge_asset
+    )
+    movie_keys = {asset: f"movie{i + 1}" for i, asset in enumerate(ordered_assets)}
+    movies = {
+        key: {"assetKeys": [asset.lower()], "footprint": _rect_ints(initial_rects[asset])}
+        for asset, key in movie_keys.items()
+    }
+    return movie_keys, movies
+
+
 def _identity_transform(state: dict[str, Any]) -> bool:
     transform = list(state.get("affineTransform", [1, 0, 0, 1, 0, 0]))
     return state.get("rotation", 0) == 0 and transform == [1, 0, 0, 1, 0, 0]
@@ -287,7 +343,57 @@ def _find_video_sublayers(base_layer: dict[str, Any]) -> list[dict[str, Any]]:
     return found
 
 
+def _encoding_refusal(slide_name: str, detail: str) -> _Refuse:
+    return _Refuse(
+        f"movie on slide {slide_name} carries an unrecognised layer encoding (possible mask): {detail}"
+    )
+
+
+def _contains_key(obj: Any, key: str) -> bool:
+    if isinstance(obj, dict):
+        return key in obj or any(_contains_key(value, key) for value in obj.values())
+    if isinstance(obj, list):
+        return any(_contains_key(item, key) for item in obj)
+    return False
+
+
+def _check_movie_encoding(node: dict[str, Any], slide_name: str) -> None:
+    """Interim mask rule: this export family encodes no mask at all, so anything outside the
+    measured vocabulary -- or any clipping knob that is not at its neutral value -- may be one."""
+    if _contains_key(node, "shapePath"):
+        raise _encoding_refusal(slide_name, "shapePath")
+    unknown = sorted(set(node) - _MOVIE_NODE_KEYS)
+    if unknown:
+        raise _encoding_refusal(slide_name, unknown[0])
+
+    def walk(layer: Any) -> None:
+        if not isinstance(layer, dict):
+            raise _encoding_refusal(slide_name, "a layer that is not an object")
+        unknown = sorted(set(layer) - _MOVIE_LAYER_KEYS)
+        if unknown:
+            raise _encoding_refusal(slide_name, unknown[0])
+        state = layer.get("initialState")
+        if not isinstance(state, dict):
+            raise _encoding_refusal(slide_name, "initialState")
+        unknown = sorted(set(state) - _MOVIE_LAYER_STATE_KEYS)
+        if unknown:
+            raise _encoding_refusal(slide_name, unknown[0])
+        if state.get("masksToBounds"):
+            raise _encoding_refusal(slide_name, "masksToBounds")
+        contents = state.get("contentsRect") or {}
+        if any(
+            abs(contents.get(name, default) - default) > 1e-6
+            for name, default in (("x", 0.0), ("y", 0.0), ("width", 1.0), ("height", 1.0))
+        ):
+            raise _encoding_refusal(slide_name, "contentsRect")
+        for child in layer.get("layers") or []:
+            walk(child)
+
+    walk(node["baseLayer"])
+
+
 def _movie_rect(node: dict[str, Any], slide_name: str) -> Rect:
+    _check_movie_encoding(node, slide_name)
     base_layer = node["baseLayer"]
     parent_state = base_layer["initialState"]
     if not _identity_transform(parent_state) or not _center_anchor(parent_state):
@@ -315,7 +421,88 @@ def _movie_rect(node: dict[str, Any], slide_name: str) -> Rect:
     child_w, child_h = video_state["width"], video_state["height"]
     abs_center_x = parent_x + video_state["position"]["pointX"]
     abs_center_y = parent_y + video_state["position"]["pointY"]
-    return Rect(abs_center_x - child_w / 2, abs_center_y - child_h / 2, child_w, child_h)
+    rect = Rect(abs_center_x - child_w / 2, abs_center_y - child_h / 2, child_w, child_h)
+    base_rect = Rect(parent_x, parent_y, parent_state["width"], parent_state["height"])
+    if not _contains(base_rect, rect):
+        raise _encoding_refusal(slide_name, "the video sub-layer is not contained in its movie layer")
+    return rect
+
+
+def _contains(outer: Rect, inner: Rect) -> bool:
+    return (
+        inner.x >= outer.x - _GEOMETRY_TOLERANCE
+        and inner.y >= outer.y - _GEOMETRY_TOLERANCE
+        and inner.x + inner.w <= outer.x + outer.w + _GEOMETRY_TOLERANCE
+        and inner.y + inner.h <= outer.y + outer.h + _GEOMETRY_TOLERANCE
+    )
+
+
+def _overlaps(a: Rect, b: Rect) -> bool:
+    width = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
+    height = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
+    return width > _OVERLAP_MIN_PX and height > _OVERLAP_MIN_PX
+
+
+def _slot_rect(state: dict[str, Any]) -> Rect:
+    width, height = state["width"], state["height"]
+    return Rect(
+        state["position"]["pointX"] - width / 2, state["position"]["pointY"] - height / 2, width, height
+    )
+
+
+def _draw_slots(event: Any, slide_name: str) -> list[Any]:
+    base_layer = event.get("baseLayer") if isinstance(event, dict) else None
+    slots = base_layer.get("layers") if isinstance(base_layer, dict) else None
+    if not isinstance(slots, list):
+        raise _Refuse(f"slide {slide_name} declares no readable draw order")
+    return slots
+
+
+def _movie_slot_index(slots: list[Any], object_id: str, slide_name: str) -> int | None:
+    found: int | None = None
+    for index, slot in enumerate(slots):
+        children = slot.get("layers") if isinstance(slot, dict) else None
+        if not isinstance(children, list):
+            raise _Refuse(f"unrecognised slide layer shape on slide {slide_name} (draw slot {index})")
+        if len(children) != 1 or not isinstance(children[0], dict):
+            continue
+        if children[0].get("objectID") != object_id:
+            continue
+        if found is not None:
+            raise _Refuse(f"slide {slide_name} draws object {object_id} in more than one slot")
+        found = index
+    return found
+
+
+def _overlap_refusal(
+    events: list[Any], instance: _MovieInstance, asset: str, to_player_index: int, slide_name: str
+) -> str | None:
+    """Whether any object authored ABOVE the movie's draw slot overlaps its painted rect, on any
+    event of the destination slide. Opacity and `hidden` are deliberately ignored: the export does
+    not mark a not-yet-built object, so every higher slot counts as artwork."""
+    if instance.object_id is None:
+        raise _Refuse(f"movie '{asset}' on slide {slide_name} has no object id")
+    drawn = False
+    for event in events:
+        slots = _draw_slots(event, slide_name)
+        movie_slot = _movie_slot_index(slots, instance.object_id, slide_name)
+        if movie_slot is None:
+            continue
+        drawn = True
+        for index in range(movie_slot + 1, len(slots)):
+            children = slots[index]["layers"]
+            if len(children) != 1 or not isinstance(children[0], dict):
+                raise _Refuse(
+                    f"unrecognised slide layer shape on slide {slide_name} (draw slot {index})"
+                )
+            if _overlaps(_slot_rect(children[0]["initialState"]), instance.rect):
+                return (
+                    f"later-authored artwork overlaps the carried '{asset}' on the destination "
+                    f"slide (player index {to_player_index}, draw slot {index})"
+                )
+    if not drawn:
+        raise _Refuse(f"movie '{asset}' has no draw slot on slide {slide_name}")
+    return None
 
 
 def _normalize_asset_key(assets_table: dict[str, Any], asset_id: str) -> str:
@@ -327,17 +514,26 @@ def _normalize_asset_key(assets_table: dict[str, Any], asset_id: str) -> str:
     return name.lower()
 
 
+@dataclass(frozen=True)
+class _MovieInstance:
+    rect: Rect
+    object_id: str | None
+
+
 def _slide_movie_instances(
     events: list[Any], assets_table: dict[str, Any], slide_name: str
-) -> dict[str, list[Rect]]:
-    instances: dict[str, list[Rect]] = {}
+) -> dict[str, list[_MovieInstance]]:
+    instances: dict[str, list[_MovieInstance]] = {}
     for node in _find_movie_nodes(events):
         asset_id = node["movie"].get("asset")
         if not isinstance(asset_id, str) or not asset_id:
             raise _Refuse(f"movie node on slide {slide_name} has no asset id")
+        object_id = node.get("objectID")
         rect = _movie_rect(node, slide_name)
         key = _normalize_asset_key(assets_table, asset_id)
-        instances.setdefault(key, []).append(rect)
+        instances.setdefault(key, []).append(
+            _MovieInstance(rect, object_id if isinstance(object_id, str) and object_id else None)
+        )
     return instances
 
 
@@ -361,19 +557,19 @@ def _boundary_transition(events: list[Any], slide_name: str) -> dict[str, Any] |
 
 
 def _resolve_continuation(
-    asset: str, out_rects: list[Rect], in_rects: list[Rect], boundary_desc: str
-) -> MovieContinuity:
-    if len(out_rects) == 1 and len(in_rects) == 1:
-        src, dst = out_rects[0], in_rects[0]
-        action = "pin" if src.close_to(dst) else "bridge"
-        return MovieContinuity(asset, action, src, dst)
-    pin_pairs = [(o, i) for o in out_rects for i in in_rects if o.close_to(i)]
+    asset: str, outgoing: list[_MovieInstance], incoming: list[_MovieInstance], boundary_desc: str
+) -> tuple[MovieContinuity, _MovieInstance]:
+    if len(outgoing) == 1 and len(incoming) == 1:
+        src, dst = outgoing[0], incoming[0]
+        action = "pin" if src.rect.close_to(dst.rect) else "bridge"
+        return MovieContinuity(asset, action, src.rect, dst.rect), dst
+    pin_pairs = [(o, i) for o in outgoing for i in incoming if o.rect.close_to(i.rect)]
     if len(pin_pairs) == 1:
         src, dst = pin_pairs[0]
-        return MovieContinuity(asset, "pin", src, dst)
+        return MovieContinuity(asset, "pin", src.rect, dst.rect), dst
     raise _Refuse(
         f"ambiguous '{asset}' ownership at {boundary_desc}: "
-        f"{len(out_rects)} instance(s) before, {len(in_rects)} after, "
+        f"{len(outgoing)} instance(s) before, {len(incoming)} after, "
         f"{len(pin_pairs)} geometry-equal pair(s)"
     )
 
@@ -404,7 +600,7 @@ def derive_plan(
     ordered.sort(key=lambda pair: pair[0])
 
     events_by_player: dict[int, list[Any]] = {}
-    instances_by_player: dict[int, dict[str, list[Rect]]] = {}
+    instances_by_player: dict[int, dict[str, list[_MovieInstance]]] = {}
     scene_index_by_player: dict[int, int] = {}
     cumulative = 0
     for player_index, uuid in ordered:
@@ -426,15 +622,18 @@ def derive_plan(
 
     slide_rects = {
         player_index: {
-            asset: rects[0].as_dict() for asset, rects in instances.items() if len(rects) == 1
+            asset: found[0].rect.as_dict() for asset, found in instances.items() if len(found) == 1
         }
         for player_index, instances in instances_by_player.items()
     }
 
     slide_instances = {
         player_index: {
-            asset: [rect.as_dict() for rect in sorted(rects, key=lambda r: (r.x, r.y, r.w, r.h))]
-            for asset, rects in sorted(instances.items())
+            asset: [
+                instance.rect.as_dict()
+                for instance in sorted(found, key=lambda i: (i.rect.x, i.rect.y, i.rect.w, i.rect.h))
+            ]
+            for asset, found in sorted(instances.items())
         }
         for player_index, instances in instances_by_player.items()
     }
@@ -457,9 +656,9 @@ def derive_plan(
         if to_player_index is None:
             movies = tuple(
                 MovieContinuity(
-                    asset, "restart", rects[0] if len(rects) == 1 else None, None
+                    asset, "restart", found[0].rect if len(found) == 1 else None, None
                 )
-                for asset, rects in sorted(outgoing.items())
+                for asset, found in sorted(outgoing.items())
             )
             boundaries.append(SlideBoundary(player_index, None, movies, transition_duration))
             continue
@@ -475,16 +674,27 @@ def derive_plan(
         movies = []
         bridge_count = 0
         for asset in continuing:
-            out_rects, in_rects = outgoing[asset], incoming[asset]
+            out_found, in_found = outgoing[asset], incoming[asset]
             if kind == "restart":
-                src = out_rects[0] if len(out_rects) == 1 else None
-                dst = in_rects[0] if len(in_rects) == 1 else None
+                src = out_found[0].rect if len(out_found) == 1 else None
+                dst = in_found[0].rect if len(in_found) == 1 else None
                 movies.append(MovieContinuity(asset, "restart", src, dst))
                 continue
             try:
-                continuity = _resolve_continuation(asset, out_rects, in_rects, boundary_desc)
+                continuity, dst_instance = _resolve_continuation(
+                    asset, out_found, in_found, boundary_desc
+                )
+                refusal = _overlap_refusal(
+                    events_by_player[to_player_index],
+                    dst_instance,
+                    asset,
+                    to_player_index,
+                    ordered[index + 1][1],
+                )
             except _Refuse as exc:
                 return Unsupported(str(exc))
+            if refusal is not None:
+                continuity = replace(continuity, refusal=refusal)
             movies.append(continuity)
             if continuity.action == "bridge":
                 bridge_count += 1
@@ -492,12 +702,30 @@ def derive_plan(
             return Unsupported(f"more than one movie changes geometry at {boundary_desc}")
         boundaries.append(SlideBoundary(player_index, to_player_index, tuple(movies), transition_duration))
 
-    return ContinuityPlan(
+    plan = ContinuityPlan(
         canvas=canvas,
         scene_index_by_player=scene_index_by_player,
         slide_rects=slide_rects,
         boundaries=tuple(boundaries),
         slide_instances=slide_instances,
+    )
+    table = _movie_table(plan)
+    movie_keys = {} if isinstance(table, Unsupported) else table[0]
+    return replace(
+        plan,
+        refusals=tuple(
+            {
+                "fromPlayer": boundary.from_player_index,
+                "toPlayer": boundary.to_player_index,
+                "atScene": scene_index_by_player.get(boundary.to_player_index),
+                "asset": movie.asset,
+                "movieKey": movie_keys.get(movie.asset),
+                "reason": movie.refusal,
+            }
+            for boundary in plan.boundaries
+            for movie in boundary.movies
+            if movie.refusal is not None
+        ),
     )
 
 
