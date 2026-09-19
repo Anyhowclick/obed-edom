@@ -48,6 +48,8 @@ from obed_edom.dsk_live import keynote_running  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
     file_identity,
+    footprint_at,
+    index_patch_roi_for,
     inventory_deck,
     score_composited_index_run,
     score_index_progression,
@@ -107,6 +109,18 @@ INDEX_PATCH_ROI = (
 INDEX_PATCH_ROI_SLIDE3 = (233, 800, 24, 12)
 # HTML event index where slide 3 begins (2 + 4 events before it → scene #6).
 SLIDE3_MIN_HASH = 6
+# ---- 3->4 moving Magic Move constants (positive control; measured Phase 0) ----
+# Slide 4's first scene (the 3->4 magic-move destination). Scene map:
+# s1=#1, s2≈#2-5, s3=#6-7, 3->4 MM lands slide 4 at #8, settles #8/#9.
+SLIDE4_MIN_HASH = 8
+# movie1 (untitled.mov) on-screen footprint at the slide-3 endpoint (SOURCE) and
+# the slide-4 endpoint (DEST) — empirically measured, matching the authored
+# translate+scale ((195.5,794.6)960x276 -> (324.3,706.0)1274x364).
+SLIDE3_MOVIE_RECT = (198, 795, 952, 268)
+SLIDE4_MOVIE_RECT = (327, 709, 1266, 356)
+# PRESERVE assetKey for untitled.mov (movie1) — used to key the 3->4 footprint
+# owner query so the retiring right-side WA0125 the grown box overlaps is excluded.
+MOVIE1_KEY = "movie1"
 # Fixed expected movie keys for restart evidence (not derived from observations).
 # untitled.mov (movie1, Shibuya crossing) is the restart target; after the
 # case-insensitive _movie_key fix, both its DOM src and pooled assetKey
@@ -558,6 +572,102 @@ def liveContinuity1to2(
         # Reported for provenance only — NOT a gating sub-condition (aliased pixel
         # crossing-MAE; the crossing IDENTITY fields above ARE gated).
         "motionAcrossFlipOk": motion_ok,
+    }
+
+
+def movingContinuity3to4(
+    owner_samples: list[dict],
+    presented_samples: list[dict],
+    slide3_movie_decoder: object,
+    hash3: object,
+    hash4: object,
+    slide4_min_hash: int,
+) -> dict:
+    """Fail-CLOSED sub-verdict for playback continuity through the 3->4 moving
+    Magic Move (positive control). The owner authored "Play movie across slides"
+    but the HTML export RESTARTS movie1 on a fresh decoder at the grown slide-4
+    footprint (see the Phase-0 diagnosis); the PRESERVE 3->4 bridge repairs it by
+    keeping the SAME decoder playing while its box translates+scales. This gate
+    proves the repair engaged — a raw (unbridged) export restarts and fails it.
+
+    `ok` iff ALL hold (absence of any ⇒ fail closed; the failing name recorded):
+      - `boundaryValid` — `hash3`/`hash4` parse, `num(hash4) > num(hash3)`, and
+        `num(hash4) >= slide4_min_hash`: a genuine forward entry into slide 4.
+      - `stableSlide4Owner` — exactly ONE distinct non-null footprint decoderId
+        across the after-window (`hn >= num(hash4)`), covering a strong majority
+        (>=70%); no `ownerAmbiguous` frame (two decoders at the slot). Owner is
+        resolved by the caller at the MOVING interpolated footprint, keyed to
+        movie1 (so the retiring right-side WA0125 the grown box overlaps is
+        excluded).
+      - `crossingIdentity` — that single slide-4 owner IS the SAME decoder that
+        played slide 3 (`slide3_movie_decoder`, the 2->3 restart decoder). This is
+        the ANTI-RESTART check: the export's fresh autoplay-from-0 element is a
+        DIFFERENT decoder and fails here; only the bridged continuing decoder
+        passes.
+      - `rvfcMonotonic` — that decoder's rVFC `presentedMediaTime` ADVANCES
+        (> 0.05) across the after-window and never rewinds (a reset-to-~0 restart
+        would rewind), proving the live clock continues rather than restarting.
+    """
+    n3 = _strict_hash_num(hash3)
+    n4 = _strict_hash_num(hash4)
+    boundary_valid = (
+        n3 is not None and n4 is not None and n4 > n3
+        and isinstance(slide4_min_hash, int) and n4 >= slide4_min_hash
+    )
+
+    def _after(s: dict) -> bool:
+        hn = _strict_hash_num(s.get("sceneHash"))
+        return hn is not None and n4 is not None and hn >= n4
+
+    after = [s for s in (owner_samples or []) if _after(s)] if boundary_valid else []
+    non_null_ids = [s.get("decoderId") for s in after if s.get("decoderId") is not None]
+    distinct_non_null = sorted({str(x) for x in non_null_ids})
+    non_null_frac = (len(non_null_ids) / len(after)) if after else 0.0
+    has_ambiguous = any(s.get("ownerAmbiguous") for s in after)
+    stable = (
+        bool(after)
+        and len(distinct_non_null) == 1
+        and non_null_frac >= 0.7
+        and not has_ambiguous
+    )
+    slide4_owner = non_null_ids[0] if stable else None
+
+    crossing_identity = bool(
+        slide4_owner is not None
+        and slide3_movie_decoder is not None
+        and str(slide4_owner) == str(slide3_movie_decoder)
+    )
+
+    if not boundary_valid:
+        rvfc = {"ok": False, "reason": "invalid 3->4 boundary", "n": 0}
+    elif slide4_owner is None:
+        rvfc = {"ok": False, "reason": "no stable slide-4 owner", "n": 0}
+    else:
+        bounded = [s for s in (presented_samples or []) if _after(s)]
+        rvfc = _presented_time_advances(bounded, slide4_owner, n4)
+    rvfc_ok = bool(rvfc.get("ok"))
+
+    checks = {
+        "boundaryValid": boundary_valid,
+        "stableSlide4Owner": stable,
+        "crossingIdentity": crossing_identity,
+        "rvfcMonotonic": rvfc_ok,
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    return {
+        "ok": not failed,
+        "failed": failed,
+        "slide4Owner": slide4_owner,
+        "slide3MovieDecoder": slide3_movie_decoder,
+        "boundaryValid": {"ok": boundary_valid, "n3": n3, "n4": n4, "slide4Min": slide4_min_hash},
+        "stableSlide4Owner": {
+            "ok": stable,
+            "distinctNonNull": distinct_non_null,
+            "nonNullFrac": round(non_null_frac, 3),
+            "afterN": len(after),
+        },
+        "crossingIdentity": {"ok": crossing_identity},
+        "rvfcMonotonic": rvfc,
     }
 
 
@@ -1357,6 +1467,110 @@ async def _dense_after_click(
     return samples, frames, decoder_frames
 
 
+async def _footprint_owner_keyed(
+    chrome: ChromeCdp, rect: tuple[float, float, float, float], key: str
+) -> dict:
+    """Resolve the footprint owner at an arbitrary (moving) rect, keyed to a movie
+    so the fixed footprint table need not classify it. Excludes hidden siblings
+    (PRESERVE's isCompositing), so the suppressed 3->4 restart element and the
+    retiring right-side WA0125 the grown box overlaps cannot tie."""
+    x, y, w, h = (int(round(v)) for v in rect)
+    owner = await chrome.evaluate(
+        "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId "
+        f"? window.__OBED_P2_PRESERVE__.footprintOwnerDecoderId({{x:{x}, y:{y}, w:{w}, h:{h}, key:'{key}'}}) "
+        ": {elId: null, key: null, via: 'unavailable'}"
+    ) or {"elId": None, "key": None, "via": "unavailable"}
+    return owner
+
+
+async def _advance_to_slide4_capture(
+    chrome: ChromeCdp, run_dir: Path, prefix: str, click_wall: float
+) -> tuple[list[dict], list[dict], list[dict], str]:
+    """Advance slide 3 -> slide 4 through the moving Magic Move while densely
+    sampling the footprint owner at the INTERPOLATED footprint (footprint_at,
+    keyed movie1), the rVFC media clocks, and the composited counter decoded at
+    the MOVING ROI (index_patch_roi_for). Returns
+    (owner_samples, media_samples, index_samples, final_hash)."""
+    owner_samples: list[dict] = []
+    media_samples: list[dict] = []
+    index_samples: list[dict] = []
+    fps = DENSE_FPS
+    dt = 1.0 / fps
+    n = int((TRANS_S + POST_SETTLE_S + 3.0) * fps)
+    start = time.monotonic()
+    flip_offset: float | None = None
+    last_adv = -10.0
+    for i in range(n):
+        target = start + (i + 1) * dt
+        while time.monotonic() < target:
+            await asyncio.sleep(0.001)
+        capture_wall = time.monotonic()
+        offset = capture_wall - click_wall
+        scene_hash = _norm_hash(
+            await chrome.evaluate(
+                "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+            )
+        )
+        hn = _hash_num(scene_hash)
+        if i % 8 == 0:
+            await _ensure_videos_playing(chrome)
+        if hn is not None and hn < SLIDE4_MIN_HASH and (offset - last_adv) > 0.9:
+            await chrome.key("ArrowRight", "ArrowRight", 39)
+            last_adv = offset
+        reached4 = hn is not None and hn >= SLIDE4_MIN_HASH
+        if reached4 and flip_offset is None:
+            flip_offset = offset
+        if reached4:
+            progress = (
+                max(0.0, min(1.0, (offset - flip_offset) / TRANS_S))
+                if flip_offset is not None else 1.0
+            )
+        else:
+            progress = 0.0
+        fp = footprint_at(progress, SLIDE3_MOVIE_RECT, SLIDE4_MOVIE_RECT)
+        media = await _media_snapshot_with_pool(chrome)
+        owner_before = await _footprint_owner_keyed(chrome, fp, MOVIE1_KEY)
+        arr = await chrome.screenshot()
+        if i % 2 == 0 or i == n - 1:
+            Image.fromarray(arr).save(run_dir / f"{prefix}-t{i:03d}.png")
+        owner_after = await _footprint_owner_keyed(chrome, fp, MOVIE1_KEY)
+        ambiguous = (
+            owner_before.get("via") == "ambiguous"
+            or owner_after.get("via") == "ambiguous"
+            or (
+                owner_before.get("elId") is not None
+                and owner_after.get("elId") is not None
+                and owner_before.get("elId") != owner_after.get("elId")
+            )
+        )
+        owner_samples.append(
+            {
+                "sceneHash": scene_hash,
+                "captureOffsetS": offset,
+                "progress": round(progress, 3),
+                "footprint": [round(v, 1) for v in fp],
+                "decoderId": owner_after.get("elId"),
+                "ownerAmbiguous": ambiguous,
+                "via": owner_after.get("via"),
+            }
+        )
+        media_samples.append({**media, "sceneHash": scene_hash, "captureOffsetS": offset})
+        index_samples.append(
+            {
+                "index": _decode_index_patch(arr, index_patch_roi_for(fp)),
+                "sceneHash": scene_hash,
+                "captureOffsetS": offset,
+                "progress": round(progress, 3),
+            }
+        )
+    final_hash = _norm_hash(
+        await chrome.evaluate(
+            "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+        )
+    )
+    return owner_samples, media_samples, index_samples, final_hash
+
+
 async def _boot(chrome: ChromeCdp, base: str) -> dict:
     await chrome.goto("about:blank")
     await asyncio.sleep(0.05)
@@ -1383,6 +1597,11 @@ async def _boot(chrome: ChromeCdp, base: str) -> dict:
 async def _run(player: Path) -> dict:
     reuse = "--reuse-export" in sys.argv
     disposable_mode = "--disposable" in sys.argv
+    # The 3->4 magic-move bridge is ON by default (the repair). --disable-bridge34
+    # skips injecting the bridge config so the raw export restarts movie1 at slide
+    # 4 — used to demonstrate continueThroughMovingMagicMove3to4 is RED without the
+    # bridge (honest gate), never a false pass.
+    bridge34 = "--disable-bridge34" not in sys.argv
     wait_profile_name = _arg_value("--wait-profile", "fast")
     wait_profile = WAIT_PROFILES[wait_profile_name]
     if OUT.exists() and not reuse:
@@ -1470,6 +1689,14 @@ async def _run(player: Path) -> dict:
     try:
         boot = await _boot(chrome, base)
         await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
+        if bridge34:
+            # Engage the 3->4 magic-move bridge: PRESERVE keeps the movie1 decoder
+            # playing across the moving cut and suppresses the export's restart.
+            await chrome.evaluate(f"window.__OBED_P2_SLIDE4_MIN_HASH__ = {SLIDE4_MIN_HASH}")
+            x4, y4, w4, h4 = SLIDE4_MOVIE_RECT
+            await chrome.evaluate(
+                f"window.__OBED_P2_SLIDE4_RECT__ = {{x:{x4}, y:{y4}, w:{w4}, h:{h4}}}"
+            )
         # Derive the footprint movie's Magic Move crossfade texture ids. Under
         # the corrected model this is the 2->3 restart-side crossfade (see
         # `_derive_movie_texids`), so it is written for provenance only and is
@@ -1975,6 +2202,37 @@ async def _run(player: Path) -> dict:
         neighbours_retained = _score_neighbours_retained_clocks(
             samples_b, intended_keys, SLIDE3_MIN_HASH
         )
+
+        # ================= Transition C: 3->4 moving Magic Move =================
+        # (positive control — new finding continueThroughMovingMagicMove3to4;
+        #  everything below is delimited for merge with Peer B's adversarial edits)
+        await _ensure_videos_playing(chrome)
+        click_wall_c = time.monotonic()
+        (
+            owner_samples_c,
+            media_samples_c,
+            index_samples_c,
+            hash4,
+        ) = await _advance_to_slide4_capture(chrome, run_dir, "mm34", click_wall_c)
+        # Counter progression is scored over the SETTLED slide-4 window (footprint
+        # fully at the destination rect, progress>=0.98) so the moving ROI lands on
+        # the decoder's flat patch: mid-transition frames sample a moving/animating
+        # box and decode garbage. Liveness THROUGH the cut is proven separately by
+        # movingContinuity3to4's rVFC advance; this corroborates that the settled
+        # slide-4 composite shows live frames, not a frozen poster.
+        slide4_index_seq = [
+            s.get("index") for s in index_samples_c
+            if (_hash_num(s.get("sceneHash")) or -1) >= SLIDE4_MIN_HASH
+            and float(s.get("progress") or 0.0) >= 0.98
+        ]
+        moving_index_run = score_index_progression(slide4_index_seq)
+        bridge_events = await chrome.evaluate(
+            "window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"
+            ".filter(function(e){return e.kind==='bridge-3to4';}).slice(-6) : []"
+        ) or []
+        slide4_after = await chrome.screenshot()
+        Image.fromarray(slide4_after).save(run_dir / "after-3to4.png")
+        # ================= end Transition C =================
     finally:
         await chrome.close()
         httpd.shutdown()
@@ -1992,6 +2250,19 @@ async def _run(player: Path) -> dict:
     live_continuity = liveContinuity1to2(
         motion_across_flip, flip_samples, samples_a, hash1, hash2,
         restart_min_hash=SLIDE3_MIN_HASH,
+    )
+
+    # Fail-closed positive-control sub-verdict for the 3->4 moving Magic Move: the
+    # bridged movie1 decoder (the SAME one that played slide 3) must own the
+    # translated+scaled slide-4 footprint with a monotonic rVFC clock (not the
+    # export's fresh autoplay-from-0 restart). slide3_movie_decoder is the decoder
+    # the 2->3 restart scoring already bound for movie1 (el4).
+    slide3_movie_decoder = (
+        (per_movie_boundary.get(EXPECTED_MOVIE_KEYS[0]) or {}).get("restartDecoderId")
+    )
+    moving_continuity = movingContinuity3to4(
+        owner_samples_c, media_samples_c, slide3_movie_decoder,
+        hash3, hash4, SLIDE4_MIN_HASH,
     )
 
     findings = [
@@ -2218,6 +2489,50 @@ async def _run(player: Path) -> dict:
                 "retireEvents": retire_events[:6],
             },
         },
+        # ===== NEW FINDING: 3->4 moving Magic Move continuity (positive control) =====
+        # Delimited for merge with Peer B's adversarial edits.
+        {
+            "id": "continueThroughMovingMagicMove3to4",
+            "pass": bool(
+                moving_continuity.get("ok", False)
+                and moving_index_run.get("ok", False)
+                and not player_build_errors
+            ),
+            "status": "failed-by-player" if player_build_errors else None,
+            "detail": {
+                "movingContinuity3to4": moving_continuity,
+                "movingIndexRun": moving_index_run,
+                "hash": f"{hash3}->{hash4}",
+                "slide4MinHash": SLIDE4_MIN_HASH,
+                "slide3MovieRect": list(SLIDE3_MOVIE_RECT),
+                "slide4MovieRect": list(SLIDE4_MOVIE_RECT),
+                "bridgeEnabled": bridge34,
+                "bridgeEvents": bridge_events,
+                "ownerVias": [s.get("via") for s in owner_samples_c][:40],
+                "slide4IndexSequence": slide4_index_seq,
+                "playerBuildErrors": player_build_errors,
+                "note": (
+                    "The owner authored 3->4 as continuity ('Play movie across slides'), "
+                    "but the HTML export RESTARTS movie1 on a fresh decoder at the grown "
+                    "slide-4 footprint (Phase-0 diagnosis). The PRESERVE 3->4 bridge repairs "
+                    "it by keeping the SAME decoder (the 2->3 restart decoder that played "
+                    "slide 3) playing while its box translates+scales into slide 4, "
+                    "suppressing the export's fresh autoplay-from-0 element. Pass gate is "
+                    "movingContinuity3to4 (fail-closed: reached slide 4 (hn>=SLIDE4_MIN_HASH); "
+                    "ONE stable non-null footprint owner across the slide-4 window, resolved "
+                    "at the MOVING interpolated footprint keyed to movie1 so the retiring "
+                    "right-side WA0125 the grown box overlaps is excluded; CROSSING IDENTITY "
+                    "= that owner IS the slide-3 movie decoder, the anti-restart check a "
+                    "fresh decoder fails; rVFC presentedMediaTime advancing >0.05 and never "
+                    "rewinding = the live clock continues, not restarts) AND movingIndexRun "
+                    "(the composited counter, decoded at the MOVING index_patch_roi_for ROI, "
+                    "marches forward on slide 4). A raw export with --disable-bridge34 "
+                    "RESTARTS (fresh decoder) and fails crossingIdentity -> RED, so this is "
+                    "an honest gate, never a false pass. A player-build-error fails it as "
+                    "failed-by-player."
+                ),
+            },
+        },
     ]
     # Restart inconclusive must not count as overall success.
     success = all(f["pass"] for f in findings) and not restart_inconclusive
@@ -2246,7 +2561,10 @@ async def _run(player: Path) -> dict:
         "perMovieBoundary": per_movie_boundary,
         "restartCanvas": restart_canvas,
         "restartVerdict": restart_verdict,
-        "hashes": {"h1": hash1, "h2": hash2, "h3": hash3},
+        "hashes": {"h1": hash1, "h2": hash2, "h3": hash3, "h4": hash4},
+        "movingContinuity3to4": moving_continuity,
+        "movingIndexRun3to4": moving_index_run,
+        "bridge34Enabled": bridge34,
         "preserveEvents": preserve_events,
         "findings": findings,
         "success": success,

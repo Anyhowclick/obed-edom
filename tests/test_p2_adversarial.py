@@ -730,3 +730,109 @@ def test_live_continuity_accepts_null_context_type():
     )
     assert verdict["ok"] is True
     assert verdict["failed"] == []
+
+
+# --------------------------------------------------------------------------- #
+# `movingContinuity3to4` — fail-closed positive control for the 3->4 moving
+# Magic Move (playback continuity the export breaks, the PRESERVE bridge repairs).
+#
+# The owner authored 3->4 as continuity ("Play movie across slides"); the HTML
+# export RESTARTS movie1 on a fresh decoder at the grown slide-4 footprint. The
+# gate passes iff ALL of:
+#   - boundaryValid: hash3/hash4 parse, num(hash4) > num(hash3), and
+#     num(hash4) >= slide4_min_hash;
+#   - stableSlide4Owner: exactly one non-null footprint owner across the after
+#     window (hn >= num(hash4)), covering >=70%, no ambiguous frame;
+#   - crossingIdentity: that owner IS the slide-3 movie decoder (anti-restart);
+#   - rvfcMonotonic: that decoder's presentedMediaTime advances >0.05, no rewind.
+# The export's fresh restart decoder differs from the slide-3 decoder and fails
+# crossingIdentity -> RED, so the gate is honest, never a false pass.
+# --------------------------------------------------------------------------- #
+S4MIN = 8  # SLIDE4_MIN_HASH
+
+
+def _owner_samples_34(decoder_id=4, ambiguous=False):
+    """Owner samples in the slide-4 after-window (hn #8,#9 >= num(hash4)=8)."""
+    return [
+        {"sceneHash": "#8", "decoderId": decoder_id, "ownerAmbiguous": ambiguous},
+        {"sceneHash": "#9", "decoderId": decoder_id, "ownerAmbiguous": ambiguous},
+    ]
+
+
+def _presented_34(decoder_id=4):
+    """Media snapshots whose slide-4 owner's presentedMediaTime advances >0.05."""
+    return [
+        {"sceneHash": "#8", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 1.6}]},
+        {"sceneHash": "#9", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 2.4}]},
+    ]
+
+
+def test_moving_continuity_passes_when_bridged_decoder_continues():
+    """Positive control: the slide-3 decoder (4) owns the slide-4 footprint with a
+    monotonic clock => ok, no failures. Proves the gate is not wired to always-fail."""
+    verdict = p2.movingContinuity3to4(
+        _owner_samples_34(4), _presented_34(4), 4, "#7", "#8", S4MIN
+    )
+    assert verdict["ok"] is True
+    assert verdict["failed"] == []
+    assert verdict["slide4Owner"] == 4
+    assert verdict["rvfcMonotonic"]["ok"] is True
+
+
+def test_moving_continuity_fails_closed_on_export_restart():
+    """The export's fresh autoplay-from-0 element is a DIFFERENT decoder (6) than
+    the slide-3 decoder (4): crossingIdentity fails => RED. This is the honest
+    RED-without-the-bridge case."""
+    verdict = p2.movingContinuity3to4(
+        _owner_samples_34(6), _presented_34(6), 4, "#7", "#8", S4MIN
+    )
+    assert verdict["ok"] is False
+    assert "crossingIdentity" in verdict["failed"]
+
+
+def test_moving_continuity_fails_closed_when_no_slide4_owner():
+    """No decoder owns the slide-4 footprint (all null — e.g. the restart element
+    drifted off the slot): stableSlide4Owner + crossingIdentity + rvfcMonotonic all
+    cascade closed."""
+    null_owner = [
+        {"sceneHash": "#8", "decoderId": None, "ownerAmbiguous": False},
+        {"sceneHash": "#9", "decoderId": None, "ownerAmbiguous": False},
+    ]
+    verdict = p2.movingContinuity3to4(null_owner, [], 4, "#7", "#8", S4MIN)
+    assert verdict["ok"] is False
+    assert "stableSlide4Owner" in verdict["failed"]
+    assert "crossingIdentity" in verdict["failed"]
+    assert "rvfcMonotonic" in verdict["failed"]
+
+
+def test_moving_continuity_fails_closed_on_ambiguous_owner():
+    """An ambiguous frame (two decoders at the slot — a handoff in flight) must not
+    be tolerated: stableSlide4Owner fails closed."""
+    verdict = p2.movingContinuity3to4(
+        _owner_samples_34(4, ambiguous=True), _presented_34(4), 4, "#7", "#8", S4MIN
+    )
+    assert verdict["ok"] is False
+    assert "stableSlide4Owner" in verdict["failed"]
+
+
+def test_moving_continuity_fails_closed_when_not_reaching_slide4():
+    """If the after hash never reaches slide 4 (num(hash4) < slide4_min_hash), the
+    boundary is invalid and the gate fails closed (never pass by absence)."""
+    verdict = p2.movingContinuity3to4(
+        _owner_samples_34(4), _presented_34(4), 4, "#7", "#7", S4MIN
+    )
+    assert verdict["ok"] is False
+    assert "boundaryValid" in verdict["failed"]
+
+
+def test_moving_continuity_fails_closed_on_rvfc_rewind():
+    """The bound decoder is stable and identity matches, but its presentedMediaTime
+    RESETS/rewinds (a restart signature even under the same reported id) => the
+    rvfcMonotonic check fails closed."""
+    rewind = [
+        {"sceneHash": "#8", "videos": [{"decoderId": 4, "presentedMediaTime": 2.4}]},
+        {"sceneHash": "#9", "videos": [{"decoderId": 4, "presentedMediaTime": 0.05}]},
+    ]
+    verdict = p2.movingContinuity3to4(_owner_samples_34(4), rewind, 4, "#7", "#8", S4MIN)
+    assert verdict["ok"] is False
+    assert "rvfcMonotonic" in verdict["failed"]

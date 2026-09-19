@@ -1338,6 +1338,48 @@ def _frozen_runs(frozen: Sequence[bool]) -> list[tuple[int, int]]:
     return runs
 
 
+def footprint_at(
+    progress: float,
+    src_rect: Sequence[float],
+    dst_rect: Sequence[float],
+) -> tuple[float, float, float, float]:
+    """Linearly interpolate a movie footprint (x, y, w, h) across a moving cut.
+
+    ``progress`` is clamped to [0, 1]. When ``src_rect == dst_rect`` (a static
+    boundary) it returns that constant rect, so a caller can wire this uniformly
+    for both static (1->2) and translating+scaling (3->4) magic moves.
+    """
+    p = max(0.0, min(1.0, float(progress)))
+    s = tuple(float(v) for v in src_rect)
+    d = tuple(float(v) for v in dst_rect)
+    return (
+        s[0] + (d[0] - s[0]) * p,
+        s[1] + (d[1] - s[1]) * p,
+        s[2] + (d[2] - s[2]) * p,
+        s[3] + (d[3] - s[3]) * p,
+    )
+
+
+def index_patch_roi_for(
+    footprint: Sequence[float],
+) -> tuple[int, int, int, int]:
+    """Map a movie footprint (x, y, w, h) to its burnt-in frame-index patch ROI.
+
+    Generalises the fixed slide-1/2 mapping (the disposable movie's counter patch
+    is the top-left 120x48 of its 1920x540 source) to an arbitrary footprint, with
+    the same insets that keep the ROI inside the flat-neutral patch and off the
+    high-contrast grating. ``index_patch_roi_for((109, 795, 952, 268))`` reproduces
+    the adversarial probe's ``INDEX_PATCH_ROI`` exactly (back-compat).
+    """
+    x, y, w, h = (float(v) for v in footprint)
+    return (
+        int(round(x)) + 2,
+        int(round(y)),
+        max(1, round(w * 120 / 1920) - 18),
+        max(1, round(h * 48 / 540) - 10),
+    )
+
+
 def score_index_progression(
     indices: Sequence[int | None],
     *,

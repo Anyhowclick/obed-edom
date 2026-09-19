@@ -472,7 +472,11 @@ PRESERVE_SCRIPT = r"""
      * A `<video>` has no 2D context stamp, so contextType is null.
      */
     footprintOwnerDecoderId: function(rect) {
-      const wantKey = footprintKeyForRect(rect);
+      // The caller may pin the asset key directly (rect.key) when it queries a
+      // rect the fixed footprint table does not classify — e.g. the moving/scaling
+      // 3->4 slot, resolved by interpolated rect + assetKey==untitled. Otherwise
+      // classify by the fixed slide-1/2 footprint table.
+      const wantKey = (rect && rect.key) ? rect.key : footprintKeyForRect(rect);
       // Unresolved footprint key -> fail closed, never admit any movie key
       // (Codex r5 F2): the helper must not own a rect it cannot identify.
       if (wantKey == null) return {elId: null, key: null, via: 'unknown-key', contextType: null};
@@ -493,6 +497,11 @@ PRESERVE_SCRIPT = r"""
         if (!(v.readyState >= 2 && v.videoWidth > 0)) return;
         const key = movieAssetKey(v.currentSrc || v.src || '');
         if (key !== wantKey) return;
+        // A hidden element does not composite, so it cannot own the visible
+        // footprint. Skip it — otherwise a suppressed 3->4 restart sibling (same
+        // untitled key, same slot, opacity 0) would tie with the visible bridged
+        // overlay and fail the owner resolution as ambiguous.
+        if (!isCompositing(v)) return;
         const r = v.getBoundingClientRect();
         if (!(r.width > 1 && r.height > 1)) return;
         const ov = rectOverlapArea(r, rect);
@@ -627,6 +636,15 @@ PRESERVE_SCRIPT = r"""
     const v = window.__OBED_P2_RESTART_MIN_HASH__;
     return (typeof v === 'number' && isFinite(v)) ? v : Infinity;
   }
+  // First scene of slide 4 (the 3->4 magic-move destination). The 2->3 DISSOLVE
+  // restart zone is [restartMinHash, slide4MinHash); at/after slide4MinHash a
+  // fresh movie1 element is the export's broken autoplay-from-0 for the 3->4
+  // magic move, which is AUTHORED continuity ("Play across slides") and must be
+  // BRIDGED (reuse the live decoder), not retired. null => no 3->4 bridge.
+  function slide4MinHash() {
+    const v = window.__OBED_P2_SLIDE4_MIN_HASH__;
+    return (typeof v === 'number' && isFinite(v)) ? v : null;
+  }
   function nearestLayer(el) {
     let n = el;
     while (n) {
@@ -650,6 +668,14 @@ PRESERVE_SCRIPT = r"""
     // Our own remount moves briefly detach the node; that self-triggered detach
     // must not re-stash and re-schedule a remount (exponential reschedule blowup).
     if (v.__obedRemounting) return;
+    // A decoder bridged through the 3->4 magic move is held at the slide-4 slot by
+    // keepAtSlot; a re-detach must not re-stash/re-remount it back onto the
+    // slide-1/2 footprint (that dropped it to the fallback position at #8->#9).
+    if (v.__obedBridged34) return;
+    // The export's 3->4 restart element is suppressed (hidden overlay); a re-detach
+    // must not remount it onto the footprint where it would paint its grating over
+    // the bridged decoder (covering the composited counter patch).
+    if (v.__obedSuppressed34) return;
     if ((v.__obedGen == null ? 0 : v.__obedGen) < preserveGeneration) {
       note('stash-stale-gen', {
         elId: v.__obedElId, why: why,
@@ -775,10 +801,137 @@ PRESERVE_SCRIPT = r"""
     requestAnimationFrame(frame);
   }
 
+  /**
+   * 3->4 magic-move moving-target pin. Unlike keepAtFootprint (which holds a
+   * bridged 1->2 decoder at a STATIC on-screen point), the 3->4 movie box
+   * TRANSLATES + SCALES from the slide-3 rect to the larger slide-4 rect across
+   * the cut, so the target moves every frame. `real` (the live continuing
+   * decoder) is DOM-swapped by bindFacade into the player's slide-4 movie slot,
+   * inheriting that layer's magic-move transform, so it should follow the
+   * animation on its own; this loop re-asserts that by measure-correcting `real`
+   * onto the authored movie poster canvas nearest its current rect every frame,
+   * defeating any residual drag from a stale 1->2 remount. Runs from the 3->4
+   * bridge engage until the decoder retires (`__obedRemountEpoch === -1` is the
+   * bridge's OWN sentinel here, so this loop ignores it) or leaves the DOM.
+   */
+  function slide4Rect() {
+    const r = window.__OBED_P2_SLIDE4_RECT__;
+    if (r && typeof r === 'object' && r.w > 1 && r.h > 1) return r;
+    return null;
+  }
+  function keepAtSlot(real, stub) {
+    if (real.__obedSlotPinning) return;
+    real.__obedSlotPinning = true;
+    const s4 = slide4MinHash();
+    function frame() {
+      const hn = currentHashNum();
+      if (real.ended || !document.contains(real)
+          || (s4 != null && hn != null && hn < s4)) {
+        real.__obedSlotPinning = false; return;
+      }
+      // Pin to the authored slide-4 destination rect (measure-and-correct so it
+      // holds through the containing layer's magic-move transform). Defeats a
+      // re-detach's fresh scheduleRemount/footprint-fallback from dragging the
+      // bridged decoder off the slide-4 slot at the #8->#9 boundary.
+      const dest = slide4Rect();
+      const cur = real.getBoundingClientRect();
+      if (dest && cur.width > 1 && cur.height > 1) {
+        const dx = dest.x - cur.left, dy = dest.y - cur.top;
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+          real.style.left = ((parseFloat(real.style.left) || 0) + dx) + 'px';
+          real.style.top = ((parseFloat(real.style.top) || 0) + dy) + 'px';
+        }
+        if (Math.abs(cur.width - dest.w) > 1) real.style.width = dest.w + 'px';
+        if (Math.abs(cur.height - dest.h) > 1) real.style.height = dest.h + 'px';
+        real.style.visibility = 'visible';
+        real.style.display = 'block';
+        real.style.opacity = '1';
+      }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+
   function rectOverlapArea(r, rect) {
     const ix = Math.max(0, Math.min(r.left + r.width, rect.x + rect.w) - Math.max(r.left, rect.x));
     const iy = Math.max(0, Math.min(r.top + r.height, rect.y + rect.h) - Math.max(r.top, rect.y));
     return ix * iy;
+  }
+  // A <video> only contributes to the composite when attached and not hidden by
+  // display/visibility/opacity. Used to exclude a suppressed 3->4 restart sibling
+  // from footprint-owner resolution (it decodes but does not paint).
+  function isCompositing(v) {
+    if (!document.contains(v)) return false;
+    if (v.__obedSuppressed34) return false;
+    try {
+      const st = getComputedStyle(v);
+      if (st.display === 'none' || st.visibility === 'hidden') return false;
+      if (parseFloat(st.opacity) <= 0.02) return false;
+    } catch (e) {}
+    return true;
+  }
+  /**
+   * Bridge a preserved live decoder through the 3->4 magic move: keep it as a
+   * visible overlay at the slide-4 destination rect (same mechanism proven for
+   * 1->2, but at the grown/translated slot and running in the slide-4 window),
+   * so its clock CONTINUES while the export's fresh autoplay-from-0 element is
+   * suppressed. Absolute-positioned on the stage at the destination rect (a
+   * root-stage append lands on top, covering the export's poster/hidden restart);
+   * keepAtSlot then holds it there through the layer transform and any re-detach.
+   */
+  function bridgeTo34(v) {
+    v.__obedBridged34 = true;
+    v.__obedRemountEpoch = -1;   // cancel any pending 1->2 remount for v
+    v.__obedPinning = false;
+    const dest = slide4Rect();
+    const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
+    try {
+      if (stage && v.parentNode !== stage) {
+        beginMove(v);
+        stage.appendChild(v);
+      }
+      v.style.position = 'absolute';
+      if (dest) {
+        v.style.left = dest.x + 'px';
+        v.style.top = dest.y + 'px';
+        v.style.width = dest.w + 'px';
+        v.style.height = dest.h + 'px';
+      }
+      v.style.visibility = 'visible';
+      v.style.display = 'block';
+      v.style.opacity = '1';
+      v.style.pointerEvents = 'none';
+      v.dataset.obedRemounted = '1';
+      if (v.paused && !v.ended) {
+        const p = v.play();
+        if (p && p.catch) p.catch(function(){});
+      }
+    } catch (e) {
+      note('bridge-3to4-error', {elId: v.__obedElId, message: String(e && e.message || e)});
+    }
+    keepAtSlot(v, null);
+  }
+  /**
+   * Keep the export's suppressed 3->4 restart element hidden every frame. A
+   * one-shot opacity/visibility override is wiped when the player re-styles the
+   * element on slide 4's later build, letting its grating paint over the bridged
+   * decoder's composited counter patch. Re-assert the hide each rAF so only the
+   * continuing decoder composites.
+   */
+  function keepSuppressed(el) {
+    if (el.__obedSuppressPinning) return;
+    el.__obedSuppressPinning = true;
+    function frame() {
+      if (!el.__obedSuppressed34 || !document.contains(el)) {
+        el.__obedSuppressPinning = false; return;
+      }
+      try {
+        el.style.setProperty('opacity', '0', 'important');
+        el.style.setProperty('visibility', 'hidden', 'important');
+      } catch (e) {}
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
   }
   /**
    * Find the movie's own authored poster <canvas> (its layer's stacking
@@ -1481,8 +1634,15 @@ PRESERVE_SCRIPT = r"""
         const key = assetKey(value);
         const hn = currentHashNum();
         const boundary = restartMinHash();
+        const s4 = slide4MinHash();
         const q = pool.get(key);
-        if (hn != null && hn >= boundary && q && q.length) {
+        // Retire ONLY inside the 2->3 dissolve restart zone [boundary, s4). A
+        // fresh element at/after s4 is the 3->4 magic-move destination (authored
+        // continuity broken by the export's autoplay-from-0) and falls through to
+        // the reuse path below so the live decoder BRIDGES the moving cut.
+        const inDissolveRestartZone = hn != null && hn >= boundary
+          && (s4 == null || hn < s4);
+        if (inDissolveRestartZone && q && q.length) {
           // On/after the restart boundary this is the authored fresh Start
           // Movie — never stitch a preserved decoder onto it.
           note('reuse-skip-boundary', {key: key, newElId: el.__obedElId, hashNum: hn, boundary: boundary, queueLen: q.length});
@@ -1525,12 +1685,26 @@ PRESERVE_SCRIPT = r"""
           }
           if (preserved && preserved !== el) {
             tag(preserved);
-            note('reuse-decoder', {
+            const bridging34 = s4 != null && hn != null && hn >= s4;
+            note(bridging34 ? 'bridge-3to4' : 'reuse-decoder', {
               key: key, newElId: el.__obedElId, oldElId: preserved.__obedElId,
               preservedT: preserved.currentTime, paused: preserved.paused,
               readyState: preserved.readyState,
               queueLeft: q ? q.length : 0
             });
+            if (bridging34) {
+              // 3->4 magic-move continuity: keep the preserved live decoder as a
+              // visible overlay at the slide-4 destination (bridgeTo34 + keepAtSlot)
+              // and SUPPRESS the export's fresh autoplay-from-0 element so only the
+              // continuing decoder composites. A visibility-gated footprint owner
+              // then resolves the overlay, not the hidden restart. We do NOT
+              // bindFacade here (a one-shot DOM swap did not survive slide-4's
+              // second build): the overlay is authoritative, el is inert.
+              bridgeTo34(preserved);
+              el.__obedSuppressed34 = true;
+              keepSuppressed(el);
+              return origSA(attr, value);
+            }
             try {
               if (el.id) preserved.id = el.id;
               const st = el.getAttribute('style');
