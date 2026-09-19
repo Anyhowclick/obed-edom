@@ -7,9 +7,11 @@ the authority for whether an input has settled.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import mimetypes
 import os
+import queue
 import re
 import shutil
 import socket
@@ -23,6 +25,8 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
+
+from websockets.sync.client import connect
 
 from .html_preview import preview_root, safe_export_file
 from .live_continuity import Unsupported, derive_plan
@@ -70,43 +74,130 @@ class LiveHostError(RuntimeError):
     """The owned browser cannot provide an observed player state."""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+
+_DISCOVERY_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _discovery_get(url: str, timeout: float) -> Any:
+    response = _DISCOVERY_OPENER.open(url, timeout=timeout)
+    if response.status != 200:
+        raise LiveHostError(f"CDP discovery at {url} returned status {response.status}.")
+    return response
+
+
+def _resolves_to_loopback_only(host: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        raise LiveHostError(f"Could not resolve {host!r} for a CDP loopback check: {exc}") from exc
+    addrs = {info[4][0] for info in infos}
+    return bool(addrs) and all(ipaddress.ip_address(addr).is_loopback for addr in addrs)
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host in ("127.0.0.1", "::1"):
+        return True
+    if host == "localhost":
+        return _resolves_to_loopback_only(host)
+    return False
+
+
 def _validate_loopback_endpoint(endpoint: str) -> str:
-    host = urlsplit(endpoint).hostname
-    if host not in ("127.0.0.1", "localhost", "::1"):
+    parts = urlsplit(endpoint)
+    if parts.scheme != "http":
+        raise LiveHostError("OBED_LIVE_ATTACH must be an http loopback endpoint.")
+    if parts.username is not None or parts.password is not None:
+        raise LiveHostError("OBED_LIVE_ATTACH must not contain userinfo.")
+    if parts.path not in ("", "/"):
+        raise LiveHostError("OBED_LIVE_ATTACH must not include a path.")
+    if parts.query or parts.fragment:
+        raise LiveHostError("OBED_LIVE_ATTACH must not include a query or fragment.")
+    host = parts.hostname
+    if host is None or not _is_loopback_host(host):
         raise LiveHostError("OBED_LIVE_ATTACH must target a loopback CDP endpoint.")
     return endpoint
 
 
+def _validate_target_ws_url(ws_url: str, endpoint: str) -> str:
+    parts = urlsplit(ws_url)
+    if parts.scheme != "ws":
+        raise LiveHostError(f"CDP target websocket URL has an unexpected scheme: {ws_url}")
+    host = parts.hostname
+    if host is None or not _is_loopback_host(host):
+        raise LiveHostError(f"CDP target websocket is not a loopback address: {ws_url}")
+    if parts.port != urlsplit(endpoint).port:
+        raise LiveHostError("CDP target websocket port does not match the attach endpoint.")
+    return ws_url
+
+
 class _SessionLogger:
-    """Append-only JSONL session log; a logging failure never reaches the caller."""
+    """Append-only JSONL session log; a logging failure never reaches the caller.
+
+    Writes are enqueued (O(1)) onto a bounded queue and drained by a single daemon
+    writer thread, so a slow or wedged log disk can never stall a CDP call or the
+    command it is embedded in. A full queue drops the record and counts the drop;
+    the count is surfaced to the caller via `dropped` so it can be recorded on the
+    session's stop record. Directory creation and file open happen here, inside
+    this constructor's own failure boundary, so an unwritable log directory can
+    never prevent a show from starting."""
+
+    _QUEUE_MAXSIZE = 2000
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._lock = threading.Lock()
         self._file: Any = None
+        self._queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
+        self._dropped = 0
+        self._writer: threading.Thread | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             self._file = path.open("a", buffering=1)
         except Exception:
             self._file = None
+        if self._file is not None:
+            self._writer = threading.Thread(target=self._drain, daemon=True)
+            self._writer.start()
+
+    @property
+    def dropped(self) -> int:
+        return self._dropped
+
+    def _drain(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            try:
+                self._file.write(json.dumps(item, default=str) + "\n")
+                self._file.flush()
+            except Exception:
+                pass
 
     def log(self, kind: str, **fields: Any) -> None:
         if self._file is None:
             return
         record = {"ts": time.time(), "kind": kind, **fields}
         try:
-            with self._lock:
-                self._file.write(json.dumps(record, default=str) + "\n")
-                self._file.flush()
-        except Exception:
-            pass
+            self._queue.put_nowait(record)
+        except queue.Full:
+            self._dropped += 1
 
     def close(self) -> None:
         if self._file is None:
             return
+        if self._writer is not None:
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
+            self._writer.join(timeout=2.0)
+            self._writer = None
         try:
-            with self._lock:
-                self._file.close()
+            self._file.close()
         except Exception:
             pass
         finally:
@@ -115,9 +206,8 @@ class _SessionLogger:
 
 def _new_log_path() -> Path:
     directory = preview_root() / "live-logs"
-    directory.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    return directory / f"{stamp}-{os.getpid()}.jsonl"
+    return directory / f"{stamp}-{os.getpid()}-{time.monotonic_ns()}.jsonl"
 
 
 @dataclass(frozen=True)
@@ -334,6 +424,8 @@ class ChromeCdp:
         self._lock = threading.Lock()
         self._stop_lock = threading.Lock()
         self._stopped = False
+        self._target_ws_url: str | None = None
+        self._blanked = False
 
     def _log(self, kind: str, **fields: Any) -> None:
         if self.logger is None: return
@@ -341,14 +433,16 @@ class ChromeCdp:
         except Exception: pass
 
     def start(self) -> None:
-        from websockets.sync.client import connect
         if self.attach_endpoint:
             targets = self._list_targets()
             target = self._pick_target(targets)
+            ws_url = _validate_target_ws_url(target["webSocketDebuggerUrl"], self.attach_endpoint)
             try:
-                self.ws = connect(target["webSocketDebuggerUrl"], open_timeout=5)
+                self.ws = connect(ws_url, open_timeout=5)
             except Exception as exc:
                 raise LiveHostError(f"Could not attach to CDP target: {exc}") from exc
+            self._target_ws_url = ws_url
+            self._blanked = False
             self.call("Runtime.enable")
             self.call("Page.enable")
             try: self.call("Log.enable")
@@ -396,22 +490,34 @@ class ChromeCdp:
             self.call("Browser.setWindowBounds", windowId=window["windowId"], bounds={"windowState": "fullscreen"})
 
     def _list_targets(self) -> list[dict[str, Any]]:
+        url = self.attach_endpoint.rstrip("/") + "/json/list"
         try:
-            with urllib.request.urlopen(self.attach_endpoint.rstrip("/") + "/json/list", timeout=5) as response:
+            with _discovery_get(url, timeout=5) as response:
                 return json.loads(response.read())
+        except LiveHostError:
+            raise
         except Exception as exc:
             raise LiveHostError(f"Could not list CDP targets at {self.attach_endpoint}: {exc}") from exc
+
+    @staticmethod
+    def _describe_targets(items: list[dict[str, Any]]) -> str:
+        return ", ".join(f"{item.get('id', '')} {item.get('url', '')} ({item.get('title', '')})" for item in items) or "none"
 
     def _pick_target(self, targets: list[dict[str, Any]]) -> dict[str, Any]:
         pages = [item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")]
         if self.attach_match:
             matched = [item for item in pages if self.attach_match in (item.get("url", "") + item.get("title", ""))]
-            if matched: return matched[0]
-        if len(pages) == 1: return pages[0]
-        candidates = ", ".join(f"{item.get('title', '')} ({item.get('url', '')})" for item in pages) or "none"
-        raise LiveHostError(f"Ambiguous CDP attach target; candidates: {candidates}")
+            if len(matched) != 1:
+                raise LiveHostError(
+                    f"CDP attach match {self.attach_match!r} did not select exactly one page target; "
+                    f"candidates: {self._describe_targets(matched or pages)}"
+                )
+            return matched[0]
+        if len(pages) != 1:
+            raise LiveHostError(f"Ambiguous CDP attach target; candidates: {self._describe_targets(pages)}")
+        return pages[0]
 
-    def call(self, method: str, **params: Any) -> dict[str, Any]:
+    def call(self, method: str, deadline_s: float | None = None, **params: Any) -> dict[str, Any]:
         with self._lock:
             ws, proc = self.ws, self.proc
             if not ws: raise LiveHostError("Program browser stopped unexpectedly.")
@@ -419,9 +525,14 @@ class ChromeCdp:
             self._id += 1
             request_id = self._id
             started = time.monotonic()
+            deadline = started + (deadline_s if deadline_s is not None else 15)
             ws.send(json.dumps({"id": request_id, "method": method, "params": params}))
             while True:
-                try: message = json.loads(ws.recv(timeout=15))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._log("cdpTimeout", method=method)
+                    raise LiveHostError(f"Program browser did not answer CDP {method} in time.")
+                try: message = json.loads(ws.recv(timeout=remaining))
                 except TimeoutError as exc:
                     self._log("cdpTimeout", method=method)
                     raise LiveHostError(f"Program browser did not answer CDP {method} in time.") from exc
@@ -441,8 +552,8 @@ class ChromeCdp:
         elif method == "Runtime.consoleAPICalled" and params.get("type") in ("error", "warning"):
             self._log("pageConsole", level=params.get("type"), args=params.get("args"))
 
-    def evaluate(self, expression: str) -> Any:
-        result = self.call("Runtime.evaluate", expression=expression, returnByValue=True, awaitPromise=False)
+    def evaluate(self, expression: str, deadline_s: float | None = None) -> Any:
+        result = self.call("Runtime.evaluate", deadline_s=deadline_s, expression=expression, returnByValue=True, awaitPromise=False)
         if result.get("exceptionDetails"): raise LiveHostError("Program browser evaluation failed.")
         return (result.get("result") or {}).get("value")
 
@@ -460,28 +571,78 @@ class ChromeCdp:
             time.sleep(.05)
         raise LiveHostError("Program page did not finish loading.")
 
+    def _blank_attached_target(self) -> None:
+        """Reconnect a fresh, short-lived websocket to the same target and confirm it
+        has navigated to about:blank, so a released attach never leaves the last
+        program frame on air. Independent of `self.ws`/`_lock`: it never waits on
+        a lock another thread may be holding inside `call()`."""
+        if not self._target_ws_url:
+            raise LiveHostError("No CDP target recorded to blank.")
+        deadline = time.monotonic() + 3.0
+        try:
+            blank_ws = connect(self._target_ws_url, open_timeout=max(0.1, deadline - time.monotonic()))
+        except Exception as exc:
+            raise LiveHostError(f"Could not reconnect to blank the CDP target: {exc}") from exc
+        try:
+            blank_ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": "about:blank"}}))
+            self._recv_matching(blank_ws, 1, deadline)
+            blank_ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {"expression": "location.href", "returnByValue": True}}))
+            result = self._recv_matching(blank_ws, 2, deadline)
+            value = (result.get("result") or {}).get("value")
+            if value != "about:blank":
+                raise LiveHostError(f"CDP target did not confirm about:blank (saw {value!r}).")
+        finally:
+            try: blank_ws.close()
+            except Exception: pass
+
+    @staticmethod
+    def _recv_matching(ws: Any, request_id: int, deadline: float) -> dict[str, Any]:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LiveHostError("Timed out waiting for CDP response while blanking the target.")
+            try: message = json.loads(ws.recv(timeout=remaining))
+            except TimeoutError as exc:
+                raise LiveHostError("Timed out waiting for CDP response while blanking the target.") from exc
+            except Exception as exc:
+                raise LiveHostError("CDP connection failed while blanking the target.") from exc
+            if message.get("id") == request_id:
+                if "error" in message:
+                    raise LiveHostError(f"CDP call failed while blanking the target: {message['error'].get('message', 'unknown error')}")
+                return message.get("result") or {}
+
     def stop(self) -> None:
         """Idempotent and thread-safe: never waits on `_lock`, so it stays prompt even
         while another thread is blocked inside `call()` on the same instance; closing
         the socket and terminating Chrome there make that blocked call fail promptly.
         Every teardown step is attempted even if an earlier one raises; a resource's
         reference is dropped only once it is actually released, so a raising stop can
-        be retried and will only redo the work that is still outstanding."""
+        be retried and will only redo the work that is still outstanding.
+
+        In attach mode the active websocket is closed first (unblocking any pending
+        `call()`), and only then is the target blanked through a fresh connection;
+        the transport is not considered released until blanking has actually
+        succeeded, so a stop that fails to blank raises and a later stop retries
+        only that step."""
         with self._stop_lock:
             self._stopped = True
-            if self.ws is None and self.proc is None: return
-            errors: list[Exception] = []
             if self.attach_endpoint:
+                if self.ws is None and self._blanked: return
+                errors: list[Exception] = []
                 if self.ws is not None:
-                    if self._lock.acquire(blocking=False):
-                        self._lock.release()
-                        try: self.call("Page.navigate", url="about:blank")
-                        except Exception: pass
                     try: self.ws.close()
                     except Exception as exc: errors.append(exc)
                     else: self.ws = None
+                if not self._blanked:
+                    try:
+                        self._blank_attached_target()
+                        self._blanked = True
+                    except Exception as exc:
+                        errors.append(exc)
                 if errors: raise LiveHostError("Program browser did not fully stop.")
                 return
+            if self.ws is None and self.proc is None: return
+            errors: list[Exception] = []
             if self.ws is not None:
                 try: self.ws.close()
                 except Exception as exc: errors.append(exc)
@@ -607,14 +768,14 @@ class LiveOutputHost:
             attachEndpoint=self._attach_endpoint, attachMatch=self._attach_match,
             headless=self.headless,
         )
-        self._validate_export()
-        self._expected_scene_count = self._authored_scene_count()
-        self._continuity_mode, self._continuity_reason, self._continuity_runtime_plan = self._resolve_continuity_static()
-        player = self.resolver(self.export_root, "assets/player/main.js").read_bytes()
-        try: patched = patch_player(player)
-        except LiveRuntimeUnsupported as exc: raise LiveHostError(str(exc)) from exc
-        self._profile = Path(tempfile.mkdtemp(prefix="obed-live-chrome-"))
         try:
+            self._validate_export()
+            self._expected_scene_count = self._authored_scene_count()
+            self._continuity_mode, self._continuity_reason, self._continuity_runtime_plan = self._resolve_continuity_static()
+            player = self.resolver(self.export_root, "assets/player/main.js").read_bytes()
+            try: patched = patch_player(player)
+            except LiveRuntimeUnsupported as exc: raise LiveHostError(str(exc)) from exc
+            self._profile = Path(tempfile.mkdtemp(prefix="obed-live-chrome-"))
             continuity_script = (
                 _continuity_scripts(self._continuity_runtime_plan, self._canvas)
                 if self._continuity_runtime_plan is not None
@@ -772,8 +933,11 @@ class LiveOutputHost:
                 "var q=v.getVideoPlaybackQuality?v.getVideoPlaybackQuality():{};"
                 "return {src:(v.currentSrc||v.src||'').split('/').pop(),currentTime:v.currentTime,"
                 "paused:v.paused,readyState:v.readyState,videoWidth:v.videoWidth,videoHeight:v.videoHeight,"
-                "droppedFrames:q.droppedVideoFrames,totalFrames:q.totalVideoFrames};})"
+                "droppedFrames:q.droppedVideoFrames,totalFrames:q.totalVideoFrames};})",
+                deadline_s=1.5,
             )
+        except LiveHostError as exc:
+            return "timeout" if "did not answer" in str(exc) else None
         except Exception:
             return None
 
@@ -871,7 +1035,7 @@ class LiveOutputHost:
             self._stopped = True
             if not self._transport and not self._server and not self._profile:
                 if self._logger is not None:
-                    self._logger.log("stop", released=[], errors=[])
+                    self._logger.log("stop", released=[], errors=[], droppedLogRecords=self._logger.dropped)
                     self._logger.close()
                 return
             errors: list[Exception] = []
@@ -889,7 +1053,7 @@ class LiveOutputHost:
                 except Exception as exc: errors.append(exc)
                 else: self._profile = None; released.append("profile")
             if self._logger is not None:
-                self._logger.log("stop", released=released, errors=[str(exc) for exc in errors])
+                self._logger.log("stop", released=released, errors=[str(exc) for exc in errors], droppedLogRecords=self._logger.dropped)
                 self._logger.close()
             if errors:
                 raise LiveHostError("Program player did not fully stop.")

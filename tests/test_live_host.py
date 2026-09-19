@@ -544,6 +544,87 @@ def test_pick_target_prefers_match_then_requires_a_single_page(tmp_path):
     assert transport._pick_target(pages[:1])["webSocketDebuggerUrl"] == "ws://a"
 
 
+def test_pick_target_with_match_requires_exactly_one_match_not_a_silent_fallback(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222", attach_match="obs")
+    no_match = [{"type": "page", "id": "1", "url": "http://x/blank", "title": "blank", "webSocketDebuggerUrl": "ws://a"}]
+    with pytest.raises(live_host.LiveHostError, match="did not select exactly one"):
+        transport._pick_target(no_match)
+    two_matches = [
+        {"type": "page", "id": "1", "url": "http://x/obs-a", "title": "obs a", "webSocketDebuggerUrl": "ws://a"},
+        {"type": "page", "id": "2", "url": "http://x/obs-b", "title": "obs b", "webSocketDebuggerUrl": "ws://b"},
+    ]
+    with pytest.raises(live_host.LiveHostError, match="did not select exactly one") as excinfo:
+        transport._pick_target(two_matches)
+    assert "1 http://x/obs-a" in str(excinfo.value)
+    assert "2 http://x/obs-b" in str(excinfo.value)
+
+
+def test_pick_target_without_match_never_falls_back_on_multiple_pages(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
+    pages = [
+        {"type": "page", "id": "1", "url": "http://x/a", "title": "a", "webSocketDebuggerUrl": "ws://a"},
+        {"type": "page", "id": "2", "url": "http://x/b", "title": "b", "webSocketDebuggerUrl": "ws://b"},
+    ]
+    with pytest.raises(live_host.LiveHostError, match="Ambiguous") as excinfo:
+        transport._pick_target(pages)
+    assert "1 http://x/a" in str(excinfo.value)
+    assert "2 http://x/b" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://127.0.0.1:9222",
+        "http://user:pass@127.0.0.1:9222",
+        "http://127.0.0.1:9222/some/path",
+        "http://127.0.0.1:9222/?x=1",
+        "http://127.0.0.1:9222/#frag",
+        "http://[::2]:9222",
+        "http://0.0.0.0:9222",
+    ],
+)
+def test_attach_endpoint_rejects_anything_but_a_bare_loopback_origin(endpoint, tmp_path, monkeypatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    with pytest.raises(live_host.LiveHostError):
+        live_host.LiveOutputHost(tmp_path, [], attach_endpoint=endpoint, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver)
+
+
+@pytest.mark.parametrize("endpoint", ["http://127.0.0.1:9222", "http://[::1]:9222", "http://localhost:9222"])
+def test_attach_endpoint_accepts_bare_loopback_origins(endpoint, tmp_path, monkeypatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    live_host.LiveOutputHost(tmp_path, [], attach_endpoint=endpoint, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver)
+
+
+def test_validate_target_ws_url_rejects_non_loopback_and_mismatched_port():
+    endpoint = "http://127.0.0.1:9222"
+    assert live_host._validate_target_ws_url("ws://127.0.0.1:9222/devtools/page/1", endpoint) == "ws://127.0.0.1:9222/devtools/page/1"
+    with pytest.raises(live_host.LiveHostError, match="scheme"):
+        live_host._validate_target_ws_url("http://127.0.0.1:9222/devtools/page/1", endpoint)
+    with pytest.raises(live_host.LiveHostError, match="loopback"):
+        live_host._validate_target_ws_url("ws://evil.example:9222/devtools/page/1", endpoint)
+    with pytest.raises(live_host.LiveHostError, match="port"):
+        live_host._validate_target_ws_url("ws://127.0.0.1:1234/devtools/page/1", endpoint)
+
+
+def test_discovery_does_not_follow_redirects(tmp_path, monkeypatch):
+    class FakeRedirectResponse:
+        status = 302
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(live_host._DISCOVERY_OPENER, "open", lambda *a, **k: FakeRedirectResponse())
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
+    with pytest.raises(live_host.LiveHostError, match="status 302"):
+        transport._list_targets()
+
+
 def test_chrome_cdp_call_does_not_require_a_process_in_attach_mode(tmp_path):
     display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
     transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
@@ -554,17 +635,129 @@ def test_chrome_cdp_call_does_not_require_a_process_in_attach_mode(tmp_path):
     assert transport.call("Test.method") == {}
 
 
-def test_attach_stop_navigates_about_blank_and_never_terminates_a_process(tmp_path):
+class FakeBlankWs:
+    def __init__(self, *, fail_navigate=False, confirmed_url="about:blank"):
+        self.sent: list[dict] = []
+        self.closed = False
+        self.fail_navigate = fail_navigate
+        self.confirmed_url = confirmed_url
+
+    def send(self, data):
+        self.sent.append(json.loads(data))
+
+    def recv(self, timeout=None):
+        message = self.sent[-1]
+        if message["method"] == "Page.navigate":
+            if self.fail_navigate:
+                return json.dumps({"id": message["id"], "error": {"message": "navigate boom"}})
+            return json.dumps({"id": message["id"], "result": {}})
+        return json.dumps({"id": message["id"], "result": {"result": {"value": self.confirmed_url}}})
+
+    def close(self):
+        self.closed = True
+
+
+def test_attach_stop_navigates_about_blank_via_a_fresh_socket_and_never_terminates_a_process(tmp_path, monkeypatch):
     display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
     transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
-    calls = []
-    transport.call = lambda method, **params: calls.append((method, params)) or {}
+    transport._target_ws_url = "ws://127.0.0.1:9222/devtools/page/abc"
     ws = BlockingWs()
     transport.ws = ws
+    blank_ws = FakeBlankWs()
+    monkeypatch.setattr(live_host, "connect", lambda *a, **k: blank_ws)
     transport.stop()
-    assert calls == [("Page.navigate", {"url": "about:blank"})]
+    # The original socket is closed (unblocking a pending call) before the fresh
+    # one is opened to confirm the blank; the process, which attach never owned,
+    # is never touched.
     assert ws.close_calls == 1
+    assert transport.ws is None
     assert transport.proc is None
+    methods = [message["method"] for message in blank_ws.sent]
+    assert methods == ["Page.navigate", "Runtime.evaluate"]
+    assert blank_ws.sent[0]["params"]["url"] == "about:blank"
+    assert blank_ws.closed
+    assert transport._blanked
+
+
+def test_attach_stop_raises_and_retries_only_the_blank_when_confirmation_fails(tmp_path, monkeypatch):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
+    transport._target_ws_url = "ws://127.0.0.1:9222/devtools/page/abc"
+    ws = BlockingWs()
+    transport.ws = ws
+    failing = FakeBlankWs(confirmed_url="https://still-live.example/")
+    monkeypatch.setattr(live_host, "connect", lambda *a, **k: failing)
+    with pytest.raises(live_host.LiveHostError, match="did not fully stop"):
+        transport.stop()
+    assert ws.close_calls == 1
+    assert transport.ws is None
+    assert not transport._blanked
+    succeeding = FakeBlankWs()
+    monkeypatch.setattr(live_host, "connect", lambda *a, **k: succeeding)
+    transport.stop()
+    assert transport._blanked
+    assert succeeding.closed
+
+
+def test_call_uses_one_absolute_deadline_not_a_fresh_one_per_recv(tmp_path, monkeypatch):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+
+    class SlowEventsWs:
+        def __init__(self):
+            self.sends = 0
+
+        def send(self, _data):
+            self.sends += 1
+
+        def recv(self, timeout=None):
+            return json.dumps({"method": "Runtime.consoleAPICalled", "params": {"type": "log"}})
+
+    transport.ws = SlowEventsWs()
+    transport.proc = None
+    clock = iter([0.0, 0.0, 5.0, 10.0, 14.9, 16.0, 20.0])
+    monkeypatch.setattr(live_host.time, "monotonic", lambda: next(clock, 100.0))
+    with pytest.raises(live_host.LiveHostError, match="did not answer"):
+        transport.call("Test.method")
+
+
+def test_call_skips_a_stale_reply_from_a_timed_out_earlier_request(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+
+    class StaleThenFreshWs:
+        def __init__(self):
+            self.replies = [
+                json.dumps({"id": 1, "result": {"stale": True}}),
+                json.dumps({"id": 2, "result": {"fresh": True}}),
+            ]
+
+        def send(self, _data):
+            pass
+
+        def recv(self, timeout=None):
+            return self.replies.pop(0)
+
+    transport.ws = StaleThenFreshWs()
+    transport.proc = None
+    transport._id = 1
+    result = transport.call("Test.method")
+    assert result == {"fresh": True}
+
+
+def test_video_snapshot_uses_a_short_deadline_and_reports_timeout_without_raising(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    host_instance = object.__new__(live_host.LiveOutputHost)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+    seen_deadlines = []
+
+    def fake_call(method, deadline_s=None, **params):
+        seen_deadlines.append(deadline_s)
+        raise live_host.LiveHostError("Program browser did not answer CDP Runtime.evaluate in time.")
+
+    transport.call = fake_call
+    assert host_instance._video_snapshot(transport) == "timeout"
+    assert seen_deadlines == [1.5]
 
 
 def test_session_logger_writes_jsonl_and_swallows_failures(tmp_path):
@@ -633,6 +826,10 @@ def host_with_continuity(tmp_path, monkeypatch, *, attach: bool = False) -> live
     # The fake CDP transport does not model authored scene counts; this fixture is
     # only exercising continuity resolution, not the build-renderer fallback check.
     monkeypatch.setattr(live_host.LiveOutputHost, "_authored_scene_count", lambda self: None)
+    # The synthetic one-movie export is not a P2-measured plan; the allowlist itself is
+    # covered in tests/test_live_continuity.py, so treat this plan as measured here.
+    from obed_edom import live_continuity
+    monkeypatch.setattr(live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256)))
     FakeCdp.instances.clear()
     kwargs = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
     return live_host.LiveOutputHost(
