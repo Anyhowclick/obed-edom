@@ -109,18 +109,20 @@ class _AssetServer:
             def do_GET(self) -> None:
                 raw = unquote(urlsplit(self.path).path)
                 relative = "index.html" if raw in ("", "/") else raw.lstrip("/")
+                headers_sent = False
                 try:
                     if relative == "assets/player/main.js":
-                        owner._send_bytes(self, owner.patched_player, "application/javascript")
+                        headers_sent = owner._send_bytes(self, owner.patched_player, "application/javascript")
                     elif relative == "program.html":
-                        owner._send_bytes(self, owner._program_html(), "text/html")
+                        headers_sent = owner._send_bytes(self, owner._program_html(), "text/html")
                     else:
                         path = owner.resolver(owner.root, relative)
-                        owner._send_file(self, path)
+                        headers_sent = owner._send_file(self, path)
                 except (BrokenPipeError, ConnectionResetError):
                     return
                 except Exception:
-                    self.send_error(404)
+                    if not headers_sent:
+                        self.send_error(404)
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -128,15 +130,19 @@ class _AssetServer:
         return f"http://127.0.0.1:{self.httpd.server_port}/program.html"
 
     @staticmethod
-    def _send_bytes(handler: BaseHTTPRequestHandler, data: bytes, content_type: str) -> None:
+    def _send_bytes(handler: BaseHTTPRequestHandler, data: bytes, content_type: str) -> bool:
         handler.send_response(200)
         handler.send_header("Content-Type", content_type)
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
-        handler.wfile.write(data)
+        try:
+            handler.wfile.write(data)
+        except OSError:
+            pass
+        return True
 
     @staticmethod
-    def _send_file(handler: BaseHTTPRequestHandler, path: Path) -> None:
+    def _send_file(handler: BaseHTTPRequestHandler, path: Path) -> bool:
         length = path.stat().st_size
         start, end = 0, length - 1
         requested = handler.headers.get("Range", "")
@@ -144,12 +150,12 @@ class _AssetServer:
             first, _, last = requested[6:].partition("-")
             if not first.isdigit() or (last and not last.isdigit()):
                 handler.send_error(416)
-                return
+                return True
             start = int(first)
             end = int(last) if last else end
             if start > end or end >= length:
                 handler.send_error(416)
-                return
+                return True
             handler.send_response(206)
             handler.send_header("Content-Range", f"bytes {start}-{end}/{length}")
         else:
@@ -158,15 +164,19 @@ class _AssetServer:
         handler.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
         handler.send_header("Content-Length", str(end - start + 1))
         handler.end_headers()
-        with path.open("rb") as source:
-            source.seek(start)
-            remaining = end - start + 1
-            while remaining:
-                chunk = source.read(min(64 * 1024, remaining))
-                if not chunk:
-                    break
-                handler.wfile.write(chunk)
-                remaining -= len(chunk)
+        try:
+            with path.open("rb") as source:
+                source.seek(start)
+                remaining = end - start + 1
+                while remaining:
+                    chunk = source.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    handler.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except OSError:
+            pass
+        return True
 
     def _program_html(self) -> bytes:
         source = self.resolver(self.root, "index.html").read_text()
@@ -176,6 +186,7 @@ class _AssetServer:
         overlay = """
 <div id="obed-output-black"></div>
 <script>window.__obedOutput={show(){document.getElementById('obed-output-black').style.display='none'},hide(){document.getElementById('obed-output-black').style.display='block'}};</script>
+<script id="obed-output-fit">Object.defineProperty(document,'webkitIsFullScreen',{get:()=>true});window.addEventListener('load',()=>setTimeout(()=>document.dispatchEvent(new Event('webkitfullscreenchange'))));</script>
 """
         head = re.search(r"<head[^>]*>", source, flags=re.IGNORECASE)
         body = re.search(r"<body[^>]*>", source, flags=re.IGNORECASE)
@@ -187,13 +198,21 @@ class _AssetServer:
         return (source[: body.end()] + overlay + source[body.end() :]).encode()
 
     def stop(self) -> None:
-        if self.httpd:
-            self.httpd.shutdown()
-            self.httpd.server_close()
-            self.httpd = None
-        if self.thread:
+        errors: list[Exception] = []
+        if self.httpd is not None:
+            for step in (self.httpd.shutdown, self.httpd.server_close):
+                try: step()
+                except Exception as exc: errors.append(exc)
+            if not errors:
+                self.httpd = None
+        if self.thread is not None:
             self.thread.join(timeout=2)
-            self.thread = None
+            if self.thread.is_alive():
+                errors.append(LiveHostError("Asset server thread did not stop."))
+            else:
+                self.thread = None
+        if errors:
+            raise LiveHostError("Asset server did not fully stop.")
 
 
 class ChromeCdp:
@@ -205,6 +224,8 @@ class ChromeCdp:
         self.port: int | None = None
         self._id = 0
         self._lock = threading.Lock()
+        self._stop_lock = threading.Lock()
+        self._stopped = False
 
     def start(self) -> None:
         from websockets.sync.client import connect
@@ -234,7 +255,8 @@ class ChromeCdp:
                     break
             except Exception: time.sleep(.05)
         if not self.ws:
-            self.stop()
+            try: self.stop()
+            except Exception: pass
             raise LiveHostError("Chrome CDP did not start.")
         self.call("Runtime.enable")
         self.call("Page.enable")
@@ -243,13 +265,14 @@ class ChromeCdp:
             self.call("Browser.setWindowBounds", windowId=window["windowId"], bounds={"windowState": "fullscreen"})
 
     def call(self, method: str, **params: Any) -> dict[str, Any]:
-        if not self.ws or not self.proc or self.proc.poll() is not None: raise LiveHostError("Program browser stopped unexpectedly.")
         with self._lock:
+            ws, proc = self.ws, self.proc
+            if not ws or not proc or proc.poll() is not None: raise LiveHostError("Program browser stopped unexpectedly.")
             self._id += 1
             request_id = self._id
-            self.ws.send(json.dumps({"id": request_id, "method": method, "params": params}))
+            ws.send(json.dumps({"id": request_id, "method": method, "params": params}))
             while True:
-                try: message = json.loads(self.ws.recv(timeout=15))
+                try: message = json.loads(ws.recv(timeout=15))
                 except TimeoutError as exc: raise LiveHostError(f"Program browser did not answer CDP {method} in time.") from exc
                 except Exception as exc: raise LiveHostError("Program browser CDP connection failed.") from exc
                 if message.get("id") == request_id:
@@ -276,16 +299,38 @@ class ChromeCdp:
         raise LiveHostError("Program page did not finish loading.")
 
     def stop(self) -> None:
-        if self.ws:
-            try: self.ws.close()
-            except Exception: pass
-            self.ws = None
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try: self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
+        """Idempotent and thread-safe: never waits on `_lock`, so it stays prompt even
+        while another thread is blocked inside `call()` on the same instance; closing
+        the socket and terminating Chrome there make that blocked call fail promptly.
+        Every teardown step is attempted even if an earlier one raises; a resource's
+        reference is dropped only once it is actually released, so a raising stop can
+        be retried and will only redo the work that is still outstanding."""
+        with self._stop_lock:
+            self._stopped = True
+            if self.ws is None and self.proc is None: return
+            errors: list[Exception] = []
+            if self.ws is not None:
+                try: self.ws.close()
+                except Exception as exc: errors.append(exc)
+                else: self.ws = None
+            proc = self.proc
+            if proc is not None:
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            proc.kill()
+                            proc.wait(timeout=5)
+                        except Exception as exc:
+                            errors.append(exc)
+                    except Exception as exc:
+                        errors.append(exc)
+                if proc.poll() is not None: self.proc = None
+                else: errors.append(LiveHostError("Program browser process did not exit."))
+            if errors:
+                raise LiveHostError("Program browser did not fully stop.")
 
 
 class LiveOutputHost:
@@ -300,6 +345,7 @@ class LiveOutputHost:
             if not slide.get("skipped") and isinstance(slide.get("playerIndex"), int)
         }
         self._stopped = False
+        self._stop_lock = threading.Lock()
         self._profile: Path | None = None
         self._runtime_revision: int | None = None
         self._can_advance: bool | None = None
@@ -338,7 +384,8 @@ class LiveOutputHost:
             self._transport.goto(url)
             return self._wait_settled()
         except Exception:
-            self.stop()
+            try: self.stop()
+            except Exception: pass
             raise
 
     def _validate_export(self) -> None:
@@ -494,13 +541,28 @@ class LiveOutputHost:
         return self._transport
 
     def stop(self) -> None:
-        self._stopped = True
-        if self._transport:
-            self._transport.stop()
-            self._transport = None
-        if self._server:
-            self._server.stop()
-            self._server = None
-        if self._profile:
-            shutil.rmtree(self._profile, ignore_errors=True)
-            self._profile = None
+        """Idempotent and thread-safe: an operator abort may call this from one thread
+        while another is blocked inside `execute()`/`observe()`.  A second, concurrent
+        or subsequent, call is a harmless no-op that waits only for the first call's
+        teardown.  Every step (transport, asset server, temp profile) is attempted even
+        if an earlier one raises; a resource's reference is dropped only once it is
+        actually released, so a raising stop can be retried and only redoes what is
+        still held."""
+        with self._stop_lock:
+            self._stopped = True
+            if not self._transport and not self._server and not self._profile: return
+            errors: list[Exception] = []
+            if self._transport is not None:
+                try: self._transport.stop()
+                except Exception as exc: errors.append(exc)
+                else: self._transport = None
+            if self._server is not None:
+                try: self._server.stop()
+                except Exception as exc: errors.append(exc)
+                else: self._server = None
+            if self._profile is not None:
+                try: shutil.rmtree(self._profile)
+                except Exception as exc: errors.append(exc)
+                else: self._profile = None
+            if errors:
+                raise LiveHostError("Program player did not fully stop.")

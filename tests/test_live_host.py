@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -144,6 +146,236 @@ def test_stop_only_stops_owned_resources_and_refuses_restart(tmp_path, monkeypat
         output.observe()
 
 
+class FakeProc:
+    def __init__(self):
+        self.terminate_calls = 0
+        self._terminated = False
+
+    def poll(self): return 0 if self._terminated else None
+    def terminate(self):
+        self.terminate_calls += 1
+        self._terminated = True
+    def wait(self, timeout=None): return 0
+
+
+class BlockingWs:
+    def __init__(self):
+        self.send_started = threading.Event()
+        self.closed = threading.Event()
+        self.close_calls = 0
+
+    def send(self, _data): self.send_started.set()
+    def recv(self, timeout=None):
+        if self.closed.wait(timeout=timeout): raise ConnectionError("closed")
+        raise TimeoutError
+    def close(self):
+        self.close_calls += 1
+        self.closed.set()
+
+
+def test_chrome_cdp_stop_unblocks_a_pending_call_without_waiting_on_the_call_lock(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+    ws, proc = BlockingWs(), FakeProc()
+    transport.ws, transport.proc = ws, proc
+    errors: list[Exception] = []
+
+    def blocked_call():
+        try: transport.call("Test.method")
+        except live_host.LiveHostError as exc: errors.append(exc)
+
+    thread = threading.Thread(target=blocked_call)
+    thread.start()
+    assert ws.send_started.wait(2)
+    start = time.monotonic()
+    transport.stop()
+    elapsed = time.monotonic() - start
+    thread.join(2)
+    assert not thread.is_alive()
+    assert elapsed < 1
+    assert errors and "CDP connection failed" in str(errors[0])
+    assert ws.close_calls == 1
+    assert proc.terminate_calls == 1
+    transport.stop()
+    assert ws.close_calls == 1
+    assert proc.terminate_calls == 1
+
+
+def test_chrome_cdp_stop_releases_resources_exactly_once_under_concurrent_calls(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+    ws, proc = BlockingWs(), FakeProc()
+    transport.ws, transport.proc = ws, proc
+    threads = [threading.Thread(target=transport.stop) for _ in range(2)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join(2)
+    assert ws.close_calls == 1
+    assert proc.terminate_calls == 1
+
+
+class FakeHttpdShutdownFlaky:
+    def __init__(self):
+        self.shutdown_calls = 0
+        self.close_calls = 0
+        self.fail_shutdown = True
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+        if self.fail_shutdown:
+            self.fail_shutdown = False
+            raise RuntimeError("shutdown boom")
+
+    def server_close(self):
+        self.close_calls += 1
+
+
+def test_asset_server_stop_attempts_server_close_even_when_shutdown_raises(tmp_path):
+    server = live_host._AssetServer(tmp_path, b"")
+    httpd = FakeHttpdShutdownFlaky()
+    server.httpd = httpd
+    server.thread = None
+
+    with pytest.raises(live_host.LiveHostError, match="did not fully stop"):
+        server.stop()
+    assert httpd.shutdown_calls == 1
+    assert httpd.close_calls == 1
+    assert server.httpd is httpd
+
+    server.stop()
+    assert httpd.shutdown_calls == 2
+    assert httpd.close_calls == 2
+    assert server.httpd is None
+
+    server.stop()
+    assert httpd.shutdown_calls == 2
+    assert httpd.close_calls == 2
+
+
+def test_live_output_host_stop_is_a_prompt_no_op_when_called_again(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    output.stop()
+    assert FakeCdp.instances[0].stopped
+    output.stop()
+    assert FakeCdp.instances[0].stopped
+
+
+def test_live_output_host_stop_blocks_a_concurrent_stop_until_teardown_completes(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    stop_calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_stop():
+        stop_calls.append(1)
+        entered.set()
+        release.wait()
+        fake.stopped = True
+
+    fake.stop = slow_stop
+    first = threading.Thread(target=output.stop)
+    first.start()
+    second = threading.Thread(target=output.stop)
+    try:
+        assert entered.wait(2)
+        second.start()
+        assert second.is_alive()
+        assert not second.join(timeout=0.2)
+        assert second.is_alive()
+    finally:
+        release.set()
+        first.join(5)
+        second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+    assert stop_calls == [1]
+    assert fake.stopped
+
+
+def test_chrome_cdp_stop_raises_when_ws_close_fails_but_still_terminates_process(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+    ws, proc = BlockingWs(), FakeProc()
+    ws.close = lambda: (_ for _ in ()).throw(RuntimeError("socket gone"))
+    transport.ws, transport.proc = ws, proc
+    with pytest.raises(live_host.LiveHostError, match="did not fully stop"):
+        transport.stop()
+    assert proc.terminate_calls == 1
+    assert transport.proc is None
+    assert transport.ws is ws
+    assert transport._stopped
+
+
+def test_chrome_cdp_stop_retries_only_the_resource_still_held(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+    ws, proc = BlockingWs(), FakeProc()
+    failing = [True]
+
+    def flaky_close():
+        ws.close_calls += 1
+        if failing[0]: raise RuntimeError("socket gone")
+        ws.closed.set()
+
+    ws.close = flaky_close
+    transport.ws, transport.proc = ws, proc
+    with pytest.raises(live_host.LiveHostError):
+        transport.stop()
+    assert proc.terminate_calls == 1
+    assert transport.ws is ws
+    failing[0] = False
+    transport.stop()
+    assert transport.ws is None
+    assert ws.close_calls == 2
+    assert proc.terminate_calls == 1
+    transport.stop()
+    assert ws.close_calls == 2
+
+
+def test_live_output_host_stop_raises_when_a_step_fails_but_attempts_every_step(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.stop = lambda: (_ for _ in ()).throw(RuntimeError("transport wedged"))
+    server = output._server
+    profile = output._profile
+    with pytest.raises(live_host.LiveHostError, match="did not fully stop"):
+        output.stop()
+    assert output._transport is not None
+    assert output._server is None
+    assert server.stopped
+    assert output._profile is None
+    assert not profile.exists()
+    fake.stop = lambda: None
+    output.stop()
+    assert output._transport is None
+
+
+def test_live_output_host_start_failure_preserves_original_error_when_cleanup_also_fails(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+
+    class ExplodingServer(FakeServer):
+        def start(self): raise RuntimeError("asset server boom")
+        def stop(self): raise RuntimeError("cleanup also failed")
+
+    output.server_factory = ExplodingServer
+    with pytest.raises(RuntimeError, match="asset server boom"):
+        output.start()
+
+
+def test_chrome_cdp_start_failure_preserves_original_error_when_stop_also_fails(monkeypatch, tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, headless=True)
+    monkeypatch.setattr(live_host.subprocess, "Popen", lambda *a, **k: FakeProc())
+    clock = iter([0.0, 100.0])
+    monkeypatch.setattr(live_host.time, "monotonic", lambda: next(clock, 100.0))
+    monkeypatch.setattr(live_host.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("no chrome")))
+    monkeypatch.setattr(transport, "stop", lambda: (_ for _ in ()).throw(RuntimeError("stop boom")))
+    with pytest.raises(live_host.LiveHostError, match="did not start"):
+        transport.start()
+
+
 def test_choose_display_prefers_external_and_validates_requested_id():
     primary = live_host.OutputDisplay(1, 0, 0, 1512, 982, True)
     external = live_host.OutputDisplay(2, 1512, 0, 1920, 1080)
@@ -161,6 +393,84 @@ def test_safe_export_file_rejects_traversal_and_symlink(tmp_path, monkeypatch):
     with pytest.raises(html_preview.PreviewError): html_preview.safe_export_file(root, "../index.html")
     (root / "out").symlink_to(tmp_path / "elsewhere")
     with pytest.raises(html_preview.PreviewError): html_preview.safe_export_file(root, "out/x")
+
+
+def test_program_html_injects_overlay_first_and_fit_once(tmp_path):
+    (tmp_path / "index.html").write_text("<html><head></head><body><div id=\"stage\"></div></body></html>")
+    server = live_host._AssetServer(tmp_path, b"", resolver=resolver_for(tmp_path))
+    document = server._program_html().decode()
+    body = document[document.index("<body"):]
+    assert body.index('id="obed-output-black"') < body.index('id="stage"')
+    assert document.count('id="obed-output-fit"') == 1
+
+
+def test_program_html_requires_head_and_body(tmp_path):
+    (tmp_path / "index.html").write_text("<div>no head or body</div>")
+    server = live_host._AssetServer(tmp_path, b"", resolver=resolver_for(tmp_path))
+    with pytest.raises(live_host.LiveHostError, match="head and body"):
+        server._program_html()
+
+
+def resolver_for(root: Path):
+    def resolve(_root: Path, relative: str) -> Path:
+        return root / relative
+    return resolve
+
+
+class RecordingHandler:
+    def __init__(self, fail_after_headers: bool):
+        self.fail_after_headers = fail_after_headers
+        self.headers = {}
+        self.status = None
+        self.error = None
+        self.sent_headers = False
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, *_args):
+        pass
+
+    def end_headers(self):
+        self.sent_headers = True
+
+    def send_error(self, status):
+        self.error = status
+
+    class _Wfile:
+        def __init__(self, outer):
+            self.outer = outer
+
+        def write(self, _chunk):
+            if self.outer.fail_after_headers:
+                raise OSError("socket gone")
+
+    @property
+    def wfile(self):
+        return self._Wfile(self)
+
+
+def test_send_file_ends_response_silently_after_headers_are_sent(tmp_path):
+    path = tmp_path / "movie.mp4"
+    path.write_bytes(b"data")
+    handler = RecordingHandler(fail_after_headers=True)
+    assert live_host._AssetServer._send_file(handler, path) is True
+    assert handler.sent_headers
+    assert handler.error is None
+
+
+def test_send_file_error_before_headers_propagates_for_a_404(tmp_path):
+    handler = RecordingHandler(fail_after_headers=False)
+    with pytest.raises(OSError):
+        live_host._AssetServer._send_file(handler, tmp_path / "missing.mp4")
+    assert not handler.sent_headers
+
+
+def test_send_bytes_ends_response_silently_when_write_fails_after_headers():
+    handler = RecordingHandler(fail_after_headers=True)
+    assert live_host._AssetServer._send_bytes(handler, b"data", "text/html") is True
+    assert handler.sent_headers
+    assert handler.error is None
 
 
 def test_key_events_omit_native_key_code(tmp_path):
