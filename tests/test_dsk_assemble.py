@@ -12736,6 +12736,37 @@ def test_stacked_movies_warn_when_the_relative_build_ins_predecessor_is_dropped(
     )
 
 
+def test_stacked_movies_warn_when_the_lower_movie_has_more_than_one_source_chunk():
+    """Codex r3: the lower movie owns source chunks 0 AND 1 (a movie-start, then a second
+    build), and the upper dissolve at chunk 2 is "with chunk 1". The inserted lower clip
+    reproduces only ONE movie-start chunk, so the relative flag would re-point at chunk 0.
+    The predecessor is a kept movie, but not reproduced one-to-one -- unsupported path."""
+    slide, builds = _slide_50_shape()
+    builds[50]["builds"][1]["chunkOrder"] = [2]
+    builds[50]["builds"].append(
+        {"kind": "movie", "kindIndex": 0, "chunkOrder": [1], "chunkReferent": [True],
+         "chunkAutomatic": [False], "chunkDelay": [0.0],
+         "effect": "apple:movie-start", "animationType": "In", "duration": 0.0}
+    )
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert 50 not in plan.clip_build_in
+    assert plan.clip_timing[50] == (
+        (("movie", 0), "after_transition"),
+        (("movie", 1), "after_previous"),
+    )
+    assert any(
+        "does not reproduce one-to-one" in w and "need a build-in" in w for w in plan.warnings
+    )
+
+
 def test_stacked_movies_keep_the_build_in_when_the_predecessor_is_the_kept_lower_movie():
     """The FRC 50 shape itself: the upper clip's relative flag points at the movie below,
     which this slide keeps, so the compacted timeline means the same thing."""

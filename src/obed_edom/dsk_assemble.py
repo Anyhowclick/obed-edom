@@ -2512,7 +2512,7 @@ def plan_assembly(
                         iid = (rec["kind"], rec["kindIndex"])
                         if iid in item_clips:
                             recs_by_item.setdefault(iid, []).append(rec)
-                    for iid in visual_order[1:]:
+                    for previous, iid in zip(visual_order, visual_order[1:]):
                         recs = recs_by_item.get(iid) or []
                         candidates = _build_in_candidates(recs)
                         if len(candidates) > 1:
@@ -2527,11 +2527,20 @@ def plan_assembly(
                             reason = _describe_builds(recs)
                         elif iwa_movies.clip_timing_mode(source.automatic, source.referent) in _RELATIVE_CLIP_MODES:
                             predecessor = _source_chunk_predecessor(src_build_recs, candidates[0])
+                            previous_chunks = sum(
+                                len(rec.get("chunkOrder") or ()) for rec in recs_by_item.get(previous) or []
+                            )
                             if predecessor not in item_clips:
                                 reason = f"{source.effect} starts relative to " + (
                                     "no source build chunk" if predecessor is None
                                     else f"a dropped {predecessor[0]} {predecessor[1]}"
                                 )
+                            elif predecessor != previous or previous_chunks != 1:
+                                reason = (
+                                    f"{source.effect} starts relative to {predecessor[0]} {predecessor[1]}'s "
+                                    "source build chunk, which the clip below does not reproduce one-to-one"
+                                )
+                            if reason is not None:
                                 source = None
                         if reason is not None:
                             unsupported.append(f"movie {iid[1]} ({reason})")

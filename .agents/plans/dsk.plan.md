@@ -460,6 +460,15 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     commit); (c) the review's `stackedMovies` chip is always centre-panel based and can disagree
     with the assembler once `keepSide` is on. Stack threshold 0.5 (intersection > half the
     smaller visible rect) is a judgement call — eyeball real decks for pairs between 0.05 and 0.5.
+    (d) Codex r3: the exporter bares EVERY upper stacked clip while the assembler writes a build-in
+    only for its supported subset — deliberate (an unsupported clip is bare + warned "add the
+    build-in by hand", never double-timed), but the two predicates are not one shared target set;
+    and a CALLER-SUPPLIED per-movie clip on a stacked slide (CLI `clips` mapping only — the
+    dashboard allows operator clips on single-movie slides only) is never proven bare, so a
+    build-in could be written over media that already bakes it. Carry bare/provenance per clip and
+    reconstruct only confirmed-bare clips. r3's other MAJOR (a lower movie owning >1 source chunk)
+    is FIXED: a relative build-in is kept only when its source predecessor is the clip directly
+    below AND that movie owns exactly one source chunk.
 
 ## 5. Live-run recipe
 
