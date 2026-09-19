@@ -24,8 +24,8 @@ from obed_edom.live_runtime import RUNTIME_VERSION
 HEADLESS_CHROME_HEIGHT_PAD = 32
 
 
-FIXTURE = Path(".claude/worktrees/keynote-parser-module-error-46801c/output/p2-recovery/html-adversarial/html-player")
-ORIGINAL_INDEX = Path(".claude/worktrees/keynote-parser-module-error-46801c/output/p2-recovery/html-adversarial/html-unmodified/index.html")
+FIXTURE = Path("output/p2-recovery/html-adversarial/html-player")
+ORIGINAL_INDEX = Path("output/p2-recovery/html-adversarial/html-unmodified/index.html")
 ARTIFACT = Path("output/keynote-live-planning-2026-09-19/live-host-headless-proof.json")
 PROBE_DIGEST = "a" * 64
 

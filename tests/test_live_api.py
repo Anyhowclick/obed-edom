@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -5,7 +6,8 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from obed_edom.live_host import OutputDisplay
+from obed_edom import live_runtime
+from obed_edom.live_host import LiveOutputHost, OutputDisplay
 from obed_edom.live_session import LiveSessionService, PlayerObservation
 from obed_edom.web import live
 
@@ -14,6 +16,7 @@ class Adapter:
     output = {'width': 1920, 'height': 1080}
 
     def __init__(self, *args, **kwargs):
+        self.continuity = kwargs.get("continuity", "auto")
         self.visible = False
         self.clicks = 0
         self.wait: Event | None = None
@@ -186,3 +189,77 @@ def test_live_api_rejects_foreign_host_even_when_origin_matches(tmp_path, monkey
                            json={'previewJobId': 'prepared'})
     assert response.status_code == 403
     assert not claims
+
+
+class FakeAttachCdp:
+    def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
+    def start(self): pass
+    def goto(self, url): pass
+    def stop(self): pass
+    def evaluate(self, expression):
+        if '__obedLive' in expression:
+            return {'exportedSlideIndex': 0, 'sceneId': '0', 'buildIndex': None, 'revision': 1, 'canAdvance': True, 'canGoTo': True, 'ready': True, 'busy': False}
+        if "getElementById('body')" in expression:
+            return False
+        return [1920, 1080]
+    def key(self, *_args): pass
+
+
+class FakeAttachServer:
+    def __init__(self, *_args, **_kwargs): pass
+    def start(self): return 'http://program.test/program.html'
+    def stop(self): pass
+
+
+def test_live_api_attach_mode_starts_without_consulting_displays(tmp_path, monkeypatch):
+    monkeypatch.setenv('OBED_EDOM_OUTPUT_ROOT', str(tmp_path / 'out'))
+    monkeypatch.setenv('OBED_LIVE_ATTACH', 'http://127.0.0.1:9222')
+    root = tmp_path / 'out' / '.html-preview' / 'export'
+    (root / 'assets' / 'player').mkdir(parents=True)
+    player_bytes = b'before;' + live_runtime._ANCHOR + b';after'
+    (root / 'assets' / 'player' / 'main.js').write_bytes(player_bytes)
+    (root / 'assets' / 'header.json').write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
+    monkeypatch.setattr(live_runtime, 'PLAYER_SHA256', hashlib.sha256(player_bytes).hexdigest())
+    from obed_edom import html_preview as hp
+    digest = hashlib.sha256(b'attach-mode-deck').hexdigest()
+    export_key = hp.cache_key(digest)
+    job = SimpleNamespace(id='prepared', kind='html-preview', status='done', result={
+        'phase': 'ready', 'path': '/example/deck.key', 'exportKey': export_key,
+        'sourceDigest': digest, 'manifest': {'playerDigest': live.PLAYER_SHA256},
+        'slides': [],
+    })
+    runner = SimpleNamespace(get=lambda key: job if key == job.id else None, list=lambda **kwargs: [job])
+    monkeypatch.setattr(live, 'registered_export_root', lambda *_: root)
+    monkeypatch.setattr(live, 'file_sha256', lambda *_: live.PLAYER_SHA256)
+    monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
+    service = LiveSessionService()
+
+    def host_factory(export_root, slides, *, display_id=None, continuity="auto"):
+        return LiveOutputHost(export_root, slides, transport_factory=FakeAttachCdp, server_factory=FakeAttachServer)
+
+    app = FastAPI()
+    app.include_router(live.live_router(runner, service=service, host_factory=host_factory, displays=lambda: []))
+    client = TestClient(app, base_url='http://127.0.0.1')
+    assert client.get('/api/live/displays').json() == []
+    response = client.post('/api/live', json={'previewJobId': 'prepared'})
+    state = response.json()
+    assert response.status_code == 200, state
+    assert state.get('error') is None, state
+    assert state['output']['transport'] == 'fill-key', state
+    assert state['output']['alpha'] is True
+    assert 'displayId' not in state['output']
+
+
+def test_live_start_forwards_per_session_continuity_opt_out(tmp_path, monkeypatch):
+    client, _, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+    response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': 'off'})
+    assert response.status_code == 200
+    assert adapters[-1].continuity == 'off'
+
+
+def test_live_start_rejects_unknown_continuity_mode(tmp_path, monkeypatch):
+    client, _, _, _, adapters, _ = client_for(tmp_path, monkeypatch)
+    response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': 'force'})
+    assert response.status_code == 422
+    assert not adapters

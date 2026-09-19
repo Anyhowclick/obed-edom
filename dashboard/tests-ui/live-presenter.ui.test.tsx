@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePresenter } from "../src/live/LivePresenter";
-import type { LiveClient, LiveCommand, LiveResult, LiveSnapshot } from "../src/live/api";
+import { liveClient, type LiveClient, type LiveCommand, type LiveContinuity, type LiveResult, type LiveSnapshot } from "../src/live/api";
 
 function state(overrides: Partial<LiveSnapshot> = {}): LiveSnapshot {
   return {
@@ -50,9 +50,96 @@ describe("LivePresenter", () => {
     const api = client();
     render(<LivePresenter client={api} pollMs={60_000} />);
     await screen.findByRole("option", { name: /Sunday service/ });
+    expect(screen.getByRole("checkbox", { name: "Enable movie continuity when qualified" })).toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
     await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2"));
     expect(screen.queryByTitle(/player|preview/i)).not.toBeInTheDocument();
+  });
+
+  it("turns continuity off for the next session without changing a running session", async () => {
+    const api = client({ start: vi.fn(async () => state({ continuity: { mode: "off" } })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByRole("option", { name: /Sunday service/ });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Enable movie continuity when qualified" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2", "off"));
+    expect(await screen.findByText("Movie continuity · Off")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Enable movie continuity when qualified" })).not.toBeInTheDocument();
+    expect(api.command).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["qualified", "Qualified", "Enabled for this deck."],
+    ["unsupported", "Unsupported", "stage is not the authored size"],
+    ["off", "Off", "Using the deck’s native movie playback."],
+    ["pending", "Checking", "Checking this deck and output size."],
+  ] as const)("shows observed %s continuity before Show output", async (mode, label, detail) => {
+    const continuity: LiveContinuity = { mode, ...(mode === "unsupported" ? { reason: detail } : {}) };
+    const api = client({ state: vi.fn(async () => state({ outputVisible: false, continuity })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const badge = await screen.findByText(`Movie continuity · ${label}`);
+    expect(screen.getByText(detail)).toBeInTheDocument();
+    const show = screen.getByRole("button", { name: "Show output" });
+    expect(badge.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([
+    [undefined, "Enabled for this deck."],
+    [1, "Enabled for this deck."],
+    [1.3333, "Enabled for this deck (stage scaled ×1.33)."],
+  ] as const)("shows scale %s in the qualified continuity detail", async (scale, detail) => {
+    const continuity: LiveContinuity = { mode: "qualified", ...(scale === undefined ? {} : { scale }) };
+    const api = client({ state: vi.fn(async () => state({ outputVisible: false, continuity })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Movie continuity · Qualified");
+    expect(screen.getByText(detail)).toBeInTheDocument();
+  });
+
+  it("does not claim qualification when the host omits continuity status", async () => {
+    const api = client({ state: vi.fn(async () => state()) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    expect(await screen.findByText("Movie continuity · Unavailable")).toBeInTheDocument();
+    expect(screen.getByText("This session has not reported movie continuity status.")).toBeInTheDocument();
+    expect(screen.queryByText("Movie continuity · Qualified")).not.toBeInTheDocument();
+  });
+
+  it("says nothing about codecs when the host omits the fields", async () => {
+    const api = client({ state: vi.fn(async () => state()) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByRole("button", { name: "Advance" });
+    expect(screen.queryByText("Some movies may not play in this output")).not.toBeInTheDocument();
+  });
+
+  it("says nothing about codecs when the host reports no warnings", async () => {
+    const output = { ...state().output, codecs: [{ asset: "clip.mov", codec: "avc1", family: "h264" as const }], codecWarnings: [] };
+    const api = client({ state: vi.fn(async () => state({ output })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByRole("button", { name: "Advance" });
+    expect(screen.queryByText("Some movies may not play in this output")).not.toBeInTheDocument();
+    expect(screen.queryByText(/more$/)).not.toBeInTheDocument();
+  });
+
+  it("warns about every unplayable movie above Show output", async () => {
+    const codecWarnings = ["clip.mov (hvc1) may not play in this output", "sting.mov (apcn) may not play in this output"];
+    const output = { ...state().output, codecWarnings };
+    const api = client({ state: vi.fn(async () => state({ outputVisible: false, output })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const heading = await screen.findByText("Some movies may not play in this output");
+    for (const warning of codecWarnings) expect(screen.getByText(warning)).toBeInTheDocument();
+    expect(screen.queryByText(/^\+\d+ more$/)).not.toBeInTheDocument();
+    const show = screen.getByRole("button", { name: "Show output" });
+    expect(heading.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("caps the codec warning list at five and counts the rest", async () => {
+    const codecWarnings = Array.from({ length: 7 }, (_, index) => `clip-${index + 1}.mov (hvc1) may not play in this output`);
+    const output = { ...state().output, codecWarnings };
+    const api = client({ state: vi.fn(async () => state({ output })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText("Some movies may not play in this output");
+    for (const warning of codecWarnings.slice(0, 5)) expect(screen.getByText(warning)).toBeInTheDocument();
+    for (const warning of codecWarnings.slice(5)) expect(screen.queryByText(warning)).not.toBeInTheDocument();
+    expect(screen.getByText("+2 more")).toBeInTheDocument();
   });
 
   it("does not move the presenter until a delayed command returns observed state", async () => {
@@ -173,7 +260,7 @@ describe("LivePresenter", () => {
     render(<LivePresenter client={api} pollMs={60_000} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Output window closed");
     expect(screen.getByRole("button", { name: "Stop session" })).toBeEnabled();
-    expect(screen.getByText("Native HTML playback only; alpha and movie continuity are not qualified.")).toBeInTheDocument();
+    expect(screen.getByText("Movie continuity is available only for qualified decks. Alpha output is not qualified.")).toBeInTheDocument();
   });
 
   it("allows output hiding while the player is busy but blocks navigation", async () => {
@@ -213,5 +300,20 @@ describe("LivePresenter", () => {
     fireEvent.keyDown(window, { key: " " });
     expect(await screen.findByRole("alert")).toHaveTextContent("Player is busy");
     expect(api.command).not.toHaveBeenCalled();
+  });
+});
+
+describe("live start request", () => {
+  it.each([undefined, "off"] as const)("sends only the requested continuity override (%s)", async (continuity) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(state()), { status: 200 }));
+    try {
+      await liveClient.start("prepared-1", "screen-2", continuity);
+      expect(fetch).toHaveBeenCalledWith("/api/live", expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ previewJobId: "prepared-1", displayId: "screen-2", ...(continuity ? { continuity } : {}) }),
+      }));
+    } finally {
+      fetch.mockRestore();
+    }
   });
 });

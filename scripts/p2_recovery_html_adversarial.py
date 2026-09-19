@@ -42,6 +42,7 @@ from p2_recovery_html_dissolve_live import (  # noqa: E402
     _norm_hash,
     _replace_hevc_movies,
     _wait_hash_clean,
+    inject_continuity_plan,
     inject_preserve,
 )
 from obed_edom.dsk_live import keynote_running  # noqa: E402
@@ -88,6 +89,9 @@ GREEN_FRONT_ROI = (820, 810, 160, 120)   # green square ∩ movie -> translucent
 EMPTY_CORNERS = ((1864, 8, 48, 48), (1864, 1024, 48, 48))  # right side stays emptier after MM
 # Large continuing movie footprint on slide 1 (inventory). Center is unobscured.
 MOVIE_ROI = (109, 795, 952, 268)
+# Second movie (WA0125) footprint on slide 1/2 — feeds the continuity plan's
+# movie2 entry (PRESERVE_CORE_JS no longer hardcodes this).
+MOVIE2_ROI = (109, 500, 663, 186)
 # The disposable movie's frame-index stimulus patch occupies the top-left
 # 120x48 of its 1920x540 source; map it to screen space via the movie's own
 # footprint fraction (see _write_h264_pattern in p2_recovery_html_dissolve_live.py).
@@ -2332,7 +2336,8 @@ async def _run_freeze_bracket(
             await chrome.start()
             try:
                 await _boot(chrome, base)
-                await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
+                # The restart boundary is already in the continuity plan baked
+                # into this player_dir's index.html by the main run above.
                 snaps[label] = await _capture_1to2_snapshot(
                     chrome, rd, "mm12", wait_profile, inject_null=inject
                 )
@@ -2459,6 +2464,33 @@ async def _run(player: Path) -> dict:
     write_patched_export(source_dir, player_dir)
     preserve = inject_preserve(player_dir)
     write_json(OUT / "preserve-inject.json", preserve)
+    continuity_plan: dict = {
+        "movies": {
+            "movie1": {
+                "assetKeys": [MOVIE1_TOKEN.lower()],
+                "footprint": dict(zip(("x", "y", "w", "h"), MOVIE_ROI)),
+            },
+            "movie2": {
+                "assetKeys": [MOVIE2_TOKEN.lower()],
+                "footprint": dict(zip(("x", "y", "w", "h"), MOVIE2_ROI)),
+            },
+        },
+        "boundaries": [{"atScene": SLIDE3_MIN_HASH, "action": "restart"}],
+        "transparentBackground": True,
+    }
+    if bridge34:
+        # Engage the 3->4 magic-move bridge: PRESERVE keeps the movie1 decoder
+        # playing across the moving cut and suppresses the export's restart.
+        continuity_plan["boundaries"].append({
+            "atScene": SLIDE4_MIN_HASH,
+            "action": "bridge",
+            "movieKey": MOVIE1_KEY,
+            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
+            "durationSeconds": TRANS_S,
+            "rect": dict(zip(("x", "y", "w", "h"), SLIDE4_MOVIE_RECT)),
+        })
+    plan_inject = inject_continuity_plan(player_dir, continuity_plan)
+    write_json(OUT / "continuity-plan-inject.json", {**plan_inject, "plan": continuity_plan})
 
     # HTTP serve
     class Handler(SimpleHTTPRequestHandler):
@@ -2482,15 +2514,9 @@ async def _run(player: Path) -> dict:
     await chrome.start()
     try:
         boot = await _boot(chrome, base)
-        await chrome.evaluate(f"window.__OBED_P2_RESTART_MIN_HASH__ = {SLIDE3_MIN_HASH}")
-        if bridge34:
-            # Engage the 3->4 magic-move bridge: PRESERVE keeps the movie1 decoder
-            # playing across the moving cut and suppresses the export's restart.
-            await chrome.evaluate(f"window.__OBED_P2_SLIDE4_MIN_HASH__ = {SLIDE4_MIN_HASH}")
-            x4, y4, w4, h4 = SLIDE4_MOVIE_RECT
-            await chrome.evaluate(
-                f"window.__OBED_P2_SLIDE4_RECT__ = {{x:{x4}, y:{y4}, w:{w4}, h:{h4}}}"
-            )
+        # The continuity plan (restart boundary, and the 3->4 bridge boundary iff
+        # bridge34) is already baked into index.html by inject_continuity_plan
+        # above, present before the core script ran at page load.
         # Derive the footprint movie's Magic Move crossfade texture ids. Under
         # the corrected model this is a motion-path Magic Move poster swap (1->2
         # or 3->4 under outgoing-slide storage; the 2->3 boundary is a dissolve,
