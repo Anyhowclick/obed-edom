@@ -766,7 +766,10 @@ function detach(v) {
 const performance = {now: () => 0};
 const requestAnimationFrame = () => 0;
 const setTimeout = () => 0;
-const setInterval = () => 0;
+const intervals = [];
+const setInterval = (fn) => { intervals.push(fn); return 0; };
+/** Run the core's keep-warm interval once (it drives the retire sweep). */
+function tick() { intervals.slice().forEach((fn) => fn()); }
 
 __CORE__
 
@@ -1048,14 +1051,18 @@ console.log(JSON.stringify({
 # --- I2: the retire zone (per-boundary refusal) -------------------------
 #
 # Contract: one `{"atScene": N, "action": "retire", "movieKey": K}` boundary
-# hands K back to the raw player for scenes [N, <next restart/bridge atScene>).
-# Inside that zone the runtime must be INVISIBLE: nothing pooled, remounted,
+# hands K back to the raw player. Measured on the real export (2026-09-20):
+# the player detaches the movie while the hash is still the TRANSITION scene
+# (`N - 1`) and only rewrites it to `N` ~2 s later — and it rewrites the hash
+# WITHOUT ever firing `hashchange`. So the zone is `[N - 1, <next
+# restart/bridge atScene>)` and the sweep is driven by the keep-warm interval.
+# Inside the zone the runtime must be INVISIBLE: nothing pooled, remounted,
 # facaded or reused, and the `src` clear / `removeAttribute('src')` the hooks
 # normally swallow must really happen. Every decline notes `preserve-refused`
-# (once per key+via); the hashchange sweep notes `retire-boundary`.
+# (once per key+via); the sweep notes `retire-boundary`.
 
-#: The fixture's shape: retire movie1 at scene 2, restart at 6 (zone end),
-#: bridge at 8 — so scenes 2..5 are refused and 6+ preserve again.
+#: The fixture's shape: retire movie1 at scene 2 (so the zone opens at the #1
+#: transition), restart at 6 (zone end), bridge at 8.
 _RETIRE_PLAN = {
     "movies": {
         "movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 100, "y": 200, "w": 300, "h": 150}},
@@ -1077,10 +1084,15 @@ _NO_RETIRE_PLAN = {
     "movies": _RETIRE_PLAN["movies"],
     "boundaries": [b for b in _RETIRE_PLAN["boundaries"] if b["action"] != "retire"],
 }
+#: Scenes the retire zone covers, and the ones just outside it on either side.
+_IN_ZONE = [1, 2, 3, 5]
+_BEFORE_ZONE = [0]
+_AFTER_ZONE = [6, 7]
 
 #: Pool a live `movie1` decoder by driving the player's real teardown path
 #: (detach -> the core's MutationObserver -> `stash`). `__SCENE__`/`__SRC__`
-#: are substituted per test.
+#: are substituted per test. The scene is ALWAYS set explicitly: the harness's
+#: default hash (`#1`) is itself inside the fixture's zone.
 _MAKE_AND_DETACH = r"""
 const v = document.createElement('video');
 v.readyState = 4; v.currentTime = 1;
@@ -1089,19 +1101,6 @@ v.src = '__SRC__';
 __SCENE__
 detach(v);
 """
-
-
-def _refusals(events: list[dict]) -> list[dict]:
-    return [e["detail"] for e in events if e["kind"] == "preserve-refused"]
-
-
-def _run_retire(script: str, *, plan: dict = _RETIRE_PLAN) -> dict:
-    return _run_full_core_in_node(plan=plan, stage=_IDENTITY_STAGE, script=script)
-
-
-def _detach_script(*, scene: str, src: str = "https://host/untitled.mov") -> str:
-    return _MAKE_AND_DETACH.replace("__SCENE__", scene).replace("__SRC__", src)
-
 
 _POOL_REPORT = r"""
 console.log(JSON.stringify({
@@ -1114,11 +1113,32 @@ console.log(JSON.stringify({
 """
 
 
-def test_retire_zone_stash_declines_and_notes_once():
-    """In-zone detach: `stash` must refuse (nothing pooled, no remount
-    scheduled) and note `preserve-refused` exactly once per (key, via) even
-    though the player tears the movie down repeatedly."""
-    script = _detach_script(scene="goToScene(3);") + r"""
+def _run_retire(script: str, *, plan: dict = _RETIRE_PLAN) -> dict:
+    return _run_full_core_in_node(plan=plan, stage=_IDENTITY_STAGE, script=script)
+
+
+def _detach_script(*, scene: int, src: str = "https://host/untitled.mov") -> str:
+    return _MAKE_AND_DETACH.replace("__SCENE__", f"goToScene({scene});").replace("__SRC__", src)
+
+
+def test_core_never_relies_on_a_hashchange_event():
+    """Measured on the real player: it rewrites `location.hash` without firing
+    `hashchange`, so the retire sweep must not be registered on it."""
+    script = r"""
+console.log(JSON.stringify({hashListeners: hashListeners.length, intervals: intervals.length}));
+"""
+    result = _run_retire(script)
+    assert result["hashListeners"] == 0
+    assert result["intervals"] >= 1
+
+
+@pytest.mark.parametrize("scene", _IN_ZONE, ids=[f"scene{s}" for s in _IN_ZONE])
+def test_retire_zone_stash_declines_and_notes_once(scene):
+    """The player's detach — which really happens at the TRANSITION scene, one
+    before `atScene` — must be refused: nothing pooled, no remount scheduled,
+    and `preserve-refused` noted exactly once per (key, via) however many times
+    the player tears the movie down."""
+    script = _detach_script(scene=scene) + r"""
 detach(v);
 detach(v);
 """ + _POOL_REPORT
@@ -1126,12 +1146,14 @@ detach(v);
     assert result["poolKeys"] == []
     assert result["pooled"] == 0
     assert result["preserved"] is None
-    assert result["refusals"] == [{"key": "movie1", "scene": 3, "via": "stash", "sceneHash": "#3"}]
-    assert "remount-scheduled" not in result["kinds"]
+    assert result["refusals"] == [
+        {"key": "movie1", "scene": scene, "via": "stash", "sceneHash": f"#{scene}"}
+    ]
     assert not [k for k in result["kinds"] if k.startswith("remount-")]
 
 
-def test_retire_zone_src_clear_really_clears():
+@pytest.mark.parametrize("scene", _IN_ZONE, ids=[f"scene{s}" for s in _IN_ZONE])
+def test_retire_zone_src_clear_really_clears(scene):
     """The src hook swallows the clear unconditionally today; inside the zone
     the REAL setter must run, or the refused movie still deviates from raw."""
     script = r"""
@@ -1139,18 +1161,20 @@ const v = document.createElement('video');
 v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
-goToScene(4);
+goToScene(__SCENE__);
 v.src = '';
 console.log(JSON.stringify({
   src: v.src,
   pooled: P.snapshot().filter(x => !x.fromDom).length,
   refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
 }));
-"""
+""".replace("__SCENE__", str(scene))
     result = _run_retire(script)
     assert result["src"] == ""
     assert result["pooled"] == 0
-    assert result["refusals"] == [{"key": "movie1", "scene": 4, "via": "src-clear", "sceneHash": "#4"}]
+    assert result["refusals"] == [
+        {"key": "movie1", "scene": scene, "via": "src-clear", "sceneHash": f"#{scene}"}
+    ]
 
 
 def test_retire_zone_remove_attribute_really_removes():
@@ -1159,7 +1183,7 @@ const v = document.createElement('video');
 v.readyState = 4; v.currentTime = 1;
 v.parentNode = bodyEl;
 v.src = 'https://host/untitled.mov';
-goToScene(5);
+goToScene(1);
 v.removeAttribute('src');
 v.removeAttribute('src');
 console.log(JSON.stringify({
@@ -1171,43 +1195,44 @@ console.log(JSON.stringify({
     result = _run_retire(script)
     assert result["removedAttrs"] == ["src", "src"]
     assert result["pooled"] == 0
-    assert result["refusals"] == [{"key": "movie1", "scene": 5, "via": "removeAttribute", "sceneHash": "#5"}]
+    assert result["refusals"] == [
+        {"key": "movie1", "scene": 1, "via": "removeAttribute", "sceneHash": "#1"}
+    ]
 
 
 def test_retire_zone_blocks_remount_of_a_decoder_pooled_before_the_boundary():
-    """`remountAll()` on a decoder pooled at scene 1 must do nothing once the
-    scene is in the zone (the hash here is set WITHOUT the sweep, so this
-    isolates `tryRemount`'s own guard)."""
-    script = _detach_script(scene="") + r"""
+    """`remountAll()` on a decoder pooled at rest on slide 1 (`#0`) must do
+    nothing once the scene is in the zone. The hash is moved WITHOUT running
+    the interval, so this isolates `tryRemount`'s own guard from the sweep."""
+    script = _detach_script(scene=0) + r"""
 const pooledBefore = P.snapshot().filter(x => !x.fromDom).length;
-location.hash = '#4';
+location.hash = '#1';
 const before = JSON.stringify(v.style);
 P.remountAll();
 console.log(JSON.stringify({
   pooledBefore,
   styleUntouched: JSON.stringify(v.style) === before,
-  remountedAfter: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#4').length,
+  remountedInZone: P.events.filter(e => e.kind.indexOf('remount-') === 0 && e.detail.sceneHash === '#1').length,
   refusals: P.events.filter(e => e.kind === 'preserve-refused').map(e => e.detail),
 }));
 """
     result = _run_retire(script)
     assert result["pooledBefore"] == 1
     assert result["styleUntouched"] is True
-    assert result["remountedAfter"] == 0
-    assert result["refusals"] == [{"key": "movie1", "scene": 4, "via": "remount", "sceneHash": "#4"}]
+    assert result["remountedInZone"] == 0
+    assert result["refusals"] == [{"key": "movie1", "scene": 1, "via": "remount", "sceneHash": "#1"}]
 
 
 def test_retire_zone_create_element_does_not_facade_or_reuse():
     """A fresh element created inside the zone plays natively: no facade, no
     `reuse-decoder`, and its own `setAttribute('src')` reaches the element."""
-    script = _detach_script(scene="") + r"""
-location.hash = '#4';
+    script = _detach_script(scene=0) + r"""
+location.hash = '#3';
 const fresh = document.createElement('video');
 fresh.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({
   facade: fresh.dataset.obedFacade || null,
   facadeFor: fresh.__obedFacadeFor ? 1 : 0,
-  styleAttr: fresh.__styleAttr === undefined,
   reuse: P.events.filter(e => e.kind === 'reuse-decoder' || e.kind === 'bridge-3to4').length,
   kinds: P.events.map(e => e.kind),
 }));
@@ -1219,16 +1244,20 @@ console.log(JSON.stringify({
     assert "retire-on-start-movie" not in result["kinds"]
 
 
-def test_retire_zone_sweep_retires_a_decoder_pooled_before_the_boundary():
-    """The 1->2 detach fires while the hash is still 1, so the decoder is
-    legitimately pooled; entering the zone must retire it (pause, out of the
-    DOM, dead for reuse) and say so with `retire-boundary`."""
-    script = _detach_script(scene="") + r"""
+def test_interval_sweep_retires_a_decoder_pooled_before_the_zone():
+    """A decoder legitimately pooled at rest on slide 1 (`#0`) must be retired
+    once the hash reaches the zone — driven by the keep-warm interval, since
+    the player never fires `hashchange`. Pause, out of the DOM, dead for
+    reuse, and said out loud with `retire-boundary`."""
+    script = _detach_script(scene=0) + r"""
 const elId = v.__obedElId;
 const pooledBefore = P.snapshot().filter(x => !x.fromDom).length;
-goToScene(2);
+location.hash = '#1';
+const sweptBeforeTick = P.events.filter(e => e.kind === 'retire-boundary').length;
+tick();
+tick();
 console.log(JSON.stringify({
-  elId, pooledBefore,
+  elId, pooledBefore, sweptBeforeTick,
   pooledAfter: P.snapshot().filter(x => !x.fromDom).length,
   poolKeys: P.poolKeys,
   paused: v.paused,
@@ -1242,6 +1271,7 @@ console.log(JSON.stringify({
 """
     result = _run_retire(script)
     assert result["pooledBefore"] == 1
+    assert result["sweptBeforeTick"] == 0
     assert result["pooledAfter"] == 0
     assert result["poolKeys"] == []
     assert result["paused"] is True
@@ -1250,22 +1280,18 @@ console.log(JSON.stringify({
     assert result["remounted"] is None
     assert result["gen"] == -1
     assert result["epoch"] == -1
+    # Swept once: the second tick finds nothing and must not re-note.
     assert result["retire"] == [
-        {"key": "movie1", "elIds": [result["elId"]], "atScene": 2, "sceneHash": "#2"}
+        {"key": "movie1", "elIds": [result["elId"]], "atScene": 2, "sceneHash": "#1"}
     ]
 
 
-def test_retire_sweep_is_silent_outside_the_zone():
-    """No decoder of the retired key, or a scene past the zone end: the sweep
-    must emit nothing (a `retire-boundary` note is a positive claim)."""
-    script = r"""
-goToScene(3);
-goToScene(7);
-const v = document.createElement('video');
-v.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;
-v.src = 'https://host/untitled.mov';
-detach(v);
-goToScene(7);
+@pytest.mark.parametrize("scene", _BEFORE_ZONE + _AFTER_ZONE, ids=lambda s: f"scene{s}")
+def test_interval_sweep_is_silent_outside_the_zone(scene):
+    """No `retire-boundary` outside the zone — the note is a positive claim,
+    and the interval runs on every scene of the deck."""
+    script = _detach_script(scene=scene) + r"""
+tick();
 console.log(JSON.stringify({
   retire: P.events.filter(e => e.kind === 'retire-boundary').length,
   pooled: P.snapshot().filter(x => !x.fromDom).length,
@@ -1276,8 +1302,10 @@ console.log(JSON.stringify({
     assert result["pooled"] == 1
 
 
-@pytest.mark.parametrize("scene", ["", "goToScene(0);", "goToScene(1);"], ids=["initial", "scene0", "scene1"])
+@pytest.mark.parametrize("scene", _BEFORE_ZONE, ids=lambda s: f"scene{s}")
 def test_before_the_retire_zone_preservation_is_unchanged(scene):
+    """Slide 1 at rest (`#0`) is one scene before the transition: the implicit
+    pin still holds, exactly as today."""
     result = _run_retire(_detach_script(scene=scene) + _POOL_REPORT)
     assert result["poolKeys"] == ["untitled.mov"]
     assert result["pooled"] == 1
@@ -1286,12 +1314,13 @@ def test_before_the_retire_zone_preservation_is_unchanged(scene):
     assert "remount-scheduled" in result["kinds"]
 
 
-@pytest.mark.parametrize("scene", [6, 7], ids=["zone-end", "after-zone-end"])
+@pytest.mark.parametrize("scene", _AFTER_ZONE, ids=["zone-end", "after-zone-end"])
 def test_after_the_zone_end_preservation_works_again(scene):
     """The restart at scene 6 creates a fresh element the export itself plays;
     from 6 on the runtime may preserve it again (that is what the 3->4 bridge
-    carries)."""
-    result = _run_retire(_detach_script(scene=f"goToScene({scene});") + _POOL_REPORT)
+    carries). The zone END keeps the plain `atScene` convention, so the 2->3
+    dissolve scene (#5) is still refused."""
+    result = _run_retire(_detach_script(scene=scene) + _POOL_REPORT)
     assert result["poolKeys"] == ["untitled.mov"]
     assert result["pooled"] == 1
     assert result["preserved"] == "1"
@@ -1299,15 +1328,13 @@ def test_after_the_zone_end_preservation_works_again(scene):
 
 
 def test_bridge_still_engages_at_scene_8_for_the_retired_key():
-    """End to end on the fixture's shape: refused at 2..5, pooled again at 7,
+    """End to end on the fixture's shape: pooled at `#0`, swept when the
+    transition opens the zone, refused through 1..5, pooled again at 7,
     bridged at 8 — the retire must not poison the later bridge."""
-    script = r"""
-const doomed = document.createElement('video');
-doomed.readyState = 4; doomed.currentTime = 1; doomed.parentNode = bodyEl;
-doomed.src = 'https://host/untitled.mov';
-detach(doomed);
-goToScene(2);
-goToScene(4);
+    script = _detach_script(scene=0) + r"""
+location.hash = '#1';
+tick();
+goToScene(3);
 const refused = document.createElement('video');
 refused.readyState = 4; refused.currentTime = 1; refused.parentNode = bodyEl;
 refused.src = 'https://host/untitled.mov';
@@ -1319,6 +1346,7 @@ fresh.src = 'https://host/untitled.mov';
 detach(fresh);
 const pooledAtSeven = P.snapshot().filter(x => !x.fromDom).length;
 goToScene(8);
+tick();
 const bridged = document.createElement('video');
 bridged.setAttribute('src', 'https://host/untitled.mov');
 console.log(JSON.stringify({
@@ -1338,11 +1366,12 @@ console.log(JSON.stringify({
     assert result["suppressed"] is True
 
 
-def test_retire_zone_does_not_touch_another_movie_key():
+@pytest.mark.parametrize("scene", _IN_ZONE, ids=[f"scene{s}" for s in _IN_ZONE])
+def test_retire_zone_does_not_touch_another_movie_key(scene):
     """The refusal is per-movie: a movie the plan does not retire keeps being
     preserved inside the zone, and the sweep never takes it."""
-    script = _detach_script(scene="goToScene(3);", src="https://host/WA0125.mov") + r"""
-goToScene(4);
+    script = _detach_script(scene=scene, src="https://host/WA0125.mov") + r"""
+tick();
 """ + _POOL_REPORT
     result = _run_retire(script)
     assert result["poolKeys"] == ["wa0125.mov"]
@@ -1351,25 +1380,30 @@ goToScene(4);
     assert result["refusals"] == []
 
 
-@pytest.mark.parametrize("scene", [2, 3, 5], ids=["boundary", "mid", "last"])
+@pytest.mark.parametrize(
+    "scene", _BEFORE_ZONE + _IN_ZONE + _AFTER_ZONE, ids=lambda s: f"scene{s}"
+)
 def test_plan_without_a_retire_behaves_exactly_as_today(scene):
     """Same scenes, same teardown, retire entry removed: every scene in what
-    WOULD be the zone preserves as before."""
+    WOULD be the zone preserves as before, and the interval sweep is inert."""
     result = _run_full_core_in_node(
         plan=_NO_RETIRE_PLAN, stage=_IDENTITY_STAGE,
-        script=_detach_script(scene=f"goToScene({scene});") + _POOL_REPORT,
+        script=_detach_script(scene=scene) + "tick();\n" + _POOL_REPORT,
     )
     assert result["poolKeys"] == ["untitled.mov"]
     assert result["pooled"] == 1
     assert result["preserved"] == "1"
     assert result["refusals"] == []
+    assert "retire-boundary" not in result["kinds"]
     assert "remount-scheduled" in result["kinds"]
 
 
 def test_null_hash_is_allowed():
     """No scene index in the hash: nothing places the player in the zone, so
     preservation stays allowed (unchanged from today)."""
-    script = _detach_script(scene="location.hash = '';") + _POOL_REPORT
+    script = _MAKE_AND_DETACH.replace("__SCENE__", "location.hash = '';").replace(
+        "__SRC__", "https://host/untitled.mov"
+    ) + "tick();\n" + _POOL_REPORT
     result = _run_retire(script)
     assert result["pooled"] == 1
     assert result["preserved"] == "1"

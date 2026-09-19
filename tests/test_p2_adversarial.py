@@ -1067,7 +1067,11 @@ def test_freeze_control_fails_when_positive_bracket_not_green():
 # I4 — the 1->2 carry is REFUSED: gates under the baseline plan.
 # --------------------------------------------------------------------------- #
 def _refusal_events() -> list[dict]:
-    """The two positive notes the retire zone may emit for movie1."""
+    """The two positive notes the retire zone may emit for movie1.
+
+    The player holds `#1` for the WHOLE 1->2 Magic Move, so the declining hooks
+    fire at scene 1; the swept `retire-boundary` still names `atScene` 2.
+    """
     return [
         {
             "kind": "retire-boundary",
@@ -1075,7 +1079,7 @@ def _refusal_events() -> list[dict]:
         },
         {
             "kind": "preserve-refused",
-            "detail": {"key": "movie1", "scene": 2, "via": "stash", "sceneHash": "#2"},
+            "detail": {"key": "movie1", "scene": 1, "via": "stash", "sceneHash": "#1"},
         },
     ]
 
@@ -1135,17 +1139,41 @@ def test_refused_carry_fails_without_a_positive_refusal_event():
     assert "no preserve-refused/retire-boundary event in the retire zone" in verdict["reasons"]
 
 
-def test_refused_carry_ignores_a_refusal_event_before_the_retire_scene():
+def test_refused_carry_accepts_a_refusal_on_the_transition_scene_alone():
+    """The transition scene (RETIRE_ZONE_MIN_HASH) is inside the zone: a
+    `preserve-refused` there satisfies (b) with no `retire-boundary` at all."""
+    only_transition = [
+        {"kind": "preserve-refused",
+         "detail": {"key": "movie1", "scene": 1, "via": "src-clear", "sceneHash": "#1"}},
+    ]
+    verdict = _refused(preserve_events=only_transition)
+    assert verdict["ok"] is True
+    assert verdict["refusalEventsN"] == 1
+
+
+def test_refused_carry_ignores_a_refusal_event_before_the_retire_zone():
     early = [
-        {"kind": "preserve-refused", "detail": {"key": "movie1", "scene": 1, "via": "stash"}},
+        {"kind": "preserve-refused", "detail": {"key": "movie1", "scene": 0, "via": "stash"}},
     ]
     verdict = _refused(preserve_events=early)
     assert verdict["ok"] is False
     assert verdict["refusalEventsN"] == 0
 
 
+def test_refused_carry_fails_on_a_remount_during_the_transition_scene():
+    """(c) The zone INCLUDES the transition scene the player still hashes as `#1`:
+    the first live run remounted there and left decoders painting on slide 2."""
+    events = _refusal_events() + [
+        {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#1"}},
+    ]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 1
+    assert "the movie was carried inside the retire zone" in verdict["reasons"]
+
+
 def test_refused_carry_fails_on_a_remount_inside_the_retire_zone():
-    """(c) Any remount/reuse/dom-swap for movie1 in [2, 6) means the carry happened."""
+    """(c) Any carry note for movie1 in [RETIRE_ZONE_MIN_HASH, 6) means it happened."""
     events = _refusal_events() + [
         {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#3"}},
     ]
@@ -1386,3 +1414,15 @@ def test_refused_carry_ignores_a_suppressed_or_errored_remount():
     verdict = _refused(preserve_events=events)
     assert verdict["ok"] is True
     assert verdict["carryEventsInRetireZoneN"] == 0
+
+
+def test_never_pooled_evidence_covers_the_transition_scene():
+    """A carry on the transition scene kills the never-pooled route too."""
+    events = _refusal_events() + [
+        {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#1"}},
+    ]
+    assert p2.neverPooledEvidence(events)["ok"] is False
+
+
+def test_retire_zone_starts_one_scene_before_the_destination():
+    assert p2.RETIRE_ZONE_MIN_HASH == p2.SLIDE2_MIN_HASH - 1

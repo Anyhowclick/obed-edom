@@ -35,13 +35,14 @@ the preserved decoder to `rect`, suppressing the export's fresh element. A
 plan is derived from export data and restricted to the measured allowlist.
 
 "retire" (at most one, before the first restart and any bridge) is a
-per-boundary REFUSAL: from `atScene` until the next restart/bridge boundary
-(the end of the deck when there is none), `movieKey` is handed back to the raw
-player. Inside that zone nothing is pooled, remounted, facaded or reused, and
-the `src` clear / `removeAttribute('src')` the hooks normally swallow really
-runs, so the movie behaves exactly as the unmodified export does. Every
-declining hook notes `preserve-refused` (once per key+via) and a `hashchange`
-sweep retires decoders already pooled before the zone, noting
+per-boundary REFUSAL: from the boundary's TRANSITION scene (`atScene - 1`,
+where the player already detaches the movie) until the next restart/bridge
+`atScene` (the end of the deck when there is none), `movieKey` is handed back
+to the raw player. Inside that zone nothing is pooled, remounted, facaded or
+reused, and the `src` clear / `removeAttribute('src')` the hooks normally
+swallow really runs, so the movie behaves exactly as the unmodified export
+does. Every declining hook notes `preserve-refused` (once per key+via), and
+the keep-warm interval sweeps decoders pooled before the zone, noting
 `retire-boundary` — refusal is asserted by a positive event, never by silence.
 The bridge moves during the preceding transition scene using linear interpolation
 over the exported duration. This is a fallback for WebGL movie geometry with no
@@ -392,10 +393,14 @@ PRESERVE_CORE_JS = r"""
     });
     return end;
   }
+  // The zone OPENS on the transition scene (`atScene - 1`, the same convention
+  // keepThroughBridge uses for the move scene): the player detaches the movie
+  // while the hash is still the transition's, so a zone starting at atScene
+  // would pool and remount the refused movie for the whole Magic Move.
   function inRetireZone(b) {
     const hn = currentHashNum();
     if (hn == null) return false;
-    return hn >= b.atScene && hn < retireZoneEnd(b);
+    return hn >= b.atScene - 1 && hn < retireZoneEnd(b);
   }
   /** May this movie be preserved at the current scene? False only in a retire zone. */
   function preserveAllowed(src) {
@@ -964,9 +969,10 @@ PRESERVE_CORE_JS = r"""
     return v.__obedElId;
   }
   /**
-   * Retire every decoder of the retired movie once the hash enters the zone.
-   * The 1->2 detach can fire while the hash is still 1, so a decoder pooled
-   * before the boundary would otherwise survive into the refused scenes.
+   * Retire every decoder of the retired movie once the hash enters the zone —
+   * the safety net for anything pooled before it. Driven by the keep-warm
+   * interval, not `hashchange`: the player rewrites `location.hash` without
+   * ever firing that event (measured on the real export, 2026-09-20).
    */
   function sweepRetireZone() {
     const b = retireBoundary();
@@ -990,7 +996,6 @@ PRESERVE_CORE_JS = r"""
     empties.forEach(function(key) { pool.delete(key); });
     note('retire-boundary', {key: b.movieKey, elIds: elIds, atScene: b.atScene});
   }
-  window.addEventListener('hashchange', sweepRetireZone);
   function tryRemount(v, epoch) {
     if (disabled) return;
     if (!v || suppressRemount) return;
@@ -1296,6 +1301,7 @@ PRESERVE_CORE_JS = r"""
   // Refresh layout while videos are still attached (detach often zeroes the box).
   setInterval(function(){
     if (disabled) return;
+    sweepRetireZone();
     document.querySelectorAll('video').forEach(function(v){ captureLayout(v); });
     pool.forEach(function(q){
       (q || []).forEach(function(v){

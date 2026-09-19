@@ -122,6 +122,11 @@ INDEX_PATCH_ROI_SLIDE3 = (233, 800, 24, 12)
 # HTML event index where slide 2 begins (the 1→2 Magic Move destination, whose
 # carry the derived plan REFUSES: slide 2 draws the green square over the movie).
 SLIDE2_MIN_HASH = 2
+# The player holds `#1` for the WHOLE 1->2 Magic Move and only flips to `#2`
+# after the move, yet it detaches the slide-1 videos at `#1` — so the retire zone
+# starts one scene early (same convention as the bridge's move scene) and a
+# remount during the transition is exactly the defect this gate must catch.
+RETIRE_ZONE_MIN_HASH = SLIDE2_MIN_HASH - 1
 # HTML event index where slide 3 begins (2 + 4 events before it → scene #6).
 SLIDE3_MIN_HASH = 6
 # ---- 3->4 moving Magic Move constants (positive control; measured Phase 0) ----
@@ -930,14 +935,17 @@ def refusedCarry1to2(
     *,
     target_key: str = MOVIE1_KEY,
     retire_scene: int = SLIDE2_MIN_HASH,
+    zone_scene: int = RETIRE_ZONE_MIN_HASH,
     restart_scene: int = SLIDE3_MIN_HASH,
 ) -> dict:
     """Fail-CLOSED verdict that the 1->2 carry was REFUSED and slide 2 therefore
     looks exactly like the raw export (plan §4).
 
     All of: (a) the injected plan retires `target_key` at `retire_scene`;
-    (b) a positive refusal event at scene >= `retire_scene`; (c) zero
-    remount/reuse/dom-swap notes for that movie inside the retire zone;
+    (b) a positive refusal event at scene >= `zone_scene` (the runtime declines
+    to preserve during the transition scene, which the player still hashes as
+    `retire_scene - 1`); (c) zero carry notes for that movie anywhere in the
+    retire zone `[zone_scene, restart_scene)`, the transition scene included;
     (d) no lingering preserved/remounted overlay and nothing painting over the
     slide-1/2 footprints on settled slide 2; (e) the composited counter frozen
     across the slide-2 window with a real 1->2 hash change; (f) no player build
@@ -954,8 +962,8 @@ def refusedCarry1to2(
         ),
         None,
     )
-    refusals = refusalEvents(preserve_events, target_key, retire_scene)
-    carried = carryEvents(preserve_events, target_key, retire_scene, restart_scene)
+    refusals = refusalEvents(preserve_events, target_key, zone_scene)
+    carried = carryEvents(preserve_events, target_key, zone_scene, restart_scene)
     lingering = lingering or {}
     no_lingering = bool(
         lingering.get("count", 1) == 0
@@ -1008,7 +1016,7 @@ def neverPooledEvidence(
     preserve_events: list[dict],
     *,
     target_key: str = MOVIE1_KEY,
-    retire_scene: int = SLIDE2_MIN_HASH,
+    zone_scene: int = RETIRE_ZONE_MIN_HASH,
     restart_scene: int = SLIDE3_MIN_HASH,
 ) -> dict:
     """"Nothing was ever pooled" — the stronger substitute for the
@@ -1019,8 +1027,8 @@ def neverPooledEvidence(
     (`remount-*`, `reuse-decoder`, `dom-swap`, `facade-block-clear`) for that
     key inside the retire zone.
     """
-    refusals = refusalEvents(preserve_events, target_key, retire_scene)
-    carried = carryEvents(preserve_events, target_key, retire_scene, restart_scene)
+    refusals = refusalEvents(preserve_events, target_key, zone_scene)
+    carried = carryEvents(preserve_events, target_key, zone_scene, restart_scene)
     return {
         "ok": bool(refusals and not carried),
         "refusalEventsN": len(refusals),
@@ -3211,7 +3219,7 @@ async def _run(player: Path) -> dict:
               }).slice(0, 20);
               return important.concat(remounts).concat(moNoTexids).concat(inZone);
             })()""".replace("__CARRY_KINDS__", json.dumps(sorted(CARRY_EVENT_KINDS)))
-            .replace("__ZONE_LO__", str(SLIDE2_MIN_HASH))
+            .replace("__ZONE_LO__", str(RETIRE_ZONE_MIN_HASH))
             .replace("__ZONE_HI__", str(SLIDE3_MIN_HASH))
         ) or []
         clear_i = next(
@@ -3489,11 +3497,16 @@ async def _run(player: Path) -> dict:
                     "OVER the movie), so this finding asserts the refusal was honoured and "
                     "slide 2 looks exactly like the raw export. Pass requires ALL of: (a) the "
                     f"injected plan retires movie1 at scene {SLIDE2_MIN_HASH}; (b) at least one "
-                    "positive preserve-refused/retire-boundary event for movie1 at that scene or "
-                    "later (refusal is asserted by an event, never by silence); (c) ZERO carry "
-                    "notes (remount-scheduled/-done/-placed, reuse-decoder, dom-swap, "
-                    "facade-block-clear) for movie1 or its elements inside the retire zone "
-                    f"[{SLIDE2_MIN_HASH}, {SLIDE3_MIN_HASH}); "
+                    "positive preserve-refused/retire-boundary event for movie1 at scene >= "
+                    f"{RETIRE_ZONE_MIN_HASH} (refusal is asserted by an event, never by silence; "
+                    "the player holds the PREVIOUS hash for the whole Magic Move, so the "
+                    "preserve-refused notes land at that scene and the swept retire-boundary at "
+                    f"{SLIDE2_MIN_HASH}); (c) ZERO carry notes (remount-scheduled/-done/-placed, "
+                    "reuse-decoder, dom-swap, facade-block-clear) for movie1 or its elements "
+                    f"anywhere in the retire zone [{RETIRE_ZONE_MIN_HASH}, {SLIDE3_MIN_HASH}) — "
+                    "the transition scene INCLUDED, since the player detaches the slide-1 videos "
+                    "while still on it and a remount there is what leaves a decoder painting on "
+                    "slide 2; "
                     "(d) on settled slide 2, zero preserved/remounted leftovers AND zero PAINTING "
                     "<video>s over the slide-1/2 footprints (the player composites slide 2 in "
                     "WebGL with its layer tree at opacity 0, so the paint test is opacity-aware); "
@@ -3650,7 +3663,8 @@ async def _run(player: Path) -> dict:
                 "a strengthening, not a weakening — 'nothing was ever pooled' beats 'the "
                 "pool was skipped', and it is carried by a positive event. The runtime "
                 "emits no stash note, so 'no later stash of that key' is read off the "
-                "absence of every pool-consuming note inside the retire zone."
+                "absence of every pool-consuming note inside the retire zone "
+                f"[{RETIRE_ZONE_MIN_HASH}, {SLIDE3_MIN_HASH})."
             ),
             "detail": {
                 "targetKey": target_key,
