@@ -250,6 +250,7 @@ class ChromeCdp:
             self.ws.send(json.dumps({"id": request_id, "method": method, "params": params}))
             while True:
                 try: message = json.loads(self.ws.recv(timeout=15))
+                except TimeoutError as exc: raise LiveHostError(f"Program browser did not answer CDP {method} in time.") from exc
                 except Exception as exc: raise LiveHostError("Program browser CDP connection failed.") from exc
                 if message.get("id") == request_id:
                     if "error" in message: raise LiveHostError(f"CDP {method} failed: {message['error'].get('message', 'unknown error')}")
@@ -261,7 +262,8 @@ class ChromeCdp:
         return (result.get("result") or {}).get("value")
 
     def key(self, key: str, code: str, vk: int) -> None:
-        values = {"key": key, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk}
+        # No nativeVirtualKeyCode: macOS Chrome routes it through AppKit key equivalents and stalls CDP.
+        values = {"key": key, "code": code, "windowsVirtualKeyCode": vk}
         self.call("Input.dispatchKeyEvent", type="keyDown", **values)
         self.call("Input.dispatchKeyEvent", type="keyUp", **values)
 

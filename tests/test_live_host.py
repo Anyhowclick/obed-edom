@@ -161,3 +161,19 @@ def test_safe_export_file_rejects_traversal_and_symlink(tmp_path, monkeypatch):
     with pytest.raises(html_preview.PreviewError): html_preview.safe_export_file(root, "../index.html")
     (root / "out").symlink_to(tmp_path / "elsewhere")
     with pytest.raises(html_preview.PreviewError): html_preview.safe_export_file(root, "out/x")
+
+
+def test_key_events_omit_native_key_code(tmp_path):
+    # A Windows VK sent as nativeVirtualKeyCode makes macOS Chrome redispatch the
+    # key through AppKit key-equivalent routing; the browser UI thread then stalls
+    # and every later CDP call times out (reproduced headless, 2026-09-19).
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+    calls = []
+    transport.call = lambda method, **params: calls.append((method, params)) or {}
+    transport.key(" ", "Space", 32)
+    assert [params["type"] for _, params in calls] == ["keyDown", "keyUp"]
+    for method, params in calls:
+        assert method == "Input.dispatchKeyEvent"
+        assert params["windowsVirtualKeyCode"] == 32
+        assert "nativeVirtualKeyCode" not in params
