@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
 import shutil
 import socket
@@ -23,13 +24,67 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
-from .html_preview import safe_export_file
-from .live_runtime import LiveRuntimeUnsupported, patch_player
+from .html_preview import preview_root, safe_export_file
+from .live_runtime import RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
 from .live_session import PlayerCommandRejected, PlayerObservation
+
+ATTACH_ENV = "OBED_LIVE_ATTACH"
+ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
+_UNSET = object()
 
 
 class LiveHostError(RuntimeError):
     """The owned browser cannot provide an observed player state."""
+
+
+def _validate_loopback_endpoint(endpoint: str) -> str:
+    host = urlsplit(endpoint).hostname
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        raise LiveHostError("OBED_LIVE_ATTACH must target a loopback CDP endpoint.")
+    return endpoint
+
+
+class _SessionLogger:
+    """Append-only JSONL session log; a logging failure never reaches the caller."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._file: Any = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = path.open("a", buffering=1)
+        except Exception:
+            self._file = None
+
+    def log(self, kind: str, **fields: Any) -> None:
+        if self._file is None:
+            return
+        record = {"ts": time.time(), "kind": kind, **fields}
+        try:
+            with self._lock:
+                self._file.write(json.dumps(record, default=str) + "\n")
+                self._file.flush()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self._file is None:
+            return
+        try:
+            with self._lock:
+                self._file.close()
+        except Exception:
+            pass
+        finally:
+            self._file = None
+
+
+def _new_log_path() -> Path:
+    directory = preview_root() / "live-logs"
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return directory / f"{stamp}-{os.getpid()}.jsonl"
 
 
 @dataclass(frozen=True)
@@ -94,8 +149,8 @@ def choose_display(display_id: int | None, displays: list[OutputDisplay] | None 
 
 
 class _AssetServer:
-    def __init__(self, root: Path, patched_player: bytes, resolver: Callable[[Path, str], Path] = safe_export_file) -> None:
-        self.root, self.patched_player, self.resolver = root, patched_player, resolver
+    def __init__(self, root: Path, patched_player: bytes, resolver: Callable[[Path, str], Path] = safe_export_file, *, alpha: bool = False) -> None:
+        self.root, self.patched_player, self.resolver, self.alpha = root, patched_player, resolver, alpha
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
@@ -180,14 +235,24 @@ class _AssetServer:
 
     def _program_html(self) -> bytes:
         source = self.resolver(self.root, "index.html").read_text()
-        style = """
-<style id="obed-output-overlay">#obed-output-black{position:fixed;inset:0;background:#000;z-index:2147483647}#slideshowNavigator,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
-"""
-        overlay = """
-<div id="obed-output-black"></div>
-<script>window.__obedOutput={show(){document.getElementById('obed-output-black').style.display='none'},hide(){document.getElementById('obed-output-black').style.display='block'}};</script>
+        fit_script = """
 <script id="obed-output-fit">Object.defineProperty(document,'webkitIsFullScreen',{get:()=>true});window.addEventListener('load',()=>setTimeout(()=>document.dispatchEvent(new Event('webkitfullscreenchange'))));</script>
 """
+        if self.alpha:
+            style = """
+<style id="obed-output-overlay">html,body,#body{background:transparent!important}#body{opacity:0}#slideshowNavigator,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
+"""
+            overlay = """
+<script>(function(){var hidden=true;function apply(){var el=document.getElementById('body');if(!el)return;el.style.setProperty('background','transparent','important');el.style.setProperty('opacity',hidden?'0':'1','important');}window.__obedOutput={show(){hidden=false;apply();},hide(){hidden=true;apply();}};var target=document.getElementById('body');if(target){new MutationObserver(apply).observe(target,{attributes:true,attributeFilter:['style','class']});}document.addEventListener('DOMContentLoaded',apply);apply();})();</script>
+""" + fit_script
+        else:
+            style = """
+<style id="obed-output-overlay">#obed-output-black{position:fixed;inset:0;background:#000;z-index:2147483647}#slideshowNavigator,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
+"""
+            overlay = """
+<div id="obed-output-black"></div>
+<script>window.__obedOutput={show(){document.getElementById('obed-output-black').style.display='none'},hide(){document.getElementById('obed-output-black').style.display='block'}};</script>
+""" + fit_script
         head = re.search(r"<head[^>]*>", source, flags=re.IGNORECASE)
         body = re.search(r"<body[^>]*>", source, flags=re.IGNORECASE)
         if not head or not body:
@@ -216,19 +281,44 @@ class _AssetServer:
 
 
 class ChromeCdp:
-    """Synchronous CDP transport with one socket and serialized request IDs."""
-    def __init__(self, chrome: Path, profile: Path, display: OutputDisplay, *, headless: bool = False) -> None:
+    """Synchronous CDP transport with one socket and serialized request IDs.
+
+    In attach mode (`attach_endpoint` set) no Chrome process is spawned: an
+    existing page target reachable over CDP HTTP is discovered and driven in
+    place. All observation, key delivery, and ack/settle logic is unchanged.
+    """
+    def __init__(self, chrome: Path, profile: Path, display: OutputDisplay | None, *, headless: bool = False, attach_endpoint: str | None = None, attach_match: str | None = None, logger: _SessionLogger | None = None, log_path: Path | None = None) -> None:
         self.chrome, self.profile, self.display, self.headless = chrome, profile, display, headless
+        self.attach_endpoint = _validate_loopback_endpoint(attach_endpoint) if attach_endpoint else None
+        self.attach_match, self.logger, self.log_path = attach_match, logger, log_path
         self.proc: subprocess.Popen[bytes] | None = None
         self.ws: Any = None
         self.port: int | None = None
+        self._stderr_file: Any = None
         self._id = 0
         self._lock = threading.Lock()
         self._stop_lock = threading.Lock()
         self._stopped = False
 
+    def _log(self, kind: str, **fields: Any) -> None:
+        if self.logger is None: return
+        try: self.logger.log(kind, **fields)
+        except Exception: pass
+
     def start(self) -> None:
         from websockets.sync.client import connect
+        if self.attach_endpoint:
+            targets = self._list_targets()
+            target = self._pick_target(targets)
+            try:
+                self.ws = connect(target["webSocketDebuggerUrl"], open_timeout=5)
+            except Exception as exc:
+                raise LiveHostError(f"Could not attach to CDP target: {exc}") from exc
+            self.call("Runtime.enable")
+            self.call("Page.enable")
+            try: self.call("Log.enable")
+            except Exception: pass
+            return
         self.profile.mkdir(parents=True, exist_ok=True)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
@@ -244,7 +334,11 @@ class ChromeCdp:
             "--app=data:text/html,<body style='margin:0;background:black'></body>",
         ]
         if self.headless: args.insert(1, "--headless=new")
-        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stderr: Any = subprocess.DEVNULL
+        if self.log_path is not None:
+            try: stderr = self._stderr_file = self.log_path.with_suffix(".chrome.log").open("wb")
+            except Exception: stderr = subprocess.DEVNULL
+        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=stderr)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             try:
@@ -260,24 +354,57 @@ class ChromeCdp:
             raise LiveHostError("Chrome CDP did not start.")
         self.call("Runtime.enable")
         self.call("Page.enable")
+        try: self.call("Log.enable")
+        except Exception: pass
         if not self.headless:
             window = self.call("Browser.getWindowForTarget")
             self.call("Browser.setWindowBounds", windowId=window["windowId"], bounds={"windowState": "fullscreen"})
 
+    def _list_targets(self) -> list[dict[str, Any]]:
+        try:
+            with urllib.request.urlopen(self.attach_endpoint.rstrip("/") + "/json/list", timeout=5) as response:
+                return json.loads(response.read())
+        except Exception as exc:
+            raise LiveHostError(f"Could not list CDP targets at {self.attach_endpoint}: {exc}") from exc
+
+    def _pick_target(self, targets: list[dict[str, Any]]) -> dict[str, Any]:
+        pages = [item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")]
+        if self.attach_match:
+            matched = [item for item in pages if self.attach_match in (item.get("url", "") + item.get("title", ""))]
+            if matched: return matched[0]
+        if len(pages) == 1: return pages[0]
+        candidates = ", ".join(f"{item.get('title', '')} ({item.get('url', '')})" for item in pages) or "none"
+        raise LiveHostError(f"Ambiguous CDP attach target; candidates: {candidates}")
+
     def call(self, method: str, **params: Any) -> dict[str, Any]:
         with self._lock:
             ws, proc = self.ws, self.proc
-            if not ws or not proc or proc.poll() is not None: raise LiveHostError("Program browser stopped unexpectedly.")
+            if not ws: raise LiveHostError("Program browser stopped unexpectedly.")
+            if proc is not None and proc.poll() is not None: raise LiveHostError("Program browser stopped unexpectedly.")
             self._id += 1
             request_id = self._id
+            started = time.monotonic()
             ws.send(json.dumps({"id": request_id, "method": method, "params": params}))
             while True:
                 try: message = json.loads(ws.recv(timeout=15))
-                except TimeoutError as exc: raise LiveHostError(f"Program browser did not answer CDP {method} in time.") from exc
+                except TimeoutError as exc:
+                    self._log("cdpTimeout", method=method)
+                    raise LiveHostError(f"Program browser did not answer CDP {method} in time.") from exc
                 except Exception as exc: raise LiveHostError("Program browser CDP connection failed.") from exc
                 if message.get("id") == request_id:
+                    duration_ms = (time.monotonic() - started) * 1000
+                    if duration_ms > 250: self._log("cdpSlow", method=method, durationMs=round(duration_ms, 1))
                     if "error" in message: raise LiveHostError(f"CDP {method} failed: {message['error'].get('message', 'unknown error')}")
                     return message.get("result") or {}
+                if "method" in message: self._route_event(message)
+
+    def _route_event(self, message: dict[str, Any]) -> None:
+        method = message.get("method")
+        params = message.get("params") or {}
+        if method == "Log.entryAdded": self._log("pageLog", entry=params.get("entry"))
+        elif method == "Runtime.exceptionThrown": self._log("pageException", detail=params.get("exceptionDetails"))
+        elif method == "Runtime.consoleAPICalled" and params.get("type") in ("error", "warning"):
+            self._log("pageConsole", level=params.get("type"), args=params.get("args"))
 
     def evaluate(self, expression: str) -> Any:
         result = self.call("Runtime.evaluate", expression=expression, returnByValue=True, awaitPromise=False)
@@ -309,6 +436,17 @@ class ChromeCdp:
             self._stopped = True
             if self.ws is None and self.proc is None: return
             errors: list[Exception] = []
+            if self.attach_endpoint:
+                if self.ws is not None:
+                    if self._lock.acquire(blocking=False):
+                        self._lock.release()
+                        try: self.call("Page.navigate", url="about:blank")
+                        except Exception: pass
+                    try: self.ws.close()
+                    except Exception as exc: errors.append(exc)
+                    else: self.ws = None
+                if errors: raise LiveHostError("Program browser did not fully stop.")
+                return
             if self.ws is not None:
                 try: self.ws.close()
                 except Exception as exc: errors.append(exc)
@@ -329,13 +467,27 @@ class ChromeCdp:
                         errors.append(exc)
                 if proc.poll() is not None: self.proc = None
                 else: errors.append(LiveHostError("Program browser process did not exit."))
+            if self._stderr_file is not None:
+                try: self._stderr_file.close()
+                except Exception as exc: errors.append(exc)
+                else: self._stderr_file = None
             if errors:
                 raise LiveHostError("Program browser did not fully stop.")
 
 
 class LiveOutputHost:
-    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0) -> None:
-        self.export_root, self.slides, self.display = export_root, slides, choose_display(display_id, headless=headless)
+    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None) -> None:
+        self.export_root, self.slides = export_root, slides
+        if attach_endpoint is _UNSET:
+            attach_endpoint = os.environ.get(ATTACH_ENV) or None
+        self._attach_endpoint = _validate_loopback_endpoint(attach_endpoint.strip()) if attach_endpoint and attach_endpoint.strip() else None
+        self._attach_match = (attach_match if attach_match is not None else os.environ.get(ATTACH_MATCH_ENV)) or None
+        if self._attach_endpoint:
+            self.display: OutputDisplay | None = None
+            self._viewport = {"width": 1920, "height": 1080}
+        else:
+            self.display = choose_display(display_id, headless=headless)
+            self._viewport = {"width": self.display.width, "height": self.display.height}
         self.chrome_path, self.headless, self.transport_factory, self.server_factory, self.resolver, self.timeout_s = chrome_path, headless, transport_factory, server_factory, resolver, timeout_s
         self._transport: ChromeCdp | None = None
         self._server: _AssetServer | None = None
@@ -351,25 +503,46 @@ class LiveOutputHost:
         self._can_advance: bool | None = None
         self._can_go_to: bool | None = None
         self._canvas = {"width": 1920, "height": 1080}
-        self._viewport = {"width": self.display.width, "height": self.display.height}
         self._expected_scene_count: int | None = None
+        self._logger: _SessionLogger | None = None
+        self._log_path: Path | None = None
+        self._last_logged_observation: tuple[Any, ...] | None = None
 
     @property
     def output(self) -> dict[str, Any]:
         """Detected physical output geometry, available before browser startup."""
-        return {
-            **self.display.as_output(),
-            "viewport": dict(self._viewport),
-            "canvas": dict(self._canvas),
-            "width": self._viewport["width"],
-            "height": self._viewport["height"],
-        }
+        if self._attach_endpoint:
+            result: dict[str, Any] = {
+                "transport": "fill-key", "alpha": True, "audio": False, "bridge": "obs-cdp",
+                "viewport": dict(self._viewport), "canvas": dict(self._canvas),
+                "width": self._viewport["width"], "height": self._viewport["height"],
+            }
+        else:
+            result = {
+                **self.display.as_output(),
+                "viewport": dict(self._viewport),
+                "canvas": dict(self._canvas),
+                "width": self._viewport["width"],
+                "height": self._viewport["height"],
+            }
+        if self._log_path is not None:
+            result["logPath"] = str(self._log_path)
+        return result
 
     def start(self) -> PlayerObservation:
         if self._stopped:
             raise LiveHostError("Program player has been stopped.")
         if self._transport:
             return self.observe()
+        self._log_path = _new_log_path()
+        self._logger = _SessionLogger(self._log_path)
+        self._logger.log(
+            "start", mode="attach" if self._attach_endpoint else "hdmi",
+            exportRoot=str(self.export_root), runtimeVersion=RUNTIME_VERSION,
+            display=(self.display.display_id if self.display else None),
+            attachEndpoint=self._attach_endpoint, attachMatch=self._attach_match,
+            headless=self.headless,
+        )
         self._validate_export()
         self._expected_scene_count = self._authored_scene_count()
         player = self.resolver(self.export_root, "assets/player/main.js").read_bytes()
@@ -377,12 +550,23 @@ class LiveOutputHost:
         except LiveRuntimeUnsupported as exc: raise LiveHostError(str(exc)) from exc
         self._profile = Path(tempfile.mkdtemp(prefix="obed-live-chrome-"))
         try:
-            self._server = self.server_factory(self.export_root, patched, self.resolver)
+            self._server = self.server_factory(self.export_root, patched, self.resolver, alpha=bool(self._attach_endpoint))
             url = self._server.start()
-            self._transport = self.transport_factory(self.chrome_path, self._profile, self.display, headless=self.headless)
+            self._transport = self.transport_factory(
+                self.chrome_path, self._profile, self.display, headless=self.headless,
+                attach_endpoint=self._attach_endpoint, attach_match=self._attach_match,
+                logger=self._logger, log_path=self._log_path,
+            )
             self._transport.start()
+            try: version = self._transport.call("Browser.getVersion")
+            except Exception: version = None
+            self._logger.log("browserVersion", result=version)
             self._transport.goto(url)
-            return self._wait_settled()
+            observed = self._wait_settled()
+            try: dpr = self._transport.evaluate("window.devicePixelRatio")
+            except Exception: dpr = None
+            self._logger.log("viewport", viewport=dict(self._viewport), devicePixelRatio=dpr)
+            return observed
         except Exception:
             try: self.stop()
             except Exception: pass
@@ -471,24 +655,74 @@ class LiveOutputHost:
             and scene_count != self._expected_scene_count
         ):
             raise LiveHostError("Player fell back from the authored build renderer.")
-        return PlayerObservation(
+        visible_expr = (
+            "getComputedStyle(document.getElementById('body')).opacity!=='0'"
+            if self._attach_endpoint
+            else "document.getElementById('obed-output-black').style.display==='none'"
+        )
+        observation = PlayerObservation(
             original_slide=original,
             scene_id=str(scene) if scene is not None else None,
             build_index=value.get("buildIndex") if isinstance(value.get("buildIndex"), int) else None,
             revision=self._runtime_revision,
             busy=bool(value.get("busy", True)),
-            output_visible=bool(
-                transport.evaluate(
-                    "document.getElementById('obed-output-black').style.display==='none'"
-                )
-            ),
+            output_visible=bool(transport.evaluate(visible_expr)),
             output=self.output,
         )
+        self._log_observation_change(observation)
+        return observation
+
+    def _log_observation_change(self, observation: PlayerObservation) -> None:
+        if self._logger is None: return
+        snapshot = (observation.original_slide, observation.scene_id, observation.busy, observation.output_visible)
+        if snapshot != self._last_logged_observation:
+            self._last_logged_observation = snapshot
+            self._logger.log(
+                "observation", originalSlide=observation.original_slide, sceneId=observation.scene_id,
+                busy=observation.busy, outputVisible=observation.output_visible,
+            )
+
+    def _video_snapshot(self, transport: ChromeCdp) -> Any:
+        try:
+            return transport.evaluate(
+                "Array.from(document.querySelectorAll('video')).map(v=>{"
+                "var q=v.getVideoPlaybackQuality?v.getVideoPlaybackQuality():{};"
+                "return {src:(v.currentSrc||v.src||'').split('/').pop(),currentTime:v.currentTime,"
+                "paused:v.paused,readyState:v.readyState,videoWidth:v.videoWidth,videoHeight:v.videoHeight,"
+                "droppedFrames:q.droppedVideoFrames,totalFrames:q.totalVideoFrames};})"
+            )
+        except Exception:
+            return None
 
     def execute(self, operation: str, slide: int | None = None) -> PlayerObservation:
         transport = self._require_transport()
+        started = time.monotonic()
         before = self.observe()
-        before_revision = self._runtime_revision
+        before_revision, before_scene = self._runtime_revision, before.scene_id
+        try:
+            observed = self._execute(operation, slide, transport, before, before_revision)
+        except PlayerCommandRejected as exc:
+            self._log_execute(operation, slide, "rejected", started, before_revision, before_revision, before_scene, before_scene, str(exc), transport)
+            raise
+        except Exception as exc:
+            self._log_execute(operation, slide, "error", started, before_revision, self._runtime_revision, before_scene, before_scene, str(exc), transport)
+            raise
+        self._log_execute(operation, slide, "ok", started, before_revision, self._runtime_revision, before_scene, observed.scene_id, None, transport)
+        return observed
+
+    def _log_execute(self, operation: str, slide: int | None, outcome: str, started: float, revision_before: int | None, revision_after: int | None, scene_before: str | None, scene_after: str | None, error: str | None, transport: ChromeCdp) -> None:
+        if self._logger is None: return
+        fields: dict[str, Any] = {
+            "operation": operation, "slide": slide, "outcome": outcome,
+            "durationMs": round((time.monotonic() - started) * 1000, 1),
+            "revisionBefore": revision_before, "revisionAfter": revision_after,
+            "sceneBefore": scene_before, "sceneAfter": scene_after,
+            "videos": self._video_snapshot(transport),
+        }
+        if error is not None: fields["error"] = error
+        self._logger.log("execute", **fields)
+
+    def _execute(self, operation: str, slide: int | None, transport: ChromeCdp, before: PlayerObservation, before_revision: int | None) -> PlayerObservation:
         if operation == "advance" and before.busy:
             raise PlayerCommandRejected("Player is busy.")
         if operation == "advance" and not self._can_advance:
@@ -550,19 +784,27 @@ class LiveOutputHost:
         still held."""
         with self._stop_lock:
             self._stopped = True
-            if not self._transport and not self._server and not self._profile: return
+            if not self._transport and not self._server and not self._profile:
+                if self._logger is not None:
+                    self._logger.log("stop", released=[], errors=[])
+                    self._logger.close()
+                return
             errors: list[Exception] = []
+            released: list[str] = []
             if self._transport is not None:
                 try: self._transport.stop()
                 except Exception as exc: errors.append(exc)
-                else: self._transport = None
+                else: self._transport = None; released.append("transport")
             if self._server is not None:
                 try: self._server.stop()
                 except Exception as exc: errors.append(exc)
-                else: self._server = None
+                else: self._server = None; released.append("server")
             if self._profile is not None:
                 try: shutil.rmtree(self._profile)
                 except Exception as exc: errors.append(exc)
-                else: self._profile = None
+                else: self._profile = None; released.append("profile")
+            if self._logger is not None:
+                self._logger.log("stop", released=released, errors=[str(exc) for exc in errors])
+                self._logger.close()
             if errors:
                 raise LiveHostError("Program player did not fully stop.")

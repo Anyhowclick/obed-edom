@@ -67,6 +67,67 @@ notes are unavailable in the current HTML preparation path. Audio is disabled.
 Only the recognised Keynote player version and manual presentation mode are
 accepted. This experiment does not enable the separate DSK animation-file exporter.
 
+### DeckLink fill/key via OBS (experimental, UNQUALIFIED)
+
+Instead of driving its own Chrome window, the host can attach to a page already
+open inside OBS's Browser Source (an offscreen CEF browser) and hand it to OBS's
+DeckLink Output with an External keyer, giving real alpha over HDMI/SDI fill+key.
+
+**This path is unqualified.** OBS bundles a different Chromium build than the one
+P2 pins; nothing from P2's fixture acceptance (movie continuity, Magic Move
+timing, alpha compositing) transfers to it. HEVC sources are unlikely to decode
+in CEF. Treat any deck run this way as unverified until it has been watched
+end-to-end on the real switcher.
+
+**Launch OBS** with a remote-debugging port so the host can attach to it:
+
+```
+/Applications/OBS.app/Contents/MacOS/OBS --remote-debugging-port=9222
+```
+
+If the attach fails with a DevTools origin error, also pass
+`--remote-allow-origins=*` (Chromium 111+ rejects a DevTools socket connection
+whose Origin header does not match unless this is set; our client sends no
+Origin header, so most builds will not need it, but CEF's behaviour is
+unverified without hardware).
+
+**Browser Source settings**: 1920x1080, any URL (the host navigates it to the
+program page once attached, so a blank page is fine), enable "Use custom
+frame rate" only if you need one, "Custom CSS" left default (the host forces
+a transparent background itself), **"Shutdown source when not visible" OFF**,
+**"Refresh browser when scene becomes active" OFF** (either would drop the
+navigated page), and control audio through the deck instead of OBS ("Control
+audio via OBS" OFF — audio is disabled in this experiment regardless).
+
+**Tools → Decklink Output**: Keyer = **External**, and a BGRA/8-bit pixel
+format matching your switcher's key input.
+
+**Environment variables**, set before starting the dashboard server:
+
+- `OBED_LIVE_ATTACH` — the OBS CDP endpoint, e.g. `http://127.0.0.1:9222`.
+  When set, `POST /api/live` skips display selection entirely (no display is
+  spawned or resized) and drives the existing OBS browser-source page instead.
+- `OBED_LIVE_ATTACH_MATCH` — optional substring to disambiguate the target
+  page when OBS has more than one Browser Source open; without it, exactly
+  one open page is required.
+
+In this mode the reported output transport is `fill-key` with `alpha: true`.
+**Hide is transparent, not black**: the program page keeps its background
+transparent and hides by fading the player to zero opacity in place, so movies
+keep decoding and transitions keep running while hidden — unlike HDMI hide,
+which is an opaque black overlay because that transport has no alpha channel.
+`stop()` in this mode only releases what the host owns (it navigates the OBS
+page to `about:blank` and closes its own CDP connection); it never terminates
+OBS or the browser source itself.
+
+**Session log**: every host start writes one JSONL file to
+`<preview cache>/.html-preview/live-logs/<UTC timestamp>-<pid>.jsonl`
+(the exact path is also returned as `output.logPath`). It records the start
+configuration, browser version, measured viewport, every command with its
+outcome and timing, every observed state change, slow or timed-out CDP calls,
+page console errors/warnings, and a per-command snapshot of any `<video>`
+elements — useful for diagnosing a bad run after the fact without OBS open.
+
 ## Important checks
 
 - The first time you generate or resize a deck, macOS may ask for Accessibility access. Allow the launcher app—usually Terminal—in **System Settings → Privacy & Security → Accessibility**, then restart the dashboard.

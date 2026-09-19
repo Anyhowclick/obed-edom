@@ -13,8 +13,9 @@ from obed_edom import html_preview, live_host, live_runtime
 class FakeCdp:
     instances: list["FakeCdp"] = []
 
-    def __init__(self, chrome, profile, display, *, headless=False):
+    def __init__(self, chrome, profile, display, *, headless=False, attach_endpoint=None, attach_match=None, logger=None, log_path=None):
         self.chrome, self.profile, self.display, self.headless = chrome, profile, display, headless
+        self.attach_endpoint, self.attach_match, self.logger, self.log_path = attach_endpoint, attach_match, logger, log_path
         self.started = False
         self.stopped = False
         self.visible = False
@@ -49,7 +50,7 @@ class FakeCdp:
 
 
 class FakeServer:
-    def __init__(self, *_): self.stopped = False
+    def __init__(self, *_, alpha=False): self.stopped = False; self.alpha = alpha
     def start(self): return "http://program.test/program.html"
     def stop(self): self.stopped = True
 
@@ -487,3 +488,108 @@ def test_key_events_omit_native_key_code(tmp_path):
         assert method == "Input.dispatchKeyEvent"
         assert params["windowsVirtualKeyCode"] == 32
         assert "nativeVirtualKeyCode" not in params
+
+
+def test_attach_mode_reads_env_skips_display_choice_and_reports_fill_key_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("OBED_LIVE_ATTACH", "http://127.0.0.1:9222")
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    (tmp_path / "main.js").write_bytes(player_bytes())
+    (tmp_path / "header.json").write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
+    monkeypatch.setattr(live_runtime, "PLAYER_SHA256", hashlib.sha256(player_bytes()).hexdigest())
+    output = live_host.LiveOutputHost(tmp_path, [], transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver)
+    assert output.display is None
+    result = output.output
+    assert result["transport"] == "fill-key"
+    assert result["alpha"] is True
+    assert result["bridge"] == "obs-cdp"
+    assert "displayId" not in result and "bounds" not in result
+
+
+def test_attach_endpoint_must_be_loopback(tmp_path, monkeypatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    with pytest.raises(live_host.LiveHostError, match="loopback"):
+        live_host.LiveOutputHost(tmp_path, [], attach_endpoint="http://example.com:9222", transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver)
+
+
+def test_attach_host_navigates_and_settles_without_a_display(tmp_path, monkeypatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = host(tmp_path, monkeypatch)
+    output._attach_endpoint = "http://127.0.0.1:9222"
+    output.display = None
+    observed = output.observe()
+    assert observed.output["transport"] == "fill-key"
+    assert FakeCdp.instances[0].display is None
+
+
+def test_program_html_alpha_mode_hides_via_opacity_not_a_black_div(tmp_path):
+    (tmp_path / "index.html").write_text('<html><head></head><body><div id="body"></div></body></html>')
+    server = live_host._AssetServer(tmp_path, b"", resolver=resolver_for(tmp_path), alpha=True)
+    document = server._program_html().decode()
+    assert 'id="obed-output-black"' not in document
+    assert "background:transparent!important" in document
+    assert "#body{opacity:0}" in document
+
+
+def test_pick_target_prefers_match_then_requires_a_single_page(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222", attach_match="program")
+    pages = [{"type": "page", "url": "http://x/blank", "title": "blank", "webSocketDebuggerUrl": "ws://a"},
+             {"type": "page", "url": "http://x/program.html", "title": "program", "webSocketDebuggerUrl": "ws://b"}]
+    assert transport._pick_target(pages)["webSocketDebuggerUrl"] == "ws://b"
+    transport.attach_match = None
+    with pytest.raises(live_host.LiveHostError, match="Ambiguous"):
+        transport._pick_target(pages)
+    assert transport._pick_target(pages[:1])["webSocketDebuggerUrl"] == "ws://a"
+
+
+def test_chrome_cdp_call_does_not_require_a_process_in_attach_mode(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
+    ws = BlockingWs()
+    ws.recv = lambda timeout=None: __import__("json").dumps({"id": 1, "result": {}})
+    transport.ws = ws
+    assert transport.proc is None
+    assert transport.call("Test.method") == {}
+
+
+def test_attach_stop_navigates_about_blank_and_never_terminates_a_process(tmp_path):
+    display = live_host.OutputDisplay(1, 0, 0, 1920, 1080, True)
+    transport = live_host.ChromeCdp(Path("chrome"), tmp_path, display, attach_endpoint="http://127.0.0.1:9222")
+    calls = []
+    transport.call = lambda method, **params: calls.append((method, params)) or {}
+    ws = BlockingWs()
+    transport.ws = ws
+    transport.stop()
+    assert calls == [("Page.navigate", {"url": "about:blank"})]
+    assert ws.close_calls == 1
+    assert transport.proc is None
+
+
+def test_session_logger_writes_jsonl_and_swallows_failures(tmp_path):
+    path = tmp_path / "sub" / "log.jsonl"
+    logger = live_host._SessionLogger(path)
+    logger.log("start", mode="hdmi")
+    logger.close()
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    record = __import__("json").loads(lines[0])
+    assert record["kind"] == "start" and record["mode"] == "hdmi"
+    broken = live_host._SessionLogger(tmp_path / "nonexistent" / "dir" / "x")
+    broken._file = None
+    broken.log("start")
+    broken.close()
+
+
+def test_observe_logs_only_on_change(tmp_path, monkeypatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    logger = output._logger
+    seen = []
+    logger.log = lambda kind, **fields: seen.append((kind, fields))
+    output.observe()
+    observation_logs = [entry for entry in seen if entry[0] == "observation"]
+    assert observation_logs == []
+    output.execute("goTo", 2)
+    observation_logs = [entry for entry in seen if entry[0] == "observation"]
+    assert len(observation_logs) == 1
