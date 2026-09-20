@@ -11,7 +11,6 @@ agent runs. Roster this round: Opus plans AND implements (owner, 2026-09-19), Co
 | `main` | — | — |
 | `feat/keynote-alpha-p2-html-mm` | EVERYTHING Alpha Keynote: P2 probe, presenter, I3, I5 codec, visible-content gate, baseline (runtime v4), plans, handovers. `main` merged in 2026-09-20 (Hall of Witnesses conflict resolved, all entries kept) ⇒ **MERGEABLE / CLEAN** | **#158 (draft) → main** — owner merges |
 | `claude/dsk-generator-alignment-options-97c5aa` | unrelated DSK Generator work (another session) | #176 (draft) → main |
-| `worktree-agent-a69e…` | UNCOMMITTED P2 qualification work in worktree `agent-consolidated` — owner said hold & bundle | — |
 
 #175 is MERGED into #158 (`31b566a`); `claude/keynote-live-continuity-next` and `claude/keynote-live-baseline` are deleted
 (local + remote, fully contained). Code on #158 is byte-identical to the gated `3a17401` for `src scripts tests dashboard`
@@ -19,7 +18,7 @@ apart from what the merge of `main` brought in (live + preview suites re-run on 
 Worktrees: `friendly-sammet-32dab4` (now on the #158 branch; its ignored `output/` holds the gate evidence, a fixture copy
 and the research harness) · `gate-runner` (detached on the #158 tip; ALL browser gates run from here; own 198 MB copy of
 the git-ignored H.264 fixture bank) · `decklink-field-test-2ad808` (detached) · `pr158-handover-findings-4366b9` (DSK
-branch) · `agent-consolidated`. Do NOT delete `friendly-sammet-32dab4` or `gate-runner` — the fixture copies are not in git.
+branch). `agent-consolidated` was RETIRED 2026-09-20 (its diff was byte-identical to `c567fefd`, already on `main`). Do NOT delete `friendly-sammet-32dab4` or `gate-runner` — the fixture copies are not in git.
 Safety bundles of every deleted branch: MAIN checkout `output/branch-cleanup-2026-09-19/`.
 The main checkout is on `main` and the venv is an editable install of it ⇒ ALWAYS `PYTHONPATH=<worktree>/src`.
 Gate runner: `run_gates.sh <gate-worktree> <outdir>` (copy in `output/live-continuity-i3/`); one full round ≈ 13 min;
