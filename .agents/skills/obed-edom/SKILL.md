@@ -40,8 +40,11 @@ Then restart `python -m obed_edom dashboard`. `npm run dev` is only for hot
 reload; the Python dashboard serves `dashboard/dist`.
 
 Dashboard tests (from `dashboard/`, with the bundled Node on `PATH`):
-`npm run test:maps` (pure-module `tests/*.test.cjs`) and `npm run test:ui`
-(Vitest/jsdom React tests in `tests-ui/`).
+`npm run test:maps` (pure-module `tests/*.test.cjs`; it skips the two wall-clock
+"near-linear" tests in the parallel run and runs them alone afterwards via
+`npm run test:perf`, since their budgets only hold on an uncontended CPU) and
+`npm run test:ui` (Vitest/jsdom React tests in `tests-ui/`). There is no CI: run
+these and the full `pytest tests/` locally for every PR that changes code.
 
 Staff-only parse:
 

@@ -568,6 +568,14 @@ def test_nul_byte_in_field_is_stripped():
     assert places[0].name == "Paris"
 
 
+def test_nul_byte_is_stripped_in_header_form_too():
+    text = "name,lat,lon\nPar\x00is,1,2\nRome,3,4"
+    places, errors = parse_places(text)
+    assert errors == []
+    assert [p.name for p in places] == ["Paris", "Rome"]
+    assert [p.line for p in places] == [2, 3]
+
+
 def test_headerless_stray_quote_mid_name_is_literal():
     text = 'Paris,1,2\nO"Brien,1,2'
     places, errors = parse_places(text)
