@@ -85,3 +85,27 @@ OBS authorisation was for that session only; the page was returned to `about:bla
 - DeckLink venue test 2026-10-10 (`decklink-field-test-runbook.md`).
 
 ## Close-out (filled at stop time)
+Stopped 2026-09-20 22:45 on the owner's instruction. **Freeze control is NOT green.**
+- Branch `feat/p2-freeze-control-3to4` tip **`32d866e1` = WIP, pushed, NOT reviewed (Codex r3 pending), NOT gated.** The
+  coordinator only quick-checked it: two files touched, `py_compile` OK, 263 unit tests pass. Review it properly first.
+- Round 3 (Opus, developed against live headless runs; evidence git-ignored in worktree `freeze-3to4`:
+  `output/scratch-freeze/*/snapshot.json`, `output/e2e-fast.log`, `output/e2e-bridgeoff.log`, scratch drivers
+  `output/scratch_*.py`). Fixer's reported live numbers (NOT independently verified): arm ok at `#7` in every run; trigger
+  1 rAF / 57–60 ms after the advance; cover residual 0.000 px after an rAF hand-off (so `COVER_TRACK_TOL_PX` 2.0 → 0.5);
+  **the counter DOES decode mid-move** (positive arm 51,54,56,|58|,61,63,65,70,72,74 ⇒ ok; frozen arm constant stale index,
+  `freezeRunAtCut` 10–11). End-to-end fast 13/14 (`continueThroughMovingMagicMove3to4` True, freeze inconclusive, `success`
+  False); bridge-off: only that finding red, freeze `skipped`.
+- **Honest INCONCLUSIVE 5/5 on `noPreAdvanceDeparture` — a PLAN PREMISE ERROR, owner design decision needed:**
+  `keepThroughBridge` creates its motion marker and starts the 1.5 s interpolation on ARRIVAL at `#7`, not on the `#7→#8`
+  advance; headless produces no frames at rest, so the motion only materialises on the next frame (≈100 ms before the
+  advance keydown). Options: re-bracket the hold on the advance INTO `#7`, or gate on the marker's own start. **CHECK
+  FIRST, unverified and possibly an on-air defect:** does the carried movie visibly start translating while the deck is
+  still settled on slide 3, before the operator advances? If yes that is a runtime bug, not an instrument problem.
+- Also unsatisfiable as written: `allInHoldMeasured` / `everyInHoldStale` during the fast part of the move (rect moves
+  ≈28 px per 50 ms sample, before/after reads cannot agree within `FOOTPRINT_COUPLE_TOL_PX`); the flip ± 6 window is measured.
+- New paid-for facts: the player ignores keys unless `document.hasFocus()` — headless only a `Page.captureScreenshot`
+  grants it; the player QUEUES presses it cannot honour and replays them later. Drain is now screenshot-then-one-press,
+  deadline 8 s → 20 s (an existing wait value changed — have Codex r3 confirm it is not a gate threshold).
+- At 22:41 no headless Chrome with a profile dir was running; nothing was killed by the coordinator. OBS was left running
+  by the owner's session; its page is back at `about:blank#program`.
+- Open PRs from this session: #182 (docs, owner merges). No integration PR for the freeze control yet.
