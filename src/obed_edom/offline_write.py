@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -920,6 +921,102 @@ def _say_verify_report(
     if say:
         say(f"{title}: overall {'PASS' if overall else 'FAIL'}.")
     return overall
+
+
+@dataclass
+class LiveVerifyReport:
+    """One `live_verify` call's result: the two live-verify bars plus coverage
+    accounting. `positional`/`multiset` are the raw `{kind: (max_delta, n, worst5)}`
+    reports (see `verify_live_frames`); `positional_pass`/`set_pass` are the
+    already-printed `_say_verify_report` verdicts for each."""
+
+    positional_pass: bool
+    set_pass: bool
+    coverage: dict[str, Any]
+    positional: dict[str, tuple[float, int, list[dict[str, Any]]]]
+    multiset: dict[str, tuple[float, int, list[dict[str, Any]]]]
+
+    def ow_updates(self) -> dict[str, Any]:
+        """The exact `ow` keys production writes: `liveVerifyPass`, `liveVerifySetPass`,
+        `liveVerifyCoverage` (JSON-safe -- `uncovered` as a list of lists)."""
+        return {
+            "liveVerifyPass": self.positional_pass and not self.coverage["uncovered"],
+            "liveVerifySetPass": self.set_pass,
+            "liveVerifyCoverage": {
+                **self.coverage, "uncovered": [list(u) for u in self.coverage["uncovered"]]
+            },
+        }
+
+
+def live_verify(
+    offline_write_info: dict[str, Any],
+    zorder_write_info: dict[str, Any] | None,
+    payload: dict[str, Any],
+    *,
+    planned: dict[int, list[dict[str, Any]]] | None = None,
+    log: Callable[[str], None] | None = None,
+    title: str = "offline-write live verify",
+) -> LiveVerifyReport:
+    """The one call path for the live-verify-zorder-bridge routing: derives the
+    positional/multiset/not-gated `(slide, kind)` split from `offline_write_info`
+    (the `ow` dict) and `zorder_write_info` (`info.get("zorderWrite")` or `None`)
+    exactly as `remap_and_inspect` did inline, runs both bars plus
+    `live_verify_coverage`, and -- when `log` is given -- prints everything it used to
+    print by hand. `planned` defaults to `offline_write_info["specs"]`; pass it
+    explicitly when the caller has no `specs` to read from (e.g. a banked run record,
+    which pops `specs` before persisting)."""
+    ow = offline_write_info
+    if planned is None:
+        planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
+    stat_slides = frozenset(ow.get("statSlides") or [])
+    kind_index_map_raw = (zorder_write_info or {}).get("kindIndexMap") or {}
+    kindindex_remap = coerce_kind_index_map(kind_index_map_raw)
+    multiset_kinds_by_slide = {n: {"group"} for n in stat_slides}
+    fallback_kinds_raw = ow.get("fallbackKinds") or {}
+    not_gated_kinds_by_slide = {
+        n: kinds & set(fallback_kinds_raw.get(str(n), ()))
+        for n, kinds in multiset_kinds_by_slide.items()
+    }
+    not_gated_kinds_by_slide = {n: ks for n, ks in not_gated_kinds_by_slide.items() if ks}
+    gated_kinds_by_slide = {
+        n: kinds - not_gated_kinds_by_slide.get(n, set())
+        for n, kinds in multiset_kinds_by_slide.items()
+    }
+    gated_kinds_by_slide = {n: ks for n, ks in gated_kinds_by_slide.items() if ks}
+
+    positional = verify_live_frames(
+        planned, payload,
+        kindindex_remap=kindindex_remap,
+        multiset_kinds_by_slide=multiset_kinds_by_slide,
+    )
+    multiset = verify_live_frames_multiset(planned, payload, gated_kinds_by_slide)
+    coverage = live_verify_coverage(
+        planned, kindindex_remap, multiset_kinds_by_slide,
+        not_gated_kinds_by_slide=not_gated_kinds_by_slide,
+    )
+    if log:
+        log(format_live_verify_coverage(coverage))
+        if not_gated_kinds_by_slide:
+            n_buckets = sum(len(ks) for ks in not_gated_kinds_by_slide.values())
+            log(
+                f"live verify (set): {n_buckets} group bucket(s) on "
+                f"{len(not_gated_kinds_by_slide)} slide(s) NOT GATED (AppleScript "
+                "fallback)."
+            )
+        if coverage["uncovered"]:
+            log(
+                f"offline-write live verify: UNCOVERED {coverage['uncovered']} -- "
+                "neither bar checked these (slide, kind) pairs; gate RED."
+            )
+    positional_pass = _say_verify_report(title, positional, LIVE_VERIFY_TOL, log)
+    set_pass = _say_verify_report(f"{title} (set)", multiset, LIVE_VERIFY_TOL, log)
+    return LiveVerifyReport(
+        positional_pass=positional_pass,
+        set_pass=set_pass,
+        coverage=coverage,
+        positional=positional,
+        multiset=multiset,
+    )
 
 
 def run_offline_write(

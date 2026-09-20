@@ -133,6 +133,19 @@ def replay_round(name: str, bank_dir: Path) -> None:
     kind_index_map_raw = zorder_write.get("kindIndexMap")
     stat_slides = frozenset(int(n) for n in (ow.get("statSlides") or []))
     multiset_kinds_by_slide = {n: {"group"} for n in stat_slides}
+    # W2 zorder-bridge Piece 2 not-gated split (`offline_write.live_verify`): a banked
+    # record without 'fallbackKinds' predates that field, so the split is a no-op for it
+    # -- every routed bucket stays gated, same numbers as before this routing moved
+    # behind `live_verify`. Stated below so an old transcript and a new one aren't
+    # confused about WHY the numbers did or didn't move.
+    fallback_kinds_raw = ow.get("fallbackKinds") or {}
+    routing_note = (
+        "banked record carries 'fallbackKinds' -- not-gated AppleScript-fallback split "
+        "applied, same as production"
+        if fallback_kinds_raw else
+        "banked record has no 'fallbackKinds' (predates it) -- not-gated split is a "
+        "no-op here, every routed bucket stays gated"
+    )
     missing_kind_index_map = bool(zorder_patched_slides) and not kind_index_map_raw
     if missing_kind_index_map:
         print(f"WARN {name}: banked zorderWrite has {len(zorder_patched_slides)} patched "
@@ -144,6 +157,8 @@ def replay_round(name: str, bank_dir: Path) -> None:
               "here. The multiset bar below needs no kindIndex, so it still replays for "
               "real; a fresh gate run banked AFTER Piece 1 is required for the positional "
               "and coverage numbers the plan documents.")
+        print(f"{name}: live-verify routing: PARTIAL path (hand-rolled here, NOT routed "
+              f"through offline_write.live_verify -- see the WARN above); {routing_note}.")
         print(f"{name}: Reading back {b_deck.name} via derive_deck_kind_index (Keynote-free)…")
         payload = _payload_from_deck(b_deck)
         planned = {
@@ -155,27 +170,19 @@ def replay_round(name: str, bank_dir: Path) -> None:
             offline_write.LIVE_VERIFY_TOL, print,
         )
         return
-    kindindex_remap = offline_write.coerce_kind_index_map(kind_index_map_raw or {})
 
     print(f"Reading back {b_deck.name} via derive_deck_kind_index (Keynote-free)…")
     payload = _payload_from_deck(b_deck)
 
-    live_report = offline_write.verify_live_frames(
-        planned, payload, kindindex_remap=kindindex_remap,
-        multiset_kinds_by_slide=multiset_kinds_by_slide,
+    print(f"{name}: live-verify routing: via offline_write.live_verify() -- the same call "
+          f"path production uses; {routing_note}.")
+    ow_like = {"statSlides": sorted(stat_slides), "fallbackKinds": fallback_kinds_raw}
+    zorder_like = {"kindIndexMap": kind_index_map_raw}
+    offline_write.live_verify(
+        ow_like, zorder_like, payload, planned=planned,
+        log=lambda msg: print(f"{name}: {msg}"),
+        title="offline-write live verify (REPLAY)",
     )
-    set_report = offline_write.verify_live_frames_multiset(planned, payload, multiset_kinds_by_slide)
-    coverage = offline_write.live_verify_coverage(planned, kindindex_remap, multiset_kinds_by_slide)
-
-    offline_write._say_verify_report(
-        f"{name}: offline-write live verify (REPLAY)", live_report, offline_write.LIVE_VERIFY_TOL,
-        print,
-    )
-    offline_write._say_verify_report(
-        f"{name}: offline-write live verify (set) (REPLAY)", set_report, offline_write.LIVE_VERIFY_TOL,
-        print,
-    )
-    print(f"{name}: {offline_write.format_live_verify_coverage(coverage)}")
 
 
 def main(argv: list[str] | None = None) -> int:
