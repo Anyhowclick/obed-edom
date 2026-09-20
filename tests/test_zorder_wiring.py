@@ -725,3 +725,50 @@ def test_orchestration_emits_single_merged_stat_zorder_detail_line(monkeypatch, 
     detail_lines = [s for s in said if s.startswith("Stat zorder detail:")]
     assert len(detail_lines) == 1
     assert "zorderRefused=1" in detail_lines[0]
+
+
+def test_skipped_slide_report_is_not_overwritten_by_framing_coverage_rows(monkeypatch, tmp_path):
+    """Regression: the driver keeps two unrelated reports -- the slide NUMBERS the planner
+    left alone (`skipped_slides`), and the framing ROWS whose overlays fell off-frame.
+
+    A shadowed local once rebound the first name to the second partway through
+    `remap_keynote`, with two consequences that both shipped: the operator line
+    "Left N skipped slide(s) alone: ..." stringified framing-row dicts (and never fired at
+    all unless some slide had off-canvas overlays), and `skippedSlidesLeftAlone` carried
+    those dicts out through the dashboard API instead of slide numbers.
+
+    Reuses the Keynote-free orchestration harness above; this is about the driver's report
+    assembly rather than zorder.
+    """
+    import obed_edom.remap_keynote as rk
+
+    monkeypatch.setenv("OBED_ZORDER_WRITE", "off")
+    _wire_zorder_remap(monkeypatch, rk, child_resize=[], badge_raises=[])
+
+    def fake_plan(*a, **k):
+        skipped = k.get("skipped_slides")
+        if skipped is not None:
+            skipped.extend([3, 7])
+        framing = k.get("framing_report")
+        if framing is not None:
+            framing.append({"slide": 2, "excludedOffCanvas": 1, "excluded": 4})
+        return []
+
+    monkeypatch.setattr(rk, "plan_payload_transforms", fake_plan)
+
+    said: list[str] = []
+    source, template, dest = _touch_paths(tmp_path)
+    wall_payload, template_payload = _payloads()
+
+    info = rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload, log=said.append,
+    )
+
+    # The API field carries slide numbers, not framing rows.
+    assert info["skippedSlidesLeftAlone"] == [3, 7]
+    assert info["framingReport"] == [{"slide": 2, "excludedOffCanvas": 1, "excluded": 4}]
+
+    # Both reports reach the operator, each in its own words.
+    assert any("Left 2 skipped slide(s) alone: 3, 7" in s for s in said)
+    assert any("Framing coverage on slide 2" in s for s in said)

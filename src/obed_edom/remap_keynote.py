@@ -1279,11 +1279,11 @@ def remap_keynote(
             + " — it would have shrunk them to a sliver, so their own best framing "
             "was used instead."
         )
-    hidden = [r for r in framing_rows if r.get("excludedOffCanvas")]
-    if hidden:
+    coverage_rows = [r for r in framing_rows if r.get("excludedOffCanvas")]
+    if coverage_rows:
         say("Framing coverage on " + ", ".join(
             f"slide {r['slide']} ({r['excludedOffCanvas']} of {r['excluded']} overlay object(s) off-frame)"
-            for r in hidden[:8]) + ("…" if len(hidden) > 8 else "")
+            for r in coverage_rows[:8]) + ("…" if len(coverage_rows) > 8 else "")
             + " is scored on the framed artwork only; those overlays are placed, not dropped.")
     if fitted:
         say(
