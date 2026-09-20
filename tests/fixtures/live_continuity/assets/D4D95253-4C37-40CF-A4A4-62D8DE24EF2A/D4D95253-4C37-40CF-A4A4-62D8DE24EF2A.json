@@ -1,0 +1,559 @@
+{
+ "assets": {
+  "Untitled.mov-0.0000-46.0333": {
+   "type": "video",
+   "index": 0,
+   "url": {
+    "web": "assets/Untitled.mov-0.0000-46.0333.mov",
+    "native": "assets/Untitled.mov-0.0000-46.0333.mov"
+   },
+   "width": 1920,
+   "height": 540
+  },
+  "VID-20250608-WA0125.mp4-0.0000-45.1381": {
+   "type": "video",
+   "index": 0,
+   "url": {
+    "web": "assets/VID-20250608-WA0125.mp4-0.0000-45.1381.mp4",
+    "native": "assets/VID-20250608-WA0125.mp4-0.0000-45.1381.mp4"
+   },
+   "width": 1280,
+   "height": 720
+  }
+ },
+ "events": [
+  {
+   "effects": [
+    {
+     "name": "apple:movie-start",
+     "type": "buildIn",
+     "beginTime": 0,
+     "baseLayer": {
+      "initialState": {
+       "affineTransform": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+       ],
+       "masksToBounds": false,
+       "rotation": 0,
+       "scale": 1,
+       "position": {
+        "pointX": 675.4776611328125,
+        "pointY": 932.5972900390625
+       },
+       "width": 960,
+       "sublayerTransform": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+       ],
+       "contentsRect": {
+        "y": 0,
+        "x": 0,
+        "width": 1,
+        "height": 1
+       },
+       "opacity": 1,
+       "edgeAntialiasingMask": 251658240,
+       "height": 276,
+       "hidden": false,
+       "anchorPoint": {
+        "pointX": 0.5,
+        "pointY": 0.5
+       }
+      },
+      "animations": [],
+      "layers": []
+     },
+     "effects": [
+      {
+       "name": "renderMovie",
+       "type": "buildIn",
+       "beginTime": 0,
+       "movie": {
+        "startTime": 0,
+        "volume": 1,
+        "endTime": 46.03333282470703,
+        "isStreaming": false,
+        "isAudioOnly": false,
+        "asset": "Untitled.mov-0.0000-46.0333"
+       },
+       "baseLayer": {
+        "initialState": {
+         "affineTransform": [
+          1,
+          0,
+          0,
+          1,
+          0,
+          0
+         ],
+         "masksToBounds": false,
+         "rotation": 0,
+         "scale": 1,
+         "position": {
+          "pointX": 673.7491455078125,
+          "pointY": 930.9080200195312
+         },
+         "width": 956.54296875,
+         "sublayerTransform": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1
+         ],
+         "contentsRect": {
+          "y": 0,
+          "x": 0,
+          "width": 1,
+          "height": 1
+         },
+         "opacity": 1,
+         "edgeAntialiasingMask": 251658240,
+         "height": 272.6214599609375,
+         "hidden": false,
+         "anchorPoint": {
+          "pointX": 0.5,
+          "pointY": 0.5
+         }
+        },
+        "animations": [],
+        "layers": [
+         {
+          "initialState": {
+           "affineTransform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+           ],
+           "masksToBounds": false,
+           "rotation": 0,
+           "scale": 1,
+           "position": {
+            "pointX": 478.271484375,
+            "pointY": 136.31072998046875
+           },
+           "width": 951.54296875,
+           "sublayerTransform": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1
+           ],
+           "contentsRect": {
+            "y": 0,
+            "x": 0,
+            "width": 1,
+            "height": 1
+           },
+           "opacity": 1,
+           "edgeAntialiasingMask": 251658240,
+           "height": 267.6214599609375,
+           "hidden": false,
+           "anchorPoint": {
+            "pointX": 0.5,
+            "pointY": 0.5
+           }
+          },
+          "isVideoLayer": true,
+          "animations": []
+         }
+        ]
+       },
+       "effects": [],
+       "objectID": "98D59E27-7807-477D-BEFB-27EB1CF1D185"
+      }
+     ]
+    },
+    {
+     "name": "apple:movie-start",
+     "type": "buildIn",
+     "beginTime": 0,
+     "baseLayer": {
+      "initialState": {
+       "affineTransform": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+       ],
+       "masksToBounds": false,
+       "rotation": 0,
+       "scale": 1,
+       "position": {
+        "pointX": 1394.71875,
+        "pointY": 930.5972900390625
+       },
+       "width": 484,
+       "sublayerTransform": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+       ],
+       "contentsRect": {
+        "y": 0,
+        "x": 0,
+        "width": 1,
+        "height": 1
+       },
+       "opacity": 1,
+       "edgeAntialiasingMask": 251658240,
+       "height": 272,
+       "hidden": false,
+       "anchorPoint": {
+        "pointX": 0.5,
+        "pointY": 0.5
+       }
+      },
+      "animations": [],
+      "layers": []
+     },
+     "effects": [
+      {
+       "name": "renderMovie",
+       "type": "buildIn",
+       "beginTime": 0,
+       "movie": {
+        "startTime": 0,
+        "volume": 0,
+        "endTime": 45.13814163208008,
+        "isStreaming": false,
+        "isAudioOnly": false,
+        "asset": "VID-20250608-WA0125.mp4-0.0000-45.1381"
+       },
+       "baseLayer": {
+        "initialState": {
+         "affineTransform": [
+          1,
+          0,
+          0,
+          1,
+          0,
+          0
+         ],
+         "masksToBounds": false,
+         "rotation": 0,
+         "scale": 1,
+         "position": {
+          "pointX": 1395.0489349365234,
+          "pointY": 930.9080200195312
+         },
+         "width": 484.6603698730469,
+         "sublayerTransform": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1
+         ],
+         "contentsRect": {
+          "y": 0,
+          "x": 0,
+          "width": 1,
+          "height": 1
+         },
+         "opacity": 1,
+         "edgeAntialiasingMask": 251658240,
+         "height": 272.6214599609375,
+         "hidden": false,
+         "anchorPoint": {
+          "pointX": 0.5,
+          "pointY": 0.5
+         }
+        },
+        "animations": [],
+        "layers": [
+         {
+          "initialState": {
+           "affineTransform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+           ],
+           "masksToBounds": false,
+           "rotation": 0,
+           "scale": 1,
+           "position": {
+            "pointX": 242.33018493652344,
+            "pointY": 136.31072998046875
+           },
+           "width": 484.6603698730469,
+           "sublayerTransform": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1
+           ],
+           "contentsRect": {
+            "y": 0,
+            "x": 0,
+            "width": 1,
+            "height": 1
+           },
+           "opacity": 1,
+           "edgeAntialiasingMask": 251658240,
+           "height": 272.6214599609375,
+           "hidden": false,
+           "anchorPoint": {
+            "pointX": 0.5,
+            "pointY": 0.5
+           }
+          },
+          "isVideoLayer": true,
+          "animations": []
+         }
+        ]
+       },
+       "effects": [],
+       "objectID": "2FE5195A-F8CF-459A-8E20-B6DF91C0047A"
+      }
+     ]
+    }
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "98D59E27-7807-477D-BEFB-27EB1CF1D185",
+        "initialState": {
+         "position": {
+          "pointX": 675.4776611328125,
+          "pointY": 932.5972900390625
+         },
+         "width": 960,
+         "height": 276
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "objectID": "2FE5195A-F8CF-459A-8E20-B6DF91C0047A",
+        "initialState": {
+         "position": {
+          "pointX": 1394.71875,
+          "pointY": 930.5972900390625
+         },
+         "width": 484,
+         "height": 272
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "effects": [
+    {
+     "name": "apple:magic-move-implied-motion-path",
+     "type": "transition",
+     "beginTime": 0,
+     "baseLayer": {
+      "initialState": {
+       "affineTransform": [
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+       ],
+       "masksToBounds": false,
+       "rotation": 0,
+       "scale": 1,
+       "position": {
+        "pointX": 960,
+        "pointY": 540
+       },
+       "width": 1920,
+       "sublayerTransform": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+       ],
+       "contentsRect": {
+        "y": 0,
+        "x": 0,
+        "width": 1,
+        "height": 1
+       },
+       "opacity": 1,
+       "edgeAntialiasingMask": 251658240,
+       "height": 1080,
+       "hidden": false,
+       "anchorPoint": {
+        "pointX": 0.5,
+        "pointY": 0.5
+       }
+      },
+      "animations": [],
+      "layers": []
+     },
+     "effects": [],
+     "duration": 1.5
+    }
+   ],
+   "baseLayer": {
+    "layers": [
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 960,
+          "pointY": 540
+         },
+         "width": 1920,
+         "height": 1080
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 478.271484375,
+          "pointY": 136.31072998046875
+         },
+         "width": 960,
+         "height": 276
+        }
+       }
+      ]
+     },
+     {
+      "layers": [
+       {
+        "initialState": {
+         "position": {
+          "pointX": 242.33018493652344,
+          "pointY": 136.31072998046875
+         },
+         "width": 484,
+         "height": 272
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

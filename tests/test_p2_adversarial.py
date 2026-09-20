@@ -1061,3 +1061,613 @@ def test_freeze_control_fails_when_positive_bracket_not_green():
     verdict = p2._score_freeze_control(a_bad, _freeze_b_snap(), _positive_snap())
     assert verdict["ok"] is False
     assert "positivesGreen" in verdict["failed"]
+
+
+# --------------------------------------------------------------------------- #
+# I4 — the 1->2 carry is REFUSED: gates under the baseline plan.
+# --------------------------------------------------------------------------- #
+def _refusal_events() -> list[dict]:
+    """The two positive notes the retire zone may emit for movie1.
+
+    The player holds `#1` for the WHOLE 1->2 Magic Move, so the declining hooks
+    fire at scene 1; the swept `retire-boundary` still names `atScene` 2.
+    """
+    return [
+        {
+            "kind": "retire-boundary",
+            "detail": {"key": "movie1", "elIds": [1], "atScene": 2, "sceneHash": "#1"},
+        },
+        {
+            "kind": "preserve-refused",
+            "detail": {"key": "movie1", "scene": 1, "via": "stash", "sceneHash": "#1"},
+        },
+    ]
+
+
+def _clean_lingering() -> dict:
+    return {"count": 0, "elIds": [], "preservedCount": 0, "paintingCount": 0, "paintingElIds": []}
+
+
+def _frozen_index_samples(index: int = 41, n: int = 8) -> list[dict]:
+    """A flip at sample 1, then a counter that never advances (raw-export slide 2)."""
+    return [{"index": index - 1, "sceneHash": "#1"}] + [
+        {"index": index, "sceneHash": "#2"} for _ in range(n)
+    ]
+
+
+def _carry_census(total: int = 0, sample=None) -> dict:
+    """The in-page carry census: `total` is counted over the FULL event log,
+    filtered to movie1, before the sample is sliced."""
+    return {
+        "key": "movie1",
+        "total": total,
+        "sample": sample if sample is not None else [],
+        "loScene": 1,
+        "hiScene": 6,
+        "eventsSeen": 400,
+    }
+
+
+def _pool_census(entries=None, scene_hash: str = "#2") -> dict:
+    return {"entries": entries if entries is not None else [], "sceneHash": scene_hash}
+
+
+def _motion_across_flip(after=(0.0, 0.0, 0.0, 0.0), before=(218.0, 0.85, 110.0), eps=2.0):
+    """`score_motion_across_flip`'s window as the live run reports it on the
+    REFUSED slide: live before the cut, pixel-frozen after it."""
+    return {
+        "ok": False,
+        "reason": "no motion after flip",
+        "flipIndex": 4,
+        "beforeOk": any(m >= eps for m in before),
+        "pairEps": eps,
+        "beforePairMae": list(before),
+        "afterPairMae": list(after),
+    }
+
+
+def _poster_roi(level: int = 120):
+    """A settled slide-2 composite: the export's poster, well above the script's
+    opaque-black level."""
+    import numpy as np
+
+    roi = np.full((20, 40, 4), 255, dtype=np.uint8)
+    roi[:, :, :3] = level
+    return roi
+
+
+def _flip_rois(after=None, *, flip_index: int = 4, n: int = 9):
+    """ROI crops in capture order: moving before the flip, then the still
+    post-flip window (the settled poster unless `after` overrides it)."""
+    import numpy as np
+
+    before = [_poster_roi(30 + 40 * (i % 2)) for i in range(flip_index)]
+    tail = after if after is not None else _poster_roi()
+    return before + [np.array(tail, copy=True) for _ in range(n - flip_index)]
+
+
+def _refused_args(**overrides):
+    args = {
+        "injected_plan": p2.build_continuity_plan(True),
+        "preserve_events": _refusal_events(),
+        "lingering": _clean_lingering(),
+        "motion_across_flip": _motion_across_flip(),
+        "flip_rois": _flip_rois(),
+        "settled_slide2_roi": _poster_roi(),
+        "index_samples": _frozen_index_samples(),
+        "flip_index": 1,
+        "hash1": "#1",
+        "hash2": "#2",
+        "player_build_errors": [],
+        "carry_census": _carry_census(),
+    }
+    args.update(overrides)
+    return args
+
+
+def _refused(**overrides) -> dict:
+    return p2.refusedCarry1to2(**_refused_args(**overrides))
+
+
+def test_refused_carry_passes_when_every_clause_holds():
+    verdict = _refused()
+    assert verdict["ok"] is True
+    assert verdict["reasons"] == []
+    assert verdict["planRetire"]["atScene"] == p2.SLIDE2_MIN_HASH
+    assert verdict["frozenComposite"]["frozen"] is True
+
+
+def test_refused_carry_fails_without_plan_retire_boundary():
+    """(a) The plan must actually retire the key — an un-retired plan cannot be
+    'honoured' by silence."""
+    plan = p2.build_continuity_plan(True)
+    plan["boundaries"] = [b for b in plan["boundaries"] if b.get("action") != "retire"]
+    verdict = _refused(injected_plan=plan)
+    assert verdict["ok"] is False
+    assert "injected plan has no retire boundary for the target key" in verdict["reasons"]
+
+
+def test_refused_carry_fails_without_a_positive_refusal_event():
+    """(b) Refusal is asserted by an event, never by silence."""
+    verdict = _refused(preserve_events=[])
+    assert verdict["ok"] is False
+    assert "no preserve-refused/retire-boundary event in the retire zone" in verdict["reasons"]
+
+
+def test_refused_carry_accepts_a_refusal_on_the_transition_scene_alone():
+    """The transition scene (RETIRE_ZONE_MIN_HASH) is inside the zone: a
+    `preserve-refused` there satisfies (b) with no `retire-boundary` at all."""
+    only_transition = [
+        {"kind": "preserve-refused",
+         "detail": {"key": "movie1", "scene": 1, "via": "src-clear", "sceneHash": "#1"}},
+    ]
+    verdict = _refused(preserve_events=only_transition)
+    assert verdict["ok"] is True
+    assert verdict["refusalEventsN"] == 1
+
+
+def test_refused_carry_ignores_a_refusal_event_before_the_retire_zone():
+    early = [
+        {"kind": "preserve-refused", "detail": {"key": "movie1", "scene": 0, "via": "stash"}},
+    ]
+    verdict = _refused(preserve_events=early)
+    assert verdict["ok"] is False
+    assert verdict["refusalEventsN"] == 0
+
+
+def test_refused_carry_fails_on_a_remount_during_the_transition_scene():
+    """(c) The zone INCLUDES the transition scene the player still hashes as `#1`:
+    the first live run remounted there and left decoders painting on slide 2."""
+    events = _refusal_events() + [
+        {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#1"}},
+    ]
+    verdict = _refused(preserve_events=events, carry_census=_carry_census(1, events[-1:]))
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 1
+    assert "carry notes inside the retire zone" in verdict["reasons"]
+
+
+def test_refused_carry_fails_on_a_remount_inside_the_retire_zone():
+    """(c) Any carry note for movie1 in [RETIRE_ZONE_MIN_HASH, 6) means it happened."""
+    events = _refusal_events() + [
+        {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#3"}},
+    ]
+    verdict = _refused(preserve_events=events, carry_census=_carry_census(1, events[-1:]))
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 1
+    assert "carry notes inside the retire zone" in verdict["reasons"]
+
+
+def test_refused_carry_fails_on_a_keyless_dom_swap_of_a_known_movie1_element():
+    """dom-swap carries no key — it is matched by the element id the retire
+    boundary already attributed to movie1."""
+    events = _refusal_events() + [
+        {"kind": "dom-swap", "detail": {"elId": 1, "t": 4.0, "sceneHash": "#4"}},
+    ]
+    verdict = _refused(preserve_events=events, carry_census=_carry_census(1, events[-1:]))
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 1
+
+
+def test_refused_carry_allows_carry_events_outside_the_retire_zone():
+    """The 3->4 bridge remounts at scene 8 — outside [2, 6) and not this gate's business."""
+    events = _refusal_events() + [
+        {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#8"}},
+        {"kind": "remount-done", "detail": {"elId": 9, "key": "movie2", "sceneHash": "#3"}},
+    ]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is True
+    assert verdict["carryEventsInRetireZoneN"] == 0
+
+
+def test_refused_carry_fails_on_a_lingering_overlay_on_slide2():
+    """(d) A remounted leftover over the slide-1/2 footprints."""
+    verdict = _refused(lingering={**_clean_lingering(), "count": 1, "elIds": [1]})
+    assert verdict["ok"] is False
+    assert "a preserved/remounted/painting <video> lingers on slide 2" in verdict["reasons"]
+
+
+def test_refused_carry_fails_on_a_painting_video_over_the_footprint():
+    """(d) A <video> that actually paints there — the player composites slide 2
+    in WebGL, so anything painting is ours."""
+    verdict = _refused(lingering={**_clean_lingering(), "paintingCount": 1})
+    assert verdict["ok"] is False
+    assert "a preserved/remounted/painting <video> lingers on slide 2" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_when_the_slide2_query_did_not_run():
+    verdict = _refused(lingering={"error": "evaluate returned nothing"})
+    assert verdict["ok"] is False
+
+
+def test_refused_carry_fails_when_the_composite_keeps_moving_after_the_flip():
+    """(e) A moving ROI on slide 2 means the movie was carried after all."""
+    verdict = _refused(motion_across_flip=_motion_across_flip(after=(0.0, 31.0, 28.0, 25.0)))
+    assert verdict["ok"] is False
+    assert "composite kept moving on the refused slide" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_when_nothing_moved_before_the_flip():
+    """A dead instrument reads 'frozen' everywhere — that is not evidence."""
+    verdict = _refused(motion_across_flip=_motion_across_flip(before=(0.0, 0.1, 0.0)))
+    assert verdict["ok"] is False
+    assert "no motion before the flip — the instrument is blind" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_on_too_few_after_pairs():
+    verdict = _refused(motion_across_flip=_motion_across_flip(after=(0.0, 0.0)))
+    assert verdict["ok"] is False
+    assert "insufficient after-pairs to judge a freeze" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_a_scored_flip_window():
+    for bad in (None, {}, {"reason": "no flip observed", "n": 3}):
+        verdict = _refused(motion_across_flip=bad)
+        assert verdict["ok"] is False
+        assert "no scored flip window" in verdict["reasons"]
+
+
+def test_refused_carry_does_not_gate_on_the_undecodable_counter():
+    """On the refused slide the patch ROI shows the export's POSTER, so the
+    burnt-in counter never decodes — it stays a labelled diagnostic."""
+    samples = [{"index": None, "sceneHash": "#1"}] + [
+        {"index": None, "sceneHash": "#2"} for _ in range(4)
+    ]
+    verdict = _refused(index_samples=samples, flip_index=1)
+    assert verdict["ok"] is True
+    assert verdict["frozenIndexNonGating"]["frozen"] is False
+    assert verdict["frozenComposite"]["frozen"] is True
+
+
+def test_refused_carry_fails_when_the_scene_hash_did_not_change():
+    verdict = _refused(hash2="#1")
+    assert verdict["ok"] is False
+    assert "no valid forward 1->2 boundary" in verdict["reasons"]
+
+
+def test_refused_carry_fails_on_a_player_build_error():
+    """(f) An uncaught player exception fails the finding outright."""
+    verdict = _refused(player_build_errors=[{"kind": "player-build-error"}])
+    assert verdict["ok"] is False
+    assert "player build error" in verdict["reasons"]
+
+
+# --------------------------------------------------------------------------- #
+# preserveDidNotBlockRestart — the two positive-evidence routes.
+# --------------------------------------------------------------------------- #
+def test_never_pooled_evidence_is_the_refusal_route():
+    """Refused + nothing pooled in the retire zone => the pool was EMPTY at the
+    2->3 boundary, which is why the reuse-skip/retire pair cannot fire."""
+    evidence = p2.neverPooledEvidence(
+        _refusal_events(), _carry_census(), _pool_census()
+    )
+    assert evidence["ok"] is True
+    assert evidence["refusalEventsN"] == 2
+    assert evidence["carryEventsInRetireZoneN"] == 0
+
+
+def test_never_pooled_evidence_requires_a_positive_refusal_event():
+    """Silence is not evidence: no refusal note => no substitute route."""
+    assert p2.neverPooledEvidence([], _carry_census(), _pool_census())["ok"] is False
+
+
+def test_never_pooled_evidence_dies_on_a_stash_consumed_in_the_retire_zone():
+    events = _refusal_events() + [
+        {"kind": "reuse-decoder", "detail": {"key": "movie1", "newElId": 3, "sceneHash": "#4"}},
+    ]
+    evidence = p2.neverPooledEvidence(
+        events, _carry_census(1, events[-1:]), _pool_census()
+    )
+    assert evidence["ok"] is False
+    assert evidence["carryEventsInRetireZoneN"] == 1
+
+
+def test_never_pooled_evidence_ignores_another_movies_reuse():
+    events = _refusal_events() + [
+        {"kind": "reuse-decoder", "detail": {"key": "movie2", "newElId": 7, "sceneHash": "#4"}},
+    ]
+    assert p2.neverPooledEvidence(events, _carry_census(), _pool_census())["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# footprintFullyLive — wiring only; thresholds are imported, never re-tuned.
+# --------------------------------------------------------------------------- #
+def _burst(rect, *, live_frac: float = 1.0, control_noise: bool = False, n: int = 6):
+    """A synthetic settled-slide burst: static grey everywhere, except a live
+    band inside `rect` (the left `live_frac` of it) that alternates every frame."""
+    import numpy as np
+
+    x, y, w, h = rect
+    frames = []
+    for i in range(n):
+        frame = np.full((1080, 1920, 3), 60, dtype=np.uint8)
+        lw = max(1, int(w * live_frac))
+        frame[y:y + h, x:x + lw] = 30 if i % 2 else 220
+        if control_noise:
+            c = p2.SLIDE4_CONTROL_RECT
+            frame[c["y"]:c["y"] + c["h"], c["x"]:c["x"] + c["w"]] = 30 if i % 2 else 220
+        frames.append(frame)
+    return frames
+
+
+def test_footprint_fully_live_green_on_a_fully_painting_footprint():
+    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT))
+    assert verdict["ok"] is True
+    assert verdict["verdict"] is True
+    assert verdict["perRect"][0]["label"] == "slide4Movie"
+
+
+def test_footprint_fully_live_red_on_a_half_dead_footprint():
+    """Half the destination rect frozen => the carry is not visibly correct."""
+    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, live_frac=0.5))
+    assert verdict["ok"] is False
+    assert verdict["verdict"] is False
+
+
+def test_footprint_fully_live_inconclusive_is_a_failure():
+    """A noise floor above threshold yields verdict None — anything but True fails."""
+    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, control_noise=True))
+    assert verdict["verdict"] is None
+    assert verdict["status"] == "inconclusive"
+    assert verdict["ok"] is False
+
+
+def test_footprint_fully_live_fails_closed_on_a_truncated_burst():
+    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, n=1))
+    assert verdict["ok"] is False
+    assert verdict["status"] == "inconclusive"
+
+
+def test_burst_offsets_come_from_the_probe():
+    """One burst cadence for both instruments — never a re-tuned local copy."""
+    import live_continuity_probe
+
+    assert p2.BURST_OFFSETS_MS == live_continuity_probe.BURST_OFFSETS_MS
+    assert len(set(p2.BURST_OFFSETS_MS)) == len(p2.BURST_OFFSETS_MS)
+
+
+# --------------------------------------------------------------------------- #
+# Injected plan shape + the findings inventory.
+# --------------------------------------------------------------------------- #
+def test_injected_plan_retires_movie1_before_the_restart_and_bridges_3to4():
+    plan = p2.build_continuity_plan(True)
+    boundaries = plan["boundaries"]
+    assert [b["action"] for b in boundaries] == ["retire", "restart", "bridge"]
+    assert boundaries[0] == {
+        "atScene": p2.SLIDE2_MIN_HASH, "action": "retire", "movieKey": p2.MOVIE1_KEY,
+    }
+    assert boundaries[1]["atScene"] == p2.SLIDE3_MIN_HASH
+    assert boundaries[2]["atScene"] == p2.SLIDE4_MIN_HASH
+    assert boundaries[0]["atScene"] < boundaries[1]["atScene"] < boundaries[2]["atScene"]
+
+
+def test_injected_plan_names_movie1_only():
+    """Naming the slide-3-only WA0125 clip admits it to the runtime's stash()
+    plan-name filter, which pools it at the 3->4 detach and remounts it at the
+    fallback footprint — the slide-4 stray."""
+    for bridge in (True, False):
+        assert list(p2.build_continuity_plan(bridge)["movies"]) == ["movie1"]
+
+
+def test_disable_bridge34_removes_only_the_bridge():
+    plan = p2.build_continuity_plan(False)
+    assert [b["action"] for b in plan["boundaries"]] == ["retire", "restart"]
+    assert plan["movies"] == p2.build_continuity_plan(True)["movies"]
+    assert plan["transparentBackground"] is True
+
+
+def test_injected_plan_matches_the_derived_runtime_plan_boundaries():
+    """The P2 injection must stay equal to `derive_plan(...).to_runtime()` for the
+    fixture (tests/test_live_continuity.py pins the other direction)."""
+    import re
+
+    expected = re.search(
+        r"EXPECTED_RUNTIME_PLAN = (\{.*?\n\})",
+        (REPO / "tests" / "test_live_continuity.py").read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert expected, "EXPECTED_RUNTIME_PLAN literal not found"
+    derived = eval(expected.group(1))  # noqa: S307 - repo-local literal
+    injected = p2.build_continuity_plan(True)
+    assert injected["boundaries"] == derived["boundaries"]
+    assert injected["movies"] == derived["movies"]
+    assert {k: v for k, v in injected.items() if k != "transparentBackground"} == derived
+
+
+def test_findings_inventory_is_still_fourteen_and_renamed():
+    import re
+
+    ids = re.findall(
+        r'"id": "(\w+)"',
+        (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text(encoding="utf-8"),
+    )
+    assert len(ids) == 14
+    assert "refusedCarry1to2" in ids
+    assert "continueThroughMagicMove1to2" not in ids
+    assert "freezeControlCaughtByCounter" in ids
+
+
+def test_refused_carry_ignores_a_suppressed_or_errored_remount():
+    """A remount that was suppressed / went stale / errored is the OPPOSITE of a
+    carry and must not turn the refusal red."""
+    events = _refusal_events() + [
+        {"kind": "remount-suppressed", "detail": {"elId": 1, "why": "mm", "sceneHash": "#3"}},
+        {"kind": "remount-stale", "detail": {"elId": 1, "epoch": 2, "sceneHash": "#3"}},
+        {"kind": "remount-error", "detail": {"elId": 1, "message": "x", "sceneHash": "#4"}},
+    ]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is True
+    assert verdict["carryEventsInRetireZoneN"] == 0
+
+
+def test_never_pooled_evidence_covers_the_transition_scene():
+    """A carry on the transition scene kills the never-pooled route too."""
+    events = _refusal_events() + [
+        {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#1"}},
+    ]
+    assert p2.neverPooledEvidence(
+        events, _carry_census(1, events[-1:]), _pool_census()
+    )["ok"] is False
+
+
+def test_retire_zone_starts_one_scene_before_the_destination():
+    assert p2.RETIRE_ZONE_MIN_HASH == p2.SLIDE2_MIN_HASH - 1
+
+
+# --------------------------------------------------------------------------- #
+# Codex r1 — the census routes: counted in the page, and the pool read for real.
+# --------------------------------------------------------------------------- #
+def test_refused_carry_fails_on_a_census_total_the_sample_cannot_show():
+    """The bounded sample is not the evidence: a positive TOTAL is red even when
+    the sample that came back is empty."""
+    verdict = _refused(carry_census=_carry_census(3, []))
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 3
+    assert "carry notes inside the retire zone" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_a_carry_census():
+    verdict = _refused(carry_census=None)
+    assert verdict["ok"] is False
+    assert "carry census missing or malformed" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_on_a_malformed_carry_census():
+    verdict = _refused(carry_census={"key": "movie1", "sample": []})
+    assert verdict["ok"] is False
+    assert "carry census missing or malformed" in verdict["reasons"]
+
+
+def test_carry_census_survives_other_movies_crowding_the_sample():
+    """25 routine movie2 notes plus ONE movie1 note: the page filters to movie1
+    BEFORE slicing, so the total is 1 and the finding is red even though the
+    fetched event list is dominated by the other movie."""
+    noise = [
+        {"kind": "remount-done", "detail": {"elId": 50 + i, "key": "movie2", "sceneHash": "#3"}}
+        for i in range(25)
+    ]
+    offender = {"kind": "remount-done", "detail": {"elId": 1, "key": "movie1", "sceneHash": "#3"}}
+    events = _refusal_events() + noise + [offender]
+    verdict = _refused(preserve_events=events, carry_census=_carry_census(1, [offender]))
+    assert verdict["ok"] is False
+    assert verdict["carryEventsInRetireZoneN"] == 1
+    assert verdict["carryInRetireZone"]["localMatchesN"] == 1
+
+
+def test_never_pooled_route_dies_when_a_decoder_is_still_pooled_on_slide2():
+    """A detached movie1 decoder sitting in the pool through slide 2 is never
+    reused or remounted — only the census can see it."""
+    census = _pool_census([
+        {"key": "movie1", "elId": 1, "inDocument": False, "currentTime": 4.0},
+    ])
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["entriesForTargetN"] == 1
+
+
+def test_never_pooled_route_dies_on_a_preserved_from_dom_entry():
+    census = _pool_census([
+        {"key": "untitled.mov", "elId": 1, "fromDom": True, "inDocument": True},
+    ])
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["fromDomForTargetN"] == 1
+
+
+def test_never_pooled_route_tolerates_another_movie_in_the_pool():
+    census = _pool_census([{"key": "movie2", "elId": 9, "inDocument": False}])
+    assert p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)["ok"] is True
+
+
+def test_never_pooled_route_is_invalid_without_a_pool_census():
+    for bad in (None, {}, {"entries": "nope", "sceneHash": "#2"}):
+        evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), bad)
+        assert evidence["ok"] is False
+        assert evidence["poolCensus"]["reason"] == "pool census missing or malformed"
+
+
+def test_never_pooled_route_is_invalid_when_the_census_left_the_retire_zone():
+    """A census taken on slide 3 says nothing about slide 2."""
+    evidence = p2.neverPooledEvidence(
+        _refusal_events(), _carry_census(), _pool_census([], scene_hash="#6")
+    )
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["reason"] == "pool census taken outside the retire zone"
+
+
+# --------------------------------------------------------------------------- #
+# Codex r2 — a still ROI must also be the RIGHT still ROI, and the hash must
+# actually move forward.
+# --------------------------------------------------------------------------- #
+def test_refused_carry_fails_when_the_post_flip_roi_went_black():
+    """Four zero MAEs also describe an ROI that died after the cut."""
+    verdict = _refused(flip_rois=_flip_rois(after=_poster_roi(0)),
+                       settled_slide2_roi=_poster_roi(0))
+    assert verdict["ok"] is False
+    assert "post-flip ROI is blank/black" in verdict["reasons"]
+
+
+def test_refused_carry_fails_when_the_post_flip_roi_is_not_what_slide2_rests_on():
+    """Frozen on something the settled slide does not show = a dead/stale surface
+    that recovered later, not the refused poster."""
+    verdict = _refused(flip_rois=_flip_rois(after=_poster_roi(200)),
+                       settled_slide2_roi=_poster_roi(120))
+    assert verdict["ok"] is False
+    assert "post-flip ROI does not match the settled slide-2 composite" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_a_settled_roi():
+    verdict = _refused(settled_slide2_roi=None)
+    assert verdict["ok"] is False
+    assert "no settled slide-2 ROI" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_without_post_flip_roi_frames():
+    verdict = _refused(flip_rois=[])
+    assert verdict["ok"] is False
+    assert "no post-flip ROI frames" in verdict["reasons"]
+
+
+def test_refused_carry_green_on_the_live_shape():
+    """After-pair MAE 0, non-blank, equal to the settled composite, #1 -> #2."""
+    verdict = _refused()
+    assert verdict["ok"] is True
+    assert verdict["frozenComposite"]["content"]["ok"] is True
+
+
+def test_refused_carry_requires_strictly_forward_hash_movement():
+    """`#5 -> #2` is not a forward 1->2 boundary."""
+    verdict = _refused(hash1="#5", hash2="#2")
+    assert verdict["ok"] is False
+    assert "no valid forward 1->2 boundary" in verdict["reasons"]
+
+
+def test_refused_carry_fails_closed_on_an_unparseable_hash():
+    for pair in (("#1", "#2x"), ("boot", "#2"), ("#1", None)):
+        verdict = _refused(hash1=pair[0], hash2=pair[1])
+        assert verdict["ok"] is False
+        assert "no valid forward 1->2 boundary" in verdict["reasons"]
+
+
+# --------------------------------------------------------------------------- #
+# Codex r2 — pool census attribution: a cleared src reports an EMPTY key.
+# --------------------------------------------------------------------------- #
+def test_pool_census_attributes_by_the_stamped_movie_key():
+    """A preserved decoder whose src was really cleared has key "" — the stamped
+    identity is what says it is movie1."""
+    census = _pool_census([{"key": "", "movieKey": "movie1", "elId": 1}])
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["entriesForTargetN"] == 1
+
+
+def test_pool_census_is_invalid_on_an_unattributable_entry():
+    census = _pool_census([{"key": "", "movieKey": None, "elId": 1}])
+    evidence = p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)
+    assert evidence["ok"] is False
+    assert evidence["poolCensus"]["reason"] == "pool census holds an unattributable entry"
+
+
+def test_pool_census_tolerates_a_provably_different_asset():
+    census = _pool_census([{"key": "vid-2024-01-01-wa0125.mp4", "movieKey": None, "elId": 9}])
+    assert p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)["ok"] is True
