@@ -469,7 +469,12 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     `--clip` is one path per slide, refused for several movies) can never be double-timed. The
     exporter bares every upper stacked clip while the assembler rebuilds only its supported
     subset — deliberate (unsupported = bare + warned, never double-timed).
-    STILL OWNER-EYEBALL: left/right flush for the standard band (43 / 1877) was not run live.
+    LEFT/RIGHT FLUSH — LIVE r19 PASS (2026-09-20, commit `393e475a`, dashboard-driven, FRC Wall
+    48 left + 50 right, videos-only): slide 48 clip x 43 (w 1404); slide 50 clips x 473, right
+    edge 1877 (upper clip w 1403 → 1876, the source's own 5 px); y 670 h 395 unchanged. The same run
+    re-proved the 0.9 rule + item 30(d) live: slide 50 still `stackedMovies`, 1 build-in bared,
+    upper clip dissolve With Previous delay 8.0; Exporter frames A@3 s / B@12 s. Peak RSS 3.07 GB.
+    Source sha unchanged. Evidence `~/Desktop/dsk-d5-work/evidence-r19/` (`lr-strip.png`).
     Stack threshold SETTLED (owner, 2026-09-20): raised 0.5 → 0.9 — FRC 50's visible rects overlap
     100% of the smaller (movie 1 is 5 px narrower inside movie 0), so nothing real needed the
     loose bound and a row that merely clips can no longer be read as a stack.
