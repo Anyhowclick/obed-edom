@@ -13,6 +13,7 @@ import {
 } from "../../api";
 import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
+import { BuildPreview } from "../../components/BuildPreview";
 import { LoadingOverlay, Lightbox } from "../../components/PreviewGrid";
 import { buildDecisionsMap, toDecisionsPayload, type DecisionsMap } from "../../dsk/decisions";
 import { SlideReviewList } from "./SlideReviewList";
@@ -213,6 +214,7 @@ export function DskGenerator() {
           {skipped.length > 0 && (
             <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
           )}
+          <BuildPreview path={result.path} disabled={busy} />
           <div className="actions">
             <button className="btn" type="button" disabled={busy} onClick={run}>
               Run
@@ -246,6 +248,7 @@ export function DskGenerator() {
           {(result.overflows || []).length > 0 && (
             <p className="note">Overflow on slide(s): {result.overflows!.join(", ")}</p>
           )}
+          <BuildPreview path={result.deckPath} disabled={busy} />
         </>
       )}
       <Lightbox src={open} onClose={() => setOpen(null)} />

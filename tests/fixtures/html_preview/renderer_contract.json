@@ -1,0 +1,10 @@
+{
+  "measuredAt": "2026-09-12",
+  "source": ".agents/research/kpf_renderer_probe_2026-09-12.md",
+  "headerMajor": 1,
+  "headerMinor": 2,
+  "creator": "Apple Keynote 15.3.1",
+  "keynoteVersion": "15.3.1",
+  "keynoteBundleId": "com.apple.Keynote",
+  "notes": "header.json on both DSK and GW HTML exports carried major/minor 1/2 and creator Apple Keynote 15.3.1. Reuse must include that export/renderer contract and the current Keynote identity, not only source digest + parser version."
+}

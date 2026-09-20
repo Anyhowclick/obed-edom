@@ -1,7 +1,7 @@
 import { createContext, useContext } from "react";
 
 export type FeatureId = "generate" | "diff" | "check" | "dsk" | "resize" | "maps" | "watercolour";
-export type TabId = FeatureId | "history" | "settings";
+export type TabId = FeatureId | "history" | "settings" | "alpha-keynote";
 
 export const FEATURE_LABELS: Record<FeatureId, string> = {
   generate: "Sermon Base Generator",
@@ -76,6 +76,7 @@ export function useLayout() {
 }
 
 export const TAB_SHORT: Record<TabId, string> = {
+  "alpha-keynote": "Alpha",
   generate: "Gen",
   check: "Chk",
   diff: "Diff",
