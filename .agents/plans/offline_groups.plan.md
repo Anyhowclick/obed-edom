@@ -134,7 +134,8 @@ Actionable record in the todos above. Census of record:
 `.agents/reviews/groups-census-2026-09-19/groups_census.md` (tables + reproducible scripts beside it). Canonical resizer plan:
 `cg_resizer.plan.md`. The pattern this mirrors — extend an already-exact transform behind an
 opt-in flag, gate it live with the right oracle, promote only on a PASS — is
-`offline_text_middle_anchor.plan.md` and `offline_maskcrop_offset.plan.md`.
+`offline_text_middle_anchor.plan.md` and the mask-crop offset promotion (PR #167, shipped;
+its plan is in Git history).
 
 The one structural warning this plan carries forward: `iwa_write._slide_edits` has no notion of
 a group spec's `children` list. Until todo 1 reports how large that slice is, nobody should
