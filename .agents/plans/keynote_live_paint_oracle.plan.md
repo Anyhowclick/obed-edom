@@ -1,6 +1,6 @@
 # Visible-content gate — trustworthy paint oracle: fix the screenshot burst, add an in-page GL read
 
-Status: DRAFT for owner review — no code written. Drafted 2026-09-20 by Opus (read-only) from the results at the bottom of
+Status: DRAFT for owner review — no code written; E0 headless part DONE 2026-09-20 (see §12), OBS attach arm pending. Drafted 2026-09-20 by Opus (read-only) from the results at the bottom of
 [`keynote_live_alternatives_research.md`](keynote_live_alternatives_research.md) ("Per-`clear` upload
 qualification", "Go-to jumps") and the gate as it stands in
 [`keynote_live_visible_content.plan.md`](keynote_live_visible_content.plan.md) §1.
@@ -184,3 +184,14 @@ any number that is not traceable to a measurement in the research doc.
 - **D-d** Whether E0 must also cover the DOM stimulus in attach mode before ANY offset change lands
   (recommended yes — it is the only measurement that tells us whether today's greens were ever at risk).
 - **D-e** Scope: fix the oracle only, or also re-run the full re-qualification suite in the same PR.
+
+## 12. E0 outcome, headless part (2026-09-20) — amends §1–§3
+Full numbers: "Paint-oracle E0" in [`keynote_live_alternatives_research.md`](keynote_live_alternatives_research.md).
+- §1 is narrower than written: the misread needs UNSPACED captures over a WebGL-only repaint. The gate's actual
+  `BURST_OFFSETS_MS` (12 shots over 2.36 s) read the WebGL stimulus live 9/9 and the DOM stimulus 9/9 with every control
+  holding. Today's verdicts were never at risk; this work is margin + the future GL-replay oracle, not a repair.
+- §2: option C (`fromSurface`) is REJECTED — alone it failed 4/9 WebGL sessions. A qualifies (9/9 + 9/9, controls 162/162);
+  B qualifies but mutates the deck (flag only). D not run.
+- §4.1: record `uniqueShas` for forensics only — it cannot detect a misread burst (12/12 unique while reading 0.004).
+- E0 gate: (i)–(iii) satisfied; (iv) OBS attach mode NOT measured ⇒ A must not become the default yet (D-d stands).
+- D-a is effectively answered by measurement: A, poke behind a flag, no `fromSurface`. D-b…D-e remain the owner's.

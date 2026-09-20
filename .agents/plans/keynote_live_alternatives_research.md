@@ -261,3 +261,26 @@ Unmeasured: OBS CEF `clip-path: path()`, 2560×1440 for the punch, go-to mid-mov
   navigation IS a go-to. Unexercised lead: the player's `jumpToSlide` takes an `automaticPlay` argument (offset ≈2361129).
   Candidate fixes (unplanned): host follows a go-to with the auto-play builds the player skipped (must not consume an
   operator-visible click-driven build) · use the `automaticPlay` path · presenter warns "movies idle until next advance".
+
+## Paint-oracle E0, headless part (2026-09-20 late, Opus; evidence `output/live-visible-content/alt-oracle/`)
+**CORRECTION to the sections above:** the three "12-shot CDP burst reads live content DEAD" reproductions all used
+UNSPACED back-to-back captures. That is NOT the product gate's profile: `BURST_OFFSETS_MS` spreads its 12 shots over
+2.36 s `(0,130,290,500,770,1000,1190,1430,1650,1910,2110,2360)`. Measured separately, the gate's real profile is sound.
+- 6 arms × 2 stimuli (S-GL = per-`clear` upload + replay loop on settled slide 2; S-DOM = DOM-painted live movie on
+  slide 3 reached by normal advances) × 3 viewports × 3 fresh sessions; 216 scored bursts, thresholds untouched.
+- Positives, sessions passed of 3 (S-GL 1920 / 2560 / 1600): gate profile 3/3/3 · unspaced rapid 3/**0**/3 · A (8 shots,
+  ≥360 ms) 3/3/3 · A+`fromSurface` 3/3/3 · rapid+DOM poke 3/3/3 · rapid+`fromSurface` **2/0/3**. S-DOM: every arm 3/3
+  at every viewport (liveFrac 0.987–0.991). In-page `readPixels` said LIVE in 18/18 S-GL bursts incl. every failing one.
+- Controls held everywhere: S-GL null DEAD 54/54, S-GL paused-video DEAD 54/54, S-DOM paused DEAD 54/54 (max liveFrac 0).
+- **(i) Today's gate verdicts on slides 1/3/4 were never at risk:** 0/54 S-DOM bursts misread in any arm; the defect
+  needs (WebGL-only repaint) × (unspaced captures) and the gate has neither.
+- **Mechanism (hypothesis, fits all evidence):** `captureScreenshot` over a canvas changed only by GL draws is served
+  from a composited surface refreshed lazily and TILE-PARTIALLY — in a failing burst consecutive shots differ only in an
+  81×34 px patch at the rect's corner while ~364k px stay byte-identical; full-rect updates resume from ≈290 ms. Spacing
+  ≥ ~300 ms or a DOM poke fixes it; `fromSurface` does not; in-page `readPixels` is NOT what rescues it (`noSample` arm).
+  **`uniqueShas` is not a flake detector** — a fully misread burst still has 12/12 unique shas (dead controls: 1/12).
+- **Recommendation:** profile A `(0,360,730,1090,1460,1820,2190,2550)` ms, default capture flags, +0.2 s/slide; keep the
+  DOM poke behind an off-by-default flag; drop `fromSurface`. The current gate profile passes 9/9 but its first gap
+  (130 ms) sits inside the stale window and survives only via max−min over later shots — A adds margin, it does not fix
+  a broken gate. NOT to land as the default until the OBS attach arm is measured (needs the owner's OBS). Screencast
+  arm not run (unnecessary).
