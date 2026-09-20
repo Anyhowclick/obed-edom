@@ -152,7 +152,9 @@ export function SlideReviewList({
                       <td>
                         {page.category}
                         {disabled && <span className="chip">text slide — benched</span>}
-                        {page.stackedMovies && <span className="chip">stacked — source build order</span>}
+                        {(decision.keepSide ? page.stackedMoviesKeepSide : page.stackedMovies) && (
+                          <span className="chip">stacked — source build order</span>
+                        )}
                       </td>
                       <td>
                         <input

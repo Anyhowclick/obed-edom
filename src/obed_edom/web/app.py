@@ -53,7 +53,7 @@ from obed_edom.dsk_movie_export import (
     visible_movie_rects,
 )
 from obed_edom.dsk_plan import ItemId, classify_deck
-from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, item_rect
+from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
 from obed_edom.dsk_stage_export import (
     export_stage_pngs,
     read_manifest,
@@ -1792,10 +1792,11 @@ def _apply_dsk_decisions(result: dict[str, Any], decisions: list[dict[str, Any]]
         page["decision"] = current
 
 
-def _dsk_videos_only_flags(cls: Any, slide: dict[str, Any] | None) -> tuple[bool, bool]:
+def _dsk_videos_only_flags(cls: Any, slide: dict[str, Any] | None, crop: Rect) -> tuple[bool, bool]:
     """`(canVideosOnly, stackedMovies)` for one proposed page. A slide can go
     videos-only when every movie it counts is a kept top-level item — a movie nested in
-    a group is out of reach. Stacked follows the assembler's own `movies_stacked`."""
+    a group is out of reach. Stacked follows the assembler's own `movies_stacked` on the
+    rects visible inside `crop` (the centre panel, or the whole wall with Keep side)."""
     movie_ids = {item for item in cls.kept if item[0] == "movie"}
     if cls.is_text or not movie_ids or cls.movie_count != len(movie_ids):
         return False, False
@@ -1804,7 +1805,7 @@ def _dsk_videos_only_flags(cls: Any, slide: dict[str, Any] | None) -> tuple[bool
         for item in (slide or {}).get("items") or []
         if (item.get("kind"), item.get("kindIndex")) in movie_ids
     }
-    return True, movies_stacked(visible_movie_rects(rects, CENTRE_PANEL_RECT))
+    return True, movies_stacked(visible_movie_rects(rects, crop))
 
 
 def _dsk_keep_side_from_result(result: dict[str, Any]) -> set[int]:
@@ -1837,6 +1838,12 @@ def _run_dsk_propose(
     all_numbers = [int(s["number"]) for s in payload["slides"]]
     numbers = sorted(expand_slide_range(slide_range) or set(all_numbers))
     classes = {c.number: c for c in classify_deck(path, payload=payload, text_slide_words=words)}
+    side_classes = {
+        c.number: c
+        for c in classify_deck(
+            path, payload=payload, text_slide_words=words, include_side=frozenset(all_numbers)
+        )
+    }
     thumbs = _dsk_preview_thumbs(job, path, payload)
     thumb_dir = wall_thumb_dir(deck_digest(path))
     slides_by_number = {int(s["number"]): s for s in payload["slides"]}
@@ -1853,7 +1860,11 @@ def _run_dsk_propose(
         if is_text:
             skipped.append({"slide": number, "reason": "text"})
             job.log(f"slide {number}: skipped (text slide; content-only)")
-        can_videos_only, stacked_movies = _dsk_videos_only_flags(cls, slides_by_number.get(number))
+        slide = slides_by_number.get(number)
+        can_videos_only, stacked_movies = _dsk_videos_only_flags(cls, slide, CENTRE_PANEL_RECT)
+        _side_can, stacked_keep_side = _dsk_videos_only_flags(
+            side_classes.get(number, cls), slide, Rect(0.0, 0.0, *LW_WALL_SIZE)
+        )
         page = {
             "slide": number,
             "thumb": thumbs.get(number),
@@ -1865,6 +1876,7 @@ def _run_dsk_propose(
             "needsClip": cls.category in {"movie", "mixed"},
             "canVideosOnly": can_videos_only,
             "stackedMovies": stacked_movies,
+            "stackedMoviesKeepSide": stacked_keep_side,
         }
         page["decision"] = _dsk_decision_defaults(page, content_only)
         pages.append(page)

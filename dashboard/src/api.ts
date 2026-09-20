@@ -301,6 +301,7 @@ export type DskPage = {
   needsClip: boolean;
   canVideosOnly?: boolean;
   stackedMovies?: boolean;
+  stackedMoviesKeepSide?: boolean;
   decision: DskDecision;
 };
 

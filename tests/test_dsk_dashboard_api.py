@@ -2137,6 +2137,31 @@ def test_dsk_propose_does_not_stack_movies_that_merely_touch(tmp_path, monkeypat
     pages = {p["slide"]: p for p in job["result"]["pages"]}
     assert pages[1]["canVideosOnly"] is True
     assert pages[1]["stackedMovies"] is False
+    assert pages[1]["stackedMoviesKeepSide"] is False
+
+
+def test_dsk_propose_stacked_flag_has_a_keep_side_variant(tmp_path, monkeypatch):
+    """Codex r2 (plan §4 item 30c): with Keep side on, the assembler decides stacking on the
+    WHOLE-WALL visible rects. Two movies that only layer on the left side panel are not
+    stacked for the centre-panel crop (nothing of them overlaps there) but are with Keep
+    side -- the review chip needs both answers."""
+    from obed_edom.web import app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    items = {1: [_movie_item(0, 0, 100, w=2400), _movie_item(1, 100, 120, w=1700)]}
+    monkeypatch.setattr(
+        app_mod, "offline_wall_payload", lambda _p: _fw_payload_with_items(items, count=1)
+    )
+    classes = {1: _movie_cls(1, movie_ids=(("movie", 0), ("movie", 1)))}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    job = _wait(client, job_id)
+    page = job["result"]["pages"][0]
+    assert page["stackedMovies"] is False
+    assert page["stackedMoviesKeepSide"] is True
 
 
 def test_dsk_decisions_roundtrip_videos_only_and_force_false_where_unavailable(
