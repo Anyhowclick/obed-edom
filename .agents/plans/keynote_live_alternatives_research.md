@@ -166,3 +166,39 @@ Confirming measurement (not run): in the recorded 88-call frame the `uniform1f` 
 movie. Coordinator note: that patch would make our replay MORE faithful to the deck than the player — an owner decision
 (it changes the look at the first build boundary from opaque→translucent pop to continuous), not a default.
 Scratch: `output/live-visible-content/alt-opacity/dump.py`.
+
+## Per-`clear` upload qualification (2026-09-20 night, Opus, headless; evidence `output/live-visible-content/alt-perclear/`)
+**Verdict: QUALIFIED-WITH-CAVEATS on the geometry-static 1→2 move, at 1920×1080 / 2560×1440 / letterboxed 1600×1000.**
+- **In-page liveness instrument** (same task as the replay: one `readPixels` over the movie rect → 16×8 band means + 40×40
+  corner control + green patch, with `currentTime`/rVFC `mediaTime`). Occluded bands are MEASURED, not assumed: swap a
+  black then a white marker into the movie texture, replay, sample — a band that does not move is covered (20/128 = the
+  green square, identical at every viewport). Controls: null (no upload) DEAD · positive LIVE (min band range 12.3) ·
+  paused DEAD (rVFC fired 0) · rVFC loop LIVE (6.95); control + green static in all. Cost p50 3.5 ms / p95 4.0 ms (8-strip
+  variant 2.4 / 3.5 ms).
+- **The CDP burst flake is reproduced on demand:** at 2560×1440 the 12-shot burst scored liveFrac 0.0044 while the in-page
+  read said LIVE in the same session; a 1-px DOM style poke before each shot → 0.805. Hypothesis: with WebGL-only
+  changes and no DOM/compositor commit, `Page.captureScreenshot` is served from a stale composited surface. ⇒ the CDP
+  burst is NOT a trustworthy liveness oracle over a replayed canvas.
+- **Full flow** (per-`clear` upload through the move → record last frame → rVFC upload+replay+sample → MutationObserver
+  stand-down → poster restore): 90–91 move uploads, LIVE at rest, loop p50 4.3–4.4 / p95 4.7–5.1 ms incl. the read,
+  0 unserviced, 0/234 dropped, 0 GL errors; stand-down `mutation:canvas-removed` **1.7–1.8 ms** after the mutation batch;
+  zero unflagged GL calls at the build. Armed vs control at four settled points × three viewports: max |Δ| outside the
+  movie rects = 0 (slide 3 needs its SECOND movie rect masked, + 1–2 px dilation for the export-vs-painted ~2 % rect).
+- The canvas backing store is 1920×1080 at EVERY viewport ⇒ buffer-space numbers are viewport-independent.
+- Frame lengths during the move are NOT uniform: `{88:60, 89:28, 93:1, 125:1}` — "every frame exactly 88 calls" holds only
+  for the recorded settle frame; the fail-closed assertion must be on the recorded last frame, not the whole move.
+- The 960×276 poster signature is NOT unique (three such textures per slide); disambiguated by which one was
+  canvas-uploaded + measured liveness. Bind the `<video>` by the export's `assets[assetId].url.web`, never "first video".
+- **3→4 (the movie itself moves/scales): there is NO invisible window** — a new WebGL context draws the move, and at
+  settle both canvases are detached and the DOM tree paints at opacity 1 (consistent with the product gate's green V on
+  slide 4). The carried poster uploads at the DESTINATION size 1274×364. Per-`clear` upload there gave a ghosted double
+  exposure (the move cross-fades whole-slide 1920×1080 snapshot textures) ⇒ NOT QUALIFIED and not needed.
+  UNRESOLVED: the peer reports the asset that moves across 3→4 as `VID-20250608-WA0125.mp4`, whereas our records say
+  movie1 `Untitled.mov` is the one that moves/scales (960×276 → 1274×364) and WA0125 is the slide-3-only retiring clip —
+  verify before relying on either. Also unmeasured: WHY slide 2 stays on WebGL at rest while slide 4 returns to the DOM
+  (pending builds on slide 2? transition type?) — this decides how common the invisible window is in real decks.
+- Coordinator correction to the peer's caveat: occluded bands being dead is the CORRECT z-order (artwork in front), so the
+  flow DOES turn the refused 1→2 carry into a visible one; what it cannot do is more than the player paints (see the
+  opacity defect above).
+**Next step toward product:** make the in-page read (`sample()` + measured occluder mask) the scorer behind the
+visible-content gate for WebGL-settled slides, replacing/augmenting the 12-shot CDP burst; arming work comes after.
