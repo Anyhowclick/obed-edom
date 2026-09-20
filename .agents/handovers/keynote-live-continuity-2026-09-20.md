@@ -1,5 +1,7 @@
 # Handover — Alpha Keynote live continuity, state at 2026-09-20 17:30
 
+> **Where-things-are table SUPERSEDED** by `keynote-live-continuity-2026-09-20-night.md` (22:45). Paid-for facts, commands and gotchas below still hold.
+
 Owner rules (AGENTS.md wins): accuracy and code quality over speed · plan first for anything complex · never
 weaken a gate · minimal natspec, no inline comments in src · no merge / auto-merge without an explicit owner
 request · hands off Keynote · ask before putting a window on the external monitor · headless Chrome only for
