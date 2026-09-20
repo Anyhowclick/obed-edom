@@ -51,6 +51,12 @@ def _build_effect_animtype(build_obj: dict) -> tuple[Any, Any]:
     return effect, animation_type
 
 
+def _build_duration(build_obj: dict) -> Any:
+    attrs = build_obj.get("attributes") or {}
+    anim = attrs.get("animationAttributes") or {}
+    return anim.get("duration") if anim.get("duration") is not None else attrs.get("databaseDuration")
+
+
 def _transition_effect_duration(transition: dict | None) -> tuple[Any, Any] | None:
     """Lifted from output/probe-builds/verify_builds.py::slide_transition."""
     if not transition:
@@ -78,10 +84,13 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
     """``{slide number (1-based): {"slideId", "builds": [...], "transition": dict|None}}``.
 
     Each build record: ``{"buildId", "chunkIds", "chunkOrder", "chunkReferent",
-    "kind", "kindIndex", "effect", "animationType", "identity"}``. ``chunkIds`` is
+    "chunkAutomatic", "chunkDelay", "kind", "kindIndex", "effect", "animationType",
+    "duration", "identity"}``. ``chunkIds`` is
     ascending by the slide's own ``buildChunks`` position; ``chunkOrder`` carries
-    that same position per chunk and ``chunkReferent`` each chunk's ``referent``
-    flag. ``buildChunks`` is Keynote's render timeline; ``builds`` is an unordered
+    that same position per chunk and ``chunkReferent``/``chunkAutomatic``/``chunkDelay``
+    each chunk's ``referent``/``automatic`` flag and its ``delay`` in seconds (the
+    start-timing triple, §3 "Build-chunk flag encoding").
+    ``buildChunks`` is Keynote's render timeline; ``builds`` is an unordered
     owning set Keynote re-serialises freely on save (D8). Every build in these
     decks targets a top-level drawable (measured: 593/593 source, 1515/1515
     output); a build whose drawable does not resolve to one is dropped — it cannot
@@ -93,10 +102,14 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
 
     chunks_by_build: dict[str, list[str]] = {}
     chunk_referent: dict[str, bool] = {}
+    chunk_automatic: dict[str, bool] = {}
+    chunk_delay: dict[str, float] = {}
     for obj_id, obj in objects.items():
         if obj.get("_pbtype") != "KN.BuildChunkArchive":
             continue
         chunk_referent[obj_id] = bool(obj.get("referent"))
+        chunk_automatic[obj_id] = bool(obj.get("automatic"))
+        chunk_delay[obj_id] = float(obj.get("delay") or 0.0)
         bid = _ref_id(obj.get("build"))
         if bid is not None:
             chunks_by_build.setdefault(bid, []).append(obj_id)
@@ -148,10 +161,13 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
                     "chunkIds": chunk_ids,
                     "chunkOrder": [chunk_order[cid] for cid in chunk_ids],
                     "chunkReferent": [chunk_referent.get(cid, False) for cid in chunk_ids],
+                    "chunkAutomatic": [chunk_automatic.get(cid, False) for cid in chunk_ids],
+                    "chunkDelay": [chunk_delay.get(cid, 0.0) for cid in chunk_ids],
                     "kind": kind,
                     "kindIndex": kind_index,
                     "effect": effect,
                     "animationType": animation_type,
+                    "duration": _build_duration(build),
                     "identity": build_identity(kind, text, file_name, child_sig),
                 }
             )

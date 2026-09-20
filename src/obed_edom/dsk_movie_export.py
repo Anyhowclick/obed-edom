@@ -17,9 +17,10 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from PIL import Image
 
@@ -61,6 +62,8 @@ from obed_edom.dsk_live import (
     run_osascript,
 )
 from obed_edom.dsk_plan import ItemId, SlideClass, _delete_order, classify_deck, visible_union
+from obed_edom.iwa_builds import deck_builds
+from obed_edom.iwa_movies import bare_source_build_ins
 from obed_edom.iwa_runs import attach_group_content_signature
 from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, is_lw_wall, item_rect
 from obed_edom.maps_movie import ffmpeg_exe
@@ -152,6 +155,7 @@ class ClipResult:
     crop_width: int
     movie_id: ItemId | None = None
     crop_rect: Rect | None = None
+    bare: bool = False
 
 
 @dataclass(frozen=True)
@@ -163,6 +167,7 @@ class _SlideJob:
     tmp: Path
     delete_ids: tuple[ItemId, ...] = ()
     movie_id: ItemId | None = None
+    bare: bool = False
 
 
 def clip_name(stem: str, slide: int, movie_index: int | None = None) -> str:
@@ -187,6 +192,115 @@ def visual_movie_order(rects: Mapping[ItemId, Rect]) -> list[ItemId]:
         if len(ids) > 1:
             raise ValueError(f"Movie items {sorted(ids)} tie at position {key}; cannot derive visual order")
     return [ids[0] for _, ids in sorted(keys.items())]
+
+
+_MOVIE_STACK_OVERLAP = 0.9
+
+
+def _rects_stack(a: Rect, b: Rect) -> bool:
+    """True when the intersection covers more than `_MOVIE_STACK_OVERLAP` of the smaller
+    rect's area, i.e. the two really layer rather than clip along an edge."""
+    ix = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
+    iy = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
+    if ix <= 0 or iy <= 0:
+        return False
+    smallest = min(a.w * a.h, b.w * b.h)
+    return smallest > 0 and (ix * iy) / smallest > _MOVIE_STACK_OVERLAP
+
+
+def movies_stacked(rects: Mapping[ItemId, Rect]) -> bool:
+    """True when two movie rects really layer -- their intersection covers nearly all of the
+    smaller one's area (`_MOVIE_STACK_OVERLAP`) -- i.e. one movie covers another. Row
+    neighbours that merely touch, or clip into each other by less, keep the visual order."""
+    ids = list(rects)
+    return any(
+        _rects_stack(rects[a], rects[b])
+        for i, a in enumerate(ids)
+        for b in ids[i + 1:]
+    )
+
+
+def visible_movie_rects(rects: Mapping[ItemId, Rect], crop: Rect) -> dict[ItemId, Rect]:
+    """Each movie's VISIBLE source rect: its wall-space item rect clipped to the slide's
+    own crop (the centre panel, or the whole wall when the side panels are kept). The
+    ordering mode is decided on these in BOTH the exporter and the assembler, so the two
+    cannot disagree about which movies cover each other. A movie outside the crop keeps a
+    zero-area rect, which never stacks."""
+    out: dict[ItemId, Rect] = {}
+    for item_id, rect in rects.items():
+        x0, y0 = max(rect.x, crop.x), max(rect.y, crop.y)
+        x1, y1 = min(rect.x + rect.w, crop.x + crop.w), min(rect.y + rect.h, crop.y + crop.h)
+        out[item_id] = Rect(x0, y0, max(0.0, x1 - x0), max(0.0, y1 - y0))
+    return out
+
+
+def stack_mode(rects: Mapping[ItemId, Rect]) -> Literal["visual", "stacked"]:
+    """The one ordering mode for a slide's VISIBLE movie rects: ``"stacked"`` (source
+    build order) when every pair really layers -- each intersection covering nearly all of
+    the smaller rect -- ``"visual"`` when no pair does, so an ordinary row whose neighbours
+    clip into each other stays visual. A PARTIAL stack -- three movies where two cover each
+    other and one sits beside them -- has no single order, so it raises ``ValueError``
+    rather than guess one."""
+    ids = list(rects)
+    pairs = [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:]]
+    stacked = [pair for pair in pairs if _rects_stack(rects[pair[0]], rects[pair[1]])]
+    if not stacked:
+        return "visual"
+    if len(stacked) != len(pairs):
+        beside = sorted({item_id for pair in pairs if pair not in stacked for item_id in pair})
+        raise ValueError(
+            f"Movie items {sorted(ids)} partially overlap ({len(stacked)} of {len(pairs)} pairs "
+            f"stack; {beside} sit beside another); visual and build order disagree, cannot derive order"
+        )
+    return "stacked"
+
+
+def movie_build_order(build_records: Sequence[Mapping], movie_ids: Iterable[ItemId]) -> dict[ItemId, int]:
+    """Each movie item's lowest `buildChunks` position, from `iwa_builds.deck_builds`
+    records; a movie with no build of its own is absent."""
+    wanted = set(movie_ids)
+    order: dict[ItemId, int] = {}
+    for rec in build_records:
+        item_id: ItemId = (rec["kind"], rec["kindIndex"])
+        if item_id not in wanted or not rec.get("chunkOrder"):
+            continue
+        pos = min(rec["chunkOrder"])
+        if item_id not in order or pos < order[item_id]:
+            order[item_id] = pos
+    return order
+
+
+def movie_order(
+    rects: Mapping[ItemId, Rect],
+    build_order: Mapping[ItemId, int] | None = None,
+    z_order: Mapping[ItemId, int] | None = None,
+    mode: Literal["visual", "stacked"] | None = None,
+) -> list[ItemId]:
+    """The one movie order every consumer uses (plan §2, 2026-09-17): `visual_movie_order`
+    unless the movies are STACKED, where left-to-right is meaningless and the SOURCE deck's
+    build-chunk order decides instead -- a movie with no build of its own plays from the
+    start, so it sorts first, among such movies by `z_order` (payload `index`). ``mode`` is
+    the slide's already-decided `stack_mode` (from its VISIBLE source rects): pass it so
+    that ordering the same slide's FW and DSK rects cannot pick different modes. Raises
+    ValueError on a tie or when the stacked inputs are missing."""
+    if (mode if mode is not None else stack_mode(rects)) == "visual":
+        return visual_movie_order(rects)
+    if build_order is None:
+        raise ValueError(f"Movie items {sorted(rects)} are stacked; source build order is required")
+    keys: dict[tuple[int, int], list[ItemId]] = {}
+    for item_id in rects:
+        pos = build_order.get(item_id)
+        if pos is None:
+            if z_order is None or item_id not in z_order:
+                raise ValueError(f"Stacked movie item {item_id} has no build and no z-order; cannot derive order")
+            key = (0, z_order[item_id])
+        else:
+            key = (1, pos)
+        keys.setdefault(key, []).append(item_id)
+    for key, tied in keys.items():
+        if len(tied) > 1:
+            raise ValueError(f"Stacked movie items {sorted(tied)} tie at build order {key}; cannot derive order")
+    return [tied[0] for _key, tied in sorted(keys.items())]
 
 
 def _rect_intersect(a: Rect, b: Rect) -> Rect:
@@ -898,6 +1012,33 @@ def _derive_pure_video_delete_ids(items: Sequence[dict], movie_id: ItemId) -> tu
     return _delete_order([iid for iid in all_ids if iid != movie_id])
 
 
+def _bare_pure_video_movies(
+    scratch: Path, source: Path, jobs: Sequence[_SlideJob], log: Callable[[str], None]
+) -> None:
+    """Bare each per-movie job's retained movie on the SCRATCH copy before the Keynote
+    export (`iwa_movies.bare_source_build_ins`). Without this an upper stacked movie's
+    source build-in -- its dissolve and its delay -- is baked into the intermediate AND
+    re-created by the assembler on the inserted clip, so the delay would be applied twice
+    (plan §4 item 28). Only `bare` jobs -- the upper clips of a STACKED slide, the ones the
+    assembler writes a build-in for -- are touched; every other export is unchanged."""
+    if scratch.resolve() == source.resolve():
+        raise RuntimeError(f"refusing to bare source build-ins on the source deck {source}")
+    targets: dict[int, list[ItemId]] = {}
+    for job in jobs:
+        if job.bare and job.movie_id is not None:
+            targets.setdefault(job.slide, []).append(job.movie_id)
+    if not targets:
+        return
+    result = bare_source_build_ins(scratch, targets)
+    if result["refused"]:
+        raise RuntimeError(f"pure-video intermediate: {result['reason']}")
+    if result["applied"]:
+        log(
+            f"pure-video intermediate: bared {result['applied']} source build-in(s) on the "
+            "scratch copy; the DSK deck's own build-in owns that timing"
+        )
+
+
 def export_slide_clips(
     fw_deck: Path,
     slides: Sequence[int],
@@ -984,6 +1125,7 @@ def export_slide_clips(
         ordinals = ordinal_map(keep)
         per_slide: list[_SlideJob] = []
         if per_movie:
+            deck_build_recs: dict[int, dict] | None = None
             for n in keep:
                 slide = slides_by_number[n]
                 items = slide.get("items") or []
@@ -993,8 +1135,22 @@ def export_slide_clips(
                 if not kept_movie_ids:
                     raise ValueError(f"Slide {n} has no kept movie items; per_movie export requires at least one")
                 movie_rects = {iid: item_rect(items_by_id[iid]) for iid in kept_movie_ids}
-                ordered_movie_ids = visual_movie_order(movie_rects)
                 base_crop = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
+                try:
+                    mode = stack_mode(visible_movie_rects(movie_rects, base_crop))
+                except ValueError as exc:
+                    raise ValueError(f"Slide {n}: {exc}") from exc
+                if mode == "stacked":
+                    if deck_build_recs is None:
+                        deck_build_recs = deck_builds(fw_deck)
+                    ordered_movie_ids = movie_order(
+                        movie_rects,
+                        movie_build_order((deck_build_recs.get(n) or {}).get("builds") or (), kept_movie_ids),
+                        {iid: int(items_by_id[iid].get("index") or 0) for iid in kept_movie_ids},
+                        mode,
+                    )
+                else:
+                    ordered_movie_ids = movie_order(movie_rects, mode=mode)
                 for movie_index, movie_id in enumerate(ordered_movie_ids, start=1):
                     movie_item = items_by_id[movie_id]
                     crop_rect = _rect_intersect(item_rect(movie_item), base_crop)
@@ -1009,6 +1165,7 @@ def export_slide_clips(
                             tmp=require_m4v(work / f"tmp.{n:04d}.{movie_index:02d}.m4v"),
                             delete_ids=del_ids,
                             movie_id=movie_id,
+                            bare=mode == "stacked" and movie_index > 1,
                         )
                     )
         else:
@@ -1082,6 +1239,7 @@ def export_slide_clips(
         while True:
             attempts += 1
             copy_keynote(fw_deck, scratch)
+            _bare_pure_video_movies(scratch, fw_deck, per_slide, log)
             proc = _run_osascript(script_path, register_proc=register_proc, on_progress=on_progress)
             if proc.returncode == 0 or "-1712" not in (proc.stderr or "") or attempts >= 2:
                 break
@@ -1109,6 +1267,11 @@ def export_slide_clips(
                 f"Keynote delete failed on slide {slide} ({addr}, errNum {errnum}): {errmsg}"
             )
 
+        if watchdog.breached:
+            raise RuntimeError(
+                f"Keynote exceeded the {rss_limit_bytes / 1e9:.1f} GB memory limit while exporting clips "
+                f"(peak {watchdog.peak_rss_bytes / 1e9:.1f} GB); raise it with OBED_DSK_RSS_LIMIT_GB"
+            )
         if proc.returncode != 0:
             if last_error is not None:
                 errnum, errmsg = last_error
@@ -1160,6 +1323,7 @@ def export_slide_clips(
                     crop_width=crop_w,
                     movie_id=job.movie_id,
                     crop_rect=Rect(crop_x, crop_y, crop_w, crop_h),
+                    bare=job.bare,
                 )
             )
 

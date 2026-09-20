@@ -1220,6 +1220,8 @@ label.check input[type="checkbox"]:disabled,
 .dsk-review { margin: 12px 0; overflow-x: auto; }
 .dsk-review-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .dsk-review-table th, .dsk-review-table td { padding: 6px 8px; border-bottom: var(--border-glass); text-align: left; vertical-align: middle; }
+.dsk-review-group { margin: 12px 0; padding: 10px 12px; border: var(--border-glass); border-radius: var(--radius-md); background: var(--bg-surface-glass); }
+.dsk-review-group .actions { flex-wrap: wrap; align-items: center; }
 .dsk-row-skipped { opacity: 0.55; }
 .dsk-review-table img { width: 96px; height: auto; border-radius: 4px; display: block; }
 .mono-list { font-family: var(--font-mono); font-size: 12px; color: var(--ink-tertiary); max-height: 200px; overflow: auto; margin: 0 0 12px; padding-left: 20px; }

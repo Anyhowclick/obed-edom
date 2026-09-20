@@ -99,6 +99,16 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   re-renders movie/mixed slides (never reuses) and deletes the `src/` intermediates after a
   successful run. The DSK deck is retained. Supersedes the "one baked clip" rule above and the
   #138 reuse rule.
+- 2026-09-19 (owner, Generator review step — LIVE-VERIFIED r18 2026-09-20, PR #176, on
+  `claude/dsk-generator-alignment-options-97c5aa`): each slide takes an explicit left / centre /
+  right alignment (the existing `anchor`, with bulk controls), and a slide with kept top-level
+  movies may be set **videos only**: every non-movie object is dropped and the movie(s) are fitted
+  to the STANDARD video band instead of `DEFAULT_BAND`, auto-anchored centre (no content/chain-head
+  anchor). Movies STACKED on one another in the source (dissolving over each other; FRC Wall slide
+  50) follow the SOURCE BUILD ORDER, not visual order; a pair counts as stacked only when its
+  intersection covers more than `dsk_movie_export._MOVIE_STACK_OVERLAP` (owner, 2026-09-20: 0.9) of
+  the smaller VISIBLE rect's area. The review list follows the CG resizer's
+  classification flow (grouped by category, bulk per group).
 - Keynote hands-off rule: work on a copy under `~/Desktop` or repo `output/` (never
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
 - Owner's open design item besides the band placeholder: the "editing phase" (d6b) — per-slide
@@ -157,6 +167,27 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   Left block is vertically CENTRED on the right block (deltas ±14 pt vs ±51 pt bottom-aligned).
 - Heading-only gold slides are 60 pt FLAT with a 46 pt badge; 2-line headings put the badge
   above centred on x=960, 1-line inline-left (pair centred on 960 either way).
+
+- STANDARD video band (measured 2026-09-20 from the hand-made gold `Alpha_DSK.key` slide 4, a
+  3840×1080 centre-panel clip at (258, 670) 1405×395): bottom 1065.0, height 395.0, centred on 960
+  → `dsk_assemble.STANDARD_VIDEO_BAND` = `Band(1065, 395, 43, 1877, 1)`; x margins SYMMETRIC about
+  960 (DEFAULT_BAND's 43…1892 centres on 967.5 and would land the clip 7.5 pt right of gold)
+  (UNMEASURED for left/right — gold 6/7/10 sit at x 198/181/181 with overlays; owner to confirm).
+  Gold 16:9 clips keep the same ~1065–1066 bottom (slides 7–9) at hand-picked heights 327–463.
+- FRC Wall slide 50 (stacked-movie reference): two 3840×2160 movies on the centre panel — movie 0
+  (1920, −1079) `apple:movie-start` chunkOrder 0 referent True; movie 1 (1915, −163)
+  `apple:dissolve` In chunkOrder 1 referent False; class `mixed`, 4 side `map BG.png` dropped.
+  Visual order would put movie 1 first (x 1915 < 1920) — hence build order for overlapping movies.
+  Clipped to the centre panel the VISIBLE rects are (1920, 0, 3840, 1080) and (1920, 0, 3835, 1080):
+  the intersection is 100% of the smaller (movie 1 is 5 px narrower INSIDE movie 0), so slide 50
+  clears the 0.9 stack threshold with room to spare. The FULL item rects only overlap ~0.58 —
+  the mode is decided on the visible rects, never the item rects.
+  Archive diff (offline, 2026-09-20): the two `KN.BuildArchive`s are IDENTICAL except
+  `attributes.animationAttributes.effect` (`apple:movie-start` vs `apple:dissolve`) and the random
+  seed — same `animationType In`, `duration 0.5`, `delivery All at Once`, `eventTrigger 1`. Movie
+  1's chunk is `automatic True, referent False, delay 8.0` (With Build 1, 8 s after movie 0
+  starts). So a build-in is a ONE-FIELD effect rewrite of the clip's auto movie-start build plus
+  the source chunk `delay` — no build creation needed (unverified live).
 
 ### Pill mask law (`dsk_pill.write_pills`)
 - The pill image drawable's own geometry NEVER varies with width (byte-identical across all 8
@@ -246,8 +277,10 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   poke the display (`caffeinate -u -t 2`). Sandboxed shells cannot launch Keynote.
 - Two concurrent Keynote scripts collide destructively; hold an `fcntl.flock` for the batch.
   Detect the process by `CFBundleExecutable` (`Keynote`), not the app name.
-- Peak RSS: 1.18–1.41 GB on a 242 MB deck, 1.83–2.3 GB on the 669 MB GW deck; watchdog default
-  3.0 GB. `-600` = Keynote not running; `-1712` = AppleEvent timeout (retry re-copies the
+- Peak RSS: 1.18–1.41 GB on a 242 MB deck, 1.83–2.3 GB on the 669 MB GW deck, **3.21 GB on the
+  6.7 GB FRC Wall deck (r18, 2-slide generate; its export 1.50 GB)**; watchdog default 3.0 GB —
+  the FRC deck BREACHES it, so launch the dashboard with `OBED_DSK_RSS_LIMIT_GB=8` (r18 used 8 on
+  a 17 GB machine). A breach now names itself in the job error. `-600` = Keynote not running; `-1712` = AppleEvent timeout (retry re-copies the
   pristine scratch, so NEVER retry a pass ≥ 2 — it would run against an unwritten deck).
 - Keynote does NOT purge unreferenced `Data/` on save: the DSK output was 94.7% of the 669 MB
   source. *File → Reduce File Size* is GUI-only; it stays an operator step.
@@ -389,7 +422,9 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     DSK deck to the Exporter rather than growing a second export path.
 24. **Both exporters share the placeholder-materialisation exposure** — UNMEASURED: only the
     assembly path deletes the prepended slot instances after `set base layout`.
-25. **`Full_Report_Card_Wall.key` (6.7 GB, 155 slides) is still unmeasured** for whole-deck live work.
+25. **`Full_Report_Card_Wall.key` (6.7 GB, 155 slides)** — a 2-slide subset ran live in r18 (generate
+    ~5 min incl. a 6.7 GB scratch copy per export, peak RSS 3.21 GB → needs
+    `OBED_DSK_RSS_LIMIT_GB`); a WHOLE-deck run is still unmeasured.
 26. **`saveToken` and the minted media style's inherited picture `frame`** are open questions on
     `mint_media_style` — no offline evidence either way.
 27. **Joint slot fit shrinks a too-long verse instead of splitting** (owner-banked 2026-09-17, from
@@ -401,6 +436,50 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     forced (`--split`) splits. Next slice: cap the joint-fit measurement and route a failed joint
     slot candidate to per-box splitting (slot-authoritative 45pt) instead of `fit_text_stack`; it
     moves the acceptance decks and needs a live text run. Pre-existing; beyond item 12's scope.
+
+28. **Stacked-clip build-IN — DONE, LIVE-VERIFIED r18 (2026-09-20).** `patch_clip_start_timing`
+    rewrites the upper clip's auto `apple:movie-start` build `effect` to the source's
+    `apple:dissolve` (allow-list) and carries the source chunk mode + `delay` through `ClipTiming`
+    (`with_previous` / `after_previous` / `on_click`); plan order = chunk order on a build-in slide;
+    build + chunk `duration` written only when the source differs. Unsupported effects, an
+    `Out`-only build, or a relative build-in whose source predecessor is not the clip directly
+    below (with exactly one source chunk) WARN and keep the plain cascade; two `In` candidates or
+    a PARTIAL stack REFUSE. Live r18 on FRC 48 + 50 (videos-only, dashboard-driven): generated
+    clips at (258, 670) 1404×395 = gold slide 4; slide 50 build chunks mirror the source (movie 0
+    movie-start pos 0; movie 1 dissolve In pos 1, automatic True / referent False / delay 8.0);
+    Keynote opens the patched deck, the Exporter renders A → cross-dissolve at ~8.25 s → B
+    playing; an open + nudge + SAVE in Keynote leaves the builds IDENTICAL. Evidence
+    `~/Desktop/dsk-d5-work/evidence-r18/` (`final50_strip.png`), outputs `…/r18-output/`.
+29. **Stacked-clip intermediates exported BARE — DONE, LIVE-VERIFIED r18.** The upper stacked clip's
+    scratch copy has its source build-in flipped to `apple:movie-start` / After Transition / delay 0
+    (`iwa_movies.bare_source_build_ins`, scratch only, `_SlideJob.bare`). Live: movie 1's
+    intermediate is 18.37 s (= 13.32 s source + the ~5 s hold, NO +8 s), plays from t=0.
+30. **Codex r2/r3 writer hardening.** (a) cross-member build/chunk — MEASURED, KEEP REFUSING: 1,429
+    builds + 1,429 chunks across FRC Wall, Alpha_DSK, DSK_Gen_Export_Input, Gold_Wall_Input and
+    Sermon_PK (GW) — zero live outside their slide's member, zero drawables outside their build's
+    member; no deck to test a cross-member write against, so the fail-closed refusal stays.
+    (b) DONE — the timing write is ONE `_patch_archive_fields` commit (the chunk reorder is the
+    slide archive's `buildChunks` field; it used to be a separate `patch_slide_builds` rewrite,
+    streaming a multi-GB deck twice) and a failed read-back restores the touched members.
+    (c) DONE — page key `stackedMoviesKeepSide`; the chip follows the row's Keep side.
+    (d) DONE — bare-ness is now carried per clip: `ClipResult.bare` mirrors `_SlideJob.bare`,
+    and `assemble_dsk_deck`/`plan_assembly` take `bare_clips[number] -> movie ids` (threaded
+    like `clip_crops`; the dashboard fills it from `clip.bare`). An upper stacked clip not in
+    `bare_clips` gets NO build-in and its own warn-only "not proven bare" warning (checked
+    BEFORE the source candidates, so item 28's two-candidate refusal applies to proven-bare
+    clips only — Codex r4), so a CALLER-SUPPLIED per-movie mapping (Python API only: CLI
+    `--clip` is one path per slide, refused for several movies) can never be double-timed. The
+    exporter bares every upper stacked clip while the assembler rebuilds only its supported
+    subset — deliberate (unsupported = bare + warned, never double-timed).
+    LEFT/RIGHT FLUSH — LIVE r19 PASS (2026-09-20, commit `393e475a`, dashboard-driven, FRC Wall
+    48 left + 50 right, videos-only): slide 48 clip x 43 (w 1404); slide 50 clips x 473, right
+    edge 1877 (upper clip w 1403 → 1876, the source's own 5 px); y 670 h 395 unchanged. The same run
+    re-proved the 0.9 rule + item 30(d) live: slide 50 still `stackedMovies`, 1 build-in bared,
+    upper clip dissolve With Previous delay 8.0; Exporter frames A@3 s / B@12 s. Peak RSS 3.07 GB.
+    Source sha unchanged. Evidence `~/Desktop/dsk-d5-work/evidence-r19/` (`lr-strip.png`).
+    Stack threshold SETTLED (owner, 2026-09-20): raised 0.5 → 0.9 — FRC 50's visible rects overlap
+    100% of the smaller (movie 1 is 5 px narrower inside movie 0), so nothing real needed the
+    loose bound and a row that merely clips can no longer be read as a stack.
 
 ## 5. Live-run recipe
 

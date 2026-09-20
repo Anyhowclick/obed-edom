@@ -278,7 +278,7 @@ export async function validateKeynote(
   return res.json();
 }
 
-/** `{slide, include, action, anchor, keepSide, clip}` — matches `DskDecisionsBody` in `web/app.py`. */
+/** `{slide, include, action, anchor, keepSide, clip, videosOnly}` — matches `DskDecisionsBody` in `web/app.py`. */
 export type DskDecision = {
   slide: number;
   include: boolean;
@@ -286,6 +286,7 @@ export type DskDecision = {
   anchor: string;
   keepSide: boolean;
   clip: string | null;
+  videosOnly: boolean;
 };
 
 /** One row of a DSK propose result's `pages[]`. */
@@ -298,6 +299,9 @@ export type DskPage = {
   isText: boolean;
   skipReason?: string | null;
   needsClip: boolean;
+  canVideosOnly?: boolean;
+  stackedMovies?: boolean;
+  stackedMoviesKeepSide?: boolean;
   decision: DskDecision;
 };
 

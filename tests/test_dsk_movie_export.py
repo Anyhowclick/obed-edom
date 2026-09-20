@@ -702,7 +702,13 @@ def _stub_live(monkeypatch, tmp_path, *, keynote_running=False, stub_content_ass
     monkeypatch.setattr(dme._RssWatchdog, "stop", lambda self: None)
     _set(monkeypatch, "_keynote_pid", lambda: None)
 
-    calls = {"osascript": 0}
+    calls = {"osascript": 0, "bared": []}
+
+    def fake_bare_source_build_ins(deck, targets):
+        calls["bared"].append((Path(deck), {n: list(ids) for n, ids in targets.items()}))
+        return {"refused": False, "reason": None, "touched": [], "applied": 0}
+
+    monkeypatch.setattr(dme, "bare_source_build_ins", fake_bare_source_build_ins)
 
     def fake_run_osascript(script_path, *, timeout=3600, register_proc=None, on_progress=None):
         calls["osascript"] += 1
@@ -2090,6 +2096,162 @@ def test_export_slide_clips_per_movie_produces_one_clip_per_movie_item(monkeypat
     assert by_movie_index[1].crop_rect == Rect(3840.0, 0.0, 1920.0, 1080.0)
 
 
+def _stacked_slide_two_movies():
+    """FRC Wall slide 50's shape: two movies layered on the centre panel."""
+    return {
+        "number": 12,
+        "items": [
+            {"kind": "movie", "kindIndex": 0, "index": 0, "x": 1920.0, "y": -1079.0, "w": 3840.0, "h": 2160.0},
+            {"kind": "movie", "kindIndex": 1, "index": 1, "x": 1915.0, "y": -163.0, "w": 3840.0, "h": 2160.0},
+        ],
+    }
+
+
+def test_export_slide_clips_per_movie_bares_only_the_upper_clip_of_a_stacked_slide(monkeypatch, tmp_path):
+    """The upper stacked clip's intermediate must be the BARE movie: its source build-in left
+    attached would be baked into the clip AND re-created by the assembler, doubling the
+    delay (Codex r2). The first stacked clip gets no build-in from the assembler, so it is
+    exported exactly as before."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    calls = _stub_live(monkeypatch, tmp_path, payload_slides=[_stacked_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+    monkeypatch.setattr(
+        dme, "deck_builds",
+        lambda deck: {12: {"builds": [
+            {"kind": "movie", "kindIndex": 0, "chunkOrder": [0]},
+            {"kind": "movie", "kindIndex": 1, "chunkOrder": [1]},
+        ]}},
+    )
+
+    dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert len(calls["bared"]) == 1
+    deck, targets = calls["bared"][0]
+    assert deck != fw
+    assert deck.name == fw.name and deck.parent.name.startswith(".dsk-export-")
+    assert targets == {12: [("movie", 1)]}
+
+
+def test_clip_result_bare_marks_only_the_upper_clip_of_a_stacked_slide(monkeypatch, tmp_path):
+    """Plan §4 item 30(d): the assembler may only write a source build-in onto a clip it
+    knows was exported BARE, so `ClipResult.bare` must carry the job's own flag out to the
+    caller -- true for the upper stacked clip, false for the one below it."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[_stacked_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+    monkeypatch.setattr(
+        dme, "deck_builds",
+        lambda deck: {12: {"builds": [
+            {"kind": "movie", "kindIndex": 0, "chunkOrder": [0]},
+            {"kind": "movie", "kindIndex": 1, "chunkOrder": [1]},
+        ]}},
+    )
+
+    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert {r.movie_id: r.bare for r in results} == {("movie", 0): False, ("movie", 1): True}
+
+
+def test_clip_result_bare_is_false_for_a_side_by_side_slide(monkeypatch, tmp_path):
+    """Null control: nothing on an unstacked row is bared, so no clip is ever eligible for
+    a build-in write."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert [r.bare for r in results] == [False, False]
+
+
+def test_export_slide_clips_per_movie_does_not_bare_a_side_by_side_slide(monkeypatch, tmp_path):
+    """Null control: an ordinary row of movies keeps today's export untouched, so a movie
+    with builds the barer would refuse cannot newly fail the whole export."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    calls = _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert calls["bared"] == []
+
+
+def test_export_slide_clips_does_not_bare_build_ins_in_whole_slide_mode(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    calls = _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    dme.export_slide_clips(fw, [12], out_dir, log=lambda *_: None)
+
+    assert calls["bared"] == []
+
+
+def test_export_slide_clips_names_the_memory_limit_when_the_watchdog_breaches(monkeypatch, tmp_path):
+    """Live r18: the 6.7 GB FRC deck breached the 3 GB default and the job error was a bare
+    "Keynote export AppleScript failed:" with empty stderr. The breach must name itself and
+    the override."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    def breaching_start(self):
+        self.breached = True
+        self.peak_rss_bytes = 3_400_000_000
+
+    monkeypatch.setattr(dme._RssWatchdog, "start", breaching_start)
+    _set(monkeypatch, "_run_osascript", lambda *a, **k: _FakeCompleted(returncode=-15, stderr=""))
+
+    with pytest.raises(RuntimeError, match=r"memory limit.*peak 3\.4 GB.*OBED_DSK_RSS_LIMIT_GB"):
+        dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+
+def test_bare_pure_video_movies_refuses_to_touch_the_source_deck(tmp_path):
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    jobs = [dme._SlideJob(slide=12, ordinal=1, crop_rect=Rect(0, 0, 10, 10), dest=fw, tmp=fw, movie_id=("movie", 0), bare=True)]
+    with pytest.raises(RuntimeError, match="refusing to bare source build-ins on the source deck"):
+        dme._bare_pure_video_movies(fw, fw, jobs, lambda *_: None)
+
+
+def test_bare_pure_video_movies_surfaces_a_refusal(monkeypatch, tmp_path):
+    scratch = tmp_path / "scratch" / "Sermon.key"
+    scratch.parent.mkdir()
+    scratch.write_bytes(b"key")
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    monkeypatch.setattr(
+        dme, "bare_source_build_ins",
+        lambda deck, targets: {"refused": True, "reason": "slide 12 movie 1: 2 listed build(s)", "touched": [], "applied": 0},
+    )
+    jobs = [dme._SlideJob(slide=12, ordinal=1, crop_rect=Rect(0, 0, 10, 10), dest=fw, tmp=fw, movie_id=("movie", 1), bare=True)]
+    with pytest.raises(RuntimeError, match="pure-video intermediate: slide 12 movie 1"):
+        dme._bare_pure_video_movies(scratch, fw, jobs, lambda *_: None)
+
+
 def test_export_slide_clips_per_movie_fires_on_progress_per_clip_with_distinct_wall_s(monkeypatch, tmp_path):
     out_dir = tmp_path / "clips"
     out_dir.mkdir()
@@ -2465,3 +2627,205 @@ def test_derive_pure_video_delete_ids_orders_fw12_group_last_within_its_class():
         by_kind.setdefault(kind, []).append(kind_index)
     for kind_indexes in by_kind.values():
         assert kind_indexes == sorted(kind_indexes, reverse=True)
+
+
+# --------------------------------------------------------------------------
+# movie_order -- visual for side-by-side rows, SOURCE BUILD ORDER when stacked
+# --------------------------------------------------------------------------
+def test_movies_stacked_false_for_side_by_side_panels():
+    # Two centre/right panels that merely abut share an edge but no area: they stay
+    # "unstacked" and keep the plain left-to-right visual order.
+    rects = {("movie", 0): Rect(0, 0, 3840, 1080), ("movie", 1): Rect(3840, 0, 3840, 1080)}
+    assert not dme.movies_stacked(rects)
+    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
+
+
+def test_movies_stacked_false_for_hairline_clip():
+    # A sliver of overlap (1% of the smaller rect's area) is a layout hairline, not a stack.
+    rects = {("movie", 0): Rect(0, 0, 1000, 1000), ("movie", 1): Rect(990, 0, 1000, 1000)}
+    assert not dme.movies_stacked(rects)
+    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
+
+
+def test_movies_stacked_false_for_a_pair_covering_four_fifths_of_the_smaller():
+    # Owner 2026-09-20: the threshold is 0.9, so a heavy clip -- 1600x1080 of the smaller
+    # 2000x1080, i.e. 0.8 -- is still a row, not a layered pair.
+    rects = {("movie", 0): Rect(1920, 0, 2000, 1080), ("movie", 1): Rect(2320, 0, 2000, 1080)}
+    assert not dme.movies_stacked(rects)
+    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
+
+
+def test_movies_stacked_true_just_above_the_threshold():
+    # 1900x1080 of the smaller 2000x1080 = 0.95, over the 0.9 threshold.
+    rects = {("movie", 0): Rect(1920, 0, 2000, 1080), ("movie", 1): Rect(2020, 0, 2000, 1080)}
+    assert dme.movies_stacked(rects)
+    assert dme.stack_mode(rects) == "stacked"
+
+
+def test_movies_stacked_true_for_the_visible_slide_50_shape():
+    # Full_Report_Card_Wall.key slide 50 clipped to the centre panel: movie 1 is 5 px
+    # narrower INSIDE movie 0, so the intersection is 100% of the smaller visible rect.
+    # The FULL item rects only overlap ~0.58 and no longer count as a stack.
+    rects = {
+        ("movie", 0): Rect(1920, -1079, 3840, 2160),
+        ("movie", 1): Rect(1915, -163, 3840, 2160),
+    }
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert (visible[("movie", 0)].x, visible[("movie", 0)].w) == (1920.0, 3840.0)
+    assert (visible[("movie", 1)].x, visible[("movie", 1)].w) == (1920.0, 3835.0)
+    assert dme.movies_stacked(visible)
+    assert not dme.movies_stacked(rects)
+
+
+def test_movie_order_stacked_follows_source_build_order_not_x():
+    # Visually movie 1 sorts first (x 1915 < 1920), but movie 0 carries the
+    # apple:movie-start build at chunk 0 and movie 1 the apple:dissolve In at chunk 1:
+    # movie 0 plays, then movie 1 dissolves in on top.
+    rects = {
+        ("movie", 0): Rect(1920, -1079, 3840, 2160),
+        ("movie", 1): Rect(1915, -163, 3840, 2160),
+    }
+    assert dme.visual_movie_order(rects) == [("movie", 1), ("movie", 0)]
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    order = dme.movie_order(visible, {("movie", 0): 0, ("movie", 1): 1})
+    assert order == [("movie", 0), ("movie", 1)]
+
+
+def test_movie_order_stacked_movie_without_build_sorts_first_by_z():
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+        ("movie", 2): Rect(1920, 0, 3840, 1080),
+    }
+    order = dme.movie_order(
+        rects,
+        {("movie", 1): 3},
+        {("movie", 0): 7, ("movie", 2): 2},
+    )
+    assert order == [("movie", 2), ("movie", 0), ("movie", 1)]
+
+
+def test_movie_order_stacked_refuses_without_build_order():
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+    }
+    with pytest.raises(ValueError, match="stacked"):
+        dme.movie_order(rects)
+
+
+def test_movie_order_stacked_refuses_on_build_order_tie():
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+    }
+    with pytest.raises(ValueError, match="tie at build order"):
+        dme.movie_order(rects, {("movie", 0): 1, ("movie", 1): 1})
+
+
+def test_movie_order_stacked_refuses_unbuilt_movie_without_z_order():
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+    }
+    with pytest.raises(ValueError, match="no build and no z-order"):
+        dme.movie_order(rects, {("movie", 0): 0})
+
+
+def test_stack_mode_refuses_a_partial_stack():
+    # Two movies cover each other, a third sits beside them: visual order and build order
+    # each govern part of the slide, so there is no single order to derive.
+    rects = {
+        ("movie", 0): Rect(1920, 0, 3840, 1080),
+        ("movie", 1): Rect(1920, 0, 3840, 1080),
+        ("movie", 2): Rect(5760, 0, 1920, 1080),
+    }
+    with pytest.raises(ValueError, match="partially overlap"):
+        dme.stack_mode(rects)
+    with pytest.raises(ValueError, match="partially overlap"):
+        dme.movie_order(rects, {("movie", 0): 0, ("movie", 1): 1, ("movie", 2): 2})
+
+
+def test_stack_mode_visual_for_a_row_whose_neighbours_clip():
+    # Codex r2: three movies side by side in the centre panel, each adjacent pair clipping
+    # into the next by ~6% of the smaller visible area (the outer two do not meet at all).
+    # Clipping is not layering: the row is ordinary, so it keeps the visual order instead
+    # of refusing as a partial stack.
+    rects = {
+        ("movie", 0): Rect(1920, 0, 1400, 1080),
+        ("movie", 1): Rect(3236, 0, 1400, 1080),
+        ("movie", 2): Rect(4552, 0, 1400, 1080),
+    }
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert dme.stack_mode(visible) == "visual"
+    assert not dme.movies_stacked(visible)
+    assert dme.movie_order(visible) == [("movie", 0), ("movie", 1), ("movie", 2)]
+
+
+def test_stack_mode_stacked_for_the_visible_slide_50_shape():
+    # Full_Report_Card_Wall.key slide 50 still layers once clipped to the centre panel:
+    # each movie's visible rect is all but covered by the other.
+    rects = {
+        ("movie", 0): Rect(1920, -1079, 3840, 2160),
+        ("movie", 1): Rect(1915, -163, 3840, 2160),
+    }
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert dme.stack_mode(visible) == "stacked"
+
+
+def test_stack_mode_refuses_a_partial_stack_of_nearly_covered_movies():
+    # A genuine partial stack: movies 0 and 1 cover 95% of each other (over the 0.9
+    # threshold), movie 2 sits clear of both. Real layering plus a plain neighbour still
+    # has no single order.
+    rects = {
+        ("movie", 0): Rect(1920, 0, 2000, 1080),
+        ("movie", 1): Rect(2020, 0, 2000, 1080),
+        ("movie", 2): Rect(4100, 0, 1000, 1080),
+    }
+    with pytest.raises(ValueError, match="partially overlap"):
+        dme.stack_mode(rects)
+
+
+def test_stack_mode_visual_for_a_pair_below_the_threshold_beside_a_third():
+    # The same shape at 80% overlap is no longer a stack at all, so the slide is an
+    # ordinary row and keeps the visual order instead of refusing.
+    rects = {
+        ("movie", 0): Rect(1920, 0, 2000, 1080),
+        ("movie", 1): Rect(2320, 0, 2000, 1080),
+        ("movie", 2): Rect(4600, 0, 1000, 1080),
+    }
+    assert dme.stack_mode(rects) == "visual"
+    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1), ("movie", 2)]
+
+
+def test_visible_movie_rects_decide_the_mode_the_full_rects_would_miss():
+    # Codex r1: the full item rects only clip (a third of the smaller), but what the clip
+    # actually shows -- the centre-panel crop, which cuts movie 0 down to the sliver that
+    # movie 1 covers -- is a stack. One predicate, one mode.
+    rects = {("movie", 0): Rect(0, 0, 3000, 1080), ("movie", 1): Rect(2000, 0, 3000, 1080)}
+    assert dme.stack_mode(rects) == "visual"
+
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert dme.stack_mode(visible) == "stacked"
+    # the caller's already-decided mode wins over re-deriving it from the rects passed in
+    order = dme.movie_order(rects, {("movie", 0): 1, ("movie", 1): 0}, mode="stacked")
+    assert order == [("movie", 1), ("movie", 0)]
+
+
+def test_visible_movie_rects_clip_to_the_crop_and_zero_outside_it():
+    rects = {("movie", 0): Rect(1920, 0, 3840, 1080), ("movie", 1): Rect(0, 0, 100, 1080)}
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert (visible[("movie", 0)].x, visible[("movie", 0)].w) == (1920.0, 3840.0)
+    assert visible[("movie", 1)].w == 0.0
+    assert dme.stack_mode(visible) == "visual"
+
+
+def test_movie_build_order_takes_the_lowest_chunk_per_movie():
+    records = [
+        {"kind": "movie", "kindIndex": 0, "chunkOrder": [3, 1]},
+        {"kind": "movie", "kindIndex": 1, "chunkOrder": [2]},
+        {"kind": "movie", "kindIndex": 2, "chunkOrder": []},
+        {"kind": "image", "kindIndex": 0, "chunkOrder": [0]},
+    ]
+    order = dme.movie_build_order(records, [("movie", 0), ("movie", 1), ("movie", 2)])
+    assert order == {("movie", 0): 1, ("movie", 1): 2}
