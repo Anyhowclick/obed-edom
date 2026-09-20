@@ -229,3 +229,35 @@ Go-to driven exactly as the host does (`LiveOutputHost.execute("goTo")` → inde
   (liveFrac 0.005); 8 shots spaced 0.35 s read 0.795–0.797 pass. Rapid `captureScreenshot` bursts are untrustworthy here.
 Unmeasured: OBS CEF `clip-path: path()`, 2560×1440 for the punch, go-to mid-move (rejected as busy), whether the missing
 `<video>` after go-to is a player behaviour or an authoring setting (movies "start on click"?).
+
+## Follow-up probes P1–P4 (2026-09-20 late, Opus; evidence `output/live-visible-content/alt-followup/`)
+- **P1 (offline) — RESOLVED: `Untitled.mov` is the asset that moves/scales across 3→4** (scale ×1.327/×1.319, translation
+  (285.9, −44.0), `contents` cross-fade to slide 4's 1274×364 texture). `VID-20250608-WA0125.mp4` is NOT on slide 4 at all:
+  the move fades it `opacity 1→0` over 0.5 s then hides it. The per-`clear` peer's E4 "correct binding" was wrong; its
+  ghosting result at 3→4 should be read as "uploaded the wrong clip" — moot, since 3→4 has no invisible window.
+- **P2 — the RULE for the invisible window (player `main.js` code-read, offsets 2292003 / 2312893 / 2316990 / 2357683 /
+  2368201).** A closed list of effects renders through WebGL (`apple:magic-move-implied-motion-path`, `apple:wipe-iris`,
+  the BUK/KLN set — Anvil, Twist, Flop, ColorPlanes, Flame, Confetti, Diffuse, Fireworks, Shimmer, Sparkle — and
+  `ca-text-shimmer`/`-sparkle`). The effect sets the DOM layer to opacity 0 and NEVER tears its canvas down; the canvas
+  dies only when the NEXT event is rendered. After the transition the player fires the next event by itself iff it has
+  `automaticPlay: true`. Slide 4's first event is an auto `apple:movie-start` ⇒ heals at settle; slide 2's first event
+  is a click-driven build ⇒ WebGL for the whole dwell. **Prevalence: any WebGL-listed transition onto a slide whose first
+  pending event is click-driven (or that has no further events) — the common case in a build-driven deck, unbounded in
+  time.** Corollary: the baseline's overlap refusal and the invisible-movie defect apply only to such slides.
+- **P3 — opacity confirmed, with a correction.** The settled 88-call frame contains NO `Opacity` call (only `mixFactor` and
+  two `MVPMatrix`); Opacity is persistent PROGRAM state set during the move. `getUniform(prog,'Opacity')` at rest: green
+  square's draw (idx 83, tex 6) = exactly 1.0 (one other draw = 0). Injecting `uniform1f(Opacity, 0.29468…)` before draw 83
+  gives green centre (29,177,0) → (184,228,176) = the exact arithmetic blend over (249,249,249); grating reads through
+  the square, square still in front. CAVEAT: restoring the poster does NOT undo it — the value stays in program state and
+  must be written back to 1.0 explicitly. Owner decision 2026-09-20 (relayed): no opacity patch in GL-replay v1; plan the
+  general per-draw fix ("G2") next.
+- **P4 — ON-AIR ISSUE CONFIRMED in the product path (continuity qualified, runtime v4): after ANY go-to the destination's
+  movies are frozen posters until the next `advance`.** Identical with continuity off: 0 `<video>` at +1 s and +6 s,
+  liveFrac 0.000 (8 shots × 0.35 s) for goTo 2 / 3 / 4 from slide 1 and goTo 1 back from slide 3; after one `advance`
+  the videos appear and read 0.991–0.9999 live. The picture looks normal (a detailed still), it just never moves. Cause:
+  the player's go-to lands at the slide's INITIAL state, BEFORE the auto `apple:movie-start` build, and does not auto-fire
+  it (host snapshot: `goToSemantics "restart-at-initial-state"`, `playerState "IdleAtInitialState"`). Not
+  fixture-specific: every auto-starting movie is exported as such a build. The host has no `previous` — backward
+  navigation IS a go-to. Unexercised lead: the player's `jumpToSlide` takes an `automaticPlay` argument (offset ≈2361129).
+  Candidate fixes (unplanned): host follows a go-to with the auto-play builds the player skipped (must not consume an
+  operator-visible click-driven build) · use the `automaticPlay` path · presenter warns "movies idle until next advance".
