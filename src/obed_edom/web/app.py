@@ -75,6 +75,7 @@ from obed_edom.framing import (
     propose_framings,
     reuse_framings,
     save_framings,
+    template_framing_digests,
 )
 from obed_edom.inspect import (
     complete_cached_wall_payload,
@@ -1026,6 +1027,7 @@ def create_app() -> FastAPI:
             list(result.get("wallDigests") or []),
             str(result.get("templateDigest") or ""),
             decisions,
+            template_digests=list(result.get("templateDigests") or []),
             job_id=job_id,
         )
         authoritative = payload.decisions is not None
@@ -2544,13 +2546,31 @@ def _run_resize_propose(
     if settings["reusePairings"]:
         record = load_framings(path, template)
         reuse = reuse_framings(
-            record, deck_slide_digests(full_context), deck_digest(template)
+            record,
+            deck_slide_digests(full_context),
+            deck_digest(template),
+            template_framing_digests(template_data),
         )
         if reuse.carried:
             job.log(
                 f"Carried {reuse.carried} earlier framing decision(s) onto this deck"
-                + (f", dropped {reuse.dropped} whose page changed" if reuse.dropped else "")
+                + (
+                    f", dropped {reuse.dropped} that could not be matched to the current "
+                    "page or template framing"
+                    if reuse.dropped
+                    else ""
+                )
                 + "."
+            )
+        elif reuse.dropped and reuse.template_changed:
+            job.log(
+                f"The template changed, so {reuse.dropped} saved framing decision(s) "
+                "could not be matched to the current template framing and are being re-offered."
+            )
+        if reuse.unpinned:
+            job.log(
+                f"Kept the side-content choice on {reuse.unpinned} page(s) whose pinned "
+                "framing could not be matched; those framings are being re-offered."
             )
         if reuse.resurfaced:
             job.log(

@@ -1722,6 +1722,139 @@ def test_match_character_style_uses_colour_when_face_matches():
     assert picked["color"] == white
 
 
+def test_match_character_style_colour_tie_falls_back_to_size():
+    """map-label-colour-tie: a near-white 25pt sample must not beat a 40/35pt
+    sample whose colour is a few 0.0001s off pure white — colours within
+    STYLE_COLOR_TIE are a tie and size decides. Old behaviour (colour first,
+    no tolerance) would always pick the 25pt sample here."""
+    from obed_edom.map_remap import match_character_style
+
+    styles = [
+        {"font": "Amplitude-Bold", "size": 40.0, "color": [0.99989, 1, 0.99985], "text": "CHC Kuching"},
+        {"font": "Amplitude-Bold", "size": 25.0, "color": [0.99998, 1, 1], "text": "Myanmar"},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": [0.99989, 1, 0.99985], "text": "CHC Foshan"},
+    ]
+    white = [1.0, 1.0, 1.0]
+    label_35 = _item(kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=35, color=white)
+    picked_35 = match_character_style(label_35, styles, size_ratio=1.0)
+    assert picked_35["size"] == 35.0  # old code: 25.0
+    label_40 = _item(kind="text", text="CHC Kuching", font="Amplitude-Bold", size=40, color=white)
+    picked_40 = match_character_style(label_40, styles, size_ratio=1.0)
+    assert picked_40["size"] == 40.0  # colour tie between 40/35, size decides  # old code: 25.0
+
+
+def test_match_character_style_prefer_slide_restricts_the_pool():
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    styles = [
+        {"font": "Amplitude-Bold", "size": 40.0, "color": white, "text": "CHC Kuching", "slides": [3]},
+        {"font": "Amplitude-Bold", "size": 25.0, "color": white, "text": "Myanmar", "slides": [4]},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": white, "text": "CHC Foshan", "slides": [5]},
+    ]
+    label = _item(kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=40, color=white)
+    # slide 5 only has a 35pt sample; it wins even though 40pt is nearer in size.
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=5)["size"] == 35.0
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=4)["size"] == 25.0
+    # No Amplitude-Bold sample on slide 9 -> falls back to the whole pool.
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=9)["size"] == 40.0
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=None)["size"] == 40.0
+
+
+def test_match_character_style_prefer_slide_needs_a_colour_match():
+    """The mapped slide only overrides the pool with a sample of the SAME colour: a red
+    sample on the mapped slide must not size a white label when a white sample exists
+    elsewhere."""
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    red = [0.987, 0.222, 0.201]
+    styles = [
+        {"font": "Amplitude-Bold", "size": 20.0, "color": red, "text": "CHC Aaliana", "slides": [5]},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": white, "text": "CHC Foshan", "slides": [3]},
+    ]
+    label = _item(kind="text", text="CHC Fu Chang", font="Amplitude-Bold", size=35, color=white)
+    picked = match_character_style(label, styles, size_ratio=1.0, prefer_slide=5)
+    assert picked["size"] == 35.0 and picked["color"] == white
+
+
+def test_match_character_style_prefer_slide_ignores_uncoloured_samples():
+    """`color_distance` reads a missing colour as 0.0, which must NOT count as a colour
+    match for the mapped-slide preference: an uncoloured 25pt sample on the mapped slide
+    may not beat a white 35pt sample elsewhere."""
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    styles = [
+        {"font": "Amplitude-Bold", "size": 25.0, "text": "Myanmar", "slides": [5]},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": white, "text": "CHC Foshan", "slides": [3]},
+    ]
+    label = _item(kind="text", text="CHC Fu Chang", font="Amplitude-Bold", size=35, color=white)
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=5)["size"] == 35.0
+    uncoloured_label = _item(kind="text", text="CHC Fu Chang", font="Amplitude-Bold", size=35)
+    assert match_character_style(uncoloured_label, styles, size_ratio=1.0, prefer_slide=5)["size"] == 35.0
+
+
+def test_match_character_style_prefer_slide_with_several_samples_lets_size_decide():
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    styles = [
+        {"font": "Amplitude-Bold", "size": 40.0, "color": white, "text": "CHC Kuching", "slides": [3]},
+        {"font": "Amplitude-Bold", "size": 60.0, "color": white, "text": "Malaysia", "slides": [3]},
+        {"font": "Amplitude-Bold", "size": 58.0, "color": white, "text": "Elsewhere", "slides": [7]},
+    ]
+    label = _item(kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=40, color=white)
+    assert match_character_style(label, styles, size_ratio=1.0, prefer_slide=3)["size"] == 40.0
+    title = _item(kind="text", text="Malaysia", font="Amplitude-Bold", size=57, color=white)
+    # 58pt elsewhere is nearer, but the mapped slide's own 60pt sample wins.
+    assert match_character_style(title, styles, size_ratio=1.0, prefer_slide=3)["size"] == 60.0
+
+
+def test_match_character_style_colour_tolerance_does_not_hide_real_colour():
+    """A genuinely different colour (red sample) must still lose to a white
+    sample for white wall text, even when the red sample is closer in size."""
+    from obed_edom.map_remap import match_character_style
+
+    white = [1.0, 1.0, 1.0]
+    red = [0.987, 0.222, 0.201]
+    styles = [
+        {"font": "Amplitude-Regular", "size": 20.0, "color": red, "text": "CHC Aaliana"},
+        {"font": "Amplitude-Regular", "size": 32.0, "color": white, "text": "UPDATE"},
+    ]
+    label = _item(kind="text", text="UPDATE", font="Amplitude-Regular", size=21, color=white)
+    picked = match_character_style(label, styles, size_ratio=1.0)
+    assert picked["color"] == white
+
+
+def test_template_character_styles_records_slide_numbers():
+    from obed_edom.map_remap import template_character_styles
+
+    slides = [
+        {
+            "number": 3,
+            "items": [_item(kind="text", text="CHC Kuching", font="Amplitude-Bold", size=40, color=[1, 1, 1])],
+        },
+        {
+            "number": 4,
+            "items": [_item(kind="text", text="Myanmar", font="Amplitude-Bold", size=25, color=[1, 1, 1])],
+        },
+        {
+            "number": 5,
+            "items": [
+                _item(kind="text", text="CHC Foshan", font="Amplitude-Bold", size=35, color=[1, 1, 1]),
+                _item(kind="text", text="CHC Kuching again", font="Amplitude-Bold", size=40, color=[1, 1, 1]),
+            ],
+        },
+    ]
+    styles = template_character_styles(slides)
+    by_size = {s["size"]: s for s in styles}
+    assert by_size[40.0]["slides"] == [3, 5]  # deduped: one record, two slides
+    assert by_size[25.0]["slides"] == [4]
+    assert by_size[35.0]["slides"] == [5]
+    assert len(styles) == 3
+
+
 def _preadd_chain_wall(*, slide2_extra, slide3_items, groupChildText2=None):
     """A base slide (map+40 pins) plus 4 junk shapes that donor search always sheds
     by slide 2 — without the junk, a reuse target 2 slides down ties slide 1 and
@@ -3158,6 +3291,34 @@ def test_demoted_label_takes_the_swatch_matching_its_ridden_affine():
     assert label_t.font_size == 40.0
 
 
+def test_demoted_label_prefers_its_mapped_template_slides_sample():
+    """End to end through plan_slide_transforms: with a colour tie across the
+    whole pool, the label must take the sample tagged with its own recipe's
+    templateSlide, not the globally nearest-size sample from another slide."""
+    label = _item(
+        kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=40,
+        x=4200, y=300, w=235, h=52, kindIndex=40, color=[1.0, 1.0, 1.0],
+    )
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+            label,
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, _map_and_swatch_template())
+    white = [1.0, 1.0, 1.0]
+    recipe["templateSlide"] = 5
+    recipe["characterStyles"] = [
+        {"font": "Amplitude-Bold", "size": 40.0, "color": white, "text": "CHC Kuching", "slides": [3]},
+        {"font": "Amplitude-Bold", "size": 35.0, "color": white, "text": "CHC Foshan", "slides": [5]},
+    ]
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    label_t = next(t for t in out if t.kind == "text" and t.kind_index == 40)
+    assert label_t.font_size == 35.0  # slide 5's own sample, not the nearer-size 40pt from slide 3
+
+
 def test_preview_wanted_covers_roster_keep_slides_without_the_whitelist():
     """resolve_source_previews is no longer gated on the whitelist, but only the
     slides the plan will consume are decoded (a full preview set is ~3.9GB as
@@ -4203,9 +4364,12 @@ def test_packing_a_single_tall_column_uses_the_top_margin():
 @lru_cache(maxsize=1)
 def _gold_pin_continuity_plan():
     """Gold-deck oracle for the pin-continuity fix (offline, Keynote-free): slides
-    6 and 7 are pinned to template slide 4, as the operator would pin them; slide 5
-    is left unpinned and reaches template 4 on its own. Returns None if the Gold
-    wall/template decks are not present on this machine."""
+    15 and 16 are pinned to template slide 5, as the operator would pin them; slide 14
+    is left unpinned and reaches template 5 on its own. Returns None if the Gold
+    wall/template decks are not present on this machine.
+
+    Slide numbers follow the live deck: the 2026-09-19 edit (Myanmar pages + a Myanmar
+    base template slide) moved wall 5-10 to 14-19 and template 4 to 5."""
     from pathlib import Path
 
     from obed_edom.offline_inspect import offline_wall_payload
@@ -4222,19 +4386,19 @@ def _gold_pin_continuity_plan():
     fitted: list[int] = []
     transforms = plan_payload_transforms(
         wall, recipe, template=template,
-        framing_overrides={6: 4, 7: 4},
+        framing_overrides={15: 5, 16: 5},
         framing_report=rows, fitted_slides=fitted,
     )
     return {"wall": wall, "template": template, "rows": rows, "fitted": fitted, "transforms": transforms}
 
 
 def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
-    """Slides 6 and 7 are pinned to template slide 4; their own art collapses to a
+    """Slides 15 and 16 are pinned to template slide 5; their own art collapses to a
     sliver, so they used to fall back to their own degenerate cover (a hand crop of
-    `Wilderness.png`, x=-544). Slide 5, left unpinned, reaches template 4 on its
-    own -- item 1 lets 6 and 7 pick that up as their adjacent sibling on the same
+    `Wilderness.png`, x=-544). Slide 14, left unpinned, reaches template 5 on its
+    own -- item 1 lets 15 and 16 pick that up as their adjacent sibling on the same
     template, and the owner's ty-clamp keeps the reused panel full-bleed instead of
-    inheriting slide 5's y=61/h=947 inset."""
+    inheriting slide 14's y=61/h=947 inset."""
     data = _gold_pin_continuity_plan()
     if data is None:
         pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
@@ -4242,15 +4406,15 @@ def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
     rows, fitted, transforms = data["rows"], data["fitted"], data["transforms"]
     by_slide = {r["slide"]: r for r in rows}
 
-    assert by_slide[5]["templateSlide"] == 4
-    assert by_slide[5]["requested"] is None
-    assert by_slide[5]["source"] == "template-layout"
-    assert by_slide[5]["pairQuality"] == 1
+    assert by_slide[14]["templateSlide"] == 5
+    assert by_slide[14]["requested"] is None
+    assert by_slide[14]["source"] == "template-layout"
+    assert by_slide[14]["pairQuality"] == 1
 
-    for n in (6, 7):
+    for n in (15, 16):
         row = by_slide[n]
-        assert row["templateSlide"] == 4
-        assert row["requested"] == 4
+        assert row["templateSlide"] == 5
+        assert row["requested"] == 5
         assert row["source"] == "sibling-affine"
         assert row["reusedSibling"] is True
         assert row["pinOverridden"] is False
@@ -4262,33 +4426,34 @@ def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
         single = {"slideWidth": wall["slideWidth"], "slideHeight": wall["slideHeight"], "slides": [slide]}
         return learn_recipe(single, template)
 
-    a5 = frame_affine(_own_recipe(5))
-    assert a5.s == 1.0 and a5.tx == -2932.0 and a5.ty == 130.0
+    a14 = frame_affine(_own_recipe(14))
+    assert a14.s == 1.0 and a14.tx == -2932.0 and a14.ty == 130.0
 
-    for n in (8, 9):
-        # 100px off slide 5's own framing: proves they were not dragged onto it.
+    for n in (17, 18):
+        # 100px off slide 14's own framing: proves they were not dragged onto it.
         assert frame_affine(_own_recipe(n)).tx == -3032.0
 
-    for n in (6, 7):
+    for n in (15, 16):
         slide = next(s for s in wall["slides"] if s.get("number") == n)
         china_idx = next(
             i for i, it in enumerate(slide.get("items") or []) if "China Adjusted" in (it.get("fileName") or "")
         )
         t = next(t for t in transforms if t.slide_number == n and t.item_index == china_idx)
-        assert t.x == -1111.0  # post-clamp: 1821 - 2932, slide 5's tx untouched (width already covers)
-        assert t.y == 0.0  # post-clamp: slide 5's ty=130 inset clamped to close the gap
+        assert t.x == -1111.0  # post-clamp: 1821 - 2932, slide 14's tx untouched (width already covers)
+        assert t.y == 0.0  # post-clamp: slide 14's ty=130 inset clamped to close the gap
         assert t.x != -544.0  # -544 is Wilderness.png's hand crop -- the bug's signature
 
-    assert fitted == [10]
+    assert fitted == [19]
 
 
 def test_gold_slide_7_reports_excluded_overlays():
-    """Item 2: slide 7's coverage is honest about what it excluded from
-    `onCanvas`, without gating on it (the owner accepted the stranding)."""
+    """Item 2: slide 16's coverage (slide 7 before the 2026-09-19 deck edit) is honest
+    about what it excluded from `onCanvas`, without gating on it (the owner accepted
+    the stranding)."""
     data = _gold_pin_continuity_plan()
     if data is None:
         pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
-    row = next(r for r in data["rows"] if r["slide"] == 7)
+    row = next(r for r in data["rows"] if r["slide"] == 16)
     assert row["onCanvas"] == 0.5  # R2 tripwire: exactly MIN_ON_CANVAS_FRACTION, strict `<` still passes it
     assert row["excluded"] == 13
     assert row["excludedOffCanvas"] == 11
@@ -5385,15 +5550,16 @@ def _gold_roster_payload():
 
 
 def test_gold_roster_is_dropped_on_every_slide_after_the_church_list():
-    """Owner rule (2026-09-05): Gold keeps the roster on 11 and 12 only. On 14-17 it is two
-    persisted groups (113 and 84 church-name leaves), invisible to the text-only roster rule
-    before this fix, and hidden only incidentally by the side-panel branch."""
+    """Owner rule (2026-09-05): Gold keeps the roster on its first two roster slides only
+    (20 and 21; 11 and 12 before the 2026-09-19 deck edit). On 23-26 it is two persisted
+    groups (113 and 84 church-name leaves), invisible to the text-only roster rule before
+    this fix, and hidden only incidentally by the side-panel branch."""
     from obed_edom.map_remap import roster_slides
 
     wall = _gold_roster_payload()
     if wall is None:
         pytest.skip("Gold wall deck not available; refuse to open Keynote")
-    assert roster_slides(wall["slides"]) == ({11, 12}, {13, 14, 15, 16, 17})
-    s14 = next(s for s in wall["slides"] if s.get("number") == 14)
-    gct = {int(k): v for k, v in (s14.get("groupChildText") or {}).items()}
-    assert len(name_column_ids(s14["items"], gct)) == 2
+    assert roster_slides(wall["slides"]) == ({20, 21}, {22, 23, 24, 25, 26})
+    s23 = next(s for s in wall["slides"] if s.get("number") == 23)
+    gct = {int(k): v for k, v in (s23.get("groupChildText") or {}).items()}
+    assert len(name_column_ids(s23["items"], gct)) == 2
