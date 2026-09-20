@@ -195,3 +195,10 @@ Full numbers: "Paint-oracle E0" in [`keynote_live_alternatives_research.md`](key
 - §4.1: record `uniqueShas` for forensics only — it cannot detect a misread burst (12/12 unique while reading 0.004).
 - E0 gate: (i)–(iii) satisfied; (iv) OBS attach mode NOT measured ⇒ A must not become the default yet (D-d stands).
 - D-a is effectively answered by measurement: A, poke behind a flag, no `fromSurface`. D-b…D-e remain the owner's.
+
+## 13. Owner decisions — ANSWERED 2026-09-20
+- D-a: profile A (8 shots ≥360 ms) default; DOM poke behind an off-by-default flag; no `fromSurface` (settled by E0).
+- D-b: land the in-page GL oracle NOW, inert-but-contracted.
+- D-c: oracle disagreement ⇒ inconclusive-and-fail.
+- D-d: the DOM stimulus in OBS attach mode must be measured before any offset change lands.
+- D-e: FULL re-qualification suite in the same PR.

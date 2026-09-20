@@ -284,3 +284,54 @@ UNSPACED back-to-back captures. That is NOT the product gate's profile: `BURST_O
   (130 ms) sits inside the stale window and survives only via max−min over later shots — A adds margin, it does not fix
   a broken gate. NOT to land as the default until the OBS attach arm is measured (needs the owner's OBS). Screencast
   arm not run (unnecessary).
+
+## Pooled decoder as texture source + stand-down hand-off (2026-09-20 night, Opus, headless; evidence `output/live-visible-content/alt-pooled/`)
+- **Q0 — YES, with the product's existing pool, unchanged.** 60 s each at 1920×1080: never-attached LIVE; attached then
+  REMOVED with no keep-warm **DEAD at once** (removing a playing `<video>` pauses it; rVFC never fires again); **the
+  runtime's own pooling (detached, held in a Map, `play()` re-tried every 200 ms) LIVE** — rVFC 29–31 Hz flat, 1/1859
+  dropped, uploads non-black and changing, whole-frame Δ 0 on screen; `display:none`, 1×1 offscreen and
+  `visibility:hidden` also LIVE. Null (no upload) and paused controls DEAD. The 200 ms keep-warm sweep is what makes the
+  pooled decoder usable — it must not be weakened; the ≤200 ms pause gap after a detach is unmeasured at frame resolution.
+- **Q0b — hand-off with the REAL runtime (plan minus its 1→2 `retire`, scratch copy of the core JS holding the remount;
+  texture fed by the PLAYER'S OWN slide-1 element): CLEAN-WITH-CAVEATS.** At rest: pooled, not in the document, zero
+  `remount-*`, no painting `<video>`, in-page LIVE (108/128 bands, 20 = the green square). Stand-down 1.7–2.1 ms after the
+  mutation batch. **The player creates NO `<video>` at build 1** ⇒ `reuse-decoder` cannot fire there; the hand-off goes
+  through `tryRemount` (`remount-into-authored-layer` — the returning DOM tree is a NEW one). Burnt-in counter strictly
+  increasing across the stand-down in 2 runs, `currentTime` continuous on the same element, exactly one painting
+  `<video>` afterwards, max Δ outside the movie rects = 0 vs the fallback control.
+  Caveats: (1) the pool is keyed by ASSET, not instance — slide 1's second same-asset element is pooled too, and an
+  unmodified hand-back remounted BOTH onto one footprint (double grating); clean only after retiring the sibling ⇒ needs an
+  instance-scoped retire; (2) the remount lands on the SOURCE-slide footprint (109,795,952,268) while the replay painted
+  the slide-2 rect (105,791,960,276) ⇒ ~4 px pop; the footprint must come from the destination rect; (3) green square pops
+  opaque→translucent at the swap (player opacity defect); (4) the ~2 ms swap is below the ~95 ms shot cadence; (5) n = 2,
+  1920×1080 only, no OBS CEF.
+- **Fallback is worse than assumed:** under today's `retire` there is NO `<video>` on slide 2 before or after build 1 —
+  the export's static poster for the whole dwell, not "a restart at build 1".
+- Runtime v4 functions the arming would touch: `preserveAllowedFor`, `scheduleRemount`, `sweepRetireZone` /
+  `retireZoneEnd` / `inRetireZone`, `stash()`, `tryRemount`, `retireDecoder` (instance-scoped), the pool keying.
+
+## Real OBS (CEF) qualification (2026-09-20 night, Opus, attached to the owner's OBS 32.2.2 / Chrome 127.0.6533.120; evidence `output/live-visible-content/alt-cef/`)
+Environment: 1920×1080, dpr 1, **ANGLE Metal (Apple M1 Pro)** — a real GPU; WebGL/WebGL2, `requestVideoFrameCallback`,
+`clip-path: path(evenodd…)` all present; `Page.captureScreenshot` p50 ≈166 ms; H.264 plays, HEVC `canPlayType ""`;
+host output `fill-key`, alpha true, transparent background. Page returned to `about:blank#program`, OBS left running.
+- **C1 paint-oracle attach arm (DOM stimulus, settled slide 3): GREEN.** 4 sessions: the gate's `BURST_OFFSETS_MS` LIVE 4/4
+  (0.9914), profile A LIVE 4/4, paused-video null DEAD 4/4 (0.000) in every arm ⇒ paint-oracle gate (iv) / D-d satisfied
+  for the DOM stimulus; profile A may land. Caveat: an UNSPACED burst cannot be produced in CEF (166 ms per shot), so the
+  stale-surface defect could be neither reproduced nor excluded there; a WebGL-only stimulus scored by screenshots in
+  CEF is unmeasured.
+- **C2 GL replay in CEF: FEASIBLE.** Prototype wrapping survives (installed after `show`, before the move — pre-navigation
+  injection not exercised); the move renders through WebGL into `#0-canvas`; 42–46 per-`clear` uploads (CEF renders the
+  move in about half the frames of headless); settle frame 88 calls, histogram `{88:30, 89:11–15, 93:1, 125:1}`; occluder
+  mask 20/128 (identical to headless); rVFC loop 10 s: p50 6.9–7.5 / p95 10.1–11.3 ms, 0 GL errors; null DEAD, positive
+  LIVE, paused DEAD (`rvfcFired 0`), resumed LIVE — 3/3 sessions; stand-down 1.4–3.9 ms after the mutation batch; after
+  build 1 the DOM movie returns with no residue. `droppedVideoFrames` is NOT a health metric for an uncomposited decoder
+  (reads 20–98 % dropped while rVFC + band change are healthy).
+- **C3 decoder hosting in CEF:** never-attached LIVE 3/3; `display:none` LIVE; offscreen 1×1 LIVE; **attached-then-removed
+  DEAD 3/3** (frozen at the removal instant). RECONCILIATION with the headless Q0: same result there for a bare removal,
+  but the PRODUCT pool (detached + `play()` re-tried every 200 ms) was LIVE headless. **The product pool's keep-warm was
+  NOT tested in CEF** — that single variant is the open item before G3; if it fails in CEF the pool must host decoders
+  attached-but-unpainted instead.
+- **C4 hole-punch in CEF: ALIVE, pixel-clean** — liveFrac 0.992, 0 outside pixels changed (cleaner than headless), whole
+  frame Δ 0 vs control after build 1.
+- **C5 go-to freeze CONFIRMED in the real output path:** goTo 3 and goTo 1-back ⇒ 0 `<video>`, liveFrac 0.000 at +1 s and
+  +6 s, 1/8 unique shas (a fully static frame); one advance ⇒ 0.991 live.
