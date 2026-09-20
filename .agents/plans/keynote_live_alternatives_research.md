@@ -147,3 +147,22 @@ as an independent pixel VERIFIER and Path C as the no-GL fallback; (3) baseline 
 not GL), at 1920×1080 / 2560×1440 / 1600×1000, scored by an in-page `readPixels` liveness read; then OBS CEF.
 Still unmeasured: two movies / equal-size posters, a MOVING movie (3→4), go-to jumps, a settled slide with no builds,
 masks, OBS CEF, the video-not-ready branch.
+
+## Opacity disagreement — explained offline (2026-09-20 evening, Opus code-read, no browser; confidence HIGH)
+The DOM path is right; the player's WebGL effect renderer DROPS WRAPPER OPACITY. Export: the green square carries opacity
+0.29468… on a WRAPPER layer on both slides (slide 1 `b.4`, slide 2 `b.6.0`; leaf opacity 1; the 1→2 move animates opacity
+1→1, only scale/translation); the texture PDFs are a flat opaque fill `0.1137 0.6941 0` = exactly the measured (29,177,0),
+no `/ExtGState`/`/SMask`. Player `main.js`: the shader is fine (`gl_FragColor = vec4(Opacity) * texColor`, blend
+`ONE, ONE_MINUS_SRC_ALPHA`), but `renderFrameWithContext` (offset ≈2190382) sets `Opacity = parentOpacity × leaf opacity`
+and `textureInfoFromEffect` (≈2263358) seeds `parentOpacity` once from the stage root (1) and passes it down unchanged —
+intermediate wrapper opacities are never multiplied in; `singleTextureOpacity` is never read. The generic GL branch
+(≈2192670) has the same defect ⇒ every GL-rendered effect whose object has wrapper opacity paints it opaque, and the
+settled frame keeps it until the next build.
+Consequences: (1) GL replay reproduces a genuine PLAYER error faithfully — pixel-correct vs the player, wrong vs the deck,
+with or without our loop; (2) Peer 2's "opaque only" rule must be judged on EXPORT opacity, never painted pixels (a fixed
+player would silently invalidate a pixel-trusted cut-out); a cut-out's source stays the settled frame's own pixels.
+Confirming measurement (not run): in the recorded 88-call frame the `uniform1f` for `Opacity` before the green square's
+`drawElements` should be exactly 1.0; re-issuing the frame with it patched to 0.29468 should blend the square over the
+movie. Coordinator note: that patch would make our replay MORE faithful to the deck than the player — an owner decision
+(it changes the look at the first build boundary from opaque→translucent pop to continuous), not a default.
+Scratch: `output/live-visible-content/alt-opacity/dump.py`.
