@@ -155,6 +155,7 @@ class ClipResult:
     crop_width: int
     movie_id: ItemId | None = None
     crop_rect: Rect | None = None
+    bare: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,7 +194,7 @@ def visual_movie_order(rects: Mapping[ItemId, Rect]) -> list[ItemId]:
     return [ids[0] for _, ids in sorted(keys.items())]
 
 
-_MOVIE_STACK_OVERLAP = 0.5
+_MOVIE_STACK_OVERLAP = 0.9
 
 
 def _rects_stack(a: Rect, b: Rect) -> bool:
@@ -208,9 +209,9 @@ def _rects_stack(a: Rect, b: Rect) -> bool:
 
 
 def movies_stacked(rects: Mapping[ItemId, Rect]) -> bool:
-    """True when two movie rects really layer -- their intersection covers more than half
-    the smaller one's area -- i.e. one movie covers another. Row neighbours that merely
-    touch, or clip into each other by less than that, keep the visual order."""
+    """True when two movie rects really layer -- their intersection covers nearly all of the
+    smaller one's area (`_MOVIE_STACK_OVERLAP`) -- i.e. one movie covers another. Row
+    neighbours that merely touch, or clip into each other by less, keep the visual order."""
     ids = list(rects)
     return any(
         _rects_stack(rects[a], rects[b])
@@ -235,7 +236,7 @@ def visible_movie_rects(rects: Mapping[ItemId, Rect], crop: Rect) -> dict[ItemId
 
 def stack_mode(rects: Mapping[ItemId, Rect]) -> Literal["visual", "stacked"]:
     """The one ordering mode for a slide's VISIBLE movie rects: ``"stacked"`` (source
-    build order) when every pair really layers -- each intersection covering more than half
+    build order) when every pair really layers -- each intersection covering nearly all of
     the smaller rect -- ``"visual"`` when no pair does, so an ordinary row whose neighbours
     clip into each other stays visual. A PARTIAL stack -- three movies where two cover each
     other and one sits beside them -- has no single order, so it raises ``ValueError``
@@ -1322,6 +1323,7 @@ def export_slide_clips(
                     crop_width=crop_w,
                     movie_id=job.movie_id,
                     crop_rect=Rect(crop_x, crop_y, crop_w, crop_h),
+                    bare=job.bare,
                 )
             )
 

@@ -337,6 +337,76 @@ def test_dsk_apply_publishes_clips_in_visual_not_crop_rect_order(tmp_path, monke
     ]
 
 
+def test_dsk_apply_forwards_bare_clips_from_the_export(tmp_path, monkeypatch):
+    """Plan §4 item 30(d): only a clip the exporter bared may take the source build-in, so
+    the dashboard must carry `ClipResult.bare` through to `assemble_dsk_deck` per movie
+    item -- the upper stacked clip is listed, the one below it is not."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "mixed", movie_count=2)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    from obed_edom.dsk_movie_export import ClipResult
+    from obed_edom.map_remap import Rect
+
+    def fake_export_clips(fw, slides, out_dir, **kwargs):
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        lower = Path(out_dir) / "lower.mov"
+        upper = Path(out_dir) / "upper.mov"
+        lower.write_text("movie")
+        upper.write_text("movie")
+        return [
+            ClipResult(
+                slide=2, movie_id=("movie", 0), path=lower, crop_rect=Rect(1000, 0, 500, 1080),
+                width=500, height=1080, duration_s=1.0, wall_s=1.0, crop_width=500,
+            ),
+            ClipResult(
+                slide=2, movie_id=("movie", 1), path=upper, crop_rect=Rect(1000, 0, 500, 1080),
+                width=500, height=1080, duration_s=1.0, wall_s=1.0, crop_width=500, bare=True,
+            ),
+        ]
+
+    seen = {}
+
+    def fake_assemble(fw, out_path, *, decisions, clips, **kwargs):
+        seen["bare_clips"] = kwargs.get("bare_clips")
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path,
+            slides_kept=(1, 2),
+            ordinals={1: 1, 2: 2},
+            fits={},
+            clips_inserted={2: dict(clips[2])},
+            stroke={},
+            zorder={},
+            builds={},
+            size_bytes=10,
+            source_size_bytes=20,
+            wall_s=1.0,
+            warnings=(),
+            movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+
+    assert seen["bare_clips"] == {2: {("movie", 1)}}
+
+
 def test_dsk_apply_rerun_deletes_orphaned_src_clip(tmp_path, monkeypatch):
     """A Generator rerun that drops a movie slide deletes its now-unreferenced
     `src/*.src.mov` intermediate once the new deck and manifest are written."""
@@ -2085,7 +2155,8 @@ def _fw_payload_with_items(items_by_slide, count=4):
 
 def test_dsk_propose_emits_can_videos_only_and_stacked_movies(tmp_path, monkeypatch):
     """canVideosOnly needs every counted movie to be a kept TOP-LEVEL item; stackedMovies
-    means two kept movies overlap across more than half of the smaller one."""
+    means two kept movies overlap across nearly all of the smaller one (the
+    `_MOVIE_STACK_OVERLAP` threshold, 0.9 since 2026-09-20)."""
     import obed_edom.web.app as app_mod
 
     deck = tmp_path / "GW.key"
@@ -2093,8 +2164,9 @@ def test_dsk_propose_emits_can_videos_only_and_stacked_movies(tmp_path, monkeypa
     items = {
         # 2: one movie, nothing to stack with.
         2: [_movie_item(0, 2000, 100)],
-        # 3: two movies dissolving over one another.
-        3: [_movie_item(0, 2000, 100), _movie_item(1, 2100, 150)],
+        # 3: two movies dissolving over one another (intersection 980x590 = 96% of the
+        # smaller 1000x600, clearing the 0.9 threshold).
+        3: [_movie_item(0, 2000, 100), _movie_item(1, 2020, 110)],
         # 4: a second movie lives inside a group, so movie_count outruns the kept ids.
         4: [_movie_item(0, 2000, 100)],
     }

@@ -15,7 +15,7 @@ import time
 import traceback
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
@@ -1431,6 +1431,7 @@ def plan_assembly(
     clips: Mapping[int, Path | Mapping[ItemId, Path]],
     clip_sizes: Mapping[str, tuple[float, float]] = {},
     clip_crops: Mapping[int, Mapping[ItemId, Rect]] | None = None,
+    bare_clips: Mapping[int, Collection[ItemId]] | None = None,
     runs: Mapping[int, Mapping[ItemId, Sequence[float]]] | None = None,
     min_text_pt: float = DEFAULT_MIN_TEXT_PT,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
@@ -1471,7 +1472,10 @@ def plan_assembly(
     When a movie has no `clip_crops` entry (legacy path / operator clips), `clip_sizes`,
     keyed by `str(path)` -> `(width, height)` media pixel size, offline-guards
     (`AssemblyRefusal`) a clip whose media aspect differs from its target fitted rect's
-    aspect by more than 0.5%; a path missing from `clip_sizes` skips the guard."""
+    aspect by more than 0.5%; a path missing from `clip_sizes` skips the guard.
+    `bare_clips[number]` lists the movie items whose clip was exported BARE
+    (`ClipResult.bare`, plan §4 item 30d): only those upper stacked clips get the source
+    build-in written onto them, since any other clip may already bake the delay/effect."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -2507,12 +2511,17 @@ def plan_assembly(
                 if stacked:
                     build_in: dict[ItemId, ClipBuildIn] = {}
                     unsupported: list[str] = []
+                    not_bare: list[str] = []
+                    slide_bare = (bare_clips or {}).get(number) or ()
                     recs_by_item: dict[ItemId, list[Mapping]] = {}
                     for rec in src_build_recs:
                         iid = (rec["kind"], rec["kindIndex"])
                         if iid in item_clips:
                             recs_by_item.setdefault(iid, []).append(rec)
                     for previous, iid in zip(visual_order, visual_order[1:]):
+                        if iid not in slide_bare:
+                            not_bare.append(f"movie {iid[1]}")
+                            continue
                         recs = recs_by_item.get(iid) or []
                         candidates = _build_in_candidates(recs)
                         if len(candidates) > 1:
@@ -2557,6 +2566,12 @@ def plan_assembly(
                         warnings.append(
                             f"slide {number}: stacked movies -- the source build-in is written "
                             f"offline onto the upper clip(s) [{written}]; pending live verification"
+                        )
+                    if not_bare:
+                        warnings.append(
+                            f"slide {number}: stacked movies -- the upper clip(s) "
+                            f"[{', '.join(not_bare)}] are not proven bare (not exported by this "
+                            "run), so no source build-in is written: the media may already bake it"
                         )
                     if unsupported:
                         warnings.append(
@@ -5843,6 +5858,7 @@ def assemble_dsk_deck(
     clips: Mapping[int, Path | Mapping[ItemId, Path]] = {},
     clip_sizes: Mapping[str, tuple[float, float]] = {},
     clip_crops: Mapping[int, Mapping[ItemId, Rect]] | None = None,
+    bare_clips: Mapping[int, Collection[ItemId]] | None = None,
     log: Callable[[str], None] = print,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     layout_policy: LayoutPolicy = "import",
@@ -5943,7 +5959,7 @@ def assemble_dsk_deck(
     builds_by_number = deck_builds(fw_deck, deck=deck)
     plan = plan_assembly(
         payload, classes, decisions=decisions, band=resolved_band, clips=clips, clip_sizes=clip_sizes,
-        clip_crops=clip_crops, runs=runs, text_fit=text_fit,
+        clip_crops=clip_crops, bare_clips=bare_clips, runs=runs, text_fit=text_fit,
         min_text_pt=min_text_pt, text_slide_words=text_slide_words, allow_split=allow_split,
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,

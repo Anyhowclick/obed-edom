@@ -105,7 +105,9 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   movies may be set **videos only**: every non-movie object is dropped and the movie(s) are fitted
   to the STANDARD video band instead of `DEFAULT_BAND`, auto-anchored centre (no content/chain-head
   anchor). Movies STACKED on one another in the source (dissolving over each other; FRC Wall slide
-  50) follow the SOURCE BUILD ORDER, not visual order. The review list follows the CG resizer's
+  50) follow the SOURCE BUILD ORDER, not visual order; a pair counts as stacked only when its
+  intersection covers more than `dsk_movie_export._MOVIE_STACK_OVERLAP` (owner, 2026-09-20: 0.9) of
+  the smaller VISIBLE rect's area. The review list follows the CG resizer's
   classification flow (grouped by category, bulk per group).
 - Keynote hands-off rule: work on a copy under `~/Desktop` or repo `output/` (never
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
@@ -176,6 +178,10 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   (1920, −1079) `apple:movie-start` chunkOrder 0 referent True; movie 1 (1915, −163)
   `apple:dissolve` In chunkOrder 1 referent False; class `mixed`, 4 side `map BG.png` dropped.
   Visual order would put movie 1 first (x 1915 < 1920) — hence build order for overlapping movies.
+  Clipped to the centre panel the VISIBLE rects are (1920, 0, 3840, 1080) and (1920, 0, 3835, 1080):
+  the intersection is 100% of the smaller (movie 1 is 5 px narrower INSIDE movie 0), so slide 50
+  clears the 0.9 stack threshold with room to spare. The FULL item rects only overlap ~0.58 —
+  the mode is decided on the visible rects, never the item rects.
   Archive diff (offline, 2026-09-20): the two `KN.BuildArchive`s are IDENTICAL except
   `attributes.animationAttributes.effect` (`apple:movie-start` vs `apple:dissolve`) and the random
   seed — same `animationType In`, `duration 0.5`, `delivery All at Once`, `eventTrigger 1`. Movie
@@ -454,13 +460,19 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     slide archive's `buildChunks` field; it used to be a separate `patch_slide_builds` rewrite,
     streaming a multi-GB deck twice) and a failed read-back restores the touched members.
     (c) DONE — page key `stackedMoviesKeepSide`; the chip follows the row's Keep side.
-    (d) OPEN (low) — a CALLER-SUPPLIED per-movie clip on a stacked slide (CLI `clips` mapping only;
-    the dashboard allows operator clips on single-movie slides only) is never proven bare, so a
-    build-in could be written over media that already bakes it; carry bare/provenance per clip.
-    The exporter bares every upper stacked clip while the assembler rebuilds only its supported
+    (d) DONE — bare-ness is now carried per clip: `ClipResult.bare` mirrors `_SlideJob.bare`,
+    and `assemble_dsk_deck`/`plan_assembly` take `bare_clips[number] -> movie ids` (threaded
+    like `clip_crops`; the dashboard fills it from `clip.bare`). An upper stacked clip not in
+    `bare_clips` gets NO build-in and its own warn-only "not proven bare" warning (checked
+    BEFORE the source candidates, so item 28's two-candidate refusal applies to proven-bare
+    clips only — Codex r4), so a CALLER-SUPPLIED per-movie mapping (Python API only: CLI
+    `--clip` is one path per slide, refused for several movies) can never be double-timed. The
+    exporter bares every upper stacked clip while the assembler rebuilds only its supported
     subset — deliberate (unsupported = bare + warned, never double-timed).
-    STILL OWNER-EYEBALL: left/right flush for the standard band (43 / 1877) was not run live; the
-    0.5 stack threshold on real decks.
+    STILL OWNER-EYEBALL: left/right flush for the standard band (43 / 1877) was not run live.
+    Stack threshold SETTLED (owner, 2026-09-20): raised 0.5 → 0.9 — FRC 50's visible rects overlap
+    100% of the smaller (movie 1 is 5 px narrower inside movie 0), so nothing real needed the
+    loose bound and a row that merely clips can no longer be read as a stack.
 
 ## 5. Live-run recipe
 

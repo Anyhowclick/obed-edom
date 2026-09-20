@@ -2136,6 +2136,46 @@ def test_export_slide_clips_per_movie_bares_only_the_upper_clip_of_a_stacked_sli
     assert targets == {12: [("movie", 1)]}
 
 
+def test_clip_result_bare_marks_only_the_upper_clip_of_a_stacked_slide(monkeypatch, tmp_path):
+    """Plan §4 item 30(d): the assembler may only write a source build-in onto a clip it
+    knows was exported BARE, so `ClipResult.bare` must carry the job's own flag out to the
+    caller -- true for the upper stacked clip, false for the one below it."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[_stacked_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+    monkeypatch.setattr(
+        dme, "deck_builds",
+        lambda deck: {12: {"builds": [
+            {"kind": "movie", "kindIndex": 0, "chunkOrder": [0]},
+            {"kind": "movie", "kindIndex": 1, "chunkOrder": [1]},
+        ]}},
+    )
+
+    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert {r.movie_id: r.bare for r in results} == {("movie", 0): False, ("movie", 1): True}
+
+
+def test_clip_result_bare_is_false_for_a_side_by_side_slide(monkeypatch, tmp_path):
+    """Null control: nothing on an unstacked row is bared, so no clip is ever eligible for
+    a build-in write."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    results = dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+    assert [r.bare for r in results] == [False, False]
+
+
 def test_export_slide_clips_per_movie_does_not_bare_a_side_by_side_slide(monkeypatch, tmp_path):
     """Null control: an ordinary row of movies keeps today's export untouched, so a movie
     with builds the barer would refuse cannot newly fail the whole export."""
@@ -2601,21 +2641,40 @@ def test_movies_stacked_false_for_side_by_side_panels():
 
 
 def test_movies_stacked_false_for_hairline_clip():
-    # A sliver of overlap (well under half the smaller rect's area) is a layout hairline,
-    # not a stack.
+    # A sliver of overlap (1% of the smaller rect's area) is a layout hairline, not a stack.
     rects = {("movie", 0): Rect(0, 0, 1000, 1000), ("movie", 1): Rect(990, 0, 1000, 1000)}
     assert not dme.movies_stacked(rects)
     assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
 
 
-def test_movies_stacked_true_for_slide_50_shape():
-    # Full_Report_Card_Wall.key slide 50: two 3840x2160 movies on the centre panel,
-    # movie 0 at (1920, -1079) and movie 1 at (1915, -163).
+def test_movies_stacked_false_for_a_pair_covering_four_fifths_of_the_smaller():
+    # Owner 2026-09-20: the threshold is 0.9, so a heavy clip -- 1600x1080 of the smaller
+    # 2000x1080, i.e. 0.8 -- is still a row, not a layered pair.
+    rects = {("movie", 0): Rect(1920, 0, 2000, 1080), ("movie", 1): Rect(2320, 0, 2000, 1080)}
+    assert not dme.movies_stacked(rects)
+    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1)]
+
+
+def test_movies_stacked_true_just_above_the_threshold():
+    # 1900x1080 of the smaller 2000x1080 = 0.95, over the 0.9 threshold.
+    rects = {("movie", 0): Rect(1920, 0, 2000, 1080), ("movie", 1): Rect(2020, 0, 2000, 1080)}
+    assert dme.movies_stacked(rects)
+    assert dme.stack_mode(rects) == "stacked"
+
+
+def test_movies_stacked_true_for_the_visible_slide_50_shape():
+    # Full_Report_Card_Wall.key slide 50 clipped to the centre panel: movie 1 is 5 px
+    # narrower INSIDE movie 0, so the intersection is 100% of the smaller visible rect.
+    # The FULL item rects only overlap ~0.58 and no longer count as a stack.
     rects = {
         ("movie", 0): Rect(1920, -1079, 3840, 2160),
         ("movie", 1): Rect(1915, -163, 3840, 2160),
     }
-    assert dme.movies_stacked(rects)
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    assert (visible[("movie", 0)].x, visible[("movie", 0)].w) == (1920.0, 3840.0)
+    assert (visible[("movie", 1)].x, visible[("movie", 1)].w) == (1920.0, 3835.0)
+    assert dme.movies_stacked(visible)
+    assert not dme.movies_stacked(rects)
 
 
 def test_movie_order_stacked_follows_source_build_order_not_x():
@@ -2627,7 +2686,8 @@ def test_movie_order_stacked_follows_source_build_order_not_x():
         ("movie", 1): Rect(1915, -163, 3840, 2160),
     }
     assert dme.visual_movie_order(rects) == [("movie", 1), ("movie", 0)]
-    order = dme.movie_order(rects, {("movie", 0): 0, ("movie", 1): 1})
+    visible = dme.visible_movie_rects(rects, dme.CENTRE_PANEL_RECT)
+    order = dme.movie_order(visible, {("movie", 0): 0, ("movie", 1): 1})
     assert order == [("movie", 0), ("movie", 1)]
 
 
@@ -2713,16 +2773,29 @@ def test_stack_mode_stacked_for_the_visible_slide_50_shape():
     assert dme.stack_mode(visible) == "stacked"
 
 
-def test_stack_mode_refuses_a_partial_stack_of_half_covered_movies():
-    # A genuine partial stack: movies 0 and 1 cover 80% of each other, movie 2 sits clear
-    # of both. Real layering plus a plain neighbour still has no single order.
+def test_stack_mode_refuses_a_partial_stack_of_nearly_covered_movies():
+    # A genuine partial stack: movies 0 and 1 cover 95% of each other (over the 0.9
+    # threshold), movie 2 sits clear of both. Real layering plus a plain neighbour still
+    # has no single order.
+    rects = {
+        ("movie", 0): Rect(1920, 0, 2000, 1080),
+        ("movie", 1): Rect(2020, 0, 2000, 1080),
+        ("movie", 2): Rect(4100, 0, 1000, 1080),
+    }
+    with pytest.raises(ValueError, match="partially overlap"):
+        dme.stack_mode(rects)
+
+
+def test_stack_mode_visual_for_a_pair_below_the_threshold_beside_a_third():
+    # The same shape at 80% overlap is no longer a stack at all, so the slide is an
+    # ordinary row and keeps the visual order instead of refusing.
     rects = {
         ("movie", 0): Rect(1920, 0, 2000, 1080),
         ("movie", 1): Rect(2320, 0, 2000, 1080),
         ("movie", 2): Rect(4600, 0, 1000, 1080),
     }
-    with pytest.raises(ValueError, match="partially overlap"):
-        dme.stack_mode(rects)
+    assert dme.stack_mode(rects) == "visual"
+    assert dme.movie_order(rects) == [("movie", 0), ("movie", 1), ("movie", 2)]
 
 
 def test_visible_movie_rects_decide_the_mode_the_full_rects_would_miss():

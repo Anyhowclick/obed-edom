@@ -12680,7 +12680,8 @@ def test_stacked_movies_order_and_time_by_source_build_order():
     clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
 
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={50: {("movie", 1)}},
     )
 
     assert list(plan.clips[50]) == [("movie", 0), ("movie", 1)]
@@ -12700,6 +12701,74 @@ def test_stacked_movies_order_and_time_by_source_build_order():
         for w in plan.warnings
     )
     assert not any("need a build-in" in w for w in plan.warnings)
+
+
+def test_stacked_movies_skip_the_build_in_when_the_clip_is_not_proven_bare():
+    """Plan §4 item 30(d): the exact FRC 50 shape that DOES take the build-in when the clip
+    is proven bare, replayed with no `bare_clips` at all (a caller-supplied clip mapping).
+    The clip may already bake the delay/effect, so writing it again would double-time it:
+    warn-only, plain cascade, never a refusal."""
+    slide, builds = _slide_50_shape()
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+
+    assert 50 not in plan.clip_build_in
+    assert plan.clip_timing[50] == (
+        (("movie", 0), "after_transition"),
+        (("movie", 1), "after_previous"),
+    )
+    assert any("[movie 1] are not proven bare" in w for w in plan.warnings)
+    assert not any("need a build-in" in w for w in plan.warnings)
+    assert not any("the source build-in is written" in w for w in plan.warnings)
+
+
+def test_stacked_movies_skip_the_build_in_for_the_clip_missing_from_bare_clips():
+    """Per-clip, not per-slide: the slide IS in `bare_clips` but the upper movie is not
+    listed, so it still gets no build-in."""
+    slide, builds = _slide_50_shape()
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={50: {("movie", 0)}},
+    )
+
+    assert 50 not in plan.clip_build_in
+    assert any("[movie 1] are not proven bare" in w for w in plan.warnings)
+
+
+def test_ambiguous_build_in_candidates_refuse_only_for_a_proven_bare_clip():
+    """Codex r4: candidate ambiguity matters only when a build-in is eligible to be written.
+    A proven-bare upper clip with two source `In` builds refuses; the same slide with a clip
+    that is not proven bare just takes the provenance warning."""
+    slide, builds = _slide_50_shape()
+    second = {**builds[50]["builds"][1], "effect": "apple:move-in", "chunkOrder": [2], "chunkDelay": [0.0]}
+    builds[50]["builds"].append(second)
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "both")}
+    clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
+
+    with pytest.raises(AssemblyRefusal, match="refusing to guess which one the stacked clip needs"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+            bare_clips={50: {("movie", 1)}},
+        )
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+    )
+    assert 50 not in plan.clip_build_in
+    assert any("[movie 1] are not proven bare" in w for w in plan.warnings)
 
 
 def test_stacked_movies_warn_when_the_relative_build_ins_predecessor_is_dropped():
@@ -12722,7 +12791,8 @@ def test_stacked_movies_warn_when_the_relative_build_ins_predecessor_is_dropped(
     clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
 
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={50: {("movie", 1)}},
     )
 
     assert 50 not in plan.clip_build_in
@@ -12754,7 +12824,8 @@ def test_stacked_movies_warn_when_the_lower_movie_has_more_than_one_source_chunk
     clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
 
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={50: {("movie", 1)}},
     )
 
     assert 50 not in plan.clip_build_in
@@ -12777,7 +12848,8 @@ def test_stacked_movies_keep_the_build_in_when_the_predecessor_is_the_kept_lower
     clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
 
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={50: {("movie", 1)}},
     )
 
     assert plan.clip_build_in[50][("movie", 1)].referent is False
@@ -12807,7 +12879,8 @@ def test_stacked_movies_warn_when_the_source_build_in_is_unsupported():
     clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
 
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={50: {("movie", 1)}},
     )
 
     assert 50 not in plan.clip_build_in
@@ -12828,7 +12901,8 @@ def test_stacked_movies_warn_when_the_upper_clips_only_build_is_an_out():
     clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
 
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={50: {("movie", 1)}},
     )
 
     assert 50 not in plan.clip_build_in
@@ -12849,7 +12923,8 @@ def test_stacked_upper_clip_takes_the_in_build_beside_a_movie_start_build():
     clips = {50: {("movie", 0): Path("/tmp/c0.mov"), ("movie", 1): Path("/tmp/c1.mov")}}
 
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={50: {("movie", 1)}},
     )
 
     assert plan.clip_build_in[50][("movie", 1)].effect == "apple:dissolve"
@@ -12867,7 +12942,8 @@ def test_stacked_movies_refuse_on_ambiguous_build_in_candidates():
 
     with pytest.raises(AssemblyRefusal, match="refusing to guess which one the stacked clip needs"):
         plan_assembly(
-            payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+            payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+            bare_clips={50: {("movie", 1)}},
         )
 
 
@@ -12931,7 +13007,8 @@ def test_movies_stacked_only_inside_the_centre_panel_take_the_build_order():
     }
 
     plan = plan_assembly(
-        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds
+        payload, classes, decisions=decisions, band=BAND, clips=clips, builds=builds,
+        bare_clips={1: {("movie", 0)}},
     )
 
     assert list(plan.clips[1]) == [("movie", 1), ("movie", 0)]

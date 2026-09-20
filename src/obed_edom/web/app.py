@@ -1941,6 +1941,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     nested_clips: dict[int, dict[ItemId, Path]] = {}
     clip_sizes: dict[str, tuple[int, int]] = {}
     clip_crops: dict[int, dict[ItemId, Rect]] = {}
+    bare_clips: dict[int, set[ItemId]] = {}
     if operator_clips:
         classes = {c.number: c for c in classify_deck(path, payload=offline_wall_payload(path))}
         for number, clip_path in operator_clips.items():
@@ -1982,6 +1983,8 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
                 clip_sizes[str(clip.path)] = (clip.width, clip.height)
                 if clip.crop_rect is not None:
                     clip_crops.setdefault(clip.slide, {})[clip.movie_id] = clip.crop_rect
+                if clip.bare:
+                    bare_clips.setdefault(clip.slide, set()).add(clip.movie_id)
 
         job.log(f"Assembling {out_path.name} (content-only={content_only})…")
         result = assemble_dsk_deck(
@@ -1992,6 +1995,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             clips=nested_clips,
             clip_sizes=clip_sizes,
             clip_crops=clip_crops,
+            bare_clips=bare_clips,
             text_slide_words=words,
             content_only=content_only,
             log=job.log,
