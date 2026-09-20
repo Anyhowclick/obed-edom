@@ -1,34 +1,31 @@
-# Handover — Alpha Keynote live continuity, state at 2026-09-20 16:45
+# Handover — Alpha Keynote live continuity, state at 2026-09-20 17:30
 
 Owner rules (AGENTS.md wins): accuracy and code quality over speed · plan first for anything complex · never
 weaken a gate · minimal natspec, no inline comments in src · no merge / auto-merge without an explicit owner
 request · hands off Keynote · ask before putting a window on the external monitor · headless Chrome only for
 agent runs. Roster this round: Opus plans AND implements (owner, 2026-09-19), Codex `gpt-5.6-sol` reviews.
 
-## Where things are (the ONE list — verified with `git worktree list` / `gh pr list` at 16:45)
-| Branch | Tip | What | PR |
-|---|---|---|---|
-| `main` | `0889246` | — | — |
-| `feat/keynote-alpha-p2-html-mm` | `6236ffe` | P2 HTML probe + presenter | #158 (draft) → main |
-| `claude/keynote-live-continuity-next` | = baseline tip | I3, I5 codec, visible-content gate AND the baseline increment (runtime v4) — baseline merged in 2026-09-20 on the owner's request | **#175 → #158** (owner will merge into #158) |
-| `claude/keynote-live-baseline` | same commit as #175's head | kept only as the working branch of worktree `friendly-sammet-32dab4`; can be deleted once #175 lands | — |
-| `claude/dsk-generator-alignment-options-97c5aa` | — | unrelated DSK Generator work (another session) | #176 (draft) → main |
-| `worktree-agent-a69e…` | `bbfa11f` | UNCOMMITTED P2 qualification work in worktree `agent-consolidated` — owner said hold & bundle | — |
+## Where things are (the ONE list — verified with `git worktree list` / `gh pr list`, 2026-09-20 ~17:30)
+| Branch | What | PR |
+|---|---|---|
+| `main` | — | — |
+| `feat/keynote-alpha-p2-html-mm` | EVERYTHING Alpha Keynote: P2 probe, presenter, I3, I5 codec, visible-content gate, baseline (runtime v4), plans, handovers. `main` merged in 2026-09-20 (Hall of Witnesses conflict resolved, all entries kept) ⇒ **MERGEABLE / CLEAN** | **#158 (draft) → main** — owner merges |
+| `claude/dsk-generator-alignment-options-97c5aa` | unrelated DSK Generator work (another session) | #176 (draft) → main |
+| `worktree-agent-a69e…` | UNCOMMITTED P2 qualification work in worktree `agent-consolidated` — owner said hold & bundle | — |
 
-Stack: `main` ← #158 ← #175 (= `claude/keynote-live-baseline`). Code at the #175 head is byte-identical to the gated
-`3a17401`. The owner merges #175 into #158 themself; never merge without the owner's go.
-Worktrees: `friendly-sammet-32dab4` (baseline branch; its ignored `output/` holds the gate evidence, a fixture copy and
-the research harness) · `gate-runner` (detached on the #175 tip; ALL browser gates run from here, pinned to a commit;
-own 198 MB copy of the git-ignored H.264 fixture bank under `output/p2-recovery/html-adversarial`) ·
-`decklink-field-test-2ad808` (detached) · `pr158-handover-findings-4366b9` (now on the DSK branch) ·
-`agent-consolidated`. Do NOT delete `friendly-sammet-32dab4` or `gate-runner` — the fixture copies are not in git.
-Gone (contained elsewhere, bundles in the MAIN checkout `output/branch-cleanup-2026-09-19/`): the presenter/handover
-branch `claude/keynote-live-planning-handover-4e550b` (its last docs commit `4bf6707` is cherry-picked here as `a90b660`),
-`claude/decklink-field-test-2ad808`, both `codex/*`, the stale `claude/*` and two `worktree-agent-*`.
+#175 is MERGED into #158 (`31b566a`); `claude/keynote-live-continuity-next` and `claude/keynote-live-baseline` are deleted
+(local + remote, fully contained). Code on #158 is byte-identical to the gated `3a17401` for `src scripts tests dashboard`
+apart from what the merge of `main` brought in (live + preview suites re-run on the merge: 950 passed).
+Worktrees: `friendly-sammet-32dab4` (now on the #158 branch; its ignored `output/` holds the gate evidence, a fixture copy
+and the research harness) · `gate-runner` (detached on the #158 tip; ALL browser gates run from here; own 198 MB copy of
+the git-ignored H.264 fixture bank) · `decklink-field-test-2ad808` (detached) · `pr158-handover-findings-4366b9` (DSK
+branch) · `agent-consolidated`. Do NOT delete `friendly-sammet-32dab4` or `gate-runner` — the fixture copies are not in git.
+Safety bundles of every deleted branch: MAIN checkout `output/branch-cleanup-2026-09-19/`.
 The main checkout is on `main` and the venv is an editable install of it ⇒ ALWAYS `PYTHONPATH=<worktree>/src`.
 Gate runner: `run_gates.sh <gate-worktree> <outdir>` (copy in `output/live-continuity-i3/`); one full round ≈ 13 min;
-**one browser user at a time** for gates (a concurrent headless Chrome made a window fall back to the laptop display
-size — `stageFit` caught it). Next DeckLink venue test: 2026-10-10 (`.agents/handovers/decklink-field-test-runbook.md`).
+**one browser user at a time** for gates. Next DeckLink venue test: 2026-10-10 (`decklink-field-test-runbook.md`).
+**Queued for the next session (owner, 2026-09-20):** the GL-replay hand-back experiment + Peer 2 — briefs ready in
+`.agents/plans/keynote_live_alternatives_research.md`.
 
 ## NEW since the overnight close — a possible path past the overlap refusal (research, not product)
 Brief + status log: `.agents/plans/keynote_live_alternatives_research.md`. Owner asked two peers to look for
@@ -46,7 +43,7 @@ posters, scaled stage, OBS CEF. **Peer 2 (compositing outside the player: occlud
 started** — brief ready in the same file. **Next experiment:** an rVFC-driven replay loop on settled slide 2 for ~5 s,
 then (a) advance to slide 3 and (b) fire a build on slide 2 — detect the player's first own GL call, stand down within
 one frame, restore the poster, compare slide 3 byte-for-byte with a control run. Harness (ignored):
-`output/live-visible-content/alt-inplayer/replay.py`. The owner has not yet said whether to queue this.
+`output/live-visible-content/alt-inplayer/replay.py`. Owner: queued for the next session.
 
 ## Two lines of work
 **A. PR #175 tip `74e0a59`** (runtime v3, sha `fb9e771e…602d`) — I3 scaled stage · I5 codec report + UI warnings ·

@@ -1,4 +1,4 @@
-# Alternatives to the overlap refusal — two-peer research brief (2026-09-20, PAUSED — resume from here)
+# Alternatives to the overlap refusal — research brief (2026-09-20, QUEUED FOR THE NEXT SESSION — resume from here)
 
 Owner ask (2026-09-20 morning): after the WebGL-texture spike died at Q2, get two independent peers to look for
 alternative paths. Peer 1 was started and time-boxed to ~7 minutes because the owner had to pause; Peer 2 was NOT
@@ -71,3 +71,31 @@ that would qualify it; ranked recommendation + the single next experiment.
   (a) advance to slide 3 and (b) fire a build on slide 2 — detect the player's first own GL call, stand down within one
   frame, restore the poster texture, and compare slide 3 byte-for-byte with a control run without the loop.
   Harness to resume from (ignored): `output/live-visible-content/alt-inplayer/replay.py` (+ `replay.json`, shots A–F).
+- 2026-09-20 ~17:30 — Owner: run item 3 (the hand-back experiment + Peer 2) **next session**. A hand-back peer was
+  launched and stopped by the owner before it measured anything; nothing to salvage. Ready-to-launch brief below.
+
+## Hand-back peer — brief to launch next session (Opus, research only, headless, scratch scripts only)
+Extend a COPY of `output/live-visible-content/alt-inplayer/replay.py` (worktree `friendly-sammet-32dab4`, git-ignored).
+Use `continuity="off"` + a fresh `<video muted autoplay loop playsinline>` on the same asset (the product baseline now
+refuses the 1→2 carry). Pinned code = `.claude/worktrees/gate-runner` (detached on the #158 tip). Fixture scenes: slide 1
+= 0,1 (1 = the 1→2 Magic Move) · slide 2 = 2–5 (three build-ins, then the 2→3 dissolve at 5) · slide 3 = 6,7 · slide 4 = 8,9.
+Measure, in order:
+1. rVFC-driven replay loop on settled slide 2 for ~5 s: iterations, ms p50/p95, GL errors, dropped video frames; score
+   with `score_visible_slide` (12-shot burst, rect (109.35,795.04,951.54,267.62), 40×40 corner control) and check a pixel
+   inside the green square stays green and static.
+2. Detect the player's own GL activity: flag calls issued by our replay; any unflagged call is the player's. Latency and
+   shape of the player's drawing for (a) a BUILD on slide 2 (redraws `#0-canvas`? new canvas? DOM tree? does the frame
+   length change?), (b) the 2→3 dissolve (draws at all, or just tears the canvas down — when?), (c) a go-to.
+3. Stand-down inside the wrapper on the first unflagged call: stop the loop and synchronously restore the ORIGINAL poster
+   into the movie texture (recorded pixel-store flags; restore the player's bindings) BEFORE the player's call proceeds.
+   Compare with a CONTROL run without the loop at the same settled points (after the first build, after all builds,
+   settled slide 3, settled slide 4): sha256; where different, max delta outside movie rects must be 0.
+4. Re-arm after a build: re-record the new last frame and resume; look at the screenshot.
+5. Stretch: keep the texture fresh WHILE the player draws the move (upload once per player frame from the `clear`
+   wrapper) — does the movie play live through the move with the player's own easing?
+6. Failure modes: context loss, `texImage2D` cost per frame, bounded memory (keep only the last frame), video not ready
+   (replay with the poster, never a blank), taint.
+Deliverable: per item numbers + screenshots looked at; hand-back verdict CLEAN / CLEAN-WITH-CAVEATS / NOT CLEAN; a
+stand-down state machine (≤ 12 lines); fail-closed conditions (when to fall back to `retire`); what stays unmeasured
+(two movies / equal-size posters, scaled stage, OBS CEF Chrome 127); the single next experiment.
+Run Peer 2 (section above) alongside it; both must assert the 1920×1080 viewport in-page and use their own cache digests.
