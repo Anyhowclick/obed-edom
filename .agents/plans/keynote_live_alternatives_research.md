@@ -284,3 +284,28 @@ UNSPACED back-to-back captures. That is NOT the product gate's profile: `BURST_O
   (130 ms) sits inside the stale window and survives only via max−min over later shots — A adds margin, it does not fix
   a broken gate. NOT to land as the default until the OBS attach arm is measured (needs the owner's OBS). Screencast
   arm not run (unnecessary).
+
+## Pooled decoder as texture source + stand-down hand-off (2026-09-20 night, Opus, headless; evidence `output/live-visible-content/alt-pooled/`)
+- **Q0 — YES, with the product's existing pool, unchanged.** 60 s each at 1920×1080: never-attached LIVE; attached then
+  REMOVED with no keep-warm **DEAD at once** (removing a playing `<video>` pauses it; rVFC never fires again); **the
+  runtime's own pooling (detached, held in a Map, `play()` re-tried every 200 ms) LIVE** — rVFC 29–31 Hz flat, 1/1859
+  dropped, uploads non-black and changing, whole-frame Δ 0 on screen; `display:none`, 1×1 offscreen and
+  `visibility:hidden` also LIVE. Null (no upload) and paused controls DEAD. The 200 ms keep-warm sweep is what makes the
+  pooled decoder usable — it must not be weakened; the ≤200 ms pause gap after a detach is unmeasured at frame resolution.
+- **Q0b — hand-off with the REAL runtime (plan minus its 1→2 `retire`, scratch copy of the core JS holding the remount;
+  texture fed by the PLAYER'S OWN slide-1 element): CLEAN-WITH-CAVEATS.** At rest: pooled, not in the document, zero
+  `remount-*`, no painting `<video>`, in-page LIVE (108/128 bands, 20 = the green square). Stand-down 1.7–2.1 ms after the
+  mutation batch. **The player creates NO `<video>` at build 1** ⇒ `reuse-decoder` cannot fire there; the hand-off goes
+  through `tryRemount` (`remount-into-authored-layer` — the returning DOM tree is a NEW one). Burnt-in counter strictly
+  increasing across the stand-down in 2 runs, `currentTime` continuous on the same element, exactly one painting
+  `<video>` afterwards, max Δ outside the movie rects = 0 vs the fallback control.
+  Caveats: (1) the pool is keyed by ASSET, not instance — slide 1's second same-asset element is pooled too, and an
+  unmodified hand-back remounted BOTH onto one footprint (double grating); clean only after retiring the sibling ⇒ needs an
+  instance-scoped retire; (2) the remount lands on the SOURCE-slide footprint (109,795,952,268) while the replay painted
+  the slide-2 rect (105,791,960,276) ⇒ ~4 px pop; the footprint must come from the destination rect; (3) green square pops
+  opaque→translucent at the swap (player opacity defect); (4) the ~2 ms swap is below the ~95 ms shot cadence; (5) n = 2,
+  1920×1080 only, no OBS CEF.
+- **Fallback is worse than assumed:** under today's `retire` there is NO `<video>` on slide 2 before or after build 1 —
+  the export's static poster for the whole dwell, not "a restart at build 1".
+- Runtime v4 functions the arming would touch: `preserveAllowedFor`, `scheduleRemount`, `sweepRetireZone` /
+  `retireZoneEnd` / `inRetireZone`, `stash()`, `tryRemount`, `retireDecoder` (instance-scoped), the pool keying.

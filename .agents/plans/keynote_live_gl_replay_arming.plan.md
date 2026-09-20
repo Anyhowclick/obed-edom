@@ -209,3 +209,12 @@ the structural refusal enough? (D4) Accept that the fail-closed arm's artifacts 
 - The go-to repair (`keynote_live_goto_autoplay.plan.md`) changes what follows a go-to; §3's "after a go-to + advance
   the move does not go through WebGL" must be re-measured once that lands.
 
+
+## 10. Q0 / Q0b measured headless (2026-09-20 night) — amends §3
+Numbers: "Pooled decoder as texture source" in the research doc. Q0 PASS: the runtime's existing pool (200 ms keep-warm
+`play()`) is a live texture source; no mounted host needed; "zero painting `<video>`s" may stay a DOM assertion.
+§3 STANDDOWN is WRONG as written: the player creates no `<video>` at build 1, so `reuse-decoder` never fires — the hand-off
+is `tryRemount` → `remount-into-authored-layer` into a NEW DOM tree, and it is pixel/counter clean only if (a) same-asset
+sibling decoders are retired per INSTANCE (the pool is asset-keyed) and (b) the remount footprint comes from the
+DESTINATION rect (today: source rect ⇒ ~4 px pop). Both are new v1 work items in G3. D1/D5 should be decided against the
+real fallback: a static poster for the whole dwell, not a restart. Still open: OBS CEF (Q1), 2 other viewports, n = 2.
