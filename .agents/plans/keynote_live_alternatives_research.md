@@ -202,3 +202,30 @@ Scratch: `output/live-visible-content/alt-opacity/dump.py`.
   opacity defect above).
 **Next step toward product:** make the in-page read (`sample()` + measured occluder mask) the scorer behind the
 visible-content gate for WebGL-settled slides, replacing/augmenting the 12-shot CDP burst; arming work comes after.
+
+## Go-to jumps + hole-punch re-run (2026-09-20 night, Opus, headless; evidence `output/live-visible-content/alt-goto/`)
+Go-to driven exactly as the host does (`LiveOutputHost.execute("goTo")` → index digits + Enter), raw player,
+`continuity="off"`, per-context GL attribution + `getContext` hook + MutationObserver installed before any context existed.
+- **Every go-to destination is painted by the DOM tree** (layer opacity 1): 1→goTo 2, 1→goTo 4, and from the settled
+  WebGL slide 2 → goTo 4 / 1 / 3. Zero GL calls, no new context. Leaving the WebGL window: `#0-canvas` + old layer removed
+  and the new layer added in ONE mutation batch, 108–263 ms after the command (build: 105 ms); never a GL call on the old
+  context afterwards. ⇒ **`#0-canvas` removal is a COMPLETE stand-down signal for every measured exit** (builds, dissolve,
+  go-to forward/back/skip) and cannot race the player's drawing.
+- **ARM signal is safe:** no go-to path produces a poster upload or a context, so ARM never fires falsely. But a boundary
+  does NOT imply a WebGL window: after goTo back to slide 1, `advance` did NOT replay the 1→2 move through WebGL (no
+  canvas, no context, no upload) — ARM must stay a measured precondition, never an inference from the plan.
+- **NEW, product-relevant, UNVERIFIED in the product path:** on every go-to destination `document.querySelectorAll('video')`
+  was EMPTY — the movie is a static poster `<canvas>` (slide 2: at authored 105,791,960,276, visible) and still static
+  6.5 s later, including goTo BACK to slide 1 whose movies were live before; `<video>`s return only after the next
+  `advance`. Measured on the raw player with continuity off — must be re-checked with the presenter/runtime v4 before
+  drawing product conclusions (does the host's goTo leave movies frozen on air?). Owner-relevant if confirmed.
+- **Hole-punch (occluder ∩ hole, video bound to the slide's own export copy): ALIVE-WITH-CAVEATS.** 1920×1080: outside-rect
+  change 0.0 %, max Δ 0; green probe Δ 0; movie probe Δ 244; 1-px antialias fringe inside the rect. 1600×1000: 0.016 %
+  (one column on the hole's edge, Δ ≤ 64). After build 1 the whole frame equals the control (Δ 0); the player removes our
+  `#stage` child + the canvas in the same batch ⇒ no teardown needed. **Scaled-stage rule: `#stage` is scaled by an ancestor
+  TRANSFORM — `clip-path` and child layout are in UNTRANSFORMED (authored) px; scaling the path by
+  `getBoundingClientRect` leaked 4.9 % of outside pixels (max Δ 255).** Still paints the occluder as WebGL does (opaque).
+- **Third independent reproduction of the CDP burst defect:** the 12-shot burst read the live punch DEAD at both viewports
+  (liveFrac 0.005); 8 shots spaced 0.35 s read 0.795–0.797 pass. Rapid `captureScreenshot` bursts are untrustworthy here.
+Unmeasured: OBS CEF `clip-path: path()`, 2560×1440 for the punch, go-to mid-move (rejected as busy), whether the missing
+`<video>` after go-to is a player behaviour or an authoring setting (movies "start on click"?).
