@@ -29,7 +29,7 @@ from obed_edom.remap_keynote import copy_keynote
 
 LOCK_PATH = Path.home() / "Library" / "Application Support" / "obed-edom" / "keynote.lock"
 DEFAULT_LAYOUT_TEMPLATE = Path.home() / "Desktop" / "Default Templates" / "2026_Lower-Thirds (ENG).key"
-DEFAULT_RSS_LIMIT_BYTES = 3_000_000_000
+DEFAULT_RSS_LIMIT_BYTES = int(float(os.environ.get("OBED_DSK_RSS_LIMIT_GB") or 3.0) * 1_000_000_000)
 _DISPLAY_POKE_INTERVAL_S = 30
 _RSS_WATCHDOG_INTERVAL_S = 2
 _APPLESCRIPT_TIMEOUT_S = 3600

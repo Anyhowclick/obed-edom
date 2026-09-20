@@ -2166,6 +2166,29 @@ def test_export_slide_clips_does_not_bare_build_ins_in_whole_slide_mode(monkeypa
     assert calls["bared"] == []
 
 
+def test_export_slide_clips_names_the_memory_limit_when_the_watchdog_breaches(monkeypatch, tmp_path):
+    """Live r18: the 6.7 GB FRC deck breached the 3 GB default and the job error was a bare
+    "Keynote export AppleScript failed:" with empty stderr. The breach must name itself and
+    the override."""
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[_mixed_slide_two_movies()])
+    _patch_build_export_script_capture(monkeypatch)
+
+    def breaching_start(self):
+        self.breached = True
+        self.peak_rss_bytes = 3_400_000_000
+
+    monkeypatch.setattr(dme._RssWatchdog, "start", breaching_start)
+    _set(monkeypatch, "_run_osascript", lambda *a, **k: _FakeCompleted(returncode=-15, stderr=""))
+
+    with pytest.raises(RuntimeError, match=r"memory limit.*peak 3\.4 GB.*OBED_DSK_RSS_LIMIT_GB"):
+        dme.export_slide_clips(fw, [12], out_dir, per_movie=True, log=lambda *_: None)
+
+
 def test_bare_pure_video_movies_refuses_to_touch_the_source_deck(tmp_path):
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")

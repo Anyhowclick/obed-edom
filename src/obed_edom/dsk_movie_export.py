@@ -1266,6 +1266,11 @@ def export_slide_clips(
                 f"Keynote delete failed on slide {slide} ({addr}, errNum {errnum}): {errmsg}"
             )
 
+        if watchdog.breached:
+            raise RuntimeError(
+                f"Keynote exceeded the {rss_limit_bytes / 1e9:.1f} GB memory limit while exporting clips "
+                f"(peak {watchdog.peak_rss_bytes / 1e9:.1f} GB); raise it with OBED_DSK_RSS_LIMIT_GB"
+            )
         if proc.returncode != 0:
             if last_error is not None:
                 errnum, errmsg = last_error
