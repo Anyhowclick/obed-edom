@@ -1,5 +1,4 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -7,24 +6,22 @@ const test = require("node:test");
 const Module = require("node:module");
 
 const root = path.resolve(__dirname, "..");
-const runtime = process.env.CODEX_NODE || process.execPath;
-const out = fs.mkdtempSync(path.join(os.tmpdir(), "maps-flight-"));
-const stubRoot = path.join(out, "node_modules", "maplibre-gl");
-fs.mkdirSync(stubRoot, { recursive: true });
-fs.writeFileSync(path.join(stubRoot, "index.js"), `exports.MercatorCoordinate=class { constructor(x,y,z){this.x=x;this.y=y;this.z=z} static fromLngLat(p){const r=Math.PI/180,s=Math.sin(p.lat*r);return new this((p.lng+180)/360,.5-Math.log((1+s)/(1-s))/(4*Math.PI),0)} toLngLat(){const n=Math.PI-2*Math.PI*this.y;return {lng:this.x*360-180,lat:180/Math.PI*Math.atan(.5*(Math.exp(n)-Math.exp(-n)))}}}; exports.Map=class {}; exports.setWorkerUrl=()=>{};`);
-const workerStub = path.join(out, "worker-stub.js");
+const out = require("./helpers/compiled.cjs").maps;
+const stubs = fs.mkdtempSync(path.join(os.tmpdir(), "maps-flight-stubs-"));
+const maplibreStub = path.join(stubs, "maplibre-gl.js");
+fs.writeFileSync(maplibreStub, `exports.MercatorCoordinate=class { constructor(x,y,z){this.x=x;this.y=y;this.z=z} static fromLngLat(p){const r=Math.PI/180,s=Math.sin(p.lat*r);return new this((p.lng+180)/360,.5-Math.log((1+s)/(1-s))/(4*Math.PI),0)} toLngLat(){const n=Math.PI-2*Math.PI*this.y;return {lng:this.x*360-180,lat:180/Math.PI*Math.atan(.5*(Math.exp(n)-Math.exp(-n)))}}}; exports.Map=class {}; exports.setWorkerUrl=()=>{};`);
+const workerStub = path.join(stubs, "worker-stub.js");
 fs.writeFileSync(workerStub, "module.exports = '';\n");
-const assetStub = path.join(out, "asset-stub.js");
+const assetStub = path.join(stubs, "asset-stub.js");
 fs.writeFileSync(assetStub, "exports.default = 'toner-vendor';\n");
 const resolve = Module._resolveFilename;
 Module._resolveFilename = function(request, parent, main, options) {
+  if (request === "maplibre-gl") return maplibreStub;
   if (request.includes("maplibre-gl-worker.mjs?worker&url")) return workerStub;
   if (request.includes("maptiler-toner-8688fbd.json?url")) return assetStub;
   return resolve.call(this, request, parent, main, options);
 };
-spawnSync(runtime, [path.join(root, "node_modules/typescript/bin/tsc"), "--noEmit", "false", "--noEmitOnError", "false", "--module", "commonjs", "--moduleResolution", "node", "--target", "ES2020", "--skipLibCheck", "true", "--outDir", out, path.join(root, "src/maps/captureFly.ts")], { cwd: root, stdio: "ignore" });
 const flight = require(path.join(out, "captureFly.js"));
-spawnSync(runtime, [path.join(root, "node_modules/typescript/bin/tsc"), "--noEmit", "false", "--noEmitOnError", "false", "--module", "commonjs", "--moduleResolution", "node", "--target", "ES2020", "--skipLibCheck", "true", "--outDir", out, path.join(root, "src/maps/flight.ts")], { cwd: root, stdio: "ignore" });
 const arcModule = require(path.join(out, "flight.js"));
 const KL = { lat: 3.139, lon: 101.6869, zoom: 8, bearing: 0, pitch: 0 };
 const LA = { lat: 34.0522, lon: -118.2437, zoom: 8, bearing: 0, pitch: 0 };
