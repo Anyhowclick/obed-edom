@@ -136,7 +136,7 @@ test("transportation casing layers are dropped; the surviving road gets warm col
 });
 
 test("cached Positron transforms without undefined style values", () => {
-  const cached = JSON.parse(fs.readFileSync(path.join(root, "..", "output", ".maps", "tile-cache", "styles", "positron.json"), "utf8"));
+  const cached = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/positron-style-sample.json"), "utf8"));
   const { style } = buildWatercolourStyle(cached);
   const walk = (value) => {
     assert.notEqual(value, undefined);
