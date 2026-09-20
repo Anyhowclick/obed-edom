@@ -307,7 +307,10 @@ MAX_RAF_GAP_MS = 100.0      # a per-rAF hold-log gap beyond this => INCONCLUSIVE
 STALE_INDEX_TOL = 2         # +/- yuv rounding on the decoded frozen counter
 COVER_MATCH_TOL = 6.0       # frozen decode mean must match the cover's painted patch mean
 MIN_STALE_TIME_S = 0.3      # the stale frame must be from genuine playback (not a t=0 unrendered black)
-HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event
+HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event (1->2, retired)
+COVER_LEFT_FRAC = 0.4       # mirrors NULL_CONTROL_JS's LEFT_FRAC (subRect) -- keep in sync
+COVER_TRACK_TOL_PX = 2.0    # cover rect vs measured*COVER_LEFT_FRAC tolerance (plan p2_freeze_control_3to4 §4)
+STAGE_ORIGIN_TOL_PX = 0.5   # stageOrigin must read (0,0) at arm (plan §2, cover geometry)
 
 # The Arm-A composited-freeze control, injected into the live page BEFORE the 3->4
 # advance. `window.__OBED_NULL_CTRL__` = {arm(rect, hash1), status(), release()}.
@@ -559,6 +562,30 @@ NULL_CONTROL_JS = r"""
     rafId = requestAnimationFrame(loop);
   }
 
+  // A stale `__obedMotion` left on the owner element by an EARLIER bridge
+  // engagement (same session, prior generation) must not fire the hold --
+  // only a motion marker that is NEW relative to what was on the element at
+  // arm() time. keepThroughBridge stores {started, generation, boundary}
+  // (src/obed_edom/live_continuity_js.py:661-663); `started`/`generation`
+  // change whenever the marker is freshly assigned, so comparing them catches
+  // a stale leftover. When the runtime's boundary object exposes `atScene`
+  // (the 3->4 boundary's own identity) it is compared too, as a belt-and-
+  // suspenders check that the NEW motion is genuinely the 3->4 boundary.
+  function motionMarkerOf(el) {
+    var m = el && el.__obedMotion;
+    if (!m) return null;
+    var atScene = (m.boundary && typeof m.boundary.atScene === 'number') ? m.boundary.atScene : null;
+    return {started: m.started, generation: m.generation, atScene: atScene};
+  }
+  function isNewMotion(marker) {
+    var armed = st.armedMotionMarker;
+    if (!marker) return false;
+    if (!armed) return true;  // nothing armed on the element -- any marker is new
+    if (marker.started === armed.started && marker.generation === armed.generation) return false;
+    if (armed.atScene != null && marker.atScene != null && marker.atScene !== armed.atScene) return false;
+    return true;
+  }
+
   window.__OBED_NULL_CTRL__ = {
     arm: function (rect, hash1) {
       st.armedRect = rect;
@@ -569,17 +596,20 @@ NULL_CONTROL_JS = r"""
       st.stageOrigin = {x: stageR.left, y: stageR.top};
       var ownerEl = resolveOwnerEl();
       st.armedElId = ownerEl ? ownerEl.__obedElId : st.armedElId;
+      st.armedMotionMarker = motionMarkerOf(ownerEl);
       st.boundDecoderId = null;  // the TRIGGER owner is what binds the cover
       st.fellBackToArmOwner = false;
       st.status = 'armed';
       // Single rAF poll for EITHER the runtime's own move signal (`__obedMotion`,
       // set on the bridged <video> by keepThroughBridge the instant it starts
-      // translating) or, as a fallback, the hash flip. The player never fires
-      // `hashchange` during the move (dead on this player), so no listener here.
+      // translating -- gated to a NEW marker by isNewMotion(), see above) or, as
+      // a fallback, the hash flip. The player never fires `hashchange` during
+      // the move (dead on this player), so no listener here.
       (function poll() {
         if (st.status !== 'armed') return;
         var el = resolveOwnerEl();
-        if (el && el.__obedMotion) { trigger('motion'); return; }
+        var marker = motionMarkerOf(el);
+        if (isNewMotion(marker)) { st.firedMotionMarker = marker; trigger('motion'); return; }
         if (String(location.hash) !== st.armedHash) { trigger('hash'); return; }
         requestAnimationFrame(poll);
       })();
@@ -591,6 +621,7 @@ NULL_CONTROL_JS = r"""
     status: function () {
       return {
         arm: st.arm, status: st.status, armedHash: st.armedHash, armedElId: st.armedElId,
+        armedMotionMarker: st.armedMotionMarker, firedMotionMarker: st.firedMotionMarker,
         stageOrigin: st.stageOrigin,
         boundDecoderId: st.boundDecoderId, fellBackToArmOwner: st.fellBackToArmOwner,
         firedVia: st.firedVia,
@@ -2657,6 +2688,13 @@ async def _capture_3to4_snapshot(
         Image.fromarray(shot).save(run_dir / f"{prefix}-burst-t{off_ms:04d}.png")
     footprint_live = footprintFullyLive(slide4_burst)
 
+    settled_index_seq = [
+        s.get("index") for s in index_samples
+        if (_hash_num(s.get("sceneHash")) or -1) >= SLIDE4_MIN_HASH
+        and float(s.get("progress") or 0.0) >= 0.98
+    ]
+    settled_index_progression = score_index_progression(settled_index_seq)
+
     measured_index_samples = [
         s for s in index_samples if s.get("footprintSource") == "measured"
     ]
@@ -2712,6 +2750,7 @@ async def _capture_3to4_snapshot(
         "armHash": str(arm_hash),
         "armResult": arm_result,
         "movingIndexRunAtCut": moving_index_run_at_cut,
+        "settledIndexProgression": settled_index_progression,
         "movingContinuity3to4": moving_continuity,
         "footprintFullyLive": footprint_live,
         "continueThroughMovingMagicMove3to4Pass": composited_pass,
@@ -2731,55 +2770,79 @@ async def _capture_3to4_snapshot(
 
 
 # Sub-verdicts that MUST be invariant across A1/B/A2 (the freeze must change ONLY
-# the counter): decoder liveness/identity + composition, none of which the partial
-# left-cover touches. continueThroughMagicMove1to2 and index_run are DELIBERATELY
-# excluded — they are what the freeze flips RED in B.
+# the counter): decoder liveness/identity + boundary/composition on the 3->4
+# moving Magic Move, none of which the partial left-cover touches.
+# `movingIndexRunAtCut` and `continueThroughMovingMagicMove3to4Pass` are
+# DELIBERATELY excluded — they are what the freeze flips RED in B (plan
+# p2_freeze_control_3to4.plan.md §4, "the slide-1/2 composition keys go").
 _ISOLATION_KEYS = (
-    "liveContinuityOk",
-    "liveContinuityFailedEmpty",
-    "rvfcAdvanceOk",
+    "movingContinuityOk",
+    "movingContinuityFailedEmpty",
+    "rvfcMonotonicOk",
     "crossingIdentityOk",
-    "stableFootprintOk",
+    "stableSlide4OwnerOk",
     "boundaryValidOk",
-    "continuityClockOk",
+    "footprintFullyLiveOk",
+    "settledIndexProgressionOk",
     "playerBuildErrorsEmpty",
-    "blackAboveOk",
-    "blackBehindShowsMovie",
-    "greenFrontGreenish",
+    "bridgeEngaged",
 )
 
 
 def _isolation_view(snap: dict) -> dict:
-    """The invariant booleans extracted from a 1->2 snapshot for A1==B==A2 checks."""
-    lc = snap.get("liveContinuity") or {}
-    comp = snap.get("composition") or {}
+    """The invariant booleans extracted from a 3->4 snapshot for A1==B==A2 checks."""
+    mc = snap.get("movingContinuity3to4") or {}
     return {
-        "liveContinuityOk": bool(lc.get("ok")),
-        "liveContinuityFailedEmpty": (lc.get("failed") == []),
-        "rvfcAdvanceOk": bool((lc.get("rvfcAdvance") or {}).get("ok")),
-        "crossingIdentityOk": bool((lc.get("crossingIdentity") or {}).get("ok")),
-        "stableFootprintOk": bool((lc.get("stableFootprintDecoder") or {}).get("ok")),
-        "boundaryValidOk": bool((lc.get("boundaryValid") or {}).get("ok")),
-        "continuityClockOk": bool(snap.get("continuesThroughDissolve")),
+        "movingContinuityOk": bool(mc.get("ok")),
+        "movingContinuityFailedEmpty": (mc.get("failed") == []),
+        "rvfcMonotonicOk": bool((mc.get("rvfcMonotonic") or {}).get("ok")),
+        "crossingIdentityOk": bool((mc.get("crossingIdentity") or {}).get("ok")),
+        "stableSlide4OwnerOk": bool((mc.get("stableSlide4Owner") or {}).get("ok")),
+        "boundaryValidOk": bool((mc.get("boundaryValid") or {}).get("ok")),
+        "footprintFullyLiveOk": bool((snap.get("footprintFullyLive") or {}).get("ok")),
+        "settledIndexProgressionOk": bool((snap.get("settledIndexProgression") or {}).get("ok")),
         "playerBuildErrorsEmpty": (snap.get("playerBuildErrors") == []),
-        "blackAboveOk": bool(comp.get("blackAboveOk")),
-        "blackBehindShowsMovie": bool(comp.get("blackBehindShowsMovie")),
-        "greenFrontGreenish": bool(comp.get("greenFrontGreenish")),
+        "bridgeEngaged": bool(snap.get("bridgeEngaged")),
     }
 
 
+def _cover_tracks_footprint(raf_log: list[dict]) -> bool:
+    """100% of hold frames: the logged cover rect must equal `subRect(measuredRect)`
+    (NULL_CONTROL_JS's own derivation -- left-fraction of the MEASURED owner rect,
+    never the modelled one) within `COVER_TRACK_TOL_PX`. Fails closed on a missing
+    log or a missing rect on any frame."""
+    if not raf_log:
+        return False
+    for r in raf_log:
+        cover = r.get("coverRect")
+        measured = r.get("measuredRect")
+        if not cover or not measured:
+            return False
+        expected_w = float(measured.get("w") or 0.0) * COVER_LEFT_FRAC
+        if (
+            abs(float(cover.get("x") or 0.0) - float(measured.get("x") or 0.0)) > COVER_TRACK_TOL_PX
+            or abs(float(cover.get("y") or 0.0) - float(measured.get("y") or 0.0)) > COVER_TRACK_TOL_PX
+            or abs(float(cover.get("w") or 0.0) - expected_w) > COVER_TRACK_TOL_PX
+            or abs(float(cover.get("h") or 0.0) - float(measured.get("h") or 0.0)) > COVER_TRACK_TOL_PX
+        ):
+            return False
+    return True
+
+
 def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
-    """Pure A-B-A verdict for `freezeControlCaughtByCounter`.
+    """Pure A-B-A verdict for `freezeControlCaughtByCounter`, re-bracketed at the
+    3->4 moving Magic Move (plan p2_freeze_control_3to4.plan.md §4; the 1->2 carry
+    is refused, so there is no carried movie to freeze there).
 
-    Passes IFF the injected freeze turns the counter RED for the right reason
-    while every other sub-verdict stays green in ALL three runs. Returns
-    `{"ok", "verdict", "reason", "checks", ...}` where `verdict` is one of
-    "pass" / "fail" / "inconclusive".
+    Passes IFF the injected freeze turns the at-cut counter RED for the right
+    reason while every other sub-verdict stays green (and equal) in ALL three
+    runs. Returns `{"ok", "verdict", "reason", "checks", ...}` where `verdict` is
+    one of "pass" / "fail" / "inconclusive".
 
-    A hold that never fired (or a per-rAF hold-log with a gap > MAX_RAF_GAP_MS) is
-    INCONCLUSIVE, never PASS/FAIL: a silently-unfired hold makes B look exactly
-    like a passing positive (index_run green), which must NOT be read as "the gate
-    is vacuous". So holdStartedAt is checked BEFORE the verdict is interpreted.
+    A hold that never fired is INCONCLUSIVE, never PASS/FAIL: a silently-unfired
+    hold makes B look exactly like a passing positive (index_run green), which
+    must NOT be read as "the gate is vacuous". So holdStartedAt is checked BEFORE
+    the two-tier integrity/verdict split below.
     """
     nc = b.get("nullControl") or {}
     checks: dict[str, object] = {}
@@ -2799,13 +2862,10 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     max_gap_ms = max(
         (raf_ts[i + 1] - raf_ts[i] for i in range(len(raf_ts) - 1)), default=0.0
     )
-    # A per-rAF gap is NOT itself disqualifying. On the static 1->2 footprint the cover
-    # is a position:fixed canvas painted ONCE, so a rAF stall — caused by the very CDP
-    # screenshots that OBSERVE the frozen counter (index_run) — cannot lift it. Observation
-    # continuity is proven by the composite screenshots + coverPatchStable + 100%
-    # elementFromPoint-on-cover over the frames that DID log + loopLive. max_gap_ms is kept
-    # as a diagnostic only. (A MOVING footprint (3->4) would instead need per-screenshot
-    # cover attestation — see the Fable consult 2026-09-19.)
+    # Unlike the retired static 1->2 footprint, the 3->4 cover TRACKS a moving
+    # target every rAF (re-derived from the measured owner rect); a rAF stall
+    # here leaves the cover behind the movie, not merely unobserved, so the gap
+    # is DISQUALIFYING (owner decision, plan §4) rather than diagnostic-only.
 
     perf_click = b.get("perfNowAtClick")
     release_at = nc.get("releaseAt")
@@ -2817,8 +2877,9 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     )
     offsets = b.get("captureOffsets") or []
     seq = b.get("indexSequence") or []
-    flip_index = b.get("flipIndex")
-    stale = nc.get("staleIndexExpected")
+    sources = b.get("footprintSources") or []
+    idx = b.get("movingIndexRunAtCut") or {}
+    flip_index = idx.get("flipIndex")
 
     in_hold_positions = [
         i for i, off in enumerate(offsets)
@@ -2826,14 +2887,14 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and (release_offset_s is None or off <= release_offset_s)
     ]
     first_in_hold = min(in_hold_positions) if in_hold_positions else None
-    in_hold_decodes = [seq[i] for i in in_hold_positions]
+    in_hold_decodes = [seq[i] for i in in_hold_positions if i < len(seq)]
     _decoded = [v for v in in_hold_decodes if v is not None]
     # "Frozen" = the in-hold composite decodes are CONSTANT and match the cover's ACTUAL
     # painted content (coverPatchMean) — NOT the currentTime-derived staleIndexExpected,
-    # which runs ahead of the presented frame by the video's presentation lag (~9 frames
-    # observed). Tying the frozen composite to the cover's own pixels is lag-immune and
-    # stronger (it proves the composite shows the cover); the decoder staying live
-    # (rvfcRanThroughHold) proves the counter WOULD advance if it were not covered.
+    # which runs ahead of the presented frame by the video's presentation lag. Tying the
+    # frozen composite to the cover's own pixels is lag-immune and stronger (it proves
+    # the composite shows the cover); the decoder staying live (rvfcRanThroughHold)
+    # proves the counter WOULD advance if it were not covered.
     cover_mean = nc.get("coverPatchMean")
     stale_ok = bool(
         in_hold_decodes
@@ -2842,70 +2903,69 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and cover_mean is not None
         and abs(sum(_decoded) / len(_decoded) - cover_mean) <= COVER_MATCH_TOL
     )
+    all_in_hold_measured = bool(in_hold_positions) and all(
+        (sources[i] if i < len(sources) else None) == "measured" for i in in_hold_positions
+    )
 
-    idx = b.get("indexRun") or {}
+    # The flip window is scored over the MEASURED-only subsequence (the same one
+    # `score_composited_index_run` scored to produce `idx`/`flip_index`); a
+    # `modelled` sample decodes garbage off a moving ROI and is never counted.
+    measured_positions = [i for i, s in enumerate(sources) if s == "measured"]
+    measured_seq = [seq[i] for i in measured_positions if i < len(seq)]
+    flip_index_present = isinstance(flip_index, int)
     flip_window_decodable = False
-    if isinstance(flip_index, int) and seq:
-        lo, hi = max(0, flip_index - 1), min(len(seq) - 1, flip_index + 3)
-        flip_window_decodable = all(seq[i] is not None for i in range(lo, hi + 1))
+    if flip_index_present and measured_seq:
+        lo, hi = max(0, flip_index - 1), min(len(measured_seq) - 1, flip_index + 3)
+        flip_window_decodable = all(measured_seq[i] is not None for i in range(lo, hi + 1))
+    n_total = idx.get("n")
+    n_after = (n_total - flip_index) if (flip_index_present and isinstance(n_total, int)) else 0
 
-    b_lc = b.get("liveContinuity") or {}
-    hashchange_at = nc.get("hashchangeEventAt")
-    within_hashchange = (
-        hashchange_at is None
-        or abs(hold_started - hashchange_at) <= HOLD_HASHCHANGE_TOL_MS
+    mc = b.get("movingContinuity3to4") or {}
+    stage_origin = nc.get("stageOrigin") or {}
+    stage_origin_zero = bool(
+        stage_origin.get("x") is not None
+        and stage_origin.get("y") is not None
+        and abs(float(stage_origin["x"])) <= STAGE_ORIGIN_TOL_PX
+        and abs(float(stage_origin["y"])) <= STAGE_ORIGIN_TOL_PX
     )
     all_cover = bool(raf_log) and all(r.get("elementFromPointIsCover") for r in raf_log)
-    n_after = (len(seq) - flip_index) if isinstance(flip_index, int) else 0
+
+    last_at_cut = b.get("lastAtCutCaptureOffsetS")
+    burst_start = b.get("burstStartOffsetS")
+    release_between = bool(
+        release_offset_s is not None
+        and last_at_cut is not None
+        and burst_start is not None
+        and last_at_cut <= release_offset_s <= burst_start
+    )
 
     # --- The counter went RED for exactly the injected freeze -------------------
     checks["indexRunRed"] = idx.get("ok") is False
     checks["reasonFreezeRunAtCut"] = idx.get("reason") == "freeze run at cut"
     checks["freezeRunMargin"] = bool((idx.get("freezeRunAtCut") or 0) >= FREEZE_MIN_RUN)
     checks["noNegativeAnomaly"] = idx.get("negativeAnomaly") is False
+    checks["flipIndexPresent"] = flip_index_present
     checks["flipWindowDecodable"] = flip_window_decodable
-    checks["flipIndexPresent"] = isinstance(flip_index, int)
     checks["enoughAfterFlip"] = n_after >= FREEZE_MIN_AFTER
 
     # --- The decoder stayed LIVE through the freeze (RED isolated to counter) ----
-    checks["liveContinuityOk"] = bool(b_lc.get("ok"))
-    checks["liveContinuityFailedEmpty"] = (b_lc.get("failed") == [])
-    checks["boundDecoderIsCoverOwner"] = (
-        b_lc.get("boundDecoderId") is not None
-        and b_lc.get("boundDecoderId") == nc.get("boundDecoderId")
+    checks["movingContinuityOk"] = bool(mc.get("ok"))
+    checks["boundDecoderIsSlide3Decoder"] = (
+        nc.get("boundDecoderId") is not None
+        and nc.get("boundDecoderId") == b.get("ownerDecoderId")
     )
     checks["noOwnerAmbiguousInWindow"] = nc.get("ownerAmbiguousInWindow") is False
     checks["rvfcRanThroughHold"] = bool(
-        (b_lc.get("rvfcAdvance") or {}).get("advance") is not None
-        and (b_lc.get("rvfcAdvance") or {}).get("advance") >= RVFC_MIN_ADVANCE_S
+        (mc.get("rvfcMonotonic") or {}).get("advance") is not None
+        and (mc.get("rvfcMonotonic") or {}).get("advance") >= RVFC_MIN_ADVANCE_S
     )
-    checks["continuityClockGreen"] = bool(b.get("continuesThroughDissolve"))
     checks["playerBuildErrorsEmpty"] = (b.get("playerBuildErrors") == [])
+    checks["bridgeEngaged"] = bool(b.get("bridgeEngaged"))
 
-    # --- The freeze fired correctly --------------------------------------------
-    checks["holdWithinHashchange"] = bool(within_hashchange)
-    checks["firstInHoldEarly"] = bool(
-        first_in_hold is not None
-        and isinstance(flip_index, int)
-        and first_in_hold <= flip_index + 1
-    )
-    checks["paintedOnce"] = nc.get("paintCount") == 1
-    checks["coverPatchStable"] = bool(
-        nc.get("coverPatchStart") is not None
-        and nc.get("coverPatchStart") == nc.get("coverPatchEnd")
-    )
-    checks["coverHitTest100"] = all_cover
-    checks["everyInHoldStale"] = stale_ok
-    checks["releaseAfterLastCapture"] = bool(
-        release_offset_s is not None
-        and offsets
-        and release_offset_s >= max(o for o in offsets if o is not None)
-    )
-    # Integrity additions (Fable 2026-09-19): the control must have fired at the ADVANCE
-    # (not the boot settle), painted a REAL decoded frame (not black), and the rAF loop
-    # must have actually run (not empty). Any of these failing => the stimulus was not
-    # delivered => INCONCLUSIVE, never a counter verdict.
+    # --- The freeze fired correctly, at the right moment, over the right target -
+    checks["firedAtMoveStart"] = nc.get("firedVia") == "motion"
     checks["firedAfterAdvance"] = bool(hold_offset_s is not None and hold_offset_s >= -0.05)
+    checks["stageOriginZero"] = stage_origin_zero
     checks["noControlError"] = nc.get("error") is None
     checks["ownerReadyAtTrigger"] = bool(
         nc.get("ownerReadyState") is not None and nc.get("ownerReadyState") >= 2
@@ -2917,14 +2977,25 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     checks["staleFrameFromPlayback"] = bool(
         nc.get("staleCurrentTime") is not None and nc.get("staleCurrentTime") >= MIN_STALE_TIME_S
     )
+    checks["paintedOnce"] = nc.get("paintCount") == 1
+    checks["coverPatchStable"] = bool(
+        nc.get("coverPatchStart") is not None
+        and nc.get("coverPatchStart") == nc.get("coverPatchEnd")
+    )
+    checks["coverHitTest100"] = all_cover
+    checks["coverTracksFootprint"] = _cover_tracks_footprint(raf_log)
     checks["loopLive"] = len(raf_ts) >= 10
+    checks["everyInHoldStale"] = stale_ok
+    checks["allInHoldMeasured"] = all_in_hold_measured
+    checks["releaseBetweenLastCaptureAndBurst"] = release_between
+    checks["maxRafGapOk"] = max_gap_ms <= MAX_RAF_GAP_MS
 
     # --- Bracketing positives are GREEN ----------------------------------------
     checks["positivesGreen"] = bool(
-        a1.get("continueThroughMagicMove1to2Pass")
-        and a2.get("continueThroughMagicMove1to2Pass")
-        and (a1.get("indexRun") or {}).get("ok")
-        and (a2.get("indexRun") or {}).get("ok")
+        a1.get("continueThroughMovingMagicMove3to4Pass")
+        and a2.get("continueThroughMovingMagicMove3to4Pass")
+        and (a1.get("movingIndexRunAtCut") or {}).get("ok")
+        and (a2.get("movingIndexRunAtCut") or {}).get("ok")
     )
 
     # --- Isolation: every invariant sub-verdict equal across A1, B, A2 ----------
@@ -2936,22 +3007,25 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     }
     checks["isolationEqual"] = isolation_diffs == {}
 
-    # Two tiers (Fable 2026-09-19): tier-1 hold INTEGRITY (the control delivered the
-    # stimulus and was observed) — any failure is INCONCLUSIVE, because a control that
-    # did not fire/hold correctly makes B look like a passing positive and would be
-    # misread as "the gate is vacuous". tier-2 is the VERDICT (the counter caught the
-    # freeze, RED isolated to the counter) — PASS/FAIL only once integrity holds.
+    # Two tiers: tier-1 hold INTEGRITY (the control delivered the stimulus at the
+    # right moment/target and was observed) — any failure is INCONCLUSIVE, because
+    # a control that did not fire/hold correctly makes B look like a passing
+    # positive and would be misread as "the gate is vacuous". tier-2 is the
+    # VERDICT (the counter caught the freeze, RED isolated to the counter) —
+    # PASS/FAIL only once integrity holds. On a MOVING footprint a rAF stall
+    # (maxRafGapOk) is disqualifying integrity, not diagnostic-only (plan §4).
     integrity_keys = (
-        "firedAfterAdvance", "holdWithinHashchange", "firstInHoldEarly", "noControlError",
-        "ownerReadyAtTrigger", "paintedOnce", "staleFrameFromPlayback", "coverPatchStable",
-        "coverHitTest100", "loopLive", "everyInHoldStale", "flipIndexPresent",
-        "flipWindowDecodable", "enoughAfterFlip", "releaseAfterLastCapture",
+        "firedAtMoveStart", "firedAfterAdvance", "stageOriginZero", "noControlError",
+        "ownerReadyAtTrigger", "staleFrameFromPlayback", "paintedOnce", "coverPatchStable",
+        "coverHitTest100", "coverTracksFootprint", "loopLive", "everyInHoldStale",
+        "flipIndexPresent", "flipWindowDecodable", "enoughAfterFlip",
+        "releaseBetweenLastCaptureAndBurst", "allInHoldMeasured", "bridgeEngaged",
+        "maxRafGapOk",
     )
     verdict_keys = (
         "indexRunRed", "reasonFreezeRunAtCut", "freezeRunMargin", "noNegativeAnomaly",
-        "liveContinuityOk", "liveContinuityFailedEmpty", "boundDecoderIsCoverOwner",
-        "noOwnerAmbiguousInWindow", "rvfcRanThroughHold", "continuityClockGreen",
-        "playerBuildErrorsEmpty", "positivesGreen", "isolationEqual",
+        "movingContinuityOk", "boundDecoderIsSlide3Decoder", "noOwnerAmbiguousInWindow",
+        "rvfcRanThroughHold", "playerBuildErrorsEmpty", "positivesGreen", "isolationEqual",
     )
     integrity_failed = [k for k in integrity_keys if not checks.get(k)]
     verdict_failed = [k for k in verdict_keys if not checks.get(k)]
@@ -2976,7 +3050,6 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
             "holdStartedAt": hold_started,
             "holdOffsetS": hold_offset_s,
             "releaseOffsetS": release_offset_s,
-            "staleIndexExpected": stale,
             "inHoldPositions": in_hold_positions,
             "inHoldDecodes": in_hold_decodes,
             "firstInHold": first_in_hold,
@@ -2985,17 +3058,34 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
             "maxRafGapMs": max_gap_ms,
             "rafFrames": len(raf_ts),
             "coverHitTestAll": all_cover,
+            "coverTracksFootprint": checks["coverTracksFootprint"],
             "paintCount": nc.get("paintCount"),
             "firedVia": nc.get("firedVia"),
             "fellBackToArmOwner": nc.get("fellBackToArmOwner"),
             "boundDecoderId": nc.get("boundDecoderId"),
             "armedElId": nc.get("armedElId"),
+            "armedMotionMarker": nc.get("armedMotionMarker"),
+            "firedMotionMarker": nc.get("firedMotionMarker"),
             "coverPatchMean": cover_mean,
             "ownerReadyState": nc.get("ownerReadyState"),
+            "stageOrigin": stage_origin,
             "error": nc.get("error"),
         },
         "isolationViews": {"a1": iv_a1, "b": iv_b, "a2": iv_a2},
     }
+
+
+def _freeze_control_blocks_success(verdict: str | None, bridge34_disabled: bool) -> bool:
+    """Owner decision 8b: does this `freeze_control` verdict block overall
+    `success`? "pass" never blocks; "skipped" blocks EXCEPT under
+    `--disable-bridge34` (the only arm with nothing to freeze); every other
+    verdict ("inconclusive", "fail", or anything unrecognised) blocks, same as
+    today — never weaken this to a pass on an unrecognised verdict."""
+    if verdict == "pass":
+        return False
+    if verdict == "skipped":
+        return not bridge34_disabled
+    return True
 
 
 async def _run_freeze_bracket(
@@ -4140,58 +4230,57 @@ async def _run(player: Path) -> dict:
     ]
 
     # Phase 2 — composited-freeze negative control (Arm A), A-B-A bracket on the
-    # STATIC 1->2 boundary. Proves the COUNTER gate (index_run) is not vacuous: an
-    # injected persistent VISIBLE stale cover turns index_run RED ("freeze run at
-    # cut") in B while the live-<video> decoder + rVFC stay green, and every other
-    # sub-verdict is identical across the two bracketing positives. Runs on fresh
-    # boots (its own server + re-navigated Chrome), so it never perturbs the main
-    # pass above.
-    freeze_control = {
-        "ok": False,
-        "verdict": "inconclusive",
-        "reason": "freeze control must be re-bracketed at 3->4 after the 1->2 refusal",
-        "bracketBoundary": "1->2 (retired — premise dead)",
-        "waitProfile": wait_profile_name,
-    }
+    # 3->4 moving Magic Move boundary (the 1->2 carry is refused, so there is no
+    # carried movie to freeze there — see the plan). Proves the COUNTER gate
+    # (`movingIndexRunAtCut`) is not vacuous: an injected persistent VISIBLE
+    # partial stale cover, tracking the MOVING measured footprint, turns it RED
+    # ("freeze run at cut") in B while the bridged decoder + rVFC stay live, and
+    # every other sub-verdict is identical across the two bracketing positives.
+    # Runs on fresh boots (its own server + re-navigated Chrome per arm), so it
+    # never perturbs the main pass above. SKIPPED under --disable-bridge34 (no
+    # carry to freeze in that arm).
+    freeze_control = await _run_freeze_bracket(player_dir, runs, wait_profile, wait_profile_name)
+    freeze_blocks_success = _freeze_control_blocks_success(freeze_control.get("verdict"), not bridge34)
     findings.append(
         {
             "id": "freezeControlCaughtByCounter",
-            "pass": bool(freeze_control.get("ok")),
+            "pass": not freeze_blocks_success,
             "verdict": freeze_control.get("verdict"),
             "detail": freeze_control,
             "note": (
-                "INCONCLUSIVE this round (blocks success): the A-B-A bracket sits on the "
-                "1->2 boundary and asserts liveContinuity1to2 stays green in arm B — a "
-                "premise the refusal kills. It must be re-bracketed on the 3->4 boundary "
-                "(the only live carry left) before it can score again; it is NOT dropped "
-                "and NOT forced green. Original contract, for the move: "
-                "Negative control (Arm A: decoder LIVE, composite FROZEN). An A-B-A "
-                "bracket on the 1->2 boundary injects a partial (left ~40% of the owner "
-                "rect) stale cover over the burnt-in counter for the middle run only. "
-                "PASS requires: index_run RED with reason 'freeze run at cut' and "
-                f"freezeRunAtCut >= {FREEZE_MIN_RUN} (margin, no negative anomaly, flip "
-                "window decodable); the live-<video> gate STILL green in B (liveContinuity "
-                "ok, bound decoder == the cover's owner, rVFC advance >= "
-                f"{RVFC_MIN_ADVANCE_S}s, continuity clock green, no player-build-error); the "
-                "freeze provably fired (holdStartedAt within 50ms of hashchange, painted "
-                "once, cover patch pixels identical hold-start vs release, elementFromPoint "
-                "== cover for 100% of hold frames, every in-hold decode == expected stale "
-                "index +/-2, released after the last capture); BOTH bracketing positives "
-                "green; and every invariant sub-verdict equal across A1/B/A2. A hold that "
-                "never fired, or a per-rAF log gap > 100ms, is INCONCLUSIVE, never PASS/FAIL "
-                "(an unfired hold would masquerade as a passing positive)."
+                "Negative control (Arm A: bridged decoder LIVE, composite FROZEN), "
+                "re-bracketed on the 3->4 moving Magic Move (the 1->2 carry is refused, "
+                "so there is nothing to freeze there). An A-B-A bracket injects a partial "
+                "(left ~40% of the MEASURED owner rect, re-tracked every rAF through the "
+                "translate+scale) stale cover over the burnt-in counter for the middle run "
+                "only. PASS requires: the at-cut counter run RED with reason 'freeze run "
+                f"at cut' and freezeRunAtCut >= {FREEZE_MIN_RUN} (margin, no negative "
+                "anomaly, flip window decodable on the measured-only sequence); the bridged "
+                "decoder STILL live in B (movingContinuity3to4 ok, bound decoder == the "
+                f"slide-3 movie decoder, rVFC advance >= {RVFC_MIN_ADVANCE_S}s, no "
+                "player-build-error, bridge engaged); the freeze provably fired AT THE MOVE "
+                "START (firedVia == 'motion', never a hash-only fire), the stage origin was "
+                "(0,0) at arm, painted once, cover patch pixels identical hold-start vs "
+                "release, elementFromPoint == cover for 100% of hold frames, the cover "
+                "tracked the measured footprint within 2px on every hold frame, every "
+                "in-hold decode from a MEASURED sample and == the expected stale index "
+                "+/-2, released strictly between the last at-cut capture and the settled "
+                "visible-content burst, and no per-rAF hold-log gap > "
+                f"{MAX_RAF_GAP_MS:.0f}ms (disqualifying on this MOVING footprint); BOTH "
+                "bracketing positives green; and every invariant sub-verdict equal across "
+                "A1/B/A2. A hold that never fired is INCONCLUSIVE, never PASS/FAIL (an "
+                "unfired hold would masquerade as a passing positive). Bridge-disabled: the "
+                "bracket is SKIPPED (nothing to freeze), which is non-blocking ONLY in that "
+                "arm — a 'skipped' verdict blocks success in every other arm."
             ),
         }
     )
 
-    # Restart inconclusive must not count as overall success. An inconclusive
-    # freeze bracket (hold never fired / unobserved interval) also blocks success:
-    # it means the counter gate could not be qualified this run.
-    success = (
-        all(f["pass"] for f in findings)
-        and not restart_inconclusive
-        and freeze_control.get("verdict") != "inconclusive"
-    )
+    # Restart inconclusive must not count as overall success. The freeze bracket's
+    # own pass/block rule lives in `_freeze_control_blocks_success` (owner decision
+    # 8b): "inconclusive"/"fail" always block; "skipped" blocks unless the 3->4
+    # bridge itself was disabled for this run (nothing to freeze there either).
+    success = all(f["pass"] for f in findings) and not restart_inconclusive
     report = {
         "probe": "p2_recovery_html_adversarial",
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
