@@ -99,7 +99,7 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   re-renders movie/mixed slides (never reuses) and deletes the `src/` intermediates after a
   successful run. The DSK deck is retained. Supersedes the "one baked clip" rule above and the
   #138 reuse rule.
-- 2026-09-19 (owner, Generator review step — code-complete + offline-tested, LIVE-UNVERIFIED, on
+- 2026-09-19 (owner, Generator review step — LIVE-VERIFIED r18 2026-09-20, PR #176, on
   `claude/dsk-generator-alignment-options-97c5aa`): each slide takes an explicit left / centre /
   right alignment (the existing `anchor`, with bulk controls), and a slide with kept top-level
   movies may be set **videos only**: every non-movie object is dropped and the movie(s) are fitted
@@ -271,8 +271,10 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   poke the display (`caffeinate -u -t 2`). Sandboxed shells cannot launch Keynote.
 - Two concurrent Keynote scripts collide destructively; hold an `fcntl.flock` for the batch.
   Detect the process by `CFBundleExecutable` (`Keynote`), not the app name.
-- Peak RSS: 1.18–1.41 GB on a 242 MB deck, 1.83–2.3 GB on the 669 MB GW deck; watchdog default
-  3.0 GB. `-600` = Keynote not running; `-1712` = AppleEvent timeout (retry re-copies the
+- Peak RSS: 1.18–1.41 GB on a 242 MB deck, 1.83–2.3 GB on the 669 MB GW deck, **3.21 GB on the
+  6.7 GB FRC Wall deck (r18, 2-slide generate; its export 1.50 GB)**; watchdog default 3.0 GB —
+  the FRC deck BREACHES it, so launch the dashboard with `OBED_DSK_RSS_LIMIT_GB=8` (r18 used 8 on
+  a 17 GB machine). A breach now names itself in the job error. `-600` = Keynote not running; `-1712` = AppleEvent timeout (retry re-copies the
   pristine scratch, so NEVER retry a pass ≥ 2 — it would run against an unwritten deck).
 - Keynote does NOT purge unreferenced `Data/` on save: the DSK output was 94.7% of the 669 MB
   source. *File → Reduce File Size* is GUI-only; it stays an operator step.
@@ -412,7 +414,9 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     DSK deck to the Exporter rather than growing a second export path.
 24. **Both exporters share the placeholder-materialisation exposure** — UNMEASURED: only the
     assembly path deletes the prepended slot instances after `set base layout`.
-25. **`Full_Report_Card_Wall.key` (6.7 GB, 155 slides) is still unmeasured** for whole-deck live work.
+25. **`Full_Report_Card_Wall.key` (6.7 GB, 155 slides)** — a 2-slide subset ran live in r18 (generate
+    ~5 min incl. a 6.7 GB scratch copy per export, peak RSS 3.21 GB → needs
+    `OBED_DSK_RSS_LIMIT_GB`); a WHOLE-deck run is still unmeasured.
 26. **`saveToken` and the minted media style's inherited picture `frame`** are open questions on
     `mint_media_style` — no offline evidence either way.
 27. **Joint slot fit shrinks a too-long verse instead of splitting** (owner-banked 2026-09-17, from
@@ -425,50 +429,38 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
     slot candidate to per-box splitting (slot-authoritative 45pt) instead of `fit_text_stack`; it
     moves the acceptance decks and needs a live text run. Pre-existing; beyond item 12's scope.
 
-28. **Stacked-clip build-IN — WRITTEN OFFLINE, LIVE-UNVERIFIED (2026-09-20).** A later stacked clip
-    sits on top and would cover the first from t=0, so `iwa_movies.patch_clip_start_timing` now
-    rewrites the upper clip's auto-created `apple:movie-start` build `effect` to the source's
-    `apple:dissolve` (allow-list; one-field diff, §3 FRC 50) and carries the source chunk mode +
-    `delay` through `ClipTiming` (`with_previous` / `after_previous` / `on_click`; FRC 50 = With
-    Build 1, 8.0 s); build + chunk `duration` are written ONLY when the source differs (the single
-    exception to "chunk duration is never touched"). A build-in slide's `buildChunks` order is the
-    plan (source build) order exactly. Fail-closed: refuses before any write unless the clip owns
-    exactly one `In` movie-start build; read-back verifies effect/In/durations/flags/delay/pos.
-    Unsupported source effects, an `Out`-only build, or no build-in WARN and keep the plain
-    cascade (operator fixes by hand); two `In` candidates REFUSE. A PARTIAL stack (some movie
-    pairs overlap, some not) refuses. LIVE ROUND must check on FRC 50 (slide subset — §4 item 25):
-    (a) Keynote opens the patched deck without repair and keeps the flipped effect on save,
-    (b) the upper clip still PLAYS when it dissolves in (its movie-start build was its play
-    trigger; the source movie 1 plays with only a dissolve build, so expected yes), (c) the
-    Exporter's self-playing re-render of the stacked slide is the wanted PP7 asset. Fallback if
-    (a)/(b) fail: one DSK slide per stacked movie with a dissolve between. Also unverified live:
-    videos-only geometry vs gold slide 4 and the standard band's left/right flush margins
-    (43 / 1877, symmetric about 960 — owner to confirm). Reviews `.agents/reviews/dsk-videos-only/`.
-
-29. **Stacked-clip intermediates are exported BARE (2026-09-20, Codex r2).** The upper stacked
-    clip's pure-video scratch copy has its source build-in flipped to a plain `apple:movie-start`
-    / After Transition / delay 0 (`iwa_movies.bare_source_build_ins`, scratch only, `_SlideJob.bare`)
-    so the dissolve + delay is not baked into the clip AND re-created on the inserted clip. The
-    build is FLIPPED, not removed — it is that movie's only play trigger. LIVE CHECK: FRC 50 movie
-    1's intermediate starts at t=0, plays, and is ~8 s shorter; if a bared movie exports frozen,
-    fall back to "assembler skips the build-in + warns".
-30. **Deferred from Codex r2 (offline writer hardening).** (a) `patch_clip_start_timing` refuses when
-    a build/chunk lives in a different IWA member than its movie/slide (fail-closed, but violates
-    "resolve the owning member"); (b) the write is not transactional — `patch_slide_builds` lands
-    before the field patches, so a later refusal leaves the chunk order rewritten (pre-existing
-    shape of the shipped timing writer; needs one preflight + a single `_rewrite_members`
-    commit); (c) the review's `stackedMovies` chip is always centre-panel based and can disagree
-    with the assembler once `keepSide` is on. Stack threshold 0.5 (intersection > half the
-    smaller visible rect) is a judgement call — eyeball real decks for pairs between 0.05 and 0.5.
-    (d) Codex r3: the exporter bares EVERY upper stacked clip while the assembler writes a build-in
-    only for its supported subset — deliberate (an unsupported clip is bare + warned "add the
-    build-in by hand", never double-timed), but the two predicates are not one shared target set;
-    and a CALLER-SUPPLIED per-movie clip on a stacked slide (CLI `clips` mapping only — the
-    dashboard allows operator clips on single-movie slides only) is never proven bare, so a
-    build-in could be written over media that already bakes it. Carry bare/provenance per clip and
-    reconstruct only confirmed-bare clips. r3's other MAJOR (a lower movie owning >1 source chunk)
-    is FIXED: a relative build-in is kept only when its source predecessor is the clip directly
-    below AND that movie owns exactly one source chunk.
+28. **Stacked-clip build-IN — DONE, LIVE-VERIFIED r18 (2026-09-20).** `patch_clip_start_timing`
+    rewrites the upper clip's auto `apple:movie-start` build `effect` to the source's
+    `apple:dissolve` (allow-list) and carries the source chunk mode + `delay` through `ClipTiming`
+    (`with_previous` / `after_previous` / `on_click`); plan order = chunk order on a build-in slide;
+    build + chunk `duration` written only when the source differs. Unsupported effects, an
+    `Out`-only build, or a relative build-in whose source predecessor is not the clip directly
+    below (with exactly one source chunk) WARN and keep the plain cascade; two `In` candidates or
+    a PARTIAL stack REFUSE. Live r18 on FRC 48 + 50 (videos-only, dashboard-driven): generated
+    clips at (258, 670) 1404×395 = gold slide 4; slide 50 build chunks mirror the source (movie 0
+    movie-start pos 0; movie 1 dissolve In pos 1, automatic True / referent False / delay 8.0);
+    Keynote opens the patched deck, the Exporter renders A → cross-dissolve at ~8.25 s → B
+    playing; an open + nudge + SAVE in Keynote leaves the builds IDENTICAL. Evidence
+    `~/Desktop/dsk-d5-work/evidence-r18/` (`final50_strip.png`), outputs `…/r18-output/`.
+29. **Stacked-clip intermediates exported BARE — DONE, LIVE-VERIFIED r18.** The upper stacked clip's
+    scratch copy has its source build-in flipped to `apple:movie-start` / After Transition / delay 0
+    (`iwa_movies.bare_source_build_ins`, scratch only, `_SlideJob.bare`). Live: movie 1's
+    intermediate is 18.37 s (= 13.32 s source + the ~5 s hold, NO +8 s), plays from t=0.
+30. **Codex r2/r3 writer hardening.** (a) cross-member build/chunk — MEASURED, KEEP REFUSING: 1,429
+    builds + 1,429 chunks across FRC Wall, Alpha_DSK, DSK_Gen_Export_Input, Gold_Wall_Input and
+    Sermon_PK (GW) — zero live outside their slide's member, zero drawables outside their build's
+    member; no deck to test a cross-member write against, so the fail-closed refusal stays.
+    (b) DONE — the timing write is ONE `_patch_archive_fields` commit (the chunk reorder is the
+    slide archive's `buildChunks` field; it used to be a separate `patch_slide_builds` rewrite,
+    streaming a multi-GB deck twice) and a failed read-back restores the touched members.
+    (c) DONE — page key `stackedMoviesKeepSide`; the chip follows the row's Keep side.
+    (d) OPEN (low) — a CALLER-SUPPLIED per-movie clip on a stacked slide (CLI `clips` mapping only;
+    the dashboard allows operator clips on single-movie slides only) is never proven bare, so a
+    build-in could be written over media that already bakes it; carry bare/provenance per clip.
+    The exporter bares every upper stacked clip while the assembler rebuilds only its supported
+    subset — deliberate (unsupported = bare + warned, never double-timed).
+    STILL OWNER-EYEBALL: left/right flush for the standard band (43 / 1877) was not run live; the
+    0.5 stack threshold on real decks.
 
 ## 5. Live-run recipe
 
