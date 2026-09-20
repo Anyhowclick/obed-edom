@@ -1,7 +1,5 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const Module = require("node:module");
@@ -10,7 +8,7 @@ const { renderToStaticMarkup } = require("react-dom/server");
 
 const root = path.resolve(__dirname, "..");
 const runtime = process.env.CODEX_NODE || process.execPath;
-const out = fs.mkdtempSync(path.join(os.tmpdir(), "maps-band-overlays-"));
+const out = require("./helpers/compiled.cjs").maps;
 
 const resolve = Module._resolveFilename;
 Module._resolveFilename = function (request, parent, main, options) {
@@ -19,18 +17,6 @@ Module._resolveFilename = function (request, parent, main, options) {
   }
   return resolve.call(this, request, parent, main, options);
 };
-
-const compile = spawnSync(runtime, [
-  path.join(root, "node_modules/typescript/bin/tsc"),
-  "--noEmit", "false", "--noEmitOnError", "false",
-  "--module", "commonjs", "--moduleResolution", "node", "--target", "ES2020",
-  "--jsx", "react-jsx", "--esModuleInterop", "true", "--skipLibCheck", "true",
-  "--outDir", out,
-  path.join(root, "src/maps/BandOverlays.tsx"),
-  path.join(root, "src/maps/types.ts"),
-  path.join(root, "src/maps/objects.ts"),
-], { cwd: root, encoding: "utf8" });
-assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 
 const { BandOverlays } = require(path.join(out, "BandOverlays.js"));
 

@@ -43,7 +43,10 @@ Dashboard tests (from `dashboard/`, with the bundled Node on `PATH`):
 `npm run test:maps` (pure-module `tests/*.test.cjs`; it skips the two wall-clock
 "near-linear" tests in the parallel run and runs them alone afterwards via
 `npm run test:perf`, since their budgets only hold on an uncontended CPU) and
-`npm run test:ui` (Vitest/jsdom React tests in `tests-ui/`). There is no CI: run
+`npm run test:ui` (Vitest/jsdom React tests in `tests-ui/`). The `.test.cjs`
+files share one `tsc` build owned by `tests/helpers/compiled.cjs`, cached in
+`dashboard/node_modules/.cache/maps-tests/` and rebuilt whenever a `src/**/*.ts(x)`
+file or the helper changes. There is no CI: run
 these and the full `pytest tests/` locally for every PR that changes code.
 
 Staff-only parse:

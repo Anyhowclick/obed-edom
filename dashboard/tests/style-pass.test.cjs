@@ -1,24 +1,10 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
-const runtime = process.env.CODEX_NODE || process.execPath;
-const out = fs.mkdtempSync(path.join(os.tmpdir(), "style-pass-"));
-
-function compile(file) {
-  const compiled = spawnSync(runtime, [
-    path.join(root, "node_modules/typescript/bin/tsc"), "--module", "commonjs", "--target", "ES2020", "--skipLibCheck", "true",
-    "--outDir", out, path.join(root, "src/maps", file),
-  ], { cwd: root, encoding: "utf8" });
-  assert.equal(compiled.status, 0, compiled.stderr || compiled.stdout);
-}
-
-compile("tonerBuildings.ts");
-compile("darkContrast.ts");
+const out = require("./helpers/compiled.cjs").maps;
 const { withoutSolidBuildings } = require(path.join(out, "tonerBuildings.js"));
 const darkContrast = require(path.join(out, "darkContrast.js"));
 const { withBrighterDarkLines } = darkContrast;
