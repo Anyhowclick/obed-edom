@@ -558,11 +558,14 @@ def test_header_form_multiline_start_line_sums_embedded_newlines():
     assert places[1].line == 5
 
 
-def test_nul_byte_in_field_parses_without_error():
+def test_nul_byte_in_field_is_stripped():
+    """Python 3.10's csv reader rejects a NUL ("line contains NUL") while 3.11+ keeps it, so
+    the parser drops NUL bytes up front: same result on every supported interpreter, and a
+    NUL never reaches a label."""
     text = "Paris\x00,1,2\n"
     places, errors = parse_places(text)
     assert errors == []
-    assert places[0].name == "Paris\x00"
+    assert places[0].name == "Paris"
 
 
 def test_headerless_stray_quote_mid_name_is_literal():

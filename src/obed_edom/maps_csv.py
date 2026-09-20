@@ -487,7 +487,7 @@ def _read_bounded_record(lines: list[str], start: int) -> tuple[list[str] | None
 
 
 def parse_places(text: str) -> tuple[list[Place], list[str]]:
-    sample = text.lstrip("﻿")
+    sample = text.lstrip("﻿").replace("\x00", "")
     raw_lines = sample.splitlines()
     if not any(line.strip() for line in raw_lines):
         return [], []
