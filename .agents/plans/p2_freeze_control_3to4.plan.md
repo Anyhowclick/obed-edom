@@ -1,6 +1,6 @@
 # Plan — re-bracket the P2 freeze negative control at the 3→4 boundary
 
-Status: DRAFT for owner review (Opus planner, 2026-09-20). No code written. Line numbers are as of `main` `946a7648`.
+Status: decisions answered, implementation NOT started — awaiting the owner's direct go (Opus planner, 2026-09-20). No code written. Line numbers are as of `main` `946a7648`.
 Why: `freezeControlCaughtByCounter` is parked `inconclusive` (P2 `success` False on `main`) because the baseline REFUSES
 the 1→2 carry (`retire`), so there is no carried movie to freeze there. 3→4 still carries.
 
@@ -118,8 +118,7 @@ over samples with `footprintSource == "measured"`. In B the freeze must give `ok
   `flipWindowDecodable` force INCONCLUSIVE, the honest outcome); does the cover stay within 2 px under rAF contention
   while CDP screenshots run; does `freezeRunAtCut >= 6` accumulate in the post-settle window at `DENSE_FPS`.
 
-## 8. Owner decisions
-a. Gate `movingIndexRunAtCut` inside finding 13 now, or report-only until one clean fast/slow/bridge-off round
-   (recommended: report first).
-b. Bridge-off arm: freeze verdict `skipped` (recommended) vs leave `inconclusive` and accept `success` False in that arm.
-c. Hash-only trigger: INCONCLUSIVE (recommended) vs a weaker "static-freeze" pass.
+## 8. Owner decisions — ANSWERED 2026-09-20 (relayed via the DSK session; owner to confirm "go implement" directly)
+a. `movingIndexRunAtCut`: REPORT-only until one clean fast/slow/bridge-off round, then gate.
+b. Bridge-off arm: freeze verdict `skipped`, non-blocking in that arm only.
+c. Hash-only trigger: INCONCLUSIVE.
