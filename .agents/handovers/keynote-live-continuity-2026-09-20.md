@@ -10,12 +10,13 @@ agent runs. Roster this round: Opus plans AND implements (owner, 2026-09-19), Co
 |---|---|---|---|
 | `main` | `0889246` | — | — |
 | `feat/keynote-alpha-p2-html-mm` | `6236ffe` | P2 HTML probe + presenter | #158 (draft) → main |
-| `claude/keynote-live-continuity-next` | `983da31` | I3 scaled stage, I5 codec, visible-content gate (runtime v3) | **#175 → #158** |
-| `claude/keynote-live-baseline` | `a90b660` | #175 + baseline increment (runtime v4) + research brief + folded DeckLink runbook | none — awaiting owner review |
+| `claude/keynote-live-continuity-next` | = baseline tip | I3, I5 codec, visible-content gate AND the baseline increment (runtime v4) — baseline merged in 2026-09-20 on the owner's request | **#175 → #158** (owner will merge into #158) |
+| `claude/keynote-live-baseline` | same commit as #175's head | kept only as the working branch of worktree `friendly-sammet-32dab4`; can be deleted once #175 lands | — |
 | `claude/dsk-generator-alignment-options-97c5aa` | — | unrelated DSK Generator work (another session) | #176 (draft) → main |
 | `worktree-agent-a69e…` | `bbfa11f` | UNCOMMITTED P2 qualification work in worktree `agent-consolidated` — owner said hold & bundle | — |
 
-Stack: `main` ← #158 ← #175 ← `claude/keynote-live-baseline`. Nothing is merged; never merge without the owner's go.
+Stack: `main` ← #158 ← #175 (= `claude/keynote-live-baseline`). Code at the #175 head is byte-identical to the gated
+`3a17401`. The owner merges #175 into #158 themself; never merge without the owner's go.
 Worktrees: `friendly-sammet-32dab4` (baseline branch; its ignored `output/` holds the gate evidence, a fixture copy and
 the research harness) · `gate-runner` (detached on the #175 tip; ALL browser gates run from here, pinned to a commit;
 own 198 MB copy of the git-ignored H.264 fixture bank under `output/p2-recovery/html-adversarial`) ·
