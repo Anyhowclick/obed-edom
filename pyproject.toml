@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "obed-edom"
 version = "0.1.0"
 description = "Generate LW and DSK Keynote decks from sermon/offering Word outlines."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "python-docx>=1.1.0",
     "PyYAML>=6.0",
