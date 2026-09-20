@@ -23,7 +23,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv sync --frozen --extra test --extra iwa
-      - run: uv run --no-sync pytest tests/ -q
+      - run: uv run --no-sync pytest tests/ -q --basetemp="$HOME/pytest-tmp"
 
   dashboard:
     runs-on: ubuntu-latest
