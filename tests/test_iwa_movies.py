@@ -600,6 +600,53 @@ def test_clip_timing_continuity_reorders_with_build_1_after_chunk_0(tmp_path):
     assert objects["930"]["duration"] == 0.5
 
 
+def test_clip_timing_reorder_and_fields_land_in_one_commit(tmp_path, monkeypatch):
+    """Codex r2 (plan §4 item 30b): the chunk reorder used to be its own deck rewrite ahead
+    of the field patches, so a later refusal left the order rewritten. It is now the slide
+    archive's `buildChunks` field inside the SAME commit -- exactly one `_rewrite_members`."""
+    import obed_edom.iwa_movies as im
+
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2, initial_chunk_order=[1, 0])
+    calls = []
+    real = im._rewrite_members
+    monkeypatch.setattr(im, "_rewrite_members", lambda d, edits: (calls.append(sorted(edits)), real(d, edits))[1])
+    plan = [ClipTiming(movie_ids[0], "after_transition"), ClipTiming(movie_ids[1], "with_build_1")]
+
+    patch_clip_start_timing(deck, {"100": plan})
+
+    assert len(calls) == 1
+    objects, _, _ = _load_deck(deck)
+    assert [str(r["identifier"]) for r in objects["100"]["buildChunks"]] == ["910", "930"]
+    # `builds` and `transition` are never part of the write.
+    assert [str(r["identifier"]) for r in objects["100"]["builds"]]
+
+
+def test_clip_timing_restores_the_deck_when_the_read_back_disagrees(tmp_path, monkeypatch):
+    """A verify mismatch must not leave the deck half-retimed: the touched members go back
+    to their original bytes and the ValueError still reaches the caller."""
+    import obed_edom.iwa_movies as im
+
+    deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 2, initial_chunk_order=[1, 0])
+    with zipfile.ZipFile(deck) as zf:
+        before = {name: zf.read(name) for name in zf.namelist()}
+    real_state = im.movie_autoplay_state
+
+    def lying_state(d, ids, effects=None):
+        state = real_state(d, ids, effects)
+        state[movie_ids[0]]["delay"] = 99.0
+        return state
+
+    monkeypatch.setattr(im, "movie_autoplay_state", lying_state)
+    plan = [ClipTiming(movie_ids[0], "after_transition"), ClipTiming(movie_ids[1], "with_build_1")]
+
+    with pytest.raises(ValueError, match="verify mismatch"):
+        patch_clip_start_timing(deck, {"100": plan})
+
+    with zipfile.ZipFile(deck) as zf:
+        after = {name: zf.read(name) for name in zf.namelist()}
+    assert after == before
+
+
 def test_clip_timing_cascade_after_previous(tmp_path):
     deck, movie_ids = _build_timing_deck(tmp_path / "timing.key", 3, initial_chunk_order=[2, 0, 1])
     plan = [

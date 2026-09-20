@@ -17,7 +17,7 @@ from keynote_parser.codec import IWAFile
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import compose_geometry
 from obed_edom.iwa_runs import _load_deck, slide_order
-from obed_edom.iwa_write import OfflineWriteCorrupted, _archive_diff, _rewrite_members, patch_slide_builds
+from obed_edom.iwa_write import OfflineWriteCorrupted, _archive_diff, _rewrite_members
 
 _FRAME_TOL = 1.0
 
@@ -543,9 +543,9 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
     clear ``playsAcrossSlides`` on every one of them. ``plans`` maps slideId to its
     clips in VISUAL ORDER. Resolves each movie's single ``apple:movie-start`` chunk
     via `_movie_build_chunk`; any resolution failure raises ``ValueError`` before any
-    write. Build-chunk ORDER is patched via ``iwa_write.patch_slide_builds`` only when
-    it differs from the deck's current order -- the slide's own ``builds`` list and
-    ``transition`` pass through verbatim. The planned movie chunks are ordered at the
+    write. Build-chunk ORDER is patched as the slide archive's own ``buildChunks`` field,
+    only when it differs from the deck's current order -- ``builds`` and ``transition``
+    are never touched. Every edit lands in ONE `_patch_archive_fields` commit. The planned movie chunks are ordered at the
     FRONT of ``buildChunks`` (after_transition at position 0). A clip slide is expected
     to carry only movie-start chunks (the gold decks' overlays are static); a build
     chunk not named in the plan means the retiming is undefined, so the write is refused
@@ -566,8 +566,9 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
     Re-reads and verifies ``(automatic, referent, delay, chunkPos)`` per movie,
     ``playsAcrossSlides is False`` and, for a ``build_in`` entry, the build's
     ``effect``/``animationType``/``duration`` and the chunk's ``duration``, raising
-    ``ValueError`` on any mismatch. Returns the verified state per slide:
-    ``{slideId: {movieId: {...}}}``.
+    ``ValueError`` on any mismatch -- after restoring the touched members' original bytes,
+    so a failed verify never leaves the deck half-retimed. Returns the verified state per
+    slide: ``{slideId: {movieId: {...}}}``.
     """
     deck = Path(deck)
     plans = {str(k): list(v) for k, v in plans.items()}
@@ -577,7 +578,6 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
     objects, id_to_file, _file_ids = _load_deck(deck)
 
     field_patches: list[tuple[str, str, dict[str, Any]]] = []
-    build_plans: dict[str, dict[str, Any]] = {}
     expected_pos: dict[str, dict[str, int]] = {}
     accepted_effects: dict[str, tuple[str, ...]] = {}
     build_checks: dict[str, dict[str, dict[str, Any]]] = {}
@@ -680,11 +680,9 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
         new_chunk_ids = target_order
 
         if new_chunk_ids != current_chunk_ids:
-            build_plans[slide_id] = {
-                "builds": [str((r or {}).get("identifier")) for r in slide.get("builds") or []],
-                "buildChunks": new_chunk_ids,
-                "transition": copy.deepcopy(slide.get("transition")),
-            }
+            field_patches.append(
+                (slide_id, "KN.SlideArchive", {"buildChunks": [{"identifier": cid} for cid in new_chunk_ids]})
+            )
 
         expected_pos[slide_id] = {movie_id: new_chunk_ids.index(chunk_by_movie[movie_id]) for movie_id in movie_ids}
 
@@ -703,16 +701,29 @@ def patch_clip_start_timing(deck: Path, plans: Mapping[str, Sequence[ClipTiming]
             field_patches.append((chunk_id, "KN.BuildChunkArchive", chunk_fields))
             field_patches.append((movie_id, "TSD.MovieArchive", {"playsAcrossSlides": False}))
 
-    if build_plans:
-        result = patch_slide_builds(deck, build_plans)
-        if result["refused"]:
-            raise ValueError(result["reason"])
+    members = {id_to_file[oid] for oid, _pbtype, _fields in field_patches if oid in id_to_file}
+    with zipfile.ZipFile(deck) as zf:
+        originals = {member: zf.read(member) for member in members}
 
     if field_patches:
         result = _patch_archive_fields(deck, field_patches)
         if result["refused"]:
             raise ValueError(result["reason"])
 
+    try:
+        return _verify_clip_start_timing(deck, plans, expected_pos, build_checks, accepted_effects)
+    except ValueError:
+        _rewrite_members(deck, originals)
+        raise
+
+
+def _verify_clip_start_timing(
+    deck: Path,
+    plans: Mapping[str, Sequence[ClipTiming]],
+    expected_pos: Mapping[str, Mapping[str, int]],
+    build_checks: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    accepted_effects: Mapping[str, Sequence[str]],
+) -> dict:
     all_movie_ids = sorted({str(e.movie_id) for entries in plans.values() for e in entries})
     state = movie_autoplay_state(deck, all_movie_ids, accepted_effects)
     after_objects, after_i2f, _after_fi = _load_deck(deck) if build_checks else ({}, {}, {})
