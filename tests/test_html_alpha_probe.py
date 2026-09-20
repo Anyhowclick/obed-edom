@@ -1679,10 +1679,31 @@ def _null_control_decode(arr, roi):
     return int(round(float(rgb.mean())))
 
 
+def _null_control_paint_rect(footprint):
+    """The counter's OWN geometry: the burnt-in patch is authored at the movie
+    SOURCE's top-left 120x48 (of a 1920x540 source), scaled into the CURRENT
+    footprint -- independent of `index_patch_roi_for`'s own (smaller, inset)
+    decode ROI, so painting and decoding are not the same computation (review
+    MAJOR 6d: the old fixture painted and decoded through the identical
+    `index_patch_roi_for(footprint)` call, which could not distinguish "the
+    tracking is load-bearing" from "the paint and decode ROIs always agree by
+    construction")."""
+    x, y, w, h = footprint
+    pw = max(1, int(round(w * 120.0 / 1920.0)))
+    ph = max(1, int(round(h * 48.0 / 540.0)))
+    return (int(round(x)), int(round(y)), pw, ph)
+
+
 def _null_control_frames_and_tracked_rois(true_indices):
     """Synthesise one frame per index: the flat counter patch is painted at the
-    footprint's tracked ROI (footprint_at 3->4 progress), everything else is the
-    high-contrast grating. Returns (frames, tracked_rois)."""
+    footprint's OWN mapped geometry (`_null_control_paint_rect`, independent of
+    the decode ROI), everything else is the high-contrast grating. Returns
+    (frames, tracked_rois) where `tracked_rois` are the DECODE ROIs
+    (`index_patch_roi_for(footprint)`, the plan/runtime's real function) -- a
+    strict subset of the painted rect on both axes (see
+    `test_index_patch_roi_for_slide4_stays_inside_flat_patch_no_scale_guard_needed`),
+    so a genuine tracking failure (paint and decode ROIs diverging) is still
+    caught, not concealed by reusing one rect for both."""
     from obed_edom.html_alpha_probe import footprint_at, index_patch_roi_for
 
     n = len(true_indices)
@@ -1691,10 +1712,11 @@ def _null_control_frames_and_tracked_rois(true_indices):
     for i, value in enumerate(true_indices):
         progress = i / (n - 1)
         footprint = footprint_at(progress, _NULL_CONTROL_SLIDE3_RECT, _NULL_CONTROL_SLIDE4_RECT)
+        paint_rect = _null_control_paint_rect(footprint)
         roi = index_patch_roi_for(footprint)
         tracked_rois.append(roi)
         frame = _null_control_grating()
-        x, y, w, h = roi
+        x, y, w, h = paint_rect
         frame[y : y + h, x : x + w] = value
         frames.append(frame)
     return frames, tracked_rois
@@ -1720,10 +1742,15 @@ def test_null_control_static_roi_fails_closed_on_translating_scaling_movie():
 
 
 def test_null_control_tracked_roi_recovers_true_index_sequence():
-    """The moving-footprint null control, part (b): decoding through
-    `index_patch_roi_for(<per-frame measured footprint>)` recovers the true index
-    sequence exactly and PASSES -- proving the tracking (not the static ROI) is
-    what makes the 3->4 counter readable."""
+    """The moving-footprint null control, part (b): the patch is painted at the
+    movie's OWN mapped geometry (`_null_control_paint_rect`, independent of the
+    decode path) and decoded through `index_patch_roi_for(<per-frame measured
+    footprint>)` -- a DIFFERENT computation that happens to land inside the
+    painted rect. Recovering the true index sequence exactly PASSES, proving the
+    tracking (not merely reusing one ROI for paint+decode) is what makes the
+    3->4 counter readable. This is a synthetic-frame unit test; whether the
+    REAL x1.32 slide-4 ROI stays decodable on actual captured frames is verified
+    by the live gate, not here (review MAJOR 6d)."""
     from obed_edom.html_alpha_probe import score_index_progression
 
     true_indices = [20 + i * 15 for i in range(12)]

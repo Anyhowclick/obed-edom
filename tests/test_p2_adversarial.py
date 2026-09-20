@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -848,20 +850,65 @@ def test_moving_continuity_fails_closed_on_rvfc_rewind():
 # the burnt-in counter for the middle run only, so `movingIndexRunAtCut` goes RED
 # ("freeze run at cut") while the bridged decoder + rVFC stay live. PASS requires
 # the RED to be exactly the injected freeze AND every other sub-verdict identical
-# across the two bracketing positives. A hold that never fired is INCONCLUSIVE
-# (never PASS/FAIL): a silently-unfired hold would masquerade as a passing
-# positive and be misread as "the counter gate is vacuous".
+# (and GREEN) across the two bracketing positives. A hold that never fired is
+# INCONCLUSIVE (never PASS/FAIL): a silently-unfired hold would masquerade as a
+# passing positive and be misread as "the counter gate is vacuous".
+#
+# Fixtures below are built through ONE small builder (`_build_snapshot_34`,
+# review MAJOR 6a) that mirrors `_capture_3to4_snapshot`'s POST-SPLIT shape: a
+# fixed run of pre-flip (#7) samples, an AT-CUT window (#8, progress<0.98, B's
+# frozen values live here), then a SETTLED window (#8, progress>=0.98) that is
+# ALWAYS built from the caller's `settled_indices` regardless of arm — for a
+# genuine freeze that is a CLEAN, ADVANCING sequence in B too (the cover is
+# released before it, review Blocker 3), so `settledIndexProgressionOk` comes
+# out green in all three arms, letting `isolationEqual` actually be satisfiable
+# by a real freeze. `movingIndexRunAtCut`/`settledIndexProgression` are computed
+# by calling the SAME scorer functions the script calls, not hand-typed.
 # --------------------------------------------------------------------------- #
-def _positive_snap_34(**overrides) -> dict:
+_PRE_FLIP_INDICES_34 = (34, 35, 36)
+FREEZE_FLIP_INDEX_34 = len(_PRE_FLIP_INDICES_34)  # first #8 sample's position
+
+
+def _capture_samples_34(at_cut_indices, settled_indices):
+    samples: list[dict] = []
+    offset = -0.1
+    for v in _PRE_FLIP_INDICES_34:
+        samples.append({"index": v, "sceneHash": "#7", "captureOffsetS": round(offset, 2),
+                         "progress": 0.0, "footprintSource": "measured"})
+        offset += 0.05
+    offset = 0.15
+    last_at_cut_offset = None
+    for v in at_cut_indices:
+        samples.append({"index": v, "sceneHash": "#8", "captureOffsetS": round(offset, 2),
+                         "progress": 0.3, "footprintSource": "measured"})
+        last_at_cut_offset = offset
+        offset += 0.05
+    release_offset = round((last_at_cut_offset if last_at_cut_offset is not None else 0.15) + 0.05, 2)
+    offset = round(release_offset + 0.05, 2)
+    settled_start = offset
+    for v in settled_indices:
+        samples.append({"index": v, "sceneHash": "#8", "captureOffsetS": round(offset, 2),
+                         "progress": 0.99, "footprintSource": "measured"})
+        offset += 0.05
+    return samples, last_at_cut_offset, release_offset, settled_start
+
+
+def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool) -> dict:
+    samples, last_at_cut_offset, release_offset, settled_start = _capture_samples_34(
+        at_cut_indices, settled_indices
+    )
+    moving_index_run_at_cut = p2.score_composited_index_run(samples, flip_index=FREEZE_FLIP_INDEX_34)
+    settled_index_progression = p2.score_index_progression(list(settled_indices))
     snap = {
         "hash3": "#7", "hash4": "#8",
-        "armHash": "7",
-        "armResult": {"ok": True, "armedElId": 4, "armedHash": "7", "stageOrigin": {"x": 0.0, "y": 0.0}},
-        "movingIndexRunAtCut": {
-            "ok": True, "reason": None, "flipIndex": 3, "n": 10,
-            "freezeRunAtCut": 0, "negativeAnomaly": False,
+        "armHash": "#7",
+        "armResult": {
+            "ok": True, "armedElId": 4, "armedHash": "#7", "stageOrigin": {"x": 0.0, "y": 0.0},
+            "armedOwnerRect": {"x": 100.0, "y": 200.0, "w": 300.0, "h": 200.0},
         },
-        "settledIndexProgression": {"ok": True},
+        "movingIndexRunAtCut": moving_index_run_at_cut,
+        "flipWindowDecodable": True,
+        "settledIndexProgression": settled_index_progression,
         "movingContinuity3to4": {
             "ok": True, "failed": [], "slide4Owner": 4, "slide3MovieDecoder": 4,
             "boundaryValid": {"ok": True, "n3": 7, "n4": 8, "slide4Min": 8},
@@ -870,53 +917,65 @@ def _positive_snap_34(**overrides) -> dict:
             "rvfcMonotonic": {"ok": True, "advance": 1.2},
         },
         "footprintFullyLive": {"ok": True},
-        "continueThroughMovingMagicMove3to4Pass": True,
-        "indexSequence": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
-        "footprintSources": ["measured"] * 10,
-        "captureOffsets": [-0.1, 0.0, 0.05, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        "continueThroughMovingMagicMove3to4Pass": not frozen,
+        "indexSequence": [s["index"] for s in samples],
+        "footprintSources": [s["footprintSource"] for s in samples],
+        "captureOffsets": [s["captureOffsetS"] for s in samples],
         "ownerDecoderId": 4,
         "playerBuildErrors": [],
         "bridgeEngaged": True,
         "bridgeEvents": [],
         "nullControl": None,
         "perfNowAtClick": None,
-        "lastAtCutCaptureOffsetS": 0.7,
+        "lastAtCutHoldOffsetS": last_at_cut_offset if frozen else None,
+        "releaseOffsetS": release_offset if frozen else None,
+        "firstSettledOffsetS": settled_start,
         "burstStartOffsetS": 1.5,
     }
+    snap["_releaseOffsetForNullControl"] = release_offset  # test-only scratch, popped by callers
+    return snap
+
+
+def _positive_snap_34(**overrides) -> dict:
+    snap = _build_snapshot_34(
+        [37, 38, 39, 40, 41, 42, 43, 44, 45], [50, 51, 52, 53, 54, 55, 56], frozen=False
+    )
+    snap.pop("_releaseOffsetForNullControl", None)
     snap.update(overrides)
     return snap
 
 
 def _freeze_b_snap_34(**overrides) -> dict:
+    snap = _build_snapshot_34([40] * 9, [50, 51, 52, 53, 54, 55, 56], frozen=True)
+    release_offset = snap.pop("_releaseOffsetForNullControl")
+    perf_click = 1000.0
+    hold_started = perf_click + 50.0  # hold_offset_s = 0.05s -> within MOVE_START_WINDOW_S
     raf = [
         {
-            "t": 1120.0 + 20.0 * i, "elementFromPointIsCover": True, "ownerResolved": True,
+            "t": hold_started + 20.0 * i, "elementFromPointIsCover": True, "ownerResolved": True,
             "coverRect": {"x": 300.0, "y": 700.0, "w": 200.0, "h": 350.0},
             "measuredRect": {"x": 300.0, "y": 700.0, "w": 500.0, "h": 350.0},
+            "boundDecoderId": 4,
         }
         for i in range(45)
     ]
-    snap = _positive_snap_34(
-        movingIndexRunAtCut={
-            "ok": False, "reason": "freeze run at cut", "flipIndex": 3, "n": 10,
-            "freezeRunAtCut": 8, "negativeAnomaly": False,
-        },
-        continueThroughMovingMagicMove3to4Pass=False,  # the freeze flips this RED
-        indexSequence=[37, 38, 39, 40, 40, 40, 40, 40, 40, 40],
-        perfNowAtClick=1000.0,
-        nullControl={
-            "status": "released", "holdStartedAt": 1120.0, "firedVia": "motion",
-            "releaseAt": 2000.0, "staleIndexExpected": 40, "staleCurrentTime": 1.33,
-            "ownerReadyState": 4, "coverPatchMean": 40.0,
-            "paintCount": 1, "coverPatchStart": {"sum": 12345, "mean": 40.0},
-            "coverPatchEnd": {"sum": 12345, "mean": 40.0},
-            "ownerAmbiguousInWindow": False, "boundDecoderId": 4, "armedElId": 4,
-            "fellBackToArmOwner": False, "rafLog": raf, "error": None,
-            "stageOrigin": {"x": 0.0, "y": 0.0},
-            "armedMotionMarker": None,
-            "firedMotionMarker": {"started": 1120.0, "generation": 1, "atScene": 8},
-        },
-    )
+    snap["perfNowAtClick"] = perf_click
+    snap["nullControl"] = {
+        "status": "released", "holdStartedAt": hold_started, "firedVia": "moved",
+        "releaseAt": perf_click + release_offset * 1000.0,
+        "staleIndexExpected": 40, "staleCurrentTime": 1.33,
+        "ownerReadyState": 4, "coverPatchMean": 40.0,
+        "paintCount": 1, "coverPatchStart": {"sum": 12345, "mean": 40.0},
+        "coverPatchEnd": {"sum": 12345, "mean": 40.0},
+        "ownerAmbiguousInWindow": False, "ownerDisconnectedInWindow": False,
+        "boundDecoderId": 4, "armedElId": 4,
+        "armedOwnerRect": {"x": 100.0, "y": 200.0, "w": 300.0, "h": 200.0},
+        "movedFromRect": {"x": 100.0, "y": 200.0, "w": 300.0, "h": 200.0},
+        "movedToRect": {"x": 110.0, "y": 205.0, "w": 305.0, "h": 205.0},
+        "obedMotionAtTrigger": {"started": hold_started, "generation": 1, "atScene": 8},
+        "fellBackToArmOwner": False, "rafLog": raf, "error": None,
+        "stageOrigin": {"x": 0.0, "y": 0.0},
+    }
     snap.update(overrides)
     return snap
 
@@ -925,7 +984,9 @@ def test_freeze_control_passes_on_clean_bracket():
     """Positive control for the instrument: a correctly-fired freeze turns the
     at-cut counter RED for the right reason while the bridged decoder stays live,
     both bracketing positives are green, and every invariant sub-verdict is equal
-    across A1/B/A2. (was test_freeze_control_passes_on_clean_bracket, 1->2)"""
+    (and GREEN) across A1/B/A2 -- including `settledIndexProgressionOk`, which is
+    now genuinely green in B too because the cover is released before the settled
+    window (review Blocker 3)."""
     verdict = p2._score_freeze_control(_positive_snap_34(), _freeze_b_snap_34(), _positive_snap_34())
     assert verdict["ok"] is True, verdict["failed"]
     assert verdict["verdict"] == "pass"
@@ -935,7 +996,7 @@ def test_freeze_control_passes_on_clean_bracket():
 def test_freeze_control_never_fired_hold_is_inconclusive_not_pass():
     """A hold that silently never fired (holdStartedAt null) leaves the counter
     GREEN in B, which looks exactly like a passing positive. It MUST be
-    INCONCLUSIVE, not PASS and not a plain FAIL. (was ..._never_fired_hold_...)"""
+    INCONCLUSIVE, not PASS and not a plain FAIL."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "status": "armed", "holdStartedAt": None}
     b["movingIndexRunAtCut"] = {
@@ -951,14 +1012,25 @@ def test_freeze_control_max_raf_gap_is_disqualifying():
     """Unlike the retired static 1->2 footprint, the 3->4 cover TRACKS a moving
     target every rAF: a stall of >MAX_RAF_GAP_MS leaves the cover behind the
     moving movie, so it is DISQUALIFYING integrity here, never a diagnostic-only
-    field (plan §4). (replaces the 1->2 'raf gap alone is not disqualifying' test
-    — the owner decision for 3->4 is the opposite)."""
+    field (plan §4)."""
     b = _freeze_b_snap_34()
     raf = b["nullControl"]["rafLog"]
     spiked = raf[:20] + [
         {**r, "t": raf[19]["t"] + 380.0 + 20.0 * i} for i, r in enumerate(raf[20:])
     ]
     b["nullControl"] = {**b["nullControl"], "rafLog": spiked}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "maxRafGapOk" in verdict["integrityFailed"]
+
+
+def test_freeze_control_trigger_to_first_frame_gap_is_disqualifying():
+    """`maxRafGapOk` also bounds the gap between the move-start TRIGGER and the
+    first hold frame (review MAJOR 5) -- not just gaps between logged frames."""
+    b = _freeze_b_snap_34()
+    raf = list(b["nullControl"]["rafLog"])
+    raf[0] = {**raf[0], "t": raf[0]["t"] + 500.0}  # first frame lags the trigger by 500ms
+    b["nullControl"] = {**b["nullControl"], "rafLog": raf}
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "maxRafGapOk" in verdict["integrityFailed"]
@@ -971,10 +1043,10 @@ def test_freeze_control_dead_loop_is_inconclusive():
     b["nullControl"] = {
         **b["nullControl"],
         "rafLog": [
-            {"t": 1120.0, "elementFromPointIsCover": True,
+            {"t": 1050.0, "elementFromPointIsCover": True, "boundDecoderId": 4,
              "coverRect": {"x": 300.0, "y": 700.0, "w": 200.0, "h": 350.0},
              "measuredRect": {"x": 300.0, "y": 700.0, "w": 500.0, "h": 350.0}},
-            {"t": 1140.0, "elementFromPointIsCover": True,
+            {"t": 1070.0, "elementFromPointIsCover": True, "boundDecoderId": 4,
              "coverRect": {"x": 300.0, "y": 700.0, "w": 200.0, "h": 350.0},
              "measuredRect": {"x": 300.0, "y": 700.0, "w": 500.0, "h": 350.0}},
         ],  # 2 frames < loopLive floor
@@ -990,7 +1062,6 @@ def test_freeze_control_unrendered_frame_is_inconclusive():
     by playback time (currentTime < MIN_STALE_TIME_S) + the trigger error, it must
     be INCONCLUSIVE, never a verdict."""
     b = _freeze_b_snap_34()
-    b["indexSequence"] = [37, 38, 39, 0, 0, 0, 0, 0, 0, 0]  # unrendered black -> decodes 0
     b["nullControl"] = {
         **b["nullControl"], "staleCurrentTime": 0.0, "coverPatchMean": 1.0,
         "error": "owner-video-not-ready-at-trigger:rs=4,t=0.01",
@@ -1005,10 +1076,8 @@ def test_freeze_control_valid_dark_counter_not_rejected():
     ~0 (tv-range luma 16 -> full-range RGB ~0). It must NOT be rejected as
     'black' — a genuinely frozen dark frame from live playback still PASSES."""
     b = _freeze_b_snap_34()
-    b["indexSequence"] = [5, 4, 3, 3, 3, 3, 3, 3, 3, 3]  # frozen at a dark counter value
     b["nullControl"] = {
-        **b["nullControl"], "staleCurrentTime": 7.33, "coverPatchMean": 3.0,
-        "coverPatchStart": {"sum": 1, "mean": 3.0}, "coverPatchEnd": {"sum": 1, "mean": 3.0},
+        **b["nullControl"], "staleCurrentTime": 7.33, "coverPatchMean": 40.0,
     }
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "pass", verdict["failed"]
@@ -1032,6 +1101,18 @@ def test_freeze_control_fired_before_advance_is_inconclusive():
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAfterAdvance" in verdict["integrityFailed"]
+
+
+def test_freeze_control_fired_late_outside_move_start_window_is_inconclusive():
+    """`firedAtMoveStart`/`firedAfterAdvance` share a bounded window
+    (`MOVE_START_WINDOW_S` = 25% of the move's own duration, review MAJOR 5): a
+    trigger that lands well after the move started is not "at move start", even
+    though it is after the click."""
+    b = _freeze_b_snap_34()
+    b["nullControl"] = {**b["nullControl"], "holdStartedAt": 1000.0 + p2.MOVE_START_WINDOW_S * 1000.0 + 50.0}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert {"firedAtMoveStart", "firedAfterAdvance"} & set(verdict["integrityFailed"])
 
 
 def test_freeze_control_fails_if_counter_did_not_go_red():
@@ -1096,32 +1177,11 @@ def test_freeze_control_fails_when_positive_bracket_not_green():
 
 def test_freeze_control_hash_only_trigger_is_inconclusive():
     """`firedVia == 'hash'` means the move is already OVER and the cover tracked
-    nothing during the move: `firedAtMoveStart` requires `firedVia == 'motion'`,
-    never a hash-only fallback fire — INCONCLUSIVE (owner decision 8c)."""
+    nothing during the move: `firedAtMoveStart` requires `firedVia == 'moved'` (a
+    MEASURED departure of the bound owner's rect from its armed rect), never a
+    hash-only fallback fire — INCONCLUSIVE (owner decision 8c)."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "firedVia": "hash"}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
-    assert verdict["verdict"] == "inconclusive"
-    assert "firedAtMoveStart" in verdict["integrityFailed"]
-
-
-def test_freeze_control_stale_prearmed_motion_falls_through_to_hash_is_inconclusive():
-    """Trigger hardening (plan item 3): a stale `__obedMotion` left by an EARLIER
-    bridge engagement on the same element must not fire the hold — the JS only
-    triggers 'motion' on a marker that is NEW relative to what was armed
-    (different started/generation, and matching boundary.atScene when the
-    runtime exposes one). A stale marker therefore falls through to the hash
-    fallback, which the scorer treats exactly like any other hash-only fire:
-    INCONCLUSIVE, never counted as `firedAtMoveStart`. (The JS trigger logic
-    itself cannot be exercised outside a browser; this asserts the SCORER-side
-    contract the hardening relies on.)"""
-    b = _freeze_b_snap_34()
-    b["nullControl"] = {
-        **b["nullControl"],
-        "firedVia": "hash",
-        "armedMotionMarker": {"started": 500.0, "generation": 1, "atScene": 8},
-        "firedMotionMarker": None,
-    }
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAtMoveStart" in verdict["integrityFailed"]
@@ -1130,7 +1190,10 @@ def test_freeze_control_stale_prearmed_motion_falls_through_to_hash_is_inconclus
 def test_freeze_control_cover_tracks_footprint_violation_is_inconclusive():
     """`coverTracksFootprint` = 100% of hold frames with the cover rect matching
     the JS's own `subRect(measuredRect)` derivation within COVER_TRACK_TOL_PX. One
-    frame off (the cover left behind the moving footprint) => INCONCLUSIVE."""
+    frame off (the cover left behind the moving footprint) => INCONCLUSIVE. The
+    two rects being mutated INDEPENDENTLY here (only `coverRect` moves) is the
+    point: production now logs both from separate `getBoundingClientRect()`
+    reads (review MAJOR 4), so this is no longer a tautology to defeat."""
     b = _freeze_b_snap_34()
     raf = list(b["nullControl"]["rafLog"])
     bad = dict(raf[10])
@@ -1145,24 +1208,36 @@ def test_freeze_control_cover_tracks_footprint_violation_is_inconclusive():
 def test_freeze_control_release_after_burst_started_is_inconclusive():
     """A release that slips past the settled-slide-4 visible-content burst start
     leaves the cover in place for part of the burst — it would red
-    `footprintFullyLive` for the WRONG reason. `releaseBetweenLastCaptureAndBurst`
-    is two-sided: INCONCLUSIVE, not a verdict."""
+    `footprintFullyLive` for the WRONG reason. `releaseStrictlyBeforeSettleAndBurst`
+    is bounded on both sides: INCONCLUSIVE, not a verdict."""
     b = _freeze_b_snap_34()
-    b["nullControl"] = {**b["nullControl"], "releaseAt": 3000.0}  # offset 2.0s > burstStartOffsetS 1.5
+    b["burstStartOffsetS"] = b["releaseOffsetS"] - 0.1  # burst now precedes release
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
-    assert "releaseBetweenLastCaptureAndBurst" in verdict["integrityFailed"]
+    assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"]
 
 
-def test_freeze_control_release_before_last_capture_is_inconclusive():
-    """The other side of the same two-sided check: releasing before the last
-    at-cut capture leaves that capture uncovered, undermining the freeze it is
-    meant to have observed => INCONCLUSIVE."""
+def test_freeze_control_release_not_strictly_after_last_capture_is_inconclusive():
+    """The check is STRICT (`<`, not `<=`): a release that lands exactly ON the
+    last at-cut capture offset must not pass — that capture's cover state at the
+    instant of the screenshot is ambiguous."""
     b = _freeze_b_snap_34()
-    b["nullControl"] = {**b["nullControl"], "releaseAt": 1150.0}  # offset 0.15s < lastAtCutCaptureOffsetS 0.7
+    b["releaseOffsetS"] = b["lastAtCutHoldOffsetS"]  # equal, not strictly after
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
-    assert "releaseBetweenLastCaptureAndBurst" in verdict["integrityFailed"]
+    assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"]
+
+
+def test_freeze_control_release_not_strictly_before_settled_is_inconclusive():
+    """The other new bound: release must land STRICTLY before the first
+    post-release settled sample, not merely before the burst — a release
+    coinciding with (or after) the first settled capture leaves that capture's
+    cover state ambiguous too (review Blocker 3)."""
+    b = _freeze_b_snap_34()
+    b["releaseOffsetS"] = b["firstSettledOffsetS"]  # equal, not strictly before
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"]
 
 
 def test_freeze_control_modelled_in_hold_sample_is_inconclusive():
@@ -1172,6 +1247,19 @@ def test_freeze_control_modelled_in_hold_sample_is_inconclusive():
     b = _freeze_b_snap_34()
     sources = list(b["footprintSources"])
     sources[5] = "modelled"
+    b["footprintSources"] = sources
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "allInHoldMeasured" in verdict["integrityFailed"]
+
+
+def test_freeze_control_unstable_in_hold_sample_is_inconclusive():
+    """An `unstable` sample (before/after screenshot rect reads disagreed,
+    review Blocker 2b) inside the hold window is just as untrustworthy as a
+    `modelled` one — `allInHoldMeasured` fails closed."""
+    b = _freeze_b_snap_34()
+    sources = list(b["footprintSources"])
+    sources[5] = "unstable"
     b["footprintSources"] = sources
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
@@ -1189,6 +1277,31 @@ def test_freeze_control_isolation_mismatch_fails():
     assert "isolationEqual" in verdict["failed"]
 
 
+def test_freeze_control_all_isolation_false_but_equal_does_not_pass():
+    """`isolationEqual` must require GREEN, not just equality (review MAJOR 4): if
+    every isolation key is False in all three arms, that is EQUAL but is not a
+    trustworthy bracket, and must not pass."""
+    def _all_false(snap):
+        snap = dict(snap)
+        snap["movingContinuity3to4"] = {
+            "ok": False, "failed": ["rvfcMonotonic"],
+            "boundaryValid": {"ok": False}, "stableSlide4Owner": {"ok": False},
+            "crossingIdentity": {"ok": False}, "rvfcMonotonic": {"ok": False, "advance": None},
+        }
+        snap["footprintFullyLive"] = {"ok": False}
+        snap["settledIndexProgression"] = {"ok": False}
+        snap["playerBuildErrors"] = [{"kind": "player-build-error"}]
+        snap["bridgeEngaged"] = False
+        return snap
+
+    a1 = _all_false(_positive_snap_34())
+    a2 = _all_false(_positive_snap_34())
+    b = _all_false(_freeze_b_snap_34())
+    verdict = p2._score_freeze_control(a1, b, a2)
+    assert verdict["ok"] is False
+    assert "isolationEqual" in verdict["failed"]
+
+
 def test_freeze_control_stage_origin_nonzero_is_inconclusive():
     """The partial cover is `position:fixed` (viewport px) while the moving
     <video> is stage-absolute px — they only coincide while the stage origin is
@@ -1200,19 +1313,60 @@ def test_freeze_control_stage_origin_nonzero_is_inconclusive():
     assert "stageOriginZero" in verdict["integrityFailed"]
 
 
-def test_freeze_control_flip_window_undecodable_on_measured_only_is_inconclusive():
-    """The flip window (`[flipIndex-1, flipIndex+3]`, flipIndex=3) is recomputed
-    by the scorer over the MEASURED-only subsequence; an undecodable sample
-    inside it (index 2, all sources still 'measured' so the alignment is
-    untouched) must fail `flipWindowDecodable` closed => INCONCLUSIVE."""
+def test_freeze_control_flip_window_undecodable_is_inconclusive():
+    """`flipWindowDecodable` is now computed at CAPTURE time on the FULL ordered
+    sample list (review Blocker 2c), and the scorer just trusts it — an
+    undecodable flip window must fail `flipWindowDecodable` closed =>
+    INCONCLUSIVE."""
     b = _freeze_b_snap_34()
-    seq = list(b["indexSequence"])
-    seq[2] = None
-    b["indexSequence"] = seq
+    b["flipWindowDecodable"] = False
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "flipWindowDecodable" in verdict["integrityFailed"]
 
+
+def test_freeze_control_owner_disconnected_mid_hold_is_inconclusive():
+    """Once bound by element id, the SAME element must stay connected/keyed for
+    the whole hold (review MAJOR 4's de-vacuumed `noOwnerAmbiguousInWindow`) — a
+    disconnect fails it closed even with `ownerAmbiguousInWindow` itself False."""
+    b = _freeze_b_snap_34()
+    b["nullControl"] = {**b["nullControl"], "ownerDisconnectedInWindow": True}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["ok"] is False
+    assert "noOwnerAmbiguousInWindow" in verdict["failed"]
+
+
+def test_freeze_control_bound_decoder_id_changes_mid_hold_fails_ambiguity():
+    """`noOwnerAmbiguousInWindow` also requires the LOGGED `boundDecoderId` to
+    stay the SAME element for every rAF frame, not just at the end."""
+    b = _freeze_b_snap_34()
+    raf = list(b["nullControl"]["rafLog"])
+    raf[10] = {**raf[10], "boundDecoderId": 99}
+    b["nullControl"] = {**b["nullControl"], "rafLog": raf}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["ok"] is False
+    assert "noOwnerAmbiguousInWindow" in verdict["failed"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_null_control_js_parses():
+    """The JS itself cannot run under pytest (no browser/DOM) -- this only
+    checks the `NULL_CONTROL_JS` source is syntactically valid, catching a
+    typo/syntax error the Python-side tests above cannot see."""
+    result = subprocess.run(
+        ["node", "--check", "-"], input=p2.NULL_CONTROL_JS, text=True, capture_output=True
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_norm_hash_regression_guard():
+    """Review Blocker 1: `arm()` compared `"7"` against `location.hash` (`"#7"`)
+    directly and fired instantly. `_norm_hash` is the shared normaliser used on
+    the Python side of the arm-time assert; guard that it actually strips the
+    `#` inconsistency the bug relied on."""
+    assert p2._norm_hash("7") != p2._norm_hash("#7")
+    assert p2._norm_hash("#7") == p2._norm_hash("#7?x=1")
+    assert p2._norm_hash("#7") == "#7"
 
 # `_freeze_control_blocks_success` — the pure owner-decision-8b rule wiring
 # `freeze_control`'s verdict into the probe's overall `success`.
