@@ -1608,6 +1608,136 @@ def test_index_patch_roi_for_clamps_to_min_one():
     assert w >= 1 and h >= 1
 
 
+def test_index_patch_roi_for_accepts_measured_footprint_dict():
+    """A measured footprint (e.g. a live getBoundingClientRect() reading, carrying
+    extra keys like `source`) maps to the same ROI as the equivalent tuple."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    tup = (324.3, 706.0, 1274.0, 364.0)
+    measured = {"x": 324.3, "y": 706.0, "w": 1274.0, "h": 364.0, "source": "measured"}
+    assert index_patch_roi_for(measured) == index_patch_roi_for(tup)
+
+
+def test_index_patch_roi_for_slide4_stays_inside_flat_patch_no_scale_guard_needed():
+    """Numeric spill check for plan Step.1.3: the scaled (x1.32) slide-4 ROI must
+    stay inside the flat-neutral counter patch, else a `scale_guard` inset would be
+    required. Measured: ROI (326, 706)-(388, 728) vs flat patch bounds
+    (324.3, 706.0)-(403.9, 738.4) -- fully inside on both axes. No spill observed,
+    so no `scale_guard` parameter is added."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    s4 = (324.3, 706.0, 1274.0, 364.0)
+    x, y, w, h = index_patch_roi_for(s4)
+    patch_x0, patch_y0 = s4[0], s4[1]
+    patch_x1 = patch_x0 + s4[2] * 120 / 1920
+    patch_y1 = patch_y0 + s4[3] * 48 / 540
+    assert patch_x0 <= x and x + w <= patch_x1
+    assert patch_y0 <= y and y + h <= patch_y1
+
+
+# ---------------------------------------------------------------------------
+# Scorer-side NULL CONTROL (plan Step.1.4): a counter patch that TRANSLATES and
+# SCALES across frames on a high-contrast grating background, mirroring the
+# 3->4 fixture geometry (slide-3 rect -> slide-4 rect). Proves that decoding
+# through a STATIC patch ROI fails closed on a moving movie, while decoding
+# through the per-frame MEASURED footprint (index_patch_roi_for(footprint_at(...)))
+# recovers the true index sequence -- i.e. the tracking is load-bearing.
+# ---------------------------------------------------------------------------
+_NULL_CONTROL_SLIDE3_RECT = (195.5, 794.6, 960.0, 276.0)
+_NULL_CONTROL_SLIDE4_RECT = (324.3, 706.0, 1274.0, 364.0)
+
+
+def _null_control_grating(height=1080, width=1920, cell=40, lo=30, hi=220):
+    """A high-contrast checkerboard background: anything decoded off it (std of
+    the crop is high) is unambiguously NOT the flat counter patch."""
+    yy, xx = np.mgrid[0:height, 0:width]
+    checker = (((xx // cell) + (yy // cell)) % 2).astype(np.uint8)
+    plane = np.where(checker == 1, hi, lo).astype(np.uint8)
+    return np.stack([plane, plane, plane], axis=-1)
+
+
+def _null_control_crop(arr, roi):
+    x, y, w, h = roi
+    height, width = arr.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(width, x + w), min(height, y + h)
+    return arr[y0:y1, x0:x1]
+
+
+def _null_control_decode(arr, roi):
+    """Mirrors the adversarial probe's `_decode_index_patch`: None on a
+    non-flat/occluded crop, else the flat patch's rounded mean gray value."""
+    patch = _null_control_crop(arr, roi)
+    if patch.size == 0:
+        return None
+    rgb = patch[:, :, :3].astype(np.float64)
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    if max(float(r.std()), float(g.std()), float(b.std())) > 8:
+        return None
+    if max(float(np.abs(r - g).max()), float(np.abs(g - b).max())) > 12:
+        return None
+    return int(round(float(rgb.mean())))
+
+
+def _null_control_frames_and_tracked_rois(true_indices):
+    """Synthesise one frame per index: the flat counter patch is painted at the
+    footprint's tracked ROI (footprint_at 3->4 progress), everything else is the
+    high-contrast grating. Returns (frames, tracked_rois)."""
+    from obed_edom.html_alpha_probe import footprint_at, index_patch_roi_for
+
+    n = len(true_indices)
+    frames = []
+    tracked_rois = []
+    for i, value in enumerate(true_indices):
+        progress = i / (n - 1)
+        footprint = footprint_at(progress, _NULL_CONTROL_SLIDE3_RECT, _NULL_CONTROL_SLIDE4_RECT)
+        roi = index_patch_roi_for(footprint)
+        tracked_rois.append(roi)
+        frame = _null_control_grating()
+        x, y, w, h = roi
+        frame[y : y + h, x : x + w] = value
+        frames.append(frame)
+    return frames, tracked_rois
+
+
+def test_null_control_static_roi_fails_closed_on_translating_scaling_movie():
+    """The moving-footprint null control, part (a): decoding through the STATIC
+    slide-3 patch ROI (never updated as the movie translates+scales to slide 4)
+    fails closed -- almost every frame's patch has moved off, so the static crop
+    lands on the grating and decodes to None."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for, score_index_progression
+
+    true_indices = [20 + i * 15 for i in range(12)]
+    frames, _tracked_rois = _null_control_frames_and_tracked_rois(true_indices)
+    static_roi = index_patch_roi_for(_NULL_CONTROL_SLIDE3_RECT)
+
+    static_decoded = [_null_control_decode(f, static_roi) for f in frames]
+    scored = score_index_progression(static_decoded)
+
+    assert scored["ok"] is False
+    assert scored["reason"] == "insufficient decodable samples"
+    assert scored["nDecodable"] < 6
+
+
+def test_null_control_tracked_roi_recovers_true_index_sequence():
+    """The moving-footprint null control, part (b): decoding through
+    `index_patch_roi_for(<per-frame measured footprint>)` recovers the true index
+    sequence exactly and PASSES -- proving the tracking (not the static ROI) is
+    what makes the 3->4 counter readable."""
+    from obed_edom.html_alpha_probe import score_index_progression
+
+    true_indices = [20 + i * 15 for i in range(12)]
+    frames, tracked_rois = _null_control_frames_and_tracked_rois(true_indices)
+
+    tracked_decoded = [
+        _null_control_decode(f, roi) for f, roi in zip(frames, tracked_rois)
+    ]
+    scored = score_index_progression(tracked_decoded)
+
+    assert tracked_decoded == true_indices
+    assert scored["ok"] is True
+    assert scored["reason"] is None
+    assert scored["nDecodable"] == len(true_indices)
 
 
 # --- visible-content gate: liveness mask, band coverage, strays, noise floor ---

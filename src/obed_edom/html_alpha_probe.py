@@ -1375,7 +1375,7 @@ def footprint_at(
 
 
 def index_patch_roi_for(
-    footprint: Sequence[float],
+    footprint: Sequence[float] | dict[str, Any],
 ) -> tuple[int, int, int, int]:
     """Map a movie footprint (x, y, w, h) to its burnt-in frame-index patch ROI.
 
@@ -1383,9 +1383,14 @@ def index_patch_roi_for(
     is the top-left 120x48 of its 1920x540 source) to an arbitrary footprint, with
     the same insets that keep the ROI inside the flat-neutral patch and off the
     high-contrast grating. ``index_patch_roi_for((109, 795, 952, 268))`` reproduces
-    the adversarial probe's ``INDEX_PATCH_ROI`` exactly (back-compat).
+    the adversarial probe's ``INDEX_PATCH_ROI`` exactly (back-compat). Also accepts
+    a measured footprint dict (``{x, y, w, h, ...}``, e.g. a live
+    ``getBoundingClientRect()`` reading); extra keys are ignored.
     """
-    x, y, w, h = (float(v) for v in footprint)
+    if isinstance(footprint, dict):
+        x, y, w, h = (float(footprint[k]) for k in ("x", "y", "w", "h"))
+    else:
+        x, y, w, h = (float(v) for v in footprint)
     return (
         int(round(x)) + 2,
         int(round(y)),
