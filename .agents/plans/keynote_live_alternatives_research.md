@@ -1,4 +1,4 @@
-# Alternatives to the overlap refusal — research brief (2026-09-20, QUEUED FOR THE NEXT SESSION — resume from here)
+# Alternatives to the overlap refusal — research brief (2026-09-20; both peers REPORTED 2026-09-20 evening — see “Results” at the bottom)
 
 Owner ask (2026-09-20 morning): after the WebGL-texture spike died at Q2, get two independent peers to look for
 alternative paths. Peer 1 was started and time-boxed to ~7 minutes because the owner had to pause; Peer 2 was NOT
@@ -99,3 +99,51 @@ Deliverable: per item numbers + screenshots looked at; hand-back verdict CLEAN /
 stand-down state machine (≤ 12 lines); fail-closed conditions (when to fall back to `retire`); what stays unmeasured
 (two movies / equal-size posters, scaled stage, OBS CEF Chrome 127); the single next experiment.
 Run Peer 2 (section above) alongside it; both must assert the 1920×1080 viewport in-page and use their own cache digests.
+
+## Results — hand-back peer + Peer 2 (2026-09-20 evening, Opus, headless, research only)
+Full reports live only in the session transcript (subagents could not write files); scripts + evidence (git-ignored) in
+worktree `friendly-sammet-32dab4`: `output/live-visible-content/alt-handback/` and `…/alt-outside/`.
+
+**The problem is narrower than we thought (both peers, independently).** On a BUILD and on the 2→3 dissolve the player
+issues ZERO GL calls: in one mutation batch it removes `#0-canvas` (and any `#stage` child of ours) and the DOM layer tree
+paints at opacity 1, where an in-layer `<video>` is natively live. The invisible-movie window is ONLY
+[Magic-Move settle, next build/transition). The only hand-back signal is the removal of `#0-canvas`
+(MutationObserver: same batch; rVFC watchdog: 139 ms after a build, 2490 ms after the dissolve command). The next Magic
+Move uses a NEW WebGL context. Renderer disagreement: the settled WebGL frame paints the α0.2947 green square flat OPAQUE
+(29,177,0); the DOM path paints it translucent — so at rest the player itself is not faithful to the authored opacity.
+
+**Hand-back peer — GL replay: CLEAN-WITH-CAVEATS.** rVFC loop on settled slide 2: ≈29 Hz, p50 0.8–1.3 ms, p95 2.5–5.2 ms,
+GL errors 0, 4–8 % of decoded frames unserviced; green pixel max Δ 0. Three armed runs vs two controls at five settled
+points: max Δ OUTSIDE the movie rects = 0 everywhere (in-rect Δ = playback phase, reproduced control-vs-control). Poster
+restore (`readPixels` at arm → re-upload) + replay = identical sha. Re-arm after a build: impossible and unnecessary.
+**Stretch ALIVE: uploading the live video once per player `clear` during the 1→2 move — 91 uploads, 0 errors, movie plays
+live with the player's OWN easing, green in front, seamless into the at-rest loop.** Caveat: the 12-shot CDP burst read a
+demonstrably live replay as dead in 1 of 3 sessions (liveFrac 0.004) ⇒ needs an in-page `readPixels` liveness read.
+State machine: IDLE →(poster upload seen, MM settles) ARM (snapshot poster, record last frame) → LIVE (per rVFC: canvas
+disconnected / unflagged GL call / context lost / frame length changed / error ⇒ STANDDOWN, else upload+replay) →
+STANDDOWN (stop, restore poster) → RETIRED (no re-arm on this slide) →(next MM, fresh context) ARM.
+
+**Peer 2 — outside the player.** Enablers: `#0-canvas` is `preserveDrawingBuffer:false` (reads empty at rest) but
+replay-then-read in the same task yields the settled frame (0.2–1.0 ms); the poster is drawn 1:1 at AUTHORED
+(105,791,960,276) — registered there 79.1 % of the rect is byte-identical to the poster and the 20.7 % rest IS the occluder
+(registering at the screen rect over-cuts to 48.6 %); at 1600×1000 the canvas keeps a 1920×1080 backing store ⇒ build
+cut-outs in authored px. The live DOM tree on the settled slide is the SOURCE slide's ⇒ geometry must come from the export.
+- A. cut-out by pixel diff: **ALIVE** — verdict true, liveFrac 0.799, green Δ 0 over 12 shots, outside-rect Δ on 9e-6 px.
+- B. cut-out by export draw-slot rect: **ALIVE-WITH-CAVEATS** — +0.44 % over-cut (export rect ≈2 % larger than painted);
+  bbox only for shapes/text/rotation.
+- C. CSS `clip-path: path(evenodd…)` hole-punch on the WebGL canvas, video behind: **ALIVE-WITH-CAVEATS** — verdict true,
+  zero readback/replay; the run had a bug (occluder not intersected with the hole ⇒ 3.09 % of outside pixels changed) —
+  the failure mode is silent and global. OBS CEF (Chrome 127) `clip-path: path()` UNMEASURED.
+Proposed fail-closed rule: poster upload found and reproduced byte-identically outside the cut-out; every overlapping
+later slot an axis-aligned OPAQUE, unmasked, unrotated, un-animated rect (the fixture's α0.2947 green would be REFUSED);
+`#0-canvas` present with the layer tree at opacity 0; observer armed before mounting. Harness caveat: the overlay used
+the first `<video>`'s `currentSrc` — a product gate must bind the asset.
+
+**Coordinator synthesis (recommendation, owner decides).** In-player GL (replay at rest + per-`clear` upload during the
+move) is the only path that keeps z-order, translucency-as-the-player-paints-it and native easing with no geometry
+assumptions, and its hand-back is pixel-clean; Peer 2's paths refuse this very fixture. Rank: (1) in-player GL; (2) Path A
+as an independent pixel VERIFIER and Path C as the no-GL fallback; (3) baseline `retire` whenever any assertion fails.
+**Next experiment:** per-`clear` upload through the move + hold at rest until `#0-canvas` is removed (MutationObserver,
+not GL), at 1920×1080 / 2560×1440 / 1600×1000, scored by an in-page `readPixels` liveness read; then OBS CEF.
+Still unmeasured: two movies / equal-size posters, a MOVING movie (3→4), go-to jumps, a settled slide with no builds,
+masks, OBS CEF, the video-not-ready branch.
