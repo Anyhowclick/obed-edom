@@ -21,8 +21,7 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 > I came to tidy three small things on a DSK PR and ran the whole suite out of habit. Nine tests
 > were red on a clean main. Nobody broke them that day; each PR had been green on its own files,
 > and nothing had ever run the rest. Three only failed because the venv was a Python older than
-> the one the tests were written on. One read a cache file that exists only on a machine that has
-> run the app.
+> the one the tests were written on.
 >
 > The suite took thirteen minutes, which is why nobody ran it: thirty-nine test files each
 > compiling the same TypeScript. One shared build later it takes two seconds. Codex then failed my
