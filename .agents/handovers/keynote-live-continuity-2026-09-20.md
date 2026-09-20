@@ -1,31 +1,51 @@
-# Handover — Alpha Keynote live continuity, state at 2026-09-20 ~02:15 (Mac powers off 03:00)
+# Handover — Alpha Keynote live continuity, state at 2026-09-20 16:45
 
 Owner rules (AGENTS.md wins): accuracy and code quality over speed · plan first for anything complex · never
 weaken a gate · minimal natspec, no inline comments in src · no merge / auto-merge without an explicit owner
 request · hands off Keynote · ask before putting a window on the external monitor · headless Chrome only for
 agent runs. Roster this round: Opus plans AND implements (owner, 2026-09-19), Codex `gpt-5.6-sol` reviews.
 
-## Where things are
-- **PR [#175](https://github.com/Anyhowclick/obed-edom/pull/175)** = ONE consolidated PR onto #158's branch
-  (`feat/keynote-alpha-p2-html-mm`), head `claude/keynote-live-continuity-next`. It contains the presenter branch
-  (incl. the other session's real-OBS fixes, DeckLink runbook, generalisation brief), Codex's deferred work and I3.
-  Not merged; do not merge without the owner's go.
-- **Stacked branch `claude/keynote-live-baseline`** (pushed, NOT in the PR yet) = PR tip + the baseline increment
-  (see below). It is what `.claude/worktrees/friendly-sammet-32dab4` has checked out now.
-- **Gate worktree** `.claude/worktrees/gate-runner` (detached, own 198 MB copy of the P2 export bank under
-  `output/p2-recovery/html-adversarial`). ALL browser gates run from there, pinned to a commit, so implementers
-  editing the branch worktree cannot change the bytes under test. Runner:
-  `run_gates.sh <gate-worktree> <outdir>` — copy kept at `output/live-continuity-i3/run_gates.sh` in the branch
-  worktree. **One browser user at a time**: a concurrent headless Chrome broke an arm's stage fit mid-run
-  (the window fell back to the laptop display size) — the `stageFit` check caught it.
-- **Kept on purpose (morning DeckLink field test, runbook `.agents/handovers/decklink-field-test-runbook.md`):**
-  branch `claude/keynote-live-planning-handover-4e550b` + worktree `pr158-handover-findings-4366b9` (code frozen
-  at `62e1ab7`), branch/worktree `claude/decklink-field-test-2ad808`. Also kept: `worktree-agent-a69e…` /
-  `agent-consolidated` (uncommitted P2 qualification work, owner said hold & bundle).
-- Deleted 2026-09-19 (bundled first → `output/branch-cleanup-2026-09-19/*.bundle` + `tips.txt` in the MAIN
-  checkout): 5 stale `claude/*`, 2 `worktree-agent-*`, both `codex/*` (+ remote `codex/live-continuity-deferred`,
-  + the `live-continuity-deferred` worktree; its evidence → `output/live-continuity-deferred-evidence/`).
-  Main checkout is now on `main` (the venv is an editable install of it ⇒ ALWAYS `PYTHONPATH=<worktree>/src`).
+## Where things are (the ONE list — verified with `git worktree list` / `gh pr list` at 16:45)
+| Branch | Tip | What | PR |
+|---|---|---|---|
+| `main` | `0889246` | — | — |
+| `feat/keynote-alpha-p2-html-mm` | `6236ffe` | P2 HTML probe + presenter | #158 (draft) → main |
+| `claude/keynote-live-continuity-next` | `983da31` | I3 scaled stage, I5 codec, visible-content gate (runtime v3) | **#175 → #158** |
+| `claude/keynote-live-baseline` | `a90b660` | #175 + baseline increment (runtime v4) + research brief + folded DeckLink runbook | none — awaiting owner review |
+| `claude/dsk-generator-alignment-options-97c5aa` | — | unrelated DSK Generator work (another session) | #176 (draft) → main |
+| `worktree-agent-a69e…` | `bbfa11f` | UNCOMMITTED P2 qualification work in worktree `agent-consolidated` — owner said hold & bundle | — |
+
+Stack: `main` ← #158 ← #175 ← `claude/keynote-live-baseline`. Nothing is merged; never merge without the owner's go.
+Worktrees: `friendly-sammet-32dab4` (baseline branch; its ignored `output/` holds the gate evidence, a fixture copy and
+the research harness) · `gate-runner` (detached on the #175 tip; ALL browser gates run from here, pinned to a commit;
+own 198 MB copy of the git-ignored H.264 fixture bank under `output/p2-recovery/html-adversarial`) ·
+`decklink-field-test-2ad808` (detached) · `pr158-handover-findings-4366b9` (now on the DSK branch) ·
+`agent-consolidated`. Do NOT delete `friendly-sammet-32dab4` or `gate-runner` — the fixture copies are not in git.
+Gone (contained elsewhere, bundles in the MAIN checkout `output/branch-cleanup-2026-09-19/`): the presenter/handover
+branch `claude/keynote-live-planning-handover-4e550b` (its last docs commit `4bf6707` is cherry-picked here as `a90b660`),
+`claude/decklink-field-test-2ad808`, both `codex/*`, the stale `claude/*` and two `worktree-agent-*`.
+The main checkout is on `main` and the venv is an editable install of it ⇒ ALWAYS `PYTHONPATH=<worktree>/src`.
+Gate runner: `run_gates.sh <gate-worktree> <outdir>` (copy in `output/live-continuity-i3/`); one full round ≈ 13 min;
+**one browser user at a time** for gates (a concurrent headless Chrome made a window fall back to the laptop display
+size — `stageFit` caught it). Next DeckLink venue test: 2026-10-10 (`.agents/handovers/decklink-field-test-runbook.md`).
+
+## NEW since the overnight close — a possible path past the overlap refusal (research, not product)
+Brief + status log: `.agents/plans/keynote_live_alternatives_research.md`. Owner asked two peers to look for
+alternatives after the WebGL-texture spike died. **Peer 1 (7 min, time-boxed): GL command-stream REPLAY is ALIVE.**
+Measured headless on the fixture's settled slide 2: the player's Magic-Move frames are `clear`-delimited and exactly 88
+GL calls each; replaying the LAST frame at rest is pixel-exact (identical screenshot sha, GL error 0, 0.03 ms/frame) —
+the player's programs/buffers/uniforms/textures persist; uploading the live `<video>` into the movie's texture
+(identified by its upload signature: canvas 960×276, RGBA, flipY + premultiply) and replaying shows the **live movie
+across the full rect WITH the green square still in front**, advancing between shots. No minified names; both
+structural assumptions are runtime-assertable ⇒ can fail closed to the baseline `retire`. The player's frames are NOT
+rAF-driven (so "keep the player drawing" via rAF is dead). **Unmeasured = the real work:** hand-back when the player
+draws again (next transition; a BUILD on the settled slide), restoring the poster texture before yielding, what
+schedules the player's frames, swapping during the move itself (would give native easing), two movies / equal-sized
+posters, scaled stage, OBS CEF. **Peer 2 (compositing outside the player: occluder cut-out, CSS hole-punch) was NOT
+started** — brief ready in the same file. **Next experiment:** an rVFC-driven replay loop on settled slide 2 for ~5 s,
+then (a) advance to slide 3 and (b) fire a build on slide 2 — detect the player's first own GL call, stand down within
+one frame, restore the poster, compare slide 3 byte-for-byte with a control run. Harness (ignored):
+`output/live-visible-content/alt-inplayer/replay.py`. The owner has not yet said whether to queue this.
 
 ## Two lines of work
 **A. PR #175 tip `74e0a59`** (runtime v3, sha `fb9e771e…602d`) — I3 scaled stage · I5 codec report + UI warnings ·
@@ -61,8 +81,8 @@ attribution) → fixed → **r3 PASS** (`.agents/reviews/live-baseline/`). Evide
    overlap-after-build. Use the existing grating-with-counter test movie.
 3. `freezeControlCaughtByCounter` must be re-bracketed at the 3→4 boundary (its 1→2 premise died with the refusal). It is
    reported `inconclusive`, which keeps P2 `success` False on the baseline branch — honest, not a regression.
-4. Spike verdict: feeding the decoder into the player's WebGL texture is DEAD at Q2 (no render at rest, no clean forced
-   redraw). Unexplored alternative noted in `keynote_live_visible_content.plan.md` §7: a static "occluder cut-out"
+4. Spike verdict: waiting for the PLAYER to redraw is dead (no render at rest, no clean forced redraw) — but replaying
+   its last GL frame ourselves works (see "NEW" above). Unexplored alternative noted in `keynote_live_visible_content.plan.md` §7: a static "occluder cut-out"
    canvas over the stage-level overlay, which could turn the overlap refusal into a carry for opaque artwork.
 
 ## Paid-for facts (measured on the real player — do not re-derive)
@@ -92,7 +112,8 @@ attribution) → fixed → **r3 PASS** (`.agents/reviews/live-baseline/`). Evide
   receiver (the codec report now warns) · native easing parity for the 3→4 move · generalisation
   (`.agents/plans/keynote_live_continuity_generalisation.md`; `retire` is its first slice).
 - 6 maps Python tests + 6 maps UI tests are red on pristine `main` — not this work.
-- The 03:00 power-off was scheduled twice: the owner's `pmset` event and a detached timer started by this session.
+- The 03:00 power-off on 2026-09-20 did NOT happen (uptime unbroken); both the owner's `pmset` event and this session's
+  detached timer are gone. Cause not investigated.
 
 ## Commands
 `PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python`, always `PYTHONPATH=<worktree>/src`.
