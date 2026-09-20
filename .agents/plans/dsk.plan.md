@@ -408,11 +408,13 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
 20. **d6b editing phase** — per-slide operator nudges need (a) an override map threaded through
     `plan_assembly` → `build_assembly_script`, (b) a canvas-accurate browser preview, (c) a
     persistence story like `framing.save_framings`. Its own plan.
-21. **d5c KPF alpha pipeline** — export → strip the lead fill op in `global/shared.pdf` → patch
-    the two black body styles → drive the player (`jumpToSlide(`, `advanceToNextBuild(`) →
-    per-build capture → ProRes 4444, plus a fidelity report against `deck_builds`. Playwright
-    pinned as an optional extra. Caveats: KPF exports movies separately; a full-bleed background
-    stays opaque after the strip; the player simplifies unsupported builds.
+21. **d5c KPF preview / alpha pipeline** — implementation handoff and acceptance gates:
+    [keynote_alpha.plan.md](keynote_alpha.plan.md). Ship on-demand dashboard build preview
+    independently of transparent animation export. The 2026-09-12 probe disproved this item's
+    old `global/shared.pdf` and public-player-method assumptions: HTML export has per-slide
+    PDFs, and player methods are private. Alpha capture and deterministic per-click video
+    segmentation remain unproven. Preserve the existing PNG and opaque-clip contracts until
+    the new route passes its own gates; do not enable `overlay_bake` separation implicitly.
 22. **d7 insert mode** (stretch) — `--dsk-existing`; reuse `MapsTab`'s drag interaction
     (`:752-789`) and `moveSlideTo`'s index math, NOT `MapsDocument`.
 23. **d8 maps reuse** — point `maps_keynote.dsk_ops`/`dsk_item` at the shared crop utility

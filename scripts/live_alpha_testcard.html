@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<!--
+  OPERATOR CHECKLIST (read at the mixer's multiview, in order):
+  1. Opaque BLACK patch: must key as SOLID BLACK, never vanish/hide -> proves alpha=1.0 keys correctly.
+  2. Alpha RAMP (white & black): must look smooth and monotonic 0->100%, no banding or reversal.
+  3. 50%/75%/25% patches: should look "half mixed" with the camera behind them, not fully opaque/transparent.
+  4. Soft-edge discs / outlined text: pick the Pre-Multiplied Key setting with NO dark halo and NO bright glow.
+  5. Motion bars: sweep must be smooth, constant-speed, no double-image / no stutter / no tearing.
+  6. Comb (1px lines): lines must stay crisp singles; doubling or flicker => field/interlace/scaling problem.
+  7. Clock hand: must rotate smoothly; visible judder = dropped frames in the pipeline.
+  8. Press H: frame must go FULLY transparent (pure camera, nothing overlaid) - this is what "hide" means on air.
+  9. Press B / W / C / G: full-frame opaque black / white / colour bars / 50%-grey-at-50%-alpha must fill edge-to-edge.
+  10. Frame edge / centre cross / corner markers: must sit exactly at the true 1920x1080 edge, not cropped or offset.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Live Alpha/Key Test Card</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+  }
+  * { box-sizing: border-box; }
+  #stage {
+    position: absolute; top: 0; left: 0;
+    width: 1920px; height: 1080px;
+    transform-origin: top left;
+    background: transparent;
+    font-family: Arial, Helvetica, sans-serif;
+    color: #fff;
+  }
+  .plate {
+    background: rgba(0,0,0,0.75);
+    color: #fff;
+    padding: 4px 10px;
+    border-radius: 4px;
+    display: inline-block;
+    font-weight: bold;
+  }
+  .label {
+    position: absolute;
+    font-size: 20px;
+    line-height: 1.2;
+    z-index: 50;
+  }
+  .patch {
+    position: absolute;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  .fullframe {
+    position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+    z-index: 200;
+  }
+  #cornerMode {
+    position: absolute; top: 12px; right: 12px; z-index: 300;
+    font-size: 26px;
+  }
+  #geomBorder {
+    position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+    border: 2px solid #ff00ff; pointer-events: none; z-index: 100;
+  }
+  .cross {
+    position: absolute; background: #ff00ff; z-index: 100;
+  }
+  .corner {
+    position: absolute; width: 60px; height: 60px; z-index: 100;
+    border: 3px solid #00ffff;
+  }
+  .safeguide {
+    position: absolute; border: 1px dashed rgba(255,255,0,0.6); z-index: 90; pointer-events: none;
+  }
+  #sysinfo {
+    position: absolute; top: 996px; left: 12px; font-size: 16px; z-index: 100;
+    max-width: 1400px;
+  }
+  #instrPlate {
+    position: absolute; top: 300px; left: 60px; width: 560px; font-size: 17px; z-index: 60;
+  }
+  #keyHelp {
+    position: absolute; top: 1038px; right: 12px; font-size: 16px; z-index: 100; text-align: right;
+  }
+  canvas { position: absolute; z-index: 40; }
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <!-- ===== SAFE / GEOMETRY ===== -->
+  <div id="geomBorder"></div>
+  <div class="cross" style="left:960px; top:0px; width:2px; height:1080px;"></div>
+  <div class="cross" style="left:0px; top:540px; width:1920px; height:2px;"></div>
+  <div class="corner" style="top:0px; left:0px; border-right:none; border-bottom:none;"></div>
+  <div class="corner" style="top:0px; right:0px; border-left:none; border-bottom:none;"></div>
+  <div class="corner" style="bottom:0px; left:0px; border-right:none; border-top:none;"></div>
+  <div class="corner" style="bottom:0px; right:0px; border-left:none; border-top:none;"></div>
+  <!-- title safe 90%, action safe 95% -->
+  <div class="safeguide" style="left:96px; top:54px; width:1728px; height:972px;"></div>
+  <div class="safeguide" style="left:48px; top:27px; width:1824px; height:1026px;"></div>
+
+  <!-- ===== ALPHA PATCH GRID ===== -->
+  <!-- row 1 -->
+  <div class="patch" style="left:20px; top:20px; width:200px; height:140px; background:#000;">
+    <span class="label plate" style="position:static;">BLACK a=1.0</span>
+  </div>
+  <div class="patch" style="left:230px; top:20px; width:200px; height:140px; background:#fff;">
+    <span class="label plate" style="position:static; color:#000; background:rgba(255,255,255,0.85);">WHITE a=1.0</span>
+  </div>
+  <div class="patch" style="left:440px; top:20px; width:200px; height:140px; background:rgba(255,255,255,0.75);">
+    <span class="label plate" style="position:static;">WHITE 75%</span>
+  </div>
+  <div class="patch" style="left:650px; top:20px; width:200px; height:140px; background:rgba(255,255,255,0.5);">
+    <span class="label plate" style="position:static;">WHITE 50%</span>
+  </div>
+  <div class="patch" style="left:860px; top:20px; width:200px; height:140px; background:rgba(255,255,255,0.25);">
+    <span class="label plate" style="position:static;">WHITE 25%</span>
+  </div>
+  <div class="patch" style="left:1070px; top:20px; width:200px; height:140px; background:rgba(0,0,0,0.5);">
+    <span class="label plate" style="position:static;">BLACK 50%</span>
+  </div>
+  <div class="patch" style="left:1280px; top:20px; width:200px; height:140px; background:rgba(255,0,0,0.5);">
+    <span class="label plate" style="position:static;">RED 50%</span>
+  </div>
+  <div class="patch" style="left:1490px; top:20px; width:200px; height:140px; background:rgba(0,255,0,0.5);">
+    <span class="label plate" style="position:static;">GREEN 50%</span>
+  </div>
+  <div class="patch" style="left:1700px; top:20px; width:200px; height:140px; background:rgba(0,0,255,0.5);">
+    <span class="label plate" style="position:static;">BLUE 50%</span>
+  </div>
+
+  <!-- ===== RAMPS ===== -->
+  <div class="label plate" style="left:20px; top:180px;">WHITE ALPHA RAMP 0% &rarr; 100%</div>
+  <div style="position:absolute; left:20px; top:210px; width:1880px; height:60px;
+              background:linear-gradient(to right, rgba(255,255,255,0), rgba(255,255,255,1));"></div>
+  <div class="label" style="left:20px; top:272px;">0%</div>
+  <div class="label" style="left:490px; top:272px;">25%</div>
+  <div class="label" style="left:960px; top:272px;">50%</div>
+  <div class="label" style="left:1430px; top:272px;">75%</div>
+  <div class="label" style="left:1870px; top:272px;">100%</div>
+
+  <div class="label plate" style="left:20px; top:190px; top:305px;">BLACK ALPHA RAMP 0% &rarr; 100%</div>
+  <div style="position:absolute; left:20px; top:335px; width:1880px; height:60px;
+              background:linear-gradient(to right, rgba(0,0,0,0), rgba(0,0,0,1));"></div>
+  <div class="label" style="left:20px; top:397px;">0%</div>
+  <div class="label" style="left:490px; top:397px;">25%</div>
+  <div class="label" style="left:960px; top:397px;">50%</div>
+  <div class="label" style="left:1430px; top:397px;">75%</div>
+  <div class="label" style="left:1870px; top:397px;">100%</div>
+
+  <!-- ===== PREMULTIPLIED DISCRIMINATOR ===== -->
+  <div class="label plate" style="left:20px; top:430px;">PREMULTIPLIED vs STRAIGHT CHECK</div>
+  <div id="instrPlate" class="plate" style="top:460px;">
+    Toggle the mixer's Pre-Multiplied Key setting; pick the one with CLEAN edges.<br>
+    Dark fringe/halo around white soft edges = key treated as premultiplied when it is straight
+    (or bright/glowing fringe = the reverse).
+  </div>
+  <canvas id="softCanvas" width="900" height="240" style="left:640px; top:440px;"></canvas>
+  <div style="position:absolute; left:1560px; top:440px; width:340px; height:240px; display:flex; align-items:center; justify-content:center;">
+    <span style="font-size:64px; font-weight:bold; color:#fff;
+                 text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">
+      EDGE TEST
+    </span>
+  </div>
+
+  <!-- ===== MOTION / CADENCE ===== -->
+  <div class="label plate" style="left:20px; top:700px;">MOTION / CADENCE</div>
+  <canvas id="motionCanvas" width="1880" height="220" style="left:20px; top:730px;"></canvas>
+  <div id="motionStats" class="plate" style="position:absolute; left:20px; top:960px; font-size:20px;"></div>
+
+  <!-- ===== SYSTEM INFO ===== -->
+  <div id="sysinfo" class="plate" style="left:12px;"></div>
+  <div id="keyHelp" class="plate">H hide | B black | W white | C bars | G grey50@50% | 1 card</div>
+
+  <!-- ===== CORNER MODE LABEL ===== -->
+  <div id="cornerMode" class="plate"></div>
+
+  <!-- ===== FULL FRAME MODES ===== -->
+  <div id="modeHide" class="fullframe" style="background:transparent; display:none;"></div>
+  <div id="modeBlack" class="fullframe" style="background:#000; display:none;"></div>
+  <div id="modeWhite" class="fullframe" style="background:#fff; display:none;"></div>
+  <canvas id="modeBars" class="fullframe" width="1920" height="1080" style="display:none;"></canvas>
+  <div id="modeGrey" class="fullframe" style="background:#808080; opacity:0.5; display:none;"></div>
+
+  <!-- on-card buttons (key focus inside OBS is unreliable) -->
+  <div id="btnRow" style="position:absolute; left:20px; top:1038px; z-index:400;">
+    <button data-mode="1">1 Card</button>
+    <button data-mode="H">H Hide</button>
+    <button data-mode="B">B Black</button>
+    <button data-mode="W">W White</button>
+    <button data-mode="C">C Bars</button>
+    <button data-mode="G">G Grey50</button>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ---- scale-to-fit, preserve 16:9 ----
+  function rescale() {
+    var sw = window.innerWidth, sh = window.innerHeight;
+    var scale = Math.min(sw / 1920, sh / 1080);
+    var stage = document.getElementById('stage');
+    var offX = (sw - 1920 * scale) / 2;
+    var offY = (sh - 1080 * scale) / 2;
+    stage.style.transform = 'translate(' + offX + 'px,' + offY + 'px) scale(' + scale + ')';
+  }
+  window.addEventListener('resize', rescale);
+  rescale();
+
+  // ---- sysinfo ----
+  function updateSysinfo() {
+    document.getElementById('sysinfo').textContent =
+      'innerWidth x innerHeight: ' + window.innerWidth + ' x ' + window.innerHeight +
+      ' | devicePixelRatio: ' + window.devicePixelRatio +
+      ' | UA: ' + navigator.userAgent;
+  }
+  updateSysinfo();
+  window.addEventListener('resize', updateSysinfo);
+
+  // ---- soft-edge discs (premultiply discriminator) ----
+  var softCanvas = document.getElementById('softCanvas');
+  var sctx = softCanvas.getContext('2d');
+  function drawSoft() {
+    sctx.clearRect(0, 0, softCanvas.width, softCanvas.height);
+    // white soft disc
+    var g1 = sctx.createRadialGradient(220, 120, 0, 220, 120, 100);
+    g1.addColorStop(0, 'rgba(255,255,255,1)');
+    g1.addColorStop(0.7, 'rgba(255,255,255,1)');
+    g1.addColorStop(1, 'rgba(255,255,255,0)');
+    sctx.fillStyle = g1;
+    sctx.beginPath(); sctx.arc(220, 120, 100, 0, Math.PI * 2); sctx.fill();
+    // black soft disc
+    var g2 = sctx.createRadialGradient(680, 120, 0, 680, 120, 100);
+    g2.addColorStop(0, 'rgba(0,0,0,1)');
+    g2.addColorStop(0.7, 'rgba(0,0,0,1)');
+    g2.addColorStop(1, 'rgba(0,0,0,0)');
+    sctx.fillStyle = g2;
+    sctx.beginPath(); sctx.arc(680, 120, 100, 0, Math.PI * 2); sctx.fill();
+  }
+  drawSoft();
+
+  // ---- colour bars (SMPTE-ish, opaque, full frame) ----
+  var barsCanvas = document.getElementById('modeBars');
+  var bctx = barsCanvas.getContext('2d');
+  (function drawBars() {
+    var colours = ['#c0c0c0', '#c0c000', '#00c0c0', '#00c000', '#c000c0', '#c00000', '#0000c0'];
+    var w = barsCanvas.width / colours.length;
+    for (var i = 0; i < colours.length; i++) {
+      bctx.fillStyle = colours[i];
+      bctx.fillRect(i * w, 0, w + 1, barsCanvas.height * 0.75);
+    }
+    bctx.fillStyle = '#000';
+    bctx.fillRect(0, barsCanvas.height * 0.75, barsCanvas.width, barsCanvas.height * 0.25);
+  })();
+
+  // ---- motion canvas: sweeping bars, comb, clock hand, fps/frame counter ----
+  var mCanvas = document.getElementById('motionCanvas');
+  var mctx = mCanvas.getContext('2d');
+  var W = mCanvas.width, H = mCanvas.height;
+  var frameCount = 0;
+  var startTime = performance.now();
+  var lastTime = startTime;
+  var frameTimes = []; // {t, dt}
+  var fpsRolling = 0;
+
+  function drawComb(x0, y0, w, h) {
+    mctx.fillStyle = '#ffffff';
+    for (var x = x0; x < x0 + w; x += 2) {
+      mctx.fillRect(x, y0, 1, h);
+    }
+  }
+
+  function frame(now) {
+    frameCount++;
+    var dt = now - lastTime;
+    lastTime = now;
+    frameTimes.push({ t: now, dt: dt });
+    // keep last 5s
+    while (frameTimes.length && now - frameTimes[0].t > 5000) frameTimes.shift();
+    var oneSecAgo = now - 1000;
+    var recent = frameTimes.filter(function(f) { return f.t >= oneSecAgo; });
+    fpsRolling = recent.length; // frames in last 1s ~= fps
+    var worst = 0;
+    for (var i = 0; i < frameTimes.length; i++) {
+      if (frameTimes[i].dt > worst) worst = frameTimes[i].dt;
+    }
+
+    var elapsed = (now - startTime) / 1000;
+
+    mctx.clearRect(0, 0, W, H);
+
+    // time-based position, constant velocity, wraps
+    var periodMs = 4000;
+    var phase = (now % periodMs) / periodMs; // 0..1
+    var barW = 80;
+    var travel = W + barW;
+    var x = (phase * travel) - barW;
+
+    // opaque black bar
+    mctx.fillStyle = '#000000';
+    mctx.fillRect(x, 10, barW, 80);
+    // 50% translucent bar, offset phase
+    var phase2 = ((now + periodMs / 2) % periodMs) / periodMs;
+    var x2 = (phase2 * travel) - barW;
+    mctx.fillStyle = 'rgba(255,255,255,0.5)';
+    mctx.fillRect(x2, 100, barW, 80);
+
+    // comb pattern strip
+    drawComb(0, 190, W, 20);
+
+    // clock hand (rotating)
+    var cx = W - 100, cy = 130, r = 60;
+    mctx.strokeStyle = '#fff';
+    mctx.lineWidth = 4;
+    mctx.beginPath();
+    mctx.arc(cx, cy, r, 0, Math.PI * 2);
+    mctx.stroke();
+    var ang = (now / 1000) * (Math.PI * 2) / 2; // 1 rev per 2s
+    mctx.beginPath();
+    mctx.moveTo(cx, cy);
+    mctx.lineTo(cx + Math.cos(ang) * r, cy + Math.sin(ang) * r);
+    mctx.stroke();
+
+    // frame counter + elapsed + fps text
+    mctx.fillStyle = '#fff';
+    mctx.font = 'bold 22px Arial';
+    mctx.fillText('frame ' + frameCount + '   t=' + elapsed.toFixed(2) + 's', 20, 235);
+
+    document.getElementById('motionStats').textContent =
+      'fps(1s roll): ' + fpsRolling + ' | worst frame interval (5s): ' + worst.toFixed(1) + ' ms';
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---- full-frame mode switching ----
+  var modes = {
+    '1': null,
+    'H': 'modeHide',
+    'B': 'modeBlack',
+    'W': 'modeWhite',
+    'C': 'modeBars',
+    'G': 'modeGrey'
+  };
+  var currentMode = '1';
+
+  window.setTestMode = function(m) {
+    if (!(m in modes)) return;
+    currentMode = m;
+    var ids = ['modeHide', 'modeBlack', 'modeWhite', 'modeBars', 'modeGrey'];
+    for (var i = 0; i < ids.length; i++) {
+      document.getElementById(ids[i]).style.display = 'none';
+    }
+    var stage = document.getElementById('stage');
+    var cornerLabel = document.getElementById('cornerMode');
+
+    if (m === '1') {
+      stage.style.visibility = 'visible';
+      cornerLabel.textContent = '';
+      cornerLabel.style.display = 'block';
+    } else {
+      // hide the whole main card content except full-frame overlay + corner label
+      var kids = stage.children;
+      for (var j = 0; j < kids.length; j++) {
+        var el = kids[j];
+        if (el.classList.contains('fullframe') || el.id === 'cornerMode') continue;
+        el.style.display = 'none';
+      }
+      document.getElementById(modes[m]).style.display = 'block';
+      if (m === 'H') {
+        cornerLabel.style.display = 'none';
+      } else {
+        cornerLabel.style.display = 'block';
+        cornerLabel.textContent = 'MODE: ' + m;
+      }
+    }
+  };
+
+  window.resetToCard = function() {
+    var stage = document.getElementById('stage');
+    var kids = stage.children;
+    for (var j = 0; j < kids.length; j++) {
+      kids[j].style.display = '';
+    }
+    var ids = ['modeHide', 'modeBlack', 'modeWhite', 'modeBars', 'modeGrey'];
+    for (var i = 0; i < ids.length; i++) {
+      document.getElementById(ids[i]).style.display = 'none';
+    }
+    document.getElementById('cornerMode').style.display = 'block';
+    document.getElementById('cornerMode').textContent = '';
+    currentMode = '1';
+  };
+
+  window.setTestModeDispatch = function(m) {
+    if (m === '1') { window.resetToCard(); }
+    else { window.setTestMode(m); }
+  };
+
+  document.addEventListener('keydown', function(e) {
+    var k = e.key.toUpperCase();
+    if (k in modes) window.setTestModeDispatch(k);
+  });
+
+  document.getElementById('btnRow').addEventListener('click', function(e) {
+    var m = e.target.getAttribute('data-mode');
+    if (m) window.setTestModeDispatch(m);
+  });
+
+})();
+</script>
+</body>
+</html>

@@ -29,6 +29,7 @@ _PRIVATE_ROOT_NAMES = (
     ".uploads",
     ".sessions",
     ".geocode",
+    ".html-preview",
 )
 
 

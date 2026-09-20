@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel
@@ -59,6 +59,15 @@ from obed_edom.dsk_stage_export import (
     read_manifest,
     stage_counts,
     write_manifest,
+)
+from obed_edom.html_preview import (
+    PreviewError,
+    apply_preview,
+    cleanup_preview,
+    inject_player_diagnostics,
+    propose_preview,
+    registered_export_root,
+    safe_export_file,
 )
 from obed_edom.framing import (
     AUTO,
@@ -205,6 +214,9 @@ class SpaStaticFiles(StaticFiles):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Obed-Edom dashboard")
+    from obed_edom.web.live import live_router
+
+    app.include_router(live_router(RUNNER))
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -366,6 +378,8 @@ def create_app() -> FastAPI:
             raise HTTPException(409, "Maps jobs use POST /api/maps/{id}/state")
         if existing.feature == "watercolour":
             raise HTTPException(400, "Watercolour jobs cannot be patched directly")
+        if existing.kind == "html-preview" or existing.feature == "html-preview":
+            raise HTTPException(409, "HTML preview jobs cannot be patched directly")
         job = RUNNER.update_result(job_id, payload.result)
         if not job:
             raise HTTPException(404, "Unknown job")
@@ -844,6 +858,96 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Unknown job")
         return RUNNER.public_dict(updated)
 
+    @app.post("/api/html-preview")
+    def start_html_preview(
+        path: str = Form(...),
+        expected_digest: str = Form(""),
+    ) -> dict:
+        key = Path(path).expanduser()
+        if not key.exists():
+            raise HTTPException(400, f"Not found: {path}")
+        expected = expected_digest.strip() or None
+        job = RUNNER.submit(
+            "html-preview",
+            lambda j, p=key, d=expected: _run_html_preview_propose(j, p, d),
+            feature="html-preview",
+        )
+        return job.to_dict()
+
+    @app.post("/api/html-preview/{job_id}/apply")
+    def apply_html_preview(job_id: str) -> dict:
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if job.kind != "html-preview":
+            raise HTTPException(404, "Unknown job")
+        result = dict(job.result)
+        key = Path(str(result.get("path") or "")).expanduser()
+        if not key.exists():
+            raise HTTPException(400, "The deck has moved since proposing the preview.")
+        if keynote_running():
+            raise HTTPException(409, "Close Keynote before exporting a build preview (strictly serial).")
+        try:
+            updated = RUNNER.rerun(job_id, lambda j, r=result: _run_html_preview_apply(j, r))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not updated:
+            raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(updated)
+
+    @app.post("/api/html-preview/{job_id}/cleanup")
+    def cleanup_html_preview(job_id: str) -> dict:
+        job = RUNNER.get(job_id)
+        if not job or job.kind != "html-preview":
+            raise HTTPException(404, "Unknown job")
+        if job.status == "running":
+            raise HTTPException(409, "Job is already running")
+        try:
+            info = cleanup_preview(job.id, job.result or {})
+        except PreviewError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        result = dict(job.result or {})
+        result.update(
+            {
+                "phase": "cleaned",
+                "exportRoot": None,
+                "manifest": None,
+                "needsExport": True,
+                "reused": False,
+                "bytes": 0,
+            }
+        )
+        updated = RUNNER.update_result(job_id, result)
+        payload = RUNNER.public_dict(updated) if updated else result
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload["cleanup"] = info
+        return payload
+
+    @app.get("/api/html-preview/{job_id}/player")
+    @app.get("/api/html-preview/{job_id}/player/{rel_path:path}")
+    def html_preview_player(job_id: str, rel_path: str = ""):
+        job = RUNNER.get(job_id)
+        if not job or job.kind != "html-preview" or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if str((job.result or {}).get("phase") or "") != "ready":
+            raise HTTPException(409, "Build preview is not ready")
+        try:
+            root = registered_export_root(job.result, job.id)
+            relative = rel_path or "index.html"
+            if relative.endswith("/"):
+                relative = f"{relative}index.html"
+            path = safe_export_file(root, relative)
+        except PreviewError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if Path(relative).name.lower() == "index.html":
+            body = inject_player_diagnostics(path.read_text(encoding="utf-8"))
+            return HTMLResponse(body, headers={"Cache-Control": "no-cache"})
+        response = FileResponse(path, media_type=_player_media_type(path))
+        if path.suffix.lower() in {".html", ".htm"}:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     @app.post("/api/resize")
     def resize_keynote(
         path: str = Form(...),
@@ -1014,6 +1118,44 @@ def create_app() -> FastAPI:
         app.mount("/", SpaStaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")
 
     return app
+
+
+_PLAYER_MEDIA_TYPES = {
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".wasm": "application/wasm",
+    ".pdf": "application/pdf",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".gif": "image/gif",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".m4v": "video/mp4",
+}
+
+
+def _player_media_type(path: Path) -> str:
+    return _PLAYER_MEDIA_TYPES.get(path.suffix.lower(), preview_media_type(path))
+
+
+def _run_html_preview_propose(job: Job, path: Path, expected_digest: str | None) -> dict[str, Any]:
+    job.log(f"Inspecting {path.name} for a build preview…")
+    return propose_preview(path, expected_digest=expected_digest, job_id=job.id, log=job.log)
+
+
+def _run_html_preview_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
+    job.log("Preparing the HTML player…")
+    return apply_preview(proposal, job_id=job.id, log=job.log)
 
 
 def _as_escape(text: str) -> str:

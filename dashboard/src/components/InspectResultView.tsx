@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { previewUrl, type Flag, type Job } from "../api";
 import { PreviewGrid } from "./PreviewGrid";
+import { BuildPreview } from "./BuildPreview";
 import { ErrorNotice } from "./ErrorNotice";
 import { JobName } from "./JobName";
 import { SHOW_INFO_KEY, useSessionToggle } from "../prefs";
@@ -88,6 +89,7 @@ export function InspectResultView({
           Source canvas {result.slideWidth}×{result.slideHeight}
         </p>
       )}
+      <BuildPreview path={result?.path} />
       {rows.length > 0 && flagged ? (
         <div className="slide-findings">
           {rows.map((row) => {

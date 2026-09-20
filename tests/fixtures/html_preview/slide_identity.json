@@ -1,0 +1,21 @@
+{
+  "measuredAt": "2026-09-12",
+  "source": ".agents/research/kpf_renderer_probe_2026-09-12.md",
+  "exportIdentityField": "events[].accessibility[].text",
+  "sourceIdentity": "iwa storage and grouped text, normalized like iwa_runs._normalize_text",
+    "notes": "The probe extracted per-object accessibility text (180 DSK / 418 GW items as {text, targetRectangle}) and aligned header.slideList to the source non-skipped order. That text is the independent source-to-export identity. Pairing only by count and position would accept a same-length reorder with the wrong original labels. Unique non-empty identity tokens must confirm positional order; identical non-empty tokens on more than one live slide are ambiguous and refused. Empty identities (photo/movie slides with no readable text) may occupy more than one live slot only when both sides are empty at the same indices.",
+  "example": {
+    "sourceLive": [
+      ["In the beginning God created the heavens and the earth.", "Genesis 1"],
+      ["MATTHEW 18|19 |Again, truly I tell you that"]
+    ],
+    "exportInOrder": [
+      ["In the beginning God created the heavens and the earth.", "Genesis 1"],
+      ["MATTHEW 18|19 |Again, truly I tell you that"]
+    ],
+    "exportReordered": [
+      ["MATTHEW 18|19 |Again, truly I tell you that"],
+      ["In the beginning God created the heavens and the earth.", "Genesis 1"]
+    ]
+  }
+}
