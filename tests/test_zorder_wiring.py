@@ -9,7 +9,18 @@ import pytest
 
 from obed_edom import remap_keynote as rk
 from obed_edom.keynote import _build_stat_finalize_script
+from obed_edom.map_remap import Plan
 from test_remap_keynote import _payloads, _touch_paths
+
+
+def _plan(**overrides) -> Plan:
+    defaults = dict(
+        transforms=[], placements=[], skipped_slides=[], fitted_slides=[],
+        offframe=[], framing=[], child_resize=[], badge_raises=[], card_grid=[],
+        roster={},
+    )
+    defaults.update(overrides)
+    return Plan(**defaults)
 
 
 def test_zorder_write_mode_default_on():
@@ -345,15 +356,9 @@ def _wire_zorder_remap(
     monkeypatch.setenv("OBED_AS_GEOMETRY", "on")
 
     def fake_plan(*a, **k):
-        report = k.get("child_resize_report")
-        if report is not None:
-            report.extend(child_resize)
-        badges = k.get("badge_raise_report")
-        if badges is not None:
-            badges.extend(badge_raises)
-        return []
+        return _plan(child_resize=list(child_resize), badge_raises=list(badge_raises))
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", fake_plan)
+    monkeypatch.setattr(rk, "plan_payload", fake_plan)
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -746,15 +751,12 @@ def test_skipped_slide_report_is_not_overwritten_by_framing_coverage_rows(monkey
     _wire_zorder_remap(monkeypatch, rk, child_resize=[], badge_raises=[])
 
     def fake_plan(*a, **k):
-        skipped = k.get("skipped_slides")
-        if skipped is not None:
-            skipped.extend([3, 7])
-        framing = k.get("framing_report")
-        if framing is not None:
-            framing.append({"slide": 2, "excludedOffCanvas": 1, "excluded": 4})
-        return []
+        return _plan(
+            skipped_slides=[3, 7],
+            framing=[{"slide": 2, "excludedOffCanvas": 1, "excluded": 4}],
+        )
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", fake_plan)
+    monkeypatch.setattr(rk, "plan_payload", fake_plan)
 
     said: list[str] = []
     source, template, dest = _touch_paths(tmp_path)

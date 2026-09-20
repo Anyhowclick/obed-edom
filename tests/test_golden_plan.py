@@ -188,18 +188,16 @@ def test_drops_reuse_jobs_and_keeps_framing_on_full_report(monkeypatch: pytest.M
     if not TEMPLATE.exists():
         pytest.skip(f"template missing: {TEMPLATE}")
     framing_rows: list[dict] = []
-    original_plan = remap_keynote.plan_payload_transforms
+    original_plan = remap_keynote.plan_payload
 
     def wrapped(*args, **kwargs):
         out = original_plan(*args, **kwargs)
-        report = kwargs.get("framing_report")
-        if report is not None:
-            framing_rows[:] = [
-                dict(r) for r in report if int(r.get("slide") or 0) in _FORMER_REUSE_CHAIN
-            ]
+        framing_rows[:] = [
+            dict(r) for r in out.framing if int(r.get("slide") or 0) in _FORMER_REUSE_CHAIN
+        ]
         return out
 
-    monkeypatch.setattr(remap_keynote, "plan_payload_transforms", wrapped)
+    monkeypatch.setattr(remap_keynote, "plan_payload", wrapped)
     _wall, _tmpl, plan, _env = capture_plan(deck, TEMPLATE)
 
     assert (plan.get("reuses") or []) == []

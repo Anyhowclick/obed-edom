@@ -28,10 +28,20 @@ from obed_edom.framing import (
     save_framings,
     template_framing_digests,
 )
-from obed_edom.map_remap import ItemTransform, Rect, frame_affine
+from obed_edom.map_remap import ItemTransform, Plan, Rect, frame_affine
 
 WALL = "/tmp/Wall.key"
 TEMPLATE = "/tmp/Base_CG_Assets.key"
+
+
+def _plan(**overrides) -> Plan:
+    defaults = dict(
+        transforms=[], placements=[], skipped_slides=[], fitted_slides=[],
+        offframe=[], framing=[], child_resize=[], badge_raises=[], card_grid=[],
+        roster={},
+    )
+    defaults.update(overrides)
+    return Plan(**defaults)
 
 
 def _img_slide(number: int, x: float, y: float, w: float, h: float, name: str = "pic.png") -> dict:
@@ -494,17 +504,12 @@ def test_proposal_uses_full_wall_context_for_digests_navigator_and_thumbnails(tm
     seen = {}
 
     def fake_plan(payload, _recipe, **kwargs):
-        report = kwargs.get("framing_report")
-        if report is not None:
-            report.extend(
-                {
-                    "slide": slide["number"],
-                    "templateSlide": 1,
-                    "fitted": False,
-                }
+        return _plan(
+            framing=[
+                {"slide": slide["number"], "templateSlide": 1, "fitted": False}
                 for slide in payload["slides"]
-            )
-        return []
+            ]
+        )
 
     def fake_thumbs(deck, payload, **_kwargs):
         if Path(deck) == wall:
@@ -521,7 +526,7 @@ def test_proposal_uses_full_wall_context_for_digests_navigator_and_thumbnails(tm
     )
     monkeypatch.setattr(baseline_mod, "wall_thumb_dir", lambda _digest: tmp_path / "thumbs")
     monkeypatch.setattr(remap_mod, "learn_recipe", lambda *_args, **_kwargs: {"destWidth": 1920, "destHeight": 1080})
-    monkeypatch.setattr(remap_mod, "plan_payload_transforms", fake_plan)
+    monkeypatch.setattr(remap_mod, "plan_payload", fake_plan)
     monkeypatch.setattr(remap_mod, "rank_framing_candidates", lambda *_args, **_kwargs: [{"templateSlide": 1}])
     monkeypatch.setattr(remap_mod, "on_canvas_fraction", lambda *_args, **_kwargs: 1.0)
     monkeypatch.setattr(remap_mod, "is_degenerate_scale", lambda *_args, **_kwargs: False)
@@ -574,10 +579,7 @@ def test_fallback_candidate_carries_text_and_card_context_onto_the_fit_recipe(tm
     captured: dict = {}
 
     def fake_plan(payload, _recipe, **kwargs):
-        report = kwargs.get("framing_report")
-        if report is not None:
-            report.append({"slide": 1, "templateSlide": 1, "fitted": True})
-        return []
+        return _plan(framing=[{"slide": 1, "templateSlide": 1, "fitted": True}])
 
     def fake_planned_rects(_slide, recipe, **_kwargs):
         captured["recipe"] = recipe
@@ -589,7 +591,7 @@ def test_fallback_candidate_carries_text_and_card_context_onto_the_fit_recipe(tm
     monkeypatch.setattr(framing_mod, "build_preview_thumbs", lambda *_a, **_k: {})
     monkeypatch.setattr(framing_mod, "planned_rects", fake_planned_rects)
     monkeypatch.setattr(remap_mod, "learn_recipe", lambda *_a, **_k: dict(trial_recipe))
-    monkeypatch.setattr(remap_mod, "plan_payload_transforms", fake_plan)
+    monkeypatch.setattr(remap_mod, "plan_payload", fake_plan)
     monkeypatch.setattr(remap_mod, "rank_framing_candidates", lambda *_a, **_k: [{"templateSlide": 1}])
     monkeypatch.setattr(remap_mod, "on_canvas_fraction", lambda *_a, **_k: 0.0)
     monkeypatch.setattr(remap_mod, "is_degenerate_scale", lambda *_a, **_k: True)
@@ -648,7 +650,7 @@ def test_planned_rects_rounds_the_serialized_apply_coordinate(monkeypatch):
     assert round(spec.as_dict()["x"]) == 82
 
     from obed_edom import map_remap as map_remap_mod
-    monkeypatch.setattr(map_remap_mod, "plan_payload_transforms", lambda *a, **k: [spec])
+    monkeypatch.setattr(map_remap_mod, "plan_payload", lambda *a, **k: _plan(transforms=[spec]))
 
     rects = planned_rects(
         {"index": 0, "number": 1, "items": []}, {}, wall_size=(1920, 1080)
@@ -669,7 +671,7 @@ def test_planned_rects_does_not_crash_on_a_refused_group(monkeypatch):
     )
 
     from obed_edom import map_remap as map_remap_mod
-    monkeypatch.setattr(map_remap_mod, "plan_payload_transforms", lambda *a, **k: [spec])
+    monkeypatch.setattr(map_remap_mod, "plan_payload", lambda *a, **k: _plan(transforms=[spec]))
 
     rects = planned_rects(
         {"index": 1, "number": 2, "items": []}, {}, wall_size=(7680, 1080)

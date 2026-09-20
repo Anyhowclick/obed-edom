@@ -93,6 +93,18 @@ def _spec(**over):
     return base
 
 
+def _stub_plan(**overrides):
+    from obed_edom.map_remap import Plan
+
+    defaults = dict(
+        transforms=[], placements=[], skipped_slides=[], fitted_slides=[],
+        offframe=[], framing=[], child_resize=[], badge_raises=[], card_grid=[],
+        roster={},
+    )
+    defaults.update(overrides)
+    return Plan(**defaults)
+
+
 def _result(**over):
     base = dict(refused=False, reason=None, applied=1, missed=0, missed_specs=[],
                 soft_fallbacks=0, value_clean=True)
@@ -2029,7 +2041,7 @@ def test_flag_off_builds_the_same_plan_as_today(monkeypatch, tmp_path):
 
     # Seams used elsewhere (tests/test_export_fold.py: monkeypatch rk.<name>;
     # tests/test_as_geometry.py: exercise the real plan-building pieces directly).
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: transforms)
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan(transforms=transforms))
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -2097,7 +2109,7 @@ def test_offline_read_off_skips_attach_group_children(monkeypatch, tmp_path):
     import obed_edom.iwa_runs as iwa_mod
     import obed_edom.remap_keynote as rk
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan())
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -3919,15 +3931,13 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
     monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
     monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
 
-    def fake_plan_payload_transforms(wall, recipe, *, child_resize_report=None,
-                                     badge_raise_report=None, **kwargs):
-        if child_resize_report is not None:
-            child_resize_report.append({"slide": 3, "captionPt": 24.0, "groupIndex": 1})
-        if badge_raise_report is not None:
-            badge_raise_report.append({"slide": 5, "isTitle": True})
-        return []
+    def fake_plan_payload(wall, recipe, **kwargs):
+        return _stub_plan(
+            child_resize=[{"slide": 3, "captionPt": 24.0, "groupIndex": 1}],
+            badge_raises=[{"slide": 5, "isTitle": True}],
+        )
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", fake_plan_payload_transforms)
+    monkeypatch.setattr(rk, "plan_payload", fake_plan_payload)
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -3995,7 +4005,7 @@ def test_plan_out_collects_group_collapse_refused_from_a_non_other_transform(mon
     )
     pin_transform.group_collapse_refused = "groupCollapseRefused(s=2,idx=1)"
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [pin_transform])
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan(transforms=[pin_transform]))
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -4073,7 +4083,7 @@ def test_plan_warns_once_per_run_on_aspect_less_items(monkeypatch, tmp_path):
     }
     template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan())
     logs: list[str] = []
     rk.remap_keynote(
         source, dest, template=template,
@@ -4088,7 +4098,7 @@ def test_plan_warns_once_per_run_on_aspect_less_items(monkeypatch, tmp_path):
         slide_number=1, item_index=1, kind="image", x=0, y=0, w=1, h=1,
         kind_index=1, role="hide",
     )
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [hide_transform])
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan(transforms=[hide_transform]))
     logs = []
     rk.remap_keynote(
         source, dest, template=template,

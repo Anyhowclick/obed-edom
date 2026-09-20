@@ -31,7 +31,7 @@ from obed_edom.map_remap import (
     GRID_MIN_CLEAR,
     format_slide_range,
     learn_recipe,
-    plan_payload_transforms,
+    plan_payload,
     roster_slides,
     score_against_gold,
     slides_for_plan,
@@ -1187,35 +1187,27 @@ def remap_keynote(
         previews, preview_note, preview_source_dir = resolve_source_previews(
             source, wall, folder=source_previews, wanted=preview_wanted
         )
-    placements: list[dict[str, Any]] = []
-    hidden: list[int] = []
-    fitted: list[int] = []
-    offframe: list[dict[str, Any]] = []
-    framing_rows: list[dict[str, Any]] = []
-    child_resize: list[dict[str, Any]] = []
-    badge_raises: list[dict[str, Any]] = []
-    card_grid: list[dict[str, Any]] = []
-    roster: dict[str, set[int]] = {}
-    transforms = plan_payload_transforms(
+    plan = plan_payload(
         wall,
         recipe,
         slide_range=slide_range,
         keep_side_panels=keep_side_panels,
         template=template_data,
         previews=previews or None,
-        placement_report=placements,
-        skipped_slides=hidden,
-        fitted_slides=fitted,
-        offframe_report=offframe,
         framing_overrides=framing_overrides,
-        framing_report=framing_rows,
         side_content_slides=side_content_slides,
-        child_resize_report=child_resize,
-        badge_raise_report=badge_raises,
         card_stroke=card_stroke,
-        card_grid_report=card_grid,
-        roster_report=roster,
     )
+    transforms = plan.transforms
+    placements = plan.placements
+    hidden = plan.skipped_slides
+    fitted = plan.fitted_slides
+    offframe = plan.offframe
+    framing_rows = plan.framing
+    child_resize = plan.child_resize
+    badge_raises = plan.badge_raises
+    card_grid = plan.card_grid
+    roster = plan.roster
     hidden_addresses = {
         (t.slide_number, t.kind, t.kind_index) for t in transforms if t.role == "hide"
     }
