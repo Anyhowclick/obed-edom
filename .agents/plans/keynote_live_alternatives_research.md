@@ -309,3 +309,29 @@ UNSPACED back-to-back captures. That is NOT the product gate's profile: `BURST_O
   the export's static poster for the whole dwell, not "a restart at build 1".
 - Runtime v4 functions the arming would touch: `preserveAllowedFor`, `scheduleRemount`, `sweepRetireZone` /
   `retireZoneEnd` / `inRetireZone`, `stash()`, `tryRemount`, `retireDecoder` (instance-scoped), the pool keying.
+
+## Real OBS (CEF) qualification (2026-09-20 night, Opus, attached to the owner's OBS 32.2.2 / Chrome 127.0.6533.120; evidence `output/live-visible-content/alt-cef/`)
+Environment: 1920×1080, dpr 1, **ANGLE Metal (Apple M1 Pro)** — a real GPU; WebGL/WebGL2, `requestVideoFrameCallback`,
+`clip-path: path(evenodd…)` all present; `Page.captureScreenshot` p50 ≈166 ms; H.264 plays, HEVC `canPlayType ""`;
+host output `fill-key`, alpha true, transparent background. Page returned to `about:blank#program`, OBS left running.
+- **C1 paint-oracle attach arm (DOM stimulus, settled slide 3): GREEN.** 4 sessions: the gate's `BURST_OFFSETS_MS` LIVE 4/4
+  (0.9914), profile A LIVE 4/4, paused-video null DEAD 4/4 (0.000) in every arm ⇒ paint-oracle gate (iv) / D-d satisfied
+  for the DOM stimulus; profile A may land. Caveat: an UNSPACED burst cannot be produced in CEF (166 ms per shot), so the
+  stale-surface defect could be neither reproduced nor excluded there; a WebGL-only stimulus scored by screenshots in
+  CEF is unmeasured.
+- **C2 GL replay in CEF: FEASIBLE.** Prototype wrapping survives (installed after `show`, before the move — pre-navigation
+  injection not exercised); the move renders through WebGL into `#0-canvas`; 42–46 per-`clear` uploads (CEF renders the
+  move in about half the frames of headless); settle frame 88 calls, histogram `{88:30, 89:11–15, 93:1, 125:1}`; occluder
+  mask 20/128 (identical to headless); rVFC loop 10 s: p50 6.9–7.5 / p95 10.1–11.3 ms, 0 GL errors; null DEAD, positive
+  LIVE, paused DEAD (`rvfcFired 0`), resumed LIVE — 3/3 sessions; stand-down 1.4–3.9 ms after the mutation batch; after
+  build 1 the DOM movie returns with no residue. `droppedVideoFrames` is NOT a health metric for an uncomposited decoder
+  (reads 20–98 % dropped while rVFC + band change are healthy).
+- **C3 decoder hosting in CEF:** never-attached LIVE 3/3; `display:none` LIVE; offscreen 1×1 LIVE; **attached-then-removed
+  DEAD 3/3** (frozen at the removal instant). RECONCILIATION with the headless Q0: same result there for a bare removal,
+  but the PRODUCT pool (detached + `play()` re-tried every 200 ms) was LIVE headless. **The product pool's keep-warm was
+  NOT tested in CEF** — that single variant is the open item before G3; if it fails in CEF the pool must host decoders
+  attached-but-unpainted instead.
+- **C4 hole-punch in CEF: ALIVE, pixel-clean** — liveFrac 0.992, 0 outside pixels changed (cleaner than headless), whole
+  frame Δ 0 vs control after build 1.
+- **C5 go-to freeze CONFIRMED in the real output path:** goTo 3 and goTo 1-back ⇒ 0 `<video>`, liveFrac 0.000 at +1 s and
+  +6 s, 1/8 unique shas (a fully static frame); one advance ⇒ 0.991 live.
