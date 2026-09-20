@@ -309,22 +309,38 @@ COVER_MATCH_TOL = 6.0       # frozen decode mean must match the cover's painted 
 MIN_STALE_TIME_S = 0.3      # the stale frame must be from genuine playback (not a t=0 unrendered black)
 HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event
 
-# The Arm-A composited-freeze control, injected into the live page BEFORE the advance
-# click. `window.__OBED_NULL_CTRL__` = {arm(rect, hash1), status(), release()}.
-#   - arm(): resolve the footprint owner (footprintOwnerDecoderId), record the armed
-#     hash, and start BOTH a `hashchange` listener AND a per-rAF `location.hash` poll.
-#   - trigger (first of the two to fire): capture the owner <video>'s CURRENT frame
-#     synchronously into an ID-LESS scratch canvas (so the player's drawImage recorder,
-#     which only records draws into a canvas WITH an id, stays inert), then paint the
-#     left-fraction sub-region ONCE onto an ID-LESS fixed top-z opaque cover canvas.
-#   - hold: per-rAF re-resolve the owner by elId, re-measure its rect, retrack the
-#     cover's left-fraction sub-rect, re-append if detached, and log whether the counter
-#     patch center hit-tests to the cover. The cover is PARTIAL (left ~40% of the owner
-#     rect) so it covers the counter patch (x~111-153) but NOT BLACK_BEHIND_ROI (x>=560)
-#     or GREEN_FRONT_ROI (x>=820) — a full cover would paint over the green square.
+# The Arm-A composited-freeze control, injected into the live page BEFORE the 3->4
+# advance. `window.__OBED_NULL_CTRL__` = {arm(rect, hash1), status(), release()}.
+# Re-bracketed at the 3->4 moving Magic Move (the 1->2 carry is refused, so there is
+# no carried movie to freeze there -- see the plan). Single mode now (no fork): the
+# 1->2 arm/trigger is not used by any other caller, so this replaces it rather than
+# adding a second code path.
+#   - arm(): resolve the footprint owner (footprintOwnerDecoderId) at the PRE-move
+#     (slide-3) rect, record the armed hash + the stage origin (the partial cover is
+#     `position:fixed` viewport px while the moving <video> is stage-absolute px --
+#     they only coincide while the stage origin is (0,0)), and start a single per-rAF
+#     poll for EITHER the runtime's own move signal (`__obedMotion`, set by
+#     `keepThroughBridge` on the bridged <video> the instant it starts translating)
+#     or, as a fallback, the `#7`->`#8` hash flip (the player never fires `hashchange`
+#     during the move; the hash only flips ~2s later, after the move ends).
+#   - trigger(via): 'motion' | 'hash' (recorded as `firedVia` -- a hash-only fire means
+#     the move is already over and the cover tracked nothing, an INCONCLUSIVE-only
+#     signal for the scorer). Capture the owner <video>'s CURRENT frame synchronously
+#     into an ID-LESS scratch canvas (so the player's drawImage recorder, which only
+#     records draws into a canvas WITH an id, stays inert), then paint the left-fraction
+#     sub-region ONCE onto an ID-LESS fixed top-z opaque cover canvas.
+#   - hold: per-rAF re-resolve the owner by elId, re-measure its LIVE rect (never the
+#     modelled/interpolated one), retrack the cover's left-fraction sub-rect onto it,
+#     re-append if detached, and log the cover rect + the measured rect (so the scorer
+#     can compute `coverTracksFootprint` within 2px) plus whether the counter patch
+#     center hit-tests to the cover. The cover is PARTIAL (left ~40% of the owner rect)
+#     so it covers the counter patch but not the slide-1/2 composition ROIs.
 #   - release(): remove the cover, stop the loop, snapshot the frozen-patch checksum and
-#     wall time. Capture is AT THE TRIGGER (never at arm()): an early capture makes the
-#     first in-hold decode step BACKWARD -> a wrong-reason negative anomaly.
+#     wall time (`coverPatchEnd`). Capture is AT THE TRIGGER (never at arm()): an early
+#     capture makes the first in-hold decode step BACKWARD -> a wrong-reason negative
+#     anomaly. The caller releases BETWEEN the last at-cut capture and the settled-
+#     slide-4 visible-content burst (a cover left in place would red `footprintFullyLive`
+#     for the wrong reason).
 NULL_CONTROL_JS = r"""
 (function () {
   if (window.__OBED_NULL_CTRL__) return;
@@ -339,10 +355,10 @@ NULL_CONTROL_JS = r"""
     armedRect: null,
     armedElId: null,
     armedAt: null,
+    stageOrigin: null,
     boundDecoderId: null,
     fellBackToArmOwner: false,
     firedVia: null,
-    hashchangeEventAt: null,
     holdStartedAt: null,
     releaseAt: null,
     staleCurrentTime: null,
@@ -375,7 +391,27 @@ NULL_CONTROL_JS = r"""
     return st.armedRect;
   }
 
+  function elById(elId) {
+    if (elId == null) return null;
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      if (vids[i].__obedElId === elId) return vids[i];
+    }
+    return null;
+  }
+
+  // Two-tier: ONCE bound (trigger has resolved a decoder), the footprint owner is
+  // the SAME <video> element for the rest of the hold -- keepThroughBridge moves it
+  // by repositioning the node in place, never replacing it -- so tracking is by
+  // elId, never by re-deriving ownership from a rect that is now stale (the video
+  // has translated+scaled away from the armed/pre-move rect). Before binding
+  // (arm() and the first trigger check), fall back to the IoU-based resolver at the
+  // armed (pre-move) rect, which is still valid then.
   function resolveOwnerEl() {
+    if (st.boundDecoderId != null) {
+      var bound = elById(st.boundDecoderId);
+      if (bound) return bound;
+    }
     var elId = null;
     try {
       var res = (P && P.footprintOwnerDecoderId) ? P.footprintOwnerDecoderId(st.armedRect) : null;
@@ -385,12 +421,9 @@ NULL_CONTROL_JS = r"""
       }
     } catch (e) { /* fall through to the arm() owner */ }
     if (elId == null) { st.fellBackToArmOwner = true; elId = st.armedElId; }
-    if (elId == null) return null;
-    var vids = document.querySelectorAll('video');
-    for (var i = 0; i < vids.length; i++) {
-      if (vids[i].__obedElId === elId) { st.boundDecoderId = elId; return vids[i]; }
-    }
-    return null;
+    var el = elById(elId);
+    if (el) st.boundDecoderId = elId;
+    return el;
   }
 
   function subRect(fp) { return {x: fp.x, y: fp.y, w: fp.w * LEFT_FRAC, h: fp.h}; }
@@ -518,7 +551,10 @@ NULL_CONTROL_JS = r"""
     }
     var pc = patchCenter(fp);
     var top = document.elementFromPoint(pc.x, pc.y);
-    st.rafLog.push({t: now, elementFromPointIsCover: top === cover, ownerResolved: !!ownerEl});
+    st.rafLog.push({
+      t: now, elementFromPointIsCover: top === cover, ownerResolved: !!ownerEl,
+      coverRect: sr, measuredRect: fp
+    });
     st.holdFrames += 1;
     rafId = requestAnimationFrame(loop);
   }
@@ -528,27 +564,36 @@ NULL_CONTROL_JS = r"""
       st.armedRect = rect;
       st.armedHash = String(hash1);
       st.armedAt = performance.now();
+      var stageEl = document.getElementById('body') || document.body;
+      var stageR = stageEl.getBoundingClientRect();
+      st.stageOrigin = {x: stageR.left, y: stageR.top};
       var ownerEl = resolveOwnerEl();
       st.armedElId = ownerEl ? ownerEl.__obedElId : st.armedElId;
       st.boundDecoderId = null;  // the TRIGGER owner is what binds the cover
       st.fellBackToArmOwner = false;
       st.status = 'armed';
-      window.addEventListener('hashchange', function () {
-        if (st.hashchangeEventAt == null) st.hashchangeEventAt = performance.now();
-        if (st.status === 'armed') trigger('hashchange');
-      });
+      // Single rAF poll for EITHER the runtime's own move signal (`__obedMotion`,
+      // set on the bridged <video> by keepThroughBridge the instant it starts
+      // translating) or, as a fallback, the hash flip. The player never fires
+      // `hashchange` during the move (dead on this player), so no listener here.
       (function poll() {
         if (st.status !== 'armed') return;
-        if (String(location.hash) !== st.armedHash) { trigger('poll'); }
-        else { requestAnimationFrame(poll); }
+        var el = resolveOwnerEl();
+        if (el && el.__obedMotion) { trigger('motion'); return; }
+        if (String(location.hash) !== st.armedHash) { trigger('hash'); return; }
+        requestAnimationFrame(poll);
       })();
-      return {ok: true, armedElId: st.armedElId, armedHash: st.armedHash};
+      return {
+        ok: true, armedElId: st.armedElId, armedHash: st.armedHash,
+        stageOrigin: st.stageOrigin
+      };
     },
     status: function () {
       return {
         arm: st.arm, status: st.status, armedHash: st.armedHash, armedElId: st.armedElId,
+        stageOrigin: st.stageOrigin,
         boundDecoderId: st.boundDecoderId, fellBackToArmOwner: st.fellBackToArmOwner,
-        firedVia: st.firedVia, hashchangeEventAt: st.hashchangeEventAt,
+        firedVia: st.firedVia,
         holdStartedAt: st.holdStartedAt, releaseAt: st.releaseAt,
         staleCurrentTime: st.staleCurrentTime, staleIndexExpected: st.staleIndexExpected,
         paintCount: st.paintCount, coverPatchStart: st.coverPatchStart,
@@ -2380,13 +2425,48 @@ async def _footprint_owner_keyed(
     return owner
 
 
+async def _measured_footprint(
+    chrome: ChromeCdp, key: str, hint_rect: tuple[float, float, float, float]
+) -> dict:
+    """Live `getBoundingClientRect()` of the keyed footprint owner -- measure,
+    don't model (plan section 1): `footprint_at`'s interpolation and the runtime's
+    OWN `keepThroughBridge` clock are unrelated, so a modelled mid-transition rect
+    can be garbage. `hint_rect` (the caller's current modelled estimate) is used
+    ONLY to disambiguate ownership by IoU via `_footprint_owner_keyed` (a plan
+    deviation: the plan's signature is `(chrome, key)` with no hint -- resolving a
+    MOVING footprint by key alone, with no rect, has no IoU to gate on, so a hint
+    is load-bearing here; report this). Returns `{"source": "none"}` when no owner
+    resolves; else `{x, y, w, h, source: "measured", elId}` off the DOM element,
+    never the interpolated/modelled rect.
+    """
+    owner = await _footprint_owner_keyed(chrome, hint_rect, key)
+    el_id = owner.get("elId")
+    if el_id is None:
+        return {"source": "none"}
+    rect = await chrome.evaluate(
+        "(function(){var vids=document.querySelectorAll('video');"
+        f"var want={json.dumps(el_id)};"
+        "for(var i=0;i<vids.length;i++){if(vids[i].__obedElId===want){"
+        "var r=vids[i].getBoundingClientRect();"
+        "if(r.width>1&&r.height>1){return {x:r.left,y:r.top,w:r.width,h:r.height};}"
+        "return null;}}"
+        "return null;})()"
+    )
+    if not rect:
+        return {"source": "none"}
+    return {"x": rect["x"], "y": rect["y"], "w": rect["w"], "h": rect["h"],
+            "source": "measured", "elId": el_id}
+
+
 async def _advance_to_slide4_capture(
     chrome: ChromeCdp, run_dir: Path, prefix: str, click_wall: float
 ) -> tuple[list[dict], list[dict], list[dict], str]:
     """Advance slide 3 -> slide 4 through the moving Magic Move while densely
     sampling the footprint owner at the INTERPOLATED footprint (footprint_at,
     keyed movie1), the rVFC media clocks, and the composited counter decoded at
-    the MOVING ROI (index_patch_roi_for). Returns
+    the MEASURED footprint when a decoder resolves (falling back to the modelled
+    ROI otherwise; `index_samples[i]["footprintSource"]` records which -- plan
+    section 1, "measure, don't model"). Returns
     (owner_samples, media_samples, index_samples, final_hash)."""
     owner_samples: list[dict] = []
     media_samples: list[dict] = []
@@ -2452,12 +2532,24 @@ async def _advance_to_slide4_capture(
             }
         )
         media_samples.append({**media, "sceneHash": scene_hash, "captureOffsetS": offset})
+        measured = await _measured_footprint(chrome, MOVIE1_KEY, fp)
+        if measured.get("source") == "measured":
+            footprint_source = "measured"
+            roi_rect = (measured["x"], measured["y"], measured["w"], measured["h"])
+        elif fp is not None:
+            footprint_source = "modelled"
+            roi_rect = fp
+        else:
+            footprint_source = "none"
+            roi_rect = None
         index_samples.append(
             {
-                "index": _decode_index_patch(arr, index_patch_roi_for(fp)),
+                "index": _decode_index_patch(arr, index_patch_roi_for(roi_rect)) if roi_rect else None,
                 "sceneHash": scene_hash,
                 "captureOffsetS": offset,
                 "progress": round(progress, 3),
+                "footprintSource": footprint_source,
+                "measuredRect": measured if footprint_source == "measured" else None,
             }
         )
     final_hash = _norm_hash(
@@ -2468,7 +2560,7 @@ async def _advance_to_slide4_capture(
     return owner_samples, media_samples, index_samples, final_hash
 
 
-async def _capture_1to2_snapshot(
+async def _capture_3to4_snapshot(
     chrome: ChromeCdp,
     run_dir: Path,
     prefix: str,
@@ -2476,76 +2568,75 @@ async def _capture_1to2_snapshot(
     *,
     inject_null: bool,
 ) -> dict:
-    """Capture + score ONE 1->2 Magic Move boundary and return a comparable
-    findings snapshot (reuses the Transition-A capture primitives).
+    """Capture + score ONE 3->4 moving Magic Move boundary and return a comparable
+    findings snapshot for the A-B-A freeze bracket. Replaces `_capture_1to2_snapshot`
+    (dead: the 1->2 carry is refused by the derived plan, so there is no carried
+    movie to freeze there; 3->4 still carries -- see the plan).
 
-    When `inject_null`, installs the Arm-A composited-freeze control
-    (`window.__OBED_NULL_CTRL__`), arms it BEFORE the advance, holds a partial
-    stale cover over the burnt-in counter through the whole capture, and releases
-    AFTER the last 1->2 capture — so `index_run` goes RED ("freeze run at cut")
-    while the live-<video> decoder (footprintOwnerDecoderId + rVFC) stays green,
-    isolating the RED to the counter. The cover is partial (left ~40% of the owner
-    rect) so the composition ROIs (black-behind, green-front) are untouched.
+    Drains to hash `#7` == SLIDE4_MIN_HASH-1 (the last slide-3 build; arming at #6
+    would fire on the 6->7 build). When `inject_null`, installs + arms the Arm-A
+    composited-freeze control (`window.__OBED_NULL_CTRL__`) there, BEFORE the 3->4
+    advance -- it fires on the runtime's own move signal (`__obedMotion`, set by
+    `keepThroughBridge`) with a `#7`->`#8` hash-poll fallback, holds a partial stale
+    cover tracking the MEASURED (never modelled) owner rect through the whole
+    moving-MM advance, and releases BETWEEN the last at-cut index capture and the
+    settled-slide-4 visible-content burst (a cover left in place would red
+    `footprintFullyLive` for the wrong reason).
     """
     await asyncio.sleep(wait_profile["clickDelayS"])
-    hash1 = _norm_hash(
+    hash_now = _norm_hash(
         await chrome.evaluate(
             "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
         )
     )
-    # On the 2nd/3rd same-session boot (the A-B-A bracket) the player's route hash
-    # transiently reads '' even after boot — reading hash1 then arms the null-control on
-    # '' and triggers on the player's ''->#N settle (before the advance). Wait for a
-    # clean #<digits> so hash1 is a real slide-1 boundary anchor.
-    _h1_deadline = time.monotonic() + 3.0
-    while _strict_hash_num(hash1) is None and time.monotonic() < _h1_deadline:
+    # As in the retired 1->2 capture: on a re-navigated same-session boot the route
+    # hash can transiently read '' even after boot settles. Wait for a clean
+    # #<digits> before trusting it as a real boundary anchor.
+    _h_deadline = time.monotonic() + 3.0
+    while _strict_hash_num(hash_now) is None and time.monotonic() < _h_deadline:
         await asyncio.sleep(0.1)
         await _ensure_videos_playing(chrome)
-        hash1 = _norm_hash(
+        hash_now = _norm_hash(
             await chrome.evaluate(
                 "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
             )
         )
 
+    # Drain slide 1/2/3 builds to #7 == SLIDE4_MIN_HASH - 1 (the last slide-3
+    # build), so arm() below sees the genuine pre-move boundary, not an earlier one.
+    arm_hash = SLIDE4_MIN_HASH - 1
+    drain_deadline = time.monotonic() + 8.0
+    while (_hash_num(hash_now) or -1) < arm_hash and time.monotonic() < drain_deadline:
+        await chrome.key("ArrowRight", "ArrowRight", 39)
+        await asyncio.sleep(0.3)
+        await _ensure_videos_playing(chrome)
+        hash_now = _norm_hash(
+            await chrome.evaluate(
+                "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+            )
+        )
+    hash3 = hash_now
+
     perf_now_at_click: float | None = None
+    arm_result: dict | None = None
     if inject_null:
         await chrome.evaluate(NULL_CONTROL_JS)
-        x, y, w, h = MOVIE_ROI
-        await chrome.evaluate(
-            f"window.__OBED_NULL_CTRL__.arm({{x:{x}, y:{y}, w:{w}, h:{h}}}, {json.dumps(hash1)})"
+        x, y, w, h = SLIDE3_MOVIE_RECT
+        arm_result = await chrome.evaluate(
+            f"window.__OBED_NULL_CTRL__.arm({{x:{x}, y:{y}, w:{w}, h:{h}, key:{json.dumps(MOVIE1_KEY)}}}, "
+            f"{json.dumps(str(arm_hash))})"
         )
+        perf_now_at_click = await chrome.evaluate("performance.now()")
 
     click_wall = time.monotonic()
-    if inject_null:
-        perf_now_at_click = await chrome.evaluate("performance.now()")
-    pre_frames = await _pre_advance_frames(
-        chrome, run_dir, prefix, click_wall,
-        wait_profile["preAdvanceFrames"], wait_profile["preAdvanceGapS"],
-    )
-    await chrome.key("ArrowRight", "ArrowRight", 39)
-    dense, frames, _ = await _dense_after_click(chrome, run_dir, prefix, click_wall)
-    hash2 = _norm_hash(
-        await chrome.evaluate(
-            "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
-        )
-    )
-    if hash2 == hash1:
-        deadline = time.monotonic() + 1.5
-        while time.monotonic() < deadline and hash2 == hash1:
-            await asyncio.sleep(0.05)
-            hash2 = _norm_hash(
-                await chrome.evaluate(
-                    "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
-                )
-            )
-
-    # Composition frame (the partial cover must NOT disturb these ROIs) — captured
-    # DURING the hold so the isolation comparison is against the covered state.
-    mid = await chrome.screenshot()
-    Image.fromarray(mid).save(run_dir / f"{prefix}-mid.png")
-    media_for_owner = await _media_snapshot_with_pool(chrome)
-    owner_target = await _footprint_target(chrome, media_for_owner, MOVIE_ROI)
-    owner_decoder_id = owner_target.get("decoderId")
+    if (_hash_num(hash3) or -1) < SLIDE4_MIN_HASH:
+        await chrome.key("ArrowRight", "ArrowRight", 39)
+    (
+        owner_samples,
+        media_samples,
+        index_samples,
+        hash4,
+    ) = await _advance_to_slide4_capture(chrome, run_dir, prefix, click_wall)
 
     null_status: dict | None = None
     if inject_null:
@@ -2553,91 +2644,89 @@ async def _capture_1to2_snapshot(
         released = await chrome.evaluate("window.__OBED_NULL_CTRL__.release()")
         null_status = released or null_status
 
-    samples_a = list(dense)
-    target_times = (
-        _times(samples_a, EXPECTED_MOVIE_KEYS[0], decoder_id=owner_decoder_id)
-        if owner_decoder_id is not None
-        else [None] * len(samples_a)
-    )
-    cont = score_playback_continuity(
-        target_times, click_i=0, capture_offsets=_caps(samples_a),
-        dissolve_s=TRANS_S, position_eps=1.25,
-    )
-    mm_paths = sorted(run_dir.glob(f"{prefix}-t*.png"))
-    visible_motion = _score_visible_movie_motion(mm_paths, MOVIE_ROI)
+    # Settled slide-4 visible-content burst -- AFTER release, per the plan's
+    # release-ordering requirement.
+    burst_start_wall = time.monotonic()
+    slide4_burst: list[np.ndarray] = []
+    for off_ms in BURST_OFFSETS_MS:
+        gap = (burst_start_wall + off_ms / 1000.0) - time.monotonic()
+        if gap > 0:
+            await asyncio.sleep(gap)
+        shot = await chrome.screenshot()
+        slide4_burst.append(np.asarray(shot)[:, :, :3])
+        Image.fromarray(shot).save(run_dir / f"{prefix}-burst-t{off_ms:04d}.png")
+    footprint_live = footprintFullyLive(slide4_burst)
 
-    flip_samples = []
-    for f in [*pre_frames, *frames]:
-        if f.get("sceneHash") is None:
-            continue
-        farr = np.array(Image.open(run_dir / f["name"]))
-        flip_samples.append(
-            {
-                "roi": _crop(farr, MOVIE_ROI),
-                "sceneHash": f["sceneHash"],
-                "captureOffsetS": f.get("captureOffsetS"),
-                "decoderId": f.get("decoderId"),
-                "w": f.get("w"),
-                "movieKey": f.get("movieKey"),
-                "contextType": f.get("contextType"),
-                "ownerAmbiguous": f.get("ownerAmbiguous"),
-            }
-        )
-    motion_across_flip = score_motion_across_flip(
-        flip_samples, start_hash=hash1, expected_key=EXPECTED_MOVIE_KEYS[0]
-    )
-    index_samples = [
-        {"index": f.get("index"), "sceneHash": f.get("sceneHash"),
-         "captureOffsetS": f.get("captureOffsetS")}
-        for f in [*pre_frames, *frames]
+    measured_index_samples = [
+        s for s in index_samples if s.get("footprintSource") == "measured"
     ]
-    flip_index = next(
-        (i for i, s in enumerate(index_samples)
-         if s["sceneHash"] is not None and s["sceneHash"] != hash1),
+    flip_index_at_cut = next(
+        (
+            i for i, s in enumerate(measured_index_samples)
+            if (_hash_num(s.get("sceneHash")) or -1) >= SLIDE4_MIN_HASH
+        ),
         None,
     )
-    if flip_index is None:
-        index_run = {"ok": False, "reason": "no scene-hash flip observed in dense window"}
+    if flip_index_at_cut is None:
+        moving_index_run_at_cut = {
+            "ok": False,
+            "reason": "no measured sample reached slide 4",
+        }
     else:
-        index_run = score_composited_index_run(index_samples, flip_index=flip_index)
-    live_continuity = liveContinuity1to2(
-        motion_across_flip, flip_samples, samples_a, hash1, hash2,
-        restart_min_hash=SLIDE3_MIN_HASH,
+        moving_index_run_at_cut = score_composited_index_run(
+            measured_index_samples, flip_index=flip_index_at_cut
+        )
+
+    pre_flip_owners = [
+        s for s in owner_samples if (_hash_num(s.get("sceneHash")) or -1) < SLIDE4_MIN_HASH
+    ]
+    slide3_movie_decoder = pre_flip_owners[-1].get("decoderId") if pre_flip_owners else None
+    moving_continuity = movingContinuity3to4(
+        owner_samples, media_samples, slide3_movie_decoder, hash3, hash4, SLIDE4_MIN_HASH,
     )
     player_build_errors = await chrome.evaluate(
         "(window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"
         ".filter(function (e) { return e.kind === 'player-build-error'; }) : [])"
     ) or []
+    bridge_events = await chrome.evaluate(
+        "window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"
+        ".filter(function(e){return e.kind==='bridge-3to4';}).slice(-6) : []"
+    ) or []
+    bridge_engaged = bool(bridge_events)
 
-    bb = _score_black(mid, BLACK_BEHIND_ROI)
+    last_at_cut_offset = max(
+        (s.get("captureOffsetS") for s in index_samples if s.get("captureOffsetS") is not None),
+        default=None,
+    )
+    burst_start_offset_s = burst_start_wall - click_wall
+
     composited_pass = bool(
-        cont.get("continuesThroughDissolve")
-        and hash1 != hash2
-        and index_run.get("ok", False)
-        and live_continuity.get("ok", False)
+        moving_continuity.get("ok", False)
+        and moving_index_run_at_cut.get("ok", False)
+        and footprint_live.get("ok", False)
         and not player_build_errors
     )
     return {
-        "hash1": hash1,
-        "hash2": hash2,
-        "flipIndex": flip_index,
-        "continuesThroughDissolve": bool(cont.get("continuesThroughDissolve")),
-        "indexRun": index_run,
-        "liveContinuity": live_continuity,
-        "motionAcrossFlipOk": bool(motion_across_flip.get("ok")),
-        "visibleMotionOk": bool(visible_motion.get("ok")),
-        "playerBuildErrors": player_build_errors,
-        "continueThroughMagicMove1to2Pass": composited_pass,
+        "hash3": hash3,
+        "hash4": hash4,
+        "armHash": str(arm_hash),
+        "armResult": arm_result,
+        "movingIndexRunAtCut": moving_index_run_at_cut,
+        "movingContinuity3to4": moving_continuity,
+        "footprintFullyLive": footprint_live,
+        "continueThroughMovingMagicMove3to4Pass": composited_pass,
         "indexSequence": [s.get("index") for s in index_samples],
+        "footprintSources": [s.get("footprintSource") for s in index_samples],
         "captureOffsets": [s.get("captureOffsetS") for s in index_samples],
-        "ownerDecoderId": owner_decoder_id,
-        "composition": {
-            "blackAboveOk": bool(_score_black(mid, BLACK_ABOVE_ROI)["ok"]),
-            "blackBehindShowsMovie": bool(bb["rgbMean"] > BLACK_RGB_MEAN_MAX and not bb["ok"]),
-            "greenFrontGreenish": bool(_score_green(mid, GREEN_FRONT_ROI)["greenish"]),
-        },
+        "ownerSamples": owner_samples,
+        "ownerDecoderId": slide3_movie_decoder,
+        "playerBuildErrors": player_build_errors,
+        "bridgeEngaged": bridge_engaged,
+        "bridgeEvents": bridge_events,
         "nullControl": null_status,
         "perfNowAtClick": perf_now_at_click,
+        "lastAtCutCaptureOffsetS": last_at_cut_offset,
+        "burstStartOffsetS": burst_start_offset_s,
     }
 
 
@@ -2912,10 +3001,28 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
 async def _run_freeze_bracket(
     player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str
 ) -> dict:
-    """A-B-A composited-freeze bracket on the 1->2 boundary: positive ->
-    freeze-control -> positive, one re-navigated Chrome (same session/profile),
-    its own HTTP server. Returns the `_score_freeze_control` verdict + the three
-    snapshots (Phase 2)."""
+    """A-B-A composited-freeze bracket on the 3->4 moving Magic Move boundary:
+    positive -> freeze-control -> positive, one re-navigated Chrome (same
+    session/profile) per run, its own HTTP server. Returns the
+    `_score_freeze_control` verdict + the three snapshots (Phase 2).
+
+    Re-bracketed off the 1->2 boundary (retired -- the derived plan REFUSES that
+    carry, so there is no carried movie to freeze there; 3->4 still carries). SKIPPED
+    (no boot, no bracket) when `--disable-bridge34` disables the 3->4 carry -- nothing
+    to freeze in that arm."""
+    if "--disable-bridge34" not in sys.argv:
+        bridge34 = True
+    else:
+        bridge34 = False
+    if not bridge34:
+        return {
+            "skipped": True,
+            "reason": "bridge disabled",
+            "verdict": "skipped",
+            "ok": False,
+            "waitProfile": wait_profile_name,
+        }
+
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
             super().__init__(*a, directory=str(player_dir), **k)
@@ -2949,10 +3056,10 @@ async def _run_freeze_bracket(
             await chrome.start()
             try:
                 await _boot(chrome, base)
-                # The restart boundary is already in the continuity plan baked
-                # into this player_dir's index.html by the main run above.
-                snaps[label] = await _capture_1to2_snapshot(
-                    chrome, rd, "mm12", wait_profile, inject_null=inject
+                # The restart + 3->4 bridge boundaries are already in the continuity
+                # plan baked into this player_dir's index.html by the main run above.
+                snaps[label] = await _capture_3to4_snapshot(
+                    chrome, rd, "mm34", wait_profile, inject_null=inject
                 )
             finally:
                 await chrome.close()
@@ -3630,6 +3737,30 @@ async def _run(player: Path) -> dict:
             and float(s.get("progress") or 0.0) >= 0.98
         ]
         moving_index_run = score_index_progression(slide4_index_seq)
+        # REPORT-only (owner decision 8a): the freeze-control at-cut run scorer
+        # (`score_composited_index_run`, flip at the first MEASURED sample reaching
+        # slide 4) computed here for `continueThroughMovingMagicMove3to4`'s detail.
+        # Never gates that finding's `pass` -- only one clean fast/slow/bridge-off
+        # round earns it a place in the pass condition.
+        measured_index_samples_c = [
+            s for s in index_samples_c if s.get("footprintSource") == "measured"
+        ]
+        _flip_idx_at_cut = next(
+            (
+                i for i, s in enumerate(measured_index_samples_c)
+                if (_hash_num(s.get("sceneHash")) or -1) >= SLIDE4_MIN_HASH
+            ),
+            None,
+        )
+        if _flip_idx_at_cut is None:
+            moving_index_run_at_cut = {
+                "ok": False,
+                "reason": "no measured sample reached slide 4",
+            }
+        else:
+            moving_index_run_at_cut = score_composited_index_run(
+                measured_index_samples_c, flip_index=_flip_idx_at_cut
+            )
         bridge_events = await chrome.evaluate(
             "window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"
             ".filter(function(e){return e.kind==='bridge-3to4';}).slice(-6) : []"
@@ -3966,6 +4097,7 @@ async def _run(player: Path) -> dict:
             "detail": {
                 "movingContinuity3to4": moving_continuity,
                 "movingIndexRun": moving_index_run,
+                "movingIndexRunAtCut": moving_index_run_at_cut,
                 "footprintFullyLive": footprint_live,
                 "burstOffsetsMs": list(BURST_OFFSETS_MS),
                 "slide4ControlRect": SLIDE4_CONTROL_RECT,
