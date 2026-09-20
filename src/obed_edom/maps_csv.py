@@ -364,7 +364,7 @@ def places_from_rows(rows: list[dict[str, object]]) -> tuple[list[Place], list[s
     places: list[Place] = []
     errors: list[str] = []
     for index, row in enumerate(rows, start=1):
-        text = {key: ("" if value is None else str(value).strip()) for key, value in row.items()}
+        text = {key: ("" if value is None else str(value).replace("\x00", "").strip()) for key, value in row.items()}
         result = _place_from_dict_row(text, index, label="Row")
         if isinstance(result, str):
             errors.append(result)

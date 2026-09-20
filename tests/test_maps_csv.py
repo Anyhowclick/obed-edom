@@ -612,6 +612,14 @@ def test_header_form_four_line_quoted_record_is_accepted():
     assert places[0].line == 2
 
 
+def test_places_from_rows_strips_nul_like_the_csv_path():
+    """Codex review of #179: the form-rows entry point (`/bootstrap-rows`) must agree with
+    `parse_places`, or the same place saves as "Paris" from CSV and "Par\x00is" from rows."""
+    places, errors = places_from_rows([{"name": "Par\x00is", "lat": "1", "lon": "2"}])
+    assert errors == []
+    assert places[0].name == "Paris"
+
+
 def test_places_from_rows_maps_a_name_only_row():
     places, errors = places_from_rows([{"name": "Singapore"}])
     assert errors == []
