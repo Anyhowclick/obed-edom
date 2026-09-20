@@ -69,9 +69,14 @@ jumps, follow-up probes P1–P4, paint-oracle E0 headless (CORRECTION recorded: 
 misread needs unspaced captures over a WebGL-only repaint). Paint-oracle plan `.agents/plans/keynote_live_paint_oracle.plan.md`:
 owner answered D-a…D-e (A default, land the in-page oracle now, disagreement = inconclusive-and-fail, attach arm first,
 FULL re-qualification in the same PR) — code waits on the OBS attach measurement.
-IN FLIGHT at the time of writing (results go under new sections of the research doc): **OBS CEF peer** (real OBS, port
-9222, owner-authorised for this session only; evidence `output/live-visible-content/alt-cef/`) and **pooled-decoder peer**
-(headless; `…/alt-pooled/`). See "Close-out".
+Both late peers REPORTED and are written up in the research doc: **real OBS (CEF 127, Metal GPU)** — GL replay FEASIBLE
+(3/3 sessions, controls correct, stand-down 1.4–3.9 ms), paint-oracle attach arm GREEN (D-d satisfied ⇒ paint-oracle code
+unblocked), hole-punch pixel-clean, go-to freeze CONFIRMED on the real output path; **pooled decoder** — the runtime's
+existing pool (200 ms keep-warm `play()`) is a live texture source headless; hand-off at stand-down CLEAN-WITH-CAVEATS
+(the player creates NO `<video>` at build 1 ⇒ hand-off is `tryRemount`; pool is asset-keyed ⇒ sibling must be retired per
+instance; remount footprint must be the DESTINATION rect). **ONE open measurement before G3:** the product pool's
+keep-warm variant was not tested inside OBS CEF (a bare attach→remove dies there, as it does headless). Arming plan §9–§10.
+OBS authorisation was for that session only; the page was returned to `about:blank#program`.
 
 ## 4. What the owner does next
 - Tomorrow: author the decks listed in the GL-replay plan §6 Q4 (no-build destination · two movies · equal-size posters ·
