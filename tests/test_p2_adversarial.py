@@ -866,28 +866,43 @@ def test_moving_continuity_fails_closed_on_rvfc_rewind():
 # by a real freeze. `movingIndexRunAtCut`/`settledIndexProgression` are computed
 # by calling the SAME scorer functions the script calls, not hand-typed.
 # --------------------------------------------------------------------------- #
-_PRE_FLIP_INDICES_34 = (34, 35, 36)
-FREEZE_FLIP_INDEX_34 = len(_PRE_FLIP_INDICES_34)  # first #8 sample's position
+# Pre-ADVANCE samples: still `#7`, cover not up, counter live in every arm.
+_PRE_ADVANCE_INDICES_34 = (31, 32, 33)
+# ...then the COVERED PRE-FLIP samples. The hash sits at `#7` for the WHOLE ~2 s
+# 3->4 move, so the cover goes up well BEFORE the flip and these are already
+# frozen in B. Modelling them is what makes the fixture the live shape: the
+# scored window opens at `coverPaintedAt`, not at the flip.
+_COVERED_PRE_FLIP_N_34 = 3
+FREEZE_FLIP_INDEX_34 = len(_PRE_ADVANCE_INDICES_34) + _COVERED_PRE_FLIP_N_34
 # The at-cut segment is the flip sample plus FREEZE_MIN_AFTER samples STRICTLY
 # after it (review BLOCKER 3), so the capture's release split lands here:
 FREEZE_SPLIT_INDEX_34 = FREEZE_FLIP_INDEX_34 + p2.FREEZE_MIN_AFTER
-# ONE browser clock (review BLOCKER 2). Pre-flip samples precede the advance
-# keydown; the trigger fires one delivered frame after it; the at-cut samples all
-# fall inside the hold.
+# ONE browser clock (review BLOCKER 2). Pre-advance samples precede the advance
+# keydown; the trigger fires one delivered frame after it.
 ADVANCE_KEY_AT_34 = 850.0
 HOLD_STARTED_AT_34 = 870.0
+# The cover is painted AFTER the <=150 ms owner-readiness retry, so it is a
+# distinct, LATER instant than the trigger (review r3 BLOCKER 2). Samples from
+# perf 900 on are at or after it; the pre-advance ones (700..800) are not.
+COVER_PAINTED_AT_34 = 880.0
 
 
-def _capture_samples_34(at_cut_indices, settled_indices):
+def _capture_samples_34(at_cut_indices, settled_indices, covered_pre_flip):
     samples: list[dict] = []
     perf = 700.0
-    offset = -0.15
-    for v in _PRE_FLIP_INDICES_34:
+    offset = -0.35
+    for v in _PRE_ADVANCE_INDICES_34:
         samples.append({"index": v, "sceneHash": "#7", "captureOffsetS": round(offset, 2),
                         "perfNowMs": perf, "progress": 0.0, "footprintSource": "measured"})
         perf += 50.0
         offset += 0.05
     perf = 900.0
+    offset = -0.15
+    for v in covered_pre_flip:
+        samples.append({"index": v, "sceneHash": "#7", "captureOffsetS": round(offset, 2),
+                        "perfNowMs": perf, "progress": 0.0, "footprintSource": "measured"})
+        perf += 50.0
+        offset += 0.05
     offset = 0.05
     for v in at_cut_indices:
         samples.append({"index": v, "sceneHash": "#8", "captureOffsetS": round(offset, 2),
@@ -903,9 +918,21 @@ def _capture_samples_34(at_cut_indices, settled_indices):
     return samples, release_perf, perf + 100.0
 
 
-def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool) -> dict:
-    samples, release_perf, burst_perf = _capture_samples_34(at_cut_indices, settled_indices)
+def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool,
+                       covered_pre_flip=None) -> dict:
+    if covered_pre_flip is None:
+        first = at_cut_indices[0]
+        covered_pre_flip = (
+            (first,) * _COVERED_PRE_FLIP_N_34 if frozen
+            else tuple(first - _COVERED_PRE_FLIP_N_34 + i for i in range(_COVERED_PRE_FLIP_N_34))
+        )
+    samples, release_perf, burst_perf = _capture_samples_34(
+        at_cut_indices, settled_indices, covered_pre_flip
+    )
     # Through the REAL helper (review MAJOR 6): no hand-set flip/decodable flags.
+    # The capture side does NOT know `coverPaintedAt` (it has no null control in
+    # two of the three arms), so it scores the whole covered_until segment; only
+    # the SCORER re-runs it with `covered_from`.
     moving_index_run_at_cut, flip_window_decodable = p2._moving_index_run_at_cut(
         samples, covered_until=FREEZE_SPLIT_INDEX_34
     )
@@ -925,6 +952,12 @@ def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool) -> dict
             "pressesSent": 5, "pressesLanded": 5, "unlandedFromHash": [],
             "selfAdvanceHash": "#6", "hashAtArm": "#7",
             "allPressesLanded": True, "hashAtArmExact": True, "ok": True,
+        },
+        # Exactly ONE advance key, sent from the exact settled `#7`, landed.
+        "advance": {
+            "pressesSent": 1, "pressesLanded": 1, "unlandedFromHash": [],
+            "outstandingAtEnd": None, "pressingStopped": False,
+            "finalHash": "#9", "pressHash": "#7", "ok": True,
         },
         "movingIndexRunAtCut": moving_index_run_at_cut,
         "flipWindowDecodable": flip_window_decodable,
@@ -970,8 +1003,13 @@ def _positive_snap_34(**overrides) -> dict:
     return snap
 
 
-def _freeze_b_snap_34(**overrides) -> dict:
-    snap = _build_snapshot_34([40] * 7, [50, 51, 52, 53, 54, 55, 56], frozen=True)
+def _freeze_b_snap_34(at_cut=None, settled=None, covered_pre_flip=None, **overrides) -> dict:
+    snap = _build_snapshot_34(
+        at_cut or [40] * 7,
+        settled or [50, 51, 52, 53, 54, 55, 56],
+        frozen=True,
+        covered_pre_flip=covered_pre_flip,
+    )
     release_perf = snap.pop("_releasePerfForNullControl")
     raf = [
         {
@@ -985,7 +1023,10 @@ def _freeze_b_snap_34(**overrides) -> dict:
     ]
     snap["nullControl"] = {
         "status": "released", "holdStartedAt": HOLD_STARTED_AT_34, "firedVia": "moved",
+        "coverPaintedAt": COVER_PAINTED_AT_34,
         "advanceKeyAt": ADVANCE_KEY_AT_34, "triggerFramesAfterAdvance": 1,
+        "motionStartedAt": HOLD_STARTED_AT_34, "motionStartedFrame": 1,
+        "pollMaxGapMs": 17.0,
         "preAdvanceDepartureAt": None, "preAdvanceDepartureRect": None,
         "loopHandedOff": True,
         "releaseAt": release_perf,
@@ -1075,12 +1116,39 @@ def test_advance_press_sends_exactly_one_press_across_the_whole_move():
     assert st["atHash"] is None
 
 
-def test_advance_press_waits_for_each_landing_when_more_than_one_is_needed():
-    """Entering below the arm boundary still drains -- but one press at a time,
-    each outstanding until its own hash step lands."""
+def test_advance_press_never_drains_from_below_the_advance_boundary():
+    """Review r3 MAJOR 1. The OLD behaviour drained from below and could send
+    TWO presses before `#8`: entering at the self-advancing `#6` sent a key the
+    player cannot honour and QUEUES; when the player's own `#6 -> #7`
+    self-advance arrived, the helper counted it as that press landing and
+    immediately sent another at `#7`. The player then replayed the queued one --
+    a contaminated multi-advance stimulus that finding 13 could still green on.
+    Now nothing leaves below the exact `#7`, and the run that entered low is
+    visibly a no-advance run rather than a silently doubled one."""
+    st, pressed = _drive_presses([5, 5, 6, 6, 6])
+    assert pressed == [] and st["sent"] == 0
+    assert p2._advance_gate(st, "#6")["ok"] is False
+
     st, pressed = _drive_presses([5, 5, 6, 6, 7, 7, 7, 9, 9])
-    assert pressed == [0, 2, 4]
-    assert st["sent"] == 3 and st["landed"] == 3
+    assert pressed == [4], "the ONLY press may be the one sent from the exact #7"
+    assert st["sent"] == 1 and st["landed"] == 1
+    assert p2._advance_gate(st, "#9")["ok"] is True
+
+
+def test_advance_gate_fails_closed_on_every_contaminated_shape():
+    """The gate is what finding 13 and the bracket hang on, so walk each way a
+    stimulus can be wrong."""
+    clean = {"atHash": None, "wall": None, "sent": 1, "landed": 1,
+             "unlanded": [], "stopped": False}
+    assert p2._advance_gate(clean, "#8")["ok"] is True
+    assert p2._advance_gate({**clean, "sent": 2, "landed": 2}, "#8")["ok"] is False
+    assert p2._advance_gate({**clean, "landed": 0}, "#8")["ok"] is False
+    assert p2._advance_gate({**clean, "atHash": 7}, "#8")["ok"] is False
+    assert p2._advance_gate({**clean, "unlanded": [7]}, "#8")["ok"] is False
+    assert p2._advance_gate({**clean, "stopped": True}, "#8")["ok"] is False
+    assert p2._advance_gate({**clean, "sent": 0, "landed": 0}, "#8")["ok"] is False
+    assert p2._advance_gate(clean, "#7")["ok"] is False, "never reached slide 4"
+    assert p2._advance_gate(clean, None)["ok"] is False
 
 
 def test_advance_press_never_re_presses_while_one_is_outstanding():
@@ -1116,17 +1184,23 @@ def test_advance_press_ignores_an_unreadable_hash():
 
 # --- footprint badge: the rect the CAPTURED FRAME actually shows ------------ #
 def _render_badge(seq: int, rect: dict, *, cell: int | None = None,
-                  magic: int | None = None, height: int = 40, width: int = 1920):
+                  magic: int | None = None, height: int = 40, width: int = 1920,
+                  corrupt_crc: bool = False):
     """Render the badge exactly as FOOTPRINT_BADGE_JS paints it: an 8-bit magic
-    prefix then seq/x/y/w/h as 16 MSB-first bits each, one flat black-or-white
-    cell per bit, in a single row at the viewport origin."""
+    prefix, then seq/x/y/w/h as 16 MSB-first bits each, then an 8-bit CRC over
+    those five words; one flat black-or-white cell per bit, in a single row at
+    the viewport origin."""
     cell = p2.FOOTPRINT_BADGE_CELL_PX if cell is None else cell
     magic = p2.FOOTPRINT_BADGE_MAGIC if magic is None else magic
     bits = [(magic >> i) & 1 for i in range(7, -1, -1)]
+    words = []
     for name in p2.FOOTPRINT_BADGE_FIELDS:
         raw = seq if name == "seq" else rect[name]
         n = max(0, min(65535, int(round(raw * (1 if name == "seq" else p2.FOOTPRINT_BADGE_Q)))))
+        words.append(n)
         bits += [(n >> i) & 1 for i in range(15, -1, -1)]
+    crc = p2._footprint_badge_crc8(words) ^ (0xFF if corrupt_crc else 0x00)
+    bits += [(crc >> i) & 1 for i in range(7, -1, -1)]
     arr = np.zeros((height, width, 4), dtype=np.uint8)
     arr[:, :, 3] = 255
     for c, bit in enumerate(bits):
@@ -1175,11 +1249,39 @@ def test_decode_footprint_badge_honours_a_device_scale():
     pitch from the captured width rather than assuming it."""
     rect = {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0}
     arr = _render_badge(9, rect, cell=p2.FOOTPRINT_BADGE_CELL_PX * 2, width=3840, height=80)
-    assert p2._decode_footprint_badge(arr, 1.0) is None or True  # scale 1 may mis-read
     out = p2._decode_footprint_badge(arr, 2.0)
-    assert out is not None and out["seq"] == 9
+    assert out is not None and out["seq"] == 9 and out["crcOk"] is True
     for k, v in rect.items():
         assert out[k] == pytest.approx(v, abs=1.0 / p2.FOOTPRINT_BADGE_Q)
+    # ...and read at the WRONG scale it must not hand back a plausible rect.
+    # Definite expected result, not "None or True": at scale 1 the sampler lands
+    # on the first half of the doubled cells, which duplicates every bit, so the
+    # magic byte 0b10110010 reads as 0b11001111 and the prefix check rejects it.
+    assert p2._decode_footprint_badge(arr, 1.0) is None
+
+
+def test_decode_footprint_badge_crc_catches_a_torn_payload():
+    """Review r3 MAJOR 3. Without a checksum, a torn frame can present a
+    CORRUPTED SEQUENCE that happens to name another logged frame; once the rect
+    has settled the coupling comparison still passes and that frame's timestamp
+    is substituted, which can move a sample across the hold or release boundary.
+    The magic prefix alone cannot see it -- it is intact in a torn payload."""
+    rect = {"x": 327.25, "y": 709.75, "w": 1266.5, "h": 356.0}
+    out = p2._decode_footprint_badge(_render_badge(4321, rect, corrupt_crc=True))
+    assert out is not None, "the magic prefix is intact -- this is not 'no badge'"
+    assert out["crcOk"] is False
+    assert p2._decode_footprint_badge(_render_badge(4321, rect))["crcOk"] is True
+
+
+def test_footprint_badge_crc_is_sensitive_to_every_field():
+    """A CRC that ignored a field would let that field tear silently."""
+    base = {"x": 198.0, "y": 797.0, "w": 952.0, "h": 268.0}
+    words = [100] + [int(base[k] * p2.FOOTPRINT_BADGE_Q) for k in ("x", "y", "w", "h")]
+    baseline = p2._footprint_badge_crc8(words)
+    for i in range(len(words)):
+        bumped = list(words)
+        bumped[i] += 1
+        assert p2._footprint_badge_crc8(bumped) != baseline
 
 
 def _badge_sample(seq, rect, **over):
@@ -1257,6 +1359,52 @@ def test_decode_footprint_badge_unlogged_frame_is_not_measured():
     )
     out = p2._couple_owner_rect(None, {k: decoded[k] for k in ("x", "y", "w", "h")})
     assert out["source"] == "unstable"
+
+
+# --- badge sequence integrity (review r3 MAJOR 3) --------------------------- #
+_SEQ_RECT = {"x": 198.0, "y": 797.0, "w": 952.0, "h": 268.0}
+
+
+def _seq_case(seqs, times):
+    samples = [_badge_sample(s, _SEQ_RECT) for s in seqs]
+    log = {str(s): {"t": t, "rect": dict(_SEQ_RECT)} for s, t in zip(seqs, times)}
+    counts = p2._fill_badge_coupling(samples, log)
+    return samples, counts
+
+
+def test_fill_badge_coupling_rejects_a_repeated_sequence():
+    """The capture samples at DENSE_FPS while the badge paints at ~60 Hz, so the
+    sequences it reads must strictly increase. A repeat means a torn or aliased
+    read -- and its substituted timestamp could move a sample across the hold or
+    release boundary -- so it is `unstable`, never `measured`."""
+    samples, counts = _seq_case([10, 11, 11, 12], [100.0, 120.0, 140.0, 160.0])
+    assert [s["footprintSource"] for s in samples] == [
+        "measured", "measured", "unstable", "measured"
+    ]
+    assert counts["seqViolation"] == 1
+
+
+def test_fill_badge_coupling_rejects_a_rewound_sequence():
+    samples, counts = _seq_case([10, 11, 9, 12], [100.0, 120.0, 140.0, 160.0])
+    assert samples[2]["footprintSource"] == "unstable"
+    assert counts["seqViolation"] == 1
+
+
+def test_fill_badge_coupling_rejects_a_non_monotonic_log_time():
+    """A sequence can be well-formed while the page's LOG time for it is not --
+    the timestamp is what gets substituted into `perfNowMs`, so it is checked in
+    its own right, and the offending sample keeps its original timestamp."""
+    samples, counts = _seq_case([10, 11, 12], [100.0, 140.0, 120.0])
+    assert samples[2]["footprintSource"] == "unstable"
+    assert samples[2]["perfNowMs"] == 1.0, "the bad log time must NOT be adopted"
+    assert counts["seqViolation"] == 1
+
+
+def test_fill_badge_coupling_clean_sequence_is_untouched():
+    samples, counts = _seq_case([10, 13, 40], [100.0, 150.0, 600.0])
+    assert [s["footprintSource"] for s in samples] == ["measured"] * 3
+    assert counts["seqViolation"] == 0
+    assert [s["perfNowMs"] for s in samples] == [100.0, 150.0, 600.0]
 
 
 # --- `_moving_index_run_at_cut` (pure) ------------------------------------- #
@@ -1607,7 +1755,9 @@ def test_freeze_control_counter_that_stayed_green_never_passes():
     caught twice over -- the at-cut run stays green AND the in-hold decodes are
     not stale -- and can never be a PASS."""
     b = _freeze_b_snap_34()
-    for i in range(FREEZE_FLIP_INDEX_34, FREEZE_SPLIT_INDEX_34 + 1):
+    # Every sample from the moment the cover went up, not merely from the flip:
+    # the scored window opens at `coverPaintedAt` (review r3 BLOCKER 2).
+    for i in range(len(_PRE_ADVANCE_INDICES_34), FREEZE_SPLIT_INDEX_34 + 1):
         b = _with_sample(b, i, index=40 + i)  # advancing again -> no freeze to catch
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["ok"] is False
@@ -1851,6 +2001,399 @@ def test_freeze_control_bound_decoder_id_changes_mid_hold_fails_ambiguity():
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["ok"] is False
     assert "noOwnerAmbiguousInWindow" in verdict["failed"]
+
+# --- review r3 BLOCKER 2: the scored window opens when the COVER was PAINTED - #
+def test_freeze_control_pre_cover_sample_does_not_fake_a_restart():
+    """The EXACT live failure. The trigger fires, then the <=150 ms owner-
+    readiness retry runs, and a capture landing in that gap still shows a LIVE
+    counter -- one step ahead of the frozen ones. Scored from `holdStartedAt`
+    the segment reads `[29, 28, 28, ...]`: a -1 step, which the at-cut scorer
+    (correctly, and untouched) calls a modulo-255 REWIND, so the bracket reached
+    a wrong-reason FAIL through `reasonFreezeRunAtCut`/`noNegativeAnomaly`
+    instead of seeing the freeze it had just injected.
+
+    Scored from `coverPaintedAt` the 29 is outside the window and the freeze is
+    exactly what it looks like. The raw sample is KEPT for diagnostics."""
+    b = _freeze_b_snap_34(at_cut=[28] * 7, covered_pre_flip=(28, 28, 28))
+    b["nullControl"] = {**b["nullControl"], "coverPatchMean": 28.0}
+    # The last pre-cover capture: live at 29, timestamped between the trigger and
+    # the cover actually being painted.
+    b = _with_sample(b, len(_PRE_ADVANCE_INDICES_34) - 1, index=29,
+                     perfNowMs=HOLD_STARTED_AT_34 + 5.0)
+    scored = [s["index"] for s in b["indexSamples"][len(_PRE_ADVANCE_INDICES_34) - 1:
+                                                   FREEZE_SPLIT_INDEX_34 + 1]]
+    assert scored[:4] == [29, 28, 28, 28], "the live shape, before trimming"
+
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "pass", verdict["failed"]
+    assert verdict["movingIndexRunAtCut"]["negativeAnomaly"] is False
+    assert verdict["movingIndexRunAtCut"]["reason"] == "freeze run at cut"
+    assert 29 in [s["index"] for s in b["indexSamples"]], "kept for diagnostics"
+
+
+def test_freeze_control_missing_cover_painted_at_fails_closed():
+    """No `coverPaintedAt`, no window: the scorer must not silently fall back to
+    `holdStartedAt` (which is the defect) nor to "everything"."""
+    b = _freeze_b_snap_34()
+    b["nullControl"] = {**b["nullControl"], "coverPaintedAt": None}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "coverPaintedAtPresent" in verdict["integrityFailed"]
+
+
+def test_freeze_control_cover_painted_before_trigger_is_not_assumed():
+    """`coverPaintedAt` is a distinct, LATER instant than `holdStartedAt`; the
+    window must follow it, not the trigger."""
+    b = _freeze_b_snap_34()
+    b["nullControl"] = {**b["nullControl"], "coverPaintedAt": 10_000.0}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert verdict["freeze"]["firstCoveredPosition"] is None
+
+
+# --- review r3 BLOCKER 3: the trigger is bounded in TIME, not only in frames - #
+def test_freeze_control_long_pre_trigger_stall_is_inconclusive():
+    """A keydown->rAF stall advances the runtime's time-based interpolation deep
+    into the move before poll frame 1 is ever delivered. The delivered-frame
+    bound cannot see it (it still reads 1), and the hold's own gap check starts
+    at the trigger -- so the page-clock ceiling is the only thing that bites."""
+    b = _freeze_b_snap_34()
+    b["nullControl"] = {
+        **b["nullControl"],
+        "holdStartedAt": ADVANCE_KEY_AT_34 + p2.FREEZE_TRIGGER_MAX_DELAY_MS + 1.0,
+        "triggerFramesAfterAdvance": 1,
+    }
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "firedAtMoveStart" in verdict["integrityFailed"]
+
+
+def test_freeze_control_pre_trigger_raf_gap_counts_towards_the_max_gap():
+    """Gaps BEFORE the trigger are measured in the page from the keydown and fold
+    into the same max-gap budget -- previously they were invisible."""
+    b = _freeze_b_snap_34()
+    b["nullControl"] = {**b["nullControl"], "pollMaxGapMs": p2.MAX_RAF_GAP_MS + 1.0}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "maxRafGapOk" in verdict["integrityFailed"]
+    assert verdict["maxRafGapMs"] == pytest.approx(p2.MAX_RAF_GAP_MS + 1.0)
+
+
+def test_freeze_control_trigger_far_from_runtime_motion_start_is_inconclusive():
+    """The departure must be the runtime's OWN move, within a callback or two of
+    `__obedMotion.started` -- not some other rect change that happened to be
+    within the frame budget."""
+    b = _freeze_b_snap_34()
+    b["nullControl"] = {
+        **b["nullControl"], "triggerFramesAfterAdvance": 8, "motionStartedFrame": 1,
+    }
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
+
+
+def test_freeze_control_missing_runtime_motion_marker_is_inconclusive():
+    """Fail CLOSED: no fresh marker means nothing ties the departure to the
+    runtime's move at all."""
+    b = _freeze_b_snap_34()
+    b["nullControl"] = {**b["nullControl"], "motionStartedFrame": None}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
+
+
+def test_freeze_control_trigger_within_the_motion_slack_still_passes():
+    """...and the slack is real: the marker is stamped inside keepThroughBridge's
+    first SYNCHRONOUS frame(), which runs in a task, so the poll can see it a
+    callback before or after the rect visibly departs."""
+    for frames, marker in ((3, 1), (1, 3), (2, 2)):
+        b = _freeze_b_snap_34()
+        b["nullControl"] = {
+            **b["nullControl"], "triggerFramesAfterAdvance": frames,
+            "motionStartedFrame": marker,
+        }
+        verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+        assert verdict["verdict"] == "pass", (frames, marker, verdict["failed"])
+
+
+# --- review r3 MAJOR 1: exactly one advance press, in every arm -------------- #
+@pytest.mark.parametrize("arm", ["a1", "b", "a2"])
+def test_freeze_control_multi_press_advance_is_inconclusive(arm):
+    """A second queued press is replayed by the player and starts the move by
+    itself, so the arms are no longer the same stimulus -- in ANY arm."""
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    snaps[arm] = {**snaps[arm], "advance": {**snaps[arm]["advance"], "pressesSent": 2, "ok": False}}
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive"
+    assert "advanceSinglePressAllArms" in verdict["integrityFailed"]
+
+
+@pytest.mark.parametrize("arm", ["a1", "b", "a2"])
+def test_freeze_control_missing_advance_block_fails_closed(arm):
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    snaps[arm] = {k: v for k, v in snaps[arm].items() if k != "advance"}
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive"
+    assert "advanceSinglePressAllArms" in verdict["integrityFailed"]
+
+
+# --- review r3 BLOCKER 4: integrity problems are INCONCLUSIVE, not FAIL ------ #
+@pytest.mark.parametrize(
+    "key,mutate",
+    [
+        ("positivesGreen",
+         lambda s: s["a1"].update(continueThroughMovingMagicMove3to4Pass=False)),
+        ("rvfcRanThroughHold",
+         lambda s: s["b"].update(movingContinuity3to4={
+             **s["b"]["movingContinuity3to4"], "rvfcMonotonic": {"ok": True, "advance": 0.01}})),
+        ("boundDecoderIsSlide3Decoder", lambda s: s["b"].update(ownerDecoderId=99)),
+        ("noOwnerAmbiguousInWindow",
+         lambda s: s["b"].update(nullControl={**s["b"]["nullControl"],
+                                              "ownerAmbiguousInWindow": True})),
+        ("playerBuildErrorsEmpty", lambda s: s["b"].update(playerBuildErrors=[{"e": 1}])),
+        ("isolationEqual", lambda s: s["b"].update(footprintFullyLive={"ok": False})),
+    ],
+)
+def test_freeze_control_integrity_problems_are_inconclusive_not_fail(key, mutate):
+    """None of these establishes whether the counter caught a valid isolated
+    freeze, so none may produce a FAIL verdict against the counter. FAIL is
+    reserved for a fully valid stimulus whose counter response misses.
+
+    Nothing gets easier to PASS: each is still required, and
+    `_freeze_control_blocks_success` blocks overall `success` on `inconclusive`
+    exactly as it does on `fail`."""
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    mutate(snaps)
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive", verdict["failed"]
+    assert key in verdict["integrityFailed"]
+    assert p2._freeze_control_blocks_success("inconclusive", bridge34_disabled=False) is True
+
+
+def test_freeze_control_negative_anomaly_is_integrity_not_a_verdict():
+    """`noNegativeAnomaly` is measurement integrity (the live failure is exactly
+    that), so it must not be able to produce a FAIL against the counter."""
+    b = _freeze_b_snap_34()
+    b = _with_sample(b, FREEZE_FLIP_INDEX_34 + 1, index=250)  # backward past modulo/2
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "noNegativeAnomaly" in verdict["integrityFailed"]
+    assert "noNegativeAnomaly" not in verdict["verdictFailed"]
+
+
+def test_freeze_control_fail_route_is_live_and_is_only_the_counter_response(monkeypatch):
+    """FAIL must still be REACHABLE, or the verdict tier is dead code. It is
+    reached by exactly one situation: the stimulus is fully valid -- the pixels
+    under the cover really were frozen, which the harness establishes for itself
+    via `everyInHoldStale` against the cover's own painted mean -- and the
+    production counter gate nonetheless does not flag it strongly enough.
+
+    That is the whole point of the negative control, so it is simulated here by
+    demanding a run the genuine freeze cannot supply."""
+    b = _freeze_b_snap_34()
+    monkeypatch.setattr(p2, "FREEZE_MIN_RUN", 99)
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "fail"
+    assert verdict["integrityFailed"] == []
+    assert verdict["verdictFailed"] == ["freezeRunMargin"]
+    assert p2._freeze_control_blocks_success("fail", bridge34_disabled=False) is True
+
+
+def test_freeze_control_a_counter_that_never_froze_is_inconclusive_not_fail():
+    """...and the common "no freeze at all" shape is NOT a claim about the
+    counter: the harness's own stale check reds first, so the bracket says
+    INCONCLUSIVE rather than accusing the gate."""
+    b = _freeze_b_snap_34(at_cut=[40, 41, 42, 43, 44, 45, 46],
+                          covered_pre_flip=(37, 38, 39))
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert verdict["integrityFailed"] == ["everyInHoldStale"]
+
+
+def test_freeze_control_verdict_tier_is_only_the_counter_response():
+    """Guard the tier split itself: the verdict tier says nothing except whether
+    the counter went red at the cut for the injected freeze."""
+    verdict = p2._score_freeze_control(_positive_snap_34(), _freeze_b_snap_34(),
+                                       _positive_snap_34())
+    assert verdict["verdict"] == "pass"
+    keys = set(verdict["checks"])
+    assert keys - set(verdict["integrityFailed"]) - set(verdict["verdictFailed"])
+    # The three counter-response keys, and nothing else, can produce a FAIL.
+    b = _freeze_b_snap_34()
+    for i in range(len(_PRE_ADVANCE_INDICES_34), FREEZE_SPLIT_INDEX_34 + 1):
+        b = _with_sample(b, i, index=40 + i)
+    v2 = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert set(v2["verdictFailed"]) <= {
+        "indexRunRed", "reasonFreezeRunAtCut", "freezeRunMargin"
+    }
+
+
+# --- review r3 MAJOR 2: one shared in-page split evaluation ----------------- #
+def test_split_eval_js_is_one_evaluation_with_the_same_shape_in_both_branches():
+    """A1/A2 previously returned LOCALLY at the split while B awaited a CDP
+    round trip, so the absolute-target capture loop caught up differently
+    afterwards -- settled progression or continuity could differ purely because
+    B paused. Both branches are now one evaluation of the SAME source, with the
+    same keys out."""
+    released = p2.SPLIT_EVAL_JS % {"release": "true"}
+    noop = p2.SPLIT_EVAL_JS % {"release": "false"}
+    assert released != noop
+    assert released.replace("var R = true;", "") == noop.replace("var R = false;", "")
+    for key in ("t", "released", "controlPresent", "status", "releaseAt",
+                "holdFrames", "paintCount", "coverPatchEnd"):
+        assert f"{key}:" in released
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_split_eval_js_returns_the_same_keys_on_both_branches():
+    """Executed, not just inspected: with no control present (the positive arms)
+    and with one present, the returned object has identical keys."""
+    harness = """
+      var calls = 0;
+      global.performance = {now: function () { return 1234.5; }};
+      global.window = {};
+      function run(src) { return eval(src); }
+      var noop = run(%s);
+      window.__OBED_NULL_CTRL__ = {release: function () {
+        calls++;
+        return {status: 'released', releaseAt: 9, holdFrames: 3, paintCount: 1,
+                coverPatchEnd: {sum: 5}};
+      }};
+      var rel = run(%s);
+      console.log(JSON.stringify({noop: Object.keys(noop).sort(),
+                                  rel: Object.keys(rel).sort(),
+                                  released: [noop.released, rel.released],
+                                  calls: calls}));
+    """ % (json.dumps(p2.SPLIT_EVAL_JS % {"release": "false"}),
+           json.dumps(p2.SPLIT_EVAL_JS % {"release": "true"}))
+    out = subprocess.run(["node", "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    assert got["noop"] == got["rel"]
+    assert got["released"] == [False, True]
+    assert got["calls"] == 1, "the no-op branch must not release anything"
+
+
+# --- review r3 BLOCKER 1 / MAJOR 3: the badge JS, EXECUTED ------------------ #
+_BADGE_HARNESS = r"""
+var cells = null, painted = [], rafQ = [], taskQ = [];
+var video = {__obedElId: 'el4', rect: {left: 198, top: 797, width: 952, height: 268},
+             getBoundingClientRect: function () {
+               return {left: this.rect.left, top: this.rect.top,
+                       width: this.rect.width, height: this.rect.height};
+             }};
+global.performance = {now: (function () { var t = 0; return function () { return (t += 16.7); }; })()};
+global.requestAnimationFrame = function (fn) { rafQ.push(fn); return rafQ.length; };
+global.setTimeout = function (fn) { taskQ.push(fn); };
+global.document = {
+  querySelectorAll: function () { return [video]; },
+  body: {appendChild: function () {}},
+  createElement: function () {
+    return {style: {}, setAttribute: function () {},
+            getContext: function () {
+              return {fillStyle: '#000000',
+                      fillRect: function (x) { cells[Math.round(x / CELL)] = this.fillStyle === '#ffffff' ? 1 : 0; }};
+            }};
+  }
+};
+global.window = {devicePixelRatio: 1, innerWidth: 1920};
+var CELL = 6;
+EVAL_BADGE
+window.__OBED_FP_BADGE__.install('el4');
+// Flush the install handoff (rAF -> task -> rAF) and then drive frames.
+function frame() {
+  var q = rafQ; rafQ = [];
+  q.forEach(function (fn) { fn(); });
+  var t = taskQ; taskQ = [];
+  t.forEach(function (fn) { fn(); });
+}
+function step(label) {
+  cells = new Array(NCELL).fill(0);
+  frame();
+  if (cells.some(function (c) { return c === 1; })) painted.push({label: label, cells: cells.slice()});
+}
+for (var i = 0; i < 4; i++) { step('pre' + i); video.rect.left += 1.5; }
+video.__obedMotion = {started: 500, generation: 3};
+for (var j = 0; j < 6; j++) { step('post' + j); video.rect.left += 1.5; }
+console.log(JSON.stringify({painted: painted,
+                            stats: window.__OBED_FP_BADGE__.stats(),
+                            log: window.__OBED_FP_BADGE__.dump()}));
+"""
+
+
+def _run_badge_js() -> dict:
+    src = _BADGE_HARNESS.replace(
+        "EVAL_BADGE",
+        "var NCELL = %d;\n%s" % (p2.FOOTPRINT_BADGE_CELLS, p2.FOOTPRINT_BADGE_JS),
+    )
+    out = subprocess.run(["node", "-e", src], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _cells_to_frame(cells) -> np.ndarray:
+    cell = p2.FOOTPRINT_BADGE_CELL_PX
+    arr = np.zeros((cell * 2, len(cells) * cell, 4), dtype=np.uint8)
+    arr[:, :, 3] = 255
+    for c, bit in enumerate(cells):
+        arr[0:cell, c * cell:(c + 1) * cell, :3] = 255 if bit else 0
+    return arr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_footprint_badge_js_paints_what_python_decodes():
+    """End to end across the language boundary: the badge JS is EXECUTED against
+    a stub DOM and the cells it actually paints are fed to the real Python
+    decoder. The previous badge tests only proved the Python codec was
+    self-consistent -- a JS-side encoding bug would have sailed through."""
+    got = _run_badge_js()
+    frames = [p for p in got["painted"] if p["label"].startswith("pre")]
+    assert frames, "the badge must paint on every frame"
+    decoded = [p2._decode_footprint_badge(_cells_to_frame(f["cells"])) for f in frames]
+    assert all(d is not None and d["crcOk"] for d in decoded), "JS CRC must match Python's"
+    seqs = [d["seq"] for d in decoded]
+    assert seqs == sorted(set(seqs)), "strictly increasing sequence numbers"
+    # ...and each painted rect matches the page's OWN log of that frame, which is
+    # exactly what `_fill_badge_coupling` couples.
+    for d in decoded:
+        logged = got["log"][str(d["seq"])]
+        if logged["rect"] is None:
+            continue
+        assert p2._couple_owner_rect(
+            logged["rect"], {k: d[k] for k in ("x", "y", "w", "h")}
+        )["source"] == "measured"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_footprint_badge_js_rehandoffs_behind_a_fresh_runtime_pin():
+    """Review r3 BLOCKER 1. The install-time handoff only ordered the loop behind
+    whatever pin existed THEN; keepThroughBridge's 3->4 pin starts later, from a
+    task, so it registers its rAF AFTER this loop has re-queued from its own
+    callback and from then on runs after us -- one frame of lag, mutually
+    consistent between badge pixels and badge log, invisible to the coupling
+    check. On a fresh `__obedMotion` generation the loop re-handoffs, and the
+    frames spanning the handoff name a NULL rect so they can only ever be
+    `unstable`."""
+    got = _run_badge_js()
+    assert got["stats"]["rehandoffs"] == 1
+    assert got["stats"]["motionStartedAt"] == 500
+    null_seqs = {int(s) for s, e in got["log"].items() if e["rect"] is None}
+    assert set(got["stats"]["rehandoffSeqs"]) == null_seqs
+    assert len(null_seqs) == 2, "this frame AND the intervening handoff frame"
+    # A sample that caught one of those frames has a single reading -> unstable.
+    seq = min(null_seqs)
+    samples = [_badge_sample(seq, {"x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0})]
+    p2._fill_badge_coupling(samples, {str(seq): got["log"][str(seq)]})
+    assert samples[0]["footprintSource"] == "unstable"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_footprint_badge_js_parses():
+    result = subprocess.run(
+        ["node", "--check", "-"], input=p2.FOOTPRINT_BADGE_JS, text=True, capture_output=True
+    )
+    assert result.returncode == 0, result.stderr
+
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_null_control_js_parses():
