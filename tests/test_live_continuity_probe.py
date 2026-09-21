@@ -969,14 +969,18 @@ class FakeTransport:
     def __init__(self, host: "FakeHost") -> None:
         self.host = host
         self.captures = 0
+        self.evaluations: list[str] = []
 
     def evaluate(self, js: str) -> Any:
+        self.evaluations.append(js)
         if js == probe.SCENE_ID_JS:
             return self.host.next_scene_id()
         if js == probe.STAGE_MAP_JS:
             return self.host.stage_map
         if js == probe.PAINTING_VIDEOS_JS:
             return self.host.painting
+        if js == probe.INPAGE_LIVENESS_JS:
+            return self.host.next_inpage()
         return True
 
     def call(self, method: str, **params: Any) -> dict[str, Any]:
@@ -1001,13 +1005,14 @@ class FakeHost:
     def __init__(
         self, *, scene_ids: list[Any], busy: list[bool] | bool = False,
         shot: str | None = None, shots: list[str] | None = None, stage_map: Any = _UNSET,
-        painting: Any = _UNSET,
+        painting: Any = _UNSET, inpage: Any = _UNSET,
     ) -> None:
         self.scene_ids = list(scene_ids)
         self.busy = busy
         self.shots = shots if shots is not None else [shot if shot is not None else png_b64(*VISIBLE_VIEWPORT)]
         self.stage_map = dict(FULL_BLEED_STAGE_MAP) if stage_map is _UNSET else stage_map
         self.painting: Any = [] if painting is _UNSET else painting
+        self.inpage: list[Any] = [] if inpage is _UNSET else list(inpage)
         self.transport = FakeTransport(self)
         self.observations = 0
 
@@ -1016,6 +1021,9 @@ class FakeHost:
 
     def next_scene_id(self) -> Any:
         return self.scene_ids.pop(0) if self.scene_ids else "exhausted"
+
+    def next_inpage(self) -> Any:
+        return self.inpage.pop(0) if self.inpage else {"applicable": False, "status": "n/a", "reason": "no __OBED_GL_ORACLE__ handle published"}
 
     def observe(self) -> FakeObservation:
         busy = self.busy if isinstance(self.busy, bool) else (self.busy.pop(0) if self.busy else False)
@@ -1029,7 +1037,10 @@ class FakeHost:
 def passing_scorer(frames: list[Any], rects: list[dict[str, Any]], control: dict[str, Any]) -> dict[str, Any]:
     return {
         "verdict": True, "status": "pass",
-        "perRect": [{"label": rect.get("label"), "verdict": True} for rect in rects],
+        "perRect": [
+            {"label": rect.get("label"), "verdict": True, "rect": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}}
+            for rect in rects
+        ],
         "stray": {"components": []}, "noiseFloor": {"p99": 0},
     }
 
@@ -1044,9 +1055,14 @@ class TestBurstScheduling:
         assert probe.burst_deadlines(100.0) == [100.0 + ms / 1000 for ms in probe.BURST_OFFSETS_MS]
 
     def test_offsets_are_unequal_so_a_periodic_animation_cannot_alias(self) -> None:
+        # Owner-approved property (research doc "Paint-oracle E0",
+        # .agents/plans/keynote_live_alternatives_research.md ~L265-287, L317-321;
+        # plan keynote_live_paint_oracle.plan.md SS14): min gap >= 350 ms and at
+        # least 2 distinct gap values -- gaps need not all be unique, unlike the
+        # earlier 130/160/210/270 cadence this restates.
         gaps = [b - a for a, b in zip(probe.BURST_OFFSETS_MS, probe.BURST_OFFSETS_MS[1:])]
-        assert gaps[:4] == [130, 160, 210, 270]
-        assert len(set(gaps)) == len(gaps)
+        assert min(gaps) >= 350
+        assert len(set(gaps)) >= 2
 
     def test_capture_burst_records_actual_offsets_and_captures_every_shot(self) -> None:
         host = FakeHost(scene_ids=[])
@@ -2357,8 +2373,209 @@ def test_burst_is_long_enough_that_a_two_state_movie_cannot_plausibly_alias():
     # shots at effectively independent phases, P(every shot lands on the same state)
     # = 2 * 0.5**n. The original 5-shot burst gave 6.25 % per live rect - measured:
     # 2 dead reads in 24 healthy live-expected rects at 2560x1440 - which is a false
-    # RED about once per gate chain. 12 shots put it at ~0.05 %.
+    # RED about once per gate chain. 12 shots put it at ~0.05 %, unchanged by the
+    # spacing fix in plan keynote_live_paint_oracle.plan.md SS14 (still 12 shots).
     shots = len(probe.BURST_OFFSETS_MS)
     assert 2 * 0.5 ** shots < 0.001
     gaps = [b - a for a, b in zip(probe.BURST_OFFSETS_MS, probe.BURST_OFFSETS_MS[1:])]
-    assert len(set(gaps)) == len(gaps)
+    assert min(gaps) >= 350
+    assert len(set(gaps)) >= 2
+
+
+def _inpage_raw(*, live: bool, n_bands: int = 4, n: int = 30) -> dict[str, Any]:
+    """A synthetic `INPAGE_LIVENESS_JS` result: every band ramps (LIVE) or holds
+    constant (DEAD), a usable occluder mask (markers differ by 100), and a
+    paused-decoder control window that itself reads DEAD -- the shape a
+    passing in-page read must have."""
+    samples = [
+        {
+            "t": t, "ms": 4.0, "vt": t * 0.033, "mediaTime": t * 0.033,
+            "bands": [100.0 + (t % 10) * 3.0 for _ in range(n_bands)] if live else [100.0] * n_bands,
+            "control": 50.0, "green": 80.0, "greenRGB": [10.0, 200.0, 10.0], "glErr": 0,
+        }
+        for t in range(n)
+    ]
+    paused = [
+        {
+            "t": t, "ms": 4.0, "vt": None, "mediaTime": None,
+            "bands": [100.0] * n_bands, "control": 50.0, "green": 80.0,
+            "greenRGB": [10.0, 200.0, 10.0], "glErr": 0,
+        }
+        for t in range(8)
+    ]
+    return {
+        "applicable": True, "status": "ok",
+        "samples": samples, "pausedDecoderSamples": paused,
+        "markerDark": [0.0] * n_bands, "markerLight": [100.0] * n_bands,
+    }
+
+
+class TestBurstPoke:
+    def test_burst_poke_is_off_by_default(self) -> None:
+        host = FakeHost(scene_ids=[])
+        clock = FakeClock()
+        probe.capture_burst(host.transport, now=clock.now, sleep=clock.sleep)
+        assert probe.BURST_POKE_JS not in host.transport.evaluations
+
+    def test_burst_poke_evaluates_once_per_shot_when_requested(self) -> None:
+        host = FakeHost(scene_ids=[])
+        clock = FakeClock()
+        probe.capture_burst(host.transport, poke=True, now=clock.now, sleep=clock.sleep)
+        assert host.transport.evaluations.count(probe.BURST_POKE_JS) == len(probe.BURST_OFFSETS_MS)
+
+    def test_burst_poke_flag_defaults_false_in_parse_args(self) -> None:
+        args = probe.parse_args([])
+        assert args.burst_poke is False
+
+
+class TestBurstProfileArtifact:
+    def test_record_carries_the_burst_profile(self) -> None:
+        host = FakeHost(scene_ids=["scene-1", "scene-1"])
+        clock = FakeClock()
+        record = probe.visible_slide_record(
+            host, VISIBLE_SLIDE, VISIBLE_INSTANCES, VISIBLE_VIEWPORT,
+            scorer=passing_scorer, now=clock.now, sleep=clock.sleep,
+        )
+        profile = record["burstProfile"]
+        assert profile["offsetsMs"] == [float(v) for v in probe.BURST_OFFSETS_MS]
+        assert profile["poke"] is False
+        assert profile["fromSurface"] is False
+        assert profile["uniqueShas"] == 1
+        assert len(profile["shas"]) == len(probe.BURST_OFFSETS_MS)
+
+    def test_unique_shas_do_not_affect_the_verdict(self) -> None:
+        shots = [png_b64(*VISIBLE_VIEWPORT, fill=i % 250) for i in range(len(probe.BURST_OFFSETS_MS))]
+        host = FakeHost(scene_ids=["scene-1", "scene-1"], shots=shots)
+        clock = FakeClock()
+        record = probe.visible_slide_record(
+            host, VISIBLE_SLIDE, VISIBLE_INSTANCES, VISIBLE_VIEWPORT,
+            scorer=passing_scorer, now=clock.now, sleep=clock.sleep,
+        )
+        assert record["burstProfile"]["uniqueShas"] == len(probe.BURST_OFFSETS_MS)
+        assert record["verdict"] is True
+
+
+class TestInPageOracleApplicability:
+    """The JS predicate cannot run in pytest, so these test the Python
+    handling of each `reason` the JS could return, plus the JS source's own
+    fail-closed shape (never a speculative `getContext`)."""
+
+    NOT_APPLICABLE_REASONS = [
+        "no __OBED_GL_ORACLE__ handle published",
+        "canvas is not a descendant of #stage",
+        "canvas disconnected or context lost",
+        "canvas does not cover the movie rect",
+        "canvas or an ancestor is not fully opaque",
+        "checkVisibility is false",
+    ]
+
+    @pytest.mark.parametrize("reason", NOT_APPLICABLE_REASONS)
+    def test_each_not_applicable_reason_yields_no_inpage_result(self, reason: str) -> None:
+        raw = {"applicable": False, "status": "n/a", "reason": reason}
+        assert probe.inpage_oracle_result(raw) is None
+
+    def test_no_gl_handle_records_not_applicable_and_changes_nothing(self) -> None:
+        raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[0]}
+        assert probe.inpage_oracle_result(raw) is None
+
+        host_without = FakeHost(scene_ids=["s", "s"])
+        host_with = FakeHost(scene_ids=["s", "s"], inpage=[dict(raw)])
+        clock1, clock2 = FakeClock(), FakeClock()
+        without = probe.visible_slide_record(
+            host_without, VISIBLE_SLIDE, VISIBLE_INSTANCES, VISIBLE_VIEWPORT,
+            scorer=passing_scorer, now=clock1.now, sleep=clock1.sleep,
+        )
+        with_probe = probe.visible_slide_record(
+            host_with, VISIBLE_SLIDE, VISIBLE_INSTANCES, VISIBLE_VIEWPORT,
+            scorer=passing_scorer, now=clock2.now, sleep=clock2.sleep,
+        )
+        for key in ("verdict", "status", "stray", "noiseFloor", "instanceCheck"):
+            assert without[key] == with_probe[key]
+        stripped = lambda rects: [{k: v for k, v in rect.items() if k != "oracles"} for rect in rects]  # noqa: E731
+        assert stripped(without["perRect"]) == stripped(with_probe["perRect"])
+        assert with_probe["perRect"][0]["oracles"]["inpage"] is None
+
+    def test_a_dom_painted_slide_is_never_scored_by_the_inpage_oracle(self) -> None:
+        raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[0]}
+        assert probe.inpage_oracle_result(raw) is None
+
+    def test_a_canvas_outside_stage_is_not_applicable(self) -> None:
+        raw = {"applicable": False, "reason": self.NOT_APPLICABLE_REASONS[1]}
+        assert probe.inpage_oracle_result(raw) is None
+
+    def test_a_disconnected_canvas_is_not_applicable(self) -> None:
+        raw = {"applicable": False, "reason": self.NOT_APPLICABLE_REASONS[2]}
+        assert probe.inpage_oracle_result(raw) is None
+
+    def test_a_canvas_that_does_not_cover_the_movie_rect_is_not_applicable(self) -> None:
+        raw = {"applicable": False, "reason": self.NOT_APPLICABLE_REASONS[3]}
+        assert probe.inpage_oracle_result(raw) is None
+
+    def test_a_zero_opacity_ancestor_is_not_applicable(self) -> None:
+        raw = {"applicable": False, "reason": self.NOT_APPLICABLE_REASONS[4]}
+        assert probe.inpage_oracle_result(raw) is None
+
+    def test_check_visibility_false_is_not_applicable(self) -> None:
+        raw = {"applicable": False, "reason": self.NOT_APPLICABLE_REASONS[5]}
+        assert probe.inpage_oracle_result(raw) is None
+
+    def test_js_source_never_speculatively_calls_get_context(self) -> None:
+        assert "getContext(" not in probe.INPAGE_LIVENESS_JS
+        assert "__OBED_GL_ORACLE__" in probe.INPAGE_LIVENESS_JS
+        assert "checkVisibility" in probe.INPAGE_LIVENESS_JS
+        assert "isContextLost" in probe.INPAGE_LIVENESS_JS
+
+
+class TestTwoOracleRecord:
+    def _base_result(self) -> dict[str, Any]:
+        return TestOverallStatusTruthTable()._base_result()
+
+    def test_disagreement_makes_the_slide_inconclusive_and_writes_evidence(self, tmp_path: Path) -> None:
+        host = FakeHost(scene_ids=["s", "s"], inpage=[_inpage_raw(live=False)])
+        clock = FakeClock()
+        record = probe.visible_slide_record(
+            host, VISIBLE_SLIDE, VISIBLE_INSTANCES, VISIBLE_VIEWPORT, scorer=passing_scorer,
+            evidence=probe.visible_evidence_writer(tmp_path, "V"), now=clock.now, sleep=clock.sleep,
+        )
+        assert record["verdict"] is None
+        assert record["status"] == "inconclusive"
+        assert record["perRect"][0]["verdict"] is None
+        assert record["perRect"][0]["reason"] == "oracle disagreement"
+        assert record["perRect"][0]["oracles"]["inpage"]["verdict"] is False
+        assert Path(record["evidence"]["inpage"]).exists()
+
+    def test_an_inconclusive_slide_cannot_earn_the_voff_red(self) -> None:
+        entry = {
+            "slides": [
+                {"originalOrdinal": 1, "playerIndex": 0, "verdict": True},
+                {"originalOrdinal": 2, "playerIndex": 1, "verdict": None},
+            ],
+            "stageFit": {"verdict": True},
+        }
+        result = {"groundTruth": {"boundaryPlayerIndex": 1}}
+        reasons = probe.visible_control_reasons(entry, result)
+        assert any("is not RED" in reason for reason in reasons)
+
+    def test_an_inconclusive_slide_fails_overall_status(self) -> None:
+        result = self._base_result()
+        result["visible"]["V"]["slides"][1].update(verdict=None, status="inconclusive")
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any("inconclusive" in reason for reason in reasons)
+
+    def test_a_failed_paused_decoder_control_makes_the_slide_inconclusive(self) -> None:
+        raw = _inpage_raw(live=True)
+        raw["pausedDecoderSamples"] = raw["samples"]
+        result = probe.inpage_oracle_result(raw)
+        assert result["verdict"] is None
+        assert result["status"] == "inconclusive"
+        assert result["reason"] == "paused-decoder control did not read dead"
+
+    def test_an_unusable_occluder_mask_is_inconclusive(self) -> None:
+        raw = _inpage_raw(live=True)
+        raw["markerDark"] = [0.0, 0.0, 0.0, 0.0]
+        raw["markerLight"] = [0.1, 0.1, 0.1, 0.1]
+        result = probe.inpage_oracle_result(raw)
+        assert result["verdict"] is None
+        assert result["status"] == "inconclusive"
+        assert result["reason"] == "occluder mask unusable"

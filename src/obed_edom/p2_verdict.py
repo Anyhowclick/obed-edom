@@ -65,7 +65,10 @@ def _norm_hash(h: str | None) -> str:
     return m.group(1) if m else s
 
 
-BURST_OFFSETS_MS = (0, 130, 290, 500, 770, 1000, 1190, 1430, 1650, 1910, 2110, 2360)
+# 12 shots at >=360 ms gaps, alternating 360/370 (paint-oracle plan SS14; research
+# doc "Paint-oracle E0"): keeps the 12-shot aliasing bound (2*0.5**12 ~ 0.05%)
+# and fixes the WebGL stale-surface misread an unspaced burst can hit.
+BURST_OFFSETS_MS = (0, 360, 730, 1090, 1460, 1820, 2190, 2550, 2920, 3280, 3650, 4010)
 CONTROL_PATCH_PX = 40
 CONTROL_INSET_PX = 4
 
