@@ -1016,7 +1016,13 @@ def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool,
         # The `#7` build's rect stopped moving before the press (plan §10.9).
         "ownerSettle": {"stableReadings": 3, "required": 3, "settled": True,
                         "rect": {"x": 198.0, "y": 795.0, "w": 952.0, "h": 268.0}},
-        "badge": {"stats": {"rehandoffs": 1,
+        # Every capture carried its own badge frame: nothing missing, torn,
+        # unlogged or out of sequence (review r7 MAJOR 1).
+        "badge": {"install": {"ok": True}, "scale": 4,
+                  "decoded": len(samples), "missing": 0, "crcBad": 0, "unlogged": 0,
+                  "counts": {"measured": len(samples), "unstable": 0, "unlogged": 0,
+                             "modelled": 0, "none": 0, "seqViolation": 0},
+                  "stats": {"rehandoffs": 1,
                             "rehandoffSeqs": [REHANDOFF_SEQ0_34, REHANDOFF_SEQ0_34 + 1],
                             "motionStartedAt": HOLD_STARTED_AT_34}},
     }
@@ -1501,6 +1507,44 @@ def test_at_cut_boundary_fails_closed_without_a_usable_keydown_clock():
     assert nonfinite["ok"] is False
 
 
+def test_at_cut_boundary_admits_the_frame_painted_during_the_key_round_trip():
+    """Review r7 MAJOR 2. The keydown lands at 1000 ms; the post-dispatch
+    `performance.now()` evaluation used to return ~1012 ms because keyDown and
+    keyUp are each an awaited CDP round trip. A badge painted at 1004 ms -- after
+    the cut, during that round trip -- was EXCLUDED from the at-cut window, so a
+    reset confined to that first frame was discarded. The page-side listener's own
+    `timeStamp` puts it back INSIDE."""
+    samples = [
+        {"index": 10, "sceneHash": "#7", "perfNowMs": 950.0,
+         "footprintSource": "measured", "badgeSeq": 700},
+        {"index": 255, "sceneHash": "#7", "perfNowMs": 1004.0,
+         "footprintSource": "measured", "badgeSeq": 701},
+        {"index": 12, "sceneHash": "#8", "perfNowMs": 1060.0,
+         "footprintSource": "measured", "badgeSeq": 702},
+    ]
+    keydown_ms, post_dispatch_ms = 1000.0, 1012.0
+    assert p2._at_cut_boundary(samples, keydown_ms) == {"from": 1, "ok": True, "reason": None}
+    assert p2._at_cut_boundary(samples, post_dispatch_ms)["from"] == 2, "the r7 blind spot"
+
+
+def test_advance_key_clock_requires_exactly_one_observed_keydown():
+    """The cut instant comes from the page's own listener, and only when it saw
+    exactly one ArrowRight keydown. Anything else is `None`, which fails the arm
+    closed rather than dating the cut from a replay or from nothing."""
+    assert p2._advance_key_clock({"n": 1, "t": 1000.0}) == 1000.0
+    assert p2._advance_key_clock({"n": 0, "t": None}) is None, "dispatch never landed"
+    assert p2._advance_key_clock({"n": 2, "t": 1000.0}) is None, "a replayed press"
+    assert p2._advance_key_clock({"n": 1, "t": None}) is None
+    assert p2._advance_key_clock({"n": 1, "t": float("inf")}) is None
+    assert p2._advance_key_clock({"n": True, "t": 1000.0}) is None
+    assert p2._advance_key_clock(None) is None
+
+    samples = _press_window_samples(12)
+    assert p2._at_cut_boundary(samples, p2._advance_key_clock({"n": 2, "t": 900.0})) == {
+        "from": None, "ok": False, "reason": "no advance keydown page clock"
+    }
+
+
 def test_at_cut_boundary_zero_is_legitimate_and_not_an_error():
     """A keydown at or before the first badge frame really does put the whole
     capture at the cut -- `from == 0` with `ok` True, which the scorer must not
@@ -1605,6 +1649,58 @@ def test_collector_undecoded_sample_time_is_unbracketed():
     dump = _collector_dump([0.0, 16.0, 32.0])
     assert p2._collector_rows_for(dump["rows"], None) == (None, None)
     assert _collector_meta_for(dump, [None, 8.0])["ok"] is False
+
+
+# --- raw capture clocks only (review r7 MAJOR 1) ---------------------------- #
+def test_collector_sample_times_never_substitutes_a_neighbours_clock():
+    """The production seam hands the bracketer each capture's OWN clock. The
+    neighbour fill still exists for diagnostics, and this is the divergence it
+    used to hide: the same series calls the gap sound when a neighbour's clock is
+    borrowed, and unbracketed when it is not."""
+    samples = [
+        {"perfNowMs": 900.0}, {"perfNowMs": 950.0},
+        {"perfNowMs": None},  # post-cover, pre-flip: the badge did not decode
+        {"perfNowMs": 1050.0}, {"perfNowMs": 1100.0},
+    ]
+    raw = p2._collector_sample_times(samples)
+    assert raw == [900.0, 950.0, None, 1050.0, 1100.0]
+
+    dump = _collector_dump([880.0, 920.0, 960.0, 1000.0, 1040.0, 1080.0, 1120.0])
+    assert _collector_meta_for(dump, raw)["unbracketed"] == 1
+    assert _collector_meta_for(dump, raw)["ok"] is False
+    borrowed = p2._nearest_sample_times(raw)
+    assert _collector_meta_for(dump, borrowed)["unbracketed"] == 0
+    assert _collector_meta_for(dump, borrowed)["ok"] is True, "the r7 counter-example"
+
+
+def test_collector_truncated_endpoint_with_no_badge_clock_fails_closed():
+    """A collector that started late or ended early AND an endpoint capture whose
+    badge never decoded: the neighbour fill used to lend that endpoint an interior
+    clock and keep the series sound. On raw clocks both endpoints are unbracketed,
+    which is what reds MAIN's `advanceOk`."""
+    raw = p2._collector_sample_times(
+        [{"perfNowMs": None}, {"perfNowMs": 950.0}, {"perfNowMs": 1000.0},
+         {"perfNowMs": None}]
+    )
+    late_start = _collector_dump([940.0, 960.0, 1010.0, 1060.0])
+    early_end = _collector_dump([900.0, 940.0, 960.0, 1010.0])
+    for dump in (late_start, early_end):
+        assert _collector_meta_for(dump, raw)["unbracketed"] == 2
+        assert _collector_meta_for(dump, raw)["ok"] is False
+        assert _collector_meta_for(dump, p2._nearest_sample_times(raw))["ok"] is True
+
+
+def test_badge_samples_sound_requires_every_capture_to_carry_its_own_frame():
+    sound = {"badge": {"install": {"ok": True}, "missing": 0, "crcBad": 0,
+                       "unlogged": 0, "counts": {"seqViolation": 0}}}
+    assert p2._badge_samples_sound(sound) is True
+    for key in ("missing", "crcBad", "unlogged"):
+        bad = {"badge": {**sound["badge"], key: 1}}
+        assert p2._badge_samples_sound(bad) is False, key
+    torn = {"badge": {**sound["badge"], "counts": {"seqViolation": 1}}}
+    assert p2._badge_samples_sound(torn) is False
+    assert p2._badge_samples_sound({"badge": {**sound["badge"], "install": None}}) is False
+    assert p2._badge_samples_sound({}) is False
 
 
 def test_moving_index_run_at_cut_refuses_an_invalid_boundary():
@@ -1820,6 +1916,51 @@ def test_freeze_control_unsound_collector_is_inconclusive_in_every_arm():
     verdict = p2._score_freeze_control(_positive_snap_34(), missing, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "collectorSeriesSound" in verdict["integrityFailed"]
+
+
+def test_freeze_control_post_cover_missing_badge_is_inconclusive_in_every_arm():
+    """Review r7 MAJOR 1, end to end. A post-cover/pre-flip capture whose badge
+    went missing has no clock of its own, so the production bracketer (raw clocks,
+    no neighbour fill) counts it unbracketed AND the arm's badge counters are
+    dirty. Either route alone makes the bracket INCONCLUSIVE -- it must never be
+    able to drop out of the in-hold lists and leave the later frozen frames to
+    carry a PASS."""
+    first_covered = len(_PRE_ADVANCE_INDICES_34)
+    for arm in ("a1", "b", "a2"):
+        snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+        snap = snaps[arm]
+        _with_sample(snap, first_covered, footprintSource="none", index=None,
+                     perfNowMs=None, badgeSeq=None, badgeRect=None)
+        raw = p2._collector_sample_times(snap["indexSamples"])
+        dump = _collector_dump(
+            [t - 10.0 for t in raw if t is not None] + [max(t for t in raw if t) + 10.0]
+        )
+        snap["collector"] = _collector_meta_for(dump, raw)
+        snap["badge"] = {**snap["badge"], "missing": 1,
+                         "counts": {**snap["badge"]["counts"], "none": 1}}
+        assert snap["collector"]["unbracketed"] == 1, arm
+        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        assert verdict["verdict"] == "inconclusive", (arm, verdict["failed"])
+        assert "collectorSeriesSound" in verdict["integrityFailed"], arm
+        assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], arm
+
+
+def test_freeze_control_torn_or_unlogged_badges_are_inconclusive_in_every_arm():
+    """...and so is a CRC-torn, unlogged or out-of-sequence badge, even when the
+    surviving captures happen to bracket cleanly."""
+    for arm in ("a1", "b", "a2"):
+        for field, value in (("crcBad", 1), ("unlogged", 1), ("counts", None)):
+            snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(),
+                     "a2": _positive_snap_34()}
+            badge = snaps[arm]["badge"]
+            if field == "counts":
+                badge = {**badge, "counts": {**badge["counts"], "seqViolation": 1}}
+            else:
+                badge = {**badge, field: value}
+            snaps[arm]["badge"] = badge
+            verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+            assert verdict["verdict"] == "inconclusive", (arm, field)
+            assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], (arm, field)
 
 
 def test_freeze_control_invalid_at_cut_boundary_is_inconclusive_in_every_arm():
@@ -2393,7 +2534,13 @@ def _with_rehandoff(b: dict, n: int, seq0: int = REHANDOFF_SEQ0_34) -> dict:
     for k in range(n):
         b = _with_sample(b, first + k, footprintSource="unstable", index=None,
                          badgeRect=None, badgeSeq=seq0 + k)
-    b["badge"] = {"stats": {"rehandoffs": 1, "rehandoffSeqs": [seq0, seq0 + 1],
+    # The pair's frames DECODE and ARE logged -- they just paint a null rect --
+    # so the arm's badge counters stay clean and only `unstable` moves.
+    counts = dict(b["badge"]["counts"])
+    counts["measured"] -= n
+    counts["unstable"] += n
+    b["badge"] = {**b["badge"], "counts": counts,
+                  "stats": {"rehandoffs": 1, "rehandoffSeqs": [seq0, seq0 + 1],
                             "motionStartedAt": HOLD_STARTED_AT_34}}
     return b
 

@@ -132,7 +132,7 @@ queues a press it cannot honour and replays it at `#7`, starting the real 3→4 
 in-hold sample" rule; re-measure `FREEZE_TRIGGER_MAX_RAFS` on ≥10 clean runs (worst + 1); apply the same one-press
 discipline to `_advance_to_slide4_capture` on the main gate path, then a full gate round.
 
-## 10. Measurements (rounds 4–9)
+## 10. Measurements (rounds 4–10)
 Every number that used to live in a code comment lands here; the code keeps only the behavioural
 invariant and a pointer to this section. Re-measure whenever the capture loop's per-frame cost
 changes — all of the trigger bounds track the HARNESS, not the player alone.
@@ -227,8 +227,8 @@ hardcoded index, so the `nDecodable` fraction carries no silent free miss; the r
 `indexSamples` for diagnostics.
 
 The boundary is a PAGE CLOCK, not a sample count. `_at_cut_boundary` returns the first badge frame
-whose own `perfNowMs` is at or after the ArrowRight keydown's `performance.now()`, recorded in every
-arm. `advancePressIndex + 1` was wrong in both directions: the press sample's screenshot is taken
+whose own `perfNowMs` is at or after the ArrowRight keydown's own event `timeStamp`, recorded
+page-side in every arm (§10.12). `advancePressIndex + 1` was wrong in both directions: the press sample's screenshot is taken
 AFTER the dispatch, so it belongs inside the segment, and an anomaly confined to it was being
 discarded. Live: `atCutFrom == 0` in 13/13 — the keydown precedes the first badge frame, so the whole
 capture is at the cut.
@@ -277,8 +277,12 @@ clean round-8 brackets the largest gap was 64.3 ms, 36 ms inside the 100 ms boun
 batches; the logs record the 1-minute load at the start of only two of them (8.7 and 5.4), so the
 third is unattested. Round 9 re-measured on the fail-closed build: 6 clean brackets in two batches
 started at load 5.2 and 5.5 (max gap 53.8-57.8 ms, trigger delay 158.4-162.9 ms, 8 frames in all 6),
-plus the e2e fast run at load 6.9. Every load figure here is the `uptime` 1-minute average printed at
-the head of that batch's own log.
+plus the e2e fast run at load 6.9. Round 10 re-measured on the raw-clock build: 6 clean brackets in
+two batches started at load 5.1 and 8.5 (max gap 52.0-59.9 ms, trigger delay 158.0-163.9 ms, 8 frames
+in all 6), every arm's collector whole (0 unbracketed / 0 dropped / 0 errors / 0 `neighbourFillable`,
+521-527 rows) and every arm's badge clean (0 missing / 0 CRC-bad / 0 unlogged / 0 sequence
+violations, 102/102 `measured`), plus the e2e fast run at load 6.0. Every load figure here is the
+`uptime` 1-minute average printed at the head of that batch's own log.
 
 
 ### 10.11 Collector series integrity (round 9, r6 MAJOR 1)
@@ -286,7 +290,44 @@ The page-side series (§10.10) is evidence, so it is fail-closed as evidence. Th
 metadata — row count, first/last page clock, rows the ring dropped, page-side errors — and
 `_collector_series_meta` additionally requires every row to carry `COLLECTOR_ROW_FIELDS` in
 non-decreasing time order. `_collector_rows_for` no longer extrapolates: a sample is admissible only
-when a real row lies at or before it AND a real row lies strictly after it, so a truncated dump or a
-gap cannot hand a capture its neighbours' owner/media rows. `collectorSeriesSound` (rows present,
+when a real row lies at or before it AND a real row lies strictly after it, so a truncated dump
+cannot hand a capture its neighbours' owner/media rows. `collectorSeriesSound` (rows present,
 schema intact, monotonic, `dropped == 0`, `errors == 0`, every capture bracketed) is an integrity key
 across A1/B/A2 and part of MAIN's `advance_c_ok`.
+
+Strict bracketing and the drop counter catch **different** failures, and the gate needs both (r6
+MINOR). Strict bracketing catches a TRUNCATED endpoint: a series that started after the first
+capture, or ended before the last, leaves that capture with no row on one side. It does NOT catch an
+interior gap — a sample falling inside a window the ring overwrote is still bracketed by the healthy
+rows on either side — so the cumulative `dropped` counter is what catches OVERWRITTEN rows, and
+`dropped == 0` is load-bearing, not belt-and-braces.
+
+
+### 10.12 Each capture's own clock (round 10, r7)
+Two substitutions were dating evidence from the wrong instant.
+
+**Collector integrity takes RAW `perfNowMs`.** A capture whose badge went missing, tore its CRC or
+named a frame the page never logged has no clock of its own. Filling it from a neighbour let a
+post-cover/pre-flip frame borrow that neighbour's collector rows, keep `unbracketed == 0`, and then
+drop out of `allInHoldMeasured`/`everyInHoldStale` entirely — a live counter or wrong ROI on that one
+frame disappeared, and the later frozen frames carried a PASS. `_collector_sample_times` is now the
+one seam the capture loop brackets against, a `None` counts as unbracketed, and `_nearest_sample_times`
+survives only as the diagnostic `collector.neighbourFillable`, scored by nothing. The same
+substitution let a collector that started late or ended early keep MAIN's `advanceOk` true when the
+uncovered endpoint had no badge clock; on raw clocks both endpoints are unbracketed.
+`badgeSamplesSoundAllArms` refuses the underlying gap in its own right: zero missing, CRC-bad,
+unlogged and sequence-invalid captures in every arm. The re-handoff pair is not an exemption here —
+its deliberate null rects still decode, still check their CRC and are still logged.
+
+**The cut instant is the KEYDOWN's, measured page-side.** `advanceKeyPerfMs` was a
+`performance.now()` read after the awaited `keyDown` and `keyUp` CDP round trips, so it ran LATE; a
+badge painted inside that window was after the real cut but before the recorded one, and
+`_at_cut_boundary` excluded it — discarding exactly the first-frame reset the control exists to see.
+MEASURED (round 10, 18 arms over 6 brackets at load 5.1–8.5, plus 3 e2e arms): the post-dispatch read
+lags the keydown by **0.7–1.1 ms, median 0.9 ms**. That is well inside one 17 ms capture period, so on
+this machine the old clock almost never moved the boundary — the exposure was real but latent, and it
+is a round trip, not a bounded quantity. `atCutFrom == 0` in all 21 arms either way.
+`ADVANCE_KEY_WATCH_JS` now arms a capture-phase one-shot `keydown` listener BEFORE dispatch and
+`_advance_key_clock` takes its event `timeStamp`, and only when the page saw EXACTLY ONE matching
+event: zero (the dispatch never landed) or more than one (a replay, or a drain press still in flight)
+yields `None`, which `_at_cut_boundary` fails closed.

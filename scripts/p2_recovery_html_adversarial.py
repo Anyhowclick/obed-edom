@@ -2951,9 +2951,10 @@ CAPTURE_COLLECTOR_JS = r"""
 
 
 def _nearest_sample_times(times: list[float | None]) -> list[float | None]:
-    """Fill each missing capture time from its nearest neighbour in SAMPLE ORDER,
-    so a sample whose badge did not decode is still associated with collector rows
-    from its own part of the move."""
+    """DIAGNOSTICS ONLY (review r7 MAJOR 1). Fill each missing capture time from
+    its nearest neighbour in SAMPLE ORDER. Nothing scored may use this: a
+    borrowed clock lends a capture its neighbour's collector evidence, which is
+    exactly the substitution the integrity path must refuse."""
     out = list(times)
     last: float | None = None
     for i, t in enumerate(out):
@@ -2968,6 +2969,13 @@ def _nearest_sample_times(times: list[float | None]) -> list[float | None]:
         else:
             nxt = out[i]
     return out
+
+
+def _collector_sample_times(index_samples: list[dict]) -> list[float | None]:
+    """The clock each capture is bracketed against: its OWN badge frame's, or
+    `None`. The one seam the capture loop uses, so a neighbour substitution can
+    never be reintroduced without a test seeing it (review r7 MAJOR 1)."""
+    return [s.get("perfNowMs") for s in index_samples]
 
 
 COLLECTOR_ROW_FIELDS = ("t", "hash", "progress", "fp", "owner", "media", "pool")
@@ -3265,6 +3273,50 @@ async def _settle_bound_owner_rect(chrome: ChromeCdp, el_id: str | None) -> dict
     }
 
 
+ADVANCE_KEY_WATCH_JS = r"""(function () {
+  var st = {n: 0, t: null};
+  var h = function (e) {
+    if (e.key !== 'ArrowRight') return;
+    st.n += 1;
+    if (st.t === null) st.t = e.timeStamp;
+  };
+  st.off = function () { window.removeEventListener('keydown', h, true); };
+  window.addEventListener('keydown', h, true);
+  window.__OBED_ADV_KEY__ = st;
+  return true;
+})()
+"""
+
+
+ADVANCE_KEY_READ_JS = r"""(function () {
+  var st = window.__OBED_ADV_KEY__ || null;
+  if (st && st.off) { try { st.off(); } catch (e) {} }
+  window.__OBED_ADV_KEY__ = null;
+  return {
+    n: st ? st.n : null,
+    t: st ? st.t : null,
+    now: performance.now(),
+    h: (window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash)
+  };
+})()
+"""
+
+
+def _advance_key_clock(read: object) -> float | None:
+    """The cut instant from the page's own one-shot keydown watch: the recorded
+    `timeStamp` iff EXACTLY ONE ArrowRight keydown was seen. Zero events (the
+    dispatch never reached the page) or more than one (a replay, or a drain press
+    still in flight) is no usable cut, and `_at_cut_boundary` fails the arm closed
+    on the `None` (review r7 MAJOR 2)."""
+    r = read if isinstance(read, dict) else {}
+    n, t = r.get("n"), r.get("t")
+    if not isinstance(n, int) or isinstance(n, bool) or n != 1:
+        return None
+    if not isinstance(t, (int, float)) or isinstance(t, bool):
+        return None
+    return float(t) if math.isfinite(float(t)) else None
+
+
 SPLIT_EVAL_JS = """(function () {
   var R = %(release)s;
   var t = performance.now();
@@ -3543,6 +3595,8 @@ async def _advance_to_slide4_capture(
     # carry a free miss. They stay in `indexSamples` for diagnostics.
     advance_press_index: int | None = None
     advance_key_perf_ms: float | None = None
+    advance_key_events: int | None = None
+    advance_key_eval_ms: float | None = None
     last_at_cut_offset_s: float | None = None
     last_at_cut_perf_ms: float | None = None
     release_offset_s: float | None = None
@@ -3566,16 +3620,25 @@ async def _advance_to_slide4_capture(
         if do_press:
             advance_press_index = i
             await chrome.screenshot()  # activate the surface (see the drain loop)
+            # The cut is the KEYDOWN, so the page timestamps it itself: a one-shot
+            # capture-phase listener armed BEFORE dispatch records the event's own
+            # `timeStamp`. A `performance.now()` read after the awaited keyDown and
+            # keyUp round trips is later than the event by the round trip, and a
+            # badge painted in between fell OUTSIDE the at-cut window (review r7
+            # MAJOR 2). Anything but exactly one matching event leaves the clock
+            # `None`, which `_at_cut_boundary` fails closed.
+            await chrome.evaluate(ADVANCE_KEY_WATCH_JS)
             await chrome.key("ArrowRight", "ArrowRight", 39)
-            # The keydown's own page clock, and the hash re-read AFTER dispatch:
-            # this sample's screenshot is taken after the key, so its pre-press
-            # hash is stale and it belongs INSIDE the at-cut segment (review r5
-            # MAJOR 3).
-            after_key = await chrome.evaluate(
-                "(function(){return {t: performance.now(), h: (window.__OBED_P2_PROBE__"
-                " ? window.__OBED_P2_PROBE__.hash() : location.hash)};})()"
-            ) or {}
-            advance_key_perf_ms = after_key.get("t")
+            # The hash is re-read AFTER dispatch: this sample's screenshot is taken
+            # after the key, so its pre-press hash is stale and it belongs INSIDE
+            # the at-cut segment (review r5 MAJOR 3).
+            after_key = await chrome.evaluate(ADVANCE_KEY_READ_JS) or {}
+            advance_key_events = after_key.get("n")
+            advance_key_perf_ms = _advance_key_clock(after_key)
+            # REPORT-only: the clock the old code used, read at this same call
+            # site. Its distance from the keydown is the round trip the at-cut
+            # window used to lose (plan §10.12).
+            advance_key_eval_ms = after_key.get("now")
             scene_hash = _norm_hash(after_key.get("h"))
             hn = _hash_num(scene_hash)
         reached4 = hn is not None and hn >= SLIDE4_MIN_HASH
@@ -3714,10 +3777,12 @@ async def _advance_to_slide4_capture(
     ) or []
     collector = _collector_series_meta(collector_dump)
     await chrome.evaluate("window.__OBED_CAP_COLLECT__.stop()")
-    # A sample whose badge did not decode has no page clock of its own; take its
-    # nearest neighbour's rather than the end of the series, so a pre-flip sample
-    # cannot be handed slide-4 owner rows.
-    sample_ts = _nearest_sample_times([s.get("perfNowMs") for s in index_samples])
+    # Each capture is bracketed by its OWN badge frame's page clock, never a
+    # neighbour's: a sample whose badge went missing, tore or named a frame the
+    # page never logged has no clock, counts as UNBRACKETED, and takes no
+    # collector evidence at all (review r7 MAJOR 1). `_nearest_sample_times` is
+    # diagnostics-only below and touches nothing scored.
+    sample_ts = _collector_sample_times(index_samples)
     unbracketed = 0
     for s, s_t in zip(index_samples, sample_ts):
         row_b, row_a = _collector_rows_for(collector_rows, s_t)
@@ -3753,6 +3818,14 @@ async def _advance_to_slide4_capture(
         )
     collector["samples"] = len(index_samples)
     collector["unbracketed"] = unbracketed
+    # DIAGNOSTICS ONLY, scored by nothing: how many captures a neighbour's clock
+    # would have covered, to tell a whole-series gap from scattered badge misses
+    # when an arm comes back INCONCLUSIVE.
+    collector["neighbourFillable"] = sum(
+        1
+        for raw, near in zip(sample_ts, _nearest_sample_times(sample_ts))
+        if raw is None and near is not None
+    )
     collector["ok"] = _collector_ok(collector)
     at_cut = _at_cut_boundary(index_samples, advance_key_perf_ms)
     final_hash = _norm_hash(
@@ -3769,6 +3842,8 @@ async def _advance_to_slide4_capture(
         "releaseStatus": release_status,
         "advancePressIndex": advance_press_index,
         "advanceKeyPerfMs": advance_key_perf_ms,
+        "advanceKeyEvents": advance_key_events,
+        "advanceKeyEvalMs": advance_key_eval_ms,
         "collectorRows": len(collector_rows),
         "collector": collector,
         "atCutFrom": at_cut["from"],
@@ -4060,6 +4135,8 @@ async def _capture_3to4_snapshot(
         "atCutFrom": capture_meta.get("atCutFrom"),
         "atCutBoundary": capture_meta.get("atCutBoundary"),
         "advanceKeyPerfMs": capture_meta.get("advanceKeyPerfMs"),
+        "advanceKeyEvents": capture_meta.get("advanceKeyEvents"),
+        "advanceKeyEvalMs": capture_meta.get("advanceKeyEvalMs"),
         "collectorRows": capture_meta.get("collectorRows"),
         "collector": capture_meta.get("collector"),
         "badge": capture_meta.get("badge"),
@@ -4146,6 +4223,23 @@ def _at_cut_boundary_valid(snap: dict) -> bool:
         and isinstance(i, int)
         and not isinstance(i, bool)
         and 0 <= i < len(snap.get("indexSamples") or [])
+    )
+
+
+def _badge_samples_sound(snap: dict) -> bool:
+    """Every capture in this arm carries its OWN badge frame (review r7 MAJOR 1):
+    the badge installed, and no capture went missing, tore its CRC, named a frame
+    the page never logged, or read a sequence out of order. The re-handoff pair is
+    not an exemption here -- its deliberate null rects still decode, still check
+    their CRC and are still logged, so a sound arm counts zero of all four."""
+    badge = snap.get("badge") or {}
+    counts = badge.get("counts") or {}
+    return bool(
+        badge.get("install")
+        and badge.get("missing") == 0
+        and badge.get("crcBad") == 0
+        and badge.get("unlogged") == 0
+        and counts.get("seqViolation") == 0
     )
 
 
@@ -4479,6 +4573,14 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     checks["atCutBoundaryValidAllArms"] = all(
         _at_cut_boundary_valid(s) for s in (a1, b, a2)
     )
+    # ...and every capture must carry its own badge frame. A missing, torn or
+    # unlogged badge leaves a capture with no page clock, so it takes no collector
+    # rows and is unbracketed -- but it also drops out of the position lists the
+    # hold is argued over, so it is refused here in its own right (review r7
+    # MAJOR 1).
+    checks["badgeSamplesSoundAllArms"] = all(
+        _badge_samples_sound(s) for s in (a1, b, a2)
+    )
     checks["maxRafGapOk"] = max_gap_ms <= MAX_RAF_GAP_MS
 
     # --- Bracketing positives are GREEN ----------------------------------------
@@ -4516,7 +4618,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         "flipIndexPresent", "flipWindowDecodable", "enoughAfterFlip",
         "releaseStrictlyBeforeSettleAndBurst", "allInHoldMeasured", "rehandoffPairSound",
         "ownerSettledAllArms", "bridgeEngaged",
-        "collectorSeriesSound", "atCutBoundaryValidAllArms",
+        "collectorSeriesSound", "atCutBoundaryValidAllArms", "badgeSamplesSoundAllArms",
         "maxRafGapOk",
         "noNegativeAnomaly", "movingContinuityOk", "boundDecoderIsSlide3Decoder",
         "noOwnerAmbiguousInWindow", "rvfcRanThroughHold", "playerBuildErrorsEmpty",
@@ -5358,6 +5460,7 @@ async def _run(player: Path) -> dict:
             and bool(owner_settle_c.get("settled"))
             and bool((_capture_meta_c.get("collector") or {}).get("ok"))
             and bool((_capture_meta_c.get("atCutBoundary") or {}).get("ok"))
+            and _badge_samples_sound(_capture_meta_c)
         )
         # Counter progression is scored over the SETTLED slide-4 window (footprint
         # fully at the destination rect, progress>=0.98) so the moving ROI lands on
