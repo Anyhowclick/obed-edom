@@ -327,6 +327,24 @@ FOOTPRINT_COUPLE_TOL_PX = 1.5  # before/after owner-rect agreement for a screens
 # 3 leaves one frame of margin over the worst observation.
 FREEZE_TRIGGER_MAX_RAFS = 3
 
+# Drain to the freeze-control arm boundary (`_capture_3to4_snapshot`). MEASURED on
+# this fixture 2026-09-21: the drain needs presses from #1..#5 only. `#6` is the
+# 2->3 dissolve IN FLIGHT and the player SELF-ADVANCES #6 -> #7 (settled slide 3)
+# with no key press. A press sent at #6 cannot be honoured, is QUEUED by the player
+# and replayed on arrival at #7 -- which starts the real 3->4 move immediately "on
+# arrival" and reds `noPreAdvanceDeparture`. So: press only while the hash is BELOW
+# the self-advancing scene, then WAIT for the self-advance.
+DRAIN_SELF_ADVANCE_HASH = SLIDE4_MIN_HASH - 2  # == #6, the self-advancing dissolve
+DRAIN_PRESS_LAND_S = 10.0   # per-press landing wait. Measured: at 2.0 s presses went
+                            # UNLANDED at #1 and #5 on several boots (an unlanded press
+                            # is queued and replayed later -- the same defect); at 10.0 s
+                            # with a `Page.captureScreenshot` per poll iteration every
+                            # press landed exactly once.
+DRAIN_SELF_ADVANCE_S = 10.0  # #6 -> #7 self-advance wait (observed ~1-2 s)
+DRAIN_DEADLINE_S = 90.0     # whole-drain budget: 5 presses x <= DRAIN_PRESS_LAND_S plus
+                            # boot slack. Was 20.0 when the drain pressed at a fixed 2 s
+                            # cadence; the per-press landing wait needs the larger budget.
+
 # The Arm-A composited-freeze control, injected into the live page BEFORE the 3->4
 # advance. `window.__OBED_NULL_CTRL__` = {arm(rect, hash1), status(), release()}.
 # Re-bracketed at the 3->4 moving Magic Move (the 1->2 carry is refused, so there is
@@ -2954,22 +2972,25 @@ async def _capture_3to4_snapshot(
     arm_hash_str = f"#{arm_hash}"
     # MEASURED in this fixture: the exported player ignores a key while
     # `document.hasFocus()` is false, and only a `Page.captureScreenshot`
-    # (surface activation) makes it true -- without one per press the drain never
-    # left `#1`, so the bracket could not even reach the arm boundary. With a
-    # screenshot before each press the drain reached `#7` in 10.4/10.5/11.2 s
-    # across three live boots, hence the 20 s deadline.
-    drain_deadline = time.monotonic() + 20.0
-    while (_hash_num(hash_now) or -1) < arm_hash and time.monotonic() < drain_deadline:
+    # (surface activation) makes it true -- without one per poll iteration the
+    # drain stalls, so the bracket cannot even reach the arm boundary.
+    # Presses stop BELOW `DRAIN_SELF_ADVANCE_HASH` (#6): that scene advances
+    # itself to the arm boundary, and a press sent there is queued and replayed
+    # on arrival at #7 (see the constant). Every press must LAND -- an unlanded
+    # press is queued too, so the run is marked and fails closed in the scorer.
+    drain_deadline = time.monotonic() + DRAIN_DEADLINE_S
+    presses_sent = 0
+    presses_landed = 0
+    unlanded_from: list[int] = []
+    while (_hash_num(hash_now) or -1) < DRAIN_SELF_ADVANCE_HASH and time.monotonic() < drain_deadline:
         before_n = _hash_num(hash_now) or -1
         await chrome.screenshot()
         await chrome.key("ArrowRight", "ArrowRight", 39)
-        # ONE press at a time. Measured: this player QUEUES presses it cannot
-        # honour yet and replays them later, so a fixed-cadence drain overshoots
-        # -- a queued press started the 3->4 move ~100 ms BEFORE the advance
-        # keydown, which the control correctly recorded as a pre-advance
-        # departure. Wait for each press to land before sending the next.
-        press_deadline = time.monotonic() + 2.0
+        presses_sent += 1
+        landed = False
+        press_deadline = time.monotonic() + DRAIN_PRESS_LAND_S
         while time.monotonic() < press_deadline:
+            await chrome.screenshot()
             await asyncio.sleep(0.1)
             await _ensure_videos_playing(chrome)
             hash_now = _norm_hash(
@@ -2978,8 +2999,35 @@ async def _capture_3to4_snapshot(
                 )
             )
             if (_hash_num(hash_now) or -1) > before_n:
+                landed = True
                 break
+        if landed:
+            presses_landed += 1
+        else:
+            unlanded_from.append(before_n)
+            break
+    # The self-advance #6 -> #7. No key here: the player gets there on its own.
+    self_advance_deadline = time.monotonic() + DRAIN_SELF_ADVANCE_S
+    while (_hash_num(hash_now) or -1) < arm_hash and time.monotonic() < self_advance_deadline:
+        await chrome.screenshot()
+        await asyncio.sleep(0.1)
+        await _ensure_videos_playing(chrome)
+        hash_now = _norm_hash(
+            await chrome.evaluate(
+                "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
+            )
+        )
     hash3 = hash_now
+    drain_meta = {
+        "pressesSent": presses_sent,
+        "pressesLanded": presses_landed,
+        "unlandedFromHash": unlanded_from,
+        "selfAdvanceHash": f"#{DRAIN_SELF_ADVANCE_HASH}",
+        "hashAtArm": hash3,
+        "allPressesLanded": presses_sent == presses_landed and not unlanded_from,
+        "hashAtArmExact": _norm_hash(hash3) == arm_hash_str,
+    }
+    drain_meta["ok"] = bool(drain_meta["allPressesLanded"] and drain_meta["hashAtArmExact"])
 
     # Bind the ROI footprint owner ONCE before the move, while it still sits on
     # the slide-3 rect (review Blocker 2a) -- independent of the null control's
@@ -3135,6 +3183,7 @@ async def _capture_3to4_snapshot(
         "hash4": hash4,
         "armHash": arm_hash_str,
         "armResult": arm_result,
+        "drain": drain_meta,
         "movingIndexRunAtCut": moving_index_run_at_cut,
         "flipWindowDecodable": flip_window_decodable,
         "indexSamples": index_samples,
@@ -3420,6 +3469,14 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         advance_key_at is not None and trigger_delay_ms is not None and trigger_delay_ms >= 0.0
     )
     checks["noPreAdvanceDeparture"] = nc.get("preAdvanceDepartureAt") is None
+    # Fails closed on a missing `drain` block: a queued press (one sent at the
+    # self-advancing scene, or one that never landed) is replayed by the player
+    # later and starts the 3->4 move by itself, so the bracket must not be able
+    # to reach PASS or FAIL when the drain was not clean.
+    drain = b.get("drain") or {}
+    checks["drainPressesAllLanded"] = bool(
+        drain.get("allPressesLanded") and drain.get("hashAtArmExact")
+    )
     checks["stageGeometryStable"] = stage_geometry_stable
     checks["stageOriginZero"] = stage_origin_zero
     checks["noControlError"] = nc.get("error") is None
@@ -3474,6 +3531,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # (maxRafGapOk) is disqualifying integrity, not diagnostic-only (plan §4).
     integrity_keys = (
         "firedAtMoveStart", "firedAfterAdvance", "noPreAdvanceDeparture",
+        "drainPressesAllLanded",
         "stageGeometryStable", "stageOriginZero", "noControlError",
         "ownerReadyAtTrigger", "staleFrameFromPlayback", "paintedOnce", "coverPatchStable",
         "coverHitTest100", "coverTracksFootprint", "loopLive", "everyInHoldStale",
@@ -3504,6 +3562,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         "verdictFailed": verdict_failed,
         "failed": failed,
         "maxRafGapMs": max_gap_ms,
+        "drain": drain,
         "isolationDiffs": isolation_diffs,
         "movingIndexRunAtCut": idx,
         "freeze": {

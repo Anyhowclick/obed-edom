@@ -918,6 +918,13 @@ def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool) -> dict
             "armedOwnerRect": {"x": 100.0, "y": 200.0, "w": 300.0, "h": 200.0},
             "stageRectAtArm": {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
         },
+        # A clean drain: five presses from #1..#5, all landed, then the player's
+        # own #6 -> #7 self-advance left the arm boundary exact.
+        "drain": {
+            "pressesSent": 5, "pressesLanded": 5, "unlandedFromHash": [],
+            "selfAdvanceHash": "#6", "hashAtArm": "#7",
+            "allPressesLanded": True, "hashAtArmExact": True, "ok": True,
+        },
         "movingIndexRunAtCut": moving_index_run_at_cut,
         "flipWindowDecodable": flip_window_decodable,
         "indexSamples": samples,
@@ -1150,6 +1157,44 @@ def test_freeze_control_arm_failure_is_inconclusive():
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "owner-unresolved-at-arm" in verdict["reason"]
+
+
+def test_freeze_control_unlanded_drain_press_is_inconclusive():
+    """MEASURED root cause of the 5/5 `noPreAdvanceDeparture` red: this player
+    QUEUES a key press it cannot honour and replays it later, so an unlanded
+    drain press can start the 3->4 move by itself. The bracket must go
+    INCONCLUSIVE at the integrity tier, never PASS and never FAIL."""
+    b = _freeze_b_snap_34()
+    b["drain"] = {
+        **b["drain"], "pressesSent": 5, "pressesLanded": 4,
+        "unlandedFromHash": [5], "allPressesLanded": False, "ok": False,
+    }
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert verdict["checks"]["drainPressesAllLanded"] is False
+    assert "drainPressesAllLanded" in verdict["integrityFailed"]
+    assert verdict["verdictFailed"] == []
+
+
+def test_freeze_control_drain_overshoot_is_inconclusive():
+    """The drain must stop EXACTLY at the arm boundary. An overshoot means a press
+    was honoured past `#7` (or a queued one replayed), so the arm no longer sits
+    on the genuine pre-move boundary."""
+    b = _freeze_b_snap_34()
+    b["drain"] = {**b["drain"], "hashAtArm": "#8", "hashAtArmExact": False, "ok": False}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "drainPressesAllLanded" in verdict["integrityFailed"]
+
+
+def test_freeze_control_missing_drain_block_fails_closed():
+    """No drain record at all (an older snapshot, a capture that died early) is
+    NOT evidence of a clean drain -- it must fail closed to INCONCLUSIVE."""
+    b = _freeze_b_snap_34()
+    b.pop("drain")
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert verdict["checks"]["drainPressesAllLanded"] is False
 
 
 def test_freeze_control_never_fired_hold_is_inconclusive_not_pass():
