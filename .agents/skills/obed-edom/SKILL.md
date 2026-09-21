@@ -47,7 +47,8 @@ Dashboard tests (from `dashboard/`, with the bundled Node on `PATH`):
 files share one `tsc` build owned by `tests/helpers/compiled.cjs`, cached in
 `dashboard/node_modules/.cache/maps-tests/` and rebuilt whenever a `src/**/*.ts(x)`
 file or the helper changes. There is no CI: run
-these and the full `pytest tests/` locally for every PR that changes code.
+these and the full `uv run pytest tests/ -n auto --dist loadfile` locally for every PR
+that changes code (drop `-n auto --dist loadfile` to debug a single test).
 
 Staff-only parse:
 
