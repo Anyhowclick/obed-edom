@@ -763,19 +763,35 @@ def test_live_continuity_accepts_null_context_type():
 S4MIN = 8  # SLIDE4_MIN_HASH
 
 
+_FP_34 = [327.0, 709.0, 1266.0, 356.0]
+
+
 def _owner_samples_34(decoder_id=4, ambiguous=False):
     """Owner samples in the slide-4 after-window (hn #8,#9 >= num(hash4)=8)."""
     return [
-        {"sceneHash": "#8", "decoderId": decoder_id, "ownerAmbiguous": ambiguous},
-        {"sceneHash": "#9", "decoderId": decoder_id, "ownerAmbiguous": ambiguous},
+        {"sceneHash": "#8", "decoderId": decoder_id, "ownerAmbiguous": ambiguous,
+         "footprint": list(_FP_34)},
+        {"sceneHash": "#9", "decoderId": decoder_id, "ownerAmbiguous": ambiguous,
+         "footprint": list(_FP_34)},
     ]
+
+
+def _video_entry_34(decoder_id, t, **over):
+    """One `videos` entry carrying the geometry the attestation reads."""
+    entry = {
+        "decoderId": decoder_id, "presentedMediaTime": t, "visible": True,
+        "hiddenBy": None, "suppressed34": False,
+        "rect": dict(zip(("x", "y", "w", "h"), _FP_34)),
+    }
+    entry.update(over)
+    return entry
 
 
 def _presented_34(decoder_id=4):
     """Media snapshots whose slide-4 owner's presentedMediaTime advances >0.05."""
     return [
-        {"sceneHash": "#8", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 1.6}]},
-        {"sceneHash": "#9", "videos": [{"decoderId": decoder_id, "presentedMediaTime": 2.4}]},
+        {"sceneHash": "#8", "videos": [_video_entry_34(decoder_id, 1.6)]},
+        {"sceneHash": "#9", "videos": [_video_entry_34(decoder_id, 2.4)]},
     ]
 
 
@@ -4202,6 +4218,149 @@ def test_owner_gap_with_nothing_resolved_after_it_is_refused():
 
 
 # --------------------------------------------------------------------------- #
+# r12 MAJOR 3, second half — the competing-decoder attestation is GEOMETRIC.
+# --------------------------------------------------------------------------- #
+def _after_positions(snap: dict) -> list[int]:
+    n4 = p2._strict_hash_num(snap["hash4"])
+    return [i for i, s in enumerate(snap["ownerSamples"])
+            if (p2._strict_hash_num(s.get("sceneHash")) or -1) >= n4]
+
+
+def _b_with_competitor(at, rect, *, visible=True, decoder=9999) -> dict:
+    """B with a synthetic extra `<video>` entry at the given after-window
+    positions, sitting on the bound decoder's own footprint."""
+    snap = _freeze_b_snap_34()
+    media = [copy.deepcopy(m) for m in snap["mediaSamples"]]
+    after = _after_positions(snap)
+    for k in at:
+        media[after[k]]["videos"].append({
+            "index": 99, "decoderId": decoder, "visible": visible,
+            "hiddenBy": None if visible else "hidden", "suppressed34": False,
+            "rect": dict(rect), "presentedMediaTime": None,
+        })
+    snap["mediaSamples"] = media
+    return snap
+
+
+def test_visible_competitor_on_the_footprint_during_the_gap_is_inconclusive():
+    """The finding r12 MAJOR 3 named and round 15 could not close: a replacement
+    decoder owning the footprint through the blind interval, while the bound
+    decoder's offscreen rVFC clock keeps ticking. It is now SEEN."""
+    b = _freeze_b_snap_34()
+    gap = p2._moving_continuity_derived(b)["stableSlide4Owner"]["nullGaps"]["gaps"][0]
+    fp = b["ownerSamples"][_after_positions(b)[gap["from"]]]["footprint"]
+    competitor = dict(zip(("x", "y", "w", "h"), fp))
+    b = _b_with_competitor(range(gap["from"], gap["to"] + 1), competitor)
+    mc = p2._moving_continuity_derived(b)
+    comp = mc["stableSlide4Owner"]["visibleCompetitors"]
+    assert comp["ok"] is False and comp["hits"]
+    assert comp["hits"][0]["iou"] > 0
+    assert "stableSlide4Owner" in mc["failed"]
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+
+
+def test_a_competitor_that_does_not_paint_is_not_a_competitor():
+    """The same overlapping box, not painting: a decoder that does not composite
+    cannot own the footprint however well its rect fits."""
+    b = _freeze_b_snap_34()
+    gap = p2._moving_continuity_derived(b)["stableSlide4Owner"]["nullGaps"]["gaps"][0]
+    fp = b["ownerSamples"][_after_positions(b)[gap["from"]]]["footprint"]
+    b = _b_with_competitor(
+        range(gap["from"], gap["to"] + 1),
+        dict(zip(("x", "y", "w", "h"), fp)),
+        visible=False,
+    )
+    assert p2._moving_continuity_derived(b)["failed"] == []
+
+
+def test_a_visible_competitor_clear_of_the_footprint_is_not_a_competitor():
+    """Overlap is the test, not presence: the deck legitimately paints other
+    movies elsewhere on slide 4."""
+    b = _b_with_competitor(range(0, 6), {"x": 0.0, "y": 0.0, "w": 40.0, "h": 40.0})
+    comp = p2._moving_continuity_derived(b)["stableSlide4Owner"]["visibleCompetitors"]
+    assert comp["ok"] is True and comp["hits"] == []
+
+
+def test_a_visible_competitor_anywhere_in_the_after_window_is_caught():
+    """Not only inside the gap: a handoff at a position whose owner reading
+    happens to resolve is still a handoff."""
+    b = _freeze_b_snap_34()
+    after = _after_positions(b)
+    late = len(after) - 5
+    fp = b["ownerSamples"][after[late]]["footprint"]
+    b = _b_with_competitor([late], dict(zip(("x", "y", "w", "h"), fp)))
+    assert "stableSlide4Owner" in p2._moving_continuity_derived(b)["failed"]
+
+
+def test_the_export_suppressed_restart_element_is_classified_never_ignored():
+    """The clean run really does carry a SECOND decoder on the same asset -- the
+    export's fresh autoplay-from-0 element, which PRESERVE suppresses so the
+    bridged decoder keeps painting. It must be visible in the snapshot as a
+    classified non-painter, not quietly absent: `suppressed34` says PRESERVE is
+    holding it, `hiddenBy` says how it reads."""
+    b = _freeze_b_snap_34()
+    bound = str(b["ownerDecoderId"])
+    n4 = p2._strict_hash_num(b["hash4"])
+    after_media = [m for m in b["mediaSamples"]
+                   if (p2._strict_hash_num(m.get("sceneHash")) or -1) >= n4]
+    others = [v for m in after_media for v in m["videos"]
+              if str(v.get("decoderId")) != bound]
+    assert others, "the clean fixture must carry the suppressed restart element"
+    suppressed = [v for v in others if v.get("suppressed34")]
+    assert suppressed, "PRESERVE's suppression marker must be retained"
+    assert all(v["visible"] is False for v in others)
+    assert {v["hiddenBy"] for v in suppressed} <= {
+        "detached", "display-none", "zero-size", "hidden", "engine-hidden", "offscreen"
+    }
+    comp = p2._moving_continuity_derived(b)["stableSlide4Owner"]["visibleCompetitors"]
+    assert comp["ok"] is True and comp["hits"] == []
+    assert sum(comp["hiddenBy"].values()) == len(others)
+
+
+@pytest.mark.parametrize("field", ["visible", "rect", "hiddenBy", "suppressed34"])
+def test_competitor_geometry_is_required_per_entry(field):
+    """Absence is not an attestation: a `videos` entry without its geometry or
+    its paint flag fails the arm closed rather than being skipped."""
+    b = _freeze_b_snap_34()
+    media = [copy.deepcopy(m) for m in b["mediaSamples"]]
+    n4 = p2._strict_hash_num(b["hash4"])
+    target = next(m for m in media
+                  if (p2._strict_hash_num(m.get("sceneHash")) or -1) >= n4)
+    del target["videos"][0][field]
+    b["mediaSamples"] = media
+    assert p2._media_samples_schema_ok(media, b["ownerDecoderId"]) is False
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "sampleSchemaSoundAllArms" in verdict["integrityFailed"]
+
+
+def test_a_competitor_without_a_stage_mapped_rect_fails_closed():
+    """`rect` is null exactly when the page could not state the geometry in
+    authored px. For a NON-painting entry that is immaterial; for a painting one
+    there is nothing to compare against the footprint, so the arm fails."""
+    b = _b_with_competitor(range(0, 4), {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0})
+    n4 = p2._strict_hash_num(b["hash4"])
+    for m in b["mediaSamples"]:
+        if (p2._strict_hash_num(m.get("sceneHash")) or -1) >= n4:
+            for v in m["videos"]:
+                if v.get("index") == 99:
+                    v["rect"] = None
+    comp = p2._moving_continuity_derived(b)["stableSlide4Owner"]["visibleCompetitors"]
+    assert comp["ok"] is False
+
+
+@pytest.mark.parametrize("a,b_,expected", [
+    ({"x": 0, "y": 0, "w": 10, "h": 10}, {"x": 0, "y": 0, "w": 10, "h": 10}, 1.0),
+    ({"x": 0, "y": 0, "w": 10, "h": 10}, {"x": 10, "y": 0, "w": 10, "h": 10}, 0.0),
+    ({"x": 0, "y": 0, "w": 10, "h": 10}, {"x": 5, "y": 0, "w": 10, "h": 10}, 1 / 3),
+])
+def test_iou_is_the_ordinary_one(a, b_, expected):
+    assert p2._iou(a, b_) == pytest.approx(expected)
+    assert p2._iou(a, {"x": 0, "y": 0, "w": None, "h": 10}) is None
+
+
+# --------------------------------------------------------------------------- #
 # r12 MINOR 2 — "exactly one" bound-decoder rVFC clock.
 # --------------------------------------------------------------------------- #
 def test_duplicate_bound_decoder_clocks_fail_the_schema():
@@ -4832,7 +4991,18 @@ _POSITIVE_SWEEP_ALLOW: dict[tuple, str] = {
     ('mediaSamples', 'preservePool', 'videoHeight'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'preservePool', 'videoWidth'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'search'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'stageMap', 'authoredHeight'): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
+    ('mediaSamples', 'stageMap', 'authoredWidth'): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
+    ('mediaSamples', 'stageMap', 'ox'): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
+    ('mediaSamples', 'stageMap', 'oy'): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
+    ('mediaSamples', 'stageMap', 's'): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
     ('mediaSamples', 'videoCount'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'attached'): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
+    ('mediaSamples', 'videos', 'checkVisibility'): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
+    ('mediaSamples', 'videos', 'clientRect', 'h'): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
+    ('mediaSamples', 'videos', 'clientRect', 'w'): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
+    ('mediaSamples', 'videos', 'clientRect', 'x'): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
+    ('mediaSamples', 'videos', 'clientRect', 'y'): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('mediaSamples', 'videos', 'currentTime'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'duration'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'ended'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
@@ -4842,10 +5012,15 @@ _POSITIVE_SWEEP_ALLOW: dict[tuple, str] = {
     ('mediaSamples', 'videos', 'loop'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'muted'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'networkState'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'opacityProduct'): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
     ('mediaSamples', 'videos', 'paused'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'playbackRate'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'presentedMediaTime'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'readyState'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'rect', 'h'): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
+    ('mediaSamples', 'videos', 'rect', 'w'): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
+    ('mediaSamples', 'videos', 'rect', 'x'): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
+    ('mediaSamples', 'videos', 'rect', 'y'): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('mediaSamples', 'videos', 'src'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'w'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'wallMs'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
@@ -4874,6 +5049,11 @@ _POSITIVE_SWEEP_ALLOW: dict[tuple, str] = {
     ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'ok'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
     ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'reason'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
     ('movingContinuity3to4', 'stableSlide4Owner', 'ok'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'hiddenBy', 'hidden'): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'hits'): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'n'): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'ok'): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'reason'): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
     ('movingIndexRunAtCut', 'firstIndex'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('movingIndexRunAtCut', 'flipIndex'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('movingIndexRunAtCut', 'flipIndexFull'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
@@ -4983,7 +5163,18 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('mediaSamples', 'preservePool', 'videoHeight')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'preservePool', 'videoWidth')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'search')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('b', ('mediaSamples', 'stageMap', 'authoredHeight')): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
+    ('b', ('mediaSamples', 'stageMap', 'authoredWidth')): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
+    ('b', ('mediaSamples', 'stageMap', 'ox')): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
+    ('b', ('mediaSamples', 'stageMap', 'oy')): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
+    ('b', ('mediaSamples', 'stageMap', 's')): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
     ('b', ('mediaSamples', 'videoCount')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('b', ('mediaSamples', 'videos', 'attached')): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
+    ('b', ('mediaSamples', 'videos', 'checkVisibility')): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
+    ('b', ('mediaSamples', 'videos', 'clientRect', 'h')): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
+    ('b', ('mediaSamples', 'videos', 'clientRect', 'w')): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
+    ('b', ('mediaSamples', 'videos', 'clientRect', 'x')): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
+    ('b', ('mediaSamples', 'videos', 'clientRect', 'y')): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('b', ('mediaSamples', 'videos', 'currentTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'duration')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'ended')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
@@ -4993,10 +5184,15 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('mediaSamples', 'videos', 'loop')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'muted')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'networkState')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('b', ('mediaSamples', 'videos', 'opacityProduct')): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
     ('b', ('mediaSamples', 'videos', 'paused')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'playbackRate')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'presentedMediaTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'readyState')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('b', ('mediaSamples', 'videos', 'rect', 'h')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
+    ('b', ('mediaSamples', 'videos', 'rect', 'w')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
+    ('b', ('mediaSamples', 'videos', 'rect', 'x')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
+    ('b', ('mediaSamples', 'videos', 'rect', 'y')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('b', ('mediaSamples', 'videos', 'src')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'w')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'wallMs')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
@@ -5025,6 +5221,11 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'ok')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
     ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'reason')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
     ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'hiddenBy', 'hidden')): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'hits')): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'n')): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'ok')): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'reason')): 'redundant: the scorer RE-DERIVES the competitor attestation from videos[].visible/rect',
     ('b', ('movingIndexRunAtCut', 'firstIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('b', ('movingIndexRunAtCut', 'flipIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('b', ('movingIndexRunAtCut', 'flipIndexFull')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
@@ -5232,23 +5433,43 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('mediaSamples', 'preservePool', 'videoWidth')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'sceneHash')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'search')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'stageMap', 'authoredHeight')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'stageMap', 'authoredWidth')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'stageMap', 'ox')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'stageMap', 'oy')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'stageMap', 's')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videoCount')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'attached')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'checkVisibility')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'clientRect', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'clientRect', 'w')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'clientRect', 'x')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'clientRect', 'y')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'currentTime')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'decoderId')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'duration')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'ended')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'fromPreservePool')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'hiddenBy')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'index')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'loop')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'muted')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'networkState')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'opacityProduct')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'paused')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'playbackRate')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'presentedMediaTime')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'readyState')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'rect')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'rect', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'rect', 'w')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'rect', 'x')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'rect', 'y')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'src')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'suppressed34')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'visible')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'w')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'wallMs')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingContinuity3to4', 'boundaryValid', 'n3')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
@@ -5278,6 +5499,11 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'ok')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'reason')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'ok')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'hiddenBy', 'hidden')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'hits')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'n')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'ok')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'visibleCompetitors', 'reason')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingIndexRunAtCut', 'firstIndex')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingIndexRunAtCut', 'flipIndex')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingIndexRunAtCut', 'flipIndexFull')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
@@ -5381,6 +5607,9 @@ def _walk(snap: dict, score) -> dict:
 # the shape the round-12 OR-aggregation hid. Each must say which positions are
 # merely diagnostic.
 _SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {
+    ('b', ('ownerSamples', 'footprint')): "gated at every AFTER-WINDOW position, where the competitor attestation compares each painting decoder's rect to this footprint; the pre-boundary positions are outside the scored window",
+    ('positive', ('ownerSamples', 'footprint')): "gated at every AFTER-WINDOW position, where the competitor attestation compares each painting decoder's rect to this footprint; the pre-boundary positions are outside the scored window",
+    ('positiveA2', ('ownerSamples', 'footprint')): "gated at every AFTER-WINDOW position, where the competitor attestation compares each painting decoder's rect to this footprint; the pre-boundary positions are outside the scored window",
     ('b', ('mediaSamples', 'videos', 'presentedMediaTime')): "gated at the bound decoder's own entries in every after-window media sample; the other entries are other decoders' clocks, which movingContinuity3to4 does not read",
     ('positive', ('mediaSamples', 'videos', 'presentedMediaTime')): "gated at the bound decoder's own entries in every after-window media sample; the other entries are other decoders' clocks, which movingContinuity3to4 does not read",
     ('positiveA2', ('mediaSamples', 'videos', 'presentedMediaTime')): "gated at the bound decoder's own entries in every after-window media sample; the other entries are other decoders' clocks, which movingContinuity3to4 does not read",

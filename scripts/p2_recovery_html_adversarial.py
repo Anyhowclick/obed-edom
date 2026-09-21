@@ -1922,6 +1922,80 @@ def liveContinuity1to2(
     }
 
 
+def _iou(a: object, b: object) -> float | None:
+    """Intersection-over-union of two authored-px rects, or `None` when either is
+    not four real measurements."""
+    ra, rb = _rect_or_none(a), _rect_or_none(b)
+    if ra is None or rb is None:
+        return None
+    ix = max(0.0, min(ra["x"] + ra["w"], rb["x"] + rb["w"]) - max(ra["x"], rb["x"]))
+    iy = max(0.0, min(ra["y"] + ra["h"], rb["y"] + rb["h"]) - max(ra["y"], rb["y"]))
+    inter = ix * iy
+    union = ra["w"] * ra["h"] + rb["w"] * rb["h"] - inter
+    return (inter / union) if union > 0 else None
+
+
+def _visible_competitors(
+    media: list[dict], owner: list[dict], bound_decoder: object, positions: list[int]
+) -> dict:
+    """Which decoders OTHER than the bound one were VISIBLY sitting on the
+    footprint, at the given positions of the after-window?
+
+    A null owner reading says the footprint query resolved nothing; it does not
+    say nothing was there. This reads the retained per-video geometry instead:
+    every `videos` entry carries its authored-px rect and whether it PAINTS
+    (`visible`), so a replacement decoder overlapping the bound decoder's own
+    footprint while the owner is unresolved is DETECTABLE rather than assumed
+    away (plan §10.18).
+
+    Overlap is `IoU > 0` against that sample's own footprint. A sample whose
+    geometry cannot be stated in authored px -- no stage map, a malformed rect,
+    a missing `visible` flag -- is not an attestation and fails closed. The
+    export's own suppressed restart element paints nothing and so does not
+    compete; `hiddenBy` records which of detached / display-none / zero-size /
+    hidden / engine-hidden / offscreen it was, and `suppressed34` records that
+    PRESERVE is what is holding it that way.
+    """
+    hits: list[dict] = []
+    classified: dict[str, int] = {}
+    ok = True
+    bound = str(bound_decoder)
+    for i in positions:
+        if not (0 <= i < len(media) and 0 <= i < len(owner)):
+            ok = False
+            continue
+        fp = _rect_or_none(dict(zip(("x", "y", "w", "h"), owner[i].get("footprint") or [])))
+        videos = media[i].get("videos")
+        if fp is None or not isinstance(videos, list) or not videos:
+            ok = False
+            continue
+        for v in videos:
+            if not isinstance(v, dict) or "visible" not in v:
+                ok = False
+                continue
+            if str(v.get("decoderId")) == bound:
+                continue
+            if not v.get("visible"):
+                why = str(v.get("hiddenBy"))
+                classified[why] = classified.get(why, 0) + 1
+                continue
+            iou = _iou(v.get("rect"), fp)
+            if iou is None:
+                ok = False
+                continue
+            if iou > 0:
+                ok = False
+                hits.append({"at": i, "decoderId": v.get("decoderId"),
+                             "iou": round(iou, 4), "rect": v.get("rect")})
+    return {
+        "ok": ok,
+        "reason": None if ok else "a visible competing decoder overlapped the footprint",
+        "hits": hits[:8],
+        "n": len(positions),
+        "hiddenBy": classified,
+    }
+
+
 def _owner_null_gaps(all_owner: list[dict], after: list[dict]) -> dict:
     """Are the after-window's null-`decoderId` intervals BOUNDED and BRACKETED?
 
@@ -2043,11 +2117,27 @@ def movingContinuity3to4(
     non_null_frac = (len(non_null_ids) / len(after)) if after else 0.0
     has_ambiguous = any(s.get("ownerAmbiguous") for s in after)
     gaps = _owner_null_gaps(all_owner, after)
+    # The owner and media series are built one per capture sample, so the
+    # after-window's media rows are the SAME positions. Every position is
+    # attested -- the gaps are where the owner reading is missing, but a visible
+    # competitor anywhere in the window is a handoff either way -- and a series
+    # that does not line up is no attestation at all.
+    after_media = (
+        [s for s in (presented_samples or []) if _after(s)] if boundary_valid else []
+    )
+    if len(after_media) == len(after):
+        competitors = _visible_competitors(
+            after_media, after, slide3_movie_decoder, list(range(len(after)))
+        )
+    else:
+        competitors = {"ok": False, "reason": "owner and media series do not align",
+                       "hits": [], "n": 0, "hiddenBy": {}}
     stable = (
         bool(after)
         and len(distinct_non_null) == 1
         and non_null_frac >= 0.7
         and gaps["ok"]
+        and competitors["ok"]
         and not has_ambiguous
     )
     slide4_owner = non_null_ids[0] if stable else None
@@ -2086,6 +2176,7 @@ def movingContinuity3to4(
             "nonNullFrac": round(non_null_frac, 3),
             "afterN": len(after),
             "nullGaps": gaps,
+            "visibleCompetitors": competitors,
         },
         "crossingIdentity": {"ok": crossing_identity},
         "rvfcMonotonic": rvfc,
@@ -2596,6 +2687,13 @@ def _merge_pool_into_media(snap: dict | None, pool: list | None) -> dict:
                 "readyState": p.get("readyState"),
                 "decoderId": p.get("elId"),
                 "fromPreservePool": True,
+                # A pooled decoder is DETACHED by definition: it holds a clock
+                # and paints nothing, so it carries the same classification the
+                # DOM probe gives a detached element, and no geometry.
+                "visible": False,
+                "hiddenBy": "detached",
+                "suppressed34": False,
+                "rect": None,
             }
             for p in pool
         ]
@@ -4599,7 +4697,13 @@ _OWNER_SAMPLE_KEYS = {
     "ownerAmbiguous": False,
 }
 _MEDIA_SAMPLE_KEYS = {"sceneHash": False, "videos": False}
-_VIDEO_ENTRY_KEYS = {"decoderId": False}
+# `rect` is admitted as an explicit `None` -- that is what the probe records when
+# the stage map is unavailable -- and `_visible_competitors` then fails the arm
+# closed at the position that needs it, rather than the whole series here.
+_VIDEO_ENTRY_KEYS = {
+    "decoderId": False, "visible": False, "hiddenBy": True, "rect": True,
+    "suppressed34": False,
+}
 
 
 def _samples_schema_ok(samples: object, required: dict[str, bool]) -> bool:

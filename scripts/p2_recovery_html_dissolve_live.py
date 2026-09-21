@@ -211,9 +211,82 @@ MEDIA_PROBE_JS = r"""
     }
   }
   Array.prototype.slice.call(document.querySelectorAll('video')).forEach(watch);
+  // The stage map PRESERVE itself uses (`stageMap`/`toScreen` in
+  // live_continuity_js): authored px -> viewport px by a single uniform scale
+  // about the stage's own top-left. Null when the stage is missing or its two
+  // axes disagree, in which case no rect below can be stated in authored px.
+  function stageMap() {
+    const stage = document.getElementById('stage');
+    if (!stage) return null;
+    const ow = stage.offsetWidth, oh = stage.offsetHeight;
+    if (!(ow > 1 && oh > 1)) return null;
+    const r = stage.getBoundingClientRect();
+    if (!(r.width > 1 && r.height > 1)) return null;
+    const sx = r.width / ow, sy = r.height / oh;
+    const avg = (sx + sy) / 2;
+    if (!(avg > 0) || Math.abs(sx - sy) / avg > 0.001) return null;
+    return {s: sx, ox: r.left, oy: r.top, authoredWidth: ow, authoredHeight: oh};
+  }
+  const SMAP = stageMap();
+  function toAuthored(r) {
+    if (!SMAP) return null;
+    return {x: (r.left - SMAP.ox) / SMAP.s, y: (r.top - SMAP.oy) / SMAP.s,
+            w: r.width / SMAP.s, h: r.height / SMAP.s};
+  }
+  function opacityProduct(el) {
+    let p = 1, n = el;
+    while (n && n.nodeType === 1) {
+      const o = parseFloat(getComputedStyle(n).opacity);
+      if (!isNaN(o)) p *= o;
+      n = n.parentElement;
+    }
+    return p;
+  }
+  // Does this <video> PAINT? A decoder that does not paint cannot own a
+  // footprint however well its box overlaps one. `checkVisibility` is the
+  // engine's own answer (content-visibility, display and the CSS visibility /
+  // opacity chains); the explicit clauses restate the ones this probe must not
+  // depend on a flag for, and `hiddenBy` names the FIRST reason found so a
+  // suppressed sibling is classified rather than silently dropped.
+  function visibility(v) {
+    const attached = document.contains(v);
+    const r = v.getBoundingClientRect();
+    const st = attached ? getComputedStyle(v) : null;
+    const op = attached ? opacityProduct(v) : 0;
+    let engine = null;
+    try {
+      engine = typeof v.checkVisibility === 'function'
+        ? v.checkVisibility({checkOpacity: true, checkVisibilityCSS: true,
+                             opacityProperty: true, visibilityProperty: true,
+                             contentVisibilityAuto: true})
+        : null;
+    } catch (e) { engine = null; }
+    const offscreen = !(r.right > 0 && r.bottom > 0
+                        && r.left < (window.innerWidth || 0)
+                        && r.top < (window.innerHeight || 0));
+    let why = null;
+    if (!attached) why = 'detached';
+    else if (st && st.display === 'none') why = 'display-none';
+    else if (!(r.width > 0 && r.height > 0)) why = 'zero-size';
+    else if (st && st.visibility === 'hidden') why = 'hidden';
+    else if (!(op > 0)) why = 'hidden';
+    else if (engine === false) why = 'engine-hidden';
+    else if (offscreen) why = 'offscreen';
+    return {
+      visible: why === null,
+      hiddenBy: why,
+      suppressed34: !!v.__obedSuppressed34,
+      attached: attached,
+      opacityProduct: op,
+      checkVisibility: engine,
+      clientRect: {x: r.left, y: r.top, w: r.width, h: r.height},
+      rect: toAuthored(r),
+    };
+  }
   const videos = Array.prototype.slice.call(document.querySelectorAll('video')).map((v, i) => ({
     index: i,
     decoderId: v.__obedElId || v.__obedId || null,
+    ...visibility(v),
     src: String(v.currentSrc || v.src || '').slice(-120),
     currentTime: v.currentTime,
     presentedMediaTime: (typeof v.__obedPresented === 'number') ? v.__obedPresented : null,
@@ -234,6 +307,7 @@ MEDIA_PROBE_JS = r"""
     search: String(location.search || ''),
     videoCount: videos.length,
     videos: videos,
+    stageMap: SMAP,
     canvasCount: document.querySelectorAll('canvas').length,
   };
 })()
