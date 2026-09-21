@@ -1374,8 +1374,26 @@ def footprint_at(
     )
 
 
+INDEX_PATCH_TOP_GUARD_PX = 2
+"""Top-edge guard for a MEASURED footprint's index-patch ROI, in screen px.
+
+The x mapping carries a +2 inset; the y mapping carries none, so the ROI's first
+row sits exactly on the footprint's own top edge. Harmless for a static, integral
+rect, but not for a live ``getBoundingClientRect()`` reading: y is fractional and
+the probe's badge quantises it to 0.5, and ``round()`` sends an exact .5 to the
+EVEN integer, i.e. down -- putting the ROI's first row on the movie's antialiased
+top edge row, which is not flat, so the patch decodes None. Measured on the
+round-5 3->4 brackets: 3 of 260 captured samples decoded None for this reason
+alone (badge y 734.5 / 744.5 / 746.5), each recovered by dropping exactly 1 top
+row and yielding the same value as its neighbours. 2 px is that 1 px plus one row
+of margin, against a measured bottom slack of >= 9 px.
+"""
+
+
 def index_patch_roi_for(
     footprint: Sequence[float] | dict[str, Any],
+    *,
+    top_guard: int = 0,
 ) -> tuple[int, int, int, int]:
     """Map a movie footprint (x, y, w, h) to its burnt-in frame-index patch ROI.
 
@@ -1386,16 +1404,23 @@ def index_patch_roi_for(
     the adversarial probe's ``INDEX_PATCH_ROI`` exactly (back-compat). Also accepts
     a measured footprint dict (``{x, y, w, h, ...}``, e.g. a live
     ``getBoundingClientRect()`` reading); extra keys are ignored.
+
+    ``top_guard`` drops that many rows off the TOP without moving the bottom edge,
+    so the result is always a SUBSET of the unguarded ROI -- it can only remove
+    contaminating pixels, never admit new ones. Callers decoding a measured
+    (fractional, badge-quantised) rect pass ``INDEX_PATCH_TOP_GUARD_PX``; the
+    default 0 leaves every static caller's ROI byte-identical.
     """
     if isinstance(footprint, dict):
         x, y, w, h = (float(footprint[k]) for k in ("x", "y", "w", "h"))
     else:
         x, y, w, h = (float(v) for v in footprint)
+    guard = max(0, int(top_guard))
     return (
         int(round(x)) + 2,
-        int(round(y)),
+        int(round(y)) + guard,
         max(1, round(w * 120 / 1920) - 18),
-        max(1, round(h * 48 / 540) - 10),
+        max(1, round(h * 48 / 540) - 10 - guard),
     )
 
 

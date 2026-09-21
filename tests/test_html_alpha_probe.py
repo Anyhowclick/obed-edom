@@ -1636,6 +1636,100 @@ def test_index_patch_roi_for_slide4_stays_inside_flat_patch_no_scale_guard_neede
 
 
 # ---------------------------------------------------------------------------
+# Top-edge guard (round-6 measurement). The scale spill the plan suspected is
+# refuted above; what actually made mid-move samples decode None is the y
+# mapping's MISSING inset meeting a half-pixel, badge-quantised rect.
+# ---------------------------------------------------------------------------
+
+# The exact failing sample measured on the round-5 bracket (output/scratch-b3,
+# run4 arm b, sample i=8): badge rect, the movie's painted top edge row, and the
+# flat counter value its neighbours decoded.
+_GUARD_BADGE_RECT = (274.75, 744.5, 1139.0, 320.5)
+_GUARD_EDGE_ROW = 744
+_GUARD_TRUE_VALUE = 33
+
+
+def test_index_patch_roi_for_top_guard_is_a_subset_and_default_is_unchanged():
+    """The guard may only SHRINK the ROI from the top: same x/width, same bottom
+    edge, strictly fewer rows. Default 0 keeps every existing caller byte-identical
+    (the static slide-1/2 back-compat identity above still holds)."""
+    from obed_edom.html_alpha_probe import INDEX_PATCH_TOP_GUARD_PX, index_patch_roi_for
+
+    fp = _GUARD_BADGE_RECT
+    bx, by, bw, bh = index_patch_roi_for(fp)
+    gx, gy, gw, gh = index_patch_roi_for(fp, top_guard=INDEX_PATCH_TOP_GUARD_PX)
+
+    assert index_patch_roi_for(fp, top_guard=0) == (bx, by, bw, bh)
+    assert (gx, gw) == (bx, bw)
+    assert gy == by + INDEX_PATCH_TOP_GUARD_PX
+    assert gy + gh == by + bh  # bottom edge pinned
+    assert gh < bh
+
+
+def test_index_patch_roi_for_top_guard_recovers_the_measured_none_sample():
+    """Reproduces the measured cause on a synthetic frame built to the round-5
+    geometry: the badge reports y=744.5, `round()` sends that exact .5 DOWN to the
+    even 744, and row 744 is the movie's antialiased top edge -- so the unguarded
+    ROI is not flat and fails closed. The guarded ROI clears the edge row and
+    decodes the value the neighbouring samples read."""
+    from obed_edom.html_alpha_probe import INDEX_PATCH_TOP_GUARD_PX, index_patch_roi_for
+
+    frame = np.zeros((900, 1600, 4), dtype=np.uint8)
+    frame[:, :, 3] = 255
+    x, y, w, h = _GUARD_BADGE_RECT
+    patch_w = int(round(w * 120 / 1920))
+    patch_h = int(round(h * 48 / 540))
+    px = int(round(x))
+    # Flat counter patch from the row BELOW the edge; the edge row itself is the
+    # bright, non-flat boundary the compositor draws at floor(y).
+    frame[_GUARD_EDGE_ROW + 1 : _GUARD_EDGE_ROW + patch_h, px : px + patch_w, :3] = (
+        _GUARD_TRUE_VALUE
+    )
+    frame[_GUARD_EDGE_ROW, px : px + patch_w, :3] = 255
+
+    unguarded = index_patch_roi_for(_GUARD_BADGE_RECT)
+    guarded = index_patch_roi_for(_GUARD_BADGE_RECT, top_guard=INDEX_PATCH_TOP_GUARD_PX)
+
+    assert unguarded[1] == _GUARD_EDGE_ROW  # the round-half-to-even landing
+    assert _null_control_decode(frame, unguarded) is None
+    assert _null_control_decode(frame, guarded) == _GUARD_TRUE_VALUE
+
+
+def test_index_patch_roi_for_top_guard_still_fails_closed_on_a_wrong_roi():
+    """Null control for the guard: it must not manufacture a plausible digit. A
+    deliberately mislocated ROI (the same guard applied to a rect that is nowhere
+    near the painted patch) still decodes None, and so does a guarded ROI over a
+    non-flat region."""
+    from obed_edom.html_alpha_probe import INDEX_PATCH_TOP_GUARD_PX, index_patch_roi_for
+
+    frame = np.zeros((900, 1600, 4), dtype=np.uint8)
+    frame[:, :, 3] = 255
+    x, y, w, h = _GUARD_BADGE_RECT
+    patch_w = int(round(w * 120 / 1920))
+    patch_h = int(round(h * 48 / 540))
+    px = int(round(x))
+    frame[_GUARD_EDGE_ROW + 1 : _GUARD_EDGE_ROW + patch_h, px : px + patch_w, :3] = (
+        _GUARD_TRUE_VALUE
+    )
+    frame[_GUARD_EDGE_ROW, px : px + patch_w, :3] = 255
+    # Everything outside the patch is a high-contrast grating.
+    frame[:_GUARD_EDGE_ROW, :, :3] = (np.indices((_GUARD_EDGE_ROW, 1600))[1] % 2 * 255)[..., None]
+
+    wrong_rect = (x, y - 300.0, w, h)  # patch is 300 px below this ROI
+    wrong = index_patch_roi_for(wrong_rect, top_guard=INDEX_PATCH_TOP_GUARD_PX)
+    assert _null_control_decode(frame, wrong) is None
+
+    # And the guard does not rescue a genuinely non-flat patch: with the counter
+    # region overpainted by the grating, the correctly-located guarded ROI still
+    # decodes None rather than the grating's mean.
+    frame[_GUARD_EDGE_ROW : _GUARD_EDGE_ROW + patch_h, px : px + patch_w, :3] = (
+        (np.indices((patch_h, patch_w))[1] % 2 * 255)[..., None]
+    )
+    right = index_patch_roi_for(_GUARD_BADGE_RECT, top_guard=INDEX_PATCH_TOP_GUARD_PX)
+    assert _null_control_decode(frame, right) is None
+
+
+# ---------------------------------------------------------------------------
 # Scorer-side NULL CONTROL (plan Step.1.4): a counter patch that TRANSLATES and
 # SCALES across frames on a high-contrast grating background, mirroring the
 # 3->4 fixture geometry (slide-3 rect -> slide-4 rect). Proves that decoding

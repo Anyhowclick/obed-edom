@@ -52,6 +52,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
     file_identity,
     footprint_at,
+    INDEX_PATCH_TOP_GUARD_PX,
     index_patch_roi_for,
     inventory_deck,
     score_composited_index_run,
@@ -3456,7 +3457,17 @@ async def _advance_to_slide4_capture(
             roi_rect = None
         index_samples.append(
             {
-                "index": _decode_index_patch(arr, index_patch_roi_for(roi_rect)) if roi_rect else None,
+                "index": (
+                    _decode_index_patch(
+                        arr,
+                        # The ROI comes from a measured, badge-quantised rect, whose
+                        # half-pixel y would otherwise put the ROI's top row on the
+                        # movie's own antialiased top edge (INDEX_PATCH_TOP_GUARD_PX).
+                        index_patch_roi_for(roi_rect, top_guard=INDEX_PATCH_TOP_GUARD_PX),
+                    )
+                    if roi_rect
+                    else None
+                ),
                 "sceneHash": scene_hash,
                 "captureOffsetS": offset,
                 # Overwritten by `_fill_badge_coupling` with the painted frame's
