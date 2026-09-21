@@ -18,6 +18,11 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   the shipped call passes `content_only=True` so text slides are pre-filtered. §4 item 12 (multi-box
   split cap) merged; item 8 (pill z-order, LIVE-BROKEN in text-r1) + item 27 (joint-fit
   split-vs-shrink) are the open next slices.
+- APPROVED FOR IMPLEMENTATION (2026-09-21): replace the Generator's grouped table with the
+  composition editor specified in §4 "Dashboard composition editor" — source-order slide rail,
+  16:9 output preview, compact inspector, explicit global/per-composition geometry, dashboard video
+  masks, and Magic Move sequence folding. The approved visual prototype is
+  `/Users/anyhowclick/.codex/visualizations/2026/09/21/01a0c358-4d90-7fc2-a893-0019fea75835/dsk-generator-mockup.html`.
 - Deliverable contract: an EDITABLE DSK deck (operator finishes crops by hand) plus a flat
   PP7 asset folder; never a finished deck. (Merged-PR history + suite counts live in Git, not here.)
 
@@ -111,8 +116,31 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   classification flow (grouped by category, bulk per group).
 - Keynote hands-off rule: work on a copy under `~/Desktop` or repo `output/` (never
   `/private/tmp`), one Keynote automation at a time, back up and quit the owner's documents.
-- Owner's open design item besides the band placeholder: the "editing phase" (d6b) — per-slide
-  operator nudges of position/size/crop over the auto defaults — is explicitly out of scope.
+- 2026-09-21 (owner, approved Generator redesign): the former out-of-scope "editing phase" is now
+  IN SCOPE for content slides. The dashboard owns global width/height + alignment defaults,
+  per-composition size/alignment overrides, an aspect-ratio lock, and per-video pan/zoom masks.
+  Placement stays lower-third-only: vertical position is fixed to the safe baseline and horizontal
+  movement snaps to left / centre / right. Source order is preserved; there is no reorder feature.
+- 2026-09-21 (owner, UI vocabulary): the visible review controls are Include, left/centre/right
+  alignment glyphs, size, Full slide / Video only, and LW / FW. `keepSide` remains an internal
+  compatibility field only: LW means centre-wall crop (`keepSide=False`), FW means full-wall crop
+  (`keepSide=True`). Category appears only as the slide-rail section heading; slide number and
+  `action` are not operator controls. Movie clips are extracted from the source deck; the new UI has
+  no manual clip picker.
+- 2026-09-21 (owner, preview/masking): the preview is a real 1920x1080 coordinate space scaled into
+  a 16:9 viewport. It shows final pixel dimensions at the content frame's top-left and resizes from
+  the top-right. For a video mask, the frame stays fixed while the original video pans/zooms below
+  it. Keynote has no live video-mask primitive, so the Generator bakes this crop into the pure-video
+  intermediate; the inserted DSK clip remains editable for outer position/size.
+- 2026-09-21 (owner, FRC Wall 108–110): a consecutive Magic Move sequence that builds a 1→2→3
+  video composition is ONE review composition and ONE DSK slide. The terminal source slide supplies
+  the final layout/static overlays; the chain supplies the union of movie assets; all three inserted
+  clips start together. Identity and poster substitution must be proved from source/archive evidence,
+  never guessed from filenames or visual proximity. An ambiguous chain stays explicit and warns.
+- 2026-09-21 (owner, FRC Wall slide 50): 100%-overlap movies stay fully overlapped in the review
+  preview and output. The frontend must not auto-tile or separate them. It exposes the ordered media
+  layers for selection/mask editing while the existing backend source build order, dissolve and delay
+  remain authoritative. Simultaneous timing is only for an explicitly qualified folded sequence.
 - 2026-09-17 (owner, clip start timing + visual order — validated against the gold
   `Alpha_DSK.key` slides 6–8): every consumer orders a slide's movie items by VISUAL order
   (left-to-right by placed x, then y; refuse on an exact tie) via
@@ -357,6 +385,218 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   movie, refusing on mismatch.
 
 ## 4. Open bugs / TODOs
+
+### Dashboard composition editor — APPROVED 2026-09-21
+
+**Implementation status (2026-09-21): COMPLETE OFFLINE.** UI, v2 review/compiler, occurrence-based
+movie export, uniform assembly placement, source-mode filtering, optimistic concurrency, atomic
+apply, and manifest provenance are implemented and covered by the gates below. A production
+Keynote run remains a separate owner-supervised acceptance step because it opens the 6.7 GB deck.
+
+#### Product surface
+
+- Replace `dashboard/src/tabs/dsk/SlideReviewList.tsx` with a three-part
+  `DskReviewWorkspace`: a source-order `SlideRail`, a 16:9 `OutputPreview`, and a compact
+  `SlideInspector`. Ship only the approved focused-rail + inspector variants (prototype A+B); do
+  not build the discarded third variant.
+- The rail preserves GLOBAL source order. It inserts Movie / Mixed / Built / Static headings for
+  contiguous category runs (a heading may therefore repeat); it never buckets/sorts all cards by
+  category and never reorders them. A card shows its thumbnail, Include state, and meaningful
+  media/build badges; category, action, and source slide numbers stay out of the normal operator
+  surface.
+- The preview is the editing surface. It uses one conversion between DOM pixels and the canonical
+  1920x1080 output coordinates, supports pointer capture, snaps horizontal dragging to the three
+  anchors, exposes a top-right resize handle, and shows the effective `W × H px` at top-left.
+  Keyboard buttons/arrow nudges must provide the same operations without dragging.
+- The inspector starts with Include, then compact Position and Size sections, then Full slide /
+  Video only and colour-distinct LW / FW segmented controls. The mask section appears only for a
+  mask-capable movie composition; a multi-movie composition adds an ordered media selector. A
+  `mediaLayout=stacked` composition renders those layers at their overlapping slots (including 100%
+  overlap) and selection edits one layer without moving the others. Use small accessible CSS
+  alignment glyphs rather than adding an icon dependency solely for alignment.
+- Give the global-default row a distinct tinted surface. It owns width, height, aspect lock and
+  default alignment. A composition stores `inherit` until the operator overrides it; Reset deletes
+  that override, so later global changes continue to flow through. Seed new jobs with 935×263,
+  centre, ratio locked; keep the seed in one product constant.
+- Keep live pointer edits local. Persist on pointer-up, debounce typed fields/toggles, and flush the
+  latest state synchronously before Generate. Never POST on every pointer-move.
+
+#### One deep review model
+
+- Add a backend composition-planning seam (target module `src/obed_edom/dsk_review.py`) between raw
+  deck inspection and both the HTTP/UI and apply phases. The UI must not infer sequences, media
+  identity, export capability, or Keynote semantics. One inspection produces TWO explicit models:
+  (1) the operator-facing ordered review compositions and prepared preview layers, and (2) a
+  validated `CompiledComposition` consumed by export/assembly. The latter is the only place that
+  resolves inherited defaults and source occurrences into concrete canvas geometry.
+- Add schema version 2 rather than growing the current `{slide, include, action, anchor,
+  keepSide, clip, videosOnly}` row. Read version-1 stored jobs through a one-way compatibility
+  adapter; new saves emit version 2 only. Keep legacy names at the assembler boundary, not in the
+  React model.
+- A review payload owns one global `defaults` record and ordered `compositions`. A composition has a
+  stable opaque `id`, `sourceSlides`, one `layoutSlide`, category/thumbnail/capability metadata,
+  `mediaLayout` (`spatial|stacked`), ordered media descriptors, warnings, and one operator decision.
+  Every media descriptor declares `sourceModes` (`lw`, `fw`, or both), so switching source view
+  never exports a side-only occurrence into LW and never omits an FW-only occurrence.
+  Layer order is source visual/build order as already resolved by the backend. Single-slide ids may be
+  `slide:<n>`; folded ids may be `sequence:<first>-<last>`. Source order is the payload order, so no
+  position/order field exists.
+- The operator decision contains `include`, `alignment` (`inherit|left|centre|right`), nullable
+  frame override `{width,height,aspectLocked}`, `source` (`lw|fw`), `contentMode`
+  (`full|video`), and per-media mask overrides. A mask stores the fixed output frame and the media
+  transform below it (`scale`, `offsetX`, `offsetY`) keyed by stable media id.
+- Give each authored media occurrence a stable id from source slide + archive drawable id, and
+  expose its embedded asset id separately. Never deduplicate occurrences by asset: two authored
+  copies of the same movie are two media placements. `(kind, kindIndex)` remains an internal
+  per-slide address only and cannot identify media across a Magic Move chain.
+- `CompiledComposition` contains its id/source slides/layout slide/resolved output frame, the
+  terminal slide used for copied overlays, and ordered explicit media placements. Each placement
+  carries occurrence id, source slide + source item/archive address, asset id, target rect,
+  viewport transform, style/playback provenance and requested timing. Earlier-slide media are
+  exported from their actual source occurrence and inserted at their explicit target rect; they are
+  never fabricated as terminal-slide `ItemId`s.
+- Frozen pipeline boundary (names may map to dataclasses, semantics may not drift):
+  `CompiledComposition{id, source_slides, layout_slide, overlay_slide, output_frame, alignment,
+  source_mode, content_mode, media}` and
+  `CompiledMedia{occurrence_id, source_slide, source_item, archive_id, asset_id, target_rect,
+  viewport, playback, timing, preserve_stroke}`. `output_frame`/`target_rect` are 1920×1080 canvas
+  pixels; `viewport` is the normalized zoom/pan contract below; `source_item` addresses the real
+  occurrence on the real source slide. For terminal-slide media, assembly replaces the review's
+  preview slot with the authoritative uniform `fit_slide` result for the resolved output frame, so
+  movie clips and retained live overlays share one affine. Review JSON and compiled dataclasses have
+  separate types.
+- Bind every proposal to the existing source-deck digest/fingerprint. Save/apply refuses when the
+  source changed. Decisions carry a monotonically increasing revision; saves are serialized and a
+  stale `baseRevision` gets 409 rather than overwriting newer state.
+- Frozen v2 write envelope: decisions POST
+  `{review:{schemaVersion:2,sourceFingerprint,defaults,decisions:[...]},baseRevision}`; Apply accepts
+  that same editable review plus `baseRevision` and `exportDir` atomically. A decision is keyed by
+  composition `id` and contains editable fields only; source slides/media/layout/preview metadata
+  remain server-authoritative. Responses carry the incremented revision. Version 1 keeps its
+  existing `{decisions:[...]}` path.
+- Duplicate API type declarations in `dashboard/src/api.ts` and `dashboard/src/dsk/decisions.ts`
+  must collapse to one exported frontend contract and one pure reducer/selector module. The reducer
+  owns selection, inheritance, reset, ratio math, mask edits and serialization; React components
+  only render and dispatch.
+
+#### Geometry and apply
+
+- Extend the assembly decision with an explicit output VIEWPORT rather than mutating the global
+  `DEFAULT_BAND` / `STANDARD_VIDEO_BAND`. Freeze one editor safe area for both sides of the contract:
+  output 1920×1080, x 43…1877 and bottom 1065. The backend returns these bounds; the frontend never
+  re-declares them. Left/right snap to those x edges and centre is geometric canvas centre.
+- Width/height are the exact viewport bounds in canonical output units, not a promise to distort the
+  contents to that aspect. Content always uses the existing uniform affine: full-slide content fits
+  inside the viewport without stretching, and video fills its mask by crop/cover. Ratio lock is
+  persisted editor behaviour; unlocked editing changes the viewport aspect only. The pixel chip
+  labels the viewport. Non-uniform object distortion is explicitly out of scope for this slice.
+- Media slots are composition-local normalized rects. A mask override is `{zoom, panX, panY}`:
+  `zoom >= 1` multiplies the slot's aspect-fill scale; `panX/panY` are normalized −1…1 positions
+  across the available post-zoom overflow (0 centred, ±1 clamped to an edge). Resizing/re-aligning
+  the outer viewport therefore preserves the crop. Source/content switches retain an occurrence's
+  mask only while that occurrence/capability remains valid, then re-clamp it; otherwise reset it
+  with a visible warning.
+- Keep current source behaviour behind the new names: `source=lw` clips/classifies against
+  `CENTRE_PANEL_RECT`; `source=fw` includes the whole 7680×1080 wall. `contentMode=video` keeps the
+  existing top-level-movie capability gate. Reject impossible or out-of-bounds frames in the review
+  validator before Keynote launches.
+- Extend `dsk_movie_export.export_slide_clips` with an explicit per-movie crop/viewport plan. Apply
+  the dashboard mask on the scratch copy, export one isolated movie, and crop the resulting pure
+  video to the mask frame. Preserve trim/playback, repetition, volume, visual/build order and the
+  existing rollback/publish guarantees. Do not pretend the output Keynote contains a live video
+  mask.
+- The manifest stays keyed by DSK ordinal and records `composition_id`, `source_slides`,
+  `layout_slide`, resolved frame, occurrence/media provenance, mask and published clip order.
+  Preserve the ACTUAL existing compatibility field `source_slide=layout_slide` and ordered
+  `srcClips`. Generator regeneration overwrites or removes all prior composition metadata for every
+  regenerated ordinal; the Exporter retains provenance while removing `srcClips` as today.
+
+#### Magic Move folding
+
+- Detect only explicit outgoing `apple:magic-move*` transitions across consecutive SELECTED source
+  slides. Build maximal candidate chains, then qualify them using occurrence identity, asset
+  continuity and a proved mapping to intended terminal slots; never group merely adjacent movie
+  slides, a pan/zoom sequence, a replacement sequence, or duplicated copies of one asset. Partial or
+  non-contiguous selection never silently pulls an unselected chain member into the output.
+- For a qualified chain, take static/live overlay layout from the terminal slide and the union of
+  distinct movie assets from the chain. For each asset use its last proved placement in the chain;
+  a terminal poster may stand in for a previous movie only when archive/export evidence proves that
+  mapping. Otherwise return separate compositions plus a visible warning.
+- Before promising folding, inspect the ORIGINAL named FRC Wall source, record its source digest and
+  a minimal offline fixture for slides 108–110. The banked terminal copy currently proves only two
+  movies + one still. If original evidence proves the stated 1→2→3 composition, acceptance is one
+  rail card, `sourceSlides=[108,109,110]`, terminal layout 110, three occurrences and three pure
+  clips on one DSK slide. Only this explicitly qualified folded composition overrides source delays:
+  patch one `after_transition` plus two `with_build_1`, all delay 0 and
+  `playsAcrossSlides=False`. Ordinary stacked/cascade timing remains unchanged.
+
+#### Phase-zero source evidence (offline, 2026-09-21)
+
+- Inspected the original
+  `/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key` without launching
+  Keynote: 6,771,226,120 bytes, 155 slides, SHA-256
+  `549343a6f95275e7ad458b1551b87cc32d0cc0e1b0cc091096ec85161776334b`.
+- Slide 108 has one movie (`VID-20250608-WA0125.mp4`) and an outgoing Magic Move. Slide 109 has two
+  movies (`...WA0125.mp4`, `...WA0121.mp4`) and an outgoing Magic Move. Slide 110 has those SAME two
+  movies plus the 1280×1080 still `Japan Bible Study.png`; its outgoing transition is dissolve.
+  Thus the named source proves a 1→2→(2 movies + 1 still) composition, NOT three distinct movie
+  assets. The Generator may fold it into one concurrent mixed composition, but it must not label the
+  still a video or synthesize a third clip. A real three-video 108–110 result remains blocked on the
+  missing third movie asset or a different source deck; generic three-video folding is covered by a
+  synthetic offline fixture meanwhile.
+
+#### Delivery slices and safe parallel work
+
+0. **Evidence + frozen contract:** inspect the original 108–110 source, freeze the checked-in v2 JSON
+   fixture, `CompiledComposition`, preview-layer contract, mask equations, editor safe area, v1
+   migration and manifest extension names. No parallel implementation starts before this closes.
+1. **Contract + visual workspace:** add the v2 model/adapter and the React reducer/components. The
+   frontend may use fixture payloads while the backend planner lands, but must integrate against the
+   committed v2 contract before the slice closes.
+2. **Resolved geometry:** wire global/default inheritance, per-composition size/alignment/source/
+   content decisions into proposal, save, apply and assembly. This slice replaces every current
+   table capability except masks/folding and removes the visible clip picker.
+3. **Video masks:** implement preview pan/zoom plus per-movie scratch crop/export and insertion.
+4. **Magic Move compositions:** implement qualified sequence folding and the 108–110 simultaneous
+   output. This may develop beside slice 3 after the v2 media identity contract is fixed, but both
+   touch apply/manifest integration and merge serially there.
+5. **Hardening/live gate:** migration, capability/refusal UX, responsive/keyboard QA, full suites,
+   then a dashboard-driven Keynote run on a COPY of `Full_Report_Card_Wall.key` slides 108–110.
+
+Parallel ownership after the v2 contract is fixed: one agent owns `dashboard/**`; one owns the
+review planner + `web/app.py` API; one owns assembly/movie-export/mask/timing. Shared API contract or
+manifest changes are proposed in the plan first and integrated by the parent; agents must not make
+overlapping edits to those boundary files without coordination.
+
+#### Acceptance gates
+
+- Pure frontend tests: inherited defaults, reset, aspect math, snap selection, mask transforms,
+  stable sequence ordering and serialization. UI tests: rail selection, pixel readout, pointer +
+  keyboard resize/nudge, LW/FW colours, Full/Video capability, media selection, no reorder control,
+  no clip picker, and Generate flushing an in-flight edit.
+- Backend tests: v1 migration, strict v2 validation, explicit-transition chain detection, rejection
+  of ambiguous poster/media mapping, 108–110 aggregation, layout-slide choice, bounds checking and
+  decision round-trip.
+- The v1 adapter must preserve current output when the operator makes no edits: legacy `auto`
+  anchoring, measured-band geometry and any manual clip override continue through the v1 apply path;
+  a deliberate edit upgrades that composition. Reject unknown/duplicate composition or occurrence
+  ids, non-finite geometry, invalid enums and unsupported rotated/grouped masks before Keynote.
+- Export/assembly tests: exact output frame, all three anchors, independent per-video crops,
+  three clips on one slide, simultaneous timing, deterministic clip/manifest order and transactional
+  rollback. Every offline test continues to forbid a Keynote process.
+- FRC Wall slide 50 acceptance keeps its two media slots 100% overlapped in the preview and compiled
+  target geometry, permits independent mask selection, and preserves the existing source build
+  order/dissolve/delay instead of applying folded-sequence simultaneous timing.
+- Proposal/preview tests cover prepared poster + overlay layers from the same compiled geometry,
+  preview-vs-generated placement within 1 output pixel, source strokes without double borders,
+  masks surviving valid outer resize, LW/FW/content invalidation, and complete/partial/noncontiguous
+  selections. Review preview is explicitly poster-based; do not expose a fake Play control.
+- Save/API tests cover source-digest mismatch, stale revision 409, latest-state Generate, fresh
+  regeneration dropping stale composition metadata/clips, and preservation of the workspace picker
+  plus text-slide exclusion.
+- Run focused Python tests, `dashboard` decision/UI tests, dashboard typecheck/build, then the full
+  Python suite. The final live gate works from a safe copy, checks one output slide with three movie
+  objects and correct masks/timing, and never mutates the owner's source deck.
 
 ### Shipped path — DONE (detail in Git + evidence dirs)
 1–7. All FIXED + live-verified 2026-09-16 (r14–r16): propose quits its own preview Keynote (leaves

@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Whole-deck A/B gate for the offline geometry-WRITE opt-in (``w-offline-write-optin``)
-and the W2 z-order write (``w-zorder-patch`` piece 4).
+"""Whole-deck A/B gate for the offline geometry writer and its feature flips.
+
+``--gate-axis zorder`` preserves the W2 gate: both arms use the same geometry
+mode, A disables offline z-order, and B enables it.
+
+``--gate-axis text-mask`` is the rollout gate for the remaining default-off
+text and axis-aligned masked-crop paths. Both arms keep offline geometry and
+z-order on; A disables text/crops and B enables both. The feature axis records
+the complete arm environment so ambient experiments cannot contaminate it, and
+requires a digest- and preview-manifest-bound ``--visual-report`` before it can
+report GREEN. That external report carries the crop-region and per-label pixel
+oracles with an independent arm-A null export and displaced positive controls;
+geometry alone cannot prove a crop selected the right pixels.
 
 Runs :func:`obed_edom.remap_keynote.remap_and_inspect` TWICE against the same
-source/template pair:
+source/template pair. Under the default z-order axis:
 
     A = ``OBED_ZORDER_WRITE=off`` — no z-order write at all: pass 2 raises nothing,
         every raise-bearing slide is reported un-raised (``zorderGui``). A measures
@@ -126,7 +137,9 @@ must be completely free (no other open decks) before starting.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -137,17 +150,37 @@ from typing import Any, NamedTuple
 # `python scripts/x.py` puts scripts/ (not the repo root) on sys.path[0].
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-GATE_VERSION = 4
-# v2 dropped explicitly (W2 zorder-bridge Piece 2): a v3 record lacks `liveVerifySetPass`/
-# `liveVerifyCoverage` but is otherwise still a valid B run -- `summary_gate_reasons`
-# treats their absence as "not measured", never as a red; v2 predates fields this gate
-# no longer knows how to interpret and is refused outright.
-COMPATIBLE_GATE_VERSIONS = {3, 4}
+GATE_VERSION = 7
+# v7 also records the gate axis and slide scope. V6 binds independently exported
+# A/B/null preview manifests and requires measured live verification for the text-mask gate.
+# V3-V6 remain valid only for the legacy z-order
+# axis; `arm_config_reasons` refuses them on text-mask. A v3 record lacks
+# `liveVerifySetPass`/`liveVerifyCoverage`, which `summary_gate_reasons` treats as "not
+# measured", never as red. V2 predates required fields and stays refused.
+COMPATIBLE_GATE_VERSIONS = {3, 4, 5, 6, 7}
+
+GATE_AXIS_ZORDER = "zorder"
+GATE_AXIS_TEXT_MASK = "text-mask"
+GATE_AXES = (GATE_AXIS_ZORDER, GATE_AXIS_TEXT_MASK)
+
+_ARM_ENV_KEYS = (
+    "OBED_SUPPRESS_GEOMETRY",
+    "OBED_AS_GEOMETRY",
+    "OBED_GEOM_PROPS",
+    "OBED_OFFLINE_READ",
+    "OBED_BULK_READ",
+    "OBED_DEBUG_PASS1_SNAPSHOT",
+    "OBED_OFFLINE_WRITE",
+    "OBED_ZORDER_WRITE",
+    "OBED_OFFLINE_TEXT",
+    "OBED_OFFLINE_MASKCROP",
+)
 
 TOL_HARD = 0.5
 TOL_SOFT = 1.0
 TOL_MASK = 2.0
 TOL_TEXT = 2.0
+TOL_TEXT_TRANSLATION = 8.0
 TOL_CHILD = 2.0
 TOL_ASPECT = 0.25
 
@@ -181,6 +214,259 @@ class Tolerances(NamedTuple):
     mask: float = TOL_MASK
     text: float = TOL_TEXT
     child: float = TOL_CHILD
+
+
+def gate_arm_configs(axis: str, mode: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Return the complete, ambient-independent environment for both gate arms."""
+    if axis not in GATE_AXES:
+        raise ValueError(f"unknown gate axis {axis!r}")
+    if mode not in {"on", "verify"}:
+        raise ValueError(f"unknown offline-write mode {mode!r}")
+
+    base = {
+        "OBED_SUPPRESS_GEOMETRY": "",
+        "OBED_AS_GEOMETRY": "1",
+        "OBED_GEOM_PROPS": "1",
+        "OBED_OFFLINE_READ": "on",
+        "OBED_BULK_READ": "on",
+        "OBED_DEBUG_PASS1_SNAPSHOT": "",
+        "OBED_OFFLINE_WRITE": mode,
+    }
+    if axis == GATE_AXIS_ZORDER:
+        return (
+            {**base, "OBED_ZORDER_WRITE": "off", "OBED_OFFLINE_TEXT": "off",
+             "OBED_OFFLINE_MASKCROP": "off"},
+            {**base, "OBED_ZORDER_WRITE": "on", "OBED_OFFLINE_TEXT": "off",
+             "OBED_OFFLINE_MASKCROP": "off"},
+        )
+    return (
+        {**base, "OBED_ZORDER_WRITE": "on", "OBED_OFFLINE_TEXT": "off",
+         "OBED_OFFLINE_MASKCROP": "off"},
+        {**base, "OBED_ZORDER_WRITE": "on", "OBED_OFFLINE_TEXT": "on",
+         "OBED_OFFLINE_MASKCROP": "on"},
+    )
+
+
+def apply_arm_env(config: dict[str, str]) -> dict[str, str | None]:
+    """Apply one complete gate arm and return the ambient environment snapshot."""
+    from scripts.write_gate_ab import _remap_env  # noqa: PLC0415
+
+    previous = {key: os.environ.get(key) for key in _ARM_ENV_KEYS}
+    clear_arm_env()
+    _remap_env(
+        suppress="", as_geometry="1", geom_props="1",
+        offline_write=config["OBED_OFFLINE_WRITE"],
+    )
+    for key, value in config.items():
+        os.environ[key] = value
+    return previous
+
+
+def clear_arm_env(previous: dict[str, str | None] | None = None) -> None:
+    for key in _ARM_ENV_KEYS:
+        old = (previous or {}).get(key)
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
+
+
+def arm_config_reasons(
+    record: dict[str, Any], expected: dict[str, str], *, allow_legacy: bool,
+) -> list[str]:
+    if not allow_legacy and record.get("gateVersion") != GATE_VERSION:
+        return [
+            f"run record gateVersion {record.get('gateVersion')!r} != {GATE_VERSION}"
+        ]
+    actual = record.get("armConfig")
+    if actual is None:
+        return [] if allow_legacy else ["run record has no armConfig provenance"]
+    return [] if actual == expected else [f"run record armConfig {actual} != expected {expected}"]
+
+
+def feature_scope_reasons(record: dict[str, Any]) -> list[str]:
+    """Text/mask evidence must be from this axis and the whole deck."""
+    reasons: list[str] = []
+    if record.get("gateAxis") != GATE_AXIS_TEXT_MASK:
+        reasons.append(
+            f"run record gateAxis {record.get('gateAxis')!r} != {GATE_AXIS_TEXT_MASK!r}"
+        )
+    if record.get("slideScope") is not None:
+        reasons.append(f"run record slideScope is partial: {record.get('slideScope')!r}")
+    return reasons
+
+
+def preview_manifest(folder: Path) -> dict[str, Any]:
+    """Stable content manifest for one Keynote PNG export directory."""
+    paths = sorted(folder.glob("*.png"), key=lambda path: path.name)
+    if not paths:
+        raise ValueError(f"no PNG previews in {folder}")
+    digest = hashlib.sha256()
+    for path in paths:
+        name = path.name.encode("utf-8")
+        payload = path.read_bytes()
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return {"count": len(paths), "sha256": digest.hexdigest()}
+
+
+def visual_oracle_reasons(
+    report: dict[str, Any] | None, *, arm_a_digest: str, arm_b_digest: str,
+    arm_a_previews: dict[str, Any] | None,
+    arm_b_previews: dict[str, Any] | None,
+    null_a_previews: dict[str, Any] | None,
+    crop_tolerance: float = TOL_MASK,
+    text_translation_tolerance: float = TOL_TEXT_TRANSLATION,
+) -> list[str]:
+    """Validate the external pixel/text oracle bound to the exact two output decks."""
+    if report is None:
+        return ["text-mask gate has no visual oracle report"]
+    if not isinstance(report, dict):
+        return ["visual oracle report is not a JSON object"]
+    reasons: list[str] = []
+    if report.get("version") != 3:
+        reasons.append(f"visual oracle version {report.get('version')!r} != 3")
+    from obed_edom.baseline import deck_digest  # noqa: PLC0415
+
+    oracle_path = Path(__file__).with_name("text_mask_visual_oracle.py")
+    if report.get("oracleDigest") != deck_digest(oracle_path):
+        reasons.append("visual oracle code digest does not match the current oracle")
+    if report.get("armADigest") != arm_a_digest:
+        reasons.append("visual oracle arm A digest does not match the compared deck")
+    if report.get("armBDigest") != arm_b_digest:
+        reasons.append("visual oracle arm B digest does not match the compared deck")
+    for label, report_key, expected in (
+        ("arm A", "armAPreviews", arm_a_previews),
+        ("arm B", "armBPreviews", arm_b_previews),
+        ("arm A null", "nullAPreviews", null_a_previews),
+    ):
+        if expected is None:
+            reasons.append(f"run record has no {label} preview manifest")
+        elif report.get(report_key) != expected:
+            reasons.append(f"visual oracle {label} preview manifest does not match the run record")
+    for key, count_key in (("crop", "regions"), ("text", "labels")):
+        section = report.get(key)
+        if not isinstance(section, dict):
+            reasons.append(f"visual oracle has no {key} section")
+            continue
+        rows = section.get("rows")
+        if not isinstance(rows, list):
+            reasons.append(f"visual oracle {key} has no result rows")
+            rows = []
+        raw_count = section.get(count_key)
+        count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) else 0
+        if count <= 0:
+            reasons.append(f"visual oracle {key} compared no {count_key}")
+        if count != len(rows):
+            reasons.append(
+                f"visual oracle {key} {count_key}={count} but carries {len(rows)} result rows"
+            )
+        if key == "text" and section.get("translationTolerancePx") != text_translation_tolerance:
+            reasons.append(
+                "visual oracle text translation tolerance "
+                f"{section.get('translationTolerancePx')!r} != {text_translation_tolerance}"
+            )
+        malformed_rows = [
+            row for row in rows
+            if not isinstance(row, dict)
+            or not isinstance(row.get("slide"), int)
+            or row.get("slide", 0) <= 0
+            or not isinstance(row.get("id"), str)
+            or not row.get("id")
+            or any(
+                not isinstance(row.get(field), (int, float))
+                or isinstance(row.get(field), bool)
+                or not math.isfinite(float(row[field]))
+                or float(row[field]) < 0.0
+                for field in ("actualRatio", "nullRatio", "positiveRatio")
+            )
+            or (
+                key == "text"
+                and (
+                    not isinstance(row.get("translationPx"), (int, float))
+                    or isinstance(row.get("translationPx"), bool)
+                    or not math.isfinite(float(row["translationPx"]))
+                    or float(row["translationPx"]) < 0.0
+                )
+            )
+        ]
+        if malformed_rows:
+            reasons.append(
+                f"visual oracle {key} has {len(malformed_rows)} malformed evidence row(s)"
+            )
+            continue
+        coverage = [(row["slide"], row["id"]) for row in rows]
+        if len(set(coverage)) != len(coverage):
+            reasons.append(f"visual oracle {key} has duplicate slide/id coverage rows")
+        row_passes = []
+        null_passes = []
+        positive_passes = []
+        for row in rows:
+            visually_inert = (
+                row.get("visuallyInert") is True
+                and isinstance(row.get("visualSpan"), (int, float))
+                and not isinstance(row.get("visualSpan"), bool)
+                and math.isfinite(float(row["visualSpan"]))
+                and float(row["visualSpan"]) == 0.0
+                and float(row["actualRatio"]) == 0.0
+                and float(row["nullRatio"]) == 0.0
+                and float(row["positiveRatio"]) == 0.0
+            )
+            controlled_pass = (
+                float(row["positiveRatio"]) > 0.0
+                and float(row["actualRatio"]) < float(row["positiveRatio"])
+                and float(row["nullRatio"]) < float(row["positiveRatio"])
+            )
+            expected_pass = controlled_pass or visually_inert
+            if key == "text":
+                expected_pass = (
+                    expected_pass
+                    and float(row["translationPx"]) <= text_translation_tolerance
+                )
+            if key == "crop":
+                delta = row.get("cropDeltaPx")
+                expected_pass = (
+                    expected_pass
+                    and isinstance(delta, (int, float))
+                    and not isinstance(delta, bool)
+                    and math.isfinite(float(delta))
+                    and float(delta) <= crop_tolerance
+                )
+            row_passes.append(expected_pass)
+            null_passes.append(
+                visually_inert
+                or float(row["nullRatio"]) < float(row["positiveRatio"])
+            )
+            positive_passes.append(
+                visually_inert or float(row["positiveRatio"]) > 0.0
+            )
+            if row.get("pass") is not expected_pass:
+                reasons.append(
+                    f"visual oracle {key} row {row['slide']}/{row['id']} asserted pass="
+                    f"{row.get('pass')!r}, recomputed {expected_pass}"
+                )
+        expected_section_pass = bool(rows) and all(row_passes)
+        expected_null = bool(rows) and all(null_passes)
+        expected_positive = bool(rows) and all(positive_passes)
+        if section.get("pass") is not expected_section_pass or not expected_section_pass:
+            reasons.append(f"visual oracle {key} verdict is not a recomputed PASS")
+        if section.get("nullControl") is not expected_null or not expected_null:
+            reasons.append(f"visual oracle {key} null control did not pass")
+        if section.get("positiveControl") is not expected_positive or not expected_positive:
+            reasons.append(f"visual oracle {key} positive control did not pass")
+    return reasons
+
+
+def visual_authority_ids(report: dict[str, Any], slide: int) -> set[tuple[str, str]]:
+    """Signature classes and ids explicitly covered by passing visual rows on one slide."""
+    out: set[tuple[str, str]] = set()
+    for section_name, signature_type in (("text", "autosize"), ("crop", "masked")):
+        for row in (report.get(section_name) or {}).get("rows") or []:
+            if row.get("pass") is True and row.get("slide") == slide:
+                out.add((signature_type, row["id"]))
+    return out
 
 
 def _log(msg: str) -> None:
@@ -744,7 +1030,8 @@ def _duplicate_composite_ids(units: list[dict[str, Any]]) -> list[str]:
 
 
 def compare_units_identity(
-    a_units: list[dict[str, Any]], b_units: list[dict[str, Any]], tols: Tolerances
+    a_units: list[dict[str, Any]], b_units: list[dict[str, Any]], tols: Tolerances,
+    *, visual_authority: set[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """PRIMARY A/B gate (D1): match every unit by drawable IDENTITY, composite
     ``(id, kind)`` (:func:`_composite_id` — see the ``duplicateOf`` twin note),
@@ -769,6 +1056,13 @@ def compare_units_identity(
     fallback), no unmatched unit on either side, and every bucket within tolerance.
     Group order is never compared (D9) -- matching is by id, so a reordered group is
     still found and compared as itself.
+
+    ``visual_authority`` is used only after the text/mask gate's digest-bound pixel
+    report passes. It delegates autosize x (an archive anchor, not a rendered frame)
+    and masked ``raw_size`` (crop visibility) to that report. Type, flips, mask angle,
+    and the composed crop frame remain hard geometry checks here. Authority is granted
+    per ``(signature type, drawable id)`` so an incomplete report cannot waive an
+    unmeasured unit.
 
     Returns ``{"pass": bool, "id_rate": float, "per_bucket": {bucket: {n, worst, pass,
     fails}}, "unmatched_a": [...], "unmatched_b": [...], "carved": [id, ...]}``.
@@ -810,9 +1104,46 @@ def compare_units_identity(
     per_bucket: dict[str, dict[str, Any]] = {}
     for ua, ub, _how in pairs:
         bucket = unit_bucket(ua)
-        entry = per_bucket.setdefault(bucket, {"n": 0, "worst": 0.0, "pass": True, "fails": []})
+        entry = per_bucket.setdefault(
+            bucket,
+            {
+                "n": 0,
+                "worst": 0.0,
+                "pass": True,
+                "fails": [],
+                "visualDelegated": 0,
+                "visualDelegatedRawWorst": 0.0,
+            },
+        )
         tol = tol_for_bucket(bucket, ua["sig"].get("type"), tols)
-        ok, worst, reasons = compare_signature(ua["sig"], ub["sig"], tol)
+        a_sig, b_sig = ua["sig"], ub["sig"]
+        covered = (a_sig.get("type"), ua["id"]) in (visual_authority or set())
+        if covered and a_sig.get("type") == b_sig.get("type") == "autosize":
+            ok = a_sig.get("flips") == b_sig.get("flips")
+            worst = abs(float(a_sig["x"]) - float(b_sig["x"]))
+            reasons = [] if ok else [f"flips {a_sig.get('flips')} != {b_sig.get('flips')}"]
+            entry["visualDelegated"] += 1
+        elif covered and a_sig.get("type") == b_sig.get("type") == "masked":
+            crop_delta = max(abs(x - y) for x, y in zip(a_sig["crop"], b_sig["crop"]))
+            raw_size_delta = max(
+                abs(x - y) for x, y in zip(a_sig["raw_size"], b_sig["raw_size"])
+            )
+            reasons = []
+            if a_sig.get("flips") != b_sig.get("flips"):
+                reasons.append(f"flips {a_sig.get('flips')} != {b_sig.get('flips')}")
+            if a_sig.get("mask_angle") != b_sig.get("mask_angle"):
+                reasons.append(
+                    f"mask angle {a_sig.get('mask_angle')} != {b_sig.get('mask_angle')}"
+                )
+            if crop_delta > tol:
+                reasons.append(f"Δ{crop_delta:.2f}px > {tol}px")
+            ok, worst = not reasons, crop_delta
+            entry["visualDelegated"] += 1
+            entry["visualDelegatedRawWorst"] = max(
+                entry["visualDelegatedRawWorst"], raw_size_delta
+            )
+        else:
+            ok, worst, reasons = compare_signature(a_sig, b_sig, tol)
         entry["n"] += 1
         entry["worst"] = max(entry["worst"], worst)
         if not ok:
@@ -821,7 +1152,17 @@ def compare_units_identity(
                                    "reasons": reasons})
     for u in (*unmatched_a, *unmatched_b):
         bucket = unit_bucket(u)
-        entry = per_bucket.setdefault(bucket, {"n": 0, "worst": 0.0, "pass": True, "fails": []})
+        entry = per_bucket.setdefault(
+            bucket,
+            {
+                "n": 0,
+                "worst": 0.0,
+                "pass": True,
+                "fails": [],
+                "visualDelegated": 0,
+                "visualDelegatedRawWorst": 0.0,
+            },
+        )
         entry["pass"] = False
         entry["fails"].append({"id": u["id"], "addr": u["addr"], "worst": float("inf"),
                                "reasons": ["unmatched"]})
@@ -841,7 +1182,17 @@ def _log_identity_report(report: dict[str, Any]) -> None:
     )
     for bucket, entry in sorted(report["per_bucket"].items()):
         tag = "PASS" if entry["pass"] else "FAIL"
-        _log(f"      {bucket:14} n={entry['n']:<4} worst={entry['worst']:.2f}px  {tag}")
+        delegated = (
+            f" visual={entry['visualDelegated']}" if entry.get("visualDelegated") else ""
+        )
+        raw_delegated = (
+            f" raw-waived={entry['visualDelegatedRawWorst']:.2f}px"
+            if entry.get("visualDelegatedRawWorst") else ""
+        )
+        _log(
+            f"      {bucket:14} n={entry['n']:<4} worst={entry['worst']:.2f}px  "
+            f"{tag}{delegated}{raw_delegated}"
+        )
         for f in entry["fails"][:8]:
             _log(f"        {f['addr']} worst={f['worst']:.2f} {f['reasons']}")
         if len(entry["fails"]) > 8:
@@ -1083,6 +1434,23 @@ def summary_gate_reasons(ow: dict[str, Any], applied_a: int, applied_b: int) -> 
     return reasons
 
 
+def required_live_verify_reasons(ow: dict[str, Any], *, label: str) -> list[str]:
+    """Text/mask rollout requires measured, passing Keynote-backed live verification."""
+    reasons: list[str] = []
+    for key in ("offlineVerifyPass", "liveVerifyPass", "liveVerifySetPass"):
+        if ow.get(key) is not True:
+            reasons.append(f"{label} {key} was not measured PASS")
+    coverage = ow.get("liveVerifyCoverage")
+    if not isinstance(coverage, dict):
+        reasons.append(f"{label} liveVerifyCoverage is missing")
+    elif coverage.get("uncovered") != []:
+        reasons.append(
+            f"{label} liveVerifyCoverage.uncovered is not empty: "
+            f"{coverage.get('uncovered')!r}"
+        )
+    return reasons
+
+
 # ==========================================================================
 # Run records (D13) — persist + reload a run Keynote-free.
 # ==========================================================================
@@ -1098,6 +1466,11 @@ def run_record(
     spec_id_map: dict[str, list[dict[str, Any]]],
     zorder_write: dict[str, Any] | None = None,
     previews: dict[str, Any] | None = None,
+    arm_config: dict[str, str] | None = None,
+    exported_previews: dict[str, Any] | None = None,
+    null_previews: dict[str, Any] | None = None,
+    gate_axis: str | None = None,
+    slide_scope: list[int] | None = None,
 ) -> dict[str, Any]:
     """Everything a later ``--reuse-a``/``--reuse-b`` needs, with no Keynote (D13).
 
@@ -1114,6 +1487,12 @@ def run_record(
     ``previews`` is the planner's preview-cache provenance (``info["previews"]`` from
     ``remap_and_inspect``: ``{"source": <dir or None>, "placements": n}``) — a record
     written before this field existed has no ``"previews"`` key.
+    ``armConfig`` is the complete environment used for this arm. The text-mask gate
+    requires it; the legacy z-order gate may reuse older records that predate it.
+    ``exportedPreviews`` binds the arm's PNG export to its record; arm A also carries
+    ``nullPreviews`` for the independent repeat export used as the visual null control.
+    ``gateAxis`` and ``slideScope`` prevent a compatible partial or differently configured
+    gate record from being reused as whole-deck text/mask evidence.
 
     Raises ``ValueError`` if ``plan`` has NEITHER key: that means ``plan`` is already a
     trimmed, PERSISTED plan (a loaded run record's ``plan``, not a fresh ``plan_out``) —
@@ -1148,6 +1527,13 @@ def run_record(
         "zorderWrite": dict(zorder_write or {}),
         "specIdMap": spec_id_map,
         "previews": dict(previews) if previews is not None else None,
+        "armConfig": dict(arm_config) if arm_config is not None else None,
+        "exportedPreviews": (
+            dict(exported_previews) if exported_previews is not None else None
+        ),
+        "nullPreviews": dict(null_previews) if null_previews is not None else None,
+        "gateAxis": gate_axis,
+        "slideScope": list(slide_scope) if slide_scope is not None else None,
     }
 
 
@@ -1657,15 +2043,7 @@ def main(argv: list[str] | None = None) -> int:
     from obed_edom.baseline import deck_digest  # noqa: PLC0415
     from obed_edom.map_remap import slides_for_plan  # noqa: PLC0415
     from obed_edom.remap_keynote import remap_and_inspect  # noqa: PLC0415
-    from scripts.write_gate_ab import _remap_env, slide_units  # noqa: PLC0415
-
-    def _write_arm_env(*, offline_write: str, zorder_write: str) -> None:
-        _remap_env(suppress="", as_geometry="1", geom_props="1", offline_write=offline_write)
-        os.environ["OBED_ZORDER_WRITE"] = zorder_write
-
-    def _clear_write_env() -> None:
-        os.environ.pop("OBED_OFFLINE_WRITE", None)
-        os.environ.pop("OBED_ZORDER_WRITE", None)
+    from scripts.write_gate_ab import slide_units  # noqa: PLC0415
 
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1679,8 +2057,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--slides", help="slides to remap, e.g. 47 or 47,82,110-113 (default: whole deck)")
     ap.add_argument(
         "--mode", choices=("verify", "on"), default="verify",
-        help="both arms' OBED_OFFLINE_WRITE (default verify: patch + live verify); "
-             "A/B then differ only on OBED_ZORDER_WRITE off vs on",
+        help="both arms' OBED_OFFLINE_WRITE (default verify: patch + live verify)",
+    )
+    ap.add_argument(
+        "--gate-axis", choices=GATE_AXES, default=GATE_AXIS_ZORDER,
+        help="zorder (default): A off/B on; text-mask: z-order on in both arms, "
+             "A text+crop off/B on",
+    )
+    ap.add_argument(
+        "--visual-report", type=Path,
+        help="text-mask only: JSON pixel/text oracle report bound to the exact A/B deck digests",
+    )
+    ap.add_argument(
+        "--export-previews", action="store_true",
+        help="export slide PNGs under OUT/previews/A and OUT/previews/B for the visual oracle",
     )
     ap.add_argument("--reuse-a", type=Path,
                     help="banked A .key (with its <deck>.run.json) — SKIP running A")
@@ -1694,7 +2084,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--validate", dest="validate", action="store_true", default=True,
                     help="live-verify readback after each run (default on)")
     ap.add_argument("--no-validate", dest="validate", action="store_false",
-                    help="skip the live-verify readback (required for the Full deck)")
+                    help="skip live readback (text-mask runs remain RED until banked records "
+                         "carry an independent Keynote-backed live verification)")
     ap.add_argument("--tol-hard", type=float, default=TOL_HARD,
                     help=f"shape px tolerance vs the PLAN (oracle, per side; line is "
                          f"skipped by the oracle); identity (A-vs-B) gates "
@@ -1722,6 +2113,16 @@ def main(argv: list[str] | None = None) -> int:
              "after closing a large deck)",
     )
     args = ap.parse_args(argv)
+
+    if args.gate_axis == GATE_AXIS_TEXT_MASK and args.control_a is not None:
+        ap.error("--control-a is only meaningful for --gate-axis zorder")
+    if args.gate_axis == GATE_AXIS_TEXT_MASK and args.mode != "verify":
+        ap.error("--gate-axis text-mask requires --mode verify")
+    if args.gate_axis == GATE_AXIS_TEXT_MASK and args.slides is not None:
+        ap.error("--gate-axis text-mask is a whole-deck gate and refuses --slides")
+    if args.gate_axis == GATE_AXIS_ZORDER and args.visual_report is not None:
+        ap.error("--visual-report is only meaningful for --gate-axis text-mask")
+    config_a, config_b = gate_arm_configs(args.gate_axis, args.mode)
 
     for label, deck in (("source", args.source), ("template", args.template)):
         if not deck.exists():
@@ -1776,32 +2177,58 @@ def main(argv: list[str] | None = None) -> int:
         applied_a = int(a_record["applied"] or 0)
         id_map = a_record["specIdMap"]
         zorder_write_a = a_record.get("zorderWrite") or {}
+        ow_a = a_record.get("offlineWrite") or {}
+        config_reasons_a = arm_config_reasons(
+            a_record, config_a, allow_legacy=args.gate_axis == GATE_AXIS_ZORDER,
+        )
+        if args.gate_axis == GATE_AXIS_TEXT_MASK:
+            config_reasons_a.extend(feature_scope_reasons(a_record))
+        if config_reasons_a:
+            _log(f"ABORT: REUSE A configuration mismatch: {'; '.join(config_reasons_a)}")
+            return 2
         _log(f"REUSE A: {a_deck} (run record OK).")
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
     else:
-        _log(f"A: {args.source.name} OBED_OFFLINE_WRITE={args.mode} "
-             f"OBED_ZORDER_WRITE=off -> {a_deck}")
-        _write_arm_env(offline_write=args.mode, zorder_write="off")
+        _log(f"A ({args.gate_axis}): {args.source.name} {config_a} -> {a_deck}")
+        previous_env = apply_arm_env(config_a)
         plan_a: dict[str, Any] = {}
+        export_a = out / "previews" / "A" if args.export_previews else None
         try:
             info_a = remap_and_inspect(
                 args.source, a_deck, template=args.template, slide_range=slide_range,
-                export_dir=None, plan_out=plan_a, log=_log, validate=args.validate,
+                export_dir=export_a, plan_out=plan_a, log=_log, validate=args.validate,
             )
         finally:
-            _clear_write_env()
+            clear_arm_env(previous_env)
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
         child_resize_a = info_a.get("childResize")
         applied_a = int(info_a.get("applied") or 0)
         id_map = spec_id_map(args.source)
         zorder_write_a = info_a.get("zorderWrite") or {}
+        ow_a = info_a.get("offlineWrite") or {}
+        exported_previews_a = preview_manifest(export_a) if export_a is not None else None
+        null_previews_a = None
+        if args.gate_axis == GATE_AXIS_TEXT_MASK and export_a is not None:
+            from obed_edom.inspect import export_slide_images  # noqa: PLC0415
+
+            null_a = out / "previews" / "A-null"
+            error = export_slide_images(a_deck, null_a, expected=exported_previews_a["count"])
+            if error:
+                _log(f"ABORT: independent arm-A null export failed: {error}")
+                return 2
+            null_previews_a = preview_manifest(null_a)
         a_record = run_record(
             commit=commit, deck_digest=deck_digest(a_deck), source_digest=deck_digest(args.source),
             plan=plan_a, child_resize=child_resize_a, applied=applied_a,
-            missed=int(info_a.get("missed") or 0), offline_write=info_a.get("offlineWrite"),
+            missed=int(info_a.get("missed") or 0), offline_write=ow_a,
             spec_id_map=id_map, zorder_write=zorder_write_a, previews=info_a.get("previews"),
+            arm_config=config_a,
+            exported_previews=exported_previews_a,
+            null_previews=null_previews_a,
+            gate_axis=args.gate_axis,
+            slide_scope=sorted(slide_range) if slide_range is not None else None,
         )
         write_run_record(_run_record_path(a_deck), a_record)
         _log(f"Run record written -> {_run_record_path(a_deck)}")
@@ -1861,31 +2288,45 @@ def main(argv: list[str] | None = None) -> int:
         applied_b = int(b_record["applied"] or 0)
         ow_b = b_record["offlineWrite"] or {}
         zorder_write_b = b_record.get("zorderWrite") or {}
+        config_reasons_b = arm_config_reasons(
+            b_record, config_b, allow_legacy=args.gate_axis == GATE_AXIS_ZORDER,
+        )
+        if args.gate_axis == GATE_AXIS_TEXT_MASK:
+            config_reasons_b.extend(feature_scope_reasons(b_record))
+        if config_reasons_b:
+            _log(f"ABORT: REUSE B configuration mismatch: {'; '.join(config_reasons_b)}")
+            return 2
         _log(f"REUSE B: {b_deck} (run record OK).")
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
     else:
-        _log(f"B: same plan, OBED_OFFLINE_WRITE={args.mode} OBED_ZORDER_WRITE=on -> {b_deck}")
-        _write_arm_env(offline_write=args.mode, zorder_write="on")
+        _log(f"B ({args.gate_axis}): same plan, {config_b} -> {b_deck}")
+        previous_env = apply_arm_env(config_b)
         plan_b: dict[str, Any] = {}
+        export_b = out / "previews" / "B" if args.export_previews else None
         try:
             info_b = remap_and_inspect(
                 args.source, b_deck, template=args.template, slide_range=slide_range,
-                export_dir=None, plan_out=plan_b, log=_log, validate=args.validate,
+                export_dir=export_b, plan_out=plan_b, log=_log, validate=args.validate,
             )
         finally:
-            _clear_write_env()
+            clear_arm_env(previous_env)
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
         child_resize_b = info_b.get("childResize")
         applied_b = int(info_b.get("applied") or 0)
         ow_b = info_b.get("offlineWrite") or {}
         zorder_write_b = info_b.get("zorderWrite") or {}
+        exported_previews_b = preview_manifest(export_b) if export_b is not None else None
         b_record = run_record(
             commit=commit, deck_digest=deck_digest(b_deck), source_digest=deck_digest(args.source),
             plan=plan_b, child_resize=child_resize_b, applied=applied_b,
             missed=int(info_b.get("missed") or 0), offline_write=ow_b, spec_id_map=id_map,
             zorder_write=zorder_write_b, previews=info_b.get("previews"),
+            arm_config=config_b,
+            exported_previews=exported_previews_b,
+            gate_axis=args.gate_axis,
+            slide_scope=sorted(slide_range) if slide_range is not None else None,
         )
         write_run_record(_run_record_path(b_deck), b_record)
         _log(f"Run record written -> {_run_record_path(b_deck)}")
@@ -1961,9 +2402,21 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"WARN B: missedSpecs={ow_missed} fully covered by the AppleScript fallback "
              f"(fallbackSpecs={ow_fallback}, unwritable=0; does not gate).")
 
+    summary_reasons_a = (
+        summary_gate_reasons(ow_a, applied_a, applied_a)
+        if args.gate_axis == GATE_AXIS_TEXT_MASK else []
+    )
+    for r in summary_reasons_a:
+        _log(f"RED A: {r}")
     summary_reasons = summary_gate_reasons(ow_b, applied_a, applied_b)
     for r in summary_reasons:
         _log(f"RED: {r}")
+    live_verify_reasons: list[str] = []
+    if args.gate_axis == GATE_AXIS_TEXT_MASK:
+        live_verify_reasons.extend(required_live_verify_reasons(ow_a, label="A"))
+        live_verify_reasons.extend(required_live_verify_reasons(ow_b, label="B"))
+        for reason in live_verify_reasons:
+            _log(f"RED LIVE: {reason}")
 
     try:
         raise_jobs = persisted_raise_jobs(plan_a, a_record)
@@ -1976,6 +2429,15 @@ def main(argv: list[str] | None = None) -> int:
         stat_jobs_a, badge_rows_a = raise_jobs
     raise_slides = raise_slides_from_jobs(stat_jobs_a, badge_rows_a)
 
+    zorder_reasons_a = (
+        zorder_write_reasons(
+            zorder_write_a, raise_slides,
+            compared_slides=compared_slides, refused=ow_a.get("refused"),
+        )
+        if args.gate_axis == GATE_AXIS_TEXT_MASK else []
+    )
+    for r in zorder_reasons_a:
+        _log(f"RED A: {r}")
     zorder_reasons = zorder_write_reasons(
         zorder_write_b, raise_slides,
         compared_slides=compared_slides, refused=ow_b.get("refused"),
@@ -1985,8 +2447,29 @@ def main(argv: list[str] | None = None) -> int:
     _log(f"A {zorder_counter_summary(zorder_write_a)}")
     _log(f"B {zorder_counter_summary(zorder_write_b)}")
 
+    visual_reasons: list[str] = []
+    visual_report: dict[str, Any] | None = None
+    if args.gate_axis == GATE_AXIS_TEXT_MASK:
+        if args.visual_report is not None:
+            try:
+                visual_report = json.loads(args.visual_report.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                visual_reasons.append(f"cannot read visual oracle report: {exc}")
+        visual_reasons.extend(visual_oracle_reasons(
+            visual_report,
+            arm_a_digest=a_record["deckDigest"], arm_b_digest=b_record["deckDigest"],
+            arm_a_previews=a_record.get("exportedPreviews"),
+            arm_b_previews=b_record.get("exportedPreviews"),
+            null_a_previews=a_record.get("nullPreviews"),
+            crop_tolerance=tols.mask,
+        ))
+        for r in visual_reasons:
+            _log(f"RED VISUAL: {r}")
+
     gate_ok = not (
-        reasons_b or drift or parity or summary_reasons or damage_b or zorder_reasons
+        reasons_b or drift or parity or summary_reasons_a or summary_reasons
+        or damage_b or zorder_reasons_a or zorder_reasons or visual_reasons
+        or live_verify_reasons
     )
 
     # ============================ per-slide compare =================================
@@ -2050,7 +2533,19 @@ def main(argv: list[str] | None = None) -> int:
 
         identity = None
         try:
-            identity = compare_units_identity(a_units, b_units, tols)
+            authority = (
+                visual_authority_ids(visual_report, n)
+                if visual_report is not None
+                and args.gate_axis == GATE_AXIS_TEXT_MASK
+                and not visual_reasons
+                else None
+            )
+            identity = compare_units_identity(
+                a_units,
+                b_units,
+                tols,
+                visual_authority=authority,
+            )
         except ValueError as exc:
             _log(f"RED: slide {n}: {exc}")
             gate_ok = False
@@ -2085,13 +2580,23 @@ def main(argv: list[str] | None = None) -> int:
         front_tag = "n/a"
         if eligible:
             zorder_front_n += 1
-            if targets_n and verdict["frontBlockOk"]:
+            a_front_ok = front_block_ok(a_z or [], targets_n)
+            b_front_ok = verdict["frontBlockOk"]
+            front_ok = (
+                targets_n and b_front_ok
+                and (a_front_ok if args.gate_axis == GATE_AXIS_TEXT_MASK else True)
+            )
+            if front_ok:
                 zorder_front_ok += 1
                 front_tag = "yes"
             else:
                 front_tag = "no"
                 gate_ok = False
-                _log(f"RED: slide {n}: FRONT_BLOCK_OK=no")
+                detail = (
+                    f"A={'yes' if a_front_ok else 'no'} B={'yes' if b_front_ok else 'no'}"
+                    if args.gate_axis == GATE_AXIS_TEXT_MASK else "B=no"
+                )
+                _log(f"RED: slide {n}: FRONT_BLOCK_OK=no ({detail})")
         ctrl_tag = "n/a"
         if control_z_by_slide is not None:
             zorder_ctrl_n += 1
@@ -2126,7 +2631,8 @@ def main(argv: list[str] | None = None) -> int:
         f"SAME_ORDER(A-vs-B) {zorder_same_ok}/{zorder_same_n} observational "
         f"{ctrl_bar}"
     )
-    _log("OFFLINE-WRITE GATE: GREEN" if gate_ok else "OFFLINE-WRITE GATE: RED (see above)")
+    gate_name = "OFFLINE TEXT+MASK GATE" if args.gate_axis == GATE_AXIS_TEXT_MASK else "OFFLINE-WRITE GATE"
+    _log(f"{gate_name}: GREEN" if gate_ok else f"{gate_name}: RED (see above)")
     return 0 if gate_ok else 1
 
 

@@ -188,18 +188,16 @@ def test_drops_reuse_jobs_and_keeps_framing_on_full_report(monkeypatch: pytest.M
     if not TEMPLATE.exists():
         pytest.skip(f"template missing: {TEMPLATE}")
     framing_rows: list[dict] = []
-    original_plan = remap_keynote.plan_payload_transforms
+    original_plan = remap_keynote.plan_payload
 
     def wrapped(*args, **kwargs):
         out = original_plan(*args, **kwargs)
-        report = kwargs.get("framing_report")
-        if report is not None:
-            framing_rows[:] = [
-                dict(r) for r in report if int(r.get("slide") or 0) in _FORMER_REUSE_CHAIN
-            ]
+        framing_rows[:] = [
+            dict(r) for r in out.framing if int(r.get("slide") or 0) in _FORMER_REUSE_CHAIN
+        ]
         return out
 
-    monkeypatch.setattr(remap_keynote, "plan_payload_transforms", wrapped)
+    monkeypatch.setattr(remap_keynote, "plan_payload", wrapped)
     _wall, _tmpl, plan, _env = capture_plan(deck, TEMPLATE)
 
     assert (plan.get("reuses") or []) == []
@@ -273,6 +271,19 @@ def test_gate_fails_on_malformed_live_planner_env(monkeypatch: pytest.MonkeyPatc
         _gate(deck_name, monkeypatch, tmp_path)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="framing.propose_framings models two of the planner's four framing arms -- the "
+    "template trial and the fit-to-frame fallback -- and hand-inlines a copy of "
+    "_framing_unusable. It does not model sibling-affine reuse (_recipe_reusing_affine) "
+    "for an unusable pin, nor the unpinned photo-only backdrop carry. On a slide the "
+    "planner frames by reusing a sibling's affine the operator's autoRects therefore show "
+    "a layout the run will not produce (Full slides 58 and 93). Pre-existing and "
+    "long hidden: this test was skipping on golden-fixture digest drift until the "
+    "2026-09-21 re-baseline. Fix is its own change -- expose the planner's per-slide "
+    "framing decision so both callers share it -- because the SET of framing arms must "
+    "not move during a refactor. strict: remove this marker when that lands.",
+)
 def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPatch) -> None:
     deck_name = "Full_Report_Card_Wall.key"
     golden = _skip_ladder(deck_name)

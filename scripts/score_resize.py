@@ -23,7 +23,7 @@ from obed_edom.map_remap import (
     DEFAULT_CARD_STROKE,
     align_by_geometry,
     learn_recipe,
-    plan_payload_transforms,
+    plan_payload,
     resolve_slides,
     score_against_gold,
     summarize_plan,
@@ -131,21 +131,19 @@ def main(argv: list[str] | None = None) -> int:
         recipe = learn_recipe(wall, template)
         wanted = sorted(slide_range) if slide_range else None
         previews = {} if args.no_previews else previews_for(wall, wanted)
-        placements: list[dict[str, Any]] = []
-        hidden: list[int] = []
-        card_grid: list[dict[str, Any]] = []
-        transforms = plan_payload_transforms(
+        plan = plan_payload(
             wall,
             recipe,
             slide_range=slide_range,
             keep_side_panels=True,
             template=template,
             previews=previews or None,
-            placement_report=placements,
-            skipped_slides=hidden,
             card_stroke=card_stroke,
-            card_grid_report=card_grid,
         )
+        transforms = plan.transforms
+        placements = plan.placements
+        hidden = plan.skipped_slides
+        card_grid = plan.card_grid
         counts = summarize_plan(transforms)
         print(f"    recipe {recipe.get('source')}, planned {counts['total']} objects {dict(counts)}")
         if hidden:

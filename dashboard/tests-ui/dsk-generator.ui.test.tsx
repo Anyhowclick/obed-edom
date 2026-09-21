@@ -13,24 +13,27 @@ const reviewJob: Job = {
   result: {
     phase: "review",
     path: "/tmp/fw.key",
-    pages: [
-      {
-        slide: 1,
-        category: "static",
-        buildCount: 1,
-        movieCount: 0,
-        isText: false,
-        needsClip: false,
-        decision: {
-          slide: 1,
-          include: true,
-          action: "in_deck",
-          anchor: "auto",
-          keepSide: false,
-          clip: null,
-        },
-      },
-    ],
+    review: {
+      schemaVersion: 2,
+      revision: 0,
+      source: { fingerprint: "fixture" },
+      canvas: { width: 1920, height: 1080 },
+      safeArea: { left: 43, right: 1877, bottom: 1065 },
+      defaults: { viewport: { width: 935, height: 263, aspectLocked: true }, alignment: "centre" },
+      compositions: [{
+        id: "slide:50", sourceSlides: [50], layoutSlide: 50, category: "mixed", mediaLayout: "stacked", thumb: "slide-50.png",
+        capabilities: { videoOnly: true, mask: true }, warnings: [],
+        media: [
+          { occurrenceId: "lower", assetId: "lower", kind: "movie", sourceSlide: 50, sourceItem: { kind: "movie", kindIndex: 0, archiveId: "lower" }, sourceModes: ["lw", "fw"], slot: { x: 0, y: 0, width: 1, height: 1 } },
+          { occurrenceId: "upper", assetId: "upper", kind: "movie", sourceSlide: 50, sourceItem: { kind: "movie", kindIndex: 1, archiveId: "upper" }, sourceModes: ["lw", "fw"], slot: { x: 0, y: 0, width: 1, height: 1 } },
+        ],
+        previewLayers: [
+          { kind: "media", occurrenceId: "lower", src: "lower.png", slot: { x: 0, y: 0, width: 1, height: 1 } },
+          { kind: "media", occurrenceId: "upper", src: "upper.png", slot: { x: 0, y: 0, width: 1, height: 1 } },
+        ],
+        decision: { include: true, alignment: "inherit", viewport: null, source: "lw", contentMode: "video", masks: {} },
+      }],
+    },
     skipped: [],
   },
   createdAt: 0,
@@ -98,7 +101,7 @@ describe("DskGenerator workspace", () => {
     });
 
     expect(chooseFolder).toHaveBeenCalledWith("DSK workspace", undefined);
-    expect(applyDsk).toHaveBeenCalledWith("job-1", expect.any(Array), "/tmp/workspace");
+    expect(applyDsk).toHaveBeenCalledWith("job-1", expect.objectContaining({ schemaVersion: 2, sourceFingerprint: "fixture" }), "/tmp/workspace", 0);
   });
 
   it("does not apply when the workspace picker is cancelled", async () => {
@@ -110,5 +113,12 @@ describe("DskGenerator workspace", () => {
     });
 
     expect(applyDsk).not.toHaveBeenCalled();
+  });
+
+  it("shows an ordered mask selector for fully overlapping movie layers", () => {
+    render(<DskGenerator />);
+    expect(screen.getByRole("combobox", { name: "Mask media" })).toHaveValue("lower");
+    fireEvent.change(screen.getByRole("combobox", { name: "Mask media" }), { target: { value: "upper" } });
+    expect(screen.getByRole("combobox", { name: "Mask media" })).toHaveValue("upper");
   });
 });

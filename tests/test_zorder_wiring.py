@@ -9,7 +9,18 @@ import pytest
 
 from obed_edom import remap_keynote as rk
 from obed_edom.keynote import _build_stat_finalize_script
+from obed_edom.map_remap import Plan
 from test_remap_keynote import _payloads, _touch_paths
+
+
+def _plan(**overrides) -> Plan:
+    defaults = dict(
+        transforms=[], placements=[], skipped_slides=[], fitted_slides=[],
+        offframe=[], framing=[], child_resize=[], badge_raises=[], card_grid=[],
+        roster={},
+    )
+    defaults.update(overrides)
+    return Plan(**defaults)
 
 
 def test_zorder_write_mode_default_on():
@@ -345,15 +356,9 @@ def _wire_zorder_remap(
     monkeypatch.setenv("OBED_AS_GEOMETRY", "on")
 
     def fake_plan(*a, **k):
-        report = k.get("child_resize_report")
-        if report is not None:
-            report.extend(child_resize)
-        badges = k.get("badge_raise_report")
-        if badges is not None:
-            badges.extend(badge_raises)
-        return []
+        return _plan(child_resize=list(child_resize), badge_raises=list(badge_raises))
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", fake_plan)
+    monkeypatch.setattr(rk, "plan_payload", fake_plan)
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -725,3 +730,47 @@ def test_orchestration_emits_single_merged_stat_zorder_detail_line(monkeypatch, 
     detail_lines = [s for s in said if s.startswith("Stat zorder detail:")]
     assert len(detail_lines) == 1
     assert "zorderRefused=1" in detail_lines[0]
+
+
+def test_skipped_slide_report_is_not_overwritten_by_framing_coverage_rows(monkeypatch, tmp_path):
+    """Regression: the driver keeps two unrelated reports -- the slide NUMBERS the planner
+    left alone (`skipped_slides`), and the framing ROWS whose overlays fell off-frame.
+
+    A shadowed local once rebound the first name to the second partway through
+    `remap_keynote`, with two consequences that both shipped: the operator line
+    "Left N skipped slide(s) alone: ..." stringified framing-row dicts (and never fired at
+    all unless some slide had off-canvas overlays), and `skippedSlidesLeftAlone` carried
+    those dicts out through the dashboard API instead of slide numbers.
+
+    Reuses the Keynote-free orchestration harness above; this is about the driver's report
+    assembly rather than zorder.
+    """
+    import obed_edom.remap_keynote as rk
+
+    monkeypatch.setenv("OBED_ZORDER_WRITE", "off")
+    _wire_zorder_remap(monkeypatch, rk, child_resize=[], badge_raises=[])
+
+    def fake_plan(*a, **k):
+        return _plan(
+            skipped_slides=[3, 7],
+            framing=[{"slide": 2, "excludedOffCanvas": 1, "excluded": 4}],
+        )
+
+    monkeypatch.setattr(rk, "plan_payload", fake_plan)
+
+    said: list[str] = []
+    source, template, dest = _touch_paths(tmp_path)
+    wall_payload, template_payload = _payloads()
+
+    info = rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload, log=said.append,
+    )
+
+    # The API field carries slide numbers, not framing rows.
+    assert info["skippedSlidesLeftAlone"] == [3, 7]
+    assert info["framingReport"] == [{"slide": 2, "excludedOffCanvas": 1, "excluded": 4}]
+
+    # Both reports reach the operator, each in its own words.
+    assert any("Left 2 skipped slide(s) alone: 3, 7" in s for s in said)
+    assert any("Framing coverage on slide 2" in s for s in said)

@@ -361,18 +361,18 @@ def planned_rects(
     card_stroke: float = DEFAULT_CARD_STROKE,
 ) -> list[dict[str, Any]]:
     """Planned dest rects for this recipe. Do not pass a template (that re-learns the automatic pick)."""
-    from obed_edom.map_remap import plan_payload_transforms  # noqa: PLC0415
+    from obed_edom.map_remap import plan_payload  # noqa: PLC0415
 
     wall_w, wall_h = wall_size
     payload = {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]}
     out: list[dict[str, Any]] = []
-    for spec in plan_payload_transforms(
+    for spec in plan_payload(
         payload,
         recipe,
         keep_side_panels=keep_side_panels,
         side_content_slides=side_content_slides,
         card_stroke=card_stroke,
-    ):
+    ).transforms:
         dropped = spec.role == "hide" or (spec.opacity is not None and spec.opacity <= 0.0)
         # Round the same 2-decimal values apply serializes (as_dict), not the raw floats,
         # so parity holds under banker's rounding at .5 boundaries. as_dict writes a
@@ -427,7 +427,7 @@ def propose_framings(
         learn_recipe,
         navigator_numbering,
         on_canvas_fraction,
-        plan_payload_transforms,
+        plan_payload,
         rank_framing_candidates,
         skipped_positions,
     )
@@ -455,16 +455,14 @@ def propose_framings(
     )
     template_slides = template_data.get("slides") or []
 
-    report: list[dict[str, Any]] = []
     recipe = learn_recipe(wall_data, template_data)
-    plan_payload_transforms(
+    report = plan_payload(
         wall_data,
         recipe,
         slide_range=slide_range,
         template=template_data,
-        framing_report=report,
         card_stroke=card_stroke,
-    )
+    ).framing
     thumbs = build_preview_thumbs(wall_path, full_wall_data, log=log)
     template_thumbs = build_preview_thumbs(template_path, template_data, log=log)
 

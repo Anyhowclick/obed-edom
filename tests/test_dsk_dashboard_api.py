@@ -83,6 +83,88 @@ def _propose_dsk(client, deck, **extra):
     return client.post("/api/dsk", data=data)
 
 
+def test_v2_apply_exports_compiled_occurrences_and_writes_composition_manifest(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+    from obed_edom.dsk_assemble import AssembleResult
+    from obed_edom.dsk_movie_export import ClipResult
+    from obed_edom.map_remap import Rect
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    payload = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slideCount": 1,
+        "slides": [{"number": 1, "index": 0, "items": [{
+            "kind": "movie", "kindIndex": 0, "index": 0, "fileName": "clip.mov",
+            "x": 1920, "y": 0, "w": 3840, "h": 1080,
+        }]}],
+    }
+    cls = SlideClass(1, "movie", 0, 1, (("movie", 0),), (), (), None, False)
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _path: payload)
+    monkeypatch.setattr(app_mod, "classify_deck", lambda *_a, **_k: [cls])
+    monkeypatch.setattr(app_mod, "build_preview_thumbs", lambda *_a, **_k: {1: "slide-1.png"})
+    monkeypatch.setattr(app_mod, "deck_digest", lambda _path: "bound")
+    monkeypatch.setattr(app_mod, "wall_thumb_dir", lambda _digest: tmp_path)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    monkeypatch.setattr(app_mod, "_dsk_archive_ids", lambda _path: {(1, "movie", 0): "movie-1"})
+    monkeypatch.setattr(app_mod, "_dsk_build_records", lambda _path: {})
+    observed = {}
+
+    def fake_export(_deck, slides, out_dir, *, movie_plans, **_kwargs):
+        observed["movie_plans"] = movie_plans
+        target = Path(out_dir) / "compiled.mov"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("clip")
+        plan = movie_plans[0]
+        return [ClipResult(
+            slide=plan.source_slide, movie_id=plan.source_item, path=target,
+            width=935, height=263, duration_s=1, wall_s=1, crop_width=935,
+            crop_rect=Rect(1920, 0, 3840, 1080), occurrence_id=plan.occurrence_id,
+        )]
+
+    def fake_assemble(_deck, out_path, *, compiled_compositions, compiled_clips, **_kwargs):
+        observed["compiled"] = compiled_compositions
+        observed["clips"] = compiled_clips
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("deck")
+        synthetic = ("movie", 1_000_000)
+        occurrence = compiled_compositions[0].media[0].occurrence_id
+        return AssembleResult(
+            path=Path(out_path), slides_kept=(1,), ordinals={1: 1}, fits={},
+            clips_inserted={1: {synthetic: compiled_clips[occurrence]}}, stroke={}, zorder={},
+            builds={}, size_bytes=4, source_size_bytes=7, wall_s=1, warnings=(), movie_props={},
+            clip_rects={1: {synthetic: Rect(43, 802, 935, 263)}},
+            clip_occurrences={1: {synthetic: occurrence}},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    proposed = _wait(client, job_id)
+    review = proposed["result"]["review"]
+    envelope = {
+        "schemaVersion": 2,
+        "sourceFingerprint": review["source"]["fingerprint"],
+        "defaults": review["defaults"],
+        "decisions": [{"id": comp["id"], **comp["decision"]} for comp in review["compositions"]],
+    }
+    response = client.post(
+        f"/api/dsk/{job_id}/apply",
+        json={"review": envelope, "baseRevision": 0, "exportDir": str(tmp_path / "workspace")},
+    )
+    assert response.status_code == 200
+    done = _wait(client, job_id)
+    assert done["status"] == "done", done.get("error")
+    assert len(observed["movie_plans"]) == 1
+    assert len(observed["compiled"]) == 1
+    manifest = json.loads((tmp_path / "workspace" / "manifest.json").read_text())
+    assert manifest["slides"]["1"]["composition_id"] == "slide:1"
+    assert manifest["slides"]["1"]["media"][0]["occurrence_id"] == "1:movie-1"
+
+
 def test_dsk_propose_marks_text_and_empty_slides_skipped(tmp_path, monkeypatch):
     import obed_edom.web.app as app_mod
 

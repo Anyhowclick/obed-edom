@@ -31,7 +31,7 @@ from obed_edom.map_remap import (
     GRID_MIN_CLEAR,
     format_slide_range,
     learn_recipe,
-    plan_payload_transforms,
+    plan_payload,
     roster_slides,
     score_against_gold,
     slides_for_plan,
@@ -169,13 +169,17 @@ def offline_text_reposition_enabled(
     explicit: str | None = None, *, offline_mode: str | None = None,
     say: Callable[[str], None] | None = None,
 ) -> bool:
-    """Offline reposition of autosize text boxes (default OFF). Env `OBED_OFFLINE_TEXT`
-    (`1`/`true`/`yes`/`on` enables). An autosize box's `naturalSize` is Keynote's render
+    """Offline reposition of autosize text boxes (default ON). Env `OBED_OFFLINE_TEXT`
+    (`0`/`false`/`no`/`off` disables). An autosize box's `naturalSize` is Keynote's render
     cache, unwritable offline, so today it hard-misses to the AppleScript fallback; when ON
     the offline writer re-seats it (position only, no size -- pass 1 already regrew it).
     Forced OFF when `offline_mode` is `off` (no offline slides to patch)."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_TEXT", "")).strip().lower()
-    if raw not in {"1", "true", "yes", "on"}:
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw not in {"", "1", "true", "yes", "on"}:
+        if say:
+            say(f"Unknown OBED_OFFLINE_TEXT value {raw!r}; forcing offline text off.")
         return False
     if offline_mode == "off":
         if say:
@@ -188,13 +192,17 @@ def offline_maskcrop_enabled(
     explicit: str | None = None, *, offline_mode: str | None = None,
     say: Callable[[str], None] | None = None,
 ) -> bool:
-    """Offline write of masked-media CROPs (default OFF). Env `OBED_OFFLINE_MASKCROP`
-    (`1`/`true`/`yes`/`on`). Today the surgical writer only writes an IDENTITY mask (no crop)
-    and hard-misses every real crop; when ON it also writes ANY axis-aligned within-frame crop
+    """Offline write of masked-media CROPs (default ON). Env `OBED_OFFLINE_MASKCROP`
+    (`0`/`false`/`no`/`off` disables). The surgical writer writes any axis-aligned
+    within-frame crop
     (offset included) via the existing `_masked_media_fields` transform. Rotated and
     cross-member crops stay refused. Forced OFF when `offline_mode` is `off`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_MASKCROP", "")).strip().lower()
-    if raw not in {"1", "true", "yes", "on"}:
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw not in {"", "1", "true", "yes", "on"}:
+        if say:
+            say(f"Unknown OBED_OFFLINE_MASKCROP value {raw!r}; forcing masked crops off.")
         return False
     if offline_mode == "off":
         if say:
@@ -1187,35 +1195,27 @@ def remap_keynote(
         previews, preview_note, preview_source_dir = resolve_source_previews(
             source, wall, folder=source_previews, wanted=preview_wanted
         )
-    placements: list[dict[str, Any]] = []
-    hidden: list[int] = []
-    fitted: list[int] = []
-    offframe: list[dict[str, Any]] = []
-    framing_rows: list[dict[str, Any]] = []
-    child_resize: list[dict[str, Any]] = []
-    badge_raises: list[dict[str, Any]] = []
-    card_grid: list[dict[str, Any]] = []
-    roster: dict[str, set[int]] = {}
-    transforms = plan_payload_transforms(
+    plan = plan_payload(
         wall,
         recipe,
         slide_range=slide_range,
         keep_side_panels=keep_side_panels,
         template=template_data,
         previews=previews or None,
-        placement_report=placements,
-        skipped_slides=hidden,
-        fitted_slides=fitted,
-        offframe_report=offframe,
         framing_overrides=framing_overrides,
-        framing_report=framing_rows,
         side_content_slides=side_content_slides,
-        child_resize_report=child_resize,
-        badge_raise_report=badge_raises,
         card_stroke=card_stroke,
-        card_grid_report=card_grid,
-        roster_report=roster,
     )
+    transforms = plan.transforms
+    placements = plan.placements
+    hidden = plan.skipped_slides
+    fitted = plan.fitted_slides
+    offframe = plan.offframe
+    framing_rows = plan.framing
+    child_resize = plan.child_resize
+    badge_raises = plan.badge_raises
+    card_grid = plan.card_grid
+    roster = plan.roster
     hidden_addresses = {
         (t.slide_number, t.kind, t.kind_index) for t in transforms if t.role == "hide"
     }
@@ -1279,11 +1279,11 @@ def remap_keynote(
             + " — it would have shrunk them to a sliver, so their own best framing "
             "was used instead."
         )
-    hidden = [r for r in framing_rows if r.get("excludedOffCanvas")]
-    if hidden:
+    coverage_rows = [r for r in framing_rows if r.get("excludedOffCanvas")]
+    if coverage_rows:
         say("Framing coverage on " + ", ".join(
             f"slide {r['slide']} ({r['excludedOffCanvas']} of {r['excluded']} overlay object(s) off-frame)"
-            for r in hidden[:8]) + ("…" if len(hidden) > 8 else "")
+            for r in coverage_rows[:8]) + ("…" if len(coverage_rows) > 8 else "")
             + " is scored on the framed artwork only; those overlays are placed, not dropped.")
     if fitted:
         say(
@@ -1851,57 +1851,8 @@ def remap_and_inspect(
     }
     info["payload"] = payload
     if ow and ow.get("mode") == "verify":
-        planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
-        stat_slides = frozenset(ow.get("statSlides") or [])
-        kind_index_map_raw = (info.get("zorderWrite") or {}).get("kindIndexMap") or {}
-        kindindex_remap = offline_write.coerce_kind_index_map(kind_index_map_raw)
-        multiset_kinds_by_slide = {n: {"group"} for n in stat_slides}
-        fallback_kinds_raw = ow.get("fallbackKinds") or {}
-        not_gated_kinds_by_slide = {
-            n: kinds & set(fallback_kinds_raw.get(str(n), ()))
-            for n, kinds in multiset_kinds_by_slide.items()
-        }
-        not_gated_kinds_by_slide = {n: ks for n, ks in not_gated_kinds_by_slide.items() if ks}
-        gated_kinds_by_slide = {
-            n: kinds - not_gated_kinds_by_slide.get(n, set())
-            for n, kinds in multiset_kinds_by_slide.items()
-        }
-        gated_kinds_by_slide = {n: ks for n, ks in gated_kinds_by_slide.items() if ks}
-        live_report = offline_write.verify_live_frames(
-            planned, payload,
-            kindindex_remap=kindindex_remap,
-            multiset_kinds_by_slide=multiset_kinds_by_slide,
-        )
-        set_report = offline_write.verify_live_frames_multiset(
-            planned, payload, gated_kinds_by_slide
-        )
-        coverage = offline_write.live_verify_coverage(
-            planned, kindindex_remap, multiset_kinds_by_slide,
-            not_gated_kinds_by_slide=not_gated_kinds_by_slide,
-        )
-        if log:
-            log(offline_write.format_live_verify_coverage(coverage))
-            if not_gated_kinds_by_slide:
-                n_buckets = sum(len(ks) for ks in not_gated_kinds_by_slide.values())
-                log(
-                    f"live verify (set): {n_buckets} group bucket(s) on "
-                    f"{len(not_gated_kinds_by_slide)} slide(s) NOT GATED (AppleScript "
-                    "fallback)."
-                )
-            if coverage["uncovered"]:
-                log(
-                    f"offline-write live verify: UNCOVERED {coverage['uncovered']} -- "
-                    "neither bar checked these (slide, kind) pairs; gate RED."
-                )
-        ow["liveVerifyPass"] = offline_write._say_verify_report(
-            "offline-write live verify", live_report, offline_write.LIVE_VERIFY_TOL, log
-        )
-        ow["liveVerifySetPass"] = offline_write._say_verify_report(
-            "offline-write live verify (set)", set_report, offline_write.LIVE_VERIFY_TOL, log
-        )
-        ow["liveVerifyCoverage"] = {**coverage, "uncovered": [list(u) for u in coverage["uncovered"]]}
-        if coverage["uncovered"]:
-            ow["liveVerifyPass"] = False
+        report = offline_write.live_verify(ow, info.get("zorderWrite"), payload, log=log)
+        ow.update(report.ow_updates())
     if export_dir:
         info["previewFiles"] = [p.name for p in preview_pngs(Path(export_dir))]
     return info

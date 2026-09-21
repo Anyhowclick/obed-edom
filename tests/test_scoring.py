@@ -1,7 +1,7 @@
 """Scoring a remap against a human-made CG deck, and leaving hidden slides alone."""
 
 from obed_edom.map_remap import (
-    plan_payload_transforms,
+    plan_payload,
     score_against_gold,
 )
 
@@ -56,7 +56,7 @@ def test_matching_the_gold_layout_scores_zero():
         ],
     }
     wall = _wall([slide])
-    transforms = plan_payload_transforms(wall, _identity_recipe())
+    transforms = plan_payload(wall, _identity_recipe()).transforms
     # Gold used the same 1:1 transform, so its objects sit where ours do.
     gold = {
         "slides": [
@@ -80,7 +80,7 @@ def test_a_different_layout_choice_shows_up_as_error():
     half = {"x": 0.0, "y": 0.0, "w": 500.0, "h": 300.0}
     recipe["mapDst"] = dict(half)
     recipe["groups"] = [{"s": 0.5, "tx": 0.0, "ty": 0.0, "src": recipe["mapSrc"], "dst": half}]
-    transforms = plan_payload_transforms(wall, recipe)
+    transforms = plan_payload(wall, recipe).transforms
     gold = {"slides": [{"number": 1, "items": [_map(0, 0, 1000, 600), _pin(500, 300)]}]}
     score = score_against_gold(transforms, gold, wall=wall)
     assert score["slides"][1]["_goldAffine"]["s"] == 1.0
@@ -105,7 +105,7 @@ def test_dense_pins_are_compared_by_identity_not_proximity():
     shifted = {"x": 150.0, "y": 0.0, "w": 1900.0, "h": 1000.0}
     recipe["groups"] = [{"s": 1.0, "tx": 150.0, "ty": 0.0, "src": recipe["mapSrc"], "dst": shifted}]
     recipe["mapDst"] = dict(shifted)
-    transforms = plan_payload_transforms(wall, recipe)
+    transforms = plan_payload(wall, recipe).transforms
     gold = {
         "slides": [
             {"number": 1, "items": [_map(0, 0, 1900, 1000), *[_pin(1000 + i * 6, 500) for i in range(40)]]}
@@ -125,7 +125,7 @@ def test_count_mismatch_is_visible():
         "items": [_map(0, 0, 1000, 600, kindIndex=0), _pin(100, 100, kindIndex=0), _pin(400, 300, kindIndex=1)],
     }
     wall = _wall([slide])
-    transforms = plan_payload_transforms(wall, _identity_recipe())
+    transforms = plan_payload(wall, _identity_recipe()).transforms
     gold = {"slides": [{"number": 1, "items": [_map(0, 0, 1000, 600), _pin(100, 100)]}]}
     score = score_against_gold(transforms, gold, wall=wall)
     row = score["slides"][1]["pin"]
@@ -137,7 +137,7 @@ def test_skipped_gold_slides_are_not_scored():
     """Hidden alternates held 21% of the items on a real gold CG deck."""
     slide = {"number": 1, "items": [_map(0, 0, 1000, 600, kindIndex=0), _pin(100, 100, kindIndex=0)]}
     wall = _wall([slide])
-    transforms = plan_payload_transforms(wall, _identity_recipe())
+    transforms = plan_payload(wall, _identity_recipe()).transforms
     gold = {
         "slides": [
             {"number": 1, "items": [_map(0, 0, 1000, 600), _pin(100, 100)]},
@@ -228,7 +228,7 @@ def test_offscreen_leftovers_are_neither_planned_nor_scored():
         ],
     }
     wall = _wall([slide])
-    transforms = plan_payload_transforms(wall, _identity_recipe())
+    transforms = plan_payload(wall, _identity_recipe()).transforms
     assert sum(1 for t in transforms if t.role == "pin") == 1
 
     gold = {
@@ -257,7 +257,7 @@ def test_partly_visible_content_is_kept():
             _pin(-20, 100, kindIndex=0),  # half off the left edge
         ],
     }
-    transforms = plan_payload_transforms(_wall([slide]), _identity_recipe())
+    transforms = plan_payload(_wall([slide]), _identity_recipe()).transforms
     assert sum(1 for t in transforms if t.role == "pin") == 1
 
 
@@ -304,7 +304,7 @@ def test_a_framing_that_throws_content_off_screen_falls_back_to_fitting():
     assert on_canvas_fraction(slide, fitted, 7680.0, 1080.0) == 1.0
 
     # Everything the fit places lands inside the frame.
-    planned = plan_payload_transforms(wall, fitted)
+    planned = plan_payload(wall, fitted).transforms
     assert planned
     for t in planned:
         assert 0 <= t.x <= 1920
@@ -351,7 +351,7 @@ def test_fit_to_frame_leaves_a_small_map_whole():
     # Pure fit already shows it whole; the bias must not push past that into cropping.
     pure_fit = min((1920 - 2 * margin) / src_w, (1080 - 2 * margin) / src_h)
     assert fitted["groups"][0]["s"] == pure_fit
-    for t in plan_payload_transforms(wall, fitted):
+    for t in plan_payload(wall, fitted).transforms:
         assert 0 <= t.x <= 1920
         assert 0 <= t.y <= 1080
 
@@ -369,21 +369,18 @@ def test_the_planner_switches_to_fitting_and_says_which_slides():
         "slideHeight": 1080.0,
         "slides": [{"number": 1, "items": [_map(0, 0, 1200, 700, kindIndex=0)]}],
     }
-    fitted_slides: list[int] = []
-    plan_payload_transforms(
+    fitted_slides = plan_payload(
         wall,
         _identity_recipe(),
         template=template,
-        fitted_slides=fitted_slides,
         min_on_canvas=1.01,
-    )
+    ).fitted_slides
     assert fitted_slides == [1]
 
     # Left alone at the real threshold, since this framing does fit.
-    untouched: list[int] = []
-    plan_payload_transforms(
-        wall, _identity_recipe(), template=template, fitted_slides=untouched
-    )
+    untouched = plan_payload(
+        wall, _identity_recipe(), template=template
+    ).fitted_slides
     assert untouched == []
 
 
@@ -640,7 +637,7 @@ def test_skipped_wall_slides_are_not_planned():
         {"number": 2, "skipped": True, "items": [_pin(200, 200, kindIndex=0)]},
         {"number": 3, "items": [_pin(300, 300, kindIndex=0)]},
     ]
-    hidden: list[int] = []
-    transforms = plan_payload_transforms(_wall(slides), _identity_recipe(), skipped_slides=hidden)
+    plan = plan_payload(_wall(slides), _identity_recipe())
+    transforms, hidden = plan.transforms, plan.skipped_slides
     assert hidden == [2]
     assert sorted({t.slide_number for t in transforms}) == [1, 3]

@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from obed_edom.baseline import (
     deck_digest,
     deck_slide_digests,
@@ -49,10 +49,19 @@ from obed_edom.dsk_movie_export import (
     _ffprobe,
     export_dsk_slide_clips,
     export_slide_clips,
+    movie_crop_plans_from_compiled,
     movies_stacked,
     visible_movie_rects,
 )
-from obed_edom.dsk_plan import ItemId, classify_deck
+from obed_edom.dsk_plan import Band, ItemId, classify_deck, fit_slide
+from obed_edom.dsk_review import (
+    ReviewValidationError,
+    apply_editable_review,
+    build_review,
+    compile_review,
+)
+from obed_edom.iwa_builds import deck_builds
+from obed_edom.iwa_geometry import compose_deck_geometry
 from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
 from obed_edom.dsk_stage_export import (
     export_stage_pngs,
@@ -177,6 +186,10 @@ class DskDecisionsBody(BaseModel):
 
     decisions: list[dict[str, Any]] | None = None
     exportDir: str | None = None
+    # Version 2 writes a deliberately narrow editable envelope.  The proposal's
+    # source/media/capability metadata remains server-authoritative.
+    review: dict[str, Any] | None = None
+    baseRevision: StrictInt | None = None
 
 
 class SettingsBody(BaseModel):
@@ -754,6 +767,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/dsk/{job_id}/decisions")
     def save_dsk_decisions(job_id: str, payload: DskDecisionsBody) -> dict:
+        if payload.review is not None or payload.baseRevision is not None:
+            return _save_v2_dsk_review(job_id, payload)
         job = RUNNER.get(job_id)
         if not job or not job.result:
             raise HTTPException(404, "Unknown job")
@@ -769,6 +784,25 @@ def create_app() -> FastAPI:
         job = RUNNER.get(job_id)
         if not job or not job.result:
             raise HTTPException(404, "Unknown job")
+        if payload.review is not None or payload.baseRevision is not None:
+            with RUNNER.job_lock(job_id):
+                current = RUNNER.get(job_id)
+                result = dict((current.result if current else None) or {})
+                key = Path(str(result.get("path") or "")).expanduser()
+                if not key.exists():
+                    raise HTTPException(400, "The FW deck has moved since proposing.")
+                if keynote_running():
+                    raise HTTPException(409, "Close Keynote before running a DSK job (strictly serial).")
+                _save_v2_dsk_review(job_id, payload)
+                fresh = RUNNER.get(job_id)
+                result = dict((fresh.result if fresh else None) or {})
+                try:
+                    updated = RUNNER.rerun(job_id, lambda j, r=result: _run_dsk_apply(j, r))
+                except RuntimeError as exc:
+                    raise HTTPException(409, str(exc)) from exc
+                if not updated:
+                    raise HTTPException(404, "Unknown job")
+                return RUNNER.public_dict(updated)
         if payload and payload.decisions is not None:
             save_dsk_decisions(job_id, payload)
         job = RUNNER.get(job_id)
@@ -1959,6 +1993,138 @@ def _dsk_keep_side_from_result(result: dict[str, Any]) -> set[int]:
     return slides
 
 
+def _resolve_dsk_compiled_targets(
+    path: Path,
+    compiled: Sequence[Any],
+    decisions: Mapping[int, SlideDecision],
+) -> tuple[Any, ...]:
+    if not compiled:
+        return ()
+    payload = offline_wall_payload(path)
+    slides = {int(slide["number"]): slide for slide in payload.get("slides") or []}
+    all_numbers = frozenset(slides)
+    lw_classes = {cls.number: cls for cls in classify_deck(path, payload=payload)}
+    fw_classes = {
+        cls.number: cls
+        for cls in classify_deck(path, payload=payload, include_side=all_numbers)
+    }
+    resolved: list[Any] = []
+    for composition in compiled:
+        number = int(composition.layout_slide)
+        decision = decisions[number]
+        cls = (fw_classes if composition.source_mode == "fw" else lw_classes)[number]
+        kept = cls.kept
+        if composition.content_mode == "video":
+            kept = tuple(item_id for item_id in kept if item_id[0] == "movie")
+        frame = composition.output_frame
+        fitted = fit_slide(
+            slides[number].get("items") or [],
+            Band(frame.y + frame.h, frame.h, frame.x, frame.x + frame.w, 1),
+            kept=kept,
+            include_side=composition.source_mode == "fw",
+            anchor=decision.anchor,
+        )
+        media = tuple(
+            replace(
+                entry,
+                target_rect=fitted.get(entry.source_item, entry.target_rect)
+                if entry.source_slide == number
+                else entry.target_rect,
+            )
+            for entry in composition.media
+        )
+        resolved.append(replace(composition, media=media))
+    return tuple(resolved)
+
+
+def _dsk_archive_ids(path: Path) -> dict[tuple[int, str, int], str]:
+    """Best-effort archive identities for v2 occurrences.
+
+    Test payloads and old/offline-only installations can lack IWA decoding.  The
+    planner retains a deterministic unresolved identity in that case, but a real
+    decode always supplies the drawable archive id.
+    """
+    try:
+        records = compose_deck_geometry(path)
+    except Exception:  # Optional IWA reader / synthetic test payload.
+        return {}
+    return {
+        (number + 1, str(record["kind"]), int(record["kindIndex"])): str(record["id"])
+        for number, entries in records.items()
+        for record in entries
+        if record.get("kind") in {"movie", "image"}
+    }
+
+
+def _dsk_build_records(path: Path) -> dict[int, dict[str, Any]]:
+    try:
+        return deck_builds(path)
+    except Exception:
+        return {}
+
+
+def _dsk_magic_move_transitions(
+    path: Path,
+    records: Mapping[int, Mapping[str, Any]] | None = None,
+) -> dict[int, str | None]:
+    result: dict[int, str | None] = {}
+    for number, entry in (records if records is not None else _dsk_build_records(path)).items():
+        attrs = ((entry.get("transition") or {}).get("attributes") or {})
+        anim = attrs.get("animationAttributes") or {}
+        result[number] = str(anim.get("effect") or attrs.get("databaseEffect") or "")
+    return result
+
+
+def _dsk_review_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    review = result.get("review")
+    return review if isinstance(review, dict) else None
+
+
+def _save_v2_dsk_review(job_id: str, payload: DskDecisionsBody) -> dict:
+    """Serialized optimistic v2 save.  The job lock covers revision read/write."""
+    if payload.review is None or payload.baseRevision is None:
+        raise HTTPException(400, "Version 2 saves require review and baseRevision")
+    if isinstance(payload.baseRevision, bool) or payload.baseRevision < 0:
+        raise HTTPException(400, "baseRevision must be a non-negative integer")
+    with RUNNER.job_lock(job_id):
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if job.status == "running":
+            raise HTTPException(409, "Job is already running")
+        result = dict(job.result)
+        stored = _dsk_review_result(result)
+        if stored is None:
+            raise HTTPException(409, "This is a version 1 DSK review; save it through the legacy path.")
+        current_revision = int(stored.get("revision") or 0)
+        if payload.baseRevision != current_revision:
+            raise HTTPException(409, "This review changed in another window; reload before saving.")
+        path = Path(str(stored.get("source", {}).get("path") or result.get("path") or ""))
+        try:
+            actual = deck_digest(path)
+        except Exception as exc:
+            raise HTTPException(409, f"Could not verify the source deck: {exc}") from exc
+        if actual != stored.get("source", {}).get("fingerprint"):
+            raise HTTPException(409, "The source deck changed since this review was proposed.")
+        try:
+            merged = apply_editable_review(stored, payload.review)
+        except ReviewValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        merged["revision"] = current_revision + 1
+        result["review"] = merged
+        result["reviewMode"] = "v2"
+        if payload.exportDir is not None and payload.exportDir.strip():
+            try:
+                result["exportDir"] = str(validate_export_dir(payload.exportDir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        # These mirrors make the response easy for a v2 client while `pages` keeps
+        # the existing v1 dashboard and apply path backward compatible.
+        result.update({key: merged[key] for key in ("schemaVersion", "revision", "source", "canvas", "safeArea", "defaults", "compositions")})
+        updated = RUNNER.update_result(job_id, result)
+        return RUNNER.public_dict(updated) if updated else result
+
+
 def _run_dsk_propose(
     job: Job,
     path: Path,
@@ -1987,7 +2153,8 @@ def _run_dsk_propose(
         )
     }
     thumbs = _dsk_preview_thumbs(job, path, payload)
-    thumb_dir = wall_thumb_dir(deck_digest(path))
+    fingerprint = deck_digest(path)
+    thumb_dir = wall_thumb_dir(fingerprint)
     slides_by_number = {int(s["number"]): s for s in payload["slides"]}
     pages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -2022,6 +2189,22 @@ def _run_dsk_propose(
         }
         page["decision"] = _dsk_decision_defaults(page, content_only)
         pages.append(page)
+    build_records = _dsk_build_records(path)
+    review = build_review(
+        path=str(path),
+        fingerprint=fingerprint,
+        payload=payload,
+        classes=classes,
+        thumbs=thumbs,
+        selected=numbers,
+        archive_ids=_dsk_archive_ids(path),
+        stacked={int(page["slide"]): bool(page.get("stackedMovies")) for page in pages},
+        stacked_fw={int(page["slide"]): bool(page.get("stackedMoviesKeepSide")) for page in pages},
+        transitions=_dsk_magic_move_transitions(path, build_records),
+        builds=build_records,
+        side_classes=side_classes,
+        content_only=content_only,
+    )
     return {
         "phase": "review",
         "path": str(path),
@@ -2032,6 +2215,8 @@ def _run_dsk_propose(
         "thumbDir": str(thumb_dir),
         "pages": pages,
         "skipped": skipped,
+        "review": review,
+        **{key: review[key] for key in ("schemaVersion", "revision", "source", "canvas", "safeArea", "defaults", "compositions")},
     }
 
 
@@ -2042,24 +2227,58 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     content_only = bool(proposal.get("contentOnly"))
     words = int(proposal.get("textSlideWords") or DEFAULT_TEXT_SLIDE_WORDS)
     pages = proposal.get("pages") or []
-    included = [p for p in pages if (p.get("decision") or {}).get("include")]
+    review = (
+        proposal.get("review")
+        if proposal.get("reviewMode") == "v2" and isinstance(proposal.get("review"), dict)
+        else None
+    )
+    compiled = compile_review(review) if review is not None else ()
+    review_by_id = {
+        str(comp["id"]): comp for comp in ((review or {}).get("compositions") or [])
+    }
+    if review is not None:
+        included = [
+            {
+                "slide": comp.layout_slide,
+                "category": str(review_by_id.get(comp.id, {}).get("category") or ""),
+                "needsClip": any(media.source_item[0] == "movie" for media in comp.media),
+                "decision": {"clip": None},
+            }
+            for comp in compiled
+        ]
+    else:
+        included = [p for p in pages if (p.get("decision") or {}).get("include")]
     if not included:
         raise AssemblyRefusal(
             "No slides selected to assemble; check Include on at least one page."
         )
-    include_side = _dsk_keep_side_from_result(proposal)
     decisions: dict[int, SlideDecision] = {}
-    for page in included:
-        decision = page["decision"]
-        number = int(page["slide"])
-        action = "both" if decision.get("clip") or page.get("needsClip") else "in_deck"
-        decisions[number] = SlideDecision(
-            slide=number,
-            action=action,
-            anchor=str(decision.get("anchor") or "auto"),
-            keep_side=number in include_side,
-            videos_only=bool(decision.get("videosOnly")) and bool(page.get("canVideosOnly")),
-        )
+    if review is not None:
+        include_side = {comp.layout_slide for comp in compiled if comp.source_mode == "fw"}
+        for comp in compiled:
+            has_movie = any(media.source_item[0] == "movie" for media in comp.media)
+            decisions[comp.layout_slide] = SlideDecision(
+                slide=comp.layout_slide,
+                action="both" if has_movie else "in_deck",
+                anchor=comp.alignment,
+                keep_side=comp.source_mode == "fw",
+                videos_only=comp.content_mode == "video",
+            )
+    else:
+        include_side = _dsk_keep_side_from_result(proposal)
+        for page in included:
+            decision = page["decision"]
+            number = int(page["slide"])
+            action = "both" if decision.get("clip") or page.get("needsClip") else "in_deck"
+            decisions[number] = SlideDecision(
+                slide=number,
+                action=action,
+                anchor=str(decision.get("anchor") or "auto"),
+                keep_side=number in include_side,
+                videos_only=bool(decision.get("videosOnly")) and bool(page.get("canVideosOnly")),
+            )
+    if review is not None:
+        compiled = _resolve_dsk_compiled_targets(path, compiled, decisions)
     raw_export = str(proposal.get("exportDir") or "").strip()
     if raw_export:
         try:
@@ -2073,14 +2292,17 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     src_dir = out_dir / "src"
 
     clip_slides = sorted(int(p["slide"]) for p in included if p.get("needsClip"))
+    movie_plans = movie_crop_plans_from_compiled(compiled) if review is not None else ()
     operator_clips: dict[int, Path] = {}
-    for page in included:
-        raw_clip = (page.get("decision") or {}).get("clip")
-        if raw_clip:
-            operator_clips[int(page["slide"])] = Path(raw_clip).expanduser()
-    missing_clip_slides = [n for n in clip_slides if n not in operator_clips]
+    if review is None:
+        for page in included:
+            raw_clip = (page.get("decision") or {}).get("clip")
+            if raw_clip:
+                operator_clips[int(page["slide"])] = Path(raw_clip).expanduser()
+    missing_clip_slides = [] if review is not None else [n for n in clip_slides if n not in operator_clips]
 
     nested_clips: dict[int, dict[ItemId, Path]] = {}
+    clips_by_occurrence: dict[str, Path] = {}
     clip_sizes: dict[str, tuple[int, int]] = {}
     clip_crops: dict[int, dict[ItemId, Rect]] = {}
     bare_clips: dict[int, set[ItemId]] = {}
@@ -2108,7 +2330,29 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     publish_journal: list[_PublishedClip] = []
     stale_src_clips: set[str] = set()
     try:
-        if missing_clip_slides:
+        if movie_plans:
+            tmp_src_dir = out_dir / f".src-{uuid4().hex}"
+            guard_out_dir(tmp_src_dir, path)
+            source_slides = sorted({plan.source_slide for plan in movie_plans})
+            job.log(f"Exporting composition clip(s) from slide(s) {source_slides} before assembly…")
+            clip_results = export_slide_clips(
+                path,
+                source_slides,
+                tmp_src_dir,
+                movie_plans=movie_plans,
+                log=job.log,
+            )
+            for clip in clip_results:
+                if clip.occurrence_id is None:
+                    raise ValueError("A compiled clip export returned without an occurrence id")
+                clips_by_occurrence[clip.occurrence_id] = clip.path
+                nested_clips.setdefault(clip.slide, {})[clip.movie_id] = clip.path
+                clip_sizes[str(clip.path)] = (clip.width, clip.height)
+                if clip.crop_rect is not None:
+                    clip_crops.setdefault(clip.slide, {})[clip.movie_id] = clip.crop_rect
+                if clip.bare:
+                    bare_clips.setdefault(clip.slide, set()).add(clip.movie_id)
+        elif missing_clip_slides:
             tmp_src_dir = out_dir / f".src-{uuid4().hex}"
             guard_out_dir(tmp_src_dir, path)
             job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")
@@ -2138,6 +2382,8 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             clip_sizes=clip_sizes,
             clip_crops=clip_crops,
             bare_clips=bare_clips,
+            compiled_compositions=compiled,
+            compiled_clips=clips_by_occurrence,
             text_slide_words=words,
             content_only=content_only,
             log=job.log,
@@ -2151,7 +2397,14 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         for entry in ((existing_manifest or {}).get("slides") or {}).values():
             previous_src_clips.update(str(rel) for rel in entry.get("srcClips") or [])
         published = _publish_generator_clips(
-            job, result.path, src_dir, nested_clips, result.ordinals, publish_journal, tmp_src_dir, order=clip_order
+            job,
+            result.path,
+            src_dir,
+            result.clips_inserted,
+            result.ordinals,
+            publish_journal,
+            tmp_src_dir,
+            order=clip_order,
         )
         categories = {
             result.ordinals[n]: str(p.get("category") or "")
@@ -2159,12 +2412,50 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             for n in [int(p["slide"])]
             if n in result.ordinals
         }
+        compiled_by_layout = {comp.layout_slide: comp for comp in compiled}
+        composition_metadata: dict[int, dict[str, Any]] = {}
+        for source_slide, ordinal in result.ordinals.items():
+            comp = compiled_by_layout.get(source_slide)
+            if comp is None:
+                continue
+            actual_media_rects = {
+                occurrence_id: result.clip_rects.get(source_slide, {}).get(item_id)
+                for item_id, occurrence_id in result.clip_occurrences.get(source_slide, {}).items()
+            }
+            composition_metadata[ordinal] = {
+                "composition_id": comp.id,
+                "source_slides": list(comp.source_slides),
+                "layout_slide": comp.layout_slide,
+                "frame": {
+                    "x": comp.output_frame.x,
+                    "y": comp.output_frame.y,
+                    "width": comp.output_frame.w,
+                    "height": comp.output_frame.h,
+                },
+                "media": [
+                    {
+                        "occurrence_id": media.occurrence_id,
+                        "asset_id": media.asset_id,
+                        "source_slide": media.source_slide,
+                        "source_item": list(media.source_item),
+                        "target_rect": {
+                            "x": (actual_media_rects.get(media.occurrence_id) or media.target_rect).x,
+                            "y": (actual_media_rects.get(media.occurrence_id) or media.target_rect).y,
+                            "width": (actual_media_rects.get(media.occurrence_id) or media.target_rect).w,
+                            "height": (actual_media_rects.get(media.occurrence_id) or media.target_rect).h,
+                        },
+                        "viewport": dict(media.viewport),
+                    }
+                    for media in comp.media
+                ],
+            }
         new_manifest_path = write_manifest(
             out_dir,
             result.path,
             [],
             categories=categories,
             source_slides={o: n for n, o in result.ordinals.items()},
+            composition_metadata=composition_metadata,
             src_clips=published,
             generator=True,
             existing=existing_manifest,
@@ -2198,6 +2489,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         "wallS": result.wall_s,
         "pages": pages,
         "contentOnly": content_only,
+        **({"review": review, "reviewMode": "v2"} if review is not None else {}),
         **({"exportDir": str(out_dir)} if raw_export else {}),
     }
 
