@@ -32,6 +32,7 @@ dependencies = [
 # tests fail to import rather than fail an assertion.
 test = [
     "pytest>=8.0",
+    "pytest-xdist>=3.6",
     "httpx2>=0.1",
 ]
 # Offline IWA decode for per-run character style (inspect item["runs"]). Kept an
