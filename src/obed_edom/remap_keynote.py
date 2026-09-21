@@ -169,13 +169,17 @@ def offline_text_reposition_enabled(
     explicit: str | None = None, *, offline_mode: str | None = None,
     say: Callable[[str], None] | None = None,
 ) -> bool:
-    """Offline reposition of autosize text boxes (default OFF). Env `OBED_OFFLINE_TEXT`
-    (`1`/`true`/`yes`/`on` enables). An autosize box's `naturalSize` is Keynote's render
+    """Offline reposition of autosize text boxes (default ON). Env `OBED_OFFLINE_TEXT`
+    (`0`/`false`/`no`/`off` disables). An autosize box's `naturalSize` is Keynote's render
     cache, unwritable offline, so today it hard-misses to the AppleScript fallback; when ON
     the offline writer re-seats it (position only, no size -- pass 1 already regrew it).
     Forced OFF when `offline_mode` is `off` (no offline slides to patch)."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_TEXT", "")).strip().lower()
-    if raw not in {"1", "true", "yes", "on"}:
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw not in {"", "1", "true", "yes", "on"}:
+        if say:
+            say(f"Unknown OBED_OFFLINE_TEXT value {raw!r}; forcing offline text off.")
         return False
     if offline_mode == "off":
         if say:
@@ -188,13 +192,17 @@ def offline_maskcrop_enabled(
     explicit: str | None = None, *, offline_mode: str | None = None,
     say: Callable[[str], None] | None = None,
 ) -> bool:
-    """Offline write of masked-media CROPs (default OFF). Env `OBED_OFFLINE_MASKCROP`
-    (`1`/`true`/`yes`/`on`). Today the surgical writer only writes an IDENTITY mask (no crop)
-    and hard-misses every real crop; when ON it also writes ANY axis-aligned within-frame crop
+    """Offline write of masked-media CROPs (default ON). Env `OBED_OFFLINE_MASKCROP`
+    (`0`/`false`/`no`/`off` disables). The surgical writer writes any axis-aligned
+    within-frame crop
     (offset included) via the existing `_masked_media_fields` transform. Rotated and
     cross-member crops stay refused. Forced OFF when `offline_mode` is `off`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_MASKCROP", "")).strip().lower()
-    if raw not in {"1", "true", "yes", "on"}:
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw not in {"", "1", "true", "yes", "on"}:
+        if say:
+            say(f"Unknown OBED_OFFLINE_MASKCROP value {raw!r}; forcing masked crops off.")
         return False
     if offline_mode == "off":
         if say:

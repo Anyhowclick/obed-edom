@@ -6,6 +6,32 @@ overview: >-
   the standalone W2 plan was folded into it. Completed feature diaries live in git and the
   Obed-Edom skill, not here.
 todos:
+  - id: text-mask-default-flip
+    content: >-
+      Promote the live-validated autosize-text reposition and axis-aligned masked-crop paths from
+      opt-in to default-on only after a fresh current-input whole-deck gate. Work branch:
+      `codex/resizer-offline-flip-gate`. The gate keeps offline geometry and z-order on in both arms;
+      arm A disables `OBED_OFFLINE_TEXT`/`OBED_OFFLINE_MASKCROP`, arm B enables them, and every other
+      experimental write flag is forced off. Run records must persist the complete arm configuration
+      and bind any reused evidence to the source/output deck digests. Geometry/live-verify bars,
+      pass-2 parity, card-border integrity, and z-order health all gate. Geometry cannot prove crop
+      correctness or text wrapping, so final GREEN additionally requires a digest-bound visual report:
+      per-region crop comparison and per-label text comparison, each with null and positive controls.
+      Keynote remains owner-gated; do all runner/tests/oracle preparation first and run both live arms
+      serially on unlocked copies, quitting Keynote between them. After GREEN, change the two defaults
+      while preserving explicit `off` kill switches, update docs/tests, and run every local suite.
+      DONE 2026-09-21: Full Report Card 155-slide A/B ran serially with Keynote quit between arms;
+      pass-2, 83/83 card-border refs, 4,658/4,658 scripted operations, offline consistency, z-order
+      `FRONT_BLOCK_OK 88/88`, and 100% drawable identity all passed. After independent Opus review,
+      the visual oracle was hardened to bind A/B/null preview manifests, use a second arm-A export as
+      its real null, score object-local difference support, compare four-direction displacement
+      controls, and enforce an alignment-aware 8px phase-correlation translation ceiling. It passed
+      339 autosize labels and 130 changed mask regions; 27 labels and 13 masks were wholly off-canvas,
+      maximum measured text translation was 7px, and maximum composed crop delta was 1.281px. Both
+      banked arms were then inspected independently through Keynote with complete live-verify coverage
+      before the final reuse replay. Bank: `output/bank/2026-09-21/text-mask-default-flip/`. Defaults
+      flipped on; explicit `off`/`0`/`false`/`no` remain kill switches, and unknown values fail closed.
+    status: completed
   - id: w2-final-live-gate
     content: >-
       Re-run the W2 RAISE10 and Gold live gate after PRs #128 and #131. If every eligibility,
