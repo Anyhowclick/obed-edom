@@ -1155,6 +1155,35 @@ def test_live_verify_planned_override_vs_derived_from_specs():
     assert overridden.positional_pass is True
 
 
+def test_live_verify_routing_splits_fallback_buckets_out_of_the_gated_set():
+    """`live_verify_routing` is the ONE definition of the split, shared by `live_verify`
+    and by `scripts/replay_live_verify.py`'s partial path (which runs the set bar alone
+    because its banked record predates `kindIndexMap`). Slide 7's group bucket was written
+    by the AppleScript fallback, so it is routed OUT of the gated set and INTO not-gated;
+    slide 9's was not, so it stays gated. Both remain in the multiset for coverage
+    accounting -- a bucket that fell out of both would be `uncovered` and RED the gate.
+    """
+    ow = {"statSlides": [7, 9], "fallbackKinds": {"7": ["group"]}}
+
+    multiset, gated, not_gated = offline_write.live_verify_routing(ow)
+
+    assert multiset == {7: {"group"}, 9: {"group"}}
+    assert gated == {9: {"group"}}
+    assert not_gated == {7: {"group"}}
+
+
+def test_live_verify_routing_without_fallback_kinds_gates_everything():
+    """A banked record predating `fallbackKinds` (every record in the 2026-09-16 bank)
+    makes the split a no-op: every routed bucket stays gated, so a replay against such a
+    record reports the same numbers it did before the routing moved behind the helper."""
+    ow = {"statSlides": [2, 4], "fallbackKinds": {}}
+
+    multiset, gated, not_gated = offline_write.live_verify_routing(ow)
+
+    assert gated == multiset == {2: {"group"}, 4: {"group"}}
+    assert not_gated == {}
+
+
 # --- run_offline_zorder kindIndexMap (W2 zorder-bridge Piece 1) ------------------
 
 

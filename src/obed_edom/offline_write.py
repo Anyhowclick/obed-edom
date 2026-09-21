@@ -948,6 +948,26 @@ class LiveVerifyReport:
         }
 
 
+def live_verify_routing(
+    offline_write_info: dict[str, Any],
+) -> tuple[dict[int, set[str]], dict[int, set[str]], dict[int, set[str]]]:
+    """The `(slide, kind)` split both live-verify bars route on, as
+    `(multiset, gated, not_gated)`: every stat-finalize `group` bucket, minus the buckets
+    the AppleScript fallback wrote (which the gate excludes rather than compares). Shared
+    by `live_verify` and by `scripts/replay_live_verify.py`'s partial path, which runs the
+    set bar alone, so the two cannot route differently."""
+    stat_slides = frozenset(offline_write_info.get("statSlides") or [])
+    multiset = {n: {"group"} for n in stat_slides}
+    fallback_kinds_raw = offline_write_info.get("fallbackKinds") or {}
+    not_gated = {
+        n: kinds & set(fallback_kinds_raw.get(str(n), ())) for n, kinds in multiset.items()
+    }
+    not_gated = {n: ks for n, ks in not_gated.items() if ks}
+    gated = {n: kinds - not_gated.get(n, set()) for n, kinds in multiset.items()}
+    gated = {n: ks for n, ks in gated.items() if ks}
+    return multiset, gated, not_gated
+
+
 def live_verify(
     offline_write_info: dict[str, Any],
     zorder_write_info: dict[str, Any] | None,
@@ -968,21 +988,11 @@ def live_verify(
     ow = offline_write_info
     if planned is None:
         planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
-    stat_slides = frozenset(ow.get("statSlides") or [])
     kind_index_map_raw = (zorder_write_info or {}).get("kindIndexMap") or {}
     kindindex_remap = coerce_kind_index_map(kind_index_map_raw)
-    multiset_kinds_by_slide = {n: {"group"} for n in stat_slides}
-    fallback_kinds_raw = ow.get("fallbackKinds") or {}
-    not_gated_kinds_by_slide = {
-        n: kinds & set(fallback_kinds_raw.get(str(n), ()))
-        for n, kinds in multiset_kinds_by_slide.items()
-    }
-    not_gated_kinds_by_slide = {n: ks for n, ks in not_gated_kinds_by_slide.items() if ks}
-    gated_kinds_by_slide = {
-        n: kinds - not_gated_kinds_by_slide.get(n, set())
-        for n, kinds in multiset_kinds_by_slide.items()
-    }
-    gated_kinds_by_slide = {n: ks for n, ks in gated_kinds_by_slide.items() if ks}
+    multiset_kinds_by_slide, gated_kinds_by_slide, not_gated_kinds_by_slide = (
+        live_verify_routing(ow)
+    )
 
     positional = verify_live_frames(
         planned, payload,

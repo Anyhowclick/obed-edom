@@ -46,7 +46,7 @@ def main() -> int:
     wall = cached(WALL)
     template = cached(TEMPLATE)
     slide = next(s for s in wall["slides"] if int(s.get("number") or 0) == SLIDE)
-    # Learn from this slide alone, as plan_payload_transforms does. Handed a whole
+    # Learn from this slide alone, as plan_payload does. Handed a whole
     # deck, learn_recipe takes the first slide holding map-like art, which on this
     # deck is the Taiwan photo, and the resulting affine describes nothing.
     recipe = learn_recipe(

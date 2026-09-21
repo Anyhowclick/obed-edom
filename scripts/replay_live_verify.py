@@ -132,7 +132,6 @@ def replay_round(name: str, bank_dir: Path) -> None:
     zorder_patched_slides = set(zorder_write.get("slides") or [])
     kind_index_map_raw = zorder_write.get("kindIndexMap")
     stat_slides = frozenset(int(n) for n in (ow.get("statSlides") or []))
-    multiset_kinds_by_slide = {n: {"group"} for n in stat_slides}
     # W2 zorder-bridge Piece 2 not-gated split (`offline_write.live_verify`): a banked
     # record without 'fallbackKinds' predates that field, so the split is a no-op for it
     # -- every routed bucket stays gated, same numbers as before this routing moved
@@ -157,14 +156,18 @@ def replay_round(name: str, bank_dir: Path) -> None:
               "here. The multiset bar below needs no kindIndex, so it still replays for "
               "real; a fresh gate run banked AFTER Piece 1 is required for the positional "
               "and coverage numbers the plan documents.")
-        print(f"{name}: live-verify routing: PARTIAL path (hand-rolled here, NOT routed "
-              f"through offline_write.live_verify -- see the WARN above); {routing_note}.")
+        print(f"{name}: live-verify routing: PARTIAL path -- the set bar routes on "
+              f"offline_write.live_verify_routing() exactly as production does, but the "
+              f"positional bar is refused (see the WARN above); {routing_note}.")
         print(f"{name}: Reading back {b_deck.name} via derive_deck_kind_index (Keynote-free)…")
         payload = _payload_from_deck(b_deck)
         planned = {
             n: [t for t in transforms if int(t.get("slide", -1)) == n] for n in stat_slides
         }
-        set_report = offline_write.verify_live_frames_multiset(planned, payload, multiset_kinds_by_slide)
+        _multiset, gated_kinds_by_slide, _not_gated = offline_write.live_verify_routing(
+            {"statSlides": sorted(stat_slides), "fallbackKinds": fallback_kinds_raw}
+        )
+        set_report = offline_write.verify_live_frames_multiset(planned, payload, gated_kinds_by_slide)
         offline_write._say_verify_report(
             f"{name}: offline-write live verify (set) (REPLAY, partial)", set_report,
             offline_write.LIVE_VERIFY_TOL, print,
