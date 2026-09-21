@@ -151,8 +151,19 @@ shrank the sequence so a bad ROI read as `"need >=3 frames"` with a wrong `n`. B
 Removing it strengthens the gate and moves no verdict. (`EMPTY_CORNERS` does NOT prove the frame
 size — `_score_empty` skips empty corner crops. Codex corrected that.)
 
-**Read `.agents/plans/gate_verdict_seam.plan.md` before restarting** — it carries the manifest, the
-retained commentary notes, and the re-do recipe.
+**Read the plan before restarting** — it carries the manifest, the retained commentary notes, the
+re-do recipe and the trigger condition. It lives ONLY on the parked branch, not on `main`, so read it
+without checking out:
+
+```bash
+git fetch origin
+git show origin/refactor/gate-verdict-seam:.agents/plans/gate_verdict_seam.plan.md
+```
+
+The re-do does **not** depend on anyone remembering to ping. The plan's TRIGGER section gives a
+detectable condition: if `coverTracksFootprint` appears in `scripts/p2_recovery_html_adversarial.py`
+on `origin/main`, the freeze-control work has landed and the re-do starts. If it does not, the park
+still holds — do not merge or rebase the seam branch in the meantime.
 
 ### SEQUENCING — owner decision: RE-DO this after `feat/p2-freeze-control-3to4` lands
 
