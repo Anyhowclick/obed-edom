@@ -1224,6 +1224,48 @@ label.check input[type="checkbox"]:disabled,
 .dsk-review-group .actions { flex-wrap: wrap; align-items: center; }
 .dsk-row-skipped { opacity: 0.55; }
 .dsk-review-table img { width: 96px; height: auto; border-radius: 4px; display: block; }
+.dsk-workspace { margin: 16px 0; }
+.dsk-defaults { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border: 1px solid var(--aud-dsk-line); border-radius: var(--radius-md); background: var(--aud-dsk-tint); }
+.dsk-defaults label, .dsk-inspector label { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-secondary); font-size: 12px; }
+.dsk-defaults input[type="number"], .dsk-inspector input[type="number"] { width: 68px; min-height: 28px; }
+.dsk-editor-grid { display: grid; grid-template-columns: minmax(135px, 180px) minmax(300px, 1fr) minmax(180px, 240px); gap: 12px; margin-top: 12px; align-items: start; }
+.dsk-rail { max-height: 540px; overflow: auto; padding-right: 4px; }
+.dsk-rail section + section { margin-top: 12px; }
+.dsk-rail h3 { margin: 0 0 5px; color: var(--ink-tertiary); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.dsk-rail-card { display: grid; grid-template-columns: 68px 1fr; gap: 7px; width: 100%; margin-bottom: 6px; padding: 5px; text-align: left; color: var(--ink-secondary); background: var(--bg-surface-glass); border: var(--border-glass); border-radius: var(--radius-xs); cursor: pointer; }
+.dsk-rail-card.selected { border-color: var(--aud-dsk); box-shadow: 0 0 0 1px var(--aud-dsk); color: var(--ink-primary); }
+.dsk-rail-card img, .dsk-thumb-placeholder { display: block; width: 68px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 3px; background: var(--bg-surface-highlight); }
+.dsk-rail-meta { display: grid; align-content: center; gap: 2px; font-size: 11px; }
+.dsk-output-preview { min-width: 0; }
+.dsk-canvas { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border: var(--border-glass); border-radius: var(--radius-md); background: #101017; box-shadow: var(--shadow-card); touch-action: none; }
+.dsk-safe-line { position: absolute; bottom: 1.4%; height: 1px; background: rgba(255,255,255,.35); }
+.dsk-frame { position: absolute; overflow: visible; border: 2px solid var(--aud-dsk); background: rgba(255,123,172,.09); cursor: grab; }
+.dsk-frame:active { cursor: grabbing; }
+.dsk-pixel-chip { position: absolute; left: -2px; top: -25px; padding: 2px 6px; color: var(--ink-inverse); background: var(--aud-dsk); border-radius: 4px 4px 0 0; font: 11px var(--font-mono); white-space: nowrap; }
+.dsk-media-layer { position: absolute; overflow: hidden; border: 1px solid transparent; }
+.dsk-media-layer.active { border-color: var(--status-info); }
+.dsk-media-crop { position: absolute; inset: 0; overflow: hidden; }
+.dsk-media-layer img { position: absolute; inset: 0 auto auto 0; display: block; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.dsk-resize-handle { position: absolute; right: -7px; top: -7px; width: 14px; height: 14px; min-height: 0; padding: 0; border: 2px solid #fff; border-radius: 50%; background: var(--aud-dsk); cursor: nesw-resize; }
+.dsk-preview-nudges { display: flex; gap: 4px; align-items: center; margin-top: 8px; }
+.dsk-preview-nudges button, .dsk-align-row button, .dsk-defaults > button { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; min-width: 30px; padding: 3px 7px; border: var(--border-glass); border-radius: 5px; color: var(--ink-secondary); background: var(--bg-surface-glass); cursor: pointer; }
+.dsk-preview-nudges button[aria-pressed="true"], .dsk-align-row button[aria-pressed="true"], .dsk-defaults > button[aria-pressed="true"] { color: var(--ink-inverse); background: var(--bg-surface-solid); }
+.align-glyph { position: relative; display: block; width: 15px; height: 12px; background: linear-gradient(currentColor 0 0) 0 1px / 100% 2px no-repeat, linear-gradient(currentColor 0 0) 0 5px / 100% 2px no-repeat, linear-gradient(currentColor 0 0) 0 9px / 100% 2px no-repeat; }
+.align-glyph.left { clip-path: inset(0 35% 0 0); }
+.align-glyph.right { clip-path: inset(0 0 0 35%); margin-left: auto; }
+.align-glyph.centre { clip-path: inset(0 18%); }
+.dsk-inspector { display: grid; gap: 10px; padding: 11px; border: var(--border-glass); border-radius: var(--radius-md); background: var(--bg-surface-glass); }
+.dsk-inspector fieldset { display: grid; gap: 7px; min-width: 0; margin: 0; padding: 8px; border: var(--border-glass-subtle); border-radius: var(--radius-xs); }
+.dsk-inspector legend { padding: 0 3px; color: var(--ink-tertiary); font-size: 11px; }
+.dsk-inspector select, .dsk-inspector input[type="range"] { width: 100%; }
+.dsk-check { font-weight: 650; color: var(--ink-primary) !important; }
+.dsk-size-row, .dsk-align-row, .dsk-segment { display: flex; gap: 5px; align-items: center; }
+.dsk-segment button { flex: 1; min-height: 30px; border: var(--border-glass); border-radius: 5px; color: var(--ink-secondary); background: var(--bg-surface-glass-sub); cursor: pointer; }
+.dsk-segment button[aria-pressed="true"] { color: var(--ink-inverse); background: var(--bg-surface-solid); }
+.dsk-segment.source button:first-child[aria-pressed="true"] { background: var(--aud-lw); }
+.dsk-segment.source button:last-child[aria-pressed="true"] { background: var(--aud-cg); }
+.link-button { justify-self: start; padding: 0; color: var(--status-info); border: 0; background: transparent; cursor: pointer; }
+@media (max-width: 900px) { .dsk-editor-grid { grid-template-columns: 1fr; } .dsk-rail { display: flex; gap: 10px; max-height: none; overflow-x: auto; } .dsk-rail section { flex: 0 0 145px; } .dsk-rail section + section { margin-top: 0; } .dsk-inspector { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .mono-list { font-family: var(--font-mono); font-size: 12px; color: var(--ink-tertiary); max-height: 200px; overflow: auto; margin: 0 0 12px; padding-left: 20px; }
 
 .build-preview { margin: 16px 0; }

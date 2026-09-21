@@ -1,4 +1,7 @@
 import type { MapsBootstrapRow } from "./maps/manualRows";
+import type { DskDecision, editableReview } from "./dsk/decisions";
+export type { DskDecision, DskPage } from "./dsk/decisions";
+export type DskEditableReview = ReturnType<typeof editableReview>;
 
 export type Flag = {
   severity: "info" | "warning" | "error" | "success";
@@ -278,33 +281,6 @@ export async function validateKeynote(
   return res.json();
 }
 
-/** `{slide, include, action, anchor, keepSide, clip, videosOnly}` — matches `DskDecisionsBody` in `web/app.py`. */
-export type DskDecision = {
-  slide: number;
-  include: boolean;
-  action: string;
-  anchor: string;
-  keepSide: boolean;
-  clip: string | null;
-  videosOnly: boolean;
-};
-
-/** One row of a DSK propose result's `pages[]`. */
-export type DskPage = {
-  slide: number;
-  thumb?: string | null;
-  category: string;
-  buildCount: number;
-  movieCount: number;
-  isText: boolean;
-  skipReason?: string | null;
-  needsClip: boolean;
-  canVideosOnly?: boolean;
-  stackedMovies?: boolean;
-  stackedMoviesKeepSide?: boolean;
-  decision: DskDecision;
-};
-
 export type DskSkip = { slide: number; reason: string };
 
 /** `POST /api/dsk` — a FORM post; propose is async, so this returns the queued job (poll it). */
@@ -332,19 +308,20 @@ export async function startDsk(
   return res.json();
 }
 
-export async function saveDskDecisions(jobId: string, decisions: DskDecision[]): Promise<Job> {
+export async function saveDskDecisions(jobId: string, decisions: DskDecision[] | DskEditableReview, baseRevision?: number): Promise<Job> {
   const res = await fetch(`/api/dsk/${jobId}/decisions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decisions }),
+    body: JSON.stringify(Array.isArray(decisions) ? { decisions } : { review: decisions, baseRevision }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
 
-export async function applyDsk(jobId: string, decisions?: DskDecision[], exportDir?: string): Promise<Job> {
-  const body: { decisions?: DskDecision[]; exportDir?: string } = {};
-  if (decisions) body.decisions = decisions;
+export async function applyDsk(jobId: string, decisions?: DskDecision[] | DskEditableReview, exportDir?: string, baseRevision?: number): Promise<Job> {
+  const body: { decisions?: DskDecision[]; review?: DskEditableReview; exportDir?: string; baseRevision?: number } = {};
+  if (Array.isArray(decisions)) body.decisions = decisions;
+  else if (decisions) { body.review = decisions; body.baseRevision = baseRevision; }
   if (exportDir) body.exportDir = exportDir;
   const res = await fetch(`/api/dsk/${jobId}/apply`, {
     method: "POST",

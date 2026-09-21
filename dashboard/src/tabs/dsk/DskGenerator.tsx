@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   applyDsk,
   chooseFolder,
@@ -17,6 +17,8 @@ import { BuildPreview } from "../../components/BuildPreview";
 import { LoadingOverlay, Lightbox } from "../../components/PreviewGrid";
 import { buildDecisionsMap, toDecisionsPayload, type DecisionsMap } from "../../dsk/decisions";
 import { SlideReviewList } from "./SlideReviewList";
+import { DskReviewWorkspace } from "./DskReviewWorkspace";
+import { editableReview, editorState, isDskReview, type DskEditorState, type DskReview } from "../../dsk/decisions";
 import { DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath } from "../../prefs";
 import { useCurrentJob } from "../../sessions";
 import { JobName } from "../../components/JobName";
@@ -52,6 +54,10 @@ type DskResult = {
   overflows?: string[];
   clips?: Record<string, string[]>;
   ordinals?: Record<string, number>;
+  review?: DskReview;
+  schemaVersion?: number;
+  revision?: number;
+  compositions?: unknown[];
 };
 
 export function DskGenerator() {
@@ -60,16 +66,23 @@ export function DskGenerator() {
   const [referenceDeck, setReferenceDeck] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
   const [decisions, setDecisions] = useState<DecisionsMap>({});
+  const [reviewState, setReviewState] = useState<DskEditorState | null>(null);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [workspace, setWorkspace] = useSessionPath(DSK_WORKSPACE_KEY);
   const defaultExportDir = useDefaultExportDir();
+  const latestReview = useRef<DskEditorState | null>(null);
+  const reviewRevision = useRef(0);
+  const initializedReviewJob = useRef<string | null>(null);
+  const saveTimer = useRef<number | null>(null);
+  const saveTail = useRef(Promise.resolve());
 
   const result = (job?.result || undefined) as DskResult | undefined;
   const pages = result?.pages || [];
   const skipped = result?.skipped || [];
+  const review = isDskReview(result?.review) ? result.review : isDskReview(result) ? result : null;
 
   useEffect(() => {
     const path = result?.path;
@@ -78,9 +91,17 @@ export function DskGenerator() {
   }, [job?.id, result?.path]);
 
   useEffect(() => {
-    if (result?.phase === "review") setDecisions(buildDecisionsMap(pages));
+    if (review && initializedReviewJob.current !== job?.id) {
+      const next = editorState(review);
+      latestReview.current = next;
+      reviewRevision.current = review.revision;
+      setReviewState(next);
+      initializedReviewJob.current = job?.id || null;
+    } else if (result?.phase === "review") setDecisions(buildDecisionsMap(pages));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job?.id]);
+  }, [job?.id, !!review]);
+
+  useEffect(() => () => { if (saveTimer.current != null) window.clearTimeout(saveTimer.current); }, []);
 
   async function track(created: { id: string }) {
     const done = await pollJob(created.id, (tick) => {
@@ -123,6 +144,26 @@ export function DskGenerator() {
     }
   }
 
+  function queueReviewSave(state: DskEditorState) {
+    if (!job) return;
+    const payload = editableReview(state);
+    saveTail.current = saveTail.current.then(async () => {
+      const saved = await saveDskDecisions(job.id, payload, reviewRevision.current);
+      const savedResult = saved.result as DskResult | undefined;
+      const nextRevision = savedResult?.revision;
+      if (typeof nextRevision === "number") reviewRevision.current = nextRevision;
+      upsert(saved);
+    }).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }
+
+  function changeReview(next: DskEditorState, persist = false) {
+    latestReview.current = next;
+    setReviewState(next);
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    if (persist) queueReviewSave(next);
+    else saveTimer.current = window.setTimeout(() => queueReviewSave(latestReview.current || next), 350);
+  }
+
   async function run() {
     if (!job) return;
     setError(null);
@@ -138,6 +179,15 @@ export function DskGenerator() {
     setWorkspace(chosen.path);
     setBusy(true);
     try {
+      if (reviewState && latestReview.current) {
+        if (saveTimer.current != null) { window.clearTimeout(saveTimer.current); saveTimer.current = null; }
+        await saveTail.current;
+        const current = latestReview.current;
+        const created = await applyDsk(job.id, editableReview(current), chosen.path, reviewRevision.current);
+        upsert(created);
+        await track(created);
+        return;
+      }
       await saveDskDecisions(job.id, toDecisionsPayload(decisions));
       const created = await applyDsk(job.id, toDecisionsPayload(decisions), chosen.path);
       upsert(created);
@@ -204,13 +254,7 @@ export function DskGenerator() {
       </div>
       {result?.phase === "review" && job && (
         <>
-          <SlideReviewList
-            jobId={job.id}
-            pages={pages}
-            decisions={decisions}
-            onChange={saveDecisions}
-            onOpen={setOpen}
-          />
+          {reviewState ? <DskReviewWorkspace jobId={job.id} state={reviewState} onChange={changeReview} /> : <SlideReviewList jobId={job.id} pages={pages} decisions={decisions} onChange={saveDecisions} onOpen={setOpen} />}
           {skipped.length > 0 && (
             <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
           )}

@@ -595,6 +595,95 @@ def test_manifest_src_clips_written_for_generator_entry(tmp_path):
     assert "clip" not in manifest["slides"]["4"]
 
 
+def test_manifest_writes_v2_composition_provenance_with_legacy_source_slide(tmp_path):
+    metadata = {
+        4: {
+            "composition_id": "sequence:108-110",
+            "source_slides": [108, 109, 110],
+            "layout_slide": 110,
+            "frame": {"x": 43, "y": 802, "width": 935, "height": 263},
+            "media": [
+                {
+                    "occurrence_id": "110:movie-wa0125",
+                    "asset_id": "VID-20250608-WA0125.mp4",
+                },
+            ],
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path,
+        Path("Deck.key"),
+        [],
+        categories={4: "mixed"},
+        source_slides={4: 110},
+        composition_metadata=metadata,
+        generator=True,
+    )
+    slide = json.loads(path.read_text())["slides"]["4"]
+    assert slide["source_slide"] == 110
+    assert slide["composition_id"] == "sequence:108-110"
+    assert slide["source_slides"] == [108, 109, 110]
+    assert slide["layout_slide"] == 110
+    assert slide["frame"]["width"] == 935
+    assert slide["media"][0]["occurrence_id"] == "110:movie-wa0125"
+
+
+def test_manifest_generator_removes_stale_composition_metadata(tmp_path):
+    existing = {
+        "slides": {
+            "4": {
+                "category": "mixed",
+                "source_slide": 110,
+                "composition_id": "sequence:108-110",
+                "source_slides": [108, 109, 110],
+                "layout_slide": 110,
+                "frame": {"x": 43, "y": 802, "width": 935, "height": 263},
+                "media": [{"occurrence_id": "110:movie-wa0125"}],
+            },
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path,
+        Path("Deck.key"),
+        [],
+        categories={4: "static"},
+        source_slides={4: 44},
+        generator=True,
+        existing=existing,
+    )
+    slide = json.loads(path.read_text())["slides"]["4"]
+    assert slide["source_slide"] == 44
+    for key in ("composition_id", "source_slides", "layout_slide", "frame", "media"):
+        assert key not in slide
+
+
+def test_manifest_exporter_drop_src_preserves_composition_provenance(tmp_path):
+    existing = {
+        "slides": {
+            "4": {
+                "category": "movie",
+                "source_slide": 50,
+                "composition_id": "slide:50",
+                "source_slides": [50],
+                "layout_slide": 50,
+                "srcClips": ["src/Deck.004.01.src.mov"],
+            },
+        },
+    }
+    path = dse.write_manifest(
+        tmp_path,
+        Path("Deck.key"),
+        [],
+        categories={},
+        existing=existing,
+        drop_src=True,
+    )
+    slide = json.loads(path.read_text())["slides"]["4"]
+    assert "srcClips" not in slide
+    assert slide["composition_id"] == "slide:50"
+    assert slide["source_slides"] == [50]
+
+
 def test_manifest_generator_mode_drops_stale_clip_after_exporter(tmp_path):
     existing = {
         "slides": {

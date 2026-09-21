@@ -392,6 +392,7 @@ def write_manifest(
     clips: Mapping[int, Path] | None = None,
     generated: str | None = None,
     source_slides: Mapping[int, int] | None = None,
+    composition_metadata: Mapping[int, Mapping[str, Any]] | None = None,
     src_clips: Mapping[int, Sequence[str]] | None = None,
     drop_src: bool = False,
     generator: bool = False,
@@ -401,7 +402,8 @@ def write_manifest(
     that need it stamped pass an ISO timestamp explicitly. Serialised with
     `sort_keys=True` so the file is byte-identical across runs of an unchanged
     export. `source_slides` maps a DSK slide to the FW slide it came from (Generator
-    output). `src_clips` records each slide's Generator intermediate clip names
+    output). `composition_metadata` adds the v2 Generator provenance for a DSK
+    ordinal while preserving the legacy singular `source_slide`. `src_clips` records each slide's Generator intermediate clip names
     (relative to `out_dir`) under `srcClips`, until the Exporter deletes them and
     calls with `drop_src=True` to remove the key from every slide entry. `existing`
     is a previously written manifest for the same folder whose slide entries are
@@ -415,13 +417,14 @@ def write_manifest(
     static/absent, rather than merely overlaid onto the existing entry."""
     clips = clips or {}
     source_slides = source_slides or {}
+    composition_metadata = composition_metadata or {}
     src_clips = src_clips or {}
     by_slide: dict[int, list[StageAsset]] = {}
     for asset in assets:
         by_slide.setdefault(asset.slide, []).append(asset)
 
     slides_out: dict[str, dict[str, Any]] = {}
-    kept_ordinals = set(source_slides) if generator else None
+    kept_ordinals = set(source_slides) | set(composition_metadata) if generator else None
     for key, entry in ((existing or {}).get("slides") or {}).items():
         if not isinstance(entry, dict):
             continue
@@ -433,8 +436,13 @@ def write_manifest(
             if key_ordinal not in kept_ordinals:
                 continue
         slides_out[str(key)] = dict(entry)
-    regenerated = set(source_slides) | set(src_clips) if generator else set()
-    for slide in sorted(set(by_slide) | set(clips) | set(source_slides) | set(src_clips)):
+    regenerated = set(source_slides) | set(composition_metadata) | set(src_clips) if generator else set()
+    composition_keys = {
+        "composition_id", "source_slides", "layout_slide", "frame", "media",
+    }
+    for slide in sorted(
+        set(by_slide) | set(clips) | set(source_slides) | set(composition_metadata) | set(src_clips)
+    ):
         entry = slides_out.get(str(slide), {})
         if slide in categories:
             entry["category"] = categories[slide]
@@ -442,6 +450,12 @@ def write_manifest(
             entry["category"] = ""
         if slide in source_slides:
             entry["source_slide"] = int(source_slides[slide])
+        if slide in regenerated:
+            for key in composition_keys:
+                entry.pop(key, None)
+        if slide in composition_metadata:
+            metadata = composition_metadata[slide]
+            entry.update({key: metadata[key] for key in composition_keys if key in metadata})
         if slide in src_clips:
             entry["srcClips"] = list(src_clips[slide])
         elif slide in regenerated:
