@@ -983,6 +983,10 @@ def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool,
         "flipWindowDecodable": flip_window_decodable,
         "indexSamples": samples,
         "advanceKeyPerfMs": advance_key_perf_ms,
+        # Exactly one TRUSTED, non-repeat ArrowRight keydown reached the page, and
+        # the watch rejected nothing.
+        "advanceKeyEvents": 1,
+        "advanceKeyRejected": 0,
         "atCutFrom": at_cut_boundary["from"],
         "atCutBoundary": at_cut_boundary,
         "collector": collector,
@@ -1529,20 +1533,56 @@ def test_at_cut_boundary_admits_the_frame_painted_during_the_key_round_trip():
 
 def test_advance_key_clock_requires_exactly_one_observed_keydown():
     """The cut instant comes from the page's own listener, and only when it saw
-    exactly one ArrowRight keydown. Anything else is `None`, which fails the arm
-    closed rather than dating the cut from a replay or from nothing."""
-    assert p2._advance_key_clock({"n": 1, "t": 1000.0}) == 1000.0
-    assert p2._advance_key_clock({"n": 0, "t": None}) is None, "dispatch never landed"
-    assert p2._advance_key_clock({"n": 2, "t": 1000.0}) is None, "a replayed press"
-    assert p2._advance_key_clock({"n": 1, "t": None}) is None
-    assert p2._advance_key_clock({"n": 1, "t": float("inf")}) is None
-    assert p2._advance_key_clock({"n": True, "t": 1000.0}) is None
+    exactly one ACCEPTED ArrowRight keydown and rejected none. Anything else is
+    `None`, which fails the arm closed rather than dating the cut from a replay,
+    from a synthetic press, or from nothing."""
+    assert p2._advance_key_clock({"n": 1, "rejected": 0, "t": 1000.0}) == 1000.0
+    assert p2._advance_key_clock({"n": 0, "rejected": 0, "t": None}) is None, "never landed"
+    assert p2._advance_key_clock({"n": 2, "rejected": 0, "t": 1000.0}) is None, "a replay"
+    assert p2._advance_key_clock({"n": 1, "rejected": 0, "t": None}) is None
+    assert p2._advance_key_clock({"n": 1, "rejected": 0, "t": float("inf")}) is None
+    assert p2._advance_key_clock({"n": True, "rejected": 0, "t": 1000.0}) is None
     assert p2._advance_key_clock(None) is None
+    # A rejected event is an untrusted or auto-repeat ArrowRight the listener
+    # refused to count: the accepted one alone is no longer a sound cut.
+    assert p2._advance_key_clock({"n": 1, "rejected": 1, "t": 1000.0}) is None
+    assert p2._advance_key_clock({"n": 1, "t": 1000.0}) is None, "counter absent"
+    assert p2._advance_key_clock({"n": 1, "rejected": True, "t": 1000.0}) is None
 
     samples = _press_window_samples(12)
-    assert p2._at_cut_boundary(samples, p2._advance_key_clock({"n": 2, "t": 900.0})) == {
-        "from": None, "ok": False, "reason": "no advance keydown page clock"
-    }
+    assert p2._at_cut_boundary(
+        samples, p2._advance_key_clock({"n": 2, "rejected": 0, "t": 900.0})
+    ) == {"from": None, "ok": False, "reason": "no advance keydown page clock"}
+
+
+def test_advance_key_watch_js_accepts_only_a_trusted_non_repeat_keydown():
+    """The listener's own filter, read off the source: the event must be a
+    `keydown`, an `ArrowRight`, `isTrusted`, and not an auto-repeat -- and a
+    refusal is COUNTED (`rejected`), never silently dropped."""
+    js = p2.ADVANCE_KEY_WATCH_JS
+    assert "e.type !== 'keydown'" in js
+    assert "e.key !== 'ArrowRight'" in js
+    assert "e.isTrusted === true" in js
+    assert "e.repeat !== true" in js
+    assert "st.rejected += 1" in js
+    assert "keyup" not in js, "a keyup can never stand in for the cut"
+
+
+def test_advance_key_observed_once_refuses_absence_and_contamination():
+    assert p2._advance_key_observed_once(
+        {"advanceKeyEvents": 1, "advanceKeyRejected": 0}
+    ) is True
+    for snap in (
+        {},                                                        # both absent
+        {"advanceKeyRejected": 0},                                 # count absent
+        {"advanceKeyEvents": 1},                                   # rejects absent
+        {"advanceKeyEvents": 0, "advanceKeyRejected": 0},          # never landed
+        {"advanceKeyEvents": 2, "advanceKeyRejected": 0},          # a replay
+        {"advanceKeyEvents": 1, "advanceKeyRejected": 1},          # synthetic/repeat
+        {"advanceKeyEvents": True, "advanceKeyRejected": 0},       # bool is not 1
+        {"advanceKeyEvents": None, "advanceKeyRejected": None},
+    ):
+        assert p2._advance_key_observed_once(snap) is False, snap
 
 
 def test_at_cut_boundary_zero_is_legitimate_and_not_an_error():
@@ -1690,17 +1730,76 @@ def test_collector_truncated_endpoint_with_no_badge_clock_fails_closed():
         assert _collector_meta_for(dump, p2._nearest_sample_times(raw))["ok"] is True
 
 
+def _sound_badge_snap(n: int = 3) -> dict:
+    samples = [
+        {"index": 40 + i, "badgeSeq": 900 + i, "badgeRect": {"x": 1.0},
+         "footprintSource": "measured"}
+        for i in range(n)
+    ]
+    return {
+        "indexSamples": samples,
+        "badge": {"install": {"ok": True}, "decoded": n, "missing": 0, "crcBad": 0,
+                  "unlogged": 0, "counts": {"seqViolation": 0}},
+    }
+
+
 def test_badge_samples_sound_requires_every_capture_to_carry_its_own_frame():
-    sound = {"badge": {"install": {"ok": True}, "missing": 0, "crcBad": 0,
-                       "unlogged": 0, "counts": {"seqViolation": 0}}}
+    sound = _sound_badge_snap()
     assert p2._badge_samples_sound(sound) is True
     for key in ("missing", "crcBad", "unlogged"):
-        bad = {"badge": {**sound["badge"], key: 1}}
+        bad = {**sound, "badge": {**sound["badge"], key: 1}}
         assert p2._badge_samples_sound(bad) is False, key
-    torn = {"badge": {**sound["badge"], "counts": {"seqViolation": 1}}}
+    torn = {**sound, "badge": {**sound["badge"], "counts": {"seqViolation": 1}}}
     assert p2._badge_samples_sound(torn) is False
-    assert p2._badge_samples_sound({"badge": {**sound["badge"], "install": None}}) is False
+    assert p2._badge_samples_sound(
+        {**sound, "badge": {**sound["badge"], "install": None}}
+    ) is False
     assert p2._badge_samples_sound({}) is False
+
+
+def test_badge_samples_sound_requires_a_usable_geometry_not_just_transport():
+    """r8 MAJOR 1: a CRC-valid, logged, in-order badge whose painted rect
+    disagrees with the page log is `unstable` -- transport-sound, geometry-junk.
+    It must not leave the arm sound."""
+    sound = _sound_badge_snap()
+    for source in ("unstable", "modelled", "none", None):
+        bad = {**sound, "indexSamples": [
+            {**sound["indexSamples"][0], "footprintSource": source},
+            *sound["indexSamples"][1:],
+        ]}
+        assert p2._badge_samples_sound(bad) is False, source
+    # `install` present but not OK, and a short decode count, are both refused.
+    assert p2._badge_samples_sound(
+        {**sound, "badge": {**sound["badge"], "install": {"ok": False}}}
+    ) is False
+    assert p2._badge_samples_sound(
+        {**sound, "badge": {**sound["badge"], "install": {}}}
+    ) is False
+    assert p2._badge_samples_sound(
+        {**sound, "badge": {**sound["badge"], "decoded": 2}}
+    ) is False, "one capture decoded nothing"
+    assert p2._badge_samples_sound(
+        {**sound, "indexSamples": []}
+    ) is False, "no samples is not soundness"
+
+
+def test_badge_samples_sound_exempts_only_the_validated_rehandoff_pair():
+    """The ONLY admissible non-`measured` sample is one of the re-handoff pair's
+    deliberate null-rect frames, and only when the scorer passes that validated
+    pair in. Absent the exemption the same sample fails the arm closed."""
+    sound = _sound_badge_snap()
+    null_sample = {"index": None, "badgeSeq": 900, "badgeRect": None,
+                   "footprintSource": "unstable"}
+    snap = {**sound, "indexSamples": [null_sample, *sound["indexSamples"][1:]]}
+    assert p2._badge_samples_sound(snap, {900, 901}) is True
+    assert p2._badge_samples_sound(snap) is False, "no exemption passed in"
+    assert p2._badge_samples_sound(snap, set()) is False
+    assert p2._badge_samples_sound(snap, {777, 778}) is False, "some other pair"
+    # A sample that DID decode a rect is a real observation: never exempt.
+    decoded = {**null_sample, "index": 41, "badgeRect": {"x": 1.0}}
+    assert p2._badge_samples_sound(
+        {**sound, "indexSamples": [decoded, *sound["indexSamples"][1:]]}, {900, 901}
+    ) is False
 
 
 def test_moving_index_run_at_cut_refuses_an_invalid_boundary():
@@ -3834,3 +3933,345 @@ def test_pool_census_is_invalid_on_an_unattributable_entry():
 def test_pool_census_tolerates_a_provably_different_asset():
     census = _pool_census([{"key": "vid-2024-01-01-wa0125.mp4", "movieKey": None, "elId": 9}])
     assert p2.neverPooledEvidence(_refusal_events(), _carry_census(), census)["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# r8 MAJOR 1 — geometry soundness. Badge TRANSPORT (installed, decoded, CRC-ok,
+# logged, in order) is not badge GEOMETRY: a sample whose painted rect disagrees
+# with the page's own log for that frame is `unstable`, and scoring it is
+# scoring a wrong ROI. Every SCORED sample must be `measured`; the only
+# exception is the scorer's already-validated re-handoff pair.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("arm", ["a1", "b", "a2"])
+def test_freeze_control_unstable_but_crc_valid_sample_is_inconclusive(arm):
+    """The exact r8 hole: CRC-valid, logged, ordered, decoded -- and geometrically
+    junk. The old transport-only gate left `badgeSamplesSoundAllArms` green."""
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    _with_sample(snaps[arm], 1, footprintSource="unstable")
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive", arm
+    assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], arm
+
+
+@pytest.mark.parametrize("arm", ["a1", "b", "a2"])
+@pytest.mark.parametrize("source", ["modelled", "none", None])
+def test_freeze_control_any_non_measured_source_is_inconclusive(arm, source):
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    _with_sample(snaps[arm], 0, footprintSource=source)
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive", (arm, source)
+    assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], (arm, source)
+
+
+@pytest.mark.parametrize("arm", ["a1", "b", "a2"])
+def test_freeze_control_badge_install_not_ok_is_inconclusive(arm):
+    """`install` merely PRESENT was enough before; it must be `ok is True`."""
+    for install in ({"ok": False}, {}, None):
+        snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+        snaps[arm]["badge"] = {**snaps[arm]["badge"], "install": install}
+        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        assert verdict["verdict"] == "inconclusive", (arm, install)
+        assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], (arm, install)
+
+
+@pytest.mark.parametrize("arm", ["a1", "b", "a2"])
+def test_freeze_control_short_decode_count_is_inconclusive(arm):
+    """`decoded` short of the capture count means some frame produced no badge at
+    all -- a sample with no geometry of its own."""
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    n = len(snaps[arm]["indexSamples"])
+    snaps[arm]["badge"] = {**snaps[arm]["badge"], "decoded": n - 1}
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive", arm
+    assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], arm
+
+
+# --------------------------------------------------------------------------- #
+# r8 MAJOR 2 — the page's own keydown count gates the verdict, in every arm.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("arm", ["a1", "b", "a2"])
+@pytest.mark.parametrize(
+    "events,rejected,label",
+    [
+        (None, None, "counters missing entirely"),
+        (0, 0, "the dispatch never reached the page"),
+        (2, 0, "a replayed or drain press in flight"),
+        (1, 1, "one accepted plus one SYNTHETIC (untrusted) ArrowRight"),
+        (0, 1, "only a synthetic ArrowRight"),
+        (1, 3, "an auto-REPEAT burst alongside the real press"),
+    ],
+)
+def test_freeze_control_advance_key_count_is_gated_in_every_arm(
+    arm, events, rejected, label
+):
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    if events is None:
+        snaps[arm].pop("advanceKeyEvents", None)
+        snaps[arm].pop("advanceKeyRejected", None)
+    else:
+        snaps[arm]["advanceKeyEvents"] = events
+        snaps[arm]["advanceKeyRejected"] = rejected
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive", (arm, label)
+    assert "atCutBoundaryValidAllArms" in verdict["integrityFailed"], (arm, label)
+
+
+def test_freeze_control_clean_bracket_still_passes_with_the_new_gates():
+    """The positive control for both r8 majors: nothing above weakened the
+    pass-capable fixture."""
+    verdict = p2._score_freeze_control(
+        _positive_snap_34(), _freeze_b_snap_34(), _positive_snap_34()
+    )
+    assert verdict["verdict"] == "pass", verdict["reason"]
+    assert verdict["integrityFailed"] == []
+
+
+# --------------------------------------------------------------------------- #
+# MAIN's finding-13 gate (`_advance_c_ok`) — the same two majors on the path
+# that is NOT the A-B-A bracket.
+# --------------------------------------------------------------------------- #
+def _main_inputs(**snap_overrides):
+    snap = _positive_snap_34(**snap_overrides)
+    return snap, snap["indexSamples"], {"exact": True}, {"settled": True}
+
+
+def test_main_advance_c_ok_is_green_on_a_clean_capture():
+    meta, samples, settle, owner = _main_inputs()
+    assert p2._advance_c_ok(meta, samples, settle, owner) is True
+    seq = [
+        s.get("index") for s in p2._slide4_settled_window(samples)
+        if s.get("footprintSource") == "measured"
+    ]
+    assert seq and p2.score_index_progression(seq)["ok"] is True
+
+
+@pytest.mark.parametrize("source", ["unstable", "modelled", "none", None])
+def test_main_wrong_roi_sample_in_the_scored_window_is_not_green(source):
+    """r8 MAJOR 1 on MAIN: a wrong-ROI (or undecoded) sample inside the SETTLED
+    slide-4 window is filtered out of `slide4IndexSequence` AND fails the gate
+    closed -- there is no re-handoff on this path to exempt it."""
+    meta, samples, settle, owner = _main_inputs()
+    window_pos = [
+        i for i, s in enumerate(samples) if s in p2._slide4_settled_window(samples)
+    ]
+    assert window_pos, "fixture must have a settled slide-4 window"
+    meta = _with_sample(dict(meta), window_pos[0], footprintSource=source)
+    samples = meta["indexSamples"]
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False, source
+    scored = [
+        s for s in p2._slide4_settled_window(samples)
+        if s.get("footprintSource") == "measured"
+    ]
+    assert len(scored) == len(window_pos) - 1, "the bad sample was scored anyway"
+
+
+def test_main_wrong_roi_sample_with_a_none_index_is_not_green():
+    """A `None` decode: the r8 wording's other half."""
+    meta, samples, settle, owner = _main_inputs()
+    window_pos = [
+        i for i, s in enumerate(samples) if s in p2._slide4_settled_window(samples)
+    ]
+    meta = _with_sample(dict(meta), window_pos[0], footprintSource="unstable", index=None)
+    assert p2._advance_c_ok(meta, meta["indexSamples"], settle, owner) is False
+
+
+@pytest.mark.parametrize(
+    "events,rejected",
+    [(None, None), (0, 0), (2, 0), (1, 1), (0, 1), (1, 3)],
+)
+def test_main_advance_key_count_is_gated(events, rejected):
+    meta, samples, settle, owner = _main_inputs()
+    meta = dict(meta)
+    if events is None:
+        meta.pop("advanceKeyEvents", None)
+        meta.pop("advanceKeyRejected", None)
+    else:
+        meta["advanceKeyEvents"], meta["advanceKeyRejected"] = events, rejected
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False
+
+
+@pytest.mark.parametrize("install", [{"ok": False}, {}, None])
+def test_main_badge_install_not_ok_is_not_green(install):
+    meta, samples, settle, owner = _main_inputs()
+    meta = {**meta, "badge": {**meta["badge"], "install": install}}
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False
+
+
+def test_main_short_decode_count_is_not_green():
+    meta, samples, settle, owner = _main_inputs()
+    meta = {**meta, "badge": {**meta["badge"], "decoded": len(samples) - 1}}
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False
+
+
+# The full absence sweep over MAIN's inputs: no input may be satisfied by being
+# missing (the pre-emptive round-11 instruction).
+MAIN_ABSENCE_FIELDS = [
+    "advance", "collector", "atCutBoundary", "advanceKeyEvents",
+    "advanceKeyRejected", "badge",
+]
+
+
+@pytest.mark.parametrize("field", MAIN_ABSENCE_FIELDS)
+def test_main_advance_c_ok_refuses_every_absent_input(field):
+    meta, samples, settle, owner = _main_inputs()
+    meta = {k: v for k, v in meta.items() if k != field}
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False, field
+
+
+@pytest.mark.parametrize("sub", ["install", "decoded", "missing", "crcBad", "unlogged", "counts"])
+def test_main_advance_c_ok_refuses_an_absent_badge_subfield(sub):
+    meta, samples, settle, owner = _main_inputs()
+    meta = {**meta, "badge": {k: v for k, v in meta["badge"].items() if k != sub}}
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False, sub
+
+
+def test_main_advance_c_ok_refuses_absent_settle_and_absent_samples():
+    meta, samples, _, _ = _main_inputs()
+    assert p2._advance_c_ok(meta, samples, {}, {"settled": True}) is False
+    assert p2._advance_c_ok(meta, samples, None, {"settled": True}) is False
+    assert p2._advance_c_ok(meta, samples, {"exact": True}, {}) is False
+    assert p2._advance_c_ok(meta, samples, {"exact": True}, None) is False
+    assert p2._advance_c_ok(meta, [], {"exact": True}, {"settled": True}) is False
+
+
+def test_main_advance_c_ok_refuses_a_sample_with_no_footprint_source():
+    meta, samples, settle, owner = _main_inputs()
+    window_pos = [
+        i for i, s in enumerate(samples) if s in p2._slide4_settled_window(samples)
+    ]
+    stripped = [dict(s) for s in samples]
+    stripped[window_pos[0]].pop("footprintSource")
+    meta = {**meta, "indexSamples": stripped}
+    assert p2._advance_c_ok(meta, stripped, settle, owner) is False
+
+
+# --------------------------------------------------------------------------- #
+# Pre-emptive absence sweep (round 11). The recurring review class has been
+# "the pass-capable fixture never carried the field the new key reads, so the
+# key was satisfied by ABSENCE". This takes the CLEAN, pass-capable bracket and,
+# for every integrity key the scorer reads, deletes the snapshot field(s) that
+# key is argued from, then asserts the verdict falls to INCONCLUSIVE.
+#
+# Two keys are NEGATIVE assertions ("no pre-advance departure", "no control
+# error"): their green state IS the absence of a value, so deleting that one
+# field cannot and must not flip them. They are probed instead by deleting the
+# whole `nullControl` block they live in, which short-circuits to "hold never
+# fired" -- inconclusive, and the two keys are never reached at all.
+# The sweep already caught one real hole this way: `maxRafGapOk` was a `max()`
+# over an empty series, green with no series to measure.
+# --------------------------------------------------------------------------- #
+def _drop(snap: dict, *path):
+    """Delete a nested field, mutating a deep copy's parents only."""
+    node = snap
+    for step in path[:-1]:
+        node = node[step]
+    if isinstance(path[-1], int):
+        del node[path[-1]]
+    else:
+        node.pop(path[-1], None)
+    return snap
+
+
+# (integrity key, arm, path to delete, does THAT key have to go red?)
+_ABSENCE_CASES = [
+    ("firedAtMoveStart", "b", ("nullControl", "firedVia"), True),
+    ("firedAtMoveStart", "b", ("nullControl", "triggerFramesAfterAdvance"), True),
+    ("firedAtRuntimeMotionStart", "b", ("nullControl", "motionStartedFrame"), True),
+    ("firedAtRuntimeMotionStart", "b", ("nullControl", "motionStartedMarker"), True),
+    ("firedAtRuntimeMotionStart", "b", ("nullControl", "obedMotionAtTrigger"), True),
+    ("firedAfterAdvance", "b", ("nullControl", "advanceKeyAt"), True),
+    ("noPreAdvanceDeparture", "b", ("nullControl",), False),
+    ("noControlError", "b", ("nullControl",), False),
+    ("drainPressesAllLanded", "a1", ("drain",), True),
+    ("drainPressesAllLanded", "b", ("drain",), True),
+    ("drainPressesAllLanded", "a2", ("drain",), True),
+    ("advanceSinglePressAllArms", "a1", ("advance",), True),
+    ("advanceSinglePressAllArms", "b", ("advance",), True),
+    ("advanceSinglePressAllArms", "a2", ("advance",), True),
+    ("coverPaintedAtPresent", "b", ("nullControl", "coverPaintedAt"), True),
+    ("stageGeometryStable", "b", ("nullControl", "stageRectAtTrigger"), True),
+    ("stageGeometryStable", "b", ("nullControl", "stageRectAtArm"), True),
+    ("stageOriginZero", "b", ("nullControl", "stageOrigin"), True),
+    ("ownerReadyAtTrigger", "b", ("nullControl", "ownerReadyState"), True),
+    ("staleFrameFromPlayback", "b", ("nullControl", "staleCurrentTime"), True),
+    ("paintedOnce", "b", ("nullControl", "paintCount"), True),
+    ("coverPatchStable", "b", ("nullControl", "coverPatchStart"), True),
+    ("coverPatchStable", "b", ("nullControl", "coverPatchEnd"), True),
+    ("coverHitTest100", "b", ("nullControl", "rafLog"), True),
+    ("coverTracksFootprint", "b", ("nullControl", "rafLog", 0, "measuredRect"), True),
+    ("coverTracksFootprint", "b", ("nullControl", "rafLog", 0, "coverRect"), True),
+    ("loopLive", "b", ("nullControl", "rafLog"), True),
+    ("maxRafGapOk", "b", ("nullControl", "rafLog"), True),
+    ("everyInHoldStale", "b", ("nullControl", "coverPatchMean"), True),
+    ("rehandoffPairSound", "b", ("badge", "stats"), True),
+    ("ownerSettledAllArms", "a1", ("ownerSettle",), True),
+    ("ownerSettledAllArms", "b", ("ownerSettle",), True),
+    ("ownerSettledAllArms", "a2", ("ownerSettle",), True),
+    ("releaseStrictlyBeforeSettleAndBurst", "b", ("nullControl", "releaseAt"), True),
+    ("releaseStrictlyBeforeSettleAndBurst", "b", ("lastAtCutPerfMs",), True),
+    ("releaseStrictlyBeforeSettleAndBurst", "b", ("burstStartPerfMs",), True),
+    ("collectorSeriesSound", "a1", ("collector",), True),
+    ("collectorSeriesSound", "b", ("collector",), True),
+    ("collectorSeriesSound", "a2", ("collector",), True),
+    ("atCutBoundaryValidAllArms", "a1", ("advanceKeyPerfMs",), True),
+    ("atCutBoundaryValidAllArms", "b", ("advanceKeyPerfMs",), True),
+    ("atCutBoundaryValidAllArms", "a2", ("advanceKeyPerfMs",), True),
+    ("atCutBoundaryValidAllArms", "b", ("atCutBoundary",), True),
+    ("atCutBoundaryValidAllArms", "a1", ("advanceKeyEvents",), True),
+    ("atCutBoundaryValidAllArms", "b", ("advanceKeyEvents",), True),
+    ("atCutBoundaryValidAllArms", "a2", ("advanceKeyEvents",), True),
+    ("atCutBoundaryValidAllArms", "a1", ("advanceKeyRejected",), True),
+    ("atCutBoundaryValidAllArms", "b", ("advanceKeyRejected",), True),
+    ("atCutBoundaryValidAllArms", "a2", ("advanceKeyRejected",), True),
+    ("badgeSamplesSoundAllArms", "a1", ("badge",), True),
+    ("badgeSamplesSoundAllArms", "b", ("badge",), True),
+    ("badgeSamplesSoundAllArms", "a2", ("badge",), True),
+    ("badgeSamplesSoundAllArms", "b", ("badge", "install"), True),
+    ("badgeSamplesSoundAllArms", "b", ("badge", "decoded"), True),
+    ("badgeSamplesSoundAllArms", "b", ("badge", "missing"), True),
+    ("badgeSamplesSoundAllArms", "b", ("badge", "crcBad"), True),
+    ("badgeSamplesSoundAllArms", "b", ("badge", "unlogged"), True),
+    ("badgeSamplesSoundAllArms", "b", ("badge", "counts"), True),
+    ("noNegativeAnomaly", "b", ("indexSamples",), True),
+    ("flipIndexPresent", "b", ("indexSamples",), True),
+    ("flipWindowDecodable", "b", ("indexSamples",), True),
+    ("enoughAfterFlip", "b", ("indexSamples",), True),
+    ("allInHoldMeasured", "b", ("indexSamples",), True),
+    ("movingContinuityOk", "b", ("movingContinuity3to4",), True),
+    ("boundDecoderIsSlide3Decoder", "b", ("nullControl", "boundDecoderId"), True),
+    ("boundDecoderIsSlide3Decoder", "b", ("ownerDecoderId",), True),
+    ("noOwnerAmbiguousInWindow", "b", ("nullControl", "ownerAmbiguousInWindow"), True),
+    ("noOwnerAmbiguousInWindow", "b", ("nullControl", "ownerDisconnectedInWindow"), True),
+    ("rvfcRanThroughHold", "b", ("movingContinuity3to4", "rvfcMonotonic"), True),
+    ("playerBuildErrorsEmpty", "b", ("playerBuildErrors",), True),
+    ("bridgeEngaged", "b", ("bridgeEngaged",), True),
+    ("positivesGreen", "a1", ("continueThroughMovingMagicMove3to4Pass",), True),
+    ("positivesGreen", "a2", ("continueThroughMovingMagicMove3to4Pass",), True),
+    ("positivesGreen", "a1", ("movingIndexRunAtCut",), True),
+    ("isolationEqual", "a1", ("footprintFullyLive",), True),
+    ("isolationEqual", "b", ("settledIndexProgression",), True),
+]
+
+
+@pytest.mark.parametrize("key,arm,path,key_must_fail", _ABSENCE_CASES)
+def test_no_integrity_key_can_be_satisfied_by_absence(key, arm, path, key_must_fail):
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    _drop(snaps[arm], *path)
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    where = (key, arm, path)
+    assert verdict["verdict"] == "inconclusive", where
+    if key_must_fail:
+        assert key in verdict["integrityFailed"], where
+
+
+def test_absence_sweep_covers_every_integrity_key():
+    """The sweep is only worth what it covers: assert it names EVERY integrity
+    key the scorer scores, so a future key cannot be added without a case."""
+    verdict = p2._score_freeze_control(
+        _positive_snap_34(), _freeze_b_snap_34(), _positive_snap_34()
+    )
+    assert verdict["verdict"] == "pass"
+    scored = set(verdict["integrityKeys"])
+    covered = {case[0] for case in _ABSENCE_CASES}
+    assert scored - covered == set(), f"integrity keys with no absence case: {scored - covered}"
+    assert covered - scored == set(), f"absence cases for non-keys: {covered - scored}"
