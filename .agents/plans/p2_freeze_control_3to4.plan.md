@@ -509,3 +509,77 @@ Live: 5/5 brackets PASS at load 4.1–6.3 (trigger delay 159–164 ms, poll/rAF 
 delivered frames, keydown→post-dispatch lag 0.7–1.2 ms median 1.0, 1 keydown per arm, zero badge
 missing/CRC-bad/unlogged/sequence violations), plus one e2e fast bridge-ON run with
 `freezeControlCaughtByCounter: True` and `success: True`.
+
+### 10.16 Schema BEFORE windowing, and the footprint verdict re-scored from pixels (round 14, r11 MAJOR 1–5 + MINOR 1–2)
+
+Round 13 re-derived the sub-verdicts but kept one structural hole underneath them: every derivation
+picks its window with `sceneHash`/`progress` first and scores `index`/`decoderId`/`videos` inside it,
+so DELETING one of those keys did not make the gate red — it moved the window off the sample that
+carried the bad evidence. The sweep read that as "gated in the scored positions, diagnostic
+elsewhere" and allowlisted it. A pre-flip reset at position 5 reddened the positive; deleting only
+that `index` made it green again.
+
+**One schema validator, before any window is selected.** `_samples_schema_ok` /
+`_media_samples_schema_ok` / `_sample_schema_failures` run FIRST in `_score_freeze_control` (integrity
+key `sampleSchemaSoundAllArms`, all three arms) and first in `_advance_c_ok`. Every sample must CARRY
+every required key; an explicit `None` is admissible only where the model permits one, and exactly two
+keys do: `indexSamples[*].index` (an undecodable badge patch is a real reading, and
+`score_composited_index_run` scores it as one) and `ownerSamples[*].decoderId` (a transient unresolved
+footprint owner, which `stableSlide4Owner` already tolerates up to 30% of the window). Required with
+no null admitted: `indexSamples` `sceneHash`/`progress`/`perfNowMs`/`footprintSource`; `ownerSamples`
+`sceneHash`/`ownerAmbiguous`; `mediaSamples` `sceneHash`/`videos`; and `decoderId` on EVERY entry
+inside `videos` — an unattributable entry could be the bound decoder's. `badgeSeq`, `measuredRect` and
+`badgeRect` are deliberately NOT in the schema: `_badge_samples_sound` already holds every sample to
+them, with the argued re-handoff exemption that a blanket presence rule would break (measured: the one
+re-handoff capture legitimately reads null rects — it fired in live run 1401).
+
+**The bound decoder's rVFC clock must exist, once, per after-window sample.** Each `mediaSamples`
+entry at or beyond `SLIDE4_MIN_HASH` must hold exactly ONE finite `presentedMediaTime` among the
+entries whose `decoderId` is the bound decoder. No reading, a non-finite one, or two that disagree is
+no reading at all. Measured on the fixture: every after-window sample carries exactly one.
+
+Eighteen collapsed fields per positive/B class are GONE from the blanket allowlist as a result (36
+bracket entries): `indexSamples` `index`/`sceneHash`/`progress`, `ownerSamples`
+`sceneHash`/`decoderId`/`ownerAmbiguous`, `mediaSamples` `sceneHash`/`videos`,
+`videos[*].decoderId`, `bridgeEvents[*].kind`, and the eight `footprintFullyLive` sub-verdicts; MAIN
+loses its three `indexSamples` entries and its eight `ownerSettle` ones. All five
+`_SWEEP_PARTIAL_ALLOW` entries go with them. ONE partial remains and is asserted, not
+excused: `videos[*].presentedMediaTime` fails closed at exactly the bound decoder's entries in the
+after-window samples and nowhere else.
+
+**The bridge event must BE the bridge.** `_bridge_engaged` validated the detail but never the `kind`,
+so a `reuse-decoder` event — same detail shape — carried the bracket. It requires
+`kind == BRIDGE_EVENT_KIND` before looking at detail.
+
+**MAIN's two settles are derived from their readings.** `_advance_c_ok` accepted
+`{"settled": True, "readings": []}` and `{"exact": True}` — binding during the `#7` build's residual
+motion can retain both. It now calls `_owner_settle_ok` on the real readings and
+`_advance_settle_exact`, which requires `hashAtAdvance` to PARSE as the exact `#7` and `expected` to
+say so. The MAIN sweep walks the real argument dicts (the owner settle IS `snap["ownerSettle"]`, so
+the snapshot walk covers it; the advance settle is walked as its own class, keyed like the bracket's
+by `(class, path)`).
+
+**`footprintFullyLive` is re-scored from the pixels it was scored on.** `ok=True` over a summary
+saying `verdict=False` still passed: a material fail-open, and a digest would only have authenticated
+bytes nobody could re-score. `score_visible_slide` is split into `score_visible_slide_from_delta`, so
+the whole verdict is a pure function of the burst's max-delta raster; the capture retains that raster
+losslessly under `footprintFullyLive.evidence` together with the frame count, dimensions, rects and
+the ten scoring parameters. `_footprint_fully_live_ok` decodes it, re-runs the SAME scorer with the
+recorded parameters, and requires agreement on `n`, `verdict`, `status`, `noiseFloor.verdict`, every
+`perRect[*].verdict` and label, and `stray.verdict`. MEASURED: PNG-grayscale beat raw zlib on every
+arm of every run, so PNG is what is stored — 2 733–3 418 B per 1920×1080 raster (3 644–4 560 B base64;
+4.1/4.8/4.1 kB of JSON for A1/B/A2), and the fixture grew 528 kB → 542 kB. The re-score is memoised on
+the blob so the sweep's ~26 000 deletions do not each decode it.
+
+**A1 and A2 are two different runs' worth of evidence.** The harness copied A1 into the A2 slot, so
+value-dependent positions in the committed A2 were never scored. `_a2_snap_34()` loads the fixture's
+own A2 and the sweep walks it as a third class.
+
+MEASURED (round 14): the bracket walk covers **26 063 concrete indexed paths** across three arms
+(was 17 821 across two) — 9 707 in B, 8 178 in each positive — 418 fully gated collapsed fields, 472
+survivors on the allowlist and 1 partial field (3 entries, one per arm); MAIN's covers 8 181 paths
+(8 178 snapshot + 3 advance settle), 53 gated, 217 survivors, 0 partials. The two suites run 620 tests in ~124 s (was 562
+in ~65 s; the third arm and the raster re-scores account for it).
+Live: 5/5 brackets PASS at load 3.8–7.5 (trigger delay 121–175 ms, poll/rAF max gap 40–64 ms, 7–8
+delivered frames, 1 keydown per arm, zero badge missing/CRC-bad/unlogged/sequence violations), plus
+one e2e fast bridge-ON run with `freezeControlCaughtByCounter: True` and `success: True`.
