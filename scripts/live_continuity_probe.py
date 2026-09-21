@@ -69,6 +69,12 @@ from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan  # noqa: E402
 from obed_edom.live_host import ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
+# Visible-content pass (see the module docstring). Deliberately unequal gaps
+# (130/160/210/270 ms) so a periodic two-state animation cannot alias into
+# "static" the way an evenly spaced burst can. Shared with
+# `scripts/p2_recovery_html_adversarial.py`'s own visible-content pass, so both
+# live here rather than as a re-tuned local copy.
+from obed_edom.p2_verdict import BURST_OFFSETS_MS, CONTROL_INSET_PX, CONTROL_PATCH_PX  # noqa: E402
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 
@@ -100,12 +106,6 @@ MAX_ADVANCE_STEPS = 40
 # window is exactly the failure mode this instrument exists to catch.
 WINDOW_PAD_S = 2.0
 
-# Visible-content pass (see the module docstring). Deliberately unequal gaps
-# (130/160/210/270 ms) so a periodic two-state animation cannot alias into
-# "static" the way an evenly spaced burst can.
-BURST_OFFSETS_MS = (0, 130, 290, 500, 770, 1000, 1190, 1430, 1650, 1910, 2110, 2360)
-CONTROL_PATCH_PX = 40
-CONTROL_INSET_PX = 4
 VISIBLE_SETTLE_TIMEOUT_S = 10.0
 # A painting `<video>` claims an expected instance rect at the same IoU the
 # runtime's own owner resolution uses.

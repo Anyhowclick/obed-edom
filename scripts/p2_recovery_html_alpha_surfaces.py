@@ -33,10 +33,10 @@ from p2_recovery_html_dissolve_live import (  # noqa: E402
     DISSOLVE_S,
     SOURCE,
     _boot_slide1,
-    _norm_hash,
     _trigger_advance,
     inject_preserve,
 )
+from obed_edom.p2_verdict import _norm_hash  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
     file_identity,
