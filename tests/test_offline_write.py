@@ -93,6 +93,18 @@ def _spec(**over):
     return base
 
 
+def _stub_plan(**overrides):
+    from obed_edom.map_remap import Plan
+
+    defaults = dict(
+        transforms=[], placements=[], skipped_slides=[], fitted_slides=[],
+        offframe=[], framing=[], child_resize=[], badge_raises=[], card_grid=[],
+        roster={},
+    )
+    defaults.update(overrides)
+    return Plan(**defaults)
+
+
 def _result(**over):
     base = dict(refused=False, reason=None, applied=1, missed=0, missed_specs=[],
                 soft_fallbacks=0, value_clean=True)
@@ -1062,6 +1074,116 @@ def test_format_live_verify_coverage_matches_plan_line_shape():
     )
 
 
+# --- offline_write.live_verify (single call path, both call sites) ---------------
+
+
+def test_live_verify_routes_not_gated_bucket_out_of_set_bar_regression_lock():
+    """Regression lock for the call-site drift this plan fixes: the replay used to call
+    `verify_live_frames_multiset` with the RAW `multiset_kinds_by_slide` (every
+    stat-finalize `group` bucket, ungated) and never passed `not_gated_kinds_by_slide=`
+    to `live_verify_coverage` -- so it gated buckets the AppleScript fallback wrote,
+    which production deliberately excludes. Slide 7's whole `group` bucket here was
+    written by the fallback and is 10px off; the OLD-STYLE ungated call below FAILS on
+    it. `live_verify` derives the gated/not-gated split itself and PASSES the identical
+    data, because that bucket is correctly routed OUT of the gated set bar.
+    """
+    specs = {
+        7: [
+            _spec(slide=7, kind="group", kindIndex=0, x=0, y=0, w=10, h=10),
+            _spec(slide=7, kind="group", kindIndex=1, x=100, y=100, w=20, h=20),
+        ]
+    }
+    payload = {"slides": [{"number": 7, "items": [
+        {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+        {"kind": "group", "kindIndex": 1, "x": 110, "y": 100, "w": 20, "h": 20},
+    ]}]}
+    multiset_kinds_by_slide = {7: {"group"}}
+
+    old_style_report = verify_live_frames_multiset(specs, payload, multiset_kinds_by_slide)
+    old_style_pass = offline_write._say_verify_report(
+        "old-style (drifted, ungated)", old_style_report, offline_write.LIVE_VERIFY_TOL, None
+    )
+    assert old_style_pass is False
+
+    ow = {"specs": specs, "statSlides": [7], "fallbackKinds": {"7": ["group"]}}
+    report = offline_write.live_verify(ow, None, payload)
+    assert report.set_pass is True
+
+
+def test_live_verify_ow_updates_match_production_keys():
+    specs = {1: [_spec(slide=1, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10)]}
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+    ]}]}
+    ow = {"specs": specs, "statSlides": [], "fallbackKinds": {}}
+    report = offline_write.live_verify(ow, None, payload)
+    updates = report.ow_updates()
+    assert set(updates) == {"liveVerifyPass", "liveVerifySetPass", "liveVerifyCoverage"}
+    assert updates["liveVerifyPass"] is True
+    assert updates["liveVerifySetPass"] is True
+    assert updates["liveVerifyCoverage"]["uncovered"] == []
+    assert all(isinstance(u, list) for u in updates["liveVerifyCoverage"]["uncovered"])
+
+
+def test_live_verify_uncovered_forces_pass_false():
+    # A group spec whose kindIndex is None is unresolvable by BOTH bars -- uncovered,
+    # and forces liveVerifyPass False even though the positional bar has nothing
+    # comparable to report (a vacuous PASS on its own).
+    specs = {1: [_spec(slide=1, kind="group", kindIndex=None, x=0, y=0, w=1, h=1)]}
+    payload = {"slides": [{"number": 1, "items": []}]}
+    ow = {"specs": specs, "statSlides": [], "fallbackKinds": {}}
+    report = offline_write.live_verify(ow, None, payload)
+    assert report.positional_pass is True
+    updates = report.ow_updates()
+    assert updates["liveVerifyCoverage"]["uncovered"] == [[1, "group"]]
+    assert updates["liveVerifyPass"] is False
+
+
+def test_live_verify_planned_override_vs_derived_from_specs():
+    specs = {1: [_spec(slide=1, kind="shape", kindIndex=0, x=0, y=0, w=10, h=10)]}
+    payload = {"slides": [{"number": 1, "items": [
+        {"kind": "shape", "kindIndex": 0, "x": 999, "y": 999, "w": 10, "h": 10},
+    ]}]}
+    ow = {"specs": specs, "statSlides": [], "fallbackKinds": {}}
+
+    # No `planned=` given -- derived from `ow["specs"]`; the mismatched payload FAILs.
+    derived = offline_write.live_verify(ow, None, payload)
+    assert derived.positional_pass is False
+
+    # `planned=` override wins over `ow["specs"]` -- empty override compares nothing.
+    overridden = offline_write.live_verify(ow, None, payload, planned={})
+    assert overridden.positional_pass is True
+
+
+def test_live_verify_routing_splits_fallback_buckets_out_of_the_gated_set():
+    """`live_verify_routing` is the ONE definition of the split, shared by `live_verify`
+    and by `scripts/replay_live_verify.py`'s partial path (which runs the set bar alone
+    because its banked record predates `kindIndexMap`). Slide 7's group bucket was written
+    by the AppleScript fallback, so it is routed OUT of the gated set and INTO not-gated;
+    slide 9's was not, so it stays gated. Both remain in the multiset for coverage
+    accounting -- a bucket that fell out of both would be `uncovered` and RED the gate.
+    """
+    ow = {"statSlides": [7, 9], "fallbackKinds": {"7": ["group"]}}
+
+    multiset, gated, not_gated = offline_write.live_verify_routing(ow)
+
+    assert multiset == {7: {"group"}, 9: {"group"}}
+    assert gated == {9: {"group"}}
+    assert not_gated == {7: {"group"}}
+
+
+def test_live_verify_routing_without_fallback_kinds_gates_everything():
+    """A banked record predating `fallbackKinds` (every record in the 2026-09-16 bank)
+    makes the split a no-op: every routed bucket stays gated, so a replay against such a
+    record reports the same numbers it did before the routing moved behind the helper."""
+    ow = {"statSlides": [2, 4], "fallbackKinds": {}}
+
+    multiset, gated, not_gated = offline_write.live_verify_routing(ow)
+
+    assert gated == multiset == {2: {"group"}, 4: {"group"}}
+    assert not_gated == {}
+
+
 # --- run_offline_zorder kindIndexMap (W2 zorder-bridge Piece 1) ------------------
 
 
@@ -1948,7 +2070,7 @@ def test_flag_off_builds_the_same_plan_as_today(monkeypatch, tmp_path):
 
     # Seams used elsewhere (tests/test_export_fold.py: monkeypatch rk.<name>;
     # tests/test_as_geometry.py: exercise the real plan-building pieces directly).
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: transforms)
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan(transforms=transforms))
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -2016,7 +2138,7 @@ def test_offline_read_off_skips_attach_group_children(monkeypatch, tmp_path):
     import obed_edom.iwa_runs as iwa_mod
     import obed_edom.remap_keynote as rk
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan())
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -3838,15 +3960,13 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
     monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
     monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
 
-    def fake_plan_payload_transforms(wall, recipe, *, child_resize_report=None,
-                                     badge_raise_report=None, **kwargs):
-        if child_resize_report is not None:
-            child_resize_report.append({"slide": 3, "captionPt": 24.0, "groupIndex": 1})
-        if badge_raise_report is not None:
-            badge_raise_report.append({"slide": 5, "isTitle": True})
-        return []
+    def fake_plan_payload(wall, recipe, **kwargs):
+        return _stub_plan(
+            child_resize=[{"slide": 3, "captionPt": 24.0, "groupIndex": 1}],
+            badge_raises=[{"slide": 5, "isTitle": True}],
+        )
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", fake_plan_payload_transforms)
+    monkeypatch.setattr(rk, "plan_payload", fake_plan_payload)
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -3914,7 +4034,7 @@ def test_plan_out_collects_group_collapse_refused_from_a_non_other_transform(mon
     )
     pin_transform.group_collapse_refused = "groupCollapseRefused(s=2,idx=1)"
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [pin_transform])
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan(transforms=[pin_transform]))
     monkeypatch.setattr(
         rk, "recipe_for",
         lambda wall, template: {
@@ -3992,7 +4112,7 @@ def test_plan_warns_once_per_run_on_aspect_less_items(monkeypatch, tmp_path):
     }
     template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
 
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan())
     logs: list[str] = []
     rk.remap_keynote(
         source, dest, template=template,
@@ -4007,7 +4127,7 @@ def test_plan_warns_once_per_run_on_aspect_less_items(monkeypatch, tmp_path):
         slide_number=1, item_index=1, kind="image", x=0, y=0, w=1, h=1,
         kind_index=1, role="hide",
     )
-    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [hide_transform])
+    monkeypatch.setattr(rk, "plan_payload", lambda *a, **k: _stub_plan(transforms=[hide_transform]))
     logs = []
     rk.remap_keynote(
         source, dest, template=template,

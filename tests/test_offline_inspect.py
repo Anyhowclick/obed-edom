@@ -656,7 +656,7 @@ def test_gate_is_not_green_pending_a_geometry_model():
     payload = _cached_payload(MAP_DECK)
     if payload is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
-    from obed_edom.map_remap import plan_payload_transforms
+    from obed_edom.map_remap import plan_payload
     from obed_edom.remap_keynote import _specs_equivalent, recipe_for
 
     template = offline_wall_payload(
@@ -666,8 +666,8 @@ def test_gate_is_not_green_pending_a_geometry_model():
     off = offline_wall_payload(MAP_DECK)
 
     def specs(wall):
-        return [t.as_dict() for t in plan_payload_transforms(
-            wall, recipe_for(wall, template), template=template)]
+        return [t.as_dict() for t in plan_payload(
+            wall, recipe_for(wall, template), template=template).transforms]
 
     assert _specs_equivalent(specs(off), specs(payload)), "offline plan diverges from JXA plan"
 
@@ -1138,7 +1138,7 @@ def _assert_two_tier_gate_green(deck: Path):
         pytest.skip("no CG template deck available for the plan gate")
     template = offline_wall_payload(tmpl_deck)
 
-    from obed_edom.map_remap import plan_payload_transforms
+    from obed_edom.map_remap import plan_payload
     from obed_edom.remap_keynote import recipe_for
 
     off = two_tier_wall_payload(deck, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
@@ -1155,7 +1155,7 @@ def _assert_two_tier_gate_green(deck: Path):
 
     def plan(wall):
         rc = recipe_for(wall, template)
-        transforms = plan_payload_transforms(wall, rc, template=template)
+        transforms = plan_payload(wall, rc, template=template).transforms
         return [t.as_dict() for t in transforms]
 
     off_t = plan(off)

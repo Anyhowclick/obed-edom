@@ -3687,7 +3687,21 @@ def roster_slides(slides: list[dict]) -> tuple[set[int], set[int]]:
     return keep, drop
 
 
-def plan_payload_transforms(
+@dataclass
+class Plan:
+    transforms: list[ItemTransform]
+    placements: list[dict[str, Any]]
+    skipped_slides: list[int]
+    fitted_slides: list[int]
+    offframe: list[dict[str, Any]]
+    framing: list[dict[str, Any]]
+    child_resize: list[dict[str, Any]]
+    badge_raises: list[dict[str, Any]]
+    card_grid: list[dict[str, Any]]
+    roster: dict[str, set[int]]
+
+
+def plan_payload(
     payload: dict[str, Any],
     recipe: dict[str, Any],
     *,
@@ -3695,39 +3709,37 @@ def plan_payload_transforms(
     keep_side_panels: bool = False,
     template: dict[str, Any] | None = None,
     previews: dict[int, Any] | None = None,
-    placement_report: list[dict[str, Any]] | None = None,
-    skipped_slides: list[int] | None = None,
-    fitted_slides: list[int] | None = None,
-    offframe_report: list[dict[str, Any]] | None = None,
     framing_overrides: dict[int, int] | None = None,
-    framing_report: list[dict[str, Any]] | None = None,
     side_content_slides: set[int] | None = None,
-    child_resize_report: list[dict[str, Any]] | None = None,
-    badge_raise_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
     card_stroke: float = DEFAULT_CARD_STROKE,
-    card_grid_report: list[dict[str, Any]] | None = None,
-    roster_report: dict[str, set[int]] | None = None,
-) -> list[ItemTransform]:
+) -> Plan:
     """Plan every slide's moves. `side_content_slides` keeps side panels; skipped slides stay at wall geometry."""
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
     wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
     transforms: list[ItemTransform] = []
+    placement_report: list[dict[str, Any]] = []
+    skipped_slides: list[int] = []
+    fitted_slides: list[int] = []
+    offframe_report: list[dict[str, Any]] = []
+    framing_report: list[dict[str, Any]] = []
+    child_resize_report: list[dict[str, Any]] = []
+    badge_raise_report: list[dict[str, Any]] = []
+    card_grid_report: list[dict[str, Any]] = []
+    roster_report: dict[str, set[int]] = {}
     prev_number: int | None = None
     prev_template: int | None = None
     prev_affine: Affine | None = None
     prev_source: str | None = None
     roster_keep, roster_drop = roster_slides(payload.get("slides") or [])
-    if roster_report is not None:
-        roster_report["keep"] = roster_keep
-        roster_report["drop"] = roster_drop
+    roster_report["keep"] = roster_keep
+    roster_report["drop"] = roster_drop
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not wants_slide(number, slide_range):
             continue
         if slide.get("skipped"):
-            if skipped_slides is not None:
-                skipped_slides.append(number)
+            skipped_slides.append(number)
             continue
         slide_recipe = recipe
         wanted = None
@@ -3781,21 +3793,20 @@ def plan_payload_transforms(
                     slide_recipe = reused
                     reused_sibling = True
                     uncovered_top = max(0.0, _f((reused.get("mapDst") or {}).get("y")))
-            if framing_report is not None:
-                row = {
-                    "slide": number,
-                    "templateSlide": slide_recipe.get("templateSlide"),
-                    "requested": wanted,
-                    "confirmed": bool(slide_recipe.get("framingPinned")),
-                    "source": slide_recipe.get("source"),
-                    "pairQuality": slide_recipe.get("pairQuality"),
-                    "fitted": False,
-                    "pinOverridden": pin_overridden,
-                    "reusedSibling": reused_sibling,
-                }
-                if uncovered_top is not None:
-                    row["uncoveredTopPx"] = round(uncovered_top, 1)
-                framing_report.append(row)
+            row = {
+                "slide": number,
+                "templateSlide": slide_recipe.get("templateSlide"),
+                "requested": wanted,
+                "confirmed": bool(slide_recipe.get("framingPinned")),
+                "source": slide_recipe.get("source"),
+                "pairQuality": slide_recipe.get("pairQuality"),
+                "fitted": False,
+                "pinOverridden": pin_overridden,
+                "reusedSibling": reused_sibling,
+            }
+            if uncovered_top is not None:
+                row["uncoveredTopPx"] = round(uncovered_top, 1)
+            framing_report.append(row)
         if template and (template.get("slides") or []):
             unusable = _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas)
             if unusable:
@@ -3808,8 +3819,7 @@ def plan_payload_transforms(
                 )
                 if fitted:
                     slide_recipe = carry_fit_context(fitted, slide_recipe)
-                    if fitted_slides is not None:
-                        fitted_slides.append(number)
+                    fitted_slides.append(number)
                     if framing_report:
                         framing_report[-1]["fitted"] = True
             if framing_report:
@@ -3853,14 +3863,12 @@ def plan_payload_transforms(
         )
         if slide_packs and analysis is not None:
             rows = _place_free_text(planned, slide, slide_recipe, analysis)
-            if placement_report is not None:
-                placement_report.extend(rows)
-            if badge_raise_report is not None and rows:
+            placement_report.extend(rows)
+            if rows:
                 _resync_badge_rows_after_placement(badge_raise_report, planned, number)
-        if offframe_report is not None:
-            offframe_report.extend(
-                offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)
-            )
+        offframe_report.extend(
+            offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)
+        )
         transforms.extend(planned)
         used_affine = frame_affine(slide_recipe)
         slide_still_usable = used_affine is not None and not _framing_unusable(
@@ -3874,7 +3882,18 @@ def plan_payload_transforms(
             if slide_recipe.get("source") in _TEMPLATE_FRAMED_SOURCES
             else None
         )
-    return transforms
+    return Plan(
+        transforms=transforms,
+        placements=placement_report,
+        skipped_slides=skipped_slides,
+        fitted_slides=fitted_slides,
+        offframe=offframe_report,
+        framing=framing_report,
+        child_resize=child_resize_report,
+        badge_raises=badge_raise_report,
+        card_grid=card_grid_report,
+        roster=roster_report,
+    )
 
 
 SCORED_ROLES = ("map", "pin", "list", "title")

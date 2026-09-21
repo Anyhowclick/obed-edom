@@ -54,7 +54,7 @@ from obed_edom.map_remap import (
     _recipe_reusing_affine,
     _reflow_card_grid,
     pair_by_size,
-    plan_payload_transforms,
+    plan_payload,
     plan_slide_transforms,
     recipe_from_cover,
     score_against_gold,
@@ -175,14 +175,12 @@ def test_framing_report_says_what_each_slide_used():
         ],
     }
     recipe = learn_recipe(wall, template)
-    report: list[dict] = []
-    plan_payload_transforms(
+    report = plan_payload(
         wall,
         recipe,
         template=template,
         framing_overrides={1: 2},
-        framing_report=report,
-    )
+    ).framing
     assert len(report) == 1
     row = report[0]
     assert row["slide"] == 1
@@ -221,11 +219,10 @@ def test_a_degenerate_pin_reuses_an_adjacent_sibling_on_the_same_template():
             {"number": 3, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
         ],
     }
-    rows: list[dict] = []
-    plan_payload_transforms(
+    rows = plan_payload(
         wall, learn_recipe(wall, template), template=template,
-        framing_overrides={1: 2, 2: 2, 3: 2}, framing_report=rows,
-    )
+        framing_overrides={1: 2, 2: 2, 3: 2},
+    ).framing
     assert rows[0]["reusedSibling"] is False  # slide 1 pairs on its own
     assert rows[1]["source"] == "sibling-affine" and rows[1]["reusedSibling"] is True
     assert rows[2]["source"] == "sibling-affine" and rows[2]["reusedSibling"] is True
@@ -253,11 +250,10 @@ def test_a_non_adjacent_or_differently_pinned_slide_does_not_reuse():
             {"number": 3, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
         ],
     }
-    rows: list[dict] = []
-    plan_payload_transforms(
+    rows = plan_payload(
         wall, learn_recipe(wall, template), template=template,
-        framing_overrides={1: 2, 3: 2}, framing_report=rows, skipped_slides=[],
-    )
+        framing_overrides={1: 2, 3: 2},
+    ).framing
     slide3 = next(r for r in rows if r["slide"] == 3)
     assert slide3["reusedSibling"] is False  # slide 1 is not adjacent to slide 3
 
@@ -277,11 +273,10 @@ def test_a_non_adjacent_or_differently_pinned_slide_does_not_reuse():
             {"number": 2, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
         ],
     }
-    rows2: list[dict] = []
-    plan_payload_transforms(
+    rows2 = plan_payload(
         wall2, learn_recipe(wall2, template2), template=template2,
-        framing_overrides={1: 1, 2: 2}, framing_report=rows2,
-    )
+        framing_overrides={1: 1, 2: 2},
+    ).framing
     assert rows2[0]["templateSlide"] == 1  # slide 1 pairs to template 1 on its own
     slide2 = next(r for r in rows2 if r["slide"] == 2)
     assert slide2["reusedSibling"] is False  # adjacent, but not the same template
@@ -308,11 +303,10 @@ def test_an_unpinned_predecessor_seeds_reuse_when_it_lands_on_the_same_template(
             {"number": 2, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
         ],
     }
-    rows: list[dict] = []
-    plan_payload_transforms(
+    rows = plan_payload(
         wall, learn_recipe(wall, template), template=template,
-        framing_overrides={2: 2}, framing_report=rows,
-    )
+        framing_overrides={2: 2},
+    ).framing
     assert rows[0]["templateSlide"] == 2 and rows[0]["reusedSibling"] is False
     assert rows[1]["source"] == "sibling-affine" and rows[1]["reusedSibling"] is True
 
@@ -456,12 +450,11 @@ def test_a_letterboxed_predecessor_never_seeds_reuse():
             {"number": 2, "items": [_item(index=0, kind="image", fileName="map BG-1.png", x=0, y=0, w=7680, h=1080)]},
         ],
     }
-    rows: list[dict] = []
-    fitted: list[int] = []
-    plan_payload_transforms(
+    plan = plan_payload(
         wall, learn_recipe(wall, template), template=template,
-        framing_overrides={2: 2}, framing_report=rows, fitted_slides=fitted,
+        framing_overrides={2: 2},
     )
+    rows, fitted = plan.framing, plan.fitted_slides
     assert fitted == [1]  # slide 2's own framing rescues it; only slide 1 is letterboxed
     slide2 = next(r for r in rows if r["slide"] == 2)
     assert slide2["reusedSibling"] is False
@@ -496,11 +489,10 @@ def test_a_cover_fallback_predecessor_never_seeds_reuse():
             {"number": 2, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
         ],
     }
-    rows: list[dict] = []
-    plan_payload_transforms(
+    rows = plan_payload(
         wall, learn_recipe(wall, template), template=template,
-        framing_overrides={1: 4, 2: 4}, framing_report=rows,
-    )
+        framing_overrides={1: 4, 2: 4},
+    ).framing
     slide1 = next(r for r in rows if r["slide"] == 1)
     assert slide1["source"] == "cover-fallback" and slide1["templateSlide"] == 4
     assert slide1["reusedSibling"] is False
@@ -596,11 +588,10 @@ def _gold_unpinned_backdrop_plan():
     if payloads is None:
         return None
     wall, template = payloads
-    rows: list[dict] = []
-    transforms = plan_payload_transforms(
-        wall, learn_recipe(wall, template), template=template, framing_report=rows,
+    plan = plan_payload(
+        wall, learn_recipe(wall, template), template=template,
     )
-    return {"wall": wall, "template": template, "rows": rows, "transforms": transforms}
+    return {"wall": wall, "template": template, "rows": plan.framing, "transforms": plan.transforms}
 
 
 def test_gold_slide_6_carries_slide_5s_affine_source_faithfully():
@@ -690,16 +681,13 @@ def test_a_degenerate_pin_falls_back_to_the_pages_own_framing():
         ],
     }
     auto = learn_recipe(wall, template)
-    report: list[dict] = []
-    fitted: list[int] = []
-    plan_payload_transforms(
+    plan = plan_payload(
         wall,
         learn_recipe(wall, template),
         template=template,
         framing_overrides={1: 2},
-        framing_report=report,
-        fitted_slides=fitted,
     )
+    report, fitted = plan.framing, plan.fitted_slides
     row = report[0]
     assert row["requested"] == 2  # the pin is still recorded as tried
     assert row["templateSlide"] == auto["templateSlide"]  # but the page's own framing was used
@@ -785,7 +773,7 @@ def test_gold_recipe_pairs_pins_and_list():
     assert recipe["pinRmse"] is not None
     assert recipe["pinRmse"] < 5
     assert "listSrc" in recipe
-    transforms = plan_payload_transforms(wall, recipe)
+    transforms = plan_payload(wall, recipe).transforms
     counts = summarize_plan(transforms)
     assert counts["map"] == 1
     assert counts["pin"] == 1
@@ -801,7 +789,7 @@ def test_gold_recipe_pairs_pins_and_list():
     assert score["pinPairs"] == 1
     assert score["pinRmse"] < 5
 
-    with_lists = plan_payload_transforms(wall, recipe, keep_side_panels=True)
+    with_lists = plan_payload(wall, recipe, keep_side_panels=True).transforms
     assert summarize_plan(with_lists)["list"] == 1
     name = next(t for t in with_lists if t.role == "list")
     assert name.font_size == 28
@@ -841,7 +829,7 @@ def test_full_frame_template_cover_crops_wall_map():
     assert recipe["mapDst"]["w"] == 7680
     assert recipe["mapDst"]["h"] == 1080
     assert recipe["mapDst"]["x"] == -2880
-    pin = next(t for t in plan_payload_transforms(wall, recipe) if t.role == "pin")
+    pin = next(t for t in plan_payload(wall, recipe).transforms if t.role == "pin")
     assert abs((pin.x + pin.w / 2) - 960) < 1
     assert abs((pin.y + pin.h / 2) - 540) < 1
 
@@ -903,7 +891,7 @@ def test_template_layout_translates_map_cluster_and_pins():
     assert recipe["source"] == "template-layout"
     assert abs(recipe["mapDst"]["x"] - 11) < 1
     assert abs(recipe["mapDst"]["w"] - 1248) < 1
-    transforms = plan_payload_transforms(wall, recipe)
+    transforms = plan_payload(wall, recipe).transforms
     counts = summarize_plan(transforms)
     assert counts["map"] == 3
     assert counts["pin"] == 1
@@ -1428,7 +1416,7 @@ def test_plan_only_the_requested_slide():
             },
         ],
     }
-    only_two = plan_payload_transforms(wall, recipe, slide_range=(2, 2))
+    only_two = plan_payload(wall, recipe, slide_range=(2, 2)).transforms
     assert {t.slide_number for t in only_two} == {2}
     assert summarize_plan(only_two)["pin"] == 1
 
@@ -1493,14 +1481,14 @@ def test_learn_recipe_uses_template_slide_with_matching_map_layers():
     assert abs(recipe["mapDst"]["x"] - 11) < 1
     assert abs(recipe["mapDst"]["w"] - 1248) < 1
     assert abs(recipe["mapDst"]["h"] - 771) < 1
-    pin = next(t for t in plan_payload_transforms(wall, recipe) if t.role == "pin")
+    pin = next(t for t in plan_payload(wall, recipe).transforms if t.role == "pin")
     assert abs(pin.x - (3563 - 3041)) < 1
 
 
 def test_learn_recipe_skips_a_keynote_skipped_first_map_slide():
     """Slide 1 carries a map layer but is Keynote-skipped; slide 2 is the live map
     slide. The deck recipe must fit slide 2's layout, not slide 1's offline-only one
-    (matching plan_payload_transforms' own skipped-slide contract)."""
+    (matching plan_payload's own skipped-slide contract)."""
     wall = {
         "slideWidth": 7680,
         "slideHeight": 1080,
@@ -1602,7 +1590,7 @@ def test_church_lists_use_sample_font_and_pack_in_gutter():
     assert recipe["listFontSize"] == 20
     assert recipe["titleFontSize"] == 50
     assert abs(recipe["titleDst"]["x"] - 135) < 1
-    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True)
+    transforms = plan_payload(wall, recipe, keep_side_panels=True).transforms
     lists = [t for t in transforms if t.role == "list"]
     assert len(lists) == 2
     assert all(t.font_size == 20 for t in lists)
@@ -1946,7 +1934,7 @@ def test_unpaired_text_resizes_when_swatch_face_differs():
     recipe = learn_recipe(wall, template)
     styles = recipe.get("characterStyles") or []
     assert any(s["size"] == 50 and "AmplitudeCond" in s["font"] for s in styles)
-    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
+    transforms = plan_payload(wall, recipe, keep_side_panels=True, template=template).transforms
     taiwan = next(t for t in transforms if t.role == "other" and abs((t.font_size or 0) - 50) < 0.1)
     assert taiwan.font == "AmplitudeCond-Medium"
     # Photo crop translate is ~-2848; Taiwan stays with the photo, not packed as a list.
@@ -2022,7 +2010,7 @@ def test_unpaired_text_keeps_source_colour_takes_only_template_size():
     recipe = learn_recipe(wall, template)
     styles = recipe.get("characterStyles") or []
     assert any(abs(s["size"] - 50) < 0.1 and "helvetica" in (s["font"] or "").lower() for s in styles)
-    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
+    transforms = plan_payload(wall, recipe, keep_side_panels=True, template=template).transforms
     verse = next(t for t in transforms if t.role == "other" and t.kind == "text")
     # Size comes from the swatch...
     assert verse.font_size is not None and abs(verse.font_size - 50) < 0.1
@@ -2091,7 +2079,7 @@ def test_title_keeps_source_font_and_colour_takes_template_position_and_size():
     assert recipe["titleFont"] == "Helvetica"
     assert recipe.get("titleColor") is not None
     assert recipe["titleFontSize"] == 50
-    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True)
+    transforms = plan_payload(wall, recipe, keep_side_panels=True).transforms
     title = next(t for t in transforms if t.role == "title")
     # ...position and size come from the template...
     assert abs(title.x - 135) < 1
@@ -2145,7 +2133,7 @@ def test_centre_panel_panorama_frames_one_to_one_over_overlaid_thumbnails():
     recipe = learn_recipe(wall, template)
     # 1:1, not the thumbnail scale it would take if the grid drove the framing.
     assert abs(frame_affine(recipe).s - 1.0) < 0.05
-    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
+    transforms = plan_payload(wall, recipe, keep_side_panels=True, template=template).transforms
     placed = [t for t in transforms if t.kind == "image" and t.role != "hide"]
     # Every overlay is still placed — held out of the crop choice, not dropped.
     assert len(placed) >= 10
@@ -2249,7 +2237,7 @@ def test_scripture_body_text_snaps_to_template_box_keeping_source_style():
     }
     recipe = learn_recipe(wall, template)
     assert recipe.get("bodyTextDst") == {"x": 698.0, "y": 119.0, "w": 1140.0, "h": 675.0}
-    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
+    transforms = plan_payload(wall, recipe, keep_side_panels=True, template=template).transforms
     body = next(t for t in transforms if t.kind == "text" and t.role == "other")
     assert (round(body.x), round(body.y), round(body.w), round(body.h)) == (698, 119, 1140, 675)
     assert abs((body.font_size or 0) - 46.67) < 0.1
@@ -2313,8 +2301,7 @@ def test_full_bleed_cover_is_not_vetoed_by_reflowed_body_and_cropped_side_conten
     # Only the cover image is the affine's own artwork; it is on-frame, so the
     # page is not vetoed.
     assert on_canvas_fraction(wall["slides"][0], recipe, 7680, 1080) >= 0.5
-    fitted: list[int] = []
-    plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template, fitted_slides=fitted)
+    fitted = plan_payload(wall, recipe, keep_side_panels=True, template=template).fitted_slides
     assert fitted == []  # covered, not scaled to fit
 
 
@@ -2389,7 +2376,7 @@ def test_sparkle_overlay_takes_body_size_not_its_own_clamp():
     overlays = sparkle_overlays(s, body)
     assert len(overlays) == 1  # only the overlapping substring, not the far one
     recipe = learn_recipe(wall, template)
-    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
+    transforms = plan_payload(wall, recipe, keep_side_panels=True, template=template).transforms
     others = [t for t in transforms if t.role == "other" and t.kind == "text"]
     body_tf = max(others, key=lambda t: t.w * t.h)
     overlay_tf = next(t for t in others if t is not body_tf and 300 < t.w < 600)
@@ -2725,7 +2712,7 @@ def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
 
 
 def test_side_content_whitelist_keeps_only_the_named_slide():
-    """plan_payload_transforms drops side content by default and keeps it on the
+    """plan_payload drops side content by default and keeps it on the
     slides named in side_content_slides — the per-slide form of keep_side_panels."""
     def slide(n):
         return {
@@ -2747,11 +2734,11 @@ def test_side_content_whitelist_keeps_only_the_named_slide():
         )
 
     # No whitelist: the side text is dropped on both slides.
-    none = plan_payload_transforms(wall, recipe, template=template)
+    none = plan_payload(wall, recipe, template=template).transforms
     assert not side_text_visible(none, 1) and not side_text_visible(none, 2)
 
     # Whitelist slide 2 only: it keeps its side text, slide 1 still drops it.
-    picked = plan_payload_transforms(wall, recipe, template=template, side_content_slides={2})
+    picked = plan_payload(wall, recipe, template=template, side_content_slides={2}).transforms
     assert not side_text_visible(picked, 1)
     assert side_text_visible(picked, 2)
 
@@ -3180,10 +3167,9 @@ def test_roster_keep_slide_gets_measured_placement_without_the_whitelist():
     )
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
     recipe = learn_recipe(wall, _map_and_swatch_template())
-    placements: list[dict] = []
-    plan_payload_transforms(
-        wall, recipe, previews={1: _white_preview()}, placement_report=placements
-    )
+    placements = plan_payload(
+        wall, recipe, previews={1: _white_preview()}
+    ).placements
     assert placements, "roster-keep slide skipped the measured placement path"
     roster_keys = {("text", it["kindIndex"]) for it in slide["items"] if it["kind"] == "text"}
     assert {(r["kind"], r["kindIndex"]) for r in placements} <= roster_keys
@@ -3201,10 +3187,10 @@ def test_measured_placement_never_moves_a_demoted_map_label():
     )
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
     recipe = learn_recipe(wall, _map_and_swatch_template())
-    placements: list[dict] = []
-    transforms = plan_payload_transforms(
-        wall, recipe, previews={1: _white_preview()}, placement_report=placements
+    plan = plan_payload(
+        wall, recipe, previews={1: _white_preview()}
     )
+    transforms, placements = plan.transforms, plan.placements
     assert placements  # the roster itself was measured-placed
     assert all((r["kind"], r["kindIndex"]) != ("text", 40) for r in placements)
     label_t = next(t for t in transforms if t.kind == "text" and t.kind_index == 40)
@@ -3537,7 +3523,7 @@ def test_resized_leftover_image_gets_its_own_affine():
         ],
     }
     recipe = learn_recipe(wall, template)
-    transforms = plan_payload_transforms(wall, recipe, template=template)
+    transforms = plan_payload(wall, recipe, template=template).transforms
     globe = next(t for t in transforms if abs(t.w - 80) < 2 and abs(t.h - 80) < 2)
     # 124→80 at (31, 59)
     assert abs(globe.w - 80) < 2
@@ -3595,7 +3581,7 @@ def test_title_badge_follows_globe_not_map():
         ],
     }
     recipe = learn_recipe(wall, template)
-    transforms = plan_payload_transforms(wall, recipe, template=template)
+    transforms = plan_payload(wall, recipe, template=template).transforms
     badge = next(t for t in transforms if t.kind == "shape" and t.w > 50)
     assert badge.x > -40
     assert badge.x < 500
@@ -3659,7 +3645,7 @@ def test_badge_logo_and_plate_land_on_their_template_slots():
     assert recipe["badgeSlots"]["image:0"] == {"x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0}
     assert recipe["badgeSlots"]["shape:0"] == {"x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0}
 
-    transforms = plan_payload_transforms(wall, recipe, template=template)
+    transforms = plan_payload(wall, recipe, template=template).transforms
     # The title text box shrinks 537 -> 271, so the affine alone would give the
     # 124px logo 63px and the 767px plate 387px.
     logo = next(t for t in transforms if t.kind == "image" and t.w < 200)
@@ -3758,7 +3744,7 @@ def test_divider_lands_on_the_template_rule():
     }
     recipe = learn_recipe(wall, template)
     assert recipe["lineSlots"][0]["start"] == [480.0, 1004.0]
-    rule = next(t for t in plan_payload_transforms(wall, recipe, template=template) if t.kind == "line")
+    rule = next(t for t in plan_payload(wall, recipe, template=template).transforms if t.kind == "line")
     assert rule.start == (480.0, 1004.0)
     assert rule.end == (480.0, 621.0)
     assert (round(rule.x), round(rule.y), round(rule.h)) == (480, 621, 383)
@@ -4257,7 +4243,7 @@ def test_a_framing_takes_its_own_slide_s_badge_not_the_deck_s_first():
 
 def test_two_framings_of_one_page_do_not_preview_the_same():
     """planned_rects was handed the template as well as the recipe, and
-    plan_payload_transforms re-learns per slide when given one — so every
+    plan_payload re-learns per slide when given one — so every
     candidate drew the automatic framing and the picker showed one picture."""
     from obed_edom.framing import planned_rects
 
@@ -4364,12 +4350,14 @@ def test_packing_a_single_tall_column_uses_the_top_margin():
 @lru_cache(maxsize=1)
 def _gold_pin_continuity_plan():
     """Gold-deck oracle for the pin-continuity fix (offline, Keynote-free): slides
-    15 and 16 are pinned to template slide 5, as the operator would pin them; slide 14
+    13 and 14 are pinned to template slide 5, as the operator would pin them; slide 12
     is left unpinned and reaches template 5 on its own. Returns None if the Gold
     wall/template decks are not present on this machine.
 
     Slide numbers follow the live deck: the 2026-09-19 edit (Myanmar pages + a Myanmar
-    base template slide) moved wall 5-10 to 14-19 and template 4 to 5."""
+    base template slide) moved wall 5-10 to 14-19 and template 4 to 5; the 2026-09-21
+    edit then moved 14-19 to 12-17. Every asserted VALUE below is unchanged across that
+    edit -- only the numbering moved."""
     from pathlib import Path
 
     from obed_edom.offline_inspect import offline_wall_payload
@@ -4382,23 +4370,23 @@ def _gold_pin_continuity_plan():
     wall = offline_wall_payload(wall_path)
     template = offline_wall_payload(template_path)
     recipe = learn_recipe(wall, template)
-    rows: list[dict] = []
-    fitted: list[int] = []
-    transforms = plan_payload_transforms(
+    plan = plan_payload(
         wall, recipe, template=template,
-        framing_overrides={15: 5, 16: 5},
-        framing_report=rows, fitted_slides=fitted,
+        framing_overrides={13: 5, 14: 5},
     )
-    return {"wall": wall, "template": template, "rows": rows, "fitted": fitted, "transforms": transforms}
+    return {
+        "wall": wall, "template": template, "rows": plan.framing,
+        "fitted": plan.fitted_slides, "transforms": plan.transforms,
+    }
 
 
 def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
-    """Slides 15 and 16 are pinned to template slide 5; their own art collapses to a
+    """Slides 13 and 14 are pinned to template slide 5; their own art collapses to a
     sliver, so they used to fall back to their own degenerate cover (a hand crop of
-    `Wilderness.png`, x=-544). Slide 14, left unpinned, reaches template 5 on its
-    own -- item 1 lets 15 and 16 pick that up as their adjacent sibling on the same
+    `Wilderness.png`, x=-544). Slide 12, left unpinned, reaches template 5 on its
+    own -- item 1 lets 13 and 14 pick that up as their adjacent sibling on the same
     template, and the owner's ty-clamp keeps the reused panel full-bleed instead of
-    inheriting slide 14's y=61/h=947 inset."""
+    inheriting slide 12's y=61/h=947 inset."""
     data = _gold_pin_continuity_plan()
     if data is None:
         pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
@@ -4406,12 +4394,12 @@ def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
     rows, fitted, transforms = data["rows"], data["fitted"], data["transforms"]
     by_slide = {r["slide"]: r for r in rows}
 
-    assert by_slide[14]["templateSlide"] == 5
-    assert by_slide[14]["requested"] is None
-    assert by_slide[14]["source"] == "template-layout"
-    assert by_slide[14]["pairQuality"] == 1
+    assert by_slide[12]["templateSlide"] == 5
+    assert by_slide[12]["requested"] is None
+    assert by_slide[12]["source"] == "template-layout"
+    assert by_slide[12]["pairQuality"] == 1
 
-    for n in (15, 16):
+    for n in (13, 14):
         row = by_slide[n]
         assert row["templateSlide"] == 5
         assert row["requested"] == 5
@@ -4426,34 +4414,34 @@ def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
         single = {"slideWidth": wall["slideWidth"], "slideHeight": wall["slideHeight"], "slides": [slide]}
         return learn_recipe(single, template)
 
-    a14 = frame_affine(_own_recipe(14))
-    assert a14.s == 1.0 and a14.tx == -2932.0 and a14.ty == 130.0
-
-    for n in (17, 18):
-        # 100px off slide 14's own framing: proves they were not dragged onto it.
-        assert frame_affine(_own_recipe(n)).tx == -3032.0
+    a12 = frame_affine(_own_recipe(12))
+    assert a12.s == 1.0 and a12.tx == -2932.0 and a12.ty == 130.0
 
     for n in (15, 16):
+        # 100px off slide 12's own framing: proves they were not dragged onto it.
+        assert frame_affine(_own_recipe(n)).tx == -3032.0
+
+    for n in (13, 14):
         slide = next(s for s in wall["slides"] if s.get("number") == n)
         china_idx = next(
             i for i, it in enumerate(slide.get("items") or []) if "China Adjusted" in (it.get("fileName") or "")
         )
         t = next(t for t in transforms if t.slide_number == n and t.item_index == china_idx)
-        assert t.x == -1111.0  # post-clamp: 1821 - 2932, slide 14's tx untouched (width already covers)
-        assert t.y == 0.0  # post-clamp: slide 14's ty=130 inset clamped to close the gap
+        assert t.x == -1111.0  # post-clamp: 1821 - 2932, slide 12's tx untouched (width already covers)
+        assert t.y == 0.0  # post-clamp: slide 12's ty=130 inset clamped to close the gap
         assert t.x != -544.0  # -544 is Wilderness.png's hand crop -- the bug's signature
 
-    assert fitted == [19]
+    assert fitted == [17]
 
 
 def test_gold_slide_7_reports_excluded_overlays():
-    """Item 2: slide 16's coverage (slide 7 before the 2026-09-19 deck edit) is honest
-    about what it excluded from `onCanvas`, without gating on it (the owner accepted
-    the stranding)."""
+    """Item 2: slide 14's coverage (slide 16 before the 2026-09-21 deck edit, slide 7
+    before the 2026-09-19 one) is honest about what it excluded from `onCanvas`, without
+    gating on it (the owner accepted the stranding)."""
     data = _gold_pin_continuity_plan()
     if data is None:
         pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
-    row = next(r for r in data["rows"] if r["slide"] == 16)
+    row = next(r for r in data["rows"] if r["slide"] == 14)
     assert row["onCanvas"] == 0.5  # R2 tripwire: exactly MIN_ON_CANVAS_FRACTION, strict `<` still passes it
     assert row["excluded"] == 13
     assert row["excludedOffCanvas"] == 11
@@ -4461,7 +4449,7 @@ def test_gold_slide_7_reports_excluded_overlays():
 
 def test_gold_on_canvas_fraction_out_param_does_not_change_anything():
     """Item 2a must be report-only: adding the `excluded_report` out-param changes
-    no fraction, and running `plan_payload_transforms` with or without a
+    no fraction, and running `plan_payload` with or without a
     `framing_report` to fill must not change which slides get fitted."""
     data = _gold_pin_continuity_plan()
     if data is None:
@@ -4469,16 +4457,12 @@ def test_gold_on_canvas_fraction_out_param_does_not_change_anything():
     wall, template = data["wall"], data["template"]
     recipe = learn_recipe(wall, template)
 
-    fitted_with_report: list[int] = []
-    plan_payload_transforms(
+    fitted_with_report = plan_payload(
         wall, recipe, template=template, framing_overrides={6: 4, 7: 4},
-        framing_report=[], fitted_slides=fitted_with_report,
-    )
-    fitted_without_report: list[int] = []
-    plan_payload_transforms(
+    ).fitted_slides
+    fitted_without_report = plan_payload(
         wall, recipe, template=template, framing_overrides={6: 4, 7: 4},
-        fitted_slides=fitted_without_report,
-    )
+    ).fitted_slides
     assert fitted_with_report == fitted_without_report
 
     wall_w, wall_h = wall["slideWidth"], wall["slideHeight"]
@@ -5034,7 +5018,7 @@ def test_fit_to_frame_recipe_carries_card_samples():
     # A wall slide whose only template framing is degenerate (forces fit-to-frame,
     # like the existing "1280 wide against a 7680 wall" scenario) must still resize
     # its photo cards to the template rect — fit_to_frame_recipe's own dict has no
-    # card data, so plan_payload_transforms must carry recipe["cardSamples"] onto it
+    # card data, so plan_payload must carry recipe["cardSamples"] onto it
     # the same way it already carries characterStyles/listFontSize/listSample.
     wall = {
         "slideWidth": 7680, "slideHeight": 1080,
@@ -5065,8 +5049,8 @@ def test_fit_to_frame_recipe_carries_card_samples():
     }
     recipe = learn_recipe(wall, template)
     assert recipe.get("cardSamples")  # sanity: the template does carry a card sample
-    fitted: list[int] = []
-    transforms = plan_payload_transforms(wall, recipe, template=template, fitted_slides=fitted)
+    plan = plan_payload(wall, recipe, template=template)
+    transforms, fitted = plan.transforms, plan.fitted_slides
     assert fitted == [1]  # sanity: this scenario really does hit fit-to-frame
     card = next(t for t in transforms if t.kind == "group")
     assert (card.w, card.h) == (120.0, 100.0)
@@ -5551,15 +5535,16 @@ def _gold_roster_payload():
 
 def test_gold_roster_is_dropped_on_every_slide_after_the_church_list():
     """Owner rule (2026-09-05): Gold keeps the roster on its first two roster slides only
-    (20 and 21; 11 and 12 before the 2026-09-19 deck edit). On 23-26 it is two persisted
-    groups (113 and 84 church-name leaves), invisible to the text-only roster rule before
-    this fix, and hidden only incidentally by the side-panel branch."""
+    (18 and 19; 20 and 21 before the 2026-09-21 deck edit, 11 and 12 before the
+    2026-09-19 one). On 21-24 it is two persisted groups of church-name leaves, invisible
+    to the text-only roster rule before this fix, and hidden only incidentally by the
+    side-panel branch."""
     from obed_edom.map_remap import roster_slides
 
     wall = _gold_roster_payload()
     if wall is None:
         pytest.skip("Gold wall deck not available; refuse to open Keynote")
-    assert roster_slides(wall["slides"]) == ({20, 21}, {22, 23, 24, 25, 26})
-    s23 = next(s for s in wall["slides"] if s.get("number") == 23)
-    gct = {int(k): v for k, v in (s23.get("groupChildText") or {}).items()}
-    assert len(name_column_ids(s23["items"], gct)) == 2
+    assert roster_slides(wall["slides"]) == ({18, 19}, {20, 21, 22, 23, 24})
+    s21 = next(s for s in wall["slides"] if s.get("number") == 21)
+    gct = {int(k): v for k, v in (s21.get("groupChildText") or {}).items()}
+    assert len(name_column_ids(s21["items"], gct)) == 2
