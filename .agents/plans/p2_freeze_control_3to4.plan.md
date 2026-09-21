@@ -63,7 +63,7 @@ is `position:fixed` (viewport px), the video absolute on the stage — equal onl
 - *bridge34 off:* no carry ⇒ nothing to freeze. Arm B detects `bridge-3to4` absent ⇒ INCONCLUSIVE `bridge disabled`; the
   bracket is SKIPPED in the `--disable-bridge34` arm.
 - *footprint pin vs cover:* `keepThroughBridge` re-asserts the rect every rAF; the cover must re-measure after it. New
-  integrity key `coverTracksFootprint` = 100 % of hold frames with cover rect within 2 px of the measured rect.
+  integrity key `coverTracksFootprint` = 100 % of hold frames with cover rect within `COVER_TRACK_TOL_PX` = 0.5 px of the measured rect.
 - *retiring WA0125 clip:* the grown slide-4 box overlaps it; owner resolution stays keyed to `MOVIE1_KEY`; any
   `ownerAmbiguous` frame in the hold is INCONCLUSIVE (`noOwnerAmbiguousInWindow`, existing).
 
@@ -115,7 +115,7 @@ over samples with `footprintSource == "measured"`. In B the freeze must give `ok
 ## 7. Risks
 - Unit-testable: every scorer key, the ROI mapping, the null control, the fixture ports.
 - Needs a live gate round: does the measured ROI decode MID-MOVE (biggest unknown — if not, `allInHoldMeasured` /
-  `flipWindowDecodable` force INCONCLUSIVE, the honest outcome); does the cover stay within 2 px under rAF contention
+  `flipWindowDecodable` force INCONCLUSIVE, the honest outcome); does the cover stay within 0.5 px under rAF contention
   while CDP screenshots run; does `freezeRunAtCut >= 6` accumulate in the post-settle window at `DENSE_FPS`.
 
 ## 8. Owner decisions — ANSWERED 2026-09-20 (relayed via the DSK session; owner to confirm "go implement" directly)
@@ -151,13 +151,14 @@ A wall-clock-only ceiling is not defensible on its own: `keepThroughBridge` inte
 (`src/obed_edom/live_continuity_js.py` ~L687) over 952→1266 px in `TRANS_S`, so the rect departs by
 >1 px within ~5 ms.
 
-### 10.2 `FREEZE_TRIGGER_MAX_DELAY_MS = 195.0` — page-clock keydown → trigger ceiling
+### 10.2 `FREEZE_TRIGGER_MAX_DELAY_MS = 190.0` — page-clock keydown → trigger ceiling
 The secondary bound for the defect a frame count CANNOT see: nine delivered poll frames can hide
 unbounded elapsed time, because a keydown→rAF stall advances the runtime's time-based interpolation
 deep into the move before poll frame 1 is ever delivered, and `maxRafGapOk` only starts at the trigger.
-Measured 2026-09-21 on 11 CLEAN freeze-arm runs (as above, final `#9`): the keydown→trigger delay ran
-158.8–175.5 ms (median 165.7) on delivered poll frame 8 in 11/11, with a 16.9–17.4 ms rAF period.
-Unimodal, no outlier. Worst observation plus one frame: 175.5 + 17.4 = 192.9 ⇒ **195**.
+Rule: worst CLEAN observation plus one rAF period. Re-measured 2026-09-21 on the round-8 capture loop
+(13 clean freeze-arm brackets, all `pass`): delay 156.7–172.1 ms (median 159.7) on delivered poll
+frame 8 in 13/13, rAF period 17.1–17.3 ms. Unimodal, no outlier. 172.1 + 17.3 = 189.4 ⇒ **190**
+(was 195 on the pre-round-8 loop, from 175.5 + 17.4).
 
 ### 10.3 `FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2`
 `keepThroughBridge` creates `__obedMotion` inside its first SYNCHRONOUS `frame()`, which runs in a
@@ -168,7 +169,7 @@ earlier. Two callbacks of slack covers both. Round 7 adds marker IDENTITY on top
 ### 10.4 `INDEX_PATCH_TOP_GUARD_PX = 2` (src)
 The x mapping carries a +2 inset; the y mapping carries none, so the ROI's first row sits exactly on
 the footprint's own top edge. Harmless for a static integral rect; not for a live
-`getBoundingClientRect()` reading, whose y is fractional, is badge-quantised to 0.5, and which
+`getBoundingClientRect()` reading, whose y is fractional, is badge-quantised to a quarter pixel (`FOOTPRINT_BADGE_Q = 4`), and which
 `round()` sends to the EVEN integer — i.e. down, onto the movie's antialiased top edge row, which is
 not flat, so the patch decodes None. Measured on the round-5 3→4 brackets: 3 of 260 captured samples
 decoded None for this reason alone (badge y 734.5 / 744.5 / 746.5), each recovered by dropping
@@ -186,18 +187,27 @@ margin, against a measured bottom slack of ≥ 9 px.
   and the whole log is dumped ONCE after it; 600 entries covered only ~10 s and the earliest sampled
   frames fell out.
 - `dump()` is per-capture, not per-sample: a per-sample lookup is one more CDP round trip inside the
-  hold. Removing it did NOT on its own clear the occasional >100 ms `maxRafGapOk` stalls, but it does
-  leave the capture loop one round trip cheaper than before the badge.
+  hold. See §10.10 for why round trips turned out not to be the cost.
 - `COVER_TRACK_TOL_PX = 0.5`: with the control loop handed off BEHIND the runtime's footprint pin the
   per-frame residual is 0 px over every hold frame of the live runs. A ONE-FRAME lag would show
   ~2.8 px in x at the 30 Hz headless rAF rate (~1.4 px at 60 Hz), so the tolerance cannot absorb one.
 
-### 10.6 Re-handoff exemption (round 7, r4 BLOCKER 1)
+### 10.6 Re-handoff exemption (round 7 r4 BLOCKER 1; tightened round 8, r5 MAJOR 1)
 The badge's re-handoff onto a fresh pin paints a NULL rect for exactly two consecutive frames, which
-it logs in `rehandoffSeqs`. Only a LEADING covered sample whose badge sequence belongs to a
-contiguous logged pair `(p, p+1)`, with a null rect and nothing decoded, is excused from
-`allInHoldMeasured`; `FREEZE_REHANDOFF_MAX_EXEMPT = 2` is that frame count. Every other post-paint
-sample through `releaseSplitIndex` must be `measured`.
+it logs in `rehandoffSeqs`. Only a LEADING covered sample whose badge sequence belongs to that pair,
+with a null rect and nothing decoded, is excused from `allInHoldMeasured`;
+`FREEZE_REHANDOFF_MAX_EXEMPT = 2` is that frame count. Every other post-paint sample through
+`releaseSplitIndex` must be `measured`.
+
+Round 8 closes four ways the exemption could be bought without a real re-handoff
+(`rehandoffPairSound`, an integrity key): `badge.stats.rehandoffs` must be exactly 1;
+`rehandoffSeqs` must be exactly one contiguous pair `(p, p+1)`; the badge's `motionStartedAt` must be
+the trigger marker's own `started` (a pair from another generation proves nothing about THIS hold);
+the captured exempt sequences must be unique and increasing; and every non-exempt covered badge
+sequence must be `> p+1`, which is what actually PROVES the first measured covered badge is after the
+re-handoff rather than assuming it. A null-rect sample also keeps `footprintSource == "badge"` through
+`_fill_badge_coupling` now, so it takes that function's monotonicity checks instead of bypassing them
+— a duplicate or reversed exempt sequence used to slip past.
 
 ### 10.7 rAF/task ordering under a later runtime pin (round 7, r4 MINOR 2)
 Node-executed ordering model (`test_footprint_badge_lands_behind_a_later_runtime_pin_callback`),
@@ -224,3 +234,31 @@ INCONCLUSIVE by construction (measured live). `_settle_bound_owner_rect` require
 `OWNER_SETTLE_READINGS = 3` consecutive rect reads agreeing under the same `_couple_owner_rect`
 "measured" test the at-cut samples use, within `OWNER_SETTLE_S = 5.0` s, and fails closed. Both the
 bracket and the MAIN gate path now use it, in the order: exact `#7` → bind → rect settle → one press.
+
+### 10.10 Capture-loop cost (round 8, r5 MAJOR 4)
+The per-sample owner / media / preserve-pool round trips are gone: they are collected page-side per
+rAF by `CAPTURE_COLLECTOR_JS` and dumped ONCE, so the loop is the screenshot plus the scene hash.
+Measured on this machine, same bake, same driver, `Page.captureScreenshot` count unchanged:
+
+| | CDP calls / sample | CDP ms / sample | loop wall / sample | maxRafGapMs (clean runs) |
+|---|---|---|---|---|
+| before (`de0cedfd`) | 7.24 | 82.6 | 95 ms | 55.6 / 56.7 / 58.0 (n=3) |
+| after | 2.16 | 81.1 | 93 ms | 46.9–64.3, median 55.9 (n=13) |
+
+**The round trips were never the cost.** Removing 5.1 CDP calls per sample moved CDP time per sample
+by ~1.5 ms; `Runtime.evaluate` on a local socket is ~0.2 ms. `Page.captureScreenshot` is ~100 ms and
+is frame-synchronised, not encode-bound — measured over 30 captures each at `deviceScaleFactor=1`:
+
+| variant | median | badge decodes |
+|---|---|---|
+| `format=png` (current) | 99.9 ms | yes |
+| `optimizeForSpeed=true` | 100.0 ms | yes |
+| `clip` to 1601×1073 (every scored ROI + badge + hit-test point) | 101.6 ms | yes |
+| `clip` + `optimizeForSpeed` | 101.4 ms | yes |
+| `fromSurface=false` | 433.6 ms | NO |
+| `format=jpeg` q95 | 100.0 ms | NO |
+
+No parameter reduces it; the two that change the pixels (`jpeg`, `fromSurface=false`) break the badge
+decode outright. So the screenshot stays exactly as it was. `MAX_RAF_GAP_MS` is NOT raised: on 13
+clean round-8 brackets the largest gap was 64.3 ms, 36 ms inside the 100 ms bound, with two batches
+started at load average 8.7 and 5.4.

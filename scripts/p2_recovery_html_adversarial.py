@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from p2_alpha_spike import CHROME, ChromeCdp, _wait_ready  # noqa: E402
 from p2_recovery_html_dissolve_live import (  # noqa: E402
+    MEDIA_PROBE_JS,
     MOVIE1_TOKEN,
     MOVIE2_TOKEN,
     _ensure_videos_playing,
@@ -318,7 +319,7 @@ FOOTPRINT_COUPLE_TOL_PX = 1.5  # before/after owner-rect agreement for a screens
 # Trigger bounds, all three calibrated in plan §10 and all tracking the harness's
 # per-frame cost, not the player alone -- re-measure when the capture loop changes.
 FREEZE_TRIGGER_MAX_RAFS = 9        # delivered poll frames, keydown -> rect departure
-FREEZE_TRIGGER_MAX_DELAY_MS = 195.0  # page-clock ceiling: a frame count cannot see a stall
+FREEZE_TRIGGER_MAX_DELAY_MS = 190.0  # page-clock ceiling: a frame count cannot see a stall
 FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2  # poll callbacks between the runtime's fresh
                                         # motion marker and the measured departure
 
@@ -363,7 +364,7 @@ DRAIN_DEADLINE_S = 90.0     # whole-drain budget: 5 presses x <= DRAIN_PRESS_LAN
 #   - hold: per-rAF re-resolve the owner by elId, re-measure its LIVE rect (never the
 #     modelled/interpolated one), retrack the cover's left-fraction sub-rect onto it,
 #     re-append if detached, and log the cover rect + the measured rect (so the scorer
-#     can compute `coverTracksFootprint` within 2px) plus whether the counter patch
+#     can compute `coverTracksFootprint` within COVER_TRACK_TOL_PX) plus whether the counter patch
 #     center hit-tests to the cover. The cover is PARTIAL (left ~40% of the owner rect)
 #     so it covers the counter patch but not the slide-1/2 composition ROIs.
 #   - release(): remove the cover, stop the loop, snapshot the frozen-patch checksum and
@@ -2341,13 +2342,12 @@ def _caps(samples: list[dict]) -> list[float | None]:
     return [s.get("captureOffsetS") for s in samples]
 
 
-async def _media_snapshot_with_pool(chrome: ChromeCdp) -> dict:
-    snap = await _media_snapshot(chrome) or {}
-    pool = await chrome.evaluate(
-        "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.snapshot "
-        "? window.__OBED_P2_PRESERVE__.snapshot() : []"
-    )
-    snap = dict(snap)
+def _merge_pool_into_media(snap: dict | None, pool: list | None) -> dict:
+    """Merge the preserve pool's detached decoders into a media snapshot: DOM
+    videos first, pooled clocks appended so an MM gap still shows an advancing
+    clock. Pure, so the page-side per-rAF collector and the one-off Python
+    snapshot produce the same shape."""
+    snap = dict(snap or {})
     snap["preservePool"] = pool or []
     # Prefer live DOM videos; fall back to pooled detached decoders for MM gaps.
     # Also merge pool clocks when DOM videos are frozen/missing.
@@ -2371,6 +2371,17 @@ async def _media_snapshot_with_pool(chrome: ChromeCdp) -> dict:
             snap["videos"] = dom + pool_vids
         snap["videoCount"] = len(snap["videos"])
     return snap
+
+
+async def _media_snapshot_with_pool(chrome: ChromeCdp) -> dict:
+    # DOM snapshot FIRST, pool second: the order the restart-boundary evidence
+    # was measured under -- do not swap it.
+    snap = await _media_snapshot(chrome) or {}
+    pool = await chrome.evaluate(
+        "window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.snapshot "
+        "? window.__OBED_P2_PRESERVE__.snapshot() : []"
+    )
+    return _merge_pool_into_media(snap, pool)
 
 
 def _resolve_target_media(media: dict, decoder_id: object) -> dict | None:
@@ -2786,17 +2797,10 @@ FOOTPRINT_BADGE_JS = r"""
     if (!running) return;
     var el = elById(st.elId);
     var key = motionKey(el);
-    // Review r3 BLOCKER 1: the install-time handoff only ordered this loop
-    // behind whatever pin existed THEN. keepThroughBridge's 3->4 pin starts
-    // later, from a TASK -- so it registers its rAF after this loop has already
-    // re-queued from its own callback, and from then on it runs AFTER us: we
-    // would read and paint the pre-move rect, the pin would then move the video,
-    // and the compositor would show both. One frame of lag, mutually consistent
-    // between badge pixels and badge log, so the coupling check cannot see it.
-    // On a FRESH pin generation, re-handoff: name a null rect for this frame AND
-    // for the intervening one (both then have a single reading and stay
+    // On a FRESH pin generation, re-handoff: paint a null rect for this frame
+    // and for the intervening one (each then has one reading and stays
     // `unstable` -- fail closed), and re-queue from a post-frame task so the loop
-    // lands BEHIND the new pin, where it stays.
+    // lands BEHIND the new pin and stays there. Plan §10.6-10.7.
     if (key !== null && key !== pinGeneration) {
       pinGeneration = key;
       st.motionStartedAt = (el.__obedMotion || {}).started;
@@ -2843,10 +2847,7 @@ FOOTPRINT_BADGE_JS = r"""
               innerWidth: window.innerWidth, dpr: window.devicePixelRatio || 1};
     },
     // Dumped ONCE after the capture loop, never per sample: a per-sample lookup
-    // is one more CDP round trip inside the hold, and the hold is where the rAF
-    // budget matters. (Measured: removing it did NOT on its own clear the
-    // occasional >100ms `maxRafGapOk` stalls -- see that check's notes -- but it
-    // does leave the capture loop one round trip CHEAPER than before the badge.)
+    // is one more CDP round trip inside the hold (plan §10.5).
     dump: function () { return st.log; },
     stats: function () {
       return {painted: st.painted, seq: st.seq, logged: st.order.length,
@@ -2870,16 +2871,146 @@ FOOTPRINT_BADGE_JS = r"""
 }
 
 
-def _rehandoff_exempt_seqs(rehandoff_seqs: object) -> set[int]:
-    """The badge sequences that may be excused from `allInHoldMeasured`: only
-    those the badge itself logged as a CONTIGUOUS re-handoff pair `(p, p+1)`. A
-    lone or non-adjacent sequence is not a re-handoff and buys no exemption."""
-    seqs = [s for s in (rehandoff_seqs or []) if isinstance(s, int)]
-    out: set[int] = set()
-    for a, b in zip(seqs, seqs[1:]):
-        if b == a + 1:
-            out.update((a, b))
+# Per-rAF page-side capture collector (review r5 MAJOR 4). The owner resolution,
+# the media/rVFC snapshot and the preserve pool used to cost FIVE CDP round trips
+# per capture sample inside the hold, which is what was driving the >100 ms
+# `maxRafGapOk` stalls. They are all page work; the page does them once per
+# animation frame and the whole series is dumped ONCE after the loop. The capture
+# loop keeps exactly two CDP calls per sample: the scene hash (control flow) and
+# the screenshot. `progress` mirrors `footprint_at`'s linear interpolation off the
+# page's own flip time, so the modelled footprint each row resolves at is the one
+# the Python loop used to resolve.
+CAPTURE_COLLECTOR_JS = r"""
+(function () {
+  if (window.__OBED_CAP_COLLECT__) return;
+  var MIN4 = %(minHash)d, TRANS_MS = %(transMs)f, KEY = %(key)s;
+  var R3 = %(r3)s, R4 = %(r4)s, RING = %(ring)d;
+  var st = {rows: [], running: false, n: 0, flipT: null};
+
+  function hashNow() {
+    return String(window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash);
+  }
+  function hashNum(h) { var m = String(h).match(/(\d+)/); return m ? parseInt(m[1], 10) : null; }
+  function ensurePlaying() {
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      try { vids[i].muted = true; var p = vids[i].play(); if (p && p.catch) p.catch(function () {}); }
+      catch (e) {}
+    }
+  }
+  function ownerAt(fp) {
+    var P = window.__OBED_P2_PRESERVE__;
+    if (!P || !P.footprintOwnerDecoderId) return {elId: null, key: null, via: 'unavailable'};
+    try {
+      return P.footprintOwnerDecoderId({x: Math.round(fp[0]), y: Math.round(fp[1]),
+                                        w: Math.round(fp[2]), h: Math.round(fp[3]), key: KEY});
+    } catch (e) { return {elId: null, key: null, via: 'error'}; }
+  }
+  function pool() {
+    var P = window.__OBED_P2_PRESERVE__;
+    try { return (P && P.snapshot) ? P.snapshot() : []; } catch (e) { return []; }
+  }
+  function frame() {
+    if (!st.running) return;
+    var t = performance.now();
+    var h = hashNow(), hn = hashNum(h);
+    var reached4 = (hn !== null && hn >= MIN4);
+    if (reached4 && st.flipT === null) st.flipT = t;
+    var progress = reached4
+      ? Math.max(0, Math.min(1, (t - st.flipT) / TRANS_MS))
+      : 0.0;
+    var fp = [R3[0] + (R4[0] - R3[0]) * progress, R3[1] + (R4[1] - R3[1]) * progress,
+              R3[2] + (R4[2] - R3[2]) * progress, R3[3] + (R4[3] - R3[3]) * progress];
+    st.rows.push({t: t, hash: h, progress: progress, fp: fp,
+                  owner: ownerAt(fp), media: %(media)s, pool: pool()});
+    while (st.rows.length > RING) st.rows.shift();
+    if ((st.n++ %% 8) === 0) ensurePlaying();
+    requestAnimationFrame(frame);
+  }
+  window.__OBED_CAP_COLLECT__ = {
+    start: function () {
+      if (!st.running) { st.running = true; requestAnimationFrame(frame); }
+      return {ok: true};
+    },
+    dump: function () { return st.rows; },
+    stop: function () { st.running = false; return {rows: st.rows.length}; }
+  };
+})()
+""" % {
+    "minHash": SLIDE4_MIN_HASH,
+    "transMs": TRANS_S * 1000.0,
+    "key": json.dumps(MOVIE1_KEY),
+    "r3": json.dumps(list(SLIDE3_MOVIE_RECT)),
+    "r4": json.dumps(list(SLIDE4_MOVIE_RECT)),
+    "ring": 4000,
+    "media": MEDIA_PROBE_JS.strip(),
+}
+
+
+def _nearest_sample_times(times: list[float | None]) -> list[float | None]:
+    """Fill each missing capture time from its nearest neighbour in SAMPLE ORDER,
+    so a sample whose badge did not decode is still associated with collector rows
+    from its own part of the move."""
+    out = list(times)
+    last: float | None = None
+    for i, t in enumerate(out):
+        if t is None:
+            out[i] = last
+        else:
+            last = t
+    nxt: float | None = None
+    for i in range(len(out) - 1, -1, -1):
+        if out[i] is None:
+            out[i] = nxt
+        else:
+            nxt = out[i]
     return out
+
+
+def _collector_rows_for(rows: list[dict], t: float | None) -> tuple[dict, dict]:
+    """The collector rows bracketing one capture sample's own badge-frame time:
+    the last row at or before it (what the pre-screenshot read used to see) and
+    the first row after it (the post-screenshot read). Empty dicts when the
+    series does not reach."""
+    before: dict = {}
+    after: dict = {}
+    if t is None:
+        return (rows[-1] if rows else {}), (rows[-1] if rows else {})
+    for r in rows:
+        rt = r.get("t")
+        if rt is None:
+            continue
+        if rt <= t:
+            before = r
+        elif not after:
+            after = r
+            break
+    if not before:
+        before = after or (rows[0] if rows else {})
+    if not after:
+        after = before
+    return before, after
+
+
+def _rehandoff_pair(badge_stats: object, motion_marker: object) -> tuple[int, int] | None:
+    """The ONE contiguous null-rect pair `(p, p+1)` the badge logged for the ONE
+    re-handoff onto the trigger's own fresh pin, or None. Requires
+    `rehandoffs == 1`, exactly that pair in `rehandoffSeqs`, and the badge's
+    `motionStartedAt` to be the trigger marker's `started` -- a pair from any
+    other generation is not the one the hold's pin-start residual is argued from
+    (plan §10.6)."""
+    st = badge_stats if isinstance(badge_stats, dict) else {}
+    marker = motion_marker if isinstance(motion_marker, dict) else {}
+    seqs = st.get("rehandoffSeqs")
+    if st.get("rehandoffs") != 1 or not isinstance(seqs, list) or len(seqs) != 2:
+        return None
+    a, b = seqs
+    if not (isinstance(a, int) and isinstance(b, int) and b == a + 1):
+        return None
+    started = marker.get("started")
+    if started is None or st.get("motionStartedAt") != started:
+        return None
+    return (a, b)
 
 
 def _is_rehandoff_sample(sample: dict, exempt_seqs: set[int]) -> bool:
@@ -3144,6 +3275,15 @@ def _fill_badge_coupling(samples: list[dict], frame_log: dict | None) -> dict:
             continue
         if t is not None:
             s["perfNowMs"] = t
+        if s.get("badgeRect") is None:
+            # A decoded badge that painted a NULL rect (owner unresolved, or the
+            # re-handoff's deliberate pair): one reading at most, so `unstable`.
+            # It still passes through the sequence checks above -- bypassing them
+            # let a duplicate or reversed exempt sequence through (review r5
+            # MAJOR 1).
+            s["footprintSource"] = "unstable"
+            counts["unstable"] += 1
+            continue
         coupled = _couple_owner_rect(frame_rect, s.get("badgeRect"))
         source = coupled.get("source")
         s["footprintSource"] = source
@@ -3209,38 +3349,37 @@ def _couple_owner_rect(before: dict | None, after: dict | None) -> dict:
     return {"source": "unstable", "before": before, "after": after}
 
 
+def _at_cut_from_perf(
+    index_samples: list[dict], advance_key_perf_ms: float | None
+) -> int | None:
+    """The at-cut segment's first sample: the first badge frame whose own page
+    clock is at or after the advance keydown's. `advancePressIndex + 1` excluded
+    a sample that WAS captured after the dispatch (review r5 MAJOR 3). Fails
+    closed (None) with no keydown clock, which leaves the pre-move Nones in the
+    tally and reds the run."""
+    if advance_key_perf_ms is None:
+        return None
+    for i, s in enumerate(index_samples):
+        t = s.get("perfNowMs")
+        if t is not None and t >= advance_key_perf_ms:
+            return i
+    return None
+
+
 def _moving_index_run_at_cut(
     index_samples: list[dict],
     covered_until: int | None = None,
     covered_from: int | None = None,
 ) -> tuple[dict, bool]:
-    """`flip_index` is identified on the FULL ordered sample list (the first
-    sample whose hash reaches slide 4), not on the measured-only subsequence
-    (review Blocker 2c: scoring the measured-only subsequence made "flip_index"
-    the first LATE resolvable sample, not the real cut).
+    """Score the at-cut counter run over `index_samples[covered_from:covered_until]`.
 
-    `covered_until` is the LAST sample index of the at-cut segment (the capture's
-    release split). Everything after it is dropped before scoring, so no
-    post-release sample can contribute to the run or to `n - flipIndex` (review
-    BLOCKER 3).
-
-    `covered_from` is the FIRST sample index of the at-cut segment: on the capture
-    side the first sample AFTER the advance press (samples at or before it are
-    pre-move, decode None by design against the slide-3 mapping, and must not
-    count as decodable misses); in the scorer's re-run for arm B, the first
-    coupled frame at or after the cover was actually PAINTED. Samples before it
-    are dropped (review r3 BLOCKER 2): the cover does not exist yet, so
-    the last live counter reading sits immediately before the frozen ones and the
-    control-onset step reads as a modulo-255 REWIND -- a wrong-reason
-    `negativeAnomaly` / "restart" instead of "freeze run at cut". The raw
-    pre-cover samples stay in `indexSamples` for diagnostics; the scorer's
-    negative-delta handling is untouched.
-
-    The flip sample and the FREEZE_MIN_AFTER samples STRICTLY AFTER it must all be
-    `measured` AND actually decoded (`index is not None`), and must all fit inside
-    the covered segment; otherwise the run is not trustworthy for an at-cut
-    verdict -- returns `flipWindowDecodable=False`, which the caller treats as
-    INCONCLUSIVE."""
+    `flip_index` is the first sample in that segment whose hash reaches slide 4,
+    found on the FULL ordered list, never on the measured-only subsequence. The
+    flip sample and the FREEZE_MIN_AFTER samples strictly after it must all be
+    `measured` and actually decoded and must all fit inside the segment, else
+    `flipWindowDecodable=False` (the caller treats that as INCONCLUSIVE). Samples
+    outside the segment stay in `indexSamples` for diagnostics only. Rationale and
+    measurements: plan §10."""
     hi_bound = len(index_samples) - 1
     if covered_until is not None:
         hi_bound = min(hi_bound, int(covered_until))
@@ -3287,30 +3426,20 @@ async def _advance_to_slide4_capture(
     bound_owner_id: str | None = None,
     split_release: bool = False,
 ) -> tuple[list[dict], list[dict], list[dict], str, dict]:
-    """Advance slide 3 -> slide 4 through the moving Magic Move while densely
-    sampling the footprint owner at the INTERPOLATED footprint (footprint_at,
-    keyed movie1), the rVFC media clocks, and the composited counter decoded at
-    the MEASURED footprint (plan section 1, "measure, don't model").
+    """Advance slide 3 -> slide 4 through the moving Magic Move, capturing the
+    composited counter at the MEASURED footprint (plan §1, "measure, don't
+    model").
 
-    `bound_owner_id` -- the footprint owner's `__obedElId`, resolved ONCE before
-    the move -- gives every sample its ROI; each sample's footprint is settled to
-    `measured` only when the frame's own badge pixels and the page's log of that
-    frame agree (`_fill_badge_coupling`), else `unstable`.
-
-    The at-cut segment closes at a purely POSITIONAL split -- the flip sample plus
-    FREEZE_MIN_AFTER samples strictly after it -- so the schedule is identical in
-    every arm regardless of what the cover does, and ONE shared in-page evaluation
-    (`SPLIT_EVAL_JS`) runs there in every arm, branching inside the page between
-    release and an equivalent no-op with the same return shape and cost.
-
-    Exactly ONE advance key leaves, from the settled `#7` (`_advance_press_decision`):
-    the player queues a key it cannot honour and replays it later, so a re-press
-    loop makes the move start at a replayed press.
+    Two CDP calls per sample -- the scene hash and the screenshot; the owner,
+    media/rVFC and preserve-pool series are collected page-side per rAF
+    (`CAPTURE_COLLECTOR_JS`) and dumped once. `bound_owner_id` gives every sample
+    its ROI through the badge, settled to `measured` only when the frame's own
+    badge pixels and the page's log of that frame agree (`_fill_badge_coupling`).
+    Exactly ONE advance key leaves, from the settled `#7`; the at-cut segment
+    closes at a purely positional split so the schedule is identical in every arm.
 
     Returns (owner_samples, media_samples, index_samples, final_hash,
-    capture_meta) where capture_meta = {"lastAtCutOffsetS", "lastAtCutPerfMs",
-    "releaseOffsetS", "releaseSplitIndex", "releasePerfMs", "releaseStatus",
-    "advancePressIndex", "atCutFrom", "advance", "badge"}.
+    capture_meta). Measurements and rationale: plan §10.
     """
     owner_samples: list[dict] = []
     media_samples: list[dict] = []
@@ -3334,6 +3463,8 @@ async def _advance_to_slide4_capture(
         probe = await chrome.screenshot()
         inner_w = float(badge_install.get("innerWidth") or 0) or float(probe.shape[1])
         badge_scale = float(probe.shape[1]) / inner_w
+    await chrome.evaluate(CAPTURE_COLLECTOR_JS)
+    await chrome.evaluate("window.__OBED_CAP_COLLECT__.start()")
     badge_decoded = 0
     badge_missing = 0
     badge_unlogged = 0
@@ -3348,6 +3479,7 @@ async def _advance_to_slide4_capture(
     # this rule, never a hardcoded index -- so the `nDecodable` fraction does not
     # carry a free miss. They stay in `indexSamples` for diagnostics.
     advance_press_index: int | None = None
+    advance_key_perf_ms: float | None = None
     last_at_cut_offset_s: float | None = None
     last_at_cut_perf_ms: float | None = None
     release_offset_s: float | None = None
@@ -3367,13 +3499,22 @@ async def _advance_to_slide4_capture(
             )
         )
         hn = _hash_num(scene_hash)
-        if i % 8 == 0:
-            await _ensure_videos_playing(chrome)
         press_state, do_press = _advance_press_decision(hn, press_state, capture_wall)
         if do_press:
             advance_press_index = i
             await chrome.screenshot()  # activate the surface (see the drain loop)
             await chrome.key("ArrowRight", "ArrowRight", 39)
+            # The keydown's own page clock, and the hash re-read AFTER dispatch:
+            # this sample's screenshot is taken after the key, so its pre-press
+            # hash is stale and it belongs INSIDE the at-cut segment (review r5
+            # MAJOR 3).
+            after_key = await chrome.evaluate(
+                "(function(){return {t: performance.now(), h: (window.__OBED_P2_PROBE__"
+                " ? window.__OBED_P2_PROBE__.hash() : location.hash)};})()"
+            ) or {}
+            advance_key_perf_ms = after_key.get("t")
+            scene_hash = _norm_hash(after_key.get("h"))
+            hn = _hash_num(scene_hash)
         reached4 = hn is not None and hn >= SLIDE4_MIN_HASH
         if reached4 and flip_offset is None:
             flip_offset = offset
@@ -3385,16 +3526,11 @@ async def _advance_to_slide4_capture(
         else:
             progress = 0.0
         fp = footprint_at(progress, SLIDE3_MOVIE_RECT, SLIDE4_MOVIE_RECT)
-        media = await _media_snapshot_with_pool(chrome)
-        owner_before = await _footprint_owner_keyed(chrome, fp, MOVIE1_KEY)
-        rect_before, perf_before = await _read_bound_owner_rect(chrome, bound_owner_id)
         arr = await chrome.screenshot()
         # The rect that THIS frame was painted with, read out of this frame's own
         # badge pixels. The ROI is decoded from it immediately (the page's own
         # record of that frame is matched against it in ONE dump after the loop,
-        # to keep a CDP round trip out of the hold). `rect_before` is a
-        # free-running read from before the capture: forensics only now, since it
-        # cannot be coupled to any particular frame.
+        # to keep a CDP round trip out of the hold).
         badge = _decode_footprint_badge(arr, badge_scale) if badge_ok else None
         # A badge whose CRC does not check out is a TORN frame, not a rect
         # (review r3 MAJOR 3): drop it here so its corrupted sequence can never
@@ -3412,44 +3548,24 @@ async def _advance_to_slide4_capture(
         badge_rect = (
             {k: badge[k] for k in ("x", "y", "w", "h")} if badge is not None else None
         )
-        # A NULL-rect badge (the owner did not resolve, or the loop is mid
-        # re-handoff) encodes zeros. Zeros are not a rect: using them as the ROI
-        # decoded the top-left corner of the viewport, which reads 255 and then
-        # looked like a live counter sample inside the hold. One reading, so the
-        # sample is `unstable` -- fail closed, as the null paint intends.
+        # A NULL-rect badge (owner unresolved, or mid re-handoff) encodes zeros,
+        # which are not a rect: no ROI, nothing decoded. The sample still carries
+        # its SEQUENCE onto the `badge` path so `_fill_badge_coupling` applies
+        # the monotonicity checks to it and settles it `unstable` (review r5
+        # MAJOR 1).
         if badge_rect is not None and not (badge_rect["w"] > 1 and badge_rect["h"] > 1):
             badge_rect = None
-            badge_torn = True
         if i % 2 == 0 or i == n - 1:
             Image.fromarray(arr).save(run_dir / f"{prefix}-t{i:03d}.png")
-        owner_after = await _footprint_owner_keyed(chrome, fp, MOVIE1_KEY)
-        ambiguous = (
-            owner_before.get("via") == "ambiguous"
-            or owner_after.get("via") == "ambiguous"
-            or (
-                owner_before.get("elId") is not None
-                and owner_after.get("elId") is not None
-                and owner_before.get("elId") != owner_after.get("elId")
-            )
-        )
-        owner_samples.append(
-            {
-                "sceneHash": scene_hash,
-                "captureOffsetS": offset,
-                "progress": round(progress, 3),
-                "footprint": [round(v, 1) for v in fp],
-                "decoderId": owner_after.get("elId"),
-                "ownerAmbiguous": ambiguous,
-                "via": owner_after.get("via"),
-            }
-        )
-        media_samples.append({**media, "sceneHash": scene_hash, "captureOffsetS": offset})
         # Provisional: the ROI comes from the frame's OWN painted rect. The
         # `measured`/`unstable` classification is settled after the loop, against
         # the page's record of that frame (`_fill_badge_coupling`).
-        if badge_rect is not None:
+        if badge is not None:
             footprint_source = "badge"
-            roi_rect = (badge_rect["x"], badge_rect["y"], badge_rect["w"], badge_rect["h"])
+            roi_rect = (
+                (badge_rect["x"], badge_rect["y"], badge_rect["w"], badge_rect["h"])
+                if badge_rect is not None else None
+            )
         elif badge_torn:
             footprint_source = "unstable"
             roi_rect = None
@@ -3474,14 +3590,14 @@ async def _advance_to_slide4_capture(
                 ),
                 "sceneHash": scene_hash,
                 "captureOffsetS": offset,
-                # Overwritten by `_fill_badge_coupling` with the painted frame's
-                # OWN timestamp; the free-running pre-capture read is the fallback.
-                "perfNowMs": perf_before,
+                # Filled by `_fill_badge_coupling` with the painted frame's OWN
+                # timestamp; a sample with no badge frame has none and can never
+                # be `measured`.
+                "perfNowMs": None,
                 "progress": round(progress, 3),
                 "footprintSource": footprint_source,
                 "badgeSeq": (int(badge["seq"]) if badge is not None else None),
                 "badgeRect": badge_rect,
-                "freeRunningRect": rect_before,
                 "measuredRect": None,
             }
         )
@@ -3496,7 +3612,6 @@ async def _advance_to_slide4_capture(
             # now been captured under the cover (review BLOCKER 3, off-by-one).
             release_split_index = i
             last_at_cut_offset_s = offset
-            last_at_cut_perf_ms = perf_before
             release_status = await chrome.evaluate(
                 SPLIT_EVAL_JS % {"release": "true" if split_release else "false"}
             )
@@ -3527,6 +3642,44 @@ async def _advance_to_slide4_capture(
         # release ordering and the settled split on that one browser clock).
         if release_split_index is not None and 0 <= release_split_index < len(index_samples):
             last_at_cut_perf_ms = index_samples[release_split_index].get("perfNowMs")
+    # ONE dump of the page-side per-rAF series, then each capture sample takes the
+    # rows BRACKETING its own badge frame -- the same before/after pair the five
+    # deleted per-sample round trips used to fetch (review r5 MAJOR 4).
+    collector_rows = await chrome.evaluate("window.__OBED_CAP_COLLECT__.dump()") or []
+    await chrome.evaluate("window.__OBED_CAP_COLLECT__.stop()")
+    # A sample whose badge did not decode has no page clock of its own; take its
+    # nearest neighbour's rather than the end of the series, so a pre-flip sample
+    # cannot be handed slide-4 owner rows.
+    sample_ts = _nearest_sample_times([s.get("perfNowMs") for s in index_samples])
+    for s, s_t in zip(index_samples, sample_ts):
+        row_b, row_a = _collector_rows_for(collector_rows, s_t)
+        ob, oa = (row_b.get("owner") or {}), (row_a.get("owner") or {})
+        owner_samples.append(
+            {
+                "sceneHash": s.get("sceneHash"),
+                "captureOffsetS": s.get("captureOffsetS"),
+                "progress": s.get("progress"),
+                "footprint": [round(float(v), 1) for v in (row_a.get("fp") or [])],
+                "decoderId": oa.get("elId"),
+                "ownerAmbiguous": bool(
+                    ob.get("via") == "ambiguous"
+                    or oa.get("via") == "ambiguous"
+                    or (
+                        ob.get("elId") is not None
+                        and oa.get("elId") is not None
+                        and ob.get("elId") != oa.get("elId")
+                    )
+                ),
+                "via": oa.get("via"),
+            }
+        )
+        media_samples.append(
+            {
+                **_merge_pool_into_media(row_b.get("media"), row_b.get("pool")),
+                "sceneHash": s.get("sceneHash"),
+                "captureOffsetS": s.get("captureOffsetS"),
+            }
+        )
     final_hash = _norm_hash(
         await chrome.evaluate(
             "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
@@ -3540,7 +3693,9 @@ async def _advance_to_slide4_capture(
         "releasePerfMs": release_perf_ms,
         "releaseStatus": release_status,
         "advancePressIndex": advance_press_index,
-        "atCutFrom": (advance_press_index + 1) if advance_press_index is not None else None,
+        "advanceKeyPerfMs": advance_key_perf_ms,
+        "collectorRows": len(collector_rows),
+        "atCutFrom": _at_cut_from_perf(index_samples, advance_key_perf_ms),
         "advance": _advance_gate(press_state, final_hash),
         "badge": {
             "install": badge_install,
@@ -3836,6 +3991,8 @@ async def _capture_3to4_snapshot(
         "releasePerfMs": capture_meta.get("releasePerfMs"),
         "advance": capture_meta.get("advance"),
         "atCutFrom": capture_meta.get("atCutFrom"),
+        "advanceKeyPerfMs": capture_meta.get("advanceKeyPerfMs"),
+        "collectorRows": capture_meta.get("collectorRows"),
         "badge": capture_meta.get("badge"),
         "firstSettledOffsetS": first_settled_offset_s,
         "firstSettledPerfMs": first_settled_perf_ms,
@@ -3985,13 +4142,8 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     seq = [s.get("index") for s in index_samples]
     sources = [s.get("footprintSource") for s in index_samples]
 
-    # The CAPTURE WINDOW the freeze is scored over opens when the cover was
-    # actually PAINTED, not at the trigger (review r3 BLOCKER 2): the <=150 ms
-    # owner-readiness retry sits between the two, and a sample landing in it
-    # shows a still-running counter one step ahead of the frozen ones -- which
-    # the at-cut scorer reads as a modulo-255 rewind, reaching FAIL through
-    # `noNegativeAnomaly` for the wrong reason. Fails CLOSED: no
-    # `coverPaintedAt`, no window.
+    # The scored window opens when the cover was actually PAINTED, not at the
+    # trigger, and fails CLOSED without a `coverPaintedAt` (plan §10).
     cover_painted_at = nc.get("coverPaintedAt")
     release_split_index = b.get("releaseSplitIndex")
     covered_positions = [
@@ -4000,24 +4152,33 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and (release_at is None or t <= release_at)
         and (not isinstance(release_split_index, int) or i <= release_split_index)
     ]
-    # ...and it opens after the badge's OWN identified re-handoff, and nothing
-    # else (review r4 BLOCKER 1). The re-handoff onto the fresh 3->4 pin lands one
-    # frame before the cover is painted and deliberately paints a null rect for
-    # the contiguous pair of frames it spans, so the first covered capture is
-    # often one of them. Only a LEADING sample that the badge itself names as part
-    # of that pair -- null rect, nothing decoded -- is exempt; every other
-    # post-paint sample through `releaseSplitIndex` must be `measured`, so an
-    # unstable sample with a live decode is INCONCLUSIVE wherever it lands.
-    exempt_seqs = _rehandoff_exempt_seqs(
-        ((b.get("badge") or {}).get("stats") or {}).get("rehandoffSeqs")
-    )
+    # ...and it opens after the badge's OWN single identified re-handoff, and
+    # nothing else (review r4 BLOCKER 1, r5 MAJOR 1): exactly one re-handoff,
+    # exactly one contiguous null-rect pair tied to the trigger marker, the
+    # captured exempt sequences unique and increasing, and EVERY non-exempt
+    # covered badge sequence strictly later than that pair -- so the argued
+    # pin-start residual is proved, not assumed (plan §10.6).
+    motion_marker = nc.get("motionStartedMarker") or {}
+    motion_at_trigger = nc.get("obedMotionAtTrigger") or {}
+    badge_stats = (b.get("badge") or {}).get("stats")
+    pair = _rehandoff_pair(badge_stats, motion_marker)
+    exempt_seqs = set(pair) if pair else set()
     exempt_prefix = 0
     for i in covered_positions:
         if not _is_rehandoff_sample(index_samples[i], exempt_seqs):
             break
         exempt_prefix += 1
-    rehandoff_exempt_ok = exempt_prefix <= FREEZE_REHANDOFF_MAX_EXEMPT
-    in_hold_positions = covered_positions[exempt_prefix:] if rehandoff_exempt_ok else []
+    exempt_seen = [index_samples[i].get("badgeSeq") for i in covered_positions[:exempt_prefix]]
+    rest = covered_positions[exempt_prefix:]
+    rest_seqs = [index_samples[i].get("badgeSeq") for i in rest]
+    rehandoff_exempt_ok = bool(
+        pair is not None
+        and exempt_prefix <= FREEZE_REHANDOFF_MAX_EXEMPT
+        and all(y > x for x, y in zip(exempt_seen, exempt_seen[1:]))
+        and rest
+        and all(isinstance(s, int) and s > pair[1] for s in rest_seqs)
+    )
+    in_hold_positions = rest if rehandoff_exempt_ok else []
     first_covered_position = in_hold_positions[0] if in_hold_positions else None
     # RECOMPUTED here from the raw samples, never trusted from the capture side
     # (review BLOCKER 3), and bounded to the covered at-cut segment at BOTH ends.
@@ -4151,8 +4312,6 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # another boundary, or a replacement generation on the bound video, can also
     # produce a timely departure. The trigger's marker must be the SAME fresh
     # marker the poll first retained, and must name the 3->4 boundary.
-    motion_marker = nc.get("motionStartedMarker") or {}
-    motion_at_trigger = nc.get("obedMotionAtTrigger") or {}
     checks["firedAtRuntimeMotionStart"] = bool(
         isinstance(motion_started_frame, int)
         and isinstance(trigger_frames, int)
@@ -4211,6 +4370,14 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     checks["loopLive"] = len(raf_ts) >= 10
     checks["everyInHoldStale"] = stale_ok
     checks["allInHoldMeasured"] = all_in_hold_measured
+    checks["rehandoffPairSound"] = rehandoff_exempt_ok
+    # The `#7` build's own animation outlasts the hash (plan §10.9), so a press
+    # sent before the owner rect settles is a different stimulus. MAIN gates this
+    # already; all three bracket arms are held to it too (review r5 MAJOR 2).
+    settles = {k: s.get("ownerSettle") for k, s in (("a1", a1), ("b", b), ("a2", a2))}
+    checks["ownerSettledAllArms"] = all(
+        isinstance(s, dict) and s.get("settled") is True for s in settles.values()
+    )
     checks["releaseStrictlyBeforeSettleAndBurst"] = release_ordered
     checks["maxRafGapOk"] = max_gap_ms <= MAX_RAF_GAP_MS
 
@@ -4247,7 +4414,8 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         "ownerReadyAtTrigger", "staleFrameFromPlayback", "paintedOnce", "coverPatchStable",
         "coverHitTest100", "coverTracksFootprint", "loopLive", "everyInHoldStale",
         "flipIndexPresent", "flipWindowDecodable", "enoughAfterFlip",
-        "releaseStrictlyBeforeSettleAndBurst", "allInHoldMeasured", "bridgeEngaged",
+        "releaseStrictlyBeforeSettleAndBurst", "allInHoldMeasured", "rehandoffPairSound",
+        "ownerSettledAllArms", "bridgeEngaged",
         "maxRafGapOk",
         "noNegativeAnomaly", "movingContinuityOk", "boundDecoderIsSlide3Decoder",
         "noOwnerAmbiguousInWindow", "rvfcRanThroughHold", "playerBuildErrorsEmpty",
@@ -4274,6 +4442,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         "maxRafGapMs": max_gap_ms,
         "drain": drain,
         "drains": drains,
+        "ownerSettles": settles,
         "isolationDiffs": isolation_diffs,
         "movingIndexRunAtCut": idx,
         "advances": {k: (s.get("advance") or {}) for k, s in (("a1", a1), ("b", b), ("a2", a2))},
@@ -4282,6 +4451,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
             "coverPaintedAt": cover_painted_at,
             "firstCoveredPosition": first_covered_position,
             "rehandoffExemptSamples": exempt_prefix,
+            "rehandoffPair": list(pair) if pair else None,
             "coveredPositions": covered_positions,
             "advanceKeyAt": advance_key_at,
             "triggerDelayMs": trigger_delay_ms,
@@ -5519,7 +5689,8 @@ async def _run(player: Path) -> dict:
                 "START (firedVia == 'motion', never a hash-only fire), the stage origin was "
                 "(0,0) at arm, painted once, cover patch pixels identical hold-start vs "
                 "release, elementFromPoint == cover for 100% of hold frames, the cover "
-                "tracked the measured footprint within 2px on every hold frame, every "
+                f"tracked the measured footprint within {COVER_TRACK_TOL_PX}px on every "
+                "hold frame, every "
                 "in-hold decode from a MEASURED sample and == the expected stale index "
                 "+/-2, released strictly between the last at-cut capture and the settled "
                 "visible-content burst, and no per-rAF hold-log gap > "

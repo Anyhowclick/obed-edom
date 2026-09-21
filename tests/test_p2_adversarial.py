@@ -888,6 +888,10 @@ HOLD_STARTED_AT_34 = 870.0
 COVER_PAINTED_AT_34 = 880.0
 
 
+REHANDOFF_SEQ0_34 = 4100   # the badge's one logged null-rect pair: (p, p+1)
+BADGE_SEQ0_34 = 4200       # every captured sample's sequence: strictly after it
+
+
 def _capture_samples_34(at_cut_indices, settled_indices, covered_pre_flip):
     samples: list[dict] = []
     perf = 700.0
@@ -916,6 +920,8 @@ def _capture_samples_34(at_cut_indices, settled_indices, covered_pre_flip):
                         "perfNowMs": perf, "progress": 0.99, "footprintSource": "measured"})
         perf += 50.0
         offset += 0.05
+    for k, s in enumerate(samples):
+        s["badgeSeq"] = BADGE_SEQ0_34 + k
     return samples, release_perf, perf + 100.0
 
 
@@ -990,6 +996,12 @@ def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool,
         "firstSettledPerfMs": settled[0]["perfNowMs"] if settled else None,
         "burstStartOffsetS": 1.5,
         "burstStartPerfMs": burst_perf,
+        # The `#7` build's rect stopped moving before the press (plan §10.9).
+        "ownerSettle": {"stableReadings": 3, "required": 3, "settled": True,
+                        "rect": {"x": 198.0, "y": 795.0, "w": 952.0, "h": 268.0}},
+        "badge": {"stats": {"rehandoffs": 1,
+                            "rehandoffSeqs": [REHANDOFF_SEQ0_34, REHANDOFF_SEQ0_34 + 1],
+                            "motionStartedAt": HOLD_STARTED_AT_34}},
     }
     snap["_releasePerfForNullControl"] = release_perf  # test-only scratch, popped by callers
     return snap
@@ -1356,7 +1368,7 @@ def test_footprint_badge_crc_is_sensitive_to_every_field():
 
 def _badge_sample(seq, rect, **over):
     s = {"footprintSource": "badge", "badgeSeq": seq, "perfNowMs": 1.0,
-         "badgeRect": dict(rect), "measuredRect": None}
+         "badgeRect": (dict(rect) if rect is not None else None), "measuredRect": None}
     s.update(over)
     return s
 
@@ -1409,6 +1421,75 @@ def test_fill_badge_coupling_null_logged_rect_is_unstable():
     p2._fill_badge_coupling(samples, {"5": {"t": 1.0, "rect": None}})
     assert samples[0]["footprintSource"] == "unstable"
     assert samples[0]["measuredRect"] is None
+
+
+def test_fill_badge_coupling_null_rect_badges_still_take_the_sequence_checks():
+    """Review r5 MAJOR 1. A decoded badge that painted a NULL rect (the
+    re-handoff pair) used to be marked `unstable` on the capture side and so
+    BYPASSED these checks -- a duplicate or reversed exempt sequence went
+    unnoticed. It now walks the same path: `unstable` either way, but a
+    non-increasing sequence is counted as a violation."""
+    good = [_badge_sample(20, None), _badge_sample(21, None)]
+    counts = p2._fill_badge_coupling(
+        good, {"20": {"t": 10.0, "rect": None}, "21": {"t": 26.0, "rect": None}}
+    )
+    assert [s["footprintSource"] for s in good] == ["unstable", "unstable"]
+    assert [s["perfNowMs"] for s in good] == [10.0, 26.0]
+    assert counts["seqViolation"] == 0
+
+    dup = [_badge_sample(20, None), _badge_sample(20, None)]
+    counts = p2._fill_badge_coupling(dup, {"20": {"t": 10.0, "rect": None}})
+    assert counts["seqViolation"] == 1
+
+    rev = [_badge_sample(21, None), _badge_sample(20, None)]
+    counts = p2._fill_badge_coupling(
+        rev, {"20": {"t": 10.0, "rect": None}, "21": {"t": 26.0, "rect": None}}
+    )
+    assert counts["seqViolation"] == 1
+
+
+# --- `_at_cut_from_perf` (review r5 MAJOR 3) -------------------------------- #
+def _press_window_samples(press_index_value):
+    """Thirteen samples on one page clock. The advance keydown lands at 1000 ms and
+    the sample at index 2 is captured 5 ms AFTER it -- its screenshot follows the
+    dispatch -- which `advancePressIndex + 1` used to drop. The counter is a
+    healthy positive arm (no cover): monotonically increasing through the flip."""
+    idx = [10, 11, press_index_value, 13, 14] + list(range(15, 23))
+    hashes = ["#7"] * 5 + ["#8"] * 8
+    return [
+        {"index": v, "sceneHash": h, "perfNowMs": 900.0 + 50.0 * i,
+         "footprintSource": "measured", "badgeSeq": 700 + i}
+        for i, (v, h) in enumerate(zip(idx, hashes))
+    ]
+
+
+def test_at_cut_from_perf_starts_at_the_first_frame_after_the_keydown():
+    samples = _press_window_samples(12)
+    assert p2._at_cut_from_perf(samples, 1000.0) == 2, "the press-index sample itself"
+    assert p2._at_cut_from_perf(samples, None) is None, "fails closed without a clock"
+    assert p2._at_cut_from_perf(samples, 10_000.0) is None
+
+
+def test_at_cut_segment_keeps_an_anomalous_press_index_sample():
+    """Review r5 MAJOR 3. An anomaly confined to the first post-keydown frame --
+    a transient reset, a wrong ROI -- must reach the scorer. Under
+    `advancePressIndex + 1` it was discarded and the arm greened for the wrong
+    reason."""
+    start = 2
+    clean, _ = p2._moving_index_run_at_cut(_press_window_samples(12), covered_from=start)
+    assert clean["ok"] is True, clean
+
+    # 11 -> 140 is a mod-256 jump of 129, i.e. a backward step past half the
+    # modulo: `negativeAnomaly`, the transient-reset signature.
+    anomalous = _press_window_samples(140)
+    assert p2._at_cut_from_perf(anomalous, 1000.0) == start
+    run, decodable = p2._moving_index_run_at_cut(anomalous, covered_from=start)
+    assert decodable is True
+    assert run["ok"] is False, run
+
+    # ...while the OLD rule's segment, one sample later, is green.
+    old_run, _ = p2._moving_index_run_at_cut(anomalous, covered_from=start + 1)
+    assert old_run["ok"] is True, old_run
 
 
 def test_fill_badge_coupling_leaves_non_badge_samples_alone():
@@ -2111,7 +2192,7 @@ def test_freeze_control_missing_cover_painted_at_fails_closed():
     assert "coverPaintedAtPresent" in verdict["integrityFailed"]
 
 
-def _with_rehandoff(b: dict, n: int, seq0: int = 4100) -> dict:
+def _with_rehandoff(b: dict, n: int, seq0: int = REHANDOFF_SEQ0_34) -> dict:
     """Turn the first `n` COVERED samples into the badge's own re-handoff frames:
     null rect, nothing decoded, sequences the badge logged as a contiguous pair.
     """
@@ -2119,7 +2200,8 @@ def _with_rehandoff(b: dict, n: int, seq0: int = 4100) -> dict:
     for k in range(n):
         b = _with_sample(b, first + k, footprintSource="unstable", index=None,
                          badgeRect=None, badgeSeq=seq0 + k)
-    b["badge"] = {"stats": {"rehandoffSeqs": [seq0, seq0 + 1]}}
+    b["badge"] = {"stats": {"rehandoffs": 1, "rehandoffSeqs": [seq0, seq0 + 1],
+                            "motionStartedAt": HOLD_STARTED_AT_34}}
     return b
 
 
@@ -2158,7 +2240,8 @@ def test_freeze_control_leading_unstable_with_a_live_decode_is_inconclusive():
 
     # ...nor does a LONE logged sequence that is not part of a contiguous pair.
     b3 = _with_rehandoff(_freeze_b_snap_34(), 1)
-    b3["badge"] = {"stats": {"rehandoffSeqs": [4100, 4200]}}
+    b3["badge"] = {"stats": {"rehandoffs": 1, "rehandoffSeqs": [4100, 4150],
+                             "motionStartedAt": HOLD_STARTED_AT_34}}
     v3 = p2._score_freeze_control(_positive_snap_34(), b3, _positive_snap_34())
     assert v3["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in v3["integrityFailed"]
@@ -2177,6 +2260,74 @@ def test_freeze_control_more_rehandoff_frames_than_the_badge_paints_is_inconclus
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in verdict["integrityFailed"]
+
+
+def test_freeze_control_rejects_a_malformed_or_foreign_rehandoff():
+    """Review r5 MAJOR 1. Two captures of the SAME exempt sequence, a reversed
+    pair, or one sample from each of several re-handoffs could all consume the
+    two-sample allowance and PASS, because `badge.stats.rehandoffs` was never
+    gated and the pair was never tied to the trigger's own marker."""
+    p0 = REHANDOFF_SEQ0_34
+
+    def stats(**over):
+        base = {"rehandoffs": 1, "rehandoffSeqs": [p0, p0 + 1],
+                "motionStartedAt": HOLD_STARTED_AT_34}
+        base.update(over)
+        return {"stats": base}
+
+    cases = {
+        "duplicate": stats(rehandoffSeqs=[p0, p0]),
+        "reversed": stats(rehandoffSeqs=[p0 + 1, p0]),
+        "multi": {"stats": {"rehandoffs": 2,
+                            "rehandoffSeqs": [p0, p0 + 1, p0 + 40, p0 + 41],
+                            "motionStartedAt": HOLD_STARTED_AT_34}},
+        "foreign-generation": stats(motionStartedAt=HOLD_STARTED_AT_34 - 900.0),
+        "missing-stats": {},
+    }
+    for name, badge in cases.items():
+        b = _with_rehandoff(_freeze_b_snap_34(), 2)
+        b["badge"] = badge
+        verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+        assert verdict["verdict"] == "inconclusive", name
+        assert "rehandoffPairSound" in verdict["integrityFailed"], name
+
+
+def test_freeze_control_rejects_two_captures_of_one_exempt_sequence():
+    """The two excused captures must be DISTINCT, increasing frames of the pair;
+    the same sequence read twice is an aliased read, not two re-handoff frames."""
+    first = len(_PRE_ADVANCE_INDICES_34)
+    b = _with_rehandoff(_freeze_b_snap_34(), 2)
+    b = _with_sample(b, first + 1, badgeSeq=REHANDOFF_SEQ0_34)
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "rehandoffPairSound" in verdict["integrityFailed"]
+
+
+def test_freeze_control_rejects_a_covered_badge_measured_before_the_pair():
+    """Nothing previously proved the first MEASURED covered badge came after the
+    re-handoff, so the argued pin-start residual was an assumption. A covered
+    measured sample whose sequence predates the pair now reds it."""
+    first = len(_PRE_ADVANCE_INDICES_34)
+    b = _with_sample(_freeze_b_snap_34(), first, badgeSeq=REHANDOFF_SEQ0_34 - 5)
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "rehandoffPairSound" in verdict["integrityFailed"]
+
+
+@pytest.mark.parametrize("arm", ["a1", "b", "a2"])
+@pytest.mark.parametrize("settle", [{"settled": False, "stableReadings": 1}, None, "absent"])
+def test_freeze_control_requires_a_settled_owner_rect_in_every_arm(arm, settle):
+    """Review r5 MAJOR 2. A timed-out or still-moving `#7` owner is a different
+    stimulus; the bracket recorded `ownerSettle` but never gated it, so a green
+    downstream could carry a failed prerequisite to PASS."""
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    if settle == "absent":
+        snaps[arm].pop("ownerSettle")
+    else:
+        snaps[arm]["ownerSettle"] = settle
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive"
+    assert "ownerSettledAllArms" in verdict["integrityFailed"]
 
 
 def test_freeze_control_no_coupled_frame_in_the_hold_fails_closed():
