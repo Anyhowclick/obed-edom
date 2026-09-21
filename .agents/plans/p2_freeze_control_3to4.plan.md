@@ -583,3 +583,83 @@ in ~65 s; the third arm and the raster re-scores account for it).
 Live: 5/5 brackets PASS at load 3.8–7.5 (trigger delay 121–175 ms, poll/rAF max gap 40–64 ms, 7–8
 delivered frames, 1 keydown per arm, zero badge missing/CRC-bad/unlogged/sequence violations), plus
 one e2e fast bridge-ON run with `freezeControlCaughtByCounter: True` and `success: True`.
+
+### 10.17 Evidence bound to its arm, and absence bounded (round 15, r12 MAJOR 1–3 + MINOR 1–5)
+
+Round 14 retained the burst raster and re-scored it, but bound it to nothing: the re-score read the
+raster's shape, its frame count, its rectangles and its ten thresholds out of the blob itself, and
+compared only booleans. Four pure-scorer probes reached PASS — A1's raster in B's slot, the frame
+count edited 12→2, the raster padded to 1921×1081, and an all-zero raster carrying parameters slack
+enough to call itself live. The same round left two kinds of ABSENCE unbounded in the scored windows.
+
+**The raster is bound to its arm and to a fixed capture contract.** `FOOTPRINT_BURST_SHAPE =
+(1080, 1920)` (the deck's stage, which every ROI here is measured in) and `FOOTPRINT_BURST_FRAMES =
+len(BURST_OFFSETS_MS) = 12` are constants, and `_footprint_evidence_bound` requires the evidence to
+carry exactly them, plus rectangles, control rect and parameters EQUAL to the module's own — the
+re-score then passes the CONSTANTS to the scorer, so a blob can no longer weaken the thresholds it is
+judged by. `_decode_delta_raster` takes the contract's shape as an argument and checks it BEFORE any
+pixel is decoded. Each arm mints a `captureId` before it captures anything and retains it TWICE — in
+the snapshot header and inside `footprintFullyLive.evidence` — so a raster lifted from another arm
+names a capture that is not the one being scored; a mismatch is INCONCLUSIVE. Per-frame sha256 of the
+12 burst frames travels as provenance (the PNGs do not). Forgery is explicitly NOT in scope: this
+binds the instrument against its own bugs, and self-described metadata could never authenticate
+provenance anyway.
+
+**The comparison is the COMPLETE result at tolerance 0.** `_footprint_fully_live_ok` requires
+`cached[k] == derived[k]` for every key the re-score produces — `liveFrac`, `maxDelta`, the clipped
+rects, the noise floor's p99, the strays, not just the booleans. MEASURED: the re-score reproduces the
+committed numbers EXACTLY on all three arms, so there is no measured reason for any tolerance. The
+sweep records it: 54 `footprintFullyLive` numeric fields left the allowlist as now-gated.
+
+**`None` counter reads are a bounded acquisition miss.** Both index scorers drop null-adjacent
+deltas, so a `None` deletes the step across it from the progress and freeze-run totals, and a run of
+them deletes an interval a reset or a freeze can hide in. `_null_reads_admissible` bounds every scored
+window: at most `SCORED_NULL_MAX_RUN = 1` consecutive; at most `AT_CUT_MAX_NULLS = 1` in an at-cut
+segment and `SETTLED_MAX_NULLS = 0` in a settled one; and an INTERIOR null must be bridged by a
+plausible forward step `1 <= d <= NULL_BRIDGE_MAX_STEP = 60` (twice `score_index_progression`'s own
+30-per-step ceiling, one step being what the miss deletes) — a zero step across it is the freeze the
+gate exists to catch. An EDGE null cannot earn a bracket and is admitted on the count alone.
+MEASURED over 33 clean arms: EXACTLY one at-cut null per arm, always at position 0 (the badge patch
+has not settled at the first read after the advance), never two consecutive, ZERO nulls in every
+settled window, and a largest single forward step of 12. Applied in `_moving_index_run_at_cut` (so B
+and both positives alike), `_settled_progression_ok` and `_advance_c_ok`.
+
+**Null footprint owners are bounded per GAP, not by the aggregate.** `nonNullFrac >= 0.7` admitted a
+single blind interval of nearly a third of the after-window; the probe nulled the first 24 of 80 and
+still passed. `_owner_null_gaps` bounds each run inside the window at `OWNER_NULL_MAX_RUN = 5` and
+requires the nearest RESOLVED readings on either side — searched in the FULL owner series — to exist
+and name the SAME decoder. MEASURED over 27 clean arms: ONE gap per arm, always leading, 4 or 5 of
+~80, never more; it straddles the boundary (the box is mid-flight and `elementFromPoint` resolves
+nothing while it moves), and its left bracket therefore lies BEFORE the window — taking it from the
+full series is what makes the check non-vacuous instead of skipped. A trailing gap has no right-hand
+bracket and fails closed.
+
+**NOT closed as worded.** r12 MAJOR 3 also asked to "attest no competing decoder overlaps the
+footprint during the gap (the `mediaSamples`/`videos` rects are retained — use them)". Those rects are
+not retained: `videos[*]` carries `w`/`h` as `videoWidth`/`videoHeight`, with no screen rect. Worse,
+a clean run legitimately carries a SECOND decoder on the same `Untitled.mov` asset — the export's
+suppressed restart element — so an asset-keyed "no competing decoder" attestation would red the clean
+bracket. A geometric attestation needs a per-video screen rect and a visibility flag added to
+`MEDIA_PROBE_JS` (a shared probe, and a third fixture-shape change), and it cannot be calibrated
+without its own live round. Deferred, with the bounded-and-bracketed gap above standing in.
+
+**MINORs.** `_decode_delta_raster` is fail-closed (`img.format == "PNG"`, contract dimensions
+enforced before load, a context manager, and Pillow's decode/decompression errors caught → `None`).
+The "exactly one" bound-decoder rVFC clock is a LIST with `len(matches) == 1`, so two duplicate
+entries no longer collapse through a set. Each arm now takes the SAME `_settle_at_advance_hash`
+reading MAIN does and persists it as `advanceSettle`, so `_main_inputs` loads a captured block
+instead of rebuilding one from `drain.hashAtArm` — and since both settles are members of the
+snapshot, MAIN's sweep is one walk. The two remaining review narratives are cut. The positive
+allowlist is defined ONCE as `_POSITIVE_SWEEP_ALLOW` and keyed per class, so A1 and A2 cannot drift.
+
+MEASURED (round 15): the bracket walk covers **26 122 concrete indexed paths**, **481 fully gated**
+collapsed fields (was 418), **457 survivors** (was 472) and the same 1 partial field (3 entries);
+MAIN's covers **8 194 paths**, 53 gated, 230 survivors, 0 partials. The two suites run **653 tests in
+~126 s** (was 620 in ~124 s). The fixture is re-captured from live run 1504 and grows 541 kB → 599 kB
+(the `captureId`, the `advanceSettle` block and 3 × 12 frame digests).
+Live: **7/7 brackets PASS** on the new code at load 3.4–8.8, plus one INCONCLUSIVE on `maxRafGapOk`
+(131 ms) during a load spike to 8.75 — an INTERLEAVED before/after control at load 6.5 put the old
+and new modules at 3/3 PASS each with `maxRafGap` 53–60 ms on both, so that inconclusive is the
+machine, not this round. One e2e fast bridge-ON run: `freezeControlCaughtByCounter: True`,
+`success: True`. The three BEFORE captures re-scored under the new gate come back INCONCLUSIVE on
+`isolationEqual` — old-shape evidence carries no `captureId`, which is the binding working.
