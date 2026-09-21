@@ -10,6 +10,7 @@ Audio is passed through unmodified (incl. volume) to follow the source slide's o
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -156,6 +157,27 @@ class ClipResult:
     movie_id: ItemId | None = None
     crop_rect: Rect | None = None
     bare: bool = False
+    occurrence_id: str | None = None
+
+
+@dataclass(frozen=True)
+class MovieCropPlan:
+    """One authored movie occurrence exported for a compiled composition.
+
+    ``target_rect`` is in the 1920x1080 output canvas.  The source occurrence is
+    deliberately addressed by its real source slide and item: folded compositions
+    must never manufacture an item address on their terminal slide.
+    """
+
+    occurrence_id: str
+    source_slide: int
+    source_item: ItemId
+    target_rect: Rect
+    source_mode: Literal["lw", "fw"] = "lw"
+    zoom: float = 1.0
+    pan_x: float = 0.0
+    pan_y: float = 0.0
+    bare: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,6 +190,69 @@ class _SlideJob:
     delete_ids: tuple[ItemId, ...] = ()
     movie_id: ItemId | None = None
     bare: bool = False
+    occurrence_id: str | None = None
+
+
+def _compiled_value(value: object, name: str, *aliases: str, default: object = None) -> object:
+    if isinstance(value, Mapping):
+        for key in (name, *aliases):
+            if key in value:
+                return value[key]
+        return default
+    for key in (name, *aliases):
+        if hasattr(value, key):
+            return getattr(value, key)
+    return default
+
+
+def movie_crop_plans_from_compiled(compositions: Sequence[object]) -> tuple[MovieCropPlan, ...]:
+    """Adapt frozen compiled media to the export-only occurrence crop contract.
+
+    It accepts dataclasses or mapping-shaped boundary objects so the exporter remains
+    independent of the review planner module.
+    """
+    plans: list[MovieCropPlan] = []
+    for composition in compositions:
+        source_mode = _compiled_value(composition, "source_mode", "sourceMode")
+        source_slides = tuple(_compiled_value(composition, "source_slides", "sourceSlides", default=()) or ())
+        media_items = tuple(_compiled_value(composition, "media", default=()) or ())
+        media_layout = str(
+            _compiled_value(composition, "media_layout", "mediaLayout", default="spatial")
+        )
+        timings = [_compiled_value(media, "timing") for media in media_items]
+        modes = [timing if isinstance(timing, str) else _compiled_value(timing, "mode") for timing in timings]
+        delays = [0.0 if isinstance(timing, str) else float(_compiled_value(timing, "delay", default=0.0)) for timing in timings]
+        folded_simultaneous = (
+            len(source_slides) > 1
+            and modes.count("after_transition") == 1
+            and all(mode in {"after_transition", "with_build_1"} for mode in modes)
+            and all(delay == 0.0 for delay in delays)
+        )
+        movie_index = 0
+        for media in media_items:
+            source_item = _compiled_value(media, "source_item", "sourceItem")
+            if not isinstance(source_item, tuple) or len(source_item) != 2 or source_item[0] != "movie":
+                continue
+            movie_index += 1
+            target = _compiled_value(media, "target_rect", "targetRect")
+            if not isinstance(target, Rect):
+                target = Rect(
+                    float(_compiled_value(target, "x")), float(_compiled_value(target, "y")),
+                    float(_compiled_value(target, "w", "width")), float(_compiled_value(target, "h", "height")),
+                )
+            viewport = _compiled_value(media, "viewport", default={})
+            plans.append(MovieCropPlan(
+                occurrence_id=str(_compiled_value(media, "occurrence_id", "occurrenceId")),
+                source_slide=int(_compiled_value(media, "source_slide", "sourceSlide")),
+                source_item=source_item,
+                target_rect=target,
+                source_mode=str(source_mode),
+                zoom=float(_compiled_value(viewport, "zoom", "scale", default=1.0)),
+                pan_x=float(_compiled_value(viewport, "pan_x", "panX", "offsetX", default=0.0)),
+                pan_y=float(_compiled_value(viewport, "pan_y", "panY", "offsetY", default=0.0)),
+                bare=folded_simultaneous or (media_layout == "stacked" and movie_index > 1),
+            ))
+    return tuple(plans)
 
 
 def clip_name(stem: str, slide: int, movie_index: int | None = None) -> str:
@@ -312,6 +397,47 @@ def _rect_intersect(a: Rect, b: Rect) -> Rect:
     if x1 <= x0 or y1 <= y0:
         raise ValueError(f"Degenerate intersection of {a} and {b}")
     return Rect(x0, y0, x1 - x0, y1 - y0)
+
+
+def viewport_crop_rect(
+    source_rect: Rect,
+    target_rect: Rect,
+    *,
+    zoom: float = 1.0,
+    pan_x: float = 0.0,
+    pan_y: float = 0.0,
+) -> Rect:
+    """Return the source crop that aspect-fills ``target_rect`` without stretching.
+
+    Pan is expressed over the post-zoom overflow: -1 and 1 pin an edge, while
+    zero remains centred.  This is intentionally independent of the output frame,
+    so a later resize/re-anchor preserves the editor's crop.
+    """
+    values = (source_rect.x, source_rect.y, source_rect.w, source_rect.h, target_rect.w, target_rect.h, zoom, pan_x, pan_y)
+    if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values):
+        raise ValueError("movie viewport contains non-finite geometry")
+    if source_rect.w <= 0 or source_rect.h <= 0 or target_rect.w <= 0 or target_rect.h <= 0:
+        raise ValueError("movie viewport needs positive source and target rectangles")
+    if zoom < 1:
+        raise ValueError(f"movie viewport zoom {zoom} is below 1")
+    if not -1 <= pan_x <= 1 or not -1 <= pan_y <= 1:
+        raise ValueError("movie viewport pan must be in -1..1")
+
+    target_aspect = target_rect.w / target_rect.h
+    source_aspect = source_rect.w / source_rect.h
+    if source_aspect >= target_aspect:
+        width, height = source_rect.h * target_aspect, source_rect.h
+    else:
+        width, height = source_rect.w, source_rect.w / target_aspect
+    width /= zoom
+    height /= zoom
+    overflow_x, overflow_y = source_rect.w - width, source_rect.h - height
+    return Rect(
+        source_rect.x + overflow_x * ((pan_x + 1) / 2),
+        source_rect.y + overflow_y * ((pan_y + 1) / 2),
+        width,
+        height,
+    )
 
 
 def require_m4v(path: Path) -> Path:
@@ -1050,6 +1176,7 @@ def export_slide_clips(
     crop_rects: Mapping[int, Rect] | None = None,
     delete_ids: Mapping[int, Collection[ItemId]] | None = None,
     per_movie: bool = False,
+    movie_plans: Sequence[MovieCropPlan] | None = None,
     log: Callable[[str], None] = print,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     layout_template: Path | None = None,
@@ -1062,6 +1189,8 @@ def export_slide_clips(
     fps_enum_name(fps)
     expected_fps = fps_rational(fps)
     dsk_live.guard_out_dir(out_dir, fw_deck)
+    if movie_plans and (per_movie or delete_ids or crop_rects):
+        raise ValueError("movie_plans cannot be combined with per_movie, delete_ids, or crop_rects")
     if per_movie and delete_ids:
         raise ValueError("delete_ids is not supported with per_movie=True; delete ids are derived per movie item")
 
@@ -1072,6 +1201,12 @@ def export_slide_clips(
         raise ValueError(f"{fw_deck} is {wall_w}x{wall_h}, not a 7680x1080 LW wall deck.")
 
     include_side = set(include_side)
+    movie_plans = tuple(movie_plans or ())
+    if movie_plans:
+        if len({plan.occurrence_id for plan in movie_plans}) != len(movie_plans):
+            raise ValueError("movie_plans contain duplicate occurrence ids")
+        if any(plan.source_mode not in ("lw", "fw") for plan in movie_plans):
+            raise ValueError("movie_plans contain an unknown source mode")
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     classes = {
         c.number: c
@@ -1084,7 +1219,8 @@ def export_slide_clips(
         crop_rects.update(_derive_include_side_crop(payload, missing_crop))
 
     delete_ids = dict(delete_ids or {})
-    for n in slides:
+    requested_slides = {plan.source_slide for plan in movie_plans} if movie_plans else set(slides)
+    for n in requested_slides:
         cls = classes.get(n)
         slide = slides_by_number.get(n)
         if cls is None or slide is None:
@@ -1093,9 +1229,9 @@ def export_slide_clips(
             log(f"slide {n}: {w}")
         if cls.category == "empty":
             raise ValueError(f"Slide {n} is empty/skipped; refusing to export it")
-        if not per_movie and n in delete_ids:
+        if not movie_plans and not per_movie and n in delete_ids:
             _validate_delete_ids(n, delete_ids[n], cls, slide)
-    if not per_movie:
+    if not movie_plans and not per_movie:
         missing_deletes = [n for n in slides if n not in delete_ids]
         if missing_deletes:
             delete_ids.update(_derive_delete_ids(classes, slides_by_number, missing_deletes))
@@ -1121,10 +1257,40 @@ def export_slide_clips(
         stem_name = scratch.stem
         doc_name = scratch.name
 
-        keep = sorted(set(slides))
+        keep = sorted(requested_slides)
         ordinals = ordinal_map(keep)
         per_slide: list[_SlideJob] = []
-        if per_movie:
+        if movie_plans:
+            for movie_index, plan in enumerate(movie_plans, start=1):
+                slide = slides_by_number[plan.source_slide]
+                items = {(it["kind"], it["kindIndex"]): it for it in (slide.get("items") or [])}
+                item = items.get(plan.source_item)
+                if item is None or item.get("kind") != "movie":
+                    raise ValueError(
+                        f"occurrence {plan.occurrence_id}: source movie {plan.source_item} "
+                        f"not found on slide {plan.source_slide}"
+                    )
+                source_crop = CENTRE_PANEL_RECT if plan.source_mode == "lw" else Rect(0.0, 0.0, float(wall_w), float(wall_h))
+                visible = _rect_intersect(item_rect(item), source_crop)
+                crop_rect = viewport_crop_rect(
+                    visible, plan.target_rect, zoom=plan.zoom, pan_x=plan.pan_x, pan_y=plan.pan_y,
+                )
+                del_ids = _derive_pure_video_delete_ids(slide.get("items") or [], plan.source_item)
+                _validate_delete_ids(plan.source_slide, del_ids, classes[plan.source_slide], slide, pure_video=True)
+                per_slide.append(
+                    _SlideJob(
+                        slide=plan.source_slide,
+                        ordinal=ordinals[plan.source_slide],
+                        crop_rect=crop_rect,
+                        dest=out_dir / f"{fw_deck.stem}.compiled.{movie_index:03d}.mov",
+                        tmp=require_m4v(work / f"tmp.compiled.{movie_index:03d}.m4v"),
+                        delete_ids=del_ids,
+                        movie_id=plan.source_item,
+                        occurrence_id=plan.occurrence_id,
+                        bare=plan.bare,
+                    )
+                )
+        elif per_movie:
             deck_build_recs: dict[int, dict] | None = None
             for n in keep:
                 slide = slides_by_number[n]
@@ -1324,6 +1490,7 @@ def export_slide_clips(
                     movie_id=job.movie_id,
                     crop_rect=Rect(crop_x, crop_y, crop_w, crop_h),
                     bare=job.bare,
+                    occurrence_id=job.occurrence_id,
                 )
             )
 

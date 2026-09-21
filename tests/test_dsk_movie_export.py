@@ -2075,6 +2075,60 @@ def _mixed_slide_two_movies():
     }
 
 
+def test_viewport_crop_rect_is_aspect_fill_with_normalized_zoom_and_pan():
+    source = Rect(0, 0, 1920, 1080)
+    target = Rect(43, 802, 300, 263)
+    centred = dme.viewport_crop_rect(source, target)
+    left_zoomed = dme.viewport_crop_rect(source, target, zoom=1.25, pan_x=-1, pan_y=1)
+    right_zoomed = dme.viewport_crop_rect(source, target, zoom=1.25, pan_x=1, pan_y=-1)
+
+    assert centred.w / centred.h == pytest.approx(target.w / target.h)
+    assert left_zoomed.w / left_zoomed.h == pytest.approx(target.w / target.h)
+    assert left_zoomed.w == pytest.approx(centred.w / 1.25)
+    assert left_zoomed.x == pytest.approx(0)
+    assert left_zoomed.y + left_zoomed.h == pytest.approx(1080)
+    assert right_zoomed.x + right_zoomed.w == pytest.approx(1920)
+    assert right_zoomed.y == pytest.approx(0)
+
+
+def test_movie_crop_plans_from_compiled_preserves_each_occurrence_and_mask():
+    plans = dme.movie_crop_plans_from_compiled(({
+        "source_mode": "fw",
+        "source_slides": [108, 109, 110],
+        "media": [
+            {"occurrence_id": "108:a", "source_slide": 108, "source_item": ("movie", 0), "timing": "after_transition",
+             "target_rect": Rect(43, 802, 300, 263), "viewport": {"zoom": 1.1, "panX": -0.2, "panY": 0.3}},
+            {"occurrence_id": "110:b", "source_slide": 110, "source_item": ("movie", 1), "timing": "with_build_1",
+             "target_rect": Rect(343, 802, 300, 263), "viewport": {}},
+        ],
+    },))
+    assert [(p.occurrence_id, p.source_slide, p.source_item) for p in plans] == [
+        ("108:a", 108, ("movie", 0)), ("110:b", 110, ("movie", 1)),
+    ]
+    assert plans[0].source_mode == "fw"
+    assert (plans[0].zoom, plans[0].pan_x, plans[0].pan_y) == (1.1, -0.2, 0.3)
+    assert all(plan.bare for plan in plans)
+
+
+def test_compiled_stacked_media_bares_only_layers_after_the_first():
+    plans = dme.movie_crop_plans_from_compiled(({
+        "source_mode": "lw",
+        "source_slides": [50],
+        "media_layout": "stacked",
+        "media": [
+            {"occurrence_id": "50:lower", "source_slide": 50, "source_item": ("movie", 0), "timing": "source", "target_rect": Rect(43, 802, 935, 263)},
+            {"occurrence_id": "50:upper", "source_slide": 50, "source_item": ("movie", 1), "timing": "source", "target_rect": Rect(43, 802, 935, 263)},
+        ],
+    },))
+    assert [plan.bare for plan in plans] == [False, True]
+
+
+@pytest.mark.parametrize("zoom,pan_x,pan_y", [(0.99, 0, 0), (1, -1.01, 0), (1, 0, 1.01)])
+def test_viewport_crop_rect_refuses_invalid_mask_values(zoom, pan_x, pan_y):
+    with pytest.raises(ValueError):
+        dme.viewport_crop_rect(Rect(0, 0, 100, 100), Rect(0, 0, 50, 50), zoom=zoom, pan_x=pan_x, pan_y=pan_y)
+
+
 def test_export_slide_clips_per_movie_produces_one_clip_per_movie_item(monkeypatch, tmp_path):
     out_dir = tmp_path / "clips"
     out_dir.mkdir()

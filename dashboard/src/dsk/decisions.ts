@@ -1,158 +1,58 @@
-/** Pure logic for the DSK Generator's per-slide review list. No React, no fetch.
- * Mirrors the real API contract: `POST /api/dsk/{id}/decisions` takes
- * `{decisions: [{slide, include, action, anchor, keepSide, clip, videosOnly}]}` — a LIST,
- * not a map keyed by slide. `DecisionsMap` below is only a client-side convenience for
- * editing; `toDecisionsPayload` flattens it back to the list the API expects.
- */
-
+export type DskAlignment = "inherit" | "left" | "centre" | "right";
 export type DskAnchor = "auto" | "centre" | "left" | "right";
+export type DskViewport = { width: number; height: number; aspectLocked: boolean };
+export type DskMask = { zoom: number; panX: number; panY: number };
+export type DskSlot = { x: number; y: number; width: number; height: number };
+export type DskCompositionDecision = { id: string; include: boolean; alignment: DskAlignment; viewport: DskViewport | null; source: "lw" | "fw"; contentMode: "full" | "video"; masks: Record<string, DskMask> };
+export type DskMedia = { occurrenceId: string; assetId: string; kind: "movie" | "image" | string; sourceSlide: number; sourceItem: { kind: string; kindIndex: number; archiveId: string }; sourceModes: ("lw" | "fw")[]; sourceCrops?: Partial<Record<"lw" | "fw", DskSlot>>; slot: DskSlot; poster?: string | null };
+export type DskPreviewLayer = { kind: string; occurrenceId?: string; src?: string | null; slot: DskSlot };
+export type DskComposition = { id: string; sourceSlides: number[]; layoutSlide: number; category: string; mediaLayout?: "spatial" | "stacked"; mediaLayouts?: { lw: "spatial" | "stacked"; fw: "spatial" | "stacked" }; thumb?: string | null; capabilities: { videoOnly?: boolean; mask?: boolean }; warnings: string[]; media: DskMedia[]; previewLayers: DskPreviewLayer[]; decision: Omit<DskCompositionDecision, "id"> };
+export type DskReview = { schemaVersion: 2; revision: number; source: { path?: string; fingerprint?: string }; canvas: { width: number; height: number }; safeArea: { left: number; right: number; bottom: number }; defaults: { viewport: DskViewport; alignment: Exclude<DskAlignment, "inherit"> }; compositions: DskComposition[] };
+export type DskEditorState = { review: DskReview; selectedId: string; selectedMediaId: string | null; lockedRatios: Record<string, number> };
+export const DSK_DEFAULT_VIEWPORT: DskViewport = { width: 935, height: 263, aspectLocked: true };
 
-export type DskDecision = {
-  slide: number;
-  include: boolean;
-  action: string;
-  anchor: string;
-  keepSide: boolean;
-  clip: string | null;
-  videosOnly: boolean;
-};
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+const cleanViewport = (viewport: DskViewport): DskViewport => ({ width: Math.round(clamp(viewport.width, 1, 1834)), height: Math.round(clamp(viewport.height, 1, 1065)), aspectLocked: !!viewport.aspectLocked });
+const cleanLockedViewport = (viewport: DskViewport): DskViewport => { if (!viewport.aspectLocked) return cleanViewport(viewport); const width = Math.max(1, Number.isFinite(viewport.width) ? viewport.width : 1); const height = Math.max(1, Number.isFinite(viewport.height) ? viewport.height : 1); const scale = Math.min(1, 1834 / width, 1065 / height); return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)), aspectLocked: true }; };
+const cleanMask = (mask: DskMask): DskMask => ({ zoom: Math.max(1, Number(mask.zoom) || 1), panX: clamp(mask.panX, -1, 1), panY: clamp(mask.panY, -1, 1) });
 
-export type DskPage = {
-  slide: number;
-  category: string;
-  isText: boolean;
-  needsClip: boolean;
-  canVideosOnly?: boolean;
-  stackedMovies?: boolean;
-  stackedMoviesKeepSide?: boolean;
-  decision?: DskDecision | null;
-};
+export function isDskReview(value: unknown): value is DskReview { return !!value && typeof value === "object" && (value as { schemaVersion?: unknown }).schemaVersion === 2 && Array.isArray((value as { compositions?: unknown }).compositions); }
+export function editorState(review: DskReview): DskEditorState { const ratios: Record<string, number> = { defaults: review.defaults.viewport.width / review.defaults.viewport.height }; for (const composition of review.compositions) { const viewport = composition.decision.viewport || review.defaults.viewport; ratios[composition.id] = viewport.width / viewport.height; } const first = review.compositions[0]; const selectedMediaId = first?.media.find((media) => media.kind === "movie")?.occurrenceId || first?.media[0]?.occurrenceId || null; return { review, selectedId: first?.id || "", selectedMediaId, lockedRatios: ratios }; }
+export function selectedComposition(state: DskEditorState): DskComposition | undefined { return state.review.compositions.find((composition) => composition.id === state.selectedId); }
+export function effectiveViewport(state: DskEditorState, composition = selectedComposition(state)): DskViewport { return cleanViewport(composition?.decision.viewport || state.review.defaults.viewport); }
+export function effectiveAlignment(state: DskEditorState, composition = selectedComposition(state)): Exclude<DskAlignment, "inherit"> { return composition?.decision.alignment === "inherit" || !composition ? state.review.defaults.alignment : composition.decision.alignment; }
+export function effectiveFrame(state: DskEditorState, composition = selectedComposition(state)): { x: number; y: number; width: number; height: number } { const viewport = effectiveViewport(state, composition); const { left, right, bottom } = state.review.safeArea; const alignment = effectiveAlignment(state, composition); const x = alignment === "left" ? left : alignment === "right" ? right - viewport.width : (state.review.canvas.width - viewport.width) / 2; return { x: Math.round(x), y: Math.round(bottom - viewport.height), ...viewport }; }
+export function selectedMask(state: DskEditorState, composition = selectedComposition(state), occurrenceId = state.selectedMediaId): DskMask { return cleanMask(composition?.decision.masks[occurrenceId || ""] || { zoom: 1, panX: 0, panY: 0 }); }
+function changeComposition(state: DskEditorState, id: string, change: (decision: DskCompositionDecision) => DskCompositionDecision): DskEditorState { return { ...state, review: { ...state.review, compositions: state.review.compositions.map((composition) => composition.id === id ? { ...composition, decision: change({ id, ...composition.decision }) } : composition) } }; }
+export type DskEditorAction = { type: "select"; id: string } | { type: "selectMedia"; occurrenceId: string | null } | { type: "defaults"; viewport?: Partial<DskViewport>; alignment?: Exclude<DskAlignment, "inherit"> } | { type: "decision"; id: string; change: Partial<Omit<DskCompositionDecision, "id" | "viewport" | "masks">> } | { type: "viewport"; id: string; viewport: Partial<DskViewport> } | { type: "resetViewport"; id: string } | { type: "mask"; id: string; occurrenceId: string; mask: Partial<DskMask> };
+export function dskEditorReducer(state: DskEditorState, action: DskEditorAction): DskEditorState {
+  if (action.type === "select") { const composition = state.review.compositions.find((item) => item.id === action.id); return composition ? { ...state, selectedId: action.id, selectedMediaId: composition.media.find((media) => media.kind === "movie")?.occurrenceId || composition.media[0]?.occurrenceId || null } : state; }
+  if (action.type === "selectMedia") return { ...state, selectedMediaId: action.occurrenceId };
+  if (action.type === "defaults") { const current = state.review.defaults.viewport; const draft = { ...current, ...action.viewport }; const justLocked = action.viewport?.aspectLocked === true && !current.aspectLocked; const ratio = justLocked ? current.width / current.height : state.lockedRatios.defaults || current.width / current.height; const next = action.viewport?.width != null && draft.aspectLocked ? { ...draft, height: action.viewport.width / ratio } : action.viewport?.height != null && draft.aspectLocked ? { ...draft, width: action.viewport.height * ratio } : draft; return { ...state, lockedRatios: justLocked ? { ...state.lockedRatios, defaults: ratio } : state.lockedRatios, review: { ...state.review, defaults: { viewport: cleanLockedViewport(next), alignment: action.alignment || state.review.defaults.alignment } } }; }
+  if (action.type === "decision") return changeComposition(state, action.id, (decision) => ({ ...decision, ...action.change }));
+  if (action.type === "resetViewport") { const changed = changeComposition(state, action.id, (decision) => ({ ...decision, viewport: null, alignment: "inherit" })); return { ...changed, lockedRatios: { ...changed.lockedRatios, [action.id]: state.review.defaults.viewport.width / state.review.defaults.viewport.height } }; }
+  if (action.type === "viewport") { const composition = state.review.compositions.find((item) => item.id === action.id); if (!composition) return state; const current = composition.decision.viewport || state.review.defaults.viewport; const draft = { ...current, ...action.viewport }; const justLocked = action.viewport.aspectLocked === true && !current.aspectLocked; const inheritedRatio = state.review.defaults.viewport.width / state.review.defaults.viewport.height; const ratio = justLocked ? current.width / current.height : composition.decision.viewport ? state.lockedRatios[action.id] || current.width / current.height : inheritedRatio; const next = action.viewport.width != null && draft.aspectLocked ? { ...draft, height: action.viewport.width / ratio } : action.viewport.height != null && draft.aspectLocked ? { ...draft, width: action.viewport.height * ratio } : draft; const changed = changeComposition(state, action.id, (decision) => ({ ...decision, viewport: cleanLockedViewport(next) })); return justLocked || composition.decision.viewport === null ? { ...changed, lockedRatios: { ...changed.lockedRatios, [action.id]: ratio } } : changed; }
+  return changeComposition(state, action.id, (decision) => ({ ...decision, masks: { ...decision.masks, [action.occurrenceId]: cleanMask({ ...decision.masks[action.occurrenceId], ...action.mask }) } }));
+}
+export function editableReview(state: DskEditorState) { return { schemaVersion: 2 as const, sourceFingerprint: state.review.source.fingerprint, defaults: state.review.defaults, decisions: state.review.compositions.map(({ id, decision }) => ({ id, ...decision })) }; }
+export function contiguousCategories(compositions: DskComposition[]): { key: string; label: string; compositions: DskComposition[] }[] { const label = (category: string) => category === "mixed" ? "Mixed" : category === "movie" ? "Movie" : category === "built" ? "Built" : "Static"; return compositions.reduce<{ key: string; label: string; compositions: DskComposition[] }[]>((groups, composition) => { const category = composition.category || "static"; const last = groups[groups.length - 1]; if (last?.key === category) last.compositions.push(composition); else groups.push({ key: category, label: label(category), compositions: [composition] }); return groups; }, []); }
 
+// Version-1 remains readable for stored jobs and legacy endpoints.
+export type DskDecision = { slide: number; include: boolean; action: string; anchor: string; keepSide: boolean; clip: string | null; videosOnly: boolean };
+export type DskPage = { slide: number; thumb?: string | null; category: string; buildCount?: number; movieCount?: number; isText: boolean; needsClip: boolean; canVideosOnly?: boolean; stackedMovies?: boolean; stackedMoviesKeepSide?: boolean; decision?: DskDecision | null };
 export type DecisionsMap = Record<number, DskDecision>;
-
-/** Movie-bearing categories need a clip file before the slide can go into the deck. */
-export function needsClip(page: DskPage): boolean {
-  return page.needsClip;
-}
-
-/** A skipped (text) slide is never included by default; everything else is,
- * matching `_dsk_decision_defaults` in `web/app.py`. */
-export function defaultDecision(page: DskPage): DskDecision {
-  if (page.decision) return { ...page.decision, videosOnly: !!page.decision.videosOnly };
-  return {
-    slide: page.slide,
-    include: !page.isText,
-    action: page.needsClip ? "both" : "in_deck",
-    anchor: "auto",
-    keepSide: false,
-    clip: null,
-    videosOnly: false,
-  };
-}
-
-export function buildDecisionsMap(pages: DskPage[]): DecisionsMap {
-  const map: DecisionsMap = {};
-  for (const page of pages) map[page.slide] = defaultDecision(page);
-  return map;
-}
-
-/** A text-slide can never be included, no matter what the operator (or a stale payload) says. */
-export function setInclude(map: DecisionsMap, pages: DskPage[], slide: number, include: boolean): DecisionsMap {
-  const page = pages.find((p) => p.slide === slide);
-  const allowed = page?.isText ? false : include;
-  const current = map[slide] || defaultDecision(page || { slide, category: "", isText: false, needsClip: false });
-  return { ...map, [slide]: { ...current, include: allowed } };
-}
-
-export function setClip(map: DecisionsMap, pages: DskPage[], slide: number, clip: string | null): DecisionsMap {
-  const page = pages.find((p) => p.slide === slide);
-  const current = map[slide] || defaultDecision(page || { slide, category: "", isText: false, needsClip: false });
-  return { ...map, [slide]: { ...current, clip } };
-}
-
-export function setAnchor(map: DecisionsMap, pages: DskPage[], slide: number, anchor: DskAnchor): DecisionsMap {
-  const page = pages.find((p) => p.slide === slide);
-  const current = map[slide] || defaultDecision(page || { slide, category: "", isText: false, needsClip: false });
-  return { ...map, [slide]: { ...current, anchor } };
-}
-
-export function setKeepSide(map: DecisionsMap, pages: DskPage[], slide: number, keepSide: boolean): DecisionsMap {
-  const page = pages.find((p) => p.slide === slide);
-  const current = map[slide] || defaultDecision(page || { slide, category: "", isText: false, needsClip: false });
-  return { ...map, [slide]: { ...current, keepSide } };
-}
-
-/** Videos-only is only offered where the backend said the slide can take it
- * (`canVideosOnly`); anywhere else it is pinned false, mirroring `_apply_dsk_decisions`. */
-export function setVideosOnly(map: DecisionsMap, pages: DskPage[], slide: number, videosOnly: boolean): DecisionsMap {
-  const page = pages.find((p) => p.slide === slide);
-  const allowed = page?.canVideosOnly ? videosOnly : false;
-  const current = map[slide] || defaultDecision(page || { slide, category: "", isText: false, needsClip: false });
-  return { ...map, [slide]: { ...current, videosOnly: allowed } };
-}
-
-/** Bulk include/exclude over a set of slides, respecting the text-slide invariant. */
-export function bulkInclude(map: DecisionsMap, pages: DskPage[], slides: number[], include: boolean): DecisionsMap {
-  let next = map;
-  for (const slide of slides) next = setInclude(next, pages, slide, include);
-  return next;
-}
-
-export function bulkKeepSide(map: DecisionsMap, pages: DskPage[], slides: number[], keepSide: boolean): DecisionsMap {
-  let next = map;
-  for (const slide of slides) next = setKeepSide(next, pages, slide, keepSide);
-  return next;
-}
-
-export function bulkAnchor(map: DecisionsMap, pages: DskPage[], slides: number[], anchor: DskAnchor): DecisionsMap {
-  let next = map;
-  for (const slide of slides) next = setAnchor(next, pages, slide, anchor);
-  return next;
-}
-
-export function bulkVideosOnly(map: DecisionsMap, pages: DskPage[], slides: number[], videosOnly: boolean): DecisionsMap {
-  let next = map;
-  for (const slide of slides) next = setVideosOnly(next, pages, slide, videosOnly);
-  return next;
-}
-
-/** Slides the operator has kept, i.e. the set a bulk control should touch. */
-export function includedSlides(map: DecisionsMap, pages: DskPage[]): number[] {
-  return pages.filter((p) => (map[p.slide] || defaultDecision(p)).include).map((p) => p.slide);
-}
-
-export type DskGroup<P extends DskPage = DskPage> = { key: string; label: string; pages: P[] };
-
-const GROUP_ORDER = ["movie", "mixed", "built", "static"];
-const GROUP_LABELS: Record<string, string> = {
-  movie: "Movie",
-  mixed: "Mixed (movie + stills)",
-  built: "Built",
-  static: "Static",
-  text: "Text — skipped",
-};
-
-/** Groups the review rows the way the CG resizer groups pages: the ones needing
- * attention (movies, which want a clip and may want videos-only) first, text last. */
-export function groupPages<P extends DskPage>(pages: P[]): DskGroup<P>[] {
-  const groups = new Map<string, P[]>();
-  for (const page of pages) {
-    const key = page.isText ? "text" : page.category || "other";
-    const bucket = groups.get(key);
-    if (bucket) bucket.push(page);
-    else groups.set(key, [page]);
-  }
-  const rank = (key: string) => {
-    const index = GROUP_ORDER.indexOf(key);
-    if (index >= 0) return index;
-    return key === "text" ? GROUP_ORDER.length + 1 : GROUP_ORDER.length;
-  };
-  return [...groups.entries()]
-    .sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
-    .map(([key, rows]) => ({ key, label: GROUP_LABELS[key] || key, pages: rows }));
-}
-
-/** Shape expected by `POST /api/dsk/{id}/decisions` and `/apply`: a list, keyed by nothing. */
-export function toDecisionsPayload(map: DecisionsMap): DskDecision[] {
-  return Object.values(map).sort((a, b) => a.slide - b.slide);
-}
+export function defaultDecision(page: DskPage): DskDecision { return page.decision ? { ...page.decision, videosOnly: !!page.decision.videosOnly } : { slide: page.slide, include: !page.isText, action: page.needsClip ? "both" : "in_deck", anchor: "auto", keepSide: false, clip: null, videosOnly: false }; }
+export function buildDecisionsMap(pages: DskPage[]): DecisionsMap { return Object.fromEntries(pages.map((page) => [page.slide, defaultDecision(page)])); }
+export function setInclude(map: DecisionsMap, pages: DskPage[], slide: number, include: boolean): DecisionsMap { const page = pages.find((item) => item.slide === slide) || { slide, category: "", isText: false, needsClip: false }; return { ...map, [slide]: { ...(map[slide] || defaultDecision(page)), include: page.isText ? false : include } }; }
+export function setClip(map: DecisionsMap, pages: DskPage[], slide: number, clip: string | null): DecisionsMap { const page = pages.find((item) => item.slide === slide) || { slide, category: "", isText: false, needsClip: false }; return { ...map, [slide]: { ...(map[slide] || defaultDecision(page)), clip } }; }
+export function setAnchor(map: DecisionsMap, pages: DskPage[], slide: number, anchor: DskAnchor): DecisionsMap { const page = pages.find((item) => item.slide === slide) || { slide, category: "", isText: false, needsClip: false }; return { ...map, [slide]: { ...(map[slide] || defaultDecision(page)), anchor } }; }
+export function setKeepSide(map: DecisionsMap, pages: DskPage[], slide: number, keepSide: boolean): DecisionsMap { const page = pages.find((item) => item.slide === slide) || { slide, category: "", isText: false, needsClip: false }; return { ...map, [slide]: { ...(map[slide] || defaultDecision(page)), keepSide } }; }
+export function setVideosOnly(map: DecisionsMap, pages: DskPage[], slide: number, videosOnly: boolean): DecisionsMap { const page = pages.find((item) => item.slide === slide) || { slide, category: "", isText: false, needsClip: false }; return { ...map, [slide]: { ...(map[slide] || defaultDecision(page)), videosOnly: !!page.canVideosOnly && videosOnly } }; }
+export function bulkInclude(map: DecisionsMap, pages: DskPage[], slides: number[], include: boolean): DecisionsMap { return slides.reduce((next, slide) => setInclude(next, pages, slide, include), map); }
+export function bulkKeepSide(map: DecisionsMap, pages: DskPage[], slides: number[], keepSide: boolean): DecisionsMap { return slides.reduce((next, slide) => setKeepSide(next, pages, slide, keepSide), map); }
+export function bulkAnchor(map: DecisionsMap, pages: DskPage[], slides: number[], anchor: DskAnchor): DecisionsMap { return slides.reduce((next, slide) => setAnchor(next, pages, slide, anchor), map); }
+export function bulkVideosOnly(map: DecisionsMap, pages: DskPage[], slides: number[], videosOnly: boolean): DecisionsMap { return slides.reduce((next, slide) => setVideosOnly(next, pages, slide, videosOnly), map); }
+export function includedSlides(map: DecisionsMap, pages: DskPage[]): number[] { return pages.filter((page) => (map[page.slide] || defaultDecision(page)).include).map((page) => page.slide); }
+export function needsClip(page: DskPage): boolean { return page.needsClip; }
+export function groupPages<P extends DskPage>(pages: P[]): { key: string; label: string; pages: P[] }[] { const groups = new Map<string, P[]>(); for (const page of pages) { const key = page.isText ? "text" : page.category || "other"; groups.set(key, [...(groups.get(key) || []), page]); } const order = ["movie", "mixed", "built", "static", "text"]; return [...groups].sort(([left], [right]) => order.indexOf(left) - order.indexOf(right)).map(([key, rows]) => ({ key, label: key === "text" ? "Text — skipped" : key, pages: rows })); }
+export function toDecisionsPayload(map: DecisionsMap): DskDecision[] { return Object.values(map).sort((a, b) => a.slide - b.slide); }

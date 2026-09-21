@@ -1,0 +1,299 @@
+{
+  "schemaVersion": 2,
+  "revision": 0,
+  "source": {
+    "path": "/fixtures/Full_Report_Card_Wall.key",
+    "fingerprint": "549343a6f95275e7ad458b1551b87cc32d0cc0e1b0cc091096ec85161776334b"
+  },
+  "canvas": {
+    "width": 1920,
+    "height": 1080
+  },
+  "safeArea": {
+    "left": 43,
+    "right": 1877,
+    "bottom": 1065
+  },
+  "defaults": {
+    "viewport": {
+      "width": 935,
+      "height": 263,
+      "aspectLocked": true
+    },
+    "alignment": "centre"
+  },
+  "compositions": [
+    {
+      "id": "slide:14",
+      "sourceSlides": [14],
+      "layoutSlide": 14,
+      "category": "movie",
+      "mediaLayout": "spatial",
+      "thumb": "slide-14.png",
+      "capabilities": {
+        "videoOnly": true,
+        "mask": true
+      },
+      "warnings": [],
+      "media": [
+        {
+          "occurrenceId": "14:movie-archive-1",
+          "assetId": "asset-video-1",
+          "kind": "movie",
+          "sourceSlide": 14,
+          "sourceItem": {
+            "kind": "movie",
+            "kindIndex": 0,
+            "archiveId": "movie-archive-1"
+          },
+          "sourceModes": ["lw", "fw"],
+          "slot": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          },
+          "poster": "slide-14-movie-1.png"
+        }
+      ],
+      "previewLayers": [
+        {
+          "kind": "media",
+          "occurrenceId": "14:movie-archive-1",
+          "src": "slide-14-movie-1.png",
+          "slot": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          }
+        }
+      ],
+      "decision": {
+        "include": true,
+        "alignment": "inherit",
+        "viewport": null,
+        "source": "lw",
+        "contentMode": "full",
+        "masks": {}
+      }
+    },
+    {
+      "id": "sequence:108-110",
+      "sourceSlides": [108, 109, 110],
+      "layoutSlide": 110,
+      "category": "mixed",
+      "mediaLayout": "spatial",
+      "thumb": "slide-110.png",
+      "capabilities": {
+        "videoOnly": true,
+        "mask": true
+      },
+      "warnings": [
+        "Source contains two movies and one still; no third movie asset was found."
+      ],
+      "media": [
+        {
+          "occurrenceId": "110:movie-wa0125",
+          "assetId": "VID-20250608-WA0125.mp4",
+          "kind": "movie",
+          "sourceSlide": 110,
+          "sourceItem": {
+            "kind": "movie",
+            "kindIndex": 1,
+            "archiveId": "movie-wa0125"
+          },
+          "sourceModes": ["lw", "fw"],
+          "slot": {
+            "x": 0,
+            "y": 0,
+            "width": 0.3333333333,
+            "height": 1
+          },
+          "poster": "slide-110-movie-wa0125.png"
+        },
+        {
+          "occurrenceId": "110:movie-wa0121",
+          "assetId": "VID-20250608-WA0121.mp4",
+          "kind": "movie",
+          "sourceSlide": 110,
+          "sourceItem": {
+            "kind": "movie",
+            "kindIndex": 0,
+            "archiveId": "movie-wa0121"
+          },
+          "sourceModes": ["lw", "fw"],
+          "slot": {
+            "x": 0.3333333333,
+            "y": 0,
+            "width": 0.3333333334,
+            "height": 1
+          },
+          "poster": "slide-110-movie-wa0121.png"
+        },
+        {
+          "occurrenceId": "110:image-japan-bible-study",
+          "assetId": "Japan Bible Study.png",
+          "kind": "image",
+          "sourceSlide": 110,
+          "sourceItem": {
+            "kind": "image",
+            "kindIndex": 4,
+            "archiveId": "image-japan-bible-study"
+          },
+          "sourceModes": ["lw", "fw"],
+          "slot": {
+            "x": 0.6666666667,
+            "y": 0,
+            "width": 0.3333333333,
+            "height": 1
+          },
+          "poster": "slide-110-image-japan-bible-study.png"
+        }
+      ],
+      "previewLayers": [
+        {
+          "kind": "media",
+          "occurrenceId": "110:movie-wa0125",
+          "src": "slide-110-movie-wa0125.png",
+          "slot": {
+            "x": 0,
+            "y": 0,
+            "width": 0.3333333333,
+            "height": 1
+          }
+        },
+        {
+          "kind": "media",
+          "occurrenceId": "110:movie-wa0121",
+          "src": "slide-110-movie-wa0121.png",
+          "slot": {
+            "x": 0.3333333333,
+            "y": 0,
+            "width": 0.3333333334,
+            "height": 1
+          }
+        },
+        {
+          "kind": "media",
+          "occurrenceId": "110:image-japan-bible-study",
+          "src": "slide-110-image-japan-bible-study.png",
+          "slot": {
+            "x": 0.6666666667,
+            "y": 0,
+            "width": 0.3333333333,
+            "height": 1
+          }
+        }
+      ],
+      "decision": {
+        "include": true,
+        "alignment": "left",
+        "viewport": {
+          "width": 935,
+          "height": 263,
+          "aspectLocked": true
+        },
+        "source": "fw",
+        "contentMode": "full",
+        "masks": {
+          "110:movie-wa0125": {
+            "zoom": 1.1,
+            "panX": -0.13,
+            "panY": -0.21
+          },
+          "110:movie-wa0121": {
+            "zoom": 1.1,
+            "panX": 0,
+            "panY": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "slide:50",
+      "sourceSlides": [50],
+      "layoutSlide": 50,
+      "category": "mixed",
+      "mediaLayout": "stacked",
+      "thumb": "slide-50.png",
+      "capabilities": {
+        "videoOnly": true,
+        "mask": true
+      },
+      "warnings": [],
+      "media": [
+        {
+          "occurrenceId": "50:movie-lower",
+          "assetId": "slide-50-lower.mp4",
+          "kind": "movie",
+          "sourceSlide": 50,
+          "sourceItem": {
+            "kind": "movie",
+            "kindIndex": 0,
+            "archiveId": "movie-lower"
+          },
+          "sourceModes": ["lw", "fw"],
+          "slot": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          },
+          "poster": "slide-50-movie-lower.png"
+        },
+        {
+          "occurrenceId": "50:movie-upper",
+          "assetId": "slide-50-upper.mp4",
+          "kind": "movie",
+          "sourceSlide": 50,
+          "sourceItem": {
+            "kind": "movie",
+            "kindIndex": 1,
+            "archiveId": "movie-upper"
+          },
+          "sourceModes": ["lw", "fw"],
+          "slot": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          },
+          "poster": "slide-50-movie-upper.png"
+        }
+      ],
+      "previewLayers": [
+        {
+          "kind": "media",
+          "occurrenceId": "50:movie-lower",
+          "src": "slide-50-movie-lower.png",
+          "slot": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          }
+        },
+        {
+          "kind": "media",
+          "occurrenceId": "50:movie-upper",
+          "src": "slide-50-movie-upper.png",
+          "slot": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 1
+          }
+        }
+      ],
+      "decision": {
+        "include": true,
+        "alignment": "centre",
+        "viewport": null,
+        "source": "lw",
+        "contentMode": "video",
+        "masks": {}
+      }
+    }
+  ]
+}

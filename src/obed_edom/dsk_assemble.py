@@ -369,6 +369,49 @@ class ClipBuildIn:
 
 
 @dataclass(frozen=True)
+class CompiledViewport:
+    """Normalized editor crop under a fixed output media frame."""
+
+    zoom: float = 1.0
+    pan_x: float = 0.0
+    pan_y: float = 0.0
+
+
+@dataclass(frozen=True)
+class CompiledMedia:
+    """Frozen assembly boundary for one authored media occurrence.
+
+    The review planner owns construction.  Assembly deliberately receives the real
+    source occurrence rather than trying to infer it from a terminal layout slide.
+    """
+
+    occurrence_id: str
+    source_slide: int
+    source_item: ItemId
+    archive_id: str
+    asset_id: str
+    target_rect: Rect
+    viewport: CompiledViewport = CompiledViewport()
+    playback: Mapping[str, Any] = field(default_factory=dict)
+    timing: Any = "after_transition"
+    preserve_stroke: bool = True
+
+
+@dataclass(frozen=True)
+class CompiledComposition:
+    id: str
+    source_slides: tuple[int, ...]
+    layout_slide: int
+    overlay_slide: int
+    output_frame: Rect
+    source_mode: Literal["lw", "fw"]
+    content_mode: Literal["full", "video"]
+    media: tuple[CompiledMedia, ...]
+    media_layout: Literal["spatial", "stacked"] = "spatial"
+    alignment: Literal["left", "centre", "right"] = "centre"
+
+
+@dataclass(frozen=True)
 class AssemblyPlan:
     """For a slide in ``splits``, ``fits[number]`` holds only the short items' part-0
     row rects -- each part's own long-box rect lives in ``splits[number][part].fits``.
@@ -416,6 +459,10 @@ class AssemblyPlan:
     clip_rects: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
     clip_timing: dict[int, tuple[tuple[ItemId, str], ...]] = field(default_factory=dict)
     clip_build_in: dict[int, dict[ItemId, ClipBuildIn]] = field(default_factory=dict)
+    composition_ids: dict[int, str] = field(default_factory=dict)
+    clip_occurrences: dict[int, dict[ItemId, str]] = field(default_factory=dict)
+    clip_sources: dict[int, dict[ItemId, tuple[int, ItemId]]] = field(default_factory=dict)
+    clip_timing_delay: dict[int, dict[ItemId, float]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -1422,6 +1469,189 @@ def _clip_timing_for_slide(
     return tuple(plan)
 
 
+EDITOR_CANVAS = (1920.0, 1080.0)
+EDITOR_SAFE_RECT = Rect(43.0, 0.0, 1834.0, 1065.0)
+
+
+def _compiled_field(value: Any, name: str, *aliases: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        for key in (name, *aliases):
+            if key in value:
+                return value[key]
+        return default
+    for key in (name, *aliases):
+        if hasattr(value, key):
+            return getattr(value, key)
+    return default
+
+
+def _compiled_rect(value: Any, label: str) -> Rect:
+    if isinstance(value, Rect):
+        rect = value
+    else:
+        rect = Rect(
+            float(_compiled_field(value, "x")), float(_compiled_field(value, "y")),
+            float(_compiled_field(value, "w", "width")), float(_compiled_field(value, "h", "height")),
+        )
+    values = (rect.x, rect.y, rect.w, rect.h)
+    if not all(math.isfinite(n) for n in values) or rect.w <= 0 or rect.h <= 0:
+        raise AssemblyRefusal(f"compiled {label} must be finite and positive")
+    return rect
+
+
+def _compiled_timing(value: Any, occurrence_id: str) -> tuple[str, float, ClipBuildIn | None]:
+    if isinstance(value, str):
+        mode, delay, build_in = value, 0.0, None
+    else:
+        mode = _compiled_field(value, "mode")
+        delay = float(_compiled_field(value, "delay", default=0.0))
+        build = _compiled_field(value, "build_in", "buildIn")
+        build_in = None
+        if build is not None:
+            build_in = ClipBuildIn(
+                effect=str(_compiled_field(build, "effect")),
+                duration=float(_compiled_field(build, "duration")),
+                automatic=bool(_compiled_field(build, "automatic")),
+                referent=bool(_compiled_field(build, "referent")),
+                delay=float(_compiled_field(build, "delay", default=delay)),
+            )
+    if mode not in {"source", "after_transition", "with_build_1", "with_previous", "after_previous", "on_click"}:
+        raise AssemblyRefusal(f"compiled media {occurrence_id}: unsupported timing {mode!r}")
+    if not math.isfinite(delay) or delay < 0:
+        raise AssemblyRefusal(f"compiled media {occurrence_id}: invalid timing delay")
+    return mode, delay, build_in
+
+
+def apply_compiled_compositions(
+    plan: AssemblyPlan,
+    compositions: Sequence[Any],
+    clips_by_occurrence: Mapping[str, Path],
+) -> AssemblyPlan:
+    """Attach frozen compiled placements to an already-planned terminal-slide deck.
+
+    This is intentionally a narrow boundary: the review planner resolves inheritance,
+    anchors, and slots; this layer validates canonical geometry and consumes only its
+    explicit media occurrence addresses.  It does not infer a terminal item for media
+    from an earlier source slide.
+    """
+    clips = {number: dict(entries) for number, entries in plan.clips.items()}
+    clip_rects = {number: dict(entries) for number, entries in plan.clip_rects.items()}
+    timing = {number: tuple(entries) for number, entries in plan.clip_timing.items()}
+    timing_delay = {number: dict(entries) for number, entries in plan.clip_timing_delay.items()}
+    build_ins = {number: dict(entries) for number, entries in plan.clip_build_in.items()}
+    composition_ids = dict(plan.composition_ids)
+    occurrences = {number: dict(entries) for number, entries in plan.clip_occurrences.items()}
+    sources = {number: dict(entries) for number, entries in plan.clip_sources.items()}
+    claimed_layouts: set[int] = set()
+
+    for composition in compositions:
+        comp_id = _compiled_field(composition, "id")
+        layout_slide = _compiled_field(composition, "layout_slide", "layoutSlide")
+        source_slides = tuple(_compiled_field(composition, "source_slides", "sourceSlides", default=()))
+        output_frame = _compiled_rect(_compiled_field(composition, "output_frame", "outputFrame"), "output frame")
+        if not isinstance(comp_id, str) or not comp_id or not isinstance(layout_slide, int):
+            raise AssemblyRefusal("compiled composition needs an id and integer layout slide")
+        if layout_slide in claimed_layouts or layout_slide not in plan.kept:
+            raise AssemblyRefusal(f"compiled composition {comp_id}: layout slide {layout_slide} is not uniquely planned")
+        claimed_layouts.add(layout_slide)
+        if layout_slide not in source_slides:
+            raise AssemblyRefusal(f"compiled composition {comp_id}: layout slide is not a source slide")
+        if (
+            output_frame.x < EDITOR_SAFE_RECT.x or output_frame.y < EDITOR_SAFE_RECT.y
+            or output_frame.x + output_frame.w > EDITOR_SAFE_RECT.x + EDITOR_SAFE_RECT.w
+            or output_frame.y + output_frame.h > EDITOR_SAFE_RECT.y + EDITOR_SAFE_RECT.h
+        ):
+            raise AssemblyRefusal(f"compiled composition {comp_id}: output frame escapes editor safe area")
+
+        media = tuple(_compiled_field(composition, "media", default=()))
+        if not media:
+            composition_ids[layout_slide] = comp_id
+            continue
+        compiled_clips: dict[ItemId, Path] = {}
+        compiled_rects: dict[ItemId, Rect] = {}
+        compiled_timing: list[tuple[ItemId, str]] = []
+        compiled_delays: dict[ItemId, float] = {}
+        compiled_sources: dict[ItemId, tuple[int, ItemId]] = {}
+        compiled_occurrences: dict[ItemId, str] = {}
+        compiled_build_ins: dict[ItemId, ClipBuildIn] = {}
+        for index, entry in enumerate(media):
+            occurrence_id = _compiled_field(entry, "occurrence_id", "occurrenceId")
+            source_slide = _compiled_field(entry, "source_slide", "sourceSlide")
+            source_item = _compiled_field(entry, "source_item", "sourceItem")
+            target = _compiled_rect(
+                _compiled_field(entry, "target_rect", "targetRect"),
+                "media target rect",
+            )
+            viewport = _compiled_field(entry, "viewport", default={})
+            zoom = float(_compiled_field(viewport, "zoom", "scale", default=1.0))
+            pan_x = float(_compiled_field(viewport, "pan_x", "panX", "offsetX", default=0.0))
+            pan_y = float(_compiled_field(viewport, "pan_y", "panY", "offsetY", default=0.0))
+            if not isinstance(occurrence_id, str) or not occurrence_id or not isinstance(source_slide, int):
+                raise AssemblyRefusal(f"compiled composition {comp_id}: media identity is invalid")
+            if not isinstance(source_item, tuple) or len(source_item) != 2:
+                raise AssemblyRefusal(
+                    f"compiled media {occurrence_id}: source item is invalid"
+                )
+            if source_item[0] != "movie":
+                continue
+            planned_target = (plan.fits.get(layout_slide) or {}).get(source_item)
+            if source_slide == layout_slide and planned_target is not None:
+                target = planned_target
+            if source_slide not in source_slides:
+                raise AssemblyRefusal(f"compiled media {occurrence_id}: source slide is outside composition")
+            if not all(math.isfinite(value) for value in (zoom, pan_x, pan_y)) or zoom < 1 or not -1 <= pan_x <= 1 or not -1 <= pan_y <= 1:
+                raise AssemblyRefusal(f"compiled media {occurrence_id}: invalid normalized viewport")
+            if (
+                target.x < output_frame.x or target.y < output_frame.y
+                or target.x + target.w > output_frame.x + output_frame.w
+                or target.y + target.h > output_frame.y + output_frame.h
+            ):
+                raise AssemblyRefusal(f"compiled media {occurrence_id}: target rect escapes output frame")
+            clip = clips_by_occurrence.get(occurrence_id)
+            if clip is None:
+                raise AssemblyRefusal(f"compiled media {occurrence_id}: exported clip is missing")
+            key: ItemId = ("movie", 1_000_000 + index)
+            mode, delay, build_in = _compiled_timing(_compiled_field(entry, "timing"), occurrence_id)
+            if mode == "source":
+                if source_slide != layout_slide:
+                    raise AssemblyRefusal(
+                        f"compiled media {occurrence_id}: source timing is only valid on its layout slide"
+                    )
+                existing_modes = dict(plan.clip_timing.get(layout_slide) or ())
+                if source_item not in existing_modes:
+                    raise AssemblyRefusal(
+                        f"compiled media {occurrence_id}: source timing has no existing source clip plan"
+                    )
+                mode = existing_modes[source_item]
+                delay = (plan.clip_timing_delay.get(layout_slide) or {}).get(source_item, 0.0)
+                build_in = (plan.clip_build_in.get(layout_slide) or {}).get(source_item)
+            compiled_clips[key] = Path(clip)
+            compiled_rects[key] = target
+            compiled_timing.append((key, mode))
+            compiled_delays[key] = delay
+            compiled_sources[key] = (source_slide, source_item)
+            compiled_occurrences[key] = occurrence_id
+            if build_in is not None:
+                compiled_build_ins[key] = build_in
+        clips[layout_slide] = compiled_clips
+        clip_rects[layout_slide] = compiled_rects
+        timing[layout_slide] = tuple(compiled_timing)
+        timing_delay[layout_slide] = compiled_delays
+        sources[layout_slide] = compiled_sources
+        occurrences[layout_slide] = compiled_occurrences
+        if compiled_build_ins:
+            build_ins[layout_slide] = compiled_build_ins
+        else:
+            build_ins.pop(layout_slide, None)
+        composition_ids[layout_slide] = comp_id
+
+    return _dc_replace(
+        plan, clips=clips, clip_rects=clip_rects, clip_timing=timing,
+        clip_timing_delay=timing_delay, clip_build_in=build_ins,
+        composition_ids=composition_ids, clip_occurrences=occurrences, clip_sources=sources,
+    )
+
+
 def plan_assembly(
     payload: dict,
     classes: Sequence[SlideClass],
@@ -1448,6 +1678,7 @@ def plan_assembly(
     split_overrides: Mapping[int, int] | None = None,
     all_classes: Sequence[SlideClass] | None = None,
     layout_policy: LayoutPolicy = "preserve",
+    slide_bands: Mapping[int, Band] | None = None,
 ) -> AssemblyPlan:
     """Pure planning over `payload`/`classes`, EXCEPT the cropped image files under
     `crop_dir` (unless `no_image_crop`), committed only once every slide validates.
@@ -1642,11 +1873,15 @@ def plan_assembly(
             else:
                 anchor = decision.anchor
             anchors_out[number] = anchor
+            slide_band = (slide_bands or {}).get(
+                number,
+                STANDARD_VIDEO_BAND if decision.videos_only else band,
+            )
 
             if decision.videos_only:
                 fit = fit_slide(
                     items,
-                    STANDARD_VIDEO_BAND,
+                    slide_band,
                     kept=videos_only_ids,
                     include_side=decision.keep_side,
                     anchor=anchor,
@@ -1654,7 +1889,7 @@ def plan_assembly(
             else:
                 fit = fit_slide(
                     items,
-                    band,
+                    slide_band,
                     include_side=decision.keep_side,
                     anchor=anchor,
                     wall=wall,
@@ -1709,7 +1944,7 @@ def plan_assembly(
             if group_ids:
                 scale = slide_affine_scale(
                     items,
-                    band,
+                    slide_band,
                     include_side=decision.keep_side,
                     anchor=anchor,
                     wall=wall,
@@ -1829,11 +2064,14 @@ def plan_assembly(
                         iid: rect for iid, rect in fit.items()
                         if iid not in long_id_set and iid not in group_top_ids and iid not in cluster_ids
                     }
-                    col_band = band
+                    col_band = slide_band
                     if cluster is not None:
                         col_band = Band(
-                            band.bottom, band.height, band.x_min + HEADING_COL_W + COL_GUTTER,
-                            band.x_max, band.sample_count,
+                            slide_band.bottom,
+                            slide_band.height,
+                            slide_band.x_min + HEADING_COL_W + COL_GUTTER,
+                            slide_band.x_max,
+                            slide_band.sample_count,
                         )
                     # The group itself takes no affine path on a text slide (Design A
                     # step 4): drop its own top-level fit entry so `_slide_lines` never
@@ -2130,7 +2368,13 @@ def plan_assembly(
                         if cluster is not None:
                             verse_block_top = min((short_rects or long_rects).values(), key=lambda r: r.y).y
                             two_col_rects, two_col_sizes, two_col_run_sizes, left_band = _two_column_rects(
-                                number, cluster, items_by_id, band, verse_block_top, min_text_pt, warnings,
+                                number,
+                                cluster,
+                                items_by_id,
+                                slide_band,
+                                verse_block_top,
+                                min_text_pt,
+                                warnings,
                             )
                             fit.update(two_col_rects)
                             stacked_text_sizes.update(two_col_sizes)
@@ -3645,11 +3889,17 @@ def _slide_lines(
     clip_items = list(clip_map.items())
     lines: list[str] = ["      try"]
     for idx, (movie_id, _clip_path) in enumerate(clip_items):
-        movie_addr = f"movie {movie_id[1] + 1} of slide {ordinal}"
-        lines += [
-            f"        set repMethod{idx} to (repetition method of {movie_addr})",
-            f"        set movVol{idx} to (movie volume of {movie_addr})",
-        ]
+        if movie_id in (plan.clip_sources.get(number) or {}):
+            lines += [
+                f"        set repMethod{idx} to compiledRep{number}_{idx}",
+                f"        set movVol{idx} to compiledVol{number}_{idx}",
+            ]
+        else:
+            movie_addr = f"movie {movie_id[1] + 1} of slide {ordinal}"
+            lines += [
+                f"        set repMethod{idx} to (repetition method of {movie_addr})",
+                f"        set movVol{idx} to (movie volume of {movie_addr})",
+            ]
 
     split_parts = plan.splits.get(number)
     if split_parts is not None:
@@ -3800,7 +4050,9 @@ def _slide_lines(
 
     if is_clip:
         for idx, (movie_id, clip_path) in enumerate(clip_items):
-            clip_rect = plan.clip_rects.get(number, {}).get(movie_id, plan.fits[number][movie_id])
+            clip_rect = plan.clip_rects.get(number, {}).get(movie_id)
+            if clip_rect is None:
+                clip_rect = plan.fits[number][movie_id]
             lines += [
                 f"        set mBefore to (count of movies of slide {ordinal})",
                 f"        tell slide {ordinal}",
@@ -3891,6 +4143,24 @@ def build_assembly_script(
         "    end if",
         "    tell theDoc",
         "      set slideCount to count of slides",
+    ]
+
+    for number, source_map in plan.clip_sources.items():
+        for index, movie_id in enumerate(plan.clips.get(number, {})):
+            source = source_map.get(movie_id)
+            if source is None:
+                continue
+            source_slide, source_item = source
+            source_name = _AS_KIND_NAMES.get(source_item[0])
+            if source_name != "movie":
+                raise AssemblyRefusal(f"slide {number}: compiled clip source is not a movie")
+            source_addr = f"movie {source_item[1] + 1} of slide {source_slide}"
+            lines += [
+                f"      set compiledRep{number}_{index} to (repetition method of {source_addr})",
+                f"      set compiledVol{number}_{index} to (movie volume of {source_addr})",
+            ]
+
+    lines += [
         f"      set keepList to {{{', '.join(str(n) for n in keep)}}}",
         "      repeat with i from slideCount to 1 by -1",
         "        if keepList does not contain i then delete slide i of theDoc",
@@ -4085,6 +4355,8 @@ class AssembleResult:
     ordinal_to_number: dict[int, int] = field(default_factory=dict)
     hidden: tuple[dict, ...] = ()
     skipped: tuple[dict, ...] = ()
+    clip_rects: dict[int, dict[ItemId, Rect]] = field(default_factory=dict)
+    clip_occurrences: dict[int, dict[ItemId, str]] = field(default_factory=dict)
 
 
 def _package_size(path: Path) -> int:
@@ -4761,11 +5033,12 @@ def _restore_clip_timing(staging_path: Path, plan: AssemblyPlan, log: Callable[[
             ]
             resolved = _resolve_clip_out_ids(number, item_clips, out_objects, out_data_index, out_z)
             slide_build_in = plan.clip_build_in.get(number) or {}
+            slide_delays = plan.clip_timing_delay.get(number) or {}
             entries = []
             for mid, mode in timing:
                 source = slide_build_in.get(mid)
                 if source is None:
-                    entries.append(iwa_movies.ClipTiming(resolved[mid], mode))
+                    entries.append(iwa_movies.ClipTiming(resolved[mid], mode, delay=slide_delays.get(mid, 0.0)))
                 else:
                     entries.append(
                         iwa_movies.ClipTiming(
@@ -5859,6 +6132,8 @@ def assemble_dsk_deck(
     clip_sizes: Mapping[str, tuple[float, float]] = {},
     clip_crops: Mapping[int, Mapping[ItemId, Rect]] | None = None,
     bare_clips: Mapping[int, Collection[ItemId]] | None = None,
+    compiled_compositions: Sequence[Any] = (),
+    compiled_clips: Mapping[str, Path] = {},
     log: Callable[[str], None] = print,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     layout_policy: LayoutPolicy = "import",
@@ -5957,6 +6232,18 @@ def assemble_dsk_deck(
             )
 
     builds_by_number = deck_builds(fw_deck, deck=deck)
+    compiled_bands: dict[int, Band] = {}
+    for composition in compiled_compositions:
+        layout_slide = _compiled_field(composition, "layout_slide", "layoutSlide")
+        frame = _compiled_rect(
+            _compiled_field(composition, "output_frame", "outputFrame"),
+            "output frame",
+        )
+        if isinstance(layout_slide, int):
+            compiled_bands[layout_slide] = _slot_band(
+                frame,
+                sample_count=resolved_band.sample_count,
+            )
     plan = plan_assembly(
         payload, classes, decisions=decisions, band=resolved_band, clips=clips, clip_sizes=clip_sizes,
         clip_crops=clip_crops, bare_clips=bare_clips, runs=runs, text_fit=text_fit,
@@ -5964,8 +6251,10 @@ def assemble_dsk_deck(
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
         no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop, split_overrides=split_overrides,
-        all_classes=classes, layout_policy=layout_policy,
+        all_classes=classes, layout_policy=layout_policy, slide_bands=compiled_bands,
     )
+    if compiled_compositions:
+        plan = apply_compiled_compositions(plan, compiled_compositions, compiled_clips)
     original_clips = {number: dict(item_clips) for number, item_clips in plan.clips.items()}
     for number in sorted(plan.anchors):
         head = plan.chain_head.get(number)
@@ -6137,4 +6426,6 @@ def assemble_dsk_deck(
         ordinal_to_number=plan.ordinal_to_number,
         hidden=tuple(hidden),
         skipped=tuple(skipped),
+        clip_rects=plan.clip_rects,
+        clip_occurrences=plan.clip_occurrences,
     )

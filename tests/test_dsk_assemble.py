@@ -79,6 +79,149 @@ def _group_item(kind_index, x=0, y=0, w=100, h=50):
     return {"kind": "group", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h}
 
 
+def _compiled_terminal_plan() -> AssemblyPlan:
+    return AssemblyPlan(
+        kept=(110,), ordinals={110: 1}, fits={110: {}}, deletes={110: ()}, clips={},
+        text_sizes={}, autosize={}, warnings=(), ordinal_to_number={1: 110},
+    )
+
+
+def test_compiled_composition_keeps_three_explicit_cross_slide_media_placements():
+    """A folded composition carries source occurrence addresses and terminal rects separately."""
+    composition = dsa.CompiledComposition(
+        id="sequence:108-110", source_slides=(108, 109, 110), layout_slide=110, overlay_slide=110,
+        output_frame=Rect(43, 802, 935, 263), source_mode="fw", content_mode="full",
+        media=(
+            dsa.CompiledMedia("108:a", 108, ("movie", 0), "a", "a.mp4", Rect(43, 802, 300, 263), timing="after_transition"),
+            dsa.CompiledMedia("109:b", 109, ("movie", 1), "b", "b.mp4", Rect(343, 802, 300, 263), timing="with_build_1"),
+            dsa.CompiledMedia("110:c", 110, ("movie", 2), "c", "c.mp4", Rect(643, 802, 335, 263), timing="with_build_1"),
+        ),
+    )
+    out = dsa.apply_compiled_compositions(
+        _compiled_terminal_plan(), (composition,),
+        {"108:a": Path("/clips/a.mov"), "109:b": Path("/clips/b.mov"), "110:c": Path("/clips/c.mov")},
+    )
+    keys = list(out.clips[110])
+    assert [out.clip_occurrences[110][key] for key in keys] == ["108:a", "109:b", "110:c"]
+    assert [out.clip_sources[110][key][0] for key in keys] == [108, 109, 110]
+    assert [out.clip_rects[110][key] for key in keys] == [
+        Rect(43, 802, 300, 263), Rect(343, 802, 300, 263), Rect(643, 802, 335, 263),
+    ]
+    assert [mode for _key, mode in out.clip_timing[110]] == ["after_transition", "with_build_1", "with_build_1"]
+
+
+def test_compiled_composition_script_reads_earlier_slide_playback_before_terminal_deletion(tmp_path):
+    composition = dsa.CompiledComposition(
+        id="sequence:108-110", source_slides=(108, 109, 110), layout_slide=110, overlay_slide=110,
+        output_frame=Rect(43, 802, 935, 263), source_mode="lw", content_mode="video",
+        media=(dsa.CompiledMedia("108:a", 108, ("movie", 0), "a", "a.mp4", Rect(43, 802, 935, 263)),),
+    )
+    plan = dsa.apply_compiled_compositions(
+        _compiled_terminal_plan(), (composition,), {"108:a": Path("/clips/a.mov")},
+    )
+    script = build_assembly_script(plan, scratch_path=tmp_path / "wall.key", staging_path=tmp_path / "out.key")
+    assert "repetition method of movie 1 of slide 108" in script
+    assert "set position of newMov to {43, 802}" in script
+    assert script.index("repetition method of movie 1 of slide 108") < script.index("repeat with i from slideCount")
+
+
+def test_compiled_composition_refuses_a_target_outside_the_frozen_safe_area():
+    composition = dsa.CompiledComposition(
+        id="slide:110", source_slides=(110,), layout_slide=110, overlay_slide=110,
+        output_frame=Rect(42, 802, 935, 263), source_mode="lw", content_mode="full", media=(),
+    )
+    with pytest.raises(AssemblyRefusal, match="safe area"):
+        dsa.apply_compiled_compositions(_compiled_terminal_plan(), (composition,), {})
+
+
+def test_compiled_single_slide_source_timing_preserves_existing_stacked_build_order_and_delay():
+    lower, upper = ("movie", 0), ("movie", 1)
+    source_plan = dataclasses.replace(
+        _compiled_terminal_plan(),
+        clips={110: {lower: Path("/old/lower.mov"), upper: Path("/old/upper.mov")}},
+        clip_timing={110: ((lower, "after_transition"), (upper, "with_build_1"))},
+        clip_timing_delay={110: {upper: 8.0}},
+        clip_build_in={110: {upper: dsa.ClipBuildIn("apple:dissolve", 0.5, True, False, 8.0)}},
+    )
+    composition = dsa.CompiledComposition(
+        id="slide:50", source_slides=(110,), layout_slide=110, overlay_slide=110,
+        output_frame=Rect(43, 670, 1405, 395), source_mode="lw", content_mode="full",
+        media=(
+            dsa.CompiledMedia("50:lower", 110, lower, "lower", "lower.mov", Rect(43, 670, 1405, 395), timing="source"),
+            dsa.CompiledMedia("50:upper", 110, upper, "upper", "upper.mov", Rect(43, 670, 1405, 395), timing="source"),
+        ),
+    )
+    out = dsa.apply_compiled_compositions(
+        source_plan, (composition,), {"50:lower": Path("/clips/lower.mov"), "50:upper": Path("/clips/upper.mov")},
+    )
+    keys = list(out.clips[110])
+    assert out.clip_timing[110] == ((keys[0], "after_transition"), (keys[1], "with_build_1"))
+    assert out.clip_timing_delay[110][keys[1]] == 8.0
+    assert out.clip_build_in[110][keys[1]].effect == "apple:dissolve"
+
+
+def test_compiled_slide_band_sizes_live_content_to_the_editor_frame():
+    item = _image_item(0, x=3000, y=100, w=1200, h=400)
+    payload = {
+        "slideWidth": 7680.0,
+        "slideHeight": 1080.0,
+        "slides": [{"number": 1, "index": 0, "items": [item]}],
+    }
+    cls = classify_slide(payload["slides"][0], None, WALL)
+    frame = Band(1065.0, 263.0, 43.0, 978.0, 4)
+    plan = plan_assembly(
+        payload,
+        [cls],
+        decisions={1: SlideDecision(1, "in_deck", "left")},
+        band=BAND,
+        clips={},
+        slide_bands={1: frame},
+    )
+    rect = plan.fits[1][("image", 0)]
+    assert rect.x >= frame.x_min
+    assert rect.y >= frame.bottom - frame.height
+    assert rect.x + rect.w <= frame.x_max
+    assert rect.y + rect.h <= frame.bottom
+    assert rect.h == pytest.approx(frame.height)
+
+
+def test_compiled_movie_uses_the_same_uniform_fit_as_live_slide_content():
+    movie_id = ("movie", 0)
+    planned = dataclasses.replace(
+        _compiled_terminal_plan(),
+        fits={110: {movie_id: Rect(116, 802, 789, 263)}},
+        clips={110: {movie_id: Path("/clips/original.mov")}},
+        clip_timing={110: ((movie_id, "after_transition"),)},
+    )
+    composition = dsa.CompiledComposition(
+        id="slide:110",
+        source_slides=(110,),
+        layout_slide=110,
+        overlay_slide=110,
+        output_frame=Rect(43, 802, 935, 263),
+        source_mode="lw",
+        content_mode="full",
+        media=(
+            dsa.CompiledMedia(
+                "110:movie",
+                110,
+                movie_id,
+                "movie",
+                "movie.mov",
+                Rect(43, 802, 935, 263),
+                timing="source",
+            ),
+        ),
+    )
+    out = dsa.apply_compiled_compositions(
+        planned,
+        (composition,),
+        {"110:movie": Path("/clips/movie.mov")},
+    )
+    synthetic_id = next(iter(out.clip_rects[110]))
+    assert out.clip_rects[110][synthetic_id] == Rect(116, 802, 789, 263)
+
+
 def _slide(number, items, skipped=False):
     return {"number": number, "index": number - 1, "skipped": skipped, "items": items}
 
