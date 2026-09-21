@@ -2382,3 +2382,235 @@ def test_visible_slide_scores_live_and_dead_rects_side_by_side():
     assert scored["perRect"][0]["verdict"] is True
     assert scored["perRect"][1]["verdict"] is False
     assert scored["stray"]["verdict"] is True
+
+
+def _inpage_samples(
+    n=30,
+    *,
+    n_bands=128,
+    static_bands=(),
+    all_static=False,
+    control_amp=0.0,
+    green_amp=0.0,
+    green_rgb=(10.0, 200.0, 10.0),
+    gl_err=0,
+):
+    """Synthetic in-page samples: every non-static band ramps 100..127 across the
+    window (range 27, well past the 1.0 threshold); ``static_bands`` (or
+    ``all_static``) hold a band constant to model an occluder or a dead read."""
+    samples = []
+    for t in range(n):
+        if all_static:
+            bands = [100.0] * n_bands
+        else:
+            bands = [
+                100.0 if b in static_bands else 100.0 + (t % 10) * 3.0
+                for b in range(n_bands)
+            ]
+        control = 50.0 + control_amp * (t % 2)
+        green = 80.0 + green_amp * (t % 2)
+        samples.append(
+            {
+                "t": t,
+                "ms": 4.0,
+                "vt": t * 0.033,
+                "mediaTime": t * 0.033,
+                "bands": bands,
+                "control": control,
+                "green": green,
+                "greenRGB": list(green_rgb),
+                "glErr": gl_err,
+            }
+        )
+    return samples
+
+
+class TestInPageLivenessScorer:
+    def test_all_bands_moving_reads_live(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples())
+        assert scored["verdict"] is True
+        assert scored["status"] == "live"
+        assert scored["occludedBands"] == 0
+        assert scored["judgedBands"] == 128
+
+    def test_one_non_occluded_static_band_reads_dead(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(static_bands=(5,)))
+        assert scored["verdict"] is False
+        assert scored["status"] == "dead"
+        assert scored["reason"] == "a judged band did not move"
+
+    def test_that_same_band_marked_occluded_reads_live(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples(static_bands=(5,))
+        mask = [1 if i == 5 else 0 for i in range(128)]
+        scored = score_inpage_liveness(samples, occluder_mask=mask)
+        assert scored["verdict"] is True
+        assert scored["occludedBands"] == 1
+        assert scored["judgedBands"] == 127
+
+    def test_a_moving_control_patch_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(control_amp=5.0))
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "control patch moved"
+
+    def test_a_moving_green_patch_reads_dead(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(green_amp=5.0))
+        assert scored["verdict"] is False
+        assert scored["reason"] == "green patch moved"
+
+    def test_a_green_patch_that_is_not_green_reads_dead(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(green_rgb=(100.0, 100.0, 100.0)))
+        assert scored["verdict"] is False
+        assert scored["reason"] == "green patch is not green"
+
+    def test_twenty_three_samples_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(n=23))
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "too few samples"
+
+    def test_a_non_zero_gl_error_reads_dead(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(gl_err=1))
+        assert scored["verdict"] is False
+        assert scored["reason"] == "gl error"
+
+    def test_more_than_half_the_bands_occluded_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        mask = [1] * 65 + [0] * 63
+        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=mask)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "more than half the bands are occluded"
+
+    def test_empty_samples_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness([])
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "no samples"
+        assert scored["n"] == 0
+
+    def test_media_time_alone_never_implies_live(self):
+        """Advancing mediaTime/vt over static bands must not read live."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(all_static=True))
+        assert scored["vtSpan"] > 0
+        assert scored["mediaTimeSpan"] > 0
+        assert scored["verdict"] is False
+
+    def test_occluder_mask_from_markers_flags_bands_that_do_not_move(self):
+        from obed_edom.html_alpha_probe import occluder_mask_from_markers
+
+        at_bound = occluder_mask_from_markers([100.0], [100.5])
+        assert at_bound["verdict"] is True
+        assert at_bound["mask"] == [1]
+        assert at_bound["occluded"] == 1
+
+        past_bound = occluder_mask_from_markers([100.0], [100.51])
+        assert past_bound["mask"] == [0]
+        assert past_bound["occluded"] == 0
+
+    def test_occluder_mask_fails_closed_on_mismatched_marker_lengths(self):
+        from obed_edom.html_alpha_probe import occluder_mask_from_markers
+
+        result = occluder_mask_from_markers([100.0, 100.0], [100.0])
+        assert result["verdict"] is False
+        assert result["mask"] is None
+        assert result["reason"] == "mismatched marker lengths"
+
+
+class TestOracleCombiner:
+    def _screenshot(self, verdict, reason=None):
+        return {"verdict": verdict, "status": "pass" if verdict else ("fail" if verdict is False else "inconclusive"), "reason": reason}
+
+    def _inpage(self, verdict, reason=None):
+        return {"verdict": verdict, "status": "live" if verdict else ("dead" if verdict is False else "inconclusive"), "reason": reason}
+
+    def test_agree_live_is_live(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        combined = combine_oracle_verdicts(self._screenshot(True), self._inpage(True))
+        assert combined["verdict"] is True
+        assert combined["status"] == "pass"
+
+    def test_agree_dead_is_dead(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        combined = combine_oracle_verdicts(self._screenshot(False, "live fraction below threshold"), self._inpage(False))
+        assert combined["verdict"] is False
+        assert combined["status"] == "fail"
+        assert combined["reason"] == "live fraction below threshold"
+
+    def test_screenshot_only_is_passthrough(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        screenshot = self._screenshot(True)
+        assert combine_oracle_verdicts(screenshot, None) == {
+            "verdict": True,
+            "status": "pass",
+            "reason": None,
+            "oracles": {"screenshot": screenshot, "inpage": None},
+        }
+        na = {"verdict": None, "status": "n/a", "reason": "no webgl canvas"}
+        combined = combine_oracle_verdicts(screenshot, na)
+        assert combined["verdict"] is True
+        assert combined["status"] == "pass"
+        assert combined["oracles"]["inpage"] is na
+
+    def test_disagreement_either_way_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        live_vs_dead = combine_oracle_verdicts(self._screenshot(True), self._inpage(False))
+        assert live_vs_dead["verdict"] is None
+        assert live_vs_dead["status"] == "inconclusive"
+        assert live_vs_dead["reason"] == "oracle disagreement"
+
+        dead_vs_live = combine_oracle_verdicts(self._screenshot(False), self._inpage(True))
+        assert dead_vs_live["verdict"] is None
+        assert dead_vs_live["status"] == "inconclusive"
+        assert dead_vs_live["reason"] == "oracle disagreement"
+
+    def test_inpage_inconclusive_over_a_live_screenshot_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        combined = combine_oracle_verdicts(self._screenshot(True), self._inpage(None, "control patch moved"))
+        assert combined["verdict"] is None
+        assert combined["status"] == "inconclusive"
+        assert combined["reason"] == "in-page oracle inconclusive: control patch moved"
+
+    def test_inpage_inconclusive_over_a_red_screenshot_stays_red(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        screenshot = self._screenshot(False, "dead bands")
+        combined = combine_oracle_verdicts(screenshot, self._inpage(None, "control patch moved"))
+        assert combined["verdict"] is False
+        assert combined["status"] == "fail"
+        assert combined["reason"] == "dead bands"
+
+    def test_an_inconclusive_screenshot_is_never_upgraded(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        screenshot = {"verdict": None, "status": "inconclusive", "reason": "noise floor above threshold"}
+        combined = combine_oracle_verdicts(screenshot, self._inpage(True))
+        assert combined["verdict"] is None
+        assert combined["status"] == "inconclusive"
+        assert combined["reason"] == "noise floor above threshold"
