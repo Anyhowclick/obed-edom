@@ -36,24 +36,26 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from p2_alpha_spike import CHROME, ChromeCdp, _wait_ready  # noqa: E402
 from p2_recovery_html_adversarial import (  # noqa: E402
-    EXPECTED_MOVIE_KEYS,
-    MOVIE_ROI,
     PROGRESSION_MEDIA_S,
     PROGRESSION_WALL_S,
-    SLIDE3_MIN_HASH,
     _advance_until_hash_at_least_sampling,
     _annotate_sample,
     _dense_after_click,
-    _hash_num,
     _media_snapshot_with_pool,
-    _norm_hash,
-    _score_visible_movie_motion,
 )
 from p2_recovery_html_dissolve_live import (  # noqa: E402
     _ensure_videos_playing,
     _replace_hevc_movies,
     _wait_hash_clean,
     inject_preserve,
+)
+from obed_edom.p2_verdict import (  # noqa: E402
+    EXPECTED_MOVIE_KEYS,
+    MOVIE_ROI,
+    SLIDE3_MIN_HASH,
+    _hash_num,
+    _norm_hash,
+    _score_visible_movie_motion,
 )
 from obed_edom.html_alpha_probe import (  # noqa: E402
     file_identity,

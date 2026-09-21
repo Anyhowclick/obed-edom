@@ -47,6 +47,7 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     write_patched_export,
 )
 from obed_edom.html_preview import export_html  # noqa: E402
+from obed_edom.p2_verdict import MOVIE1_TOKEN, MOVIE2_TOKEN, _movie_key, _norm_hash  # noqa: E402
 
 SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
 OUT = REPO / "output" / "p2-recovery" / "html-dissolve-live"
@@ -57,18 +58,6 @@ POST_SETTLE_S = 0.6
 # Jump/restart thresholds on media.currentTime (seconds)
 RESTART_EPS = 0.35  # drop toward 0
 JUMP_EPS = 0.85  # forward discontinuity larger than capture dt allows
-MOVIE1_TOKEN = "Untitled.mov"
-MOVIE2_TOKEN = "WA0125"
-
-
-def _movie_key(src: str) -> str:
-    s = str(src or "").lower()
-    if MOVIE1_TOKEN.lower() in s:
-        return "movie1"
-    if MOVIE2_TOKEN.lower() in s:
-        return "movie2"
-    # fallback: basename stem
-    return s.rsplit("/", 1)[-1][:40] or "unknown"
 
 
 def _time_for(samples: list[dict], key: str) -> list[float | None]:
@@ -624,17 +613,6 @@ async def _wait_hash_clean(chrome: ChromeCdp, timeout_s: float = 8.0) -> str:
     return last.split("?", 1)[0] if "?" in (last or "") else last
 
 
-def _norm_hash(h: str | None) -> str:
-    s = str(h or "")
-    if "?" in s:
-        s = s.split("?", 1)[0]
-    # keep only leading #digits
-    import re
-
-    m = re.match(r"(#\d+)", s)
-    return m.group(1) if m else s
-
-
 def _alpha_report(arr: np.ndarray) -> dict:
     a = analyze_rgba(arr)
     return {
@@ -902,6 +880,8 @@ def main() -> int:
         OUT.mkdir(parents=True)
         shutil.copytree(src, unmodified)
         (OUT / "runs").mkdir(parents=True, exist_ok=True)
+    elif reuse:
+        raise SystemExit(f"missing reusable export at {unmodified}")
     else:
         if OUT.exists():
             shutil.rmtree(OUT)
