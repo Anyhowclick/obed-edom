@@ -445,3 +445,67 @@ same event. The controller now applies the identical filter, records `e.timeStam
 rejected; `advanceKeySameEventInControl` requires `nullControl.advanceKeyAt == advanceKeyPerfMs` and a
 zero rejection count, and `atCutBoundaryValidAllArms` continues to hold all three arms to the watch's
 own counts.
+
+### 10.15 The scorer RE-DERIVES, and the sweep walks the REAL bracket (round 13, r10 MAJOR 1–5 + MINOR 1)
+
+Round 12 closed the cached-verdict class for `collectorSeriesSound` and `positivesGreen` only. Round 9
+of review found the rest of it: the scorer still accepted the capture side's own sub-verdicts and
+derived labels wherever the raw evidence was retained, and the harness's OR-aggregated sweep on a
+hand-built fixture could not see it.
+
+**The at-cut boundary is re-run, not range-checked.** `_at_cut_boundary_valid` verified only that the
+cached `atCutBoundary.from` was an in-range integer, so a stale LATER index discarded the first
+post-keydown reset the control exists to catch. It now re-runs `_at_cut_boundary(indexSamples,
+advanceKeyPerfMs)` and requires exact agreement. The same shape sat on the release ordering:
+`lastAtCutPerfMs` was taken from the capture, so a stale EARLIER value could claim the release
+followed the final covered capture when `indexSamples[releaseSplitIndex].perfNowMs` said otherwise. It
+is read off the validated split sample now, and the reported field must agree.
+
+**Every re-derivable gate is re-derived and held to its cache.** `_advance_ok_derived` rebuilds the
+press state from `pressesSent`/`pressesLanded`/`unlandedFromHash`/`outstandingAtEnd`/`pressingStopped`
+and re-runs `_advance_gate`; `_drain_clean` rebuilds `allPressesLanded`/`hashAtArmExact` from the
+recorded counts and `hashAtArm`, which must be the arm's own `armHash` AND the exact `#7`;
+`_settled_progression_ok` re-scores the post-split settled window. `_owner_settle_ok` replays the
+ordered rect readings the settle loop now RETAINS (`ownerSettle.readings`) through the same
+`_couple_owner_rect` run — a stable count and a Boolean were two more derived values, not the readings
+they came from. `movingContinuity3to4` is RE-RUN from `ownerSamples` and the newly retained
+`mediaSamples`: without the media series a stale green could hide a handoff or an rVFC rewind, and
+`rvfcRanThroughHold` now reads the derived advance. `bridgeEngaged` is DERIVED from `bridgeEvents`
+validated for movie key, a scene at or beyond slide 4, the bound slide-3 decoder as `oldElId`, and a
+preserve generation matching the one current when it fired (`oldGen`/`generation`, added to the
+runtime's `bridge-3to4` note) — a snapshot claiming `bridgeEngaged` with no events is INCONCLUSIVE.
+`_isolation_view` is built from the same derivations, so `isolationEqual` compares evidence rather
+than cached booleans; `footprintFullyLive.ok` stays cached because the burst pixels it is scored from
+are not retained.
+
+**MAIN re-derives the collector too.** The bracket re-ran `_collector_ok`, but `_advance_c_ok` read
+only `collector.ok`, so a truncated, dropped or unbracketed MAIN series with a stale `ok` stayed
+green. It calls `_collector_ok` and requires agreement, and the nine MAIN allowlist entries that
+excused the collector primitives are gone — as are the seven advance primitives.
+
+**A badge sample is held to its OWN evidence.** `_badge_samples_sound` trusted each sample's derived
+`footprintSource == "measured"` and the aggregate counters, so a covered sample could lose its clock
+and drop out of `covered_positions`, or keep a stale "measured" label after its coupling evidence
+disappeared. Every non-exempt sample must now carry a finite `perfNowMs`, a typed and STRICTLY
+INCREASING `badgeSeq`, both `measuredRect` and `badgeRect`, and must re-satisfy
+`_couple_owner_rect(measuredRect, badgeRect) == "measured"`. The re-handoff pair is validated
+separately through `_is_rehandoff_sample`, as before.
+
+**The pass fixture is a real live bracket, and the walk keeps its positions.** The hand-built bracket
+could only model fields its author had thought of — it carried `bridgeEngaged=True` with
+`bridgeEvents=[]` and no rect evidence at all. `tests/fixtures/p2_freeze_3to4/clean_bracket.json` is
+the verbatim A1/B/A2 snapshot triple of one clean live run (round 13, run 1300), 515 KB, with nothing
+dropped: the sweep walks the production shape. The walk also kept COLLAPSING list indices and ORing
+the results, so one deletion that failed closed marked the whole field gated. Positions are now kept
+apart and aggregated with AND; a field gated in some positions only must be classified in
+`_SWEEP_PARTIAL_ALLOW`, and the headline case is asserted rather than excused — deleting a capture's
+decoded `index` fails closed at EXACTLY the 23 in-hold positions the freeze is scored over.
+
+MEASURED (round 13): the bracket walk covers **17 821 concrete indexed paths** (102-sample arms),
+210 fully gated collapsed fields, 361 survivors on the allowlist and 5 partials; MAIN's covers 8 152
+paths, 39 gated, 202 survivors, 0 partials. Deletion is done by mutate-and-restore rather than a deep
+copy per case (the real fixture makes the copy the dominant cost); the two suites run in ~65 s.
+Live: 5/5 brackets PASS at load 4.1–6.3 (trigger delay 159–164 ms, poll/rAF max gap 55–60 ms, 8
+delivered frames, keydown→post-dispatch lag 0.7–1.2 ms median 1.0, 1 keydown per arm, zero badge
+missing/CRC-bad/unlogged/sequence violations), plus one e2e fast bridge-ON run with
+`freezeControlCaughtByCounter: True` and `success: True`.
