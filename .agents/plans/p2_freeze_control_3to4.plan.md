@@ -1,6 +1,12 @@
 # Plan — re-bracket the P2 freeze negative control at the 3→4 boundary
 
-Status: decisions answered, implementation NOT started — awaiting the owner's direct go (Opus planner, 2026-09-20). No code written. Line numbers are as of `main` `946a7648`.
+Status: IMPLEMENTED and under review — the freeze negative control is re-bracketed on the MOVING 3→4 Magic Move
+and runs in both the A-B-A scratch bracket and the e2e. Codex review rounds 1–11 (r1–r8 recorded under
+`.agents/reviews/freeze-3to4/`); round 11 closes r8's two majors (geometry-sound badge gate; page-counted
+trusted-keydown gate) plus a pre-emptive absence sweep over every integrity key. NOT merged; no CI, so the
+two suites are run locally. Current live results (round 11, this machine): 7/7 clean scratch brackets `pass`
+with `integrityFailed []` at load 4.6–7.1, and e2e fast/disposable/bridge-on `success: True` with
+`freezeControlCaughtByCounter` `pass` at load 6.1–7.4. Line numbers below are as of `main` `946a7648`.
 Why: `freezeControlCaughtByCounter` is parked `inconclusive` (P2 `success` False on `main`) because the baseline REFUSES
 the 1→2 carry (`retire`), so there is no carried movie to freeze there. 3→4 still carries.
 
@@ -331,3 +337,61 @@ is a round trip, not a bounded quantity. `atCutFrom == 0` in all 21 arms either 
 `_advance_key_clock` takes its event `timeStamp`, and only when the page saw EXACTLY ONE matching
 event: zero (the dispatch never landed) or more than one (a replay, or a drain press still in flight)
 yields `None`, which `_at_cut_boundary` fails closed.
+
+**Badge TRANSPORT is not badge GEOMETRY (round 11, r8 MAJOR 1).** The `badgeSamplesSoundAllArms` gate
+above proved only that each capture carried a badge: installed, decoded, CRC-valid, logged, in
+sequence. It ignored what that badge *said*. A badge can satisfy every one of those and still name a
+rect that disagrees with the page's own log for that frame — `_fill_badge_coupling` settles such a
+sample `unstable`, which means its ROI was read at the wrong place, so its decoded counter value is
+junk. The positive arms discarded those samples through their measured-only filter, but the gate
+itself stayed green, and MAIN did not filter `slide4IndexSequence` by `footprintSource` at all, so a
+wrong-ROI or `None` decode could sit in finding 13's scored sequence. `_badge_samples_sound` now
+additionally requires `install.ok is True`, `decoded == len(indexSamples)`, and that EVERY sample is
+`measured`. The single exception is the re-handoff pair's two deliberate null-rect frames, and it is
+not a property of the sample: the scorer passes the pair in as `exempt_seqs` only once
+`rehandoffPairSound` has validated it (§10.6), and a sample that actually decoded a rect is never
+exempt. MAIN applies the same gate plus a measured-only filter on the settled slide-4 window, and
+fails `advanceOk` closed if that filter removes anything — there is no re-handoff on MAIN's path, so
+the admissible loss is zero. The MAIN gate is extracted as `_advance_c_ok` purely so it can be
+unit-tested; it is the same conjunction that was inline.
+
+### 10.13 The advance keydown is COUNTED, and only a trusted one counts (round 11, r8 MAJOR 2)
+§10.12's predecessor recorded the keydown page-side but only *used* the exact-one rule while
+producing `advanceKeyPerfMs`. The scorer never required the count itself, and no pass-capable fixture
+carried it — so a snapshot with a finite (or stale) timestamp and a missing, zero or doubled event
+count could reach PASS. The listener also accepted any `ArrowRight` keydown, including a synthetic
+one dispatched by page script (`isTrusted === false`) and an auto-repeat burst held down by the OS.
+Both can advance the player, so both change the stimulus while the count still reads 1.
+
+The watch now filters on `e.type === 'keydown' && e.key === 'ArrowRight' && e.isTrusted && !e.repeat`
+and COUNTS what it refuses (`rejected`) rather than dropping it silently — a refusal that is not
+counted is indistinguishable from an event that never happened, which is the same absence bug one
+level down. `_advance_key_clock` yields the timestamp only for `n == 1 && rejected == 0`, and
+`_advance_key_observed_once` re-checks both counters in `_at_cut_boundary_valid` (all three arms) and
+in MAIN's `advanceOk`, rejecting bools and missing keys explicitly. `advanceKeyEvents: 1` and
+`advanceKeyRejected: 0` are now part of the shared clean fixture. MEASURED (round 11, 21 arms over 7
+clean brackets at load 4.6–7.1, plus 3 e2e arms): `advanceKeyEvents == 1`, `advanceKeyRejected == 0`
+and `atCutFrom == 0` in every arm; the keydown→post-dispatch lag re-measured at **0.7–1.2 ms, median
+1.0** (consistent with round 10's 0.7–1.1).
+
+**Absence sweep (round 11, pre-emptive).** Three consecutive rounds found the same defect class: a
+new integrity key read a field the pass-capable fixture never carried, so the key was satisfied by
+ABSENCE and the "positive" proved nothing. `test_no_integrity_key_can_be_satisfied_by_absence` now
+takes the clean bracket and, for every integrity key the scorer scores, deletes the snapshot field(s)
+that key is argued from and asserts the verdict falls to INCONCLUSIVE;
+`test_absence_sweep_covers_every_integrity_key` asserts the case table names exactly the scorer's own
+`integrityKeys`, so a key cannot be added without one. The same sweep runs over MAIN's `_advance_c_ok`
+inputs. Two keys are negative assertions (`noPreAdvanceDeparture`, `noControlError`) whose green state
+IS an absent value; deleting their whole `nullControl` block short-circuits to "hold never fired",
+which is inconclusive, and they are never reached. The sweep immediately caught a real hole:
+`maxRafGapOk` was `max(gaps) <= ceiling` over a possibly EMPTY series, i.e. green with no series to
+measure at all; it now requires a non-empty rAF series as well.
+
+**Live before/after control (round 11).** The first five brackets of the round came back
+`inconclusive` on `firedAtMoveStart` (keydown→trigger 208–256 ms against the 190 ms ceiling) with rAF
+gaps of 93–158 ms. That was NOT the change: run interleaved against the pre-change module on the same
+machine, AFTER went 4/4 `pass` and BEFORE 4/4 `pass` with identical timings (delay 157–164 ms, gap
+54–68 ms). The five bad brackets ran while the machine was still draining a just-finished gate round
+(15-minute load average 7.18 decaying). Recorded because the trigger bounds track the HARNESS, not
+the player: a loaded machine reads as a stimulus failure here, and the honest response is the
+interleaved control, never a wider ceiling.

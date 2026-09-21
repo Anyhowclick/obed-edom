@@ -64,8 +64,10 @@ The findings, grouped:
   at the footprint (IoU), no fallbacks; ties/ambiguity fail closed.
 - **Honest-gate discipline:** a green you cannot trace to the fix is a red. Every positive control has a
   matching red-without-the-fix demonstration (`--disable-bridge34`).
-- **Freeze negative control** (`freezeControlCaughtByCounter`, Arm A): an A-B-A bracket on the static
-  1→2 boundary injects a partial stale cover over the counter while the decoder stays LIVE, so
+- **Freeze negative control** (`freezeControlCaughtByCounter`, Arm A): an A-B-A bracket on the MOVING
+  3→4 Magic Move (re-bracketed off the static 1→2, whose carry the baseline refuses — there is no
+  carried movie to freeze there; see `.agents/plans/p2_freeze_control_3to4.plan.md`) injects a partial
+  stale cover, re-tracked every rAF through the translate+scale, over the counter while the decoder stays LIVE, so
   `index_run` goes RED ("freeze run at cut") while rVFC stays green — isolating the RED to the counter,
   proving the gate is not vacuous. Two-tier scorer: hold-INTEGRITY failures → `inconclusive`;
   gate/isolation/positives → `pass`/`fail` only once integrity holds. Fresh Chrome per bracket run (the
