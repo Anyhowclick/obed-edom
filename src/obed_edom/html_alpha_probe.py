@@ -1780,7 +1780,18 @@ def score_noise_floor(
     max_p99: int = NOISE_FLOOR_P99_MAX,
 ) -> dict[str, Any]:
     """99th-percentile burst delta over a known-static control region (plan §1.2.3)."""
-    delta = _max_delta_map(frames)
+    return score_noise_floor_from_delta(
+        _max_delta_map(frames), control_rect, max_p99=max_p99
+    )
+
+
+def score_noise_floor_from_delta(
+    delta: np.ndarray,
+    control_rect: dict[str, float],
+    *,
+    max_p99: int = NOISE_FLOOR_P99_MAX,
+) -> dict[str, Any]:
+    """``score_noise_floor`` over an already-computed max-delta map."""
     clipped = _clip_rect(control_rect, delta.shape[0], delta.shape[1])
     if clipped is None:
         return {"verdict": False, "p99": None, "rect": None, "reason": "control rect outside image"}
@@ -1819,7 +1830,45 @@ def score_visible_slide(
     A failed noise floor yields ``verdict None`` / ``status "inconclusive"``;
     callers must treat anything but ``verdict is True`` as a failure.
     """
-    noise = score_noise_floor(frames, control_rect, max_p99=max_p99)
+    return score_visible_slide_from_delta(
+        _max_delta_map(frames),
+        expected_rects,
+        control_rect,
+        delta_min=delta_min,
+        cols=cols,
+        rows=rows,
+        band_live_frac=band_live_frac,
+        min_live_frac=min_live_frac,
+        inset_px=inset_px,
+        dilate_px=dilate_px,
+        min_area_px=min_area_px,
+        dead_max_live_frac=dead_max_live_frac,
+        ignore_rects=ignore_rects,
+        max_p99=max_p99,
+    )
+
+
+def score_visible_slide_from_delta(
+    delta: np.ndarray,
+    expected_rects: Sequence[dict[str, Any]],
+    control_rect: dict[str, float],
+    *,
+    delta_min: int = LIVE_DELTA_MIN,
+    cols: int = LIVE_BAND_COLS,
+    rows: int = LIVE_BAND_ROWS,
+    band_live_frac: float = LIVE_BAND_MIN_FRAC,
+    min_live_frac: float = LIVE_RECT_MIN_FRAC,
+    inset_px: int = LIVE_RECT_INSET_PX,
+    dilate_px: int = STRAY_DILATE_PX,
+    min_area_px: int = STRAY_MIN_AREA_PX,
+    dead_max_live_frac: float = DEAD_RECT_MAX_LIVE_FRAC,
+    ignore_rects: Sequence[dict[str, float]] = (),
+    max_p99: int = NOISE_FLOOR_P99_MAX,
+) -> dict[str, Any]:
+    """``score_visible_slide`` over an already-computed max-delta map — the whole
+    verdict is a function of that raster, so retaining it is enough to recompute
+    the slide's visible-content result later."""
+    noise = score_noise_floor_from_delta(delta, control_rect, max_p99=max_p99)
     if not noise["verdict"]:
         return {
             "verdict": None,
@@ -1830,7 +1879,6 @@ def score_visible_slide(
             "reason": noise.get("reason") or "noise floor above threshold",
         }
 
-    delta = _max_delta_map(frames)
     mask = delta >= int(delta_min)
     per_rect: list[dict[str, Any]] = []
     for rect in expected_rects:
