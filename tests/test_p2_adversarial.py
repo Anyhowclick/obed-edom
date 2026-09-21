@@ -5666,15 +5666,17 @@ def _bracket_sweep() -> dict:
                     key = (cls, path)
                     if key in seen:
                         raise AssertionError(f"bracket sweep path scored twice: {key}")
-                    seen[key] = True
-                    _BRACKET_SWEEP_CACHE[key] = closed
+                    seen[key] = closed
 
         for cls, count in expected.items():
-            actual = sum(1 for (c, _p) in _BRACKET_SWEEP_CACHE if c == cls)
+            actual = sum(1 for (c, _p) in seen if c == cls)
             assert actual == count, (
                 f"bracket sweep for {cls!r}: expected {count} paths, "
                 f"covered {actual} -- shards left a gap"
             )
+        # Published only once whole: a failed shard must not leave a partial
+        # cache for the next caller to mistake for a finished sweep.
+        _BRACKET_SWEEP_CACHE.update(seen)
     return _BRACKET_SWEEP_CACHE
 
 
