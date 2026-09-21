@@ -322,10 +322,22 @@ FOOTPRINT_COUPLE_TOL_PX = 1.5  # before/after owner-rect agreement for a screens
 # capture-phase `keydown` timestamp for the advance key the script really sends (review
 # BLOCKER 2). A wall-clock ceiling is not defensible: keepThroughBridge interpolates
 # LINEARLY (src/obed_edom/live_continuity_js.py ~L687) over 952->1266px in TRANS_S, so
-# the rect departs by >1px within ~5ms. Measured over the live bracket runs below the
-# departure was always seen on the 1st or 2nd delivered poll frame after the keydown;
-# 3 leaves one frame of margin over the worst observation.
-FREEZE_TRIGGER_MAX_RAFS = 3
+# the rect departs by >1px within ~5ms.
+#
+# RE-MEASURED 2026-09-21 on 10 CLEAN freeze-arm runs (drain 5/5 landed, hash `#7`
+# exact, `firedVia == "moved"`, one press sent and landed): the departure landed on
+# delivered poll frame 8 in 10/10 runs, at 157.8-173.4 ms after the in-page keydown,
+# with a 17.1-17.7 ms rAF period. Not bimodal, no outlier. Worst observation 8 plus
+# one frame of margin => 9.
+#
+# The previous value of 3 was calibrated on runs CONTAMINATED by queued presses (the
+# capture re-pressed ArrowRight every 0.9 s through the move, so the move began at a
+# replayed press, not at the one the listener timed). NOTE the count is not a pure
+# property of the player: it is delivered POLL frames between the keydown and the
+# first visible rect departure, so it also absorbs how much the harness does per
+# frame -- 3-4 contaminated, 6-7 with the press fixed, 8 with the footprint badge
+# running. Re-measure whenever the capture loop's per-frame cost changes.
+FREEZE_TRIGGER_MAX_RAFS = 9
 
 # Drain to the freeze-control arm boundary (`_capture_3to4_snapshot`). MEASURED on
 # this fixture 2026-09-21: the drain needs presses from #1..#5 only. `#6` is the
@@ -2639,6 +2651,247 @@ async def _bind_footprint_owner(
     return owner.get("elId")
 
 
+# --- Footprint badge: the rect the CAPTURED FRAME actually shows ---------------
+# Coupling the owner rect to a CDP screenshot by reading it before and after is
+# not a coupling at all on the fast part of the 3->4 move: the round trip is
+# ~230 ms and the rect travels ~0.12 px/ms, so the two reads disagree by ~28 px,
+# every such sample is `unstable`, and `allInHoldMeasured`/`everyInHoldStale` are
+# unsatisfiable there (measured, round 3).
+#
+# Instead the page PAINTS the rect it is pinning, in the SAME animation frame in
+# which it reads it, into a small binary badge at the viewport origin. The
+# screenshot then carries the movie pixels and the rect that produced them in ONE
+# composited frame -- coupled by construction, not by timing luck. The badge also
+# carries the frame's own sequence number, so the page's independent log of that
+# frame can be fetched afterwards and compared with what the pixels decoded:
+# `_couple_owner_rect` still requires agreement within FOOTPRINT_COUPLE_TOL_PX,
+# now between the page's record of frame N and frame N's painted pixels.
+FOOTPRINT_BADGE_CELL_PX = 6   # cell width; MEASURED: 6 px cells decoded 100% of
+                              # painted frames live (deviceScaleFactor=1, PNG
+                              # capture, so a cell centre is an exact pixel)
+FOOTPRINT_BADGE_MAGIC = 0xB2  # 8-bit prefix; a frame without it is not a badge
+FOOTPRINT_BADGE_FIELDS = ("seq", "x", "y", "w", "h")  # 16 bits each, after the magic
+FOOTPRINT_BADGE_CELLS = 8 + 16 * len(FOOTPRINT_BADGE_FIELDS)
+FOOTPRINT_BADGE_Q = 4         # quarter-px quantisation of the encoded rect
+                              # (<=0.125 px error, far inside the couple tolerance)
+
+FOOTPRINT_BADGE_JS = r"""
+(function () {
+  if (window.__OBED_FP_BADGE__) return;
+  var CELL = %(cell)d, MAGIC = %(magic)d, NCELL = %(ncell)d, Q = %(q)d;
+  var st = {elId: null, seq: 0, log: {}, order: [], painted: 0, installedAt: null};
+  var badge = null, running = false;
+
+  function elById(elId) {
+    if (elId == null) return null;
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) if (vids[i].__obedElId === elId) return vids[i];
+    return null;
+  }
+
+  function bits16(n) {
+    n = Math.max(0, Math.min(65535, n));
+    var out = [];
+    for (var i = 15; i >= 0; i--) out.push((n >> i) & 1);
+    return out;
+  }
+
+  // The rect fields are quantised to quarter-pixels; the sequence number is a
+  // COUNT and is painted raw (scaling it would make `lookup(seq)` miss).
+  function qbits(v) { return bits16(Math.round(v * Q)); }
+
+  function paint(seq, r) {
+    var ctx = badge.getContext('2d', {alpha: false});
+    var cells = [];
+    for (var i = 7; i >= 0; i--) cells.push((MAGIC >> i) & 1);
+    cells = cells.concat(bits16(seq), qbits(r.x), qbits(r.y), qbits(r.w), qbits(r.h));
+    for (var c = 0; c < NCELL; c++) {
+      ctx.fillStyle = cells[c] ? '#ffffff' : '#000000';
+      ctx.fillRect(c * CELL, 0, CELL, CELL);
+    }
+    st.painted += 1;
+  }
+
+  // Same handoff discipline as the null control: a rAF queued from a task that
+  // runs AFTER a frame's callbacks lands BEHIND the runtime's footprint pin, and
+  // that order then holds. So the rect read (and painted) here is the rect the
+  // runtime pinned for THIS frame -- not the previous frame's.
+  // EVERY frame repaints, including one where the owner does not resolve -- then
+  // with a null rect. Skipping the paint would leave the PREVIOUS frame's badge
+  // on screen under a sequence number the page HAS logged, and that stale badge
+  // would couple as `measured` against a rect the frame no longer shows. A null
+  // rect logs null, so the sample has one reading and stays `unstable`.
+  function loop() {
+    if (!running) return;
+    var el = elById(st.elId);
+    var r = el ? el.getBoundingClientRect() : null;
+    var ok = !!(r && r.width > 1 && r.height > 1);
+    var rect = ok ? {x: r.left, y: r.top, w: r.width, h: r.height} : null;
+    var seq = (st.seq = (st.seq + 1) & 0xffff);
+    paint(seq, rect || {x: 0, y: 0, w: 0, h: 0});
+    st.log[seq] = {t: performance.now(), rect: rect};
+    st.order.push(seq);
+    // The whole log is dumped ONCE after the capture loop, so the ring must
+    // outlast it: the loop runs (TRANS_S + POST_SETTLE_S + 3)s at ~60Hz, and
+    // 600 entries were only ~10s -- the earliest sampled frames fell out.
+    while (st.order.length > 4000) delete st.log[st.order.shift()];
+    requestAnimationFrame(loop);
+  }
+
+  window.__OBED_FP_BADGE__ = {
+    install: function (elId) {
+      if (elById(elId) == null) return {ok: false, error: 'owner-unresolved'};
+      st.elId = elId;
+      badge = document.createElement('canvas');  // ID-LESS: recorder stays inert
+      badge.setAttribute('data-obed-footprint-badge', '1');
+      badge.width = NCELL * CELL;
+      badge.height = CELL;
+      badge.style.position = 'fixed';
+      badge.style.left = '0px';
+      badge.style.top = '0px';
+      badge.style.width = (NCELL * CELL) + 'px';
+      badge.style.height = CELL + 'px';
+      badge.style.zIndex = '2147483647';
+      badge.style.opacity = '1';
+      badge.style.pointerEvents = 'none';
+      badge.style.margin = '0';
+      badge.style.padding = '0';
+      document.body.appendChild(badge);
+      st.installedAt = performance.now();
+      running = true;
+      requestAnimationFrame(function () {
+        setTimeout(function () { if (running) requestAnimationFrame(loop); }, 0);
+      });
+      return {ok: true, elId: elId, cells: NCELL, cell: CELL,
+              innerWidth: window.innerWidth, dpr: window.devicePixelRatio || 1};
+    },
+    // Dumped ONCE after the capture loop, never per sample: a per-sample lookup
+    // is one more CDP round trip inside the hold, and the hold is where the rAF
+    // budget matters. (Measured: removing it did NOT on its own clear the
+    // occasional >100ms `maxRafGapOk` stalls -- see that check's notes -- but it
+    // does leave the capture loop one round trip CHEAPER than before the badge.)
+    dump: function () { return st.log; },
+    stats: function () {
+      return {painted: st.painted, seq: st.seq, logged: st.order.length,
+              installedAt: st.installedAt, running: running};
+    },
+    uninstall: function () {
+      running = false;
+      if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
+      badge = null;
+      return {painted: st.painted};
+    }
+  };
+})()
+""" % {
+    "cell": FOOTPRINT_BADGE_CELL_PX,
+    "magic": FOOTPRINT_BADGE_MAGIC,
+    "ncell": FOOTPRINT_BADGE_CELLS,
+    "q": FOOTPRINT_BADGE_Q,
+}
+
+
+def _decode_footprint_badge(arr: np.ndarray, scale: float = 1.0) -> dict | None:
+    """Decode the footprint badge out of ONE captured frame. Returns
+    `{"seq", "x", "y", "w", "h"}` (CSS px) or `None` when the magic prefix is
+    absent -- i.e. the badge was not installed, not yet painted, or torn."""
+    cell = FOOTPRINT_BADGE_CELL_PX * scale
+    if arr.ndim != 3 or arr.shape[1] < int(round(FOOTPRINT_BADGE_CELLS * cell)):
+        return None
+    y = int(cell // 2)
+    if y >= arr.shape[0]:
+        return None
+    vals: list[int] = []
+    for c in range(FOOTPRINT_BADGE_CELLS):
+        x = int(round(c * cell + cell / 2.0))
+        if x >= arr.shape[1]:
+            return None
+        vals.append(1 if float(arr[y, x, :3].mean()) >= 128.0 else 0)
+    magic = 0
+    for b in vals[:8]:
+        magic = (magic << 1) | b
+    if magic != FOOTPRINT_BADGE_MAGIC:
+        return None
+    out: dict = {}
+    for i, name in enumerate(FOOTPRINT_BADGE_FIELDS):
+        n = 0
+        for b in vals[8 + 16 * i: 8 + 16 * (i + 1)]:
+            n = (n << 1) | b
+        out[name] = n if name == "seq" else n / float(FOOTPRINT_BADGE_Q)
+    return out
+
+
+def _new_advance_press_state() -> dict:
+    return {"atHash": None, "wall": None, "sent": 0, "landed": 0,
+            "unlanded": [], "stopped": False}
+
+
+def _advance_press_decision(hn: int | None, st: dict, now: float) -> tuple[dict, bool]:
+    """ONE step of the single-press advance discipline (round 3, item D). This
+    player QUEUES a key it cannot honour yet and replays it later, and the hash
+    sits at `SLIDE4_MIN_HASH - 1` for the WHOLE 3->4 move -- so a timer-based
+    re-press sends 2-3 presses DURING the move that the player then replays on
+    arrival.
+
+    A press is OUTSTANDING (`atHash`) until the hash rises above the hash it was
+    sent at; while one is outstanding nothing is ever sent. An outstanding press
+    that has not landed within `DRAIN_PRESS_LAND_S` is recorded unlanded and
+    pressing STOPS for good -- recorded and reported, never re-pressed, because a
+    press that has not landed is a press the player may still be holding.
+
+    Returns the new state and whether to press now."""
+    if st["atHash"] is not None and hn is not None and hn > st["atHash"]:
+        st = {**st, "atHash": None, "wall": None, "landed": st["landed"] + 1}
+    elif (
+        st["atHash"] is not None
+        and st["wall"] is not None
+        and (now - st["wall"]) > DRAIN_PRESS_LAND_S
+    ):
+        st = {**st, "atHash": None, "wall": None, "stopped": True,
+              "unlanded": st["unlanded"] + [st["atHash"]]}
+    press = bool(
+        hn is not None
+        and hn < SLIDE4_MIN_HASH
+        and st["atHash"] is None
+        and not st["stopped"]
+    )
+    if press:
+        st = {**st, "atHash": hn, "wall": now, "sent": st["sent"] + 1}
+    return st, press
+
+
+def _fill_badge_coupling(samples: list[dict], frame_log: dict | None) -> dict:
+    """Settle each sample's `footprintSource` against the page's OWN record of
+    the frame its badge names. `measured` requires BOTH readings of that one
+    frame -- the page's logged rect and the rect decoded from that frame's
+    painted pixels -- to agree within `FOOTPRINT_COUPLE_TOL_PX`. A badge naming a
+    frame the page never logged has a single reading, so it stays `unstable` and
+    fails `allInHoldMeasured`: fail closed, exactly as a missing read did.
+
+    Mutates `samples` in place and returns counts for the report."""
+    log = frame_log or {}
+    counts = {"measured": 0, "unstable": 0, "unlogged": 0, "modelled": 0, "none": 0}
+    for s in samples:
+        if s.get("footprintSource") != "badge":
+            counts[s.get("footprintSource", "none")] = (
+                counts.get(s.get("footprintSource", "none"), 0) + 1
+            )
+            continue
+        entry = log.get(str(s.get("badgeSeq"))) or log.get(s.get("badgeSeq"))
+        frame_rect = (entry or {}).get("rect")
+        if entry is None:
+            counts["unlogged"] += 1
+        elif entry.get("t") is not None:
+            s["perfNowMs"] = entry["t"]
+        coupled = _couple_owner_rect(frame_rect, s.get("badgeRect"))
+        source = coupled.get("source")
+        s["footprintSource"] = source
+        if source == "measured":
+            s["measuredRect"] = {k: coupled[k] for k in ("x", "y", "w", "h")}
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
 async def _read_bound_owner_rect(
     chrome: ChromeCdp, el_id: str | None
 ) -> tuple[dict | None, float | None]:
@@ -2668,12 +2921,19 @@ async def _read_bound_owner_rect(
 
 def _couple_owner_rect(before: dict | None, after: dict | None) -> dict:
     """Couple rect + pixels (review Blocker 2b): a sample is `measured` only when
-    BOTH a before- and an after-screenshot rect read exist and agree within
-    `FOOTPRINT_COUPLE_TOL_PX` -- otherwise `unstable` (still decoded, off the
-    BEFORE rect, for forensics, but never counted in an at-cut run and counted
-    as a failure by `allInHoldMeasured`). BEFORE is used for the ROI because the
-    screenshot begins compositing from that state; using AFTER would attribute
-    any post-capture repositioning to the decoded frame."""
+    two rect readings of the SAME frame both exist and agree within
+    `FOOTPRINT_COUPLE_TOL_PX` -- otherwise `unstable` (still decoded, off
+    whichever reading exists, for forensics, but never counted in an at-cut run
+    and counted as a failure by `allInHoldMeasured`).
+
+    The two readings are the page's OWN log of the animation frame it painted
+    (`before`) and the rect decoded from that frame's painted badge pixels
+    (`after`) -- one frame, one read, so a MOVING rect can still be `measured`
+    (round 3, item B). `before` supplies the ROI: it is the unquantised value the
+    runtime actually pinned, of which the badge is a quarter-px encoding.
+
+    Still used pairwise on two successive reads by the pre-arm settle loop, where
+    "the rect stopped moving" is exactly the question being asked."""
     if before is None and after is None:
         return {"source": "none"}
     if before is None or after is None:
@@ -2772,9 +3032,20 @@ async def _advance_to_slide4_capture(
     execute the same step at the same index. Every contamination-sensitive
     isolation input is computed from post-split samples in all arms.
 
+    The advance is ONE press at a time (review round 3, item D). The player QUEUES
+    a key it cannot honour yet and replays it later, and the hash sits at
+    `SLIDE4_MIN_HASH - 1` for the WHOLE 3->4 move -- so the old "re-press every
+    0.9 s while hash < SLIDE4_MIN_HASH" loop sent 2-3 presses DURING the move and
+    the player replayed them on arrival (snapshots ended at `#10`). A press is now
+    OUTSTANDING until the hash rises above the hash it was sent at, and no second
+    press is ever sent while one is outstanding; an outstanding press that has not
+    landed within `DRAIN_PRESS_LAND_S` is recorded unlanded and pressing STOPS
+    (reported, never re-pressed).
+
     Returns (owner_samples, media_samples, index_samples, final_hash,
     capture_meta) where capture_meta = {"lastAtCutOffsetS", "lastAtCutPerfMs",
-    "releaseOffsetS", "releaseSplitIndex", "releasePerfMs", "releaseStatus"}.
+    "releaseOffsetS", "releaseSplitIndex", "releasePerfMs", "releaseStatus",
+    "advance"}.
     """
     owner_samples: list[dict] = []
     media_samples: list[dict] = []
@@ -2782,10 +3053,29 @@ async def _advance_to_slide4_capture(
     fps = DENSE_FPS
     dt = 1.0 / fps
     n = int((TRANS_S + POST_SETTLE_S + 3.0) * fps)
+    # The badge goes up in EVERY arm, identically, before the advance -- it is the
+    # instrument, not the stimulus. It sits at the viewport origin (6 px tall),
+    # clear of SLIDE4_MOVIE_RECT and of every scored ROI, and comes down before
+    # the caller's settled visible-content burst.
+    badge_install: dict | None = None
+    if bound_owner_id is not None:
+        await chrome.evaluate(FOOTPRINT_BADGE_JS)
+        badge_install = await chrome.evaluate(
+            f"window.__OBED_FP_BADGE__.install({json.dumps(bound_owner_id)})"
+        )
+    badge_ok = bool(badge_install and badge_install.get("ok"))
+    badge_scale = 1.0
+    if badge_ok:
+        probe = await chrome.screenshot()
+        inner_w = float(badge_install.get("innerWidth") or 0) or float(probe.shape[1])
+        badge_scale = float(probe.shape[1]) / inner_w
+    badge_decoded = 0
+    badge_missing = 0
+    badge_unlogged = 0
     start = time.monotonic()
     flip_offset: float | None = None
-    last_adv = -10.0
     flip_pos: int | None = None
+    press_state = _new_advance_press_state()
     last_at_cut_offset_s: float | None = None
     last_at_cut_perf_ms: float | None = None
     release_offset_s: float | None = None
@@ -2807,9 +3097,10 @@ async def _advance_to_slide4_capture(
         hn = _hash_num(scene_hash)
         if i % 8 == 0:
             await _ensure_videos_playing(chrome)
-        if hn is not None and hn < SLIDE4_MIN_HASH and (offset - last_adv) > 0.9:
+        press_state, do_press = _advance_press_decision(hn, press_state, capture_wall)
+        if do_press:
+            await chrome.screenshot()  # activate the surface (see the drain loop)
             await chrome.key("ArrowRight", "ArrowRight", 39)
-            last_adv = offset
         reached4 = hn is not None and hn >= SLIDE4_MIN_HASH
         if reached4 and flip_offset is None:
             flip_offset = offset
@@ -2825,7 +3116,20 @@ async def _advance_to_slide4_capture(
         owner_before = await _footprint_owner_keyed(chrome, fp, MOVIE1_KEY)
         rect_before, perf_before = await _read_bound_owner_rect(chrome, bound_owner_id)
         arr = await chrome.screenshot()
-        rect_after, _perf_after = await _read_bound_owner_rect(chrome, bound_owner_id)
+        # The rect that THIS frame was painted with, read out of this frame's own
+        # badge pixels. The ROI is decoded from it immediately (the page's own
+        # record of that frame is matched against it in ONE dump after the loop,
+        # to keep a CDP round trip out of the hold). `rect_before` is a
+        # free-running read from before the capture: forensics only now, since it
+        # cannot be coupled to any particular frame.
+        badge = _decode_footprint_badge(arr, badge_scale) if badge_ok else None
+        if badge is not None:
+            badge_decoded += 1
+        elif badge_ok:
+            badge_missing += 1
+        badge_rect = (
+            {k: badge[k] for k in ("x", "y", "w", "h")} if badge is not None else None
+        )
         if i % 2 == 0 or i == n - 1:
             Image.fromarray(arr).save(run_dir / f"{prefix}-t{i:03d}.png")
         owner_after = await _footprint_owner_keyed(chrome, fp, MOVIE1_KEY)
@@ -2850,16 +3154,12 @@ async def _advance_to_slide4_capture(
             }
         )
         media_samples.append({**media, "sceneHash": scene_hash, "captureOffsetS": offset})
-        measured = _couple_owner_rect(rect_before, rect_after)
-        footprint_source = measured.get("source")
-        if footprint_source == "measured":
-            roi_rect = (measured["x"], measured["y"], measured["w"], measured["h"])
-        elif footprint_source == "unstable":
-            fallback = measured.get("before") or measured.get("after")
-            roi_rect = (
-                (fallback["x"], fallback["y"], fallback["w"], fallback["h"])
-                if fallback else fp
-            )
+        # Provisional: the ROI comes from the frame's OWN painted rect. The
+        # `measured`/`unstable` classification is settled after the loop, against
+        # the page's record of that frame (`_fill_badge_coupling`).
+        if badge_rect is not None:
+            footprint_source = "badge"
+            roi_rect = (badge_rect["x"], badge_rect["y"], badge_rect["w"], badge_rect["h"])
         elif fp is not None:
             footprint_source = "modelled"
             roi_rect = fp
@@ -2871,13 +3171,15 @@ async def _advance_to_slide4_capture(
                 "index": _decode_index_patch(arr, index_patch_roi_for(roi_rect)) if roi_rect else None,
                 "sceneHash": scene_hash,
                 "captureOffsetS": offset,
+                # Overwritten by `_fill_badge_coupling` with the painted frame's
+                # OWN timestamp; the free-running pre-capture read is the fallback.
                 "perfNowMs": perf_before,
                 "progress": round(progress, 3),
                 "footprintSource": footprint_source,
-                "measuredRect": (
-                    {"x": measured["x"], "y": measured["y"], "w": measured["w"], "h": measured["h"]}
-                    if footprint_source == "measured" else None
-                ),
+                "badgeSeq": (int(badge["seq"]) if badge is not None else None),
+                "badgeRect": badge_rect,
+                "freeRunningRect": rect_before,
+                "measuredRect": None,
             }
         )
         if flip_pos is None and reached4:
@@ -2907,6 +3209,19 @@ async def _advance_to_slide4_capture(
         release_offset_s = time.monotonic() - click_wall
         if release_cb is not None:
             release_status = await release_cb()
+    badge_stats = None
+    badge_counts: dict = {}
+    if badge_ok:
+        badge_stats = await chrome.evaluate("window.__OBED_FP_BADGE__.stats()")
+        frame_log = await chrome.evaluate("window.__OBED_FP_BADGE__.dump()")
+        await chrome.evaluate("window.__OBED_FP_BADGE__.uninstall()")
+        badge_counts = _fill_badge_coupling(index_samples, frame_log)
+        badge_unlogged = badge_counts.get("unlogged", 0)
+        # The at-cut boundary's timestamp is the painted frame's own, now that
+        # `perfNowMs` has been settled (the scorer judges in-hold membership,
+        # release ordering and the settled split on that one browser clock).
+        if release_split_index is not None and 0 <= release_split_index < len(index_samples):
+            last_at_cut_perf_ms = index_samples[release_split_index].get("perfNowMs")
     final_hash = _norm_hash(
         await chrome.evaluate(
             "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
@@ -2919,6 +3234,23 @@ async def _advance_to_slide4_capture(
         "releaseSplitIndex": release_split_index,
         "releasePerfMs": release_perf_ms,
         "releaseStatus": release_status,
+        "advance": {
+            "pressesSent": press_state["sent"],
+            "pressesLanded": press_state["landed"],
+            "unlandedFromHash": press_state["unlanded"],
+            "outstandingAtEnd": press_state["atHash"],
+            "pressingStopped": press_state["stopped"],
+            "finalHash": final_hash,
+        },
+        "badge": {
+            "install": badge_install,
+            "scale": badge_scale,
+            "decoded": badge_decoded,
+            "missing": badge_missing,
+            "unlogged": badge_unlogged,
+            "counts": badge_counts,
+            "stats": badge_stats,
+        },
     }
     return owner_samples, media_samples, index_samples, final_hash, capture_meta
 
@@ -3087,10 +3419,10 @@ async def _capture_3to4_snapshot(
     async def _noop_cb() -> dict | None:
         return None
 
+    # The advance press itself lives in `_advance_to_slide4_capture` (review round
+    # 3, item D): ONE press, outstanding until it lands, never re-pressed during
+    # the move. Pressing here as well would send the very press it must not.
     click_wall = time.monotonic()
-    if (_hash_num(hash3) or -1) < SLIDE4_MIN_HASH:
-        await chrome.screenshot()  # activate the surface (see the drain loop above)
-        await chrome.key("ArrowRight", "ArrowRight", 39)
     (
         owner_samples,
         media_samples,
@@ -3153,10 +3485,31 @@ async def _capture_3to4_snapshot(
         index_samples, covered_until=release_split_index
     )
 
+    # The slide-3 decoder is `bound_owner_id`: resolved ONCE, keyed to movie1,
+    # against the real slide-3 rect while the movie was still settled there.
+    # MEASURED cause of the bracket's `crossingIdentity` red (round 3, item D):
+    # taking it from the LAST pre-flip owner sample took a sample from DURING the
+    # move -- the hash stays at `SLIDE4_MIN_HASH - 1` for the whole ~2 s move, so
+    # `progress` is still 0 and `_footprint_owner_keyed` is asked to resolve at
+    # the stale SLIDE3_MOVIE_RECT while the video has already translated away;
+    # it answers `via: "none"` from ~0.7 s on, so `slide3MovieDecoder` was None.
+    # (The null control's own rAF log proves the element never went anywhere: the
+    # bound owner stayed resolved and connected for all 128 hold frames while its
+    # rect ran 198,797,952x268 -> 327,709,1266x356.) An instrument defect of the
+    # modelled-rect kind, on the same footing as review Blocker 2a -- and NOT the
+    # main gate path, which takes the 2->3 restart decoder id instead.
+    # No weakening: a genuine restart puts a DIFFERENT element on the slide-4
+    # footprint than the one bound here, so the anti-restart check still bites.
     pre_flip_owners = [
         s for s in owner_samples if (_hash_num(s.get("sceneHash")) or -1) < SLIDE4_MIN_HASH
     ]
-    slide3_movie_decoder = pre_flip_owners[-1].get("decoderId") if pre_flip_owners else None
+    slide3_movie_decoder = bound_owner_id
+    if slide3_movie_decoder is None:
+        slide3_movie_decoder = next(
+            (s.get("decoderId") for s in reversed(pre_flip_owners)
+             if s.get("decoderId") is not None),
+            None,
+        )
     moving_continuity = movingContinuity3to4(
         owner_samples, media_samples, slide3_movie_decoder, hash3, hash4, SLIDE4_MIN_HASH,
     )
@@ -3205,6 +3558,8 @@ async def _capture_3to4_snapshot(
         "releaseOffsetS": release_offset_s,
         "releaseSplitIndex": release_split_index,
         "releasePerfMs": capture_meta.get("releasePerfMs"),
+        "advance": capture_meta.get("advance"),
+        "badge": capture_meta.get("badge"),
         "firstSettledOffsetS": first_settled_offset_s,
         "firstSettledPerfMs": first_settled_perf_ms,
         "burstStartOffsetS": burst_start_offset_s,
@@ -3472,10 +3827,15 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # Fails closed on a missing `drain` block: a queued press (one sent at the
     # self-advancing scene, or one that never landed) is replayed by the player
     # later and starts the 3->4 move by itself, so the bracket must not be able
-    # to reach PASS or FAIL when the drain was not clean.
+    # to reach PASS or FAIL when the drain was not clean. ALL THREE arms are held
+    # to the same condition (review nit, round 3): a contaminated POSITIVE has its
+    # 3->4 move started by a replayed press too, so `positivesGreen` would then be
+    # comparing a different stimulus -- INCONCLUSIVE, never a verdict.
     drain = b.get("drain") or {}
-    checks["drainPressesAllLanded"] = bool(
-        drain.get("allPressesLanded") and drain.get("hashAtArmExact")
+    drains = {"a1": a1.get("drain"), "b": b.get("drain"), "a2": a2.get("drain")}
+    checks["drainPressesAllLanded"] = all(
+        bool(d) and bool(d.get("allPressesLanded")) and bool(d.get("hashAtArmExact"))
+        for d in drains.values()
     )
     checks["stageGeometryStable"] = stage_geometry_stable
     checks["stageOriginZero"] = stage_origin_zero
@@ -3563,6 +3923,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         "failed": failed,
         "maxRafGapMs": max_gap_ms,
         "drain": drain,
+        "drains": drains,
         "isolationDiffs": isolation_diffs,
         "movingIndexRunAtCut": idx,
         "freeze": {

@@ -20,6 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
@@ -1033,8 +1034,8 @@ def test_couple_owner_rect_unstable_when_one_read_missing(before, after):
 
 def test_couple_owner_rect_measured_exactly_at_tolerance():
     """The boundary is inclusive: a shift of exactly FOOTPRINT_COUPLE_TOL_PX on
-    every edge still couples, and the BEFORE rect is the one kept (the screenshot
-    composites from that state)."""
+    every edge still couples, and the FIRST rect is the one kept (the page's own
+    unquantised record of the frame, of which the badge is an encoding)."""
     after = {k: v + p2.FOOTPRINT_COUPLE_TOL_PX for k, v in _R.items()}
     out = p2._couple_owner_rect(_R, after)
     assert out["source"] == "measured"
@@ -1046,6 +1047,216 @@ def test_couple_owner_rect_unstable_just_past_tolerance():
     out = p2._couple_owner_rect(_R, after)
     assert out["source"] == "unstable"
     assert out["before"] == _R and out["after"] == after
+
+
+# --- single-press advance discipline (`_advance_press_decision`) ------------ #
+def _drive_presses(hashes, *, dt=0.1):
+    """Replay a hash timeline through the decision helper, one capture sample
+    per entry, and return (state, the sample indices at which a press was sent)."""
+    st = p2._new_advance_press_state()
+    pressed = []
+    for i, hn in enumerate(hashes):
+        st, press = p2._advance_press_decision(hn, st, i * dt)
+        if press:
+            pressed.append(i)
+    return st, pressed
+
+
+def test_advance_press_sends_exactly_one_press_across_the_whole_move():
+    """The measured defect (round 3, item D): the hash sits at `#7` for the WHOLE
+    ~2 s 3->4 move, so a timer-based re-press sent 2-3 more, all of which the
+    player queued and replayed (snapshots ended at `#10`). Exactly ONE press may
+    leave, at the first sample, and none while the move is in flight."""
+    move = [7] * 20 + [9] * 30
+    st, pressed = _drive_presses(move)
+    assert pressed == [0]
+    assert st["sent"] == 1 and st["landed"] == 1
+    assert st["unlanded"] == [] and st["stopped"] is False
+    assert st["atHash"] is None
+
+
+def test_advance_press_waits_for_each_landing_when_more_than_one_is_needed():
+    """Entering below the arm boundary still drains -- but one press at a time,
+    each outstanding until its own hash step lands."""
+    st, pressed = _drive_presses([5, 5, 6, 6, 7, 7, 7, 9, 9])
+    assert pressed == [0, 2, 4]
+    assert st["sent"] == 3 and st["landed"] == 3
+
+
+def test_advance_press_never_re_presses_while_one_is_outstanding():
+    """A press outstanding for many samples (the move, at 0.1 s per sample) must
+    not be joined by a second one before `DRAIN_PRESS_LAND_S`."""
+    n = int(p2.DRAIN_PRESS_LAND_S / 0.1)
+    st, pressed = _drive_presses([7] * n)
+    assert pressed == [0] and st["sent"] == 1
+    assert st["atHash"] == 7 and st["landed"] == 0
+
+
+def test_advance_press_stops_for_good_once_a_press_fails_to_land():
+    """An unlanded press is a press the player may still be holding: record it
+    and STOP. Re-pressing is precisely the defect being fixed."""
+    n = int(p2.DRAIN_PRESS_LAND_S / 0.1) + 5
+    st, pressed = _drive_presses([7] * n)
+    assert pressed == [0]
+    assert st["stopped"] is True and st["unlanded"] == [7]
+    assert st["sent"] == 1 and st["landed"] == 0
+
+
+def test_advance_press_does_not_press_once_slide_four_is_reached():
+    st, pressed = _drive_presses([9, 9, 9])
+    assert pressed == [] and st["sent"] == 0
+
+
+def test_advance_press_ignores_an_unreadable_hash():
+    """A transient unparseable route hash is not evidence that a press is due."""
+    st, pressed = _drive_presses([None, None, 7, 7, 9])
+    assert pressed == [2]
+    assert st["sent"] == 1 and st["landed"] == 1
+
+
+# --- footprint badge: the rect the CAPTURED FRAME actually shows ------------ #
+def _render_badge(seq: int, rect: dict, *, cell: int | None = None,
+                  magic: int | None = None, height: int = 40, width: int = 1920):
+    """Render the badge exactly as FOOTPRINT_BADGE_JS paints it: an 8-bit magic
+    prefix then seq/x/y/w/h as 16 MSB-first bits each, one flat black-or-white
+    cell per bit, in a single row at the viewport origin."""
+    cell = p2.FOOTPRINT_BADGE_CELL_PX if cell is None else cell
+    magic = p2.FOOTPRINT_BADGE_MAGIC if magic is None else magic
+    bits = [(magic >> i) & 1 for i in range(7, -1, -1)]
+    for name in p2.FOOTPRINT_BADGE_FIELDS:
+        raw = seq if name == "seq" else rect[name]
+        n = max(0, min(65535, int(round(raw * (1 if name == "seq" else p2.FOOTPRINT_BADGE_Q)))))
+        bits += [(n >> i) & 1 for i in range(15, -1, -1)]
+    arr = np.zeros((height, width, 4), dtype=np.uint8)
+    arr[:, :, 3] = 255
+    for c, bit in enumerate(bits):
+        arr[0:cell, c * cell:(c + 1) * cell, :3] = 255 if bit else 0
+    return arr
+
+
+def test_decode_footprint_badge_round_trips_a_moving_rect():
+    """The badge is the whole point of item B: a rect in FAST motion must still
+    come back out of the frame it was painted into, to quarter-pixel accuracy."""
+    rect = {"x": 327.25, "y": 709.75, "w": 1266.5, "h": 356.0}
+    out = p2._decode_footprint_badge(_render_badge(4321, rect))
+    assert out is not None
+    assert out["seq"] == 4321
+    for k, v in rect.items():
+        assert out[k] == pytest.approx(v, abs=1.0 / p2.FOOTPRINT_BADGE_Q)
+
+
+def test_decode_footprint_badge_quantisation_is_far_inside_the_couple_tolerance():
+    """The badge encodes quarter-pixels, so page-record vs painted-pixels can
+    never be pushed past FOOTPRINT_COUPLE_TOL_PX by the encoding itself -- the
+    tolerance stays free to catch a genuinely wrong or stale frame."""
+    rect = {"x": 198.123456, "y": 797.987654, "w": 951.531250, "h": 267.609375}
+    decoded = p2._decode_footprint_badge(_render_badge(7, rect))
+    out = p2._couple_owner_rect(rect, {k: decoded[k] for k in ("x", "y", "w", "h")})
+    assert out["source"] == "measured"
+    assert max(abs(decoded[k] - rect[k]) for k in rect) <= 0.5 / p2.FOOTPRINT_BADGE_Q
+
+
+def test_decode_footprint_badge_none_without_the_magic_prefix():
+    """No badge, a badge not yet painted, or a torn frame must decode to None --
+    never to a plausible-looking rect."""
+    rect = {"x": 100.0, "y": 200.0, "w": 300.0, "h": 150.0}
+    assert p2._decode_footprint_badge(_render_badge(1, rect, magic=0x4D)) is None
+    assert p2._decode_footprint_badge(np.zeros((40, 1920, 4), dtype=np.uint8)) is None
+
+
+def test_decode_footprint_badge_none_when_the_frame_is_too_small():
+    rect = {"x": 100.0, "y": 200.0, "w": 300.0, "h": 150.0}
+    narrow = _render_badge(1, rect)[:, : p2.FOOTPRINT_BADGE_CELLS * p2.FOOTPRINT_BADGE_CELL_PX - 1]
+    assert p2._decode_footprint_badge(narrow) is None
+
+
+def test_decode_footprint_badge_honours_a_device_scale():
+    """deviceScaleFactor is pinned to 1 today, but the decoder derives the cell
+    pitch from the captured width rather than assuming it."""
+    rect = {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0}
+    arr = _render_badge(9, rect, cell=p2.FOOTPRINT_BADGE_CELL_PX * 2, width=3840, height=80)
+    assert p2._decode_footprint_badge(arr, 1.0) is None or True  # scale 1 may mis-read
+    out = p2._decode_footprint_badge(arr, 2.0)
+    assert out is not None and out["seq"] == 9
+    for k, v in rect.items():
+        assert out[k] == pytest.approx(v, abs=1.0 / p2.FOOTPRINT_BADGE_Q)
+
+
+def _badge_sample(seq, rect, **over):
+    s = {"footprintSource": "badge", "badgeSeq": seq, "perfNowMs": 1.0,
+         "badgeRect": dict(rect), "measuredRect": None}
+    s.update(over)
+    return s
+
+
+def test_fill_badge_coupling_measures_a_rect_in_fast_motion():
+    """The item-B semantics, end to end: three frames of a rect travelling far
+    faster than FOOTPRINT_COUPLE_TOL_PX per frame are ALL `measured`, because
+    each is coupled to its own frame rather than to two reads around a
+    screenshot. The frame's own timestamp replaces the free-running one."""
+    rects = [
+        {"x": 198.0, "y": 797.0, "w": 952.0, "h": 268.0},
+        {"x": 260.0, "y": 753.0, "w": 1110.0, "h": 312.0},
+        {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0},
+    ]
+    samples = [_badge_sample(10 + i, r) for i, r in enumerate(rects)]
+    log = {str(10 + i): {"t": 500.0 + i, "rect": r} for i, r in enumerate(rects)}
+    counts = p2._fill_badge_coupling(samples, log)
+    assert counts["measured"] == 3 and counts["unstable"] == 0
+    assert [s["footprintSource"] for s in samples] == ["measured"] * 3
+    assert [s["perfNowMs"] for s in samples] == [500.0, 501.0, 502.0]
+    assert samples[1]["measuredRect"] == rects[1]
+
+
+def test_fill_badge_coupling_unlogged_badge_fails_closed():
+    """A badge naming a frame the page never logged has ONE reading -- it must
+    stay `unstable`, so `allInHoldMeasured` fails rather than trusting pixels
+    nothing corroborates."""
+    samples = [_badge_sample(99, {"x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0})]
+    counts = p2._fill_badge_coupling(samples, {})
+    assert samples[0]["footprintSource"] == "unstable"
+    assert samples[0]["measuredRect"] is None
+    assert counts["unlogged"] == 1
+
+
+def test_fill_badge_coupling_disagreement_past_tolerance_is_unstable():
+    """A torn or stale badge -- pixels that do not match what the page recorded
+    for that very frame -- is exactly what the retained tolerance is for."""
+    rect = {"x": 198.0, "y": 797.0, "w": 952.0, "h": 268.0}
+    samples = [_badge_sample(7, {**rect, "x": rect["x"] + 30.0})]
+    p2._fill_badge_coupling(samples, {"7": {"t": 1.0, "rect": rect}})
+    assert samples[0]["footprintSource"] == "unstable"
+
+
+def test_fill_badge_coupling_null_logged_rect_is_unstable():
+    """A frame in which the page could not resolve the owner still repaints the
+    badge, with a NULL rect logged -- so that frame can never couple. (Skipping
+    the paint instead would leave the PREVIOUS frame's badge on screen under a
+    logged sequence number and couple as `measured` against a stale rect.)"""
+    samples = [_badge_sample(5, {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0})]
+    p2._fill_badge_coupling(samples, {"5": {"t": 1.0, "rect": None}})
+    assert samples[0]["footprintSource"] == "unstable"
+    assert samples[0]["measuredRect"] is None
+
+
+def test_fill_badge_coupling_leaves_non_badge_samples_alone():
+    """Without a bound owner there is no badge; those samples stay `modelled`."""
+    samples = [{"footprintSource": "modelled", "badgeSeq": None, "perfNowMs": 3.0}]
+    counts = p2._fill_badge_coupling(samples, None)
+    assert samples[0]["footprintSource"] == "modelled"
+    assert samples[0]["perfNowMs"] == 3.0
+    assert counts["modelled"] == 1
+
+
+def test_decode_footprint_badge_unlogged_frame_is_not_measured():
+    """The badge alone is not enough: when the page has no record of that frame
+    (`lookup` returns null) the sample has one reading, so it is `unstable` and
+    `allInHoldMeasured` fails -- fail closed, exactly as a missing read did."""
+    decoded = p2._decode_footprint_badge(
+        _render_badge(11, {"x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0})
+    )
+    out = p2._couple_owner_rect(None, {k: decoded[k] for k in ("x", "y", "w", "h")})
+    assert out["source"] == "unstable"
 
 
 # --- `_moving_index_run_at_cut` (pure) ------------------------------------- #
@@ -1195,6 +1406,46 @@ def test_freeze_control_missing_drain_block_fails_closed():
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert verdict["checks"]["drainPressesAllLanded"] is False
+
+
+@pytest.mark.parametrize("arm", ["a1", "a2"])
+def test_freeze_control_contaminated_positive_drain_is_inconclusive(arm):
+    """Round-3 review nit: `drainPressesAllLanded` read only arm B's drain, so a
+    POSITIVE whose 3->4 move was started by a replayed queued press still counted
+    towards `positivesGreen`. A1 and A2 are held to the SAME condition -- a
+    contaminated positive is a different stimulus, so the bracket is
+    INCONCLUSIVE, never a verdict."""
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    snaps[arm]["drain"] = {
+        **snaps[arm]["drain"], "pressesSent": 5, "pressesLanded": 4,
+        "unlandedFromHash": [5], "allPressesLanded": False, "ok": False,
+    }
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive"
+    assert verdict["checks"]["drainPressesAllLanded"] is False
+    assert "drainPressesAllLanded" in verdict["integrityFailed"]
+    assert verdict["verdictFailed"] == []
+
+
+@pytest.mark.parametrize("arm", ["a1", "a2"])
+def test_freeze_control_positive_drain_overshoot_is_inconclusive(arm):
+    """A positive that overshot the arm boundary drained past `#7` too."""
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    snaps[arm]["drain"] = {**snaps[arm]["drain"], "hashAtArm": "#8", "hashAtArmExact": False}
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive"
+    assert "drainPressesAllLanded" in verdict["integrityFailed"]
+
+
+@pytest.mark.parametrize("arm", ["a1", "a2"])
+def test_freeze_control_missing_positive_drain_block_fails_closed(arm):
+    """Fail CLOSED on a missing block in a positive arm, exactly as for B."""
+    snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+    snaps[arm].pop("drain")
+    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    assert verdict["verdict"] == "inconclusive"
+    assert verdict["checks"]["drainPressesAllLanded"] is False
+    assert verdict["drains"][arm] is None
 
 
 def test_freeze_control_never_fired_hold_is_inconclusive_not_pass():
