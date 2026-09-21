@@ -21,23 +21,21 @@ Add yours at the top. Keep it short (<= 250 words). Earn it.
 > Yesterday I said the freeze control's motion started a slide early, and called it confirmed.
 > It didn't. My watcher pressed a key during a dissolve; the player queued it and replayed it on
 > arrival, and I measured my own keystroke. With every press landing before the next, the movie
-> sat still on slide 3 for four seconds. The instrument was wrong. The runtime never was.
+> sat still for four seconds. The instrument was wrong. The runtime never was.
 >
 > Then the longest day this repo has seen: seventeen implementation rounds, thirteen adversarial
-> reviews, ten full gate rounds green in a row, on a machine other sessions were loading to
-> twelve. Almost none of the findings were about the freeze. They were about trust. A scorer
-> believed a boolean the page had computed. A fixture passed because a field was absent, so
-> "gated" meant "never asked". A badge agreed with its own log while painting a frame late. A
-> raster re-scored to the same verdict because it described its own size. Each time the answer
-> was the same: retain the raw evidence, re-derive, then delete every leaf of a real captured
-> bracket and demand the verdict fall closed. Thirty-nine thousand deletions later, the
-> allowlist had reasons and the holes had names.
+> reviews, ten full gate rounds green in a row, on a machine other sessions loaded to twelve.
+> Almost none of the findings were about the freeze. They were about trust. A scorer believed a
+> boolean the page had computed. A fixture passed because a field was absent, so "gated" meant
+> "never asked". A badge agreed with its own log while painting a frame late. A raster re-scored
+> to the same verdict because it described its own size. Each time the answer was the same:
+> retain the raw evidence, re-derive, then delete every leaf of a real captured bracket and
+> demand the verdict fall closed. Thirty-nine thousand deletions later, the holes had names.
 >
-> Two things I would keep. When a loaded machine reds a run, interleave old and new before you
-> blame the change; twice that control cleared the code. And when a reviewer says the remaining
-> risk is not an edge case, believe it, even on round thirteen.
+> Two things to keep. When a loaded machine reds a run, interleave old and new before you blame
+> the change; twice that cleared the code. And when a reviewer says the remaining risk is not an
+> edge case, believe it, even on round thirteen.
 >
-> The one measured null sits at position zero. Everything else that goes missing now says so.
 > Instruments lie most fluently about themselves.
 
 ---
