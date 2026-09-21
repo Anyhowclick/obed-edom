@@ -18,6 +18,7 @@ import asyncio
 import base64
 import io
 import json
+import math
 import shutil
 import socket
 import sys
@@ -2871,21 +2872,20 @@ FOOTPRINT_BADGE_JS = r"""
 }
 
 
-# Per-rAF page-side capture collector (review r5 MAJOR 4). The owner resolution,
-# the media/rVFC snapshot and the preserve pool used to cost FIVE CDP round trips
-# per capture sample inside the hold, which is what was driving the >100 ms
-# `maxRafGapOk` stalls. They are all page work; the page does them once per
-# animation frame and the whole series is dumped ONCE after the loop. The capture
-# loop keeps exactly two CDP calls per sample: the scene hash (control flow) and
-# the screenshot. `progress` mirrors `footprint_at`'s linear interpolation off the
-# page's own flip time, so the modelled footprint each row resolves at is the one
-# the Python loop used to resolve.
+# Per-rAF page-side collector: the owner resolution, the media/rVFC snapshot and
+# the preserve pool are page work, done once per animation frame and dumped ONCE
+# after the capture loop, which keeps that loop at two CDP calls per sample (the
+# scene hash and the screenshot). `progress` mirrors `footprint_at`'s linear
+# interpolation off the page's own flip time, so each row resolves at the
+# footprint the Python loop resolved at. The dump carries its own integrity
+# metadata -- ring drops and page-side errors -- because the series is evidence,
+# not diagnostics (plan §10.10).
 CAPTURE_COLLECTOR_JS = r"""
 (function () {
   if (window.__OBED_CAP_COLLECT__) return;
   var MIN4 = %(minHash)d, TRANS_MS = %(transMs)f, KEY = %(key)s;
   var R3 = %(r3)s, R4 = %(r4)s, RING = %(ring)d;
-  var st = {rows: [], running: false, n: 0, flipT: null};
+  var st = {rows: [], running: false, n: 0, flipT: null, dropped: 0, errors: 0, started: null};
 
   function hashNow() {
     return String(window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash);
@@ -2904,11 +2904,11 @@ CAPTURE_COLLECTOR_JS = r"""
     try {
       return P.footprintOwnerDecoderId({x: Math.round(fp[0]), y: Math.round(fp[1]),
                                         w: Math.round(fp[2]), h: Math.round(fp[3]), key: KEY});
-    } catch (e) { return {elId: null, key: null, via: 'error'}; }
+    } catch (e) { st.errors++; return {elId: null, key: null, via: 'error'}; }
   }
   function pool() {
     var P = window.__OBED_P2_PRESERVE__;
-    try { return (P && P.snapshot) ? P.snapshot() : []; } catch (e) { return []; }
+    try { return (P && P.snapshot) ? P.snapshot() : []; } catch (e) { st.errors++; return []; }
   }
   function frame() {
     if (!st.running) return;
@@ -2923,16 +2923,19 @@ CAPTURE_COLLECTOR_JS = r"""
               R3[2] + (R4[2] - R3[2]) * progress, R3[3] + (R4[3] - R3[3]) * progress];
     st.rows.push({t: t, hash: h, progress: progress, fp: fp,
                   owner: ownerAt(fp), media: %(media)s, pool: pool()});
-    while (st.rows.length > RING) st.rows.shift();
+    while (st.rows.length > RING) { st.rows.shift(); st.dropped++; }
     if ((st.n++ %% 8) === 0) ensurePlaying();
     requestAnimationFrame(frame);
   }
   window.__OBED_CAP_COLLECT__ = {
     start: function () {
-      if (!st.running) { st.running = true; requestAnimationFrame(frame); }
+      if (!st.running) { st.running = true; st.started = performance.now(); requestAnimationFrame(frame); }
       return {ok: true};
     },
-    dump: function () { return st.rows; },
+    dump: function () {
+      return {rows: st.rows, dropped: st.dropped, errors: st.errors,
+              started: st.started, running: st.running};
+    },
     stop: function () { st.running = false; return {rows: st.rows.length}; }
   };
 })()
@@ -2967,29 +2970,77 @@ def _nearest_sample_times(times: list[float | None]) -> list[float | None]:
     return out
 
 
-def _collector_rows_for(rows: list[dict], t: float | None) -> tuple[dict, dict]:
-    """The collector rows bracketing one capture sample's own badge-frame time:
-    the last row at or before it (what the pre-screenshot read used to see) and
-    the first row after it (the post-screenshot read). Empty dicts when the
-    series does not reach."""
-    before: dict = {}
-    after: dict = {}
+COLLECTOR_ROW_FIELDS = ("t", "hash", "progress", "fp", "owner", "media", "pool")
+
+
+def _collector_rows_for(
+    rows: list[dict], t: float | None
+) -> tuple[dict | None, dict | None]:
+    """The collector rows genuinely BRACKETING one capture sample's own badge-frame
+    time: the last row at or before it (what the pre-screenshot read used to see)
+    and the first row strictly after it (the post-screenshot read). `(None, None)`
+    when the series does not bracket the sample -- never an extrapolated endpoint,
+    which would lend a gap its neighbours' evidence (plan §10.10)."""
     if t is None:
-        return (rows[-1] if rows else {}), (rows[-1] if rows else {})
+        return None, None
+    before: dict | None = None
     for r in rows:
-        rt = r.get("t")
-        if rt is None:
+        rt = r.get("t") if isinstance(r, dict) else None
+        if not isinstance(rt, (int, float)):
             continue
         if rt <= t:
             before = r
-        elif not after:
-            after = r
+        else:
+            return (before, r) if before is not None else (None, None)
+    return None, None
+
+
+def _collector_series_meta(dump: object) -> dict:
+    """Fail-closed integrity metadata for the ONE page-side collector dump: row
+    count, first/last page clock, rows the ring dropped, page-side errors, and
+    whether every row carries `COLLECTOR_ROW_FIELDS` in non-decreasing time
+    order. `ok` is completed by the caller once every sample is bracketed."""
+    d = dump if isinstance(dump, dict) else {}
+    rows = d.get("rows")
+    rows = rows if isinstance(rows, list) else []
+    schema_ok = bool(rows)
+    monotonic_ok = bool(rows)
+    times: list[float] = []
+    for r in rows:
+        if not isinstance(r, dict) or any(r.get(k) is None for k in COLLECTOR_ROW_FIELDS):
+            schema_ok = False
             break
-    if not before:
-        before = after or (rows[0] if rows else {})
-    if not after:
-        after = before
-    return before, after
+        t = r.get("t")
+        if not isinstance(t, (int, float)) or isinstance(t, bool):
+            schema_ok = False
+            break
+        if times and t < times[-1]:
+            monotonic_ok = False
+        times.append(float(t))
+    return {
+        "rowCount": len(rows),
+        "firstT": times[0] if times else None,
+        "lastT": times[-1] if times else None,
+        "dropped": int(d.get("dropped") or 0),
+        "errors": int(d.get("errors") or 0),
+        "schemaOk": schema_ok,
+        "monotonicOk": monotonic_ok,
+    }
+
+
+def _collector_ok(meta: dict) -> bool:
+    """The collector series is admissible evidence: rows present, schema intact,
+    time non-decreasing, nothing dropped by the ring, no page-side error, and
+    every capture sample bracketed by real rows."""
+    return bool(
+        meta.get("rowCount")
+        and meta.get("schemaOk")
+        and meta.get("monotonicOk")
+        and meta.get("dropped") == 0
+        and meta.get("errors") == 0
+        and meta.get("samples")
+        and meta.get("unbracketed") == 0
+    )
 
 
 def _rehandoff_pair(badge_stats: object, motion_marker: object) -> tuple[int, int] | None:
@@ -3349,21 +3400,24 @@ def _couple_owner_rect(before: dict | None, after: dict | None) -> dict:
     return {"source": "unstable", "before": before, "after": after}
 
 
-def _at_cut_from_perf(
+def _at_cut_boundary(
     index_samples: list[dict], advance_key_perf_ms: float | None
-) -> int | None:
-    """The at-cut segment's first sample: the first badge frame whose own page
-    clock is at or after the advance keydown's. `advancePressIndex + 1` excluded
-    a sample that WAS captured after the dispatch (review r5 MAJOR 3). Fails
-    closed (None) with no keydown clock, which leaves the pre-move Nones in the
-    tally and reds the run."""
-    if advance_key_perf_ms is None:
-        return None
+) -> dict:
+    """The at-cut segment's first sample AND whether that boundary is valid: the
+    first badge frame whose own page clock is at or after the advance keydown's
+    (plan §10.8). Index `0` is a legitimate boundary and must not be confused
+    with an invalid one, so the verdict travels as `ok`: a missing or
+    non-finite keydown clock, or a keydown later than every badge frame, is
+    `{"from": None, "ok": False}` and fails its arm closed."""
+    if not isinstance(advance_key_perf_ms, (int, float)) or isinstance(advance_key_perf_ms, bool):
+        return {"from": None, "ok": False, "reason": "no advance keydown page clock"}
+    if not math.isfinite(float(advance_key_perf_ms)):
+        return {"from": None, "ok": False, "reason": "non-finite advance keydown page clock"}
     for i, s in enumerate(index_samples):
         t = s.get("perfNowMs")
-        if t is not None and t >= advance_key_perf_ms:
-            return i
-    return None
+        if isinstance(t, (int, float)) and not isinstance(t, bool) and t >= advance_key_perf_ms:
+            return {"from": i, "ok": True, "reason": None}
+    return {"from": None, "ok": False, "reason": "no badge frame at or after the advance keydown"}
 
 
 def _moving_index_run_at_cut(
@@ -3373,6 +3427,9 @@ def _moving_index_run_at_cut(
 ) -> tuple[dict, bool]:
     """Score the at-cut counter run over `index_samples[covered_from:covered_until]`.
 
+    `covered_from` is the at-cut boundary and is REQUIRED: `None` means the
+    boundary is invalid, never index 0 (plan §10.8), and the run is not scored.
+
     `flip_index` is the first sample in that segment whose hash reaches slide 4,
     found on the FULL ordered list, never on the measured-only subsequence. The
     flip sample and the FREEZE_MIN_AFTER samples strictly after it must all be
@@ -3380,10 +3437,16 @@ def _moving_index_run_at_cut(
     `flipWindowDecodable=False` (the caller treats that as INCONCLUSIVE). Samples
     outside the segment stay in `indexSamples` for diagnostics only. Rationale and
     measurements: plan §10."""
+    if covered_from is None:
+        return (
+            {"ok": False, "reason": "no valid at-cut boundary", "flipIndex": None,
+             "flipIndexFull": None},
+            False,
+        )
     hi_bound = len(index_samples) - 1
     if covered_until is not None:
         hi_bound = min(hi_bound, int(covered_until))
-    lo_bound = max(0, int(covered_from)) if covered_from is not None else 0
+    lo_bound = max(0, int(covered_from))
     samples = index_samples[lo_bound: hi_bound + 1] if hi_bound >= lo_bound else []
     flip_index_full = next(
         (
@@ -3645,14 +3708,22 @@ async def _advance_to_slide4_capture(
     # ONE dump of the page-side per-rAF series, then each capture sample takes the
     # rows BRACKETING its own badge frame -- the same before/after pair the five
     # deleted per-sample round trips used to fetch (review r5 MAJOR 4).
-    collector_rows = await chrome.evaluate("window.__OBED_CAP_COLLECT__.dump()") or []
+    collector_dump = await chrome.evaluate("window.__OBED_CAP_COLLECT__.dump()") or {}
+    collector_rows = (
+        collector_dump.get("rows") if isinstance(collector_dump, dict) else None
+    ) or []
+    collector = _collector_series_meta(collector_dump)
     await chrome.evaluate("window.__OBED_CAP_COLLECT__.stop()")
     # A sample whose badge did not decode has no page clock of its own; take its
     # nearest neighbour's rather than the end of the series, so a pre-flip sample
     # cannot be handed slide-4 owner rows.
     sample_ts = _nearest_sample_times([s.get("perfNowMs") for s in index_samples])
+    unbracketed = 0
     for s, s_t in zip(index_samples, sample_ts):
         row_b, row_a = _collector_rows_for(collector_rows, s_t)
+        if row_b is None or row_a is None:
+            unbracketed += 1
+            row_b, row_a = {}, {}
         ob, oa = (row_b.get("owner") or {}), (row_a.get("owner") or {})
         owner_samples.append(
             {
@@ -3680,6 +3751,10 @@ async def _advance_to_slide4_capture(
                 "captureOffsetS": s.get("captureOffsetS"),
             }
         )
+    collector["samples"] = len(index_samples)
+    collector["unbracketed"] = unbracketed
+    collector["ok"] = _collector_ok(collector)
+    at_cut = _at_cut_boundary(index_samples, advance_key_perf_ms)
     final_hash = _norm_hash(
         await chrome.evaluate(
             "window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash"
@@ -3695,7 +3770,9 @@ async def _advance_to_slide4_capture(
         "advancePressIndex": advance_press_index,
         "advanceKeyPerfMs": advance_key_perf_ms,
         "collectorRows": len(collector_rows),
-        "atCutFrom": _at_cut_from_perf(index_samples, advance_key_perf_ms),
+        "collector": collector,
+        "atCutFrom": at_cut["from"],
+        "atCutBoundary": at_cut,
         "advance": _advance_gate(press_state, final_hash),
         "badge": {
             "install": badge_install,
@@ -3916,20 +3993,10 @@ async def _capture_3to4_snapshot(
     )
 
     # The slide-3 decoder is `bound_owner_id`: resolved ONCE, keyed to movie1,
-    # against the real slide-3 rect while the movie was still settled there.
-    # MEASURED cause of the bracket's `crossingIdentity` red (round 3, item D):
-    # taking it from the LAST pre-flip owner sample took a sample from DURING the
-    # move -- the hash stays at `SLIDE4_MIN_HASH - 1` for the whole ~2 s move, so
-    # `progress` is still 0 and `_footprint_owner_keyed` is asked to resolve at
-    # the stale SLIDE3_MOVIE_RECT while the video has already translated away;
-    # it answers `via: "none"` from ~0.7 s on, so `slide3MovieDecoder` was None.
-    # (The null control's own rAF log proves the element never went anywhere: the
-    # bound owner stayed resolved and connected for all 128 hold frames while its
-    # rect ran 198,797,952x268 -> 327,709,1266x356.) An instrument defect of the
-    # modelled-rect kind, on the same footing as review Blocker 2a -- and NOT the
-    # main gate path, which takes the 2->3 restart decoder id instead.
-    # No weakening: a genuine restart puts a DIFFERENT element on the slide-4
-    # footprint than the one bound here, so the anti-restart check still bites.
+    # against the real slide-3 rect while the movie was still settled there. The
+    # last-pre-flip-owner fallback resolves at a stale modelled rect mid-move and
+    # answers `via: "none"` (plan §10, item D). No weakening: a genuine restart
+    # puts a DIFFERENT element on the slide-4 footprint than the one bound here.
     pre_flip_owners = [
         s for s in owner_samples if (_hash_num(s.get("sceneHash")) or -1) < SLIDE4_MIN_HASH
     ]
@@ -3991,8 +4058,10 @@ async def _capture_3to4_snapshot(
         "releasePerfMs": capture_meta.get("releasePerfMs"),
         "advance": capture_meta.get("advance"),
         "atCutFrom": capture_meta.get("atCutFrom"),
+        "atCutBoundary": capture_meta.get("atCutBoundary"),
         "advanceKeyPerfMs": capture_meta.get("advanceKeyPerfMs"),
         "collectorRows": capture_meta.get("collectorRows"),
+        "collector": capture_meta.get("collector"),
         "badge": capture_meta.get("badge"),
         "firstSettledOffsetS": first_settled_offset_s,
         "firstSettledPerfMs": first_settled_perf_ms,
@@ -4061,6 +4130,23 @@ def _cover_tracks_footprint(raf_log: list[dict]) -> bool:
         ):
             return False
     return True
+
+
+def _at_cut_boundary_valid(snap: dict) -> bool:
+    """One arm's at-cut boundary is admissible: a finite advance-keydown page
+    clock and an in-range first sample (index `0` is legitimate; `None` is not)."""
+    boundary = snap.get("atCutBoundary") or {}
+    key_ms = snap.get("advanceKeyPerfMs")
+    i = boundary.get("from")
+    return bool(
+        isinstance(key_ms, (int, float))
+        and not isinstance(key_ms, bool)
+        and math.isfinite(float(key_ms))
+        and boundary.get("ok") is True
+        and isinstance(i, int)
+        and not isinstance(i, bool)
+        and 0 <= i < len(snap.get("indexSamples") or [])
+    )
 
 
 def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
@@ -4379,6 +4465,20 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         isinstance(s, dict) and s.get("settled") is True for s in settles.values()
     )
     checks["releaseStrictlyBeforeSettleAndBurst"] = release_ordered
+    # The page-side evidence series must be whole in EVERY arm: a truncated dump,
+    # a ring drop, a non-monotonic or malformed row, or a sample the series does
+    # not bracket would hand a capture its neighbours' owner/media rows (review r6
+    # MAJOR 1). Same condition on all three arms -- a positive scored off a gapped
+    # series is not comparable either.
+    checks["collectorSeriesSound"] = all(
+        bool((s.get("collector") or {}).get("ok")) for s in (a1, b, a2)
+    )
+    # ...and the press-relative cut must exist before anything is scored against
+    # it: no keydown page clock, or a keydown later than every badge frame, is an
+    # INVALID boundary, not index 0 (review r6 MAJOR 2).
+    checks["atCutBoundaryValidAllArms"] = all(
+        _at_cut_boundary_valid(s) for s in (a1, b, a2)
+    )
     checks["maxRafGapOk"] = max_gap_ms <= MAX_RAF_GAP_MS
 
     # --- Bracketing positives are GREEN ----------------------------------------
@@ -4416,6 +4516,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         "flipIndexPresent", "flipWindowDecodable", "enoughAfterFlip",
         "releaseStrictlyBeforeSettleAndBurst", "allInHoldMeasured", "rehandoffPairSound",
         "ownerSettledAllArms", "bridgeEngaged",
+        "collectorSeriesSound", "atCutBoundaryValidAllArms",
         "maxRafGapOk",
         "noNegativeAnomaly", "movingContinuityOk", "boundDecoderIsSlide3Decoder",
         "noOwnerAmbiguousInWindow", "rvfcRanThroughHold", "playerBuildErrorsEmpty",
@@ -4443,6 +4544,10 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         "drain": drain,
         "drains": drains,
         "ownerSettles": settles,
+        "collectors": {k: (s.get("collector") or {}) for k, s in (("a1", a1), ("b", b), ("a2", a2))},
+        "atCutBoundaries": {
+            k: (s.get("atCutBoundary") or {}) for k, s in (("a1", a1), ("b", b), ("a2", a2))
+        },
         "isolationDiffs": isolation_diffs,
         "movingIndexRunAtCut": idx,
         "advances": {k: (s.get("advance") or {}) for k, s in (("a1", a1), ("b", b), ("a2", a2))},
@@ -5242,14 +5347,17 @@ async def _run(player: Path) -> dict:
             chrome, run_dir, "mm34", click_wall_c, bound_owner_id=bound_owner_id_c
         )
         advance_c = _capture_meta_c.get("advance") or {}
-        # Fail CLOSED on a contaminated stimulus: unless exactly one press was
-        # sent from a SETTLED `#7` (exact hash AND a stopped owner rect) and
-        # landed, with nothing outstanding or unlanded and the boundary reached,
-        # finding 13 is not looking at the intended 3->4 move.
+        # Fail CLOSED on a contaminated stimulus or unsound evidence: unless
+        # exactly one press was sent from a SETTLED `#7` (exact hash AND a stopped
+        # owner rect) and landed, the page-side collector series is whole and
+        # brackets every capture, and the press-relative cut boundary is valid,
+        # finding 13 is not looking at the intended 3->4 move (review r6).
         advance_c_ok = (
             bool(advance_c.get("ok"))
             and bool(settle_c.get("exact"))
             and bool(owner_settle_c.get("settled"))
+            and bool((_capture_meta_c.get("collector") or {}).get("ok"))
+            and bool((_capture_meta_c.get("atCutBoundary") or {}).get("ok"))
         )
         # Counter progression is scored over the SETTLED slide-4 window (footprint
         # fully at the destination rect, progress>=0.98) so the moving ROI lands on
@@ -5612,6 +5720,8 @@ async def _run(player: Path) -> dict:
                 "advanceSettle": settle_c,
                 "advanceOwnerSettle": owner_settle_c,
                 "advanceOk": advance_c_ok,
+                "collector": _capture_meta_c.get("collector"),
+                "atCutBoundary": _capture_meta_c.get("atCutBoundary"),
                 "movingContinuity3to4": moving_continuity,
                 "movingIndexRun": moving_index_run,
                 "movingIndexRunAtCut": moving_index_run_at_cut,

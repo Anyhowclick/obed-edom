@@ -941,10 +941,23 @@ def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool,
     # two of the three arms), so it scores the whole covered_until segment; only
     # the SCORER re-runs it with `covered_from`.
     moving_index_run_at_cut, flip_window_decodable = p2._moving_index_run_at_cut(
-        samples, covered_until=FREEZE_SPLIT_INDEX_34
+        samples, covered_until=FREEZE_SPLIT_INDEX_34, covered_from=0
     )
     settled_index_progression = p2.score_index_progression(list(settled_indices))
     settled = samples[FREEZE_SPLIT_INDEX_34 + 1:]
+    # The advance keydown's own page clock, and the at-cut boundary derived from
+    # it by the REAL helper -- never a hand-set index (review r6 MAJOR 2).
+    advance_key_perf_ms = min(s["perfNowMs"] for s in samples)
+    at_cut_boundary = p2._at_cut_boundary(samples, advance_key_perf_ms)
+    # A whole page-side collector series: every capture bracketed, nothing
+    # dropped, no page-side error (review r6 MAJOR 1).
+    collector = {
+        "rowCount": 4 * len(samples), "firstT": samples[0]["perfNowMs"] - 100.0,
+        "lastT": samples[-1]["perfNowMs"] + 100.0, "dropped": 0, "errors": 0,
+        "schemaOk": True, "monotonicOk": True, "samples": len(samples),
+        "unbracketed": 0,
+    }
+    collector["ok"] = p2._collector_ok(collector)
     snap = {
         "hash3": "#7", "hash4": "#8",
         "armHash": "#7",
@@ -969,6 +982,10 @@ def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool,
         "movingIndexRunAtCut": moving_index_run_at_cut,
         "flipWindowDecodable": flip_window_decodable,
         "indexSamples": samples,
+        "advanceKeyPerfMs": advance_key_perf_ms,
+        "atCutFrom": at_cut_boundary["from"],
+        "atCutBoundary": at_cut_boundary,
+        "collector": collector,
         "settledIndexProgression": settled_index_progression,
         "movingContinuity3to4": {
             "ok": True, "failed": [], "slide4Owner": 4, "slide3MovieDecoder": 4,
@@ -1448,7 +1465,7 @@ def test_fill_badge_coupling_null_rect_badges_still_take_the_sequence_checks():
     assert counts["seqViolation"] == 1
 
 
-# --- `_at_cut_from_perf` (review r5 MAJOR 3) -------------------------------- #
+# --- `_at_cut_boundary` (review r5 MAJOR 3, r6 MAJOR 2) --------------------- #
 def _press_window_samples(press_index_value):
     """Thirteen samples on one page clock. The advance keydown lands at 1000 ms and
     the sample at index 2 is captured 5 ms AFTER it -- its screenshot follows the
@@ -1463,11 +1480,139 @@ def _press_window_samples(press_index_value):
     ]
 
 
-def test_at_cut_from_perf_starts_at_the_first_frame_after_the_keydown():
+def test_at_cut_boundary_starts_at_the_first_frame_after_the_keydown():
     samples = _press_window_samples(12)
-    assert p2._at_cut_from_perf(samples, 1000.0) == 2, "the press-index sample itself"
-    assert p2._at_cut_from_perf(samples, None) is None, "fails closed without a clock"
-    assert p2._at_cut_from_perf(samples, 10_000.0) is None
+    assert p2._at_cut_boundary(samples, 1000.0) == {
+        "from": 2, "ok": True, "reason": None
+    }, "the press-index sample itself"
+
+
+def test_at_cut_boundary_fails_closed_without_a_usable_keydown_clock():
+    """Review r6 MAJOR 2. A missing timestamp, and a timestamp later than every
+    badge frame, are INVALID boundaries -- distinguishable from a legitimate 0."""
+    samples = _press_window_samples(12)
+    missing = p2._at_cut_boundary(samples, None)
+    assert missing["from"] is None and missing["ok"] is False
+
+    late = p2._at_cut_boundary(samples, 10_000.0)
+    assert late["from"] is None and late["ok"] is False
+
+    nonfinite = p2._at_cut_boundary(samples, float("nan"))
+    assert nonfinite["ok"] is False
+
+
+def test_at_cut_boundary_zero_is_legitimate_and_not_an_error():
+    """A keydown at or before the first badge frame really does put the whole
+    capture at the cut -- `from == 0` with `ok` True, which the scorer must not
+    confuse with the None above (this is the live schedule: atCutFrom == 0)."""
+    samples = _press_window_samples(12)
+    boundary = p2._at_cut_boundary(samples, samples[0]["perfNowMs"])
+    assert boundary == {"from": 0, "ok": True, "reason": None}
+    assert p2._at_cut_boundary(samples, 0.0)["from"] == 0
+
+
+# --- page-side collector series (review r6 MAJOR 1) ------------------------- #
+def _collector_row(t: float, **overrides) -> dict:
+    row = {
+        "t": t, "hash": "#8", "progress": 0.5, "fp": [1.0, 2.0, 3.0, 4.0],
+        "owner": {"elId": 4, "key": "movie1", "via": "keyed"},
+        "media": {"currentTime": 1.2}, "pool": [],
+    }
+    row.update(overrides)
+    return row
+
+
+def _collector_dump(times, **overrides) -> dict:
+    dump = {"rows": [_collector_row(t) for t in times], "dropped": 0, "errors": 0,
+            "started": 0.0, "running": True}
+    dump.update(overrides)
+    return dump
+
+
+def _collector_meta_for(dump: dict, sample_times) -> dict:
+    """The capture side's own arithmetic: series metadata, then one bracket
+    lookup per capture sample."""
+    meta = p2._collector_series_meta(dump)
+    rows = dump.get("rows") or []
+    unbracketed = sum(
+        1 for t in sample_times
+        if any(r is None for r in p2._collector_rows_for(rows, t))
+    )
+    meta["samples"] = len(list(sample_times))
+    meta["unbracketed"] = unbracketed
+    meta["ok"] = p2._collector_ok(meta)
+    return meta
+
+
+def test_collector_series_is_sound_when_every_sample_is_bracketed():
+    dump = _collector_dump([0.0, 16.0, 32.0, 48.0, 64.0])
+    meta = _collector_meta_for(dump, [20.0, 40.0])
+    assert meta["ok"] is True
+    assert (meta["rowCount"], meta["firstT"], meta["lastT"]) == (5, 0.0, 64.0)
+    assert meta["unbracketed"] == 0
+
+
+def test_collector_truncated_dump_fails_closed():
+    """A dump that stops before the last capture: the trailing samples have no
+    row AFTER them, so they are unbracketed -- no endpoint extrapolation."""
+    dump = _collector_dump([0.0, 16.0, 32.0])
+    meta = _collector_meta_for(dump, [8.0, 100.0])
+    assert meta["unbracketed"] == 1
+    assert meta["ok"] is False
+    assert p2._collector_rows_for(dump["rows"], 100.0) == (None, None)
+    assert p2._collector_rows_for(dump["rows"], -5.0) == (None, None)
+
+
+def test_collector_gap_containing_a_sample_fails_closed():
+    """The exact r6 counter-example: a dropped interval that happens to contain a
+    decoder handoff must not hand its captures the neighbouring healthy rows."""
+    dump = _collector_dump([0.0, 16.0, 500.0, 516.0], dropped=12)
+    meta = _collector_meta_for(dump, [8.0, 250.0])
+    assert meta["dropped"] == 12
+    assert meta["ok"] is False, "the ring dropped rows"
+
+    # ...and even with `dropped` unreported, the sample inside the gap IS
+    # bracketed by rows 16.0 and 500.0, so the drop counter is what catches it.
+    honest = _collector_meta_for(_collector_dump([0.0, 16.0, 500.0, 516.0]), [8.0, 250.0])
+    assert honest["unbracketed"] == 0 and honest["ok"] is True
+
+
+def test_collector_non_monotonic_rows_fail_closed():
+    dump = _collector_dump([0.0, 32.0, 16.0, 48.0])
+    meta = _collector_meta_for(dump, [8.0])
+    assert meta["monotonicOk"] is False
+    assert meta["ok"] is False
+
+
+def test_collector_missing_field_fails_closed():
+    for field in p2.COLLECTOR_ROW_FIELDS:
+        dump = _collector_dump([0.0, 16.0, 32.0])
+        dump["rows"][1][field] = None
+        meta = _collector_meta_for(dump, [8.0])
+        assert meta["schemaOk"] is False, field
+        assert meta["ok"] is False, field
+
+
+def test_collector_page_side_error_and_empty_series_fail_closed():
+    assert _collector_meta_for(_collector_dump([0.0, 16.0], errors=1), [8.0])["ok"] is False
+    assert _collector_meta_for(_collector_dump([]), [8.0])["ok"] is False
+    assert _collector_meta_for(_collector_dump([0.0, 16.0]), [])["ok"] is False, "no captures"
+    assert p2._collector_series_meta(None)["schemaOk"] is False
+
+
+def test_collector_undecoded_sample_time_is_unbracketed():
+    """A capture with no page clock at all (`None`) cannot be bracketed."""
+    dump = _collector_dump([0.0, 16.0, 32.0])
+    assert p2._collector_rows_for(dump["rows"], None) == (None, None)
+    assert _collector_meta_for(dump, [None, 8.0])["ok"] is False
+
+
+def test_moving_index_run_at_cut_refuses_an_invalid_boundary():
+    """`covered_from=None` means "no valid boundary", never index 0 -- the run is
+    not scored and the window is not decodable, so the arm fails closed."""
+    result, decodable = p2._moving_index_run_at_cut(_cut_samples(), covered_from=None)
+    assert decodable is False
+    assert result["ok"] is False and result["reason"] == "no valid at-cut boundary"
 
 
 def test_at_cut_segment_keeps_an_anomalous_press_index_sample():
@@ -1482,7 +1627,7 @@ def test_at_cut_segment_keeps_an_anomalous_press_index_sample():
     # 11 -> 140 is a mod-256 jump of 129, i.e. a backward step past half the
     # modulo: `negativeAnomaly`, the transient-reset signature.
     anomalous = _press_window_samples(140)
-    assert p2._at_cut_from_perf(anomalous, 1000.0) == start
+    assert p2._at_cut_boundary(anomalous, 1000.0)["from"] == start
     run, decodable = p2._moving_index_run_at_cut(anomalous, covered_from=start)
     assert decodable is True
     assert run["ok"] is False, run
@@ -1575,7 +1720,7 @@ def test_moving_index_run_at_cut_flip_is_on_the_full_list():
     the first resolvable one in the measured-only subsequence."""
     samples = _cut_samples()
     samples[1]["footprintSource"] = "unstable"
-    result, decodable = p2._moving_index_run_at_cut(samples)
+    result, decodable = p2._moving_index_run_at_cut(samples, covered_from=0)
     assert result["flipIndexFull"] == 3
     assert decodable is True
 
@@ -1586,7 +1731,7 @@ def test_moving_index_run_at_cut_measured_but_undecoded_is_not_decodable():
     only the source tag, so an all-None window scored a freeze run)."""
     samples = _cut_samples()
     samples[4]["index"] = None
-    result, decodable = p2._moving_index_run_at_cut(samples)
+    result, decodable = p2._moving_index_run_at_cut(samples, covered_from=0)
     assert decodable is False
     assert result["ok"] is False and result["reason"] == "flip window not decodable"
 
@@ -1597,7 +1742,7 @@ def test_moving_index_run_at_cut_all_none_window_never_scores_a_freeze_run():
     samples = _cut_samples()
     for s in samples[3:]:
         s["index"] = None
-    result, decodable = p2._moving_index_run_at_cut(samples)
+    result, decodable = p2._moving_index_run_at_cut(samples, covered_from=0)
     assert decodable is False
     assert result.get("freezeRunAtCut") is None
 
@@ -1606,8 +1751,8 @@ def test_moving_index_run_at_cut_needs_strictly_after_flip_samples():
     """FREEZE_MIN_AFTER samples STRICTLY after the flip -- the flip sample itself
     does not count towards them (the release off-by-one)."""
     short = _cut_samples(n_after=p2.FREEZE_MIN_AFTER - 1)
-    assert p2._moving_index_run_at_cut(short)[1] is False
-    assert p2._moving_index_run_at_cut(_cut_samples())[1] is True
+    assert p2._moving_index_run_at_cut(short, covered_from=0)[1] is False
+    assert p2._moving_index_run_at_cut(_cut_samples(), covered_from=0)[1] is True
 
 
 def test_moving_index_run_at_cut_ignores_post_release_samples():
@@ -1616,7 +1761,7 @@ def test_moving_index_run_at_cut_ignores_post_release_samples():
     samples = _cut_samples()
     samples += [{"index": 100 + i, "sceneHash": "#8", "footprintSource": "measured"} for i in range(8)]
     covered = 3 + p2.FREEZE_MIN_AFTER
-    result, decodable = p2._moving_index_run_at_cut(samples, covered_until=covered)
+    result, decodable = p2._moving_index_run_at_cut(samples, covered_until=covered, covered_from=0)
     assert decodable is True
     assert result["n"] == covered + 1
     assert result["n"] - result["flipIndex"] == p2.FREEZE_MIN_AFTER + 1
@@ -1626,14 +1771,14 @@ def test_moving_index_run_at_cut_truncated_window_is_not_decodable():
     """A covered segment that stops before flip + FREEZE_MIN_AFTER cannot judge
     the cut."""
     samples = _cut_samples()
-    result, decodable = p2._moving_index_run_at_cut(samples, covered_until=3 + 2)
+    result, decodable = p2._moving_index_run_at_cut(samples, covered_until=3 + 2, covered_from=0)
     assert decodable is False
     assert result["ok"] is False
 
 
 def test_moving_index_run_at_cut_no_slide4_sample():
     samples = [{"index": 30 + i, "sceneHash": "#7", "footprintSource": "measured"} for i in range(5)]
-    result, decodable = p2._moving_index_run_at_cut(samples)
+    result, decodable = p2._moving_index_run_at_cut(samples, covered_from=0)
     assert decodable is False
     assert result["reason"] == "no sample reached slide 4"
 
@@ -1641,7 +1786,7 @@ def test_moving_index_run_at_cut_no_slide4_sample():
 def test_moving_index_run_at_cut_positive_arm_is_green():
     """The live positive arm's shape: an advancing counter through the cut scores
     `ok` with no freeze run -- the negative control's counterpart."""
-    result, decodable = p2._moving_index_run_at_cut(_cut_samples(frozen=False))
+    result, decodable = p2._moving_index_run_at_cut(_cut_samples(frozen=False), covered_from=0)
     assert decodable is True
     assert result["ok"] is True and result["freezeRunAtCut"] == 0
 
@@ -1657,6 +1802,54 @@ def test_freeze_control_passes_on_clean_bracket():
     assert verdict["ok"] is True, verdict["failed"]
     assert verdict["verdict"] == "pass"
     assert verdict["isolationDiffs"] == {}
+
+
+def test_freeze_control_unsound_collector_is_inconclusive_in_every_arm():
+    """Review r6 MAJOR 1. The page-side evidence series is gated in ALL THREE
+    arms: a gapped or truncated dump anywhere makes the bracket INCONCLUSIVE, not
+    a verdict about the counter."""
+    for arm in ("a1", "b", "a2"):
+        snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+        snaps[arm]["collector"] = {**snaps[arm]["collector"], "unbracketed": 1, "ok": False}
+        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        assert verdict["verdict"] == "inconclusive", arm
+        assert "collectorSeriesSound" in verdict["integrityFailed"], arm
+
+    missing = _freeze_b_snap_34()
+    missing.pop("collector")
+    verdict = p2._score_freeze_control(_positive_snap_34(), missing, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "collectorSeriesSound" in verdict["integrityFailed"]
+
+
+def test_freeze_control_invalid_at_cut_boundary_is_inconclusive_in_every_arm():
+    """Review r6 MAJOR 2. No keydown page clock, or one later than every badge
+    frame, is an invalid cut boundary in any arm -- the positives must not stay
+    green off a boundary that was silently index 0."""
+    for arm in ("a1", "b", "a2"):
+        snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _positive_snap_34()}
+        snaps[arm]["advanceKeyPerfMs"] = None
+        snaps[arm]["atCutBoundary"] = p2._at_cut_boundary(snaps[arm]["indexSamples"], None)
+        snaps[arm]["atCutFrom"] = None
+        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        assert verdict["verdict"] == "inconclusive", arm
+        assert "atCutBoundaryValidAllArms" in verdict["integrityFailed"], arm
+
+    late = _positive_snap_34()
+    late["atCutBoundary"] = p2._at_cut_boundary(late["indexSamples"], 1e9)
+    late["advanceKeyPerfMs"] = 1e9
+    verdict = p2._score_freeze_control(late, _freeze_b_snap_34(), _positive_snap_34())
+    assert "atCutBoundaryValidAllArms" in verdict["integrityFailed"]
+
+
+def test_freeze_control_at_cut_boundary_zero_still_passes():
+    """...while a LEGITIMATE `from == 0` -- the live schedule -- is admissible
+    and the clean bracket still passes (no fail-closed overreach)."""
+    a1, b, a2 = _positive_snap_34(), _freeze_b_snap_34(), _positive_snap_34()
+    for snap in (a1, b, a2):
+        assert snap["atCutBoundary"]["from"] == 0 and snap["atCutBoundary"]["ok"] is True
+    verdict = p2._score_freeze_control(a1, b, a2)
+    assert verdict["verdict"] == "pass", verdict["failed"]
 
 
 def test_freeze_control_arm_failure_is_inconclusive():

@@ -132,7 +132,7 @@ queues a press it cannot honour and replays it at `#7`, starting the real 3→4 
 in-hold sample" rule; re-measure `FREEZE_TRIGGER_MAX_RAFS` on ≥10 clean runs (worst + 1); apply the same one-press
 discipline to `_advance_to_slide4_capture` on the main gate path, then a full gate round.
 
-## 10. Measurements (rounds 4–7)
+## 10. Measurements (rounds 4–9)
 Every number that used to live in a code comment lands here; the code keeps only the behavioural
 invariant and a pointer to this section. Re-measure whenever the capture loop's per-frame cost
 changes — all of the trigger bounds track the HARNESS, not the player alone.
@@ -220,12 +220,25 @@ rect synchronously, re-queues from its own rAF callback):
   can never enter the scored window. Every frame that reads at all from the re-handoff onward is
   residual-0 against the pin's own rect.
 
-### 10.8 Pre-move sample exclusion (round 7)
-Samples captured at or before the advance press are pre-move: the movie is still on its slide-3 rect,
-whose counter has its own mapping, so they decode None BY DESIGN (live: `i = 0`). The exclusion is a
-stated rule — `capture_meta["atCutFrom"] = advancePressIndex + 1`, fed to `_moving_index_run_at_cut`
-as `covered_from` on the capture side — never a hardcoded index, so the `nDecodable` fraction carries
-no silent free miss. The raw samples stay in `indexSamples` for diagnostics.
+### 10.8 The at-cut boundary (round 7; page clock round 8 r5 MAJOR 3; fail-closed round 9 r6 MAJOR 2)
+Samples captured before the advance press are pre-move: the movie is still on its slide-3 rect, whose
+counter has its own mapping, so they decode None BY DESIGN. The exclusion is a stated rule, never a
+hardcoded index, so the `nDecodable` fraction carries no silent free miss; the raw samples stay in
+`indexSamples` for diagnostics.
+
+The boundary is a PAGE CLOCK, not a sample count. `_at_cut_boundary` returns the first badge frame
+whose own `perfNowMs` is at or after the ArrowRight keydown's `performance.now()`, recorded in every
+arm. `advancePressIndex + 1` was wrong in both directions: the press sample's screenshot is taken
+AFTER the dispatch, so it belongs inside the segment, and an anomaly confined to it was being
+discarded. Live: `atCutFrom == 0` in 13/13 — the keydown precedes the first badge frame, so the whole
+capture is at the cut.
+
+That makes `0` a legitimate boundary, so validity travels separately: `_at_cut_boundary` returns
+`{"from", "ok", "reason"}` and answers `{"from": None, "ok": False}` for a missing or non-finite
+keydown clock and for a keydown later than every badge frame. `_moving_index_run_at_cut` treats
+`covered_from=None` as "no valid boundary" and refuses to score (never index 0), and
+`atCutBoundaryValidAllArms` is an integrity key requiring a finite `advanceKeyPerfMs` and an in-range
+`from` in A1/B/A2; MAIN carries the same condition in `advance_c_ok`.
 
 ### 10.9 Owner-rect settle (round 7, r4 MAJOR 2)
 The hash reaching `#7` is an instantaneous value, not a settled build: the `#7` build's own animation
@@ -260,5 +273,20 @@ is frame-synchronised, not encode-bound — measured over 30 captures each at `d
 
 No parameter reduces it; the two that change the pixels (`jpeg`, `fromSurface=false`) break the badge
 decode outright. So the screenshot stays exactly as it was. `MAX_RAF_GAP_MS` is NOT raised: on 13
-clean round-8 brackets the largest gap was 64.3 ms, 36 ms inside the 100 ms bound, with two batches
-started at load average 8.7 and 5.4.
+clean round-8 brackets the largest gap was 64.3 ms, 36 ms inside the 100 ms bound. Round-8 ran three
+batches; the logs record the 1-minute load at the start of only two of them (8.7 and 5.4), so the
+third is unattested. Round 9 re-measured on the fail-closed build: 6 clean brackets in two batches
+started at load 5.2 and 5.5 (max gap 53.8-57.8 ms, trigger delay 158.4-162.9 ms, 8 frames in all 6),
+plus the e2e fast run at load 6.9. Every load figure here is the `uptime` 1-minute average printed at
+the head of that batch's own log.
+
+
+### 10.11 Collector series integrity (round 9, r6 MAJOR 1)
+The page-side series (§10.10) is evidence, so it is fail-closed as evidence. The dump carries its own
+metadata — row count, first/last page clock, rows the ring dropped, page-side errors — and
+`_collector_series_meta` additionally requires every row to carry `COLLECTOR_ROW_FIELDS` in
+non-decreasing time order. `_collector_rows_for` no longer extrapolates: a sample is admissible only
+when a real row lies at or before it AND a real row lies strictly after it, so a truncated dump or a
+gap cannot hand a capture its neighbours' owner/media rows. `collectorSeriesSound` (rows present,
+schema intact, monotonic, `dropped == 0`, `errors == 0`, every capture bracketed) is an integrity key
+across A1/B/A2 and part of MAIN's `advance_c_ok`.

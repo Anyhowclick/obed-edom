@@ -19,7 +19,11 @@ the code is the source of truth.** One sub-doc kept: [`../research/kpf_renderer_
 ## P2 status — the probe & its findings
 Offline, no Keynote: `scripts/p2_recovery_html_adversarial.py` (`--reuse-export --disposable
 --wait-profile fast|slow`), scorers in `src/obed_edom/html_alpha_probe.py`, MM/restart bridge +
-preserve in `scripts/p2_recovery_html_dissolve_live.py`. **14 findings GREEN on both wait profiles**
+preserve in `scripts/p2_recovery_html_dissolve_live.py`.
+**Both flags are mandatory, every run.** `--disposable` swaps in the disposable movie assets: the
+deck's ORIGINAL HEVC does not decode in headless Chrome, so without it the probe scores black frames
+and reds findings for the wrong reason. Omitting `--reuse-export` triggers a full bake, which DELETES
+`output/p2-recovery/html-adversarial/` — every previous run's evidence with it. **14 findings GREEN on both wait profiles**
 (`success:True`); ~129 unit tests (`tests/test_p2_adversarial.py`, `tests/test_html_alpha_probe.py`).
 
 The findings, grouped:
