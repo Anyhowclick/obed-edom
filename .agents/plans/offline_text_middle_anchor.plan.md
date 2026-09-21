@@ -1,5 +1,5 @@
 ---
-name: Offline text — middle-anchor reposition (OPEN 1 reopened)
+name: Offline text — middle-anchor reposition (COMPLETED 2026-09-21)
 overview: >-
   2026-09-18. Two Fable peers in series (analysis + adversarial review) overturned the "middle-anchored
   autosize text is BLOCKED on Δh" conclusion of the 2026-09-18 handover: it was a mis-diagnosis. Middle
@@ -9,12 +9,15 @@ overview: >-
   the gate rework, and the single owner-gated live experiment that confirms it. Grow-height width writes
   (c) stay behind their own flag as the only unvalidated mechanic. Wall-time lever is still NOT unlocked
   (non-text specs keep the AppleScript fallback pass alive) — this is a coverage/correctness win.
-  Source artifacts (this session's scratchpad): `dh_middle_analysis.md` (peer 1),
+  Completed 2026-09-21 after the owner authorized the whole-deck gate and accepted subtle rendered
+  differences unless materially large. The original per-class 1px experiment criterion below is
+  retained as historical context; rollout evidence instead combines Keynote live verification with
+  an alignment-aware, fixed 8px rendered-translation ceiling. Source artifacts: `dh_middle_analysis.md` (peer 1),
   `dh_middle_review.md` + `adv/` (peer 2). Canonical resizer plan: `cg_resizer.plan.md`.
 todos:
   - id: corrected-diagnosis
     content: >-
-      RECORD OF FACT (offline-evidenced; live confirm still owed). (1) A position-only write changes no
+      RECORD OF FACT (offline-evidenced, live-confirmed 2026-09-21). (1) A position-only write changes no
       layout input, so Keynote's re-laid-out height is identical seed→final (Δh=0 by determinism);
       re-measured per-label with an FFT matcher + positive/null controls (82/82 injected-shift detection),
       0 of ~100 resolvable middle boxes moved vertically across the full pipeline (pass-1 save → seed
@@ -25,10 +28,10 @@ todos:
       hypothesis is algebraically the shipped top-delta formula (sy≡1, `reported_h` is already CG-scale);
       reading (ii) is worse for position-only and only correct paired with a width write. `ta-derive`
       still bars deriving the absolute render height offline — but the middle fix never needed it.
-    status: pending
+    status: completed
   - id: shipped-defects-161
     content: >-
-      Two confirmed latent defects in the default-OFF `OBED_OFFLINE_TEXT` path shipped by PR #161
+      Two confirmed latent defects in the formerly default-OFF `OBED_OFFLINE_TEXT` path shipped by PR #161
       ("correct, live-validated" is contested). (a) `pos_x = spec.x` is absolute, but stored x is the
       anchor point: centre for centre-aligned grow-both (b=½), right edge for right-aligned (b=1). 68
       centre + 1 right box on Full_Report_Card land w/2 (or w) to the left. The right-aligned case is not
@@ -37,7 +40,10 @@ todos:
       keeps pass-1's 0.25× canvas-scaled width under a position-only write → wrong wrap; `verify_live_frames`
       compares x/y only, so it passes a visibly wrong box. Both must be fixed regardless of the enable
       decision.
-    status: pending
+      DONE: the delta-form position defect is fixed and whole-deck/live verified. Grow-height width
+      writing was not promoted; that class remains on the AppleScript fallback, while the rendered
+      oracle checks wrapping for every converted label.
+    status: completed
   - id: impl-drop-top-and-delta-x
     content: >-
       THE INCREMENT (GO, on this session's implementation branch `research/resizer-middle-anchor-text`).
@@ -48,7 +54,8 @@ todos:
       (never a size) and seed-gated. Default OFF behind `OBED_OFFLINE_TEXT` as today. Update the
       docstring + the `middle_anchored_hard_misses` / `unlaidout_hard_misses` tests whose stated evidence
       ("174 measured on a middle box" / "on a (0,0) box") is wrong.
-    status: pending
+      DONE 2026-09-21; the default is now ON with explicit fail-closed kill switches.
+    status: completed
   - id: impl-four-diff-bugs
     content: >-
       Peer 2's four bugs in peer 1's sketch, to fix in the increment. (1) `used_reported` accounting
@@ -62,7 +69,7 @@ todos:
       or derive h differently. (4) `test_autosize_text_reposition_x_without_y_needs_no_seed` inverts
       (delta-x now needs the seed) — update the contract explicitly. Also note `align not in
       _ANCHOR_FRACTION` refuses None, stricter than `_autosize_rect`'s middle default.
-    status: pending
+    status: completed
   - id: gate-rework-nw
     content: >-
       The conversion ceiling, not the math, is the risk. Pass 1's refont+save zeroes BOTH `naturalSize`
@@ -74,15 +81,15 @@ todos:
       wrong gate. The genuinely un-renderable class (`naturalSize.width==0` invalid-cache sentinel, e.g.
       ki18) stays refused only if the snapshot shows it is distinguishable from the benign post-pass-1
       zeroing — decide empirically, not by theory.
-    status: pending
+    status: completed
   - id: verify-wh
     content: >-
-      Add live `w` (and `h`, loosely) to the offline-written-text comparison in `verify_live_frames`, so
-      the grow-height wrap defect (b) is gated instead of invisible. `verify_offline_frames` still
-      excludes text. Replace the §5 PNG check's band matcher (`png_shift.py`, no positive control, blind
-      inside multi-label bands, search radius too small for a 174px move) with a per-label matcher that
-      has a positive control (peer 2's `adv/label_shift2.py` is one).
-    status: pending
+      RESOLVED DIFFERENTLY: live `verify_live_frames` still compares text x/y only; live w/h was not
+      added. Grow-height width writes remain excluded and fall back to AppleScript. The old band matcher
+      was replaced by a per-label rendered oracle with independent A-null export, four-direction positive
+      controls, alignment-aware A/B footprints, and a fixed 8px phase-correlation ceiling across all 339
+      converted labels. This is the wrapping/render bar; the live readback remains the position bar.
+    status: completed
   - id: live-experiment
     content: >-
       OWNER-GATED (Keynote hands-off). One run confirms (a)+(b) and decides (c) and the nw gate. Deck
@@ -93,8 +100,10 @@ todos:
       text row ≤0.5px on all but the genuinely-refused sentinel; (3) per-label PNG matcher vs the retained
       `subset_off_validate_CG` baseline. Kill criteria PER CLASS: a middle box |dy|>1 kills (a); a
       centre/right label |dx|>1 kills (b); a grow-height box still narrow-wrapping kills (c) → grow-height
-      stays on AppleScript. Do NOT run without an explicit owner go; do NOT enable by default without one.
-    status: pending
+      stays on AppleScript. HISTORICAL criterion: superseded by the owner's 2026-09-21 go and explicit
+      acceptance of subtle visible differences. The completed whole-deck gate uses an 8px fixed rendered
+      translation ceiling and measured 7px maximum, while live geometry measured under 1px in both arms.
+    status: completed
   - id: wall-time-note
     content: >-
       Wall-time lever is still NOT unlocked. 277 non-text specs (188 masked — ~70 origin crops convertible
@@ -105,9 +114,10 @@ todos:
     status: pending
 ---
 
-# Offline text — middle-anchor reposition (OPEN 1 reopened)
+# Offline text — middle-anchor reposition (completed 2026-09-21)
 
 See the todos above for the actionable record. Narrative and evidence live in the two peer artifacts
 (this session's scratchpad): `dh_middle_analysis.md` and `dh_middle_review.md` (+ `adv/`). Implementation
-lands on `research/resizer-middle-anchor-text` (behind `OBED_OFFLINE_TEXT`, default off); this plan branch
-carries the design only. The live experiment is owner-gated and enabling-by-default is an owner call.
+landed before the whole-deck rollout on `codex/resizer-offline-flip-gate`. `OBED_OFFLINE_TEXT` is now
+default-on; explicit `off`/`0`/`false`/`no` remain the production kill switch. Final evidence and the
+owner-approved acceptance bar are recorded in `cg_resizer.plan.md`.

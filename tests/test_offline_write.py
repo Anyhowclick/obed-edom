@@ -176,18 +176,24 @@ def test_drop_unreadable_seed_rows_handles_empty_and_missing():
 # --- offline_text_reposition_enabled -----------------------------------------
 
 
-def test_offline_text_reposition_defaults_off(monkeypatch):
+def test_offline_text_reposition_defaults_on(monkeypatch):
     monkeypatch.delenv("OBED_OFFLINE_TEXT", raising=False)
-    assert offline_text_reposition_enabled() is False
+    assert offline_text_reposition_enabled() is True
 
 
 def test_offline_text_reposition_parses_truthy_tokens(monkeypatch):
     for tok in ("1", "true", "yes", "on", "ON"):
         monkeypatch.setenv("OBED_OFFLINE_TEXT", tok)
         assert offline_text_reposition_enabled() is True
-    for tok in ("0", "off", "no", "bogus", ""):
+    for tok in ("0", "false", "off", "no"):
         monkeypatch.setenv("OBED_OFFLINE_TEXT", tok)
         assert offline_text_reposition_enabled() is False
+    monkeypatch.setenv("OBED_OFFLINE_TEXT", "")
+    assert offline_text_reposition_enabled() is True
+    said = []
+    monkeypatch.setenv("OBED_OFFLINE_TEXT", "bogus")
+    assert offline_text_reposition_enabled(say=said.append) is False
+    assert said and "Unknown" in said[0]
 
 
 def test_offline_text_reposition_forced_off_when_offline_write_off(monkeypatch):
@@ -200,15 +206,21 @@ def test_offline_text_reposition_forced_off_when_offline_write_off(monkeypatch):
 # --- offline_maskcrop_enabled ------------------------------------------------
 
 
-def test_offline_maskcrop_defaults_off_and_parses_tokens(monkeypatch):
+def test_offline_maskcrop_defaults_on_and_parses_tokens(monkeypatch):
     monkeypatch.delenv("OBED_OFFLINE_MASKCROP", raising=False)
-    assert offline_maskcrop_enabled() is False
+    assert offline_maskcrop_enabled() is True
     for tok in ("1", "true", "yes", "on", "ON"):
         monkeypatch.setenv("OBED_OFFLINE_MASKCROP", tok)
         assert offline_maskcrop_enabled() is True
-    for tok in ("0", "off", "no", "bogus", ""):
+    for tok in ("0", "false", "off", "no"):
         monkeypatch.setenv("OBED_OFFLINE_MASKCROP", tok)
         assert offline_maskcrop_enabled() is False
+    monkeypatch.setenv("OBED_OFFLINE_MASKCROP", "")
+    assert offline_maskcrop_enabled() is True
+    said = []
+    monkeypatch.setenv("OBED_OFFLINE_MASKCROP", "bogus")
+    assert offline_maskcrop_enabled(say=said.append) is False
+    assert said and "Unknown" in said[0]
 
 
 def test_offline_maskcrop_forced_off_when_offline_write_off(monkeypatch):

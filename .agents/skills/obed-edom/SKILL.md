@@ -347,6 +347,23 @@ slides' identity geometry failed. Those defects were fixed (PRs #57/#59/#73/#78/
 #104/#115) and the strict full gate went GREEN 2026-09-12; the W1 default flipped to
 `OBED_OFFLINE_WRITE=on` on 2026-09-14 (`off` restores the scripted AppleScript path).
 
+Autosize-text reposition and axis-aligned masked-crop writes are default-on since
+2026-09-21. `OBED_OFFLINE_TEXT=off` and `OBED_OFFLINE_MASKCROP=off` are the production
+kill switches (`0`/`false`/`no` also disable). The Full Report Card feature-axis gate
+bank is `output/bank/2026-09-21/text-mask-default-flip/`: 155 slides, card refs 83/83,
+z-order front block 88/88, 100% identity, and a digest-bound visual report covering 339
+autosize labels plus 130 changed masked regions. The visual bar compares each visible
+region on object-local difference support against four deliberately displaced positive
+controls (8px for text; 2–8px for crops) and a second, independent arm-A null export. A
+phase-correlation bar independently caps text translation at 8px; horizontal and vertical
+alignment determine both A and projected-B footprints. Composed crop geometry stays under
+2px, and wholly off-canvas objects compare at whole-slide scope. The A/B/null PNG manifests,
+both deck digests, and oracle-code digest bind the report to the recorded run.
+Only exact `(slide, drawable id)` rows from a passing report may delegate autosize archive x
+or masked raw-size checks; type, flips, mask angle, crop frame, and identity still gate.
+Generate the report with `scripts/text_mask_visual_oracle.py --previews-null-a ...`, then pass it to
+`scripts/offline_write_ab.py --gate-axis text-mask --visual-report REPORT.json`.
+
 A 2026-09-07 gate-integrity follow-up added a gating `group` bar (composed
 child-union vs the planned rect, 2.5px) to the offline verify — it is expected
 FAIL against today's writer (the known `sx = spec/reported` defect), not a new
@@ -567,8 +584,12 @@ longer permutes any kind but `group` (piece 1 removed the last GUI raise), so th
 only kind that ever needs the multiset bar. `remap_and_inspect` logs one coverage line
 (`live verify: positional N slide(s) (K remapped), set-compare G group bucket(s) on M
 slide(s), uncovered [...] — total P of P.`) built from `offline_write.live_verify_coverage`;
-a non-empty `uncovered` REDs the gate. `scripts/offline_write_ab.py`'s `GATE_VERSION` is 4
-(`COMPATIBLE_GATE_VERSIONS = {3, 4}`) — a reused v3 record simply lacks
+a non-empty `uncovered` REDs the gate. `scripts/offline_write_ab.py`'s `GATE_VERSION` is 7
+(`COMPATIBLE_GATE_VERSIONS = {3, 4, 5, 6, 7}`): v7 records the gate axis and whole-deck
+scope in addition to the complete gate-arm environment, A/B/null preview manifests, and
+required Keynote-backed live-verification evidence for the
+text/mask default-flip axis, which refuses older records; the legacy z-order axis may still
+reuse v3/v4/v5/v6 records. A reused v3 record simply lacks
 `liveVerifySetPass`/`liveVerifyCoverage`, read as "not measured", never as a red.
 `scripts/replay_live_verify.py` re-derives both bars Keynote-free against a banked A/B
 round (re-running the planner against the original source+template, reading
