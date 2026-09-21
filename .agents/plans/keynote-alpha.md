@@ -78,8 +78,11 @@ The findings, grouped:
   counter, same-movie instances, and fail-closed ties.
 - Strict boundary parsing is bypassed by `_norm_hash` prefix-normalisation — unreachable in production
   (player emits clean `#N`); closing needs raw-hash pipeline re-plumbing.
-- Freeze control uses state-based (not per-screenshot) cover attestation — sound for the STATIC 1→2; a
-  MOVING-footprint freeze control would need per-screenshot attestation.
+- ~~Freeze control uses state-based (not per-screenshot) cover attestation~~ — CLOSED by the 3→4
+  re-bracket: the MOVING-footprint control attests PER FRAME (a CRC'd badge frame decoded from every
+  capture, whose painted rect must agree with the page's own log for that frame, plus a per-rAF cover
+  hit-test, cover-tracks-footprint check and a bounded rAF/poll gap). Absence of any of it is
+  INCONCLUSIVE, never green.
 - Arm B (decoder-pause control) deferred — Arm A is sufficient; B would separately certify `rvfcAdvance`.
 - `_decode_index_patch` returns 0 for a flat-black ROI — a false-RED source (fails closed, not a
   false-pass); could return None outside the counter alphabet.

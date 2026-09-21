@@ -1,12 +1,14 @@
 # Plan — re-bracket the P2 freeze negative control at the 3→4 boundary
 
 Status: IMPLEMENTED and under review — the freeze negative control is re-bracketed on the MOVING 3→4 Magic Move
-and runs in both the A-B-A scratch bracket and the e2e. Codex review rounds 1–11 (r1–r8 recorded under
-`.agents/reviews/freeze-3to4/`); round 11 closes r8's two majors (geometry-sound badge gate; page-counted
-trusted-keydown gate) plus a pre-emptive absence sweep over every integrity key. NOT merged; no CI, so the
-two suites are run locally. Current live results (round 11, this machine): 7/7 clean scratch brackets `pass`
-with `integrityFailed []` at load 4.6–7.1, and e2e fast/disposable/bridge-on `success: True` with
-`freezeControlCaughtByCounter` `pass` at load 6.1–7.4. Line numbers below are as of `main` `946a7648`.
+and runs in both the A-B-A scratch bracket and the e2e. Codex review rounds 1–12 (r1–r9 recorded under
+`.agents/reviews/freeze-3to4/`); round 12 closes r9's four majors (MAIN's cut boundary, the pre-trigger poll
+gap, the release split + first settled instant, the null controller's keydown filter) and replaces the
+hand-picked absence sweep with an EXHAUSTIVE leaf walk (§10.14), which found two further ungated
+cached-verdict reads and a Chrome orphan path. NOT merged; no CI, so the
+two suites are run locally. Current live results (round 12, this machine): 5/5 clean scratch brackets `pass`
+with `integrityFailed []` at load 3.5–7.5, and e2e fast/disposable/bridge-on `success: True` with
+`freezeControlCaughtByCounter` `pass` at load 6.7–7.1. Line numbers below are as of `main` `946a7648`.
 Why: `freezeControlCaughtByCounter` is parked `inconclusive` (P2 `success` False on `main`) because the baseline REFUSES
 the 1→2 carry (`retire`), so there is no carried movie to freeze there. 3→4 still carries.
 
@@ -81,16 +83,26 @@ over samples with `footprintSource == "measured"`. In B the freeze must give `ok
 `freezeRunAtCut >= 6`, `negativeAnomaly False`, `n − flip_index >= 6`, flip window decodable.
 
 ## 4. Pass / inconclusive / fail
-- **Integrity (any failure ⇒ INCONCLUSIVE):** `firedAtMoveStart` (new), `firedAfterAdvance`, `stageOriginZero` (new),
-  `noControlError`, `ownerReadyAtTrigger`, `staleFrameFromPlayback`, `paintedOnce`, `coverPatchStable`, `coverHitTest100`,
-  `coverTracksFootprint` (new), `loopLive` (≥10 rAF frames), `everyInHoldStale`, `flipIndexPresent`,
-  `flipWindowDecodable`, `enoughAfterFlip`, `releaseBetweenLastCaptureAndBurst`, `allInHoldMeasured` (new),
-  `bridgeEngaged` (new), `maxRafGapMs <= 100` (on a MOVING footprint a rAF stall leaves the cover behind the movie, so the
-  1→2 "diagnostic only" carve-out does not transfer).
-- **Verdict (PASS iff all, else FAIL):** `indexRunRed`, `reasonFreezeRunAtCut`, `freezeRunMargin`, `noNegativeAnomaly`,
+As IMPLEMENTED (`_score_freeze_control`; the original draft split below was revised in rounds 3–12 — a FAIL is a claim
+about the COUNTER, so everything that instead says "the stimulus or the measurement was not sound" is INCONCLUSIVE, and
+continuity / positives / isolation moved from the verdict tier to the integrity tier):
+- **Integrity (any failure ⇒ INCONCLUSIVE):** `firedAtMoveStart`, `firedAtRuntimeMotionStart`, `firedAfterAdvance`,
+  `advanceKeySameEventInControl`, `noPreAdvanceDeparture`, `drainPressesAllLanded`, `advanceSinglePressAllArms`,
+  `coverPaintedAtPresent`, `stageGeometryStable`, `stageOriginZero`, `noControlError`, `ownerReadyAtTrigger`,
+  `staleFrameFromPlayback`, `paintedOnce`, `coverPatchStable`, `coverHitTest100`, `coverTracksFootprint`,
+  `loopLive` (≥10 rAF frames), `everyInHoldStale`, `flipIndexPresent`, `flipWindowDecodable`, `enoughAfterFlip`,
+  `releaseStrictlyBeforeSettleAndBurst`, `allInHoldMeasured`, `rehandoffPairSound`, `ownerSettledAllArms`,
+  `bridgeEngaged`, `collectorSeriesSound`, `atCutBoundaryValidAllArms`, `badgeSamplesSoundAllArms`,
+  `maxRafGapOk` (`maxRafGapMs <= 100`, folding the PRE-trigger poll gap; on a MOVING footprint a rAF stall leaves the
+  cover behind the movie, so the 1→2 "diagnostic only" carve-out does not transfer), `noNegativeAnomaly`,
   `movingContinuityOk`, `boundDecoderIsSlide3Decoder`, `noOwnerAmbiguousInWindow`, `rvfcRanThroughHold` (≥0.5 s),
-  `playerBuildErrorsEmpty`, `positivesGreen` (A1/A2 `continueThroughMovingMagicMove3to4` pass AND their
-  `movingIndexRunAtCut.ok`), `isolationEqual`.
+  `playerBuildErrorsEmpty`, `positivesGreen`, `isolationEqual`.
+- **Verdict (PASS iff all three, else FAIL, and only once every integrity key holds):** `indexRunRed`,
+  `reasonFreezeRunAtCut`, `freezeRunMargin`.
+- **Nothing is satisfiable by absence.** `positivesGreen` and `collectorSeriesSound` RE-DERIVE the positives' at-cut run
+  and the collector's admissibility from the raw samples rather than trusting the capture side's cached `ok`; the
+  bracket and MAIN inputs are walked leaf by leaf in `test_bracket_absence_sweep_is_exhaustive` /
+  `test_main_absence_sweep_is_exhaustive`, whose allowlists carry a one-line reason per surviving field (§10.14).
 - **`_ISOLATION_KEYS` for 3→4:** `movingContinuityOk`, `movingContinuityFailedEmpty`, `rvfcMonotonicOk`,
   `crossingIdentityOk`, `stableSlide4OwnerOk`, `boundaryValidOk`, `footprintFullyLiveOk`, `settledIndexProgressionOk`,
   `playerBuildErrorsEmpty`, `bridgeEngaged`. Slide-1/2 composition keys dropped; `movingIndexRunAtCut` and the 3→4
@@ -395,3 +407,41 @@ machine, AFTER went 4/4 `pass` and BEFORE 4/4 `pass` with identical timings (del
 (15-minute load average 7.18 decaying). Recorded because the trigger bounds track the HARNESS, not
 the player: a loaded machine reads as a stimulus failure here, and the honest response is the
 interleaved control, never a wider ceiling.
+
+### 10.14 The absence sweep is EXHAUSTIVE, not hand-picked (round 12, r9 MAJOR 1–4 + owner instruction)
+
+Round 11's sweep was written per integrity KEY: one deletion per key, chosen by the author from the
+field that key is argued from. Round 9 of review then found four more holes of exactly the class the
+sweep existed to close — `advanceKeyPerfMs` and `atCutBoundary.from` on MAIN, `nullControl.pollMaxGapMs`
+(absent read as a `0.0` gap), `releaseSplitIndex` and `firstSettledPerfMs` (the latter explicitly
+accepted when absent). A per-key sweep can only cover the fields its author already thought of, which
+is the same blind spot that produced the holes.
+
+It is now a WALK. `test_bracket_absence_sweep_is_exhaustive` enumerates every leaf of the clean,
+pass-capable bracket — both arm classes, nested dicts, and the leaves of every dict inside every list —
+deletes each in turn, and requires the verdict to fall to INCONCLUSIVE; `test_main_absence_sweep_is_exhaustive`
+does the same for `_advance_c_ok`. A field counts as gated when deleting it from ANY list element
+fails closed (a sample outside the scored window is not an absence hole). Anything that survives its
+own deletion must be named in `_SWEEP_ALLOW` / `_MAIN_SWEEP_ALLOW` with a one-line reason, in one of
+four classes — report-only, redundant (a view of a gated field), provenance (an input the PAGE used
+for a sub-verdict the scorer re-derives or reads only as `ok`), and negative (the key asserts absence,
+so its PRESENCE is what `_ABSENCE_CASES` tests). A companion test refuses a DEAD allowlist entry, so
+a reason cannot outlive the hole it excused.
+
+The walk found two ungated classes beyond the review's four, both the "trust a cached verdict" shape:
+`collectorSeriesSound` read the page's `collector.ok` while every field that `ok` was computed from
+could be deleted, and `positivesGreen` took A1/A2's at-cut run from the capture side's cached
+`movingIndexRunAtCut` — so the positives' `index`, `perfNowMs`, `progress` and `sceneHash` were not
+gated at all. Both now RE-DERIVE (`_collector_ok`, `_moving_index_run_at_cut`) from the raw snapshot
+and require the derivation to agree with what the capture reported. A third, `stageGeometryStable`,
+raised `KeyError` instead of failing closed on a rect missing a component; numeric reads go through
+`_finite` now (absent, boolean and non-finite are all "no measurement", never a zero).
+
+The null CONTROLLER's own `onAdvanceKey` was the last asymmetry: the capture watch filtered for a
+trusted, non-repeat `keydown`/`ArrowRight` while the controller accepted any `ArrowRight` and stamped
+`performance.now()`, so a synthetic or repeated press just before the real one could seed the
+controller's clock while the watch timed the trusted event, and nothing proved the two clocks named the
+same event. The controller now applies the identical filter, records `e.timeStamp`, and counts what it
+rejected; `advanceKeySameEventInControl` requires `nullControl.advanceKeyAt == advanceKeyPerfMs` and a
+zero rejection count, and `atCutBoundaryValidAllArms` continues to hold all three arms to the watch's
+own counts.
