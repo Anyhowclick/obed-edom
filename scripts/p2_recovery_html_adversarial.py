@@ -310,17 +310,10 @@ LINGERING_MOVIE_OVERLAYS_JS = """(() => {
 })()"""
 
 HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event (1->2, retired)
-                            # ONE-FRAME lag cannot hide in it (plan §10)
 PRE_KEY_PATCH_INSET_PX = 2  # extra inset for the PRE-MOVE counter patch: on the smaller
                             # slide-3 rect the mapped ROI lands on the movie's
                             # antialiased edge and decodes nothing (plan §10.19)
-                                # "measured" rather than "unstable" (review Blocker 2b)
-                                        # motion marker and the measured departure
 
-                            # UNLANDED at #1 and #5 on several boots (an unlanded press
-                            # is queued and replayed later -- the same defect); at 10.0 s
-                            # with a `Page.captureScreenshot` per poll iteration every
-                            # press landed exactly once.
 DRAIN_SELF_ADVANCE_S = 10.0  # #6 -> #7 self-advance wait (observed ~1-2 s)
 DRAIN_DEADLINE_S = 90.0     # whole-drain budget: 5 presses x <= DRAIN_PRESS_LAND_S plus
                             # boot slack. Was 20.0 when the drain pressed at a fixed 2 s
@@ -1617,8 +1610,6 @@ async def _bind_footprint_owner(
     return owner.get("elId")
 
 
-                              # (<=0.125 px error, far inside the couple tolerance)
-
 FOOTPRINT_BADGE_JS = r"""
 (function () {
   if (window.__OBED_FP_BADGE__) return;
@@ -2795,6 +2786,8 @@ async def _boot(chrome: ChromeCdp, base: str) -> dict:
 
 async def _run(player: Path) -> dict:
     reuse = "--reuse-export" in sys.argv
+    if reuse and not (OUT / "html-unmodified" / "index.html").is_file():
+        raise SystemExit(f"missing reusable export at {OUT / 'html-unmodified' / 'index.html'}")
     disposable_mode = "--disposable" in sys.argv
     # The 3->4 magic-move bridge is ON by default (the repair). --disable-bridge34
     # skips injecting the bridge config so the raw export restarts movie1 at slide
@@ -2837,8 +2830,6 @@ async def _run(player: Path) -> dict:
     disposable_dir = OUT / "html-disposable"
     player_dir = OUT / "html-player"
     if reuse:
-        if not (unmodified / "index.html").is_file():
-            raise SystemExit(f"missing reusable export at {unmodified / 'index.html'}")
         print("reusing HTML export at", unmodified)
     else:
         print("HTML export…")

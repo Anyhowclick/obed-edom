@@ -13,15 +13,11 @@ against, so a regression that reopens a Codex defect fails a NAMED test.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import contextlib
 import copy
 import io
 import json
-import shutil
-import subprocess
-import sys
 import zlib
 from pathlib import Path
 
@@ -3220,16 +3216,6 @@ def test_footprint_fully_live_fails_closed_on_a_truncated_burst():
     assert verdict["status"] == "inconclusive"
 
 
-def test_burst_offsets_come_from_the_probe():
-    """One burst cadence for both instruments — never a re-tuned local copy."""
-    if str(REPO / "scripts") not in sys.path:
-        sys.path.insert(0, str(REPO / "scripts"))
-    import live_continuity_probe
-
-    assert p2.BURST_OFFSETS_MS == live_continuity_probe.BURST_OFFSETS_MS
-    assert len(set(p2.BURST_OFFSETS_MS)) == len(p2.BURST_OFFSETS_MS)
-
-
 # --------------------------------------------------------------------------- #
 # Injected plan shape + the findings inventory.
 # --------------------------------------------------------------------------- #
@@ -3276,19 +3262,6 @@ def test_injected_plan_matches_the_derived_runtime_plan_boundaries():
     assert injected["boundaries"] == derived["boundaries"]
     assert injected["movies"] == derived["movies"]
     assert {k: v for k, v in injected.items() if k != "transparentBackground"} == derived
-
-
-def test_findings_inventory_is_still_fourteen_and_renamed():
-    import re
-
-    ids = re.findall(
-        r'"id": "(\w+)"',
-        (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text(encoding="utf-8"),
-    )
-    assert len(ids) == 14
-    assert "refusedCarry1to2" in ids
-    assert "continueThroughMagicMove1to2" not in ids
-    assert "freezeControlCaughtByCounter" in ids
 
 
 def test_refused_carry_ignores_a_suppressed_or_errored_remount():
@@ -5758,28 +5731,3 @@ def test_absence_sweep_covers_every_integrity_key():
     covered = {case[0] for case in _ABSENCE_CASES}
     assert scored - covered == set(), f"integrity keys with no absence case: {scored - covered}"
     assert covered - scored == set(), f"absence cases for non-keys: {covered - scored}"
-
-
-# --------------------------------------------------------------------------- #
-# Chrome lifecycle: a spawned browser the driver never attached to is an ORPHAN
-# (observed live: a `chrome-profile-a2` headless Chrome outliving its run by
-# 36 minutes, parent launchd, holding the machine while the next round tried to
-# measure trigger latency on it).
-# --------------------------------------------------------------------------- #
-def test_chrome_start_kills_its_process_when_the_attach_fails(tmp_path, monkeypatch):
-    """`/usr/bin/yes` stays alive under Chrome's argv and never opens a CDP port,
-    so `start()` must fail AND leave no process behind."""
-    import subprocess
-    from pathlib import Path
-
-    if str(REPO / "scripts") not in sys.path:
-        sys.path.insert(0, str(REPO / "scripts"))
-    import p2_alpha_spike as spike
-
-    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 0.3)
-    c = spike.ChromeCdp(Path("/usr/bin/yes"), tmp_path / "profile")
-    with pytest.raises(RuntimeError):
-        asyncio.run(c.start())
-    assert c.proc is not None
-    assert c.proc.poll() is not None, "Chrome survived a failed start()"
-    assert isinstance(c.proc, subprocess.Popen)

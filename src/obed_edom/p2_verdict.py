@@ -147,7 +147,7 @@ MIN_STALE_TIME_S = 0.3      # the stale frame must be from genuine playback (not
 
 COVER_LEFT_FRAC = 0.4       # mirrors NULL_CONTROL_JS's LEFT_FRAC (subRect) -- keep in sync
 COVER_TRACK_TOL_PX = 0.5    # cover rect vs measured*COVER_LEFT_FRAC; tight enough that a
-
+                            # ONE-FRAME lag cannot hide in it (plan §10)
 STAGE_ORIGIN_TOL_PX = 0.5   # stageOrigin must read (0,0) at arm (plan §2, cover geometry)
 # --- Admissible ABSENCE in the scored series (plan §10.17, §10.19) ----------- #
 # A `None` counter read and a null footprint owner are real readings, but both
@@ -162,12 +162,13 @@ NULL_BRIDGE_MAX_STEP = 30   # plausible forward counter step ACROSS one missed r
 OWNER_NULL_MAX_RUN = 5      # consecutive null footprint owners INSIDE the after-window
 
 FOOTPRINT_COUPLE_TOL_PX = 1.5  # before/after owner-rect agreement for a screenshot to count
-
+                                # "measured" rather than "unstable" (review Blocker 2b)
 # Trigger bounds, all three calibrated in plan §10 and all tracking the harness's
 # per-frame cost, not the player alone -- re-measure when the capture loop changes.
 FREEZE_TRIGGER_MAX_RAFS = 9        # delivered poll frames, keydown -> rect departure
 FREEZE_TRIGGER_MAX_DELAY_MS = 190.0  # page-clock ceiling: a frame count cannot see a stall
 FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2  # poll callbacks between the runtime's fresh
+                                        # motion marker and the measured departure
 
 # Drain to the freeze-control arm boundary (`_capture_3to4_snapshot`). MEASURED on
 # this fixture 2026-09-21: the drain needs presses from #1..#5 only. `#6` is the
@@ -178,6 +179,10 @@ FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2  # poll callbacks between the runtime's f
 # the self-advancing scene, then WAIT for the self-advance.
 DRAIN_SELF_ADVANCE_HASH = SLIDE4_MIN_HASH - 2  # == #6, the self-advancing dissolve
 DRAIN_PRESS_LAND_S = 10.0   # per-press landing wait. Measured: at 2.0 s presses went
+                            # UNLANDED at #1 and #5 on several boots (an unlanded press
+                            # is queued and replayed later -- the same defect); at 10.0 s
+                            # with a `Page.captureScreenshot` per poll iteration every
+                            # press landed exactly once.
 
 
 def _layer_identity(node: dict) -> str | None:
@@ -1628,6 +1633,7 @@ FOOTPRINT_BADGE_CRC_BITS = 8
 FREEZE_REHANDOFF_MAX_EXEMPT = 2
 FOOTPRINT_BADGE_CELLS = 8 + 16 * len(FOOTPRINT_BADGE_FIELDS) + FOOTPRINT_BADGE_CRC_BITS
 FOOTPRINT_BADGE_Q = 4         # quarter-px quantisation of the encoded rect
+                              # (<=0.125 px error, far inside the couple tolerance)
 
 
 def _nearest_sample_times(times: list[float | None]) -> list[float | None]:

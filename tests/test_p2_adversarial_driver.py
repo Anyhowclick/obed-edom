@@ -488,6 +488,41 @@ def test_reuse_export_refuses_rather_than_exporting_via_keynote_when_the_export_
     assert run_calls == [], "the async driver must never start before the refusal"
 
 
+def test_run_refuses_before_any_destructive_or_expensive_work_when_the_export_is_missing(
+    tmp_path, monkeypatch
+):
+    """`main()`'s guard only protects the CLI entry point -- `_run` itself must be
+    self-protecting too, since it already runs `shutil.rmtree(OUT / "runs")`,
+    hashes the deck (`file_identity`), `inventory_deck`, and writes JSON before
+    its old reuse check. Calls `_run` directly (real `asyncio.run`, not stubbed)
+    with prior `runs/` evidence on disk and no reusable export."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    marker = runs_dir / "marker.txt"
+    marker.write_text("prior run evidence")
+
+    monkeypatch.setattr(p2, "OUT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["p2_recovery_html_adversarial.py", "--reuse-export"])
+
+    rmtree_calls = []
+    identity_calls = []
+    inventory_calls = []
+    export_calls = []
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: rmtree_calls.append((a, k)))
+    monkeypatch.setattr(p2, "file_identity", lambda *a, **k: identity_calls.append((a, k)))
+    monkeypatch.setattr(p2, "inventory_deck", lambda *a, **k: inventory_calls.append((a, k)))
+    monkeypatch.setattr(p2, "export_html", lambda *a, **k: export_calls.append((a, k)))
+
+    with pytest.raises(SystemExit, match="missing reusable export"):
+        asyncio.run(p2._run(tmp_path / "html-player"))
+
+    assert rmtree_calls == [], "nothing destructive may run before the refusal"
+    assert identity_calls == [], "the deck must not be hashed before the refusal"
+    assert inventory_calls == [], "the deck must not be inventoried before the refusal"
+    assert export_calls == [], "export_html must never run when the reuse export is missing"
+    assert marker.read_text() == "prior run evidence", "prior runs/ evidence must survive the refusal"
+
+
 def test_dissolve_live_reuse_export_refuses_rather_than_deleting_prior_evidence_when_the_export_is_missing(
     tmp_path, monkeypatch
 ):
@@ -526,3 +561,51 @@ def test_dissolve_live_reuse_export_refuses_rather_than_deleting_prior_evidence_
     assert rmtree_calls == [], "prior evidence must not be deleted before the refusal"
     assert keynote_calls == [], "Keynote must never be probed before the refusal"
     assert run_calls == [], "the async driver must never start before the refusal"
+
+
+def test_burst_offsets_come_from_the_probe():
+    """One burst cadence for both instruments — never a re-tuned local copy."""
+    if str(REPO / "scripts") not in sys.path:
+        sys.path.insert(0, str(REPO / "scripts"))
+    import live_continuity_probe
+
+    assert p2.BURST_OFFSETS_MS == live_continuity_probe.BURST_OFFSETS_MS
+    assert len(set(p2.BURST_OFFSETS_MS)) == len(p2.BURST_OFFSETS_MS)
+
+
+def test_findings_inventory_is_still_fourteen_and_renamed():
+    import re
+
+    ids = re.findall(
+        r'"id": "(\w+)"',
+        (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text(encoding="utf-8"),
+    )
+    assert len(ids) == 14
+    assert "refusedCarry1to2" in ids
+    assert "continueThroughMagicMove1to2" not in ids
+    assert "freezeControlCaughtByCounter" in ids
+
+
+# --------------------------------------------------------------------------- #
+# Chrome lifecycle: a spawned browser the driver never attached to is an ORPHAN
+# (observed live: a `chrome-profile-a2` headless Chrome outliving its run by
+# 36 minutes, parent launchd, holding the machine while the next round tried to
+# measure trigger latency on it).
+# --------------------------------------------------------------------------- #
+def test_chrome_start_kills_its_process_when_the_attach_fails(tmp_path, monkeypatch):
+    """`/usr/bin/yes` stays alive under Chrome's argv and never opens a CDP port,
+    so `start()` must fail AND leave no process behind."""
+    import subprocess
+    from pathlib import Path
+
+    if str(REPO / "scripts") not in sys.path:
+        sys.path.insert(0, str(REPO / "scripts"))
+    import p2_alpha_spike as spike
+
+    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 0.3)
+    c = spike.ChromeCdp(Path("/usr/bin/yes"), tmp_path / "profile")
+    with pytest.raises(RuntimeError):
+        asyncio.run(c.start())
+    assert c.proc is not None
+    assert c.proc.poll() is not None, "Chrome survived a failed start()"
+    assert isinstance(c.proc, subprocess.Popen)
