@@ -126,10 +126,8 @@ class ChromeCdp:
         self.port: int | None = None
 
     async def start(self) -> None:
-        """Spawn Chrome and attach. Anything that goes wrong AFTER the spawn kills
-        the process before re-raising: a Chrome whose driver never attached is an
-        orphan nothing will ever close, and the next run then shares the machine
-        with it."""
+        """Spawn Chrome and attach, killing the process if anything after the
+        spawn raises, so a failed start leaves no orphan behind."""
         self.profile.mkdir(parents=True, exist_ok=True)
         self._spawn()
         try:

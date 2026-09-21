@@ -1475,6 +1475,7 @@ PRESERVE_CORE_JS = r"""
               key: key, newElId: el.__obedElId, oldElId: preserved.__obedElId,
               preservedT: preserved.currentTime, paused: preserved.paused,
               readyState: preserved.readyState,
+              oldGen: preserved.__obedGen, generation: preserveGeneration,
               queueLeft: q ? q.length : 0
             });
             if (bridging34) {

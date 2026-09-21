@@ -3257,11 +3257,13 @@ async def _settle_bound_owner_rect(chrome: ChromeCdp, el_id: str | None) -> dict
     rect reads agreeing under the same `_couple_owner_rect` "measured" test the
     at-cut samples use. Fails CLOSED (`settled` False) on a timeout or no bind."""
     prev_rect: dict | None = None
+    readings: list[dict | None] = []
     stable = 0
     deadline = time.monotonic() + OWNER_SETTLE_S
     while el_id is not None and time.monotonic() < deadline and stable < OWNER_SETTLE_READINGS:
         await asyncio.sleep(OWNER_SETTLE_POLL_S)
         rect_now, _ = await _read_bound_owner_rect(chrome, el_id)
+        readings.append(rect_now)
         stable = (
             stable + 1
             if _couple_owner_rect(prev_rect, rect_now).get("source") == "measured"
@@ -3271,6 +3273,7 @@ async def _settle_bound_owner_rect(chrome: ChromeCdp, el_id: str | None) -> dict
     return {
         "stableReadings": stable,
         "required": OWNER_SETTLE_READINGS,
+        "readings": readings,
         "rect": prev_rect,
         "settled": bool(el_id is not None and stable >= OWNER_SETTLE_READINGS),
     }
@@ -4140,6 +4143,7 @@ async def _capture_3to4_snapshot(
         "footprintSources": [s.get("footprintSource") for s in index_samples],
         "captureOffsets": [s.get("captureOffsetS") for s in index_samples],
         "ownerSamples": owner_samples,
+        "mediaSamples": media_samples,
         "ownerDecoderId": slide3_movie_decoder,
         "playerBuildErrors": player_build_errors,
         "bridgeEngaged": bridge_engaged,
@@ -4189,19 +4193,25 @@ _ISOLATION_KEYS = (
 
 
 def _isolation_view(snap: dict) -> dict:
-    """The invariant booleans extracted from a 3->4 snapshot for A1==B==A2 checks."""
-    mc = snap.get("movingContinuity3to4") or {}
+    """The invariant booleans extracted from a 3->4 snapshot for A1==B==A2 checks.
+    Continuity, settled progression and bridge engagement are RE-DERIVED from the
+    arm's raw evidence and held to the cached values; `footprintFullyLive` stays
+    cached because the burst pixels it is scored from are not retained."""
+    mc = _moving_continuity_derived(snap) or {}
+    cached_mc = snap.get("movingContinuity3to4") or {}
     return {
-        "movingContinuityOk": bool(mc.get("ok")),
-        "movingContinuityFailedEmpty": (mc.get("failed") == []),
+        "movingContinuityOk": _moving_continuity_ok(snap),
+        "movingContinuityFailedEmpty": (
+            mc.get("failed") == [] and cached_mc.get("failed") == []
+        ),
         "rvfcMonotonicOk": bool((mc.get("rvfcMonotonic") or {}).get("ok")),
         "crossingIdentityOk": bool((mc.get("crossingIdentity") or {}).get("ok")),
         "stableSlide4OwnerOk": bool((mc.get("stableSlide4Owner") or {}).get("ok")),
         "boundaryValidOk": bool((mc.get("boundaryValid") or {}).get("ok")),
         "footprintFullyLiveOk": bool((snap.get("footprintFullyLive") or {}).get("ok")),
-        "settledIndexProgressionOk": bool((snap.get("settledIndexProgression") or {}).get("ok")),
+        "settledIndexProgressionOk": _settled_progression_ok(snap),
         "playerBuildErrorsEmpty": (snap.get("playerBuildErrors") == []),
-        "bridgeEngaged": bool(snap.get("bridgeEngaged")),
+        "bridgeEngaged": _bridge_engaged(snap),
     }
 
 
@@ -4239,23 +4249,174 @@ def _finite(v: object) -> float | None:
     return f if math.isfinite(f) else None
 
 
+def _rect_or_none(rect: object) -> dict | None:
+    """A rect with four real measurements, or `None`. A partial rect is absence."""
+    if not isinstance(rect, dict):
+        return None
+    out = {k: _finite(rect.get(k)) for k in ("x", "y", "w", "h")}
+    return out if all(v is not None for v in out.values()) else None
+
+
 def _at_cut_boundary_valid(snap: dict) -> bool:
     """One arm's at-cut boundary is admissible: exactly one accepted advance
-    keydown, a finite page clock for it, and an in-range first sample (index `0`
-    is legitimate; `None` is not)."""
-    boundary = snap.get("atCutBoundary") or {}
+    keydown, a finite page clock for it, and a boundary RE-DERIVED here from that
+    clock and the arm's own samples that agrees exactly with the cached one. A
+    cached boundary that is merely in range can name a later sample and discard
+    the first post-keydown reset the control exists to see."""
     key_ms = snap.get("advanceKeyPerfMs")
-    i = boundary.get("from")
+    derived = _at_cut_boundary(snap.get("indexSamples") or [], key_ms)
+    cached = snap.get("atCutBoundary") or {}
     return bool(
         _advance_key_observed_once(snap)
-        and isinstance(key_ms, (int, float))
-        and not isinstance(key_ms, bool)
-        and math.isfinite(float(key_ms))
-        and boundary.get("ok") is True
-        and isinstance(i, int)
-        and not isinstance(i, bool)
-        and 0 <= i < len(snap.get("indexSamples") or [])
+        and _finite(key_ms) is not None
+        and derived.get("ok") is True
+        and isinstance(derived.get("from"), int)
+        and cached.get("ok") is True
+        and cached.get("from") == derived.get("from")
     )
+
+
+def _advance_ok_derived(advance: object) -> bool:
+    """`advance.ok` RE-DERIVED from the recorded press primitives through the same
+    `_advance_gate`, and required to agree with the cached verdict."""
+    a = advance if isinstance(advance, dict) else {}
+    sent, landed = a.get("pressesSent"), a.get("pressesLanded")
+    unlanded, stopped = a.get("unlandedFromHash"), a.get("pressingStopped")
+    if not (
+        isinstance(sent, int) and not isinstance(sent, bool)
+        and isinstance(landed, int) and not isinstance(landed, bool)
+        and isinstance(unlanded, list)
+        and isinstance(stopped, bool)
+        and "outstandingAtEnd" in a
+        and a.get("pressHash") == f"#{ADVANCE_PRESS_HASH}"
+    ):
+        return False
+    derived = _advance_gate(
+        {"atHash": a.get("outstandingAtEnd"), "wall": None, "sent": sent,
+         "landed": landed, "unlanded": unlanded, "stopped": stopped},
+        a.get("finalHash"),
+    )
+    return bool(derived["ok"]) and a.get("ok") is True
+
+
+def _drain_clean(snap: dict) -> bool:
+    """Drain cleanliness RE-DERIVED from the recorded counts, unlanded list and
+    `hashAtArm`, and required to agree with the cached booleans. `hashAtArm` must
+    be the exact arm boundary this arm claims AND the exact `#7` the single
+    advance press is sent from."""
+    d = snap.get("drain") if isinstance(snap.get("drain"), dict) else {}
+    sent, landed = d.get("pressesSent"), d.get("pressesLanded")
+    unlanded = d.get("unlandedFromHash")
+    if not (
+        isinstance(sent, int) and not isinstance(sent, bool)
+        and isinstance(landed, int) and not isinstance(landed, bool)
+        and isinstance(unlanded, list)
+    ):
+        return False
+    at_arm = d.get("hashAtArm")
+    return bool(
+        sent == landed
+        and not unlanded
+        and _norm_hash(at_arm) == _norm_hash(snap.get("armHash"))
+        and _strict_hash_num(at_arm) == ADVANCE_PRESS_HASH
+        and d.get("allPressesLanded") is True
+        and d.get("hashAtArmExact") is True
+        and d.get("ok") is True
+        and d.get("selfAdvanceHash") == f"#{DRAIN_SELF_ADVANCE_HASH}"
+    )
+
+
+def _settled_progression_ok(snap: dict) -> bool:
+    """`settledIndexProgression.ok` RE-DERIVED from the POST-SPLIT settled samples
+    and required to agree with the cached verdict: a stalled settled counter can
+    otherwise sit under a stale green."""
+    split = snap.get("releaseSplitIndex")
+    samples = snap.get("indexSamples") or []
+    if not (
+        isinstance(split, int) and not isinstance(split, bool)
+        and 0 <= split < len(samples)
+    ):
+        return False
+    derived = score_index_progression(
+        [s.get("index") for s in _slide4_settled_window(samples[split + 1:])]
+    )
+    return bool(derived.get("ok")) and (snap.get("settledIndexProgression") or {}).get("ok") is True
+
+
+def _owner_settle_ok(owner_settle: object) -> bool:
+    """The pre-advance settle RE-DERIVED by replaying the ordered rect readings
+    through the same `_couple_owner_rect` run the capture loop used, and required
+    to agree with the recorded counters. A count and a Boolean alone are two more
+    derived values, not the readings they came from."""
+    st = owner_settle if isinstance(owner_settle, dict) else {}
+    readings = st.get("readings")
+    if not isinstance(readings, list):
+        return False
+    prev, stable = None, 0
+    for raw in readings:
+        rect = _rect_or_none(raw)
+        stable = (
+            stable + 1
+            if _couple_owner_rect(prev, rect).get("source") == "measured"
+            else 0
+        )
+        prev = rect
+    return bool(
+        stable >= OWNER_SETTLE_READINGS
+        and st.get("stableReadings") == stable
+        and st.get("required") == OWNER_SETTLE_READINGS
+        and st.get("settled") is True
+    )
+
+
+def _moving_continuity_derived(snap: dict) -> dict | None:
+    """`movingContinuity3to4` RE-RUN from the retained owner and media samples, or
+    `None` when either series is absent. Without the media samples a stale green
+    continuity field hides a handoff or an rVFC rewind."""
+    owner, media = snap.get("ownerSamples"), snap.get("mediaSamples")
+    if not isinstance(owner, list) or not isinstance(media, list):
+        return None
+    return movingContinuity3to4(
+        owner, media, snap.get("ownerDecoderId"),
+        snap.get("hash3"), snap.get("hash4"), SLIDE4_MIN_HASH,
+    )
+
+
+def _moving_continuity_ok(snap: dict) -> bool:
+    derived = _moving_continuity_derived(snap)
+    cached = snap.get("movingContinuity3to4") or {}
+    return bool(
+        derived is not None and derived.get("ok")
+        and cached.get("ok") is True and cached.get("failed") == []
+    )
+
+
+def _bridge_engaged(snap: dict) -> bool:
+    """3->4 bridge engagement DERIVED from the retained `bridge-3to4` events: one
+    must name the expected movie key, a scene at or beyond slide 4, the bound
+    slide-3 decoder as the OLD element, and a preserve generation matching the
+    one current when it fired. The cached Boolean must agree."""
+    events = snap.get("bridgeEvents")
+    owner = snap.get("ownerDecoderId")
+    if not isinstance(events, list) or owner is None:
+        return False
+    for e in events:
+        detail = e.get("detail") if isinstance(e, dict) else None
+        if not isinstance(detail, dict):
+            continue
+        gen, old_gen = detail.get("generation"), detail.get("oldGen")
+        if (
+            _movie_key(detail.get("key") or "") in EXPECTED_MOVIE_KEYS
+            and (_event_scene(e) if isinstance(e, dict) else None) is not None
+            and _event_scene(e) >= SLIDE4_MIN_HASH
+            and detail.get("oldElId") is not None
+            and str(detail.get("oldElId")) == str(owner)
+            and isinstance(gen, int) and not isinstance(gen, bool)
+            and isinstance(old_gen, int) and not isinstance(old_gen, bool)
+            and old_gen == gen
+        ):
+            return snap.get("bridgeEngaged") is True
+    return False
 
 
 def _badge_samples_sound(snap: dict, exempt_seqs: set[int] | None = None) -> bool:
@@ -4265,14 +4426,20 @@ def _badge_samples_sound(snap: dict, exempt_seqs: set[int] | None = None) -> boo
     sample's painted rect agreed with the page's log (`measured`). The only
     non-`measured` samples admitted are the scorer's already-validated re-handoff
     pair, passed in as `exempt_seqs`; absent that, transport soundness alone is
-    not geometry soundness (plan §10.12)."""
+    not geometry soundness (plan §10.12).
+
+    Every sample is held to its OWN evidence, never to the aggregate counters or
+    to its derived `footprintSource` label: a finite page clock, a strictly
+    increasing typed badge sequence, both rect readings, and a coupling
+    RECOMPUTED from them (plan §10.15)."""
     badge = snap.get("badge") or {}
     counts = badge.get("counts") or {}
     install = badge.get("install") or {}
     samples = snap.get("indexSamples") or []
     exempt = exempt_seqs or set()
     if not (
-        install.get("ok") is True
+        samples
+        and install.get("ok") is True
         and badge.get("decoded") == len(samples)
         and badge.get("missing") == 0
         and badge.get("crcBad") == 0
@@ -4280,10 +4447,26 @@ def _badge_samples_sound(snap: dict, exempt_seqs: set[int] | None = None) -> boo
         and counts.get("seqViolation") == 0
     ):
         return False
-    return bool(samples) and all(
-        s.get("footprintSource") == "measured" or _is_rehandoff_sample(s, exempt)
-        for s in samples
-    )
+    prev_seq: int | None = None
+    for s in samples:
+        if not isinstance(s, dict):
+            return False
+        seq = s.get("badgeSeq")
+        if not (isinstance(seq, int) and not isinstance(seq, bool)):
+            return False
+        if prev_seq is not None and seq <= prev_seq:
+            return False
+        prev_seq = seq
+        if _finite(s.get("perfNowMs")) is None:
+            return False
+        if _is_rehandoff_sample(s, exempt):
+            continue
+        coupled = _couple_owner_rect(
+            _rect_or_none(s.get("measuredRect")), _rect_or_none(s.get("badgeRect"))
+        )
+        if coupled.get("source") != "measured" or s.get("footprintSource") != "measured":
+            return False
+    return True
 
 
 def _slide4_settled_window(index_samples: list[dict]) -> list[dict]:
@@ -4304,15 +4487,19 @@ def _advance_c_ok(
     accepted keydown, one press sent from a SETTLED exact `#7` that landed, a
     whole bracketing collector series, a valid cut boundary, every capture
     badge- and geometry-sound, and a scored window that loses nothing to the
-    measured-only filter -- there is no re-handoff here to exempt (plan §10.12)."""
-    advance = capture_meta.get("advance") or {}
+    measured-only filter -- there is no re-handoff here to exempt (plan §10.12).
+
+    The advance gate and the collector series are RE-DERIVED here and required to
+    agree with the page's cached `ok` (plan §10.15)."""
+    collector = capture_meta.get("collector") or {}
     window = _slide4_settled_window(index_samples)
     measured = [s for s in window if s.get("footprintSource") == "measured"]
     return bool(
-        advance.get("ok")
+        _advance_ok_derived(capture_meta.get("advance"))
         and (settle or {}).get("exact")
         and (owner_settle or {}).get("settled")
-        and (capture_meta.get("collector") or {}).get("ok")
+        and collector.get("ok") is True
+        and _collector_ok(collector)
         and _at_cut_boundary_valid({**capture_meta, "indexSamples": index_samples})
         and _badge_samples_sound({**capture_meta, "indexSamples": index_samples})
         and len(measured) == len(window)
@@ -4481,7 +4668,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     n_total = idx.get("n")
     n_after = (n_total - flip_index) if (flip_index_present and isinstance(n_total, int)) else 0
 
-    mc = b.get("movingContinuity3to4") or {}
+    mc = _moving_continuity_derived(b) or {}
     stage_at_arm = nc.get("stageRectAtArm")
     stage_at_trigger = nc.get("stageRectAtTrigger")
     stage_geometry_stable = bool(
@@ -4507,7 +4694,6 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # `releaseBetweenLastCaptureAndBurst` -- its meaning changed: release now
     # happens MID-CAPTURE, strictly before the first post-release settled sample
     # too, not just before the burst).
-    last_at_cut = b.get("lastAtCutPerfMs")
     burst_start = b.get("burstStartPerfMs")
     # The split is the at-cut segment's upper bound, so an absent or out-of-range
     # `releaseSplitIndex` is no bound at all; and the first post-split settled
@@ -4517,6 +4703,13 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         isinstance(release_split_index, int)
         and not isinstance(release_split_index, bool)
         and 0 <= release_split_index < len(index_samples)
+    )
+    # The last covered instant is the SPLIT SAMPLE's own clock, not the capture's
+    # cached copy of it: a stale earlier value can claim the release followed the
+    # final covered capture when the sample says otherwise.
+    last_at_cut = (
+        _finite(index_samples[release_split_index].get("perfNowMs"))
+        if split_valid else None
     )
     settled_after_split = (
         _slide4_settled_window(index_samples[release_split_index + 1:])
@@ -4538,6 +4731,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and burst_start is not None
         and first_settled is not None
         and b.get("firstSettledPerfMs") == first_settled
+        and b.get("lastAtCutPerfMs") == last_at_cut
         and last_at_cut < release_at
         and release_at < first_settled
         and release_at < burst_start
@@ -4553,7 +4747,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     checks["enoughAfterFlip"] = n_after >= FREEZE_MIN_AFTER
 
     # --- The decoder stayed LIVE through the freeze (RED isolated to counter) ----
-    checks["movingContinuityOk"] = bool(mc.get("ok"))
+    checks["movingContinuityOk"] = _moving_continuity_ok(b)
     checks["boundDecoderIsSlide3Decoder"] = (
         nc.get("boundDecoderId") is not None
         and nc.get("boundDecoderId") == b.get("ownerDecoderId")
@@ -4576,7 +4770,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and (mc.get("rvfcMonotonic") or {}).get("advance") >= RVFC_MIN_ADVANCE_S
     )
     checks["playerBuildErrorsEmpty"] = (b.get("playerBuildErrors") == [])
-    checks["bridgeEngaged"] = bool(b.get("bridgeEngaged"))
+    checks["bridgeEngaged"] = _bridge_engaged(b)
 
     # --- The freeze fired correctly, at the right moment, over the right target -
     # `firedVia == "moved"` is a MEASURED departure of the bound owner's rect from
@@ -4635,17 +4829,17 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # to the same condition (review nit, round 3): a contaminated POSITIVE has its
     # 3->4 move started by a replayed press too, so `positivesGreen` would then be
     # comparing a different stimulus -- INCONCLUSIVE, never a verdict.
+    # RE-DERIVED from the recorded counts, unlanded list and `hashAtArm`, then
+    # held to the cached booleans: the cleanliness flags are themselves derived
+    # values and a stale pair of them can sit over two presses or a `#8` arm.
     drain = b.get("drain") or {}
     drains = {"a1": a1.get("drain"), "b": b.get("drain"), "a2": a2.get("drain")}
-    checks["drainPressesAllLanded"] = all(
-        bool(d) and bool(d.get("allPressesLanded")) and bool(d.get("hashAtArmExact"))
-        for d in drains.values()
-    )
+    checks["drainPressesAllLanded"] = all(_drain_clean(s) for s in (a1, b, a2))
     # Exactly one key, from the exact settled `#7`, landed, in ALL THREE arms
     # (review r3 MAJOR 1): a second queued press is replayed by the player and
     # makes the stimulus a different one, so the arms are no longer comparable.
     checks["advanceSinglePressAllArms"] = all(
-        bool((s.get("advance") or {}).get("ok")) for s in (a1, b, a2)
+        _advance_ok_derived(s.get("advance")) for s in (a1, b, a2)
     )
     checks["coverPaintedAtPresent"] = cover_painted_at is not None
     checks["stageGeometryStable"] = stage_geometry_stable
@@ -4676,18 +4870,13 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # sent before the owner rect settles is a different stimulus. MAIN gates this
     # already; all three bracket arms are held to it too (review r5 MAJOR 2).
     settles = {k: s.get("ownerSettle") for k, s in (("a1", a1), ("b", b), ("a2", a2))}
-    checks["ownerSettledAllArms"] = all(
-        isinstance(s, dict) and s.get("settled") is True for s in settles.values()
-    )
+    checks["ownerSettledAllArms"] = all(_owner_settle_ok(s) for s in settles.values())
     checks["releaseStrictlyBeforeSettleAndBurst"] = release_ordered
     # The page-side evidence series must be whole in EVERY arm: a truncated dump,
     # a ring drop, a non-monotonic or malformed row, or a sample the series does
     # not bracket would hand a capture its neighbours' owner/media rows (review r6
     # MAJOR 1). Same condition on all three arms -- a positive scored off a gapped
-    # series is not comparable either.
-    # RE-DERIVED, not trusted: a cached `ok` is the capture side's claim, and the
-    # sweep showed every field it was computed from could be deleted with the
-    # cached verdict left standing (round 12).
+    # series is not comparable either -- and RE-DERIVED, then held to the cached `ok`.
     checks["collectorSeriesSound"] = all(
         bool((s.get("collector") or {}).get("ok")) and _collector_ok(s.get("collector") or {})
         for s in (a1, b, a2)
