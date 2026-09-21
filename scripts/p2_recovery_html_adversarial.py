@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import functools
+import hashlib
 import io
 import json
 import math
@@ -26,6 +27,7 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -329,6 +331,25 @@ COVER_LEFT_FRAC = 0.4       # mirrors NULL_CONTROL_JS's LEFT_FRAC (subRect) -- k
 COVER_TRACK_TOL_PX = 0.5    # cover rect vs measured*COVER_LEFT_FRAC; tight enough that a
                             # ONE-FRAME lag cannot hide in it (plan §10)
 STAGE_ORIGIN_TOL_PX = 0.5   # stageOrigin must read (0,0) at arm (plan §2, cover geometry)
+# --- Admissible ABSENCE in the scored series (r12 MAJOR 2/3; plan §10.17) ----- #
+# A `None` counter read and a null footprint owner are real readings, but both
+# DELETE the interval across them from what the scorers total, so they are
+# bounded, not merely tolerated. Every bound is the worst value measured over the
+# clean runs of round 15, with no headroom: an arm beyond it comes back
+# INCONCLUSIVE, which is fail-closed.
+INDEX_PATCH_MODULO = 256    # the burnt-in counter's wrap, as both index scorers read it
+SCORED_NULL_MAX_RUN = 1     # consecutive `None` counter reads; 33 clean arms never showed 2
+AT_CUT_MAX_NULLS = 1        # `None` reads in an at-cut scored segment: EXACTLY 1 in all 33
+                            # clean arms, always at position 0 (the badge patch has not
+                            # settled at the first read after the advance)
+SETTLED_MAX_NULLS = 0       # `None` reads in a settled window: 0 in all 33 clean arms
+NULL_BRIDGE_MAX_STEP = 60   # plausible forward counter step ACROSS one missed read: twice
+                            # score_index_progression's own 30-per-step ceiling, one step
+                            # being what the miss deletes (largest step measured: 12)
+OWNER_NULL_MAX_RUN = 5      # consecutive null footprint owners INSIDE the after-window.
+                            # Clean runs show ONE run, while the box is mid-flight and
+                            # elementFromPoint resolves nothing: 4 or 5 of ~80 in all 27
+                            # clean arms measured, never more
 FOOTPRINT_COUPLE_TOL_PX = 1.5  # before/after owner-rect agreement for a screenshot to count
                                 # "measured" rather than "unstable" (review Blocker 2b)
 # Trigger bounds, all three calibrated in plan §10 and all tracking the harness's
@@ -1596,8 +1617,16 @@ def neverPooledEvidence(
     }
 
 
-# The scoring parameters the burst is judged with, carried in the snapshot so the
-# re-score reads them from the evidence rather than from today's imports.
+# The CAPTURE CONTRACT for the settled-slide-4 visible-content burst. The re-score
+# takes the raster's shape, its frame count, both rects and every threshold from
+# HERE, never from the retained blob: evidence that describes its own geometry and
+# its own thresholds authenticates nothing (plan §10.17). The shape is the deck's
+# 1920x1080 stage, which every ROI in this module is measured in; the frame count
+# is the probe's own burst schedule.
+FOOTPRINT_BURST_SHAPE = (1080, 1920)
+FOOTPRINT_BURST_FRAMES = len(BURST_OFFSETS_MS)
+# The scoring parameters the burst is judged with, carried in the snapshot for the
+# report and asserted against these constants by the re-score.
 FOOTPRINT_SCORE_PARAMS = {
     "deltaMin": LIVE_DELTA_MIN,
     "cols": LIVE_BAND_COLS,
@@ -1637,15 +1666,23 @@ def _encode_delta_raster(delta: np.ndarray) -> dict:
     }
 
 
-def _decode_delta_raster(evidence: dict) -> np.ndarray | None:
-    """The retained raster, or `None` when it cannot be reproduced EXACTLY as
-    recorded: an unknown encoding, a truncated blob, a byte count that disagrees
-    with the payload, or a shape other than the recorded one."""
+def _decode_delta_raster(evidence: dict, shape: tuple[int, int]) -> np.ndarray | None:
+    """The retained raster at the CONTRACT's `shape`, or `None`.
+
+    Fails closed on anything that is not exactly the recorded bytes decoded at
+    exactly that shape: a self-described size other than the contract's, an
+    unknown encoding, a truncated blob, a byte count that disagrees with the
+    payload, a container that is not really a PNG, or a decoder error. The
+    dimensions are checked BEFORE any pixel is decoded, so an oversized or
+    decompression-bomb header is refused rather than expanded."""
+    h_want, w_want = shape
     data, encoding = evidence.get("data"), evidence.get("encoding")
     h, w, n_bytes = evidence.get("h"), evidence.get("w"), evidence.get("bytes")
     if not isinstance(data, str) or not all(
         isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in (h, w, n_bytes)
     ):
+        return None
+    if (h, w) != (h_want, w_want):
         return None
     try:
         blob = base64.b64decode(data, validate=True)
@@ -1660,35 +1697,42 @@ def _decode_delta_raster(evidence: dict) -> np.ndarray | None:
                 return None
             arr = arr.reshape(h, w)
         elif encoding == "png-gray":
-            img = Image.open(io.BytesIO(blob))
-            if img.mode != "L":
-                return None
-            arr = np.asarray(img, dtype=np.uint8)
+            with Image.open(io.BytesIO(blob)) as img:
+                if img.format != "PNG" or img.mode != "L" or img.size != (w, h):
+                    return None
+                arr = np.asarray(img, dtype=np.uint8)
         else:
             return None
-    except (ValueError, OSError, zlib.error):
+    except (ValueError, OSError, zlib.error, Image.DecompressionBombError,
+            Image.UnidentifiedImageError):
         return None
     return arr if arr.shape == (h, w) else None
 
 
-def footprintFullyLive(
-    frames: list,
-    *,
+def _footprint_rects(
     expected_rect: tuple[int, int, int, int] = SLIDE4_MOVIE_RECT,
-    control_rect: dict | None = None,
-) -> dict:
+) -> list[dict]:
+    """The contract's scored rectangles for the settled slide-4 burst."""
+    return [{**dict(zip(("x", "y", "w", "h"), expected_rect)), "label": "slide4Movie"}]
+
+
+def footprintFullyLive(frames: list, *, capture_id: str) -> dict:
     """Settled slide 4 must PAINT the carried movie: `score_visible_slide` over
     the bridged footprint, with imported thresholds. Anything but
     `verdict is True` (including `inconclusive`) fails.
 
-    The scored max-delta raster, the rects and the parameters are RETAINED under
-    `evidence`: the verdict is a pure function of them, so the scorer recomputes
-    coverage, bands, noise and strays instead of trusting the cached summary."""
+    The scored max-delta raster is RETAINED under `evidence` with the arm's own
+    `capture_id` and a per-frame sha256 of the burst: the verdict is a pure
+    function of the raster, so the scorer recomputes coverage, bands, noise and
+    strays instead of trusting the cached summary, and the `captureId` (retained
+    again in the snapshot header) says WHOSE burst it recomputed them from. The
+    rects and parameters travel for the report; the re-score reads the contract's
+    constants (plan §10.17)."""
     if len(frames) < 2:
         return {"ok": False, "verdict": None, "status": "inconclusive",
                 "reason": "insufficient burst frames", "n": len(frames)}
-    rects = [{**dict(zip(("x", "y", "w", "h"), expected_rect)), "label": "slide4Movie"}]
-    ctrl = dict(control_rect or SLIDE4_CONTROL_RECT)
+    rects = _footprint_rects()
+    ctrl = dict(SLIDE4_CONTROL_RECT)
     delta = _max_delta_map(frames)
     scored = score_visible_slide_from_delta(
         delta, rects, ctrl,
@@ -1698,10 +1742,15 @@ def footprintFullyLive(
         "ok": scored.get("verdict") is True,
         "n": len(frames),
         "evidence": {
+            "captureId": capture_id,
             "n": len(frames),
             "rects": rects,
             "controlRect": ctrl,
             "params": dict(FOOTPRINT_SCORE_PARAMS),
+            "frameSha256": [
+                hashlib.sha256(np.ascontiguousarray(f).tobytes()).hexdigest()
+                for f in frames
+            ],
             **_encode_delta_raster(delta),
         },
         **scored,
@@ -1873,6 +1922,76 @@ def liveContinuity1to2(
     }
 
 
+def _owner_null_gaps(all_owner: list[dict], after: list[dict]) -> dict:
+    """Are the after-window's null-`decoderId` intervals BOUNDED and BRACKETED?
+
+    `nonNullFrac >= 0.7` is an aggregate: it admits a single blind interval of
+    nearly a third of the window, during which a replacement decoder could own
+    the footprint while the bound decoder's offscreen rVFC clock keeps ticking
+    (r12 MAJOR 3). Each gap is therefore bounded on its own:
+
+      - no run of nulls longer than `OWNER_NULL_MAX_RUN` INSIDE the window --
+        that run is the blind interval, and it is what is bounded;
+      - the nearest RESOLVED readings on either side of it, searched in the FULL
+        owner series, must both exist and name the SAME decoder. The clean run's
+        one gap straddles the boundary (the box is mid-flight and
+        `elementFromPoint` resolves nothing while it moves), so its left bracket
+        lies before the window; taking it from the full series is what makes the
+        check non-vacuous instead of skipped;
+      - a gap with nothing resolved after it is unbracketed and fails closed.
+
+    Every admitted gap is reported with its span and its bracketing identity, so
+    an arm that comes back INCONCLUSIVE says which interval was not observed.
+    """
+    if not after:
+        return {"ok": False, "reason": "empty after-window", "gaps": [], "maxRun": 0}
+    start = next((i for i, s in enumerate(all_owner) if s is after[0]), None)
+    if start is None or all_owner[start:start + len(after)] != after:
+        return {"ok": False, "reason": "after-window is not a slice of the series",
+                "gaps": [], "maxRun": 0}
+
+    def _resolved(i: int, step: int) -> object | None:
+        """The nearest resolved `decoderId` from `i`, walking by `step`."""
+        while 0 <= i < len(all_owner):
+            did = all_owner[i].get("decoderId")
+            if did is not None:
+                return did
+            i += step
+        return None
+
+    gaps: list[dict] = []
+    ok = True
+    i = 0
+    while i < len(after):
+        if after[i].get("decoderId") is not None:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(after) and after[j + 1].get("decoderId") is None:
+            j += 1
+        before = _resolved(start + i - 1, -1)
+        after_id = _resolved(start + j + 1, 1)
+        run = j - i + 1
+        bracketed = (
+            before is not None
+            and after_id is not None
+            and str(before) == str(after_id)
+        )
+        if run > OWNER_NULL_MAX_RUN or not bracketed:
+            ok = False
+        gaps.append({
+            "from": i, "to": j, "run": run,
+            "before": before, "after": after_id, "bracketed": bracketed,
+        })
+        i = j + 1
+    return {
+        "ok": ok,
+        "reason": None if ok else "unbounded or unbracketed null-owner gap",
+        "gaps": gaps,
+        "maxRun": max((g["run"] for g in gaps), default=0),
+    }
+
+
 def movingContinuity3to4(
     owner_samples: list[dict],
     presented_samples: list[dict],
@@ -1917,15 +2036,18 @@ def movingContinuity3to4(
         hn = _strict_hash_num(s.get("sceneHash"))
         return hn is not None and n4 is not None and hn >= n4
 
-    after = [s for s in (owner_samples or []) if _after(s)] if boundary_valid else []
+    all_owner = owner_samples or []
+    after = [s for s in all_owner if _after(s)] if boundary_valid else []
     non_null_ids = [s.get("decoderId") for s in after if s.get("decoderId") is not None]
     distinct_non_null = sorted({str(x) for x in non_null_ids})
     non_null_frac = (len(non_null_ids) / len(after)) if after else 0.0
     has_ambiguous = any(s.get("ownerAmbiguous") for s in after)
+    gaps = _owner_null_gaps(all_owner, after)
     stable = (
         bool(after)
         and len(distinct_non_null) == 1
         and non_null_frac >= 0.7
+        and gaps["ok"]
         and not has_ambiguous
     )
     slide4_owner = non_null_ids[0] if stable else None
@@ -1963,6 +2085,7 @@ def movingContinuity3to4(
             "distinctNonNull": distinct_non_null,
             "nonNullFrac": round(non_null_frac, 3),
             "afterN": len(after),
+            "nullGaps": gaps,
         },
         "crossingIdentity": {"ok": crossing_identity},
         "rvfcMonotonic": rvfc,
@@ -3653,6 +3776,18 @@ def _moving_index_run_at_cut(
             False,
         )
     measured = [s for s in samples if s.get("footprintSource") == "measured"]
+    # A `None` read deletes the step across it from the freeze-run and progress
+    # totals, so an unbounded run of them can conceal exactly the reset or freeze
+    # this segment is scored for (r12 MAJOR 2). Inadmissible absence is an
+    # INCONCLUSIVE segment, never a verdict about the counter.
+    if not _null_reads_admissible(
+        [s.get("index") for s in measured], max_total=AT_CUT_MAX_NULLS
+    ):
+        return (
+            {"ok": False, "reason": "inadmissible null reads at cut",
+             "flipIndex": None, "flipIndexFull": flip_index_full},
+            False,
+        )
     flip_index_measured = next(
         i for i, s in enumerate(measured) if s is samples[flip_index_full]
     )
@@ -4015,6 +4150,10 @@ async def _capture_3to4_snapshot(
     (review Blocker 3; a cover left in place through those would red
     `footprintFullyLive` for the wrong reason).
     """
+    # This arm's identity, minted BEFORE anything is captured and retained twice:
+    # once in the snapshot header and once inside the burst evidence, so a raster
+    # lifted from another arm names a capture that is not this one (plan §10.17).
+    capture_id = uuid.uuid4().hex
     await asyncio.sleep(wait_profile["clickDelayS"])
     hash_now = _norm_hash(
         await chrome.evaluate(
@@ -4105,6 +4244,10 @@ async def _capture_3to4_snapshot(
     if (_hash_num(hash3) or -1) < SLIDE4_MIN_HASH:
         bound_owner_id = await _bind_footprint_owner(chrome, MOVIE1_KEY, SLIDE3_MOVIE_RECT)
 
+    # The SAME settled-`#7` reading MAIN takes, taken here too and persisted, so
+    # the bracket snapshot carries a real `advanceSettle` instead of one the
+    # harness reconstructs from `drain.hashAtArm` (plan §10.17).
+    advance_settle = await _settle_at_advance_hash(chrome)
     owner_settle = await _settle_bound_owner_rect(chrome, bound_owner_id)
 
     arm_result: dict | None = None
@@ -4166,7 +4309,7 @@ async def _capture_3to4_snapshot(
         shot = await chrome.screenshot()
         slide4_burst.append(np.asarray(shot)[:, :, :3])
         Image.fromarray(shot).save(run_dir / f"{prefix}-burst-t{off_ms:04d}.png")
-    footprint_live = footprintFullyLive(slide4_burst)
+    footprint_live = footprintFullyLive(slide4_burst, capture_id=capture_id)
 
     # Post-release only (review Blocker 3): a sample captured before the
     # mid-loop release is still under the cover in B, so it must not feed the
@@ -4232,11 +4375,13 @@ async def _capture_3to4_snapshot(
         and not player_build_errors
     )
     return {
+        "captureId": capture_id,
         "hash3": hash3,
         "hash4": hash4,
         "armHash": arm_hash_str,
         "armResult": arm_result,
         "drain": drain_meta,
+        "advanceSettle": advance_settle,
         "ownerSettle": owner_settle,
         "movingIndexRunAtCut": moving_index_run_at_cut,
         "flipWindowDecodable": flip_window_decodable,
@@ -4323,71 +4468,71 @@ def _isolation_view(snap: dict) -> dict:
 @functools.lru_cache(maxsize=8)
 def _rescore_footprint_raster(data: str, meta_json: str) -> dict | None:
     """One re-score of a retained burst raster, memoised on the blob itself: the
-    sweep scores the same three arms thousands of times."""
+    sweep scores the same three arms thousands of times. The scoring inputs are
+    the CONTRACT's; `meta_json` carries only the blob's self-described container
+    fields, which `_decode_delta_raster` checks against the contract's shape."""
     meta = json.loads(meta_json)
-    delta = _decode_delta_raster({**meta, "data": data})
+    delta = _decode_delta_raster({**meta, "data": data}, FOOTPRINT_BURST_SHAPE)
     if delta is None:
         return None
     return score_visible_slide_from_delta(
-        delta, meta["rects"], meta["controlRect"],
-        **{arg: meta["params"][key] for key, arg in _FOOTPRINT_PARAM_ARGS.items()},
+        delta, _footprint_rects(), dict(SLIDE4_CONTROL_RECT),
+        **{arg: FOOTPRINT_SCORE_PARAMS[key] for key, arg in _FOOTPRINT_PARAM_ARGS.items()},
     )
 
 
-def _rescored_footprint(evidence: object) -> dict | None:
-    """`footprintFullyLive` RECOMPUTED from its retained evidence, or `None` when
-    the evidence is not a whole, self-consistent scoring input."""
+def _footprint_evidence_bound(evidence: object, capture_id: object) -> dict | None:
+    """The retained evidence, once it is BOUND to this arm and to the capture
+    contract, or `None`.
+
+    Requires: the arm's own `captureId` (retained independently in the snapshot
+    header, so a raster lifted from another arm names the wrong capture); the
+    contract's frame count; a per-frame sha256 list of that same length, as
+    provenance for the burst the raster was reduced from; and the rects, control
+    rect and the ten parameters EQUAL to the constants the re-score will use, so
+    a blob cannot weaken its own thresholds. The shape is enforced at decode."""
     ev = evidence if isinstance(evidence, dict) else {}
-    rects, ctrl, params = ev.get("rects"), ev.get("controlRect"), ev.get("params")
+    ev_id = ev.get("captureId")
+    shas = ev.get("frameSha256")
     if not (
-        isinstance(rects, list) and rects
+        isinstance(capture_id, str) and capture_id
+        and isinstance(ev_id, str) and ev_id == capture_id
+        and ev.get("n") == FOOTPRINT_BURST_FRAMES
+        and isinstance(shas, list) and len(shas) == FOOTPRINT_BURST_FRAMES
         and all(
-            isinstance(r, dict) and isinstance(r.get("label"), str)
-            and _rect_or_none(r) is not None
-            for r in rects
+            isinstance(s, str) and len(s) == 64 and not set(s) - set("0123456789abcdef")
+            for s in shas
         )
-        and _rect_or_none(ctrl) is not None
-        and isinstance(params, dict)
-        and all(
-            isinstance(params.get(k), (int, float)) and not isinstance(params.get(k), bool)
-            for k in _FOOTPRINT_PARAM_ARGS
-        )
+        and ev.get("rects") == _footprint_rects()
+        and ev.get("controlRect") == dict(SLIDE4_CONTROL_RECT)
+        and ev.get("params") == dict(FOOTPRINT_SCORE_PARAMS)
     ):
         return None
     meta = {k: ev.get(k) for k in ("encoding", "bytes", "h", "w")}
-    meta.update(rects=rects, controlRect=ctrl, params=params)
     return _rescore_footprint_raster(ev.get("data"), json.dumps(meta, sort_keys=True))
 
 
 def _footprint_fully_live_ok(snap: dict) -> bool:
-    """`footprintFullyLive.ok` RE-SCORED from the retained max-delta raster and
-    required to agree with every cached sub-verdict (frame count, top-level
-    verdict, noise floor, each rect, strays). A summary alone authenticates
-    nothing: it can claim a live footprint over a raster that shows a frozen one."""
+    """`footprintFullyLive.ok` RE-SCORED from the retained max-delta raster, bound
+    to this arm's `captureId` and to the capture contract, and required to equal
+    the cached result in EVERY field it derives -- `liveFrac`, `maxDelta`, the
+    clipped rects, the noise floor's p99, the strays -- not merely in its
+    booleans. Exact equality, no tolerance: the re-score runs the same code on
+    the same raster, and it reproduces the committed numbers exactly on all three
+    arms (plan §10.17). A summary alone authenticates nothing: it can claim a
+    live footprint over a raster that shows a frozen one, or over another arm's."""
     cached = snap.get("footprintFullyLive")
     if not isinstance(cached, dict):
         return False
-    derived = _rescored_footprint(cached.get("evidence"))
+    derived = _footprint_evidence_bound(
+        cached.get("evidence"), snap.get("captureId")
+    )
     if derived is None or derived.get("verdict") is not True:
         return False
-    cached_per, derived_per = cached.get("perRect"), derived["perRect"]
-    n = cached.get("n")
     return bool(
         cached.get("ok") is True
-        and cached.get("verdict") is True
-        and cached.get("status") == derived["status"]
-        and isinstance(n, int) and not isinstance(n, bool) and n >= 2
-        and (cached.get("evidence") or {}).get("n") == n
-        and (cached.get("noiseFloor") or {}).get("verdict")
-        is derived["noiseFloor"]["verdict"]
-        and isinstance(cached_per, list) and len(cached_per) == len(derived_per)
-        and all(
-            isinstance(c, dict)
-            and c.get("verdict") is d["verdict"]
-            and c.get("label") == d.get("label")
-            for c, d in zip(cached_per, derived_per)
-        )
-        and (cached.get("stray") or {}).get("verdict") is derived["stray"]["verdict"]
+        and cached.get("n") == FOOTPRINT_BURST_FRAMES
+        and all(k in cached and cached[k] == v for k, v in derived.items())
     )
 
 
@@ -4472,8 +4617,10 @@ def _samples_schema_ok(samples: object, required: dict[str, bool]) -> bool:
 def _media_samples_schema_ok(samples: object, bound_decoder: object) -> bool:
     """`mediaSamples` carry their required keys, every `videos` entry is
     attributable to a decoder, and every after-window sample holds exactly ONE
-    finite `presentedMediaTime` for the bound decoder: no observation, or two
-    that disagree, is no rVFC reading at all."""
+    finite `presentedMediaTime` for the bound decoder: no observation, two that
+    disagree, or two that AGREE is no rVFC reading at all -- a set collapsed
+    duplicates into one and let two entries for one decoder through (r12 MINOR
+    2)."""
     if not _samples_schema_ok(samples, _MEDIA_SAMPLE_KEYS):
         return False
     for s in samples:
@@ -4483,12 +4630,12 @@ def _media_samples_schema_ok(samples: object, bound_decoder: object) -> bool:
         hn = _strict_hash_num(s.get("sceneHash"))
         if bound_decoder is None or hn is None or hn < SLIDE4_MIN_HASH:
             continue
-        times = {
+        matches = [
             _finite(v.get("presentedMediaTime"))
             for v in videos
             if str(v.get("decoderId")) == str(bound_decoder) and "presentedMediaTime" in v
-        }
-        if times != {t for t in times if t is not None} or len(times) != 1:
+        ]
+        if len(matches) != 1 or matches[0] is None:
             return False
     return True
 
@@ -4587,10 +4734,13 @@ def _settled_progression_ok(snap: dict) -> bool:
         and 0 <= split < len(samples)
     ):
         return False
-    derived = score_index_progression(
-        [s.get("index") for s in _slide4_settled_window(samples[split + 1:])]
+    seq = [s.get("index") for s in _slide4_settled_window(samples[split + 1:])]
+    derived = score_index_progression(seq)
+    return bool(
+        _null_reads_admissible(seq, max_total=SETTLED_MAX_NULLS)
+        and derived.get("ok")
+        and (snap.get("settledIndexProgression") or {}).get("ok") is True
     )
-    return bool(derived.get("ok")) and (snap.get("settledIndexProgression") or {}).get("ok") is True
 
 
 def _owner_settle_ok(owner_settle: object) -> bool:
@@ -4735,6 +4885,57 @@ def _badge_samples_sound(snap: dict, exempt_seqs: set[int] | None = None) -> boo
     return True
 
 
+def _longest_run(positions: list[int]) -> int:
+    """The longest run of CONSECUTIVE positions in a sorted index list."""
+    longest = run = 0
+    prev: int | None = None
+    for p in positions:
+        run = run + 1 if prev is not None and p == prev + 1 else 1
+        longest = max(longest, run)
+        prev = p
+    return longest
+
+
+def _null_reads_admissible(indices: list, *, max_total: int) -> bool:
+    """Are this scored window's `None` counter reads a narrowly identified
+    ACQUISITION MISS, or evidence the window is missing?
+
+    `score_composited_index_run` and `score_index_progression` both drop
+    null-adjacent deltas, so a `None` is not a neutral sample: it deletes the
+    step across it from the progress and freeze-run totals. A run of them
+    deletes an interval, and a reset or a freeze can hide inside it (r12 MAJOR
+    2). Admissible, and only just:
+
+      - at most `max_total` of them in the window;
+      - no run longer than `SCORED_NULL_MAX_RUN` -- one missed acquisition is a
+        miss, two consecutive is an unobserved interval;
+      - an INTERIOR one (decodes on both sides) must be bracketed by a
+        PLAUSIBLE forward step, `1 <= (after - before) mod 256 <=
+        NULL_BRIDGE_MAX_STEP`: the counter must be shown to have kept marching
+        ACROSS the miss. A zero step across it is the freeze the gate exists to
+        catch; a large one is a reset.
+
+    An EDGE null (the window's first or last read) has no such bracket and no
+    way to earn one, so it is admitted on the count bound alone -- measured, it
+    is the one real null in a clean run: the badge patch has not settled at the
+    first read after the advance (plan §10.17).
+    """
+    if not isinstance(indices, list):
+        return False
+    nulls = [i for i, v in enumerate(indices) if v is None]
+    if len(nulls) > max_total or _longest_run(nulls) > SCORED_NULL_MAX_RUN:
+        return False
+    for i in nulls:
+        before = indices[i - 1] if i > 0 else None
+        after = indices[i + 1] if i + 1 < len(indices) else None
+        if before is None or after is None:
+            continue
+        step = (int(after) - int(before)) % INDEX_PATCH_MODULO
+        if not 1 <= step <= NULL_BRIDGE_MAX_STEP:
+            return False
+    return True
+
+
 def _slide4_settled_window(index_samples: list[dict]) -> list[dict]:
     """Finding 13's scored window: samples whose hash has reached slide 4 and
     whose footprint has settled on the destination rect. Mid-transition frames
@@ -4764,7 +4965,10 @@ def _advance_c_ok(
     window = _slide4_settled_window(index_samples)
     measured = [s for s in window if s.get("footprintSource") == "measured"]
     return bool(
-        _advance_ok_derived(capture_meta.get("advance"))
+        _null_reads_admissible(
+            [s.get("index") for s in measured], max_total=SETTLED_MAX_NULLS
+        )
+        and _advance_ok_derived(capture_meta.get("advance"))
         and _advance_settle_exact(settle)
         and _owner_settle_ok(owner_settle)
         and collector.get("ok") is True
@@ -4966,10 +5170,9 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     )
     all_cover = bool(raf_log) and all(r.get("elementFromPointIsCover") for r in raf_log)
 
-    # release ordering (review Blocker 3, renamed from
-    # `releaseBetweenLastCaptureAndBurst` -- its meaning changed: release now
-    # happens MID-CAPTURE, strictly before the first post-release settled sample
-    # too, not just before the burst).
+    # Release ordering: the release happens MID-CAPTURE, so it must fall strictly
+    # after the last covered instant and strictly before BOTH the first settled
+    # sample and the burst (plan §10).
     burst_start = b.get("burstStartPerfMs")
     # The split is the at-cut segment's upper bound, so an absent or out-of-range
     # `releaseSplitIndex` is no bound at all; and the first post-split settled
@@ -5097,15 +5300,12 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and nc_rejected == 0
     )
     checks["noPreAdvanceDeparture"] = nc.get("preAdvanceDepartureAt") is None
-    # Fails closed on a missing `drain` block: a queued press (one sent at the
-    # self-advancing scene, or one that never landed) is replayed by the player
-    # later and starts the 3->4 move by itself, so the bracket must not be able
-    # to reach PASS or FAIL when the drain was not clean. ALL THREE arms are held
-    # to the same condition (review nit, round 3): a contaminated POSITIVE has its
-    # 3->4 move started by a replayed press too, so `positivesGreen` would then be
-    # comparing a different stimulus -- INCONCLUSIVE, never a verdict.
-    # RE-DERIVED from the recorded counts, unlanded list and `hashAtArm`, then
-    # held to the cached booleans.
+    # A queued press -- one sent at the self-advancing scene, or one that never
+    # landed -- is replayed by the player later and starts the 3->4 move by
+    # itself, so a drain that was not clean makes the stimulus a different one in
+    # ANY arm. RE-DERIVED from the counts, unlanded list and `hashAtArm`, held to
+    # the cached booleans, and required of all three arms; fails closed on a
+    # missing block (plan §10).
     drain = b.get("drain") or {}
     drains = {"a1": a1.get("drain"), "b": b.get("drain"), "a2": a2.get("drain")}
     checks["drainPressesAllLanded"] = all(_drain_clean(s) for s in (a1, b, a2))
@@ -6043,6 +6243,7 @@ async def _run(player: Path) -> dict:
         # ROI footprint owner on the pre-move rect, then wait for that rect to stop
         # moving. Binding before the hash settles binds on a moving `#7` build, and
         # pressing there presses during residual motion.
+        capture_id_c = uuid.uuid4().hex
         settle_c = await _settle_at_advance_hash(chrome)
         bound_owner_id_c = await _bind_footprint_owner(chrome, MOVIE1_KEY, SLIDE3_MOVIE_RECT)
         owner_settle_c = await _settle_bound_owner_rect(chrome, bound_owner_id_c)
@@ -6092,7 +6293,7 @@ async def _run(player: Path) -> dict:
             shot = await chrome.screenshot()
             slide4_burst.append(np.asarray(shot)[:, :, :3])
             Image.fromarray(shot).save(run_dir / f"slide4-live-t{off_ms:04d}.png")
-        footprint_live = footprintFullyLive(slide4_burst)
+        footprint_live = footprintFullyLive(slide4_burst, capture_id=capture_id_c)
         # ================= end Transition C =================
     finally:
         await chrome.close()
@@ -6410,6 +6611,7 @@ async def _run(player: Path) -> dict:
             ),
             "status": "failed-by-player" if player_build_errors else None,
             "detail": {
+                "captureId": capture_id_c,
                 "advance": advance_c,
                 "advanceSettle": settle_c,
                 "advanceOwnerSettle": owner_settle_c,

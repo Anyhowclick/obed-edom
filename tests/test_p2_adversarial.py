@@ -18,6 +18,7 @@ import base64
 import contextlib
 import copy
 import importlib.util
+import io
 import json
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -3522,7 +3524,7 @@ def _burst(rect, *, live_frac: float = 1.0, control_noise: bool = False, n: int 
 
 
 def test_footprint_fully_live_green_on_a_fully_painting_footprint():
-    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT))
+    verdict = p2.footprintFullyLive(capture_id="cap-test", frames=_burst(p2.SLIDE4_MOVIE_RECT))
     assert verdict["ok"] is True
     assert verdict["verdict"] is True
     assert verdict["perRect"][0]["label"] == "slide4Movie"
@@ -3530,21 +3532,21 @@ def test_footprint_fully_live_green_on_a_fully_painting_footprint():
 
 def test_footprint_fully_live_red_on_a_half_dead_footprint():
     """Half the destination rect frozen => the carry is not visibly correct."""
-    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, live_frac=0.5))
+    verdict = p2.footprintFullyLive(capture_id="cap-test", frames=_burst(p2.SLIDE4_MOVIE_RECT, live_frac=0.5))
     assert verdict["ok"] is False
     assert verdict["verdict"] is False
 
 
 def test_footprint_fully_live_inconclusive_is_a_failure():
     """A noise floor above threshold yields verdict None — anything but True fails."""
-    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, control_noise=True))
+    verdict = p2.footprintFullyLive(capture_id="cap-test", frames=_burst(p2.SLIDE4_MOVIE_RECT, control_noise=True))
     assert verdict["verdict"] is None
     assert verdict["status"] == "inconclusive"
     assert verdict["ok"] is False
 
 
 def test_footprint_fully_live_fails_closed_on_a_truncated_burst():
-    verdict = p2.footprintFullyLive(_burst(p2.SLIDE4_MOVIE_RECT, n=1))
+    verdict = p2.footprintFullyLive(capture_id="cap-test", frames=_burst(p2.SLIDE4_MOVIE_RECT, n=1))
     assert verdict["ok"] is False
     assert verdict["status"] == "inconclusive"
 
@@ -3896,20 +3898,343 @@ def test_freeze_control_clean_bracket_still_passes_with_the_new_gates():
 
 
 # --------------------------------------------------------------------------- #
+# r12 MAJOR 1 — the retained burst raster is bound to its ARM and to the fixed
+# capture contract. Codex's four pure-scorer probes each reached PASS before
+# this; every one of them must now come back INCONCLUSIVE.
+# --------------------------------------------------------------------------- #
+def _reencode_raster(arr, **over) -> dict:
+    """An `evidence` block for `arr`, contract-shaped except where overridden."""
+    ev = {
+        "captureId": _FIXTURE_34["b"]["captureId"],
+        "n": p2.FOOTPRINT_BURST_FRAMES,
+        "rects": p2._footprint_rects(),
+        "controlRect": dict(p2.SLIDE4_CONTROL_RECT),
+        "params": dict(p2.FOOTPRINT_SCORE_PARAMS),
+        "frameSha256": ["0" * 64] * p2.FOOTPRINT_BURST_FRAMES,
+        **p2._encode_delta_raster(arr),
+    }
+    ev.update(over)
+    return ev
+
+
+def _b_with_evidence(**over) -> dict:
+    snap = _freeze_b_snap_34()
+    live = copy.deepcopy(snap["footprintFullyLive"])
+    live["evidence"] = {**live["evidence"], **over}
+    snap["footprintFullyLive"] = live
+    return snap
+
+
+def test_footprint_raster_from_another_arm_is_inconclusive():
+    """Probe 1: B's evidence replaced with A1's raster. The raster re-scores
+    green -- it is a real passing burst -- but it is not B's, and the captureId
+    retained in B's snapshot header says so."""
+    a1_ev = _FIXTURE_34["a1"]["footprintFullyLive"]["evidence"]
+    snap = _b_with_evidence(**{k: a1_ev[k] for k in ("data", "bytes", "h", "w",
+                                                     "encoding", "frameSha256")})
+    assert p2._footprint_fully_live_ok(snap) is False
+    verdict = p2._score_freeze_control(_positive_snap_34(), snap, _a2_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "isolationEqual" in verdict["integrityFailed"]
+
+
+def test_footprint_raster_with_a_swapped_capture_id_is_inconclusive():
+    """The same binding from the other side: the evidence keeps B's pixels but
+    names another capture."""
+    snap = _b_with_evidence(captureId=_FIXTURE_34["a1"]["captureId"])
+    assert p2._footprint_fully_live_ok(snap) is False
+
+
+@pytest.mark.parametrize("n", [2, 11, 13, 0, None, "12"])
+def test_footprint_frame_count_off_contract_is_inconclusive(n):
+    """Probe 2: the burst length is the CONTRACT's, not the evidence's. A raster
+    reduced from 2 frames says far less than one reduced from 12, and a cached
+    count that agrees with a forged one proves nothing."""
+    snap = _b_with_evidence(n=n)
+    assert p2._footprint_fully_live_ok(snap) is False
+
+
+def test_footprint_frame_sha_list_must_match_the_burst_length():
+    """The per-frame provenance is retained at the contract's length; a short or
+    malformed list is not the burst's provenance."""
+    assert p2._footprint_fully_live_ok(_b_with_evidence(frameSha256=["0" * 64])) is False
+    assert p2._footprint_fully_live_ok(
+        _b_with_evidence(frameSha256=["zz" + "0" * 62] * p2.FOOTPRINT_BURST_FRAMES)
+    ) is False
+    assert p2._footprint_fully_live_ok(_b_with_evidence(frameSha256=None)) is False
+
+
+def test_footprint_padded_raster_is_inconclusive():
+    """Probe 3: the raster padded and re-encoded at 1921x1081. It decodes, and it
+    is self-consistent, but it is not the capture viewport."""
+    delta = p2._decode_delta_raster(
+        _FIXTURE_34["b"]["footprintFullyLive"]["evidence"], p2.FOOTPRINT_BURST_SHAPE
+    )
+    padded = np.zeros((delta.shape[0] + 1, delta.shape[1] + 1), dtype=np.uint8)
+    padded[: delta.shape[0], : delta.shape[1]] = delta
+    snap = _b_with_evidence(**p2._encode_delta_raster(padded))
+    assert p2._footprint_fully_live_ok(snap) is False
+
+
+def test_footprint_all_zero_raster_with_weakened_params_is_inconclusive():
+    """Probe 4: a dead (all-zero) raster carrying parameters slack enough to call
+    itself live. The re-score uses the CONSTANTS, so the weakened parameters are
+    refused outright -- and the dead raster would fail them anyway."""
+    dead = np.zeros(p2.FOOTPRINT_BURST_SHAPE, dtype=np.uint8)
+    slack = {**p2.FOOTPRINT_SCORE_PARAMS, "deltaMin": 0, "minLiveFrac": 0.0,
+             "bandLiveFrac": 0.0}
+    snap = _b_with_evidence(params=slack, **p2._encode_delta_raster(dead))
+    assert p2._footprint_fully_live_ok(snap) is False
+    snap = _b_with_evidence(**p2._encode_delta_raster(dead))
+    assert p2._footprint_fully_live_ok(snap) is False
+
+
+@pytest.mark.parametrize("field", ["rects", "controlRect"])
+def test_footprint_rects_must_equal_the_contract(field):
+    """A blob cannot move the rectangles it is scored over."""
+    moved = ({"x": 0, "y": 0, "w": 40, "h": 40, "label": "slide4Movie"}
+             if field == "rects" else {"x": 0, "y": 0, "w": 40, "h": 40})
+    snap = _b_with_evidence(**{field: [moved] if field == "rects" else moved})
+    assert p2._footprint_fully_live_ok(snap) is False
+
+
+def test_footprint_cached_numbers_must_equal_the_re_derived_ones():
+    """The comparison is over the COMPLETE result, at tolerance 0: a single
+    per-rect `liveFrac` or `maxDelta` edited away from what the raster yields is
+    a cached summary that no longer describes its own evidence."""
+    for path in (("perRect", 0, "liveFrac"), ("perRect", 0, "maxDelta"),
+                 ("noiseFloor", "p99"), ("stray", "strays")):
+        snap = _freeze_b_snap_34()
+        live = copy.deepcopy(snap["footprintFullyLive"])
+        node = live
+        for step in path[:-1]:
+            node = node[step]
+        node[path[-1]] = 0 if node[path[-1]] != 0 else 1
+        snap["footprintFullyLive"] = live
+        assert p2._footprint_fully_live_ok(snap) is False, path
+
+
+def test_footprint_decode_is_fail_closed(tmp_path):
+    """r12 MINOR 1: a non-PNG L-mode container, a declared-shape mismatch and a
+    decompression-bomb header all decode to `None`, never to pixels."""
+    buf = io.BytesIO()
+    Image.fromarray(
+        np.zeros(p2.FOOTPRINT_BURST_SHAPE, dtype=np.uint8), mode="L"
+    ).save(buf, format="TIFF")
+    blob = buf.getvalue()
+    ev = {"encoding": "png-gray", "bytes": len(blob), "h": 1080, "w": 1920,
+          "data": base64.b64encode(blob).decode("ascii")}
+    assert p2._decode_delta_raster(ev, p2.FOOTPRINT_BURST_SHAPE) is None
+    good = _FIXTURE_34["b"]["footprintFullyLive"]["evidence"]
+    assert p2._decode_delta_raster(good, (1081, 1921)) is None
+    assert p2._decode_delta_raster({**good, "h": 1081}, p2.FOOTPRINT_BURST_SHAPE) is None
+    old_limit = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = 16
+    try:
+        assert p2._decode_delta_raster(good, p2.FOOTPRINT_BURST_SHAPE) is None
+    finally:
+        Image.MAX_IMAGE_PIXELS = old_limit
+
+
+# --------------------------------------------------------------------------- #
+# r12 MAJOR 2 — `None` counter reads in a scored window.
+# --------------------------------------------------------------------------- #
+def _positive_with_at_cut_nulls(positions) -> dict:
+    """A1 with `index` nulled at the given positions of its at-cut segment."""
+    snap = _positive_snap_34()
+    lo = snap["atCutBoundary"]["from"]
+    hi = snap["releaseSplitIndex"]
+    seg = [i for i in range(lo, hi + 1)
+           if snap["indexSamples"][i].get("footprintSource") == "measured"]
+    samples = [dict(s) for s in snap["indexSamples"]]
+    for pos in positions:
+        samples[seg[pos]]["index"] = None
+    snap["indexSamples"] = samples
+    return snap
+
+
+def test_positive_at_cut_null_run_is_inconclusive():
+    """Codex's probe: positions 1-13 of the 24-sample at-cut segment nulled. The
+    bracket reached PASS before -- the null-adjacent deltas simply vanished from
+    the progress and freeze-run totals, so the interval was unobserved."""
+    a1 = _positive_with_at_cut_nulls(range(1, 14))
+    verdict = p2._score_freeze_control(a1, _freeze_b_snap_34(), _a2_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "positivesGreen" in verdict["integrityFailed"]
+
+
+def test_positive_at_cut_two_consecutive_nulls_are_inconclusive():
+    """The bound is on the RUN, not only on the total: two in a row is an
+    unobserved interval however short."""
+    a1 = _positive_with_at_cut_nulls((5, 6))
+    verdict = p2._score_freeze_control(a1, _freeze_b_snap_34(), _a2_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "positivesGreen" in verdict["integrityFailed"]
+
+
+def test_the_clean_at_cut_leading_null_is_still_scorable():
+    """The other half of the rule: every clean arm carries exactly one null, the
+    unsettled first read after the advance, and it must stay admissible."""
+    a1 = _positive_snap_34()
+    lo, hi = a1["atCutBoundary"]["from"], a1["releaseSplitIndex"]
+    seg = [s.get("index") for s in a1["indexSamples"][lo:hi + 1]
+           if s.get("footprintSource") == "measured"]
+    assert seg.count(None) == 1 and seg[0] is None
+    assert p2._score_freeze_control(
+        a1, _freeze_b_snap_34(), _a2_snap_34()
+    )["verdict"] == "pass"
+
+
+@pytest.mark.parametrize("indices,ok", [
+    ([None, 1, 2, 3, 4], True),                 # a leading edge null, as measured
+    ([1, 2, 3, 4, None], True),                 # a trailing edge null
+    ([1, 2, None, 4, 5], True),                 # isolated, bridged by a +2 step
+    ([1, 2, None, 2, 3], False),                # bridged by a ZERO step: a freeze
+    ([1, 2, None, 200, 201], False),            # bridged by a reset
+    ([1, None, None, 4, 5], False),             # a run of two
+    ([1, None, 3, None, 5], False),             # two isolated: over the total
+])
+def test_null_reads_admissible_rules(indices, ok):
+    assert p2._null_reads_admissible(indices, max_total=1) is ok
+
+
+def test_main_settled_window_admits_no_nulls():
+    """MAIN's settled window measured ZERO nulls in every clean arm, so one is
+    already evidence the window is missing a read."""
+    meta, samples, settle, owner = _main_inputs()
+    assert p2._advance_c_ok(meta, samples, settle, owner) is True
+    window = [i for i, s in enumerate(samples)
+              if s in p2._slide4_settled_window(samples)
+              and s.get("footprintSource") == "measured"]
+    meta = _with_sample(dict(meta), window[3], index=None)
+    assert p2._advance_c_ok(meta, meta["indexSamples"], settle, owner) is False
+
+
+def test_settled_progression_null_is_not_green_in_the_bracket():
+    """The same rule on the bracket's settled window, which is an isolation key."""
+    snap = _freeze_b_snap_34()
+    split = snap["releaseSplitIndex"]
+    window = [i for i, s in enumerate(snap["indexSamples"])
+              if i > split and s in p2._slide4_settled_window(
+                  snap["indexSamples"][split + 1:])]
+    snap = _with_sample(snap, window[2], index=None)
+    assert p2._settled_progression_ok(snap) is False
+
+
+# --------------------------------------------------------------------------- #
+# r12 MAJOR 3 — null-`decoderId` gaps in the after-window.
+# --------------------------------------------------------------------------- #
+def _b_with_owner_nulls(n: int, *, start: int = 0, decoder=None) -> dict:
+    """B with the first `n` after-window owner readings from `start` nulled (or
+    re-attributed to `decoder`)."""
+    snap = _freeze_b_snap_34()
+    n4 = p2._strict_hash_num(snap["hash4"])
+    samples = [dict(s) for s in snap["ownerSamples"]]
+    after = [i for i, s in enumerate(samples)
+             if (p2._strict_hash_num(s.get("sceneHash")) or -1) >= n4]
+    for i in after[start:start + n]:
+        samples[i]["decoderId"] = decoder
+    snap["ownerSamples"] = samples
+    return snap
+
+
+def test_owner_null_gap_of_24_of_80_is_inconclusive():
+    """Codex's probe: the first 24 of 80 after-window `decoderId` readings nulled
+    consecutively. `nonNullFrac == 0.70` satisfies the majority gate, so the
+    bracket passed -- while a replacement decoder could own the footprint for
+    that whole interval."""
+    b = _b_with_owner_nulls(24)
+    mc = p2._moving_continuity_derived(b)
+    assert mc["stableSlide4Owner"]["nonNullFrac"] >= 0.7
+    assert "stableSlide4Owner" in mc["failed"]
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+
+
+def test_owner_null_gap_just_over_the_bound_is_inconclusive():
+    """The bound bites well before the aggregate does."""
+    b = _b_with_owner_nulls(p2.OWNER_NULL_MAX_RUN + 1)
+    mc = p2._moving_continuity_derived(b)
+    assert mc["stableSlide4Owner"]["nonNullFrac"] > 0.7
+    assert "stableSlide4Owner" in mc["failed"]
+
+
+def test_the_clean_leading_owner_gap_is_still_admissible():
+    """The measured clean gap -- the box mid-flight, `elementFromPoint`
+    resolving nothing -- stays admissible, and is bracketed by the bound decoder
+    on both sides, its left bracket read from BEFORE the window."""
+    gaps = p2._moving_continuity_derived(
+        _freeze_b_snap_34()
+    )["stableSlide4Owner"]["nullGaps"]
+    assert gaps["ok"] is True
+    assert len(gaps["gaps"]) == 1 and gaps["gaps"][0]["from"] == 0
+    assert gaps["maxRun"] <= p2.OWNER_NULL_MAX_RUN
+    assert gaps["gaps"][0]["bracketed"] is True
+
+
+def test_owner_gap_bracketed_by_a_different_decoder_is_refused():
+    """A gap the owner ENTERS as one decoder and LEAVES as another is exactly
+    the handoff the gate exists to catch, however short it is."""
+    snap = _freeze_b_snap_34()
+    n4 = p2._strict_hash_num(snap["hash4"])
+    samples = [dict(s) for s in snap["ownerSamples"]]
+    after = [i for i, s in enumerate(samples)
+             if (p2._strict_hash_num(s.get("sceneHash")) or -1) >= n4]
+    for i in after[10:12]:
+        samples[i]["decoderId"] = None
+    for i in after[12:]:
+        samples[i]["decoderId"] = 99
+    snap["ownerSamples"] = samples
+    gaps = p2._owner_null_gaps(samples, [samples[i] for i in after])
+    assert gaps["ok"] is False
+    assert any(g["bracketed"] is False for g in gaps["gaps"])
+
+
+def test_owner_gap_with_nothing_resolved_after_it_is_refused():
+    """A trailing gap has no right-hand bracket and cannot earn one."""
+    after_n = p2._moving_continuity_derived(
+        _freeze_b_snap_34()
+    )["stableSlide4Owner"]["afterN"]
+    snap = _b_with_owner_nulls(3, start=after_n - 3)
+    gaps = p2._moving_continuity_derived(snap)["stableSlide4Owner"]["nullGaps"]
+    assert gaps["ok"] is False
+    assert gaps["gaps"][-1]["after"] is None
+
+
+# --------------------------------------------------------------------------- #
+# r12 MINOR 2 — "exactly one" bound-decoder rVFC clock.
+# --------------------------------------------------------------------------- #
+def test_duplicate_bound_decoder_clocks_fail_the_schema():
+    """Two entries for the bound decoder used to collapse into one through a
+    set, agreeing or not. Two readings for one decoder is not one reading."""
+    snap = _freeze_b_snap_34()
+    n4 = p2._strict_hash_num(snap["hash4"])
+    media = [copy.deepcopy(m) for m in snap["mediaSamples"]]
+    target = next(
+        m for m in media
+        if (p2._strict_hash_num(m.get("sceneHash")) or -1) >= n4
+    )
+    bound = next(v for v in target["videos"]
+                 if str(v.get("decoderId")) == str(snap["ownerDecoderId"]))
+    target["videos"].append(copy.deepcopy(bound))
+    snap["mediaSamples"] = media
+    assert p2._media_samples_schema_ok(media, snap["ownerDecoderId"]) is False
+    verdict = p2._score_freeze_control(_positive_snap_34(), snap, _a2_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "sampleSchemaSoundAllArms" in verdict["integrityFailed"]
+
+
+# --------------------------------------------------------------------------- #
 # MAIN's finding-13 gate (`_advance_c_ok`) — the same two majors on the path
 # that is NOT the A-B-A bracket.
 # --------------------------------------------------------------------------- #
 def _main_inputs(**snap_overrides):
-    """MAIN's four real arguments. The bracket arm drains to the same settled
-    `#7` `_settle_at_advance_hash` waits for and records it as `drain.hashAtArm`,
-    so the advance settle is the fixture's own reading, not a stand-in."""
+    """MAIN's four real arguments, every one of them CAPTURED. The arm takes the
+    same `_settle_at_advance_hash` reading MAIN does and persists it as
+    `advanceSettle`, so the sweep walks a captured block instead of one the
+    harness rebuilt from `drain.hashAtArm` (review r12 MINOR 3)."""
     snap = _positive_snap_34(**snap_overrides)
-    settle = {
-        "hashAtAdvance": snap["drain"]["hashAtArm"],
-        "expected": f"#{p2.ADVANCE_PRESS_HASH}",
-        "exact": True,
-    }
-    return snap, snap["indexSamples"], settle, snap["ownerSettle"]
+    return snap, snap["indexSamples"], snap["advanceSettle"], snap["ownerSettle"]
 
 
 def test_main_advance_c_ok_is_green_on_a_clean_capture():
@@ -4400,7 +4725,9 @@ def test_footprint_raster_round_trips_losslessly():
     delta = np.zeros((64, 96), dtype=np.int16)
     delta[10:50, 20:80] = np.arange(40 * 60, dtype=np.int16).reshape(40, 60) % 256
     encoded = p2._encode_delta_raster(delta)
-    assert np.array_equal(p2._decode_delta_raster(encoded), delta.astype(np.uint8))
+    assert np.array_equal(
+        p2._decode_delta_raster(encoded, delta.shape), delta.astype(np.uint8)
+    )
     assert encoded["encoding"] in ("png-gray", "zlib-u8")
     assert encoded["bytes"] == len(base64.b64decode(encoded["data"]))
 
@@ -4408,10 +4735,11 @@ def test_footprint_raster_round_trips_losslessly():
 def test_footprint_raster_rejects_a_tampered_blob():
     delta = np.zeros((32, 32), dtype=np.int16)
     encoded = p2._encode_delta_raster(delta)
-    assert p2._decode_delta_raster({**encoded, "bytes": encoded["bytes"] + 1}) is None
-    assert p2._decode_delta_raster({**encoded, "encoding": "raw"}) is None
-    assert p2._decode_delta_raster({**encoded, "h": encoded["h"] + 1}) is None
-    assert p2._decode_delta_raster({**encoded, "data": "not base64!"}) is None
+    shape = delta.shape
+    assert p2._decode_delta_raster({**encoded, "bytes": encoded["bytes"] + 1}, shape) is None
+    assert p2._decode_delta_raster({**encoded, "encoding": "raw"}, shape) is None
+    assert p2._decode_delta_raster({**encoded, "h": encoded["h"] + 1}, shape) is None
+    assert p2._decode_delta_raster({**encoded, "data": "not base64!"}, shape) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -4431,6 +4759,155 @@ def test_footprint_raster_rejects_a_tampered_blob():
 #                    deleting that field cannot flip it; its PRESENCE is what
 #                    the key tests, and those cases live in `_ABSENCE_CASES`.
 # --------------------------------------------------------------------------- #
+# A positive arm's survivors are a property of the ARM CLASS, not of which run
+# filled it: A1 and A2 are two captures of the same thing, walked independently.
+# Defined ONCE and keyed per class below, so the two can no longer drift apart
+# and classify identical evidence differently (review r12 MINOR 5).
+_POSITIVE_SWEEP_ALLOW: dict[tuple, str] = {
+    ('advanceKeyEvalMs',): 'report-only: the post-dispatch read, kept to measure its lag against the page-side keydown clock',
+    ('advanceKeySeen',): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
+    ('advanceKeySeen', 'isTrusted'): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
+    ('advanceKeySeen', 'repeat'): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
+    ('advanceKeySeen', 't'): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
+    ('advanceKeySeen', 'type'): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
+    ('advanceSettle', 'exact'): "provenance: the bracket persists MAIN's own settled-`#7` reading; the bracket's own arm boundary is gated through drain.hashAtArmExact",
+    ('advanceSettle', 'expected'): "provenance: the bracket persists MAIN's own settled-`#7` reading; the bracket's own arm boundary is gated through drain.hashAtArmExact",
+    ('advanceSettle', 'hashAtAdvance'): "provenance: the bracket persists MAIN's own settled-`#7` reading; the bracket's own arm boundary is gated through drain.hashAtArmExact",
+    ('armResult',): 'report-only in a positive arm: only B arms the freeze control',
+    ('atCutBoundary', 'reason'): "report-only: the boundary's reason string",
+    ('atCutFrom',): 'redundant: a view of atCutBoundary.from, gated there',
+    ('badge', 'counts', 'measured'): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
+    ('badge', 'counts', 'modelled'): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
+    ('badge', 'counts', 'none'): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
+    ('badge', 'counts', 'unlogged'): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
+    ('badge', 'counts', 'unstable'): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
+    ('badge', 'install', 'cell'): 'report-only badge install geometry; install.ok is gated',
+    ('badge', 'install', 'cells'): 'report-only badge install geometry; install.ok is gated',
+    ('badge', 'install', 'dpr'): 'report-only badge install geometry; install.ok is gated',
+    ('badge', 'install', 'elId'): 'report-only badge install geometry; install.ok is gated',
+    ('badge', 'install', 'innerWidth'): 'report-only badge install geometry; install.ok is gated',
+    ('badge', 'scale'): 'report-only: badge geometry diagnostic',
+    ('badge', 'stats', 'installedAt'): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
+    ('badge', 'stats', 'logged'): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
+    ('badge', 'stats', 'motionStartedAt'): "report-only in a positive arm: only B's re-handoff pair is scored",
+    ('badge', 'stats', 'painted'): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
+    ('badge', 'stats', 'rehandoffSeqs'): "report-only in a positive arm: only B's re-handoff pair is scored",
+    ('badge', 'stats', 'rehandoffs'): "report-only in a positive arm: only B's re-handoff pair is scored",
+    ('badge', 'stats', 'running'): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
+    ('badge', 'stats', 'seq'): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
+    ('bridgeEvents', 'detail', 'newElId'): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
+    ('bridgeEvents', 'detail', 'paused'): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
+    ('bridgeEvents', 'detail', 'preservedT'): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
+    ('bridgeEvents', 'detail', 'queueLeft'): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
+    ('bridgeEvents', 'detail', 'readyState'): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
+    ('bridgeEvents', 't'): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
+    ('burstStartOffsetS',): 'report-only: the perfMs form is what is ordered',
+    ('burstStartPerfMs',): "report-only in a positive arm: only B's release is ordered",
+    ('captureOffsets',): 'report-only: wall offsets; the perfMs clock is what is ordered',
+    ('collector', 'firstT'): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
+    ('collector', 'lastT'): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
+    ('collector', 'neighbourFillable'): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
+    ('collectorRows',): 'report-only row count; collector.rowCount is the gated one',
+    ('firstSettledOffsetS',): 'report-only: the perfMs form is what is ordered',
+    ('firstSettledPerfMs',): "report-only in a positive arm: only B's release is ordered",
+    ('flipWindowDecodable',): 'redundant: the scorer RE-DERIVES it from the samples',
+    ('footprintSources',): 'redundant: a view of indexSamples[*].footprintSource',
+    ('indexSamples', 'captureOffsetS'): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
+    ('indexSequence',): 'redundant: a view of indexSamples[*].index',
+    ('lastAtCutHoldOffsetS',): 'report-only: the perfMs form is what is ordered',
+    ('lastAtCutPerfMs',): "report-only in a positive arm: only B's release is ordered",
+    ('mediaSamples', 'canvasCount'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'captureOffsetS'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'hash'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'currentTime'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'elId'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'ended'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'fromDom'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'inDocument'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'key'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'movieKey'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'paused'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'readyState'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'videoHeight'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'preservePool', 'videoWidth'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'search'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videoCount'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'currentTime'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'duration'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'ended'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'fromPreservePool'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'h'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'index'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'loop'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'muted'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'networkState'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'paused'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'playbackRate'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'presentedMediaTime'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'readyState'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'src'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'w'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'wallMs'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('movingContinuity3to4', 'boundaryValid', 'n3'): 'provenance of movingContinuity3to4.ok, the gated key',
+    ('movingContinuity3to4', 'boundaryValid', 'n4'): 'provenance of movingContinuity3to4.ok, the gated key',
+    ('movingContinuity3to4', 'boundaryValid', 'ok'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'boundaryValid', 'slide4Min'): 'provenance of movingContinuity3to4.ok, the gated key',
+    ('movingContinuity3to4', 'crossingIdentity', 'ok'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'rvfcMonotonic', 'advance'): 'provenance of movingContinuity3to4.ok, the gated key',
+    ('movingContinuity3to4', 'rvfcMonotonic', 'n'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'rvfcMonotonic', 'ok'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'rvfcMonotonic', 'worstRegression'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'slide3MovieDecoder'): 'provenance of movingContinuity3to4.ok, the gated key',
+    ('movingContinuity3to4', 'slide4Owner'): 'provenance of movingContinuity3to4.ok, the gated key',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'afterN'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'distinctNonNull'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nonNullFrac'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'after'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'before'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'bracketed'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'from'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'run'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'to'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'maxRun'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'ok'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'reason'): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('movingContinuity3to4', 'stableSlide4Owner', 'ok'): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('movingIndexRunAtCut', 'firstIndex'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'flipIndex'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'flipIndexFull'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'freezeRunAtCut'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'freezeRunBaseline'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'lastIndex'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'n'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'negativeAnomaly'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'reason'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'totalProgressAfter'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('movingIndexRunAtCut', 'totalProgressBefore'): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
+    ('nullControl',): 'expected: a positive arm carries no null control',
+    ('ownerSamples', 'captureOffsetS'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
+    ('ownerSamples', 'footprint'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
+    ('ownerSamples', 'progress'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
+    ('ownerSamples', 'via'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
+    ('ownerSettle', 'rect', 'h'): 'provenance; `settled` is the gated key',
+    ('ownerSettle', 'rect', 'w'): 'provenance; `settled` is the gated key',
+    ('ownerSettle', 'rect', 'x'): 'provenance; `settled` is the gated key',
+    ('ownerSettle', 'rect', 'y'): 'provenance; `settled` is the gated key',
+    ('releaseOffsetS',): 'report-only: the perfMs form is what is ordered',
+    ('releasePerfMs',): 'redundant: nullControl.releaseAt is the gated release clock',
+    ('settledIndexProgression', 'decodableFrac'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'firstIndex'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'implausibleStep'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'lastIndex'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'longestStallRun'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'n'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'nDecodable'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'nDistinct'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'reason'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    ('settledIndexProgression', 'totalForward'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+}
+
 _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('advanceKeyEvalMs',)): 'report-only: the post-dispatch read, kept to measure its lag against the page-side keydown clock',
     ('b', ('advanceKeySeen',)): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
@@ -4438,6 +4915,9 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('advanceKeySeen', 'repeat')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
     ('b', ('advanceKeySeen', 't')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
     ('b', ('advanceKeySeen', 'type')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
+    ('b', ('advanceSettle', 'exact')): "provenance: the bracket persists MAIN's own settled-`#7` reading; the bracket's own arm boundary is gated through drain.hashAtArmExact",
+    ('b', ('advanceSettle', 'expected')): "provenance: the bracket persists MAIN's own settled-`#7` reading; the bracket's own arm boundary is gated through drain.hashAtArmExact",
+    ('b', ('advanceSettle', 'hashAtAdvance')): "provenance: the bracket persists MAIN's own settled-`#7` reading; the bracket's own arm boundary is gated through drain.hashAtArmExact",
     ('b', ('armResult', 'armedElId')): 'report-only: nullControl carries the gated copies of the arm geometry',
     ('b', ('armResult', 'armedHash')): 'report-only: nullControl carries the gated copies of the arm geometry',
     ('b', ('armResult', 'armedOwnerRect', 'h')): 'report-only: nullControl carries the gated copies of the arm geometry',
@@ -4483,24 +4963,6 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('continueThroughMovingMagicMove3to4Pass',)): 'negative in B: the freeze is what turns it red',
     ('b', ('firstSettledOffsetS',)): 'report-only: the perfMs form is what is ordered',
     ('b', ('flipWindowDecodable',)): 'redundant: the scorer RE-DERIVES it from the samples',
-    ('b', ('footprintFullyLive', 'noiseFloor', 'p99')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'noiseFloor', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'noiseFloor', 'rect', 'h')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'noiseFloor', 'rect', 'w')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'noiseFloor', 'rect', 'x')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'noiseFloor', 'rect', 'y')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'deadColumnBands')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'deadRowBands')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'expect')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'liveFrac')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'maxDelta')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'rect', 'h')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'rect', 'w')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'rect', 'x')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'perRect', 'rect', 'y')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('b', ('footprintFullyLive', 'stray', 'strays')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
     ('b', ('footprintSources',)): 'redundant: a view of indexSamples[*].footprintSource',
     ('b', ('indexSamples', 'captureOffsetS')): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
     ('b', ('indexSequence',)): 'redundant: a view of indexSamples[*].index',
@@ -4552,6 +5014,16 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'afterN')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
     ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'distinctNonNull')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
     ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nonNullFrac')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'after')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'before')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'bracketed')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'from')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'run')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'to')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'maxRun')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'ok')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
+    ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'reason')): 'redundant: the scorer RE-DERIVES movingContinuity3to4, null gaps and all; the cached ok/failed are what the isolation keys read',
     ('b', ('movingContinuity3to4', 'stableSlide4Owner', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
     ('b', ('movingIndexRunAtCut', 'firstIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
     ('b', ('movingIndexRunAtCut', 'flipIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
@@ -4610,300 +5082,9 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('settledIndexProgression', 'nDistinct')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
     ('b', ('settledIndexProgression', 'reason')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
     ('b', ('settledIndexProgression', 'totalForward')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('advanceKeyEvalMs',)): 'report-only: the post-dispatch read, kept to measure its lag against the page-side keydown clock',
-    ('positive', ('advanceKeySeen',)): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positive', ('advanceKeySeen', 'isTrusted')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positive', ('advanceKeySeen', 'repeat')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positive', ('advanceKeySeen', 't')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positive', ('advanceKeySeen', 'type')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positive', ('armResult',)): 'report-only in a positive arm: only B arms the freeze control',
-    ('positive', ('atCutBoundary', 'reason')): "report-only: the boundary's reason string",
-    ('positive', ('atCutFrom',)): 'redundant: a view of atCutBoundary.from, gated there',
-    ('positive', ('badge', 'counts', 'measured')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positive', ('badge', 'counts', 'modelled')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positive', ('badge', 'counts', 'none')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positive', ('badge', 'counts', 'unlogged')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positive', ('badge', 'counts', 'unstable')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positive', ('badge', 'install', 'cell')): 'report-only badge install geometry; install.ok is gated',
-    ('positive', ('badge', 'install', 'cells')): 'report-only badge install geometry; install.ok is gated',
-    ('positive', ('badge', 'install', 'dpr')): 'report-only badge install geometry; install.ok is gated',
-    ('positive', ('badge', 'install', 'elId')): 'report-only badge install geometry; install.ok is gated',
-    ('positive', ('badge', 'install', 'innerWidth')): 'report-only badge install geometry; install.ok is gated',
-    ('positive', ('badge', 'scale')): 'report-only: badge geometry diagnostic',
-    ('positive', ('badge', 'stats', 'installedAt')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positive', ('badge', 'stats', 'logged')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positive', ('badge', 'stats', 'motionStartedAt')): "report-only in a positive arm: only B's re-handoff pair is scored",
-    ('positive', ('badge', 'stats', 'painted')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positive', ('badge', 'stats', 'rehandoffSeqs')): "report-only in a positive arm: only B's re-handoff pair is scored",
-    ('positive', ('badge', 'stats', 'rehandoffs')): "report-only in a positive arm: only B's re-handoff pair is scored",
-    ('positive', ('badge', 'stats', 'running')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positive', ('badge', 'stats', 'seq')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positive', ('bridgeEvents', 'detail', 'newElId')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positive', ('bridgeEvents', 'detail', 'paused')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positive', ('bridgeEvents', 'detail', 'preservedT')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positive', ('bridgeEvents', 'detail', 'queueLeft')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positive', ('bridgeEvents', 'detail', 'readyState')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positive', ('bridgeEvents', 't')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positive', ('burstStartOffsetS',)): 'report-only: the perfMs form is what is ordered',
-    ('positive', ('burstStartPerfMs',)): "report-only in a positive arm: only B's release is ordered",
-    ('positive', ('captureOffsets',)): 'report-only: wall offsets; the perfMs clock is what is ordered',
-    ('positive', ('collector', 'firstT')): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
-    ('positive', ('collector', 'lastT')): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
-    ('positive', ('collector', 'neighbourFillable')): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
-    ('positive', ('collectorRows',)): 'report-only row count; collector.rowCount is the gated one',
-    ('positive', ('firstSettledOffsetS',)): 'report-only: the perfMs form is what is ordered',
-    ('positive', ('firstSettledPerfMs',)): "report-only in a positive arm: only B's release is ordered",
-    ('positive', ('flipWindowDecodable',)): 'redundant: the scorer RE-DERIVES it from the samples',
-    ('positive', ('footprintFullyLive', 'noiseFloor', 'p99')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'noiseFloor', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'noiseFloor', 'rect', 'h')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'noiseFloor', 'rect', 'w')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'noiseFloor', 'rect', 'x')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'noiseFloor', 'rect', 'y')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'deadColumnBands')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'deadRowBands')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'expect')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'liveFrac')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'maxDelta')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'rect', 'h')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'rect', 'w')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'rect', 'x')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'perRect', 'rect', 'y')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintFullyLive', 'stray', 'strays')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positive', ('footprintSources',)): 'redundant: a view of indexSamples[*].footprintSource',
-    ('positive', ('indexSamples', 'captureOffsetS')): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
-    ('positive', ('indexSequence',)): 'redundant: a view of indexSamples[*].index',
-    ('positive', ('lastAtCutHoldOffsetS',)): 'report-only: the perfMs form is what is ordered',
-    ('positive', ('lastAtCutPerfMs',)): "report-only in a positive arm: only B's release is ordered",
-    ('positive', ('mediaSamples', 'canvasCount')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'captureOffsetS')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'hash')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'currentTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'elId')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'ended')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'fromDom')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'inDocument')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'key')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'movieKey')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'paused')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'readyState')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'videoHeight')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'preservePool', 'videoWidth')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'search')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videoCount')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'currentTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'duration')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'ended')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'fromPreservePool')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'h')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'index')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'loop')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'muted')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'networkState')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'paused')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'playbackRate')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'presentedMediaTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'readyState')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'src')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'videos', 'w')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('mediaSamples', 'wallMs')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positive', ('movingContinuity3to4', 'boundaryValid', 'n3')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positive', ('movingContinuity3to4', 'boundaryValid', 'n4')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positive', ('movingContinuity3to4', 'boundaryValid', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingContinuity3to4', 'boundaryValid', 'slide4Min')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positive', ('movingContinuity3to4', 'crossingIdentity', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingContinuity3to4', 'rvfcMonotonic', 'advance')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positive', ('movingContinuity3to4', 'rvfcMonotonic', 'n')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingContinuity3to4', 'rvfcMonotonic', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingContinuity3to4', 'rvfcMonotonic', 'worstRegression')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingContinuity3to4', 'slide3MovieDecoder')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positive', ('movingContinuity3to4', 'slide4Owner')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positive', ('movingContinuity3to4', 'stableSlide4Owner', 'afterN')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingContinuity3to4', 'stableSlide4Owner', 'distinctNonNull')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingContinuity3to4', 'stableSlide4Owner', 'nonNullFrac')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingContinuity3to4', 'stableSlide4Owner', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positive', ('movingIndexRunAtCut', 'firstIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'flipIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'flipIndexFull')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'freezeRunAtCut')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'freezeRunBaseline')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'lastIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'n')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'negativeAnomaly')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'reason')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'totalProgressAfter')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('movingIndexRunAtCut', 'totalProgressBefore')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positive', ('nullControl',)): 'expected: a positive arm carries no null control',
-    ('positive', ('ownerSamples', 'captureOffsetS')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
-    ('positive', ('ownerSamples', 'footprint')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
-    ('positive', ('ownerSamples', 'progress')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
-    ('positive', ('ownerSamples', 'via')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
-    ('positive', ('ownerSettle', 'rect', 'h')): 'provenance; `settled` is the gated key',
-    ('positive', ('ownerSettle', 'rect', 'w')): 'provenance; `settled` is the gated key',
-    ('positive', ('ownerSettle', 'rect', 'x')): 'provenance; `settled` is the gated key',
-    ('positive', ('ownerSettle', 'rect', 'y')): 'provenance; `settled` is the gated key',
-    ('positive', ('releaseOffsetS',)): 'report-only: the perfMs form is what is ordered',
-    ('positive', ('releasePerfMs',)): 'redundant: nullControl.releaseAt is the gated release clock',
-    ('positive', ('settledIndexProgression', 'decodableFrac')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'firstIndex')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'implausibleStep')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'lastIndex')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'longestStallRun')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'n')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'nDecodable')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'nDistinct')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'reason')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positive', ('settledIndexProgression', 'totalForward')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('advanceKeyEvalMs',)): 'report-only: the post-dispatch read, kept to measure its lag against the page-side keydown clock',
-    ('positiveA2', ('advanceKeySeen',)): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positiveA2', ('advanceKeySeen', 'isTrusted')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positiveA2', ('advanceKeySeen', 'repeat')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positiveA2', ('advanceKeySeen', 't')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positiveA2', ('advanceKeySeen', 'type')): 'report-only: the counted, filtered keydown is gated via advanceKeyEvents/advanceKeyRejected and advanceKeyPerfMs',
-    ('positiveA2', ('armResult',)): 'report-only in a positive arm: only B arms the freeze control',
-    ('positiveA2', ('atCutBoundary', 'reason')): "report-only: the boundary's reason string",
-    ('positiveA2', ('atCutFrom',)): 'redundant: a view of atCutBoundary.from, gated there',
-    ('positiveA2', ('badge', 'counts', 'measured')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positiveA2', ('badge', 'counts', 'modelled')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positiveA2', ('badge', 'counts', 'none')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positiveA2', ('badge', 'counts', 'unlogged')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positiveA2', ('badge', 'counts', 'unstable')): 'report-only count: seqViolation is gated, per-sample truth by footprintSource',
-    ('positiveA2', ('badge', 'install', 'cell')): 'report-only badge install geometry; install.ok is gated',
-    ('positiveA2', ('badge', 'install', 'cells')): 'report-only badge install geometry; install.ok is gated',
-    ('positiveA2', ('badge', 'install', 'dpr')): 'report-only badge install geometry; install.ok is gated',
-    ('positiveA2', ('badge', 'install', 'elId')): 'report-only badge install geometry; install.ok is gated',
-    ('positiveA2', ('badge', 'install', 'innerWidth')): 'report-only badge install geometry; install.ok is gated',
-    ('positiveA2', ('badge', 'scale')): 'report-only: badge geometry diagnostic',
-    ('positiveA2', ('badge', 'stats', 'installedAt')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positiveA2', ('badge', 'stats', 'logged')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positiveA2', ('badge', 'stats', 'motionStartedAt')): "report-only in a positive arm: only B's re-handoff pair is scored",
-    ('positiveA2', ('badge', 'stats', 'painted')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positiveA2', ('badge', 'stats', 'rehandoffSeqs')): "report-only in a positive arm: only B's re-handoff pair is scored",
-    ('positiveA2', ('badge', 'stats', 'rehandoffs')): "report-only in a positive arm: only B's re-handoff pair is scored",
-    ('positiveA2', ('badge', 'stats', 'running')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positiveA2', ('badge', 'stats', 'seq')): 'report-only badge counter; the re-handoff pair evidence (rehandoffs/rehandoffSeqs/motionStartedAt) is gated',
-    ('positiveA2', ('bridgeEvents', 'detail', 'newElId')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positiveA2', ('bridgeEvents', 'detail', 'paused')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positiveA2', ('bridgeEvents', 'detail', 'preservedT')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positiveA2', ('bridgeEvents', 'detail', 'queueLeft')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positiveA2', ('bridgeEvents', 'detail', 'readyState')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positiveA2', ('bridgeEvents', 't')): 'report-only: bridge engagement is DERIVED from key/scene/oldElId/oldGen/generation',
-    ('positiveA2', ('burstStartOffsetS',)): 'report-only: the perfMs form is what is ordered',
-    ('positiveA2', ('burstStartPerfMs',)): "report-only in a positive arm: only B's release is ordered",
-    ('positiveA2', ('captureOffsets',)): 'report-only: wall offsets; the perfMs clock is what is ordered',
-    ('positiveA2', ('collector', 'firstT')): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
-    ('positiveA2', ('collector', 'lastT')): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
-    ('positiveA2', ('collector', 'neighbourFillable')): 'provenance of the collector series; the scorer RE-DERIVES _collector_ok',
-    ('positiveA2', ('collectorRows',)): 'report-only row count; collector.rowCount is the gated one',
-    ('positiveA2', ('firstSettledOffsetS',)): 'report-only: the perfMs form is what is ordered',
-    ('positiveA2', ('firstSettledPerfMs',)): "report-only in a positive arm: only B's release is ordered",
-    ('positiveA2', ('flipWindowDecodable',)): 'redundant: the scorer RE-DERIVES it from the samples',
-    ('positiveA2', ('footprintFullyLive', 'noiseFloor', 'p99')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'noiseFloor', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'noiseFloor', 'rect', 'h')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'noiseFloor', 'rect', 'w')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'noiseFloor', 'rect', 'x')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'noiseFloor', 'rect', 'y')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'deadColumnBands')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'deadRowBands')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'expect')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'liveFrac')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'maxDelta')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'rect', 'h')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'rect', 'w')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'rect', 'x')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'perRect', 'rect', 'y')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'reason')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintFullyLive', 'stray', 'strays')): 'report-only: only `ok` is scored, and the burst pixels it was derived from are not retained',
-    ('positiveA2', ('footprintSources',)): 'redundant: a view of indexSamples[*].footprintSource',
-    ('positiveA2', ('indexSamples', 'captureOffsetS')): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
-    ('positiveA2', ('indexSequence',)): 'redundant: a view of indexSamples[*].index',
-    ('positiveA2', ('lastAtCutHoldOffsetS',)): 'report-only: the perfMs form is what is ordered',
-    ('positiveA2', ('lastAtCutPerfMs',)): "report-only in a positive arm: only B's release is ordered",
-    ('positiveA2', ('mediaSamples', 'canvasCount')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'captureOffsetS')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'hash')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'currentTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'elId')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'ended')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'fromDom')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'inDocument')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'key')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'movieKey')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'paused')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'readyState')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'videoHeight')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'preservePool', 'videoWidth')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'search')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videoCount')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'currentTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'duration')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'ended')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'fromPreservePool')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'h')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'index')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'loop')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'muted')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'networkState')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'paused')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'playbackRate')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'presentedMediaTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'readyState')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'src')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'videos', 'w')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('mediaSamples', 'wallMs')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('positiveA2', ('movingContinuity3to4', 'boundaryValid', 'n3')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positiveA2', ('movingContinuity3to4', 'boundaryValid', 'n4')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positiveA2', ('movingContinuity3to4', 'boundaryValid', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingContinuity3to4', 'boundaryValid', 'slide4Min')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positiveA2', ('movingContinuity3to4', 'crossingIdentity', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingContinuity3to4', 'rvfcMonotonic', 'advance')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positiveA2', ('movingContinuity3to4', 'rvfcMonotonic', 'n')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingContinuity3to4', 'rvfcMonotonic', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingContinuity3to4', 'rvfcMonotonic', 'worstRegression')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingContinuity3to4', 'slide3MovieDecoder')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positiveA2', ('movingContinuity3to4', 'slide4Owner')): 'provenance of movingContinuity3to4.ok, the gated key',
-    ('positiveA2', ('movingContinuity3to4', 'stableSlide4Owner', 'afterN')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingContinuity3to4', 'stableSlide4Owner', 'distinctNonNull')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingContinuity3to4', 'stableSlide4Owner', 'nonNullFrac')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingContinuity3to4', 'stableSlide4Owner', 'ok')): 'provenance: the scorer RE-RUNS movingContinuity3to4 from ownerSamples/mediaSamples and holds only `ok`/`failed` to the cache',
-    ('positiveA2', ('movingIndexRunAtCut', 'firstIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'flipIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'flipIndexFull')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'freezeRunAtCut')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'freezeRunBaseline')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'lastIndex')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'n')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'negativeAnomaly')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'reason')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'totalProgressAfter')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('movingIndexRunAtCut', 'totalProgressBefore')): 'redundant: the scorer RE-DERIVES the at-cut run from the samples',
-    ('positiveA2', ('nullControl',)): 'expected: a positive arm carries no null control',
-    ('positiveA2', ('ownerSamples', 'captureOffsetS')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
-    ('positiveA2', ('ownerSamples', 'footprint')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
-    ('positiveA2', ('ownerSamples', 'progress')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
-    ('positiveA2', ('ownerSamples', 'via')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash/decoderId/ownerAmbiguous',
-    ('positiveA2', ('ownerSettle', 'rect', 'h')): 'provenance; `settled` is the gated key',
-    ('positiveA2', ('ownerSettle', 'rect', 'w')): 'provenance; `settled` is the gated key',
-    ('positiveA2', ('ownerSettle', 'rect', 'x')): 'provenance; `settled` is the gated key',
-    ('positiveA2', ('ownerSettle', 'rect', 'y')): 'provenance; `settled` is the gated key',
-    ('positiveA2', ('releaseOffsetS',)): 'report-only: the perfMs form is what is ordered',
-    ('positiveA2', ('releasePerfMs',)): 'redundant: nullControl.releaseAt is the gated release clock',
-    ('positiveA2', ('settledIndexProgression', 'decodableFrac')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'firstIndex')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'implausibleStep')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'lastIndex')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'longestStallRun')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'n')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'nDecodable')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'nDistinct')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'reason')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
-    ('positiveA2', ('settledIndexProgression', 'totalForward')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
+    **{(cls, path): reason
+       for cls in ("positive", "positiveA2")
+       for path, reason in _POSITIVE_SWEEP_ALLOW.items()},
 }
 
 # The same accounting for MAIN's `_advance_c_ok` input.
@@ -4953,6 +5134,7 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('bridgeEvents', 't')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('burstStartOffsetS',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('burstStartPerfMs',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('captureId',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('captureOffsets',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('collector', 'firstT')): 'provenance of the collector series; MAIN RE-DERIVES `_collector_ok` and holds the cached `ok` to it',
     ('main', ('collector', 'lastT')): 'provenance of the collector series; MAIN RE-DERIVES `_collector_ok` and holds the cached `ok` to it',
@@ -4971,12 +5153,14 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('firstSettledPerfMs',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('flipWindowDecodable',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'bytes')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('footprintFullyLive', 'evidence', 'captureId')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'controlRect', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'controlRect', 'w')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'controlRect', 'x')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'controlRect', 'y')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'data')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'encoding')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('footprintFullyLive', 'evidence', 'frameSha256')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'n')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('footprintFullyLive', 'evidence', 'params', 'bandLiveFrac')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
@@ -5083,6 +5267,16 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'afterN')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'distinctNonNull')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nonNullFrac')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'after')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'before')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'bracketed')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'from')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'run')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'gaps', 'to')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'maxRun')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'ok')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'nullGaps', 'reason')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingContinuity3to4', 'stableSlide4Owner', 'ok')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingIndexRunAtCut', 'firstIndex')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('movingIndexRunAtCut', 'flipIndex')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
@@ -5291,22 +5485,21 @@ _MAIN_SWEEP_CACHE: dict = {}
 
 
 def _main_sweep() -> dict:
-    """The walk over MAIN's real arguments, the advance settle included (review
-    r11 MAJOR 4). `owner` IS `snap["ownerSettle"]`, exactly as MAIN passes it, so
-    the snapshot walk already covers every one of its leaves."""
+    """The walk over MAIN's real arguments. Both settles ARE members of the
+    captured snapshot, exactly as MAIN passes them, so the one snapshot walk
+    covers every leaf of both (review r11 MAJOR 4, r12 MINOR 3)."""
     if not _MAIN_SWEEP_CACHE:
         snap, _, settle, owner = _main_inputs()
-        assert owner is snap["ownerSettle"]
+        assert owner is snap["ownerSettle"] and settle is snap["advanceSettle"]
 
         def score() -> bool:
             return p2._advance_c_ok(
                 snap, snap.get("indexSamples") or [], settle, owner
             ) is False
 
-        for cls, node in (("main", snap), ("settle", settle)):
-            _MAIN_SWEEP_CACHE.update(
-                {(cls, path): closed for path, closed in _walk(node, score).items()}
-            )
+        _MAIN_SWEEP_CACHE.update(
+            {("main", path): closed for path, closed in _walk(snap, score).items()}
+        )
     return _MAIN_SWEEP_CACHE
 
 
