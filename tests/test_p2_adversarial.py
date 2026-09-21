@@ -23,6 +23,7 @@ import json
 import shutil
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -777,11 +778,15 @@ def _owner_samples_34(decoder_id=4, ambiguous=False):
 
 
 def _video_entry_34(decoder_id, t, **over):
-    """One `videos` entry carrying the geometry the attestation reads."""
+    """One `videos` entry carrying the geometry AND the raw readings the paint
+    decision is re-derived from."""
+    box = dict(zip(("x", "y", "w", "h"), _FP_34))
     entry = {
         "decoderId": decoder_id, "presentedMediaTime": t, "visible": True,
-        "hiddenBy": None, "suppressed34": False,
-        "rect": dict(zip(("x", "y", "w", "h"), _FP_34)),
+        "hiddenBy": None, "suppressed34": False, "rect": dict(box),
+        "inDocument": True, "display": "block", "visibility": "visible",
+        "opacityProduct": 1.0, "checkVisibility": True,
+        "clientRect": dict(box), "viewport": {"w": 1920.0, "h": 1080.0},
     }
     entry.update(over)
     return entry
@@ -898,6 +903,19 @@ ADVANCE_KEY_AT_34 = _FIXTURE_34["b"]["advanceKeyPerfMs"]
 HOLD_STARTED_AT_34 = _FIXTURE_34["b"]["nullControl"]["holdStartedAt"]
 COVER_PAINTED_AT_34 = _FIXTURE_34["b"]["nullControl"]["coverPaintedAt"]
 REHANDOFF_SEQ0_34 = _FIXTURE_34["b"]["badge"]["stats"]["rehandoffSeqs"][0]
+
+
+_MISSING = object()
+
+
+def _score_34(a1: dict, b: dict, a2: dict, manifest=_MISSING) -> dict:
+    """The A-B-A scorer, handed the bracket MANIFEST the fixture was captured
+    under. The manifest is minted before any arm runs and lives outside the
+    snapshots, so it is an argument here exactly as it is in production."""
+    return p2._score_freeze_control(
+        a1, b, a2,
+        _FIXTURE_34["manifest"] if manifest is _MISSING else manifest,
+    )
 
 
 def _positive_snap_34(**overrides) -> dict:
@@ -1873,7 +1891,7 @@ def test_freeze_control_passes_on_clean_bracket():
     (and GREEN) across A1/B/A2 -- including `settledIndexProgressionOk`, which is
     genuinely green in B too because the cover is released before the settled
     window (review Blocker 3)."""
-    verdict = p2._score_freeze_control(_positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34())
     assert verdict["ok"] is True, verdict["failed"]
     assert verdict["verdict"] == "pass"
     assert verdict["isolationDiffs"] == {}
@@ -1886,13 +1904,13 @@ def test_freeze_control_unsound_collector_is_inconclusive_in_every_arm():
     for arm in ("a1", "b", "a2"):
         snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
         snaps[arm]["collector"] = {**snaps[arm]["collector"], "unbracketed": 1, "ok": False}
-        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
         assert verdict["verdict"] == "inconclusive", arm
         assert "collectorSeriesSound" in verdict["integrityFailed"], arm
 
     missing = _freeze_b_snap_34()
     missing.pop("collector")
-    verdict = p2._score_freeze_control(_positive_snap_34(), missing, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), missing, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "collectorSeriesSound" in verdict["integrityFailed"]
 
@@ -1918,7 +1936,7 @@ def test_freeze_control_post_cover_missing_badge_is_inconclusive_in_every_arm():
         snap["badge"] = {**snap["badge"], "missing": 1,
                          "counts": {**snap["badge"]["counts"], "none": 1}}
         assert snap["collector"]["unbracketed"] == 1, arm
-        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
         assert verdict["verdict"] == "inconclusive", (arm, verdict["failed"])
         assert "collectorSeriesSound" in verdict["integrityFailed"], arm
         assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], arm
@@ -1937,7 +1955,7 @@ def test_freeze_control_torn_or_unlogged_badges_are_inconclusive_in_every_arm():
             else:
                 badge = {**badge, field: value}
             snaps[arm]["badge"] = badge
-            verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+            verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
             assert verdict["verdict"] == "inconclusive", (arm, field)
             assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], (arm, field)
 
@@ -1951,14 +1969,14 @@ def test_freeze_control_invalid_at_cut_boundary_is_inconclusive_in_every_arm():
         snaps[arm]["advanceKeyPerfMs"] = None
         snaps[arm]["atCutBoundary"] = p2._at_cut_boundary(snaps[arm]["indexSamples"], None)
         snaps[arm]["atCutFrom"] = None
-        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
         assert verdict["verdict"] == "inconclusive", arm
         assert "atCutBoundaryValidAllArms" in verdict["integrityFailed"], arm
 
     late = _positive_snap_34()
     late["atCutBoundary"] = p2._at_cut_boundary(late["indexSamples"], 1e9)
     late["advanceKeyPerfMs"] = 1e9
-    verdict = p2._score_freeze_control(late, _freeze_b_snap_34(), _a2_snap_34())
+    verdict = _score_34(late, _freeze_b_snap_34(), _a2_snap_34())
     assert "atCutBoundaryValidAllArms" in verdict["integrityFailed"]
 
 
@@ -1974,7 +1992,7 @@ def test_freeze_control_at_cut_boundary_zero_still_passes():
         snap["atCutBoundary"] = p2._at_cut_boundary(snap["indexSamples"], first_perf)
         assert snap["atCutBoundary"]["from"] == 0 and snap["atCutBoundary"]["ok"] is True
     b["nullControl"]["advanceKeyAt"] = b["advanceKeyPerfMs"]
-    verdict = p2._score_freeze_control(a1, b, a2)
+    verdict = _score_34(a1, b, a2)
     assert verdict["verdict"] == "pass", verdict["failed"]
 
 
@@ -1983,7 +2001,7 @@ def test_freeze_control_arm_failure_is_inconclusive():
     recorded arm error must surface as INCONCLUSIVE, never as a verdict."""
     b = _freeze_b_snap_34()
     b["armResult"] = {"ok": False, "error": "owner-unresolved-at-arm"}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "owner-unresolved-at-arm" in verdict["reason"]
 
@@ -1998,7 +2016,7 @@ def test_freeze_control_unlanded_drain_press_is_inconclusive():
         **b["drain"], "pressesSent": 5, "pressesLanded": 4,
         "unlandedFromHash": [5], "allPressesLanded": False, "ok": False,
     }
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert verdict["checks"]["drainPressesAllLanded"] is False
     assert "drainPressesAllLanded" in verdict["integrityFailed"]
@@ -2011,7 +2029,7 @@ def test_freeze_control_drain_overshoot_is_inconclusive():
     on the genuine pre-move boundary."""
     b = _freeze_b_snap_34()
     b["drain"] = {**b["drain"], "hashAtArm": "#8", "hashAtArmExact": False, "ok": False}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "drainPressesAllLanded" in verdict["integrityFailed"]
 
@@ -2021,7 +2039,7 @@ def test_freeze_control_missing_drain_block_fails_closed():
     NOT evidence of a clean drain -- it must fail closed to INCONCLUSIVE."""
     b = _freeze_b_snap_34()
     b.pop("drain")
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert verdict["checks"]["drainPressesAllLanded"] is False
 
@@ -2038,7 +2056,7 @@ def test_freeze_control_contaminated_positive_drain_is_inconclusive(arm):
         **snaps[arm]["drain"], "pressesSent": 5, "pressesLanded": 4,
         "unlandedFromHash": [5], "allPressesLanded": False, "ok": False,
     }
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive"
     assert verdict["checks"]["drainPressesAllLanded"] is False
     assert "drainPressesAllLanded" in verdict["integrityFailed"]
@@ -2050,7 +2068,7 @@ def test_freeze_control_positive_drain_overshoot_is_inconclusive(arm):
     """A positive that overshot the arm boundary drained past `#7` too."""
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     snaps[arm]["drain"] = {**snaps[arm]["drain"], "hashAtArm": "#8", "hashAtArmExact": False}
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive"
     assert "drainPressesAllLanded" in verdict["integrityFailed"]
 
@@ -2060,7 +2078,7 @@ def test_freeze_control_missing_positive_drain_block_fails_closed(arm):
     """Fail CLOSED on a missing block in a positive arm, exactly as for B."""
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     snaps[arm].pop("drain")
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive"
     assert verdict["checks"]["drainPressesAllLanded"] is False
     assert verdict["drains"][arm] is None
@@ -2072,7 +2090,7 @@ def test_freeze_control_never_fired_hold_is_inconclusive_not_pass():
     INCONCLUSIVE, not PASS and not a plain FAIL."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "status": "armed", "holdStartedAt": None}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert verdict["ok"] is False
 
@@ -2088,7 +2106,7 @@ def test_freeze_control_max_raf_gap_is_disqualifying():
         {**r, "t": raf[19]["t"] + 380.0 + 20.0 * i} for i, r in enumerate(raf[20:])
     ]
     b["nullControl"] = {**b["nullControl"], "rafLog": spiked}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "maxRafGapOk" in verdict["integrityFailed"]
 
@@ -2100,7 +2118,7 @@ def test_freeze_control_trigger_to_first_frame_gap_is_disqualifying():
     raf = list(b["nullControl"]["rafLog"])
     raf[0] = {**raf[0], "t": raf[0]["t"] + 500.0}  # first frame lags the trigger by 500ms
     b["nullControl"] = {**b["nullControl"], "rafLog": raf}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "maxRafGapOk" in verdict["integrityFailed"]
 
@@ -2122,7 +2140,7 @@ def test_freeze_control_dead_loop_is_inconclusive():
              "measuredRect": {"x": 300.0, "y": 700.0, "w": 500.0, "h": 350.0}},
         ],  # 2 frames < loopLive floor
     }
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "loopLive" in verdict["integrityFailed"]
 
@@ -2137,7 +2155,7 @@ def test_freeze_control_unrendered_frame_is_inconclusive():
         **b["nullControl"], "staleCurrentTime": 0.0, "coverPatchMean": 1.0,
         "error": "owner-video-not-ready-at-trigger:rs=4,t=0.01",
     }
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert {"staleFrameFromPlayback", "noControlError"} & set(verdict["integrityFailed"])
 
@@ -2148,7 +2166,7 @@ def test_freeze_control_valid_dark_counter_not_rejected():
     'black' — a genuinely frozen dark frame from live playback still PASSES."""
     b = _authored_b_34([2])
     b["nullControl"] = {**b["nullControl"], "staleCurrentTime": 7.33, "coverPatchMean": 2.0}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "pass", verdict["failed"]
 
 
@@ -2157,7 +2175,7 @@ def test_freeze_control_owner_not_ready_is_inconclusive():
     the stale frame was not captured from a real frame => INCONCLUSIVE."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "ownerReadyState": 0}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "ownerReadyAtTrigger" in verdict["integrityFailed"]
 
@@ -2167,7 +2185,7 @@ def test_freeze_control_fired_before_advance_is_inconclusive():
     frame, not the cut => INCONCLUSIVE (review BLOCKER 2, one clock)."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "holdStartedAt": ADVANCE_KEY_AT_34 - 30.0}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAfterAdvance" in verdict["integrityFailed"]
 
@@ -2177,7 +2195,7 @@ def test_freeze_control_no_advance_timestamp_is_inconclusive():
     -- INCONCLUSIVE, never a verdict."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "advanceKeyAt": None}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAfterAdvance" in verdict["integrityFailed"]
 
@@ -2188,7 +2206,7 @@ def test_freeze_control_pre_advance_departure_is_inconclusive():
     cut => INCONCLUSIVE with the departure recorded."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "preAdvanceDepartureAt": ADVANCE_KEY_AT_34 - 100.0}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "noPreAdvanceDeparture" in verdict["integrityFailed"]
 
@@ -2201,7 +2219,7 @@ def test_freeze_control_fired_too_many_frames_after_advance_is_inconclusive():
     b["nullControl"] = {
         **b["nullControl"], "triggerFramesAfterAdvance": p2.FREEZE_TRIGGER_MAX_RAFS + 1
     }
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAtMoveStart" in verdict["integrityFailed"]
 
@@ -2214,7 +2232,7 @@ def test_freeze_control_stage_resized_between_arm_and_trigger_is_inconclusive():
         **b["nullControl"],
         "stageRectAtTrigger": {"x": 0.0, "y": 0.0, "w": 1600.0, "h": 900.0},
     }
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "stageGeometryStable" in verdict["integrityFailed"]
 
@@ -2229,7 +2247,7 @@ def test_freeze_control_counter_that_stayed_green_never_passes():
     # the scored window opens at `coverPaintedAt` (review r3 BLOCKER 2).
     for i in range(FIRST_IN_HOLD_34, FREEZE_SPLIT_INDEX_34 + 1):
         b = _with_sample(b, i, index=40 + i)  # advancing again -> no freeze to catch
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["ok"] is False
     assert verdict["verdict"] != "pass"
     assert "indexRunRed" in verdict["failed"]
@@ -2243,7 +2261,7 @@ def test_freeze_control_fails_on_weak_freeze_margin():
     b = _freeze_b_snap_34()
     # Break the run in the middle: two short frozen runs instead of one long one.
     b = _with_sample(b, FREEZE_FLIP_INDEX_34 + 3, index=77)
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["ok"] is False
     assert "freezeRunMargin" in verdict["failed"] or "everyInHoldStale" in verdict["integrityFailed"]
 
@@ -2254,7 +2272,7 @@ def test_freeze_control_fails_when_freeze_leaked_into_liveness():
     => fail on isolation (or its own key), never a spurious pass."""
     b = _freeze_b_snap_34()
     b["movingContinuity3to4"] = {**b["movingContinuity3to4"], "ok": False, "failed": ["rvfcMonotonic"]}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["ok"] is False
     assert "isolationEqual" in verdict["failed"] or "movingContinuityOk" in verdict["failed"]
 
@@ -2264,7 +2282,7 @@ def test_freeze_control_fails_when_bound_decoder_is_not_slide3_decoder():
     the freeze proved nothing about the decoder under test."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "boundDecoderId": 99}  # cover bound a different el
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["ok"] is False
     assert "boundDecoderIsSlide3Decoder" in verdict["failed"]
 
@@ -2278,7 +2296,7 @@ def test_freeze_control_fails_when_positive_bracket_not_green():
         "freezeRunAtCut": 7, "negativeAnomaly": False,
     }
     a_bad["continueThroughMovingMagicMove3to4Pass"] = False
-    verdict = p2._score_freeze_control(a_bad, _freeze_b_snap_34(), _a2_snap_34())
+    verdict = _score_34(a_bad, _freeze_b_snap_34(), _a2_snap_34())
     assert verdict["ok"] is False
     assert "positivesGreen" in verdict["failed"]
 
@@ -2290,7 +2308,7 @@ def test_freeze_control_hash_only_trigger_is_inconclusive():
     hash-only fallback fire — INCONCLUSIVE (owner decision 8c)."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "firedVia": "hash"}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAtMoveStart" in verdict["integrityFailed"]
 
@@ -2307,7 +2325,7 @@ def test_freeze_control_cover_tracks_footprint_violation_is_inconclusive():
     bad["coverRect"] = {**bad["coverRect"], "x": bad["coverRect"]["x"] + 25.0}
     raf[10] = bad
     b["nullControl"] = {**b["nullControl"], "rafLog": raf}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "coverTracksFootprint" in verdict["integrityFailed"]
 
@@ -2324,7 +2342,7 @@ def test_freeze_control_one_frame_cover_lag_is_caught():
         lagged = {**r["coverRect"], "x": r["coverRect"]["x"] + 2.8 * max(0, i - 1)}
         raf.append({**r, "measuredRect": moved, "coverRect": lagged})
     b["nullControl"] = {**b["nullControl"], "rafLog": raf}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "coverTracksFootprint" in verdict["integrityFailed"]
 
@@ -2336,7 +2354,7 @@ def test_freeze_control_release_after_burst_started_is_inconclusive():
     is bounded on both sides: INCONCLUSIVE, not a verdict."""
     b = _freeze_b_snap_34()
     b["burstStartPerfMs"] = b["nullControl"]["releaseAt"] - 10.0
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"]
 
@@ -2347,7 +2365,7 @@ def test_freeze_control_release_not_strictly_after_last_capture_is_inconclusive(
     of the screenshot is ambiguous."""
     b = _freeze_b_snap_34()
     b["lastAtCutPerfMs"] = b["nullControl"]["releaseAt"]
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"]
 
@@ -2357,7 +2375,7 @@ def test_freeze_control_release_not_strictly_before_settled_is_inconclusive():
     settled sample, not merely before the burst (review Blocker 3)."""
     b = _freeze_b_snap_34()
     b["firstSettledPerfMs"] = b["nullControl"]["releaseAt"]
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"]
 
@@ -2367,7 +2385,7 @@ def test_freeze_control_modelled_in_hold_sample_is_inconclusive():
     the ROI mapping for that decode is unproven — `allInHoldMeasured` fails
     closed rather than trusting a decode off an unverified ROI."""
     b = _with_sample(_freeze_b_snap_34(), FREEZE_FLIP_INDEX_34 + 1, footprintSource="modelled")
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in verdict["integrityFailed"]
 
@@ -2377,7 +2395,7 @@ def test_freeze_control_unstable_in_hold_sample_is_inconclusive():
     review Blocker 2b) inside the hold window is just as untrustworthy as a
     `modelled` one — `allInHoldMeasured` fails closed."""
     b = _with_sample(_freeze_b_snap_34(), FREEZE_FLIP_INDEX_34 + 1, footprintSource="unstable")
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in verdict["integrityFailed"]
 
@@ -2388,7 +2406,7 @@ def test_freeze_control_isolation_mismatch_fails():
     isolation, never a spurious pass."""
     a1 = _positive_snap_34()
     a1["footprintFullyLive"] = {"ok": False}
-    verdict = p2._score_freeze_control(a1, _freeze_b_snap_34(), _a2_snap_34())
+    verdict = _score_34(a1, _freeze_b_snap_34(), _a2_snap_34())
     assert verdict["ok"] is False
     assert "isolationEqual" in verdict["failed"]
 
@@ -2413,7 +2431,7 @@ def test_freeze_control_all_isolation_false_but_equal_does_not_pass():
     a1 = _all_false(_positive_snap_34())
     a2 = _all_false(_a2_snap_34())
     b = _all_false(_freeze_b_snap_34())
-    verdict = p2._score_freeze_control(a1, b, a2)
+    verdict = _score_34(a1, b, a2)
     assert verdict["ok"] is False
     assert "isolationEqual" in verdict["failed"]
 
@@ -2424,7 +2442,7 @@ def test_freeze_control_stage_origin_nonzero_is_inconclusive():
     (0,0). A nonzero origin at arm invalidates the geometry => INCONCLUSIVE."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "stageOrigin": {"x": 12.0, "y": 0.0}}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "stageOriginZero" in verdict["integrityFailed"]
 
@@ -2435,7 +2453,7 @@ def test_freeze_control_flip_window_undecodable_is_inconclusive():
     it, and an undecodable flip window is INCONCLUSIVE."""
     b = _with_sample(_freeze_b_snap_34(), FREEZE_FLIP_INDEX_34 + 2, index=None)
     b["flipWindowDecodable"] = True  # the capture-side claim is ignored
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "flipWindowDecodable" in verdict["integrityFailed"]
 
@@ -2445,7 +2463,7 @@ def test_freeze_control_post_release_samples_do_not_pad_after_flip():
     a short segment cannot be padded by post-release settled samples."""
     b = _freeze_b_snap_34()
     b["releaseSplitIndex"] = FREEZE_FLIP_INDEX_34 + 2
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert {"enoughAfterFlip", "flipWindowDecodable"} & set(verdict["integrityFailed"])
 
@@ -2456,7 +2474,7 @@ def test_freeze_control_owner_disconnected_mid_hold_is_inconclusive():
     disconnect fails it closed even with `ownerAmbiguousInWindow` itself False."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "ownerDisconnectedInWindow": True}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["ok"] is False
     assert "noOwnerAmbiguousInWindow" in verdict["failed"]
 
@@ -2468,7 +2486,7 @@ def test_freeze_control_bound_decoder_id_changes_mid_hold_fails_ambiguity():
     raf = list(b["nullControl"]["rafLog"])
     raf[10] = {**raf[10], "boundDecoderId": 99}
     b["nullControl"] = {**b["nullControl"], "rafLog": raf}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["ok"] is False
     assert "noOwnerAmbiguousInWindow" in verdict["failed"]
 
@@ -2491,7 +2509,7 @@ def test_freeze_control_pre_cover_sample_does_not_fake_a_restart():
     raw = [s["index"] for s in b["indexSamples"][: b["releaseSplitIndex"] + 1]]
     assert raw[0] == 29 and raw[2:5] == [28, 28, 28], "the live shape, before trimming"
 
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "pass", verdict["failed"]
     assert verdict["movingIndexRunAtCut"]["negativeAnomaly"] is False
     assert verdict["movingIndexRunAtCut"]["reason"] == "freeze run at cut"
@@ -2503,7 +2521,7 @@ def test_freeze_control_missing_cover_painted_at_fails_closed():
     `holdStartedAt` (which is the defect) nor to "everything"."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "coverPaintedAt": None}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "coverPaintedAtPresent" in verdict["integrityFailed"]
 
@@ -2535,7 +2553,7 @@ def test_freeze_control_window_opens_after_the_badges_own_rehandoff():
     are no evidence either way."""
     for n in (1, 2):
         b = _with_rehandoff(_freeze_b_snap_34(), n)
-        verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+        verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
         assert verdict["verdict"] == "pass", (n, verdict["failed"])
         assert verdict["freeze"]["rehandoffExemptSamples"] == n
         assert verdict["freeze"]["firstCoveredPosition"] == FIRST_IN_HOLD_34 + n
@@ -2548,7 +2566,7 @@ def test_freeze_control_leading_unstable_with_a_live_decode_is_inconclusive():
     decoded something is a real observation on an uncoupled frame: INCONCLUSIVE."""
     first = FIRST_IN_HOLD_34
     b = _with_sample(_freeze_b_snap_34(), first, footprintSource="unstable", index=255)
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in verdict["integrityFailed"]
 
@@ -2556,7 +2574,7 @@ def test_freeze_control_leading_unstable_with_a_live_decode_is_inconclusive():
     # buys no exemption either.
     b2 = _with_sample(_freeze_b_snap_34(), first, footprintSource="unstable",
                       index=None, badgeRect=None, badgeSeq=999)
-    v2 = p2._score_freeze_control(_positive_snap_34(), b2, _a2_snap_34())
+    v2 = _score_34(_positive_snap_34(), b2, _a2_snap_34())
     assert v2["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in v2["integrityFailed"]
 
@@ -2564,13 +2582,13 @@ def test_freeze_control_leading_unstable_with_a_live_decode_is_inconclusive():
     b3 = _with_rehandoff(_freeze_b_snap_34(), 1)
     b3["badge"] = {"stats": {"rehandoffs": 1, "rehandoffSeqs": [4100, 4150],
                              "motionStartedAt": HOLD_STARTED_AT_34}}
-    v3 = p2._score_freeze_control(_positive_snap_34(), b3, _a2_snap_34())
+    v3 = _score_34(_positive_snap_34(), b3, _a2_snap_34())
     assert v3["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in v3["integrityFailed"]
 
     # ...and an unstable sample in the MIDDLE of the hold still reds it.
     b4 = _with_sample(_freeze_b_snap_34(), first + 2, footprintSource="unstable")
-    v4 = p2._score_freeze_control(_positive_snap_34(), b4, _a2_snap_34())
+    v4 = _score_34(_positive_snap_34(), b4, _a2_snap_34())
     assert v4["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in v4["integrityFailed"]
 
@@ -2579,7 +2597,7 @@ def test_freeze_control_more_rehandoff_frames_than_the_badge_paints_is_inconclus
     """The re-handoff spans exactly two frames; a third excused sample means the
     badge was not doing what its own contract says."""
     b = _with_rehandoff(_freeze_b_snap_34(), 3)
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in verdict["integrityFailed"]
 
@@ -2609,7 +2627,7 @@ def test_freeze_control_rejects_a_malformed_or_foreign_rehandoff():
     for name, badge in cases.items():
         b = _with_rehandoff(_freeze_b_snap_34(), 2)
         b["badge"] = badge
-        verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+        verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
         assert verdict["verdict"] == "inconclusive", name
         assert "rehandoffPairSound" in verdict["integrityFailed"], name
 
@@ -2620,7 +2638,7 @@ def test_freeze_control_rejects_two_captures_of_one_exempt_sequence():
     first = FIRST_IN_HOLD_34
     b = _with_rehandoff(_freeze_b_snap_34(), 2)
     b = _with_sample(b, first + 1, badgeSeq=REHANDOFF_SEQ0_34)
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "rehandoffPairSound" in verdict["integrityFailed"]
 
@@ -2631,7 +2649,7 @@ def test_freeze_control_rejects_a_covered_badge_measured_before_the_pair():
     measured sample whose sequence predates the pair now reds it."""
     first = FIRST_IN_HOLD_34
     b = _with_sample(_freeze_b_snap_34(), first, badgeSeq=REHANDOFF_SEQ0_34 - 5)
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "rehandoffPairSound" in verdict["integrityFailed"]
 
@@ -2647,7 +2665,7 @@ def test_freeze_control_requires_a_settled_owner_rect_in_every_arm(arm, settle):
         snaps[arm].pop("ownerSettle")
     else:
         snaps[arm]["ownerSettle"] = settle
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive"
     assert "ownerSettledAllArms" in verdict["integrityFailed"]
 
@@ -2657,7 +2675,7 @@ def test_freeze_control_no_coupled_frame_in_the_hold_fails_closed():
     b = _freeze_b_snap_34()
     for i in range(FIRST_IN_HOLD_34, len(b["indexSamples"])):
         b = _with_sample(b, i, footprintSource="unstable")
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in verdict["integrityFailed"]
 
@@ -2667,7 +2685,7 @@ def test_freeze_control_cover_painted_before_trigger_is_not_assumed():
     window must follow it, not the trigger."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "coverPaintedAt": 10_000.0}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert verdict["freeze"]["firstCoveredPosition"] is None
 
@@ -2684,7 +2702,7 @@ def test_freeze_control_long_pre_trigger_stall_is_inconclusive():
         "holdStartedAt": ADVANCE_KEY_AT_34 + p2.FREEZE_TRIGGER_MAX_DELAY_MS + 1.0,
         "triggerFramesAfterAdvance": 1,
     }
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAtMoveStart" in verdict["integrityFailed"]
 
@@ -2694,7 +2712,7 @@ def test_freeze_control_pre_trigger_raf_gap_counts_towards_the_max_gap():
     into the same max-gap budget -- previously they were invisible."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "pollMaxGapMs": p2.MAX_RAF_GAP_MS + 1.0}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "maxRafGapOk" in verdict["integrityFailed"]
     assert verdict["maxRafGapMs"] == pytest.approx(p2.MAX_RAF_GAP_MS + 1.0)
@@ -2708,7 +2726,7 @@ def test_freeze_control_trigger_far_from_runtime_motion_start_is_inconclusive():
     b["nullControl"] = {
         **b["nullControl"], "triggerFramesAfterAdvance": 8, "motionStartedFrame": 1,
     }
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
 
@@ -2718,7 +2736,7 @@ def test_freeze_control_missing_runtime_motion_marker_is_inconclusive():
     runtime's move at all."""
     b = _freeze_b_snap_34()
     b["nullControl"] = {**b["nullControl"], "motionStartedFrame": None}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
 
@@ -2737,7 +2755,7 @@ def test_freeze_control_motion_marker_for_the_wrong_boundary_is_inconclusive():
             "motionStartedMarker": {**nc["motionStartedMarker"], "atScene": at_scene},
             "obedMotionAtTrigger": {**nc["obedMotionAtTrigger"], "atScene": at_scene},
         }
-        verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+        verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
         assert verdict["verdict"] == "inconclusive", at_scene
         assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
 
@@ -2750,21 +2768,21 @@ def test_freeze_control_motion_marker_replaced_before_the_trigger_is_inconclusiv
     nc = b["nullControl"]
     replaced_gen = {**nc["obedMotionAtTrigger"], "generation": 2}
     b["nullControl"] = {**nc, "obedMotionAtTrigger": replaced_gen}
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
 
     replaced_start = {**nc["obedMotionAtTrigger"], "started": HOLD_STARTED_AT_34 + 40.0}
     b2 = _freeze_b_snap_34()
     b2["nullControl"] = {**b2["nullControl"], "obedMotionAtTrigger": replaced_start}
-    v2 = p2._score_freeze_control(_positive_snap_34(), b2, _a2_snap_34())
+    v2 = _score_34(_positive_snap_34(), b2, _a2_snap_34())
     assert v2["verdict"] == "inconclusive"
     assert "firedAtRuntimeMotionStart" in v2["integrityFailed"]
 
     # ...and no marker at the trigger at all fails closed too.
     b3 = _freeze_b_snap_34()
     b3["nullControl"] = {**b3["nullControl"], "obedMotionAtTrigger": None}
-    v3 = p2._score_freeze_control(_positive_snap_34(), b3, _a2_snap_34())
+    v3 = _score_34(_positive_snap_34(), b3, _a2_snap_34())
     assert v3["verdict"] == "inconclusive"
     assert "firedAtRuntimeMotionStart" in v3["integrityFailed"]
 
@@ -2779,7 +2797,7 @@ def test_freeze_control_trigger_within_the_motion_slack_still_passes():
             **b["nullControl"], "triggerFramesAfterAdvance": frames,
             "motionStartedFrame": marker,
         }
-        verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+        verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
         assert verdict["verdict"] == "pass", (frames, marker, verdict["failed"])
 
 
@@ -2790,7 +2808,7 @@ def test_freeze_control_multi_press_advance_is_inconclusive(arm):
     itself, so the arms are no longer the same stimulus -- in ANY arm."""
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     snaps[arm] = {**snaps[arm], "advance": {**snaps[arm]["advance"], "pressesSent": 2, "ok": False}}
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive"
     assert "advanceSinglePressAllArms" in verdict["integrityFailed"]
 
@@ -2799,7 +2817,7 @@ def test_freeze_control_multi_press_advance_is_inconclusive(arm):
 def test_freeze_control_missing_advance_block_fails_closed(arm):
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     snaps[arm] = {k: v for k, v in snaps[arm].items() if k != "advance"}
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive"
     assert "advanceSinglePressAllArms" in verdict["integrityFailed"]
 
@@ -2836,7 +2854,7 @@ def test_freeze_control_integrity_problems_are_inconclusive_not_fail(key, mutate
     exactly as it does on `fail`."""
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     mutate(snaps)
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive", verdict["failed"]
     assert key in verdict["integrityFailed"]
     assert p2._freeze_control_blocks_success("inconclusive", bridge34_disabled=False) is True
@@ -2847,7 +2865,7 @@ def test_freeze_control_negative_anomaly_is_integrity_not_a_verdict():
     that), so it must not be able to produce a FAIL against the counter."""
     b = _freeze_b_snap_34()
     b = _with_sample(b, FREEZE_FLIP_INDEX_34 + 1, index=250)  # backward past modulo/2
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "noNegativeAnomaly" in verdict["integrityFailed"]
     assert "noNegativeAnomaly" not in verdict["verdictFailed"]
@@ -2864,7 +2882,7 @@ def test_freeze_control_fail_route_is_live_and_is_only_the_counter_response(monk
     demanding a run the genuine freeze cannot supply."""
     b = _freeze_b_snap_34()
     monkeypatch.setattr(p2, "FREEZE_MIN_RUN", 99)
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "fail"
     assert verdict["integrityFailed"] == []
     assert verdict["verdictFailed"] == ["freezeRunMargin"]
@@ -2876,7 +2894,7 @@ def test_freeze_control_a_counter_that_never_froze_is_inconclusive_not_fail():
     counter: the harness's own stale check reds first, so the bracket says
     INCONCLUSIVE rather than accusing the gate."""
     b = _authored_b_34([37, 38, 39, 40, 41, 42, 43, 44, 45, 46])
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert verdict["integrityFailed"] == ["everyInHoldStale"]
 
@@ -2884,8 +2902,7 @@ def test_freeze_control_a_counter_that_never_froze_is_inconclusive_not_fail():
 def test_freeze_control_verdict_tier_is_only_the_counter_response():
     """Guard the tier split itself: the verdict tier says nothing except whether
     the counter went red at the cut for the injected freeze."""
-    verdict = p2._score_freeze_control(_positive_snap_34(), _freeze_b_snap_34(),
-                                       _positive_snap_34())
+    verdict = _score_34(_positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34())
     assert verdict["verdict"] == "pass"
     keys = set(verdict["checks"])
     assert keys - set(verdict["integrityFailed"]) - set(verdict["verdictFailed"])
@@ -2893,7 +2910,7 @@ def test_freeze_control_verdict_tier_is_only_the_counter_response():
     b = _freeze_b_snap_34()
     for i in range(FIRST_IN_HOLD_34, FREEZE_SPLIT_INDEX_34 + 1):
         b = _with_sample(b, i, index=40 + i)
-    v2 = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    v2 = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert set(v2["verdictFailed"]) <= {
         "indexRunRed", "reasonFreezeRunAtCut", "freezeRunMargin"
     }
@@ -3835,7 +3852,7 @@ def test_freeze_control_unstable_but_crc_valid_sample_is_inconclusive(arm):
     junk. The old transport-only gate left `badgeSamplesSoundAllArms` green."""
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     _with_sample(snaps[arm], 1, footprintSource="unstable")
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive", arm
     assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], arm
 
@@ -3845,7 +3862,7 @@ def test_freeze_control_unstable_but_crc_valid_sample_is_inconclusive(arm):
 def test_freeze_control_any_non_measured_source_is_inconclusive(arm, source):
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     _with_sample(snaps[arm], 0, footprintSource=source)
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive", (arm, source)
     assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], (arm, source)
 
@@ -3856,7 +3873,7 @@ def test_freeze_control_badge_install_not_ok_is_inconclusive(arm):
     for install in ({"ok": False}, {}, None):
         snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
         snaps[arm]["badge"] = {**snaps[arm]["badge"], "install": install}
-        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
         assert verdict["verdict"] == "inconclusive", (arm, install)
         assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], (arm, install)
 
@@ -3868,7 +3885,7 @@ def test_freeze_control_short_decode_count_is_inconclusive(arm):
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     n = len(snaps[arm]["indexSamples"])
     snaps[arm]["badge"] = {**snaps[arm]["badge"], "decoded": n - 1}
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive", arm
     assert "badgeSamplesSoundAllArms" in verdict["integrityFailed"], arm
 
@@ -3898,7 +3915,7 @@ def test_freeze_control_advance_key_count_is_gated_in_every_arm(
     else:
         snaps[arm]["advanceKeyEvents"] = events
         snaps[arm]["advanceKeyRejected"] = rejected
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     assert verdict["verdict"] == "inconclusive", (arm, label)
     assert "atCutBoundaryValidAllArms" in verdict["integrityFailed"], (arm, label)
 
@@ -3906,7 +3923,7 @@ def test_freeze_control_advance_key_count_is_gated_in_every_arm(
 def test_freeze_control_clean_bracket_still_passes_with_the_new_gates():
     """The positive control for both r8 majors: nothing above weakened the
     pass-capable fixture."""
-    verdict = p2._score_freeze_control(
+    verdict = _score_34(
         _positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34()
     )
     assert verdict["verdict"] == "pass", verdict["reason"]
@@ -3949,7 +3966,7 @@ def test_footprint_raster_from_another_arm_is_inconclusive():
     snap = _b_with_evidence(**{k: a1_ev[k] for k in ("data", "bytes", "h", "w",
                                                      "encoding", "frameSha256")})
     assert p2._footprint_fully_live_ok(snap) is False
-    verdict = p2._score_freeze_control(_positive_snap_34(), snap, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), snap, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "isolationEqual" in verdict["integrityFailed"]
 
@@ -4074,7 +4091,7 @@ def test_positive_at_cut_null_run_is_inconclusive():
     bracket reached PASS before -- the null-adjacent deltas simply vanished from
     the progress and freeze-run totals, so the interval was unobserved."""
     a1 = _positive_with_at_cut_nulls(range(1, 14))
-    verdict = p2._score_freeze_control(a1, _freeze_b_snap_34(), _a2_snap_34())
+    verdict = _score_34(a1, _freeze_b_snap_34(), _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "positivesGreen" in verdict["integrityFailed"]
 
@@ -4083,7 +4100,7 @@ def test_positive_at_cut_two_consecutive_nulls_are_inconclusive():
     """The bound is on the RUN, not only on the total: two in a row is an
     unobserved interval however short."""
     a1 = _positive_with_at_cut_nulls((5, 6))
-    verdict = p2._score_freeze_control(a1, _freeze_b_snap_34(), _a2_snap_34())
+    verdict = _score_34(a1, _freeze_b_snap_34(), _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "positivesGreen" in verdict["integrityFailed"]
 
@@ -4096,22 +4113,9 @@ def test_the_clean_at_cut_leading_null_is_still_scorable():
     seg = [s.get("index") for s in a1["indexSamples"][lo:hi + 1]
            if s.get("footprintSource") == "measured"]
     assert seg.count(None) == 1 and seg[0] is None
-    assert p2._score_freeze_control(
+    assert _score_34(
         a1, _freeze_b_snap_34(), _a2_snap_34()
     )["verdict"] == "pass"
-
-
-@pytest.mark.parametrize("indices,ok", [
-    ([None, 1, 2, 3, 4], True),                 # a leading edge null, as measured
-    ([1, 2, 3, 4, None], True),                 # a trailing edge null
-    ([1, 2, None, 4, 5], True),                 # isolated, bridged by a +2 step
-    ([1, 2, None, 2, 3], False),                # bridged by a ZERO step: a freeze
-    ([1, 2, None, 200, 201], False),            # bridged by a reset
-    ([1, None, None, 4, 5], False),             # a run of two
-    ([1, None, 3, None, 5], False),             # two isolated: over the total
-])
-def test_null_reads_admissible_rules(indices, ok):
-    assert p2._null_reads_admissible(indices, max_total=1) is ok
 
 
 def test_main_settled_window_admits_no_nulls():
@@ -4163,7 +4167,7 @@ def test_owner_null_gap_of_24_of_80_is_inconclusive():
     mc = p2._moving_continuity_derived(b)
     assert mc["stableSlide4Owner"]["nonNullFrac"] >= 0.7
     assert "stableSlide4Owner" in mc["failed"]
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
 
 
@@ -4226,6 +4230,22 @@ def _after_positions(snap: dict) -> list[int]:
             if (p2._strict_hash_num(s.get("sceneHash")) or -1) >= n4]
 
 
+def _competitor_entry(rect, visible, decoder) -> dict:
+    """An extra `videos` entry whose raw readings AGREE with its paint flag, so
+    the attestation is exercised on the overlap rather than on a contradiction."""
+    return {
+        "index": 99, "decoderId": decoder, "presentedMediaTime": None,
+        "visible": visible,
+        "hiddenBy": None if visible else "hidden",
+        "suppressed34": False,
+        "rect": dict(rect), "clientRect": dict(rect),
+        "inDocument": True, "display": "block",
+        "visibility": "visible" if visible else "hidden",
+        "opacityProduct": 1.0, "checkVisibility": True,
+        "viewport": {"w": 1920.0, "h": 1080.0},
+    }
+
+
 def _b_with_competitor(at, rect, *, visible=True, decoder=9999) -> dict:
     """B with a synthetic extra `<video>` entry at the given after-window
     positions, sitting on the bound decoder's own footprint."""
@@ -4233,11 +4253,7 @@ def _b_with_competitor(at, rect, *, visible=True, decoder=9999) -> dict:
     media = [copy.deepcopy(m) for m in snap["mediaSamples"]]
     after = _after_positions(snap)
     for k in at:
-        media[after[k]]["videos"].append({
-            "index": 99, "decoderId": decoder, "visible": visible,
-            "hiddenBy": None if visible else "hidden", "suppressed34": False,
-            "rect": dict(rect), "presentedMediaTime": None,
-        })
+        media[after[k]]["videos"].append(_competitor_entry(rect, visible, decoder))
     snap["mediaSamples"] = media
     return snap
 
@@ -4256,7 +4272,7 @@ def test_visible_competitor_on_the_footprint_during_the_gap_is_inconclusive():
     assert comp["ok"] is False and comp["hits"]
     assert comp["hits"][0]["iou"] > 0
     assert "stableSlide4Owner" in mc["failed"]
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
 
 
@@ -4330,7 +4346,7 @@ def test_competitor_geometry_is_required_per_entry(field):
     del target["videos"][0][field]
     b["mediaSamples"] = media
     assert p2._media_samples_schema_ok(media, b["ownerDecoderId"]) is False
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "sampleSchemaSoundAllArms" in verdict["integrityFailed"]
 
@@ -4361,6 +4377,260 @@ def test_iou_is_the_ordinary_one(a, b_, expected):
 
 
 # --------------------------------------------------------------------------- #
+# r13 MAJOR 1 — the arm identity comes from OUTSIDE the arm.
+# --------------------------------------------------------------------------- #
+def test_whole_arm_substitution_is_inconclusive():
+    """The probe r13 named: move A1's COMPLETE `footprintFullyLive` block and its
+    header id into B. Everything inside B then agrees with itself -- raster,
+    numbers, hashes, ids -- because both copies went stale together. The
+    manifest, minted before any arm ran and held outside the snapshots, is what
+    still disagrees."""
+    a1, b, a2 = _positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34()
+    b["footprintFullyLive"] = copy.deepcopy(a1["footprintFullyLive"])
+    b["captureId"] = a1["captureId"]
+    assert p2._footprint_fully_live_ok(b) is True, "the swap is self-consistent"
+    verdict = _score_34(a1, b, a2)
+    assert verdict["verdict"] == "inconclusive"
+    assert "armIdentitiesMatchManifest" in verdict["integrityFailed"]
+
+
+def test_manifest_must_be_present_and_well_formed():
+    """No manifest, a foreign manifest, or one of the wrong kind is no arm
+    provenance at all."""
+    args = (_positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34())
+    for manifest in (None, {}, {"arms": {}}, p2._new_bracket_manifest(),
+                     {**_FIXTURE_34["manifest"], "kind": "something-else"}):
+        verdict = _score_34(*args, manifest=manifest)
+        assert verdict["verdict"] == "inconclusive", manifest
+        assert "armIdentitiesMatchManifest" in verdict["integrityFailed"]
+
+
+def test_manifest_requires_three_distinct_arm_ids():
+    """One id shared by two arms would make "another arm's evidence" meaningless
+    -- the substitution above would agree."""
+    one = _FIXTURE_34["manifest"]["arms"]["a1"]
+    manifest = {"kind": p2.BRACKET_MANIFEST_KIND,
+                "arms": {label: one for label in p2.BRACKET_ARMS}}
+    snaps = [_positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34()]
+    for s in snaps:
+        s["captureId"] = one
+    verdict = _score_34(*snaps, manifest=manifest)
+    assert verdict["verdict"] == "inconclusive"
+    assert "armIdentitiesMatchManifest" in verdict["integrityFailed"]
+
+
+def test_the_real_bracket_matches_its_own_manifest():
+    """The other half: the committed bracket's three arms carry exactly the three
+    identities its manifest handed them."""
+    manifest = _FIXTURE_34["manifest"]
+    assert manifest["kind"] == p2.BRACKET_MANIFEST_KIND
+    ids = [manifest["arms"][label] for label in p2.BRACKET_ARMS]
+    assert len(set(ids)) == 3
+    assert [_FIXTURE_34[label]["captureId"] for label in p2.BRACKET_ARMS] == ids
+    assert _score_34(_positive_snap_34(), _freeze_b_snap_34(),
+                     _a2_snap_34())["verdict"] == "pass"
+
+
+# --------------------------------------------------------------------------- #
+# r13 MAJOR 2 — the paint decision is RE-DERIVED, not trusted.
+# --------------------------------------------------------------------------- #
+def _raw_visible(**over) -> dict:
+    """The raw readings of an attached, opaque, on-screen entry."""
+    entry = {
+        "decoderId": 4242, "inDocument": True, "display": "block",
+        "visibility": "visible", "opacityProduct": 1.0, "checkVisibility": True,
+        "clientRect": {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0},
+        "viewport": {"w": 1920.0, "h": 1080.0},
+        "rect": {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0},
+        "visible": True, "hiddenBy": None, "suppressed34": False,
+    }
+    entry.update(over)
+    return entry
+
+
+def test_a_stale_not_visible_flag_over_a_painting_entry_is_inconclusive():
+    """r13's probe: an overlapping entry that is attached, opacity 1,
+    `checkVisibility` true and on-screen, but whose derived flag says
+    `visible=false`. Trusting the flag SKIPPED it and the bracket passed."""
+    stale = _raw_visible(visible=False, hiddenBy="hidden")
+    assert p2._derived_paint(stale) == (True, None)
+    assert p2._paint_agrees(stale, set()) is False
+    b = _freeze_b_snap_34()
+    n4 = p2._strict_hash_num(b["hash4"])
+    media = [copy.deepcopy(m) for m in b["mediaSamples"]]
+    for m in media:
+        if (p2._strict_hash_num(m.get("sceneHash")) or -1) >= n4:
+            m["videos"].append(stale)
+    b["mediaSamples"] = media
+    comp = p2._moving_continuity_derived(b)["stableSlide4Owner"]["visibleCompetitors"]
+    assert comp["ok"] is False
+    assert _score_34(_positive_snap_34(), b, _a2_snap_34())["verdict"] == "inconclusive"
+
+
+@pytest.mark.parametrize("over,expected", [
+    ({}, (True, None)),
+    ({"inDocument": False}, (False, "detached")),
+    ({"display": "none"}, (False, "display-none")),
+    ({"clientRect": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}}, (False, "zero-size")),
+    ({"visibility": "hidden"}, (False, "hidden")),
+    ({"opacityProduct": 0.0}, (False, "hidden")),
+    ({"checkVisibility": False}, (False, "engine-hidden")),
+    ({"clientRect": {"x": 4000.0, "y": 10.0, "w": 100.0, "h": 100.0}},
+     (False, "offscreen")),
+])
+def test_paint_is_rederived_from_the_raw_readings(over, expected):
+    """The page's rules, restated on the retained readings, in the same order."""
+    assert p2._derived_paint(_raw_visible(**over)) == expected
+
+
+@pytest.mark.parametrize(
+    "missing", ["inDocument", "display", "visibility", "opacityProduct", "clientRect",
+                "viewport"])
+def test_paint_cannot_be_rederived_without_its_readings(missing):
+    entry = _raw_visible()
+    del entry[missing]
+    assert p2._derived_paint(entry) is None
+    assert p2._paint_agrees(entry, set()) is False
+
+
+def test_pool_detached_is_admitted_only_on_the_retained_reading():
+    """`hiddenBy: "detached"` on a pool entry is a CLAIM. It is admitted only
+    when the page's own `inDocument` reading says so."""
+    pooled = {"decoderId": 4, "fromPreservePool": True, "visible": False,
+              "hiddenBy": "detached", "suppressed34": False, "rect": None,
+              "inDocument": False}
+    assert p2._paint_agrees(pooled, set()) is True
+    assert p2._paint_agrees({**pooled, "inDocument": True}, set()) is False
+    assert p2._paint_agrees({**pooled, "inDocument": None}, set()) is False
+
+
+def test_an_attached_pool_entry_needs_its_dom_census_entry():
+    """A pool entry that says it is still attached asserts nothing by itself; it
+    is admitted only when that sample's DOM census carries the same decoder."""
+    attached = {"decoderId": 4, "fromPreservePool": True, "visible": False,
+                "hiddenBy": "pool-duplicate", "suppressed34": False, "rect": None,
+                "inDocument": True}
+    assert p2._paint_agrees(attached, {"4"}) is True
+    assert p2._paint_agrees(attached, {"6"}) is False
+    assert p2._paint_agrees({**attached, "hiddenBy": "detached"}, {"4"}) is False
+
+
+def test_the_clean_fixtures_pool_entries_are_classified_from_their_readings():
+    """What the clean run actually carries, asserted rather than assumed."""
+    b = _freeze_b_snap_34()
+    pooled = [v for m in b["mediaSamples"] for v in m["videos"]
+              if v.get("fromPreservePool")]
+    assert pooled
+    for v in pooled:
+        assert isinstance(v["inDocument"], bool)
+        assert v["hiddenBy"] == ("pool-duplicate" if v["inDocument"] else "detached")
+
+
+# --------------------------------------------------------------------------- #
+# r13 MAJOR 3 — the null is admissible only where it was measured.
+# --------------------------------------------------------------------------- #
+def test_a_null_moved_off_position_zero_is_inconclusive():
+    """r13's probe: the SOLE null moved from position 0 into the middle of the
+    at-cut segment. The count bound still passes and the bridge across it still
+    reads as plausible forward progress, yet both sides of a restart would be
+    erased there."""
+    a1 = _positive_snap_34()
+    lo, hi = a1["atCutBoundary"]["from"], a1["releaseSplitIndex"]
+    seg = [i for i in range(lo, hi + 1)
+           if a1["indexSamples"][i].get("footprintSource") == "measured"]
+    samples = [dict(s) for s in a1["indexSamples"]]
+    samples[seg[0]]["index"] = samples[seg[1]]["index"]   # fill the leading miss
+    samples[seg[10]]["index"] = None                      # and move it inward
+    a1["indexSamples"] = samples
+    verdict = _score_34(a1, _freeze_b_snap_34(), _a2_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "positivesGreen" in verdict["integrityFailed"]
+
+
+def test_a_trailing_null_is_inconclusive():
+    a1 = _positive_snap_34()
+    lo, hi = a1["atCutBoundary"]["from"], a1["releaseSplitIndex"]
+    seg = [i for i in range(lo, hi + 1)
+           if a1["indexSamples"][i].get("footprintSource") == "measured"]
+    samples = [dict(s) for s in a1["indexSamples"]]
+    samples[seg[0]]["index"] = samples[seg[1]]["index"]
+    samples[seg[-1]]["index"] = None
+    a1["indexSamples"] = samples
+    assert _score_34(a1, _freeze_b_snap_34(), _a2_snap_34())["verdict"] == "inconclusive"
+
+
+def test_the_leading_null_is_bounded_against_the_pre_key_reading():
+    """The clean arm's one null is admitted only because a DECODED reading taken
+    before the advance brackets it. Remove that reading, or make it disagree with
+    the first decoded sample, and the window fails closed."""
+    a1 = _positive_snap_34()
+    assert a1["preKeySample"]["index"] is not None
+    lo, hi = a1["atCutBoundary"]["from"], a1["releaseSplitIndex"]
+    seg = [x.get("index") for x in a1["indexSamples"][lo:hi + 1]
+           if x.get("footprintSource") == "measured"]
+    assert seg[0] is None and seg.count(None) == 1, "the arm must carry the miss"
+    for bad in (None, {"index": None}, {"index": seg[1]}, {"index": 200}):
+        arm = _positive_snap_34()
+        arm["preKeySample"] = bad
+        verdict = _score_34(arm, _freeze_b_snap_34(), _a2_snap_34())
+        assert verdict["verdict"] == "inconclusive", bad
+        assert "positivesGreen" in verdict["integrityFailed"], bad
+
+
+@pytest.mark.parametrize("indices,pre,ok", [
+    ([None, 5, 6, 7], 4, True),          # the measured shape, properly bracketed
+    ([None, 5, 6, 7], None, False),      # no pre-key reading at all
+    ([None, 5, 6, 7], 5, False),         # a ZERO step across the miss: a freeze
+    ([None, 5, 6, 7], 200, False),       # an implausible step: a reset
+    ([4, None, 6, 7], 3, False),         # interior
+    ([4, 5, 6, None], 3, False),         # trailing
+    ([4, 5, 6, 7], None, True),          # no nulls needs no bracket
+])
+def test_null_admissibility_is_positional(indices, pre, ok):
+    assert p2._null_reads_admissible(
+        indices, max_total=1, pre_key_index=pre
+    ) is ok
+
+
+def test_null_bridge_step_ceiling_is_the_progression_rules_own():
+    """No semantic headroom over the scorer that owns the rule."""
+    assert p2.NULL_BRIDGE_MAX_STEP == 30
+    assert p2._plausible_step(0, p2.NULL_BRIDGE_MAX_STEP) is True
+    assert p2._plausible_step(0, p2.NULL_BRIDGE_MAX_STEP + 1) is False
+
+
+# --------------------------------------------------------------------------- #
+# r13 MINOR 2 — the zlib path is bounded.
+# --------------------------------------------------------------------------- #
+def test_zlib_raster_decode_is_bounded():
+    """A stream that inflates past the contract's pixel count, one with a tail,
+    and a truncated one each return `None` rather than inflating."""
+    shape = (16, 16)
+    delta = np.zeros(shape, dtype=np.int16)
+    raw = zlib.compress(np.zeros(shape, dtype=np.uint8).tobytes(), 9)
+    good = {"encoding": "zlib-u8", "bytes": len(raw), "h": 16, "w": 16,
+            "data": base64.b64encode(raw).decode("ascii")}
+    assert p2._decode_delta_raster(good, shape) is not None
+    bomb = zlib.compress(np.zeros((16, 64), dtype=np.uint8).tobytes(), 9)
+    assert p2._decode_delta_raster(
+        {**good, "bytes": len(bomb), "data": base64.b64encode(bomb).decode("ascii")},
+        shape,
+    ) is None
+    tailed = raw + b"\x00\x01\x02"
+    assert p2._decode_delta_raster(
+        {**good, "bytes": len(tailed),
+         "data": base64.b64encode(tailed).decode("ascii")},
+        shape,
+    ) is None
+    cut = raw[: len(raw) // 2]
+    assert p2._decode_delta_raster(
+        {**good, "bytes": len(cut), "data": base64.b64encode(cut).decode("ascii")},
+        shape,
+    ) is None
+    assert delta.shape == shape
+
+
+# --------------------------------------------------------------------------- #
 # r12 MINOR 2 — "exactly one" bound-decoder rVFC clock.
 # --------------------------------------------------------------------------- #
 def test_duplicate_bound_decoder_clocks_fail_the_schema():
@@ -4378,7 +4648,7 @@ def test_duplicate_bound_decoder_clocks_fail_the_schema():
     target["videos"].append(copy.deepcopy(bound))
     snap["mediaSamples"] = media
     assert p2._media_samples_schema_ok(media, snap["ownerDecoderId"]) is False
-    verdict = p2._score_freeze_control(_positive_snap_34(), snap, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), snap, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "sampleSchemaSoundAllArms" in verdict["integrityFailed"]
 
@@ -4670,6 +4940,9 @@ _ABSENCE_CASES = [
     ("sampleSchemaSoundAllArms", "a2", ("mediaSamples", 0, "videos"), True),
     ("isolationEqual", "a1", ("footprintFullyLive", "evidence", "data"), True),
     ("isolationEqual", "b", ("settledIndexProgression",), True),
+    ("armIdentitiesMatchManifest", "a1", ("captureId",), True),
+    ("armIdentitiesMatchManifest", "b", ("captureId",), True),
+    ("armIdentitiesMatchManifest", "a2", ("captureId",), True),
 ]
 
 
@@ -4677,7 +4950,7 @@ _ABSENCE_CASES = [
 def test_no_integrity_key_can_be_satisfied_by_absence(key, arm, path, key_must_fail):
     snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(), "a2": _a2_snap_34()}
     _drop(snaps[arm], *path)
-    verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
     where = (key, arm, path)
     assert verdict["verdict"] == "inconclusive", where
     if key_must_fail:
@@ -4693,7 +4966,7 @@ def test_freeze_control_poll_gap_must_be_a_real_measurement(gap):
     short, clean hold series carried `maxRafGapOk` with no pre-trigger evidence."""
     b = _freeze_b_snap_34()
     b["nullControl"]["pollMaxGapMs"] = gap
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "maxRafGapOk" in verdict["integrityFailed"], gap
 
@@ -4703,7 +4976,7 @@ def test_freeze_control_release_split_index_must_be_in_range(split):
     """r9 MAJOR 3: without a valid split there is no at-cut upper bound at all."""
     b = _freeze_b_snap_34()
     b["releaseSplitIndex"] = split
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"], split
 
@@ -4714,14 +4987,14 @@ def test_freeze_control_first_settled_is_derived_not_trusted():
     no page clock leaves nothing to derive."""
     b = _freeze_b_snap_34()
     b["firstSettledPerfMs"] = b["firstSettledPerfMs"] - 500.0
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"]
 
     b2 = _freeze_b_snap_34()
     settled = p2._slide4_settled_window(b2["indexSamples"][b2["releaseSplitIndex"] + 1:])
     post = b2["indexSamples"].index(settled[0])
     b2 = _with_sample(b2, post, perfNowMs=None)
-    verdict2 = p2._score_freeze_control(_positive_snap_34(), b2, _a2_snap_34())
+    verdict2 = _score_34(_positive_snap_34(), b2, _a2_snap_34())
     assert verdict2["verdict"] == "inconclusive"
     assert "releaseStrictlyBeforeSettleAndBurst" in verdict2["integrityFailed"]
 
@@ -4733,19 +5006,19 @@ def test_freeze_control_null_controller_clock_must_be_the_watched_event():
     nothing tied the two clocks together at all."""
     pre = _freeze_b_snap_34()
     pre["nullControl"]["advanceKeyAt"] = ADVANCE_KEY_AT_34 - 5.0
-    v_pre = p2._score_freeze_control(_positive_snap_34(), pre, _a2_snap_34())
+    v_pre = _score_34(_positive_snap_34(), pre, _a2_snap_34())
     assert v_pre["verdict"] == "inconclusive"
     assert "advanceKeySameEventInControl" in v_pre["integrityFailed"]
 
     rep = _freeze_b_snap_34()
     rep["nullControl"]["advanceKeyRejected"] = 1
-    v_rep = p2._score_freeze_control(_positive_snap_34(), rep, _a2_snap_34())
+    v_rep = _score_34(_positive_snap_34(), rep, _a2_snap_34())
     assert v_rep["verdict"] == "inconclusive"
     assert "advanceKeySameEventInControl" in v_rep["integrityFailed"]
 
     mism = _freeze_b_snap_34()
     mism["advanceKeyPerfMs"] = ADVANCE_KEY_AT_34 + 0.4
-    v_mis = p2._score_freeze_control(_positive_snap_34(), mism, _a2_snap_34())
+    v_mis = _score_34(_positive_snap_34(), mism, _a2_snap_34())
     assert v_mis["verdict"] == "inconclusive"
     assert "advanceKeySameEventInControl" in v_mis["integrityFailed"]
 
@@ -4789,7 +5062,7 @@ def test_freeze_control_absent_sample_key_is_inconclusive_at_every_position(seri
     rows = snaps[arm][series]
     for pos in (0, len(rows) // 2, len(rows) - 1):
         kept = rows[pos].pop(key)
-        verdict = p2._score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+        verdict = _score_34(snaps["a1"], snaps["b"], snaps["a2"])
         rows[pos][key] = kept
         assert verdict["verdict"] == "inconclusive", (series, key, arm, pos)
         assert "sampleSchemaSoundAllArms" in verdict["integrityFailed"]
@@ -4819,11 +5092,11 @@ def test_freeze_control_bound_decoder_needs_one_finite_rvfc_reading_per_sample()
     bound = next(v for v in after["videos"] if str(v["decoderId"]) == str(b["ownerDecoderId"])
                  and "presentedMediaTime" in v)
     kept = bound.pop("presentedMediaTime")
-    assert p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())["verdict"] \
+    assert _score_34(_positive_snap_34(), b, _a2_snap_34())["verdict"] \
         == "inconclusive"
     bound["presentedMediaTime"] = kept
     after["videos"].append({**bound, "presentedMediaTime": kept + 1.0})
-    assert p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())["verdict"] \
+    assert _score_34(_positive_snap_34(), b, _a2_snap_34())["verdict"] \
         == "inconclusive"
 
 
@@ -4832,13 +5105,13 @@ def test_freeze_control_bridge_event_of_another_kind_is_inconclusive():
     `bridge-3to4` event is this bridge."""
     b = _freeze_b_snap_34()
     b["bridgeEvents"][0]["kind"] = "reuse-decoder"
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "bridgeEngaged" in verdict["integrityFailed"]
 
     b2 = _freeze_b_snap_34()
     b2["bridgeEvents"][0].pop("kind")
-    assert p2._score_freeze_control(_positive_snap_34(), b2, _a2_snap_34())["verdict"] \
+    assert _score_34(_positive_snap_34(), b2, _a2_snap_34())["verdict"] \
         == "inconclusive"
 
 
@@ -4859,7 +5132,7 @@ def test_freeze_control_cached_footprint_verdict_must_agree_with_the_raster(muta
     max-delta raster and every cached sub-verdict has to match it."""
     b = _freeze_b_snap_34()
     mutate(b["footprintFullyLive"])
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())
+    verdict = _score_34(_positive_snap_34(), b, _a2_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "isolationEqual" in verdict["integrityFailed"]
 
@@ -4874,7 +5147,7 @@ def test_freeze_control_cached_footprint_verdict_must_agree_with_the_raster(muta
 def test_freeze_control_footprint_without_its_raster_is_inconclusive(path):
     """No raster, no re-derivation: a cached verdict alone cannot show pixels."""
     b = _drop(_freeze_b_snap_34(), "footprintFullyLive", *path)
-    assert p2._score_freeze_control(_positive_snap_34(), b, _a2_snap_34())["verdict"] \
+    assert _score_34(_positive_snap_34(), b, _a2_snap_34())["verdict"] \
         == "inconclusive"
 
 
@@ -4997,13 +5270,13 @@ _POSITIVE_SWEEP_ALLOW: dict[tuple, str] = {
     ('mediaSamples', 'stageMap', 'oy'): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
     ('mediaSamples', 'stageMap', 's'): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
     ('mediaSamples', 'videoCount'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('mediaSamples', 'videos', 'attached'): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
     ('mediaSamples', 'videos', 'checkVisibility'): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
     ('mediaSamples', 'videos', 'clientRect', 'h'): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('mediaSamples', 'videos', 'clientRect', 'w'): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('mediaSamples', 'videos', 'clientRect', 'x'): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('mediaSamples', 'videos', 'clientRect', 'y'): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('mediaSamples', 'videos', 'currentTime'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'display'): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
     ('mediaSamples', 'videos', 'duration'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'ended'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'videos', 'fromPreservePool'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
@@ -5022,6 +5295,9 @@ _POSITIVE_SWEEP_ALLOW: dict[tuple, str] = {
     ('mediaSamples', 'videos', 'rect', 'x'): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('mediaSamples', 'videos', 'rect', 'y'): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('mediaSamples', 'videos', 'src'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('mediaSamples', 'videos', 'viewport', 'h'): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
+    ('mediaSamples', 'videos', 'viewport', 'w'): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
+    ('mediaSamples', 'videos', 'visibility'): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
     ('mediaSamples', 'videos', 'w'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('mediaSamples', 'wallMs'): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('movingContinuity3to4', 'boundaryValid', 'n3'): 'provenance of movingContinuity3to4.ok, the gated key',
@@ -5074,6 +5350,12 @@ _POSITIVE_SWEEP_ALLOW: dict[tuple, str] = {
     ('ownerSettle', 'rect', 'w'): 'provenance; `settled` is the gated key',
     ('ownerSettle', 'rect', 'x'): 'provenance; `settled` is the gated key',
     ('ownerSettle', 'rect', 'y'): 'provenance; `settled` is the gated key',
+    ('preKeySample', 'badgeSeq'): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('preKeySample', 'rect', 'h'): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('preKeySample', 'rect', 'w'): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('preKeySample', 'rect', 'x'): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('preKeySample', 'rect', 'y'): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('preKeySample', 'sceneHash'): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
     ('releaseOffsetS',): 'report-only: the perfMs form is what is ordered',
     ('releasePerfMs',): 'redundant: nullControl.releaseAt is the gated release clock',
     ('settledIndexProgression', 'decodableFrac'): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
@@ -5169,13 +5451,13 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('mediaSamples', 'stageMap', 'oy')): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
     ('b', ('mediaSamples', 'stageMap', 's')): 'provenance: the PAGE applies this map to state videos[].rect in authored px; the scorer compares the mapped rects, never the map',
     ('b', ('mediaSamples', 'videoCount')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
-    ('b', ('mediaSamples', 'videos', 'attached')): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
     ('b', ('mediaSamples', 'videos', 'checkVisibility')): 'provenance of the paint decision; `visible` and `hiddenBy` are what the attestation reads',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'h')): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'w')): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'x')): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('b', ('mediaSamples', 'videos', 'clientRect', 'y')): 'report-only: the raw viewport rect kept beside the authored-px `rect` that is scored',
     ('b', ('mediaSamples', 'videos', 'currentTime')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('b', ('mediaSamples', 'videos', 'display')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
     ('b', ('mediaSamples', 'videos', 'duration')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'ended')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'videos', 'fromPreservePool')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
@@ -5194,6 +5476,9 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('mediaSamples', 'videos', 'rect', 'x')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('b', ('mediaSamples', 'videos', 'rect', 'y')): "not read for a NON-painting entry: a rect is compared to the footprint only when `visible` is true, and a visible entry's missing component fails closed",
     ('b', ('mediaSamples', 'videos', 'src')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
+    ('b', ('mediaSamples', 'videos', 'viewport', 'h')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
+    ('b', ('mediaSamples', 'videos', 'viewport', 'w')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
+    ('b', ('mediaSamples', 'videos', 'visibility')): 'not read for a POOL entry, which is classified by its retained `inDocument` alone; gated at every DOM entry, where the paint decision is re-derived from it',
     ('b', ('mediaSamples', 'videos', 'w')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('mediaSamples', 'wallMs')): 'not read by the re-derived movingContinuity3to4: it scores sceneHash plus videos[].decoderId/presentedMediaTime',
     ('b', ('movingContinuity3to4', 'boundaryValid', 'n3')): 'provenance of movingContinuity3to4.ok, the gated key',
@@ -5271,6 +5556,13 @@ _SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('b', ('ownerSettle', 'rect', 'w')): 'provenance; `settled` is the gated key',
     ('b', ('ownerSettle', 'rect', 'x')): 'provenance; `settled` is the gated key',
     ('b', ('ownerSettle', 'rect', 'y')): 'provenance; `settled` is the gated key',
+    ('b', ('preKeySample', 'badgeSeq')): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('b', ('preKeySample', 'index')): 'not scored in the FREEZE arm: its at-cut segment opens after the validated re-handoff pair, so it carries no leading miss to bracket; gated in both positives, whose segments do',
+    ('b', ('preKeySample', 'rect', 'h')): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('b', ('preKeySample', 'rect', 'w')): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('b', ('preKeySample', 'rect', 'x')): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('b', ('preKeySample', 'rect', 'y')): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
+    ('b', ('preKeySample', 'sceneHash')): 'provenance of the pre-key reading; its decoded `index` is what brackets the leading miss',
     ('b', ('releaseOffsetS',)): 'report-only: the perfMs form is what is ordered',
     ('b', ('releasePerfMs',)): 'redundant: nullControl.releaseAt is the gated release clock',
     ('b', ('settledIndexProgression', 'decodableFrac')): 'provenance of a pre-scored sub-verdict; its `ok` is the isolation key',
@@ -5440,7 +5732,6 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('mediaSamples', 'stageMap', 's')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videoCount')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
-    ('main', ('mediaSamples', 'videos', 'attached')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'checkVisibility')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'clientRect', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'clientRect', 'w')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
@@ -5448,11 +5739,13 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('mediaSamples', 'videos', 'clientRect', 'y')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'currentTime')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'decoderId')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'display')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'duration')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'ended')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'fromPreservePool')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'hiddenBy')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'inDocument')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'index')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'loop')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'muted')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
@@ -5469,6 +5762,9 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('mediaSamples', 'videos', 'rect', 'y')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'src')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'suppressed34')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'viewport', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'viewport', 'w')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('mediaSamples', 'videos', 'visibility')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'visible')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'videos', 'w')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('mediaSamples', 'wallMs')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
@@ -5531,6 +5827,13 @@ _MAIN_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
     ('main', ('ownerSettle', 'rect', 'x')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)',
     ('main', ('ownerSettle', 'rect', 'y')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)',
     ('main', ('playerBuildErrors',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('preKeySample', 'badgeSeq')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('preKeySample', 'index')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('preKeySample', 'rect', 'h')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('preKeySample', 'rect', 'w')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('preKeySample', 'rect', 'x')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('preKeySample', 'rect', 'y')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
+    ('main', ('preKeySample', 'sceneHash')): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('releaseOffsetS',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('releasePerfMs',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
     ('main', ('releaseSplitIndex',)): 'not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only',
@@ -5607,6 +5910,36 @@ def _walk(snap: dict, score) -> dict:
 # the shape the round-12 OR-aggregation hid. Each must say which positions are
 # merely diagnostic.
 _SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {
+    ('b', ('mediaSamples', 'videos', 'clientRect', 'h')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'clientRect', 'w')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'clientRect', 'x')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'clientRect', 'y')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'display')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'fromPreservePool')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'opacityProduct')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'viewport', 'h')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'viewport', 'w')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('b', ('mediaSamples', 'videos', 'visibility')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'clientRect', 'h')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'clientRect', 'w')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'clientRect', 'x')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'clientRect', 'y')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'display')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'fromPreservePool')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'opacityProduct')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'viewport', 'h')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'viewport', 'w')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positive', ('mediaSamples', 'videos', 'visibility')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'clientRect', 'h')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'clientRect', 'w')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'clientRect', 'x')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'clientRect', 'y')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'display')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'fromPreservePool')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'opacityProduct')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'viewport', 'h')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'viewport', 'w')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
+    ('positiveA2', ('mediaSamples', 'videos', 'visibility')): 'gated at every AFTER-WINDOW position, where the paint decision is re-derived; the pre-boundary samples are outside the scored window',
     ('b', ('ownerSamples', 'footprint')): "gated at every AFTER-WINDOW position, where the competitor attestation compares each painting decoder's rect to this footprint; the pre-boundary positions are outside the scored window",
     ('positive', ('ownerSamples', 'footprint')): "gated at every AFTER-WINDOW position, where the competitor attestation compares each painting decoder's rect to this footprint; the pre-boundary positions are outside the scored window",
     ('positiveA2', ('ownerSamples', 'footprint')): "gated at every AFTER-WINDOW position, where the competitor attestation compares each painting decoder's rect to this footprint; the pre-boundary positions are outside the scored window",
@@ -5630,7 +5963,7 @@ def _bracket_sweep() -> dict:
                  "a2": _a2_snap_34()}
 
         def score() -> bool:
-            return p2._score_freeze_control(
+            return _score_34(
                 snaps["a1"], snaps["b"], snaps["a2"]
             )["verdict"] == "inconclusive"
 
@@ -5659,7 +5992,7 @@ def test_bracket_absence_sweep_is_exhaustive():
     is gated in SOME positions only must additionally be classified in
     `_SWEEP_PARTIAL_ALLOW`. A1 and A2 are the run's two REAL positives and are
     walked independently (review r11 MINOR 1)."""
-    assert p2._score_freeze_control(
+    assert _score_34(
         _positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34()
     )["verdict"] == "pass"
     swept = _bracket_sweep()
@@ -5766,7 +6099,7 @@ def test_main_sweep_allowlist_has_no_dead_entries():
 def test_absence_sweep_covers_every_integrity_key():
     """The sweep is only worth what it covers: assert it names EVERY integrity
     key the scorer scores, so a future key cannot be added without a case."""
-    verdict = p2._score_freeze_control(
+    verdict = _score_34(
         _positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34()
     )
     assert verdict["verdict"] == "pass"

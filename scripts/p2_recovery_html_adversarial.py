@@ -331,25 +331,20 @@ COVER_LEFT_FRAC = 0.4       # mirrors NULL_CONTROL_JS's LEFT_FRAC (subRect) -- k
 COVER_TRACK_TOL_PX = 0.5    # cover rect vs measured*COVER_LEFT_FRAC; tight enough that a
                             # ONE-FRAME lag cannot hide in it (plan §10)
 STAGE_ORIGIN_TOL_PX = 0.5   # stageOrigin must read (0,0) at arm (plan §2, cover geometry)
-# --- Admissible ABSENCE in the scored series (r12 MAJOR 2/3; plan §10.17) ----- #
+# --- Admissible ABSENCE in the scored series (plan §10.17, §10.19) ----------- #
 # A `None` counter read and a null footprint owner are real readings, but both
 # DELETE the interval across them from what the scorers total, so they are
-# bounded, not merely tolerated. Every bound is the worst value measured over the
-# clean runs of round 15, with no headroom: an arm beyond it comes back
-# INCONCLUSIVE, which is fail-closed.
+# bounded in COUNT, RUN and POSITION, not merely tolerated. Derivations and the
+# measured distributions behind each value: plan §10.17 and §10.19.
 INDEX_PATCH_MODULO = 256    # the burnt-in counter's wrap, as both index scorers read it
-SCORED_NULL_MAX_RUN = 1     # consecutive `None` counter reads; 33 clean arms never showed 2
-AT_CUT_MAX_NULLS = 1        # `None` reads in an at-cut scored segment: EXACTLY 1 in all 33
-                            # clean arms, always at position 0 (the badge patch has not
-                            # settled at the first read after the advance)
-SETTLED_MAX_NULLS = 0       # `None` reads in a settled window: 0 in all 33 clean arms
-NULL_BRIDGE_MAX_STEP = 60   # plausible forward counter step ACROSS one missed read: twice
-                            # score_index_progression's own 30-per-step ceiling, one step
-                            # being what the miss deletes (largest step measured: 12)
-OWNER_NULL_MAX_RUN = 5      # consecutive null footprint owners INSIDE the after-window.
-                            # Clean runs show ONE run, while the box is mid-flight and
-                            # elementFromPoint resolves nothing: 4 or 5 of ~80 in all 27
-                            # clean arms measured, never more
+SCORED_NULL_MAX_RUN = 1     # consecutive `None` counter reads
+AT_CUT_MAX_NULLS = 1        # `None` reads in an at-cut scored segment, position 0 only
+SETTLED_MAX_NULLS = 0       # `None` reads in a settled window
+NULL_BRIDGE_MAX_STEP = 30   # plausible forward counter step ACROSS one missed read
+OWNER_NULL_MAX_RUN = 5      # consecutive null footprint owners INSIDE the after-window
+PRE_KEY_PATCH_INSET_PX = 2  # extra inset for the PRE-MOVE counter patch: on the smaller
+                            # slide-3 rect the mapped ROI lands on the movie's
+                            # antialiased edge and decodes nothing (plan §10.19)
 FOOTPRINT_COUPLE_TOL_PX = 1.5  # before/after owner-rect agreement for a screenshot to count
                                 # "measured" rather than "unstable" (review Blocker 2b)
 # Trigger bounds, all three calibrated in plan §10 and all tracking the harness's
@@ -1617,16 +1612,11 @@ def neverPooledEvidence(
     }
 
 
-# The CAPTURE CONTRACT for the settled-slide-4 visible-content burst. The re-score
-# takes the raster's shape, its frame count, both rects and every threshold from
-# HERE, never from the retained blob: evidence that describes its own geometry and
-# its own thresholds authenticates nothing (plan §10.17). The shape is the deck's
-# 1920x1080 stage, which every ROI in this module is measured in; the frame count
-# is the probe's own burst schedule.
+# The CAPTURE CONTRACT for the settled-slide-4 visible-content burst: the shape,
+# frame count, rects and thresholds the re-score uses, taken from HERE and never
+# from the retained blob (plan §10.17).
 FOOTPRINT_BURST_SHAPE = (1080, 1920)
 FOOTPRINT_BURST_FRAMES = len(BURST_OFFSETS_MS)
-# The scoring parameters the burst is judged with, carried in the snapshot for the
-# report and asserted against these constants by the re-score.
 FOOTPRINT_SCORE_PARAMS = {
     "deltaMin": LIVE_DELTA_MIN,
     "cols": LIVE_BAND_COLS,
@@ -1692,10 +1682,15 @@ def _decode_delta_raster(evidence: dict, shape: tuple[int, int]) -> np.ndarray |
         return None
     try:
         if encoding == "zlib-u8":
-            arr = np.frombuffer(zlib.decompress(blob), dtype=np.uint8)
-            if arr.size != h * w:
+            # BOUNDED: never inflate more than one pixel past the contract's
+            # size, so a corrupt stream returns `None` instead of exhausting
+            # memory. Excess output, an unconsumed tail and a stream that never
+            # terminates are each a refusal.
+            dec = zlib.decompressobj()
+            raw = dec.decompress(blob, h * w + 1)
+            if len(raw) != h * w or dec.unconsumed_tail or dec.unused_data or not dec.eof:
                 return None
-            arr = arr.reshape(h, w)
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w)
         elif encoding == "png-gray":
             with Image.open(io.BytesIO(blob)) as img:
                 if img.format != "PNG" or img.mode != "L" or img.size != (w, h):
@@ -1935,6 +1930,72 @@ def _iou(a: object, b: object) -> float | None:
     return (inter / union) if union > 0 else None
 
 
+def _derived_paint(entry: dict) -> tuple[bool, str | None] | None:
+    """`(visible, hiddenBy)` RECOMPUTED from the raw readings, or `None` when the
+    entry does not carry them.
+
+    The page's own `visible` is a derived Boolean like any other, and a stale one
+    reading `false` over an attached, opaque, on-screen element would be SKIPPED
+    by the attestation. The rules are the page's, restated on the
+    retained `inDocument` / `display` / `visibility` / ancestor-opacity product /
+    `checkVisibility` / client rect / viewport, in the same order, so the two
+    must agree exactly."""
+    attached = entry.get("inDocument")
+    display, visibility = entry.get("display"), entry.get("visibility")
+    op = _finite(entry.get("opacityProduct"))
+    engine = entry.get("checkVisibility")
+    rect = _rect_or_none(entry.get("clientRect"))
+    view = entry.get("viewport") if isinstance(entry.get("viewport"), dict) else {}
+    vw, vh = _finite(view.get("w")), _finite(view.get("h"))
+    if not (
+        isinstance(attached, bool)
+        and (engine is None or isinstance(engine, bool))
+        and rect is not None
+        and vw is not None and vh is not None
+    ):
+        return None
+    if not attached:
+        return False, "detached"
+    if not (isinstance(display, str) and isinstance(visibility, str) and op is not None):
+        return None
+    if display == "none":
+        return False, "display-none"
+    if not (rect["w"] > 0 and rect["h"] > 0):
+        return False, "zero-size"
+    if visibility == "hidden" or not op > 0:
+        return False, "hidden"
+    if engine is False:
+        return False, "engine-hidden"
+    if not (
+        rect["x"] + rect["w"] > 0 and rect["y"] + rect["h"] > 0
+        and rect["x"] < vw and rect["y"] < vh
+    ):
+        return False, "offscreen"
+    return True, None
+
+
+def _paint_agrees(entry: dict, dom_ids: set[str]) -> bool:
+    """Is this entry's paint decision RE-DERIVABLE and equal to the page's?
+
+    A preserve-pool entry is a CLOCK record, not a paint claim, and carries no
+    CSS of its own. It is admitted as `detached` only on a retained
+    `inDocument == false`; one that says it is still attached asserts nothing by
+    itself and is admitted only when that sample's DOM census carries the same
+    decoder -- whose own entry is re-derived by this same rule (plan §10.19)."""
+    if entry.get("fromPreservePool"):
+        if entry.get("inDocument") is False:
+            return entry.get("visible") is False and entry.get("hiddenBy") == "detached"
+        if entry.get("inDocument") is not True:
+            return False
+        return (
+            entry.get("visible") is False
+            and entry.get("hiddenBy") == "pool-duplicate"
+            and str(entry.get("decoderId")) in dom_ids
+        )
+    derived = _derived_paint(entry)
+    return derived is not None and (entry.get("visible"), entry.get("hiddenBy")) == derived
+
+
 def _visible_competitors(
     media: list[dict], owner: list[dict], bound_decoder: object, positions: list[int]
 ) -> dict:
@@ -1969,8 +2030,12 @@ def _visible_competitors(
         if fp is None or not isinstance(videos, list) or not videos:
             ok = False
             continue
+        dom_ids = {
+            str(e.get("decoderId")) for e in videos
+            if isinstance(e, dict) and not e.get("fromPreservePool")
+        }
         for v in videos:
-            if not isinstance(v, dict) or "visible" not in v:
+            if not isinstance(v, dict) or "visible" not in v or not _paint_agrees(v, dom_ids):
                 ok = False
                 continue
             if str(v.get("decoderId")) == bound:
@@ -2002,7 +2067,7 @@ def _owner_null_gaps(all_owner: list[dict], after: list[dict]) -> dict:
     `nonNullFrac >= 0.7` is an aggregate: it admits a single blind interval of
     nearly a third of the window, during which a replacement decoder could own
     the footprint while the bound decoder's offscreen rVFC clock keeps ticking
-    (r12 MAJOR 3). Each gap is therefore bounded on its own:
+    (plan §10.17). Each gap is therefore bounded on its own:
 
       - no run of nulls longer than `OWNER_NULL_MAX_RUN` INSIDE the window --
         that run is the blind interval, and it is what is bounded;
@@ -2687,13 +2752,18 @@ def _merge_pool_into_media(snap: dict | None, pool: list | None) -> dict:
                 "readyState": p.get("readyState"),
                 "decoderId": p.get("elId"),
                 "fromPreservePool": True,
-                # A pooled decoder is DETACHED by definition: it holds a clock
-                # and paints nothing, so it carries the same classification the
-                # DOM probe gives a detached element, and no geometry.
+                # A pooled decoder holds a clock and paints nothing. The page's
+                # own `inDocument` reading travels with the classification, so
+                # the scorer admits `detached` on the READING rather than on this
+                # stamp; a pooled entry that is in fact attached is corroborated
+                # against the sample's DOM census instead.
                 "visible": False,
-                "hiddenBy": "detached",
+                "hiddenBy": (
+                    "pool-duplicate" if p.get("inDocument") is True else "detached"
+                ),
                 "suppressed34": False,
                 "rect": None,
+                "inDocument": p.get("inDocument") is True,
             }
             for p in pool
         ]
@@ -3472,6 +3542,43 @@ def _decode_footprint_badge(arr: np.ndarray, scale: float = 1.0) -> dict | None:
 ADVANCE_PRESS_HASH = SLIDE4_MIN_HASH - 1  # == #7, the settled pre-move boundary
 
 
+def _pre_key_patch_roi(rect: dict) -> tuple[int, int, int, int]:
+    """The counter patch ROI on the PRE-MOVE (slide-3) footprint: the shared
+    mapping, inset a further `PRE_KEY_PATCH_INSET_PX` on every side. The slide-3
+    rect is ~0.75x the slide-4 one, and at that size the mapped ROI's first rows
+    and columns fall on the movie's antialiased edge, which is not flat and
+    decodes nothing."""
+    x, y, w, h = index_patch_roi_for(rect, top_guard=INDEX_PATCH_TOP_GUARD_PX)
+    k = PRE_KEY_PATCH_INSET_PX
+    return (x + k, y + k, max(1, w - 2 * k), max(1, h - k))
+
+
+def _decode_pre_key_badge(
+    arr: np.ndarray, badge_scale: float | None, scene_hash: object
+) -> dict:
+    """The counter decoded from ONE frame taken before the advance keydown, at
+    that frame's OWN badge-reported rect. `index` is `None` whenever the frame
+    does not carry a whole, CRC-clean badge with a usable rect -- there is no
+    fallback to a modelled rect here, because the point of the reading is that it
+    is a real decode."""
+    badge = _decode_footprint_badge(arr, badge_scale) if badge_scale else None
+    if badge is not None and not badge.get("crcOk"):
+        badge = None
+    rect = {k: badge[k] for k in ("x", "y", "w", "h")} if badge is not None else None
+    if rect is not None and not (rect["w"] > 1 and rect["h"] > 1):
+        rect = None
+    index = (
+        _decode_index_patch(arr, _pre_key_patch_roi(rect))
+        if rect is not None else None
+    )
+    return {
+        "index": index,
+        "sceneHash": _norm_hash(scene_hash),
+        "badgeSeq": badge.get("seq") if badge is not None else None,
+        "rect": rect,
+    }
+
+
 def _new_advance_press_state() -> dict:
     return {"atHash": None, "wall": None, "sent": 0, "landed": 0,
             "unlanded": [], "stopped": False}
@@ -3825,6 +3932,7 @@ def _moving_index_run_at_cut(
     index_samples: list[dict],
     covered_until: int | None = None,
     covered_from: int | None = None,
+    pre_key_index: object = None,
 ) -> tuple[dict, bool]:
     """Score the at-cut counter run over `index_samples[covered_from:covered_until]`.
 
@@ -3876,10 +3984,11 @@ def _moving_index_run_at_cut(
     measured = [s for s in samples if s.get("footprintSource") == "measured"]
     # A `None` read deletes the step across it from the freeze-run and progress
     # totals, so an unbounded run of them can conceal exactly the reset or freeze
-    # this segment is scored for (r12 MAJOR 2). Inadmissible absence is an
+    # this segment is scored for. Inadmissible absence is an
     # INCONCLUSIVE segment, never a verdict about the counter.
     if not _null_reads_admissible(
-        [s.get("index") for s in measured], max_total=AT_CUT_MAX_NULLS
+        [s.get("index") for s in measured], max_total=AT_CUT_MAX_NULLS,
+        pre_key_index=pre_key_index,
     ):
         return (
             {"ok": False, "reason": "inadmissible null reads at cut",
@@ -3955,6 +4064,7 @@ async def _advance_to_slide4_capture(
     # this rule, never a hardcoded index -- so the `nDecodable` fraction does not
     # carry a free miss. They stay in `indexSamples` for diagnostics.
     advance_press_index: int | None = None
+    pre_key_sample: dict | None = None
     advance_key_perf_ms: float | None = None
     advance_key_events: int | None = None
     advance_key_rejected: int | None = None
@@ -3982,7 +4092,16 @@ async def _advance_to_slide4_capture(
         press_state, do_press = _advance_press_decision(hn, press_state, capture_wall)
         if do_press:
             advance_press_index = i
-            await chrome.screenshot()  # activate the surface (see the drain loop)
+            pre_key_arr = await chrome.screenshot()  # activates the surface too
+            # ONE decoded reading of the counter BEFORE the key, on the settled
+            # `#7`. The at-cut segment's first sample is the one read the clean
+            # run legitimately misses, and without a decoded neighbour on the
+            # near side there is nothing to bound it against -- a seek or a
+            # restart in that interval would simply disappear (plan §10.19).
+            pre_key_sample = _decode_pre_key_badge(
+                pre_key_arr, badge_scale if badge_ok else None, scene_hash
+            )
+            Image.fromarray(pre_key_arr).save(run_dir / f"{prefix}-prekey.png")
             # The cut is the KEYDOWN, timestamped page-side by a capture-phase
             # watch armed BEFORE dispatch (plan §10.13).
             await chrome.evaluate(ADVANCE_KEY_WATCH_JS)
@@ -4200,6 +4319,7 @@ async def _advance_to_slide4_capture(
         "releasePerfMs": release_perf_ms,
         "releaseStatus": release_status,
         "advancePressIndex": advance_press_index,
+        "preKeySample": pre_key_sample,
         "advanceKeyPerfMs": advance_key_perf_ms,
         "advanceKeyEvents": advance_key_events,
         "advanceKeyRejected": advance_key_rejected,
@@ -4231,6 +4351,7 @@ async def _capture_3to4_snapshot(
     wait_profile: dict,
     *,
     inject_null: bool,
+    capture_id: str,
 ) -> dict:
     """Capture + score ONE 3->4 moving Magic Move boundary and return a comparable
     findings snapshot for the A-B-A freeze bracket. Replaces `_capture_1to2_snapshot`
@@ -4248,10 +4369,6 @@ async def _capture_3to4_snapshot(
     (review Blocker 3; a cover left in place through those would red
     `footprintFullyLive` for the wrong reason).
     """
-    # This arm's identity, minted BEFORE anything is captured and retained twice:
-    # once in the snapshot header and once inside the burst evidence, so a raster
-    # lifted from another arm names a capture that is not this one (plan §10.17).
-    capture_id = uuid.uuid4().hex
     await asyncio.sleep(wait_profile["clickDelayS"])
     hash_now = _norm_hash(
         await chrome.evaluate(
@@ -4434,6 +4551,7 @@ async def _capture_3to4_snapshot(
         index_samples,
         covered_until=release_split_index,
         covered_from=capture_meta.get("atCutFrom"),
+        pre_key_index=(capture_meta.get("preKeySample") or {}).get("index"),
     )
 
     # The slide-3 decoder is `bound_owner_id`: resolved ONCE, keyed to movie1,
@@ -4506,6 +4624,7 @@ async def _capture_3to4_snapshot(
         "advance": capture_meta.get("advance"),
         "atCutFrom": capture_meta.get("atCutFrom"),
         "atCutBoundary": capture_meta.get("atCutBoundary"),
+        "preKeySample": capture_meta.get("preKeySample"),
         "advanceKeyPerfMs": capture_meta.get("advanceKeyPerfMs"),
         "advanceKeyEvents": capture_meta.get("advanceKeyEvents"),
         "advanceKeyRejected": capture_meta.get("advanceKeyRejected"),
@@ -4702,7 +4821,7 @@ _MEDIA_SAMPLE_KEYS = {"sceneHash": False, "videos": False}
 # closed at the position that needs it, rather than the whole series here.
 _VIDEO_ENTRY_KEYS = {
     "decoderId": False, "visible": False, "hiddenBy": True, "rect": True,
-    "suppressed34": False,
+    "suppressed34": False, "inDocument": False,
 }
 
 
@@ -4722,9 +4841,7 @@ def _media_samples_schema_ok(samples: object, bound_decoder: object) -> bool:
     """`mediaSamples` carry their required keys, every `videos` entry is
     attributable to a decoder, and every after-window sample holds exactly ONE
     finite `presentedMediaTime` for the bound decoder: no observation, two that
-    disagree, or two that AGREE is no rVFC reading at all -- a set collapsed
-    duplicates into one and let two entries for one decoder through (r12 MINOR
-    2)."""
+    disagree, or two that AGREE is no rVFC reading at all."""
     if not _samples_schema_ok(samples, _MEDIA_SAMPLE_KEYS):
         return False
     for s in samples:
@@ -5000,44 +5117,47 @@ def _longest_run(positions: list[int]) -> int:
     return longest
 
 
-def _null_reads_admissible(indices: list, *, max_total: int) -> bool:
-    """Are this scored window's `None` counter reads a narrowly identified
-    ACQUISITION MISS, or evidence the window is missing?
+def _plausible_step(before: object, after: object) -> bool:
+    """Did the counter march FORWARD by a plausible amount across one missed
+    read? A zero step is the freeze the gate exists to catch; a large one is a
+    reset."""
+    if before is None or after is None:
+        return False
+    return 1 <= (int(after) - int(before)) % INDEX_PATCH_MODULO <= NULL_BRIDGE_MAX_STEP
 
-    `score_composited_index_run` and `score_index_progression` both drop
-    null-adjacent deltas, so a `None` is not a neutral sample: it deletes the
-    step across it from the progress and freeze-run totals. A run of them
-    deletes an interval, and a reset or a freeze can hide inside it (r12 MAJOR
-    2). Admissible, and only just:
 
-      - at most `max_total` of them in the window;
-      - no run longer than `SCORED_NULL_MAX_RUN` -- one missed acquisition is a
-        miss, two consecutive is an unobserved interval;
-      - an INTERIOR one (decodes on both sides) must be bracketed by a
-        PLAUSIBLE forward step, `1 <= (after - before) mod 256 <=
-        NULL_BRIDGE_MAX_STEP`: the counter must be shown to have kept marching
-        ACROSS the miss. A zero step across it is the freeze the gate exists to
-        catch; a large one is a reset.
+def _null_reads_admissible(
+    indices: list, *, max_total: int, pre_key_index: object = None
+) -> bool:
+    """Are this scored window's `None` counter reads the ONE identified
+    acquisition miss, or evidence the window is missing?
 
-    An EDGE null (the window's first or last read) has no such bracket and no
-    way to earn one, so it is admitted on the count bound alone -- measured, it
-    is the one real null in a clean run: the badge patch has not settled at the
-    first read after the advance (plan §10.17).
+    Both index scorers drop null-adjacent deltas, so a `None` is not a neutral
+    sample: it deletes the step across it from the progress and freeze-run
+    totals, and a reset or a freeze can hide in what it deleted. Only the
+    measured shape is admitted:
+
+      - at most `max_total` of them, and no run longer than
+        `SCORED_NULL_MAX_RUN`;
+      - a null is admissible only at POSITION 0. A count bound alone left the
+        POSITION free: a sole null in the middle of the window erases both sides
+        of a restart while the bridge across it still reads as plausible forward
+        progress. Interior and trailing nulls are refused outright;
+      - and the position-0 miss is bounded against the DECODED PRE-KEY reading
+        taken before the advance, exactly as an interior null would be bounded
+        against its own neighbours. Without that reading the leading miss has no
+        near-side neighbour at all and the window fails closed.
     """
     if not isinstance(indices, list):
         return False
     nulls = [i for i, v in enumerate(indices) if v is None]
+    if not nulls:
+        return True
     if len(nulls) > max_total or _longest_run(nulls) > SCORED_NULL_MAX_RUN:
         return False
-    for i in nulls:
-        before = indices[i - 1] if i > 0 else None
-        after = indices[i + 1] if i + 1 < len(indices) else None
-        if before is None or after is None:
-            continue
-        step = (int(after) - int(before)) % INDEX_PATCH_MODULO
-        if not 1 <= step <= NULL_BRIDGE_MAX_STEP:
-            return False
-    return True
+    if nulls != [0]:
+        return False
+    return _plausible_step(pre_key_index, indices[1] if len(indices) > 1 else None)
 
 
 def _slide4_settled_window(index_samples: list[dict]) -> list[dict]:
@@ -5083,7 +5203,42 @@ def _advance_c_ok(
     )
 
 
-def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
+BRACKET_MANIFEST_KIND = "p2-freeze-bracket-3to4"
+BRACKET_ARMS = ("a1", "b", "a2")
+
+
+def _new_bracket_manifest() -> dict:
+    """One arm identity per arm, minted before any arm is captured."""
+    return {
+        "kind": BRACKET_MANIFEST_KIND,
+        "arms": {label: uuid.uuid4().hex for label in BRACKET_ARMS},
+    }
+
+
+def _manifest_arms_ok(manifest: object, snaps: dict[str, dict]) -> bool:
+    """Does every arm carry the identity the manifest HANDED it, and are the three
+    distinct?
+
+    The manifest is written before the first capture and lives outside the
+    snapshots, so substituting a whole arm -- header id, raster evidence and all
+    -- no longer agrees with anything: the moved block names another arm's
+    identity, and the arm it replaced no longer names its own. Three distinct ids
+    is what makes "another arm's" meaningful at all."""
+    m = manifest if isinstance(manifest, dict) else {}
+    arms = m.get("arms")
+    if not (m.get("kind") == BRACKET_MANIFEST_KIND and isinstance(arms, dict)):
+        return False
+    expected = [arms.get(label) for label in BRACKET_ARMS]
+    if not all(isinstance(v, str) and v for v in expected):
+        return False
+    if len(set(expected)) != len(BRACKET_ARMS):
+        return False
+    return all(
+        snaps[label].get("captureId") == arms[label] for label in BRACKET_ARMS
+    )
+
+
+def _score_freeze_control(a1: dict, b: dict, a2: dict, manifest: object = None) -> dict:
     """Pure A-B-A verdict for `freezeControlCaughtByCounter`, re-bracketed at the
     3->4 moving Magic Move (plan p2_freeze_control_3to4.plan.md §4; the 1->2 carry
     is refused, so there is no carried movie to freeze there).
@@ -5105,6 +5260,9 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         for name, snap in (("a1", a1), ("b", b), ("a2", a2))
     }
     checks["sampleSchemaSoundAllArms"] = not any(schema_failed.values())
+    checks["armIdentitiesMatchManifest"] = _manifest_arms_ok(
+        manifest, {"a1": a1, "b": b, "a2": a2}
+    )
 
     nc = b.get("nullControl") or {}
 
@@ -5218,6 +5376,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         index_samples,
         covered_until=b.get("releaseSplitIndex"),
         covered_from=first_covered_position,
+        pre_key_index=(b.get("preKeySample") or {}).get("index"),
     )
     flip_index = idx.get("flipIndex")
 
@@ -5489,6 +5648,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
             s.get("indexSamples") or [],
             covered_until=s.get("releaseSplitIndex"),
             covered_from=(s.get("atCutBoundary") or {}).get("from"),
+            pre_key_index=(s.get("preKeySample") or {}).get("index"),
         )
         return bool(run.get("ok")) and (s.get("movingIndexRunAtCut") or {}).get("ok") is True
 
@@ -5517,7 +5677,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # and `_freeze_control_blocks_success` blocks `success` on "inconclusive"
     # exactly as it does on "fail".
     integrity_keys = (
-        "sampleSchemaSoundAllArms",
+        "sampleSchemaSoundAllArms", "armIdentitiesMatchManifest",
         "firedAtMoveStart", "firedAtRuntimeMotionStart", "firedAfterAdvance",
         "advanceKeySameEventInControl", "noPreAdvanceDeparture", "drainPressesAllLanded", "advanceSinglePressAllArms",
         "coverPaintedAtPresent",
@@ -5670,6 +5830,15 @@ async def _run_freeze_bracket(
     # route hash '' indefinitely, which armed the null-control on '' and triggered on
     # the boot settle. Each run being a first-load gives a real #1 boundary. The A-B-A
     # comparison is unaffected (same code + fixture; the isolation check is per-snapshot).
+    # The three arm identities are minted HERE, before any arm runs, and written
+    # OUTSIDE the snapshots. An id minted inside a capture and copied into that
+    # capture's own header and evidence can go stale together, so a whole arm's
+    # block can be substituted for another's and still agree with itself; an
+    # identity the arm is HANDED cannot (plan §10.19).
+    manifest = _new_bracket_manifest()
+    manifest_path = bdir / "manifest.json"
+    write_json(manifest_path, manifest)
+
     snaps: dict[str, dict] = {}
     try:
         for label, inject in (("a1", False), ("b", True), ("a2", False)):
@@ -5682,14 +5851,16 @@ async def _run_freeze_bracket(
                 # The restart + 3->4 bridge boundaries are already in the continuity
                 # plan baked into this player_dir's index.html by the main run above.
                 snaps[label] = await _capture_3to4_snapshot(
-                    chrome, rd, "mm34", wait_profile, inject_null=inject
+                    chrome, rd, "mm34", wait_profile, inject_null=inject,
+                    capture_id=manifest["arms"][label],
                 )
             finally:
                 await chrome.close()
     finally:
         httpd.shutdown()
 
-    verdict = _score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"])
+    verdict = _score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"], manifest)
+    verdict["manifest"] = manifest
     verdict["waitProfile"] = wait_profile_name
     verdict["snapshots"] = snaps
     return verdict
@@ -6379,6 +6550,7 @@ async def _run(player: Path) -> dict:
             index_samples_c,
             covered_until=_capture_meta_c.get("releaseSplitIndex"),
             covered_from=_capture_meta_c.get("atCutFrom"),
+            pre_key_index=(_capture_meta_c.get("preKeySample") or {}).get("index"),
         )
         bridge_events = await chrome.evaluate(
             "window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"

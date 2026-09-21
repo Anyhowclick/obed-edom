@@ -211,10 +211,8 @@ MEDIA_PROBE_JS = r"""
     }
   }
   Array.prototype.slice.call(document.querySelectorAll('video')).forEach(watch);
-  // The stage map PRESERVE itself uses (`stageMap`/`toScreen` in
-  // live_continuity_js): authored px -> viewport px by a single uniform scale
-  // about the stage's own top-left. Null when the stage is missing or its two
-  // axes disagree, in which case no rect below can be stated in authored px.
+  // PRESERVE's own map: authored px -> viewport px by one uniform scale about
+  // the stage's top-left; null when the stage is missing or the axes disagree.
   function stageMap() {
     const stage = document.getElementById('stage');
     if (!stage) return null;
@@ -276,10 +274,15 @@ MEDIA_PROBE_JS = r"""
       visible: why === null,
       hiddenBy: why,
       suppressed34: !!v.__obedSuppressed34,
-      attached: attached,
+      // The RAW readings the two fields above are a function of, so the same
+      // decision can be recomputed off-page and required to agree.
+      inDocument: attached,
+      display: st ? String(st.display) : null,
+      visibility: st ? String(st.visibility) : null,
       opacityProduct: op,
       checkVisibility: engine,
       clientRect: {x: r.left, y: r.top, w: r.width, h: r.height},
+      viewport: {w: window.innerWidth || 0, h: window.innerHeight || 0},
       rect: toAuthored(r),
     };
   }
