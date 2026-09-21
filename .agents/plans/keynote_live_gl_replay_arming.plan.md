@@ -19,8 +19,8 @@ Reference flow (git-ignored): `output/live-visible-content/alt-perclear/{js,e2}.
 Such a boundary derives `action: "glReplay"` instead of `retire`. Everything else — overlap refusals on
 non-WebGL transitions, multi-movie boundaries, masks, unreadable slot shapes — is byte-unchanged.
 
-**Non-goals for v1.** No opacity patch (owner: the per-draw wrapper-opacity fix is the separate "G2" plan; our
-replay reproduces the player's own defect faithfully — pixel-correct vs the player, wrong vs the deck). No 3→4 /
+**Non-goals for v1.** ~~No opacity patch~~ — SUPERSEDED 2026-09-21: the owner wants the wrapper-opacity fix IN v1,
+without modifying `main.js` (see "Owner decisions — ANSWERED" below). No 3→4 /
 moving-movie arming (measured: no invisible window there, auto `movie-start` heals it, per-`clear` upload ghosts).
 No two-movie slide, no masked movie, no go-to arming (go-to destinations are DOM-painted; the separate P4
 frozen-poster-after-go-to defect is NOT fixed here and must be stated in the capability report). No hole-punch /
@@ -190,6 +190,16 @@ works? (D2) Is reproducing the player's opacity defect acceptable on air for v1,
 the structural refusal enough? (D4) Accept that the fail-closed arm's artifacts differ from today's by the
 `glreplay-standdown` notes (they cannot be byte-identical and still be provable)? (D5) Does arming default to
 `auto` for the owner's own HDMI runs once qualified, or stay `off` until a second deck is qualified?
+
+**Owner decisions — ANSWERED 2026-09-21.** D1 moot (GL replay measured FEASIBLE in real OBS CEF 127; G3 still waits on
+the pool keep-warm-inside-CEF measurement). D2: NOT acceptable as the target — the opacity fix ships with v1 if it can be
+done WITHOUT editing `main.js` (a patched player is a dependency that breaks on a Keynote update). Measured route
+(research doc P3): in OUR replay, `uniform1f(Opacity, <export wrapper-opacity product>)` before the affected draw gives the
+exact blend; `Opacity` is persistent program state ⇒ write 1.0 back on stand-down. New v1 stage "G2": first todo =
+MEASURE a provable draw→export-object mapping (fixture: draw idx 83 / tex 6); assert the `Opacity` uniform exists; when
+the mapping cannot be proven for a boundary, replay with the player's own (opaque) look and emit a presenter note — do
+not refuse the carry. D3: the two-movie and equal-size-poster decks must be authored and MEASURED refusing before v1
+ships. D4: accepted. D5: arming stays `off` by default until a second deck is qualified.
 
 ## 9. Coordinator review (2026-09-20) — amendments before this plan is approved
 - **Q0 (new, blocks everything, headless, no decks needed): the POOLED decoder as the texture source is UNMEASURED.**

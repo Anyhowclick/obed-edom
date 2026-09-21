@@ -19,8 +19,12 @@ the code is the source of truth.** One sub-doc kept: [`../research/kpf_renderer_
 ## P2 status — the probe & its findings
 Offline, no Keynote: `scripts/p2_recovery_html_adversarial.py` (`--reuse-export --disposable
 --wait-profile fast|slow`), scorers in `src/obed_edom/html_alpha_probe.py`, MM/restart bridge +
-preserve in `scripts/p2_recovery_html_dissolve_live.py`. **14 findings GREEN on both wait profiles**
-(`success:True`); ~129 unit tests (`tests/test_p2_adversarial.py`, `tests/test_html_alpha_probe.py`).
+preserve in `scripts/p2_recovery_html_dissolve_live.py`.
+**Both flags are mandatory, every run.** `--disposable` swaps in the disposable movie assets: the
+deck's ORIGINAL HEVC does not decode in headless Chrome, so without it the probe scores black frames
+and reds findings for the wrong reason. Omitting `--reuse-export` triggers a full bake, which DELETES
+`output/p2-recovery/html-adversarial/` — every previous run's evidence with it. **14 findings GREEN on both wait profiles**
+(`success:True`), covered by `tests/test_p2_adversarial.py` and `tests/test_html_alpha_probe.py`.
 
 The findings, grouped:
 - **Pre-cut composition** — `emptyCanvasPre`, `blackSentinelOpaquePre`, `greenTranslucentPre`,
@@ -60,8 +64,10 @@ The findings, grouped:
   at the footprint (IoU), no fallbacks; ties/ambiguity fail closed.
 - **Honest-gate discipline:** a green you cannot trace to the fix is a red. Every positive control has a
   matching red-without-the-fix demonstration (`--disable-bridge34`).
-- **Freeze negative control** (`freezeControlCaughtByCounter`, Arm A): an A-B-A bracket on the static
-  1→2 boundary injects a partial stale cover over the counter while the decoder stays LIVE, so
+- **Freeze negative control** (`freezeControlCaughtByCounter`, Arm A): an A-B-A bracket on the MOVING
+  3→4 Magic Move (re-bracketed off the static 1→2, whose carry the baseline refuses — there is no
+  carried movie to freeze there; see `.agents/plans/p2_freeze_control_3to4.plan.md`) injects a partial
+  stale cover, re-tracked every rAF through the translate+scale, over the counter while the decoder stays LIVE, so
   `index_run` goes RED ("freeze run at cut") while rVFC stays green — isolating the RED to the counter,
   proving the gate is not vacuous. Two-tier scorer: hold-INTEGRITY failures → `inconclusive`;
   gate/isolation/positives → `pass`/`fail` only once integrity holds. Fresh Chrome per bracket run (the
@@ -72,8 +78,11 @@ The findings, grouped:
   counter, same-movie instances, and fail-closed ties.
 - Strict boundary parsing is bypassed by `_norm_hash` prefix-normalisation — unreachable in production
   (player emits clean `#N`); closing needs raw-hash pipeline re-plumbing.
-- Freeze control uses state-based (not per-screenshot) cover attestation — sound for the STATIC 1→2; a
-  MOVING-footprint freeze control would need per-screenshot attestation.
+- ~~Freeze control uses state-based (not per-screenshot) cover attestation~~ — CLOSED by the 3→4
+  re-bracket: the MOVING-footprint control attests PER FRAME (a CRC'd badge frame decoded from every
+  capture, whose painted rect must agree with the page's own log for that frame, plus a per-rAF cover
+  hit-test, cover-tracks-footprint check and a bounded rAF/poll gap). Absence of any of it is
+  INCONCLUSIVE, never green.
 - Arm B (decoder-pause control) deferred — Arm A is sufficient; B would separately certify `rvfcAdvance`.
 - `_decode_index_patch` returns 0 for a flat-black ROI — a false-RED source (fails closed, not a
   false-pass); could return None outside the counter alphabet.
