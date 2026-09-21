@@ -634,14 +634,11 @@ nothing while it moves), and its left bracket therefore lies BEFORE the window �
 full series is what makes the check non-vacuous instead of skipped. A trailing gap has no right-hand
 bracket and fails closed.
 
-**NOT closed as worded.** r12 MAJOR 3 also asked to "attest no competing decoder overlaps the
-footprint during the gap (the `mediaSamples`/`videos` rects are retained — use them)". Those rects are
-not retained: `videos[*]` carries `w`/`h` as `videoWidth`/`videoHeight`, with no screen rect. Worse,
-a clean run legitimately carries a SECOND decoder on the same `Untitled.mov` asset — the export's
-suppressed restart element — so an asset-keyed "no competing decoder" attestation would red the clean
-bracket. A geometric attestation needs a per-video screen rect and a visibility flag added to
-`MEDIA_PROBE_JS` (a shared probe, and a third fixture-shape change), and it cannot be calibrated
-without its own live round. Deferred, with the bounded-and-bracketed gap above standing in.
+**The competing-decoder attestation — CLOSED IN ROUND 16 (§10.18).** r12 MAJOR 3 also asked to
+"attest no competing decoder overlaps the footprint during the gap (the `mediaSamples`/`videos` rects
+are retained — use them)". Those rects were not retained: `videos[*]` carried `w`/`h` as
+`videoWidth`/`videoHeight` only. Round 15 shipped the bounded-and-bracketed gap above and left the
+attestation open; round 16 retains the geometry and closes it.
 
 **MINORs.** `_decode_delta_raster` is fail-closed (`img.format == "PNG"`, contract dimensions
 enforced before load, a context manager, and Pillow's decode/decompression errors caught → `None`).
@@ -663,3 +660,53 @@ and new modules at 3/3 PASS each with `maxRafGap` 53–60 ms on both, so that in
 machine, not this round. One e2e fast bridge-ON run: `freezeControlCaughtByCounter: True`,
 `success: True`. The three BEFORE captures re-scored under the new gate come back INCONCLUSIVE on
 `isolationEqual` — old-shape evidence carries no `captureId`, which is the binding working.
+
+### 10.18 The competing-decoder attestation is GEOMETRIC (round 16, closing r12 MAJOR 3)
+
+Round 15 bounded and bracketed the null-owner gap but could not say what was ON the footprint while
+the owner reading was missing, because no per-video geometry was retained. Two facts made the obvious
+substitutes unusable, and both are why this had to be geometric rather than asset-keyed: the clean
+run ALWAYS carries a second decoder on the same `Untitled.mov` asset — the export's fresh
+autoplay-from-0 element, which PRESERVE suppresses so the bridged decoder keeps painting — and that
+element's box is the slide-4 destination rect, measured at (326.75, 708.52) 1266.48×356.19 against a
+footprint of (327, 709) 1266×356. It overlaps the footprint essentially exactly. Any check on asset
+key, or on overlap alone, reds every clean bracket.
+
+**The probe retains the geometry and the paint decision.** `MEDIA_PROBE_JS` now gives every
+`videos[*]` entry a `rect` in AUTHORED px, a `clientRect` in viewport px, and a `visible` flag with a
+`hiddenBy` classification. The authored-px mapping is PRESERVE's own `stageMap`/`toScreen` — a single
+uniform scale about the stage's top-left, refused when the two axes disagree by more than 0.1% —
+reimplemented inline because the probe runs standalone. MEASURED: the map reads exactly
+`{s: 1, ox: 0, oy: 0, 1920x1080}` on this fixture, i.e. the identity the badge's `stageOriginZero`
+gate already assumes; a non-identity map would now be applied rather than assumed. `visible` is
+`checkVisibility()` AND an ancestor-opacity product > 0 AND non-zero size AND not `display:none`,
+with `hiddenBy` naming the FIRST reason found among detached / display-none / zero-size / hidden /
+engine-hidden / offscreen. The preserve pool's merged entries are stamped `hiddenBy: "detached"` at
+the merge: a pooled decoder holds a clock and paints nothing, and leaving those three keys null made
+every arm fail the schema (caught live, on the first round-16 batch).
+
+**The scorer reads it.** `_visible_competitors` walks EVERY after-window position — not only the
+admitted gap; a handoff at a position whose owner happens to resolve is still a handoff — and fails
+the arm when any decoder other than the bound one is `visible` and its rect meets that sample's own
+footprint at `IoU > 0`. A position whose geometry cannot be stated in authored px, a `videos` entry
+missing its paint flag or rect, or owner and media series that do not align is not an attestation and
+fails closed. `visible`, `hiddenBy`, `rect` and `suppressed34` joined `_VIDEO_ENTRY_KEYS`, so absence
+is refused before any window is cut.
+
+MEASURED (round 16, 5 clean brackets = 15 arms): **3 videos in every one of the 1200 after-window
+samples** (the bridged decoder, the suppressed restart element, one pooled clock), the suppressed
+element classified `hidden` in **15 of 15 arms** with `suppressed34: true` on every one of its 80
+readings per arm, and **0 visible overlaps** anywhere. A synthetic painting competitor on the
+footprint during the gap is INCONCLUSIVE; the same box not painting, and a painting one clear of the
+footprint, stay scorable — all three tested. `ownerSamples[*].footprint` moved from fully
+allowlisted to a classified PARTIAL: gated at every after-window position, which is exactly where the
+attestation reads it.
+
+Sweep after round 16: the bracket walk covers **36 896** concrete indexed paths (was 26 122), **493
+gated**, **520 survivors**, 6 partial keys; MAIN's **11 789** paths, 53 gated, 255 survivors. The
+fixture is re-captured and grows 599 kB → **806 kB** — the per-video rect and visibility fields on
+every sample are most of it. The two suites run **666 tests in ~245 s** (was 653 in ~126 s): the
+whole increase is inside the exhaustive sweep, which now re-derives the attestation over ~37 000
+deletions × three arms; the non-sweep tests still run in ~12 s. Live: **5/5 brackets PASS** at load
+6.0–6.9 with `maxRafGap` 56.6–62.5 ms, plus one e2e fast bridge-ON with
+`freezeControlCaughtByCounter: True` and `success: True`.
