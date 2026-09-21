@@ -1,12 +1,12 @@
 {
  "bankVersion": 1,
- "capturedUTC": "2026-09-11T06:53:00.721944+00:00",
+ "capturedUTC": "2026-09-21T01:47:09.634986+00:00",
  "deck": "Gold_Wall_Input.key",
  "inspectVersion": 5,
  "keynoteBundleId": "com.apple.Keynote",
  "keynoteVersion": "15.3.1",
  "reader": "jxa",
- "slideCount": 19,
+ "slideCount": 24,
  "slides": [
   {
    "counts": {
@@ -27,13 +27,45 @@
   },
   {
    "counts": {
+    "image": 5,
+    "shape": 1,
+    "text": 3
+   },
+   "slide": 2
+  },
+  {
+   "counts": {
+    "image": 5,
+    "shape": 1,
+    "text": 3
+   },
+   "slide": 3
+  },
+  {
+   "counts": {
     "image": 14,
     "line": 1,
     "movie": 1,
     "shape": 5,
     "text": 8
    },
-   "slide": 2
+   "slide": 4
+  },
+  {
+   "counts": {
+    "image": 5,
+    "shape": 1,
+    "text": 3
+   },
+   "slide": 5
+  },
+  {
+   "counts": {
+    "image": 5,
+    "shape": 1,
+    "text": 3
+   },
+   "slide": 6
   },
   {
    "counts": {
@@ -43,7 +75,35 @@
     "shape": 6,
     "text": 8
    },
-   "slide": 3
+   "slide": 7
+  },
+  {
+   "counts": {
+    "image": 13,
+    "line": 1,
+    "shape": 20,
+    "text": 5
+   },
+   "slide": 8
+  },
+  {
+   "counts": {
+    "image": 13,
+    "line": 1,
+    "shape": 20,
+    "text": 5
+   },
+   "slide": 9
+  },
+  {
+   "counts": {
+    "image": 16,
+    "line": 1,
+    "movie": 10,
+    "shape": 50,
+    "text": 25
+   },
+   "slide": 10
   },
   {
    "counts": {
@@ -53,7 +113,7 @@
     "shape": 1,
     "text": 5
    },
-   "slide": 4
+   "slide": 11
   },
   {
    "counts": {
@@ -61,7 +121,7 @@
     "shape": 1,
     "text": 2
    },
-   "slide": 5
+   "slide": 12
   },
   {
    "counts": {
@@ -70,7 +130,7 @@
     "shape": 1,
     "text": 2
    },
-   "slide": 6
+   "slide": 13
   },
   {
    "counts": {
@@ -79,7 +139,7 @@
     "shape": 13,
     "text": 12
    },
-   "slide": 7
+   "slide": 14
   },
   {
    "counts": {
@@ -89,7 +149,7 @@
     "shape": 36,
     "text": 21
    },
-   "slide": 8
+   "slide": 15
   },
   {
    "counts": {
@@ -97,7 +157,7 @@
     "movie": 1,
     "text": 2
    },
-   "slide": 9
+   "slide": 16
   },
   {
    "counts": {
@@ -105,7 +165,7 @@
     "shape": 139,
     "text": 15
    },
-   "slide": 10
+   "slide": 17
   },
   {
    "counts": {
@@ -113,7 +173,7 @@
     "shape": 139,
     "text": 202
    },
-   "slide": 11
+   "slide": 18
   },
   {
    "counts": {
@@ -123,7 +183,7 @@
     "shape": 139,
     "text": 200
    },
-   "slide": 12
+   "slide": 19
   },
   {
    "counts": {
@@ -133,7 +193,7 @@
     "shape": 139,
     "text": 3
    },
-   "slide": 13
+   "slide": 20
   },
   {
    "counts": {
@@ -143,7 +203,7 @@
     "shape": 139,
     "text": 3
    },
-   "slide": 14
+   "slide": 21
   },
   {
    "counts": {
@@ -153,7 +213,7 @@
     "shape": 139,
     "text": 3
    },
-   "slide": 15
+   "slide": 22
   },
   {
    "counts": {
@@ -163,26 +223,8 @@
     "shape": 139,
     "text": 3
    },
-   "slide": 16
-  },
-  {
-   "counts": {
-    "image": 4,
-    "shape": 1,
-    "text": 4
-   },
-   "slide": 17
-  },
-  {
-   "counts": {
-    "group": 67,
-    "image": 122,
-    "line": 68,
-    "shape": 2,
-    "text": 2
-   },
-   "slide": 18
+   "slide": 23
   }
  ],
- "sourceDigest": "c7f870edf4a5be2f862eec95a52e7c8224a8628d133e4d236beb611d06011f67"
+ "sourceDigest": "9e012210c39bb66752d11c15975e0bdd31ca53722d6d89938d6ff332ae137659"
 }

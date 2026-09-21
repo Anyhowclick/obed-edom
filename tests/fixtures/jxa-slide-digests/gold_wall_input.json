@@ -1,12 +1,12 @@
 {
  "bankVersion": 1,
- "capturedUTC": "2026-09-11T02:58:30.013184+00:00",
+ "capturedUTC": "2026-09-21T01:42:25.119418+00:00",
  "deck": "Gold_Wall_Input.key",
  "inspectVersion": 5,
  "keynoteBundleId": "com.apple.Keynote",
  "keynoteVersion": "15.3.1",
  "reader": "jxa",
- "slideCount": 19,
+ "slideCount": 24,
  "slideDigestVersion": 1,
  "slides": [
   {
@@ -32,6 +32,32 @@
    "text": "chc kuching"
   },
   {
+   "digest": "f00fa83e9e2a020f",
+   "images": [
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "pasted-movie.png"
+   ],
+   "skipped": "0",
+   "slide": 2,
+   "text": "main sanctuary"
+  },
+  {
+   "digest": "31a52813a277dce3",
+   "images": [
+    "Klang 7 Cafe.jpg",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png"
+   ],
+   "skipped": "0",
+   "slide": 3,
+   "text": "caf\u00e9 area"
+  },
+  {
    "digest": "68113c20da3a3275",
    "images": [
     "WhatsApp Image 2025-10-15 at 14.07.31_83b3b525.jpg",
@@ -50,8 +76,34 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 2,
+   "slide": 4,
    "text": "chc kuching missions update malaysia west malaysia chc sitiawan"
+  },
+  {
+   "digest": "93cd25cc5f1bfbbf",
+   "images": [
+    "THN Praying.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png"
+   ],
+   "skipped": "0",
+   "slide": 5,
+   "text": "early morning prayer meetings"
+  },
+  {
+   "digest": "974b57901cae4d4a",
+   "images": [
+    "250817_Michael Chan_007A5377.jpg",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png"
+   ],
+   "skipped": "0",
+   "slide": 6,
+   "text": "early morning prayer meetings"
   },
   {
    "digest": "d5c7cf4035586b28",
@@ -72,8 +124,74 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 3,
+   "slide": 7,
    "text": "chc kuching missions update malaysia west malaysia chc sitiawan"
+  },
+  {
+   "digest": "058850098e41a4cf",
+   "images": [
+    "Poor Myanmar.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf"
+   ],
+   "skipped": "0",
+   "slide": 8,
+   "text": "missions update myanmar"
+  },
+  {
+   "digest": "9a3c266d90f35d5a",
+   "images": [
+    "Myanmar Soldiers.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "map BG.png",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf"
+   ],
+   "skipped": "0",
+   "slide": 9,
+   "text": "missions update myanmar"
+  },
+  {
+   "digest": "e23c30a80e1777ef",
+   "images": [
+    "Myanmar Pastors.png",
+    "map BG.png",
+    "map BG.png",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf",
+    "pasted-image.pdf"
+   ],
+   "skipped": "0",
+   "slide": 10,
+   "text": "missions update myanmar chc yangon chc shwepyithar chc hlawga chc tabitha chc zwechipen chc chauk chc baung gone chc sami chc selsaung gone chc tuikinwa chc ohn chc chailong chc hosanna chc taik kyi evangel chc bethlehem chc tat thit chc cannan chc saw chc htantabin chc yangon bible school"
   },
   {
    "digest": "2d539ba031df619b",
@@ -88,7 +206,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 4,
+   "slide": 11,
    "text": "missions update china"
   },
   {
@@ -100,7 +218,7 @@
     "map BG.png"
    ],
    "skipped": "0",
-   "slide": 5,
+   "slide": 12,
    "text": ""
   },
   {
@@ -124,7 +242,7 @@
     "pasted-movie.png"
    ],
    "skipped": "0",
-   "slide": 6,
+   "slide": 13,
    "text": ""
   },
   {
@@ -144,7 +262,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 7,
+   "slide": 14,
    "text": "missions update china chc bian lan chc xian chou chc pu you chc nu zhou chc zui si chc rao bo not actual names"
   },
   {
@@ -164,7 +282,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 8,
+   "slide": 15,
    "text": "missions update china chc bian lan chc zui si chc chun gu chc kuan ping chc di he chc xian chou chc feng yun chc qiu cha chc rao bo chc da mi chc fu chang chc jiang yin chc pu you chc nu zhou not actual names chc jiang shou"
   },
   {
@@ -175,7 +293,7 @@
     "map BG.png"
    ],
    "skipped": "0",
-   "slide": 9,
+   "slide": 16,
    "text": ""
   },
   {
@@ -204,7 +322,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 10,
+   "slide": 17,
    "text": "global missions chc zui si chc zwechipen chel sewing centre kasur chel sewing centre lahore chli bg slum school chli biw slum school chli bn tribal school chli bs slum school chli bw slum school chli gb slum school chli kd slum school chli og slum school chli pc slum school chli pl 1 slum school chli pl 2 slum school chli sb slum school chli sd slum school chli sv slum school chli tg slum school chc aaliana chc agape love chc aliwal chc arakan chc aramaywan quezon chc arao chc ata village chc ayala capitol chc bagakay chc bahrain chc bais chc balaong chc baler chc baliwagan chc basirang chc baung gone chc berong chc bethlehem chc bian lan chc binalbagan chc bohol chc bugca chc bukit doa chc bullowal chc cabol-anonan chc cabuan chc cabungahan chc calatrava chc camiguin chc camote chc camsur bicol chc cannan chc cansilayan chc carapali chc cavinte chc central chc chailong chc change rai uttar chc chauk chc chiang mai chc chun gu chc coimbatore chc da mi chc dabawali chc daburji chc dahunan chc dhurkot chc di he chc diguan chc dumaguete chc dungingi chc fairview novaliches chc farm master chc fazilkha chc femiwala chc feng yun chc ff. gonzaga chc fu chang chc gamayon chc gorontalo chc hlawga chc hoa nitang chc hosanna chc hoshiarpur chc htantabin chc humayan chc ipoh chc isabela chc jalandhar chc jalla chowk chc jiang shou chc jiang yin chc kabanjahe chc kabankalan chc kairon nagal chc kannudaiyampalayam chc karatupalayam chc kaybiga chc khanowal chc kikuyo chc klang chc kollampalayam chc kot mohan lal chc kotagiri chc kotkapura chc kuan ping chc kuching chc labinay chc las pinas chc lehra mohabaat chc limboto chc lipat-on chc litapan chc lower mabini chc lubuk pakam chc lwg school chc m\u2019lang chc mabinay chc macolango chc magazine chc magtajos chc magtalisay chc makhu issa nagri chc malluwala chc manarra ata tribe chc marilao bulacan chc matatempa chc medan chc sarab chc saudi arabia chc saw chc selsaung gone chc sholurmattam chc shwepyithar chc silay chc sitiawan chc siwahon 3 chc spur 13 chc spur 8 chc sta. monica chc sta. rosa laguna chc tabitha chc tagpisa chc tagum chc taichung chc taik kyi evangel chc talabonggan chc talwandi lal singh chc tangili chc tapa chc tat thit chc thirumullaivoyal chc tinabiangan chc tinago chc tuikinwa chc tungib chc vaaikalmedu chc villamonte chc wana riotinto chc wana wera chc xian chou chc yangon chc yedakkad chc zamboanga chc zamboanguita chc zion chc mendoza chc metro (iloilo) chc moga chc mt. canlaon chc mt. talinis chc nitang chc nomads chc nu zhou chc ocayan chc odyong chc ohn chc ozamiz chc pindi chc pinedapa chc prai chc prk lubong chc pu you chc pulot chc purana makku chc qiu cha chc rajpura chc rao bo chc rizal chc royal house chc rp quezon city chc saidpur chc salamayang chc sami chc san bartolome chc san carlos chc san enrique chc san miguel bulacan chc santa barbara chc sapang palay"
   },
   {
@@ -233,7 +351,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 11,
+   "slide": 18,
    "text": "global missions chc aaliana chc agape love chc aliwal chc arakan chc aramaywan quezon chc arao chc ata village chc ayala capitol chc bagakay chc bahrain chc bais chc balaong chc baler chc baliwagan chc basirang chc baung gone chc berong chc bethlehem chc bian lan chc binalbagan chc bohol chc bugca chc bukit doa chc bullowal chc cabol-anonan chc cabuan chc cabungahan chc calatrava chc camiguin chc camote chc camsur bicol chc cannan chc cansilayan chc carapali chc cavinte chc central chc chailong chc change rai uttar chc chauk chc chiang mai chc chun gu chc coimbatore chc da mi chc dabawali chc daburji chc dahunan chc dhurkot chc di he chc diguan chc dumaguete chc dungingi chc fairview novaliches chc farm master chc fazilkha chc femiwala chc feng yun chc ff. gonzaga chc fu chang chc gamayon chc gorontalo chc hlawga chc hoa nitang chc hosanna chc hoshiarpur chc htantabin chc humayan chc ipoh chc isabela chc jalandhar chc jalla chowk chc jiang shou chc jiang yin chc kabanjahe chc kabankalan chc kairon nagal chc kannudaiyampalayam chc karatupalayam chc kaybiga chc khanowal chc kikuyo chc klang chc kollampalayam chc kot mohan lal chc kotagiri chc kotkapura chc kuan ping chc kuching chc labinay chc las pinas chc lehra mohabaat chc limboto chc lipat-on chc litapan chc lower mabini chc lubuk pakam chc lwg school chc m\u2019lang chc mabinay chc macolango chc magazine chc magtajos chc magtalisay chc makhu issa nagri chc malluwala chc manarra ata tribe chc marilao bulacan chc matatempa chc medan chc mendoza chc metro (iloilo) chc moga chc mt. canlaon chc mt. talinis chc nitang chc nomads chc nu zhou chc ocayan chc odyong chc ohn chc ozamiz chc pindi chc pinedapa chc prai chc prk lubong chc pu you chc pulot chc purana makku chc qiu cha chc rajpura chc rao bo chc rizal chc royal house chc rp quezon city chc saidpur chc salamayang chc sami chc san bartolome chc san carlos chc san enrique chc san miguel bulacan chc santa barbara chc sapang palay chc sarab chc saudi arabia chc saw chc selsaung gone chc sholurmattam chc shwepyithar chc silay chc sitiawan chc siwahon 3 chc spur 13 chc spur 8 chc sta. monica chc sta. rosa laguna chc tabitha chc tagpisa chc tagum chc taichung chc taik kyi evangel chc talabonggan chc talwandi lal singh chc tangili chc tapa chc tat thit chc thirumullaivoyal chc tinabiangan chc tinago chc tuikinwa chc tungib chc vaaikalmedu chc villamonte chc wana riotinto chc wana wera chc xian chou chc yangon chc yedakkad chc zamboanga chc zamboanguita chc zion chc zui si chc zwechipen chel sewing centre kasur chel sewing centre lahore chli bg slum school chli biw slum school chli bn tribal school chli bs slum school chli bw slum school chli gb slum school chli kd slum school chli og slum school chli pc slum school chli pl 1 slum school chli pl 2 slum school chli sb slum school chli sd slum school chli sv slum school chli tg slum school"
   },
   {
@@ -262,7 +380,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 12,
+   "slide": 19,
    "text": "global missions chc aaliana chc agape love chc aliwal chc arakan chc aramaywan quezon chc arao chc ata village chc ayala capitol chc bagakay chc bahrain chc bais chc balaong chc baler chc baliwagan chc basirang chc baung gone chc berong chc bethlehem chc bian lan chc binalbagan chc bohol chc bugca chc bukit doa chc bullowal chc cabungahan chc calatrava chc camiguin chc camote chc camsur bicol chc cannan chc cansilayan chc carapali chc cavinte chc central chc chailong chc change rai uttar chc chauk chc chiang mai chc chun gu chc coimbatore chc da mi chc dabawali chc daburji chc dahunan chc dhurkot chc di he chc diguan chc dumaguete chc dungingi chc fairview novaliches chc farm master chc fazilkha chc femiwala chc feng yun chc ff. gonzaga chc fu chang chc gamayon chc gorontalo chc hlawga chc hoa nitang chc hosanna chc hoshiarpur chc htantabin chc humayan chc ipoh chc isabela chc jalandhar chc jalla chowk chc jiang shou chc jiang yin chc kabanjahe chc kabankalan chc kairon nagal chc kannudaiyampalayam chc karatupalayam chc kaybiga chc khanowal chc kikuyo chc klang chc kollampalayam chc kot mohan lal chc kotagiri chc kotkapura chc kuan ping chc kuching chc labinay chc las pinas chc lehra mohabaat chc limboto chc lipat-on chc litapan chc lower mabini chc lubuk pakam chc lwg school chc m\u2019lang chc mabinay chc macolango chc magazine chc magtajos chc magtalisay chc makhu issa nagri chc malluwala chc manarra ata tribe chc marilao bulacan chc matatempa chc medan chc mendoza chc metro (iloilo) chc moga chc mt. canlaon chc mt. talinis chc nitang chc nomads chc nu zhou chc ocayan chc odyong chc ohn chc ozamiz chc pindi chc pinedapa chc prai chc prk lubong chc pu you chc pulot chc purana makku chc qiu cha chc rajpura chc rao bo chc rizal chc royal house chc rp quezon city chc saidpur chc salamayang chc sami chc san bartolome chc san carlos chc san enrique chc san miguel bulacan chc santa barbara chc sapang palay chc sarab chc saudi arabia chc saw chc selsaung gone chc sholurmattam chc shwepyithar chc silay chc sitiawan chc siwahon 3 chc spur 13 chc spur 8 chc sta. monica chc sta. rosa laguna chc tabitha chc tagpisa chc tagum chc taichung chc taik kyi evangel chc talabonggan chc talwandi lal singh chc tangili chc tapa chc tat thit chc thirumullaivoyal chc tinabiangan chc tinago chc tuikinwa chc tungib chc vaaikalmedu chc villamonte chc wana riotinto chc wana wera chc xian chou chc yangon chc yedakkad chc zamboanga chc zamboanguita chc zion chc zui si chc zwechipen chel sewing centre kasur chel sewing centre lahore chli bg slum school chli biw slum school chli bn tribal school chli bs slum school chli bw slum school chli gb slum school chli kd slum school chli og slum school chli pc slum school chli pl 1 slum school chli pl 2 slum school chli sb slum school chli sd slum school chli sv slum school chli tg slum school"
   },
   {
@@ -291,7 +409,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 13,
+   "slide": 20,
    "text": "global missions"
   },
   {
@@ -320,7 +438,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 14,
+   "slide": 21,
    "text": "global missions"
   },
   {
@@ -350,7 +468,7 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 15,
+   "slide": 22,
    "text": "global missions"
   },
   {
@@ -379,151 +497,9 @@
     "pasted-image.pdf"
    ],
    "skipped": "0",
-   "slide": 16,
+   "slide": 23,
    "text": "global missions"
-  },
-  {
-   "digest": "ea26554bbafbc604",
-   "images": [
-    "BLANK.png",
-    "map BG.png",
-    "map BG.png",
-    "map BG.png"
-   ],
-   "skipped": "0",
-   "slide": 17,
-   "text": "romans 15 20 it has always been my ambition to preach the gospel where christ was not known, so that i would not be building on someone else\u2019s foundation. 21 rather, as it is written: \u201cthose who were not told about him will see, and those who have not heard will understand.\u201d"
-  },
-  {
-   "digest": "f2a4435208dfdd7f",
-   "images": [
-    "Suntec New 2.png",
-    "map BG.png",
-    "map BG.png",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf",
-    "pasted-image.pdf"
-   ],
-   "skipped": "0",
-   "slide": 18,
-   "text": "upg chc"
   }
  ],
- "sourceDigest": "c7f870edf4a5be2f862eec95a52e7c8224a8628d133e4d236beb611d06011f67"
+ "sourceDigest": "9e012210c39bb66752d11c15975e0bdd31ca53722d6d89938d6ff332ae137659"
 }
