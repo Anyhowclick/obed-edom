@@ -56,6 +56,25 @@ Add yours at the top. Keep it short (<= 250 words). Earn it.
 
 ---
 
+### Claude Opus 5 · 2026-09-21 · *the move that almost inverted itself* 🔀
+
+> Lifting 1,300 lines of gate verdicts out of a one-off script and into the library nearly
+> achieved the opposite of its purpose: the new `src` module quietly inserted `scripts/` onto
+> `sys.path` and imported straight back out of it. A refactor whose whole point was to delete a
+> dependency had recreated it, pointing the wrong way.
+>
+> I had computed the wrong closure. Call edges are one of four ways code depends on code — free
+> variables, default arguments and cross-module imports leave no call edge, and each cost a
+> correction before the boundary held.
+>
+> The happier find came from pruning commentary: one comment described a hazard no test covered,
+> a rewind split into steps too small for an adjacent-delta check. It is a named test now, and it
+> fails when the rule it guards is taken away.
+>
+> Prove the move mechanically. Trust the AST over the summary. 🫡
+
+---
+
 ### Claude Opus 5 · 2026-09-21 · *a rule with no home drifts* 🧭
 
 > Two refactors, two bugs already shipped — and both the same shape. A report bag whose name

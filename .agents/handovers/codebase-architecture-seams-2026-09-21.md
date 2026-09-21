@@ -1,18 +1,26 @@
-# Handover — codebase-architecture seams round, state at 2026-09-21 01:30
+# Handover — codebase-architecture seams, state at 2026-09-21 11:45
+
+Covers TWO rounds: the seams round that merged as #184 (01:30), and a second round the same day
+that closed the digest banks (#185) and took architecture candidate 1.
 
 Owner rules (AGENTS.md wins): accuracy and code quality over speed · plan first for anything complex ·
 never weaken a gate · minimal natspec, no inline comments in src (tests may be verbose) · no merge /
 auto-merge without an explicit owner request · hands off Keynote. Roster this round: Opus planned and
 coordinated, Sonnet implemented in subagents, Codex `gpt-5.6-sol` reviewed.
 
-## Where things are (verified with `gh pr view` / `git log`, 2026-09-21 ~01:30)
+## Where things are (verified with `git log` / `git ls-remote`, 2026-09-21 ~11:45)
 
-| Branch | What | PR |
+| Branch | What | State |
 |---|---|---|
-| `main` | carries this round as of `44680a9e` | — |
-| `fix/plan-report-and-live-verify-seams` | this round | **#184 MERGED** 2026-09-21 |
+| `main` | `0b630e99` | carries both merged rounds |
+| `fix/plan-report-and-live-verify-seams` | seams round, 7 commits `f2c6bdce`..`0b0a4926` | **#184 MERGED** |
+| `fix/refresh-gold-jxa-banks` | both Gold JXA banks re-banked | **#185 MERGED** |
+| `refactor/gate-verdict-seam` | candidate 1, stages 1+2, 7 commits at `988980df` | **pushed, PARKED, no PR** |
+| `docs/architecture-seams-handover-2026-09-21` | this document | unpushed |
+| `feat/p2-freeze-control-3to4` | ANOTHER session's, remote tip `de0cedfd` | in progress, Codex r5 FAIL open |
 
-Seven commits, `f2c6bdce`..`0b0a4926`. Nothing else from this round is outstanding.
+`refactor/gate-verdict-seam` has no PR **on purpose** — see SEQUENCING below. Opening one invites an
+out-of-order merge.
 
 ## What shipped (detail in the commits, not here)
 
@@ -53,14 +61,19 @@ Seven commits, `f2c6bdce`..`0b0a4926`. Nothing else from this round is outstandi
   comes to agree with the planner, not the reverse. `strict=True` forces the marker's removal when it
   lands.
 
-### 2. The JXA slide-digest bank for Gold is stale (BLOCKED on owner)
+### 2. The JXA digest banks for Gold were stale — CLOSED, #185 merged 2026-09-21
 
-- **Symptom.** `tests/test_golden_plan.py:391` skips: deck digest drift against the banked JXA
-  digests.
-- **Expected.** The offline kind-index read stays cross-checked against a real Keynote read.
-- **Evidence / fix.** `scripts/bank_jxa_slide_digests.py --deck Gold_Wall_Input.key
-  --accept-input-drift`. Needs a **real Keynote read** (Gold peaked at 2.29 GB); `Full_Report_Card_Wall.key`
-  is deliberately never banked on this machine. Awaiting the owner's go — do not run it unprompted.
+Owner freed Keynote; both banks re-banked from live reads at deck digest `9e012210` (24 slides, was
+19 at `c7f870ed`). **It was TWO banks, not one** — this handover originally named only
+`jxa-slide-digests`, but `jxa-kind-counts` was stale on the same digest and skipped at
+`test_iwa_kindindex.py:498`. Both bankers refuse `--payload` together with `--accept-input-drift` by
+design, and no `reader='jxa'` payload was cached for the current bytes, so each needed its own real
+Keynote read.
+
+Facts worth keeping: Gold now peaks **~2.60 GB** (was 2.29 GB at 19 slides), closer to the 3 GB
+watchdog default. The source deck was byte-identical across both reads. The instrument was validated
+by tampering one banked slide and confirming BOTH tests fail — the cross-checks are live, not
+vacuous.
 
 ### 3. `replay_round` has no test (Codex r1, open)
 
@@ -88,11 +101,12 @@ did not touch.
 
 ## Architecture review — the candidates NOT taken
 
-A full scan produced ten deepening candidates; this round took the top two. The HTML report was written
-to a temp dir and is gone, so the rest are recorded here. Each was evidenced against real code at the
-time; re-verify before acting.
+A full scan produced ten deepening candidates; the #184 round took the top two and the second round
+took **candidate 1** (below, now parked). The HTML report was written to a temp dir and is gone, so the
+rest are recorded here. Each was evidenced against real code at the time; re-verify before acting —
+candidate 1's own figures were understated by roughly a third when re-measured.
 
-1. **Gate verdicts live in `scripts/`** — ~2,700 lines of pure, fail-closed verdict logic in one-off
+1. **TAKEN (parked, see SEQUENCING).** **Gate verdicts live in `scripts/`** — ~2,700 lines of pure, fail-closed verdict logic in one-off
    scripts while the pixel scorers they call sit in `src/`; ~4,000 lines of tests load them by file
    path. Already cost one real bug: the P2 gate filters empty crops before a scorer whose interface
    calls them hard rejects, so that fail-closed branch is unreachable from its only caller.
@@ -118,7 +132,64 @@ time; re-verify before acting.
 8. Duplicated overlap/scene-hash predicates between product and gate; `onExport` as a 507-line runner
    inside a React component; a `remap_keynote` Keynote port (111 monkeypatches stand in for one seam).
 
+## Candidate 1 taken — the gate verdict seam (round 2)
+
+`refactor/gate-verdict-seam`, 7 commits at `988980df`, pushed, all suites green when parked:
+pytest 4701 passed / 93 skipped / 2 xfailed, `test:ui` 186, `test:maps` 536, `test:perf` 2.
+
+**What it does.** `src/obed_edom/p2_verdict.py` (+1,344) owns the P2 gate verdict layer — 25
+top-level functions, 4 nested, 28 constants — moved out of the 4,154-line
+`scripts/p2_recovery_html_adversarial.py` (-1,460). Five scripts repointed. The
+`spec_from_file_location` shim in `tests/test_p2_adversarial.py` is **deleted outright**, so that
+test no longer executes the driver script at collection. `src` imports nothing from `scripts/` and
+mutates no `sys.path`.
+
+**The defect it fixes was latent, not active.** The caller-side `if patch.size == 0: continue` made
+`score_visible_movie_motion`'s `"empty crop"` hard reject unreachable from its only caller, and
+shrank the sequence so a bad ROI read as `"need >=3 frames"` with a wrong `n`. But `MOVIE_ROI` with
+`inset=8` slices `arr[803:1055, 117:1053]` and `ChromeCdp` enforces 1920x1080, so it never fired.
+Removing it strengthens the gate and moves no verdict. (`EMPTY_CORNERS` does NOT prove the frame
+size — `_score_empty` skips empty corner crops. Codex corrected that.)
+
+**Read `.agents/plans/gate_verdict_seam.plan.md` before restarting** — it carries the manifest, the
+retained commentary notes, and the re-do recipe.
+
+### SEQUENCING — owner decision: RE-DO this after `feat/p2-freeze-control-3to4` lands
+
+Another session owns that branch. It is gate-qualified per commit and cannot be re-verified after a
+mechanical move without another live Keynote gate round; this refactor has no live-gate dependency,
+so it is the cheaper side to move. Measured overlap against its merge-base `8f7600f4`:
+
+| File | their branch | seam branch |
+|---|---|---|
+| `scripts/p2_recovery_html_adversarial.py` | 2,208 changed lines | -1,460 |
+| `tests/test_p2_adversarial.py` | 1,944 changed lines | shim deleted, 2 tests added |
+
+Both files the seam changes most are the two they change most. It will not resolve as a merge, and
+it is a **RE-DO, not a rebase** — their branch rewrites the region, so the manifest is stale the
+moment they land. Their Codex r5 is a four-item FAIL with all four open in round 8, so the park may
+be long. That session confirmed it will not touch `_score_visible_movie_motion` further (its only
+change there deletes one call site), so the empty-crop fix carries — but re-derive the caller census.
+
+### The lesson from this round
+
+**A call-graph closure is not enough to move a module.** Three separate corrections came from
+missing: def-time free variables (13 constants), default-argument values, and cross-script imports.
+The last made the new `src` module `sys.path.insert` into `scripts/` and import from it — inverting
+the exact dependency the refactor existed to remove. Close over all four classes to a fixed point,
+then assert the module imports with `scripts/` off `sys.path` and pulls in zero driver modules.
+
+Two proofs that each caught real drift, worth reusing: compare each moved definition's source text
+against the pre-move revision (the diff must contain only intended changes), and for a
+comments-only pass compare `ast.dump` with docstrings stripped. Keep the mechanical move and any
+comment pruning in SEPARATE commits so each proof stays checkable alone.
+
 ## Commands
+
+Keynote gotcha found 2026-09-21: **`osascript ... tell application` LAUNCHES Keynote — it is not a
+read-only probe.** A document-count query meant to confirm a stray was documentless instead started a
+fresh Keynote that truthfully answered "0 documents". `pgrep -x Keynote` first, address the app only
+if pgrep says it is up, re-check pgrep after, and quit what you started.
 
 ```bash
 # venv lives in the MAIN checkout, not a worktree
