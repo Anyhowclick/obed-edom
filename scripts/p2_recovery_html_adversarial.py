@@ -2836,7 +2836,9 @@ async def _run(player: Path) -> dict:
     unmodified = OUT / "html-unmodified"
     disposable_dir = OUT / "html-disposable"
     player_dir = OUT / "html-player"
-    if reuse and (unmodified / "index.html").is_file():
+    if reuse:
+        if not (unmodified / "index.html").is_file():
+            raise SystemExit(f"missing reusable export at {unmodified / 'index.html'}")
         print("reusing HTML export at", unmodified)
     else:
         print("HTML export…")
@@ -3958,6 +3960,8 @@ async def _run(player: Path) -> dict:
 
 def main() -> int:
     reuse = "--reuse-export" in sys.argv
+    if reuse and not (OUT / "html-unmodified" / "index.html").is_file():
+        raise SystemExit(f"missing reusable export at {OUT / 'html-unmodified' / 'index.html'}")
     if keynote_running() and not reuse:
         raise SystemExit(
             "Keynote is already running — refuse to force-quit an owner session. "

@@ -49,6 +49,23 @@ p2 = _load_adversarial_module()
 from test_p2_adversarial import _badge_sample  # noqa: E402
 
 
+def _load_dissolve_live_module():
+    """Import `p2_recovery_html_dissolve_live` by file path, same as `p2` above."""
+    for sub in ("scripts", "src"):
+        p = str(REPO / sub)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    spec = importlib.util.spec_from_file_location(
+        "p2_recovery_html_dissolve_live", REPO / "scripts" / "p2_recovery_html_dissolve_live.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+dissolve_live = _load_dissolve_live_module()
+
+
 class _RectChrome:
     """Minimal CDP stand-in for `_read_bound_owner_rect`: replays a scripted
     series of owner rects, one per `evaluate()`."""
@@ -439,3 +456,73 @@ def test_freeze_bracket_starts_chrome_inside_its_try():
     assert body.index("try:") < body.index("await chrome.start()"), (
         "chrome.start() runs outside the try that closes it"
     )
+
+
+# --- `--reuse-export` must fail closed, never fall through to a real Keynote
+# export or delete prior evidence (`.agents/plans/keynote-alpha.md:20` documents
+# it as "Offline, no Keynote") ------------------------------------------------- #
+def test_reuse_export_refuses_rather_than_exporting_via_keynote_when_the_export_is_missing(
+    tmp_path, monkeypatch
+):
+    """With `--reuse-export` set and the reusable export missing, `main()` must
+    refuse before anything destructive or Keynote/Chrome-launching runs -- not
+    silently fall through to a real export."""
+    monkeypatch.setattr(p2, "OUT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["p2_recovery_html_adversarial.py", "--reuse-export"])
+
+    export_calls = []
+    rmtree_calls = []
+    keynote_calls = []
+    run_calls = []
+    monkeypatch.setattr(p2, "export_html", lambda *a, **k: export_calls.append((a, k)))
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: rmtree_calls.append((a, k)))
+    monkeypatch.setattr(p2, "keynote_running", lambda: keynote_calls.append(True) or False)
+    monkeypatch.setattr(asyncio, "run", lambda *a, **k: run_calls.append((a, k)))
+
+    with pytest.raises(SystemExit, match="missing reusable export"):
+        p2.main()
+
+    assert export_calls == [], "export_html must never run when the reuse export is missing"
+    assert rmtree_calls == [], "nothing destructive may run before the refusal"
+    assert keynote_calls == [], "Keynote must never be probed before the refusal"
+    assert run_calls == [], "the async driver must never start before the refusal"
+
+
+def test_dissolve_live_reuse_export_refuses_rather_than_deleting_prior_evidence_when_the_export_is_missing(
+    tmp_path, monkeypatch
+):
+    """Plain `--reuse-export` (no `--handoff`/`--preserve`) with the export
+    missing used to fall to the bake branch, which deletes EVERY prior run's
+    evidence (`shutil.rmtree(OUT)`) before a real Keynote export. It must instead
+    refuse -- and must not even hash the real 169 MB deck first."""
+    monkeypatch.setattr(dissolve_live, "OUT", tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["p2_recovery_html_dissolve_live.py", "--reuse-export"]
+    )
+
+    export_calls = []
+    rmtree_calls = []
+    keynote_calls = []
+    run_calls = []
+    identity_calls = []
+    inventory_calls = []
+    monkeypatch.setattr(dissolve_live, "export_html", lambda *a, **k: export_calls.append((a, k)))
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: rmtree_calls.append((a, k)))
+    monkeypatch.setattr(dissolve_live, "keynote_running", lambda: keynote_calls.append(True) or False)
+    monkeypatch.setattr(asyncio, "run", lambda *a, **k: run_calls.append((a, k)))
+    monkeypatch.setattr(
+        dissolve_live, "file_identity",
+        lambda *a, **k: identity_calls.append((a, k)) or {"sha256": "x"},
+    )
+    monkeypatch.setattr(
+        dissolve_live, "inventory_deck",
+        lambda *a, **k: inventory_calls.append((a, k)) or {},
+    )
+
+    with pytest.raises(SystemExit, match="missing reusable export"):
+        dissolve_live.main()
+
+    assert export_calls == [], "export_html must never run when the reuse export is missing"
+    assert rmtree_calls == [], "prior evidence must not be deleted before the refusal"
+    assert keynote_calls == [], "Keynote must never be probed before the refusal"
+    assert run_calls == [], "the async driver must never start before the refusal"

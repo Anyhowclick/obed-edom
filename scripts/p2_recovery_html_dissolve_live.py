@@ -880,6 +880,8 @@ def main() -> int:
         OUT.mkdir(parents=True)
         shutil.copytree(src, unmodified)
         (OUT / "runs").mkdir(parents=True, exist_ok=True)
+    elif reuse:
+        raise SystemExit(f"missing reusable export at {unmodified}")
     else:
         if OUT.exists():
             shutil.rmtree(OUT)
