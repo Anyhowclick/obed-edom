@@ -710,3 +710,64 @@ whole increase is inside the exhaustive sweep, which now re-derives the attestat
 deletions × three arms; the non-sweep tests still run in ~12 s. Live: **5/5 brackets PASS** at load
 6.0–6.9 with `maxRafGap` 56.6–62.5 ms, plus one e2e fast bridge-ON with
 `freezeControlCaughtByCounter: True` and `success: True`.
+
+### 10.19 Provenance from outside the arm, a re-derived paint decision, and a positional null (round 17, r13)
+
+Round 16's evidence was complete and self-consistent, which was exactly the remaining problem: three
+things authenticated themselves.
+
+**The arm identity now comes from outside the arm.** `captureId` was minted inside
+`_capture_3to4_snapshot` and copied into that arm's own header and raster evidence, so both copies
+could go stale TOGETHER: moving A1's complete `footprintFullyLive` block and header id into B left
+every number, hash and id agreeing, and the bracket passed. `_run_freeze_bracket` now mints the three
+identities BEFORE any arm runs, writes them to `runs/freeze-bracket/manifest.json`, hands each arm
+its own, and passes the manifest to `_score_freeze_control` as a separate argument.
+`armIdentitiesMatchManifest` requires every arm to carry the identity it was handed and the three to
+be DISTINCT — without distinctness "another arm's evidence" has no meaning. The manifest is committed
+with the fixture and is an argument in the tests exactly as in production.
+
+**The paint decision is re-derived.** The page's rules were sound, but Python trusted the derived
+`videos[*].visible` Boolean, so an entry that was attached, opacity 1, `checkVisibility` true and
+on-screen, yet carried a stale `visible: false`, was SKIPPED by the attestation. The probe now retains
+the raw readings — `inDocument`, computed `display` and `visibility`, the ancestor-opacity product,
+the `checkVisibility` result, the client rect and the viewport — and `_derived_paint` restates the
+page's rules on them, in the same order; `_paint_agrees` requires exact agreement on both `visible`
+and `hiddenBy`. A pool entry is a CLOCK record, not a paint claim: `detached` is admitted only on a
+retained `inDocument == false`, and one that says it is still attached is admitted only when that
+sample's DOM census carries the same decoder (it is then stamped `pool-duplicate`, not `detached`).
+The sweep shows the consequence: the derivation inputs are now PARTIALS — gated at every DOM entry in
+the after-window, tolerated only at pool entries and outside the scored window.
+
+**The null is admissible only where it was measured.** The count and run bounds left the POSITION
+free, and a sole null moved from position 0 to the middle of the segment still passed while erasing
+both sides of a restart. Only position 0 is admitted now; interior and trailing nulls are refused
+outright. The leading miss is no longer unbracketed either: the capture takes ONE decoded reading
+before the advance keydown, on the settled `#7`, and the miss must be bridged from it by the same
+plausible-forward-step rule an interior null would face. Without that reading the window fails closed.
+`NULL_BRIDGE_MAX_STEP` drops 60 → **30**, the progression rule's own per-step ceiling, with no
+semantic headroom.
+
+MEASURED (round 17). The pre-key patch needed its own inset: on the slide-3 rect (~0.75× the slide-4
+one) the shared mapping puts the ROI's first rows and columns on the movie's antialiased edge and it
+decodes NOTHING — which is why the first batch came back 5/5 inconclusive with `preKeySample.index`
+null. Scanning the frame, 1540 candidate ROIs decode and all agree; an extra inset of 1 px is enough
+and 1–4 px all read the same value, so `PRE_KEY_PATCH_INSET_PX = 2`, one px of margin over the
+measured minimum and the same convention as `INDEX_PATCH_TOP_GUARD_PX`. With it the pre-key sample
+decoded in **15 of 15** arms captured after the fix, and the step across the leading miss measured
+**4–11** over those arms (ceiling 30; the largest single step ever measured on this fixture is 12).
+
+**One value NOT changed, and the reason.** Over the 33 round-17 arms the owner null-gap run measured
+4 (×2), 5 (×30) and **6 (×1)** — the first exceedance of `OWNER_NULL_MAX_RUN = 5` in 60 clean arms,
+in run 2003 at load 9.0, which came back INCONCLUSIVE. Raising the bound on one observation would be
+weakening a gate to fit the machine, so the constant stands and that arm stays inconclusive, which is
+fail-closed. The cost is honest: expect roughly one bracket in fifteen to go inconclusive on this key
+under load ≥ 9. If the owner wants it calibrated rather than fail-closed, that needs its own
+measured round, not this one.
+
+Sweep after round 17: the bracket walk covers **39 470** concrete indexed paths (was 36 896), **498
+gated**, **548 survivors**, 36 partial keys; MAIN's **12 659** paths, 53 gated, 266 survivors. The
+fixture is re-captured with its manifest and the pre-key sample: 806 kB → **862 kB**. The two suites
+run **696 tests in ~361 s** (was 666 in ~245 s); the increase is again the exhaustive sweep, which the
+owner has accepted rather than memoising the derivation. Live: **4/5 brackets PASS** at load 5.9–9.0
+with `maxRafGap` 55.7–58.1 ms (the fifth is the owner-gap-6 arm above), plus one e2e fast bridge-ON at
+load 2.2 with `freezeControlCaughtByCounter: True` and `success: True`.
