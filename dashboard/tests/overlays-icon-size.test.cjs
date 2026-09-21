@@ -1,19 +1,9 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
-const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { createExpression, validateStyleMin } = require("@maplibre/maplibre-gl-style-spec");
 
-const root = path.resolve(__dirname, "..");
-const out = fs.mkdtempSync(path.join(os.tmpdir(), "maps-overlays-icon-size-"));
-const runtime = process.env.CODEX_NODE || process.execPath;
-const compile = spawnSync(runtime, [
-  path.join(root, "node_modules/typescript/bin/tsc"), "--module", "commonjs", "--target", "ES2020", "--skipLibCheck", "true",
-  "--outDir", out, path.join(root, "src/maps/objects.ts"),
-], { cwd: root, encoding: "utf8" });
-assert.equal(compile.status, 0, compile.stderr || compile.stdout);
+const out = require("./helpers/compiled.cjs").maps;
 const { zoomScaledStops } = require(path.join(out, "objects.js"));
 
 function stopValues(stops) {
@@ -118,14 +108,8 @@ test("zoomScaledStops holds a scaleWithMap:false feature constant at every zoom"
   }
 });
 
-const overlaysOut = fs.mkdtempSync(path.join(os.tmpdir(), "maps-overlays-icon-size-full-"));
-const overlaysCompile = spawnSync(runtime, [
-  path.join(root, "node_modules/typescript/bin/tsc"), "--module", "commonjs", "--target", "ES2020", "--skipLibCheck", "true",
-  "--outDir", overlaysOut, path.join(root, "src/maps/overlays.ts"), path.join(root, "src/maps/objects.ts"),
-], { cwd: root, encoding: "utf8" });
-assert.equal(overlaysCompile.status, 0, overlaysCompile.stderr || overlaysCompile.stdout);
-const { churchesGeo, churchesLayers, labelPillBucket, labelPillCssSize, LABEL_FONT_PX, LABEL_GAP_EMS, LABEL_CHAR_W_PX, LABEL_PILL_BUCKETS, DROP_PIN_SELECTED_SCALE, DOT_BORDER_PT } = require(path.join(overlaysOut, "overlays.js"));
-const { defaultLandmarkSize, defaultObjectSize, ICON_SIZE_PACK_MAX } = require(path.join(overlaysOut, "objects.js"));
+const { churchesGeo, churchesLayers, labelPillBucket, labelPillCssSize, LABEL_FONT_PX, LABEL_GAP_EMS, LABEL_CHAR_W_PX, LABEL_PILL_BUCKETS, DROP_PIN_SELECTED_SCALE, DOT_BORDER_PT } = require(path.join(out, "overlays.js"));
+const { defaultLandmarkSize, defaultObjectSize, ICON_SIZE_PACK_MAX } = require(path.join(out, "objects.js"));
 
 test("churchesLayers (churches-dots/-drops/-landmarks) validates with the real maplibre style spec", () => {
   const style = {

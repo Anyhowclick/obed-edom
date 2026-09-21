@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test:maps": "node --test tests/*.test.cjs",
+    "test:maps": "node tests/helpers/compiled.cjs && node --test --test-skip-pattern=\"^(shared-edge suppression|seam application) stays near-linear\" tests/*.test.cjs && npm run test:perf",
+    "test:perf": "node tests/helpers/compiled.cjs && node --test --test-name-pattern=\"^(shared-edge suppression|seam application) stays near-linear\" tests/borderlands-ink.test.cjs",
     "typecheck:ui": "tsc -p tests-ui --noEmit",
     "test:ui": "npm run typecheck:ui && vitest run",
     "test:ui:watch": "vitest",

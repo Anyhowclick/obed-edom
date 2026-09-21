@@ -1,18 +1,8 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
-const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const root = path.resolve(__dirname, "..");
-const out = fs.mkdtempSync(path.join(os.tmpdir(), "maps-overlays-admin1-race-"));
-const runtime = process.env.CODEX_NODE || process.execPath;
-const compile = spawnSync(runtime, [
-  path.join(root, "node_modules/typescript/bin/tsc"), "--module", "commonjs", "--target", "ES2020", "--skipLibCheck", "true",
-  "--outDir", out, path.join(root, "src/maps/overlays.ts"), path.join(root, "src/maps/adminSync.ts"),
-], { cwd: root, encoding: "utf8" });
-assert.equal(compile.status, 0, compile.stderr || compile.stdout);
+const out = require("./helpers/compiled.cjs").maps;
 const { ensureAdmin0Highlights, syncAdmin1Source, applyHighlights, applyAdmin1Highlights, applyIsolate, addOverlays, ensureLabelPillImage, labelPillImageId, LABEL_PILL_ID, LABEL_PILL_MAX_PX, LABEL_NAME_HEIGHT_PX } = require(path.join(out, "overlays.js"));
 const { AdminSyncGate } = require(path.join(out, "adminSync.js"));
 

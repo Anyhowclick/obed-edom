@@ -1,9 +1,10 @@
 import { act, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mapsApiScript } from "./fakes/mapsApi";
 import { makeDoc, makeJob, makeSlide } from "./fakes/doc";
-import { renderMapsTab } from "./renderMapsTab";
+import { renderMapsTab, tick } from "./renderMapsTab";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 
 const pin = (id: string, name: string, overrides: Record<string, unknown> = {}) => ({
   id,
@@ -16,9 +17,16 @@ const pin = (id: string, name: string, overrides: Record<string, unknown> = {}) 
   ...overrides,
 });
 
+beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+});
+
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+const setupUser = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
 
 async function openObjects() {
   await act(async () => {
@@ -148,9 +156,7 @@ describe("object bulk actions", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("checkbox", { name: /Scale with map/ }));
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 550));
-    });
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);
@@ -186,9 +192,7 @@ describe("object bulk actions", () => {
     await act(async () => {
       fireEvent.change(screen.getByLabelText("Pin size"), { target: { value: "40" } });
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 550));
-    });
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);
@@ -201,7 +205,7 @@ describe("object bulk actions", () => {
   });
 
   it("lets the pin hex field be typed character by character", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     const job = makeJob({
       result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha", { color: "#c44a42" })] })] }), stateRevision: 1 },
     });
@@ -227,7 +231,7 @@ describe("object bulk actions", () => {
   });
 
   it("lets the bulk hex field be typed character by character", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     const job = makeJob({
       result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha"), pin("c2", "Beta")] })] }), stateRevision: 1 },
     });
@@ -244,7 +248,7 @@ describe("object bulk actions", () => {
   });
 
   it("lets the pill hex field be typed and persists labelColor", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     const job = makeJob({
       result: { ...makeDoc({ slides: [makeSlide({ churches: [pin("c1", "Alpha", { showLabel: true })] })] }), stateRevision: 1 },
     });
@@ -260,9 +264,7 @@ describe("object bulk actions", () => {
     await user.clear(hex);
     await user.type(hex, "#112233");
     expect(hex).toHaveValue("#112233");
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 550));
-    });
+    await tick(MAPS_SAVE_IDLE_MS);
     const document = mapsApiScript.saveMapsState.calls[mapsApiScript.saveMapsState.calls.length - 1]?.document as {
       slides: Array<{ churches: Array<{ id: string; labelColor?: string }> }>;
     };
@@ -307,9 +309,7 @@ describe("object bulk actions", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Show labels" }));
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 550));
-    });
+    await tick(MAPS_SAVE_IDLE_MS);
     const document = mapsApiScript.saveMapsState.calls[mapsApiScript.saveMapsState.calls.length - 1]?.document as {
       slides: Array<{ churches: Array<{ id: string; showLabel?: boolean }> }>;
     };

@@ -558,11 +558,22 @@ def test_header_form_multiline_start_line_sums_embedded_newlines():
     assert places[1].line == 5
 
 
-def test_nul_byte_in_field_parses_without_error():
+def test_nul_byte_in_field_is_stripped():
+    """Python 3.10's csv reader rejects a NUL ("line contains NUL") while 3.11+ keeps it, so
+    the parser drops NUL bytes up front: same result on every supported interpreter, and a
+    NUL never reaches a label."""
     text = "Paris\x00,1,2\n"
     places, errors = parse_places(text)
     assert errors == []
-    assert places[0].name == "Paris\x00"
+    assert places[0].name == "Paris"
+
+
+def test_nul_byte_is_stripped_in_header_form_too():
+    text = "name,lat,lon\nPar\x00is,1,2\nRome,3,4"
+    places, errors = parse_places(text)
+    assert errors == []
+    assert [p.name for p in places] == ["Paris", "Rome"]
+    assert [p.line for p in places] == [2, 3]
 
 
 def test_headerless_stray_quote_mid_name_is_literal():
@@ -599,6 +610,14 @@ def test_header_form_four_line_quoted_record_is_accepted():
     assert errors == []
     assert places[0].name == "A\nB\nC\nD"
     assert places[0].line == 2
+
+
+def test_places_from_rows_strips_nul_like_the_csv_path():
+    """Codex review of #179: the form-rows entry point (`/bootstrap-rows`) must agree with
+    `parse_places`, or the same place saves as "Paris" from CSV and "Par\x00is" from rows."""
+    places, errors = places_from_rows([{"name": "Par\x00is", "lat": "1", "lon": "2"}])
+    assert errors == []
+    assert places[0].name == "Paris"
 
 
 def test_places_from_rows_maps_a_name_only_row():

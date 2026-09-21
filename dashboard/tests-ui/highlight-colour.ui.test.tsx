@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MapsExportPlan } from "../src/api";
 import { DEFAULT_HIGHLIGHT_COLOUR, highlightColour as currentHighlightColour } from "../src/maps/highlight";
 import { flushMicrotasks, renderMapsTab, tick } from "./renderMapsTab";
+import { MAPS_SAVE_IDLE_MS } from "../src/maps/saveQueue";
 import { mapsApiScript, putSettings, saveMapsState, fetchMapsExportPlan } from "./fakes/mapsApi";
 import { makeCamera, makeDoc, makeJob, makeSlide } from "./fakes/doc";
 import { refreshHighlightColour } from "../src/prefs";
@@ -329,7 +330,7 @@ describe("Selected regions colour wheel", () => {
     await act(async () => {
       fireEvent.change(picker, { target: { value: "#00aaff" } });
     });
-    await tick(800);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);
@@ -354,7 +355,7 @@ describe("Selected regions colour wheel", () => {
     await act(async () => {
       fireEvent.click(noFill);
     });
-    await tick(800);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);
@@ -367,7 +368,7 @@ describe("Selected regions colour wheel", () => {
     await act(async () => {
       fireEvent.change(picker, { target: { value: "#112233" } });
     });
-    await tick(800);
+    await tick(MAPS_SAVE_IDLE_MS);
     const after = mapsApiScript.saveMapsState.calls[mapsApiScript.saveMapsState.calls.length - 1].document
       .slides as Array<{ highlightColours?: Record<string, string> }>;
     expect(after[0]?.highlightColours).toEqual({ SGP: "#112233" });
@@ -426,7 +427,7 @@ describe("Selected regions colour wheel", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /Select slide Slide 2/ }));
     });
-    await tick(800);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);
@@ -467,7 +468,7 @@ describe("Selected regions colour wheel", () => {
     await act(async () => {
       fireEvent.click(screen.getByTitle("Independent CG"));
     });
-    await tick(800);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);
@@ -501,7 +502,7 @@ describe("bulk highlight colour", () => {
     await act(async () => {
       fireEvent.change(picker, { target: { value: "#112233" } });
     });
-    await tick(800);
+    await tick(MAPS_SAVE_IDLE_MS);
 
     const calls = mapsApiScript.saveMapsState.calls;
     expect(calls.length).toBeGreaterThan(0);

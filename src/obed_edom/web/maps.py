@@ -149,10 +149,10 @@ class MapsCommit:
                 backup: Path | None = None
                 if dest.exists():
                     backup = dest.with_name(f"{dest.name}.obedbak-{uuid.uuid4().hex}")
-                    dest.replace(backup)
+                    os.replace(dest, backup)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 promoted.append((dest, backup))
-                tmp.replace(dest)
+                os.replace(tmp, dest)
         except Exception:
             self._restore(promoted)
             self._abort()
@@ -163,7 +163,7 @@ class MapsCommit:
         for dest, backup in reversed(promoted):
             self._remove(dest)
             if backup is not None:
-                backup.replace(dest)
+                os.replace(backup, dest)
 
     def _cleanup_backups(self, promoted: list[tuple[Path, Path | None]]) -> None:
         for _dest, backup in promoted:

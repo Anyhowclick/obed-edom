@@ -1,18 +1,10 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
-const out = fs.mkdtempSync(path.join(os.tmpdir(), "watercolour-style-"));
-const runtime = process.env.CODEX_NODE || process.execPath;
-const compile = spawnSync(runtime, [
-  path.join(root, "node_modules/typescript/bin/tsc"), "--module", "commonjs", "--target", "ES2020", "--skipLibCheck", "true",
-  "--outDir", out, path.join(root, "src/maps/watercolourStyle.ts"),
-], { cwd: root, encoding: "utf8" });
-assert.equal(compile.status, 0, compile.stderr || compile.stdout);
+const out = require("./helpers/compiled.cjs").maps;
 const { buildWatercolourStyle, WATERCOLOUR_PATTERN_IDS, SCRIBBLE_ORIENTS, scribbleStrokes, paperGrainPixels, paperGrainCss } = require(path.join(out, "watercolourStyle.js"));
 
 const base = {
@@ -136,7 +128,7 @@ test("transportation casing layers are dropped; the surviving road gets warm col
 });
 
 test("cached Positron transforms without undefined style values", () => {
-  const cached = JSON.parse(fs.readFileSync(path.join(root, "..", "output", ".maps", "tile-cache", "styles", "positron.json"), "utf8"));
+  const cached = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/positron-style-sample.json"), "utf8"));
   const { style } = buildWatercolourStyle(cached);
   const walk = (value) => {
     assert.notEqual(value, undefined);
