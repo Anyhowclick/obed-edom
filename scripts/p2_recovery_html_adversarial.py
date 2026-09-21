@@ -343,10 +343,16 @@ FREEZE_TRIGGER_MAX_RAFS = 9
 # 3): nine delivered poll frames can hide unbounded elapsed time, because a
 # keydown->rAF stall advances the runtime's time-based interpolation deep into
 # the move before poll frame 1 is ever delivered, and `maxRafGapOk` only starts
-# at the trigger. Calibrated like the frame count -- clean worst plus one rAF --
-# on the clean runs tabled in the round-5 report. PROVISIONAL until that live
-# calibration lands; do not treat this value as measured.
-FREEZE_TRIGGER_MAX_DELAY_MS = 210.0
+# at the trigger.
+#
+# MEASURED 2026-09-21 on 11 CLEAN freeze-arm runs (drain 5/5 landed, hash `#7`
+# exact, `firedVia == "moved"`, one press sent and landed, final `#9`): the
+# keydown->trigger delay ran 158.8-175.5 ms (median 165.7), on a delivered poll
+# frame 8 in 11/11, with a 16.9-17.4 ms rAF period. Unimodal, no outlier. Worst
+# observation plus one frame of margin: 175.5 + 17.4 = 192.9 -> 195.
+# Like FREEZE_TRIGGER_MAX_RAFS this tracks how much the harness does per frame,
+# not the player alone -- re-measure whenever the capture loop's cost changes.
+FREEZE_TRIGGER_MAX_DELAY_MS = 195.0
 # The departure must also land within this many poll callbacks of the runtime's
 # OWN fresh motion-start marker (`__obedMotion.started` at/after the advance
 # keydown). keepThroughBridge creates the marker inside its first SYNCHRONOUS
@@ -3401,6 +3407,14 @@ async def _advance_to_slide4_capture(
         badge_rect = (
             {k: badge[k] for k in ("x", "y", "w", "h")} if badge is not None else None
         )
+        # A NULL-rect badge (the owner did not resolve, or the loop is mid
+        # re-handoff) encodes zeros. Zeros are not a rect: using them as the ROI
+        # decoded the top-left corner of the viewport, which reads 255 and then
+        # looked like a live counter sample inside the hold. One reading, so the
+        # sample is `unstable` -- fail closed, as the null paint intends.
+        if badge_rect is not None and not (badge_rect["w"] > 1 and badge_rect["h"] > 1):
+            badge_rect = None
+            badge_torn = True
         if i % 2 == 0 or i == n - 1:
             Image.fromarray(arr).save(run_dir / f"{prefix}-t{i:03d}.png")
         owner_after = await _footprint_owner_keyed(chrome, fp, MOVIE1_KEY)
@@ -3975,12 +3989,27 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # `noNegativeAnomaly` for the wrong reason. Fails CLOSED: no
     # `coverPaintedAt`, no window.
     cover_painted_at = nc.get("coverPaintedAt")
-    in_hold_positions = [
+    covered_positions = [
         i for i, t in enumerate(perfs)
         if cover_painted_at is not None and t is not None and t >= cover_painted_at
         and (release_at is None or t <= release_at)
     ]
-    first_covered_position = min(in_hold_positions) if in_hold_positions else None
+    # ...and it opens at the first COUPLED frame in that span. The badge's
+    # re-handoff onto the fresh 3->4 pin happens at motion start, one frame
+    # before the cover is painted, and names a null rect for the two frames it
+    # spans -- so the very first covered capture is often a frame with a single
+    # reading. Skipping the leading uncoupled frames is not a relaxation: an
+    # `unstable` sample anywhere from the first coupled frame onwards still fails
+    # `allInHoldMeasured`, and a span with NO coupled frame fails it too.
+    first_covered_position = next(
+        (i for i in covered_positions
+         if (sources[i] if i < len(sources) else None) == "measured"),
+        None,
+    )
+    in_hold_positions = (
+        [i for i in covered_positions if i >= first_covered_position]
+        if first_covered_position is not None else []
+    )
     # RECOMPUTED here from the raw samples, never trusted from the capture side
     # (review BLOCKER 3), and bounded to the covered at-cut segment at BOTH ends.
     idx, flip_window_decodable = _moving_index_run_at_cut(
@@ -4007,7 +4036,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and cover_mean is not None
         and abs(sum(_decoded) / len(_decoded) - cover_mean) <= COVER_MATCH_TOL
     )
-    all_in_hold_measured = bool(in_hold_positions) and all(
+    all_in_hold_measured = bool(covered_positions) and bool(in_hold_positions) and all(
         (sources[i] if i < len(sources) else None) == "measured" for i in in_hold_positions
     )
 
@@ -4237,6 +4266,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
             "holdStartedAt": hold_started,
             "coverPaintedAt": cover_painted_at,
             "firstCoveredPosition": first_covered_position,
+            "coveredPositions": covered_positions,
             "advanceKeyAt": advance_key_at,
             "triggerDelayMs": trigger_delay_ms,
             "triggerFramesAfterAdvance": trigger_frames,

@@ -2041,6 +2041,37 @@ def test_freeze_control_missing_cover_painted_at_fails_closed():
     assert "coverPaintedAtPresent" in verdict["integrityFailed"]
 
 
+def test_freeze_control_window_opens_at_the_first_coupled_frame():
+    """LIVE (bracket run0): the badge's re-handoff onto the fresh 3->4 pin lands
+    ONE frame before the cover is painted, so the first covered capture was a
+    null-rect frame -- `unstable`, with no rect. Scoring from it made the whole
+    bracket INCONCLUSIVE on every run. The window opens at the first COUPLED
+    frame instead; an `unstable` sample from there on still fails closed."""
+    b = _freeze_b_snap_34()
+    first = len(_PRE_ADVANCE_INDICES_34)
+    b = _with_sample(b, first, footprintSource="unstable", index=255)
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "pass", verdict["failed"]
+    assert verdict["freeze"]["firstCoveredPosition"] == first + 1
+    assert 255 not in verdict["freeze"]["inHoldDecodes"]
+
+    # ...but one in the MIDDLE of the hold still reds it.
+    b2 = _with_sample(_freeze_b_snap_34(), first + 2, footprintSource="unstable")
+    v2 = p2._score_freeze_control(_positive_snap_34(), b2, _positive_snap_34())
+    assert v2["verdict"] == "inconclusive"
+    assert "allInHoldMeasured" in v2["integrityFailed"]
+
+
+def test_freeze_control_no_coupled_frame_in_the_hold_fails_closed():
+    """A covered span with NOTHING coupled in it is not a measured hold."""
+    b = _freeze_b_snap_34()
+    for i in range(len(_PRE_ADVANCE_INDICES_34), len(b["indexSamples"])):
+        b = _with_sample(b, i, footprintSource="unstable")
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "allInHoldMeasured" in verdict["integrityFailed"]
+
+
 def test_freeze_control_cover_painted_before_trigger_is_not_assumed():
     """`coverPaintedAt` is a distinct, LATER instant than `holdStartedAt`; the
     window must follow it, not the trigger."""
