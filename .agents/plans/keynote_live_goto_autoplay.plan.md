@@ -1,6 +1,6 @@
 # Keynote live — go-to leaves movies frozen: host-side auto-play repair (PLAN)
 
-Status: DRAFT for owner review — no code written. Drafted 2026-09-20 by an Opus planner (read-only). Parent: `keynote_live_alternatives_research.md` §"Go-to jumps", §"Follow-up probes P1–P4" (P4).
+Status: OWNER-DECIDED 2026-09-21 (§7) — ready to implement, no code written. Drafted 2026-09-20 by an Opus planner (read-only). Parent: `keynote_live_alternatives_research.md` §"Go-to jumps", §"Follow-up probes P1–P4" (P4).
 
 ## 1. Problem
 After any `goTo` (forward / skip / back — the host has no `previous`), the destination slide's movies are frozen posters: 0 `<video>`, movie-rect liveness 0.000 at +1 s and +6 s; one `advance` → 0.99+. Identical with continuity v4 qualified and off. The player's go-to lands at `IdleAtInitialState`, before the slide's auto `apple:movie-start` build, and never fires it. On air this looks like a normal still.
@@ -71,3 +71,5 @@ Its own host session (no rAF sampler; screenshots would perturb it), modelled on
 - **R3** Extra ~0.3–1 s in `goTo` latency. **Owner decision 2:** acceptable?
 - **R4** Runtime version bump changes injected bytes ⇒ hash-pinned tests move; off/unsupported HTML must stay byte-identical.
 - **Owner decision 3:** ship (a) now and keep (b) `jumpToSlide(n,true)` unbuilt, or plan (b) in parallel as a v2 that removes the visible initial-state flash entirely?
+
+**Owner decisions — ANSWERED 2026-09-21.** (1) Player-faithful rule: play the leading run of `automaticPlay: true` events, whatever their effect; never a click-driven event. (2) The extra ~0.3–1 s `goTo` latency is accepted. (3) Ship (a) now; (b) `jumpToSlide(n,true)` stays unbuilt as a possible v2.

@@ -1374,8 +1374,17 @@ def footprint_at(
     )
 
 
+# Top-edge guard (screen px) for a MEASURED footprint's index-patch ROI: the y
+# mapping carries no inset, so a fractional rect can put the ROI's first row on
+# the movie's antialiased top edge and the patch decodes None. Calibration in
+# `.agents/plans/p2_freeze_control_3to4.plan.md` §10.
+INDEX_PATCH_TOP_GUARD_PX = 2
+
+
 def index_patch_roi_for(
-    footprint: Sequence[float],
+    footprint: Sequence[float] | dict[str, Any],
+    *,
+    top_guard: int = 0,
 ) -> tuple[int, int, int, int]:
     """Map a movie footprint (x, y, w, h) to its burnt-in frame-index patch ROI.
 
@@ -1383,14 +1392,28 @@ def index_patch_roi_for(
     is the top-left 120x48 of its 1920x540 source) to an arbitrary footprint, with
     the same insets that keep the ROI inside the flat-neutral patch and off the
     high-contrast grating. ``index_patch_roi_for((109, 795, 952, 268))`` reproduces
-    the adversarial probe's ``INDEX_PATCH_ROI`` exactly (back-compat).
+    the adversarial probe's ``INDEX_PATCH_ROI`` exactly (back-compat). Also accepts
+    a measured footprint dict (``{x, y, w, h, ...}``, e.g. a live
+    ``getBoundingClientRect()`` reading); extra keys are ignored.
+
+    ``top_guard`` drops that many rows off the TOP without moving the bottom edge,
+    so the result is ALWAYS a subset of the unguarded ROI: the guard is clamped to
+    ``height - 1``, so even a tiny footprint keeps at least one row and never grows
+    downwards. Callers decoding a measured (fractional, badge-quantised) rect pass
+    ``INDEX_PATCH_TOP_GUARD_PX``; the default 0 leaves every static caller's ROI
+    byte-identical.
     """
-    x, y, w, h = (float(v) for v in footprint)
+    if isinstance(footprint, dict):
+        x, y, w, h = (float(footprint[k]) for k in ("x", "y", "w", "h"))
+    else:
+        x, y, w, h = (float(v) for v in footprint)
+    height = max(1, round(h * 48 / 540) - 10)
+    guard = min(max(0, int(top_guard)), height - 1)
     return (
         int(round(x)) + 2,
-        int(round(y)),
+        int(round(y)) + guard,
         max(1, round(w * 120 / 1920) - 18),
-        max(1, round(h * 48 / 540) - 10),
+        height - guard,
     )
 
 
@@ -1757,7 +1780,18 @@ def score_noise_floor(
     max_p99: int = NOISE_FLOOR_P99_MAX,
 ) -> dict[str, Any]:
     """99th-percentile burst delta over a known-static control region (plan §1.2.3)."""
-    delta = _max_delta_map(frames)
+    return score_noise_floor_from_delta(
+        _max_delta_map(frames), control_rect, max_p99=max_p99
+    )
+
+
+def score_noise_floor_from_delta(
+    delta: np.ndarray,
+    control_rect: dict[str, float],
+    *,
+    max_p99: int = NOISE_FLOOR_P99_MAX,
+) -> dict[str, Any]:
+    """``score_noise_floor`` over an already-computed max-delta map."""
     clipped = _clip_rect(control_rect, delta.shape[0], delta.shape[1])
     if clipped is None:
         return {"verdict": False, "p99": None, "rect": None, "reason": "control rect outside image"}
@@ -1796,7 +1830,45 @@ def score_visible_slide(
     A failed noise floor yields ``verdict None`` / ``status "inconclusive"``;
     callers must treat anything but ``verdict is True`` as a failure.
     """
-    noise = score_noise_floor(frames, control_rect, max_p99=max_p99)
+    return score_visible_slide_from_delta(
+        _max_delta_map(frames),
+        expected_rects,
+        control_rect,
+        delta_min=delta_min,
+        cols=cols,
+        rows=rows,
+        band_live_frac=band_live_frac,
+        min_live_frac=min_live_frac,
+        inset_px=inset_px,
+        dilate_px=dilate_px,
+        min_area_px=min_area_px,
+        dead_max_live_frac=dead_max_live_frac,
+        ignore_rects=ignore_rects,
+        max_p99=max_p99,
+    )
+
+
+def score_visible_slide_from_delta(
+    delta: np.ndarray,
+    expected_rects: Sequence[dict[str, Any]],
+    control_rect: dict[str, float],
+    *,
+    delta_min: int = LIVE_DELTA_MIN,
+    cols: int = LIVE_BAND_COLS,
+    rows: int = LIVE_BAND_ROWS,
+    band_live_frac: float = LIVE_BAND_MIN_FRAC,
+    min_live_frac: float = LIVE_RECT_MIN_FRAC,
+    inset_px: int = LIVE_RECT_INSET_PX,
+    dilate_px: int = STRAY_DILATE_PX,
+    min_area_px: int = STRAY_MIN_AREA_PX,
+    dead_max_live_frac: float = DEAD_RECT_MAX_LIVE_FRAC,
+    ignore_rects: Sequence[dict[str, float]] = (),
+    max_p99: int = NOISE_FLOOR_P99_MAX,
+) -> dict[str, Any]:
+    """``score_visible_slide`` over an already-computed max-delta map — the whole
+    verdict is a function of that raster, so retaining it is enough to recompute
+    the slide's visible-content result later."""
+    noise = score_noise_floor_from_delta(delta, control_rect, max_p99=max_p99)
     if not noise["verdict"]:
         return {
             "verdict": None,
@@ -1807,7 +1879,6 @@ def score_visible_slide(
             "reason": noise.get("reason") or "noise floor above threshold",
         }
 
-    delta = _max_delta_map(frames)
     mask = delta >= int(delta_min)
     per_rect: list[dict[str, Any]] = []
     for rect in expected_rects:
