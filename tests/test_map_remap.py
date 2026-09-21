@@ -4350,12 +4350,14 @@ def test_packing_a_single_tall_column_uses_the_top_margin():
 @lru_cache(maxsize=1)
 def _gold_pin_continuity_plan():
     """Gold-deck oracle for the pin-continuity fix (offline, Keynote-free): slides
-    15 and 16 are pinned to template slide 5, as the operator would pin them; slide 14
+    13 and 14 are pinned to template slide 5, as the operator would pin them; slide 12
     is left unpinned and reaches template 5 on its own. Returns None if the Gold
     wall/template decks are not present on this machine.
 
     Slide numbers follow the live deck: the 2026-09-19 edit (Myanmar pages + a Myanmar
-    base template slide) moved wall 5-10 to 14-19 and template 4 to 5."""
+    base template slide) moved wall 5-10 to 14-19 and template 4 to 5; the 2026-09-21
+    edit then moved 14-19 to 12-17. Every asserted VALUE below is unchanged across that
+    edit -- only the numbering moved."""
     from pathlib import Path
 
     from obed_edom.offline_inspect import offline_wall_payload
@@ -4370,7 +4372,7 @@ def _gold_pin_continuity_plan():
     recipe = learn_recipe(wall, template)
     plan = plan_payload(
         wall, recipe, template=template,
-        framing_overrides={15: 5, 16: 5},
+        framing_overrides={13: 5, 14: 5},
     )
     return {
         "wall": wall, "template": template, "rows": plan.framing,
@@ -4379,12 +4381,12 @@ def _gold_pin_continuity_plan():
 
 
 def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
-    """Slides 15 and 16 are pinned to template slide 5; their own art collapses to a
+    """Slides 13 and 14 are pinned to template slide 5; their own art collapses to a
     sliver, so they used to fall back to their own degenerate cover (a hand crop of
-    `Wilderness.png`, x=-544). Slide 14, left unpinned, reaches template 5 on its
-    own -- item 1 lets 15 and 16 pick that up as their adjacent sibling on the same
+    `Wilderness.png`, x=-544). Slide 12, left unpinned, reaches template 5 on its
+    own -- item 1 lets 13 and 14 pick that up as their adjacent sibling on the same
     template, and the owner's ty-clamp keeps the reused panel full-bleed instead of
-    inheriting slide 14's y=61/h=947 inset."""
+    inheriting slide 12's y=61/h=947 inset."""
     data = _gold_pin_continuity_plan()
     if data is None:
         pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
@@ -4392,12 +4394,12 @@ def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
     rows, fitted, transforms = data["rows"], data["fitted"], data["transforms"]
     by_slide = {r["slide"]: r for r in rows}
 
-    assert by_slide[14]["templateSlide"] == 5
-    assert by_slide[14]["requested"] is None
-    assert by_slide[14]["source"] == "template-layout"
-    assert by_slide[14]["pairQuality"] == 1
+    assert by_slide[12]["templateSlide"] == 5
+    assert by_slide[12]["requested"] is None
+    assert by_slide[12]["source"] == "template-layout"
+    assert by_slide[12]["pairQuality"] == 1
 
-    for n in (15, 16):
+    for n in (13, 14):
         row = by_slide[n]
         assert row["templateSlide"] == 5
         assert row["requested"] == 5
@@ -4412,34 +4414,34 @@ def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
         single = {"slideWidth": wall["slideWidth"], "slideHeight": wall["slideHeight"], "slides": [slide]}
         return learn_recipe(single, template)
 
-    a14 = frame_affine(_own_recipe(14))
-    assert a14.s == 1.0 and a14.tx == -2932.0 and a14.ty == 130.0
-
-    for n in (17, 18):
-        # 100px off slide 14's own framing: proves they were not dragged onto it.
-        assert frame_affine(_own_recipe(n)).tx == -3032.0
+    a12 = frame_affine(_own_recipe(12))
+    assert a12.s == 1.0 and a12.tx == -2932.0 and a12.ty == 130.0
 
     for n in (15, 16):
+        # 100px off slide 12's own framing: proves they were not dragged onto it.
+        assert frame_affine(_own_recipe(n)).tx == -3032.0
+
+    for n in (13, 14):
         slide = next(s for s in wall["slides"] if s.get("number") == n)
         china_idx = next(
             i for i, it in enumerate(slide.get("items") or []) if "China Adjusted" in (it.get("fileName") or "")
         )
         t = next(t for t in transforms if t.slide_number == n and t.item_index == china_idx)
-        assert t.x == -1111.0  # post-clamp: 1821 - 2932, slide 14's tx untouched (width already covers)
-        assert t.y == 0.0  # post-clamp: slide 14's ty=130 inset clamped to close the gap
+        assert t.x == -1111.0  # post-clamp: 1821 - 2932, slide 12's tx untouched (width already covers)
+        assert t.y == 0.0  # post-clamp: slide 12's ty=130 inset clamped to close the gap
         assert t.x != -544.0  # -544 is Wilderness.png's hand crop -- the bug's signature
 
-    assert fitted == [19]
+    assert fitted == [17]
 
 
 def test_gold_slide_7_reports_excluded_overlays():
-    """Item 2: slide 16's coverage (slide 7 before the 2026-09-19 deck edit) is honest
-    about what it excluded from `onCanvas`, without gating on it (the owner accepted
-    the stranding)."""
+    """Item 2: slide 14's coverage (slide 16 before the 2026-09-21 deck edit, slide 7
+    before the 2026-09-19 one) is honest about what it excluded from `onCanvas`, without
+    gating on it (the owner accepted the stranding)."""
     data = _gold_pin_continuity_plan()
     if data is None:
         pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
-    row = next(r for r in data["rows"] if r["slide"] == 16)
+    row = next(r for r in data["rows"] if r["slide"] == 14)
     assert row["onCanvas"] == 0.5  # R2 tripwire: exactly MIN_ON_CANVAS_FRACTION, strict `<` still passes it
     assert row["excluded"] == 13
     assert row["excludedOffCanvas"] == 11
@@ -5533,15 +5535,16 @@ def _gold_roster_payload():
 
 def test_gold_roster_is_dropped_on_every_slide_after_the_church_list():
     """Owner rule (2026-09-05): Gold keeps the roster on its first two roster slides only
-    (20 and 21; 11 and 12 before the 2026-09-19 deck edit). On 23-26 it is two persisted
-    groups (113 and 84 church-name leaves), invisible to the text-only roster rule before
-    this fix, and hidden only incidentally by the side-panel branch."""
+    (18 and 19; 20 and 21 before the 2026-09-21 deck edit, 11 and 12 before the
+    2026-09-19 one). On 21-24 it is two persisted groups of church-name leaves, invisible
+    to the text-only roster rule before this fix, and hidden only incidentally by the
+    side-panel branch."""
     from obed_edom.map_remap import roster_slides
 
     wall = _gold_roster_payload()
     if wall is None:
         pytest.skip("Gold wall deck not available; refuse to open Keynote")
-    assert roster_slides(wall["slides"]) == ({20, 21}, {22, 23, 24, 25, 26})
-    s23 = next(s for s in wall["slides"] if s.get("number") == 23)
-    gct = {int(k): v for k, v in (s23.get("groupChildText") or {}).items()}
-    assert len(name_column_ids(s23["items"], gct)) == 2
+    assert roster_slides(wall["slides"]) == ({18, 19}, {20, 21, 22, 23, 24})
+    s21 = next(s for s in wall["slides"] if s.get("number") == 21)
+    gct = {int(k): v for k, v in (s21.get("groupChildText") or {}).items()}
+    assert len(name_column_ids(s21["items"], gct)) == 2
