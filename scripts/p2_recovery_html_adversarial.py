@@ -310,56 +310,17 @@ COVER_MATCH_TOL = 6.0       # frozen decode mean must match the cover's painted 
 MIN_STALE_TIME_S = 0.3      # the stale frame must be from genuine playback (not a t=0 unrendered black)
 HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event (1->2, retired)
 COVER_LEFT_FRAC = 0.4       # mirrors NULL_CONTROL_JS's LEFT_FRAC (subRect) -- keep in sync
-COVER_TRACK_TOL_PX = 0.5    # cover rect vs measured*COVER_LEFT_FRAC. Measured, not guessed: with
-                            # the control loop handed off BEHIND the runtime's footprint pin
-                            # (NULL_CONTROL_JS handoff()) the per-frame residual is 0 px over
-                            # every hold frame of the live runs below. A ONE-FRAME lag would
-                            # show ~2.8px in x at the 30Hz headless rAF rate (~1.4px at 60Hz),
-                            # so this tolerance cannot absorb one.
+COVER_TRACK_TOL_PX = 0.5    # cover rect vs measured*COVER_LEFT_FRAC; tight enough that a
+                            # ONE-FRAME lag cannot hide in it (plan §10)
 STAGE_ORIGIN_TOL_PX = 0.5   # stageOrigin must read (0,0) at arm (plan §2, cover geometry)
 FOOTPRINT_COUPLE_TOL_PX = 1.5  # before/after owner-rect agreement for a screenshot to count
                                 # "measured" rather than "unstable" (review Blocker 2b)
-# The trigger must land on the FIRST post-advance rAFs, counted IN THE PAGE from a
-# capture-phase `keydown` timestamp for the advance key the script really sends (review
-# BLOCKER 2). A wall-clock ceiling is not defensible: keepThroughBridge interpolates
-# LINEARLY (src/obed_edom/live_continuity_js.py ~L687) over 952->1266px in TRANS_S, so
-# the rect departs by >1px within ~5ms.
-#
-# RE-MEASURED 2026-09-21 on 10 CLEAN freeze-arm runs (drain 5/5 landed, hash `#7`
-# exact, `firedVia == "moved"`, one press sent and landed): the departure landed on
-# delivered poll frame 8 in 10/10 runs, at 157.8-173.4 ms after the in-page keydown,
-# with a 17.1-17.7 ms rAF period. Not bimodal, no outlier. Worst observation 8 plus
-# one frame of margin => 9.
-#
-# The previous value of 3 was calibrated on runs CONTAMINATED by queued presses (the
-# capture re-pressed ArrowRight every 0.9 s through the move, so the move began at a
-# replayed press, not at the one the listener timed). NOTE the count is not a pure
-# property of the player: it is delivered POLL frames between the keydown and the
-# first visible rect departure, so it also absorbs how much the harness does per
-# frame -- 3-4 contaminated, 6-7 with the press fixed, 8 with the footprint badge
-# running. Re-measure whenever the capture loop's per-frame cost changes.
-FREEZE_TRIGGER_MAX_RAFS = 9
-
-# Secondary bound, for the defect the frame count CANNOT see (review r3 BLOCKER
-# 3): nine delivered poll frames can hide unbounded elapsed time, because a
-# keydown->rAF stall advances the runtime's time-based interpolation deep into
-# the move before poll frame 1 is ever delivered, and `maxRafGapOk` only starts
-# at the trigger.
-#
-# MEASURED 2026-09-21 on 11 CLEAN freeze-arm runs (drain 5/5 landed, hash `#7`
-# exact, `firedVia == "moved"`, one press sent and landed, final `#9`): the
-# keydown->trigger delay ran 158.8-175.5 ms (median 165.7), on a delivered poll
-# frame 8 in 11/11, with a 16.9-17.4 ms rAF period. Unimodal, no outlier. Worst
-# observation plus one frame of margin: 175.5 + 17.4 = 192.9 -> 195.
-# Like FREEZE_TRIGGER_MAX_RAFS this tracks how much the harness does per frame,
-# not the player alone -- re-measure whenever the capture loop's cost changes.
-FREEZE_TRIGGER_MAX_DELAY_MS = 195.0
-# The departure must also land within this many poll callbacks of the runtime's
-# OWN fresh motion-start marker (`__obedMotion.started` at/after the advance
-# keydown). keepThroughBridge creates the marker inside its first SYNCHRONOUS
-# `frame()`, which runs in a task, so the poll can see the marker on the same
-# frame it first sees the rect move, or one frame earlier.
-FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2
+# Trigger bounds, all three calibrated in plan §10 and all tracking the harness's
+# per-frame cost, not the player alone -- re-measure when the capture loop changes.
+FREEZE_TRIGGER_MAX_RAFS = 9        # delivered poll frames, keydown -> rect departure
+FREEZE_TRIGGER_MAX_DELAY_MS = 195.0  # page-clock ceiling: a frame count cannot see a stall
+FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2  # poll callbacks between the runtime's fresh
+                                        # motion marker and the measured departure
 
 # Drain to the freeze-control arm boundary (`_capture_3to4_snapshot`). MEASURED on
 # this fixture 2026-09-21: the drain needs presses from #1..#5 only. `#6` is the
@@ -447,6 +408,7 @@ NULL_CONTROL_JS = r"""
     pollMaxGapMs: 0,
     motionStartedAt: null,
     motionStartedFrame: null,
+    motionStartedMarker: null,
     releaseAt: null,
     staleCurrentTime: null,
     staleIndexExpected: null,
@@ -813,13 +775,15 @@ NULL_CONTROL_JS = r"""
         st.framesAfterAdvance += 1;
         // The runtime's own move-start marker, only counted when it is FRESH
         // (stamped at or after the advance keydown): keepThroughBridge can carry
-        // an older generation's marker. The scorer requires the measured
-        // departure to land within a couple of callbacks of it.
+        // an older generation's marker. The COMPLETE marker is retained so the
+        // scorer can require the trigger's marker to be the SAME one (same
+        // `started`, same `generation`) and to name the 3->4 boundary.
         if (st.motionStartedFrame == null) {
           var mi = motionInfoOf(el);
           if (mi && typeof mi.started === 'number' && mi.started >= st.advanceKeyAt) {
             st.motionStartedAt = mi.started;
             st.motionStartedFrame = st.framesAfterAdvance;
+            st.motionStartedMarker = mi;
           }
         }
         if (departed) {
@@ -865,6 +829,7 @@ NULL_CONTROL_JS = r"""
         holdStartedAt: st.holdStartedAt, coverPaintedAt: st.coverPaintedAt,
         pollMaxGapMs: st.pollMaxGapMs,
         motionStartedAt: st.motionStartedAt, motionStartedFrame: st.motionStartedFrame,
+        motionStartedMarker: st.motionStartedMarker,
         releaseAt: st.releaseAt,
         staleCurrentTime: st.staleCurrentTime, staleIndexExpected: st.staleIndexExpected,
         paintCount: st.paintCount, coverPatchStart: st.coverPatchStart,
@@ -2716,31 +2681,22 @@ async def _bind_footprint_owner(
 
 
 # --- Footprint badge: the rect the CAPTURED FRAME actually shows ---------------
-# Coupling the owner rect to a CDP screenshot by reading it before and after is
-# not a coupling at all on the fast part of the 3->4 move: the round trip is
-# ~230 ms and the rect travels ~0.12 px/ms, so the two reads disagree by ~28 px,
-# every such sample is `unstable`, and `allInHoldMeasured`/`everyInHoldStale` are
-# unsatisfiable there (measured, round 3).
-#
-# Instead the page PAINTS the rect it is pinning, in the SAME animation frame in
-# which it reads it, into a small binary badge at the viewport origin. The
-# screenshot then carries the movie pixels and the rect that produced them in ONE
-# composited frame -- coupled by construction, not by timing luck. The badge also
-# carries the frame's own sequence number, so the page's independent log of that
-# frame can be fetched afterwards and compared with what the pixels decoded:
-# `_couple_owner_rect` still requires agreement within FOOTPRINT_COUPLE_TOL_PX,
-# now between the page's record of frame N and frame N's painted pixels.
-FOOTPRINT_BADGE_CELL_PX = 6   # cell width; MEASURED: 6 px cells decoded 100% of
-                              # painted frames live (deviceScaleFactor=1, PNG
-                              # capture, so a cell centre is an exact pixel)
+# The page paints the rect it is pinning, in the SAME animation frame it reads it,
+# into a small binary badge at the viewport origin, with that frame's sequence
+# number and a CRC. A screenshot therefore carries the movie pixels and the rect
+# that produced them in ONE composited frame -- coupled by construction, not by
+# timing luck -- and the page's own log of that frame can be matched against the
+# decoded pixels afterwards. Round-trip measurements: plan §10.
+FOOTPRINT_BADGE_CELL_PX = 6   # cell width (plan §10: 100% decode at dpr 1)
 FOOTPRINT_BADGE_MAGIC = 0xB2  # 8-bit prefix; a frame without it is not a badge
 FOOTPRINT_BADGE_FIELDS = ("seq", "x", "y", "w", "h")  # 16 bits each, after the magic
-# ...then an 8-bit CRC over exactly those five 16-bit words, MSB-first (review r3
-# MAJOR 3). Without it a torn/aliased frame can present a corrupted SEQUENCE that
-# happens to name another logged frame; once the rect is settled the coupling
-# comparison still passes and that frame's timestamp is substituted, which can
-# move a sample across the hold or release boundary.
+# ...then an 8-bit CRC over those five words, MSB-first: without it a torn frame
+# can present a corrupted SEQUENCE that names another logged frame and borrows its
+# timestamp, moving a sample across the hold or release boundary.
 FOOTPRINT_BADGE_CRC_BITS = 8
+# The re-handoff paints a null rect for exactly two consecutive frames, so at most
+# two captures can land in it.
+FREEZE_REHANDOFF_MAX_EXEMPT = 2
 FOOTPRINT_BADGE_CELLS = 8 + 16 * len(FOOTPRINT_BADGE_FIELDS) + FOOTPRINT_BADGE_CRC_BITS
 FOOTPRINT_BADGE_Q = 4         # quarter-px quantisation of the encoded rect
                               # (<=0.125 px error, far inside the couple tolerance)
@@ -2804,18 +2760,12 @@ FOOTPRINT_BADGE_JS = r"""
     st.painted += 1;
   }
 
-  // Same handoff discipline as the null control: a rAF queued from a task that
-  // runs AFTER a frame's callbacks lands BEHIND the runtime's footprint pin, and
-  // that order then holds. So the rect read (and painted) here is the rect the
-  // runtime pinned for THIS frame -- not the previous frame's.
   // EVERY frame repaints, including one where the owner does not resolve -- then
   // with a null rect. Skipping the paint would leave the PREVIOUS frame's badge
   // on screen under a sequence number the page HAS logged, and that stale badge
   // would couple as `measured` against a rect the frame no longer shows. A null
   // rect logs null, so the sample has one reading and stays `unstable`.
-  // The whole log is dumped ONCE after the capture loop, so the ring must
-  // outlast it: the loop runs (TRANS_S + POST_SETTLE_S + 3)s at ~60Hz, and
-  // 600 entries were only ~10s -- the earliest sampled frames fell out.
+  // The ring must outlast the whole capture loop (plan §10).
   function record(rect) {
     var seq = (st.seq = (st.seq + 1) & 0xffff);
     paint(seq, rect || {x: 0, y: 0, w: 0, h: 0});
@@ -2918,6 +2868,32 @@ FOOTPRINT_BADGE_JS = r"""
     "ncell": FOOTPRINT_BADGE_CELLS,
     "q": FOOTPRINT_BADGE_Q,
 }
+
+
+def _rehandoff_exempt_seqs(rehandoff_seqs: object) -> set[int]:
+    """The badge sequences that may be excused from `allInHoldMeasured`: only
+    those the badge itself logged as a CONTIGUOUS re-handoff pair `(p, p+1)`. A
+    lone or non-adjacent sequence is not a re-handoff and buys no exemption."""
+    seqs = [s for s in (rehandoff_seqs or []) if isinstance(s, int)]
+    out: set[int] = set()
+    for a, b in zip(seqs, seqs[1:]):
+        if b == a + 1:
+            out.update((a, b))
+    return out
+
+
+def _is_rehandoff_sample(sample: dict, exempt_seqs: set[int]) -> bool:
+    """A capture that landed on one of those null-rect re-handoff frames: no
+    rect was painted, so nothing was decoded and the sample carries no evidence
+    either way. Anything that DID decode is a real observation and must be
+    `measured` instead."""
+    return bool(
+        sample.get("footprintSource") != "measured"
+        and sample.get("index") is None
+        and sample.get("badgeRect") is None
+        and isinstance(sample.get("badgeSeq"), int)
+        and sample["badgeSeq"] in exempt_seqs
+    )
 
 
 def _footprint_badge_crc8(words: list[int]) -> int:
@@ -3075,6 +3051,38 @@ async def _settle_at_advance_hash(chrome: ChromeCdp) -> dict:
     }
 
 
+OWNER_SETTLE_READINGS = 3   # consecutive agreeing keyed-owner rect reads
+OWNER_SETTLE_S = 5.0        # budget for them
+OWNER_SETTLE_POLL_S = 0.1   # gap between reads
+
+
+async def _settle_bound_owner_rect(chrome: ChromeCdp, el_id: str | None) -> dict:
+    """Wait for the bound owner's rect to STOP MOVING before the advance. The
+    hash reaching `#7` does not mean the `#7` build has finished: its own
+    animation still runs, so pressing there presses during residual motion and
+    arming there records a pre-advance departure. Settled = three consecutive
+    rect reads agreeing under the same `_couple_owner_rect` "measured" test the
+    at-cut samples use. Fails CLOSED (`settled` False) on a timeout or no bind."""
+    prev_rect: dict | None = None
+    stable = 0
+    deadline = time.monotonic() + OWNER_SETTLE_S
+    while el_id is not None and time.monotonic() < deadline and stable < OWNER_SETTLE_READINGS:
+        await asyncio.sleep(OWNER_SETTLE_POLL_S)
+        rect_now, _ = await _read_bound_owner_rect(chrome, el_id)
+        stable = (
+            stable + 1
+            if _couple_owner_rect(prev_rect, rect_now).get("source") == "measured"
+            else 0
+        )
+        prev_rect = rect_now
+    return {
+        "stableReadings": stable,
+        "required": OWNER_SETTLE_READINGS,
+        "rect": prev_rect,
+        "settled": bool(el_id is not None and stable >= OWNER_SETTLE_READINGS),
+    }
+
+
 SPLIT_EVAL_JS = """(function () {
   var R = %(release)s;
   var t = performance.now();
@@ -3216,9 +3224,12 @@ def _moving_index_run_at_cut(
     post-release sample can contribute to the run or to `n - flipIndex` (review
     BLOCKER 3).
 
-    `covered_from` is the FIRST sample index of the at-cut segment -- for arm B,
-    the first coupled frame at or after the cover was actually PAINTED. Samples
-    before it are dropped (review r3 BLOCKER 2): the cover does not exist yet, so
+    `covered_from` is the FIRST sample index of the at-cut segment: on the capture
+    side the first sample AFTER the advance press (samples at or before it are
+    pre-move, decode None by design against the slide-3 mapping, and must not
+    count as decodable misses); in the scorer's re-run for arm B, the first
+    coupled frame at or after the cover was actually PAINTED. Samples before it
+    are dropped (review r3 BLOCKER 2): the cover does not exist yet, so
     the last live counter reading sits immediately before the frozen ones and the
     control-onset step reads as a modulo-255 REWIND -- a wrong-reason
     `negativeAnomaly` / "restart" instead of "freeze run at cut". The raw
@@ -3282,38 +3293,24 @@ async def _advance_to_slide4_capture(
     the MEASURED footprint (plan section 1, "measure, don't model").
 
     `bound_owner_id` -- the footprint owner's `__obedElId`, resolved ONCE before
-    the move (review Blocker 2a) -- is read directly every sample via
-    `_read_bound_owner_rect`, immediately before AND immediately after the
-    screenshot; `_couple_owner_rect` requires both reads to agree within
-    `FOOTPRINT_COUPLE_TOL_PX` for `index_samples[i]["footprintSource"] ==
-    "measured"` (else `"unstable"`; `"modelled"`/`"none"` as before when no
-    owner is bound at all).
+    the move -- gives every sample its ROI; each sample's footprint is settled to
+    `measured` only when the frame's own badge pixels and the page's log of that
+    frame agree (`_fill_badge_coupling`), else `unstable`.
 
     The at-cut segment closes at a purely POSITIONAL split -- the flip sample plus
     FREEZE_MIN_AFTER samples strictly after it -- so the schedule is identical in
-    every arm regardless of what the cover does (review MAJOR 4). ONE shared
-    in-page evaluation (`SPLIT_EVAL_JS`) runs there in EVERY arm, branching
-    inside the page between releasing the cover and an equivalent no-op with the
-    same return shape (review r3 MAJOR 2: the old positive-arm callback returned
-    LOCALLY, with no CDP round trip at all, so the absolute-target capture loop
-    caught up differently after the split and settled progression or continuity
-    could differ for a purely instrumental reason). Every contamination-sensitive
-    isolation input is computed from post-split samples in all arms.
+    every arm regardless of what the cover does, and ONE shared in-page evaluation
+    (`SPLIT_EVAL_JS`) runs there in every arm, branching inside the page between
+    release and an equivalent no-op with the same return shape and cost.
 
-    The advance is ONE press at a time (review round 3, item D). The player QUEUES
-    a key it cannot honour yet and replays it later, and the hash sits at
-    `SLIDE4_MIN_HASH - 1` for the WHOLE 3->4 move -- so the old "re-press every
-    0.9 s while hash < SLIDE4_MIN_HASH" loop sent 2-3 presses DURING the move and
-    the player replayed them on arrival (snapshots ended at `#10`). A press is now
-    OUTSTANDING until the hash rises above the hash it was sent at, and no second
-    press is ever sent while one is outstanding; an outstanding press that has not
-    landed within `DRAIN_PRESS_LAND_S` is recorded unlanded and pressing STOPS
-    (reported, never re-pressed).
+    Exactly ONE advance key leaves, from the settled `#7` (`_advance_press_decision`):
+    the player queues a key it cannot honour and replays it later, so a re-press
+    loop makes the move start at a replayed press.
 
     Returns (owner_samples, media_samples, index_samples, final_hash,
     capture_meta) where capture_meta = {"lastAtCutOffsetS", "lastAtCutPerfMs",
     "releaseOffsetS", "releaseSplitIndex", "releasePerfMs", "releaseStatus",
-    "advance"}.
+    "advancePressIndex", "atCutFrom", "advance", "badge"}.
     """
     owner_samples: list[dict] = []
     media_samples: list[dict] = []
@@ -3345,6 +3342,12 @@ async def _advance_to_slide4_capture(
     flip_offset: float | None = None
     flip_pos: int | None = None
     press_state = _new_advance_press_state()
+    # Samples captured at or before the advance press are PRE-MOVE: the movie is
+    # still on its slide-3 rect, whose counter has its own mapping, so they decode
+    # None by design. They are not part of any at-cut tally -- the exclusion is
+    # this rule, never a hardcoded index -- so the `nDecodable` fraction does not
+    # carry a free miss. They stay in `indexSamples` for diagnostics.
+    advance_press_index: int | None = None
     last_at_cut_offset_s: float | None = None
     last_at_cut_perf_ms: float | None = None
     release_offset_s: float | None = None
@@ -3368,6 +3371,7 @@ async def _advance_to_slide4_capture(
             await _ensure_videos_playing(chrome)
         press_state, do_press = _advance_press_decision(hn, press_state, capture_wall)
         if do_press:
+            advance_press_index = i
             await chrome.screenshot()  # activate the surface (see the drain loop)
             await chrome.key("ArrowRight", "ArrowRight", 39)
         reached4 = hn is not None and hn >= SLIDE4_MIN_HASH
@@ -3535,6 +3539,8 @@ async def _advance_to_slide4_capture(
         "releaseSplitIndex": release_split_index,
         "releasePerfMs": release_perf_ms,
         "releaseStatus": release_status,
+        "advancePressIndex": advance_press_index,
+        "atCutFrom": (advance_press_index + 1) if advance_press_index is not None else None,
         "advance": _advance_gate(press_state, final_hash),
         "badge": {
             "install": badge_install,
@@ -3664,24 +3670,7 @@ async def _capture_3to4_snapshot(
     if (_hash_num(hash3) or -1) < SLIDE4_MIN_HASH:
         bound_owner_id = await _bind_footprint_owner(chrome, MOVIE1_KEY, SLIDE3_MOVIE_RECT)
 
-    # The `#7` build's OWN animation is still running when the drain stops, so the
-    # owner rect is still moving; arming on it records a pre-advance departure and
-    # the run is INCONCLUSIVE by construction (measured live). Wait for three
-    # consecutive agreeing rect reads -- the same agreement test the capture uses
-    # for a `measured` sample -- before arming.
-    if bound_owner_id is not None:
-        settle_deadline = time.monotonic() + 5.0
-        prev_rect: dict | None = None
-        stable = 0
-        while time.monotonic() < settle_deadline and stable < 3:
-            await asyncio.sleep(0.1)
-            rect_now, _ = await _read_bound_owner_rect(chrome, bound_owner_id)
-            stable = (
-                stable + 1
-                if _couple_owner_rect(prev_rect, rect_now).get("source") == "measured"
-                else 0
-            )
-            prev_rect = rect_now
+    owner_settle = await _settle_bound_owner_rect(chrome, bound_owner_id)
 
     arm_result: dict | None = None
     if inject_null:
@@ -3766,7 +3755,9 @@ async def _capture_3to4_snapshot(
     )
 
     moving_index_run_at_cut, flip_window_decodable = _moving_index_run_at_cut(
-        index_samples, covered_until=release_split_index
+        index_samples,
+        covered_until=release_split_index,
+        covered_from=capture_meta.get("atCutFrom"),
     )
 
     # The slide-3 decoder is `bound_owner_id`: resolved ONCE, keyed to movie1,
@@ -3821,6 +3812,7 @@ async def _capture_3to4_snapshot(
         "armHash": arm_hash_str,
         "armResult": arm_result,
         "drain": drain_meta,
+        "ownerSettle": owner_settle,
         "movingIndexRunAtCut": moving_index_run_at_cut,
         "flipWindowDecodable": flip_window_decodable,
         "indexSamples": index_samples,
@@ -3843,6 +3835,7 @@ async def _capture_3to4_snapshot(
         "releaseSplitIndex": release_split_index,
         "releasePerfMs": capture_meta.get("releasePerfMs"),
         "advance": capture_meta.get("advance"),
+        "atCutFrom": capture_meta.get("atCutFrom"),
         "badge": capture_meta.get("badge"),
         "firstSettledOffsetS": first_settled_offset_s,
         "firstSettledPerfMs": first_settled_perf_ms,
@@ -4000,27 +3993,32 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # `noNegativeAnomaly` for the wrong reason. Fails CLOSED: no
     # `coverPaintedAt`, no window.
     cover_painted_at = nc.get("coverPaintedAt")
+    release_split_index = b.get("releaseSplitIndex")
     covered_positions = [
         i for i, t in enumerate(perfs)
         if cover_painted_at is not None and t is not None and t >= cover_painted_at
         and (release_at is None or t <= release_at)
+        and (not isinstance(release_split_index, int) or i <= release_split_index)
     ]
-    # ...and it opens at the first COUPLED frame in that span. The badge's
-    # re-handoff onto the fresh 3->4 pin happens at motion start, one frame
-    # before the cover is painted, and names a null rect for the two frames it
-    # spans -- so the very first covered capture is often a frame with a single
-    # reading. Skipping the leading uncoupled frames is not a relaxation: an
-    # `unstable` sample anywhere from the first coupled frame onwards still fails
-    # `allInHoldMeasured`, and a span with NO coupled frame fails it too.
-    first_covered_position = next(
-        (i for i in covered_positions
-         if (sources[i] if i < len(sources) else None) == "measured"),
-        None,
+    # ...and it opens after the badge's OWN identified re-handoff, and nothing
+    # else (review r4 BLOCKER 1). The re-handoff onto the fresh 3->4 pin lands one
+    # frame before the cover is painted and deliberately paints a null rect for
+    # the contiguous pair of frames it spans, so the first covered capture is
+    # often one of them. Only a LEADING sample that the badge itself names as part
+    # of that pair -- null rect, nothing decoded -- is exempt; every other
+    # post-paint sample through `releaseSplitIndex` must be `measured`, so an
+    # unstable sample with a live decode is INCONCLUSIVE wherever it lands.
+    exempt_seqs = _rehandoff_exempt_seqs(
+        ((b.get("badge") or {}).get("stats") or {}).get("rehandoffSeqs")
     )
-    in_hold_positions = (
-        [i for i in covered_positions if i >= first_covered_position]
-        if first_covered_position is not None else []
-    )
+    exempt_prefix = 0
+    for i in covered_positions:
+        if not _is_rehandoff_sample(index_samples[i], exempt_seqs):
+            break
+        exempt_prefix += 1
+    rehandoff_exempt_ok = exempt_prefix <= FREEZE_REHANDOFF_MAX_EXEMPT
+    in_hold_positions = covered_positions[exempt_prefix:] if rehandoff_exempt_ok else []
+    first_covered_position = in_hold_positions[0] if in_hold_positions else None
     # RECOMPUTED here from the raw samples, never trusted from the capture side
     # (review BLOCKER 3), and bounded to the covered at-cut segment at BOTH ends.
     idx, flip_window_decodable = _moving_index_run_at_cut(
@@ -4047,8 +4045,14 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and cover_mean is not None
         and abs(sum(_decoded) / len(_decoded) - cover_mean) <= COVER_MATCH_TOL
     )
-    all_in_hold_measured = bool(covered_positions) and bool(in_hold_positions) and all(
-        (sources[i] if i < len(sources) else None) == "measured" for i in in_hold_positions
+    all_in_hold_measured = (
+        bool(covered_positions)
+        and bool(in_hold_positions)
+        and rehandoff_exempt_ok
+        and all(
+            (sources[i] if i < len(sources) else None) == "measured"
+            for i in in_hold_positions
+        )
     )
 
     flip_index_present = isinstance(flip_index, int)
@@ -4143,10 +4147,22 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
         and trigger_delay_ms is not None
         and trigger_delay_ms <= FREEZE_TRIGGER_MAX_DELAY_MS
     )
+    # Frame proximity alone is not identity (review r4 MAJOR 1): a marker for
+    # another boundary, or a replacement generation on the bound video, can also
+    # produce a timely departure. The trigger's marker must be the SAME fresh
+    # marker the poll first retained, and must name the 3->4 boundary.
+    motion_marker = nc.get("motionStartedMarker") or {}
+    motion_at_trigger = nc.get("obedMotionAtTrigger") or {}
     checks["firedAtRuntimeMotionStart"] = bool(
         isinstance(motion_started_frame, int)
         and isinstance(trigger_frames, int)
         and abs(trigger_frames - motion_started_frame) <= FREEZE_TRIGGER_MOTION_SLACK_FRAMES
+        and motion_marker.get("atScene") == SLIDE4_MIN_HASH
+        and motion_marker.get("started") is not None
+        and motion_at_trigger.get("started") == motion_marker.get("started")
+        and motion_marker.get("generation") is not None
+        and motion_at_trigger.get("generation") == motion_marker.get("generation")
+        and motion_at_trigger.get("atScene") == SLIDE4_MIN_HASH
     )
     checks["firedAfterAdvance"] = bool(
         advance_key_at is not None and trigger_delay_ms is not None and trigger_delay_ms >= 0.0
@@ -4217,24 +4233,12 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     isolation_all_green = all(iv_a1[k] and iv_b[k] and iv_a2[k] for k in _ISOLATION_KEYS)
     checks["isolationEqual"] = (isolation_diffs == {}) and isolation_all_green
 
-    # Two tiers: tier-1 hold INTEGRITY (the control delivered the stimulus at the
-    # right moment/target and was observed) — any failure is INCONCLUSIVE, because
-    # a control that did not fire/hold correctly makes B look like a passing
-    # positive and would be misread as "the gate is vacuous". tier-2 is the
-    # VERDICT (the counter caught the freeze, RED isolated to the counter) —
-    # PASS/FAIL only once integrity holds. On a MOVING footprint a rAF stall
-    # (maxRafGapOk) is disqualifying integrity, not diagnostic-only (plan §4).
-    # Re-tiered per review r3 BLOCKER 4: a FAIL is a claim about the COUNTER --
-    # "a fully valid isolated freeze was delivered and the counter did not catch
-    # it". Anything that says instead "the stimulus or the measurement was not
-    # sound" is INCONCLUSIVE. A red A1, a B-only rVFC failure, mismatched
-    # control/capture decoder ids, owner ambiguity, a player build error, a
-    # failed isolation and a negative anomaly are all of the second kind: none of
-    # them establishes whether the counter caught a valid isolated freeze.
-    #
-    # Nothing becomes easier to PASS: every one of these keys must still be True
-    # to reach "pass", and `_freeze_control_blocks_success` blocks overall
-    # `success` on "inconclusive" exactly as it does on "fail".
+    # Two tiers. A FAIL is a claim about the COUNTER -- "a fully valid isolated
+    # freeze was delivered and the counter did not catch it" -- so anything that
+    # instead says "the stimulus or the measurement was not sound" is INCONCLUSIVE
+    # (tier 1). Nothing is easier to PASS: every tier-1 key must still be True,
+    # and `_freeze_control_blocks_success` blocks `success` on "inconclusive"
+    # exactly as it does on "fail".
     integrity_keys = (
         "firedAtMoveStart", "firedAtRuntimeMotionStart", "firedAfterAdvance",
         "noPreAdvanceDeparture", "drainPressesAllLanded", "advanceSinglePressAllArms",
@@ -4277,6 +4281,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
             "holdStartedAt": hold_started,
             "coverPaintedAt": cover_painted_at,
             "firstCoveredPosition": first_covered_position,
+            "rehandoffExemptSamples": exempt_prefix,
             "coveredPositions": covered_positions,
             "advanceKeyAt": advance_key_at,
             "triggerDelayMs": trigger_delay_ms,
@@ -5047,16 +5052,15 @@ async def _run(player: Path) -> dict:
         # (positive control — new finding continueThroughMovingMagicMove3to4;
         #  everything below is delimited for merge with Peer B's adversarial edits)
         await _ensure_videos_playing(chrome)
-        # Bind the ROI footprint owner before the move, exactly as the bracketed
-        # capture does (review MAJOR 7) -- without it every sample here is
-        # `modelled` and the report-only at-cut run below has nothing to score.
-        bound_owner_id_c = await _bind_footprint_owner(chrome, MOVIE1_KEY, SLIDE3_MOVIE_RECT)
-        # Review r3 MAJOR 1: the capture now presses exactly once, and only from
-        # the exact settled `#7`. Settle here first -- `#6` is the 2->3 dissolve
-        # in flight and self-advances on its own; pressing at it queues a key the
-        # player replays later, which is the multi-advance contamination the
-        # single-press discipline exists to stop.
+        # Same order as the bracketed capture (review r4 MAJOR 2): wait for the
+        # exact `#7` FIRST -- `#6` is the 2->3 dissolve in flight and self-advances
+        # on its own, and a key sent there is queued and replayed -- then bind the
+        # ROI footprint owner on the pre-move rect, then wait for that rect to stop
+        # moving. Binding before the hash settles binds on a moving `#7` build, and
+        # pressing there presses during residual motion.
         settle_c = await _settle_at_advance_hash(chrome)
+        bound_owner_id_c = await _bind_footprint_owner(chrome, MOVIE1_KEY, SLIDE3_MOVIE_RECT)
+        owner_settle_c = await _settle_bound_owner_rect(chrome, bound_owner_id_c)
         click_wall_c = time.monotonic()
         (
             owner_samples_c,
@@ -5069,9 +5073,14 @@ async def _run(player: Path) -> dict:
         )
         advance_c = _capture_meta_c.get("advance") or {}
         # Fail CLOSED on a contaminated stimulus: unless exactly one press was
-        # sent from `#7` and landed, with nothing outstanding or unlanded and the
-        # boundary reached, finding 13 is not looking at the intended 3->4 move.
-        advance_c_ok = bool(advance_c.get("ok")) and bool(settle_c.get("exact"))
+        # sent from a SETTLED `#7` (exact hash AND a stopped owner rect) and
+        # landed, with nothing outstanding or unlanded and the boundary reached,
+        # finding 13 is not looking at the intended 3->4 move.
+        advance_c_ok = (
+            bool(advance_c.get("ok"))
+            and bool(settle_c.get("exact"))
+            and bool(owner_settle_c.get("settled"))
+        )
         # Counter progression is scored over the SETTLED slide-4 window (footprint
         # fully at the destination rect, progress>=0.98) so the moving ROI lands on
         # the decoder's flat patch: mid-transition frames sample a moving/animating
@@ -5090,7 +5099,9 @@ async def _run(player: Path) -> dict:
         # Never gates that finding's `pass` -- only one clean fast/slow/bridge-off
         # round earns it a place in the pass condition.
         moving_index_run_at_cut, _flip_window_decodable_c = _moving_index_run_at_cut(
-            index_samples_c, covered_until=_capture_meta_c.get("releaseSplitIndex")
+            index_samples_c,
+            covered_until=_capture_meta_c.get("releaseSplitIndex"),
+            covered_from=_capture_meta_c.get("atCutFrom"),
         )
         bridge_events = await chrome.evaluate(
             "window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"
@@ -5429,6 +5440,7 @@ async def _run(player: Path) -> dict:
             "detail": {
                 "advance": advance_c,
                 "advanceSettle": settle_c,
+                "advanceOwnerSettle": owner_settle_c,
                 "advanceOk": advance_c_ok,
                 "movingContinuity3to4": moving_continuity,
                 "movingIndexRun": moving_index_run,

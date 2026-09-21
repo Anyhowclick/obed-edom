@@ -1666,6 +1666,25 @@ def test_index_patch_roi_for_top_guard_is_a_subset_and_default_is_unchanged():
     assert gh < bh
 
 
+def test_index_patch_roi_for_top_guard_holds_the_subset_property_on_tiny_footprints():
+    """Review r4 MINOR 1. The subset property must hold for EVERY footprint, not
+    just the 3->4 one: when the unguarded ROI is no taller than the guard, the
+    old `max(1, h - guard)` pushed the bottom edge DOWN, outside the unguarded
+    ROI. The guard is clamped to `height - 1` instead, so the ROI always keeps at
+    least one row and its bottom edge never moves."""
+    from obed_edom.html_alpha_probe import index_patch_roi_for
+
+    for h in range(1, 400):
+        for guard in (0, 1, 2, 5, 50):
+            fp = (100.0, 200.0, 1920.0, float(h))
+            bx, by, bw, bh = index_patch_roi_for(fp)
+            gx, gy, gw, gh = index_patch_roi_for(fp, top_guard=guard)
+            assert (gx, gw) == (bx, bw)
+            assert gy >= by, (h, guard)
+            assert gy + gh == by + bh, (h, guard)   # bottom edge pinned
+            assert 1 <= gh <= bh, (h, guard)
+
+
 def test_index_patch_roi_for_top_guard_recovers_the_measured_none_sample():
     """Reproduces the measured cause on a synthetic frame built to the round-5
     geometry: the badge reports y=744.5, `round()` sends that exact .5 DOWN to the

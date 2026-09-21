@@ -13,6 +13,7 @@ against, so a regression that reopens a Codex defect fails a NAMED test.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import shutil
@@ -1026,6 +1027,11 @@ def _freeze_b_snap_34(at_cut=None, settled=None, covered_pre_flip=None, **overri
         "coverPaintedAt": COVER_PAINTED_AT_34,
         "advanceKeyAt": ADVANCE_KEY_AT_34, "triggerFramesAfterAdvance": 1,
         "motionStartedAt": HOLD_STARTED_AT_34, "motionStartedFrame": 1,
+        # The COMPLETE first fresh marker the poll retained; the trigger's marker
+        # must be the same one, for the 3->4 boundary (review r4 MAJOR 1).
+        "motionStartedMarker": {
+            "started": HOLD_STARTED_AT_34, "generation": 1, "atScene": 8,
+        },
         "pollMaxGapMs": 17.0,
         "preAdvanceDepartureAt": None, "preAdvanceDepartureRect": None,
         "loopHandedOff": True,
@@ -1149,6 +1155,70 @@ def test_advance_gate_fails_closed_on_every_contaminated_shape():
     assert p2._advance_gate({**clean, "sent": 0, "landed": 0}, "#8")["ok"] is False
     assert p2._advance_gate(clean, "#7")["ok"] is False, "never reached slide 4"
     assert p2._advance_gate(clean, None)["ok"] is False
+
+
+class _RectChrome:
+    """Minimal CDP stand-in for `_read_bound_owner_rect`: replays a scripted
+    series of owner rects, one per `evaluate()`."""
+
+    def __init__(self, rects, then_moving: bool = False):
+        self._rects = list(rects)
+        self._then_moving = then_moving
+        self.calls = 0
+
+    async def evaluate(self, _script):
+        if self.calls < len(self._rects):
+            rect = self._rects[self.calls]
+        elif self._then_moving:
+            rect = _moving_rect(self.calls)
+        else:
+            rect = self._rects[-1]
+        self.calls += 1
+        return {"t": 100.0 + 16.7 * self.calls, "rect": rect}
+
+
+def _moving_rect(i: int, step: float = 4.0):
+    return {"x": 198.0 + step * i, "y": 797.0, "w": 952.0, "h": 268.0}
+
+
+def _moving_rects(n: int):
+    return [_moving_rect(i) for i in range(n)]
+
+
+def _settle(chrome, el_id="el4", monkeypatch=None):
+    monkeypatch.setattr(p2, "OWNER_SETTLE_POLL_S", 0.0)
+    monkeypatch.setattr(p2, "OWNER_SETTLE_S", 0.5)
+    return asyncio.run(p2._settle_bound_owner_rect(chrome, el_id))
+
+
+def test_owner_rect_settle_rejects_a_still_moving_hash_7_build(monkeypatch):
+    """Review r4 MAJOR 2. The hash reaching `#7` proves an instantaneous value,
+    not a settled build: the `#7` build's own animation is still running, so a
+    press sent there is a press during residual motion. Three CONSECUTIVE
+    agreeing rect reads are required, and a moving rect never gets them."""
+    chrome = _RectChrome(_moving_rects(4), then_moving=True)
+    got = _settle(chrome, monkeypatch=monkeypatch)
+    assert got["settled"] is False
+    assert got["stableReadings"] < p2.OWNER_SETTLE_READINGS
+
+
+def test_owner_rect_settle_accepts_a_stopped_build(monkeypatch):
+    """...and a stopped rect settles, on exactly the `_couple_owner_rect`
+    "measured" agreement the at-cut samples are held to."""
+    still = {"x": 198.0, "y": 797.0, "w": 952.0, "h": 268.0}
+    chrome = _RectChrome(_moving_rects(2) + [still] * 8)
+    got = _settle(chrome, monkeypatch=monkeypatch)
+    assert got["settled"] is True
+    assert got["stableReadings"] == p2.OWNER_SETTLE_READINGS
+    assert got["rect"] == still
+
+
+def test_owner_rect_settle_fails_closed_without_a_bound_owner(monkeypatch):
+    """No bind, no settle -- and no round trips either."""
+    chrome = _RectChrome([None])
+    got = _settle(chrome, el_id=None, monkeypatch=monkeypatch)
+    assert got["settled"] is False
+    assert chrome.calls == 0
 
 
 def test_advance_press_never_re_presses_while_one_is_outstanding():
@@ -2041,25 +2111,72 @@ def test_freeze_control_missing_cover_painted_at_fails_closed():
     assert "coverPaintedAtPresent" in verdict["integrityFailed"]
 
 
-def test_freeze_control_window_opens_at_the_first_coupled_frame():
-    """LIVE (bracket run0): the badge's re-handoff onto the fresh 3->4 pin lands
-    ONE frame before the cover is painted, so the first covered capture was a
-    null-rect frame -- `unstable`, with no rect. Scoring from it made the whole
-    bracket INCONCLUSIVE on every run. The window opens at the first COUPLED
-    frame instead; an `unstable` sample from there on still fails closed."""
-    b = _freeze_b_snap_34()
+def _with_rehandoff(b: dict, n: int, seq0: int = 4100) -> dict:
+    """Turn the first `n` COVERED samples into the badge's own re-handoff frames:
+    null rect, nothing decoded, sequences the badge logged as a contiguous pair.
+    """
     first = len(_PRE_ADVANCE_INDICES_34)
-    b = _with_sample(b, first, footprintSource="unstable", index=255)
-    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
-    assert verdict["verdict"] == "pass", verdict["failed"]
-    assert verdict["freeze"]["firstCoveredPosition"] == first + 1
-    assert 255 not in verdict["freeze"]["inHoldDecodes"]
+    for k in range(n):
+        b = _with_sample(b, first + k, footprintSource="unstable", index=None,
+                         badgeRect=None, badgeSeq=seq0 + k)
+    b["badge"] = {"stats": {"rehandoffSeqs": [seq0, seq0 + 1]}}
+    return b
 
-    # ...but one in the MIDDLE of the hold still reds it.
-    b2 = _with_sample(_freeze_b_snap_34(), first + 2, footprintSource="unstable")
+
+def test_freeze_control_window_opens_after_the_badges_own_rehandoff():
+    """LIVE (bracket run0): the badge's re-handoff onto the fresh 3->4 pin lands
+    ONE frame before the cover is painted and paints a NULL rect for the
+    contiguous pair of frames it spans, so the first covered capture is often one
+    of them. Those -- and only those -- are excused: they decoded nothing, so they
+    are no evidence either way."""
+    for n in (1, 2):
+        b = _with_rehandoff(_freeze_b_snap_34(), n)
+        verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+        assert verdict["verdict"] == "pass", (n, verdict["failed"])
+        assert verdict["freeze"]["rehandoffExemptSamples"] == n
+        assert verdict["freeze"]["firstCoveredPosition"] == len(_PRE_ADVANCE_INDICES_34) + n
+
+
+def test_freeze_control_leading_unstable_with_a_live_decode_is_inconclusive():
+    """Review r4 BLOCKER 1. An unguarded leading skip let a CRC/sequence/coupling
+    failure that still DECODED a live counter open the window past itself, and
+    later frozen frames then carried the verdict. A leading `unstable` sample that
+    decoded something is a real observation on an uncoupled frame: INCONCLUSIVE."""
+    first = len(_PRE_ADVANCE_INDICES_34)
+    b = _with_sample(_freeze_b_snap_34(), first, footprintSource="unstable", index=255)
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "allInHoldMeasured" in verdict["integrityFailed"]
+
+    # ...and a null-rect leading sample the badge did NOT log as a re-handoff
+    # buys no exemption either.
+    b2 = _with_sample(_freeze_b_snap_34(), first, footprintSource="unstable",
+                      index=None, badgeRect=None, badgeSeq=999)
     v2 = p2._score_freeze_control(_positive_snap_34(), b2, _positive_snap_34())
     assert v2["verdict"] == "inconclusive"
     assert "allInHoldMeasured" in v2["integrityFailed"]
+
+    # ...nor does a LONE logged sequence that is not part of a contiguous pair.
+    b3 = _with_rehandoff(_freeze_b_snap_34(), 1)
+    b3["badge"] = {"stats": {"rehandoffSeqs": [4100, 4200]}}
+    v3 = p2._score_freeze_control(_positive_snap_34(), b3, _positive_snap_34())
+    assert v3["verdict"] == "inconclusive"
+    assert "allInHoldMeasured" in v3["integrityFailed"]
+
+    # ...and an unstable sample in the MIDDLE of the hold still reds it.
+    b4 = _with_sample(_freeze_b_snap_34(), first + 2, footprintSource="unstable")
+    v4 = p2._score_freeze_control(_positive_snap_34(), b4, _positive_snap_34())
+    assert v4["verdict"] == "inconclusive"
+    assert "allInHoldMeasured" in v4["integrityFailed"]
+
+
+def test_freeze_control_more_rehandoff_frames_than_the_badge_paints_is_inconclusive():
+    """The re-handoff spans exactly two frames; a third excused sample means the
+    badge was not doing what its own contract says."""
+    b = _with_rehandoff(_freeze_b_snap_34(), 3)
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "allInHoldMeasured" in verdict["integrityFailed"]
 
 
 def test_freeze_control_no_coupled_frame_in_the_hold_fails_closed():
@@ -2131,6 +2248,52 @@ def test_freeze_control_missing_runtime_motion_marker_is_inconclusive():
     verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
     assert verdict["verdict"] == "inconclusive"
     assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
+
+
+def test_freeze_control_motion_marker_for_the_wrong_boundary_is_inconclusive():
+    """Review r4 MAJOR 1. Frame proximity is not identity: keepThroughBridge
+    stamps a marker for whatever boundary it is pinning, and a marker for another
+    boundary produces an equally timely departure -- after which the real 3->4
+    bridge runs uncovered and the bracket could still reach `#8`/`#9`. The
+    marker must name the 3->4 boundary (`atScene == SLIDE4_MIN_HASH`)."""
+    for at_scene in (6, 12, None):
+        b = _freeze_b_snap_34()
+        nc = b["nullControl"]
+        b["nullControl"] = {
+            **nc,
+            "motionStartedMarker": {**nc["motionStartedMarker"], "atScene": at_scene},
+            "obedMotionAtTrigger": {**nc["obedMotionAtTrigger"], "atScene": at_scene},
+        }
+        verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+        assert verdict["verdict"] == "inconclusive", at_scene
+        assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
+
+
+def test_freeze_control_motion_marker_replaced_before_the_trigger_is_inconclusive():
+    """A replacement marker on the bound video between the poll retaining the
+    first fresh one and the departure means the departure belongs to a DIFFERENT
+    move. The trigger's marker must be identical in `started` AND `generation`."""
+    b = _freeze_b_snap_34()
+    nc = b["nullControl"]
+    replaced_gen = {**nc["obedMotionAtTrigger"], "generation": 2}
+    b["nullControl"] = {**nc, "obedMotionAtTrigger": replaced_gen}
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "firedAtRuntimeMotionStart" in verdict["integrityFailed"]
+
+    replaced_start = {**nc["obedMotionAtTrigger"], "started": HOLD_STARTED_AT_34 + 40.0}
+    b2 = _freeze_b_snap_34()
+    b2["nullControl"] = {**b2["nullControl"], "obedMotionAtTrigger": replaced_start}
+    v2 = p2._score_freeze_control(_positive_snap_34(), b2, _positive_snap_34())
+    assert v2["verdict"] == "inconclusive"
+    assert "firedAtRuntimeMotionStart" in v2["integrityFailed"]
+
+    # ...and no marker at the trigger at all fails closed too.
+    b3 = _freeze_b_snap_34()
+    b3["nullControl"] = {**b3["nullControl"], "obedMotionAtTrigger": None}
+    v3 = p2._score_freeze_control(_positive_snap_34(), b3, _positive_snap_34())
+    assert v3["verdict"] == "inconclusive"
+    assert "firedAtRuntimeMotionStart" in v3["integrityFailed"]
 
 
 def test_freeze_control_trigger_within_the_motion_slack_still_passes():
@@ -2360,6 +2523,114 @@ def _run_badge_js() -> dict:
     out = subprocess.run(["node", "-e", src], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
+
+
+# A SIMULATED runtime footprint pin, ordered exactly as `keepThroughBridge` is:
+# it starts from a post-frame TASK, applies the rect synchronously there, and
+# re-queues from its OWN rAF callback. Registering in the task phase puts it
+# BEHIND a badge loop that re-queued from its rAF callback -- which is the
+# one-frame lag the re-handoff exists to undo.
+_PIN_HARNESS = r"""
+var cells = null, rafQ = [], taskQ = [], trace = [], pinTicks = 0;
+var video = {__obedElId: 'el4', rect: {left: 200, top: 797, width: 952, height: 268},
+             getBoundingClientRect: function () {
+               return {left: this.rect.left, top: this.rect.top,
+                       width: this.rect.width, height: this.rect.height};
+             }};
+global.performance = {now: (function () { var t = 0; return function () { return (t += 16.7); }; })()};
+global.requestAnimationFrame = function (fn) { rafQ.push(fn); return rafQ.length; };
+global.setTimeout = function (fn) { taskQ.push(fn); };
+global.document = {
+  querySelectorAll: function () { return [video]; },
+  body: {appendChild: function () {}},
+  createElement: function () {
+    return {style: {}, setAttribute: function () {},
+            getContext: function () {
+              return {fillStyle: '#000000', fillRect: function () {}};
+            }};
+  }
+};
+global.window = {devicePixelRatio: 1, innerWidth: 1920};
+EVAL_BADGE
+var B = window.__OBED_FP_BADGE__;
+B.install('el4');
+function frame() {
+  var q = rafQ; rafQ = [];
+  q.forEach(function (fn) { fn(); });
+  var t = taskQ; taskQ = [];
+  t.forEach(function (fn) { fn(); });
+}
+function pinTick() {
+  pinTicks += 1;
+  video.rect.left = 200 + 10 * pinTicks;
+  requestAnimationFrame(pinTick);
+}
+function startPin() {
+  taskQ.push(function () {
+    if (MARK_ON) video.__obedMotion = {started: 500, generation: 3};
+    pinTick();
+  });
+}
+function step(label) {
+  var before = B.stats().seq;
+  frame();
+  var st = B.stats(), log = B.dump(), painted = [];
+  for (var s = before + 1; s <= st.seq; s++) painted.push(log[s] ? log[s].rect : null);
+  trace.push({label: label, painted: painted, endX: video.rect.left});
+}
+for (var i = 0; i < 3; i++) step('pre' + i);
+startPin();
+for (var j = 0; j < 8; j++) step('post' + j);
+console.log(JSON.stringify({trace: trace, stats: B.stats()}));
+"""
+
+
+def _run_pin_js(mark_on: bool) -> dict:
+    src = (
+        _PIN_HARNESS
+        .replace("EVAL_BADGE", "var NCELL = %d;\n%s"
+                 % (p2.FOOTPRINT_BADGE_CELLS, p2.FOOTPRINT_BADGE_JS))
+        .replace("MARK_ON", "true" if mark_on else "false")
+    )
+    out = subprocess.run(["node", "-e", src], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _pin_residuals(trace):
+    """Per frame: (badge-painted x) - (rect the pin left on screen for it). 0 is
+    the badge reading BEHIND the pin; negative is the one-frame lag."""
+    out = []
+    for fr in trace:
+        rects = [r for r in fr["painted"] if r is not None]
+        if len(rects) == 1:
+            out.append((fr["label"], rects[0]["x"] - fr["endX"]))
+    return out
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_footprint_badge_lands_behind_a_later_runtime_pin_callback():
+    """Review r4 MINOR 2. Deterministic rAF/task ordering, with a simulated
+    runtime pin scheduled AFTER the badge callback. Without the re-handoff the
+    badge reads the pre-move rect and the composited frame shows the moved one --
+    a lag of exactly one pin step, mutually consistent between badge pixels and
+    badge log, so the coupling check cannot see it. With the re-handoff the badge
+    paints NULL across the transfer and every later frame is residual-0."""
+    lagged = _pin_residuals(_run_pin_js(mark_on=False)["trace"])
+    after = [r for label, r in lagged if label.startswith("post")]
+    assert after and set(after[1:]) == {-10.0}, after
+
+    got = _run_pin_js(mark_on=True)
+    assert got["stats"]["rehandoffs"] == 1
+    post = [r for label, r in _pin_residuals(got["trace"]) if label.startswith("post")]
+    # Exactly ONE lagged frame survives: the frame the pin STARTS on, where the
+    # badge has already read before the task that creates the marker runs. It is
+    # strictly before the trigger (which is the first poll frame that SEES the
+    # departure) and therefore before `coverPaintedAt`, so it can never be in the
+    # scored window. The transfer frames then paint a null rect, and every frame
+    # that reads at all from there on is exactly on the pin's own rect.
+    assert post[0] == -10.0, post
+    assert set(post[1:]) == {0.0}, post
 
 
 def _cells_to_frame(cells) -> np.ndarray:
