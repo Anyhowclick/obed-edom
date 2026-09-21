@@ -111,6 +111,8 @@ def _png_to_rgba(data: bytes) -> np.ndarray:
 class ChromeCdp:
     """System Chrome + CDP. Real Input.* events; never calls player function names."""
 
+    START_TIMEOUT_S = 20.0
+
     def __init__(self, chrome: Path, profile: Path, width: int = 1920, height: int = 1080) -> None:
         self.chrome = chrome
         self.profile = profile
@@ -121,13 +123,24 @@ class ChromeCdp:
         self._next_id = 0
         self.peak_rss = 0
         self.console: list[dict[str, Any]] = []
+        self.port: int | None = None
 
     async def start(self) -> None:
-        import urllib.request
-        import websockets
-
+        """Spawn Chrome and attach. Anything that goes wrong AFTER the spawn kills
+        the process before re-raising: a Chrome whose driver never attached is an
+        orphan nothing will ever close, and the next run then shares the machine
+        with it."""
         self.profile.mkdir(parents=True, exist_ok=True)
+        self._spawn()
+        try:
+            await self._attach()
+        except BaseException:
+            self._kill_proc()
+            raise
+
+    def _spawn(self) -> None:
         port = _free_port()
+        self.port = port
         self.proc = subprocess.Popen(
             [
                 str(self.chrome),
@@ -149,8 +162,14 @@ class ChromeCdp:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+    async def _attach(self) -> None:
+        import urllib.request
+        import websockets
+
+        port = self.port
         ready = False
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + self.START_TIMEOUT_S
         while time.monotonic() < deadline:
             self._sample_rss()
             try:
@@ -273,12 +292,16 @@ class ChromeCdp:
                 await self._ws.close()
         except Exception:
             pass
+        self._kill_proc()
+
+    def _kill_proc(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
             try:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait(timeout=5)
 
 
 async def _wait_ready(

@@ -393,6 +393,7 @@ NULL_CONTROL_JS = r"""
     stageRectAtArm: null,
     stageRectAtTrigger: null,
     advanceKeyAt: null,
+    advanceKeyRejected: 0,
     framesAfterAdvance: 0,
     triggerFramesAfterAdvance: null,
     preAdvanceDepartureAt: null,
@@ -671,13 +672,16 @@ NULL_CONTROL_JS = r"""
 
   // The script advances with a CDP-dispatched ArrowRight keydown. A timestamp taken
   // in Python (or in an evaluate() before the dispatch) is not a trigger-causality
-  // proof; this capture-phase listener is (review BLOCKER 2).
+  // proof; this capture-phase listener is (review BLOCKER 2). It applies the SAME
+  // trust/repeat filter as the capture watch and records the EVENT's own
+  // `timeStamp`, so the scorer can require both to name the same event; a
+  // synthetic or repeated ArrowRight is counted, never used (review r9 MAJOR 4).
   function onAdvanceKey(e) {
+    if (!e || e.type !== 'keydown' || e.key !== 'ArrowRight') return;
+    if (e.isTrusted !== true || e.repeat === true) { st.advanceKeyRejected += 1; return; }
     if (st.advanceKeyAt != null) return;
-    if (e && e.key === 'ArrowRight') {
-      st.advanceKeyAt = performance.now();
-      st.framesAfterAdvance = 0;
-    }
+    st.advanceKeyAt = e.timeStamp;
+    st.framesAfterAdvance = 0;
   }
 
   function stageRectNow() {
@@ -821,6 +825,7 @@ NULL_CONTROL_JS = r"""
         stageOrigin: st.stageOrigin,
         stageRectAtArm: st.stageRectAtArm, stageRectAtTrigger: st.stageRectAtTrigger,
         advanceKeyAt: st.advanceKeyAt,
+        advanceKeyRejected: st.advanceKeyRejected,
         triggerFramesAfterAdvance: st.triggerFramesAfterAdvance,
         preAdvanceDepartureAt: st.preAdvanceDepartureAt,
         preAdvanceDepartureRect: st.preAdvanceDepartureRect,
@@ -4225,6 +4230,15 @@ def _cover_tracks_footprint(raf_log: list[dict]) -> bool:
     return True
 
 
+def _finite(v: object) -> float | None:
+    """A real measurement, or `None`. Booleans and non-finite values are not
+    numbers here, and a missing one is absence, never a zero."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) else None
+
+
 def _at_cut_boundary_valid(snap: dict) -> bool:
     """One arm's at-cut boundary is admissible: exactly one accepted advance
     keydown, a finite page clock for it, and an in-range first sample (index `0`
@@ -4299,8 +4313,7 @@ def _advance_c_ok(
         and (settle or {}).get("exact")
         and (owner_settle or {}).get("settled")
         and (capture_meta.get("collector") or {}).get("ok")
-        and (capture_meta.get("atCutBoundary") or {}).get("ok")
-        and _advance_key_observed_once(capture_meta)
+        and _at_cut_boundary_valid({**capture_meta, "indexSamples": index_samples})
         and _badge_samples_sound({**capture_meta, "indexSamples": index_samples})
         and len(measured) == len(window)
     )
@@ -4358,8 +4371,13 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # ...and the PRE-trigger poll gaps, measured in the page from the advance
     # keydown (review r3 BLOCKER 3): a stall there is unobserved by everything
     # else, yet it is exactly when the runtime's interpolation runs away.
-    poll_max_gap_ms = float(nc.get("pollMaxGapMs") or 0.0)
-    max_gap_ms = max(max_gap_ms, poll_max_gap_ms)
+    # ...and a MISSING pre-trigger measurement is absence, not a zero gap: without
+    # it a low-gap hold series would carry `maxRafGapOk` on its own (review r9
+    # MAJOR 2).
+    poll_gap = _finite(nc.get("pollMaxGapMs"))
+    poll_gap_present = poll_gap is not None and poll_gap >= 0.0
+    poll_max_gap_ms = poll_gap if poll_gap_present else None
+    max_gap_ms = max(max_gap_ms, poll_max_gap_ms or 0.0)
     # Unlike the retired static 1->2 footprint, the 3->4 cover TRACKS a moving
     # target every rAF (re-derived from the measured owner rect); a rAF stall
     # here leaves the cover behind the movie, not merely unobserved, so the gap
@@ -4469,16 +4487,19 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     stage_geometry_stable = bool(
         stage_at_arm and stage_at_trigger
         and all(
-            abs(float(stage_at_arm[k]) - float(stage_at_trigger[k])) <= STAGE_ORIGIN_TOL_PX
+            _finite(stage_at_arm.get(k)) is not None
+            and _finite(stage_at_trigger.get(k)) is not None
+            and abs(_finite(stage_at_arm.get(k)) - _finite(stage_at_trigger.get(k)))
+            <= STAGE_ORIGIN_TOL_PX
             for k in ("x", "y", "w", "h")
         )
     )
     stage_origin = nc.get("stageOrigin") or {}
     stage_origin_zero = bool(
-        stage_origin.get("x") is not None
-        and stage_origin.get("y") is not None
-        and abs(float(stage_origin["x"])) <= STAGE_ORIGIN_TOL_PX
-        and abs(float(stage_origin["y"])) <= STAGE_ORIGIN_TOL_PX
+        _finite(stage_origin.get("x")) is not None
+        and _finite(stage_origin.get("y")) is not None
+        and abs(_finite(stage_origin["x"])) <= STAGE_ORIGIN_TOL_PX
+        and abs(_finite(stage_origin["y"])) <= STAGE_ORIGIN_TOL_PX
     )
     all_cover = bool(raf_log) and all(r.get("elementFromPointIsCover") for r in raf_log)
 
@@ -4487,14 +4508,38 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # happens MID-CAPTURE, strictly before the first post-release settled sample
     # too, not just before the burst).
     last_at_cut = b.get("lastAtCutPerfMs")
-    first_settled = b.get("firstSettledPerfMs")
     burst_start = b.get("burstStartPerfMs")
+    # The split is the at-cut segment's upper bound, so an absent or out-of-range
+    # `releaseSplitIndex` is no bound at all; and the first post-split settled
+    # instant is RE-DERIVED here from the samples, never accepted as absent
+    # (review r9 MAJOR 3). The reported field must agree with the derivation.
+    split_valid = (
+        isinstance(release_split_index, int)
+        and not isinstance(release_split_index, bool)
+        and 0 <= release_split_index < len(index_samples)
+    )
+    settled_after_split = (
+        _slide4_settled_window(index_samples[release_split_index + 1:])
+        if split_valid else []
+    )
+    settled_perfs = [s.get("perfNowMs") for s in settled_after_split]
+    first_settled = (
+        min(settled_perfs)
+        if settled_perfs and all(
+            isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(float(t))
+            for t in settled_perfs
+        )
+        else None
+    )
     release_ordered = bool(
-        release_at is not None
+        split_valid
+        and release_at is not None
         and last_at_cut is not None
         and burst_start is not None
+        and first_settled is not None
+        and b.get("firstSettledPerfMs") == first_settled
         and last_at_cut < release_at
-        and (first_settled is None or release_at < first_settled)
+        and release_at < first_settled
         and release_at < burst_start
     )
 
@@ -4569,6 +4614,19 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     checks["firedAfterAdvance"] = bool(
         advance_key_at is not None and trigger_delay_ms is not None and trigger_delay_ms >= 0.0
     )
+    # The control's clock and the capture watch's must be the SAME EVENT, not two
+    # ArrowRights: the control now filters as the watch does, so a shared
+    # `timeStamp` identifies one trusted, non-repeat keydown, and anything the
+    # control rejected means another ArrowRight reached the page (review r9
+    # MAJOR 4). `atCutBoundaryValidAllArms` holds A1/A2 to the watch's own count.
+    nc_rejected = nc.get("advanceKeyRejected")
+    checks["advanceKeySameEventInControl"] = bool(
+        _finite(advance_key_at) is not None
+        and advance_key_at == b.get("advanceKeyPerfMs")
+        and isinstance(nc_rejected, int)
+        and not isinstance(nc_rejected, bool)
+        and nc_rejected == 0
+    )
     checks["noPreAdvanceDeparture"] = nc.get("preAdvanceDepartureAt") is None
     # Fails closed on a missing `drain` block: a queued press (one sent at the
     # self-advancing scene, or one that never landed) is replayed by the player
@@ -4627,8 +4685,12 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # not bracket would hand a capture its neighbours' owner/media rows (review r6
     # MAJOR 1). Same condition on all three arms -- a positive scored off a gapped
     # series is not comparable either.
+    # RE-DERIVED, not trusted: a cached `ok` is the capture side's claim, and the
+    # sweep showed every field it was computed from could be deleted with the
+    # cached verdict left standing (round 12).
     checks["collectorSeriesSound"] = all(
-        bool((s.get("collector") or {}).get("ok")) for s in (a1, b, a2)
+        bool((s.get("collector") or {}).get("ok")) and _collector_ok(s.get("collector") or {})
+        for s in (a1, b, a2)
     )
     # ...and the press-relative cut must exist before anything is scored against
     # it: no keydown page clock, or a keydown later than every badge frame, is an
@@ -4646,14 +4708,28 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # An EMPTY rAF series has no gap to exceed the ceiling, so the bound must not
     # be satisfiable by absence: a series with nothing to bracket is not a gap
     # measurement at all (plan §10.12).
-    checks["maxRafGapOk"] = bool(raf_ts) and max_gap_ms <= MAX_RAF_GAP_MS
+    checks["maxRafGapOk"] = (
+        bool(raf_ts) and poll_gap_present and max_gap_ms <= MAX_RAF_GAP_MS
+    )
 
     # --- Bracketing positives are GREEN ----------------------------------------
+    # B's at-cut run is re-derived from B's own samples above; the positives' was
+    # taken from the capture side's cached dict, so every sample field it rests on
+    # could be deleted and the bracket still passed (round 12 sweep). Re-derived
+    # here the same way, and required to AGREE with what the capture reported.
+    def _positive_run_ok(s: dict) -> bool:
+        run, _ = _moving_index_run_at_cut(
+            s.get("indexSamples") or [],
+            covered_until=s.get("releaseSplitIndex"),
+            covered_from=(s.get("atCutBoundary") or {}).get("from"),
+        )
+        return bool(run.get("ok")) and (s.get("movingIndexRunAtCut") or {}).get("ok") is True
+
     checks["positivesGreen"] = bool(
         a1.get("continueThroughMovingMagicMove3to4Pass")
         and a2.get("continueThroughMovingMagicMove3to4Pass")
-        and (a1.get("movingIndexRunAtCut") or {}).get("ok")
-        and (a2.get("movingIndexRunAtCut") or {}).get("ok")
+        and _positive_run_ok(a1)
+        and _positive_run_ok(a2)
     )
 
     # --- Isolation: every invariant sub-verdict GREEN and equal across A1/B/A2 --
@@ -4675,7 +4751,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
     # exactly as it does on "fail".
     integrity_keys = (
         "firedAtMoveStart", "firedAtRuntimeMotionStart", "firedAfterAdvance",
-        "noPreAdvanceDeparture", "drainPressesAllLanded", "advanceSinglePressAllArms",
+        "advanceKeySameEventInControl", "noPreAdvanceDeparture", "drainPressesAllLanded", "advanceSinglePressAllArms",
         "coverPaintedAtPresent",
         "stageGeometryStable", "stageOriginZero", "noControlError",
         "ownerReadyAtTrigger", "staleFrameFromPlayback", "paintedOnce", "coverPatchStable",
@@ -4727,6 +4803,7 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict) -> dict:
             "rehandoffPair": list(pair) if pair else None,
             "coveredPositions": covered_positions,
             "advanceKeyAt": advance_key_at,
+            "advanceKeyRejected": nc_rejected,
             "triggerDelayMs": trigger_delay_ms,
             "triggerFramesAfterAdvance": trigger_frames,
             "motionStartedFrame": motion_started_frame,
@@ -4830,8 +4907,8 @@ async def _run_freeze_bracket(
             rd = bdir / label
             rd.mkdir()
             chrome = ChromeCdp(CHROME, bdir / f"chrome-profile-{label}")
-            await chrome.start()
             try:
+                await chrome.start()
                 await _boot(chrome, base)
                 # The restart + 3->4 bridge boundaries are already in the continuity
                 # plan baked into this player_dir's index.html by the main run above.

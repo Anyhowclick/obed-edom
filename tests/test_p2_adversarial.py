@@ -946,8 +946,10 @@ def _build_snapshot_34(at_cut_indices, settled_indices, *, frozen: bool,
     settled_index_progression = p2.score_index_progression(list(settled_indices))
     settled = samples[FREEZE_SPLIT_INDEX_34 + 1:]
     # The advance keydown's own page clock, and the at-cut boundary derived from
-    # it by the REAL helper -- never a hand-set index (review r6 MAJOR 2).
-    advance_key_perf_ms = min(s["perfNowMs"] for s in samples)
+    # it by the REAL helper -- never a hand-set index (review r6 MAJOR 2). It is
+    # the SAME event instant the null control's own listener records, so the two
+    # clocks agree by construction in a clean capture (review r9 MAJOR 4).
+    advance_key_perf_ms = ADVANCE_KEY_AT_34
     at_cut_boundary = p2._at_cut_boundary(samples, advance_key_perf_ms)
     # A whole page-side collector series: every capture bracketed, nothing
     # dropped, no page-side error (review r6 MAJOR 1).
@@ -1064,7 +1066,8 @@ def _freeze_b_snap_34(at_cut=None, settled=None, covered_pre_flip=None, **overri
     snap["nullControl"] = {
         "status": "released", "holdStartedAt": HOLD_STARTED_AT_34, "firedVia": "moved",
         "coverPaintedAt": COVER_PAINTED_AT_34,
-        "advanceKeyAt": ADVANCE_KEY_AT_34, "triggerFramesAfterAdvance": 1,
+        "advanceKeyAt": ADVANCE_KEY_AT_34, "advanceKeyRejected": 0,
+        "triggerFramesAfterAdvance": 1,
         "motionStartedAt": HOLD_STARTED_AT_34, "motionStartedFrame": 1,
         # The COMPLETE first fresh marker the poll retained; the trigger's marker
         # must be the same one, for the 3->4 boundary (review r4 MAJOR 1).
@@ -2086,8 +2089,14 @@ def test_freeze_control_at_cut_boundary_zero_still_passes():
     """...while a LEGITIMATE `from == 0` -- the live schedule -- is admissible
     and the clean bracket still passes (no fail-closed overreach)."""
     a1, b, a2 = _positive_snap_34(), _freeze_b_snap_34(), _positive_snap_34()
+    # A keydown at or before the first capture: the whole series is at-cut. B's
+    # control listener saw the SAME event, so both clocks move together.
+    first_perf = min(s["perfNowMs"] for s in a1["indexSamples"])
     for snap in (a1, b, a2):
+        snap["advanceKeyPerfMs"] = first_perf
+        snap["atCutBoundary"] = p2._at_cut_boundary(snap["indexSamples"], first_perf)
         assert snap["atCutBoundary"]["from"] == 0 and snap["atCutBoundary"]["ok"] is True
+    b["nullControl"]["advanceKeyAt"] = first_perf
     verdict = p2._score_freeze_control(a1, b, a2)
     assert verdict["verdict"] == "pass", verdict["failed"]
 
@@ -4107,8 +4116,31 @@ def test_main_short_decode_count_is_not_green():
 # missing (the pre-emptive round-11 instruction).
 MAIN_ABSENCE_FIELDS = [
     "advance", "collector", "atCutBoundary", "advanceKeyEvents",
-    "advanceKeyRejected", "badge",
+    "advanceKeyRejected", "advanceKeyPerfMs", "badge",
 ]
+
+
+def test_main_advance_c_ok_refuses_an_absent_at_cut_boundary_from():
+    """r9 MAJOR 1: MAIN read the cached `atCutBoundary.ok` and never the
+    boundary's own `from`, so a boundary with no placeable first sample passed."""
+    meta, samples, settle, owner = _main_inputs()
+    meta = {**meta, "atCutBoundary": {k: v for k, v in meta["atCutBoundary"].items()
+                                      if k != "from"}}
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False
+
+
+@pytest.mark.parametrize("i", [-1, 10**6, True, None, 1.5])
+def test_main_advance_c_ok_refuses_an_out_of_range_boundary_from(i):
+    meta, samples, settle, owner = _main_inputs()
+    meta = {**meta, "atCutBoundary": {**meta["atCutBoundary"], "from": i}}
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False
+
+
+@pytest.mark.parametrize("key_ms", [None, True, float("nan"), float("inf"), "700"])
+def test_main_advance_c_ok_refuses_a_bad_advance_key_clock(key_ms):
+    meta, samples, settle, owner = _main_inputs()
+    meta = {**meta, "advanceKeyPerfMs": key_ms}
+    assert p2._advance_c_ok(meta, samples, settle, owner) is False
 
 
 @pytest.mark.parametrize("field", MAIN_ABSENCE_FIELDS)
@@ -4202,6 +4234,10 @@ _ABSENCE_CASES = [
     ("coverTracksFootprint", "b", ("nullControl", "rafLog", 0, "coverRect"), True),
     ("loopLive", "b", ("nullControl", "rafLog"), True),
     ("maxRafGapOk", "b", ("nullControl", "rafLog"), True),
+    ("maxRafGapOk", "b", ("nullControl", "pollMaxGapMs"), True),
+    ("advanceKeySameEventInControl", "b", ("nullControl", "advanceKeyAt"), True),
+    ("advanceKeySameEventInControl", "b", ("nullControl", "advanceKeyRejected"), True),
+    ("advanceKeySameEventInControl", "b", ("advanceKeyPerfMs",), True),
     ("everyInHoldStale", "b", ("nullControl", "coverPatchMean"), True),
     ("rehandoffPairSound", "b", ("badge", "stats"), True),
     ("ownerSettledAllArms", "a1", ("ownerSettle",), True),
@@ -4210,6 +4246,8 @@ _ABSENCE_CASES = [
     ("releaseStrictlyBeforeSettleAndBurst", "b", ("nullControl", "releaseAt"), True),
     ("releaseStrictlyBeforeSettleAndBurst", "b", ("lastAtCutPerfMs",), True),
     ("releaseStrictlyBeforeSettleAndBurst", "b", ("burstStartPerfMs",), True),
+    ("releaseStrictlyBeforeSettleAndBurst", "b", ("releaseSplitIndex",), True),
+    ("releaseStrictlyBeforeSettleAndBurst", "b", ("firstSettledPerfMs",), True),
     ("collectorSeriesSound", "a1", ("collector",), True),
     ("collectorSeriesSound", "b", ("collector",), True),
     ("collectorSeriesSound", "a2", ("collector",), True),
@@ -4264,6 +4302,541 @@ def test_no_integrity_key_can_be_satisfied_by_absence(key, arm, path, key_must_f
         assert key in verdict["integrityFailed"], where
 
 
+# --------------------------------------------------------------------------- #
+# Round 12 (review r9 MAJOR 2/3/4): the values, not only the absences.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("gap", [None, True, False, -1.0, float("nan"), float("inf"), "17"])
+def test_freeze_control_poll_gap_must_be_a_real_measurement(gap):
+    """r9 MAJOR 2: a missing/degenerate pre-trigger gap used to read as 0.0, so a
+    short, clean hold series carried `maxRafGapOk` with no pre-trigger evidence."""
+    b = _freeze_b_snap_34()
+    b["nullControl"]["pollMaxGapMs"] = gap
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "maxRafGapOk" in verdict["integrityFailed"], gap
+
+
+@pytest.mark.parametrize("split", [None, True, -1, 10**6, 1.5, "6"])
+def test_freeze_control_release_split_index_must_be_in_range(split):
+    """r9 MAJOR 3: without a valid split there is no at-cut upper bound at all."""
+    b = _freeze_b_snap_34()
+    b["releaseSplitIndex"] = split
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert verdict["verdict"] == "inconclusive"
+    assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"], split
+
+
+def test_freeze_control_first_settled_is_derived_not_trusted():
+    """r9 MAJOR 3: the reported `firstSettledPerfMs` must agree with the instant
+    re-derived from the post-split settled samples, and a post-split sample with
+    no page clock leaves nothing to derive."""
+    b = _freeze_b_snap_34()
+    b["firstSettledPerfMs"] = b["firstSettledPerfMs"] - 500.0
+    verdict = p2._score_freeze_control(_positive_snap_34(), b, _positive_snap_34())
+    assert "releaseStrictlyBeforeSettleAndBurst" in verdict["integrityFailed"]
+
+    b2 = _freeze_b_snap_34()
+    post = FREEZE_SPLIT_INDEX_34 + 1
+    b2 = _with_sample(b2, post, perfNowMs=None)
+    verdict2 = p2._score_freeze_control(_positive_snap_34(), b2, _positive_snap_34())
+    assert verdict2["verdict"] == "inconclusive"
+    assert "releaseStrictlyBeforeSettleAndBurst" in verdict2["integrityFailed"]
+
+
+def test_freeze_control_null_controller_clock_must_be_the_watched_event():
+    """r9 MAJOR 4, the three shapes. A SYNTHETIC ArrowRight landing shortly
+    BEFORE the real one used to seed the controller's clock while the capture
+    watch (which filters) timed the trusted event; a REPEAT did the same; and
+    nothing tied the two clocks together at all."""
+    pre = _freeze_b_snap_34()
+    pre["nullControl"]["advanceKeyAt"] = ADVANCE_KEY_AT_34 - 5.0
+    v_pre = p2._score_freeze_control(_positive_snap_34(), pre, _positive_snap_34())
+    assert v_pre["verdict"] == "inconclusive"
+    assert "advanceKeySameEventInControl" in v_pre["integrityFailed"]
+
+    rep = _freeze_b_snap_34()
+    rep["nullControl"]["advanceKeyRejected"] = 1
+    v_rep = p2._score_freeze_control(_positive_snap_34(), rep, _positive_snap_34())
+    assert v_rep["verdict"] == "inconclusive"
+    assert "advanceKeySameEventInControl" in v_rep["integrityFailed"]
+
+    mism = _freeze_b_snap_34()
+    mism["advanceKeyPerfMs"] = ADVANCE_KEY_AT_34 + 0.4
+    v_mis = p2._score_freeze_control(_positive_snap_34(), mism, _positive_snap_34())
+    assert v_mis["verdict"] == "inconclusive"
+    assert "advanceKeySameEventInControl" in v_mis["integrityFailed"]
+
+
+def test_null_controller_keydown_filter_matches_the_capture_watch():
+    """r9 MAJOR 4 in the page source: the controller must apply the watch's own
+    trust/repeat/type/key filter, record the EVENT's `timeStamp`, and count what
+    it rejected -- the two listeners are only comparable if they agree."""
+    import inspect
+    body = inspect.getsource(p2)
+    fn = body[body.index("function onAdvanceKey"):]
+    fn = fn[: fn.index("\n  }") + 4]
+    for needle in (
+        "e.type !== 'keydown'", "e.key !== 'ArrowRight'", "e.isTrusted !== true",
+        "e.repeat === true", "st.advanceKeyRejected += 1", "st.advanceKeyAt = e.timeStamp",
+    ):
+        assert needle in fn, needle
+    assert "performance.now()" not in fn
+
+
+# --------------------------------------------------------------------------- #
+# EXHAUSTIVE absence sweep (round 12, replacing the hand-picked round-11 one).
+# Every LEAF of the clean pass-capable bracket -- all three arms, nested dicts,
+# every dict inside every list -- is deleted in turn and the verdict must fall
+# to INCONCLUSIVE. Anything that may survive its own deletion is named below
+# with a reason; that allowlist IS the argument, so every entry is one line and
+# `test_bracket_sweep_allowlist_has_no_dead_entries` refuses a stale one.
+#
+# Reason classes:
+#  * report-only  -- carried into the report/forensics, scored by nothing.
+#  * redundant    -- a duplicate view of a field gated elsewhere in the snapshot.
+#  * provenance   -- an input the PAGE used to compute a sub-verdict the scorer
+#                    either re-derives itself or reads only as `ok`.
+#  * negative     -- the key ASSERTS absence (`is None` / `is False`), so
+#                    deleting that field cannot flip it; its PRESENCE is what
+#                    the key tests, and those cases live in `_ABSENCE_CASES`.
+# --------------------------------------------------------------------------- #
+_SWEEP_ALLOW: dict[tuple[str, tuple], str] = {
+    ("b", ('advance', 'finalHash')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("b", ('advance', 'outstandingAtEnd')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("b", ('advance', 'pressHash')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("b", ('advance', 'pressesLanded')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("b", ('advance', 'pressesSent')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("b", ('advance', 'pressingStopped')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("b", ('advance', 'unlandedFromHash')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("b", ('armHash',)): "report-only: drain.hashAtArmExact is the gated arm-hash evidence",
+    ("b", ('armResult', 'armedElId')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'armedHash')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'armedOwnerRect', 'h')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'armedOwnerRect', 'w')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'armedOwnerRect', 'x')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'armedOwnerRect', 'y')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'stageOrigin', 'x')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'stageOrigin', 'y')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'stageRectAtArm', 'h')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'stageRectAtArm', 'w')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'stageRectAtArm', 'x')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('armResult', 'stageRectAtArm', 'y')): "report-only: nullControl carries the gated copies of the arm geometry",
+    ("b", ('atCutBoundary', 'reason')): "report-only: the boundary's reason string",
+    ("b", ('atCutFrom',)): "redundant: a view of atCutBoundary.from, gated there",
+    ("b", ('badge', 'counts', 'measured')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("b", ('badge', 'counts', 'modelled')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("b", ('badge', 'counts', 'none')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("b", ('badge', 'counts', 'unlogged')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("b", ('badge', 'counts', 'unstable')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("b", ('badge', 'scale')): "report-only: badge geometry diagnostic",
+    ("b", ('bridgeEvents',)): "report-only: bridgeEngaged is the gated form",
+    ("b", ('burstStartOffsetS',)): "report-only: the perfMs form is what is ordered",
+    ("b", ('captureOffsets',)): "report-only: wall offsets; the perfMs clock is what is ordered",
+    ("b", ('collector', 'firstT')): "provenance of the collector series; the scorer RE-DERIVES _collector_ok",
+    ("b", ('collector', 'lastT')): "provenance of the collector series; the scorer RE-DERIVES _collector_ok",
+    ("b", ('continueThroughMovingMagicMove3to4Pass',)): "negative in B: the freeze is what turns it red",
+    ("b", ('drain', 'hashAtArm')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("b", ('drain', 'ok')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("b", ('drain', 'pressesLanded')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("b", ('drain', 'pressesSent')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("b", ('drain', 'selfAdvanceHash')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("b", ('drain', 'unlandedFromHash')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("b", ('firstSettledOffsetS',)): "report-only: the perfMs form is what is ordered",
+    ("b", ('flipWindowDecodable',)): "redundant: the scorer RE-DERIVES it from the samples",
+    ("b", ('footprintSources',)): "redundant: a view of indexSamples[*].footprintSource",
+    ("b", ('hash3',)): "report-only: the recorded scene hashes are narrative",
+    ("b", ('hash4',)): "report-only: the recorded scene hashes are narrative",
+    ("b", ('indexSamples', 'captureOffsetS')): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
+    ("b", ('indexSequence',)): "redundant: a view of indexSamples[*].index",
+    ("b", ('lastAtCutHoldOffsetS',)): "report-only: the perfMs form is what is ordered",
+    ("b", ('movingContinuity3to4', 'boundaryValid', 'n3')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("b", ('movingContinuity3to4', 'boundaryValid', 'n4')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("b", ('movingContinuity3to4', 'boundaryValid', 'slide4Min')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("b", ('movingContinuity3to4', 'slide3MovieDecoder')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("b", ('movingContinuity3to4', 'slide4Owner')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("b", ('movingIndexRunAtCut', 'firstIndex')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'flipIndex')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'flipIndexFull')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'freezeRunAtCut')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'freezeRunBaseline')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'lastIndex')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'n')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'negativeAnomaly')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'ok')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'reason')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'totalProgressAfter')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('movingIndexRunAtCut', 'totalProgressBefore')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("b", ('nullControl', 'armedElId')): "report-only: boundDecoderId is the gated identity",
+    ("b", ('nullControl', 'armedOwnerRect', 'h')): "report-only: the MEASURED departure, not the armed rect, is gated",
+    ("b", ('nullControl', 'armedOwnerRect', 'w')): "report-only: the MEASURED departure, not the armed rect, is gated",
+    ("b", ('nullControl', 'armedOwnerRect', 'x')): "report-only: the MEASURED departure, not the armed rect, is gated",
+    ("b", ('nullControl', 'armedOwnerRect', 'y')): "report-only: the MEASURED departure, not the armed rect, is gated",
+    ("b", ('nullControl', 'error')): "negative: green IS absence (noControlError)",
+    ("b", ('nullControl', 'fellBackToArmOwner')): "report-only: noOwnerAmbiguousInWindow gates the binding",
+    ("b", ('nullControl', 'loopHandedOff')): "report-only: the hand-off is proved by the rafLog itself",
+    ("b", ('nullControl', 'motionStartedAt')): "redundant: motionStartedMarker.started is the gated instant",
+    ("b", ('nullControl', 'movedFromRect', 'h')): "report-only: firedVia is the gated form of the departure",
+    ("b", ('nullControl', 'movedFromRect', 'w')): "report-only: firedVia is the gated form of the departure",
+    ("b", ('nullControl', 'movedFromRect', 'x')): "report-only: firedVia is the gated form of the departure",
+    ("b", ('nullControl', 'movedFromRect', 'y')): "report-only: firedVia is the gated form of the departure",
+    ("b", ('nullControl', 'movedToRect', 'h')): "report-only: firedVia is the gated form of the departure",
+    ("b", ('nullControl', 'movedToRect', 'w')): "report-only: firedVia is the gated form of the departure",
+    ("b", ('nullControl', 'movedToRect', 'x')): "report-only: firedVia is the gated form of the departure",
+    ("b", ('nullControl', 'movedToRect', 'y')): "report-only: firedVia is the gated form of the departure",
+    ("b", ('nullControl', 'preAdvanceDepartureAt')): "negative: green IS absence (noPreAdvanceDeparture)",
+    ("b", ('nullControl', 'preAdvanceDepartureRect')): "negative: forensics for noPreAdvanceDeparture",
+    ("b", ('nullControl', 'rafLog', 't')): "one frame with no clock widens the gap it sits in; the bound still applies",
+    ("b", ('nullControl', 'staleIndexExpected')): "report-only: superseded by coverPatchMean",
+    ("b", ('ownerSettle', 'rect', 'h')): "provenance; `settled` is the gated key",
+    ("b", ('ownerSettle', 'rect', 'w')): "provenance; `settled` is the gated key",
+    ("b", ('ownerSettle', 'rect', 'x')): "provenance; `settled` is the gated key",
+    ("b", ('ownerSettle', 'rect', 'y')): "provenance; `settled` is the gated key",
+    ("b", ('ownerSettle', 'required')): "provenance; `settled` is the gated key",
+    ("b", ('ownerSettle', 'stableReadings')): "provenance; `settled` is the gated key",
+    ("b", ('releaseOffsetS',)): "report-only: the perfMs form is what is ordered",
+    ("b", ('releasePerfMs',)): "redundant: nullControl.releaseAt is the gated release clock",
+    ("b", ('settledIndexProgression', 'decodableFrac')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'firstIndex')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'implausibleStep')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'lastIndex')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'longestStallRun')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'n')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'nDecodable')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'nDistinct')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'reason')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("b", ('settledIndexProgression', 'totalForward')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('advance', 'finalHash')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("positive", ('advance', 'outstandingAtEnd')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("positive", ('advance', 'pressHash')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("positive", ('advance', 'pressesLanded')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("positive", ('advance', 'pressesSent')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("positive", ('advance', 'pressingStopped')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("positive", ('advance', 'unlandedFromHash')): "provenance of the page-side advance gate; its `ok` is gated, its inputs are not in the snapshot",
+    ("positive", ('armHash',)): "report-only: drain.hashAtArmExact is the gated arm-hash evidence",
+    ("positive", ('armResult', 'armedElId')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'armedHash')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'armedOwnerRect', 'h')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'armedOwnerRect', 'w')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'armedOwnerRect', 'x')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'armedOwnerRect', 'y')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'ok')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'stageOrigin', 'x')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'stageOrigin', 'y')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'stageRectAtArm', 'h')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'stageRectAtArm', 'w')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'stageRectAtArm', 'x')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('armResult', 'stageRectAtArm', 'y')): "report-only in a positive arm: only B arms the control",
+    ("positive", ('atCutBoundary', 'reason')): "report-only: the boundary's reason string",
+    ("positive", ('atCutFrom',)): "redundant: a view of atCutBoundary.from, gated there",
+    ("positive", ('badge', 'counts', 'measured')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("positive", ('badge', 'counts', 'modelled')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("positive", ('badge', 'counts', 'none')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("positive", ('badge', 'counts', 'unlogged')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("positive", ('badge', 'counts', 'unstable')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    ("positive", ('badge', 'scale')): "report-only: badge geometry diagnostic",
+    ("positive", ('badge', 'stats', 'motionStartedAt')): "report-only in a positive arm: only B's re-handoff pair is scored",
+    ("positive", ('badge', 'stats', 'rehandoffSeqs')): "report-only in a positive arm: only B's re-handoff pair is scored",
+    ("positive", ('badge', 'stats', 'rehandoffs')): "report-only in a positive arm: only B's re-handoff pair is scored",
+    ("positive", ('bridgeEvents',)): "report-only: bridgeEngaged is the gated form",
+    ("positive", ('burstStartOffsetS',)): "report-only: the perfMs form is what is ordered",
+    ("positive", ('burstStartPerfMs',)): "report-only in a positive arm: only B's release is ordered",
+    ("positive", ('captureOffsets',)): "report-only: wall offsets; the perfMs clock is what is ordered",
+    ("positive", ('collector', 'firstT')): "provenance of the collector series; the scorer RE-DERIVES _collector_ok",
+    ("positive", ('collector', 'lastT')): "provenance of the collector series; the scorer RE-DERIVES _collector_ok",
+    ("positive", ('drain', 'hashAtArm')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("positive", ('drain', 'ok')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("positive", ('drain', 'pressesLanded')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("positive", ('drain', 'pressesSent')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("positive", ('drain', 'selfAdvanceHash')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("positive", ('drain', 'unlandedFromHash')): "provenance of the drain gate; allPressesLanded/hashAtArmExact are the gated keys",
+    ("positive", ('firstSettledOffsetS',)): "report-only: the perfMs form is what is ordered",
+    ("positive", ('firstSettledPerfMs',)): "report-only in a positive arm: only B's release is ordered",
+    ("positive", ('flipWindowDecodable',)): "redundant: the scorer RE-DERIVES it from the samples",
+    ("positive", ('footprintSources',)): "redundant: a view of indexSamples[*].footprintSource",
+    ("positive", ('hash3',)): "report-only: the recorded scene hashes are narrative",
+    ("positive", ('hash4',)): "report-only: the recorded scene hashes are narrative",
+    ("positive", ('indexSamples', 'badgeSeq')): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
+    ("positive", ('indexSamples', 'captureOffsetS')): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
+    ("positive", ('indexSamples', 'perfNowMs')): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
+    ("positive", ('indexSamples', 'progress')): "report-only in a positive arm: the positives' run is re-derived from index/hash/progress only",
+    ("positive", ('indexSequence',)): "redundant: a view of indexSamples[*].index",
+    ("positive", ('lastAtCutHoldOffsetS',)): "report-only: the perfMs form is what is ordered",
+    ("positive", ('lastAtCutPerfMs',)): "report-only in a positive arm: only B's release is ordered",
+    ("positive", ('movingContinuity3to4', 'boundaryValid', 'n3')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("positive", ('movingContinuity3to4', 'boundaryValid', 'n4')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("positive", ('movingContinuity3to4', 'boundaryValid', 'slide4Min')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("positive", ('movingContinuity3to4', 'rvfcMonotonic', 'advance')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("positive", ('movingContinuity3to4', 'slide3MovieDecoder')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("positive", ('movingContinuity3to4', 'slide4Owner')): "provenance of movingContinuity3to4.ok, the gated key",
+    ("positive", ('movingIndexRunAtCut', 'firstIndex')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'flipIndex')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'flipIndexFull')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'freezeRunAtCut')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'freezeRunBaseline')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'lastIndex')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'n')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'negativeAnomaly')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'reason')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'totalProgressAfter')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('movingIndexRunAtCut', 'totalProgressBefore')): "redundant: the scorer RE-DERIVES the at-cut run from the samples",
+    ("positive", ('nullControl',)): "expected: a positive arm carries no null control",
+    ("positive", ('ownerDecoderId',)): "report-only in a positive arm: only B's is bound to the control",
+    ("positive", ('ownerSettle', 'rect', 'h')): "provenance; `settled` is the gated key",
+    ("positive", ('ownerSettle', 'rect', 'w')): "provenance; `settled` is the gated key",
+    ("positive", ('ownerSettle', 'rect', 'x')): "provenance; `settled` is the gated key",
+    ("positive", ('ownerSettle', 'rect', 'y')): "provenance; `settled` is the gated key",
+    ("positive", ('ownerSettle', 'required')): "provenance; `settled` is the gated key",
+    ("positive", ('ownerSettle', 'stableReadings')): "provenance; `settled` is the gated key",
+    ("positive", ('releaseOffsetS',)): "report-only: the perfMs form is what is ordered",
+    ("positive", ('releasePerfMs',)): "redundant: nullControl.releaseAt is the gated release clock",
+    ("positive", ('releaseSplitIndex',)): "report-only in a positive arm: only B's split bounds a hold",
+    ("positive", ('settledIndexProgression', 'decodableFrac')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'firstIndex')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'implausibleStep')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'lastIndex')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'longestStallRun')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'n')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'nDecodable')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'nDistinct')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'reason')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+    ("positive", ('settledIndexProgression', 'totalForward')): "provenance of a pre-scored sub-verdict; its `ok` is the isolation key",
+}
+
+# The same accounting for MAIN's `_advance_c_ok` input.
+_MAIN_SWEEP_ALLOW: dict[tuple, str] = {
+    (('advance', 'finalHash')): "provenance of the page-side advance gate; its `ok` is gated",
+    (('advance', 'outstandingAtEnd')): "provenance of the page-side advance gate; its `ok` is gated",
+    (('advance', 'pressHash')): "provenance of the page-side advance gate; its `ok` is gated",
+    (('advance', 'pressesLanded')): "provenance of the page-side advance gate; its `ok` is gated",
+    (('advance', 'pressesSent')): "provenance of the page-side advance gate; its `ok` is gated",
+    (('advance', 'pressingStopped')): "provenance of the page-side advance gate; its `ok` is gated",
+    (('advance', 'unlandedFromHash')): "provenance of the page-side advance gate; its `ok` is gated",
+    (('armHash',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'armedElId')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'armedHash')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'armedOwnerRect', 'h')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'armedOwnerRect', 'w')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'armedOwnerRect', 'x')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'armedOwnerRect', 'y')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'stageOrigin', 'x')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'stageOrigin', 'y')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'stageRectAtArm', 'h')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'stageRectAtArm', 'w')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'stageRectAtArm', 'x')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('armResult', 'stageRectAtArm', 'y')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('atCutBoundary', 'reason')): "report-only: the boundary's reason string",
+    (('atCutFrom',)): "redundant: a view of atCutBoundary.from, gated there",
+    (('badge', 'counts', 'measured')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    (('badge', 'counts', 'modelled')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    (('badge', 'counts', 'none')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    (('badge', 'counts', 'unlogged')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    (('badge', 'counts', 'unstable')): "report-only count: seqViolation is gated, per-sample truth by footprintSource",
+    (('badge', 'scale')): "report-only: badge geometry diagnostic",
+    (('badge', 'stats', 'motionStartedAt')): "report-only: MAIN has no re-handoff to exempt",
+    (('badge', 'stats', 'rehandoffSeqs')): "report-only: MAIN has no re-handoff to exempt",
+    (('badge', 'stats', 'rehandoffs')): "report-only: MAIN has no re-handoff to exempt",
+    (('bridgeEngaged',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('bridgeEvents',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('burstStartOffsetS',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('burstStartPerfMs',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('captureOffsets',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('collector', 'dropped')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('collector', 'errors')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('collector', 'firstT')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('collector', 'lastT')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('collector', 'monotonicOk')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('collector', 'rowCount')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('collector', 'samples')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('collector', 'schemaOk')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('collector', 'unbracketed')): "provenance of the collector series; MAIN reads the page's `ok`",
+    (('continueThroughMovingMagicMove3to4Pass',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('drain', 'allPressesLanded')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('drain', 'hashAtArm')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('drain', 'hashAtArmExact')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('drain', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('drain', 'pressesLanded')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('drain', 'pressesSent')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('drain', 'selfAdvanceHash')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('drain', 'unlandedFromHash')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('firstSettledOffsetS',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('firstSettledPerfMs',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('flipWindowDecodable',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('footprintFullyLive', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('footprintSources',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('hash3',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('hash4',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('indexSamples', 'badgeSeq')): "outside the scored settled window in every sample: MAIN gates that window only",
+    (('indexSamples', 'captureOffsetS')): "outside the scored settled window in every sample: MAIN gates that window only",
+    (('indexSamples', 'index')): "outside the scored settled window in every sample: MAIN gates that window only",
+    (('indexSamples', 'perfNowMs')): "outside the scored settled window in every sample: MAIN gates that window only",
+    (('indexSamples', 'progress')): "outside the scored settled window in every sample: MAIN gates that window only",
+    (('indexSamples', 'sceneHash')): "outside the scored settled window in every sample: MAIN gates that window only",
+    (('indexSequence',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('lastAtCutHoldOffsetS',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('lastAtCutPerfMs',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'boundaryValid', 'n3')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'boundaryValid', 'n4')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'boundaryValid', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'boundaryValid', 'slide4Min')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'crossingIdentity', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'failed')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'rvfcMonotonic', 'advance')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'rvfcMonotonic', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'slide3MovieDecoder')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'slide4Owner')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingContinuity3to4', 'stableSlide4Owner', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'firstIndex')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'flipIndex')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'flipIndexFull')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'freezeRunAtCut')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'freezeRunBaseline')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'lastIndex')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'n')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'negativeAnomaly')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'reason')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'totalProgressAfter')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('movingIndexRunAtCut', 'totalProgressBefore')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('nullControl',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('ownerDecoderId',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('ownerSettle', 'rect', 'h')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)",
+    (('ownerSettle', 'rect', 'w')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)",
+    (('ownerSettle', 'rect', 'x')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)",
+    (('ownerSettle', 'rect', 'y')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)",
+    (('ownerSettle', 'required')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)",
+    (('ownerSettle', 'settled')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)",
+    (('ownerSettle', 'stableReadings')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only (the settle dict is passed in separately)",
+    (('playerBuildErrors',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('releaseOffsetS',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('releasePerfMs',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('releaseSplitIndex',)): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'decodableFrac')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'firstIndex')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'implausibleStep')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'lastIndex')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'longestStallRun')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'n')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'nDecodable')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'nDistinct')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'ok')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'reason')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+    (('settledIndexProgression', 'totalForward')): "not read by `_advance_c_ok`: MAIN scores advance/settle/collector/boundary/badge/window only",
+}
+
+
+def _leaf_paths(node, prefix=()):
+    """Every leaf of a snapshot: scalars, empty containers, and the leaves of
+    every dict inside every list. A non-empty list is itself a leaf too (its
+    deletion must be refused)."""
+    if isinstance(node, dict):
+        if not node:
+            yield prefix
+            return
+        for k, v in node.items():
+            yield from _leaf_paths(v, prefix + (k,))
+    elif isinstance(node, list):
+        yield prefix
+        for i, v in enumerate(node):
+            if isinstance(v, dict):
+                yield from _leaf_paths(v, prefix + (i,))
+    else:
+        yield prefix
+
+
+def _sweep_key(path: tuple) -> tuple:
+    """List indices collapse: `rafLog[0].t` and `rafLog[40].t` are one question.
+    A field counts as GATED when deleting it from ANY element fails the verdict
+    closed -- a sample outside the scored window is not an absence hole."""
+    return tuple(x for x in path if not isinstance(x, int))
+
+
+def _bracket_sweep() -> dict:
+    """(arm class, collapsed path) -> did EVERY deletion keep a verdict?"""
+    out: dict = {}
+    for arm, cls in (("a1", "positive"), ("b", "b")):
+        for path in list(_leaf_paths(
+            _positive_snap_34() if arm == "a1" else _freeze_b_snap_34()
+        )):
+            if not path:
+                continue
+            snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(),
+                     "a2": _positive_snap_34()}
+            _drop(snaps[arm], *path)
+            closed = p2._score_freeze_control(
+                snaps["a1"], snaps["b"], snaps["a2"]
+            )["verdict"] == "inconclusive"
+            k = (cls, _sweep_key(path))
+            out[k] = out.get(k, False) or closed
+    return out
+
+
+def test_bracket_absence_sweep_is_exhaustive():
+    """Walk EVERY leaf of the clean pass-capable bracket, delete it, and require
+    INCONCLUSIVE. Anything that survives must be on `_SWEEP_ALLOW` with a reason
+    (round 12; the round-11 sweep was hand-picked per key and missed fields).
+    A1 and A2 are the same fixture, so the positive arm is walked once."""
+    assert p2._score_freeze_control(
+        _positive_snap_34(), _freeze_b_snap_34(), _positive_snap_34()
+    )["verdict"] == "pass"
+    swept = _bracket_sweep()
+    assert len(swept) > 300, f"the walk collapsed to {len(swept)} fields"
+    survivors = sorted(k for k, closed in swept.items() if not closed)
+    assert [k for k in survivors if k not in _SWEEP_ALLOW] == [], (
+        f"leaves whose deletion kept a verdict: "
+        f"{[k for k in survivors if k not in _SWEEP_ALLOW]}"
+    )
+
+
+def test_bracket_sweep_allowlist_has_no_dead_entries():
+    """A stale excuse is worse than none: every allowlist entry must still be
+    survivable, or a reader trusts a reason for a field that is now gated."""
+    swept = _bracket_sweep()
+    survivors = {k for k, closed in swept.items() if not closed}
+    assert set(_SWEEP_ALLOW) - survivors == set(), (
+        f"allowlist entries that are already gated: {set(_SWEEP_ALLOW) - survivors}"
+    )
+    assert all(v.strip() for v in _SWEEP_ALLOW.values()), "an allowlist entry has no reason"
+
+
+def _main_sweep() -> dict:
+    settle, owner = {"exact": True}, {"settled": True}
+    out: dict = {}
+    for path in list(_leaf_paths(_main_inputs()[0])):
+        if not path:
+            continue
+        snap = _main_inputs()[0]
+        _drop(snap, *path)
+        closed = p2._advance_c_ok(
+            snap, snap.get("indexSamples") or [], settle, owner
+        ) is False
+        k = _sweep_key(path)
+        out[k] = out.get(k, False) or closed
+    return out
+
+
+def test_main_absence_sweep_is_exhaustive():
+    """The same exhaustive walk over MAIN's `_advance_c_ok` input."""
+    meta, samples, settle, owner = _main_inputs()
+    assert p2._advance_c_ok(meta, samples, settle, owner) is True
+    swept = _main_sweep()
+    assert len(swept) > 100, f"the walk collapsed to {len(swept)} fields"
+    survivors = sorted(k for k, closed in swept.items() if not closed)
+    assert [k for k in survivors if k not in _MAIN_SWEEP_ALLOW] == [], (
+        f"MAIN leaves whose deletion kept the gate green: "
+        f"{[k for k in survivors if k not in _MAIN_SWEEP_ALLOW]}"
+    )
+
+
+def test_main_sweep_allowlist_has_no_dead_entries():
+    swept = _main_sweep()
+    survivors = {k for k, closed in swept.items() if not closed}
+    assert set(_MAIN_SWEEP_ALLOW) - survivors == set(), (
+        f"allowlist entries that are already gated: {set(_MAIN_SWEEP_ALLOW) - survivors}"
+    )
+
+
 def test_absence_sweep_covers_every_integrity_key():
     """The sweep is only worth what it covers: assert it names EVERY integrity
     key the scorer scores, so a future key cannot be added without a case."""
@@ -4275,3 +4848,39 @@ def test_absence_sweep_covers_every_integrity_key():
     covered = {case[0] for case in _ABSENCE_CASES}
     assert scored - covered == set(), f"integrity keys with no absence case: {scored - covered}"
     assert covered - scored == set(), f"absence cases for non-keys: {covered - scored}"
+
+
+# --------------------------------------------------------------------------- #
+# Chrome lifecycle: a spawned browser the driver never attached to is an ORPHAN
+# (observed live: a `chrome-profile-a2` headless Chrome outliving its run by
+# 36 minutes, parent launchd, holding the machine while the next round tried to
+# measure trigger latency on it).
+# --------------------------------------------------------------------------- #
+def test_chrome_start_kills_its_process_when_the_attach_fails(tmp_path, monkeypatch):
+    """`/usr/bin/yes` stays alive under Chrome's argv and never opens a CDP port,
+    so `start()` must fail AND leave no process behind."""
+    import subprocess
+    from pathlib import Path
+
+    import p2_alpha_spike as spike
+
+    monkeypatch.setattr(spike.ChromeCdp, "START_TIMEOUT_S", 0.3)
+    c = spike.ChromeCdp(Path("/usr/bin/yes"), tmp_path / "profile")
+    with pytest.raises(RuntimeError):
+        asyncio.run(c.start())
+    assert c.proc is not None
+    assert c.proc.poll() is not None, "Chrome survived a failed start()"
+    assert isinstance(c.proc, subprocess.Popen)
+
+
+def test_freeze_bracket_starts_chrome_inside_its_try():
+    """The per-arm `close()` must cover `start()` too: starting outside the try
+    leaks exactly the arm's Chrome when the attach fails."""
+    import inspect
+
+    src = inspect.getsource(p2._run_freeze_bracket)
+    body = src[src.index("chrome = ChromeCdp("):]
+    body = body[: body.index("finally:")]
+    assert body.index("try:") < body.index("await chrome.start()"), (
+        "chrome.start() runs outside the try that closes it"
+    )
