@@ -131,3 +131,96 @@ queues a press it cannot honour and replays it at `#7`, starting the real 3→4 
 (2026-09-21): hold A1/A2 to the drain check; couple the rect read to the capture in ONE in-page rAF and keep the "every
 in-hold sample" rule; re-measure `FREEZE_TRIGGER_MAX_RAFS` on ≥10 clean runs (worst + 1); apply the same one-press
 discipline to `_advance_to_slide4_capture` on the main gate path, then a full gate round.
+
+## 10. Measurements (rounds 4–7)
+Every number that used to live in a code comment lands here; the code keeps only the behavioural
+invariant and a pointer to this section. Re-measure whenever the capture loop's per-frame cost
+changes — all of the trigger bounds track the HARNESS, not the player alone.
+
+### 10.1 `FREEZE_TRIGGER_MAX_RAFS = 9` — delivered poll frames, advance keydown → rect departure
+Re-measured 2026-09-21 on 10 CLEAN freeze-arm runs (drain 5/5 landed, hash `#7` exact,
+`firedVia == "moved"`, one press sent and landed): the departure landed on delivered poll frame 8 in
+10/10 runs, at 157.8–173.4 ms after the in-page keydown, with a 17.1–17.7 ms rAF period. Not bimodal,
+no outlier. Worst observation 8 plus one frame of margin ⇒ **9**.
+The previous value of 3 was calibrated on runs CONTAMINATED by queued presses (the capture re-pressed
+ArrowRight every 0.9 s through the move, so the move began at a replayed press, not at the one the
+listener timed). The count is not a property of the player: it is delivered POLL frames, so it
+absorbs how much the harness does per frame — 3–4 contaminated, 6–7 with the press fixed, 8 with the
+footprint badge running.
+A wall-clock-only ceiling is not defensible on its own: `keepThroughBridge` interpolates LINEARLY
+(`src/obed_edom/live_continuity_js.py` ~L687) over 952→1266 px in `TRANS_S`, so the rect departs by
+>1 px within ~5 ms.
+
+### 10.2 `FREEZE_TRIGGER_MAX_DELAY_MS = 195.0` — page-clock keydown → trigger ceiling
+The secondary bound for the defect a frame count CANNOT see: nine delivered poll frames can hide
+unbounded elapsed time, because a keydown→rAF stall advances the runtime's time-based interpolation
+deep into the move before poll frame 1 is ever delivered, and `maxRafGapOk` only starts at the trigger.
+Measured 2026-09-21 on 11 CLEAN freeze-arm runs (as above, final `#9`): the keydown→trigger delay ran
+158.8–175.5 ms (median 165.7) on delivered poll frame 8 in 11/11, with a 16.9–17.4 ms rAF period.
+Unimodal, no outlier. Worst observation plus one frame: 175.5 + 17.4 = 192.9 ⇒ **195**.
+
+### 10.3 `FREEZE_TRIGGER_MOTION_SLACK_FRAMES = 2`
+`keepThroughBridge` creates `__obedMotion` inside its first SYNCHRONOUS `frame()`, which runs in a
+task, so the poll can see the marker on the same frame it first sees the rect move, or one frame
+earlier. Two callbacks of slack covers both. Round 7 adds marker IDENTITY on top of proximity
+(§10.7), because proximity alone accepts a marker for another boundary or generation.
+
+### 10.4 `INDEX_PATCH_TOP_GUARD_PX = 2` (src)
+The x mapping carries a +2 inset; the y mapping carries none, so the ROI's first row sits exactly on
+the footprint's own top edge. Harmless for a static integral rect; not for a live
+`getBoundingClientRect()` reading, whose y is fractional, is badge-quantised to 0.5, and which
+`round()` sends to the EVEN integer — i.e. down, onto the movie's antialiased top edge row, which is
+not flat, so the patch decodes None. Measured on the round-5 3→4 brackets: 3 of 260 captured samples
+decoded None for this reason alone (badge y 734.5 / 744.5 / 746.5), each recovered by dropping
+exactly 1 top row and yielding the same value as its neighbours. 2 px = that 1 px plus one row of
+margin, against a measured bottom slack of ≥ 9 px.
+
+### 10.5 Badge constants
+- Coupling by reading the owner rect before and after a CDP screenshot is not a coupling at all on
+  the fast part of the 3→4 move: the round trip is ~230 ms and the rect travels ~0.12 px/ms, so the
+  two reads disagree by ~28 px, every such sample is `unstable`, and
+  `allInHoldMeasured`/`everyInHoldStale` are unsatisfiable (measured, round 3). Hence the badge.
+- `FOOTPRINT_BADGE_CELL_PX = 6`: 6 px cells decoded 100 % of painted frames live
+  (`deviceScaleFactor=1`, PNG capture, so a cell centre is an exact pixel).
+- Badge log ring = 4000 entries: the capture loop runs `(TRANS_S + POST_SETTLE_S + 3)` s at ~60 Hz
+  and the whole log is dumped ONCE after it; 600 entries covered only ~10 s and the earliest sampled
+  frames fell out.
+- `dump()` is per-capture, not per-sample: a per-sample lookup is one more CDP round trip inside the
+  hold. Removing it did NOT on its own clear the occasional >100 ms `maxRafGapOk` stalls, but it does
+  leave the capture loop one round trip cheaper than before the badge.
+- `COVER_TRACK_TOL_PX = 0.5`: with the control loop handed off BEHIND the runtime's footprint pin the
+  per-frame residual is 0 px over every hold frame of the live runs. A ONE-FRAME lag would show
+  ~2.8 px in x at the 30 Hz headless rAF rate (~1.4 px at 60 Hz), so the tolerance cannot absorb one.
+
+### 10.6 Re-handoff exemption (round 7, r4 BLOCKER 1)
+The badge's re-handoff onto a fresh pin paints a NULL rect for exactly two consecutive frames, which
+it logs in `rehandoffSeqs`. Only a LEADING covered sample whose badge sequence belongs to a
+contiguous logged pair `(p, p+1)`, with a null rect and nothing decoded, is excused from
+`allInHoldMeasured`; `FREEZE_REHANDOFF_MAX_EXEMPT = 2` is that frame count. Every other post-paint
+sample through `releaseSplitIndex` must be `measured`.
+
+### 10.7 rAF/task ordering under a later runtime pin (round 7, r4 MINOR 2)
+Node-executed ordering model (`test_footprint_badge_lands_behind_a_later_runtime_pin_callback`),
+with the pin ordered exactly as `keepThroughBridge` is (starts from a post-frame task, applies the
+rect synchronously, re-queues from its own rAF callback):
+- WITHOUT the re-handoff, every frame after the pin starts is lagged by exactly one pin step.
+- WITH it, exactly ONE lagged frame remains — the frame the pin STARTS on, where the badge has
+  already read before the task that creates the marker runs. That frame is strictly before the
+  trigger (the first poll frame that SEES the departure) and therefore before `coverPaintedAt`, so it
+  can never enter the scored window. Every frame that reads at all from the re-handoff onward is
+  residual-0 against the pin's own rect.
+
+### 10.8 Pre-move sample exclusion (round 7)
+Samples captured at or before the advance press are pre-move: the movie is still on its slide-3 rect,
+whose counter has its own mapping, so they decode None BY DESIGN (live: `i = 0`). The exclusion is a
+stated rule — `capture_meta["atCutFrom"] = advancePressIndex + 1`, fed to `_moving_index_run_at_cut`
+as `covered_from` on the capture side — never a hardcoded index, so the `nDecodable` fraction carries
+no silent free miss. The raw samples stay in `indexSamples` for diagnostics.
+
+### 10.9 Owner-rect settle (round 7, r4 MAJOR 2)
+The hash reaching `#7` is an instantaneous value, not a settled build: the `#7` build's own animation
+is still running when the drain stops, so arming there records a pre-advance departure and the run is
+INCONCLUSIVE by construction (measured live). `_settle_bound_owner_rect` requires
+`OWNER_SETTLE_READINGS = 3` consecutive rect reads agreeing under the same `_couple_owner_rect`
+"measured" test the at-cut samples use, within `OWNER_SETTLE_S = 5.0` s, and fails closed. Both the
+bracket and the MAIN gate path now use it, in the order: exact `#7` → bind → rect settle → one press.
