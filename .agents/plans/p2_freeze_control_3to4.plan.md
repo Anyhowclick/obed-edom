@@ -122,3 +122,12 @@ over samples with `footprintSource == "measured"`. In B the freeze must give `ok
 a. `movingIndexRunAtCut`: REPORT-only until one clean fast/slow/bridge-off round, then gate.
 b. Bridge-off arm: freeze verdict `skipped`, non-blocking in that arm only.
 c. Hash-only trigger: INCONCLUSIVE.
+
+## 9. Correction 2026-09-21 — the "motion starts on arrival at #7" premise error was an instrument artifact
+Measured headless (bridge-on, every press landing): `#6` is the 2→3 dissolve in flight and SELF-ADVANCES to `#7`; on
+settled `#7` the carried movie is static (x=198, w=951.5, 4 s, no `__obedMotion`). The drain pressed AT `#6`; the player
+queues a press it cannot honour and replays it at `#7`, starting the real 3→4 move "on arrival". Fixed in `a94c2c81`
+(press only below `#6`, wait for the self-advance, `drainPressesAllLanded` integrity key). Owner-approved follow-ups
+(2026-09-21): hold A1/A2 to the drain check; couple the rect read to the capture in ONE in-page rAF and keep the "every
+in-hold sample" rule; re-measure `FREEZE_TRIGGER_MAX_RAFS` on ≥10 clean runs (worst + 1); apply the same one-press
+discipline to `_advance_to_slide4_capture` on the main gate path, then a full gate round.
