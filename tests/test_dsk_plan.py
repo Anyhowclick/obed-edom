@@ -1218,8 +1218,9 @@ def test_wrapped_height_matches_golden_boxes():
     # over-prediction direction is policed: `observed` is the item's frame height, an
     # upper bound on the actual laid-out text, so under-prediction is not necessarily
     # estimator error.
-    # ArgentCF-Bold over-predicts by >2 lines (golden slide 33) -- a known predictor
-    # limit on that font, xfailed by name rather than hidden by scoping the test down.
+    # Golden slide 33 over-predicts by >2 lines because the predictor ignores paragraph-style
+    # sizes and line spacing (not a wrap or font-metric error); it is xfailed by name in
+    # test_wrapped_height_golden_slide_33_argentcf_bold rather than hidden by scoping this down.
     _require_deck(DSK_DECK)
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
@@ -1252,7 +1253,15 @@ def test_wrapped_height_matches_golden_boxes():
     assert not failures, failures
 
 
-@pytest.mark.xfail(reason="ArgentCF-Bold over-predicts golden slide 33 by >2 lines -- known predictor limit")
+@pytest.mark.xfail(
+    reason="wrapped_height ignores per-paragraph font size and paragraph line spacing: golden "
+    "slide 33 is five hard lines (no wrap) and the predictor prices all five at the item's "
+    "65 pt x 1.157 + 21 = 397.0 pt, vs the autosize box's saved 229.8 pt (2.78 lines, +2.22 "
+    "over). The IWA has paragraphs at 65/65/10/40 pt with lineSpacing 0.7. Pricing each "
+    "paragraph at its own size alone gives 304.5 pt (+0.99 lines), too thin a margin to trust. "
+    "Planned fix: .agents/plans/dsk.plan.md section 4 item 31 (per-paragraph size, lineSpacing, "
+    "real ascent/descent, Keynote-calibrated)."
+)
 def test_wrapped_height_golden_slide_33_argentcf_bold():
     _require_deck(DSK_DECK)
     _require_font("ArgentCF-Bold")
