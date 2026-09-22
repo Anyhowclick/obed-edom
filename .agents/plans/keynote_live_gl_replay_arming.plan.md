@@ -147,6 +147,23 @@ with the master flag defaulting off and OBS capture explicitly documented as una
    stand-down hand-back where the destination has nothing above the movie.
 (ii)/(iii) may only *refuse* in v1; they exist to prove the refusal is measured, not assumed.
 
+**Q4 status 2026-09-22 (owner-authored, exported to `output/gl-decks/`, checked offline via `derive_plan`):**
+(i) = `Minimal Alpha_DSK` S4→S5, plans `pin`. "No further events" is NOT authorable: Keynote always emits a Start
+Movie build for a movie, so the destination's Start Movie is set to **On Click** (click-driven first event, no other
+builds). An **After Transition** start on a carried movie exports as an automatic first event and heals the window
+(3→4 behaviour) — this is a backend condition `derive_plan` already reads; the operator-facing side is a
+validation warning (see §7 follow-up). (ii) = S6→S7, both movies at identical rects, plans `pin` per movie; the
+opacity computation refuses on an unmeasured `transform.rotation.z` (allowed here). (iii) = S8→S9, two movie
+objects at the identical rect on both slides: **measured refusal** `ambiguous ownership … 4 geometry-equal pairs`
+(a whole-deck refusal, so 4→5 and 6→7 are gated as sub-decks with the rest skipped). (iv) is **MOOT**: Keynote
+cannot mask movies (menu disabled), and a DSK-generator "mask" is a pre-cropped video file exported at the final
+dimensions — a plain movie node with ordinary geometry. The baseline's `possible mask` refusal stays as the
+closed-vocabulary guard with nothing to measure it against. (v) = `Positive Control.key`, 4 slides, plans
+`pin` / `bridge` / `restart`, no refusals.
+**Follow-up (§7):** a sermon-validation warning — movie carried through a Magic Move whose destination Start Movie
+is After Transition ⇒ "will restart on the destination; set On Click / After Build N". The DSK generator authors
+its own decks and should set the build start directly rather than warn.
+
 ## 7. Work split, tests, rollout
 
 | # | Files (disjoint) | Work |
