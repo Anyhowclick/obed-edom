@@ -215,6 +215,7 @@ describe("DskGenerator template memory", () => {
     await renderGenerator();
 
     expect(putSettings).not.toHaveBeenCalled();
+    expect(localStorage.getItem("obed-edom.generate.dskTemplate")).toBeNull();
     expect(within(getDeckRow("DSK template")).getByText("template.key")).toBeInTheDocument();
   });
 
@@ -236,7 +237,7 @@ describe("DskGenerator template memory", () => {
 });
 
 describe("DskGenerator workspace", () => {
-  it("picks a workspace on Run and applies into that folder, sending the current template", async () => {
+  it("picks a workspace on Run and applies into that folder without overriding the proposal's donor", async () => {
     rememberTemplate("/tmp/template.key");
     await renderGenerator();
     await act(async () => {
@@ -249,7 +250,28 @@ describe("DskGenerator workspace", () => {
       expect.objectContaining({ schemaVersion: 2, sourceFingerprint: "fixture" }),
       "/tmp/workspace",
       0,
-      "/tmp/template.key"
+      undefined
+    );
+  });
+
+  it("sends the template as an override on Run only when it was changed after the proposal", async () => {
+    rememberTemplate("/tmp/template.key");
+    vi.mocked(chooseKeynote).mockResolvedValueOnce({ path: "/tmp/new.key", name: "new.key" });
+    await renderGenerator();
+
+    await act(async () => {
+      fireEvent.click(within(getDeckRow("DSK template")).getByRole("button", { name: "Change DSK template" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    });
+
+    expect(applyDsk).toHaveBeenLastCalledWith(
+      "job-1",
+      expect.objectContaining({ schemaVersion: 2, sourceFingerprint: "fixture" }),
+      "/tmp/workspace",
+      0,
+      "/tmp/new.key"
     );
   });
 

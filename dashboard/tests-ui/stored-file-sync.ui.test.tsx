@@ -124,4 +124,56 @@ describe("useStoredTemplate", () => {
     expect(screen.getByTestId("a-value")).toHaveTextContent("old.key");
     expect(screen.getByTestId("lw")).toHaveTextContent("lw.key");
   });
+
+  it("rolls back only the written field when the save fails while the first fetch is still pending", async () => {
+    let resolveGet!: (value: typeof emptySettings) => void;
+    vi.mocked(getSettings).mockReturnValueOnce(new Promise((r) => { resolveGet = r; }));
+    let rejectPut!: (err: Error) => void;
+    vi.mocked(putSettings).mockReturnValueOnce(new Promise((_r, rej) => { rejectPut = rej; }));
+    function Lw() {
+      const [file] = useStoredTemplate("lwTemplate");
+      return <span data-testid="lw">{file?.name || "none"}</span>;
+    }
+    render(<><Consumer label="a" /><Lw /></>);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("a-choose"));
+    });
+    await act(async () => {
+      resolveGet({ ...emptySettings, lwTemplate: "/tmp/lw.key", dskTemplate: "/tmp/old.key" });
+    });
+    expect(screen.getByTestId("a-value")).toHaveTextContent("a.key");
+    expect(screen.getByTestId("lw")).toHaveTextContent("lw.key");
+
+    await act(async () => {
+      rejectPut(new Error("read-only"));
+    });
+    expect(screen.getByTestId("a-value")).toHaveTextContent("none");
+    expect(screen.getByTestId("lw")).toHaveTextContent("lw.key");
+  });
+
+  it("lets the newest write win when two saves of the same field complete out of order", async () => {
+    const puts: Array<{ resolve: (v: typeof emptySettings) => void; reject: (e: Error) => void }> = [];
+    vi.mocked(putSettings).mockImplementation(
+      () => new Promise((resolve, reject) => { puts.push({ resolve, reject }); })
+    );
+    render(<Consumer label="a" />);
+    await act(async () => {});
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("a-choose"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("a-clear"));
+    });
+    expect(puts).toHaveLength(2);
+
+    await act(async () => {
+      puts[1].resolve({ ...emptySettings, dskTemplate: "" });
+    });
+    await act(async () => {
+      puts[0].reject(new Error("late failure"));
+    });
+    expect(screen.getByTestId("a-value")).toHaveTextContent("none");
+  });
 });

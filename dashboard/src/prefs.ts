@@ -196,7 +196,9 @@ async function migrateLegacyTemplates(stored: StoredTemplates): Promise<StoredTe
   const patch: Partial<Settings> = {};
   for (const field of ["lwTemplate", "dskTemplate"] as const) {
     const legacy = readLegacyTemplate(field);
-    if (legacy && !stored[field]) patch[field] = legacy;
+    if (!legacy) continue;
+    if (stored[field]) forgetLegacyTemplate(field);
+    else patch[field] = legacy;
   }
   if (!Object.keys(patch).length) return stored;
   const written = pickTemplates(await putSettings(patch));
@@ -207,19 +209,27 @@ async function migrateLegacyTemplates(stored: StoredTemplates): Promise<StoredTe
 const NO_TEMPLATES: StoredTemplates = { lwTemplate: "", dskTemplate: "" };
 let templatesRequest: Promise<StoredTemplates> | null = null;
 let templatesCache: StoredTemplates | null = null;
-let templateWrites = 0;
+const templateWrites: Record<TemplateField, number> = { lwTemplate: 0, dskTemplate: 0 };
 const templateListeners = new Set<() => void>();
+
+function notifyTemplates() {
+  templateListeners.forEach((listener) => listener());
+}
+
+function setTemplate(field: TemplateField, path: string) {
+  templatesCache = { ...(templatesCache || NO_TEMPLATES), [field]: path };
+}
 
 /** Invalidates the shared templates fetch so every mounted `useStoredTemplate` refetches. */
 export function refreshStoredTemplates(): void {
   templatesRequest = null;
   templatesCache = null;
-  templateListeners.forEach((listener) => listener());
+  notifyTemplates();
 }
 
 function templatesReady(): Promise<StoredTemplates> {
   if (!templatesRequest) {
-    const writesBefore = templateWrites;
+    const writesBefore = { ...templateWrites };
     templatesRequest = getSettings()
       .then((settings) => {
         const stored = pickTemplates(settings);
@@ -227,8 +237,10 @@ function templatesReady(): Promise<StoredTemplates> {
       })
       .catch(() => NO_TEMPLATES)
       .then((stored) => {
-        if (templateWrites === writesBefore) templatesCache = stored;
-        templateListeners.forEach((listener) => listener());
+        for (const field of ["lwTemplate", "dskTemplate"] as const) {
+          if (templateWrites[field] === writesBefore[field]) setTemplate(field, stored[field]);
+        }
+        notifyTemplates();
         return templatesCache || stored;
       });
   }
@@ -258,17 +270,18 @@ export function useStoredTemplate(field: TemplateField): [StoredFile | null, (fi
   const update = useCallback(
     async (file: StoredFile | null) => {
       const path = file?.path || "";
-      const previous = templatesCache || NO_TEMPLATES;
-      templateWrites += 1;
-      templatesCache = { ...previous, [field]: path };
-      templateListeners.forEach((listener) => listener());
+      const previous = templatesCache?.[field] || "";
+      const generation = (templateWrites[field] += 1);
+      setTemplate(field, path);
+      notifyTemplates();
       try {
-        templatesCache = pickTemplates(await putSettings({ [field]: path }));
+        const written = pickTemplates(await putSettings({ [field]: path }));
+        if (generation === templateWrites[field]) setTemplate(field, written[field]);
       } catch (err) {
-        templatesCache = previous;
+        if (generation === templateWrites[field]) setTemplate(field, previous);
         throw err;
       } finally {
-        templateListeners.forEach((listener) => listener());
+        notifyTemplates();
       }
     },
     [field]

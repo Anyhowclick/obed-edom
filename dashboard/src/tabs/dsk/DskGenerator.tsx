@@ -85,6 +85,7 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
   const initializedReviewJob = useRef<string | null>(null);
   const saveTimer = useRef<number | null>(null);
   const saveTail = useRef(Promise.resolve());
+  const templateOverride = useRef<string | null>(null);
 
   const result = (job?.result || undefined) as DskResult | undefined;
   const pages = result?.pages || [];
@@ -122,6 +123,7 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
     setTemplateError(null);
     try {
       await setDskTemplate(file);
+      templateOverride.current = file?.path || null;
     } catch (e) {
       setTemplateError(e instanceof Error ? e.message : String(e));
     }
@@ -156,6 +158,7 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
         referenceDeck: referenceDeck?.path,
         slides: parseSlideSpec(range),
       });
+      templateOverride.current = null;
       upsert(created);
       await track(created);
     } catch (err) {
@@ -221,13 +224,13 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
         if (saveTimer.current != null) { window.clearTimeout(saveTimer.current); saveTimer.current = null; }
         await saveTail.current;
         const current = latestReview.current;
-        const created = await applyDsk(job.id, editableReview(current), chosen.path, reviewRevision.current, dskTemplate?.path);
+        const created = await applyDsk(job.id, editableReview(current), chosen.path, reviewRevision.current, templateOverride.current || undefined);
         upsert(created);
         await track(created);
         return;
       }
       await saveDskDecisions(job.id, toDecisionsPayload(decisions));
-      const created = await applyDsk(job.id, toDecisionsPayload(decisions), chosen.path, undefined, dskTemplate?.path);
+      const created = await applyDsk(job.id, toDecisionsPayload(decisions), chosen.path, undefined, templateOverride.current || undefined);
       upsert(created);
       await track(created);
     } catch (err) {

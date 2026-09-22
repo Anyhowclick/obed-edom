@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import time
+import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -2205,7 +2206,7 @@ def _resolve_dsk_layout_donor(
         try:
             check_layout_import_preconditions(fw_deck, layout_template=reference, layout_names=names)
             return reference.resolve()
-        except Exception:  # noqa: BLE001 -- an unreadable or unsuitable reference falls through to the template
+        except (ValueError, OSError, KeyError, zipfile.BadZipFile):
             pass
     reason = (
         f"Choose the DSK template (.key): {fw_deck.name} has no transparent "
