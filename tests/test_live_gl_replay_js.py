@@ -149,7 +149,7 @@ PRE_ARM_REASONS = {
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = ""
+PINNED_JS_SHA256 = "c13d67878ea2832cdbf78b7f1a6421d591dd83b6e0a472e097ae7b176233c352"
 
 
 # =======================================================================================
@@ -168,11 +168,6 @@ def test_js_sha256_matches_the_shipped_bytes():
     assert live_gl_replay_js.js_sha256() == live_gl_replay_js.js_sha256()
 
 
-@pytest.mark.xfail(
-    not PINNED_JS_SHA256,
-    reason="S1 in flight: the literal is pinned once `live_gl_replay_js.GL_REPLAY_JS` is stable",
-    strict=False,
-)
 def test_js_sha256_matches_the_pinned_literal():
     assert live_gl_replay_js.js_sha256() == PINNED_JS_SHA256
 
@@ -1006,7 +1001,13 @@ async function main() {
   }
   if (CFG.scenario === 'sample') {
     const handle = window.__OBED_GL_ORACLE__;
-    if (handle) out.samples = (await pumpUntil(handle.sample(24))).value;
+    if (handle) {
+      out.epochAtPublish = handle.epoch;
+      out.samples = (await pumpUntil(handle.sample(24))).value;
+      out.epochAfterSamples = handle.epoch;
+      out.markerBands = (await pumpUntil(handle.markerBands())).value;
+      out.handleStillSame = window.__OBED_GL_ORACLE__ === handle;
+    }
     out.final = snapshotState();
     return out;
   }
@@ -1207,7 +1208,27 @@ def test_published_handle_carries_exactly_the_plan_fields():
     assert scalars["instanceId"] == GL_REPLAY_ENTRY["instanceId"]
     assert scalars["rect"] == GL_REPLAY_ENTRY["instanceRect"]
     assert scalars["canvasId"] == "0-canvas"
-    assert isinstance(scalars["epoch"], int) and scalars["epoch"] >= 1
+    # One armed boundary in v1 means exactly one record, so the frozen epoch is 1.
+    assert scalars["epoch"] == 1
+    assert live["stats"]["epoch"] == 1
+
+
+def test_handle_epoch_is_frozen_at_publish_for_the_single_record():
+    """Plan §2.4 (Opus r1 finding 12): `epoch` is incremented on every record and
+    frozen on the handle at publish. v1 arms ONE boundary, so exactly one record
+    exists: the handle's epoch is 1, never moves while LIVE, and every awaited
+    answer the probe re-checks (`markerBands`) reports that same epoch."""
+    out = _run_sandbox(scenario="sample")
+    final = _assert_clean(out)
+    assert out["epochAtPublish"] == 1, out["epochAtPublish"]
+    assert out["epochAfterSamples"] == 1, out["epochAfterSamples"]
+    assert out["handleStillSame"] is True, "the handle object was replaced mid-LIVE"
+    assert out["markerBands"]["epoch"] == out["epochAtPublish"], out["markerBands"]["epoch"]
+    # `stats()` reports the same single record — the probe's re-check compares them.
+    assert final["stats"]["epoch"] == out["epochAtPublish"], final["stats"]["epoch"]
+    assert final["handleScalars"]["epoch"] == out["epochAtPublish"]
+    assert len(out["markerBands"]["dark"]) == html_alpha_probe.INPAGE_BAND_COUNT
+    assert len(out["markerBands"]["light"]) == html_alpha_probe.INPAGE_BAND_COUNT
 
 
 def test_sample_returns_monotonic_ticks_with_128_bands():
