@@ -1,9 +1,9 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DskGenerator } from "../src/tabs/dsk/DskGenerator";
-import { applyDsk, chooseFolder, chooseKeynote, FieldError, pollJob, saveDskDecisions, startDsk } from "../src/api";
+import { applyDsk, chooseFolder, chooseKeynote, FieldError, getSettings, pollJob, putSettings, saveDskDecisions, startDsk } from "../src/api";
 import type { Job } from "../src/api";
-import { DSK_TEMPLATE_KEY } from "../src/prefs";
+import { refreshStoredTemplates } from "../src/prefs";
 
 const reviewJob: Job = {
   id: "job-1",
@@ -78,6 +78,16 @@ const queuedJob: Job = {
   updatedAt: 0,
 };
 
+const emptySettings = {
+  reuseThreshold: 0.6,
+  reusePairings: true,
+  reusePreviews: true,
+  defaultExportDir: "",
+  highlightColour: "#e8772a",
+  lwTemplate: "",
+  dskTemplate: "",
+};
+
 vi.mock("../src/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/api")>();
   return {
@@ -88,6 +98,8 @@ vi.mock("../src/api", async (importOriginal) => {
     saveDskDecisions: vi.fn(async () => reviewJob),
     applyDsk: vi.fn(async () => doneJob),
     reveal: vi.fn(async () => undefined),
+    getSettings: vi.fn(async () => emptySettings),
+    putSettings: vi.fn(async (next) => ({ ...emptySettings, ...next })),
     pollJob: vi.fn(async (_id, onTick) => {
       onTick(doneJob);
       return doneJob;
@@ -124,7 +136,23 @@ function mockSession(initialJob: Job | null) {
   }));
 }
 
+/** The DSK template settings.json remembers, as the dashboard would read it on load. */
+function rememberTemplate(path: string) {
+  vi.mocked(getSettings).mockResolvedValue({ ...emptySettings, dskTemplate: path });
+}
+
+/** Renders the generator and lets the remembered-template fetch settle. */
+async function renderGenerator() {
+  render(<DskGenerator />);
+  await act(async () => {});
+}
+
 beforeEach(() => {
+  refreshStoredTemplates();
+  vi.mocked(getSettings).mockReset();
+  vi.mocked(putSettings).mockReset();
+  vi.mocked(getSettings).mockResolvedValue(emptySettings);
+  vi.mocked(putSettings).mockImplementation(async (next) => ({ ...emptySettings, ...next }));
   vi.mocked(chooseFolder).mockReset();
   vi.mocked(chooseKeynote).mockReset();
   vi.mocked(startDsk).mockReset();
@@ -144,10 +172,73 @@ beforeEach(() => {
   mockSession(reviewJob);
 });
 
+describe("DskGenerator template memory", () => {
+  it("writes a chosen template to settings.json so any browser on this Mac sees it", async () => {
+    mockSession(null);
+    vi.mocked(chooseKeynote).mockResolvedValueOnce({ path: "/tmp/chosen.key", name: "chosen.key" });
+    await renderGenerator();
+
+    await act(async () => {
+      fireEvent.click(within(getDeckRow("DSK template")).getByRole("button", { name: "Choose on this Mac" }));
+    });
+
+    expect(putSettings).toHaveBeenCalledWith({ dskTemplate: "/tmp/chosen.key" });
+    expect(within(getDeckRow("DSK template")).getByText("chosen.key")).toBeInTheDocument();
+  });
+
+  it("Forget clears the template in settings.json", async () => {
+    rememberTemplate("/tmp/template.key");
+    mockSession(null);
+    await renderGenerator();
+
+    await act(async () => {
+      fireEvent.click(within(getDeckRow("DSK template")).getByRole("button", { name: "Forget DSK template" }));
+    });
+
+    expect(putSettings).toHaveBeenCalledWith({ dskTemplate: "" });
+  });
+
+  it("migrates a template an older dashboard kept in browser storage into settings.json, once", async () => {
+    localStorage.setItem("obed-edom.generate.dskTemplate", JSON.stringify({ path: "/tmp/legacy.key", name: "legacy.key" }));
+    mockSession(null);
+    await renderGenerator();
+
+    expect(putSettings).toHaveBeenCalledWith({ dskTemplate: "/tmp/legacy.key" });
+    expect(localStorage.getItem("obed-edom.generate.dskTemplate")).toBeNull();
+    expect(within(getDeckRow("DSK template")).getByText("legacy.key")).toBeInTheDocument();
+  });
+
+  it("keeps the settings.json template over a stale browser-storage one", async () => {
+    localStorage.setItem("obed-edom.generate.dskTemplate", JSON.stringify({ path: "/tmp/legacy.key", name: "legacy.key" }));
+    rememberTemplate("/tmp/template.key");
+    mockSession(null);
+    await renderGenerator();
+
+    expect(putSettings).not.toHaveBeenCalled();
+    expect(within(getDeckRow("DSK template")).getByText("template.key")).toBeInTheDocument();
+  });
+
+  it("shows the save failure on the template row and keeps the previous template", async () => {
+    rememberTemplate("/tmp/template.key");
+    mockSession(null);
+    vi.mocked(putSettings).mockRejectedValueOnce(new Error("settings.json is read-only"));
+    vi.mocked(chooseKeynote).mockResolvedValueOnce({ path: "/tmp/chosen.key", name: "chosen.key" });
+    await renderGenerator();
+
+    await act(async () => {
+      fireEvent.click(within(getDeckRow("DSK template")).getByRole("button", { name: "Change DSK template" }));
+    });
+
+    const row = getDeckRow("DSK template");
+    expect(within(row).getByRole("alert")).toHaveTextContent("settings.json is read-only");
+    expect(within(row).getByText("template.key")).toBeInTheDocument();
+  });
+});
+
 describe("DskGenerator workspace", () => {
   it("picks a workspace on Run and applies into that folder, sending the current template", async () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/template.key", name: "template.key" }));
-    render(<DskGenerator />);
+    rememberTemplate("/tmp/template.key");
+    await renderGenerator();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Run" }));
     });
@@ -163,10 +254,10 @@ describe("DskGenerator workspace", () => {
   });
 
   it("does not apply when the workspace picker is cancelled", async () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/template.key", name: "template.key" }));
+    rememberTemplate("/tmp/template.key");
     vi.mocked(chooseFolder).mockRejectedValueOnce(new Error("Cancelled"));
 
-    render(<DskGenerator />);
+    await renderGenerator();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Run" }));
     });
@@ -174,8 +265,8 @@ describe("DskGenerator workspace", () => {
     expect(applyDsk).not.toHaveBeenCalled();
   });
 
-  it("shows an ordered mask selector for fully overlapping movie layers", () => {
-    render(<DskGenerator />);
+  it("shows an ordered mask selector for fully overlapping movie layers", async () => {
+    await renderGenerator();
     expect(screen.getByRole("combobox", { name: "Mask media" })).toHaveValue("lower");
     fireEvent.change(screen.getByRole("combobox", { name: "Mask media" }), { target: { value: "upper" } });
     expect(screen.getByRole("combobox", { name: "Mask media" })).toHaveValue("upper");
@@ -196,11 +287,11 @@ function getDeckRow(label: string) {
 }
 
 describe("DskGenerator DSK template", () => {
-  it("shows the remembered template as the default: file name, folder path, and a default label, no required marker", () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/somewhere/template.key", name: "template.key" }));
+  it("shows the remembered template as the default: file name, folder path, and a default label, no required marker", async () => {
+    rememberTemplate("/tmp/somewhere/template.key");
     mockSession(null);
 
-    render(<DskGenerator />);
+    await renderGenerator();
 
     const row = getDeckRow("DSK template");
     expect(within(row).getByText("template.key")).toBeInTheDocument();
@@ -211,9 +302,9 @@ describe("DskGenerator DSK template", () => {
     expect(within(row).getByRole("button", { name: "Forget DSK template" })).toBeInTheDocument();
   });
 
-  it("shows the required state with a required marker and Choose on this Mac when no template is remembered", () => {
+  it("shows the required state with a required marker and Choose on this Mac when no template is remembered", async () => {
     mockSession(null);
-    render(<DskGenerator />);
+    await renderGenerator();
 
     const row = getDeckRow("DSK template");
     expect(within(row).getByText("Required")).toBeInTheDocument();
@@ -222,9 +313,9 @@ describe("DskGenerator DSK template", () => {
   });
 
   it("Forget returns the row to the required state and disables Propose", async () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/template.key", name: "template.key" }));
+    rememberTemplate("/tmp/template.key");
     mockSession(null);
-    render(<DskGenerator />);
+    await renderGenerator();
 
     const row = getDeckRow("DSK template");
     await act(async () => {
@@ -238,7 +329,7 @@ describe("DskGenerator DSK template", () => {
 
   it("disables Propose and shows a reason until a template is chosen", async () => {
     mockSession(null);
-    render(<DskGenerator />);
+    await renderGenerator();
 
     await act(async () => {
       fireEvent.click(within(getWell("Finalised FW .key")).getByRole("button", { name: "Choose on this Mac" }));
@@ -248,9 +339,9 @@ describe("DskGenerator DSK template", () => {
     expect(screen.getByText("Choose the DSK template to continue.")).toBeInTheDocument();
   });
 
-  it("disables Run and shows a reason until a template is chosen", () => {
+  it("disables Run and shows a reason until a template is chosen", async () => {
     mockSession(reviewJob);
-    render(<DskGenerator />);
+    await renderGenerator();
 
     const runButton = screen.getByRole("button", { name: "Run" });
     expect(runButton).toBeDisabled();
@@ -258,9 +349,9 @@ describe("DskGenerator DSK template", () => {
   });
 
   it("sends the chosen template to startDsk as dskTemplate", async () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/template.key", name: "template.key" }));
+    rememberTemplate("/tmp/template.key");
     mockSession(null);
-    render(<DskGenerator />);
+    await renderGenerator();
 
     await act(async () => {
       fireEvent.click(within(getWell("Finalised FW .key")).getByRole("button", { name: "Choose on this Mac" }));
@@ -275,12 +366,12 @@ describe("DskGenerator DSK template", () => {
   });
 
   it("shows a FieldError from startDsk inline on the template row only, once, and not in the global notice", async () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/missing.key", name: "missing.key" }));
+    rememberTemplate("/tmp/missing.key");
     mockSession(null);
     vi.mocked(startDsk).mockRejectedValueOnce(
       new FieldError("dskTemplate", "DSK template not found at /tmp/missing.key. Choose it again with \u201cChoose on this Mac\u201d.")
     );
-    render(<DskGenerator />);
+    await renderGenerator();
 
     await act(async () => {
       fireEvent.click(within(getWell("Finalised FW .key")).getByRole("button", { name: "Choose on this Mac" }));
@@ -299,10 +390,10 @@ describe("DskGenerator DSK template", () => {
 
   it("clears the inline template error from the whole document once a new template is chosen", async () => {
     const message = "DSK template not found at /tmp/missing.key.";
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/missing.key", name: "missing.key" }));
+    rememberTemplate("/tmp/missing.key");
     mockSession(null);
     vi.mocked(startDsk).mockRejectedValueOnce(new FieldError("dskTemplate", message));
-    render(<DskGenerator />);
+    await renderGenerator();
 
     await act(async () => {
       fireEvent.click(within(getWell("Finalised FW .key")).getByRole("button", { name: "Choose on this Mac" }));
@@ -321,11 +412,11 @@ describe("DskGenerator DSK template", () => {
   });
 
   it("sends the newly chosen template to applyDsk after a FieldError, not the stale one", async () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/old.key", name: "old.key" }));
+    rememberTemplate("/tmp/old.key");
     mockSession(reviewJob);
     vi.mocked(applyDsk).mockRejectedValueOnce(new FieldError("dskTemplate", "DSK template not found at /tmp/old.key."));
     vi.mocked(chooseKeynote).mockResolvedValueOnce({ path: "/tmp/new.key", name: "new.key" });
-    render(<DskGenerator />);
+    await renderGenerator();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Run" }));
@@ -350,9 +441,9 @@ describe("DskGenerator DSK template", () => {
 });
 
 describe("DskGenerator reference deck", () => {
-  it("shows Standard video band and a Choose action when blank", () => {
+  it("shows Standard video band and a Choose action when blank", async () => {
     mockSession(null);
-    render(<DskGenerator />);
+    await renderGenerator();
 
     const row = getDeckRow("Reference deck");
     expect(within(row).getByText("Standard video band")).toBeInTheDocument();
@@ -362,7 +453,7 @@ describe("DskGenerator reference deck", () => {
   it("shows the chosen reference file and a Clear action, then clears back to blank", async () => {
     mockSession(null);
     vi.mocked(chooseKeynote).mockResolvedValueOnce({ path: "/tmp/ref.key", name: "ref.key" });
-    render(<DskGenerator />);
+    await renderGenerator();
 
     const row = getDeckRow("Reference deck");
     await act(async () => {
@@ -379,9 +470,9 @@ describe("DskGenerator reference deck", () => {
 });
 
 describe("DskGenerator result card", () => {
-  it("renders the deck file name, slide count, and full path, with no Notes section when there is nothing to note", () => {
+  it("renders the deck file name, slide count, and full path, with no Notes section when there is nothing to note", async () => {
     mockSession(doneJob);
-    render(<DskGenerator />);
+    await renderGenerator();
 
     expect(screen.getByText("fw_DSK.key · 1 slides")).toBeInTheDocument();
     expect(screen.getByText("/tmp/workspace/fw_DSK.key")).toBeInTheDocument();
@@ -390,9 +481,9 @@ describe("DskGenerator result card", () => {
     expect(screen.queryByText("Notes")).toBeNull();
   });
 
-  it("lists skipped slides, warnings, and overflows as Notes when present", () => {
+  it("lists skipped slides, warnings, and overflows as Notes when present", async () => {
     mockSession(doneJobWithNotes);
-    render(<DskGenerator />);
+    await renderGenerator();
 
     expect(screen.getByText("Notes")).toBeInTheDocument();
     expect(screen.getByText("Skipped slide 4 — empty")).toBeInTheDocument();
@@ -403,7 +494,7 @@ describe("DskGenerator result card", () => {
 
 describe("DskGenerator stage progress overlay", () => {
   it("maps job.progress to a Step N of M overlay with elapsed time and collapsed details while running", async () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/template.key", name: "template.key" }));
+    rememberTemplate("/tmp/template.key");
     mockSession(reviewJob);
     let resolveTick: (() => void) | undefined;
     vi.mocked(pollJob).mockImplementation(
@@ -421,7 +512,7 @@ describe("DskGenerator stage progress overlay", () => {
         })
     );
 
-    render(<DskGenerator />);
+    await renderGenerator();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Run" }));
       await new Promise((r) => setTimeout(r, 0));
@@ -440,7 +531,7 @@ describe("DskGenerator stage progress overlay", () => {
   });
 
   it("titles the overlay for Propose as preparing the review, not building the deck", async () => {
-    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/template.key", name: "template.key" }));
+    rememberTemplate("/tmp/template.key");
     mockSession(null);
     let resolvePoll: (() => void) | undefined;
     vi.mocked(pollJob).mockImplementation(
@@ -449,7 +540,7 @@ describe("DskGenerator stage progress overlay", () => {
           resolvePoll = () => resolve(reviewJob);
         })
     );
-    render(<DskGenerator />);
+    await renderGenerator();
     await act(async () => {
       fireEvent.click(within(getWell("Finalised FW .key")).getByRole("button", { name: "Choose on this Mac" }));
     });

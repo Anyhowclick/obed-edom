@@ -17,6 +17,8 @@ const baseSettings: Settings = {
   reusePreviews: true,
   defaultExportDir: "",
   highlightColour: "#e8772a",
+  lwTemplate: "",
+  dskTemplate: "",
 };
 
 describe("SettingsTab highlight colour", () => {

@@ -22,7 +22,7 @@ import { SlideReviewList } from "./SlideReviewList";
 import { DskReviewWorkspace } from "./DskReviewWorkspace";
 import { DskDecksCard } from "./DskDecksCard";
 import { editableReview, editorState, isDskReview, type DskEditorState, type DskReview } from "../../dsk/decisions";
-import { DSK_TEMPLATE_KEY, DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath, useStoredFile } from "../../prefs";
+import { DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath, useStoredTemplate } from "../../prefs";
 import { useCurrentJob } from "../../sessions";
 import { JobName } from "../../components/JobName";
 import { IconTick, IconInfo, IconWarning } from "../../components/icons";
@@ -67,7 +67,7 @@ type DskResult = {
 export function DskGenerator() {
   const { job, upsert, rename, error: openError } = useCurrentJob("dsk");
   const [keynote, setKeynote] = useState<ChosenFile | null>(null);
-  const [dskTemplate, setDskTemplate] = useStoredFile(DSK_TEMPLATE_KEY);
+  const [dskTemplate, setDskTemplate] = useStoredTemplate("dskTemplate");
   const [templateError, setTemplateError] = useState<string | null>(null);
   const [referenceDeck, setReferenceDeck] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
@@ -119,9 +119,13 @@ export function DskGenerator() {
 
   useEffect(() => () => { if (saveTimer.current != null) window.clearTimeout(saveTimer.current); }, []);
 
-  function rememberDskTemplate(file: ChosenFile | null) {
-    setDskTemplate(file);
+  async function rememberDskTemplate(file: ChosenFile | null) {
     setTemplateError(null);
+    try {
+      await setDskTemplate(file);
+    } catch (e) {
+      setTemplateError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function track(created: { id: string }) {
@@ -270,13 +274,13 @@ export function DskGenerator() {
           templateError={templateError}
           onChooseTemplate={async () => {
             try {
-              rememberDskTemplate(await chooseKeynote("DSK Keynote template"));
+              await rememberDskTemplate(await chooseKeynote("DSK Keynote template"));
             } catch (e) {
               setError(e instanceof Error ? e.message : String(e));
             }
           }}
-          onTemplatePath={(path) => rememberDskTemplate({ path, name: path.split("/").pop() || path })}
-          onForgetTemplate={() => rememberDskTemplate(null)}
+          onTemplatePath={(path) => void rememberDskTemplate({ path, name: path.split("/").pop() || path })}
+          onForgetTemplate={() => void rememberDskTemplate(null)}
           referenceDeck={referenceDeck}
           onChooseReference={async () => {
             try {

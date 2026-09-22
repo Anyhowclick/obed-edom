@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getSettings } from "./api";
+import { getSettings, putSettings, type Settings } from "./api";
 import { DEFAULT_HIGHLIGHT_COLOUR, normaliseHighlightColour } from "./maps/highlight";
 
 /** A boolean the operator sets once and keeps for the rest of the session. */
@@ -156,70 +156,113 @@ export const SIDE_PANELS_KEY = "obed-edom.diff.sidePanels";
 export const MAPS_SIDE_PANELS_KEY = "obed-edom.maps.sidePanels";
 export const MAPS_INSPECTOR_KEY = "obed-edom.maps.inspector";
 export const MAPS_PICK_MODE_KEY = "obed-edom.maps.pickMode";
-export const LW_TEMPLATE_KEY = "obed-edom.generate.lwTemplate";
-export const DSK_TEMPLATE_KEY = "obed-edom.generate.dskTemplate";
 export const DSK_WORKSPACE_KEY = "obed-edom.dsk.workspace";
 
 export type StoredFile = { path: string; name: string };
+export type TemplateField = "lwTemplate" | "dskTemplate";
 
-export function loadStoredFile(key: string): StoredFile | null {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const data = JSON.parse(raw) as StoredFile;
-    if (data && typeof data.path === "string" && typeof data.name === "string" && data.path) {
-      return data;
-    }
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
+const LEGACY_TEMPLATE_KEYS: Record<TemplateField, string> = {
+  lwTemplate: "obed-edom.generate.lwTemplate",
+  dskTemplate: "obed-edom.generate.dskTemplate",
+};
 
-export function saveStoredFile(key: string, file: StoredFile | null) {
+type StoredTemplates = Record<TemplateField, string>;
+
+function readLegacyTemplate(field: TemplateField): string {
   try {
-    if (file) localStorage.setItem(key, JSON.stringify(file));
-    else localStorage.removeItem(key);
+    const raw = localStorage.getItem(LEGACY_TEMPLATE_KEYS[field]);
+    if (!raw) return "";
+    const data = JSON.parse(raw) as Partial<StoredFile>;
+    return typeof data?.path === "string" ? data.path : "";
   } catch {
-    /* ignore */
+    return "";
   }
 }
 
-const storedFileListeners = new Map<string, Set<() => void>>();
-
-function notifyStoredFile(key: string) {
-  storedFileListeners.get(key)?.forEach((listener) => listener());
+function forgetLegacyTemplate(field: TemplateField) {
+  try {
+    localStorage.removeItem(LEGACY_TEMPLATE_KEYS[field]);
+  } catch {
+    /* ignore */
+  }
 }
 
-/** A stored file kept in sync across every mounted subscriber on this key, in this tab and others. */
-export function useStoredFile(key: string): [StoredFile | null, (file: StoredFile | null) => void] {
-  const [value, setValue] = useState<StoredFile | null>(() => loadStoredFile(key));
+function pickTemplates(settings: Partial<Settings>): StoredTemplates {
+  return { lwTemplate: settings.lwTemplate || "", dskTemplate: settings.dskTemplate || "" };
+}
+
+/** Moves templates remembered by an older dashboard (browser storage) into settings.json, once. */
+async function migrateLegacyTemplates(stored: StoredTemplates): Promise<StoredTemplates> {
+  const patch: Partial<Settings> = {};
+  for (const field of ["lwTemplate", "dskTemplate"] as const) {
+    const legacy = readLegacyTemplate(field);
+    if (legacy && !stored[field]) patch[field] = legacy;
+  }
+  if (!Object.keys(patch).length) return stored;
+  const written = pickTemplates(await putSettings(patch));
+  (Object.keys(patch) as TemplateField[]).forEach(forgetLegacyTemplate);
+  return written;
+}
+
+let templatesRequest: Promise<StoredTemplates> | null = null;
+let templatesCache: StoredTemplates | null = null;
+const templateListeners = new Set<() => void>();
+
+/** Invalidates the shared templates fetch so every mounted `useStoredTemplate` refetches. */
+export function refreshStoredTemplates(): void {
+  templatesRequest = null;
+  templatesCache = null;
+  templateListeners.forEach((listener) => listener());
+}
+
+function templatesReady(): Promise<StoredTemplates> {
+  if (!templatesRequest) {
+    templatesRequest = getSettings()
+      .then((settings) => migrateLegacyTemplates(pickTemplates(settings)))
+      .catch(() => ({ lwTemplate: "", dskTemplate: "" }))
+      .then((stored) => {
+        templatesCache = stored;
+        templateListeners.forEach((listener) => listener());
+        return stored;
+      });
+  }
+  return templatesRequest;
+}
+
+function toStoredFile(path: string): StoredFile | null {
+  return path ? { path, name: path.split("/").pop() || path } : null;
+}
+
+/** A template remembered in settings.json, so it survives any browser, tab, or profile on this Mac. */
+export function useStoredTemplate(field: TemplateField): [StoredFile | null, (file: StoredFile | null) => Promise<void>] {
+  const [value, setValue] = useState<StoredFile | null>(() => toStoredFile(templatesCache?.[field] || ""));
 
   useEffect(() => {
-    setValue(loadStoredFile(key));
-    const listener = () => setValue(loadStoredFile(key));
-    let listeners = storedFileListeners.get(key);
-    if (!listeners) {
-      listeners = new Set();
-      storedFileListeners.set(key, listeners);
-    }
-    listeners.add(listener);
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key) listener();
-    };
-    window.addEventListener("storage", onStorage);
+    const sync = () => setValue(toStoredFile(templatesCache?.[field] || ""));
+    templateListeners.add(sync);
+    sync();
+    void templatesReady();
     return () => {
-      listeners!.delete(listener);
-      window.removeEventListener("storage", onStorage);
+      templateListeners.delete(sync);
     };
-  }, [key]);
+  }, [field]);
 
   const update = useCallback(
-    (file: StoredFile | null) => {
-      saveStoredFile(key, file);
-      notifyStoredFile(key);
+    async (file: StoredFile | null) => {
+      const path = file?.path || "";
+      const previous = templatesCache;
+      templatesCache = { ...(templatesCache || { lwTemplate: "", dskTemplate: "" }), [field]: path };
+      templateListeners.forEach((listener) => listener());
+      try {
+        templatesCache = pickTemplates(await putSettings({ [field]: path }));
+      } catch (err) {
+        templatesCache = previous;
+        throw err;
+      } finally {
+        templateListeners.forEach((listener) => listener());
+      }
     },
-    [key]
+    [field]
   );
 
   return [value, update];

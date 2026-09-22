@@ -206,6 +206,8 @@ class SettingsBody(BaseModel):
     reusePreviews: bool | None = None
     defaultExportDir: str | None = None
     highlightColour: str | None = None
+    lwTemplate: str | None = None
+    dskTemplate: str | None = None
 
 
 OPENABLE_SUFFIXES = {".key", ".docx", ".pdf", ".png", ".jpg", ".jpeg", ".mov", ".mp4"}
@@ -266,6 +268,10 @@ def create_app() -> FastAPI:
             current["defaultExportDir"] = payload.defaultExportDir
         if payload.highlightColour is not None:
             current["highlightColour"] = payload.highlightColour
+        if payload.lwTemplate is not None:
+            current["lwTemplate"] = payload.lwTemplate
+        if payload.dskTemplate is not None:
+            current["dskTemplate"] = payload.dskTemplate
         try:
             return save_settings(current, validate_dir=payload.defaultExportDir is not None)
         except ValueError as exc:

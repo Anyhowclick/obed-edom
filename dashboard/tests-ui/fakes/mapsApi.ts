@@ -144,6 +144,8 @@ const DEFAULT_SETTINGS: Settings = {
   reusePreviews: false,
   defaultExportDir: "",
   highlightColour: "#e8772a",
+  lwTemplate: "",
+  dskTemplate: "",
 };
 
 let settingsValue: Settings = { ...DEFAULT_SETTINGS };
