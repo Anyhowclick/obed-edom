@@ -127,6 +127,19 @@ const PIN_OVERRIDDEN_NOTE =
   "The run won't use this pin: its framing would push the page off the frame or shrink it to a " +
   "sliver. The run will frame this slide automatically instead.";
 
+const CANDIDATE_CONTEXT_NOTE =
+  "Each preview assumes every other page stays automatic. Pinning the page before this one can " +
+  "change how this page frames.";
+
+function chipLabel(page: FramingPage, slide: number | null, keepsSide: boolean): string {
+  return (
+    `Slide ${page.slide}` +
+    (fellBackWith(page, slide) ? " — no framing fit, so it is scaled to the frame" : "") +
+    (pinOverriddenWith(page, slide) ? " — the run won't use this pin" : "") +
+    (keepsSide ? " · side panels kept" : "")
+  );
+}
+
 function categoryOf(page: FramingPage, decisions: Record<number, FramingDecision>): Category {
   const state = stateOf(page, decisions);
   if (state === "pinned") return "reviewed";
@@ -737,16 +750,8 @@ export function FramingReview({
                       (fellBackWith(page, pinnedSlide(page, decisions)) ? " fellback" : "") +
                       (keepsSideContent(page) ? " kept" : "")
                     }
-                    title={
-                      `Slide ${page.slide}` +
-                      (fellBackWith(page, pinnedSlide(page, decisions))
-                        ? " — no framing fit, so it is scaled to the frame"
-                        : "") +
-                      (pinOverriddenWith(page, pinnedSlide(page, decisions))
-                        ? " — the run won't use this pin"
-                        : "") +
-                      (keepsSideContent(page) ? " · side panels kept" : "")
-                    }
+                    title={chipLabel(page, pinnedSlide(page, decisions), keepsSideContent(page))}
+                    aria-label={chipLabel(page, pinnedSlide(page, decisions), keepsSideContent(page))}
                   >
                     <CropPreview
                       src={thumbUrl(page)}
@@ -830,6 +835,8 @@ export function FramingReview({
                   const shown = previewing[page.index] ?? pinnedSlide(page, decisions);
                   const previewFalls = fellBackWith(page, shown);
                   const previewOverridden = pinOverriddenWith(page, shown);
+                  const warningId = `framing-pin-warning-${page.slide}`;
+                  const contextId = `framing-candidate-context-${page.slide}`;
                   return (
                     <div key={page.slide} className="framing-row">
                       <span className="outline-num framing-row-num">{page.slide}</span>
@@ -894,13 +901,24 @@ export function FramingReview({
                               />
                             )}
                           </div>
-                          <div className="framing-picker">
+                          <div
+                            className="framing-picker"
+                            role="group"
+                            aria-label={`Template framings for slide ${page.slide}`}
+                            aria-describedby={contextId}
+                          >
                             {page.candidates.map((candidate) => (
                               <button
                                 key={candidate.templateSlide}
                                 type="button"
                                 disabled={busy}
                                 title={candidateLabel(candidate)}
+                                aria-label={candidateLabel(candidate)}
+                                aria-describedby={
+                                  candidate.templateSlide === shown && previewOverridden
+                                    ? warningId
+                                    : undefined
+                                }
                                 className={
                                   "framing-option" +
                                   (candidate.templateSlide === preview ? " current" : "") +
@@ -950,6 +968,9 @@ export function FramingReview({
                               </button>
                             ))}
                           </div>
+                          <p id={contextId} className="note">
+                            {CANDIDATE_CONTEXT_NOTE}
+                          </p>
                         </div>
                       <div className="framing-row-controls">
                         <div className="actions">
@@ -957,6 +978,7 @@ export function FramingReview({
                             className="btn secondary tone-alt"
                             type="button"
                             disabled={busy || (preview ?? page.autoTemplateSlide) == null}
+                            aria-describedby={previewOverridden ? warningId : undefined}
                             onClick={() =>
                               decide(
                                 [page.index],
@@ -985,10 +1007,13 @@ export function FramingReview({
                             <span>Keep side panels</span>
                           </label>
                         </div>
+                        <p id={warningId} className="note" role="status" aria-live="polite">
+                          {previewOverridden ? PIN_OVERRIDDEN_NOTE : ""}
+                        </p>
                         <p className="note">
                           {`Template slide ${preview ?? "—"}. `}
                           {previewOverridden
-                            ? `${PIN_OVERRIDDEN_NOTE} `
+                            ? ""
                             : previewFalls
                               ? "This framing does not fit, so the page is scaled to the frame. "
                               : "This framing applies cleanly. "}

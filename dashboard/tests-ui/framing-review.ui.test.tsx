@@ -92,26 +92,79 @@ describe("framing review overridden pin", () => {
         },
       ],
     });
-    const { container } = renderReview(p);
+    renderReview(p);
     fireEvent.click(screen.getByRole("button", { name: /^Reviewed/ }));
-    expect(container.querySelector(".framing-chip")!.getAttribute("title")).toContain(
-      "the run won't use this pin"
-    );
+    expect(
+      screen.getByRole("button", { name: "Slide 58 — the run won't use this pin" })
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
-    expect(screen.getByText(/The run won't use this pin: its framing would push the page off the frame/)).toBeTruthy();
-    expect(screen.getByText(/The run will frame this slide automatically instead\./)).toBeTruthy();
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(
+      "The run won't use this pin: its framing would push the page off the frame or shrink it " +
+        "to a sliver. The run will frame this slide automatically instead."
+    );
+    const candidate = screen.getByRole("button", {
+      name: /^Template slide 3 — the run won't use this pin/,
+    });
+    expect(candidate).toHaveAccessibleDescription(status.textContent!);
+    expect(screen.getByRole("button", { name: "Confirm this framing" })).toHaveAccessibleDescription(
+      status.textContent!
+    );
     expect(screen.queryByText(/This framing applies cleanly/)).toBeNull();
+  });
+
+  it("announces the warning in the same live region when the operator previews an overridden pin", () => {
+    const p = page({
+      candidates: [
+        ...page().candidates,
+        {
+          templateSlide: 3,
+          agreement: 0,
+          fit: 0.2,
+          wouldFallBack: false,
+          pinOverridden: true,
+          transform: { s: 0.5, tx: -100, ty: 0 },
+          rects: [AUTO_RECT],
+        },
+      ],
+    });
+    renderReview(p);
+    fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toBeEmptyDOMElement();
+    const overridden = screen.getByRole("button", {
+      name: /^Template slide 3 — the run won't use this pin/,
+    });
+    expect(overridden).not.toHaveAccessibleDescription(/its framing would push the page/);
+    fireEvent.click(overridden);
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status).toHaveTextContent(/^The run won't use this pin/);
+    expect(overridden).toHaveAccessibleDescription(status.textContent!);
+    expect(screen.getByRole("button", { name: /^Template slide 1 —/ })).not.toHaveAccessibleDescription(/its framing would push the page/);
   });
 
   it("keeps the clean note for a pin the run honours", () => {
     const decision: FramingDecision = { wallIndex: 57, state: "pinned", templateSlide: 1 };
-    const { container } = renderReview(page({ decision }));
+    renderReview(page({ decision }));
     fireEvent.click(screen.getByRole("button", { name: /^Reviewed/ }));
-    expect(container.querySelector(".framing-chip")!.getAttribute("title")).not.toContain(
-      "won't use this pin"
-    );
+    expect(screen.getByRole("button", { name: "Slide 58" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
-    expect(screen.getByText(/This framing applies cleanly/)).toBeTruthy();
+    expect(screen.getByText(/This framing applies cleanly/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
     expect(screen.queryByText(/won't use this pin/)).toBeNull();
+  });
+});
+
+describe("framing review candidate context", () => {
+  it("tells the operator each candidate preview assumes the other pages stay automatic", () => {
+    renderReview(page());
+    fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
+    expect(
+      screen.getByRole("group", { name: "Template framings for slide 58" })
+    ).toHaveAccessibleDescription(
+      "Each preview assumes every other page stays automatic. Pinning the page before this one " +
+        "can change how this page frames."
+    );
   });
 });
