@@ -30,6 +30,7 @@ from obed_edom.live_codec import codec_family, movie_codec
 
 _GEOMETRY_TOLERANCE = 0.5
 _OVERLAP_MIN_PX = 1.0
+_GL_REPLAY_TRANSITIONS: frozenset[str] = frozenset({"apple:magic-move-implied-motion-path"})
 _TRIM_SUFFIX_RE = re.compile(r"^(?P<name>.+)-\d+\.\d+-\d+\.\d+(?P<ext>\.[A-Za-z0-9]+)$")
 
 _MOVIE_SUBTREE_KEYS: dict[str, frozenset[str]] = {
@@ -623,7 +624,12 @@ class _Refuse(Exception):
     """Internal control-flow only: carries the reason for an `Unsupported` result."""
 
 
-QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset({"bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e"})
+QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset(
+    {
+        "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e",
+        "2ac48f1178bc271b679b58f7e58b46d1b0b383026cd3a82ffeb9aefcb98386f8",
+    }
+)
 
 
 def plan_signature(runtime: dict[str, Any]) -> str:
@@ -661,14 +667,23 @@ class MovieContinuity:
     refusal: str | None = None
     """Why this boundary cannot carry the movie, when `action` says it structurally could.
     Last field with a default so positional construction keeps working."""
+    gl_replay: dict[str, Any] | None = None
+    """The full `effect_opacity_overrides` result when this refused pin qualified for `glReplay`
+    derivation (arming plan section 11), else `None`."""
+    gl_replay_reason: str | None = None
+    """Why `gl_replay` derivation was not attempted or did not qualify, else `None`."""
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "asset": self.asset,
             "action": self.action,
             "srcRect": self.src_rect.as_dict() if self.src_rect else None,
             "dstRect": self.dst_rect.as_dict() if self.dst_rect else None,
         }
+        if self.gl_replay is not None or self.gl_replay_reason is not None:
+            result["glReplay"] = self.gl_replay is not None
+            result["glReplayReason"] = self.gl_replay_reason
+        return result
 
 
 @dataclass(frozen=True)
@@ -726,7 +741,9 @@ class ContinuityPlan:
         positive export duration, or a `pin`
         action recurring after a `restart` boundary, a bridge before a restart,
         or any actionable boundary after a bridge. A boundary carrying a `refusal` becomes a
-        `retire` -- at most one, and only before the first restart and any bridge.
+        `retire` -- at most one, and only before the first restart and any bridge -- unless the
+        movie qualified for `glReplay` derivation, in which case it becomes a `glReplay` boundary
+        under the same guards.
         """
         if not self.boundaries:
             return Unsupported("no boundaries to translate")
@@ -764,7 +781,26 @@ class ContinuityPlan:
                 key = movie_keys.get(movie.asset)
                 if key is None:
                     return Unsupported(f"refused asset '{movie.asset}' is not in the movie table")
-                runtime_boundaries.append({"atScene": scene, "action": "retire", "movieKey": key})
+                if movie.gl_replay is not None:
+                    gl = movie.gl_replay
+                    slot_sizes = gl.get("slotSizes")
+                    slot_rects = gl.get("slotRects")
+                    overrides = gl.get("opacityOverrides")
+                    if (
+                        not isinstance(overrides, list)
+                        or not isinstance(slot_sizes, list)
+                        or not isinstance(slot_rects, list)
+                        or len(slot_sizes) != len(slot_rects)
+                    ):
+                        return Unsupported("glReplay boundary carries an unreadable override table")
+                    runtime_boundaries.append(
+                        {
+                            "atScene": scene, "action": "glReplay", "movieKey": key, "fallback": "retire",
+                            "slotSizes": slot_sizes, "slotRects": slot_rects, "opacityOverrides": overrides,
+                        }
+                    )
+                else:
+                    runtime_boundaries.append({"atScene": scene, "action": "retire", "movieKey": key})
                 emitted_retire = True
 
             if emitted_cut and "pin" in actions:
@@ -1195,11 +1231,64 @@ def _resolve_continuation(
     )
 
 
+def _gl_replay_attempt(
+    movie: MovieContinuity,
+    transition: dict[str, Any] | None,
+    transition_name: str | None,
+    continuing_count: int,
+    dst_events: list[Any],
+) -> MovieContinuity:
+    """Rules 1-5 of arming plan section 11, applied to a `pin` that received an overlap refusal.
+    The first failing rule is the recorded reason; success attaches the full
+    `effect_opacity_overrides` result."""
+    if transition_name not in _GL_REPLAY_TRANSITIONS:
+        reason = f"transition '{transition_name}' is not in the measured WebGL list"
+        return replace(movie, gl_replay=None, gl_replay_reason=reason)
+    if continuing_count != 1:
+        reason = f"{continuing_count} movies are carried across the boundary, expected exactly 1"
+        return replace(movie, gl_replay=None, gl_replay_reason=reason)
+    if movie.action != "pin":
+        reason = "carried movie changes geometry across the boundary"
+        return replace(movie, gl_replay=None, gl_replay_reason=reason)
+    first_event = dst_events[0] if dst_events else {}
+    automatic_play = first_event.get("automaticPlay") if isinstance(first_event, dict) else None
+    if automatic_play is not False:
+        reason = f"destination first event is not click-driven (automaticPlay={automatic_play!r})"
+        return replace(movie, gl_replay=None, gl_replay_reason=reason)
+    result = effect_opacity_overrides(transition)
+    if isinstance(result, Unsupported):
+        reason = f"transition effect: {result.reason}"
+        return replace(movie, gl_replay=None, gl_replay_reason=reason)
+    return replace(movie, gl_replay=result, gl_replay_reason=None)
+
+
+def _refusal_record(
+    boundary: SlideBoundary,
+    movie: MovieContinuity,
+    scene_index_by_player: dict[int, int],
+    movie_keys: dict[str, str],
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "fromPlayer": boundary.from_player_index,
+        "toPlayer": boundary.to_player_index,
+        "atScene": scene_index_by_player.get(boundary.to_player_index),
+        "asset": movie.asset,
+        "movieKey": movie_keys.get(movie.asset),
+        "reason": movie.refusal,
+    }
+    if movie.gl_replay is not None or movie.gl_replay_reason is not None:
+        record["glReplay"] = movie.gl_replay is not None
+        record["glReplayReason"] = movie.gl_replay_reason
+        record["opacityExcluded"] = movie.gl_replay.get("excluded", []) if movie.gl_replay else []
+    return record
+
+
 def derive_plan(
     export_root: Path,
     slides: list[dict[str, Any]],
     *,
     resolver: Callable[[Path, str], Path] = safe_export_file,
+    gl_replay: bool = False,
 ) -> ContinuityPlan | Unsupported:
     try:
         header = json.loads(resolver(export_root, "assets/header.json").read_text())
@@ -1274,6 +1363,9 @@ def derive_plan(
         incoming = instances_by_player.get(to_player_index, {}) if to_player_index is not None else {}
         boundary_desc = f"player index {player_index} -> {to_player_index}"
 
+        if transition_name is not None and not isinstance(transition_name, str):
+            return Unsupported(f"unreadable transition name at {boundary_desc}")
+
         if to_player_index is None:
             movies = tuple(
                 MovieContinuity(
@@ -1316,6 +1408,10 @@ def derive_plan(
                 return Unsupported(str(exc))
             if refusal is not None:
                 continuity = replace(continuity, refusal=refusal)
+                if gl_replay:
+                    continuity = _gl_replay_attempt(
+                        continuity, transition, transition_name, len(continuing), events_by_player[to_player_index]
+                    )
             movies.append(continuity)
             if continuity.action == "bridge":
                 bridge_count += 1
@@ -1335,14 +1431,7 @@ def derive_plan(
     return replace(
         plan,
         refusals=tuple(
-            {
-                "fromPlayer": boundary.from_player_index,
-                "toPlayer": boundary.to_player_index,
-                "atScene": scene_index_by_player.get(boundary.to_player_index),
-                "asset": movie.asset,
-                "movieKey": movie_keys.get(movie.asset),
-                "reason": movie.refusal,
-            }
+            _refusal_record(boundary, movie, scene_index_by_player, movie_keys)
             for boundary in plan.boundaries
             for movie in boundary.movies
             if movie.refusal is not None

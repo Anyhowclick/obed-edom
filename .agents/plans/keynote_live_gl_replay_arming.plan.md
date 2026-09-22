@@ -245,3 +245,46 @@ is `tryRemount` → `remount-into-authored-layer` into a NEW DOM tree, and it is
 sibling decoders are retired per INSTANCE (the pool is asset-keyed) and (b) the remount footprint comes from the
 DESTINATION rect (today: source rect ⇒ ~4 px pop). Both are new v1 work items in G3. D1/D5 should be decided against the
 real fallback: a static poster for the whole dwell, not a restart. Still open: OBS CEF (Q1), 2 other viewports, n = 2.
+
+## 11. G1 plan (2026-09-22 evening, Fable planner M) — `glReplay` derivation, offline only
+
+**Measured before planning** (real exports): P2 1→2 = `pin` + overlap refusal (slot 6), transition
+`apple:magic-move-implied-motion-path`, slide-2 `events[0].automaticPlay == False`, `effect_opacity_overrides` ⇒ one
+override (slot 4, α 0.29468628764152527, 178×157). Minimal (i) S4→S5 = `pin`, NO refusal (nothing above the movie),
+overrides `[]`; (ii) S6→S7 = two pins, one refusal, S7 first event automatic, opacity refuses on `transform.rotation.z`;
+(iii) = whole-deck ambiguous-ownership `Unsupported`. Positive Control unchanged. The committed four-slide fixture
+lacks `automaticPlay` and the full slide-1 transition tree — fixture work is part of G1.
+
+**Derivation** (inside `derive_plan`, only for a pin that received an overlap refusal — §2 "those boundaries stay
+`pin` and never reach here"; first failure keeps `retire` and records `glReplay: false, glReplayReason`):
+1. transition name ∈ `_GL_REPLAY_TRANSITIONS = {"apple:magic-move-implied-motion-path"}` (the only measured name);
+2. exactly one continuing movie at the boundary; 3. that movie's action is `pin` (geometry-static);
+4. destination `events[0].automaticPlay is False` (absent / True / non-bool ⇒ refuse: "no further event" is not authorable);
+5. `effect_opacity_overrides(transition)` returns a result (an `Unsupported` propagates as the reason, never raises);
+6. masks are already a whole-deck refusal upstream.
+Runtime entry: `{atScene, action: "glReplay", movieKey, fallback: "retire", slotSizes, slotRects, opacityOverrides}`;
+`slotRects` exact floats; `excluded` is note-only. `to_runtime` treats `retire` and `glReplay` as one retire-class
+(same guards, same messages) plus an unreadable-override-table guard.
+
+**Decisions taken under stated assumptions (owner may overrule, each is a one-condition switch):**
+- **A. Deck (i) plans `pin`, not `glReplay`.** The handover's "(i) glReplay" contradicts §2 and the Q4 status line
+  ("plans `pin`"); §2 wins. Consequence worth an owner look: a click-driven WebGL pin with nothing above the movie is
+  still inside the invisible window and G1 does not arm it.
+- **B. Flag-gated derivation, not an allowlist replacement.** `derive_plan(..., gl_replay=False)`; off ⇒ every byte
+  is today's (old sha, P2 injected plan and `p2_verdict.py` untouched — the rollout-flag rule in §7). On ⇒ the
+  `glReplay` entry and a NEW sha. `QUALIFIED_PLAN_SHA256` therefore holds two entries until G3 (which bumps
+  `CONTINUITY_VERSION` 4→5 and replaces the list); without this, runtime v4 — which filters boundaries by literal
+  action — would receive a plan with no retire zone and carry the movie into the overlap ("carry anyway").
+- **C. WITHDRAWN (owner-confirmed 2026-09-22): no rule changes, no operator warning.** After Transition is the healthy
+  authoring: the automatic first event removes the WebGL canvas at settle, so the invisible window never opens, and the
+  runtime substitutes the live decoder when the export autoplays from zero (the bridge feature P2 qualified). Measured:
+  every Positive Control slide has an automatic first event and the deck plans `pin / bridge / restart / restart` with
+  no refusals; the owner confirms S1 plays across to S3 live (S4 is an intentional restart). On Click is what opens the
+  window and would make DSK-generated decks depend on unqualified GL replay plus an operator click, so the DSK
+  generator's rule 2 (After Transition) stays, rule 4 stays as the precondition, and the §7 warning follow-up is dropped.
+
+**Tests:** fixture 1→2 ⇒ `glReplay` with the slot-4 override (flag on) and byte-identical to today (flag off);
+mutation negatives per rule 1/2/4/5 (each asserts the reason string and that the flag-on runtime is unqualified);
+`to_runtime` guards; real-export parity; new `tests/test_live_continuity_decks.py` on sanitized deck fixtures
+(`minimal_alpha_dsk/` S4–S9, `positive_control/`) asserting (i) pin/no refusal, (ii) refuse rule 2, (iii) ambiguous,
+Positive Control unchanged; `REAL`-gated parity vs `output/gl-decks/`.
