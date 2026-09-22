@@ -2394,7 +2394,7 @@ def test_burst_is_long_enough_that_a_two_state_movie_cannot_plausibly_alias():
 
 
 def _inpage_raw(
-    *, live: bool, n_bands: int = 4, n: int = probe.INPAGE_MIN_SAMPLES,
+    *, live: bool, n_bands: int = probe.INPAGE_BAND_COUNT, n: int = probe.INPAGE_MIN_SAMPLES,
     paused_n: int = probe.INPAGE_MIN_SAMPLES, epoch: int = 1, marker_epoch: int | None = None,
 ) -> dict[str, Any]:
     """A synthetic `INPAGE_LIVENESS_JS` result: every band ramps (LIVE) or holds
@@ -2706,8 +2706,8 @@ class TestTwoOracleRecord:
 
     def test_an_unusable_occluder_mask_is_inconclusive(self) -> None:
         raw = _inpage_raw(live=True)
-        raw["markerDark"] = [0.0, 0.0, 0.0, 0.0]
-        raw["markerLight"] = [0.1, 0.1, 0.1, 0.1]
+        raw["markerDark"] = [0.0] * probe.INPAGE_BAND_COUNT
+        raw["markerLight"] = [0.1] * probe.INPAGE_BAND_COUNT
         result = probe.inpage_oracle_result(raw)
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"

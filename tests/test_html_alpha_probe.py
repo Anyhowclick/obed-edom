@@ -2498,6 +2498,37 @@ class TestInPageLivenessScorer:
         assert scored["verdict"] is False
         assert scored["reason"] == "gl error"
 
+    def test_a_missing_gl_error_field_is_inconclusive(self):
+        """Codex r5: `glErr` is part of the contract; a sample without it (or with
+        None) is malformed, never silently "no error" -- a missing field could
+        otherwise hide a GL error and let the window read LIVE."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        for missing in ({"glErr": None}, "drop"):
+            samples = _inpage_samples(24)
+            for sample in samples:
+                if missing == "drop":
+                    sample.pop("glErr")
+                else:
+                    sample.update(missing)
+            result = score_inpage_liveness(samples, occluder_mask=[0] * len(samples[0]["bands"]))
+            assert result["verdict"] is None
+            assert result["reason"] == "malformed samples"
+
+    def test_band_count_other_than_the_fixed_grid_is_inconclusive(self):
+        """Codex r5: the contract is 16x8 = 128 band means; 1, 127 or 129 bands
+        (with a matching mask) must be refused rather than scored as a smaller
+        grid that could be trivially all-moving."""
+        from obed_edom.html_alpha_probe import INPAGE_BAND_COUNT, score_inpage_liveness
+
+        for n in (1, INPAGE_BAND_COUNT - 1, INPAGE_BAND_COUNT + 1):
+            samples = _inpage_samples(24)
+            for k, sample in enumerate(samples):
+                sample["bands"] = [100.0 + (k % 10) * 3.0] * n
+            result = score_inpage_liveness(samples, occluder_mask=[0] * n)
+            assert result["verdict"] is None, n
+            assert result["reason"] == "malformed samples"
+
     def test_more_than_half_the_bands_occluded_is_inconclusive(self):
         from obed_edom.html_alpha_probe import score_inpage_liveness
 
@@ -2585,14 +2616,23 @@ class TestInPageLivenessScorer:
     def test_occluder_mask_from_markers_flags_bands_that_do_not_move(self):
         from obed_edom.html_alpha_probe import occluder_mask_from_markers
 
-        at_bound = occluder_mask_from_markers([100.0], [100.5])
-        assert at_bound["verdict"] is True
-        assert at_bound["mask"] == [1]
-        assert at_bound["occluded"] == 1
+        from obed_edom.html_alpha_probe import INPAGE_BAND_COUNT
 
-        past_bound = occluder_mask_from_markers([100.0], [100.51])
-        assert past_bound["mask"] == [0]
+        # The contract is the fixed 16x8 grid (Codex r5): a marker array of any
+        # other length is refused, so the boundary is probed on full-size arrays.
+        n = INPAGE_BAND_COUNT
+        at_bound = occluder_mask_from_markers([100.0] * n, [100.5] * n)
+        assert at_bound["verdict"] is True
+        assert at_bound["mask"] == [1] * n
+        assert at_bound["occluded"] == n
+
+        past_bound = occluder_mask_from_markers([100.0] * n, [100.51] * n)
+        assert past_bound["mask"] == [0] * n
         assert past_bound["occluded"] == 0
+
+        for bad in (1, n - 1, n + 1):
+            short = occluder_mask_from_markers([100.0] * bad, [100.5] * bad)
+            assert short["verdict"] is False and short["mask"] is None, bad
 
     def test_occluder_mask_fails_closed_on_mismatched_marker_lengths(self):
         from obed_edom.html_alpha_probe import occluder_mask_from_markers
@@ -2605,7 +2645,11 @@ class TestInPageLivenessScorer:
     def test_occluder_mask_fails_closed_on_non_numeric_marker_values(self):
         from obed_edom.html_alpha_probe import occluder_mask_from_markers
 
-        result = occluder_mask_from_markers([100.0, "oops"], [100.0, 100.0])
+        from obed_edom.html_alpha_probe import INPAGE_BAND_COUNT
+
+        dark = [100.0] * INPAGE_BAND_COUNT
+        dark[1] = "oops"
+        result = occluder_mask_from_markers(dark, [100.0] * INPAGE_BAND_COUNT)
         assert result["verdict"] is False
         assert result["mask"] is None
         assert result["reason"] == "non-finite marker delta"

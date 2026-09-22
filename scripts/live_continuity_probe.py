@@ -70,6 +70,7 @@ from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
+    INPAGE_BAND_COUNT,
     INPAGE_MIN_SAMPLES,
     combine_oracle_verdicts,
     inpage_mask_is_usable,
@@ -1417,9 +1418,9 @@ def evaluate_async(transport: Any, expression: str) -> Any:
 
 
 def inpage_applicability_reason(raw: Any) -> str | None:
-    """`None` only when the handle itself is absent (Codex r2 Spec 3): every
-    other case -- malformed, mismatched identity, a stale/replaced handle --
-    is an APPLICABLE inconclusive result, never n/a."""
+    """The canonical absent-handle reason for exactly that n/a response, else
+    `None`: every other case -- malformed, mismatched identity, a stale or
+    replaced handle -- is an APPLICABLE inconclusive result, never n/a."""
     if (
         isinstance(raw, dict) and raw.get("applicable") is False
         and raw.get("status") == "n/a" and raw.get("reason") == INPAGE_HANDLE_ABSENT_REASON

@@ -83,6 +83,7 @@ INPAGE_CONTROL_RANGE_MAX = 1.0
 INPAGE_GREEN_STATIC_MAX = 1.0
 INPAGE_GREEN_CHANNEL_MARGIN = 30
 INPAGE_MIN_SAMPLES = 24
+INPAGE_BAND_COUNT = LIVE_BAND_COLS * LIVE_BAND_ROWS
 INPAGE_OCCLUDED_BANDS_MAX_FRAC = 0.5
 INPAGE_MARKER_DELTA_MAX = 0.5
 PLAYER_RAF_ASSIGN = "window.requestAnimFrame=window.requestAnimationFrame"
@@ -1961,8 +1962,7 @@ def _valid_inpage_sample(sample: Any, n_bands: int) -> bool:
         return False
     if _finite_float(sample.get("ms")) is None or _finite_float(sample.get("t")) is None:
         return False
-    gl_err = sample.get("glErr")
-    return gl_err is None or _finite_float(gl_err) is not None
+    return _finite_float(sample.get("glErr")) is not None
 
 
 def _distinct_monotonic(values: Sequence[float]) -> bool:
@@ -1997,8 +1997,7 @@ def score_inpage_liveness(
     if not samples:
         return {"verdict": None, "status": "inconclusive", "reason": "no samples", "n": 0}
 
-    first_bands = samples[0].get("bands") if isinstance(samples[0], dict) else None
-    n_bands = len(first_bands) if isinstance(first_bands, (list, tuple)) else 0
+    n_bands = INPAGE_BAND_COUNT
     if not all(_valid_inpage_sample(s, n_bands) for s in samples):
         return {
             "verdict": None,
@@ -2065,7 +2064,7 @@ def score_inpage_liveness(
         mean_rgb[1] > mean_rgb[0] + INPAGE_GREEN_CHANNEL_MARGIN
         and mean_rgb[1] > mean_rgb[2] + INPAGE_GREEN_CHANNEL_MARGIN
     )
-    gl_err_values = [_finite_float(s.get("glErr")) or 0.0 for s in samples]
+    gl_err_values = [float(s["glErr"]) for s in samples]
     gl_err_any = max((abs(v) for v in gl_err_values), default=0.0)
     sample_ms = [float(s["ms"]) for s in samples]
 
@@ -2133,7 +2132,7 @@ def occluder_mask_from_markers(
     if not isinstance(dark_bands, (list, tuple)) or not isinstance(light_bands, (list, tuple)):
         return {"verdict": False, "mask": None, "reason": "mismatched marker lengths"}
     n = len(dark_bands)
-    if n == 0 or len(light_bands) != n:
+    if n != INPAGE_BAND_COUNT or len(light_bands) != n:
         return {"verdict": False, "mask": None, "reason": "mismatched marker lengths"}
     dark = [_finite_float(v) for v in dark_bands]
     light = [_finite_float(v) for v in light_bands]
