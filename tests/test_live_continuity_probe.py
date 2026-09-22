@@ -1082,13 +1082,13 @@ class TestBurstScheduling:
 
         def slow_call(method: str, **params: Any) -> dict[str, Any]:
             if host.transport.captures == 0:
-                clock.t += 0.2
+                clock.t += 0.4  # must overrun the first gap (360 ms) to be an overrun at all
             return real_call(method, **params)
 
         host.transport.call = slow_call  # type: ignore[method-assign]
         _, offsets = probe.capture_burst(host.transport, now=clock.now, sleep=clock.sleep)
         assert offsets[0] == 0.0
-        assert offsets[1] == 200.0  # the overrun itself is reported, never hidden
+        assert offsets[1] == 400.0  # the overrun itself is reported, never hidden
         assert offsets[2:] == [float(ms) for ms in probe.BURST_OFFSETS_MS[2:]]
 
 
