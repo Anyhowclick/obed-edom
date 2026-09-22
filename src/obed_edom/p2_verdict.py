@@ -67,7 +67,7 @@ def _norm_hash(h: str | None) -> str:
 
 # 12 shots at >=360 ms gaps, alternating 360/370 (paint-oracle plan SS14; research
 # doc "Paint-oracle E0"): keeps the 12-shot aliasing bound (2*0.5**12 ~ 0.05%)
-# and fixes the WebGL stale-surface misread an unspaced burst can hit.
+# and fixes the WebGL stale-surface misread the earlier, tighter burst can hit.
 BURST_OFFSETS_MS = (0, 360, 730, 1090, 1460, 1820, 2190, 2550, 2920, 3280, 3650, 4010)
 CONTROL_PATCH_PX = 40
 CONTROL_INSET_PX = 4
@@ -2139,7 +2139,11 @@ _ISOLATION_KEYS = (
 )
 
 
-def _isolation_view(snap: dict) -> dict:
+def _isolation_view(
+    snap: dict, *,
+    evidence_cadence: tuple[int, ...] = BURST_OFFSETS_MS,
+    legacy_unrecorded_cadence: tuple[int, ...] | None = None,
+) -> dict:
     """The invariant booleans extracted from a 3->4 snapshot for A1==B==A2 checks.
     Every one is RE-DERIVED from the arm's raw evidence -- samples, bridge events,
     and the retained burst raster -- and held to the cached values."""
@@ -2154,7 +2158,9 @@ def _isolation_view(snap: dict) -> dict:
         "crossingIdentityOk": bool((mc.get("crossingIdentity") or {}).get("ok")),
         "stableSlide4OwnerOk": bool((mc.get("stableSlide4Owner") or {}).get("ok")),
         "boundaryValidOk": bool((mc.get("boundaryValid") or {}).get("ok")),
-        "footprintFullyLiveOk": _footprint_fully_live_ok(snap),
+        "footprintFullyLiveOk": _footprint_fully_live_ok(
+            snap, evidence_cadence=evidence_cadence, legacy_unrecorded_cadence=legacy_unrecorded_cadence,
+        ),
         "settledIndexProgressionOk": _settled_progression_ok(snap),
         "playerBuildErrorsEmpty": (snap.get("playerBuildErrors") == []),
         "bridgeEngaged": _bridge_engaged(snap),
@@ -2177,28 +2183,38 @@ def _rescore_footprint_raster(data: str, meta_json: str) -> dict | None:
     )
 
 
-def _footprint_evidence_bound(evidence: object, capture_id: object) -> dict | None:
-    """The retained evidence, once it is BOUND to this arm and to the capture
-    contract, or `None`.
+def _footprint_evidence_bound(
+    evidence: object, capture_id: object, *,
+    evidence_cadence: tuple[int, ...] = BURST_OFFSETS_MS,
+    legacy_unrecorded_cadence: tuple[int, ...] | None = None,
+) -> dict | None:
+    """The retained evidence, once it is BOUND to this arm, to the capture
+    contract, AND to the named capture cadence, or `None`. Cadence is part of
+    the instrument: evidence binds only to the profile `evidence_cadence`
+    names, and a capture retained under an earlier profile (no recorded
+    `burstOffsetsMs`) is scored only when the caller names that legacy
+    profile explicitly via `legacy_unrecorded_cadence` -- the live driver
+    path never does, so unrecorded evidence is unbound there by default.
 
-    Requires: the arm's own `captureId` (retained independently in the snapshot
-    header, so a raster lifted from another arm names the wrong capture); the
-    contract's frame count; a per-frame sha256 list of that same length, as
-    provenance for the burst the raster was reduced from; and the rects, control
-    rect and the ten parameters EQUAL to the constants the re-score will use, so
-    a blob cannot weaken its own thresholds. The shape is enforced at decode.
-
-    `burstOffsetsMs` is recorded in the evidence but deliberately NOT bound
-    here: the re-score is a pure function of the max-delta raster (no time
-    axis; the cadence enters scoring only as `len() == FOOTPRINT_BURST_FRAMES`,
-    already checked), cadence only changes the false-FAIL rate never the
-    false-PASS rate, and thresholds are already bound via `params`; cadence
-    itself is enforced at capture by the driver loop over `BURST_OFFSETS_MS`."""
+    Also requires: the arm's own `captureId` (retained independently in the
+    snapshot header, so a raster lifted from another arm names the wrong
+    capture); the contract's frame count; a per-frame sha256 list of that
+    same length, as provenance for the burst the raster was reduced from;
+    and the rects, control rect and the ten parameters EQUAL to the constants
+    the re-score will use, so a blob cannot weaken its own thresholds. The
+    shape is enforced at decode."""
     ev = evidence if isinstance(evidence, dict) else {}
     ev_id = ev.get("captureId")
     shas = ev.get("frameSha256")
+    recorded = ev.get("burstOffsetsMs")
+    cadence_bound = (
+        evidence_cadence == legacy_unrecorded_cadence
+        if recorded is None
+        else recorded == list(evidence_cadence)
+    )
     if not (
-        isinstance(capture_id, str) and capture_id
+        cadence_bound
+        and isinstance(capture_id, str) and capture_id
         and isinstance(ev_id, str) and ev_id == capture_id
         and ev.get("n") == FOOTPRINT_BURST_FRAMES
         and isinstance(shas, list) and len(shas) == FOOTPRINT_BURST_FRAMES
@@ -2215,20 +2231,26 @@ def _footprint_evidence_bound(evidence: object, capture_id: object) -> dict | No
     return _rescore_footprint_raster(ev.get("data"), json.dumps(meta, sort_keys=True))
 
 
-def _footprint_fully_live_ok(snap: dict) -> bool:
+def _footprint_fully_live_ok(
+    snap: dict, *,
+    evidence_cadence: tuple[int, ...] = BURST_OFFSETS_MS,
+    legacy_unrecorded_cadence: tuple[int, ...] | None = None,
+) -> bool:
     """`footprintFullyLive.ok` RE-SCORED from the retained max-delta raster, bound
-    to this arm's `captureId` and to the capture contract, and required to equal
-    the cached result in EVERY field it derives -- `liveFrac`, `maxDelta`, the
-    clipped rects, the noise floor's p99, the strays -- not merely in its
-    booleans. Exact equality, no tolerance: the re-score runs the same code on
-    the same raster, and it reproduces the committed numbers exactly on all three
-    arms (plan §10.17). A summary alone authenticates nothing: it can claim a
-    live footprint over a raster that shows a frozen one, or over another arm's."""
+    to this arm's `captureId`, to the capture contract, and to the named capture
+    cadence, and required to equal the cached result in EVERY field it derives --
+    `liveFrac`, `maxDelta`, the clipped rects, the noise floor's p99, the strays --
+    not merely in its booleans. Exact equality, no tolerance: the re-score runs
+    the same code on the same raster, and it reproduces the committed numbers
+    exactly on all three arms (plan §10.17). A summary alone authenticates
+    nothing: it can claim a live footprint over a raster that shows a frozen
+    one, or over another arm's."""
     cached = snap.get("footprintFullyLive")
     if not isinstance(cached, dict):
         return False
     derived = _footprint_evidence_bound(
-        cached.get("evidence"), snap.get("captureId")
+        cached.get("evidence"), snap.get("captureId"),
+        evidence_cadence=evidence_cadence, legacy_unrecorded_cadence=legacy_unrecorded_cadence,
     )
     if derived is None or derived.get("verdict") is not True:
         return False
@@ -2724,7 +2746,11 @@ def _manifest_arms_ok(manifest: object, snaps: dict[str, dict]) -> bool:
     )
 
 
-def _score_freeze_control(a1: dict, b: dict, a2: dict, manifest: object = None) -> dict:
+def _score_freeze_control(
+    a1: dict, b: dict, a2: dict, manifest: object = None, *,
+    evidence_cadence: tuple[int, ...] = BURST_OFFSETS_MS,
+    legacy_unrecorded_cadence: tuple[int, ...] | None = None,
+) -> dict:
     """Pure A-B-A verdict for `freezeControlCaughtByCounter`, re-bracketed at the
     3->4 moving Magic Move (plan p2_freeze_control_3to4.plan.md §4; the 1->2 carry
     is refused, so there is no carried movie to freeze there).
@@ -3147,7 +3173,12 @@ def _score_freeze_control(a1: dict, b: dict, a2: dict, manifest: object = None) 
 
     # --- Isolation: every invariant sub-verdict GREEN and equal across A1/B/A2 --
     # (review MAJOR 4: equality alone let all-False-but-equal pass.)
-    iv_a1, iv_b, iv_a2 = _isolation_view(a1), _isolation_view(b), _isolation_view(a2)
+    isolation_kwargs = {"evidence_cadence": evidence_cadence, "legacy_unrecorded_cadence": legacy_unrecorded_cadence}
+    iv_a1, iv_b, iv_a2 = (
+        _isolation_view(a1, **isolation_kwargs),
+        _isolation_view(b, **isolation_kwargs),
+        _isolation_view(a2, **isolation_kwargs),
+    )
     isolation_diffs = {
         k: {"a1": iv_a1[k], "b": iv_b[k], "a2": iv_a2[k]}
         for k in _ISOLATION_KEYS

@@ -214,7 +214,11 @@ Full numbers: "Paint-oracle E0" in [`keynote_live_alternatives_research.md`](key
 - Accepted documented residuals: attach mode measured at 1920×1080 only; a WebGL-only stimulus scored by screenshots in
   CEF is unmeasured (cannot be produced there at 166 ms/shot).
 - W4 = no touch: P2 imports `BURST_OFFSETS_MS`; `FOOTPRINT_BURST_FRAMES` stays 12.
-  Retained evidence carries `burstOffsetsMs` but it is unbound (owner decision, Codex r1 Spec 10 follow-up); the
-  freeze-control fixture stays at the legacy cadence, and its refresh is a freeze-control decision on the owner's
-  go, not a paint-oracle deliverable. For that refresh: the new 12 `burstOffsetsMs[i]` leaves per arm will surface
-  in the absence sweep as ungated and belong in `_SWEEP_ALLOW`/`_MAIN_SWEEP_ALLOW` as report-only provenance.
+  Retained evidence carries `burstOffsetsMs` and IS bound to it (owner decision, Codex r2 Spec 2 -- reversing the
+  r1-follow-up "unbound" call after Codex r2 demonstrated a cadence-specific false-PASS path): `_footprint_evidence_bound`
+  takes a keyword-only `evidence_cadence` (default `BURST_OFFSETS_MS`, the live path) and `legacy_unrecorded_cadence`
+  (default `None`), threaded through `_footprint_fully_live_ok`/`_isolation_view`/`_score_freeze_control`. The real
+  freeze-control fixture stays at its legacy cadence and is scored ONLY via the test-side `_score_34`, which names that
+  legacy profile explicitly on both parameters; a fixture refresh under the current cadence is a freeze-control decision
+  on the owner's go, not a paint-oracle deliverable. For that refresh: the new 12 `burstOffsetsMs[i]` leaves per arm
+  will surface in the absence sweep as ungated and belong in `_SWEEP_ALLOW`/`_MAIN_SWEEP_ALLOW` as report-only provenance.

@@ -904,14 +904,33 @@ REHANDOFF_SEQ0_34 = _FIXTURE_34["b"]["badge"]["stats"]["rehandoffSeqs"][0]
 
 _MISSING = object()
 
+# The real A1/B/A2 bracket committed under `tests/fixtures/p2_freeze_3to4/`
+# (fixture commit 3b31048a) was captured before `burstOffsetsMs` existed in
+# `footprintFullyLive.evidence` at all, under the burst cadence THEN in force
+# -- the unspaced 5-shot-derived 12-shot profile this tuple names. It is
+# scored under its OWN profile, named explicitly here; this tuple lives only
+# in tests; production code never references it.
+LEGACY_BURST_OFFSETS_MS = (0, 130, 290, 500, 770, 1000, 1190, 1430, 1650, 1910, 2110, 2360)
 
-def _score_34(a1: dict, b: dict, a2: dict, manifest=_MISSING) -> dict:
+
+def _score_34(
+    a1: dict, b: dict, a2: dict, manifest=_MISSING, *,
+    evidence_cadence: tuple = LEGACY_BURST_OFFSETS_MS,
+    legacy_unrecorded_cadence: tuple = LEGACY_BURST_OFFSETS_MS,
+) -> dict:
     """The A-B-A scorer, handed the bracket MANIFEST the fixture was captured
     under. The manifest is minted before any arm runs and lives outside the
-    snapshots, so it is an argument here exactly as it is in production."""
+    snapshots, so it is an argument here exactly as it is in production.
+
+    Defaults name the REAL fixture's own legacy cadence on both cadence
+    parameters, since every other test in this module scores that real
+    bracket (or a copy derived from it) and none of them mutate the fixture's
+    evidence on disk. A test that wants to prove the LIVE (strict, current-
+    cadence) path overrides these explicitly."""
     return p2._score_freeze_control(
         a1, b, a2,
         _FIXTURE_34["manifest"] if manifest is _MISSING else manifest,
+        evidence_cadence=evidence_cadence, legacy_unrecorded_cadence=legacy_unrecorded_cadence,
     )
 
 
@@ -3640,33 +3659,54 @@ def test_footprint_frame_sha_list_must_match_the_burst_length():
 
 
 def test_footprint_evidence_records_the_capture_cadence():
-    """`burstOffsetsMs` is retained for provenance/diagnosability, but the
-    footprint re-score is a pure function of the max-delta raster (no time
-    axis) and the cadence enters scoring only through `len()`, already
-    checked -- so it is recorded, not bound (owner decision, Codex r1 Spec 10
-    follow-up)."""
-    verdict = p2.footprintFullyLive(capture_id="cap-test", frames=_burst(p2.SLIDE4_MOVIE_RECT))
+    """`burstOffsetsMs` is retained in the evidence for provenance AND is now
+    bound to the profile the caller names (owner decision, Codex r2 Spec 2):
+    a fresh capture's evidence matches the live driver's default
+    `evidence_cadence=BURST_OFFSETS_MS` exactly."""
+    verdict = p2.footprintFullyLive(capture_id="cap-test", frames=_burst(p2.SLIDE4_MOVIE_RECT, n=p2.FOOTPRINT_BURST_FRAMES))
     assert verdict["evidence"]["burstOffsetsMs"] == list(p2.BURST_OFFSETS_MS)
+    assert p2._footprint_evidence_bound(verdict["evidence"], "cap-test") is not None
+
+
+def test_footprint_evidence_with_a_mismatched_recorded_cadence_is_unbound():
+    """The false-PASS path Codex r2 demonstrated: a raster recorded under one
+    cadence must not silently re-score bound to a different named one."""
+    verdict = p2.footprintFullyLive(capture_id="cap-test", frames=_burst(p2.SLIDE4_MOVIE_RECT))
+    mismatched = {**verdict["evidence"], "burstOffsetsMs": [0] * p2.FOOTPRINT_BURST_FRAMES}
+    assert p2._footprint_evidence_bound(mismatched, "cap-test") is None
 
 
 def test_real_bracket_was_captured_under_the_legacy_cadence():
-    """The committed `tests/fixtures/p2_freeze_3to4/clean_bracket.json` (fixture
-    commit 3b31048a) predates `burstOffsetsMs` in the evidence entirely -- it
-    was captured under the LEGACY 12-shot cadence
-    `(0, 130, 290, 500, 770, 1000, 1190, 1430, 1650, 1910, 2110, 2360)`, before
-    the paint-oracle spacing fix moved `BURST_OFFSETS_MS` to
-    `(0, 360, 730, 1090, 1460, 1820, 2190, 2550, 2920, 3280, 3650, 4010)`.
+    """(a) The committed `tests/fixtures/p2_freeze_3to4/clean_bracket.json`
+    (fixture commit 3b31048a) has NO `burstOffsetsMs` in its evidence at all
+    -- it predates the field, captured under the LEGACY cadence
+    `LEGACY_BURST_OFFSETS_MS = (0, 130, 290, 500, 770, 1000, 1190, 1430, 1650,
+    1910, 2110, 2360)`, before the paint-oracle spacing fix moved
+    `BURST_OFFSETS_MS` to `(0, 360, 730, 1090, 1460, 1820, 2190, 2550, 2920,
+    3280, 3650, 4010)`. This is a documentation tripwire: it must go RED the
+    day the fixture is regenerated under the current cadence, which is the
+    owner-gated freeze-control fixture refresh's signal that this test (and
+    `LEGACY_BURST_OFFSETS_MS`'s use in `_score_34`) need updating.
 
-    The verdict is unaffected either way: `_footprint_evidence_bound` does not
-    require `burstOffsetsMs` to be present or to match (owner decision -- the
-    re-score is a pure function of the raster, and cadence only changes the
-    false-FAIL rate, never the false-PASS rate). This test's only job is
-    documentation-as-a-tripwire: it must go RED the day the fixture is
-    regenerated under the current cadence, which is the signal that the
-    freeze-control fixture refresh (a separate, owner-gated deliverable) has
-    landed and this test's premise -- and its docstring -- need updating."""
+    (b) Scoring the real bracket through the LIVE path -- i.e. WITHOUT naming
+    the legacy profile -- is INCONCLUSIVE: the live driver's default
+    (`evidence_cadence=BURST_OFFSETS_MS`, `legacy_unrecorded_cadence=None`)
+    correctly refuses to bind unrecorded evidence.
+
+    (c) Scoring it WITH the legacy profile named explicitly (what `_score_34`
+    does by default for every other test in this module) still PASSES -- the
+    verdict this fixture proves is unchanged by the cadence-binding fix, only
+    the scoring call needed to name its profile."""
     for label in ("a1", "b", "a2"):
         assert "burstOffsetsMs" not in _FIXTURE_34[label]["footprintFullyLive"]["evidence"]
+
+    live_verdict = p2._score_freeze_control(
+        _positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34(), _FIXTURE_34["manifest"],
+    )
+    assert live_verdict["verdict"] == "inconclusive"
+
+    named_verdict = _score_34(_positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34())
+    assert named_verdict["verdict"] == "pass"
 
 
 def test_footprint_padded_raster_is_inconclusive():
@@ -4060,7 +4100,9 @@ def test_whole_arm_substitution_is_inconclusive():
     a1, b, a2 = _positive_snap_34(), _freeze_b_snap_34(), _a2_snap_34()
     b["footprintFullyLive"] = copy.deepcopy(a1["footprintFullyLive"])
     b["captureId"] = a1["captureId"]
-    assert p2._footprint_fully_live_ok(b) is True, "the swap is self-consistent"
+    assert p2._footprint_fully_live_ok(
+        b, evidence_cadence=LEGACY_BURST_OFFSETS_MS, legacy_unrecorded_cadence=LEGACY_BURST_OFFSETS_MS,
+    ) is True, "the swap is self-consistent"
     verdict = _score_34(a1, b, a2)
     assert verdict["verdict"] == "inconclusive"
     assert "armIdentitiesMatchManifest" in verdict["integrityFailed"]
