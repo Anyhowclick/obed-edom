@@ -204,6 +204,9 @@ GL_REPLAY_JS = r"""
       opacityUnproven: state.unproven.slice(),
       restOpacity: state.restOpacity.slice(),
       opacityAfterProofs: state.opacityAfterProofs ? state.opacityAfterProofs.slice() : null,
+      programsDistinct: state.programs.every(function(prog, slot){
+        return state.programs.indexOf(prog) === slot;
+      }),
       greenAuthored: state.geometry ? state.geometry.greenAuthored : null,
       greenRoi: state.geometry ? state.geometry.green : null,
       geometry: state.geometry, canvasId: state.canvas ? state.canvas.id : null
@@ -332,10 +335,14 @@ GL_REPLAY_JS = r"""
       var sb = g.getParameter(g.TEXTURE_BINDING_2D);
       var n = MARKER_PATCH_PX, px = new Uint8Array(n * n * 4);
       for (var i = 0; i < n * n; i++){ px[i * 4] = r; px[i * 4 + 1] = gr; px[i * 4 + 2] = b; px[i * 4 + 3] = 255; }
+      var fy = g.getParameter(g.UNPACK_FLIP_Y_WEBGL);
+      var pm = g.getParameter(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL);
       g.bindTexture(g.TEXTURE_2D, tex);
       g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, false);
       g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       g.texImage2D(g.TEXTURE_2D, 0, up.intFmt, n, n, 0, up.extFmt, up.type, px);
+      g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, fy);
+      g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, pm);
       g.bindTexture(g.TEXTURE_2D, sb);
     } catch (e) {}
     state.replaying--;
@@ -404,9 +411,11 @@ GL_REPLAY_JS = r"""
   // The recorded frame sets `Opacity` for some programs and not others (opacity
   // plan F-10), so every replay writes the value it intends for EVERY draw --
   // otherwise a probe's uniform stays sticky on the program the frame never sets.
+  // The rest value is captured per DRAW, immediately before that draw, so two
+  // draws sharing one program keep their own value.
   function opacityFor(slot, opts){
     var rest = state.restOpacity[slot];
-    if (opts.only != null) return opts.only === slot ? opts.value : rest;
+    if (opts.only != null) return opts.only === slot ? (opts.value == null ? rest : opts.value) : rest;
     if (opts.rest) return rest;
     return state.overrides[slot] != null ? state.overrides[slot] : rest;
   }
@@ -423,10 +432,18 @@ GL_REPLAY_JS = r"""
       var isDraw = e.m === 'drawArrays' || e.m === 'drawElements';
       if (isDraw){
         var slot = drawSeen++;
-        var value = opacityFor(slot, opts);
         var loc = state.locations[slot];
-        if (value != null && loc && loc.Opacity){
-          try { g.uniform1f(loc.Opacity, value); } catch (x) { errs++; }
+        if (opts.capture){
+          state.restOpacity[slot] = null;
+          if (loc && loc.Opacity && state.programs[slot]){
+            try { state.restOpacity[slot] = g.getUniform(state.programs[slot], loc.Opacity); }
+            catch (x) { state.restOpacity[slot] = null; }
+          }
+        } else {
+          var value = opacityFor(slot, opts);
+          if (value != null && loc && loc.Opacity){
+            try { g.uniform1f(loc.Opacity, value); } catch (x) { errs++; }
+          }
         }
         if (opts.skip === slot) continue;
       }
@@ -657,7 +674,6 @@ GL_REPLAY_JS = r"""
       for (var s0 = 0; s0 < slots; s0++) if (wanted[s0] != null) unproven(s0, COUNT_REASON);
       return;
     }
-    replayFrame({rest: true});
     var complete = [];
     for (var j = 0; j < draws.length; j++){
       var program = programBefore(draws[j]);
@@ -671,10 +687,8 @@ GL_REPLAY_JS = r"""
       }
       state.locations[j] = locations;
       complete[j] = !!program && UNIFORM_NAMES.every(function(n){ return names[n] && locations[n]; });
-      if (!complete[j]) continue;
-      try { state.restOpacity[j] = g.getUniform(program, locations.Opacity); }
-      catch (e) { state.restOpacity[j] = null; }
     }
+    replayFrame({capture: true});
 
     for (var i = 0; i < draws.length; i++){
       var prog = state.programs[i], loc = state.locations[i];
@@ -776,11 +790,16 @@ GL_REPLAY_JS = r"""
     var g = state.gl;
     var lost = false;
     try { lost = !g || (typeof g.isContextLost === 'function' && g.isContextLost()); } catch (e) { lost = true; }
-    var written = [];
+    var written = [], writtenPrograms = [];
     for (var i = 0; i < state.programs.length; i++){
-      var loc = state.locations[i];
-      if (state.overrides[i] == null || !state.programs[i] || !loc || !loc.Opacity) continue;
-      if (state.restOpacity[i] != null) written.push(i);
+      if (state.overrides[i] == null || !state.programs[i]) continue;
+      if (writtenPrograms.indexOf(state.programs[i]) >= 0) continue;
+      var last = i;
+      for (var n = i + 1; n < state.programs.length; n++) if (state.programs[n] === state.programs[i]) last = n;
+      var loc = state.locations[last];
+      if (!loc || !loc.Opacity || state.restOpacity[last] == null) continue;
+      writtenPrograms.push(state.programs[i]);
+      written.push(last);
     }
     var failed = false;
     if (!lost && written.length){
