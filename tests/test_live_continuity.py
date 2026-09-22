@@ -701,6 +701,9 @@ def test_fixture_refuses_only_the_1_to_2_boundary_and_names_the_green_squares_sl
                 "later-authored artwork overlaps the carried 'untitled.mov' on the destination "
                 f"slide (player index 1, draw slot {SLIDE2_GREEN_SLOT})"
             ),
+            "glReplay": False,
+            "glReplayReason": None,
+            "opacityExcluded": [],
         },
     )
     # the refusal lives on the boundary's own MovieContinuity too, and `action` still says pin.
@@ -2603,3 +2606,275 @@ def test_real_export_matches_fixture_and_classifies_other_effects_by_shape():
                 _check_effect_encoding(other)
         else:
             _check_effect_encoding(other)
+
+
+# --- G1: glReplay derivation (arming plan section 11) ---------------------------------------
+
+GL_REPLAY_RUNTIME_PLAN_SHA256 = "2ac48f1178bc271b679b58f7e58b46d1b0b383026cd3a82ffeb9aefcb98386f8"
+
+# `derive_plan(..., gl_replay=True)` on the fixture must produce exactly this runtime plan.
+EXPECTED_GL_REPLAY_RUNTIME_PLAN = {
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 109, "y": 795, "w": 952, "h": 268}}},
+    "boundaries": [
+        {
+            "atScene": 2, "action": "glReplay", "movieKey": "movie1", "fallback": "retire",
+            "slotSizes": [[1920, 1080], [671, 195], [266, 236], [960, 276], [178, 157]],
+            "slotRects": [
+                [0.0, 0.0, 1920.0, 1080.0],
+                [1071.6833801269531, 871.9523239135742, 671.0, 195.0],
+                [541.858301475681, 721.0772309801108, 181.0, 161.0],
+                [105.1231918334961, 790.846923828125, 960.0, 276.0],
+                [788.725538103768, 672.9158876261134, 353.0, 313.0],
+            ],
+            "opacityOverrides": [{"slot": 4, "opacity": REAL_SLOT4_OPACITY, "texW": 178, "texH": 157}],
+        },
+        {"atScene": 6, "action": "restart"},
+        {
+            "atScene": 8, "action": "bridge", "movieKey": "movie1",
+            "srcRect": {"x": 198, "y": 797, "w": 952, "h": 268},
+            "durationSeconds": 1.5,
+            "rect": {"x": 327, "y": 709, "w": 1266, "h": 356},
+        },
+    ],
+}
+
+
+def test_gl_replay_defaults_to_off_and_is_byte_identical_to_today():
+    plan_default = _plan()
+    plan_off = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=False)
+    assert isinstance(plan_default, ContinuityPlan)
+    assert isinstance(plan_off, ContinuityPlan)
+    runtime_default = plan_default.to_runtime()
+    runtime_off = plan_off.to_runtime()
+    assert runtime_default == EXPECTED_RUNTIME_PLAN
+    assert runtime_off == EXPECTED_RUNTIME_PLAN
+    from obed_edom import live_continuity
+
+    assert live_continuity.plan_signature(runtime_off) == EXPECTED_PLAN_SHA256
+    for boundary in plan_off.boundaries:
+        for movie in boundary.movies:
+            assert movie.gl_replay is None
+            assert movie.gl_replay_reason is None
+
+
+def test_gl_replay_flag_on_derives_the_slot4_override():
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    boundary = _boundary(plan, 0)
+    movies = {m["asset"]: m for m in boundary["movies"]}
+    assert movies["untitled.mov"]["action"] == "pin"
+    assert movies["untitled.mov"]["glReplay"] is True
+    assert movies["untitled.mov"]["glReplayReason"] is None
+
+    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
+    assert refusal["glReplay"] is True
+    assert refusal["glReplayReason"] is None
+    assert refusal["opacityExcluded"] == [{"slot": 1, "reason": "fade"}]
+
+
+def test_gl_replay_flag_on_runtime_plan_is_pinned_and_qualified():
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    for got, want in zip(
+        runtime["boundaries"][0]["slotRects"], EXPECTED_GL_REPLAY_RUNTIME_PLAN["boundaries"][0]["slotRects"]
+    ):
+        for g, w in zip(got, want):
+            assert g == pytest.approx(w, abs=5e-3)
+    trimmed = json.loads(json.dumps(runtime))
+    trimmed["boundaries"][0]["slotRects"] = EXPECTED_GL_REPLAY_RUNTIME_PLAN["boundaries"][0]["slotRects"]
+    assert trimmed == EXPECTED_GL_REPLAY_RUNTIME_PLAN
+
+    from obed_edom import live_continuity
+
+    assert live_continuity.plan_signature(runtime) == GL_REPLAY_RUNTIME_PLAN_SHA256
+    assert GL_REPLAY_RUNTIME_PLAN_SHA256 in live_continuity.QUALIFIED_PLAN_SHA256
+
+
+def test_gl_replay_rule1_rejects_an_unmeasured_transition_name():
+    tmp = _mutate_slide(SLIDE1, lambda data: _map_transitions(data, lambda name: "apple:magic-move-dissolve"))
+    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
+    assert refusal["glReplay"] is False
+    assert "is not in the measured WebGL list" in refusal["glReplayReason"]
+    boundary_movies = {m["asset"]: m for m in _boundary(plan, 0)["movies"]}
+    assert boundary_movies["untitled.mov"]["glReplayReason"] == refusal["glReplayReason"]
+    # a rule-1 failure falls back to the ordinary (already-qualified) retire boundary.
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def _add_second_continuing_movie(tmp: Path) -> None:
+    """Give the 0->1 boundary a second continuing asset, alongside 'untitled.mov', so
+    `len(continuing) != 1` (rule 2). The clone is a deep copy of the qualified movie node with a
+    new asset id and object id, discoverable by `_find_movie_nodes`'s generic recursion and given
+    its own draw slot on slide 2 so the (unrelated) overlap check it also triggers does not raise."""
+
+    def clone_onto_slide1(data):
+        events = copy.deepcopy(data["events"])
+        source = _find_movie_nodes(events)[0]
+        clone = copy.deepcopy(source)
+        clone["objectID"] = "CLONE-SECOND-MOVIE"
+        clone["movie"] = {**clone["movie"], "asset": "Second.mov-0.0000-1.0"}
+        events[0]["clonedMovies"] = [clone]
+        data = {**data, "events": events}
+        data = {
+            **data,
+            "assets": {
+                **data["assets"],
+                "Second.mov-0.0000-1.0": {
+                    "type": "video", "url": {"web": "assets/Second.mov-0.0000-1.0.mov"},
+                },
+            },
+        }
+        return data
+
+    def clone_onto_slide2(data):
+        events = copy.deepcopy(data["events"])
+        source = _find_movie_nodes(events)[0]
+        clone = copy.deepcopy(source)
+        clone["objectID"] = "CLONE-SECOND-MOVIE"
+        clone["movie"] = {**clone["movie"], "asset": "Second.mov-0.0000-1.0"}
+        events[0]["clonedMovies"] = [clone]
+        events[0]["baseLayer"]["layers"].insert(0, {"layers": [{"objectID": "CLONE-SECOND-MOVIE"}]})
+        data = {**data, "events": events}
+        data = {
+            **data,
+            "assets": {
+                **data["assets"],
+                "Second.mov-0.0000-1.0": {
+                    "type": "video", "url": {"web": "assets/Second.mov-0.0000-1.0.mov"},
+                },
+            },
+        }
+        return data
+
+    _rewrite_slide_json(tmp, SLIDE1, clone_onto_slide1)
+    _rewrite_slide_json(tmp, SLIDE2, clone_onto_slide2)
+
+
+def test_gl_replay_rule2_rejects_more_than_one_continuing_movie():
+    tmp = _copy_fixture_tree()
+    _add_second_continuing_movie(tmp)
+    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    refusal = next(r for r in plan.refusals if r["atScene"] == 2 and r["asset"] == "untitled.mov")
+    assert refusal["glReplay"] is False
+    assert "movies are carried across the boundary, expected exactly 1" in refusal["glReplayReason"]
+    assert refusal["glReplayReason"].startswith("2 movies")
+    # the clone is itself refused too (it is drawn under the other authored artwork), and
+    # `to_runtime` cannot retire two movies at one boundary -- a separate, expected guard.
+    result = plan.to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "more than one" in result.reason or "cannot retire" in result.reason
+
+
+@pytest.mark.parametrize("automatic_play", [True, "popped", 1])
+def test_gl_replay_rule4_rejects_a_non_click_driven_destination(automatic_play):
+    def change_first_event_automatic_play(data):
+        events = copy.deepcopy(data["events"])
+        if automatic_play == "popped":
+            events[0].pop("automaticPlay")
+        else:
+            events[0]["automaticPlay"] = automatic_play
+        return {**data, "events": events}
+
+    tmp = _mutate_slide(SLIDE2, change_first_event_automatic_play)
+    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
+    assert refusal["glReplay"] is False
+    assert "destination first event is not click-driven" in refusal["glReplayReason"]
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def test_gl_replay_rule5_rejects_on_a_missing_effect_attributes_key():
+    def drop_attributes(effect):
+        del effect["attributes"]
+
+    tmp = _mutate_slide(SLIDE1, lambda data: _map_transitions_effect(data, drop_attributes))
+    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
+    assert refusal["glReplay"] is False
+    assert refusal["glReplayReason"].startswith("transition effect: ")
+    assert "missing measured keys" in refusal["glReplayReason"]
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def test_gl_replay_rule5_rejects_an_unmeasured_animation_property():
+    def rotate_z(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        group = leaf["animations"][0]
+        group["animations"][0]["property"] = "transform.rotation.z"
+
+    tmp = _mutate_slide(SLIDE1, lambda data: _map_transitions_effect(data, rotate_z))
+    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    refusal = next(r for r in plan.refusals if r["atScene"] == 2)
+    assert refusal["glReplay"] is False
+    assert refusal["glReplayReason"].startswith("transition effect: ")
+    assert "not a measured property" in refusal["glReplayReason"]
+    assert plan.to_runtime() == EXPECTED_RUNTIME_PLAN
+
+
+def _map_transitions_effect(data, transform):
+    """Like `_map_transitions`, but hands the whole transition-effect dict (not just its
+    `name`) to `transform`, for the rule-5 mutation tests."""
+    events = copy.deepcopy(data["events"])
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if obj.get("type") == "transition":
+                transform(obj)
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(events)
+    return {**data, "events": events}
+
+
+def test_to_runtime_refuses_unreadable_gl_replay_override_table():
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    boundary = plan.boundaries[0]
+    movie = boundary.movies[0]
+    assert movie.gl_replay is not None
+    bad_gl_replay = {**movie.gl_replay, "opacityOverrides": "not-a-list"}
+    bad_movie = replace(movie, gl_replay=bad_gl_replay)
+    bad_boundary = replace(boundary, movies=(bad_movie,))
+    result = replace(plan, boundaries=(bad_boundary, *plan.boundaries[1:])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "unreadable override table" in result.reason
+
+
+def test_to_runtime_refuses_gl_replay_mismatched_slot_lists():
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    boundary = plan.boundaries[0]
+    movie = boundary.movies[0]
+    assert movie.gl_replay is not None
+    bad_gl_replay = {**movie.gl_replay, "slotRects": movie.gl_replay["slotRects"][:-1]}
+    bad_movie = replace(movie, gl_replay=bad_gl_replay)
+    bad_boundary = replace(boundary, movies=(bad_movie,))
+    result = replace(plan, boundaries=(bad_boundary, *plan.boundaries[1:])).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "unreadable override table" in result.reason
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_real_export_gl_replay_parity_both_flag_states():
+    def resolver(root: Path, relative: str) -> Path:
+        return root / relative
+
+    for flag in (False, True):
+        real = derive_plan(REAL_PLAYER_ROOT, SLIDES, resolver=resolver, gl_replay=flag)
+        fixture = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=flag)
+        assert isinstance(real, ContinuityPlan)
+        assert isinstance(fixture, ContinuityPlan)
+        assert real.to_runtime() == fixture.to_runtime()
+        assert real.refusals == fixture.refusals
