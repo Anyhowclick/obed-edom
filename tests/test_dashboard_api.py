@@ -1064,8 +1064,47 @@ def test_choose_save_script_includes_name_and_location():
     script = _choose_save_script("Export Keynote", "Sunday.key", "/Users/me/Desktop")
     assert 'choose file name with prompt "Export Keynote"' in script
     assert 'default name "Sunday.key"' in script
-    assert 'default location (POSIX file "/Users/me/Desktop")' in script
-    assert "POSIX path of theFile" in script
+    assert script.startswith(
+        "set hostApp to (path to frontmost application as text)\n"
+        'set defaultLoc to POSIX file "/Users/me/Desktop"\n'
+        "tell application hostApp\n    activate\n"
+    )
+    assert "default location defaultLoc" in script
+    assert "System Events" not in script
+    assert "with timeout of 86400 seconds" in script
+    assert script.endswith("end tell\nPOSIX path of chosen")
+
+
+def test_picker_script_without_location_has_no_default_location():
+    from obed_edom.web.app import _picker_script
+
+    script = _picker_script('choose folder with prompt "Pick"')
+    assert "defaultLoc" not in script
+    assert "        set chosen to choose folder with prompt \"Pick\"\n" in script
+
+
+def test_picker_scripts_compile():
+    """osacompile parses each script without showing a panel (macOS only)."""
+    import shutil
+    import subprocess
+
+    from obed_edom.web.app import _choose_save_script, _picker_script
+
+    if not shutil.which("osacompile"):
+        pytest.skip("osacompile unavailable")
+    scripts = [
+        _picker_script('choose file with prompt "Pick"'),
+        _picker_script('choose folder with prompt "Pick"', "/Users/me/Desktop"),
+        _choose_save_script("Export Keynote", "Sunday.key", "/Users/me/Desktop"),
+    ]
+    for script in scripts:
+        proc = subprocess.run(
+            ["osacompile", "-o", "/dev/null", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
 
 
 def test_choose_save_returns_chosen_path(monkeypatch, tmp_path):

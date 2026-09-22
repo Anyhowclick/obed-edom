@@ -141,6 +141,14 @@ placeholder, and every review/brief under `.agents/reviews/dsk-d4b|dsk-layout` a
   preview and output. The frontend must not auto-tile or separate them. It exposes the ordered media
   layers for selection/mask editing while the existing backend source build order, dissolve and delay
   remain authoritative. Simultaneous timing is only for an explicitly qualified folded sequence.
+- 2026-09-22 (owner, Alpha_Wall slides 2-4 and 7; live-verified): a group's children map through the
+  SAME affine as the group's own fit -- from the group's VISIBLE origin (payload rect ∩ wall_rect),
+  never its raw origin (the raw origin shifted children by the clipped overhang and turned the 3→4
+  Magic Move downward). Axis-aligned dividers are trimmed along their own axis to the extent of
+  their group level's non-line content (gold Alpha_DSK 9/10: divider = image height). A group
+  caption writes at least 35 pt (`MIN_CAPTION_PT`, gold slide 10); its pill (smallest containing
+  shape, clipped to the source canvas) and its text box grow by the same factor from the pill's
+  top-left. Top-level lines/shapes/text rotated 90 deg write their UNROTATED width/height.
 - 2026-09-17 (owner, clip start timing + visual order — validated against the gold
   `Alpha_DSK.key` slides 6–8): every consumer orders a slide's movie items by VISUAL order
   (left-to-right by placed x, then y; refuse on an exact tie) via

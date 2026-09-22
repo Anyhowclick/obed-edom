@@ -19,6 +19,7 @@ from obed_edom.dsk_assemble import (
     AssembleResult,
     AssemblyPlan,
     AssemblyRefusal,
+    MIN_CAPTION_PT,
     SlideDecision,
     SplitPart,
     TextRefit,
@@ -77,6 +78,13 @@ def _movie_item(kind_index, x=0, y=0, w=100, h=50):
 
 def _group_item(kind_index, x=0, y=0, w=100, h=50):
     return {"kind": "group", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h}
+
+
+def _line_item(kind_index, x=0, y=0, w=100, h=0, rotation=0):
+    item = {"kind": "line", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h}
+    if rotation:
+        item["rotation"] = rotation
+    return item
 
 
 def _compiled_terminal_plan() -> AssemblyPlan:
@@ -1096,6 +1104,278 @@ def test_group_blind_fallback_when_no_text_present():
     script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
     assert "iWork items of group" in script
     assert "(width of theObj)" not in script  # blind path also uses the precomputed scale, not a live gw read
+
+
+# --------------------------------------------------------------------------
+# Owner-approved fix set: group origin is the VISIBLE (clamped) rect, group-child
+# dividers are trimmed to their photo extent, a rotated top-level line's write is
+# axis-swapped, and a sub-35pt group caption is bumped to 35pt anchored at its pill.
+# Geometries below are pinned to the real gold fixture (Alpha_Wall.key slides 3/5/10).
+# --------------------------------------------------------------------------
+def test_group_overhanging_wall_left_places_children_at_planner_affine():
+    # Alpha_Wall.key slide 3 group 1: raw group frame x=-3,y=0,w=3842,h=1079 overhangs
+    # the centre panel's left edge (1920) -- its VISIBLE origin is (1920, 0), not its
+    # raw (-3, 0). A child image at src x=1917.278 must land near the fit rect's own
+    # left edge (~491.8), not near the raw-origin bug's ~960.
+    group = _group_item(1, x=-3, y=0, w=3842, h=1079)
+    slide = _slide(3, [group])
+    slide["groupChildren"] = {
+        1: [{"kind": "image", "kindIndex": 0, "autosize": False, "x": 1917.278, "y": 0.0, "w": 480.0, "h": 360.0}]
+    }
+    slide["groupChildText"] = {}
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {3: SlideDecision(3, "in_deck")}
+    band = dsa._slot_band(Rect(492.5, 802.0, 935.0, 263.0))
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=band, clips={})
+
+    assert plan.group_origin[3][1] == pytest.approx((1920.0, 0.0), abs=0.01)
+    fit = plan.fits[3][("group", 1)]
+    scale = plan.group_scale[3]
+    expected_x = fit.x + (1917.278 - 1920.0) * scale
+    buggy_x = fit.x + (1917.278 - (-3.0)) * scale  # the raw-origin (-3, 0) bug's placement
+    assert expected_x < fit.x  # the child sits left of the group's own fit origin
+    assert expected_x != pytest.approx(buggy_x, abs=1.0)
+
+    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
+    ordinal = plan.ordinals[3]
+    lines = script.splitlines()
+    start = lines.index(f"          set theObj to image 1 of group 2 of slide {ordinal}")
+    pos_line = next(l for l in lines[start:start + 20] if "set position of theObj" in l)
+    assert pos_line.strip() == f"set position of theObj to {{{dsa._as_num(expected_x)}, {dsa._as_num(fit.y)}}}"
+
+
+def test_group_divider_lines_clamped_to_photo_extent_axis_only():
+    # Real geometry (Alpha_Wall.key group dividers, pre-fix): a vertical divider is
+    # 1317.5 long spanning y -174..1143 on a 1080-tall canvas; a horizontal one is 7714
+    # long -- both drawn far past the photo grid beside them. Each clamps to the ON-AXIS
+    # extent of the group's own non-line content, never lengthens, and never moves
+    # perpendicular to its own axis.
+    group = _group_item(0, x=1920, y=0, w=1920, h=1080)
+    slide = _slide(1, [group])
+    slide["groupChildren"] = {0: [
+        {"kind": "image", "kindIndex": 0, "autosize": False, "x": 1920.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
+        {"kind": "line", "kindIndex": 0, "autosize": False, "x": 2880.0, "y": -174.0, "w": 1317.5, "h": 0.0, "angle": 90.0},
+        {"kind": "line", "kindIndex": 1, "autosize": False, "x": 1420.0, "y": 540.0, "w": 7714.0, "h": 0.0},
+    ]}
+    slide["groupChildText"] = {}
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+    children_by_ki = {(c["kind"], c["kindIndex"]): c for c in plan.group_children[1][0]}
+    vertical = children_by_ki[("line", 0)]
+    horizontal = children_by_ki[("line", 1)]
+
+    assert vertical["x"] == pytest.approx(2880.0)  # perpendicular position untouched
+    assert vertical["y"] == pytest.approx(0.0, abs=0.01)
+    assert vertical["w"] == pytest.approx(1080.0, abs=0.01)  # clamped to the photo's y extent
+
+    assert horizontal["y"] == pytest.approx(540.0)  # perpendicular position untouched
+    assert horizontal["x"] == pytest.approx(1920.0, abs=0.01)
+    assert horizontal["w"] == pytest.approx(1920.0, abs=0.01)  # clamped to the photo's x extent
+    assert not plan.warnings
+
+
+def test_group_divider_clamp_with_no_positive_length_left_unchanged_and_warned():
+    group = _group_item(0, x=1920, y=0, w=1920, h=1080)
+    slide = _slide(1, [group])
+    slide["groupChildren"] = {0: [
+        {"kind": "image", "kindIndex": 0, "autosize": False, "x": 1920.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        # Entirely below the content's y extent (0..100): clamps to nothing.
+        {"kind": "line", "kindIndex": 0, "autosize": False, "x": 2880.0, "y": 500.0, "w": 200.0, "h": 0.0, "angle": 90.0},
+    ]}
+    slide["groupChildText"] = {}
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+    line = next(c for c in plan.group_children[1][0] if c["kind"] == "line")
+    assert line["x"] == 2880.0 and line["y"] == 500.0 and line["w"] == 200.0  # left unchanged
+    assert any("clamps to non-positive length" in w for w in plan.warnings)
+
+
+def test_group_divider_clamp_uses_rotated_sibling_extent():
+    # A 90-degree image record keeps its unrotated w/h (100x400) but visually spans
+    # x 1920..2320; the horizontal divider must trim to that visual extent, not to w=100.
+    children = [
+        {"kind": "image", "kindIndex": 0, "autosize": False, "x": 1920.0, "y": 0.0, "w": 100.0, "h": 400.0,
+         "angle": 90.0, "group_path": ()},
+        {"kind": "line", "kindIndex": 0, "autosize": False, "x": 1800.0, "y": 50.0, "w": 700.0, "h": 0.0,
+         "group_path": ()},
+    ]
+    warnings: list[str] = []
+    out = dsa._clamp_group_line_children(children, number=1, kind_index=0, warnings=warnings)
+    line = out[1]
+    assert (line["x"], line["w"], line["y"]) == (1920.0, 400.0, 50.0)
+    assert warnings == []
+
+
+def test_group_divider_clamp_uses_its_own_nested_level():
+    # Nested group (0,) holds 100pt of content and a 200pt divider; a wider sibling at the
+    # top level must not widen the nested divider's trim range.
+    children = [
+        {"kind": "image", "kindIndex": 0, "autosize": False, "x": 0.0, "y": 0.0, "w": 100.0, "h": 50.0,
+         "group_path": (0,)},
+        {"kind": "line", "kindIndex": 0, "autosize": False, "x": -50.0, "y": 60.0, "w": 200.0, "h": 0.0,
+         "group_path": (0,)},
+        {"kind": "image", "kindIndex": 1, "autosize": False, "x": 0.0, "y": 100.0, "w": 1100.0, "h": 50.0,
+         "group_path": ()},
+    ]
+    out = dsa._clamp_group_line_children(children, number=1, kind_index=0, warnings=[])
+    assert (out[1]["x"], out[1]["w"]) == (0.0, 100.0)
+
+
+def test_top_level_rotated_90_line_emits_width_as_length_height_zero():
+    # Alpha_Wall.key slide 3 line 0: the planner's fit is a correct AABB (w=0, h=262.97
+    # -- a vertical line, length 262.97), but Keynote's AppleScript width/height for a
+    # rotated shape are its UNROTATED frame -- writing width=0/height=262.97 verbatim
+    # reads back as a ZERO-length line. width must carry the length (rect.h), height the
+    # point dimension (rect.w).
+    item = _line_item(0, x=3840.0, y=700.0, w=0.0, h=262.97, rotation=90)
+    slide = _slide(3, [item])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {3: SlideDecision(3, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    fit = plan.fits[3][("line", 0)]
+    assert plan.rotations[3][("line", 0)] == 90
+
+    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
+    ordinal = plan.ordinals[3]
+    lines = script.splitlines()
+    start = lines.index(f"          set theObj to line 1 of slide {ordinal}")
+    block = lines[start:start + 20]
+    width_line = next(l for l in block if "set width of theObj" in l).strip()
+    height_line = next(l for l in block if "set height of theObj" in l).strip()
+    assert width_line == f"set width of theObj to {dsa._as_num(fit.h)}"
+    assert height_line == f"set height of theObj to {dsa._as_num(fit.w)}"
+
+
+def test_unrotated_top_level_line_width_height_unaffected():
+    item = _line_item(0, x=3800.0, y=500.0, w=400.0, h=0.0)
+    slide = _slide(1, [item])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    assert 1 not in plan.rotations
+    fit = plan.fits[1][("line", 0)]
+    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
+    ordinal = plan.ordinals[1]
+    lines = script.splitlines()
+    start = lines.index(f"          set theObj to line 1 of slide {ordinal}")
+    block = lines[start:start + 20]
+    width_line = next(l for l in block if "set width of theObj" in l).strip()
+    assert width_line == f"set width of theObj to {dsa._as_num(fit.w)}"
+
+
+def test_group_caption_below_35pt_bumped_and_anchored_at_clipped_pill():
+    # Alpha_Wall.key slide 10 group 0 ("Sunday Service"): a 50pt source caption
+    # (raw_size well under 35pt at this scale) is bumped to 35pt; k = 35 / raw_size.
+    # The pill (362.8x159.8 at y=-76.9, half off the 1080-tall source canvas) is first
+    # clipped to the canvas (0, 0, WALL) -- clipped h = 159.8 - 76.9 = 82.9 -- then its
+    # clipped top-left is mapped through the normal (unscaled-by-k) affine, and its DSK
+    # size is the clipped size * scale * k. The text child is re-anchored the same k
+    # beyond the clipped pill's own top-left.
+    group = _group_item(0, x=1920, y=0, w=1200, h=1080)
+    slide = _slide(10, [group])
+    slide["groupChildren"] = {0: [
+        {"kind": "shape", "kindIndex": 0, "autosize": False,
+         "x": 1942.5, "y": -76.9, "w": 362.8, "h": 159.8},
+        {"kind": "text", "kindIndex": 0, "autosize": True,
+         "x": 1956.1, "y": 10.8, "w": 335.6, "h": 64.0},
+    ]}
+    slide["groupChildText"] = {0: "Sunday Service"}
+    slide["groupCaption"] = {0: {"text": "Sunday Service", "size": 50.0}}
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {10: SlideDecision(10, "in_deck")}
+    band = dsa._slot_band(Rect(492.5, 802.0, 935.0, 263.0))
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=band, clips={})
+
+    scale = plan.group_scale[10]
+    raw_size = 50.0 * scale
+    assert raw_size < MIN_CAPTION_PT
+    k = MIN_CAPTION_PT / raw_size
+    assert plan.group_text_sizes[10][0] == pytest.approx(MIN_CAPTION_PT)
+
+    children_by_kind = {c["kind"]: c for c in plan.group_children[10][0]}
+    pill = children_by_kind["shape"]
+    text = children_by_kind["text"]
+    clipped_x, clipped_y, clipped_h = 1942.5, 0.0, 82.9  # clipped to the source canvas
+    assert pill["x"] == pytest.approx(clipped_x, abs=0.01)
+    assert pill["y"] == pytest.approx(clipped_y, abs=0.01)
+    assert pill["w"] == pytest.approx(362.8 * k, abs=0.05)
+    assert pill["h"] == pytest.approx(clipped_h * k, abs=0.05)
+    assert text["x"] == pytest.approx(clipped_x + (1956.1 - clipped_x) * k, abs=0.05)
+    assert text["y"] == pytest.approx(clipped_y + (10.8 - clipped_y) * k, abs=0.05)
+    # Live r1: the writer sets the autosize text width before its size, so an unscaled
+    # width (natural 335.6 at 50pt) wraps the 35pt caption onto three lines.
+    assert text["w"] == pytest.approx(335.6 * k, abs=0.05)
+
+
+def test_group_caption_nested_name_tag_gets_the_same_pill_anchor():
+    # Alpha_Wall.key slide 5 groups 2-5: a name tag is an image + a NESTED group holding
+    # the shape+text pair (group_path (0,)), captions well under 35pt (13.39pt gold).
+    # The top-level image sibling (group_path ()) must be untouched.
+    group = _group_item(0, x=1920, y=0, w=700, h=1080)
+    slide = _slide(5, [group])
+    slide["groupChildren"] = {0: [
+        {"kind": "image", "kindIndex": 0, "autosize": False,
+         "x": 1920.0, "y": 100.0, "w": 660.0, "h": 975.0, "group_path": ()},
+        {"kind": "shape", "kindIndex": 0, "autosize": False,
+         "x": 2030.0, "y": 109.6, "w": 763.6, "h": 228.9, "group_path": (0,)},
+        {"kind": "text", "kindIndex": 0, "autosize": True,
+         "x": 2056.5, "y": 129.9, "w": 275.0, "h": 70.0, "group_path": (0,)},
+    ]}
+    slide["groupChildText"] = {0: "Guo Rong"}
+    slide["groupCaption"] = {0: {"text": "Guo Rong", "size": 13.39}}
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {5: SlideDecision(5, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+    scale = plan.group_scale[5]
+    raw_size = 13.39 * scale
+    k = MIN_CAPTION_PT / raw_size
+    assert plan.group_text_sizes[5][0] == pytest.approx(MIN_CAPTION_PT)
+
+    image = next(c for c in plan.group_children[5][0] if c["kind"] == "image")
+    assert image["x"] == 1920.0 and image["y"] == 100.0  # untouched: different group_path
+
+    pill = next(c for c in plan.group_children[5][0] if c["kind"] == "shape")
+    text = next(c for c in plan.group_children[5][0] if c["kind"] == "text")
+    assert pill["w"] == pytest.approx(763.6 * k, rel=0.01)
+    assert text["x"] == pytest.approx(2030.0 + (2056.5 - 2030.0) * k, rel=0.05)
+
+
+def test_group_caption_already_above_35pt_unchanged():
+    group = _group_item(0, x=1920, y=0, w=1200, h=1080)
+    slide = _slide(1, [group])
+    slide["groupChildren"] = {0: [
+        {"kind": "shape", "kindIndex": 0, "autosize": False, "x": 1942.5, "y": 0.0, "w": 400.0, "h": 100.0},
+        {"kind": "text", "kindIndex": 0, "autosize": True, "x": 1981.7, "y": 10.8, "w": 335.6, "h": 64.0},
+    ]}
+    slide["groupChildText"] = {0: "Big Caption"}
+    # A large enough source size that raw_size = size * scale already clears 35pt.
+    slide["groupCaption"] = {0: {"text": "Big Caption", "size": 400.0}}
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+    scale = plan.group_scale[1]
+    raw_size = 400.0 * scale
+    assert raw_size >= MIN_CAPTION_PT
+    assert plan.group_text_sizes[1][0] == pytest.approx(raw_size)
+
+    pill = next(c for c in plan.group_children[1][0] if c["kind"] == "shape")
+    text = next(c for c in plan.group_children[1][0] if c["kind"] == "text")
+    assert pill["x"] == 1942.5 and pill["y"] == 0.0 and pill["w"] == 400.0 and pill["h"] == 100.0
+    assert text["x"] == 1981.7 and text["y"] == 10.8
 
 
 # --------------------------------------------------------------------------

@@ -422,7 +422,8 @@ class AssemblyPlan:
     ``clip_build_in[number][movie_id]`` is a stacked-movie slide's SOURCE build-in per
     UPPER clip whose source build-in this writer supports -- the instruction the offline
     build patch rewrites onto the inserted clip (an unsupported one is warned about
-    instead, see the matching ``warnings`` entry)."""
+    instead, see the matching ``warnings`` entry). ``rotations`` holds top-level non-media
+    source rotations so the writer can swap width/height at 90 deg."""
 
     kept: tuple[int, ...]
     ordinals: dict[int, int]
@@ -463,6 +464,7 @@ class AssemblyPlan:
     clip_occurrences: dict[int, dict[ItemId, str]] = field(default_factory=dict)
     clip_sources: dict[int, dict[ItemId, tuple[int, ItemId]]] = field(default_factory=dict)
     clip_timing_delay: dict[int, dict[ItemId, float]] = field(default_factory=dict)
+    rotations: dict[int, dict[ItemId, float]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -981,6 +983,7 @@ MAX_HEADING_BLOCK_PT = 140.0
 # GW 29/30/34 (gold): a group-child verse badge's caption is 40.0 pt AzoSans-Bold in
 # every measured gold slide, dual shape+text child or not (finding gw44-group-badge).
 _GROUP_BADGE_TEXT_PT = 40.0
+MIN_CAPTION_PT = 35.0
 
 _HEADING_FONT_PREFIX = "ArgentCF"
 _HEADING_MAX_WORDS = 5
@@ -1748,6 +1751,7 @@ def plan_assembly(
     group_children: dict[int, dict[int, list[dict]]] = {}
     group_text_sizes: dict[int, dict[int, float]] = {}
     group_origin: dict[int, dict[int, tuple[float, float]]] = {}
+    rotations: dict[int, dict[ItemId, float]] = {}
     shrink_text_sizes: dict[int, dict[ItemId, float]] = {}
     parts: dict[int, int] = {}
     splits: dict[int, tuple[SplitPart, ...]] = {}
@@ -1906,6 +1910,15 @@ def plan_assembly(
                 )
             fits[number] = fit
 
+            slide_rotations: dict[ItemId, float] = {}
+            for iid in fit:
+                if iid[0] in ("line", "shape", "text"):
+                    rot = items_by_id.get(iid, {}).get("rotation")
+                    if rot:
+                        slide_rotations[iid] = rot
+            if slide_rotations:
+                rotations[number] = slide_rotations
+
             id_by_item: dict[ItemId, str] | None = None
             if objects_graph is not None:
                 id_slide_archive = _slide_archive_for_number(objects_graph, number)
@@ -1946,6 +1959,7 @@ def plan_assembly(
 
             group_ids = [iid for iid in cls.kept if iid[0] == "group"]
             if group_ids:
+                wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if decision.keep_side else CENTRE_PANEL_RECT
                 scale = slide_affine_scale(
                     items,
                     slide_band,
@@ -1981,14 +1995,29 @@ def plan_assembly(
                     # A group whose child text triggered the text-slide classification
                     # takes no affine path (Design A step 4) -- its children are stacked
                     # into the band below instead, so it is excluded here entirely.
-                    if children is not None and kind_index not in text_group_kis:
-                        slide_group_children[kind_index] = children
-                        group_item = items_by_id.get(iid)
-                        if group_item is not None:
-                            slide_group_origin[kind_index] = (group_item.get("x", 0.0), group_item.get("y", 0.0))
-                        caption = caption_payload.get(kind_index)
-                        if caption is not None and caption.get("size") and scale is not None:
-                            slide_group_text_sizes[kind_index] = caption["size"] * scale
+                    if kind_index in text_group_kis:
+                        continue
+                    group_item = items_by_id.get(iid)
+                    origin = (group_item.get("x", 0.0), group_item.get("y", 0.0)) if group_item is not None else None
+                    if group_item is not None:
+                        visible = _intersect(item_rect(group_item), wall_rect)
+                        if visible is not None:
+                            origin = (visible.x, visible.y)
+                    if origin is not None:
+                        slide_group_origin[kind_index] = origin
+                    if children is None:
+                        continue
+                    children = _clamp_group_line_children(children, number=number, kind_index=kind_index, warnings=warnings)
+                    caption = caption_payload.get(kind_index)
+                    if caption is not None and caption.get("size") and scale is not None:
+                        raw_size = caption["size"] * scale
+                        text_size = max(raw_size, MIN_CAPTION_PT)
+                        slide_group_text_sizes[kind_index] = text_size
+                        if raw_size > 0 and text_size > raw_size:
+                            children = _apply_caption_pill_anchor(
+                                children, raw_size=raw_size, text_size=text_size, wall=wall,
+                            )
+                    slide_group_children[kind_index] = children
                 if slide_group_children:
                     group_children[number] = slide_group_children
                 if slide_group_text_sizes:
@@ -2813,7 +2842,7 @@ def plan_assembly(
                         )
                         warnings.append(
                             f"slide {number}: stacked movies -- the source build-in is written "
-                            f"offline onto the upper clip(s) [{written}]; pending live verification"
+                            f"offline onto the upper clip(s) [{written}]"
                         )
                     if not_bare:
                         warnings.append(
@@ -3057,6 +3086,7 @@ def plan_assembly(
         clip_build_in=clip_build_in_out,
         chain_head=chain_head_applied,
         clip_rects=clip_rects_out,
+        rotations=rotations,
     )
 
 
@@ -3189,6 +3219,98 @@ def _child_word_count(child: dict, objects: dict[str, dict]) -> int | None:
     if text is None:
         return None
     return _word_count(_normalize_text(text))
+
+
+def _clamp_group_line_children(
+    children: list[dict], *, number: int, kind_index: int, warnings: list[str]
+) -> list[dict]:
+    """Trim each axis-aligned divider along its own axis to the extent of its own group
+    level's non-line children (the whole group when that level has none); never
+    lengthened or moved sideways. A line's length is ``w``."""
+    extents = [
+        (c.get("group_path"), _content_item_aabb({**c, "rotation": c.get("angle") or 0.0}))
+        for c in children if c["kind"] != "line"
+    ]
+    if not extents:
+        return children
+
+    out: list[dict] = []
+    for child in children:
+        if child["kind"] != "line":
+            out.append(child)
+            continue
+        level = [r for path, r in extents if path == child.get("group_path")] or [r for _p, r in extents]
+        union_x0 = min(r.x for r in level)
+        union_y0 = min(r.y for r in level)
+        union_x1 = max(r.x + r.w for r in level)
+        union_y1 = max(r.y + r.h for r in level)
+        angle_mod = (child.get("angle") or 0.0) % 180.0
+        near_0 = angle_mod <= 0.01 or angle_mod >= 180.0 - 0.01
+        near_90 = abs(angle_mod - 90.0) <= 0.01
+        if not (near_0 or near_90):
+            out.append(child)
+            continue
+        axis_field = "y" if near_90 else "x"
+        lo, hi = (union_y0, union_y1) if near_90 else (union_x0, union_x1)
+        e0 = child[axis_field]
+        e1 = e0 + child["w"]
+        new_e0, new_e1 = max(e0, lo), min(e1, hi)
+        if new_e1 - new_e0 <= 0:
+            warnings.append(
+                f"slide {number}: group {kind_index} divider (line {child['kindIndex']}) "
+                "clamps to non-positive length against its group's content -- left unchanged"
+            )
+            out.append(child)
+            continue
+        new_child = dict(child)
+        new_child[axis_field] = new_e0
+        new_child["w"] = new_e1 - new_e0
+        out.append(new_child)
+    return out
+
+
+def _rect_contains(outer: dict, inner: dict, *, tol: float = 0.5) -> bool:
+    return (
+        outer["x"] <= inner["x"] + tol
+        and outer["y"] <= inner["y"] + tol
+        and outer["x"] + outer["w"] >= inner["x"] + inner["w"] - tol
+        and outer["y"] + outer["h"] >= inner["y"] + inner["h"] - tol
+    )
+
+
+def _apply_caption_pill_anchor(
+    children: list[dict], *, raw_size: float, text_size: float, wall: tuple[float, float]
+) -> list[dict]:
+    """Grow an upscaled caption's pill (the smallest shape containing the text, clipped to
+    the source canvas) and the text by ``text_size / raw_size`` from the pill's top-left."""
+    text_children = [c for c in children if c["kind"] == "text"]
+    if len(text_children) != 1:
+        return children
+    text_child = text_children[0]
+    pill = None
+    for c in children:
+        if (
+            c["kind"] == "shape"
+            and not c.get("angle")
+            and c.get("group_path") == text_child.get("group_path")
+            and _rect_contains(c, text_child)
+        ):
+            if pill is None or c["w"] * c["h"] < pill["w"] * pill["h"]:
+                pill = c
+    if pill is None:
+        return children
+    clipped = _intersect(Rect(pill["x"], pill["y"], pill["w"], pill["h"]), Rect(0.0, 0.0, *wall))
+    if clipped is None:
+        return children
+    k = text_size / raw_size
+    new_pill = dict(pill)
+    new_pill["x"], new_pill["y"] = clipped.x, clipped.y
+    new_pill["w"], new_pill["h"] = clipped.w * k, clipped.h * k
+    new_text = dict(text_child)
+    new_text["x"] = clipped.x + (text_child["x"] - clipped.x) * k
+    new_text["y"] = clipped.y + (text_child["y"] - clipped.y) * k
+    new_text["w"], new_text["h"] = text_child["w"] * k, text_child["h"] * k
+    return [new_pill if c is pill else new_text if c is text_child else c for c in children]
 
 
 def _attach_full_group_children(fw_deck: Path, payload: dict, *, deck: Any = None) -> None:
@@ -3762,24 +3884,24 @@ def _group_known_child_lines(
     )
 
 
-def _group_blind_child_lines(number: int, ordinal: int, kind_index: int, rect: Rect, scale: float) -> list[str]:
+def _group_blind_child_lines(
+    number: int, ordinal: int, kind_index: int, rect: Rect, scale: float, group_x: float, group_y: float
+) -> list[str]:
     """Fallback for a text-free group (`attach_group_child_text` found nothing): scales
-    +translates children live about the group's own live frame using the plan's
+    +translates children live about the plan's visible group origin using the plan's
     precomputed shared scale (never `rect.w / live group width`). Safe only because no
     text child -- and so no autosize-freeze hazard -- exists on this group; per-child
     unlock/relock is not attempted here since children are enumerated live rather than
     addressed individually."""
     group_addr = f"group {kind_index + 1} of slide {ordinal}"
     return [
-        f"          set gx to (item 1 of (position of {group_addr}))",
-        f"          set gy to (item 2 of (position of {group_addr}))",
         f"          repeat with theChild in (iWork items of {group_addr})",
         "            set cx to (item 1 of (position of theChild))",
         "            set cy to (item 2 of (position of theChild))",
         "            set cw to (width of theChild)",
         "            set chh to (height of theChild)",
-        f"            set position of theChild to {{{_as_num(rect.x)} + ((cx - gx) * {_as_num(scale)}), "
-        f"{_as_num(rect.y)} + ((cy - gy) * {_as_num(scale)})}}",
+        f"            set position of theChild to {{{_as_num(rect.x)} + ((cx - {_as_num(group_x)}) * {_as_num(scale)}), "
+        f"{_as_num(rect.y)} + ((cy - {_as_num(group_y)}) * {_as_num(scale)})}}",
         f"            set width of theChild to (cw * {_as_num(scale)})",
         f"            set height of theChild to (chh * {_as_num(scale)})",
         "          end repeat",
@@ -3928,6 +4050,7 @@ def _slide_lines(
     group_origin = plan.group_origin.get(number, {})
     scale = plan.group_scale.get(number)
     slide_crops = plan.crops.get(number, {}) if split_parts is None else {}
+    rotations_here = plan.rotations.get(number, {})
 
     groupchild_by_group: dict[int, list[tuple[dict, Rect, float | None, tuple | None, tuple | None]]] = {}
     for item_id, rect in fit.items():
@@ -3976,15 +4099,20 @@ def _slide_lines(
                     number, ordinal, kind_index, group_x, group_y, rect, scale, children,
                     group_text_sizes.get(kind_index),
                 )
-            elif scale is not None:
+            elif scale is not None and kind_index in group_origin:
+                group_x, group_y = group_origin[kind_index]
                 lines += _locked_write_block(
-                    number, addr, body=_group_blind_child_lines(number, ordinal, kind_index, rect, scale)
+                    number, addr,
+                    body=_group_blind_child_lines(number, ordinal, kind_index, rect, scale, group_x, group_y),
                 )
             continue
 
-        body = [f"          set width of theObj to {_as_num(rect.w)}"]
+        rotation = rotations_here.get(item_id) if kind in ("line", "shape", "text") else None
+        swap_wh = rotation is not None and abs((rotation % 180.0) - 90.0) <= 0.5
+        write_w, write_h = (rect.h, rect.w) if swap_wh else (rect.w, rect.h)
+        body = [f"          set width of theObj to {_as_num(write_w)}"]
         if item_id not in autosize_ids:
-            body.append(f"          set height of theObj to {_as_num(rect.h)}")
+            body.append(f"          set height of theObj to {_as_num(write_h)}")
         position_line = f"          set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}"
         size_lines: list[str] = []
         if kind == "text" and item_id in run_sizes_here:

@@ -273,10 +273,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/choose-file")
     def choose_file(prompt: str = Form("Select a Keynote file")) -> dict:
-        script = (
-            f'set theFile to choose file with prompt "{_as_escape(prompt)}"\n'
-            "POSIX path of theFile"
-        )
+        script = _picker_script(f'choose file with prompt "{_as_escape(prompt)}"')
         proc = subprocess.run(
             ["osascript", "-"],
             input=script,
@@ -296,13 +293,13 @@ def create_app() -> FastAPI:
         prompt: str = Form("Select the output folder"),
         default_location: str = Form(""),
     ) -> dict:
-        cmd = f'set theFolder to choose folder with prompt "{_as_escape(prompt)}"'
+        folder = ""
         loc = default_location.strip()
         if loc:
             candidate = Path(loc).expanduser()
             if candidate.is_dir() and candidate.is_absolute():
-                cmd += f' default location (POSIX file "{_as_escape(str(candidate))}")'
-        script = f"{cmd}\nPOSIX path of theFolder"
+                folder = str(candidate)
+        script = _picker_script(f'choose folder with prompt "{_as_escape(prompt)}"', folder)
         proc = subprocess.run(
             ["osascript", "-"],
             input=script,
@@ -1209,18 +1206,32 @@ def _as_escape(text: str) -> str:
 
 
 def _choose_save_script(prompt: str, default_name: str, default_location: str = "") -> str:
-    """AppleScript for the standard Finder save panel (`choose file name`)."""
+    """AppleScript for the standard save panel (`choose file name`)."""
     name = Path(default_name).name or "untitled.key"
-    cmd = (
-        f'set theFile to choose file name with prompt "{_as_escape(prompt)}" '
-        f'default name "{_as_escape(name)}"'
-    )
     loc = (default_location or "").strip()
-    if loc:
-        resolved = Path(loc).expanduser()
-        if resolved.is_absolute():
-            cmd += f' default location (POSIX file "{_as_escape(str(resolved))}")'
-    return f"{cmd}\nPOSIX path of theFile"
+    resolved = Path(loc).expanduser() if loc else None
+    return _picker_script(
+        f'choose file name with prompt "{_as_escape(prompt)}" default name "{_as_escape(name)}"',
+        str(resolved) if resolved and resolved.is_absolute() else "",
+    )
+
+
+def _picker_script(choose: str, default_location: str = "") -> str:
+    """Host a chooser in the frontmost app (the operator's browser), which owns the panel."""
+    lines = ["set hostApp to (path to frontmost application as text)"]
+    if default_location:
+        lines.append(f'set defaultLoc to POSIX file "{_as_escape(default_location)}"')
+        choose += " default location defaultLoc"
+    lines += [
+        "tell application hostApp",
+        "    activate",
+        "    with timeout of 86400 seconds",
+        f"        set chosen to {choose}",
+        "    end timeout",
+        "end tell",
+        "POSIX path of chosen",
+    ]
+    return "\n".join(lines)
 
 
 def _diagnostics_path(job_id: str) -> Path:
