@@ -76,6 +76,13 @@ clear gap 32.7 ms vs 99.8 ms to `ready`) · `CONTROL_PATCH_PX/CONTROL_INSET_PX/B
 (band-mean difference below which a marker band counts as occluded), `ABLATION_COVERAGE_MIN = 0.8`, `ABLATION_GRID_PX = 4`
 (the grid itself, not the tolerance), `MARKER_PATCH_PX = 8`.
 
+**Rest-opacity capture (Opus r3 spec 1, shipped in `33f2f81d`):** `restOpacity[i]` is captured PER DRAW from a clean
+capture replay (the value in effect when draw i executes), never per program at end of frame — two draws sharing a program
+with different in-frame `Opacity` would otherwise both replay at the last value. Write-back restores once per program the
+value the frame last set for it. `stats().programsDistinct` reports whether the real deck exercises the shared case; the
+per-slot `opacityAfterProofs` invariant is only load-bearing while it is true. Lesson: on the P2 frame only program 4 (never
+re-set in-frame) can reveal a missing `Opacity` write — tests must target slot 4 and dirty the program first.
+
 ## 3. Work split (parallel, disjoint files)
 
 | Stream | Owns | Do not touch | Done when |
