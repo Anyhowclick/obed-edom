@@ -94,10 +94,11 @@ rectangles, not video sub-layers), so admitting them would open exactly the hole
 vocabulary exists to close. `attributes`/`baseLayer`/`initialState`/`position`/`anchorPoint`/
 `contentsRect` are shared verbatim because the measured keys are identical to the movie subtree's.
 `texturedRectangle` additionally measures `shapePath` here -- the shape-path inset noted in plan
-section 0, not a mask; movie nodes never carry it. `animations` groups and leaf animations are
-closed-set-checked separately (`_EFFECT_ANIMATION_GROUP_KEYS` / `_EFFECT_ANIMATION_LEAF_KEYS` /
-`_EFFECT_PROPERTY_VALUE_CHECKS`), since which shape and payload type apply depend on the
-animated `property`, not on the key that holds the object."""
+section 0, not a mask; movie nodes never carry it. Key NAMES alone are not enough (Codex round 2
+finding 1): every key's VALUE shape and type is enforced too, by `_EFFECT_SCALAR_FIELD_CHECKS`
+for the primitive fields, an explicit empty-list check for `effects`, an explicit list-of-dicts
+check for `layers`, and by `_EFFECT_PROPERTY_VALUE_CHECKS` / `_EFFECT_ANIMATION_GROUP_KEYS` /
+`_EFFECT_ANIMATION_LEAF_KEYS` / `_check_effect_animation_controls` for animations."""
 
 _EFFECT_ANIMATION_GROUP_KEYS: frozenset[str] = frozenset(
     {"additive", "animations", "autoreverses", "beginTime", "duration", "fillMode",
@@ -107,10 +108,28 @@ _EFFECT_ANIMATION_LEAF_KEYS: frozenset[str] = frozenset(
     {"additive", "autoreverses", "beginTime", "duration", "fillMode", "from", "property",
      "removedOnCompletion", "repeatCount", "timeOffset", "timingFunction", "to"}
 )
+_EFFECT_ANIMATION_LEAF_OPTIONAL_KEYS: frozenset[str] = frozenset({"timingFunction"})
+"""Every measured animation-group key is mandatory on every group (measured on all 9 groups of
+the qualified boundary); every leaf key is mandatory on every leaf (measured on all 16 leaves)
+except `timingFunction`, present on 15 of 16."""
+
+_EFFECT_FILL_MODES: frozenset[str] = frozenset({"both", "forwards"})
+_EFFECT_TIMING_FUNCTIONS: frozenset[str] = frozenset({"EaseInEaseOut"})
+_EFFECT_NEUTRAL_ANIMATION_CONTROLS: dict[str, Any] = {
+    "additive": False, "autoreverses": False, "repeatCount": 0, "timeOffset": 0,
+}
+"""Every animation-settling control that was constant across all 9 measured groups and all 16
+measured leaves of the qualified boundary. `removedOnCompletion` (`True` and `False` both occur)
+and `beginTime`/`duration` (legitimately vary with each animation's timing) are excluded and
+type/range-checked instead of pinned."""
 
 
 def _is_effect_number(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _is_effect_int(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int)
 
 
 def _is_effect_bool(value: Any) -> bool:
@@ -119,6 +138,14 @@ def _is_effect_bool(value: Any) -> bool:
 
 def _is_effect_texture_id(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
+
+
+def _is_effect_nonempty_str(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _is_effect_number_list(value: Any, length: int) -> bool:
+    return isinstance(value, list) and len(value) == length and all(_is_effect_number(v) for v in value)
 
 
 _EFFECT_PROPERTY_VALUE_CHECKS: dict[str, dict[str, Callable[[Any], bool]]] = {
@@ -136,6 +163,65 @@ string, `hidden` a boolean scalar, every other measured property a finite numeri
 point. A property outside this table, or a `from`/`to` whose keys or value types disagree with
 its entry, is unmeasured and refuses."""
 
+_EFFECT_LEAF_ONLY_PROPERTIES: frozenset[str] = frozenset(
+    {"transform.scale.x", "transform.scale.y", "transform.translation"}
+)
+"""Only ever measured on a chain's textured leaf (`m3b_anim.log`: E.2.0/E.4.0, never E.2/E.4);
+a wrapper or the effect root carrying one is unmeasured geometry, not a per-slot exclusion."""
+
+_EFFECT_SCALAR_FIELD_CHECKS: dict[str, dict[str, Callable[[Any], bool]]] = {
+    "<transition effect>": {
+        "beginTime": _is_effect_number,
+        "duration": _is_effect_number,
+        "name": _is_effect_nonempty_str,
+        "objectID": _is_effect_nonempty_str,
+        "type": lambda v: v in ("transition", "buildIn"),
+    },
+    "attributes": {"direction": _is_effect_int},
+    "baseLayer": {"objectID": _is_effect_nonempty_str},
+    "layers": {"texture": _is_effect_texture_id},
+    "initialState": {
+        "width": _is_effect_number,
+        "height": _is_effect_number,
+        "rotation": _is_effect_number,
+        "scale": _is_effect_number,
+        "opacity": _is_effect_number,
+        "hidden": _is_effect_bool,
+        "masksToBounds": _is_effect_bool,
+        "edgeAntialiasingMask": _is_effect_int,
+        "affineTransform": lambda v: _is_effect_number_list(v, 6),
+        "sublayerTransform": lambda v: _is_effect_number_list(v, 16),
+    },
+    "position": {"pointX": _is_effect_number, "pointY": _is_effect_number},
+    "anchorPoint": {"pointX": _is_effect_number, "pointY": _is_effect_number},
+    "contentsRect": {
+        "x": _is_effect_number, "y": _is_effect_number,
+        "width": _is_effect_number, "height": _is_effect_number,
+    },
+    "texturedRectangle": {
+        "isBackgroundTexture": _is_effect_bool,
+        "isVerticalText": _is_effect_bool,
+        "singleTextureOpacity": _is_effect_number,
+        "textBaseline": _is_effect_int,
+        "textXHeight": _is_effect_int,
+        "textureType": _is_effect_int,
+    },
+    "shapePath": {
+        "flatness": _is_effect_number,
+        "lineCapStyle": _is_effect_int,
+        "lineJoinStyle": _is_effect_int,
+        "lineWidth": _is_effect_number,
+        "miterLimit": _is_effect_number,
+        "windingRule": _is_effect_int,
+    },
+    "elements": {"type": lambda v: v in {"MoveToPoint", "AddLine", "CloseSubpath"}},
+}
+"""Every primitive (non-container) key's measured type or closed-value predicate, by the kind
+that holds it (Codex round 2 finding 1: name-only checks let `effects=[1]`, `texture=None`,
+`texture=42` etc. through unnoticed since the generic recursive walker no-ops on a value that is
+neither a dict nor a list of dicts). `effects` and `layers` are validated separately below
+because their correctness is about the CONTAINER shape, not a per-key predicate."""
+
 
 def _walk_effect_subtree(value: Any, kind: str, path: str) -> None:
     if isinstance(value, list):
@@ -147,13 +233,44 @@ def _walk_effect_subtree(value: Any, kind: str, path: str) -> None:
     allowed = _EFFECT_SUBTREE_KEYS.get(kind)
     if allowed is None:
         raise _Refuse(f"effect tree object at {path} has no measured vocabulary for '{kind}'")
+    checks = _EFFECT_SCALAR_FIELD_CHECKS.get(kind, {})
     for key, child in value.items():
         if key not in allowed:
             raise _Refuse(f"effect tree at {path}.{key} is outside the measured vocabulary")
         if key == "animations":
             _walk_effect_animations(child, f"{path}.animations")
-        else:
-            _walk_effect_subtree(child, key, f"{path}.{key}")
+            continue
+        if key == "effects":
+            if not isinstance(child, list) or child:
+                raise _Refuse(f"{path}.{key} must be measured as always empty")
+            continue
+        if key == "layers":
+            if not isinstance(child, list) or any(not isinstance(item, dict) for item in child):
+                raise _Refuse(f"{path}.{key} is not a readable list of layer objects")
+        field_check = checks.get(key)
+        if field_check is not None and not field_check(child):
+            raise _Refuse(f"{path}.{key} has an unmeasured value or shape")
+        _walk_effect_subtree(child, key, f"{path}.{key}")
+
+
+def _check_effect_animation_controls(item: dict[str, Any], item_path: str) -> None:
+    for key, neutral in _EFFECT_NEUTRAL_ANIMATION_CONTROLS.items():
+        value = item.get(key)
+        matches = (
+            isinstance(value, bool) and value is neutral
+            if isinstance(neutral, bool)
+            else _is_effect_int(value) and value == neutral
+        )
+        if not matches:
+            raise _Refuse(f"{item_path}.{key} is not the measured neutral value {neutral!r}")
+    if item.get("fillMode") not in _EFFECT_FILL_MODES:
+        raise _Refuse(f"{item_path}.fillMode is not a measured fill mode")
+    if not isinstance(item.get("removedOnCompletion"), bool):
+        raise _Refuse(f"{item_path}.removedOnCompletion is not a readable boolean")
+    for key in ("beginTime", "duration"):
+        value = item.get(key)
+        if not _is_effect_number(value) or value < 0:
+            raise _Refuse(f"{item_path}.{key} is not a readable non-negative number")
 
 
 def _walk_effect_animations(items: Any, path: str) -> None:
@@ -167,18 +284,27 @@ def _walk_effect_animations(items: Any, path: str) -> None:
             extra = set(item) - _EFFECT_ANIMATION_GROUP_KEYS
             if extra:
                 raise _Refuse(f"{item_path} carries unmeasured animation-group keys {sorted(extra)}")
+            missing = _EFFECT_ANIMATION_GROUP_KEYS - set(item)
+            if missing:
+                raise _Refuse(f"{item_path} is missing measured animation-group keys {sorted(missing)}")
+            _check_effect_animation_controls(item, item_path)
             _walk_effect_animations(item["animations"], f"{item_path}.animations")
             continue
         extra = set(item) - _EFFECT_ANIMATION_LEAF_KEYS
         if extra:
             raise _Refuse(f"{item_path} carries unmeasured animation keys {sorted(extra)}")
+        missing = (_EFFECT_ANIMATION_LEAF_KEYS - _EFFECT_ANIMATION_LEAF_OPTIONAL_KEYS) - set(item)
+        if missing:
+            raise _Refuse(f"{item_path} is missing measured animation keys {sorted(missing)}")
+        _check_effect_animation_controls(item, item_path)
+        timing = item.get("timingFunction")
+        if timing is not None and timing not in _EFFECT_TIMING_FUNCTIONS:
+            raise _Refuse(f"{item_path}.timingFunction is not a measured timing function")
         property_ = item.get("property")
         checks = _EFFECT_PROPERTY_VALUE_CHECKS.get(property_)
         if checks is None:
             raise _Refuse(f"{item_path} has an unmeasured animation property {property_!r}")
         for side in ("from", "to"):
-            if side not in item:
-                continue
             value = item[side]
             if not isinstance(value, dict) or set(value) != set(checks):
                 raise _Refuse(
@@ -241,19 +367,23 @@ def _effect_chain(slot: Any, index: int) -> list[dict[str, Any]]:
 
 
 _IDENTITY_SUBLAYER_TRANSFORM = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-_EFFECT_ANCHOR_TOLERANCE = 2e-3
+_EFFECT_ANCHOR_PIXEL_TOLERANCE = 1.0
 _EFFECT_SUBLAYER_TOLERANCE = 2e-3
+_EFFECT_CHILD_CENTER_TOLERANCE_PX = 1.0
 
 
 def _check_effect_node_geometry(state: dict[str, Any], where: str) -> None:
     """The invariants the settled-leaf-rect formula (`m4_settled.py`: wrapper position plus leaf
     translation/scale, both anchored at centre) relies on and never itself checks, measured true
     for every node of the qualified 1->2 boundary: no rotation, a unit `initialState.scale`, an
-    identity `affineTransform`, a centred `anchorPoint` (leaf anchors carry up to ~5e-4 of float
-    noise around 0.5 per `m4_settled.log`, which `_EFFECT_ANCHOR_TOLERANCE` covers -- a real
-    off-centre anchor is orders of magnitude past that), and an identity `sublayerTransform`.
-    Any node outside these refuses the whole computation; unlike a fade or a `hidden` animation,
-    bad geometry is not a per-slot exclusion because the rect formula has no fallback for it."""
+    identity `affineTransform`, a centred `anchorPoint`, and an identity `sublayerTransform`. The
+    anchor bound is derived from the plan's own 1 px geometry contract -- anchor error times the
+    node's own size must not exceed 1 px (measured worst case on the qualified boundary: leaf 1's
+    anchor is 4.7e-4 off 0.5 at width 671, a 0.32 px error, matching the plan's measured MVP-decode
+    worst case exactly) -- rather than a fixed fraction that could pass on a small layer and fail
+    the contract on a large one. Any node outside these refuses the whole computation; unlike a
+    fade or a `hidden` animation, bad geometry is not a per-slot exclusion because the rect
+    formula has no fallback for it."""
     rotation = _number(state, "rotation", where=where, slide_name="<effect>")
     if rotation != 0.0:
         raise _Refuse(f"{where} is rotated ({rotation}), outside the measured geometry")
@@ -267,12 +397,17 @@ def _check_effect_node_geometry(state: dict[str, Any], where: str) -> None:
         or [_finite(v, "affineTransform", where, "<effect>") for v in affine] != _IDENTITY_AFFINE
     ):
         raise _Refuse(f"{where} has a non-identity affineTransform")
+    width = _number(state, "width", where=where, slide_name="<effect>")
+    height = _number(state, "height", where=where, slide_name="<effect>")
     anchor = state.get("anchorPoint")
     if not isinstance(anchor, dict):
         raise _Refuse(f"{where} has no readable anchorPoint")
     anchor_x = _number(anchor, "pointX", where=where, slide_name="<effect>")
     anchor_y = _number(anchor, "pointY", where=where, slide_name="<effect>")
-    if abs(anchor_x - 0.5) > _EFFECT_ANCHOR_TOLERANCE or abs(anchor_y - 0.5) > _EFFECT_ANCHOR_TOLERANCE:
+    if (
+        abs(anchor_x - 0.5) * width > _EFFECT_ANCHOR_PIXEL_TOLERANCE
+        or abs(anchor_y - 0.5) * height > _EFFECT_ANCHOR_PIXEL_TOLERANCE
+    ):
         raise _Refuse(f"{where} has an off-center anchorPoint ({anchor_x}, {anchor_y})")
     sublayer = state.get("sublayerTransform")
     if not isinstance(sublayer, list) or len(sublayer) != len(_IDENTITY_SUBLAYER_TRANSFORM):
@@ -282,16 +417,37 @@ def _check_effect_node_geometry(state: dict[str, Any], where: str) -> None:
             raise _Refuse(f"{where} has a non-identity sublayerTransform")
 
 
+def _check_effect_child_centered_in_parent(
+    child_state: dict[str, Any], parent_state: dict[str, Any], where: str
+) -> None:
+    """A chain child's `position` must sit at its parent's own centre (`(parent.width/2,
+    parent.height/2)`) -- measured true within 3.7e-6 px on every slot of the qualified boundary.
+    The formula itself never reads a leaf's `position` (it derives the leaf's centre from the
+    wrapper's position plus the leaf's own translation animation), so this only catches an
+    authored child that is NOT where the formula assumes it to be."""
+    parent_width = _number(parent_state, "width", where=where, slide_name="<effect>")
+    parent_height = _number(parent_state, "height", where=where, slide_name="<effect>")
+    child_x = _number(child_state, "position", "pointX", where=where, slide_name="<effect>")
+    child_y = _number(child_state, "position", "pointY", where=where, slide_name="<effect>")
+    if (
+        abs(child_x - parent_width / 2) > _EFFECT_CHILD_CENTER_TOLERANCE_PX
+        or abs(child_y - parent_height / 2) > _EFFECT_CHILD_CENTER_TOLERANCE_PX
+    ):
+        raise _Refuse(f"{where} child position is not centred in its parent's bounding box")
+
+
 def effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any] | Unsupported:
     """Settled per-slot opacity overrides for a `glReplay` boundary's transition effect (plan
-    section 2). Any object outside `_EFFECT_SUBTREE_KEYS`, an animation shape or payload type
-    this module has never measured, a node whose geometry is not the measured invariants
-    (`_check_effect_node_geometry`), or a node with no settled opacity animation and no readable
-    `initialState.opacity`, refuses the whole computation. A real fade (any opacity animation on
+    section 2). Any object outside `_EFFECT_SUBTREE_KEYS` (key OR value shape/type), an animation
+    shape, control, or payload type this module has never measured, a node (including the effect
+    root) whose geometry is not the measured invariants (`_check_effect_node_geometry`,
+    `_check_effect_child_centered_in_parent`), a scale/translation animation on a non-leaf node,
+    a node with no settled opacity animation and no readable `initialState.opacity`, or a
+    non-finite emitted rect, refuses the whole computation. A real fade (any opacity animation on
     the path with `from != to`, exactly, regardless of `fillMode`) or a `hidden` animation
-    anywhere on a slot's path, a settled product that disagrees with the leaf's
-    `singleTextureOpacity`, or an overridden slot's texture size duplicating another slot's,
-    excludes only that slot -- never a refusal."""
+    anywhere on a slot's path, a settled product that is not `math.isclose` (absolute, no
+    relative tolerance) to the leaf's `singleTextureOpacity`, or an overridden slot's texture
+    size duplicating another slot's, excludes only that slot -- never a refusal."""
     try:
         return _effect_opacity_overrides(effect)
     except _Refuse as exc:
@@ -305,6 +461,12 @@ def _effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any]:
     base_layer = effect.get("baseLayer")
     if not isinstance(base_layer, dict):
         raise _Refuse("effect has no readable baseLayer")
+    root_state = base_layer.get("initialState")
+    if not isinstance(root_state, dict):
+        raise _Refuse("effect baseLayer has no readable initialState")
+    _check_effect_node_geometry(root_state, "effect baseLayer")
+    if base_layer.get("animations"):
+        raise _Refuse("effect baseLayer carries animations, which are always measured empty")
     slots = base_layer.get("layers")
     if not isinstance(slots, list) or not slots:
         raise _Refuse("effect declares no readable top-level slots")
@@ -316,19 +478,24 @@ def _effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any]:
         fade = False
         hidden = False
         node_settled: list[dict[str, dict[str, Any]]] = []
-        for node in chain:
+        for depth, node in enumerate(chain):
             state = node.get("initialState")
             if not isinstance(state, dict):
                 raise _Refuse(f"slot {index} has a node with no readable initialState")
             where = f"slot {index}"
             _check_effect_node_geometry(state, where)
+            if depth > 0:
+                _check_effect_child_centered_in_parent(state, chain[depth - 1]["initialState"], where)
 
+            is_leaf = depth == len(chain) - 1
             settled: dict[str, dict[str, Any]] = {}
             for anim in _flatten_effect_animations(node.get("animations")):
                 property_ = anim.get("property")
+                if not is_leaf and property_ in _EFFECT_LEAF_ONLY_PROPERTIES:
+                    raise _Refuse(f"{where} has a {property_!r} animation on a non-leaf node")
                 if property_ == "opacity":
-                    to_value = _effect_scalar(anim.get("to"), f"{where} opacity.to")
-                    from_value = _effect_scalar(anim.get("from"), f"{where} opacity.from")
+                    to_value = _effect_scalar(anim["to"], f"{where} opacity.to")
+                    from_value = _effect_scalar(anim["from"], f"{where} opacity.from")
                     if from_value != to_value:
                         fade = True
                 elif property_ == "hidden":
@@ -384,6 +551,8 @@ def _effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any]:
         center_x = wrapper_x + tx
         center_y = wrapper_y + ty
         rect = [center_x - rect_w / 2, center_y - rect_h / 2, rect_w, rect_h]
+        if not all(math.isfinite(v) for v in rect):
+            raise _Refuse(f"slot {index} has a non-finite emitted rect {rect}")
 
         computed.append(
             {
@@ -402,7 +571,7 @@ def _effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any]:
         if c["hidden"]:
             excluded.append({"slot": index, "reason": "hidden"})
             continue
-        if abs(c["product"] - c["sto"]) > 1e-6:
+        if not math.isclose(c["product"], c["sto"], rel_tol=0, abs_tol=1e-6):
             excluded.append({"slot": index, "reason": "product-mismatch"})
             continue
         if c["sto"] < 1 - 1e-6:
