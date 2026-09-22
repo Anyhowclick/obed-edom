@@ -192,25 +192,42 @@ function pickTemplates(settings: Partial<Settings>): StoredTemplates {
 }
 
 /** Moves templates remembered by an older dashboard (browser storage) into settings.json, once. */
-async function migrateLegacyTemplates(stored: StoredTemplates): Promise<StoredTemplates> {
+const NO_TEMPLATES: StoredTemplates = { lwTemplate: "", dskTemplate: "" };
+let templatesRequest: Promise<StoredTemplates> | null = null;
+let templatesCache: StoredTemplates | null = null;
+let serverTemplates: StoredTemplates | null = null;
+let templateWriteTail: Promise<unknown> = Promise.resolve();
+const templateWrites: Record<TemplateField, number> = { lwTemplate: 0, dskTemplate: 0 };
+const templateListeners = new Set<() => void>();
+
+/** Writes go to settings.json one at a time, in the order they were made. */
+function putTemplates(patch: Partial<Settings>): Promise<StoredTemplates> {
+  const next = templateWriteTail.then(
+    () => putSettings(patch),
+    () => putSettings(patch)
+  );
+  templateWriteTail = next;
+  return next.then((settings) => {
+    serverTemplates = pickTemplates(settings);
+    return serverTemplates;
+  });
+}
+
+/** Moves templates remembered by an older dashboard (browser storage) into settings.json, once;
+ * a field the operator wrote while the fetch was in flight is left alone. */
+async function migrateLegacyTemplates(stored: StoredTemplates, untouched: (field: TemplateField) => boolean): Promise<StoredTemplates> {
   const patch: Partial<Settings> = {};
   for (const field of ["lwTemplate", "dskTemplate"] as const) {
     const legacy = readLegacyTemplate(field);
-    if (!legacy) continue;
+    if (!legacy || !untouched(field)) continue;
     if (stored[field]) forgetLegacyTemplate(field);
     else patch[field] = legacy;
   }
   if (!Object.keys(patch).length) return stored;
-  const written = pickTemplates(await putSettings(patch));
+  const written = await putTemplates(patch);
   (Object.keys(patch) as TemplateField[]).forEach(forgetLegacyTemplate);
   return written;
 }
-
-const NO_TEMPLATES: StoredTemplates = { lwTemplate: "", dskTemplate: "" };
-let templatesRequest: Promise<StoredTemplates> | null = null;
-let templatesCache: StoredTemplates | null = null;
-const templateWrites: Record<TemplateField, number> = { lwTemplate: 0, dskTemplate: 0 };
-const templateListeners = new Set<() => void>();
 
 function notifyTemplates() {
   templateListeners.forEach((listener) => listener());
@@ -224,21 +241,25 @@ function setTemplate(field: TemplateField, path: string) {
 export function refreshStoredTemplates(): void {
   templatesRequest = null;
   templatesCache = null;
+  serverTemplates = null;
+  templateWriteTail = Promise.resolve();
   notifyTemplates();
 }
 
 function templatesReady(): Promise<StoredTemplates> {
   if (!templatesRequest) {
     const writesBefore = { ...templateWrites };
+    const untouched = (field: TemplateField) => templateWrites[field] === writesBefore[field];
     templatesRequest = getSettings()
       .then((settings) => {
         const stored = pickTemplates(settings);
-        return migrateLegacyTemplates(stored).catch(() => stored);
+        serverTemplates = { ...(serverTemplates || stored), ...Object.fromEntries((["lwTemplate", "dskTemplate"] as const).filter(untouched).map((f) => [f, stored[f]])) };
+        return migrateLegacyTemplates(stored, untouched).catch(() => stored);
       })
       .catch(() => NO_TEMPLATES)
       .then((stored) => {
         for (const field of ["lwTemplate", "dskTemplate"] as const) {
-          if (templateWrites[field] === writesBefore[field]) setTemplate(field, stored[field]);
+          if (untouched(field)) setTemplate(field, stored[field]);
         }
         notifyTemplates();
         return templatesCache || stored;
@@ -275,10 +296,10 @@ export function useStoredTemplate(field: TemplateField): [StoredFile | null, (fi
       setTemplate(field, path);
       notifyTemplates();
       try {
-        const written = pickTemplates(await putSettings({ [field]: path }));
+        const written = await putTemplates({ [field]: path });
         if (generation === templateWrites[field]) setTemplate(field, written[field]);
       } catch (err) {
-        if (generation === templateWrites[field]) setTemplate(field, previous);
+        if (generation === templateWrites[field]) setTemplate(field, serverTemplates ? serverTemplates[field] : previous);
         throw err;
       } finally {
         notifyTemplates();

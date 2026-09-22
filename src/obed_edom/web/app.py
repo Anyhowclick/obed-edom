@@ -808,6 +808,8 @@ def create_app() -> FastAPI:
                     raise HTTPException(400, "The FW deck has moved since proposing.")
                 if keynote_running():
                     raise HTTPException(409, "Close Keynote before running a DSK job (strictly serial).")
+                if (payload.dskTemplate or "").strip():
+                    _validate_dsk_template(payload.dskTemplate, key, content_only=bool(result.get("contentOnly")))
                 _save_v2_dsk_review(job_id, payload)
                 fresh = RUNNER.get(job_id)
                 result = dict((fresh.result if fresh else None) or {})

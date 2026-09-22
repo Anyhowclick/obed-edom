@@ -2581,6 +2581,32 @@ def test_dsk_apply_honours_an_explicit_template_override_even_when_no_donor_is_n
     assert seen["dskTemplate"] == str(template.resolve())
 
 
+def test_dsk_v2_apply_rejects_a_bad_override_before_bumping_the_review_revision(tmp_path, monkeypatch):
+    """A 400 on the apply-time template must leave the review revision untouched, so the
+    corrected retry with the same baseRevision is not answered with a 409."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+    monkeypatch.setattr(app_mod, "owned_alpha_safe_layout", lambda _deck, names: names[0])
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template="").json()["id"]
+    proposed = _wait(client, job_id)
+    envelope = {key: proposed["result"][key] for key in ("schemaVersion", "revision", "source", "compositions") if key in proposed["result"]}
+    before = int(proposed["result"].get("revision") or 0)
+
+    res = client.post(
+        f"/api/dsk/{job_id}/apply",
+        json={"review": {**envelope, "compositions": []}, "baseRevision": before, "dskTemplate": str(tmp_path / "missing.key")},
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"]["field"] == "dskTemplate"
+    assert int(client.get(f"/api/jobs/{job_id}").json()["result"].get("revision") or 0) == before
+
+
 def test_dsk_propose_full_text_path_always_requires_template(tmp_path, monkeypatch):
     import obed_edom.web.app as app_mod
 

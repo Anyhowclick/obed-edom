@@ -121,10 +121,12 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
 
   async function rememberDskTemplate(file: ChosenFile | null) {
     setTemplateError(null);
+    const before = templateOverride.current;
+    templateOverride.current = file?.path || null;
     try {
       await setDskTemplate(file);
-      templateOverride.current = file?.path || null;
     } catch (e) {
+      templateOverride.current = before;
       setTemplateError(e instanceof Error ? e.message : String(e));
     }
   }
