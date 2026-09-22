@@ -14,10 +14,12 @@ against, so a regression that reopens a Codex defect fails a NAMED test.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import contextlib
 import copy
 import io
 import json
+import os
 import zlib
 from pathlib import Path
 
@@ -5510,6 +5512,10 @@ def _without(snap: dict, path: tuple):
         node = node[step]
     key = path[-1]
     missing = object()
+    after = []
+    if not isinstance(key, int) and key in node:
+        keys = list(node)
+        after = keys[keys.index(key) + 1:]
     value = node.pop(key) if isinstance(key, int) else node.pop(key, missing)
     try:
         yield
@@ -5517,7 +5523,12 @@ def _without(snap: dict, path: tuple):
         if isinstance(key, int):
             node.insert(key, value)
         elif value is not missing:
+            # Back in its ORIGINAL position: a plain assignment would append the
+            # key, so serial and sharded walks would leave different key orders
+            # behind them (Codex test-speed r1 #3).
             node[key] = value
+            for later in after:
+                node[later] = node.pop(later)
 
 
 def _walk(snap: dict, score) -> dict:
@@ -5575,25 +5586,107 @@ _MAIN_SWEEP_PARTIAL_ALLOW: dict[tuple[str, tuple], str] = {}
 
 _BRACKET_SWEEP_CACHE: dict = {}
 
+_BRACKET_SWEEP_ARMS = (("a1", "positive"), ("b", "b"), ("a2", "positiveA2"))
+
+
+def _bracket_snapshots() -> dict:
+    return {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(),
+            "a2": _a2_snap_34()}
+
+
+def _bracket_closed(snaps: dict) -> bool:
+    return _score_34(
+        snaps["a1"], snaps["b"], snaps["a2"]
+    )["verdict"] == "inconclusive"
+
+
+def _bracket_sweep_worker(arm: str, shard: int, n_shards: int) -> list:
+    """Picklable, module-level worker for `_bracket_sweep`'s process pool.
+
+    Builds its OWN fresh snapshots (a `_without` deletion mutates one in
+    place, so snapshots can never be shared across processes or shards), then
+    scores this shard's slice of `arm`'s leaf paths -- `paths[shard::n_shards]`
+    of the SAME ordered list `_walk` would produce -- exactly as `_walk` does:
+    same `_without`, same "inconclusive" predicate, empty path skipped.
+    Returns a list of (path, closed) pairs rather than a dict so the parent
+    can detect duplicate/missing paths across shards itself.
+    """
+    snaps = _bracket_snapshots()
+    paths = [p for p in _leaf_paths(snaps[arm]) if p][shard::n_shards]
+    out = []
+    for path in paths:
+        with _without(snaps[arm], path):
+            out.append((path, _bracket_closed(snaps)))
+    return out
+
+
+def _bracket_sweep_worker_count() -> int:
+    """`OBED_TEST_SWEEP_WORKERS` overrides; `1` forces the original serial
+    walk (useful under nested xdist or for debugging). Capped at the
+    machine's core count either way."""
+    cap = os.cpu_count() or 1
+    override = os.environ.get("OBED_TEST_SWEEP_WORKERS")
+    if override is None:
+        return cap
+    if not override.isdigit() or int(override) < 1:
+        raise pytest.UsageError(
+            f"OBED_TEST_SWEEP_WORKERS must be an integer >= 1, got {override!r}"
+        )
+    return min(int(override), cap)
+
 
 def _bracket_sweep() -> dict:
     """{(arm class, CONCRETE indexed path) -> did that one deletion fail closed?}
 
     Positions are kept apart and aggregated with AND by the callers (review r10
     MAJOR 5): the round-12 walk ORed them, so one gated position marked the whole
-    collapsed field gated and hid every other position's hole."""
+    collapsed field gated and hid every other position's hole.
+
+    The deletions are independent pure-scorer calls, so they are fanned out over
+    a `ProcessPoolExecutor`; every path is still visited exactly once and scored
+    exactly as `_walk` would score it."""
     if not _BRACKET_SWEEP_CACHE:
-        snaps = {"a1": _positive_snap_34(), "b": _freeze_b_snap_34(),
-                 "a2": _a2_snap_34()}
+        n_workers = _bracket_sweep_worker_count()
 
-        def score() -> bool:
-            return _score_34(
-                snaps["a1"], snaps["b"], snaps["a2"]
-            )["verdict"] == "inconclusive"
+        snaps = _bracket_snapshots()
+        if n_workers <= 1:
+            for arm, cls in _BRACKET_SWEEP_ARMS:
+                walked = _walk(snaps[arm], lambda: _bracket_closed(snaps))
+                for path, closed in walked.items():
+                    _BRACKET_SWEEP_CACHE[(cls, path)] = closed
+            return _BRACKET_SWEEP_CACHE
 
-        for arm, cls in (("a1", "positive"), ("b", "b"), ("a2", "positiveA2")):
-            for path, closed in _walk(snaps[arm], score).items():
-                _BRACKET_SWEEP_CACHE[(cls, path)] = closed
+        expected = {
+            cls: len([p for p in _leaf_paths(snaps[arm]) if p])
+            for arm, cls in _BRACKET_SWEEP_ARMS
+        }
+
+        seen: dict = {}
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
+            futures = {
+                ex.submit(_bracket_sweep_worker, arm, shard, n_workers): cls
+                for arm, cls in _BRACKET_SWEEP_ARMS
+                for shard in range(n_workers)
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                cls = futures[fut]
+                # .result() re-raises any worker exception loudly -- a failed
+                # shard must fail the sweep, never silently shrink the cache.
+                for path, closed in fut.result():
+                    key = (cls, path)
+                    if key in seen:
+                        raise AssertionError(f"bracket sweep path scored twice: {key}")
+                    seen[key] = closed
+
+        for cls, count in expected.items():
+            actual = sum(1 for (c, _p) in seen if c == cls)
+            assert actual == count, (
+                f"bracket sweep for {cls!r}: expected {count} paths, "
+                f"covered {actual} -- shards left a gap"
+            )
+        # Published only once whole: a failed shard must not leave a partial
+        # cache for the next caller to mistake for a finished sweep.
+        _BRACKET_SWEEP_CACHE.update(seen)
     return _BRACKET_SWEEP_CACHE
 
 
@@ -5650,6 +5743,38 @@ def test_bracket_absence_sweep_is_exhaustive():
         and closed
     )
     assert closed_at == expected
+
+
+def test_without_restores_the_original_key_and_list_order():
+    """A sharded walk and the serial walk delete different sequences of leaves
+    from one long-lived snapshot. They can only be equivalent if every deletion
+    leaves the snapshot EXACTLY as it found it -- including dict key order,
+    which a plain `node[key] = value` restore would silently rotate."""
+    snap = {"a": 1, "b": {"x": 1, "y": 2, "z": 3}, "c": [10, 20, 30]}
+    before = json.dumps(snap)
+    for path in [p for p in _leaf_paths(snap) if p]:
+        with _without(snap, path):
+            assert json.dumps(snap) != before
+        assert json.dumps(snap) == before, path
+
+
+@pytest.mark.parametrize("raw", ["", "0", "-2", "two", "1.5"])
+def test_sweep_worker_override_refuses_a_malformed_value(monkeypatch, raw):
+    monkeypatch.setenv("OBED_TEST_SWEEP_WORKERS", raw)
+    with pytest.raises(pytest.UsageError, match="OBED_TEST_SWEEP_WORKERS"):
+        _bracket_sweep_worker_count()
+
+
+def test_sweep_worker_count_is_capped_and_survives_an_unknown_core_count(monkeypatch):
+    monkeypatch.setattr(os, "cpu_count", lambda: None)
+    monkeypatch.delenv("OBED_TEST_SWEEP_WORKERS", raising=False)
+    assert _bracket_sweep_worker_count() == 1
+    monkeypatch.setattr(os, "cpu_count", lambda: 4)
+    assert _bracket_sweep_worker_count() == 4
+    monkeypatch.setenv("OBED_TEST_SWEEP_WORKERS", "64")
+    assert _bracket_sweep_worker_count() == 4
+    monkeypatch.setenv("OBED_TEST_SWEEP_WORKERS", "1")
+    assert _bracket_sweep_worker_count() == 1
 
 
 def test_bracket_sweep_allowlist_has_no_dead_entries():
