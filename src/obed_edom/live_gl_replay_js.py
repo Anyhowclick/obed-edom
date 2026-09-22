@@ -12,12 +12,21 @@ it in page, consumes only `window.__OBED_P2_PRESERVE__.glReplay` (the G3 seam)
 and `window.__obedLive.snapshot()`, and publishes
 `window.__OBED_GL_REPLAY__` plus, in LIVE only, the oracle handle
 `window.__OBED_GL_ORACLE__` read by `scripts/live_continuity_probe.py`.
+
+`writebackFailed` is a SECONDARY reason: it is only ever recorded alongside the
+primary reason that triggered the stand-down, so it has no standalone path and
+the fail-closed arm reaches it through whichever primary reason it accompanies.
+
+`debugForceFail` is seeded only from a pre-existing partial
+`window.__OBED_GL_REPLAY__` (:28-29 returns whenever one carries a version), so
+no product injection can set it. `API.debug` is seeded under the same condition.
 """
 
 from __future__ import annotations
 
 import hashlib
 import math
+import re
 from typing import Any
 
 GL_REPLAY_VERSION = 1
@@ -55,6 +64,26 @@ GL_REPLAY_JS = r"""
     debugForceFail: (PRESET && PRESET.debugForceFail) || null,
     stats: function(){ return statsOf(); }
   };
+
+  // Reachable only when a pre-existing partial `window.__OBED_GL_REPLAY__` seeded
+  // it, exactly like `debugForceFail`; the product path never creates one.
+  if (PRESET){
+    API.debug = {
+      replay: function(opts){ return replayFrame(opts || {}); },
+      programs: function(){
+        return state.programs.map(function(prog, slot){
+          var loc = state.locations[slot];
+          var current = null;
+          if (prog && loc && loc.Opacity && state.gl){
+            try { current = state.gl.getUniform(prog, loc.Opacity); } catch (e) { current = null; }
+          }
+          return {slot: slot, program: prog || null, restOpacity: state.restOpacity[slot],
+                  override: state.overrides[slot] == null ? null : state.overrides[slot],
+                  opacity: current};
+        });
+      }
+    };
+  }
 
   function finite(v){ return typeof v === 'number' && isFinite(v); }
   function rectOf(a){ return {x: a[0], y: a[1], w: a[2], h: a[3]}; }
@@ -109,19 +138,20 @@ GL_REPLAY_JS = r"""
     gl: null, canvas: null, video: null, seam: null,
     segment: [], retained: [], frame: null, frameLen: 0,
     poster: null, posterTex: null, posterUpload: null, posterAmbiguous: false,
-    programs: [], locations: [], opacityBefore: [], overrides: {}, unproven: [],
-    epoch: 0, frozenSceneId: null, loopGen: 0, arming: false, pending: null,
+    programs: [], locations: [], restOpacity: [], opacityAfterProofs: null,
+    overrides: {}, unproven: [],
+    epoch: 0, frozenSceneId: null, loopGen: 0, arming: false, pending: null, retainedTick: -1,
     iter: 0, uploads: 0, glErrors: 0, tick: 0, lastPlayerTick: -1,
     lastClearAt: null, readyAt: null, settleGapMs: null, settleToHashMs: null,
-    latencyFromMutationMs: null, occluded: null, mask: null,
+    mutationScanMs: null, occluded: null, mask: null,
     paused: false, pausedByUs: false, geometry: null, buffers: null,
     collectors: [], observer: null
   };
 
   function now(){ return performance.now(); }
 
-  // Every stand-down reason of plan §2.7 is emitted from exactly one site: the
-  // `assertOr`/`refuseInstall` call that carries its literal.
+  // Every stand-down reason of plan §2.7 is a literal defined once; the sites
+  // that can emit it are listed in plan §2.7.
   function assertOr(reason, ok, detail){
     if (ok && API.debugForceFail !== reason) return true;
     // An ARM-PRE requirement that is not yet met is only recorded until the armed
@@ -168,11 +198,14 @@ GL_REPLAY_JS = r"""
       version: API.version, state: API.state, epoch: state.epoch, iter: state.iter,
       frameLen: state.frameLen, uploads: state.uploads, glErrors: state.glErrors,
       settleGapMs: state.settleGapMs, settleToHashMs: state.settleToHashMs,
-      latencyFromMutationMs: state.latencyFromMutationMs,
+      mutationScanMs: state.mutationScanMs,
       pending: state.pending, occludedBands: state.occluded, occluderMask: state.mask,
       bandCount: BAND_COLS * BAND_ROWS,
       opacityUnproven: state.unproven.slice(),
-      greenRoi: state.geometry ? state.geometry.greenAuthored : null,
+      restOpacity: state.restOpacity.slice(),
+      opacityAfterProofs: state.opacityAfterProofs ? state.opacityAfterProofs.slice() : null,
+      greenAuthored: state.geometry ? state.geometry.greenAuthored : null,
+      greenRoi: state.geometry ? state.geometry.green : null,
       geometry: state.geometry, canvasId: state.canvas ? state.canvas.id : null
     };
   }
@@ -189,7 +222,6 @@ GL_REPLAY_JS = r"""
 
   // ---------------------------------------------------------------- wrapping
   var SKIP = /^(get|is|read|create|delete|checkFramebufferStatus)/;
-  var wrappedCount = 0;
 
   function uploadInfo(g, args, name){
     var src = args[args.length - 1];
@@ -237,7 +269,8 @@ GL_REPLAY_JS = r"""
         var orig = d.value;
         var wrapper = function(){
           if (!state.hot || state.replaying || this !== state.gl) return orig.apply(this, arguments);
-          if (state.phase === 'LIVE' || state.phase === 'ARM-POST'){
+          if (state.phase === 'LIVE' || state.phase === 'ARM-POST' ||
+              API.debugForceFail === UNFLAGGED_PLAYER_CALL){
             assertOr(UNFLAGGED_PLAYER_CALL, false, {call: name});
             return orig.apply(this, arguments);
           }
@@ -254,10 +287,8 @@ GL_REPLAY_JS = r"""
         };
         wrapper.__obedGlReplay = 1;
         P[name] = wrapper;
-        wrappedCount++;
       });
     });
-    return wrappedCount;
   }
 
   function record(g, name, args){
@@ -268,7 +299,7 @@ GL_REPLAY_JS = r"""
       var carry = null;
       var seg = state.segment;
       if (seg.length && seg[seg.length - 1].m === 'clearColor') carry = seg.pop();
-      if (seg.length) state.retained = seg;
+      if (seg.length){ state.retained = seg; state.retainedTick = state.tick; }
       state.segment = carry ? [carry] : [];
     }
     state.segment.push(call);
@@ -370,6 +401,16 @@ GL_REPLAY_JS = r"""
   }
 
   // ------------------------------------------------------------ replay + read
+  // The recorded frame sets `Opacity` for some programs and not others (opacity
+  // plan F-10), so every replay writes the value it intends for EVERY draw --
+  // otherwise a probe's uniform stays sticky on the program the frame never sets.
+  function opacityFor(slot, opts){
+    var rest = state.restOpacity[slot];
+    if (opts.only != null) return opts.only === slot ? opts.value : rest;
+    if (opts.rest) return rest;
+    return state.overrides[slot] != null ? state.overrides[slot] : rest;
+  }
+
   function replayFrame(opts){
     opts = opts || {};
     var F = state.frame;
@@ -382,11 +423,12 @@ GL_REPLAY_JS = r"""
       var isDraw = e.m === 'drawArrays' || e.m === 'drawElements';
       if (isDraw){
         var slot = drawSeen++;
-        if (opts.skip === slot) continue;
-        var value = opts.only != null ? (opts.only === slot ? opts.value : undefined) : state.overrides[slot];
-        if (value != null && state.locations[slot] && state.locations[slot].Opacity){
-          try { g.uniform1f(state.locations[slot].Opacity, value); } catch (x) { errs++; }
+        var value = opacityFor(slot, opts);
+        var loc = state.locations[slot];
+        if (value != null && loc && loc.Opacity){
+          try { g.uniform1f(loc.Opacity, value); } catch (x) { errs++; }
         }
+        if (opts.skip === slot) continue;
       }
       try { e.g[e.m].apply(e.g, e.a); } catch (x) { errs++; }
     }
@@ -615,24 +657,29 @@ GL_REPLAY_JS = r"""
       for (var s0 = 0; s0 < slots; s0++) if (wanted[s0] != null) unproven(s0, COUNT_REASON);
       return;
     }
-    replayFrame({only: -1});
-    for (var i = 0; i < draws.length; i++){
-      var prog = programBefore(draws[i]);
-      state.programs[i] = prog;
-      var names = prog ? uniformNames(prog) : {};
-      var loc = {};
-      if (prog){
+    replayFrame({rest: true});
+    var complete = [];
+    for (var j = 0; j < draws.length; j++){
+      var program = programBefore(draws[j]);
+      state.programs[j] = program;
+      var names = program ? uniformNames(program) : {};
+      var locations = {};
+      if (program){
         UNIFORM_NAMES.forEach(function(n){
-          try { loc[n] = g.getUniformLocation(prog, n); } catch (e) { loc[n] = null; }
+          try { locations[n] = g.getUniformLocation(program, n); } catch (e) { locations[n] = null; }
         });
       }
-      state.locations[i] = loc;
-      var complete = !!prog && UNIFORM_NAMES.every(function(n){ return names[n] && loc[n]; });
-      if (complete){
-        try { state.opacityBefore[i] = g.getUniform(prog, loc.Opacity); } catch (e) { state.opacityBefore[i] = null; }
-      }
+      state.locations[j] = locations;
+      complete[j] = !!program && UNIFORM_NAMES.every(function(n){ return names[n] && locations[n]; });
+      if (!complete[j]) continue;
+      try { state.restOpacity[j] = g.getUniform(program, locations.Opacity); }
+      catch (e) { state.restOpacity[j] = null; }
+    }
+
+    for (var i = 0; i < draws.length; i++){
+      var prog = state.programs[i], loc = state.locations[i];
       if (wanted[i] == null) continue;
-      if (!provenOr(i, 'uniforms', complete)) continue;
+      if (!provenOr(i, 'uniforms', complete[i])) continue;
 
       var mix = null;
       try { mix = g.getUniform(prog, loc.mixFactor); } catch (e) { mix = null; }
@@ -656,7 +703,7 @@ GL_REPLAY_JS = r"""
         Math.abs(decoded.h - want.h) <= MVP_TOLERANCE_PX;
       if (!provenOr(i, 'mvp', ok)) continue;
 
-      if (!provenOr(i, 'rest-opacity', state.opacityBefore[i] === 1)) continue;
+      if (!provenOr(i, 'rest-opacity', state.restOpacity[i] === 1)) continue;
 
       var roi = toBuffer({x: want.x - ABLATION_DILATION_PX, y: want.y - ABLATION_DILATION_PX,
                           w: want.w + 2 * ABLATION_DILATION_PX, h: want.h + 2 * ABLATION_DILATION_PX});
@@ -665,10 +712,10 @@ GL_REPLAY_JS = r"""
       var zeroed = new Uint8Array(roi.w * roi.h * 4);
       state.replaying++;
       try {
-        replayFrame({only: -1}); readInto(roi, clean);
+        replayFrame({rest: true}); readInto(roi, clean);
         replayFrame({skip: i}); readInto(roi, ablated);
         replayFrame({only: i, value: 0}); readInto(roi, zeroed);
-      } catch (e) {}
+      } catch (e) {} finally { replayFrame({rest: true}); }
       state.replaying--;
       var wantGl = toBuffer(want);
       var region = changedRegion(clean, ablated, roi, wantGl);
@@ -685,7 +732,12 @@ GL_REPLAY_JS = r"""
 
       state.overrides[i] = wanted[i];
     }
-    replayFrame({only: -1});
+    replayFrame({rest: true});
+    state.opacityAfterProofs = state.programs.map(function(prog, slot){
+      var loc = state.locations[slot];
+      if (!prog || !loc || !loc.Opacity) return null;
+      try { return g.getUniform(prog, loc.Opacity); } catch (e) { return null; }
+    });
   }
 
   // ------------------------------------------------------------- marker swap
@@ -728,7 +780,7 @@ GL_REPLAY_JS = r"""
     for (var i = 0; i < state.programs.length; i++){
       var loc = state.locations[i];
       if (state.overrides[i] == null || !state.programs[i] || !loc || !loc.Opacity) continue;
-      if (state.opacityBefore[i] != null) written.push(i);
+      if (state.restOpacity[i] != null) written.push(i);
     }
     var failed = false;
     if (!lost && written.length){
@@ -738,7 +790,7 @@ GL_REPLAY_JS = r"""
         for (var k = 0; k < written.length; k++){
           var slot = written[k];
           g.useProgram(state.programs[slot]);
-          g.uniform1f(state.locations[slot].Opacity, state.opacityBefore[slot]);
+          g.uniform1f(state.locations[slot].Opacity, state.restOpacity[slot]);
         }
         g.useProgram(prev);
         if (g.getError() !== 0) failed = true;
@@ -836,7 +888,6 @@ GL_REPLAY_JS = r"""
 
   function tickOnce(meta){
     if (state.down) return false;
-    if (!assertOr(UNFLAGGED_PLAYER_CALL, true, {forced: true})) return false;
     var why = guards();
     if (why){ standDown(why, null); return false; }
     if (!state.paused) perLiveUpload();
@@ -886,7 +937,11 @@ GL_REPLAY_JS = r"""
   function armPost(){
     state.recording = false;
     var seg = state.segment;
-    if (!isDelimited(seg) && isDelimited(state.retained)) seg = state.retained;
+    if (!isDelimited(seg) && isDelimited(state.retained) &&
+        state.tick - state.retainedTick <= SETTLE_QUIET_TICKS){
+      seg = state.retained;
+      event('glreplay-retained-frame', {tick: state.retainedTick, len: seg.length});
+    }
     if (!requireDelimitedFrame(isDelimited(seg), {len: seg.length})) return;
     state.frame = seg;
     state.frameLen = seg.length;
@@ -926,7 +981,7 @@ GL_REPLAY_JS = r"""
             var n = removed[j];
             if (n.nodeType !== 1) continue;
             if (n === state.canvas || (n.contains && n.contains(state.canvas))){
-              state.latencyFromMutationMs = now() - at;
+              state.mutationScanMs = now() - at;
               standDown(CANVAS_REMOVED, null);
               return;
             }
@@ -948,7 +1003,7 @@ GL_REPLAY_JS = r"""
     state.arming = true;
     var ok = assertOr('runtimeSeamAbsent', !!seam, null) &&
       assertOr('observerNotArmed', !!state.observer || armObserver(), null) &&
-      assertOr('settleSignalAbsent', !!liveSnapshot(), null) &&
+      assertOr('settleSignalAbsent', !!liveSnapshot() || state.segment.length > 0, null) &&
       requireVideoFrameCallback(typeof HTMLVideoElement !== 'undefined' &&
         typeof HTMLVideoElement.prototype.requestVideoFrameCallback === 'function');
     state.arming = false;
@@ -1111,5 +1166,5 @@ def gl_replay_script(runtime_plan: Any) -> str:
     nothing."""
     if validate_gl_replay_entry(runtime_plan) is None:
         return ""
-    body = GL_REPLAY_JS.replace("</script", "<\\/script")
+    body = re.sub(r"</(?=script)", "<\\\\/", GL_REPLAY_JS, flags=re.IGNORECASE)
     return f'<script id="obed-gl-replay">{body}</script>\n'
