@@ -105,20 +105,22 @@ function stateOf(page: FramingPage, decisions: Record<number, FramingDecision>):
   return (decisions[page.index] ?? page.decision)?.state ?? "auto";
 }
 
-/** The template slide the run is pinned to; null when the planner frames the page itself. */
 function pinnedSlide(page: FramingPage, decisions: Record<number, FramingDecision>): number | null {
   return stateOf(page, decisions) === "pinned" ? chosenSlide(page, decisions) : null;
 }
 
+function candidateFor(page: FramingPage, slide: number | null): FramingCandidate | undefined {
+  if (slide == null) return undefined;
+  return page.candidates.find((c) => c.templateSlide === slide);
+}
+
 function fellBackWith(page: FramingPage, slide: number | null): boolean {
   if (slide == null) return page.autoFellBack;
-  const candidate = page.candidates.find((c) => c.templateSlide === slide);
-  return candidate?.wouldFallBack ?? page.autoFellBack;
+  return candidateFor(page, slide)?.wouldFallBack ?? page.autoFellBack;
 }
 
 function pinOverriddenWith(page: FramingPage, slide: number | null): boolean {
-  if (slide == null) return false;
-  return page.candidates.find((c) => c.templateSlide === slide)?.pinOverridden ?? false;
+  return candidateFor(page, slide)?.pinOverridden ?? false;
 }
 
 const PIN_OVERRIDDEN_NOTE =
@@ -133,15 +135,11 @@ function categoryOf(page: FramingPage, decisions: Record<number, FramingDecision
 }
 
 function transformFor(page: FramingPage, slide: number | null): FramingTransform | null {
-  if (slide == null) return page.autoTransform ?? null;
-  const candidate = page.candidates.find((c) => c.templateSlide === slide);
-  return candidate?.transform ?? page.autoTransform ?? null;
+  return candidateFor(page, slide)?.transform ?? page.autoTransform ?? null;
 }
 
 function rectsFor(page: FramingPage, slide: number | null): PlannedRect[] {
-  if (slide == null) return page.autoRects ?? [];
-  const candidate = page.candidates.find((c) => c.templateSlide === slide);
-  return candidate?.rects ?? page.autoRects ?? [];
+  return candidateFor(page, slide)?.rects ?? page.autoRects ?? [];
 }
 
 function CropPreview({
