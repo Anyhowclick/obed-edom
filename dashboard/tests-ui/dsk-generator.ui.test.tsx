@@ -321,6 +321,7 @@ describe("DskGenerator stage progress overlay", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
 
+    expect(screen.getByRole("heading", { name: "Building the DSK deck…" })).toBeInTheDocument();
     expect(screen.getByText("Step 2 of 3 — Assembling the DSK deck")).toBeInTheDocument();
     expect(screen.getByText(/^Elapsed \d:\d\d$/)).toBeInTheDocument();
     const details = screen.getByText("Technical details").closest("details");
@@ -328,6 +329,34 @@ describe("DskGenerator stage progress overlay", () => {
 
     await act(async () => {
       resolveTick?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  });
+
+  it("titles the overlay for Propose as preparing the review, not building the deck", async () => {
+    localStorage.setItem(DSK_TEMPLATE_KEY, JSON.stringify({ path: "/tmp/template.key", name: "template.key" }));
+    mockSession(null);
+    let resolvePoll: (() => void) | undefined;
+    vi.mocked(pollJob).mockImplementation(
+      () =>
+        new Promise<Job>((resolve) => {
+          resolvePoll = () => resolve(reviewJob);
+        })
+    );
+    render(<DskGenerator />);
+    await act(async () => {
+      fireEvent.click(within(getWell("Finalised FW .key")).getByRole("button", { name: "Choose on this Mac" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Propose" }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.getByRole("heading", { name: "Preparing the review…" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Building the DSK deck…" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolvePoll?.();
       await new Promise((r) => setTimeout(r, 0));
     });
   });

@@ -71,7 +71,7 @@ export function DskGenerator() {
   const [range, setRange] = useState("");
   const [decisions, setDecisions] = useState<DecisionsMap>({});
   const [reviewState, setReviewState] = useState<DskEditorState | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<false | "propose" | "run">(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [details, setDetails] = useState<string[]>([]);
   const [progress, setProgress] = useState<JobProgress | null>(null);
@@ -142,7 +142,7 @@ export function DskGenerator() {
       return;
     }
     setError(null);
-    setBusy(true);
+    setBusy("propose");
     setDetails([]);
     setProgress(null);
     try {
@@ -212,7 +212,7 @@ export function DskGenerator() {
       return;
     }
     setWorkspace(chosen.path);
-    setBusy(true);
+    setBusy("run");
     setDetails([]);
     setProgress(null);
     try {
@@ -308,7 +308,7 @@ export function DskGenerator() {
         />
       </label>
       <div className="actions">
-        <button className="btn" type="button" disabled={!keynote || !dskTemplate || busy} onClick={propose}>
+        <button className="btn" type="button" disabled={!keynote || !dskTemplate || !!busy} onClick={propose}>
           Propose
         </button>
         {!dskTemplate && <span className="note">Choose the DSK template to continue.</span>}
@@ -319,9 +319,9 @@ export function DskGenerator() {
           {skipped.length > 0 && (
             <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
           )}
-          <BuildPreview path={result.path} disabled={busy} />
+          <BuildPreview path={result.path} disabled={!!busy} />
           <div className="actions">
-            <button className="btn" type="button" disabled={busy || !dskTemplate} onClick={run}>
+            <button className="btn" type="button" disabled={!!busy || !dskTemplate} onClick={run}>
               Run
             </button>
             {!dskTemplate && <span className="note">Choose the DSK template to continue.</span>}
@@ -331,7 +331,7 @@ export function DskGenerator() {
       <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && (
         <LoadingOverlay
-          title="Building the DSK deck…"
+          title={busy === "propose" ? "Preparing the review…" : "Building the DSK deck…"}
           logs={logs}
           progress={overlayProgress}
           details={details}
@@ -362,7 +362,7 @@ export function DskGenerator() {
           {(result.overflows || []).length > 0 && (
             <p className="note">Overflow on slide(s): {result.overflows!.join(", ")}</p>
           )}
-          <BuildPreview path={result.deckPath} disabled={busy} />
+          <BuildPreview path={result.deckPath} disabled={!!busy} />
         </>
       )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
