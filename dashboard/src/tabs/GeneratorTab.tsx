@@ -4,32 +4,30 @@ import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
-import { DSK_TEMPLATE_KEY, LW_TEMPLATE_KEY, useStoredFile } from "../prefs";
+import { useStoredTemplate } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 export function GeneratorTab() {
   const { job, upsert, rename, error: openError } = useCurrentJob("generate");
-  const [lwTemplate, setLwTemplate] = useStoredFile(LW_TEMPLATE_KEY);
-  const [dskTemplate, setDskTemplate] = useStoredFile(DSK_TEMPLATE_KEY);
+  const [lwTemplate, setLwTemplate] = useStoredTemplate("lwTemplate");
+  const [dskTemplate, setDskTemplate] = useStoredTemplate("dskTemplate");
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  function rememberLw(file: ChosenFile) {
-    setLwTemplate(file);
-  }
-
-  function rememberDsk(file: ChosenFile) {
-    setDskTemplate(file);
+  async function remember(which: "lw" | "dsk", file: ChosenFile | null) {
+    try {
+      await (which === "lw" ? setLwTemplate(file) : setDskTemplate(file));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function pickTemplate(which: "lw" | "dsk") {
     try {
-      const file = await chooseKeynote(which === "lw" ? "LW Keynote template" : "DSK Keynote template");
-      if (which === "lw") rememberLw(file);
-      else rememberDsk(file);
-      setError(null);
+      await remember(which, await chooseKeynote(which === "lw" ? "LW Keynote template" : "DSK Keynote template"));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -92,8 +90,8 @@ export function GeneratorTab() {
           tone="lw"
           file={lwTemplate}
           onChoose={() => pickTemplate("lw")}
-          onPath={(path) => rememberLw({ path, name: path.split("/").pop() || path })}
-          onClear={() => setLwTemplate(null)}
+          onPath={(path) => void remember("lw", { path, name: path.split("/").pop() || path })}
+          onClear={() => void remember("lw", null)}
           onError={setError}
         />
         <FileWell
@@ -102,8 +100,8 @@ export function GeneratorTab() {
           tone="dsk"
           file={dskTemplate}
           onChoose={() => pickTemplate("dsk")}
-          onPath={(path) => rememberDsk({ path, name: path.split("/").pop() || path })}
-          onClear={() => setDskTemplate(null)}
+          onPath={(path) => void remember("dsk", { path, name: path.split("/").pop() || path })}
+          onClear={() => void remember("dsk", null)}
           onError={setError}
         />
       </div>

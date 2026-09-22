@@ -32,11 +32,13 @@ function slideOf(flag: Flag): number | null {
 export function InspectResultView({
   job,
   labelPrefix = "Slide",
+  buildPreview = true,
   onOpen,
   onRename,
 }: {
   job: Job;
   labelPrefix?: string;
+  buildPreview?: boolean;
   onOpen: (src: string) => void;
   onRename?: (id: string, name: string) => Promise<Job>;
 }) {
@@ -89,7 +91,7 @@ export function InspectResultView({
           Source canvas {result.slideWidth}×{result.slideHeight}
         </p>
       )}
-      <BuildPreview path={result?.path} />
+      {buildPreview && <BuildPreview path={result?.path} />}
       {rows.length > 0 && flagged ? (
         <div className="slide-findings">
           {rows.map((row) => {

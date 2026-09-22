@@ -4225,7 +4225,7 @@ def build_assembly_script(
     layout_policy: LayoutPolicy = "import",
     black_layout_names: Sequence[str] = DEFAULT_TRANSPARENT_LAYOUT_NAMES,
     import_layout_names: Sequence[str] = DEFAULT_DSK_LAYOUT_NAMES,
-    layout_template: Path = DEFAULT_LAYOUT_TEMPLATE,
+    layout_template: Path | None = DEFAULT_LAYOUT_TEMPLATE,
     text_fit: Literal["warn", "shrink"] = "warn",
     slide_layout_names: Mapping[int, str] | None = None,
 ) -> str:
@@ -4302,7 +4302,8 @@ def build_assembly_script(
     ]
 
     if layout_policy == "import":
-        lines += layout_import_lines("theDoc", import_layout_names, layout_template)
+        if layout_template is not None:
+            lines += layout_import_lines("theDoc", import_layout_names, layout_template)
         if slide_layout_names:
             needed_names = sorted({slide_layout_names.get(number, black_layout_names[-1]) for number in keep})
             layout_vars: dict[str, str] = {}
@@ -6271,7 +6272,7 @@ def assemble_dsk_deck(
     layout_policy: LayoutPolicy = "import",
     black_layout_names: Sequence[str] = DEFAULT_TRANSPARENT_LAYOUT_NAMES,
     import_layout_names: Sequence[str] = DEFAULT_DSK_LAYOUT_NAMES,
-    layout_template: Path = DEFAULT_LAYOUT_TEMPLATE,
+    layout_template: Path | None = DEFAULT_LAYOUT_TEMPLATE,
     stroke_min_refs: int = 1,
     text_fit: Literal["warn", "shrink"] = "warn",
     min_text_pt: float = DEFAULT_MIN_TEXT_PT,
@@ -6326,9 +6327,16 @@ def assemble_dsk_deck(
             import_layout_names = black_layout_names
 
     if layout_policy == "import":
-        check_layout_import_preconditions(
-            fw_deck, layout_template=layout_template, layout_names=import_layout_names
-        )
+        if layout_template is not None:
+            check_layout_import_preconditions(
+                fw_deck, layout_template=layout_template, layout_names=import_layout_names
+            )
+        else:
+            for name in import_layout_names:
+                if dsk_live.owned_alpha_safe_layout(fw_deck, (name,)) is None:
+                    raise AssemblyRefusal(
+                        f"no layout template given and {fw_deck.name} owns no alpha-safe layout named {name!r}"
+                    )
 
     if reference_deck is not None:
         resolved_band = read_band(reference_deck)

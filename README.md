@@ -18,7 +18,7 @@ If macOS blocks the launcher, Control-click it and choose **Open**.
 - **Sermon Checker** — check an outline, one deck, or an LW/DSK pair for cue, wording, layout, photo, and house-style issues. Checks do not alter the source files.
 - **Alpha Keynote** — experimental presenter for a prepared 16:9 Keynote HTML export, with current/upcoming stills, slide-number navigation, and a separate silent display output. Native HTML alpha and movie continuity are not qualified; DeckLink fill/key is not available yet.
 - **CG Resizer** — turn a finalised wide-wall deck into a 16:9 CG deck and review any framing choices.
-- **DSK Generator** — turn a full-wall (FW) deck into a lower-thirds (DSK) deck; the DSK template is required, chosen once and remembered on this Mac, shared with Sermon Base Generator.
+- **DSK Generator** — turn a full-wall (FW) deck into a lower-thirds (DSK) deck; the DSK template is optional for image/video decks (the wall deck's own transparent layout, then the reference deck, are tried first), required for reformatted text verses; chosen once and remembered on this Mac, shared with Sermon Base Generator.
 - **Maps** — build and export map slides for LW, DSK, and CG.
 - **Watercolour** — turn photos into pencil-and-wash artwork and add them to maps.
 - **History** — reopen recent results stored in the `output` folder.

@@ -1,3 +1,4 @@
+import type { Settings } from "../src/api";
 import { act, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MapsExportPlan } from "../src/api";
@@ -121,7 +122,7 @@ describe("highlight colour readiness gates export", () => {
     await renderMapsTab({ job });
     mapsApiScript.fetchMapsExportPlan.resolve(plan);
 
-    let resolveSettings!: (value: { highlightColour: string; reuseThreshold: number; reusePairings: boolean; reusePreviews: boolean; defaultExportDir: string }) => void;
+    let resolveSettings!: (value: Settings) => void;
     const deferred = new Promise<Parameters<typeof resolveSettings>[0]>((resolve) => {
       resolveSettings = resolve;
     });
@@ -141,6 +142,8 @@ describe("highlight colour readiness gates export", () => {
         reusePairings: false,
         reusePreviews: false,
         defaultExportDir: "",
+        lwTemplate: "",
+        dskTemplate: "",
         highlightColour: "#123456",
       });
     });
@@ -176,7 +179,7 @@ describe("highlight colour readiness gates export", () => {
     await renderMapsTab({ job });
     mapsApiScript.fetchMapsExportPlan.resolve(plan);
 
-    let resolveSettings!: (value: { highlightColour: string; reuseThreshold: number; reusePairings: boolean; reusePreviews: boolean; defaultExportDir: string }) => void;
+    let resolveSettings!: (value: Settings) => void;
     const deferred = new Promise<Parameters<typeof resolveSettings>[0]>((resolve) => {
       resolveSettings = resolve;
     });
@@ -217,6 +220,8 @@ describe("highlight colour readiness gates export", () => {
         reusePairings: false,
         reusePreviews: false,
         defaultExportDir: "",
+        lwTemplate: "",
+        dskTemplate: "",
         highlightColour: "#abcdef",
       });
     });
@@ -257,7 +262,7 @@ describe("highlight colour readiness gates export", () => {
     await renderMapsTab({ job });
     mapsApiScript.fetchMapsExportPlan.resolve(plan);
 
-    let resolveSettings!: (value: { highlightColour: string; reuseThreshold: number; reusePairings: boolean; reusePreviews: boolean; defaultExportDir: string }) => void;
+    let resolveSettings!: (value: Settings) => void;
     const deferred = new Promise<Parameters<typeof resolveSettings>[0]>((resolve) => {
       resolveSettings = resolve;
     });
@@ -285,6 +290,8 @@ describe("highlight colour readiness gates export", () => {
         reusePairings: false,
         reusePreviews: false,
         defaultExportDir: "",
+        lwTemplate: "",
+        dskTemplate: "",
         highlightColour: "#123456",
       });
     });

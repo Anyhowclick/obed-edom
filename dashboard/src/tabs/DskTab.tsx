@@ -39,7 +39,7 @@ export function DskTab() {
           Exporter
         </button>
       </div>
-      {sub === "generator" ? <DskGenerator /> : <DskExporter />}
+      {sub === "generator" ? <DskGenerator onOpenExporter={() => choose("exporter")} /> : <DskExporter />}
     </div>
   );
 }

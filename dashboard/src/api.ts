@@ -221,6 +221,8 @@ export type Settings = {
   reusePreviews: boolean;
   defaultExportDir: string;
   highlightColour: string;
+  lwTemplate: string;
+  dskTemplate: string;
 };
 
 export async function getSettings(): Promise<Settings> {

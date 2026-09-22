@@ -15,14 +15,13 @@ import {
 } from "../../api";
 import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
-import { BuildPreview } from "../../components/BuildPreview";
 import { LoadingOverlay, Lightbox, type OverlayProgress } from "../../components/PreviewGrid";
 import { buildDecisionsMap, toDecisionsPayload, type DecisionsMap } from "../../dsk/decisions";
 import { SlideReviewList } from "./SlideReviewList";
 import { DskReviewWorkspace } from "./DskReviewWorkspace";
 import { DskDecksCard } from "./DskDecksCard";
 import { editableReview, editorState, isDskReview, type DskEditorState, type DskReview } from "../../dsk/decisions";
-import { DSK_TEMPLATE_KEY, DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath, useStoredFile } from "../../prefs";
+import { DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath, useStoredTemplate } from "../../prefs";
 import { useCurrentJob } from "../../sessions";
 import { JobName } from "../../components/JobName";
 import { IconTick, IconInfo, IconWarning } from "../../components/icons";
@@ -64,10 +63,10 @@ type DskResult = {
   compositions?: unknown[];
 };
 
-export function DskGenerator() {
+export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void } = {}) {
   const { job, upsert, rename, error: openError } = useCurrentJob("dsk");
   const [keynote, setKeynote] = useState<ChosenFile | null>(null);
-  const [dskTemplate, setDskTemplate] = useStoredFile(DSK_TEMPLATE_KEY);
+  const [dskTemplate, setDskTemplate] = useStoredTemplate("dskTemplate");
   const [templateError, setTemplateError] = useState<string | null>(null);
   const [referenceDeck, setReferenceDeck] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
@@ -86,6 +85,7 @@ export function DskGenerator() {
   const initializedReviewJob = useRef<string | null>(null);
   const saveTimer = useRef<number | null>(null);
   const saveTail = useRef(Promise.resolve());
+  const templateOverride = useRef<string | null>(null);
 
   const result = (job?.result || undefined) as DskResult | undefined;
   const pages = result?.pages || [];
@@ -119,9 +119,16 @@ export function DskGenerator() {
 
   useEffect(() => () => { if (saveTimer.current != null) window.clearTimeout(saveTimer.current); }, []);
 
-  function rememberDskTemplate(file: ChosenFile | null) {
-    setDskTemplate(file);
+  async function rememberDskTemplate(file: ChosenFile | null) {
     setTemplateError(null);
+    const before = templateOverride.current;
+    templateOverride.current = file?.path || null;
+    try {
+      await setDskTemplate(file);
+    } catch (e) {
+      templateOverride.current = before;
+      setTemplateError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function track(created: { id: string }) {
@@ -153,6 +160,7 @@ export function DskGenerator() {
         referenceDeck: referenceDeck?.path,
         slides: parseSlideSpec(range),
       });
+      templateOverride.current = null;
       upsert(created);
       await track(created);
     } catch (err) {
@@ -199,10 +207,6 @@ export function DskGenerator() {
 
   async function run() {
     if (!job) return;
-    if (!dskTemplate) {
-      setError("Choose the DSK template first.");
-      return;
-    }
     setError(null);
     let chosen;
     try {
@@ -222,13 +226,13 @@ export function DskGenerator() {
         if (saveTimer.current != null) { window.clearTimeout(saveTimer.current); saveTimer.current = null; }
         await saveTail.current;
         const current = latestReview.current;
-        const created = await applyDsk(job.id, editableReview(current), chosen.path, reviewRevision.current, dskTemplate?.path);
+        const created = await applyDsk(job.id, editableReview(current), chosen.path, reviewRevision.current, templateOverride.current || undefined);
         upsert(created);
         await track(created);
         return;
       }
       await saveDskDecisions(job.id, toDecisionsPayload(decisions));
-      const created = await applyDsk(job.id, toDecisionsPayload(decisions), chosen.path, undefined, dskTemplate?.path);
+      const created = await applyDsk(job.id, toDecisionsPayload(decisions), chosen.path, undefined, templateOverride.current || undefined);
       upsert(created);
       await track(created);
     } catch (err) {
@@ -270,13 +274,13 @@ export function DskGenerator() {
           templateError={templateError}
           onChooseTemplate={async () => {
             try {
-              rememberDskTemplate(await chooseKeynote("DSK Keynote template"));
+              await rememberDskTemplate(await chooseKeynote("DSK Keynote template"));
             } catch (e) {
               setError(e instanceof Error ? e.message : String(e));
             }
           }}
-          onTemplatePath={(path) => rememberDskTemplate({ path, name: path.split("/").pop() || path })}
-          onForgetTemplate={() => rememberDskTemplate(null)}
+          onTemplatePath={(path) => void rememberDskTemplate({ path, name: path.split("/").pop() || path })}
+          onForgetTemplate={() => void rememberDskTemplate(null)}
           referenceDeck={referenceDeck}
           onChooseReference={async () => {
             try {
@@ -300,10 +304,9 @@ export function DskGenerator() {
         />
       </label>
       <div className="actions">
-        <button className="btn" type="button" disabled={!keynote || !dskTemplate || !!busy} onClick={propose}>
+        <button className="btn" type="button" disabled={!keynote || !!busy} onClick={propose}>
           Propose
         </button>
-        {!dskTemplate && <span className="note">Choose the DSK template to continue.</span>}
       </div>
       {result?.phase === "review" && job && (
         <>
@@ -311,12 +314,10 @@ export function DskGenerator() {
           {skipped.length > 0 && (
             <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
           )}
-          <BuildPreview path={result.path} disabled={!!busy} />
           <div className="actions">
-            <button className="btn" type="button" disabled={!!busy || !dskTemplate} onClick={run}>
+            <button className="btn" type="button" disabled={!!busy} onClick={run}>
               Run
             </button>
-            {!dskTemplate && <span className="note">Choose the DSK template to continue.</span>}
           </div>
         </>
       )}
@@ -342,14 +343,18 @@ export function DskGenerator() {
               </p>
             </div>
           </div>
-          <p className="path-note dsk-result-path">{result.deckPath}</p>
-          <div className="actions">
+          <p className="dsk-result-path" title={result.deckPath}>{result.deckPath}</p>
+          <div className="actions dsk-result-actions">
+            {onOpenExporter && (
+              <button className="btn" type="button" onClick={onOpenExporter}>
+                Continue in Exporter
+              </button>
+            )}
             <button className="btn secondary" type="button" onClick={() => reveal(result.deckPath!)}>
               Show in Finder
             </button>
+            <span className="note">Next, the Exporter bakes the live overlays into the final .mov(s).</span>
           </div>
-          <BuildPreview path={result.deckPath} disabled={!!busy} />
-          <p className="note">Next: open the Exporter tab to bake the live overlays into the final .mov(s).</p>
           {(skipped.length > 0 || (result.warnings || []).length > 0 || (result.overflows || []).length > 0) && (
             <div className="dsk-result-notes">
               <p className="dsk-result-notes-title">Notes</p>
