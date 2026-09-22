@@ -1217,13 +1217,13 @@ def _choose_save_script(prompt: str, default_name: str, default_location: str = 
 
 
 def _picker_script(choose: str, default_location: str = "") -> str:
-    """Host a chooser in System Events so the panel is activated in front of other windows."""
-    lines = []
+    """Host a chooser in the frontmost app (the operator's browser), which owns the panel."""
+    lines = ["set hostApp to (path to frontmost application as text)"]
     if default_location:
         lines.append(f'set defaultLoc to POSIX file "{_as_escape(default_location)}"')
         choose += " default location defaultLoc"
     lines += [
-        'tell application "System Events"',
+        "tell application hostApp",
         "    activate",
         "    with timeout of 86400 seconds",
         f"        set chosen to {choose}",

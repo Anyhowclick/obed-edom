@@ -1064,9 +1064,13 @@ def test_choose_save_script_includes_name_and_location():
     script = _choose_save_script("Export Keynote", "Sunday.key", "/Users/me/Desktop")
     assert 'choose file name with prompt "Export Keynote"' in script
     assert 'default name "Sunday.key"' in script
-    assert script.startswith('set defaultLoc to POSIX file "/Users/me/Desktop"\n')
+    assert script.startswith(
+        "set hostApp to (path to frontmost application as text)\n"
+        'set defaultLoc to POSIX file "/Users/me/Desktop"\n'
+        "tell application hostApp\n    activate\n"
+    )
     assert "default location defaultLoc" in script
-    assert 'tell application "System Events"\n    activate' in script
+    assert "System Events" not in script
     assert "with timeout of 86400 seconds" in script
     assert script.endswith("end tell\nPOSIX path of chosen")
 
