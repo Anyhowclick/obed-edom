@@ -1614,6 +1614,9 @@ def test_planned_movie_with_one_unreadable_slide_copy_is_unsupported(tmp_path, m
 def test_codecs_recorded_in_session_log(tmp_path, monkeypatch):
     output = host_with_continuity(tmp_path, monkeypatch, extra_movie_bytes=hevc_movie_bytes())
     output.start()
+    # The session log is drained by a daemon writer thread; only stop() joins it,
+    # so reading before stop() races the writer (flaked under xdist load).
+    output.stop()
     records = [json.loads(line) for line in output._log_path.read_text().splitlines()]
     codecs_record = next(record for record in records if record["kind"] == "codecs")
     assets = {entry["asset"] for entry in codecs_record["report"]}
