@@ -68,6 +68,14 @@ Stand-down: `planUnreadable, runtimeSeamAbsent, glReplayUnavailable, settleSigna
 ### 2.8 Python side
 `GL_REPLAY_VERSION = 1`, `GL_REPLAY_JS`, `js_sha256()`, `validate_gl_replay_entry(runtime_plan) -> dict | None` (exactly one `glReplay` boundary, every field of §2.0 + rev 1's shape checks, `fallback == "retire"`), `gl_replay_script(runtime_plan) -> str` (`""` or `<script id="obed-gl-replay">…</script>\n`, `</script` escaped). Nothing imports it in G2; G4 wires it. JS literals `CONTROL_PATCH_PX=40`, `CONTROL_INSET_PX=4`, `BAND_COLS=16`, `BAND_ROWS=8` asserted equal to `p2_verdict`/`html_alpha_probe` by test.
 
+### 2.9 Constants — measured vs assumed (Opus r1 finding 11, recorded 2026-09-22)
+Measured: `MVP_TOLERANCE_PX = 1` (opacity §0, worst 0.32 px) · ablation tolerance `ABLATION_GRID_PX + 2` (opacity §1.4) ·
+`OCCLUSION_MAX_FRACTION = 0.5` (arming §2) · `SEGMENT_CALL_CAP = 512` (F7 max 125) · `SETTLE_QUIET_TICKS = 3` (max intra-move
+clear gap 32.7 ms vs 99.8 ms to `ready`) · `CONTROL_PATCH_PX/CONTROL_INSET_PX/BAND_COLS/BAND_ROWS` (probe) · `GREEN_INSET_PX = 8` (D1(a)).
+**Assumptions, no measurement behind them (state in the PR; S3 gates exercise them on the real frame):** `MARKER_BAND_EPSILON = 0.5`
+(band-mean difference below which a marker band counts as occluded), `ABLATION_COVERAGE_MIN = 0.8`, `ABLATION_GRID_PX = 4`
+(the grid itself, not the tolerance), `MARKER_PATCH_PX = 8`.
+
 ## 3. Work split (parallel, disjoint files)
 
 | Stream | Owns | Do not touch | Done when |
