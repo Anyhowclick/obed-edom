@@ -1939,7 +1939,7 @@ def score_visible_slide_from_delta(
 def _finite_float(value: Any) -> float | None:
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return result if np.isfinite(result) else None
 
@@ -1959,10 +1959,16 @@ def _valid_inpage_sample(sample: Any, n_bands: int) -> bool:
     rgb = sample.get("greenRGB")
     if not isinstance(rgb, (list, tuple)) or len(rgb) != 3 or any(_finite_float(v) is None for v in rgb):
         return False
-    if _finite_float(sample.get("ms")) is None:
+    if _finite_float(sample.get("ms")) is None or _finite_float(sample.get("t")) is None:
         return False
     gl_err = sample.get("glErr")
     return gl_err is None or _finite_float(gl_err) is not None
+
+
+def _distinct_monotonic(values: Sequence[float]) -> bool:
+    """Strictly increasing, no repeats: a duplicated or replayed callback cannot
+    "prove" a window by repeating one frozen sample."""
+    return all(a < b for a, b in zip(values, values[1:]))
 
 
 def _valid_occluder_mask(mask: Any, n_bands: int) -> bool:
@@ -1986,6 +1992,8 @@ def score_inpage_liveness(
     mask, a moving control, mostly-occluded bands) rather than ever manufacturing a
     pass. ``mediaTime``/``vt`` are recorded only and never influence the verdict.
     """
+    if not isinstance(samples, (list, tuple)):
+        return {"verdict": None, "status": "inconclusive", "reason": "malformed samples", "n": 0}
     if not samples:
         return {"verdict": None, "status": "inconclusive", "reason": "no samples", "n": 0}
 
@@ -1996,6 +2004,14 @@ def score_inpage_liveness(
             "verdict": None,
             "status": "inconclusive",
             "reason": "malformed samples",
+            "n": len(samples),
+        }
+    t_values = [float(s["t"]) for s in samples]
+    if not _distinct_monotonic(t_values) or not _distinct_monotonic([float(s["ms"]) for s in samples]):
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "reason": "duplicate or non-monotonic sample callbacks",
             "n": len(samples),
         }
     if not _valid_occluder_mask(occluder_mask, n_bands):
@@ -2011,8 +2027,8 @@ def score_inpage_liveness(
     control = np.array([s["control"] for s in samples], dtype=float)
     green = np.array([s["green"] for s in samples], dtype=float)
     rgb = np.array([s["greenRGB"] for s in samples], dtype=float)
-    vt = [s.get("vt") for s in samples]
-    media_time = [s.get("mediaTime") for s in samples]
+    vt_values = [_finite_float(s.get("vt")) for s in samples]
+    media_time_values = [_finite_float(s.get("mediaTime")) for s in samples]
 
     occ = np.asarray(occluder_mask, dtype=bool)
     n_occluded = int(occ.sum())
@@ -2049,7 +2065,8 @@ def score_inpage_liveness(
         mean_rgb[1] > mean_rgb[0] + INPAGE_GREEN_CHANNEL_MARGIN
         and mean_rgb[1] > mean_rgb[2] + INPAGE_GREEN_CHANNEL_MARGIN
     )
-    gl_err_any = int(max((s.get("glErr") or 0) for s in samples))
+    gl_err_values = [_finite_float(s.get("glErr")) or 0.0 for s in samples]
+    gl_err_any = max((abs(v) for v in gl_err_values), default=0.0)
     sample_ms = [s["ms"] for s in samples]
 
     common = {
@@ -2068,10 +2085,10 @@ def score_inpage_liveness(
         "greenRange": green_range,
         "greenMeanRGB": [float(v) for v in mean_rgb],
         "greenIsGreen": green_is_green,
-        "vtSpan": (max(vt) - min(vt)) if all(v is not None for v in vt) else None,
+        "vtSpan": (max(vt_values) - min(vt_values)) if all(v is not None for v in vt_values) else None,
         "mediaTimeSpan": (
-            (max(media_time) - min(media_time))
-            if all(v is not None for v in media_time)
+            (max(media_time_values) - min(media_time_values))
+            if all(v is not None for v in media_time_values)
             else None
         ),
         "sampleMsP50": float(np.percentile(sample_ms, 50)),
@@ -2092,7 +2109,7 @@ def score_inpage_liveness(
         reasons.append("green patch moved")
     if not green_is_green:
         reasons.append("green patch is not green")
-    if gl_err_any:
+    if gl_err_any != 0:
         reasons.append("gl error")
 
     verdict = not reasons

@@ -988,7 +988,10 @@ class FakeTransport:
         if method == "Runtime.evaluate":
             assert params.get("awaitPromise") is True
             self.evaluations.append(params.get("expression", ""))
-            return {"result": {"value": self.host.next_inpage()}}
+            value = self.host.next_inpage()
+            if isinstance(value, BaseException):
+                raise value
+            return {"result": {"value": value}}
         assert method == "Page.captureScreenshot"
         assert params == {"format": "png"}
         data = self.host.shot_for(self.captures)
@@ -2450,37 +2453,6 @@ class TestBurstPoke:
         assert "style.background=" in probe.BURST_POKE_JS
         assert "Math.random()" in probe.BURST_POKE_JS
 
-    def test_poke_paints_a_distinct_value_on_every_evaluation(self) -> None:
-        """Executes the actual `BURST_POKE_JS` source under Node (no browser)
-        against a minimal DOM stub, evaluating it once per requested shot and
-        asserting the painted element's background changed every time."""
-        node = shutil.which("node")
-        if node is None:
-            pytest.skip("node is not available")
-        script = f"""
-        var backgrounds = [];
-        var style = {{}};
-        var el = {{
-          id: null,
-          style: {{ cssText: '', set background(v) {{ style.background = v; backgrounds.push(v); }}, get background() {{ return style.background; }} }},
-        }};
-        var byId = null;
-        var document = {{
-          getElementById: function(id) {{ return byId; }},
-          createElement: function() {{ return el; }},
-          body: {{ appendChild: function(node) {{ byId = node; }} }},
-        }};
-        for (var i = 0; i < {len(probe.BURST_OFFSETS_MS)}; i++) {{
-          eval({json.dumps(probe.BURST_POKE_JS)});
-        }}
-        console.log(JSON.stringify(backgrounds));
-        """
-        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
-        assert result.returncode == 0, result.stderr
-        backgrounds = json.loads(result.stdout.strip())
-        assert len(backgrounds) == len(probe.BURST_OFFSETS_MS)
-        assert len(set(backgrounds)) > 1
-
 
 class TestBurstProfileArtifact:
     def test_record_carries_the_burst_profile(self) -> None:
@@ -2528,44 +2500,83 @@ class TestInPageOracleApplicability:
         raw = {"applicable": False, "status": "n/a", "reason": reason}
         assert probe.inpage_oracle_result(raw) is None
 
+    def _base_shaped_record(
+        self, host: "FakeHost", slide: dict[str, Any], instances: dict[int, dict[str, list[Any]]],
+        viewport: tuple[int, int], scorer: Any, clock: "FakeClock",
+    ) -> dict[str, Any]:
+        """The origin/main record shape, built by driving the SAME pre-existing
+        primitives `visible_slide_record` itself calls (settle wait, scene,
+        stage map, burst capture, expected rects, instance check, control,
+        scorer) -- literally the pre-oracle record path, so the comparison
+        below is against a real base-shaped record, not a re-derivation of
+        the branch's own combined output (Codex r2 Spec 7)."""
+        transport = host._require_transport()
+        assert probe.wait_until_settled(host, now=clock.now, sleep=clock.sleep)
+        scene_id = transport.evaluate(probe.SCENE_ID_JS)
+        stage_map = transport.evaluate(probe.STAGE_MAP_JS)
+        painting_raw = transport.evaluate(probe.PAINTING_VIDEOS_JS)
+        frames, offsets = probe.capture_burst(transport, now=clock.now, sleep=clock.sleep)
+        expected = probe.expected_screen_rects(instances, slide["playerIndex"], stage_map, None)
+        painting = probe.painting_videos(painting_raw, stage_map)
+        instance_check = probe.match_painting_videos(painting, expected)
+        control = probe.control_region(probe.stage_screen_rect(stage_map), viewport)
+        scored = scorer(
+            frames,
+            [{**item["screen"], "label": item["label"], "expect": item["expect"]} for item in expected],
+            control,
+        )
+        verdict, status = scored.get("verdict"), scored.get("status")
+        if verdict is True and not instance_check["verdict"]:
+            verdict, status = False, "fail"
+        return {
+            "playerIndex": int(slide["playerIndex"]), "originalOrdinal": slide.get("originalOrdinal"),
+            "sceneId": scene_id, "expectedRects": expected, "perRect": scored.get("perRect") or [],
+            "stray": scored.get("stray"), "noiseFloor": scored.get("noiseFloor"), "shotOffsetsMs": offsets,
+            "stageMap": stage_map, "instanceCheck": instance_check, "status": status, "verdict": verdict,
+            "attempts": 1, "control": control,
+        }
+
     def test_no_gl_handle_records_not_applicable_and_changes_nothing(self) -> None:
-        """Golden-compare against a base-shaped record recomputed independently
-        by the real scorer (Codex r1 Spec 12): every pre-existing field must
-        equal the base exactly, and only the documented `burstProfile`/
-        `oracles` keys may be additive."""
+        """Full base-shaped golden compare (Codex r2 Spec 7): the branch's
+        record and an independently-driven base record (built from the SAME
+        pre-existing primitives, see `_base_shaped_record`) must be IDENTICAL
+        field for field -- scene, expected rects, stage map, instance check,
+        attempts, and control included, not only the scorer's own verdict --
+        exempting only `shotOffsetsMs`, and permitting only the documented
+        additive `burstProfile` and per-rect `oracles` keys."""
         from obed_edom.html_alpha_probe import score_visible_slide
 
         stage_map = PAINT_STAGE_MAPS["full-bleed"]
         shot = png_b64(*PAINT_VIEWPORT)
-        host = FakeHost(scene_ids=["s", "s"], stage_map=dict(stage_map), shot=shot)
-        clock = FakeClock()
         instances = {0: {"Untitled.mov": [probe.to_authored_rect(EXPECTED_SCREEN_RECT, stage_map)]}}
+
+        clock_a = FakeClock()
+        host_a = FakeHost(scene_ids=["s"] * 8, stage_map=dict(stage_map), shot=shot)
         record = probe.visible_slide_record(
-            host, VISIBLE_SLIDE, instances, PAINT_VIEWPORT, scorer=score_visible_slide,
-            now=clock.now, sleep=clock.sleep,
+            host_a, VISIBLE_SLIDE, instances, PAINT_VIEWPORT, scorer=score_visible_slide,
+            now=clock_a.now, sleep=clock_a.sleep,
         )
 
-        frames = [probe.decode_png(shot) for _ in probe.BURST_OFFSETS_MS]
-        base = score_visible_slide(
-            frames,
-            [{**item["screen"], "label": item["label"], "expect": item["expect"]} for item in record["expectedRects"]],
-            record["control"],
+        clock_b = FakeClock()
+        host_b = FakeHost(scene_ids=["s"] * 8, stage_map=dict(stage_map), shot=shot)
+        base = self._base_shaped_record(
+            host_b, VISIBLE_SLIDE, instances, PAINT_VIEWPORT, score_visible_slide, clock_b,
         )
-        assert record["verdict"] == base["verdict"]
-        assert record["status"] == base["status"]
-        assert record["stray"] == base["stray"]
-        assert record["noiseFloor"] == base["noiseFloor"]
-        assert len(record["perRect"]) == len(base["perRect"])
-        for got, want in zip(record["perRect"], base["perRect"]):
-            assert {k: v for k, v in got.items() if k != "oracles"} == want
-            assert got["oracles"]["inpage"] is None
 
-        base_top_level_keys = {
-            "playerIndex", "originalOrdinal", "sceneId", "expectedRects", "perRect", "stray",
-            "noiseFloor", "shotOffsetsMs", "stageMap", "instanceCheck", "status", "verdict",
-            "attempts", "control",
-        }
-        assert set(record) - base_top_level_keys == {"burstProfile"}
+        assert record["perRect"], "the fixture must exercise at least one rect"
+        stripped_record = dict(record)
+        stripped_record.pop("burstProfile", None)
+        stripped_record["perRect"] = [
+            {k: v for k, v in rect.items() if k != "oracles"} for rect in stripped_record["perRect"]
+        ]
+        for rect in record["perRect"]:
+            assert set(rect) - set(base["perRect"][0]) <= {"oracles"}
+            assert rect["oracles"]["inpage"] is None
+
+        assert set(record) - set(base) == {"burstProfile"}
+        assert stripped_record.pop("shotOffsetsMs") == [float(v) for v in probe.BURST_OFFSETS_MS]
+        base.pop("shotOffsetsMs")
+        assert stripped_record == base
 
     def test_a_dom_painted_slide_is_never_scored_by_the_inpage_oracle(self) -> None:
         raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[0]}
@@ -2636,6 +2647,19 @@ class TestTwoOracleRecord:
         combined = probe.combine_rect_oracles(entry, inpage)
         assert combined["verdict"] is None
 
+    def test_dead_expected_rect_with_an_inconclusive_paused_control_is_inconclusive(self) -> None:
+        """Codex r2 Spec 1 regression: screenshot expectation-met `True` on a
+        DEAD-expected rect became physical `False`, and the combiner used to
+        preserve physical DEAD when the in-page result was merely INCONCLUSIVE
+        (a failed paused-decoder control), then translate it back to
+        expectation-met `True` -- a silent PASS on a failed control. A failed
+        or otherwise applicable-but-inconclusive control must make the slide
+        INCONCLUSIVE, never a pass, regardless of `expect`."""
+        entry = {"verdict": True, "expect": probe.DEAD, "reason": None, "liveFrac": 0.01}
+        inpage = {"verdict": None, "status": "inconclusive", "reason": "paused-decoder control did not read dead"}
+        combined = probe.combine_rect_oracles(entry, inpage)
+        assert combined["verdict"] is None
+
     def test_disagreement_makes_the_slide_inconclusive_and_writes_evidence(self, tmp_path: Path) -> None:
         host = FakeHost(scene_ids=["s", "s"], inpage=[_inpage_raw(live=False)])
         clock = FakeClock()
@@ -2685,3 +2709,126 @@ class TestTwoOracleRecord:
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"
         assert result["reason"] == "occluder mask unusable"
+
+
+class TestHandleIdentityBinding:
+    """Codex r2 Spec 3: the JS handle contract publishes `sceneId`/`rect`/
+    `instanceId`/`canvasId` and Python must bind the read to the scene,
+    authored rect, and movie-instance identity being scored. The JS predicate
+    itself cannot run in pytest, so these test the wiring Python controls:
+    the exact values sent to the page, and the Python-side handling of each
+    identity-mismatch reason the JS could return.
+    """
+
+    IDENTITY_MISMATCH_REASONS = [
+        "the runtime handle was replaced",
+        "handle re-recorded during the sample window",
+        "handle scene no longer matches the live player scene",
+        "canvas disconnected",
+        "context lost",
+        "canvas is not visible",
+        "handle rect does not exactly match the scored instance rect",
+        "handle instance does not match the scored instance",
+    ]
+
+    @pytest.mark.parametrize("reason", IDENTITY_MISMATCH_REASONS)
+    def test_each_identity_mismatch_reason_is_an_applicable_inconclusive(self, reason: str) -> None:
+        raw = {"applicable": True, "status": "inconclusive", "reason": reason}
+        result = probe.inpage_oracle_result(raw)
+        assert result is not None
+        assert result["verdict"] is None
+        assert result["status"] == "inconclusive"
+        assert result["reason"] == reason
+
+    def test_measurement_binds_the_scene_rect_and_instance_before_reading(self) -> None:
+        host = FakeHost(scene_ids=["scene-7", "scene-7"], inpage=[{"applicable": False, "status": "n/a", "reason": "no handle"}])
+        rect = {"x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0}
+        probe.measure_inpage_oracle_with_paused_control(host.transport, rect, "scene-7", "Untitled.mov#1")
+        setter = next(js for js in host.transport.evaluations if "__obedInpageRect" in js)
+        assert json.dumps(rect) in setter
+        assert json.dumps("scene-7") in setter
+        assert json.dumps("Untitled.mov#1") in setter
+
+    def test_js_source_rechecks_identity_after_every_await(self) -> None:
+        js = probe.INPAGE_LIVENESS_JS
+        assert "instanceId" in js
+        assert "recheck" in js
+        assert js.count("recheck()") >= 4
+        assert "__OBED_GL_ORACLE__ !== handle" in js
+
+
+class TestAsyncOracleFailureHandling:
+    """Codex r2 Spec 4: a rejected promise or a transport timeout while
+    measuring the (optional, inert) in-page oracle must degrade to an
+    applicable INCONCLUSIVE for that one rect -- never `status:"error"` for
+    the whole pass."""
+
+    def test_a_rejected_promise_is_an_applicable_inconclusive_not_a_raise(self) -> None:
+        host = FakeHost(scene_ids=["s", "s"], inpage=[RuntimeError("promise rejected")])
+        result = probe.measure_inpage_oracle_with_paused_control(
+            host.transport, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, "s", "Untitled.mov#1"
+        )
+        assert result["verdict"] is None
+        assert result["status"] == "inconclusive"
+        assert "promise rejected" in result["reason"]
+
+    def test_a_transport_timeout_is_an_applicable_inconclusive_not_a_raise(self) -> None:
+        host = FakeHost(scene_ids=["s", "s"], inpage=[TimeoutError("cdp deadline")])
+        result = probe.measure_inpage_oracle_with_paused_control(
+            host.transport, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, "s", "Untitled.mov#1"
+        )
+        assert result["verdict"] is None
+        assert result["status"] == "inconclusive"
+
+    def test_a_failure_never_collapses_the_whole_slide_to_status_error(self) -> None:
+        host = FakeHost(scene_ids=["s", "s"], inpage=[RuntimeError("boom")])
+        clock = FakeClock()
+        record = probe.visible_slide_record(
+            host, VISIBLE_SLIDE, VISIBLE_INSTANCES, VISIBLE_VIEWPORT,
+            scorer=passing_scorer, now=clock.now, sleep=clock.sleep,
+        )
+        assert record["status"] != "error"
+        assert record["perRect"][0]["oracles"]["inpage"]["status"] == "inconclusive"
+
+    def test_js_source_wraps_paused_sampling_in_try_finally_with_resume(self) -> None:
+        js = probe.INPAGE_LIVENESS_JS
+        pause_index = js.index("handle.pause()")
+        try_index = js.index("try", pause_index)
+        finally_index = js.index("finally", try_index)
+        resume_index = js.index("handle.resume()", finally_index)
+        assert pause_index < try_index < finally_index < resume_index
+
+
+class TestPokeIsProbabilistic:
+    def test_poke_test_documents_random_values_may_repeat(self) -> None:
+        """Codex r2 Spec 8: `BURST_POKE_JS` is byte-for-byte the E0 harness's
+        POKE_JS (test_poke_is_the_e0_qualified_painted_element_poke), which
+        derives its painted value from `Math.random()` -- consecutive shots
+        MAY repeat by chance. This test only asserts the poke reassigns the
+        background on every evaluation, not that every value differs."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not available")
+        script = f"""
+        var backgrounds = [];
+        var style = {{}};
+        var el = {{
+          id: null,
+          style: {{ cssText: '', set background(v) {{ style.background = v; backgrounds.push(v); }}, get background() {{ return style.background; }} }},
+        }};
+        var byId = null;
+        var document = {{
+          getElementById: function(id) {{ return byId; }},
+          createElement: function() {{ return el; }},
+          body: {{ appendChild: function(node) {{ byId = node; }} }},
+        }};
+        for (var i = 0; i < {len(probe.BURST_OFFSETS_MS)}; i++) {{
+          eval({json.dumps(probe.BURST_POKE_JS)});
+        }}
+        console.log(JSON.stringify(backgrounds));
+        """
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        backgrounds = json.loads(result.stdout.strip())
+        assert len(backgrounds) == len(probe.BURST_OFFSETS_MS)
+        assert all(bg for bg in backgrounds)

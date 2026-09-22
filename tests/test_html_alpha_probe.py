@@ -2412,7 +2412,7 @@ def _inpage_samples(
         samples.append(
             {
                 "t": t,
-                "ms": 4.0,
+                "ms": 4.0 + t * 0.01,
                 "vt": t * 0.033,
                 "mediaTime": t * 0.033,
                 "bands": bands,
@@ -2606,6 +2606,66 @@ class TestInPageLivenessScorer:
         assert result["verdict"] is False
         assert result["mask"] is None
         assert result["reason"] == "non-finite marker delta"
+
+    def test_a_frozen_sample_repeated_twenty_four_times_is_inconclusive(self):
+        """Codex r2 Spec 5: the scorer requires 24 array entries, not 24
+        DISTINCT callbacks -- repeating one frozen sample must not "prove" a
+        window by inflating its length."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        frozen = _inpage_samples(n=1)[0]
+        samples = [dict(frozen) for _ in range(24)]
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "duplicate or non-monotonic sample callbacks"
+
+    def test_a_regressing_timestamp_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[-1]["t"] = samples[0]["t"]
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["reason"] == "duplicate or non-monotonic sample callbacks"
+
+    def test_a_non_sequence_samples_argument_is_inconclusive_not_a_raise(self):
+        """Codex r2 Standards 1: a truthy non-sequence `samples` (a dict here)
+        must not raise when indexed."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness({"not": "a list"}, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+
+    def test_an_overflowing_numeric_value_is_inconclusive_not_a_raise(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[0]["control"] = "1" + "0" * 400  # int() succeeds; float() overflows
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "malformed samples"
+
+    def test_non_numeric_vt_does_not_raise_and_is_excluded_from_the_span(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[0]["vt"] = "not-a-number"
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is True
+        assert scored["vtSpan"] is None
+
+    def test_a_fractional_gl_error_is_not_truncated_to_zero(self):
+        """Codex r2 Standards 1: `int(max(...))` used to truncate 0.5 to 0 and
+        return LIVE; every numeric `glErr != 0` must count as an error."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(gl_err=0.5), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is False
+        assert scored["reason"] == "gl error"
+        assert scored["glErrAny"] == 0.5
 
 
 class TestOracleCombiner:
