@@ -191,10 +191,10 @@ def _quoted_literals(source: str) -> list[str]:
 
 def _emitted_reasons(source: str) -> set[str]:
     """Every reason literal the module can actually emit: the first string argument
-    of an `assertOr`/`refuseInstall`/`provenOr`/`unproven`/`standDown` call site, plus
-    the named constants those helpers are handed (`CANVAS_REMOVED` and friends)."""
+    of an `assertOr`/`refuseInstall`/`pendingOr`/`provenOr`/`unproven`/`standDown`
+    call site, plus the named constants those helpers are handed."""
     direct = set(re.findall(
-        r"(?:assertOr|refuseInstall|provenOr|unproven|standDown)\s*\(\s*"
+        r"(?:assertOr|refuseInstall|pendingOr|provenOr|unproven|standDown)\s*\(\s*"
         r"(?:[A-Za-z0-9_.]+\s*,\s*)?['\"]([A-Za-z0-9_-]+)['\"]",
         source,
     ))
@@ -1248,7 +1248,7 @@ STAND_DOWN_CASES: list[tuple[str, str, dict]] = [
     ("glReplayUnavailable", "natural", {"scenario": "install_only", "noWebGL": True}),
     ("settleSignalAbsent", "natural", {"scenario": "arm_only", "noObedLive": True}),
     ("rvfcUnavailable", "natural", {"scenario": "arm_only", "noRvfc": True}),
-    ("observerNotArmed", "natural", {"scenario": "install_only", "observerThrows": True}),
+    ("observerNotArmed", "natural", {"scenario": "arm_only", "observerThrows": True}),
     ("canvasShape", "natural", {"scenario": "arm_only", "canvasW": 1280, "canvasH": 720}),
     ("assetUnbound", "natural", {"scenario": "arm_only", "carriedNull": True}),
     ("videoNotReady", "natural", {"scenario": "arm_only", "videoNotReady": True}),
@@ -1265,8 +1265,10 @@ STAND_DOWN_CASES: list[tuple[str, str, dict]] = [
                                       "debugForceFail": "frameLengthChanged"}),
 ]
 
-# Reasons reached before the carried decoder is bound: no `release()` is owed.
-NO_RELEASE_REASONS = PRE_ARM_REASONS | {"assetUnbound"}
+# Reasons reached before the module ever holds the seam: `release()` cannot be
+# called at all. Every other reason owes the §2.5 step-6 hand-off, including the
+# ones where no decoder was ever bound.
+NO_RELEASE_REASONS = {"planUnreadable", "glReplayUnavailable", "runtimeSeamAbsent"}
 
 
 def test_stand_down_cases_cover_the_closed_reason_set():
