@@ -184,3 +184,43 @@ export function saveStoredFile(key: string, file: StoredFile | null) {
     /* ignore */
   }
 }
+
+const storedFileListeners = new Map<string, Set<() => void>>();
+
+function notifyStoredFile(key: string) {
+  storedFileListeners.get(key)?.forEach((listener) => listener());
+}
+
+/** A stored file kept in sync across every mounted subscriber on this key, in this tab and others. */
+export function useStoredFile(key: string): [StoredFile | null, (file: StoredFile | null) => void] {
+  const [value, setValue] = useState<StoredFile | null>(() => loadStoredFile(key));
+
+  useEffect(() => {
+    setValue(loadStoredFile(key));
+    const listener = () => setValue(loadStoredFile(key));
+    let listeners = storedFileListeners.get(key);
+    if (!listeners) {
+      listeners = new Set();
+      storedFileListeners.set(key, listeners);
+    }
+    listeners.add(listener);
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === key) listener();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      listeners!.delete(listener);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [key]);
+
+  const update = useCallback(
+    (file: StoredFile | null) => {
+      saveStoredFile(key, file);
+      notifyStoredFile(key);
+    },
+    [key]
+  );
+
+  return [value, update];
+}

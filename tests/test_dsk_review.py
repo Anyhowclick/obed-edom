@@ -202,9 +202,12 @@ def test_v2_api_serializes_revision_and_binds_source(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(app_mod, "deck_digest", lambda _path: state["digest"])
     monkeypatch.setattr(app_mod, "wall_thumb_dir", lambda _digest: tmp_path)
     monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "check_layout_import_preconditions", lambda *_a, **_k: None)
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("fixture")
 
     client = TestClient(app_mod.app)
-    started = client.post("/api/dsk", data={"path": str(deck)})
+    started = client.post("/api/dsk", data={"path": str(deck), "dsk_template": str(template)})
     assert started.status_code == 200
     job_id = started.json()["id"]
     for _ in range(100):

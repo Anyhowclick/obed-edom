@@ -1084,3 +1084,130 @@ def test_rename_rollback_releases_source_reservation_no_duplicate(tmp_path: Path
     _wait(runner, other.id)
     with pytest.raises(FileExistsError):
         runner.rename(other.id, old_name)
+
+
+def test_job_detail_appends_and_bumps_updated_at():
+    job = Job(id="x", kind="dsk")
+    before = job.updated_at
+    time.sleep(0.01)
+    job.detail("technical line")
+    assert job.details == ["technical line"]
+    assert job.updated_at > before
+
+
+def test_job_set_progress_sets_fields_and_bumps_updated_at():
+    job = Job(id="x", kind="dsk")
+    before = job.updated_at
+    time.sleep(0.01)
+    job.set_progress(1, 3, "Reading the deck", detail="extra")
+    assert job.progress["step"] == 1
+    assert job.progress["steps"] == 3
+    assert job.progress["label"] == "Reading the deck"
+    assert job.progress["detail"] == "extra"
+    assert "stepStartedAt" in job.progress
+    assert job.updated_at > before
+
+
+def test_job_to_dict_from_dict_round_trips_details_progress_started_at():
+    job = Job(id="abc", kind="dsk", feature="dsk", status="done")
+    job.detail("technical line")
+    job.set_progress(2, 3, "Assembling the DSK deck", detail="3 clips")
+    job.started_at = 12345.0
+
+    data = job.to_dict()
+    assert data["details"] == ["technical line"]
+    assert data["progress"] == job.progress
+    assert data["startedAt"] == 12345.0
+
+    reloaded = Job.from_dict(data)
+    assert reloaded.details == ["technical line"]
+    assert reloaded.progress == job.progress
+    assert reloaded.started_at == 12345.0
+
+
+def test_job_from_dict_tolerates_absent_details_progress_started_at():
+    job = Job.from_dict({"id": "x", "kind": "dsk", "status": "done"})
+    assert job.details == []
+    assert job.progress is None
+    assert job.started_at is None
+
+
+def test_progress_cleared_when_job_finishes_done(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+
+    def work(job: Job):
+        job.set_progress(1, 2, "Doing work")
+        return {"ok": True}
+
+    job = runner.submit("dsk", work, feature="dsk")
+    done = _wait(runner, job.id)
+    assert done.status == "done"
+    assert done.progress is None
+
+
+def test_progress_cleared_when_job_finishes_error(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+
+    def work(job: Job):
+        job.set_progress(1, 2, "Doing work")
+        raise RuntimeError("boom")
+
+    job = runner.submit("dsk", work, feature="dsk")
+    done = _wait(runner, job.id)
+    assert done.status == "error"
+    assert done.progress is None
+
+
+def test_started_at_set_when_a_run_begins(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    job = runner.submit("dsk", lambda _j: {"ok": True}, feature="dsk")
+    done = _wait(runner, job.id)
+    assert done.started_at is not None
+    assert done.started_at >= done.created_at
+
+
+def test_started_at_updates_on_rerun(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    job = runner.submit("dsk", lambda _j: {"ok": True}, feature="dsk")
+    done = _wait(runner, job.id)
+    first_started = done.started_at
+
+    time.sleep(0.01)
+    rerun_job = runner.rerun(job.id, lambda _j: {"ok": True, "again": True})
+    done2 = _wait(runner, rerun_job.id)
+    assert done2.started_at is not None
+    assert done2.started_at > first_started
+
+
+def test_rerun_clears_started_at_while_queued_behind_a_busy_worker(tmp_path: Path):
+    """`rerun()`'s returned Job must not still carry the previous run's `startedAt`
+    while it sits queued -- only the worker actually starting it should set a new
+    one. The single worker thread is kept busy with another job so the rerun-ed
+    job is guaranteed to still be queued when we inspect it."""
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+
+    job = runner.submit("dsk", lambda _j: {"ok": True}, feature="dsk")
+    done = _wait(runner, job.id)
+    assert done.started_at is not None
+    first_started = done.started_at
+
+    blocker_started = threading.Event()
+    release_blocker = threading.Event()
+
+    def blocking_work(_job: Job):
+        blocker_started.set()
+        assert release_blocker.wait(2)
+        return {"ok": True}
+
+    blocker = runner.submit("dsk", blocking_work, feature="dsk")
+    assert blocker_started.wait(1)
+
+    rerun_job = runner.rerun(job.id, lambda _j: {"ok": True, "again": True})
+    assert rerun_job.status == "queued"
+    assert rerun_job.started_at is None
+
+    release_blocker.set()
+    _wait(runner, blocker.id)
+    finished = _wait(runner, rerun_job.id)
+    assert finished.started_at is not None
+    assert finished.started_at > first_started

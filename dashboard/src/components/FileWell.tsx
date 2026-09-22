@@ -15,6 +15,8 @@ type Props = {
   folder?: boolean;
   tone?: "lw" | "cg" | "dsk" | "document" | "photo";
   browseLabel?: string;
+  required?: boolean;
+  error?: string | null;
 };
 
 export function FileWell({
@@ -31,9 +33,14 @@ export function FileWell({
   folder,
   tone,
   browseLabel,
+  required,
+  error,
 }: Props) {
   const [over, setOver] = useState(false);
   const inputId = `file-${label.replace(/[^a-z0-9]+/gi, "-")}`;
+  const errorId = `${inputId}-error`;
+  const requiredId = `${inputId}-required`;
+  const describedBy = [required ? requiredId : null, error ? errorId : null].filter(Boolean).join(" ") || undefined;
 
   async function handleDrop(e: DragEvent) {
     e.preventDefault();
@@ -72,15 +79,29 @@ export function FileWell({
           }
         }}
       >
-        <strong>{label}</strong>
+        <strong>
+          {label}
+          {required ? (
+            <span className="err" aria-hidden="true">
+              {" "}*
+            </span>
+          ) : null}
+        </strong>
+        {required ? (
+          <span id={requiredId} className="visually-hidden">
+            Required
+          </span>
+        ) : null}
         <p>{file?.name || file?.path || hint}</p>
         {onFiles && (
           <input
             type="file"
             accept={accept}
             multiple={multiple}
+            required={required || undefined}
             hidden
             id={inputId}
+            aria-describedby={describedBy}
             onChange={(e) => {
               const files = e.target.files ? [...e.target.files] : [];
               e.target.value = "";
@@ -89,6 +110,11 @@ export function FileWell({
           />
         )}
       </div>
+      {error ? (
+        <p className="field-error" id={errorId} role="alert">
+          {error}
+        </p>
+      ) : null}
       {onFiles && (
         <div className="actions">
           <button
@@ -105,7 +131,7 @@ export function FileWell({
       )}
       {onChoose && (
         <div className="actions">
-          <button className="btn secondary" type="button" onClick={onChoose}>
+          <button className="btn secondary" type="button" aria-describedby={describedBy} onClick={onChoose}>
             Choose on this Mac
           </button>
           {onClear && file && (

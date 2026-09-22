@@ -22,6 +22,8 @@ export type Artifacts = {
   suggestedPath?: string | null;
 };
 
+export type JobProgress = { step: number; steps: number; label: string; detail?: string | null; stepStartedAt?: number };
+
 export type Job = {
   id: string;
   kind: string;
@@ -34,14 +36,30 @@ export type Job = {
   createdAt?: number;
   updatedAt?: number;
   artifacts?: Artifacts;
+  details?: string[];
+  progress?: JobProgress | null;
+  startedAt?: number;
 };
 
 export type ChosenFile = { path: string; name: string };
+
+export class FieldError extends Error {
+  readonly field: string;
+
+  constructor(field: string, message: string) {
+    super(message);
+    this.field = field;
+  }
+}
 
 async function readError(res: Response, parsed?: unknown): Promise<string> {
   try {
     const data = parsed !== undefined ? parsed : await res.json();
     const detail = (data as { detail?: unknown })?.detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const { field, message } = detail as { field?: unknown; message?: unknown };
+      if (typeof field === "string" && typeof message === "string") throw new FieldError(field, message);
+    }
     if (Array.isArray(detail)) {
       const joined = detail
         .map((item) => (typeof item === "string" ? item : (item as { msg?: string })?.msg ?? JSON.stringify(item)))
@@ -49,7 +67,8 @@ async function readError(res: Response, parsed?: unknown): Promise<string> {
       return joined || JSON.stringify(data);
     }
     return (typeof detail === "string" && detail) || JSON.stringify(data);
-  } catch {
+  } catch (err) {
+    if (err instanceof FieldError) throw err;
     return res.statusText;
   }
 }
@@ -287,6 +306,7 @@ export type DskSkip = { slide: number; reason: string };
 export async function startDsk(
   path: string,
   opts?: {
+    dskTemplate?: string;
     referenceDeck?: string;
     rangeFrom?: number;
     rangeTo?: number;
@@ -297,6 +317,7 @@ export async function startDsk(
 ): Promise<Job> {
   const body = new FormData();
   body.set("path", path);
+  if (opts?.dskTemplate) body.set("dsk_template", opts.dskTemplate);
   if (opts?.referenceDeck) body.set("reference_deck", opts.referenceDeck);
   if (opts?.slides?.length) body.set("slides", opts.slides.join(","));
   if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
@@ -318,11 +339,18 @@ export async function saveDskDecisions(jobId: string, decisions: DskDecision[] |
   return res.json();
 }
 
-export async function applyDsk(jobId: string, decisions?: DskDecision[] | DskEditableReview, exportDir?: string, baseRevision?: number): Promise<Job> {
-  const body: { decisions?: DskDecision[]; review?: DskEditableReview; exportDir?: string; baseRevision?: number } = {};
+export async function applyDsk(
+  jobId: string,
+  decisions?: DskDecision[] | DskEditableReview,
+  exportDir?: string,
+  baseRevision?: number,
+  dskTemplate?: string
+): Promise<Job> {
+  const body: { decisions?: DskDecision[]; review?: DskEditableReview; exportDir?: string; baseRevision?: number; dskTemplate?: string } = {};
   if (Array.isArray(decisions)) body.decisions = decisions;
   else if (decisions) { body.review = decisions; body.baseRevision = baseRevision; }
   if (exportDir) body.exportDir = exportDir;
+  if (dskTemplate) body.dskTemplate = dskTemplate;
   const res = await fetch(`/api/dsk/${jobId}/apply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

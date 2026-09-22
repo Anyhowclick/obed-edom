@@ -39,12 +39,19 @@ from obed_edom.diff_keynotes import (
     slots_from_pairs,
 )
 from obed_edom.dsk_assemble import (
+    DEFAULT_DSK_LAYOUT_NAMES,
     DEFAULT_TEXT_SLIDE_WORDS,
     AssemblyRefusal,
     SlideDecision,
     assemble_dsk_deck,
+    check_layout_import_preconditions,
 )
-from obed_edom.dsk_live import guard_out_dir, keynote_running, quit_and_wait_for_exit
+from obed_edom.dsk_live import (
+    DEFAULT_TRANSPARENT_LAYOUT_NAMES,
+    guard_out_dir,
+    keynote_running,
+    quit_and_wait_for_exit,
+)
 from obed_edom.dsk_movie_export import (
     _ffprobe,
     export_dsk_slide_clips,
@@ -190,6 +197,7 @@ class DskDecisionsBody(BaseModel):
     # source/media/capability metadata remains server-authoritative.
     review: dict[str, Any] | None = None
     baseRevision: StrictInt | None = None
+    dskTemplate: str | None = None
 
 
 class SettingsBody(BaseModel):
@@ -721,6 +729,7 @@ def create_app() -> FastAPI:
     def start_dsk(
         path: str = Form(...),
         reference_deck: str = Form(""),
+        dsk_template: str = Form(""),
         range_from: int | None = Form(None),
         range_to: int | None = Form(None),
         slides: str = Form(""),
@@ -745,10 +754,11 @@ def create_app() -> FastAPI:
             except ValueError:
                 raise HTTPException(400, f"Bad text_slide_words: {text_slide_words!r}")
         do_content_only = _form_flag(content_only)
+        template_path = _validate_dsk_template(dsk_template, key, content_only=do_content_only)
         job = RUNNER.submit(
             "dsk",
-            lambda j, p=key, r=reference, sl=sel, co=do_content_only, w=words: (
-                _run_dsk_propose(j, p, r, sl, co, w)
+            lambda j, p=key, r=reference, t=template_path, sl=sel, co=do_content_only, w=words: (
+                _run_dsk_propose(j, p, r, t, sl, co, w)
             ),
             feature="dsk",
         )
@@ -796,6 +806,7 @@ def create_app() -> FastAPI:
                 _save_v2_dsk_review(job_id, payload)
                 fresh = RUNNER.get(job_id)
                 result = dict((fresh.result if fresh else None) or {})
+                result, _ = _resolve_apply_dsk_template(job_id, result, payload.dskTemplate)
                 try:
                     updated = RUNNER.rerun(job_id, lambda j, r=result: _run_dsk_apply(j, r))
                 except RuntimeError as exc:
@@ -815,6 +826,7 @@ def create_app() -> FastAPI:
             seeded = RUNNER.update_result(job_id, result)
             if seeded:
                 result = dict(seeded.result or result)
+        result, _ = _resolve_apply_dsk_template(job_id, result, payload.dskTemplate if payload else None)
         key = Path(str(result.get("path") or "")).expanduser()
         if not key.exists():
             raise HTTPException(400, "The FW deck has moved since proposing.")
@@ -1926,7 +1938,7 @@ def _dsk_preview_thumbs(job: Job, path: Path, payload: dict[str, Any]) -> dict[i
     previews; that launch is quit again here so the following apply's strictly-serial
     Keynote gate does not 409. A Keynote the operator already had open is left alone."""
     was_running = keynote_running()
-    thumbs = build_preview_thumbs(path, payload, log=job.log)
+    thumbs = build_preview_thumbs(path, payload, log=job.detail)
     if not was_running and keynote_running():
         job.log("Quitting the Keynote launched for preview export…")
         out_dir = _dsk_output_dir(path)
@@ -2125,16 +2137,70 @@ def _save_v2_dsk_review(job_id: str, payload: DskDecisionsBody) -> dict:
         return RUNNER.public_dict(updated) if updated else result
 
 
+def _require_dsk_template_field(raw: str) -> Path:
+    stripped = (raw or "").strip()
+    if not stripped:
+        raise HTTPException(
+            400,
+            detail={
+                "field": "dskTemplate",
+                "message": "Choose the DSK template (.key) — the lower-thirds deck that supplies the DSK layouts.",
+            },
+        )
+    template_path = Path(stripped).expanduser()
+    if not template_path.exists():
+        raise HTTPException(
+            400,
+            detail={
+                "field": "dskTemplate",
+                "message": f"DSK template not found at {stripped}. Choose it again with “Choose on this Mac”.",
+            },
+        )
+    return template_path.resolve()
+
+
+def _validate_dsk_template(raw: str, fw_deck: Path, *, content_only: bool) -> Path:
+    template_path = _require_dsk_template_field(raw)
+    layout_names = DEFAULT_TRANSPARENT_LAYOUT_NAMES if content_only else DEFAULT_DSK_LAYOUT_NAMES
+    try:
+        check_layout_import_preconditions(
+            fw_deck, layout_template=template_path, layout_names=layout_names
+        )
+    except AssemblyRefusal as exc:
+        raise HTTPException(400, detail={"field": "dskTemplate", "message": str(exc)}) from exc
+    return template_path
+
+
+def _resolve_apply_dsk_template(
+    job_id: str, result: dict[str, Any], override: str | None
+) -> tuple[dict[str, Any], Path]:
+    raw_override = (override or "").strip()
+    if not raw_override:
+        return result, _require_dsk_template_field(str(result.get("dskTemplate") or ""))
+    fw_deck = Path(str(result.get("path") or "")).expanduser()
+    template_path = _validate_dsk_template(
+        raw_override, fw_deck, content_only=bool(result.get("contentOnly"))
+    )
+    result = dict(result)
+    result["dskTemplate"] = str(template_path)
+    seeded = RUNNER.update_result(job_id, result)
+    if seeded:
+        result = dict(seeded.result or result)
+    return result, template_path
+
+
 def _run_dsk_propose(
     job: Job,
     path: Path,
     reference_deck: Path | None,
+    dsk_template: Path,
     slide_range: frozenset[int] | None,
     content_only: bool,
     text_slide_words: int | None,
 ) -> dict[str, Any]:
     words = text_slide_words if text_slide_words is not None else DEFAULT_TEXT_SLIDE_WORDS
     mode = "content-only (skips text slides)" if content_only else "full"
+    job.set_progress(1, 3, "Reading the deck")
     job.log(f"Reading {path.name} for the DSK generator ({mode})…")
     payload = offline_wall_payload(path)
     wall = (payload.get("slideWidth"), payload.get("slideHeight"))
@@ -2152,12 +2218,15 @@ def _run_dsk_propose(
             path, payload=payload, text_slide_words=words, include_side=frozenset(all_numbers)
         )
     }
+    job.set_progress(2, 3, "Making slide previews")
     thumbs = _dsk_preview_thumbs(job, path, payload)
+    job.log(f"Made {len(thumbs)} slide preview(s).")
     fingerprint = deck_digest(path)
     thumb_dir = wall_thumb_dir(fingerprint)
     slides_by_number = {int(s["number"]): s for s in payload["slides"]}
     pages: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    job.set_progress(3, 3, "Building the review")
     for number in numbers:
         cls = classes.get(number)
         if cls is None:
@@ -2168,7 +2237,7 @@ def _run_dsk_propose(
         is_text = bool(cls.is_text)
         if is_text:
             skipped.append({"slide": number, "reason": "text"})
-            job.log(f"slide {number}: skipped (text slide; content-only)")
+            job.detail(f"slide {number}: skipped (text slide; content-only)")
         slide = slides_by_number.get(number)
         can_videos_only, stacked_movies = _dsk_videos_only_flags(cls, slide, CENTRE_PANEL_RECT)
         _side_can, stacked_keep_side = _dsk_videos_only_flags(
@@ -2209,6 +2278,7 @@ def _run_dsk_propose(
         "phase": "review",
         "path": str(path),
         "referenceDeck": str(reference_deck) if reference_deck else None,
+        "dskTemplate": str(dsk_template),
         "contentOnly": content_only,
         "textSlideWords": words,
         "slideRange": sorted(slide_range) if slide_range else None,
@@ -2222,6 +2292,10 @@ def _run_dsk_propose(
 
 def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(proposal.get("path") or "")).expanduser()
+    raw_dsk_template = proposal.get("dskTemplate")
+    if not raw_dsk_template:
+        raise ValueError("Missing DSK template; re-propose to choose one.")
+    dsk_template = Path(str(raw_dsk_template)).expanduser()
     reference_raw = proposal.get("referenceDeck")
     reference_deck = Path(reference_raw).expanduser() if reference_raw else None
     content_only = bool(proposal.get("contentOnly"))
@@ -2300,6 +2374,9 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             if raw_clip:
                 operator_clips[int(page["slide"])] = Path(raw_clip).expanduser()
     missing_clip_slides = [] if review is not None else [n for n in clip_slides if n not in operator_clips]
+    needs_clip_export = bool(movie_plans) or bool(missing_clip_slides)
+    apply_steps = 3 if needs_clip_export else 2
+    apply_step = 0
 
     nested_clips: dict[int, dict[ItemId, Path]] = {}
     clips_by_occurrence: dict[str, Path] = {}
@@ -2334,13 +2411,24 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             tmp_src_dir = out_dir / f".src-{uuid4().hex}"
             guard_out_dir(tmp_src_dir, path)
             source_slides = sorted({plan.source_slide for plan in movie_plans})
-            job.log(f"Exporting composition clip(s) from slide(s) {source_slides} before assembly…")
+            apply_step += 1
+            job.set_progress(
+                apply_step,
+                apply_steps,
+                "Exporting video clips",
+                detail=(
+                    f"{len(movie_plans)} clip(s) from slide(s) {source_slides} — Keynote renders "
+                    "each one; this can take a few minutes."
+                ),
+            )
+            job.log(f"Exporting {len(movie_plans)} video clip(s) from slide(s) {source_slides}…")
             clip_results = export_slide_clips(
                 path,
                 source_slides,
                 tmp_src_dir,
                 movie_plans=movie_plans,
-                log=job.log,
+                layout_template=dsk_template,
+                log=job.detail,
             )
             for clip in clip_results:
                 if clip.occurrence_id is None:
@@ -2355,14 +2443,25 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         elif missing_clip_slides:
             tmp_src_dir = out_dir / f".src-{uuid4().hex}"
             guard_out_dir(tmp_src_dir, path)
-            job.log(f"Exporting clip(s) for slide(s) {missing_clip_slides} before assembly…")
+            apply_step += 1
+            job.set_progress(
+                apply_step,
+                apply_steps,
+                "Exporting video clips",
+                detail=(
+                    f"{len(missing_clip_slides)} clip(s) from slide(s) {missing_clip_slides} — "
+                    "Keynote renders each one; this can take a few minutes."
+                ),
+            )
+            job.log(f"Exporting {len(missing_clip_slides)} video clip(s) from slide(s) {missing_clip_slides}…")
             clip_results = export_slide_clips(
                 path,
                 missing_clip_slides,
                 tmp_src_dir,
                 per_movie=True,
                 include_side=include_side & set(missing_clip_slides),
-                log=job.log,
+                layout_template=dsk_template,
+                log=job.detail,
             )
             for clip in clip_results:
                 nested_clips.setdefault(clip.slide, {})[clip.movie_id] = clip.path
@@ -2372,7 +2471,9 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
                 if clip.bare:
                     bare_clips.setdefault(clip.slide, set()).add(clip.movie_id)
 
-        job.log(f"Assembling {out_path.name} (content-only={content_only})…")
+        apply_step += 1
+        job.set_progress(apply_step, apply_steps, "Assembling the DSK deck")
+        job.log(f"Assembling {out_path.name}…")
         result = assemble_dsk_deck(
             path,
             out_path,
@@ -2386,9 +2487,11 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
             compiled_clips=clips_by_occurrence,
             text_slide_words=words,
             content_only=content_only,
-            log=job.log,
+            layout_template=dsk_template,
+            log=job.detail,
         )
-        job.log(f"Wrote {result.path}: {len(result.slides_kept)} slide(s).")
+        apply_step += 1
+        job.set_progress(apply_step, apply_steps, "Finishing outputs")
         clip_order: dict[int, list[ItemId]] = {
             number: list(item_clips) for number, item_clips in result.clips_inserted.items()
         }
@@ -2472,9 +2575,10 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     finally:
         if tmp_src_dir is not None and tmp_src_dir.is_dir():
             shutil.rmtree(tmp_src_dir, ignore_errors=True)
-            job.log(f"Removed clip export dir {tmp_src_dir}")
+            job.detail(f"Removed clip export dir {tmp_src_dir}")
     if stale_src_clips:
         _delete_managed_src_clips(job, out_dir, src_dir, stale_src_clips)
+    job.log(f"Wrote {result.path.name} ({len(result.slides_kept)} slide(s)).")
     return {
         "phase": "done",
         "path": str(path),
@@ -2489,6 +2593,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         "wallS": result.wall_s,
         "pages": pages,
         "contentOnly": content_only,
+        "dskTemplate": str(dsk_template),
         **({"review": review, "reviewMode": "v2"} if review is not None else {}),
         **({"exportDir": str(out_dir)} if raw_export else {}),
     }
