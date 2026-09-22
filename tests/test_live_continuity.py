@@ -14,6 +14,7 @@ from obed_edom.live_continuity import (
     Rect,
     Unsupported,
     _check_effect_encoding,
+    _IDENTITY_SUBLAYER_TRANSFORM,
     _Refuse,
     codec_report,
     derive_plan,
@@ -1680,6 +1681,7 @@ def _opacity_anim_of(effect: dict, slot: int) -> dict:
 
 
 def _assert_is_the_qualified_1_to_2_result(result) -> None:
+    assert not isinstance(result, Unsupported)
     assert isinstance(result, dict)
     assert result["slotSizes"] == REAL_SLOT_SIZES
     # REAL_SLOT_RECTS are copied from m4_settled.log, which prints rects at 2 dp.
@@ -1935,26 +1937,6 @@ def test_an_unmeasured_animation_property_is_refused():
         _check_effect_encoding(_mutate_sanitized_effect(tamper))
 
 
-def test_fade_is_detected_even_when_not_the_settled_animation():
-    """Slot 0 (background) has product == sto == 1 and no `opacity` animation of its own (its
-    only group is `zPosition`). Prepending an EARLIER opacity fade, followed by a LATER opacity
-    group that settles back to 1->1 (so it -- not the fade -- is the one `settled[property]`
-    keeps, per last-both/forwards-wins), must still exclude the slot: the exclusion scan is not
-    limited to whichever animation ends up chosen as settled."""
-
-    def add_earlier_fade(effect):
-        wrapper = effect["baseLayer"]["layers"][0]
-        wrapper["animations"] = [
-            _opacity_group(1, 0.5),
-            _opacity_group(1, 1),
-            *(wrapper.get("animations") or []),
-        ]
-
-    result = effect_opacity_overrides(_mutate_sanitized_effect(add_earlier_fade))
-    assert isinstance(result, dict)
-    assert {"slot": 0, "reason": "fade"} in result["excluded"]
-
-
 def test_fade_uses_exact_inequality_not_a_tolerance():
     """The old `abs(from - to) > 1e-9` rule let a 1e-12 drift through as 'settled'; the plan's
     `from != to` is exact, so even a float-noise-sized difference must exclude."""
@@ -2031,7 +2013,7 @@ def test_off_center_anchor_point_refuses():
 
     result = effect_opacity_overrides(_mutate_sanitized_effect(skew_anchor))
     assert isinstance(result, Unsupported)
-    assert "anchor" in result.reason
+    assert "accumulated geometry error" in result.reason
 
 
 def test_a_rotated_wrapper_refuses():
@@ -2093,7 +2075,7 @@ def test_leaf_position_moved_100px_refuses():
 
     result = effect_opacity_overrides(_mutate_sanitized_effect(move_leaf))
     assert isinstance(result, Unsupported)
-    assert "not centred in its parent" in result.reason
+    assert "accumulated geometry error" in result.reason
 
 
 def test_wrapper_translation_animation_refuses():
@@ -2135,7 +2117,7 @@ def test_root_position_moved_100px_refuses():
 
     result = effect_opacity_overrides(_mutate_sanitized_effect(move_root))
     assert isinstance(result, Unsupported)
-    assert "effect baseLayer position" in result.reason
+    assert "accumulated geometry error" in result.reason
 
 
 def test_negative_settled_scale_refuses():
@@ -2164,7 +2146,7 @@ def test_near_limit_anchor_error_that_only_exceeds_1px_after_scaling_refuses():
 
     result = effect_opacity_overrides(_mutate_sanitized_effect(near_limit_anchor))
     assert isinstance(result, Unsupported)
-    assert "accumulated anchor error" in result.reason
+    assert "accumulated geometry error" in result.reason
 
 
 def test_a_small_anchor_deviation_passes_on_an_unscaled_slot():
@@ -2225,11 +2207,12 @@ def test_an_overflowed_rect_component_refuses():
 
     result = effect_opacity_overrides(_mutate_sanitized_effect(overflow_scale))
     assert isinstance(result, Unsupported)
-    # a 1e300 scale first exceeds the 1px anchor-error contract (an anchor deviation that was
-    # negligible unscaled becomes enormous), which is itself the correct fail-closed outcome for
-    # ungoverned scale growth; the finite-rect check is the backstop for the remaining case
-    # where anchor error is exactly zero and the rect components alone go non-finite.
-    assert "anchor error" in result.reason or "non-finite emitted rect" in result.reason
+    # a 1e300 scale first exceeds the accumulated 1px geometry-error contract (an anchor
+    # deviation that was negligible unscaled becomes enormous), which is itself the correct
+    # fail-closed outcome for ungoverned scale growth; the finite-rect check is the backstop for
+    # the remaining case where anchor error is exactly zero and the rect components alone go
+    # non-finite.
+    assert "accumulated geometry error" in result.reason or "non-finite emitted rect" in result.reason
 
 
 def test_an_overflowed_rect_with_zero_anchor_error_refuses_on_finiteness():
@@ -2261,26 +2244,23 @@ def test_a_type_outside_transition_or_buildin_refuses():
         _check_effect_encoding(_mutate_sanitized_effect(bad_type))
 
 
-def test_last_settled_opacity_wins_and_its_value_is_the_one_emitted():
-    """Three DISTINCT constant (from == to, so none is a fade) opacity animations on slot 4's
-    leaf; only the LAST one's value equals `singleTextureOpacity`. If an earlier one governed
-    the product instead, the product (0.9 or 0.5) would disagree with `sto`
-    (`REAL_SLOT4_OPACITY`) and the slot would be excluded `product-mismatch`, not overridden --
-    so asserting the override's exact value discriminates which animation actually won."""
+def test_more_than_one_settled_opacity_animation_on_one_node_refuses():
+    """The fixture has at most one `opacity` animation per node; a second is unmeasured. Which
+    one the runtime's own "last" rule (list order vs. animation begin-time order) would pick if
+    they disagree is exactly the kind of ambiguity the plan's fail-closed rule exists to refuse,
+    rather than silently letting Python's list-order 'last' win over a player that might settle
+    by begin time instead."""
 
-    def three_distinct_constants(effect):
+    def two_distinct_constants(effect):
         leaf = _leaf_of(effect["baseLayer"]["layers"][4])
         leaf["animations"] = [
             _opacity_group(0.9, 0.9),
-            _opacity_group(0.5, 0.5),
             _opacity_group(REAL_SLOT4_OPACITY, REAL_SLOT4_OPACITY),
         ]
 
-    result = effect_opacity_overrides(_mutate_sanitized_effect(three_distinct_constants))
-    assert isinstance(result, dict)
-    assert not any(e["slot"] == 4 for e in result["excluded"])
-    override = next(o for o in result["opacityOverrides"] if o["slot"] == 4)
-    assert override["opacity"] == pytest.approx(REAL_SLOT4_OPACITY, abs=1e-9)
+    result = effect_opacity_overrides(_mutate_sanitized_effect(two_distinct_constants))
+    assert isinstance(result, Unsupported)
+    assert "more than one settled opacity animation" in result.reason
 
 
 def test_multi_node_product_uses_a_non_one_initial_state_opacity_fallback():
@@ -2301,6 +2281,235 @@ def test_multi_node_product_uses_a_non_one_initial_state_opacity_fallback():
     assert not any(e["slot"] == 3 for e in result["excluded"])
     override = next(o for o in result["opacityOverrides"] if o["slot"] == 3)
     assert override["opacity"] == pytest.approx(0.3, abs=1e-9)
+
+
+# --- round 4, item 1: discriminated wrapper/leaf schemas ---------------------------------------
+
+
+def test_a_wrapper_replaced_by_its_own_leaf_refuses():
+    """A top-level slot must be a non-textured wrapper with at least one child; substituting
+    slot 4's own leaf (which has `texture`/`texturedRectangle` and empty `layers`) in its place
+    used to pass the old schema (both were optional everywhere) and emit an override with the
+    WRONG rect, since the leaf's `initialState.position` was never the value the formula reads
+    for a wrapper."""
+
+    def wrapper_becomes_its_leaf(effect):
+        effect["baseLayer"]["layers"][4] = _leaf_of(effect["baseLayer"]["layers"][4])
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(wrapper_becomes_its_leaf))
+    assert isinstance(result, Unsupported)
+
+
+def test_a_leaf_without_texture_refuses():
+    def drop_texture(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        del leaf["texture"]
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(drop_texture))
+    assert isinstance(result, Unsupported)
+
+
+def test_a_leaf_without_textured_rectangle_refuses():
+    def drop_textured_rectangle(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        del leaf["texturedRectangle"]
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(drop_textured_rectangle))
+    assert isinstance(result, Unsupported)
+
+
+def test_a_wrapper_carrying_texture_keys_refuses():
+    """The inverse of the leaf checks: a non-terminal node (it still has a child) must not ALSO
+    carry `texture`/`texturedRectangle` -- a slot the offline schema cannot tell apart from a
+    single textured draw when the player might render two."""
+
+    def wrapper_gains_texture(effect):
+        wrapper = effect["baseLayer"]["layers"][4]
+        leaf = _leaf_of(wrapper)
+        wrapper["texture"] = leaf["texture"]
+        wrapper["texturedRectangle"] = copy.deepcopy(leaf["texturedRectangle"])
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(wrapper_gains_texture))
+    assert isinstance(result, Unsupported)
+
+
+# --- round 4, item 2: one per-axis <=1px geometry budget, not independent per-check budgets ----
+
+
+def test_root_and_child_subpixel_residuals_combine_to_refuse():
+    """0.75px root-origin residual plus 0.75px child-position residual is 1.5px of real,
+    ignored displacement even though EACH alone is under the old independent 1px budgets."""
+
+    def combined_subpixel_offsets(effect):
+        effect["baseLayer"]["initialState"]["position"]["pointX"] += 0.75
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        leaf["initialState"]["position"]["pointX"] += 0.75
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(combined_subpixel_offsets))
+    assert isinstance(result, Unsupported)
+    assert "accumulated geometry error" in result.reason
+
+
+def test_negative_wrapper_size_with_a_consistent_child_position_refuses():
+    """A negative wrapper width, with the child's `position` adjusted to still satisfy the
+    centred-in-parent residual for that (negative) width, must refuse on the wrapper's own
+    non-positive size -- a flipped/negative wrapper is not something the rect formula (or any
+    measured deck) ever produces."""
+
+    def negative_wrapper_width(effect):
+        wrapper = effect["baseLayer"]["layers"][4]
+        wrapper["initialState"]["width"] = -wrapper["initialState"]["width"]
+        leaf = _leaf_of(wrapper)
+        leaf["initialState"]["position"]["pointX"] = wrapper["initialState"]["width"] / 2
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(negative_wrapper_width))
+    assert isinstance(result, Unsupported)
+    assert "non-positive" in result.reason
+
+
+# --- round 4, item 3: numeric overflow and the fail-closed net -------------------------------
+
+
+def test_huge_integer_width_refuses_instead_of_raising_overflowerror():
+    """`math.isfinite` raises `OverflowError` (not `False`) on a Python int too large to convert
+    to a float; the validator must catch that itself, not rely on the outer net."""
+
+    def huge_width(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        leaf["initialState"]["width"] = 10**400
+
+    with pytest.raises(_Refuse, match="finite number"):
+        _check_effect_encoding(_mutate_sanitized_effect(huge_width))
+    result = effect_opacity_overrides(_mutate_sanitized_effect(huge_width))
+    assert isinstance(result, Unsupported)
+
+
+def test_huge_integer_duration_refuses_instead_of_raising_overflowerror():
+    def huge_duration(effect):
+        effect["duration"] = 10**1000
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(huge_duration))
+    assert isinstance(result, Unsupported)
+
+
+def _wrapper_shell(width: float, height: float, position: tuple[float, float]) -> dict:
+    return {
+        "animations": [],
+        "initialState": {
+            "affineTransform": [1, 0, 0, 1, 0, 0], "anchorPoint": {"pointX": 0.5, "pointY": 0.5},
+            "contentsRect": {"x": 0, "y": 0, "width": 1, "height": 1}, "edgeAntialiasingMask": 0,
+            "height": height, "hidden": False, "masksToBounds": False, "opacity": 1,
+            "position": {"pointX": position[0], "pointY": position[1]}, "rotation": 0, "scale": 1,
+            "sublayerTransform": list(_IDENTITY_SUBLAYER_TRANSFORM), "width": width,
+        },
+        "layers": [],
+    }
+
+
+def test_a_very_deep_layers_chain_refuses_via_the_recursion_guard():
+    """600 genuine wrapper levels (no leaf shape at any intermediate level, so the new
+    wrapper/leaf schema does not short-circuit this early for an unrelated reason) exceed
+    Python's default recursion limit inside the recursive schema validator; the public net's
+    broadened `except Exception` catches the resulting `RecursionError`. This is a deliberate
+    choice over an explicit depth cap in the schema: no measured deck approaches this depth, and
+    the recursion limit is a real, already-enforced backstop for it."""
+
+    def very_deep_chain(effect):
+        wrapper = effect["baseLayer"]["layers"][4]
+        width, height = wrapper["initialState"]["width"], wrapper["initialState"]["height"]
+        real_leaf = copy.deepcopy(_leaf_of(wrapper))
+        node = _wrapper_shell(width, height, (width / 2, height / 2))
+        top = node
+        for _ in range(600):
+            child = _wrapper_shell(width, height, (width / 2, height / 2))
+            node["layers"] = [child]
+            node = child
+        node["layers"] = [real_leaf]
+        wrapper["layers"] = [top]
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(very_deep_chain))
+    assert isinstance(result, Unsupported)
+    assert result.reason.startswith("unexpected malformed input")
+
+
+def test_the_fail_closed_net_is_exercised_by_a_monkeypatched_exception(monkeypatch):
+    """`layers=None`-style mutations are refused by the schema itself, which never reaches the
+    net -- deleting the net's `except` clause would not fail that test. Monkeypatch the inner
+    implementation to raise something only the net's `except Exception` catches, and assert the
+    public function converts it rather than propagating it."""
+    from obed_edom import live_continuity
+
+    def boom(effect):
+        raise ZeroDivisionError("simulated non-_Refuse failure")
+
+    monkeypatch.setattr(live_continuity, "_effect_opacity_overrides", boom)
+    result = effect_opacity_overrides(_sanitized_effect())
+    assert isinstance(result, Unsupported)
+    assert result.reason.startswith("unexpected malformed input")
+    assert "ZeroDivisionError" in result.reason
+
+
+# --- round 4, item 4 (Fable B2): sublayerTransform[11] range, zPosition bound -------------------
+
+
+def test_sublayer_transform_index_0_off_identity_refuses():
+    def tamper(effect):
+        effect["baseLayer"]["layers"][0]["initialState"]["sublayerTransform"][0] = 1.0019
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(tamper))
+    assert isinstance(result, Unsupported)
+    assert "non-identity sublayerTransform" in result.reason
+
+
+def test_sublayer_transform_index_3_perspective_off_identity_refuses():
+    def tamper(effect):
+        effect["baseLayer"]["layers"][4]["initialState"]["sublayerTransform"][3] = 0.002
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(tamper))
+    assert isinstance(result, Unsupported)
+    assert "non-identity sublayerTransform" in result.reason
+
+
+def test_sublayer_transform_index_11_at_the_measured_value_passes():
+    def tamper(effect):
+        effect["baseLayer"]["layers"][0]["initialState"]["sublayerTransform"][11] = -0.0004
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(tamper))
+    assert isinstance(result, dict)
+
+
+def test_z_position_scalar_exceeding_the_measured_bound_refuses():
+    def tamper(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        group = leaf["animations"][0]
+        group["animations"].append(
+            {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
+             "fillMode": "both", "duration": 0.1, "autoreverses": False, "property": "zPosition",
+             "removedOnCompletion": True, "timingFunction": "EaseInEaseOut",
+             "from": {"scalar": 0}, "to": {"scalar": 2}}
+        )
+
+    with pytest.raises(_Refuse, match="range"):
+        _check_effect_encoding(_mutate_sanitized_effect(tamper))
+
+
+# --- round 4 (Fable S1): removedOnCompletion is pinned, not merely boolean-typed ---------------
+
+
+def test_group_removed_on_completion_must_be_false():
+    def tamper(effect):
+        effect["baseLayer"]["layers"][4]["animations"][0]["removedOnCompletion"] = True
+
+    with pytest.raises(_Refuse, match="removedOnCompletion"):
+        _check_effect_encoding(_mutate_sanitized_effect(tamper))
+
+
+def test_leaf_removed_on_completion_must_be_true():
+    def tamper(effect):
+        _opacity_anim_of(effect, 4)["removedOnCompletion"] = False
+
+    with pytest.raises(_Refuse, match="removedOnCompletion"):
+        _check_effect_encoding(_mutate_sanitized_effect(tamper))
 
 
 # --- O1's own exclusion/candidate rules, unconditional -----------------------------------------
@@ -2343,7 +2552,8 @@ def test_duplicate_size_only_blocks_patched_slots():
     assert {"slot": 4, "reason": "duplicate-size"} in blocked["excluded"]
 
 
-# --- the one real-export parity test: sanitized fixture == real export, other effects refuse --
+# --- the one real-export parity test: sanitized fixture == real export, other effects classified
+# --- by measured shape ---------------------------------------------------------------------
 
 
 def _real_export_effects(root: Path = REAL_PLAYER_ROOT) -> list[tuple[str, int, int, dict]]:
