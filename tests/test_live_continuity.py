@@ -1687,8 +1687,9 @@ def test_gl_replay_opacity_overrides_from_export():
     result = effect_opacity_overrides(_real_effect())
     assert isinstance(result, dict)
     assert result["slotSizes"] == REAL_SLOT_SIZES
+    # REAL_SLOT_RECTS are copied from m4_settled.log, which prints rects at 2 dp.
     for got, want in zip(result["slotRects"], REAL_SLOT_RECTS):
-        assert got == pytest.approx(want, abs=1e-6)
+        assert got == pytest.approx(want, abs=5e-3)
     assert len(result["opacityOverrides"]) == 1
     override = result["opacityOverrides"][0]
     assert override["slot"] == 4
