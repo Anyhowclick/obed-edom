@@ -405,14 +405,14 @@ class _AssetServer:
 """
         if self.alpha:
             style = """
-<style id="obed-output-overlay">html,body,#body{background:transparent!important}#body{opacity:0}#slideshowNavigator,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
+<style id="obed-output-overlay">html,body,#body{background:transparent!important}#body{opacity:0}#slideshowNavigator,#slideNumberControl,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
 """
             overlay = """
 <script>(function(){var hidden=true;function apply(){var el=document.getElementById('body');if(!el)return;el.style.setProperty('background','transparent','important');el.style.setProperty('opacity',hidden?'0':'1','important');}window.__obedOutput={show(){hidden=false;apply();},hide(){hidden=true;apply();}};var target=document.getElementById('body');if(target){new MutationObserver(apply).observe(target,{attributes:true,attributeFilter:['style','class']});}document.addEventListener('DOMContentLoaded',apply);apply();})();</script>
 """
         else:
             style = """
-<style id="obed-output-overlay">#obed-output-black{position:fixed;inset:0;background:#000;z-index:2147483647}#slideshowNavigator,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
+<style id="obed-output-overlay">#obed-output-black{position:fixed;inset:0;background:#000;z-index:2147483647}#slideshowNavigator,#slideNumberControl,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
 """
             overlay = """
 <div id="obed-output-black"></div>
