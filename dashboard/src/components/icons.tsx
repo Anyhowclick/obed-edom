@@ -195,6 +195,15 @@ export function IconInfo({ className }: IconProps) {
   );
 }
 
+export function IconWarning({ className }: IconProps) {
+  return (
+    <svg {...base} className={cls(className)}>
+      <path d="M12 4.2 21.5 20H2.5z" strokeLinejoin="round" />
+      <path d="M12 10v4.5M12 17.3h.01" />
+    </svg>
+  );
+}
+
 export function IconChevronLeft({ className }: IconProps) {
   return (
     <svg {...base} className={cls(className)}>

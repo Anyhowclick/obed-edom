@@ -303,6 +303,28 @@ h3 {
 .well-tone-dsk .btn.secondary { border-color: var(--aud-dsk-line); color: var(--aud-dsk); }
 .well-tone-document .btn.secondary { border-color: rgba(0, 229, 255, 0.4); color: var(--status-info); }
 .well-tone-photo .btn.secondary { border-color: var(--job-watercolour-line); color: var(--job-watercolour); }
+.dsk-decks.well { cursor: default; }
+.dsk-deck-row { padding-top: 16px; margin-top: 16px; border-top: var(--border-glass-subtle); }
+.dsk-deck-row:first-of-type { padding-top: 10px; margin-top: 10px; }
+.dsk-deck-row.over { background: rgba(255, 123, 172, 0.1); border-radius: var(--radius-sm); }
+.dsk-deck-row-label { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; color: var(--ink-secondary); }
+.dsk-deck-row-name { margin: 6px 0 0; color: var(--ink-primary); font-weight: 600; font-size: 15px; }
+.dsk-deck-row-name.muted { color: var(--ink-secondary); font-weight: 500; }
+.dsk-deck-row-path { margin: 2px 0 0; color: var(--ink-tertiary); font-size: 12px; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.dsk-deck-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface-highlight);
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+.dsk-deck-row .actions { margin: 10px 0 0; }
 .field-error { margin: 8px 0 0; font-size: 13px; color: var(--err); }
 .visually-hidden {
   position: absolute;
@@ -698,6 +720,16 @@ h3 {
   background: #ff6b6b;
 }
 .path-note { overflow-wrap: anywhere; }
+.dsk-result { margin: 16px 0; }
+.dsk-result-header { display: flex; align-items: flex-start; gap: 10px; }
+.dsk-result-icon { --icon-size: 22px; color: var(--ok); flex: none; margin-top: 2px; }
+.dsk-result-heading { min-width: 0; }
+.dsk-result-name { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 600; color: var(--ink-primary); }
+.dsk-result-path { margin-top: 4px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-tertiary); }
+.dsk-result-notes { margin-top: 16px; }
+.dsk-result-notes-title { margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; color: var(--ink-secondary); }
+.dsk-result-notes .flag { display: flex; align-items: flex-start; gap: 8px; }
+.dsk-result-notes .flag .status-icon { margin-top: 2px; flex: none; }
 .pane.off { display: none; }
 .main:has(> .maps-pane) {
   overflow: hidden;
