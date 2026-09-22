@@ -36,6 +36,8 @@ export type FramingCandidate = {
   fit: number;
   autoPick?: boolean;
   wouldFallBack?: boolean;
+  /** Pinning this slide is overridden by the planner's own auto framing. */
+  pinOverridden?: boolean;
   transform?: FramingTransform | null;
   rects?: PlannedRect[];
 };
@@ -103,17 +105,31 @@ function stateOf(page: FramingPage, decisions: Record<number, FramingDecision>):
   return (decisions[page.index] ?? page.decision)?.state ?? "auto";
 }
 
+/** The template slide the run is pinned to; null when the planner frames the page itself. */
+function pinnedSlide(page: FramingPage, decisions: Record<number, FramingDecision>): number | null {
+  return stateOf(page, decisions) === "pinned" ? chosenSlide(page, decisions) : null;
+}
+
 function fellBackWith(page: FramingPage, slide: number | null): boolean {
   if (slide == null) return page.autoFellBack;
   const candidate = page.candidates.find((c) => c.templateSlide === slide);
   return candidate?.wouldFallBack ?? page.autoFellBack;
 }
 
+function pinOverriddenWith(page: FramingPage, slide: number | null): boolean {
+  if (slide == null) return false;
+  return page.candidates.find((c) => c.templateSlide === slide)?.pinOverridden ?? false;
+}
+
+const PIN_OVERRIDDEN_NOTE =
+  "The run won't use this pin: its framing would push the page off the frame or shrink it to a " +
+  "sliver. The run will frame this slide automatically instead.";
+
 function categoryOf(page: FramingPage, decisions: Record<number, FramingDecision>): Category {
   const state = stateOf(page, decisions);
   if (state === "pinned") return "reviewed";
   if (state === "deferred") return "template";
-  return fellBackWith(page, chosenSlide(page, decisions)) ? "fitted" : "matched";
+  return fellBackWith(page, null) ? "fitted" : "matched";
 }
 
 function transformFor(page: FramingPage, slide: number | null): FramingTransform | null {
@@ -287,6 +303,7 @@ function indexesUnder(strip: HTMLElement, box: Marquee["box"]): number[] {
 function candidateLabel(candidate: FramingCandidate): string {
   const bits = [`Template slide ${candidate.templateSlide}`];
   if (candidate.wouldFallBack) bits.push("would fall back");
+  if (candidate.pinOverridden) bits.push("the run won't use this pin");
   if (candidate.autoPick) bits.push("auto");
   bits.push(`agreement ${candidate.agreement}`, `fit ${candidate.fit.toFixed(3)}`);
   return bits.join(" — ");
@@ -335,8 +352,8 @@ export function FramingReview({
     for (const page of pages) out[categoryOf(page, decisions)].push(page);
     for (const list of Object.values(out)) {
       list.sort((a, b) => {
-        const af = fellBackWith(a, chosenSlide(a, decisions));
-        const bf = fellBackWith(b, chosenSlide(b, decisions));
+        const af = fellBackWith(a, pinnedSlide(a, decisions));
+        const bf = fellBackWith(b, pinnedSlide(b, decisions));
         if (af !== bf) return af ? -1 : 1;
         return a.slide - b.slide;
       });
@@ -623,7 +640,7 @@ export function FramingReview({
       {groups.map((group) => {
         const open = openGroup === group.key;
         const fellBack = group.pages.filter((p) =>
-          fellBackWith(p, chosenSlide(p, decisions))
+          fellBackWith(p, pinnedSlide(p, decisions))
         ).length;
         const chosenPages = group.pages.filter((p) => selected.has(p.index));
         const scoped = open && openScope === "selected" && chosenPages.length > 0;
@@ -719,21 +736,24 @@ export function FramingReview({
                     className={
                       "framing-chip" +
                       (isSelected ? " selected" : "") +
-                      (fellBackWith(page, chosenSlide(page, decisions)) ? " fellback" : "") +
+                      (fellBackWith(page, pinnedSlide(page, decisions)) ? " fellback" : "") +
                       (keepsSideContent(page) ? " kept" : "")
                     }
                     title={
                       `Slide ${page.slide}` +
-                      (fellBackWith(page, chosenSlide(page, decisions))
+                      (fellBackWith(page, pinnedSlide(page, decisions))
                         ? " — no framing fit, so it is scaled to the frame"
+                        : "") +
+                      (pinOverriddenWith(page, pinnedSlide(page, decisions))
+                        ? " — the run won't use this pin"
                         : "") +
                       (keepsSideContent(page) ? " · side panels kept" : "")
                     }
                   >
                     <CropPreview
                       src={thumbUrl(page)}
-                      transform={transformFor(page, chosenSlide(page, decisions))}
-                      rects={rectsFor(page, chosenSlide(page, decisions)).filter(
+                      transform={transformFor(page, pinnedSlide(page, decisions))}
+                      rects={rectsFor(page, pinnedSlide(page, decisions)).filter(
                         (r) => r.role !== "pin"
                       )}
                       wallWidth={wallWidth}
@@ -809,7 +829,9 @@ export function FramingReview({
                   const current = chosenSlide(page, decisions);
                   const preview = previewing[page.index] ?? current;
                   const differs = preview != null && preview !== current;
-                  const previewFalls = fellBackWith(page, preview);
+                  const shown = previewing[page.index] ?? pinnedSlide(page, decisions);
+                  const previewFalls = fellBackWith(page, shown);
+                  const previewOverridden = pinOverriddenWith(page, shown);
                   return (
                     <div key={page.slide} className="framing-row">
                       <span className="outline-num framing-row-num">{page.slide}</span>
@@ -845,12 +867,12 @@ export function FramingReview({
                             </span>
                             <CropPreview
                               src={thumbUrl(page)}
-                              transform={transformFor(page, preview)}
+                              transform={transformFor(page, shown)}
                               view={planView}
                               rects={
                                 planView === "composite"
-                                  ? rectsFor(page, preview)
-                                  : rectsFor(page, preview).filter((r) => !hiddenRoles.has(r.role))
+                                  ? rectsFor(page, shown)
+                                  : rectsFor(page, shown).filter((r) => !hiddenRoles.has(r.role))
                               }
                               wallWidth={wallWidth}
                               wallHeight={wallHeight}
@@ -861,7 +883,7 @@ export function FramingReview({
                             />
                             {planView === "boxes" && (
                               <PlanLegend
-                                rects={rectsFor(page, preview)}
+                                rects={rectsFor(page, shown)}
                                 hidden={hiddenRoles}
                                 onToggle={(role) =>
                                   setHiddenRoles((cur) => {
@@ -967,9 +989,11 @@ export function FramingReview({
                         </div>
                         <p className="note">
                           {`Template slide ${preview ?? "—"}. `}
-                          {previewFalls
-                            ? "This framing does not fit, so the page is scaled to the frame. "
-                            : "This framing applies cleanly. "}
+                          {previewOverridden
+                            ? `${PIN_OVERRIDDEN_NOTE} `
+                            : previewFalls
+                              ? "This framing does not fit, so the page is scaled to the frame. "
+                              : "This framing applies cleanly. "}
                           {stateOf(page, decisions) === "pinned" && "Reviewed. "}
                           {keepsSideContent(page) && "Side panels kept. "}
                           {page.resurfaced && "The template changed since you deferred this. "}
