@@ -885,20 +885,25 @@ def _destination_instance(
     instances: list[dict[str, float]] | None, dst_rect: "Rect | None"
 ) -> tuple[int, dict[str, float]] | None:
     """The 1-based position of `dst_rect` in the asset's `slide_instances` list -- the same
-    DOM-ordered list, and the same floats, the probe binds `asset#index` and its rect to -- plus
-    that stored rect verbatim. `None` when the rect is absent, unmatched, or not four finite
-    floats."""
+    list, in the same order and with the same floats, the probe binds `asset#index` and its rect
+    to -- plus that stored rect verbatim. `None` when the rect is absent, not four finite floats,
+    or matched by other than exactly one instance (two byte-identical rects would make
+    `asset#index` a guess)."""
     if not instances or dst_rect is None:
         return None
     wanted = dst_rect.as_dict()
-    for index, rect in enumerate(instances, start=1):
-        if not isinstance(rect, dict) or rect != wanted:
-            continue
-        values = [rect.get(k) for k in ("x", "y", "w", "h")]
-        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
-            return None
-        return index, {k: rect[k] for k in ("x", "y", "w", "h")}
-    return None
+    matches = [
+        (index, rect)
+        for index, rect in enumerate(instances, start=1)
+        if isinstance(rect, dict) and rect == wanted
+    ]
+    if len(matches) != 1:
+        return None
+    index, rect = matches[0]
+    values = [rect.get(k) for k in ("x", "y", "w", "h")]
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
+        return None
+    return index, {k: rect[k] for k in ("x", "y", "w", "h")}
 
 
 def _rect_ints(rect: dict[str, float]) -> dict[str, int]:

@@ -36,6 +36,8 @@ GL_REPLAY_JS = r"""
   var SEGMENT_CALL_CAP = 512;
   var SETTLE_QUIET_TICKS = 3;
   var OCCLUSION_MAX_FRACTION = 0.5;
+  var MARKER_BAND_EPSILON = 0.5;
+  var MARKER_PATCH_PX = 8;
   var MVP_TOLERANCE_PX = 1;
   var ABLATION_GRID_PX = 4;
   var ABLATION_DILATION_PX = 8;
@@ -107,8 +109,9 @@ GL_REPLAY_JS = r"""
     segment: [], retained: [], frame: null, frameLen: 0,
     poster: null, posterTex: null, posterUpload: null, posterAmbiguous: false,
     programs: [], locations: [], opacityBefore: [], overrides: {}, unproven: [],
-    epoch: 0, iter: 0, uploads: 0, glErrors: 0, tick: 0, lastPlayerTick: -1,
-    lastPlayerAt: null, readyAt: null, settleGapMs: null, settleToHashMs: null,
+    epoch: 0, frozenSceneId: null, loopGen: 0, arming: false, pending: null,
+    iter: 0, uploads: 0, glErrors: 0, tick: 0, lastPlayerTick: -1,
+    lastClearAt: null, readyAt: null, settleGapMs: null, settleToHashMs: null,
     latencyFromMutationMs: null, occluded: null, mask: null,
     paused: false, pausedByUs: false, geometry: null, buffers: null,
     collectors: [], observer: null
@@ -120,6 +123,9 @@ GL_REPLAY_JS = r"""
   // `assertOr`/`refuseInstall` call that carries its literal.
   function assertOr(reason, ok, detail){
     if (ok && API.debugForceFail !== reason) return true;
+    // An ARM-PRE requirement that is not yet met is only recorded until the armed
+    // context exists; from then on it is an ordinary stand-down (plan §2.2).
+    if (state.arming && !state.gl){ state.pending = reason; return false; }
     standDown(reason, detail || null);
     return false;
   }
@@ -130,6 +136,12 @@ GL_REPLAY_JS = r"""
     event('glreplay-standdown', {reason: reason});
     return false;
   }
+  var CANVAS_REMOVED = 'canvasRemoved';
+  var UNFLAGGED_PLAYER_CALL = 'unflaggedPlayerCall';
+  var CONTEXT_LOST = 'contextLost';
+  var FRAME_LENGTH_CHANGED = 'frameLengthChanged';
+  var WRITEBACK_FAILED = 'writebackFailed';
+
   function requireDelimitedFrame(ok, detail){ return assertOr('frameNotDelimited', ok, detail); }
   function requireVideoFrameCallback(ok){ return assertOr('rvfcUnavailable', ok, null); }
 
@@ -156,7 +168,8 @@ GL_REPLAY_JS = r"""
       frameLen: state.frameLen, uploads: state.uploads, glErrors: state.glErrors,
       settleGapMs: state.settleGapMs, settleToHashMs: state.settleToHashMs,
       latencyFromMutationMs: state.latencyFromMutationMs,
-      occludedBands: state.occluded, occluderMask: state.mask, bandCount: BAND_COLS * BAND_ROWS,
+      pending: state.pending, occludedBands: state.occluded, occluderMask: state.mask,
+      bandCount: BAND_COLS * BAND_ROWS,
       opacityUnproven: state.unproven.slice(),
       greenRoi: state.geometry ? state.geometry.greenAuthored : null,
       geometry: state.geometry, canvasId: state.canvas ? state.canvas.id : null
@@ -222,13 +235,13 @@ GL_REPLAY_JS = r"""
         if (SKIP.test(name)) return;
         var orig = d.value;
         var wrapper = function(){
-          if (state.replaying || !state.hot || this !== state.gl) return orig.apply(this, arguments);
-          if (state.phase === 'LIVE'){
-            standDown('unflaggedPlayerCall', {call: name});
+          if (!state.hot || state.replaying || this !== state.gl) return orig.apply(this, arguments);
+          if (state.phase === 'LIVE' || state.phase === 'ARM-POST'){
+            assertOr(UNFLAGGED_PLAYER_CALL, false, {call: name});
             return orig.apply(this, arguments);
           }
           state.lastPlayerTick = state.tick;
-          state.lastPlayerAt = now();
+          if (name === 'clear') state.lastClearAt = now();
           if (name === 'bindTexture') bindingsOf(this)[arguments[0]] = arguments[1];
           if (name === 'texImage2D' || name === 'texSubImage2D'){
             try { onPlayerUpload(this, arguments, name); } catch (e) {}
@@ -285,7 +298,7 @@ GL_REPLAY_JS = r"""
     state.replaying++;
     try {
       var sb = g.getParameter(g.TEXTURE_BINDING_2D);
-      var n = 8, px = new Uint8Array(n * n * 4);
+      var n = MARKER_PATCH_PX, px = new Uint8Array(n * n * 4);
       for (var i = 0; i < n * n; i++){ px[i * 4] = r; px[i * 4 + 1] = gr; px[i * 4 + 2] = b; px[i * 4 + 3] = 255; }
       g.bindTexture(g.TEXTURE_2D, tex);
       g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, false);
@@ -382,11 +395,12 @@ GL_REPLAY_JS = r"""
 
   function toBuffer(r){
     var c = state.canvas;
-    var x = Math.max(0, Math.round(r.x));
-    var w = Math.max(1, Math.min(Math.round(r.w), c.width));
-    var h = Math.max(1, Math.min(Math.round(r.h), c.height));
+    var x = Math.min(Math.max(0, Math.round(r.x)), c.width - 1);
     var yTop = Math.round(r.y);
-    return {x: Math.min(x, c.width - 1), y: Math.max(0, c.height - (yTop + h)), w: w, h: h};
+    var y = Math.min(Math.max(0, c.height - (yTop + Math.round(r.h))), c.height - 1);
+    return {x: x, y: y,
+            w: Math.max(1, Math.min(Math.round(r.w), c.width - x)),
+            h: Math.max(1, Math.min(Math.round(r.h), c.height - y))};
   }
 
   function readInto(roi, buf){
@@ -686,7 +700,7 @@ GL_REPLAY_JS = r"""
     replayFrame();
     var mask = [], occ = 0;
     for (var i = 0; i < dark.length; i++){
-      var o = Math.abs(dark[i] - light[i]) <= 0.5;
+      var o = Math.abs(dark[i] - light[i]) <= MARKER_BAND_EPSILON;
       mask.push(o ? 1 : 0);
       if (o) occ++;
     }
@@ -704,26 +718,33 @@ GL_REPLAY_JS = r"""
     API.state = 'STANDDOWN';
     state.recording = false;
     state.hot = false;
+    state.collectors.forEach(function(c){ c.resolve(c.out); });
+    state.collectors = [];
     var g = state.gl;
     var lost = false;
     try { lost = !g || (typeof g.isContextLost === 'function' && g.isContextLost()); } catch (e) { lost = true; }
+    var written = [];
+    for (var i = 0; i < state.programs.length; i++){
+      var loc = state.locations[i];
+      if (state.overrides[i] == null || !state.programs[i] || !loc || !loc.Opacity) continue;
+      if (state.opacityBefore[i] != null) written.push(i);
+    }
     var failed = false;
-    if (!lost){
+    if (!lost && written.length){
       state.replaying++;
       try {
         var prev = g.getParameter(g.CURRENT_PROGRAM);
-        for (var i = 0; i < state.programs.length; i++){
-          var prog = state.programs[i], loc = state.locations[i], before = state.opacityBefore[i];
-          if (!prog || !loc || !loc.Opacity || before == null) continue;
-          g.useProgram(prog);
-          g.uniform1f(loc.Opacity, before);
+        for (var k = 0; k < written.length; k++){
+          var slot = written[k];
+          g.useProgram(state.programs[slot]);
+          g.uniform1f(state.locations[slot].Opacity, state.opacityBefore[slot]);
         }
         g.useProgram(prev);
         if (g.getError() !== 0) failed = true;
       } catch (e) { failed = true; }
       state.replaying--;
-      restorePoster();
     }
+    if (!lost) restorePoster();
     if (failed || API.debugForceFail === WRITEBACK_FAILED) API.standDowns.push(WRITEBACK_FAILED);
     API.standDowns.push(reason);
     if (state.pausedByUs && state.video){
@@ -736,12 +757,13 @@ GL_REPLAY_JS = r"""
     }
     try { delete window.__OBED_GL_ORACLE__; } catch (e) {}
     var released = null;
-    if (state.seam && state.video){
+    if (state.seam){
       try { released = state.seam.release(ENTRY.movieKey, {rect: rectOf(ENTRY.slotRects[MOVIE_SLOT])}); }
       catch (e) { released = {ok: false, reason: String(e)}; }
     }
-    var payload = Object.assign({reason: reason, released: released,
-      writebackFailed: failed, completedMs: now() - started}, detail || {});
+    var payload = Object.assign({released: released, writebackFailed: failed,
+      completedMs: now() - started}, detail || {});
+    payload.reason = reason;
     event(reason === CANVAS_REMOVED ? 'glreplay-handoff' : 'glreplay-standdown', payload);
     if (state.observer){ try { state.observer.disconnect(); } catch (e) {} }
     state.phase = 'RETIRED';
@@ -802,11 +824,6 @@ GL_REPLAY_JS = r"""
     state.collectors = keep;
   }
 
-  var CANVAS_REMOVED = 'canvasRemoved';
-  var CONTEXT_LOST = 'contextLost';
-  var FRAME_LENGTH_CHANGED = 'frameLengthChanged';
-  var WRITEBACK_FAILED = 'writebackFailed';
-
   function guards(){
     var c = state.canvas, g = state.gl;
     var stage = document.getElementById('stage');
@@ -818,6 +835,7 @@ GL_REPLAY_JS = r"""
 
   function tickOnce(meta){
     if (state.down) return false;
+    if (!assertOr(UNFLAGGED_PLAYER_CALL, true, {forced: true})) return false;
     var why = guards();
     if (why){ standDown(why, null); return false; }
     if (!state.paused) perLiveUpload();
@@ -837,11 +855,12 @@ GL_REPLAY_JS = r"""
 
   function startLiveLoop(){
     if (state.down || state.paused) return;
+    var gen = ++state.loopGen;
     var request = function(step){
       try { state.video.requestVideoFrameCallback(step); return true; } catch (e) { return false; }
     };
     var step = function(t, meta){
-      if (state.down || state.paused) return;
+      if (state.down || state.paused || gen !== state.loopGen) return;
       if (!tickOnce(meta)) return;
       requireVideoFrameCallback(request(step));
     };
@@ -849,8 +868,9 @@ GL_REPLAY_JS = r"""
   }
 
   function startPausedLoop(){
+    var gen = ++state.loopGen;
     var step = function(){
-      if (state.down || !state.paused) return;
+      if (state.down || !state.paused || gen !== state.loopGen) return;
       if (!tickOnce(null)) return;
       requestAnimationFrame(step);
     };
@@ -858,11 +878,15 @@ GL_REPLAY_JS = r"""
   }
 
   // ---------------------------------------------------------------- ARM-POST
+  function isDelimited(seg){
+    return !!seg && seg.length > 2 && seg[0].m === 'clearColor' && seg[1].m === 'clear';
+  }
+
   function armPost(){
     state.recording = false;
     var seg = state.segment;
-    var delimited = seg.length > 2 && seg[0].m === 'clearColor' && seg[1].m === 'clear';
-    if (!requireDelimitedFrame(delimited, {len: seg.length})) return;
+    if (!isDelimited(seg) && isDelimited(state.retained)) seg = state.retained;
+    if (!requireDelimitedFrame(isDelimited(seg), {len: seg.length})) return;
     state.frame = seg;
     state.frameLen = seg.length;
 
@@ -892,7 +916,7 @@ GL_REPLAY_JS = r"""
   // ----------------------------------------------------------------- ARM-PRE
   function armObserver(){
     try {
-      state.observer = new MutationObserver(function(records){
+      var observer = new MutationObserver(function(records){
         var at = now();
         if (!state.canvas) return;
         for (var i = 0; i < records.length; i++){
@@ -908,18 +932,26 @@ GL_REPLAY_JS = r"""
           }
         }
       });
-      state.observer.observe(document.documentElement, {childList: true, subtree: true});
+      observer.observe(document.documentElement, {childList: true, subtree: true});
+      state.observer = observer;
       return true;
     } catch (e) { return false; }
   }
 
+  // Polled every ARM-PRE tick: a requirement that appears one frame late is not a
+  // stand-down until the armed context exists (plan §2.2).
   function preflight(){
     var seam = window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.glReplay;
-    if (!assertOr('runtimeSeamAbsent', !!seam, null)) return false;
-    state.seam = seam;
-    if (!assertOr('settleSignalAbsent', !!liveSnapshot(), null)) return false;
-    return requireVideoFrameCallback(typeof HTMLVideoElement !== 'undefined' &&
-      typeof HTMLVideoElement.prototype.requestVideoFrameCallback === 'function');
+    if (seam) state.seam = seam;
+    state.arming = true;
+    var ok = assertOr('runtimeSeamAbsent', !!seam, null) &&
+      assertOr('observerNotArmed', !!state.observer || armObserver(), null) &&
+      assertOr('settleSignalAbsent', !!liveSnapshot(), null) &&
+      requireVideoFrameCallback(typeof HTMLVideoElement !== 'undefined' &&
+        typeof HTMLVideoElement.prototype.requestVideoFrameCallback === 'function');
+    state.arming = false;
+    if (ok) state.pending = null;
+    return ok;
   }
 
   function onContextCreated(gl, canvas){
@@ -930,6 +962,7 @@ GL_REPLAY_JS = r"""
         {id: canvas.id, w: canvas.width, h: canvas.height})) return;
     state.gl = gl;
     state.canvas = canvas;
+    if (!preflight()) return;
     state.recording = true;
     state.hot = true;
     event('glreplay-arm', {canvasId: canvas.id, atScene: ENTRY.atScene});
@@ -943,21 +976,22 @@ GL_REPLAY_JS = r"""
       if (hash === ENTRY.atScene - 1){
         state.phase = 'ARM-PRE';
         API.state = 'ARM-PRE';
-        if (!preflight()) return;
       }
-    } else if (state.phase === 'ARM-PRE' && state.gl && state.segment.length){
+    }
+    if (state.phase === 'ARM-PRE'){
+      preflight();
       var snap = liveSnapshot();
-      if (state.readyAt == null && snap && snap.ready === true &&
+      if (state.gl && state.segment.length && state.readyAt == null &&
+          snap && snap.ready === true &&
           state.lastPlayerTick >= 0 && state.tick - state.lastPlayerTick >= SETTLE_QUIET_TICKS){
         state.readyAt = now();
-        state.settleGapMs = state.lastPlayerAt == null ? null : state.readyAt - state.lastPlayerAt;
+        state.settleGapMs = state.lastClearAt == null ? null : state.readyAt - state.lastClearAt;
         if (!assertOr('sceneMismatch', snap.sceneId === ENTRY.atScene - 1,
             {sceneId: snap.sceneId, atScene: ENTRY.atScene})) return;
         state.frozenSceneId = snap.sceneId;
         state.phase = 'ARM-POST';
         API.state = 'ARM-POST';
         armPost();
-        return;
       }
     } else if (state.phase === 'LIVE' && state.settleToHashMs == null && hash === ENTRY.atScene && state.readyAt != null){
       state.settleToHashMs = now() - state.readyAt;
@@ -983,7 +1017,7 @@ GL_REPLAY_JS = r"""
   }
   wrapContexts();
 
-  if (!refuseInstall('observerNotArmed', armObserver())) return;
+  armObserver();
   requestAnimationFrame(poll);
 })();
 """.strip()
