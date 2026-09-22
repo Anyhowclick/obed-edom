@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -552,6 +553,16 @@ def test_program_html_alpha_mode_hides_via_opacity_not_a_black_div(tmp_path):
     assert 'id="obed-output-black"' not in document
     assert "background:transparent!important" in document
     assert "#body{opacity:0}" in document
+
+
+@pytest.mark.parametrize("alpha", [False, True])
+def test_program_html_overlay_hides_slide_number_control(tmp_path, alpha):
+    (tmp_path / "index.html").write_text('<html><head></head><body><div id="stage"></div></body></html>')
+    server = live_host._AssetServer(tmp_path, b"", resolver=resolver_for(tmp_path), alpha=alpha)
+    document = server._program_html().decode()
+    overlay = document[document.index('id="obed-output-overlay"') : document.index("</style>")]
+    rule = re.search(r"([^{}]*)\{display:none!important\}", overlay)
+    assert rule and "#slideNumberControl" in rule.group(1).split(",")
 
 
 def test_pick_target_prefers_match_then_requires_a_single_page(tmp_path):
@@ -1455,12 +1466,13 @@ def test_logger_full_queue_close_drains_and_never_closes_a_busy_writer(tmp_path,
 
 @pytest.mark.parametrize("mode", ["off", "unsupported"])
 @pytest.mark.parametrize("alpha,expected_sha", [
-    (False, "214fe86209b3b88fa2ff129674f108b5b99d2023bf061321b98f7c9bbdea5a99"),
-    (True, "747ae7b38e5c724cad51f1b4be9c5893e7cebdd556435c5a72671bf05b83cafc"),
+    (False, "2e15d1c44f3cc6760fc65d3d857d6c14884eabaa5a50b9842917556ec1fed616"),
+    (True, "46302ad0c78b1271a5546e251aa128395846761b258d1bae5f66fa7779dc4ac7"),
 ])
 def test_continuity_inactive_html_is_byte_identical_to_pre_i2(tmp_path, monkeypatch, mode, alpha, expected_sha):
-    # Hashes generated from _AssetServer._program_html at 1ff9f89 (before I2),
-    # using this fixture's exact index.html; include blank lines in the contract.
+    # Hashes generated from _AssetServer._program_html at 1ff9f89 (before I2) plus
+    # the #slideNumberControl hide, using this fixture's exact index.html; include
+    # blank lines in the contract.
     if mode == "off":
         monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
     else:
