@@ -20,10 +20,12 @@ import { LoadingOverlay, Lightbox, type OverlayProgress } from "../../components
 import { buildDecisionsMap, toDecisionsPayload, type DecisionsMap } from "../../dsk/decisions";
 import { SlideReviewList } from "./SlideReviewList";
 import { DskReviewWorkspace } from "./DskReviewWorkspace";
+import { DskDecksCard } from "./DskDecksCard";
 import { editableReview, editorState, isDskReview, type DskEditorState, type DskReview } from "../../dsk/decisions";
 import { DSK_TEMPLATE_KEY, DSK_WORKSPACE_KEY, useDefaultExportDir, useSessionPath, useStoredFile } from "../../prefs";
 import { useCurrentJob } from "../../sessions";
 import { JobName } from "../../components/JobName";
+import { IconTick, IconInfo, IconWarning } from "../../components/icons";
 
 function parseSlideSpec(raw: string): number[] | undefined {
   const trimmed = raw.trim();
@@ -263,39 +265,29 @@ export function DskGenerator() {
           onPath={(path) => setKeynote({ path, name: path.split("/").pop() || path })}
           onError={setError}
         />
-        <FileWell
-          label="DSK template (.key)"
-          tone="dsk"
-          required
-          hint="Required. The lower-thirds .key that supplies the DSK layouts. Remembered on this Mac, shared with Sermon Base Generator."
-          file={dskTemplate}
-          error={templateError}
-          onChoose={async () => {
+        <DskDecksCard
+          dskTemplate={dskTemplate}
+          templateError={templateError}
+          onChooseTemplate={async () => {
             try {
               rememberDskTemplate(await chooseKeynote("DSK Keynote template"));
             } catch (e) {
               setError(e instanceof Error ? e.message : String(e));
             }
           }}
-          onPath={(path) => rememberDskTemplate({ path, name: path.split("/").pop() || path })}
-          onClear={() => rememberDskTemplate(null)}
-          onError={setError}
-        />
-        <FileWell
-          label="Reference deck (optional)"
-          tone="dsk"
-          hint="Optional. A finished DSK deck to measure the video band from; leave blank for the standard band."
-          file={referenceDeck}
-          onChoose={async () => {
+          onTemplatePath={(path) => rememberDskTemplate({ path, name: path.split("/").pop() || path })}
+          onForgetTemplate={() => rememberDskTemplate(null)}
+          referenceDeck={referenceDeck}
+          onChooseReference={async () => {
             try {
               setReferenceDeck(await chooseKeynote("Reference DSK deck for video-band measurement"));
             } catch (e) {
               setError(e instanceof Error ? e.message : String(e));
             }
           }}
-          onPath={(path) => setReferenceDeck({ path, name: path.split("/").pop() || path })}
-          onClear={() => setReferenceDeck(null)}
-          onError={setError}
+          onReferencePath={(path) => setReferenceDeck({ path, name: path.split("/").pop() || path })}
+          onClearReference={() => setReferenceDeck(null)}
+          onDropError={setError}
         />
       </div>
       <label className="field">
@@ -339,31 +331,51 @@ export function DskGenerator() {
         />
       )}
       {result?.phase === "done" && result.deckPath && (
-        <>
-          <JobName job={job!} onRename={rename} className="path-note" />
-          <p className="note path-note">
-            Wrote {result.deckPath}
-            {result.slidesKept ? ` — ${result.slidesKept.length} slide(s)` : ""}
-          </p>
-          <p className="note">
-            The deck is editable — each movie item became a pure-video clip inserted behind the
-            live objects. Export it with the Exporter tab to bake the live overlays and produce
-            the final .mov(s).
-          </p>
+        <div className="dsk-result">
+          <div className="dsk-result-header">
+            <IconTick className="dsk-result-icon" />
+            <div className="dsk-result-heading">
+              <JobName job={job!} onRename={rename} />
+              <p className="dsk-result-name">
+                {result.deckPath.split("/").pop()}
+                {result.slidesKept ? ` · ${result.slidesKept.length} slides` : ""}
+              </p>
+            </div>
+          </div>
+          <p className="path-note dsk-result-path">{result.deckPath}</p>
           <div className="actions">
             <button className="btn secondary" type="button" onClick={() => reveal(result.deckPath!)}>
               Show in Finder
             </button>
           </div>
-          {skipped.length > 0 && (
-            <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
-          )}
-          {(result.warnings || []).length > 0 && <p className="note">{result.warnings!.join(" · ")}</p>}
-          {(result.overflows || []).length > 0 && (
-            <p className="note">Overflow on slide(s): {result.overflows!.join(", ")}</p>
-          )}
           <BuildPreview path={result.deckPath} disabled={!!busy} />
-        </>
+          <p className="note">Next: open the Exporter tab to bake the live overlays into the final .mov(s).</p>
+          {(skipped.length > 0 || (result.warnings || []).length > 0 || (result.overflows || []).length > 0) && (
+            <div className="dsk-result-notes">
+              <p className="dsk-result-notes-title">Notes</p>
+              {skipped.map((s) => (
+                <div className="flag info" key={`skip-${s.slide}`}>
+                  <IconInfo className="status-icon" />
+                  <span>
+                    Skipped slide {s.slide} — {s.reason}
+                  </span>
+                </div>
+              ))}
+              {(result.warnings || []).map((warning, i) => (
+                <div className="flag warning" key={`warning-${i}`}>
+                  <IconWarning className="status-icon" />
+                  <span>{warning}</span>
+                </div>
+              ))}
+              {(result.overflows || []).map((slide) => (
+                <div className="flag warning" key={`overflow-${slide}`}>
+                  <IconWarning className="status-icon" />
+                  <span>Overflow on slide {slide}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
