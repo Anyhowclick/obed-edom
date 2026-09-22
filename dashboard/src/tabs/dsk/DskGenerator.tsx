@@ -15,7 +15,6 @@ import {
 } from "../../api";
 import { FileWell } from "../../components/FileWell";
 import { ErrorNotice } from "../../components/ErrorNotice";
-import { BuildPreview } from "../../components/BuildPreview";
 import { LoadingOverlay, Lightbox, type OverlayProgress } from "../../components/PreviewGrid";
 import { buildDecisionsMap, toDecisionsPayload, type DecisionsMap } from "../../dsk/decisions";
 import { SlideReviewList } from "./SlideReviewList";
@@ -315,7 +314,6 @@ export function DskGenerator() {
           {skipped.length > 0 && (
             <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
           )}
-          <BuildPreview path={result.path} disabled={!!busy} />
           <div className="actions">
             <button className="btn" type="button" disabled={!!busy || !dskTemplate} onClick={run}>
               Run
@@ -352,7 +350,6 @@ export function DskGenerator() {
               Show in Finder
             </button>
           </div>
-          <BuildPreview path={result.deckPath} disabled={!!busy} />
           <p className="note">Next: open the Exporter tab to bake the live overlays into the final .mov(s).</p>
           {(skipped.length > 0 || (result.warnings || []).length > 0 || (result.overflows || []).length > 0) && (
             <div className="dsk-result-notes">
