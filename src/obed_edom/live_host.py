@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.request
 from urllib.parse import unquote, urlsplit
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -39,6 +39,8 @@ ATTACH_ENV = "OBED_LIVE_ATTACH"
 ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
 ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
+GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
+GOTO_AUTOPLAY_DEFERRED_NOTE = "Movies idle until next advance"
 _UNSET = object()
 _CDP_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 _CONTINUITY_STAGE_GATE_EXPR = (
@@ -403,14 +405,14 @@ class _AssetServer:
 """
         if self.alpha:
             style = """
-<style id="obed-output-overlay">html,body,#body{background:transparent!important}#body{opacity:0}#slideshowNavigator,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
+<style id="obed-output-overlay">html,body,#body{background:transparent!important}#body{opacity:0}#slideshowNavigator,#slideNumberControl,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
 """
             overlay = """
 <script>(function(){var hidden=true;function apply(){var el=document.getElementById('body');if(!el)return;el.style.setProperty('background','transparent','important');el.style.setProperty('opacity',hidden?'0':'1','important');}window.__obedOutput={show(){hidden=false;apply();},hide(){hidden=true;apply();}};var target=document.getElementById('body');if(target){new MutationObserver(apply).observe(target,{attributes:true,attributeFilter:['style','class']});}document.addEventListener('DOMContentLoaded',apply);apply();})();</script>
 """
         else:
             style = """
-<style id="obed-output-overlay">#obed-output-black{position:fixed;inset:0;background:#000;z-index:2147483647}#slideshowNavigator,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
+<style id="obed-output-overlay">#obed-output-black{position:fixed;inset:0;background:#000;z-index:2147483647}#slideshowNavigator,#slideNumberControl,#slideNumberDisplay,#helpPlacard{display:none!important}body{cursor:none}</style>
 """
             overlay = """
 <div id="obed-output-black"></div>
@@ -731,6 +733,14 @@ class ChromeCdp:
                 raise LiveHostError("Program browser did not fully stop.")
 
 
+@dataclass(frozen=True)
+class _GoToAutoplayResult:
+    run_length: int | None
+    run_kinds: list[Any] | None
+    fired: bool | None
+    deferred_reason: str | None
+
+
 class LiveOutputHost:
     def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto") -> None:
         if continuity not in ("auto", "off"):
@@ -767,6 +777,13 @@ class LiveOutputHost:
         self._log_path: Path | None = None
         self._last_logged_observation: tuple[Any, ...] | None = None
         self._advance_mode = "key"
+        self._goto_autoplay_mode = "on"
+        self._auto_play_run_length: int | None = None
+        self._auto_play_run_kinds: list[Any] | None = None
+        self._runtime_version_seen: int | None = None
+        self._slide_number_showing = False
+        self._last_observation: PlayerObservation | None = None
+        self._last_goto_autoplay: _GoToAutoplayResult | None = None
         self._continuity_mode: str = "off"
         self._continuity_reason: str | None = None
         self._continuity_runtime_plan: dict[str, Any] | None = None
@@ -935,6 +952,7 @@ class LiveOutputHost:
         self._advance_mode = os.environ.get(ADVANCE_ENV, "key").strip().lower()
         if self._advance_mode not in ("key", "click"):
             raise LiveHostError("OBED_LIVE_ADVANCE must be key or click.")
+        self._goto_autoplay_mode = "off" if os.environ.get(GOTO_AUTOPLAY_ENV, "").strip().lower() == "off" else "on"
         self._log_path = _new_log_path()
         self._logger = _SessionLogger(self._log_path)
         self._logger.log(
@@ -943,6 +961,7 @@ class LiveOutputHost:
             display=(self.display.display_id if self.display else None),
             attachEndpoint=self._attach_endpoint, attachMatch=self._attach_match,
             headless=self.headless, advanceMode=self._advance_mode,
+            goToAutoplayMode=self._goto_autoplay_mode,
         )
         try:
             self._validate_export()
@@ -1040,7 +1059,7 @@ class LiveOutputHost:
             advance["reason"] = "Player has no next manual action."
         go_to: dict[str, Any] = {
             "supported": self._can_go_to is not False,
-            "semantics": "restart-at-initial-state",
+            "semantics": "restart-at-initial-state+autoplay" if self._goto_autoplay_mode != "off" else "restart-at-initial-state",
         }
         if self._can_go_to is False:
             go_to["reason"] = "Player is not ready for go-to."
@@ -1058,6 +1077,13 @@ class LiveOutputHost:
         self._runtime_revision = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
         self._can_advance = bool(value.get("canAdvance"))
         self._can_go_to = bool(value.get("canGoTo"))
+        run_length = value.get("autoPlayRunLength")
+        self._auto_play_run_length = run_length if isinstance(run_length, int) and not isinstance(run_length, bool) else None
+        run_kinds = value.get("autoPlayRunKinds")
+        self._auto_play_run_kinds = run_kinds if isinstance(run_kinds, list) else None
+        version_seen = value.get("runtimeVersion")
+        self._runtime_version_seen = version_seen if isinstance(version_seen, int) and not isinstance(version_seen, bool) else None
+        self._slide_number_showing = value.get("slideNumberShowing") is True
         viewport = transport.evaluate("[window.innerWidth, window.innerHeight]")
         if (
             isinstance(viewport, list)
@@ -1092,6 +1118,7 @@ class LiveOutputHost:
             output=self.output,
         )
         self._log_observation_change(observation)
+        self._last_observation = observation
         return observation
 
     def _log_observation_change(self, observation: PlayerObservation) -> None:
@@ -1124,6 +1151,7 @@ class LiveOutputHost:
         started = time.monotonic()
         before = self.observe()
         before_revision, before_scene = self._runtime_revision, before.scene_id
+        self._last_goto_autoplay = None
         try:
             observed = self._execute(operation, slide, transport, before, before_revision)
         except PlayerCommandRejected as exc:
@@ -1144,6 +1172,11 @@ class LiveOutputHost:
             "sceneBefore": scene_before, "sceneAfter": scene_after,
             "videos": self._video_snapshot(transport),
         }
+        if operation == "goTo" and self._last_goto_autoplay is not None:
+            fields["autoPlayRunLength"] = self._last_goto_autoplay.run_length
+            fields["autoPlayRunKinds"] = self._last_goto_autoplay.run_kinds
+            fields["autoPlayFired"] = self._last_goto_autoplay.fired
+            fields["autoPlayDeferredReason"] = self._last_goto_autoplay.deferred_reason
         if error is not None: fields["error"] = error
         self._logger.log("execute", **fields)
 
@@ -1154,15 +1187,14 @@ class LiveOutputHost:
             raise PlayerCommandRejected("Player has no next manual action.")
         if operation == "goTo" and before.busy:
             raise PlayerCommandRejected("Player is busy.")
-        if operation in ("advance", "goTo"):
-            transport.evaluate("window.focus();document.body.focus()")
         if operation == "advance":
-            if self._advance_mode == "click": transport.click_stage()
-            else: transport.key(" ", "Space", 32)
+            self._await_click_target()
+            self._send_advance_input(transport)
         elif operation == "goTo":
             if slide is None: raise PlayerCommandRejected("A slide number is required.")
             player_index = next((int(s["playerIndex"]) for s in self.slides if s.get("originalOrdinal") == slide and not s.get("skipped")), None)
             if player_index is None: raise PlayerCommandRejected("Original slide is unavailable or skipped.")
+            transport.evaluate("window.focus();document.body.focus()")
             if self._continuity_mode == "qualified":
                 transport.evaluate("window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.clear && window.__OBED_P2_PRESERVE__.clear()")
             for digit in str(player_index + 1): transport.key(digit, "Digit" + digit, ord(digit))
@@ -1172,7 +1204,81 @@ class LiveOutputHost:
         else: raise LiveHostError("Unsupported player operation.")
         if operation in ("hide", "show"):
             return self.observe()
-        return self._wait_for_ack(before_revision, operation=operation)
+        observed = self._wait_for_ack(before_revision, operation=operation)
+        if operation == "goTo":
+            return self._repair_goto_autoplay(observed, slide, transport, before_revision)
+        return observed
+
+    def _await_click_target(self) -> None:
+        """The player spends a click hiding its slide-number overlay (shown by go-to digits) instead of advancing."""
+        if self._advance_mode != "click": return
+        deadline = time.monotonic() + self.timeout_s
+        while self._slide_number_showing:
+            if time.monotonic() >= deadline:
+                raise PlayerCommandRejected("Click advance is unavailable while the slide-number overlay is showing.")
+            time.sleep(.05)
+            self.observe()
+
+    def _send_advance_input(self, transport: ChromeCdp) -> None:
+        transport.evaluate("window.focus();document.body.focus()")
+        if self._advance_mode == "click": transport.click_stage()
+        else: transport.key(" ", "Space", 32)
+
+    def _repair_goto_autoplay(self, ack_observed: PlayerObservation, slide: int | None, transport: ChromeCdp, before_revision: int | None) -> PlayerObservation:
+        """Start the destination's leading automatic-play run after go-to settles."""
+        if self._goto_autoplay_mode == "off":
+            return ack_observed
+        phase = "pre_dispatch"
+        target_reached = False
+        run_length: int | None = None
+        run_kinds: list[Any] | None = None
+        try:
+            settled = replace(self._wait_settled(expected_slide=slide, previous_revision=before_revision), go_to_target_reached=True)
+            target_reached = True
+            run_length, run_kinds = self._auto_play_run_length, self._auto_play_run_kinds
+            if run_length is None:
+                return self._goto_autoplay_deferred("runLength null", run_length, run_kinds)
+            if not (isinstance(self._runtime_version_seen, int) and self._runtime_version_seen >= RUNTIME_VERSION):
+                return self._goto_autoplay_deferred("runtime version", run_length, run_kinds)
+            if run_length == 0:
+                self._last_goto_autoplay = _GoToAutoplayResult(0, run_kinds, False, None)
+                return settled
+            if not self._can_advance:
+                return self._goto_autoplay_deferred("busy", run_length, run_kinds)
+            marker = (settled.scene_id, settled.revision)
+            self._await_click_target()
+            fresh = self.observe()
+            if (fresh.scene_id, fresh.revision) != marker or self._auto_play_run_length != run_length:
+                return self._goto_autoplay_deferred("changed before fire", run_length, run_kinds)
+            phase = "dispatch_attempted"
+            self._send_advance_input(transport)
+            self._wait_for_ack(settled.revision, operation="advance")
+            phase = "acknowledged"
+            final = replace(self._wait_settled(previous_revision=settled.revision), go_to_target_reached=True)
+        except (LiveHostError, PlayerCommandRejected) as exc:
+            return self._goto_autoplay_after_failure(phase, exc, run_length, run_kinds, target_reached)
+        self._last_goto_autoplay = _GoToAutoplayResult(run_length, run_kinds, True, None)
+        return final
+
+    def _goto_autoplay_after_failure(self, phase: str, exc: Exception, run_length: int | None, run_kinds: list[Any] | None, target_reached: bool) -> PlayerObservation:
+        """Only a `pre_dispatch` failure is safe to call idle: once input delivery has
+        begun, its outcome may be unknown (never claim it's safe to press advance). The
+        target-reached marker is preserved whenever the jump itself already settled, so a
+        later plain observation can't reject a go-to that already succeeded."""
+        observation = replace(self._last_observation, go_to_target_reached=target_reached)
+        if phase == "pre_dispatch":
+            reason = "settle timeout" if "did not settle" in str(exc) else f"pre-dispatch error: {exc}"
+            self._last_goto_autoplay = _GoToAutoplayResult(run_length, run_kinds, False, reason)
+            return replace(observation, auto_play_deferred=GOTO_AUTOPLAY_DEFERRED_NOTE)
+        if phase == "acknowledged":
+            self._last_goto_autoplay = _GoToAutoplayResult(run_length, run_kinds, True, f"settle unconfirmed: {exc}")
+        else:
+            self._last_goto_autoplay = _GoToAutoplayResult(run_length, run_kinds, None, f"delivery unknown: {exc}")
+        return observation
+
+    def _goto_autoplay_deferred(self, reason: str, run_length: int | None = None, run_kinds: list[Any] | None = None) -> PlayerObservation:
+        self._last_goto_autoplay = _GoToAutoplayResult(run_length, run_kinds, False, reason)
+        return replace(self._last_observation, auto_play_deferred=GOTO_AUTOPLAY_DEFERRED_NOTE)
 
     def _wait_for_ack(self, previous_revision: int | None, *, operation: str | None = None) -> PlayerObservation:
         """Wait for actual input delivery, without treating it as scene completion."""

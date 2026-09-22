@@ -18,6 +18,7 @@ export type LiveSnapshot = {
   sceneId: string | null;
   buildIndex: number | null;
   outputVisible: boolean;
+  autoPlayDeferred?: string | null;
   continuity?: LiveContinuity;
   capabilities: Record<Exclude<LiveOperation, "stop">, LiveCapability>;
   slides: LiveSlide[];

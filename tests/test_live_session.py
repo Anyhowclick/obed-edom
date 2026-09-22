@@ -131,6 +131,10 @@ class Adapter:
         self.observe_calls = 0
         self.stop_wait: Event | None = None
         self.stop_release: Event | None = None
+        self.auto_play_deferred: str | None = None
+        self.goto_final_slide: int | None = None
+        self.goto_target_reached = False
+        self.goto_busy = False
 
     def capabilities(self):
         return {
@@ -165,7 +169,13 @@ class Adapter:
         if operation == "advance":
             self.observed = PlayerObservation(original_slide=2, scene_id="two", revision=2, busy=True)
         elif operation == "goTo":
-            self.observed = PlayerObservation(original_slide=slide, scene_id=f"slide-{slide}", revision=2)
+            final_slide = self.goto_final_slide if self.goto_final_slide is not None else slide
+            self.observed = PlayerObservation(
+                original_slide=final_slide, scene_id=f"slide-{final_slide}", revision=2,
+                auto_play_deferred=self.auto_play_deferred,
+                go_to_target_reached=self.goto_target_reached,
+                busy=self.goto_busy,
+            )
         elif operation == "hide":
             self.observed = PlayerObservation(
                 original_slide=2 if self.keep_busy_for_visibility else 1,
@@ -844,3 +854,80 @@ def test_command_finishing_while_stop_is_in_progress_is_superseded(tmp_path):
     assert len(released) == 1
     replay = service.command(session_id, "advance-1", "advance")
     assert (replay["outcome"], replay["reason"]) == ("rejected", "Navigation was superseded by stop.")
+
+
+def test_goto_stays_busy_and_rejects_operator_command_while_in_flight(tmp_path):
+    service, adapter, state, _claims, _releases = make_service(tmp_path)
+    adapter.wait = Event()
+    adapter.release = Event()
+    responses = []
+    thread = Thread(target=lambda: responses.append(service.command(state["sessionId"], "g", "goTo", 2)))
+    thread.start()
+    try:
+        assert adapter.wait.wait(1)
+        assert service.state()["status"] == "busy"
+        rejected = service.command(state["sessionId"], "a", "advance")
+        assert rejected["outcome"] == "rejected"
+        assert rejected["reason"] == "A player command is already in progress."
+    finally:
+        adapter.release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert responses[0]["outcome"] == "completed"
+    assert responses[0]["state"]["status"] == "ready"
+
+
+def test_auto_play_deferred_is_sticky_set_by_goto_and_cleared_by_advance(tmp_path):
+    service, adapter, state, _claims, _releases = make_service(tmp_path)
+    assert state["autoPlayDeferred"] is None
+
+    adapter.auto_play_deferred = "Movies idle until next advance"
+    deferred = service.command(state["sessionId"], "go-1", "goTo", 2)
+    assert deferred["state"]["autoPlayDeferred"] == "Movies idle until next advance"
+
+    adapter.observed = PlayerObservation(original_slide=2, scene_id="slide-2", revision=2)
+    polled = service.state()
+    assert polled["autoPlayDeferred"] == "Movies idle until next advance"
+
+    adapter.auto_play_deferred = None
+    cleared_by_goto = service.command(state["sessionId"], "go-2", "goTo", 1)
+    assert cleared_by_goto["state"]["autoPlayDeferred"] is None
+
+    adapter.auto_play_deferred = "Movies idle until next advance"
+    service.command(state["sessionId"], "go-3", "goTo", 2)
+    assert service.state()["autoPlayDeferred"] == "Movies idle until next advance"
+    advanced = service.command(state["sessionId"], "adv-1", "advance")
+    assert advanced["state"]["autoPlayDeferred"] is None
+
+
+def test_goto_completes_when_the_automatic_run_settles_on_a_later_slide(tmp_path):
+    service, adapter, state, _claims, _releases = make_service(tmp_path)
+    adapter.goto_final_slide = 3
+    adapter.goto_target_reached = True
+
+    result = service.command(state["sessionId"], "go-cross", "goTo", 2)
+
+    assert result["outcome"] == "completed"
+    assert result["state"]["originalSlide"] == 3
+
+
+def test_goto_busy_with_target_reached_completes_immediately_and_a_later_poll_cannot_reject_it(tmp_path):
+    service, adapter, state, _claims, _releases = make_service(tmp_path)
+    adapter.goto_final_slide = 3
+    adapter.goto_target_reached = True
+    adapter.goto_busy = True
+
+    result = service.command(state["sessionId"], "go-cross-busy", "goTo", 2)
+
+    assert result["outcome"] == "completed"
+    assert result["state"]["status"] == "busy"
+    assert result["state"]["originalSlide"] == 3
+
+    # A later, plain poll (no marker -- the automatic run finishing on its own) must not
+    # re-litigate a request that already resolved; there is nothing left pending to reject.
+    adapter.observed = PlayerObservation(original_slide=3, scene_id="slide-3", revision=2, busy=False)
+    polled = service.state()
+    assert polled["status"] == "ready"
+    assert polled["originalSlide"] == 3
+    replay = service.command(state["sessionId"], "go-cross-busy", "goTo", 2)
+    assert replay["outcome"] == "completed"
