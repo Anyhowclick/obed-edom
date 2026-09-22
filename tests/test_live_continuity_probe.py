@@ -2525,19 +2525,32 @@ class TestInPageOracleApplicability:
     handling of each `reason` the JS could return, plus the JS source's own
     fail-closed shape (never a speculative `getContext`)."""
 
-    NOT_APPLICABLE_REASONS = [
-        "no __OBED_GL_ORACLE__ handle published",
+    # Codex r4: only an ABSENT handle may be n/a. Every other "not applicable"
+    # claim the JS could make -- and any malformed n/a-shaped response -- is an
+    # APPLICABLE inconclusive result, so a present-but-unusable handle can never
+    # silently hand the rect back to the screenshot oracle alone.
+    NON_ABSENCE_REASONS = [
         "canvas is not a descendant of #stage",
         "canvas disconnected or context lost",
         "canvas does not cover the movie rect",
         "canvas or an ancestor is not fully opaque",
         "checkVisibility is false",
+        "handle is present but malformed",
+        "",
+        None,
     ]
 
-    @pytest.mark.parametrize("reason", NOT_APPLICABLE_REASONS)
-    def test_each_not_applicable_reason_yields_no_inpage_result(self, reason: str) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": reason}
+    def test_only_an_absent_handle_is_not_applicable(self) -> None:
+        raw = {"applicable": False, "status": "n/a", "reason": probe.INPAGE_HANDLE_ABSENT_REASON}
         assert probe.inpage_oracle_result(raw) is None
+        assert probe.INPAGE_HANDLE_ABSENT_REASON in probe.INPAGE_LIVENESS_JS
+
+    @pytest.mark.parametrize("reason", NON_ABSENCE_REASONS)
+    def test_every_other_n_a_claim_is_an_applicable_inconclusive(self, reason: object) -> None:
+        raw = {"applicable": False, "status": "n/a", "reason": reason}
+        result = probe.inpage_oracle_result(raw)
+        assert result is not None
+        assert result["verdict"] is None and result["status"] == "inconclusive"
 
     # Codex r3 Spec 5: compare against a FIXED literal/checked-in golden, not a
     # dynamically re-derived one -- the primitives below could otherwise drift
@@ -2591,30 +2604,6 @@ class TestInPageOracleApplicability:
         assert stripped_record.pop("shotOffsetsMs") == [float(v) for v in probe.BURST_OFFSETS_MS]
         base.pop("shotOffsetsMs")
         assert stripped_record == base
-
-    def test_a_dom_painted_slide_is_never_scored_by_the_inpage_oracle(self) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[0]}
-        assert probe.inpage_oracle_result(raw) is None
-
-    def test_a_canvas_outside_stage_is_not_applicable(self) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[1]}
-        assert probe.inpage_oracle_result(raw) is None
-
-    def test_a_disconnected_canvas_is_not_applicable(self) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[2]}
-        assert probe.inpage_oracle_result(raw) is None
-
-    def test_a_canvas_that_does_not_cover_the_movie_rect_is_not_applicable(self) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[3]}
-        assert probe.inpage_oracle_result(raw) is None
-
-    def test_a_zero_opacity_ancestor_is_not_applicable(self) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[4]}
-        assert probe.inpage_oracle_result(raw) is None
-
-    def test_check_visibility_false_is_not_applicable(self) -> None:
-        raw = {"applicable": False, "status": "n/a", "reason": self.NOT_APPLICABLE_REASONS[5]}
-        assert probe.inpage_oracle_result(raw) is None
 
     def test_js_source_never_speculatively_calls_get_context(self) -> None:
         assert "getContext(" not in probe.INPAGE_LIVENESS_JS

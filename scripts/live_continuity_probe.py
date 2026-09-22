@@ -298,7 +298,7 @@ _INPAGE_LIVENESS_JS_TEMPLATE = r"""
   function notApplicable(reason){ return {applicable: false, status: "n/a", reason: reason}; }
   function inconclusive(reason){ return {applicable: true, status: "inconclusive", reason: reason}; }
   var handle = window.__OBED_GL_ORACLE__;
-  if (!handle) { return notApplicable('no __OBED_GL_ORACLE__ handle published'); }
+  if (!handle) { return notApplicable('__ABSENT__'); }
   if (!handle.gl || !handle.canvas || !handle.video ||
       typeof handle.sample !== 'function' || typeof handle.markerBands !== 'function' ||
       typeof handle.pause !== 'function' || typeof handle.resume !== 'function') {
@@ -380,7 +380,10 @@ _INPAGE_LIVENESS_JS_TEMPLATE = r"""
   };
 })()
 """
-INPAGE_LIVENESS_JS = _INPAGE_LIVENESS_JS_TEMPLATE.replace("__N__", str(INPAGE_MIN_SAMPLES))
+INPAGE_HANDLE_ABSENT_REASON = "no __OBED_GL_ORACLE__ handle published"
+INPAGE_LIVENESS_JS = _INPAGE_LIVENESS_JS_TEMPLATE.replace("__N__", str(INPAGE_MIN_SAMPLES)).replace(
+    "__ABSENT__", INPAGE_HANDLE_ABSENT_REASON
+)
 
 
 def parse_viewport_arg(value: str) -> tuple[int, int]:
@@ -1417,8 +1420,11 @@ def inpage_applicability_reason(raw: Any) -> str | None:
     """`None` only when the handle itself is absent (Codex r2 Spec 3): every
     other case -- malformed, mismatched identity, a stale/replaced handle --
     is an APPLICABLE inconclusive result, never n/a."""
-    if isinstance(raw, dict) and raw.get("applicable") is False and raw.get("status") == "n/a":
-        return raw.get("reason") or "in-page oracle not applicable"
+    if (
+        isinstance(raw, dict) and raw.get("applicable") is False
+        and raw.get("status") == "n/a" and raw.get("reason") == INPAGE_HANDLE_ABSENT_REASON
+    ):
+        return INPAGE_HANDLE_ABSENT_REASON
     return None
 
 

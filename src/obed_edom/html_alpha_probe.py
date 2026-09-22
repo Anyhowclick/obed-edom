@@ -2067,7 +2067,7 @@ def score_inpage_liveness(
     )
     gl_err_values = [_finite_float(s.get("glErr")) or 0.0 for s in samples]
     gl_err_any = max((abs(v) for v in gl_err_values), default=0.0)
-    sample_ms = [float(s["ms"]) for s in samples]  # validated finite-convertible above
+    sample_ms = [float(s["ms"]) for s in samples]
 
     common = {
         "n": len(samples),
