@@ -275,9 +275,13 @@ Runtime entry: `{atScene, action: "glReplay", movieKey, fallback: "retire", slot
   `glReplay` entry and a NEW sha. `QUALIFIED_PLAN_SHA256` therefore holds two entries until G3 (which bumps
   `CONTINUITY_VERSION` 4→5 and replaces the list); without this, runtime v4 — which filters boundaries by literal
   action — would receive a plan with no retire zone and carry the movie into the overlap ("carry anyway").
-- **C. Operator warning is a follow-up PR** in the sermon-validation family (reads `.key`, not exports). Note for
-  that follow-up: the DSK generator's rule 2 (`dsk_assemble.py:_clip_timing_for_slide`) sets continuity clips to
-  After Transition — exactly rule 4's refusal — so generated DSK decks can never arm until one side moves.
+- **C. WITHDRAWN (owner-confirmed 2026-09-22): no rule changes, no operator warning.** After Transition is the healthy
+  authoring: the automatic first event removes the WebGL canvas at settle, so the invisible window never opens, and the
+  runtime substitutes the live decoder when the export autoplays from zero (the bridge feature P2 qualified). Measured:
+  every Positive Control slide has an automatic first event and the deck plans `pin / bridge / restart / restart` with
+  no refusals; the owner confirms S1 plays across to S3 live (S4 is an intentional restart). On Click is what opens the
+  window and would make DSK-generated decks depend on unqualified GL replay plus an operator click, so the DSK
+  generator's rule 2 (After Transition) stays, rule 4 stays as the precondition, and the §7 warning follow-up is dropped.
 
 **Tests:** fixture 1→2 ⇒ `glReplay` with the slot-4 override (flag on) and byte-identical to today (flag off);
 mutation negatives per rule 1/2/4/5 (each asserts the reason string and that the flag-on runtime is unqualified);
