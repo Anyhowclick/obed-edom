@@ -1,0 +1,124 @@
+{
+  "_provenance": "Fixed origin/main-shaped record (Codex r3 Spec 5): generated once by calling the module-level `_base_shaped_record()` helper in tests/test_live_continuity_probe.py (kept there only for regeneration, never called by a test), which drives the SAME pre-existing primitives visible_slide_record itself calls (wait_until_settled, capture_burst, expected_screen_rects, painting_videos, match_painting_videos, control_region, stage_screen_rect, score_visible_slide) over a FakeHost with stage_map=PAINT_STAGE_MAPS['full-bleed'], a single repeated static shot png_b64(*PAINT_VIEWPORT), instances={0: {'Untitled.mov': [to_authored_rect(EXPECTED_SCREEN_RECT, stage_map)]}}, and VISIBLE_SLIDE/PAINT_VIEWPORT from that test module, scene_ids=['s']*8 and a fresh FakeClock. Regenerate only if one of those primitives or fixtures intentionally changes shape; a silent regeneration would defeat the point of a FIXED golden.",
+  "record": {
+    "attempts": 1,
+    "control": {
+      "h": 40,
+      "source": "stage-corner",
+      "w": 40,
+      "x": 4,
+      "y": 4
+    },
+    "expectedRects": [
+      {
+        "authored": {
+          "h": 268.0,
+          "w": 952.0,
+          "x": 20.0,
+          "y": 70.0
+        },
+        "expect": "live",
+        "label": "Untitled.mov#1",
+        "screen": {
+          "h": 268.0,
+          "w": 952.0,
+          "x": 20.0,
+          "y": 70.0
+        }
+      }
+    ],
+    "instanceCheck": {
+      "duplicateVideos": [],
+      "painting": [],
+      "reason": null,
+      "unexpectedVideos": [],
+      "verdict": true
+    },
+    "noiseFloor": {
+      "p99": 0.0,
+      "reason": null,
+      "rect": {
+        "h": 40,
+        "w": 40,
+        "x": 4,
+        "y": 4
+      },
+      "verdict": true
+    },
+    "originalOrdinal": 1,
+    "perRect": [
+      {
+        "deadColumnBands": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "deadRowBands": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "expect": "live",
+        "label": "Untitled.mov#1",
+        "liveFrac": 0.0,
+        "maxDelta": 0,
+        "reason": "dead bands",
+        "rect": {
+          "h": 264,
+          "w": 948,
+          "x": 22,
+          "y": 72
+        },
+        "verdict": false
+      }
+    ],
+    "playerIndex": 0,
+    "sceneId": "s",
+    "shotOffsetsMs": [
+      0.0,
+      360.0,
+      730.0,
+      1090.0,
+      1460.0,
+      1820.0,
+      2190.0,
+      2550.0,
+      2920.0,
+      3280.0,
+      3650.0,
+      4010.0
+    ],
+    "stageMap": {
+      "offsetHeight": 400.0,
+      "offsetWidth": 1000.0,
+      "ox": 0.0,
+      "oy": 0.0,
+      "s": 1.0,
+      "sy": 1.0
+    },
+    "status": "fail",
+    "stray": {
+      "strays": [],
+      "verdict": true
+    },
+    "verdict": false
+  }
+}
