@@ -58,12 +58,13 @@ def test_minimal_s4_to_s5_pins_with_no_refusal():
 
 def test_minimal_s4_to_s5_gl_replay_keyword():
     # Deck (i) has no overlap refusal on its pin, so derivation never applies
-    # (arming plan §11: only a refused pin is considered for glReplay).
+    # (arming plan §11: only a refused pin is considered for glReplay) and the
+    # glReplay keys stay absent, exactly as with the flag off.
     plan = derive_plan(MINIMAL_ROOT, _slides(MINIMAL_UUIDS[0:2]), resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
     movie = plan.boundaries[0].as_dict()["movies"][0]
-    assert movie["glReplay"] is False
-    assert movie["glReplayReason"] is None
+    assert "glReplay" not in movie
+    assert "glReplayReason" not in movie
 
 
 def test_minimal_s6_to_s7_two_pins_one_refusal():
