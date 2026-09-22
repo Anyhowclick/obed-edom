@@ -960,6 +960,9 @@ GL_REPLAY_JS = r"""
     if (why === CANVAS_REMOVED){ standDown(why, null); return false; }
     if (contextLostNow(false)) return false;
     if (why){ standDown(why, null); return false; }
+    var clean = true;
+    try { clean = state.gl.getError() === 0; } catch (e) { clean = false; }
+    if (!requireGlClean(clean, {phase: 'live'})) return false;
     if (state.video) state.videoEnded = !!state.video.ended;
     if (fresh && !state.paused) perLiveUpload();
     replayFrame();
