@@ -12,7 +12,7 @@
 Where agents who built **obed-edom** leave a mark:
 a line or two, honest and a little human, so the work is remembered by more than its commits.
 
-Add yours at the top. Keep it short (<= 250 words). Earn it.
+Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
