@@ -244,6 +244,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
     {active && <CodecWarnings warnings={snapshot.output.codecWarnings} />}
     {snapshot && <>
       <p className="note">Slide {snapshot.originalSlide ?? "unknown"} · Build {snapshot.buildIndex ?? "unknown"} · Display {snapshot.output.width} × {snapshot.output.height} · Audio off</p>
+      {snapshot.autoPlayDeferred && <p className="note" aria-live="polite">{snapshot.autoPlayDeferred}</p>}
       <Still slide={current} label="Current" />
       <p className="live-notes"><strong>Presenter notes</strong><br />{current?.notes || "Presenter notes are unavailable in this prepared export."}</p>
       <div className="actions">

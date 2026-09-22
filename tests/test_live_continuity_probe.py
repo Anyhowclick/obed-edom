@@ -2951,3 +2951,526 @@ class TestPokeIsProbabilistic:
         backgrounds = json.loads(result.stdout.strip())
         assert len(backgrounds) == len(probe.BURST_OFFSETS_MS)
         assert all(bg for bg in backgrounds)
+
+
+# --------------------------------------------------------------------------
+# Pass G -- goTo autoplay repair gate
+# --------------------------------------------------------------------------
+
+class TestPassGArgs:
+    def test_pass_flag_defaults_to_full_run(self) -> None:
+        assert probe.parse_args([]).only_pass is None
+
+    def test_pass_g_selectable(self) -> None:
+        assert probe.parse_args(["--pass", "G"]).only_pass == "G"
+
+    def test_pass_rejects_other_values(self) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--pass", "V"])
+
+    def test_attach_flag_defaults_false(self) -> None:
+        assert probe.parse_args([]).attach is False
+
+    def test_attach_flag_settable(self) -> None:
+        assert probe.parse_args(["--pass", "G", "--attach"]).attach is True
+
+
+class TestGBurstSpacing:
+    def test_g_offsets_are_eight_shots(self) -> None:
+        assert len(probe.G_BURST_OFFSETS_MS) == 8
+
+    def test_g_offsets_have_real_margin_over_the_360ms_floor(self) -> None:
+        # A live gate run measured realized gaps as low as 358.5ms against the
+        # paint-oracle cadence's 360/370ms nominal schedule -- ordinary
+        # scheduling jitter, not a defect, but enough to trip the floor. The
+        # nominal schedule needs headroom over that jitter; the floor itself
+        # (checked on MEASURED timestamps, see `spacing_ok`) stays 360ms.
+        gaps = [b - a for a, b in zip(probe.G_BURST_OFFSETS_MS, probe.G_BURST_OFFSETS_MS[1:])]
+        assert min(gaps) >= 440
+
+    def test_g_offsets_are_spaced_at_least_360ms_apart(self) -> None:
+        assert probe.spacing_ok(probe.G_BURST_OFFSETS_MS) is True
+
+    def test_spacing_ok_detects_a_rapid_burst_of_the_right_count(self) -> None:
+        rapid = (0, 100, 200, 300, 400, 500, 600, 700)
+        assert probe.spacing_ok(rapid, expected_count=len(rapid)) is False
+
+    def test_wrong_count_is_inconclusive(self) -> None:
+        assert probe.spacing_ok(()) is None
+        assert probe.spacing_ok((0,)) is None
+        assert probe.spacing_ok(probe.G_BURST_OFFSETS_MS[:-1]) is None
+
+    def test_non_finite_value_is_inconclusive(self) -> None:
+        values = list(probe.G_BURST_OFFSETS_MS)
+        values[-1] = float("nan")
+        assert probe.spacing_ok(tuple(values)) is None
+
+
+class TestCombineVerdicts:
+    def test_all_true_is_true(self) -> None:
+        assert probe.combine_verdicts(True, True, True) is True
+
+    def test_any_false_is_false(self) -> None:
+        assert probe.combine_verdicts(True, False, True) is False
+
+    def test_any_none_is_none_even_with_a_false_present(self) -> None:
+        # A missing/unreadable check must not let another check's False stand
+        # in for it, and must not let a True elsewhere paper over it either.
+        assert probe.combine_verdicts(True, None) is None
+        assert probe.combine_verdicts(False, None) is None
+
+    def test_empty_is_true(self) -> None:
+        assert probe.combine_verdicts() is True
+
+
+class TestCaptureIsFresh:
+    def test_a_single_frame_burst_where_something_is_live_expected_is_stale(self) -> None:
+        assert probe.capture_is_fresh(True, 1) is False
+
+    def test_varied_frames_are_fresh(self) -> None:
+        assert probe.capture_is_fresh(True, 8) is True
+
+    def test_exactly_the_minimum_is_fresh(self) -> None:
+        assert probe.capture_is_fresh(True, 2) is True
+
+    def test_nothing_live_expected_is_never_flagged(self) -> None:
+        assert probe.capture_is_fresh(False, 1) is True
+        assert probe.capture_is_fresh(False, None) is True
+
+    def test_unreadable_count_when_live_expected_is_inconclusive(self) -> None:
+        assert probe.capture_is_fresh(True, None) is None
+        assert probe.capture_is_fresh(True, "n/a") is None
+        assert probe.capture_is_fresh(True, True) is None
+
+
+class TestGotoRectExpectations:
+    V_EXPECTATIONS = {
+        0: {"untitled.mov": probe.LIVE},
+        1: {"untitled.mov": probe.DEAD, "vid.mp4": probe.LIVE},
+    }
+
+    def test_armed_returns_the_v_expectations_unchanged(self) -> None:
+        assert probe.goto_rect_expectations(self.V_EXPECTATIONS, armed=True) == self.V_EXPECTATIONS
+
+    def test_off_marks_every_asset_dead(self) -> None:
+        off = probe.goto_rect_expectations(self.V_EXPECTATIONS, armed=False)
+        assert off == {
+            0: {"untitled.mov": probe.DEAD},
+            1: {"untitled.mov": probe.DEAD, "vid.mp4": probe.DEAD},
+        }
+
+    def test_off_does_not_mutate_the_input(self) -> None:
+        before = {k: dict(v) for k, v in self.V_EXPECTATIONS.items()}
+        probe.goto_rect_expectations(self.V_EXPECTATIONS, armed=False)
+        assert self.V_EXPECTATIONS == before
+
+
+class TestScoreNoConsumption:
+    def test_missing_execute_record_is_inconclusive(self) -> None:
+        verdict = probe.score_no_consumption("2", "2", None)
+        assert verdict["verdict"] is None
+        assert verdict["sceneOk"] is True
+
+    def test_missing_fields_on_the_record_are_inconclusive(self) -> None:
+        # Another stream is landing autoPlayRunLength/autoPlayFired on
+        # live_host.py concurrently -- a record that predates them must not
+        # be read as a false pass.
+        assert probe.score_no_consumption("2", "2", {"outcome": "ok"})["verdict"] is None
+
+    def test_wrong_scene_fails(self) -> None:
+        verdict = probe.score_no_consumption("6", "2", {"autoPlayRunLength": 0, "autoPlayFired": False})
+        assert verdict["verdict"] is False
+        assert verdict["sceneOk"] is False
+
+    def test_nonzero_run_length_fails(self) -> None:
+        verdict = probe.score_no_consumption("2", "2", {"autoPlayRunLength": 1, "autoPlayFired": True})
+        assert verdict["verdict"] is False
+
+    def test_fired_true_fails_even_with_zero_run_length(self) -> None:
+        verdict = probe.score_no_consumption("2", "2", {"autoPlayRunLength": 0, "autoPlayFired": True})
+        assert verdict["verdict"] is False
+
+    def test_clean_no_consumption_passes(self) -> None:
+        verdict = probe.score_no_consumption(
+            "2", "2", {"autoPlayRunLength": 0, "autoPlayFired": False, "autoPlayRunKinds": []}
+        )
+        assert verdict["verdict"] is True
+
+
+class TestExecuteLog:
+    def test_read_execute_log_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        assert probe.read_execute_log(tmp_path / "nope.jsonl") == []
+
+    def test_read_execute_log_returns_none_for_no_path(self) -> None:
+        assert probe.read_execute_log(None) == []
+
+    def test_read_execute_log_skips_malformed_or_non_object_lines(self, tmp_path: Path) -> None:
+        p = tmp_path / "log.jsonl"
+        p.write_text(
+            '{"kind": "start"}\n'
+            "not json\n"
+            '["a list is not a record"]\n'
+            '{"kind": "execute", "operation": "goTo", "slide": 2}\n'
+        )
+        assert probe.read_execute_log(p) == [
+            {"kind": "start"},
+            {"kind": "execute", "operation": "goTo", "slide": 2},
+        ]
+
+    def test_find_execute_record_returns_the_last_match(self) -> None:
+        records = [
+            {"kind": "execute", "operation": "goTo", "slide": 2, "autoPlayFired": True},
+            {"kind": "execute", "operation": "goTo", "slide": 2, "autoPlayFired": False},
+        ]
+        assert probe.find_execute_record(records, operation="goTo", slide=2)["autoPlayFired"] is False
+
+    def test_find_execute_record_ignores_other_operations_and_slides(self) -> None:
+        records = [
+            {"kind": "execute", "operation": "advance", "slide": None},
+            {"kind": "execute", "operation": "goTo", "slide": 3},
+        ]
+        assert probe.find_execute_record(records, operation="goTo", slide=2) is None
+
+    def test_wait_for_execute_record_polls_until_the_record_lands(self, tmp_path: Path) -> None:
+        log_path = tmp_path / "log.jsonl"
+        clock = FakeClock()
+        calls = {"n": 0}
+
+        def sleep(duration: float) -> None:
+            calls["n"] += 1
+            clock.sleep(duration)
+            if calls["n"] == 2:
+                log_path.write_text(
+                    '{"kind": "execute", "operation": "goTo", "slide": 2, "autoPlayRunLength": 0}\n'
+                )
+
+        record = probe.wait_for_execute_record(
+            log_path, operation="goTo", slide=2, timeout_s=1.0, now=clock.now, sleep=sleep
+        )
+        assert record is not None and record["autoPlayRunLength"] == 0
+
+    def test_wait_for_execute_record_gives_up_after_the_timeout(self, tmp_path: Path) -> None:
+        clock = FakeClock()
+        record = probe.wait_for_execute_record(
+            tmp_path / "nope.jsonl", operation="goTo", slide=2, timeout_s=0.2, now=clock.now, sleep=clock.sleep
+        )
+        assert record is None
+
+
+class TestCropScreenRect:
+    def test_crop_clips_to_frame_bounds(self) -> None:
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        crop = probe._crop_screen_rect(frame, {"x": 5, "y": 5, "w": 20, "h": 20})
+        assert crop.shape == (5, 5, 3)
+
+    def test_crop_outside_frame_is_empty(self) -> None:
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        crop = probe._crop_screen_rect(frame, {"x": 50, "y": 50, "w": 5, "h": 5})
+        assert crop.size == 0
+
+
+class TestScoreRegionChanged:
+    @staticmethod
+    def _frame(width: int, height: int, fill: int) -> np.ndarray:
+        return np.full((height, width, 3), fill, dtype=np.uint8)
+
+    def test_a_changed_region_passes(self) -> None:
+        before, after = self._frame(100, 100, 10), self._frame(100, 100, 10)
+        after[20:60, 20:60] = 200
+        result = probe.score_region_changed(before, after, {"x": 20, "y": 20, "w": 40, "h": 40})
+        assert result["verdict"] is True
+        assert result["mae"] >= probe.CHARACTER_REGION_MAE_MIN
+
+    def test_an_unchanged_region_fails(self) -> None:
+        before, after = self._frame(100, 100, 10), self._frame(100, 100, 10)
+        result = probe.score_region_changed(before, after, {"x": 20, "y": 20, "w": 40, "h": 40})
+        assert result["verdict"] is False
+        assert result["mae"] == 0.0
+
+    def test_an_empty_crop_is_a_hard_fail(self) -> None:
+        before, after = self._frame(100, 100, 10), self._frame(100, 100, 10)
+        result = probe.score_region_changed(before, after, {"x": 500, "y": 500, "w": 10, "h": 10})
+        assert result["verdict"] is False
+        assert result["mae"] is None
+
+    def test_mismatched_crop_shapes_are_a_hard_fail(self) -> None:
+        before, after = self._frame(100, 100, 10), self._frame(50, 50, 10)
+        result = probe.score_region_changed(before, after, {"x": 30, "y": 30, "w": 40, "h": 40})
+        assert result["verdict"] is False
+        assert result["mae"] is None
+
+
+def _character_effect(object_id: str, px: float, py: float, width: float, height: float, *, anchor: bool = True) -> dict[str, Any]:
+    state: dict[str, Any] = {"position": {"pointX": px, "pointY": py}, "width": width, "height": height}
+    if anchor:
+        state["anchorPoint"] = {"pointX": 0.5, "pointY": 0.5}
+    return {
+        "beginTime": 0, "type": "buildIn", "name": "apple:dissolve character", "objectID": object_id,
+        "baseLayer": {"initialState": state},
+    }
+
+
+class TestWalkCharacterRects:
+    def test_finds_a_character_buildin_rect(self) -> None:
+        rects = probe._walk_character_rects([_character_effect("A", 100, 200, 40, 60)])
+        assert rects == [{"x": 80.0, "y": 170.0, "w": 40.0, "h": 60.0}]
+
+    def test_ignores_non_character_effects(self) -> None:
+        node = [{
+            "type": "buildIn", "name": "apple:dissolve", "objectID": "X",
+            "baseLayer": {"initialState": {"position": {"pointX": 0, "pointY": 0}, "width": 10, "height": 10}},
+        }]
+        assert probe._walk_character_rects(node) == []
+
+    def test_defaults_anchor_to_center_when_unspecified(self) -> None:
+        node = [_character_effect("A", 50, 50, 10, 10, anchor=False)]
+        assert probe._walk_character_rects(node) == [{"x": 45.0, "y": 45.0, "w": 10.0, "h": 10.0}]
+
+    def test_recurses_into_nested_effects(self) -> None:
+        node = [{"type": "buildIn", "effects": [_character_effect("A", 100, 200, 40, 60)]}]
+        assert len(probe._walk_character_rects(node)) == 1
+
+    def test_a_node_missing_geometry_is_skipped(self) -> None:
+        node = [{"name": "apple:dissolve character", "baseLayer": {"initialState": {}}}]
+        assert probe._walk_character_rects(node) == []
+
+
+class TestUnionRect:
+    def test_empty_is_none(self) -> None:
+        assert probe._union_rect([]) is None
+
+    def test_unions_the_bounding_box(self) -> None:
+        rects = [{"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}, {"x": 20.0, "y": -5.0, "w": 10.0, "h": 10.0}]
+        assert probe._union_rect(rects) == {"x": 0.0, "y": -5.0, "w": 30.0, "h": 15.0}
+
+
+class TestCharacterRegionRect:
+    def test_unions_every_character_build_on_the_slide(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        export_root = tmp_path / "export"
+        uuid = "SLIDE-UUID"
+        slide_dir = export_root / "assets" / uuid
+        slide_dir.mkdir(parents=True)
+        events = [
+            {"automaticPlay": False, "effects": [_character_effect("A", 100, 100, 40, 40)]},
+            {"automaticPlay": False, "effects": [_character_effect("B", 300, 300, 40, 40)]},
+            {"automaticPlay": False, "effects": []},
+        ]
+        (slide_dir / f"{uuid}.json").write_text(json.dumps({"events": events, "assets": {}}))
+        rect = probe.character_region_rect(export_root, {"exportedUuid": uuid})
+        assert rect == {"x": 80.0, "y": 80.0, "w": 240.0, "h": 240.0}
+
+    def test_missing_slide_json_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        assert probe.character_region_rect(tmp_path, {"exportedUuid": "nope"}) is None
+
+    def test_malformed_slide_json_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        export_root = tmp_path / "export"
+        uuid = "SLIDE-UUID"
+        slide_dir = export_root / "assets" / uuid
+        slide_dir.mkdir(parents=True)
+        (slide_dir / f"{uuid}.json").write_text("{not valid json")
+        assert probe.character_region_rect(export_root, {"exportedUuid": uuid}) is None
+
+    def test_events_not_a_list_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "safe_export_file", lambda root, rel: root / rel)
+        export_root = tmp_path / "export"
+        uuid = "SLIDE-UUID"
+        slide_dir = export_root / "assets" / uuid
+        slide_dir.mkdir(parents=True)
+        (slide_dir / f"{uuid}.json").write_text(json.dumps({"events": None, "assets": {}}))
+        assert probe.character_region_rect(export_root, {"exportedUuid": uuid}) is None
+
+    def test_missing_uuid_is_none(self) -> None:
+        assert probe.character_region_rect(Path("/nonexistent"), {}) is None
+
+
+class TestResolveNoConsumption:
+    """Codex round 2: missing/unreadable character geometry must make the
+    no-consumption check inconclusive, never silently True -- and must never
+    touch the player to get there."""
+
+    def test_missing_character_rect_is_inconclusive_without_touching_the_player(self) -> None:
+        result = probe.resolve_no_consumption(None, "2", None, {"s": 1}, execute_record=None)
+        assert result["verdict"] is None
+        assert "characters region rect is unavailable" in result["reason"]
+
+    def test_invalid_stage_map_is_inconclusive_without_touching_the_player(self) -> None:
+        result = probe.resolve_no_consumption(None, "2", {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, None, execute_record=None)
+        assert result["verdict"] is None
+        assert "stage map" in result["reason"]
+
+
+class TestGotoTelemetry:
+    def test_extracts_the_four_autoplay_fields(self) -> None:
+        record = {
+            "autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"], "autoPlayFired": True,
+            "autoPlayDeferredReason": None, "operation": "goTo", "slide": 3,
+        }
+        assert probe.goto_telemetry(record) == {
+            "autoPlayRunLength": 1, "autoPlayRunKinds": ["apple:movie-start"],
+            "autoPlayFired": True, "autoPlayDeferredReason": None,
+        }
+
+    def test_missing_record_is_all_none(self) -> None:
+        assert probe.goto_telemetry(None) == {field: None for field in probe.GOTO_TELEMETRY_FIELDS}
+
+
+class TestTelemetryPresent:
+    def test_all_fields_present_is_true_even_with_null_values(self) -> None:
+        record = {field: None for field in probe.GOTO_TELEMETRY_FIELDS}
+        assert probe.telemetry_present(record) is True
+
+    def test_missing_record_is_inconclusive(self) -> None:
+        assert probe.telemetry_present(None) is None
+
+    def test_partial_record_is_inconclusive(self) -> None:
+        assert probe.telemetry_present({"autoPlayRunLength": 1}) is None
+
+
+class _ShotTransport:
+    def __init__(self, shots: list[str]) -> None:
+        self.shots = shots
+        self.calls = 0
+
+    def call(self, method: str, **params: Any) -> dict[str, Any]:
+        assert method == "Page.captureScreenshot"
+        data = self.shots[min(self.calls, len(self.shots) - 1)]
+        self.calls += 1
+        return {"data": data}
+
+
+def _png_b64_from_array(image: np.ndarray) -> str:
+    ok, buffer = cv2.imencode(".png", image)
+    assert ok
+    return base64.b64encode(buffer.tobytes()).decode("ascii")
+
+
+class TestScoreStaticControl:
+    """Codex round 2: a black or wrong-slide capture must fail even though every movie rect is
+    correctly DEAD-expected there -- scored on the area OUTSIDE every expected movie rect."""
+
+    def test_all_black_frame_fails_the_non_black_check(self) -> None:
+        shot = png_b64(40, 40, fill=0)
+        transport = _ShotTransport([shot, shot])
+        result = probe.score_static_control(transport, [], gap_s=0.0)
+        assert result["verdict"] is False
+        assert "no rendered content" in result["reason"]
+
+    def test_bright_content_outside_the_excluded_rect_passes(self) -> None:
+        image = np.zeros((40, 40, 3), dtype=np.uint8)
+        image[0:10, 0:10] = 200
+        shot = _png_b64_from_array(image)
+        transport = _ShotTransport([shot, shot])
+        result = probe.score_static_control(transport, [{"x": 10, "y": 10, "w": 30, "h": 30}], gap_s=0.0)
+        assert result["verdict"] is True
+
+    def test_bright_content_only_inside_the_excluded_rect_still_fails(self) -> None:
+        image = np.zeros((40, 40, 3), dtype=np.uint8)
+        image[10:40, 10:40] = 200
+        shot = _png_b64_from_array(image)
+        transport = _ShotTransport([shot, shot])
+        result = probe.score_static_control(transport, [{"x": 10, "y": 10, "w": 30, "h": 30}], gap_s=0.0)
+        assert result["verdict"] is False
+        assert "no rendered content" in result["reason"]
+
+    def test_unstable_content_outside_the_rect_fails(self) -> None:
+        first = np.zeros((40, 40, 3), dtype=np.uint8)
+        first[0:10, 0:10] = 200
+        second = np.zeros((40, 40, 3), dtype=np.uint8)
+        second[0:10, 0:10] = 50
+        transport = _ShotTransport([_png_b64_from_array(first), _png_b64_from_array(second)])
+        result = probe.score_static_control(transport, [], gap_s=0.0)
+        assert result["verdict"] is False
+        assert "changed unexpectedly" in result["reason"]
+
+    def test_excluding_the_whole_frame_is_inconclusive(self) -> None:
+        shot = png_b64(40, 40, fill=200)
+        transport = _ShotTransport([shot, shot])
+        result = probe.score_static_control(transport, [{"x": 0, "y": 0, "w": 40, "h": 40}], gap_s=0.0)
+        assert result["verdict"] is None
+
+    def test_mismatched_shots_fail(self) -> None:
+        transport = _ShotTransport([png_b64(40, 40, fill=200), png_b64(20, 20, fill=200)])
+        result = probe.score_static_control(transport, [], gap_s=0.0)
+        assert result["verdict"] is False
+        assert "empty or mismatched" in result["reason"]
+
+
+def _g_destination(from_ordinal: int, to_ordinal: int, verdict: bool | None, reasons: Sequence[str] = ()) -> dict[str, Any]:
+    return {"fromOrdinal": from_ordinal, "toOrdinal": to_ordinal, "verdict": verdict, "reasons": list(reasons)}
+
+
+class TestDestinationsOf:
+    def test_reads_a_list_of_dicts(self) -> None:
+        entry = {"destinations": [{"a": 1}, "not a dict", {"b": 2}]}
+        assert probe.destinations_of(entry) == [{"a": 1}, {"b": 2}]
+
+    def test_missing_or_wrong_shape_is_empty(self) -> None:
+        assert probe.destinations_of(None) == []
+        assert probe.destinations_of({}) == []
+        assert probe.destinations_of({"destinations": "nope"}) == []
+
+
+def _g_arm(destinations: list[dict[str, Any]], *, output_visible: bool = True, stop_error: str | None = None) -> dict[str, Any]:
+    arm: dict[str, Any] = {"destinations": destinations, "outputVisible": output_visible}
+    if stop_error is not None:
+        arm["stopError"] = stop_error
+    return arm
+
+
+def _all_true_g_arm() -> dict[str, Any]:
+    return _g_arm([_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX])
+
+
+class TestOverallStatusG:
+    def test_all_true_both_arms_passes(self) -> None:
+        result = {"armed": _all_true_g_arm(), "nullControl": _all_true_g_arm()}
+        assert probe.overall_status_g(result) == ("pass", [])
+
+    def test_a_false_armed_destination_fails(self) -> None:
+        destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
+        destinations[0] = _g_destination(1, 2, False, ["movie rect stayed dead"])
+        result = {"armed": _g_arm(destinations), "nullControl": _all_true_g_arm()}
+        status, reasons = probe.overall_status_g(result)
+        assert status == "fail"
+        assert any("armed goTo 1->2" in reason for reason in reasons)
+
+    def test_a_green_null_control_fails_the_pass(self) -> None:
+        """A null-control destination reading LIVE (verdict False, missing its
+        DEAD expectation) is the "green null control" the plan requires to
+        fail the whole pass -- never a silent pass alongside a clean armed
+        arm."""
+        destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
+        destinations[0] = _g_destination(1, 2, False, ["expected dead, read live"])
+        result = {"armed": _all_true_g_arm(), "nullControl": _g_arm(destinations)}
+        status, reasons = probe.overall_status_g(result)
+        assert status == "fail"
+        assert any("null control goTo 1->2" in reason for reason in reasons)
+
+    def test_any_inconclusive_destination_makes_the_pass_inconclusive(self) -> None:
+        destinations = [_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX]
+        destinations[0] = _g_destination(1, 2, None)
+        result = {"armed": _g_arm(destinations), "nullControl": _all_true_g_arm()}
+        status, _ = probe.overall_status_g(result)
+        assert status == "inconclusive"
+
+    def test_missing_destinations_is_an_error(self) -> None:
+        status, _ = probe.overall_status_g({"armed": _g_arm([]), "nullControl": _all_true_g_arm()})
+        assert status == "error"
+
+    def test_output_not_visible_fails_even_with_all_true_destinations(self) -> None:
+        result = {"armed": _g_arm([_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX], output_visible=False), "nullControl": _all_true_g_arm()}
+        status, reasons = probe.overall_status_g(result)
+        assert status == "fail"
+        assert any("armed output was not visible" in reason for reason in reasons)
+
+    def test_a_stop_error_fails(self) -> None:
+        result = {
+            "armed": _g_arm([_g_destination(f, t, True) for f, t in probe.GOTO_MATRIX], stop_error="boom"),
+            "nullControl": _all_true_g_arm(),
+        }
+        status, reasons = probe.overall_status_g(result)
+        assert status == "fail"
+        assert any("armed player.stop() failed: boom" in reason for reason in reasons)

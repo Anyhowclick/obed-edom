@@ -21,6 +21,8 @@ class PlayerObservation:
     busy: bool = False
     output_visible: bool = False
     output: dict[str, Any] | None = None
+    auto_play_deferred: str | None = None
+    go_to_target_reached: bool = False
 
 
 class PlayerCommandRejected(RuntimeError):
@@ -85,6 +87,7 @@ class LiveSessionService:
                 "sceneId": None,
                 "buildIndex": None,
                 "outputVisible": False,
+                "autoPlayDeferred": None,
                 "slides": slides,
                 "output": {**deepcopy(identity.get("output", {})), "transport": "hdmi", "alpha": False, "audio": False},
                 "capabilities": self._disabled_capabilities(),
@@ -172,7 +175,7 @@ class LiveSessionService:
         session.pending_navigation.clear()
         session.pending_visibility.clear()
 
-    def _apply(self, session: _Session, observed: PlayerObservation) -> None:
+    def _apply(self, session: _Session, observed: PlayerObservation, *, executed_operation: str | None = None) -> None:
         state = session.state
         update = {
             "originalSlide": observed.original_slide,
@@ -183,22 +186,29 @@ class LiveSessionService:
         }
         if observed.output is not None:
             update["output"] = deepcopy(observed.output)
+        if executed_operation == "goTo":
+            update["autoPlayDeferred"] = observed.auto_play_deferred
+        elif executed_operation == "advance":
+            update["autoPlayDeferred"] = None
         if any(state.get(key) != value for key, value in update.items()):
             state.update(update)
             state["revision"] += 1
         state.pop("error", None)
         session.player_revision = observed.revision
-        if not observed.busy:
-            for request_id, baseline in tuple(session.pending_navigation.items()):
-                operation, target, scene, revision = baseline
-                changed = observed.scene_id != scene or observed.revision != revision
-                complete = changed if operation == "advance" else observed.original_slide == target and observed.revision != revision
-                if complete:
-                    self._completed(session, request_id)
-                else:
-                    payload, _request = session.requests[request_id]
-                    self._store(session, request_id, payload, "rejected", "No observed navigation change.")
-            session.pending_navigation.clear()
+        for request_id, baseline in tuple(session.pending_navigation.items()):
+            operation, target, scene, revision = baseline
+            target_reached = operation == "goTo" and observed.go_to_target_reached
+            if observed.busy and not target_reached:
+                continue
+            changed = observed.scene_id != scene or observed.revision != revision
+            on_target = target_reached or observed.original_slide == target
+            complete = changed if operation == "advance" else on_target and observed.revision != revision
+            if complete:
+                self._completed(session, request_id)
+            else:
+                payload, _request = session.requests[request_id]
+                self._store(session, request_id, payload, "rejected", "No observed navigation change.")
+            session.pending_navigation.pop(request_id, None)
         for request_id, visible in tuple(session.pending_visibility.items()):
             if observed.output_visible == visible:
                 self._completed(session, request_id)
@@ -375,7 +385,7 @@ class LiveSessionService:
                 if not isinstance(observed, PlayerObservation):
                     raise ValueError("Player returned no observation for the command.")
                 self._apply_capabilities(session, caps)
-                self._apply(session, observed)
+                self._apply(session, observed, executed_operation=operation)
                 return self._reply(session, request_id)
 
         except PlayerCommandRejected as exc:
