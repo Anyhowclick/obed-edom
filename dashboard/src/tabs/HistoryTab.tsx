@@ -101,7 +101,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                 {feature === "diff" && <CheckResultView job={active} onOpen={setOpen} onRename={rename} />}
                 {isLeftoverVisual && <DiffResultView job={active} onOpen={setOpen} onRename={rename} />}
                 {feature === "check" && <CheckResultView job={active} onOpen={setOpen} onRename={rename} />}
-                {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} onRename={rename} />}
+                {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" buildPreview={false} onOpen={setOpen} onRename={rename} />}
                 {feature === "resize" && (
                   <>
                     {(active.result as { destPath?: string } | null)?.destPath && (

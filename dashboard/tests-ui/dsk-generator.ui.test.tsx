@@ -302,17 +302,18 @@ describe("DskGenerator DSK template", () => {
     expect(within(row).getByRole("button", { name: "Forget DSK template" })).toBeInTheDocument();
   });
 
-  it("shows the required state with a required marker and Choose on this Mac when no template is remembered", async () => {
+  it("shows the optional state with Choose on this Mac when no template is remembered", async () => {
     mockSession(null);
     await renderGenerator();
 
     const row = getDeckRow("DSK template");
-    expect(within(row).getByText("Required")).toBeInTheDocument();
+    expect(within(row).queryByText("Required")).toBeNull();
+    expect(within(row).getByText(/^Optional\./)).toBeInTheDocument();
     expect(within(row).getByRole("button", { name: "Choose on this Mac" })).toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: "Change DSK template" })).toBeNull();
   });
 
-  it("Forget returns the row to the required state and disables Propose", async () => {
+  it("Forget returns the row to the optional state and keeps Propose enabled", async () => {
     rememberTemplate("/tmp/template.key");
     mockSession(null);
     await renderGenerator();
@@ -321,31 +322,46 @@ describe("DskGenerator DSK template", () => {
     await act(async () => {
       fireEvent.click(within(row).getByRole("button", { name: "Forget DSK template" }));
     });
+    await act(async () => {
+      fireEvent.click(within(getWell("Finalised FW .key")).getByRole("button", { name: "Choose on this Mac" }));
+    });
 
-    expect(within(row).getByText("Required")).toBeInTheDocument();
     expect(within(row).getByRole("button", { name: "Choose on this Mac" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Propose" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Propose" })).toBeEnabled();
   });
 
-  it("disables Propose and shows a reason until a template is chosen", async () => {
+  it("proposes without a template, sending no dskTemplate", async () => {
     mockSession(null);
     await renderGenerator();
 
     await act(async () => {
       fireEvent.click(within(getWell("Finalised FW .key")).getByRole("button", { name: "Choose on this Mac" }));
     });
+    expect(screen.queryByText("Choose the DSK template to continue.")).toBeNull();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Propose" }));
+    });
 
-    expect(screen.getByRole("button", { name: "Propose" })).toBeDisabled();
-    expect(screen.getByText("Choose the DSK template to continue.")).toBeInTheDocument();
+    expect(startDsk).toHaveBeenCalledWith("/tmp/fw.key", expect.objectContaining({ dskTemplate: undefined }));
   });
 
-  it("disables Run and shows a reason until a template is chosen", async () => {
+  it("Run is enabled without a template and applies with no dskTemplate", async () => {
     mockSession(reviewJob);
     await renderGenerator();
 
     const runButton = screen.getByRole("button", { name: "Run" });
-    expect(runButton).toBeDisabled();
-    expect(within(runButton.closest(".actions") as HTMLElement).getByText("Choose the DSK template to continue.")).toBeInTheDocument();
+    expect(runButton).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+
+    expect(applyDsk).toHaveBeenCalledWith(
+      "job-1",
+      expect.objectContaining({ schemaVersion: 2, sourceFingerprint: "fixture" }),
+      "/tmp/workspace",
+      0,
+      undefined
+    );
   });
 
   it("sends the chosen template to startDsk as dskTemplate", async () => {

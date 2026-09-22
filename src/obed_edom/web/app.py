@@ -50,6 +50,7 @@ from obed_edom.dsk_live import (
     DEFAULT_TRANSPARENT_LAYOUT_NAMES,
     guard_out_dir,
     keynote_running,
+    owned_alpha_safe_layout,
     quit_and_wait_for_exit,
 )
 from obed_edom.dsk_movie_export import (
@@ -757,7 +758,7 @@ def create_app() -> FastAPI:
             except ValueError:
                 raise HTTPException(400, f"Bad text_slide_words: {text_slide_words!r}")
         do_content_only = _form_flag(content_only)
-        template_path = _validate_dsk_template(dsk_template, key, content_only=do_content_only)
+        template_path = _resolve_dsk_layout_donor(dsk_template, key, reference, content_only=do_content_only)
         job = RUNNER.submit(
             "dsk",
             lambda j, p=key, r=reference, t=template_path, sl=sel, co=do_content_only, w=words: (
@@ -2154,14 +2155,15 @@ def _save_v2_dsk_review(job_id: str, payload: DskDecisionsBody) -> dict:
         return RUNNER.public_dict(updated) if updated else result
 
 
-def _require_dsk_template_field(raw: str) -> Path:
+def _require_dsk_template_field(raw: str, *, reason: str | None = None) -> Path:
     stripped = (raw or "").strip()
     if not stripped:
         raise HTTPException(
             400,
             detail={
                 "field": "dskTemplate",
-                "message": "Choose the DSK template (.key) — the lower-thirds deck that supplies the DSK layouts.",
+                "message": reason
+                or "Choose the DSK template (.key) — the lower-thirds deck that supplies the DSK layouts.",
             },
         )
     template_path = Path(stripped).expanduser()
@@ -2176,8 +2178,8 @@ def _require_dsk_template_field(raw: str) -> Path:
     return template_path.resolve()
 
 
-def _validate_dsk_template(raw: str, fw_deck: Path, *, content_only: bool) -> Path:
-    template_path = _require_dsk_template_field(raw)
+def _validate_dsk_template(raw: str, fw_deck: Path, *, content_only: bool, reason: str | None = None) -> Path:
+    template_path = _require_dsk_template_field(raw, reason=reason)
     layout_names = DEFAULT_TRANSPARENT_LAYOUT_NAMES if content_only else DEFAULT_DSK_LAYOUT_NAMES
     try:
         check_layout_import_preconditions(
@@ -2188,18 +2190,49 @@ def _validate_dsk_template(raw: str, fw_deck: Path, *, content_only: bool) -> Pa
     return template_path
 
 
+def _resolve_dsk_layout_donor(
+    raw_template: str, fw_deck: Path, reference: Path | None, *, content_only: bool
+) -> Path | None:
+    """The deck that donates the DSK layouts, in order: none when `fw_deck` already owns an
+    alpha-safe transparent layout, else the reference deck when it can donate one, else the
+    template. The full (text) path always needs the template."""
+    if not content_only:
+        return _validate_dsk_template(raw_template, fw_deck, content_only=False)
+    names = DEFAULT_TRANSPARENT_LAYOUT_NAMES
+    if owned_alpha_safe_layout(fw_deck, names) is not None:
+        return None
+    if reference is not None:
+        try:
+            check_layout_import_preconditions(fw_deck, layout_template=reference, layout_names=names)
+            return reference.resolve()
+        except AssemblyRefusal:
+            pass
+    reason = (
+        f"Choose the DSK template (.key): {fw_deck.name} has no transparent "
+        f"{names[0]!r} layout and no reference deck supplies one."
+    )
+    return _validate_dsk_template(raw_template, fw_deck, content_only=True, reason=reason)
+
+
 def _resolve_apply_dsk_template(
     job_id: str, result: dict[str, Any], override: str | None
-) -> tuple[dict[str, Any], Path]:
+) -> tuple[dict[str, Any], Path | None]:
     raw_override = (override or "").strip()
     if not raw_override:
-        return result, _require_dsk_template_field(str(result.get("dskTemplate") or ""))
+        if "dskTemplate" not in result:
+            return result, _require_dsk_template_field("")
+        stored = str(result.get("dskTemplate") or "")
+        if not stored and result.get("contentOnly"):
+            return result, None
+        return result, _require_dsk_template_field(stored)
     fw_deck = Path(str(result.get("path") or "")).expanduser()
-    template_path = _validate_dsk_template(
-        raw_override, fw_deck, content_only=bool(result.get("contentOnly"))
+    reference_raw = result.get("referenceDeck")
+    reference = Path(str(reference_raw)).expanduser() if reference_raw else None
+    template_path = _resolve_dsk_layout_donor(
+        raw_override, fw_deck, reference, content_only=bool(result.get("contentOnly"))
     )
     result = dict(result)
-    result["dskTemplate"] = str(template_path)
+    result["dskTemplate"] = str(template_path) if template_path else ""
     seeded = RUNNER.update_result(job_id, result)
     if seeded:
         result = dict(seeded.result or result)
@@ -2210,7 +2243,7 @@ def _run_dsk_propose(
     job: Job,
     path: Path,
     reference_deck: Path | None,
-    dsk_template: Path,
+    dsk_template: Path | None,
     slide_range: frozenset[int] | None,
     content_only: bool,
     text_slide_words: int | None,
@@ -2295,7 +2328,7 @@ def _run_dsk_propose(
         "phase": "review",
         "path": str(path),
         "referenceDeck": str(reference_deck) if reference_deck else None,
-        "dskTemplate": str(dsk_template),
+        "dskTemplate": str(dsk_template) if dsk_template else "",
         "contentOnly": content_only,
         "textSlideWords": words,
         "slideRange": sorted(slide_range) if slide_range else None,
@@ -2309,10 +2342,10 @@ def _run_dsk_propose(
 
 def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(proposal.get("path") or "")).expanduser()
-    raw_dsk_template = proposal.get("dskTemplate")
-    if not raw_dsk_template:
+    if "dskTemplate" not in proposal:
         raise ValueError("Missing DSK template; re-propose to choose one.")
-    dsk_template = Path(str(raw_dsk_template)).expanduser()
+    raw_dsk_template = str(proposal.get("dskTemplate") or "")
+    dsk_template = Path(raw_dsk_template).expanduser() if raw_dsk_template else None
     reference_raw = proposal.get("referenceDeck")
     reference_deck = Path(reference_raw).expanduser() if reference_raw else None
     content_only = bool(proposal.get("contentOnly"))
@@ -2610,7 +2643,7 @@ def _run_dsk_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
         "wallS": result.wall_s,
         "pages": pages,
         "contentOnly": content_only,
-        "dskTemplate": str(dsk_template),
+        "dskTemplate": str(dsk_template) if dsk_template else "",
         **({"review": review, "reviewMode": "v2"} if review is not None else {}),
         **({"exportDir": str(out_dir)} if raw_export else {}),
     }

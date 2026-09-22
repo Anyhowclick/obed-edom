@@ -493,16 +493,7 @@ def _normalize_even_crop(x: int, y: int, w: int, h: int, wall_w: int, wall_h: in
 
 
 def _resolve_black_layout_name(fw_deck: Path, candidates: Sequence[str]) -> str | None:
-    """`candidates` are alternative aliases (any one acceptable), not all required.
-    Returns the first one `fw_deck` already owns alpha-safely -- no import needed --
-    or `None` when it owns none of them safely."""
-    fw_objects, _fw_file, _fw_file_ids = dsk_live._load_deck(fw_deck)
-    fw_canvas = dsk_live._canvas_size(fw_objects)
-    for name in candidates:
-        owned = dsk_live._find_layout_by_name(fw_objects, name)
-        if owned is not None and dsk_live.layout_alpha_safe(owned, fw_objects, fw_canvas):
-            return name
-    return None
+    return dsk_live.owned_alpha_safe_layout(fw_deck, candidates)
 
 
 def _resolve_black_layout_donor(layout_template: Path, candidates: Sequence[str]) -> str | None:

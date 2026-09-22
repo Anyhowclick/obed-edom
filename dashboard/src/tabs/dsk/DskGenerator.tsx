@@ -202,10 +202,6 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
 
   async function run() {
     if (!job) return;
-    if (!dskTemplate) {
-      setError("Choose the DSK template first.");
-      return;
-    }
     setError(null);
     let chosen;
     try {
@@ -303,10 +299,9 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
         />
       </label>
       <div className="actions">
-        <button className="btn" type="button" disabled={!keynote || !dskTemplate || !!busy} onClick={propose}>
+        <button className="btn" type="button" disabled={!keynote || !!busy} onClick={propose}>
           Propose
         </button>
-        {!dskTemplate && <span className="note">Choose the DSK template to continue.</span>}
       </div>
       {result?.phase === "review" && job && (
         <>
@@ -315,11 +310,10 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
             <p className="note">Skipped: {skipped.map((s) => `${s.slide} (${s.reason})`).join(", ")}</p>
           )}
           <div className="actions">
-            <button className="btn" type="button" disabled={!!busy || !dskTemplate} onClick={run}>
+            <button className="btn" type="button" disabled={!!busy} onClick={run}>
               Run
             </button>
-            {!dskTemplate && <span className="note">Choose the DSK template to continue.</span>}
-          </div>
+              </div>
         </>
       )}
       <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />

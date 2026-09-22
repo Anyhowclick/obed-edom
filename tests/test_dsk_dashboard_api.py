@@ -34,6 +34,7 @@ def no_keynote(monkeypatch):
     # stand-ins, so it is a no-op by default. Tests exercising the precondition
     # itself re-patch this to something that raises.
     monkeypatch.setattr(app_mod, "check_layout_import_preconditions", lambda *_a, **_k: None)
+    monkeypatch.setattr(app_mod, "owned_alpha_safe_layout", lambda *_a, **_k: None)
     yield
 
 
@@ -2479,8 +2480,96 @@ def test_dsk_propose_refuses_blank_template(tmp_path):
     assert res.status_code == 400
     assert res.json()["detail"] == {
         "field": "dskTemplate",
-        "message": "Choose the DSK template (.key) — the lower-thirds deck that supplies the DSK layouts.",
+        "message": "Choose the DSK template (.key): FW.key has no transparent 'Blank Black' layout and no reference deck supplies one.",
     }
+
+
+def test_dsk_propose_needs_no_template_when_fw_deck_owns_blank_black(tmp_path, monkeypatch):
+    """Donor hierarchy tier 1: the FW deck already owns an alpha-safe transparent layout, so
+    no template is required and the proposal records an empty donor."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+    monkeypatch.setattr(app_mod, "owned_alpha_safe_layout", lambda _deck, names: names[0])
+
+    client = TestClient(app)
+    res = client.post("/api/dsk", data={"path": str(deck), "dsk_template": ""})
+    assert res.status_code == 200, res.text
+    job = _wait(client, res.json()["id"])
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["dskTemplate"] == ""
+
+
+def test_dsk_propose_reference_deck_donates_before_template(tmp_path, monkeypatch):
+    """Donor hierarchy tier 2: a reference deck that passes the layout-import precondition
+    is the donor, and the template is not consulted at all."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    reference = tmp_path / "Reference_DSK.key"
+    reference.write_text("reference")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+    seen = []
+    monkeypatch.setattr(
+        app_mod, "check_layout_import_preconditions",
+        lambda fw_deck, *, layout_template, layout_names: seen.append(layout_template),
+    )
+
+    client = TestClient(app)
+    res = client.post("/api/dsk", data={"path": str(deck), "reference_deck": str(reference), "dsk_template": ""})
+    assert res.status_code == 200, res.text
+    job = _wait(client, res.json()["id"])
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["dskTemplate"] == str(reference.resolve())
+    assert seen == [reference]
+
+
+def test_dsk_propose_falls_back_to_template_when_reference_cannot_donate(tmp_path, monkeypatch):
+    """Donor hierarchy tier 3: a reference deck that fails the precondition is skipped and
+    the template is validated instead."""
+    import obed_edom.web.app as app_mod
+    from obed_edom.dsk_assemble import AssemblyRefusal
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    reference = tmp_path / "Reference_DSK.key"
+    reference.write_text("reference")
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("template")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+
+    def check(fw_deck, *, layout_template, layout_names):
+        if layout_template == reference:
+            raise AssemblyRefusal("no layout named 'Blank Black' found in layout template")
+
+    monkeypatch.setattr(app_mod, "check_layout_import_preconditions", check)
+
+    client = TestClient(app)
+    res = client.post(
+        "/api/dsk", data={"path": str(deck), "reference_deck": str(reference), "dsk_template": str(template)}
+    )
+    assert res.status_code == 200, res.text
+    job = _wait(client, res.json()["id"])
+    assert job["result"]["dskTemplate"] == str(template.resolve())
+
+
+def test_dsk_propose_full_text_path_always_requires_template(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    monkeypatch.setattr(app_mod, "owned_alpha_safe_layout", lambda _deck, names: names[0])
+
+    client = TestClient(app)
+    res = client.post("/api/dsk", data={"path": str(deck), "dsk_template": "", "content_only": "false"})
+    assert res.status_code == 400
+    assert res.json()["detail"]["field"] == "dskTemplate"
 
 
 def test_dsk_propose_refuses_missing_template_field(tmp_path):
