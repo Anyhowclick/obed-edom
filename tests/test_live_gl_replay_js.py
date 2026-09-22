@@ -135,21 +135,9 @@ OPACITY_UNPROVEN_REASONS = [
     "identity",
 ]
 
-# Reasons that can only be reached before the seam/poster/handle exist, so no
-# `release()` and no handle teardown is owed for them.
-PRE_ARM_REASONS = {
-    "planUnreadable",
-    "runtimeSeamAbsent",
-    "glReplayUnavailable",
-    "settleSignalAbsent",
-    "rvfcUnavailable",
-    "observerNotArmed",
-    "canvasShape",
-}
-
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "9c5e63798c0e71b1520c045a171efb4a7176f10390e25ac2ddb0b993e959558e"
+PINNED_JS_SHA256 = "39bb40ebf54d28e612ed65961a4da23ddc266be56d865fbf7bb21a5566908610"
 
 
 # =======================================================================================
@@ -504,10 +492,6 @@ def test_settle_frame_measured_patch_is_exact_alpha_arithmetic():
 # 2. Node sandbox
 # =======================================================================================
 
-# =======================================================================================
-# 2. Node sandbox
-# =======================================================================================
-#
 # The fake platform below is a state machine, not an emulator. Its GL:
 #   * holds the five player programs of the fixture with real uniform tables, so
 #     `getActiveUniform`/`getUniformLocation`/`getUniform` answer truthfully;
@@ -610,6 +594,9 @@ function FakeGL(canvas) {
   };
   this._draw = function (slotFromOffset) {
     gl._rec('draw');
+    // A driver failure that throws WITHOUT setting a GL error — `getError()` stays
+    // clean, so only the exception itself can reveal it (codex r1 spec 1).
+    if (gl._drawThrows) throw new Error('draw refused');
     const prog = gl._current;
     if (!prog) { gl._error = GLC.INVALID_OPERATION; return; }
     const opacity = prog.uniforms.has('Opacity') ? prog.uniforms.get('Opacity').value : 1;
@@ -744,6 +731,7 @@ FakeGL.prototype.bindFramebuffer = function (t, f) { this._fbo = f; };
 FakeGL.prototype.framebufferTexture2D = function (t, a, tt, tex) { this._fboTex = tex; };
 FakeGL.prototype.checkFramebufferStatus = function () { return this._fboStatus; };
 FakeGL.prototype.readPixels = function (x, y, w, h, fmt, type, out) {
+  if (this._readPixelsThrows && !this._fbo) throw new Error('readPixels refused');
   if (this._fbo) {                            // poster readback off the attached texture
     const col = (this._fboTex && this._fboTex.colour) || [0, 0, 0, 255];
     for (let i = 0; i < w * h; i++) {
@@ -934,6 +922,12 @@ if (!CFG.noObedLive) {
                           ready: this._ready, sceneId: this._sceneId }; },
   };
 }
+if (CFG.nonWritableMethod) {
+  // Assignment to this in non-strict code fails SILENTLY; the module must notice.
+  Object.defineProperty(FakeGL.prototype, CFG.nonWritableMethod, {
+    value: FakeGL.prototype[CFG.nonWritableMethod], writable: false, configurable: false,
+  });
+}
 const HTMLCanvasElement = FakeCanvas;
 const HTMLVideoElement = FakeVideo;
 const WebGLRenderingContext = FakeGL;
@@ -949,9 +943,23 @@ if (CFG.seedDebug && !CFG.debugForceFail) window.__OBED_GL_REPLAY__ = {};
 const RAW = { useProgram: FakeGL.prototype.useProgram, uniform1f: FakeGL.prototype.uniform1f };
 
 // ------------------------------------------------------------------ install the module
+// The product module is injected as a plain <script>, so it is NOT strict mode.
+// Evaluating it through the Function constructor reproduces that; inlining it here
+// would inherit this file's own `use strict`, under which a failed assignment to a
+// non-writable prototype method THROWS instead of failing silently — the exact
+// difference codex r1 spec 6 turns on.
 let installThrew = null;
 try {
-__MODULE__
+  const moduleFn = new Function(
+    'window', 'document', 'location', 'performance',
+    'HTMLCanvasElement', 'HTMLVideoElement', 'WebGLRenderingContext',
+    'MutationObserver', 'requestAnimationFrame', 'cancelAnimationFrame',
+    'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
+    __MODULE_SOURCE__);
+  moduleFn(window, document, location, performance,
+           FakeCanvas, FakeVideo, FakeGL,
+           MutationObserver, requestAnimationFrame, cancelAnimationFrame,
+           setTimeout, clearTimeout, setInterval, clearInterval);
 } catch (e) { installThrew = String((e && e.stack) || e); }
 const M = window.__OBED_GL_REPLAY__ && window.__OBED_GL_REPLAY__.version
   ? window.__OBED_GL_REPLAY__ : null;
@@ -1029,6 +1037,7 @@ function snapshotState() {
     } : null,
     drawnOpacities: gl ? gl._drawn.map((d) => d.opacity) : null,
     drawnSlots: gl ? gl._drawn.map((d) => d.slot) : null,
+    currentProgramSlot: gl && gl._current ? gl._current.slot : null,
     uploads: world.uploads.length,
     harnessErrors: world.harnessErrors,
     opacityAfter: gl ? FIXTURE.programs.map(
@@ -1055,7 +1064,8 @@ async function armAndGoLive(out) {
   stage.isConnected = true;
   body.appendChild(stage);
   world.canvas = canvas;
-  stage.appendChild(canvas);
+  // Connected, but NOT under `#stage` when the test asks for that.
+  (CFG.canvasOutsideStage ? body : stage).appendChild(canvas);
   const gl = canvas.getContext('webgl');
   world.gl = gl;
   if (CFG.videoNotReady) world.video.readyState = 1;
@@ -1075,6 +1085,7 @@ async function armAndGoLive(out) {
   if (CFG.floodWithoutClear) {
     for (let i = 0; i < 600; i++) gl.enable(GLC.BLEND);
   }
+  if (CFG.readPixelsThrowsAtArmPost) gl._readPixelsThrows = true;
   if (window.__obedLive) window.__obedLive._ready = true;
   await settle(CFG.settleTicks === undefined ? 14 : CFG.settleTicks);
   return gl;
@@ -1124,6 +1135,35 @@ async function main() {
       await pumpUntil(handle.resume());
       out.afterResume = { seam: world.seamCalls.slice(), video: world.videoCalls.slice() };
     }
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'draw_throws') {
+    gl.callLog.length = 0;
+    gl._drawThrows = true;              // throws, and getError() stays clean
+    await settle(4);
+    out.glErrorAfter = gl._error;
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'context_lost_event_only') {
+    // The event arrives BEFORE `isContextLost()` flips, which is legal.
+    world.rvfcDead = true;
+    rafQueue = [];
+    gl.callLog.length = 0;
+    world.canvas.dispatchEvent({ type: 'webglcontextlost', preventDefault() {} });
+    await null; await null;
+    out.callOrder = gl.callLog.slice();
+    out.isContextLostStayedFalse = gl.isContextLost() === false;
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'writeback_fails_unflagged') {
+    gl._uniform1fThrows = true;
+    gl.callLog.length = 0;
+    gl.enable(GLC.BLEND);               // the player's unflagged call
+    out.callOrder = gl.callLog.slice();
+    await settle(3);
     out.final = snapshotState();
     return out;
   }
@@ -1330,7 +1370,7 @@ def _run_sandbox(*, scenario: str = "happy", plan: object = _DEFAULT_PLAN,
     harness = (
         _SANDBOX_JS.replace("__FIXTURE__", json.dumps(SETTLE_FRAME if frame is None else frame))
         .replace("__CFG__", json.dumps(config))
-        .replace("__MODULE__", live_gl_replay_js.GL_REPLAY_JS)
+        .replace("__MODULE_SOURCE__", json.dumps(live_gl_replay_js.GL_REPLAY_JS))
     )
     result = subprocess.run([node, "-e", harness], text=True, capture_output=True)
     for line in result.stdout.splitlines():
@@ -2046,3 +2086,118 @@ def test_canvas_removal_does_not_replay_onto_a_detached_canvas():
     assert final["standDowns"] == [NORMAL_EXIT_REASON], final["standDowns"]
     assert _frames_replayed(out["callOrder"]) == 0, (
         "a frame was replayed onto a canvas that is no longer in the document")
+
+
+# --- codex r1: caught GL failures, canvas qualification, cleanup edges ------------------
+
+
+def test_recorded_draw_that_throws_without_a_gl_error_stands_down():
+    """codex r1 spec 1. `replayFrame` turns a thrown recorded call into an `errs`
+    count that every production caller discards, and a driver failure can throw
+    with `getError()` still clean — so the exception is the ONLY evidence. It must
+    take the single `glError` path, not vanish."""
+    out = _run_sandbox(scenario="draw_throws")
+    final = _assert_clean(out)
+    assert out["glErrorAfter"] == 0, "the fake set a GL error; the test would pass for free"
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    assert final["state"] == "RETIRED", final["state"]
+    assert final["handlePresent"] is False
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_read_pixels_throwing_during_arm_post_stands_down():
+    """codex r1 spec 1, the other half: `sampleOnce` swallows a read failure into
+    `bands = null`, `markerSwap` then reads `dark.length`, and that TypeError
+    escapes `armPost` into the rAF callback — leaving the module stranded in
+    ARM-POST with the seam never released and no handle ever published.
+
+    The injection is scoped to reads of the DRAWING BUFFER. A throw on every read
+    would be hit first by the poster snapshot, which reads through a bound
+    framebuffer and has its own, more specific reason — `posterUnreadable`, covered
+    by the `fboStatus` case — and would never reach the path this guards."""
+    out = _run_sandbox(scenario="arm_only", readPixelsThrowsAtArmPost=True)
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    assert final["state"] == "RETIRED", final["state"]
+    assert final["handlePresent"] is False
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+@pytest.mark.parametrize(
+    "label,cfg",
+    [
+        ("bad_canvas_id", {"canvasId": "stage-canvas"}),
+        ("connected_outside_stage", {"canvasOutsideStage": True}),
+    ],
+)
+def test_canvas_that_fails_qualification_stands_down(label, cfg):
+    """codex r1 spec 2. A context on a canvas with the wrong id, or on a connected
+    canvas that is not under `#stage`, was silently ignored — the module then sat
+    in ARM-PRE forever with no stand-down and the decoder never handed back. Both
+    must reach the single `canvasShape` site."""
+    out = _run_sandbox(scenario="arm_only", **cfg)
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["canvasShape"], (label, final["standDowns"])
+    assert final["state"] == "RETIRED", final["state"]
+    assert final["handlePresent"] is False
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_context_lost_event_exempts_cleanup_before_is_context_lost_flips():
+    """codex r1 spec 4. `standDown` recomputed the exemption from `isContextLost()`
+    alone, but the event may arrive before that flag flips. The reason itself must
+    carry the exemption, or the write-back and poster restore run on a dead
+    context."""
+    out = _run_sandbox(scenario="context_lost_event_only")
+    final = _assert_clean(out)
+    assert out["isContextLostStayedFalse"] is True, (
+        "the fake flipped isContextLost(); this test would not exercise the edge")
+    assert final["standDowns"] == ["contextLost"], final["standDowns"]
+    assert final["state"] == "RETIRED", final["state"]
+    assert [c["m"] for c in out["callOrder"]] == [], out["callOrder"]
+    releases = [c for c in final["seamCalls"] if c["fn"] == "release"]
+    assert len(releases) == 1 and releases[0]["rect"] == DESTINATION_RECT
+
+
+def test_writeback_failure_still_restores_the_current_program():
+    """codex r1 spec 5. If `uniform1f` throws, control skipped `useProgram(prev)`
+    and the player inherited whichever replay program happened to be selected."""
+    out = _run_sandbox(scenario="writeback_fails")
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["writebackFailed", NORMAL_EXIT_REASON], final["standDowns"]
+    # The recorded frame ends on `useProgram(null)`, so that is what the player
+    # must get back — not the program the write-back died on.
+    assert final["currentProgramSlot"] is None, final["currentProgramSlot"]
+    releases = [c for c in final["seamCalls"] if c["fn"] == "release"]
+    assert len(releases) == 1 and releases[0]["rect"] == DESTINATION_RECT
+    assert final["handlePresent"] is False
+
+
+def test_writeback_failure_on_the_unflagged_path_keeps_the_forwarded_call_last():
+    """codex r1 spec 5, the ordering half: a throwing write-back must not reorder
+    the stand-down around the player's own call."""
+    out = _run_sandbox(scenario="writeback_fails_unflagged")
+    final = _assert_clean(out)
+    assert set(final["standDowns"]) == {"writebackFailed", "unflaggedPlayerCall"}, \
+        final["standDowns"]
+    order = [c["m"] for c in out["callOrder"]]
+    assert order.count("enable") == 1, order
+    assert order[-1] == "enable", ("the forwarded player call was not last", order)
+    assert final["currentProgramSlot"] is None, final["currentProgramSlot"]
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_unwritable_prototype_method_refuses_installation():
+    """codex r1 spec 6. The module is injected as a plain `<script>`, so it is not
+    strict: assigning a wrapper over a non-writable prototype method fails SILENTLY.
+    Nothing would then be captured and no reason would ever be emitted, so the
+    module must read the assignment back and refuse to install."""
+    out = _run_sandbox(scenario="install_only", nonWritableMethod="clear")
+    final = out["final"]
+    assert final["installThrew"] is None, (
+        "the assignment threw — the sandbox is running the module in strict mode, "
+        "which is not how a <script> behaves")
+    assert final["standDowns"] == ["glReplayUnavailable"], final["standDowns"]
+    assert final["state"] == "RETIRED", final["state"]
+    assert final["handlePresent"] is False
+    assert "glreplay-arm" not in final["eventKinds"], final["eventKinds"]
