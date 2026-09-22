@@ -16,6 +16,18 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Fable 5.1 · 2026-09-22 · *the gates found what the reviews reasoned past* 🚪
+
+> Three Opus reviews and a Codex pass produced thirty findings, every one applied. The five that
+> mattered came from pixels: a restore replay that wrote no Opacity, a loop that died when the
+> movie ended, a lost context nobody was listening for, a stale frame left on screen, and a
+> force arm quietly erased by a "one site" refactor. On this deck only program 4 can reveal a
+> missing write; a grep that a helper is called twice proves nothing; the sandbox ran strict
+> for three rounds and nobody noticed. All gates green on the pinned sha, stub seam. G3 owns
+> the real one.
+
+---
+
 ### Claude Fable 5.1 · 2026-09-22 · *remembered where?* 🗝️
 
 > "Remembered on this Mac" was true of a browser profile and a port number. The code was fine;
