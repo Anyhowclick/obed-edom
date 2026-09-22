@@ -353,8 +353,6 @@ def _effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any]:
 
         width = _number(leaf_state, "width", where=f"slot {index} leaf", slide_name="<effect>")
         height = _number(leaf_state, "height", where=f"slot {index} leaf", slide_name="<effect>")
-        # `_check_effect_node_geometry` already requires initialState.scale == 1.0 on every
-        # node, so the only source of a real leaf scale is an explicit scale animation.
         scale_x = (
             _effect_scalar(leaf_settled["transform.scale.x"]["to"], f"slot {index} scale.x")
             if "transform.scale.x" in leaf_settled
@@ -365,9 +363,6 @@ def _effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any]:
             if "transform.scale.y" in leaf_settled
             else 1.0
         )
-        # No translation animation means no authored translation -- `m4_settled.py`'s own
-        # convention, not an invented default (unlike opacity, there is no other source to
-        # require here).
         if "transform.translation" in leaf_settled:
             tx, ty = _effect_point(leaf_settled["transform.translation"]["to"], f"slot {index} translation")
         else:
