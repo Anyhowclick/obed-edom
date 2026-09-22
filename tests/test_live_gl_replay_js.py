@@ -137,7 +137,7 @@ OPACITY_UNPROVEN_REASONS = [
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "39bb40ebf54d28e612ed65961a4da23ddc266be56d865fbf7bb21a5566908610"
+PINNED_JS_SHA256 = "985afeb1cc5722d77ff180e9318c7262b2e622ae5c4a023e16f3dcc6641f6569"
 
 
 # =======================================================================================
@@ -597,6 +597,10 @@ function FakeGL(canvas) {
     // A driver failure that throws WITHOUT setting a GL error — `getError()` stays
     // clean, so only the exception itself can reveal it (codex r1 spec 1).
     if (gl._drawThrows) throw new Error('draw refused');
+    // A GL error raised BY a replay call: the tick-start guard was clean, so only
+    // `sampleOnce`'s end-of-tick read can catch it. One-shot, so the stand-down's
+    // own rest replay does not raise it again and confuse the write-back check.
+    if (gl._errorOnceAtDraw) { gl._errorOnceAtDraw = false; gl._error = GLC.INVALID_OPERATION; }
     const prog = gl._current;
     if (!prog) { gl._error = GLC.INVALID_OPERATION; return; }
     const opacity = prog.uniforms.has('Opacity') ? prog.uniforms.get('Opacity').value : 1;
@@ -1138,6 +1142,16 @@ async function main() {
     out.final = snapshotState();
     return out;
   }
+  if (CFG.scenario === 'gl_error_forced_mid_live') {
+    // Armed clean, then the force flag is flipped WHILE LIVE: the next tick's
+    // own guard must see it, not merely a later real failure.
+    M.debugForceFail = 'glError';
+    const iterBefore = M.stats().iter;
+    await settle(4);
+    out.iterDelta = M.stats().iter - iterBefore;
+    out.final = snapshotState();
+    return out;
+  }
   if (CFG.scenario === 'draw_throws') {
     gl.callLog.length = 0;
     gl._drawThrows = true;              // throws, and getError() stays clean
@@ -1201,7 +1215,8 @@ async function main() {
   }
   if (CFG.scenario === 'gl_error_replay') {
     gl.callLog.length = 0;
-    gl._error = GLC.INVALID_OPERATION;
+    if (CFG.errorDuringReplay) gl._errorOnceAtDraw = true;
+    else gl._error = GLC.INVALID_OPERATION;
     await settle(4);
     out.callOrder = gl.callLog.slice();
     out.final = snapshotState();
@@ -2068,13 +2083,30 @@ def test_stand_down_on_a_live_context_leaves_the_clean_frame_composited():
     rest = final["stats"]["restOpacity"]
     assert final["drawnOpacities"] == rest, (
         f"the composited frame is still patched: {final['drawnOpacities']} vs rest {rest}")
-    # The window opens just before the erroring tick, so it holds that tick's own
-    # replay plus exactly one more — the stand-down's rest replay — and that last
-    # frame is complete.
-    assert _frames_replayed(out["callOrder"]) == 2, (
-        f"expected one LIVE tick plus exactly one rest replay, saw "
-        f"{_frames_replayed(out['callOrder'])} frames")
+    # The error is already pending when the window opens, so N4's tick-start guard
+    # retires the module BEFORE it paints: the only frame here is the stand-down's
+    # own rest replay. The two-frame path — an error raised by a replay call and
+    # caught by `sampleOnce` at end of tick — is the variant below.
+    assert _frames_replayed(out["callOrder"]) == 1, (
+        f"expected only the rest replay, saw {_frames_replayed(out['callOrder'])} frames")
     assert _draws_in_final_frame(out["callOrder"]) == len(SETTLE_FRAME["draws"])
+
+
+def test_error_raised_during_a_replay_is_caught_at_end_of_tick():
+    """The second half of the `glError` story. N4's guard reads `getError()` at tick
+    START, so an error raised BY the upload or the replay within that tick can only
+    be seen by `sampleOnce` at the end of it. That tick paints, so the window holds
+    its frame plus the stand-down's rest replay, and the two reads must not
+    double-report — `getError` clears the flag."""
+    out = _run_sandbox(scenario="gl_error_replay", errorDuringReplay=True)
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    assert len([e for e in final["events"] if e["kind"] == "glreplay-standdown"]) == 1
+    assert _frames_replayed(out["callOrder"]) == 2, (
+        f"expected the painting tick plus one rest replay, saw "
+        f"{_frames_replayed(out['callOrder'])} frames")
+    assert final["drawnOpacities"] == final["stats"]["restOpacity"]
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
 
 
 def test_canvas_removal_does_not_replay_onto_a_detached_canvas():
@@ -2201,3 +2233,57 @@ def test_unwritable_prototype_method_refuses_installation():
     assert final["state"] == "RETIRED", final["state"]
     assert final["handlePresent"] is False
     assert "glreplay-arm" not in final["eventKinds"], final["eventKinds"]
+
+
+# --- S3 r4 N4: the glError force path -----------------------------------------------------
+
+
+def test_forced_gl_error_seeded_at_install_stands_down():
+    """S3 r4 N4. Folding the `glError` emission into a single `requireGlClean`
+    helper left it reachable only with `ok=false`, i.e. only after a REAL failure —
+    so `debugForceFail='glError'` armed cleanly and ran forever, and the gate-6
+    fail-closed arm silently lost a reason. Every §2.7 reason must be forceable."""
+    out = _run_sandbox(scenario="arm_only", debugForceFail="glError")
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    assert final["state"] == "RETIRED", final["state"]
+    assert final["handlePresent"] is False
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_forced_gl_error_set_mid_live_stands_down_on_the_next_tick():
+    """The force flag is read at the assertion site, so flipping it while LIVE must
+    be seen by the very next tick's own guard — not only by a later real failure."""
+    out = _run_sandbox(scenario="gl_error_forced_mid_live")
+    final = _assert_clean(out)
+    assert out["iterDelta"] <= 1, (
+        f"the module ran {out['iterDelta']} more ticks before noticing the force flag")
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    assert final["state"] == "RETIRED", final["state"]
+    assert final["handlePresent"] is False
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_real_gl_error_on_a_tick_is_reported_once():
+    """The per-tick `getError()` guard is folded in beside the failure reports, so
+    a single real error must still produce exactly one reason, not two."""
+    out = _run_sandbox(scenario="gl_error")
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    standdowns = [e for e in final["events"] if e["kind"] == "glreplay-standdown"]
+    assert len(standdowns) == 1, final["events"]
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_gl_error_still_has_exactly_one_emitting_site():
+    """N4's fix adds a per-tick call; it must go through `requireGlClean`, which is
+    the sole `assertOr('glError', …)` emission, rather than become a second site.
+
+    Reachability of that per-tick call is covered behaviourally by the two forced
+    cases above — a call-count grep here would pass a module that had dropped it.
+    """
+    source = _js_source()
+    assert len(re.findall(r"['\"]glError['\"]", source)) == 1, "glError literal duplicated"
+    helpers = re.findall(
+        r"function\s+(\w+)\s*\([^)]*\)\s*\{\s*return\s+assertOr\(\s*'glError'", source)
+    assert helpers == ["requireGlClean"], helpers
