@@ -3639,15 +3639,34 @@ def test_footprint_frame_sha_list_must_match_the_burst_length():
     assert p2._footprint_fully_live_ok(_b_with_evidence(frameSha256=None)) is False
 
 
-def test_footprint_evidence_must_be_bound_to_the_capture_cadence():
-    """Codex r1 Spec 10: retained evidence must also match BURST_OFFSETS_MS, not
-    only the frame count -- a raster captured under an earlier burst cadence
-    must refuse to re-score under today's (different) capture contract."""
-    assert p2._footprint_fully_live_ok(_b_with_evidence(burstOffsetsMs=[0] * p2.FOOTPRINT_BURST_FRAMES)) is False
-    assert p2._footprint_fully_live_ok(_b_with_evidence(burstOffsetsMs=None)) is False
-    assert p2._footprint_fully_live_ok(
-        _b_with_evidence(burstOffsetsMs=list(p2.BURST_OFFSETS_MS)[:-1] + [999999])
-    ) is False
+def test_footprint_evidence_records_the_capture_cadence():
+    """`burstOffsetsMs` is retained for provenance/diagnosability, but the
+    footprint re-score is a pure function of the max-delta raster (no time
+    axis) and the cadence enters scoring only through `len()`, already
+    checked -- so it is recorded, not bound (owner decision, Codex r1 Spec 10
+    follow-up)."""
+    verdict = p2.footprintFullyLive(capture_id="cap-test", frames=_burst(p2.SLIDE4_MOVIE_RECT))
+    assert verdict["evidence"]["burstOffsetsMs"] == list(p2.BURST_OFFSETS_MS)
+
+
+def test_real_bracket_was_captured_under_the_legacy_cadence():
+    """The committed `tests/fixtures/p2_freeze_3to4/clean_bracket.json` (fixture
+    commit 3b31048a) predates `burstOffsetsMs` in the evidence entirely -- it
+    was captured under the LEGACY 12-shot cadence
+    `(0, 130, 290, 500, 770, 1000, 1190, 1430, 1650, 1910, 2110, 2360)`, before
+    the paint-oracle spacing fix moved `BURST_OFFSETS_MS` to
+    `(0, 360, 730, 1090, 1460, 1820, 2190, 2550, 2920, 3280, 3650, 4010)`.
+
+    The verdict is unaffected either way: `_footprint_evidence_bound` does not
+    require `burstOffsetsMs` to be present or to match (owner decision -- the
+    re-score is a pure function of the raster, and cadence only changes the
+    false-FAIL rate, never the false-PASS rate). This test's only job is
+    documentation-as-a-tripwire: it must go RED the day the fixture is
+    regenerated under the current cadence, which is the signal that the
+    freeze-control fixture refresh (a separate, owner-gated deliverable) has
+    landed and this test's premise -- and its docstring -- need updating."""
+    for label in ("a1", "b", "a2"):
+        assert "burstOffsetsMs" not in _FIXTURE_34[label]["footprintFullyLive"]["evidence"]
 
 
 def test_footprint_padded_raster_is_inconclusive():

@@ -214,3 +214,7 @@ Full numbers: "Paint-oracle E0" in [`keynote_live_alternatives_research.md`](key
 - Accepted documented residuals: attach mode measured at 1920×1080 only; a WebGL-only stimulus scored by screenshots in
   CEF is unmeasured (cannot be produced there at 166 ms/shot).
 - W4 = no touch: P2 imports `BURST_OFFSETS_MS`; `FOOTPRINT_BURST_FRAMES` stays 12.
+  Retained evidence carries `burstOffsetsMs` but it is unbound (owner decision, Codex r1 Spec 10 follow-up); the
+  freeze-control fixture stays at the legacy cadence, and its refresh is a freeze-control decision on the owner's
+  go, not a paint-oracle deliverable. For that refresh: the new 12 `burstOffsetsMs[i]` leaves per arm will surface
+  in the absence sweep as ungated and belong in `_SWEEP_ALLOW`/`_MAIN_SWEEP_ALLOW` as report-only provenance.

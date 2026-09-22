@@ -2184,12 +2184,16 @@ def _footprint_evidence_bound(evidence: object, capture_id: object) -> dict | No
     Requires: the arm's own `captureId` (retained independently in the snapshot
     header, so a raster lifted from another arm names the wrong capture); the
     contract's frame count; a per-frame sha256 list of that same length, as
-    provenance for the burst the raster was reduced from; the rects, control
+    provenance for the burst the raster was reduced from; and the rects, control
     rect and the ten parameters EQUAL to the constants the re-score will use, so
-    a blob cannot weaken its own thresholds; and `burstOffsetsMs` EQUAL to
-    `BURST_OFFSETS_MS`, so evidence retained under an earlier capture cadence
-    refuses to bind rather than being re-scored under today's thresholds with
-    yesterday's burst. The shape is enforced at decode."""
+    a blob cannot weaken its own thresholds. The shape is enforced at decode.
+
+    `burstOffsetsMs` is recorded in the evidence but deliberately NOT bound
+    here: the re-score is a pure function of the max-delta raster (no time
+    axis; the cadence enters scoring only as `len() == FOOTPRINT_BURST_FRAMES`,
+    already checked), cadence only changes the false-FAIL rate never the
+    false-PASS rate, and thresholds are already bound via `params`; cadence
+    itself is enforced at capture by the driver loop over `BURST_OFFSETS_MS`."""
     ev = evidence if isinstance(evidence, dict) else {}
     ev_id = ev.get("captureId")
     shas = ev.get("frameSha256")
@@ -2205,7 +2209,6 @@ def _footprint_evidence_bound(evidence: object, capture_id: object) -> dict | No
         and ev.get("rects") == _footprint_rects()
         and ev.get("controlRect") == dict(SLIDE4_CONTROL_RECT)
         and ev.get("params") == dict(FOOTPRINT_SCORE_PARAMS)
-        and ev.get("burstOffsetsMs") == list(BURST_OFFSETS_MS)
     ):
         return None
     meta = {k: ev.get(k) for k in ("encoding", "bytes", "h", "w")}
