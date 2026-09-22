@@ -29,12 +29,19 @@ class FakeCdp:
         self.revision_on_enter = True
         self.busy_on_enter = False
         self.can_advance = True
+        self.auto_play_run_length: int | None = None
+        self.auto_play_run_kinds: list | None = None
+        self.runtime_version = 2
+        self.space_rejects: bool = False
+        self.slide_number_showing = False
         self.__class__.instances.append(self)
 
     def start(self): self.started = True
     def goto(self, url): self.url = url
     def stop(self): self.stopped = True
     def key(self, key, code, vk):
+        if key == " " and self.space_rejects:
+            raise live_host.PlayerCommandRejected("Player is busy.")
         self.keys.append(key)
         if key == " ":
             self.revision += 1
@@ -45,6 +52,8 @@ class FakeCdp:
                 self.revision += 1
             self.busy = self.busy_on_enter
     def click_stage(self):
+        if self.space_rejects:
+            raise live_host.PlayerCommandRejected("Player is busy.")
         self.clicks += 1
         self.revision += 1
         self.busy = self.busy_on_enter
@@ -52,7 +61,12 @@ class FakeCdp:
         if "__OBED_CONTINUITY_INFO__" in expression:
             return {"ready": False, "present": False, "info": {"installed": True}, "stage": None}
         if "__obedLive" in expression:
-            return {"exportedSlideIndex": self.index, "sceneId": self.index, "buildIndex": None, "revision": self.revision, "canAdvance": self.can_advance, "canGoTo": not self.busy, "ready": not self.busy, "busy": self.busy}
+            return {
+                "exportedSlideIndex": self.index, "sceneId": self.index, "buildIndex": None, "revision": self.revision,
+                "canAdvance": self.can_advance, "canGoTo": not self.busy, "ready": not self.busy, "busy": self.busy,
+                "autoPlayRunLength": self.auto_play_run_length, "autoPlayRunKinds": self.auto_play_run_kinds,
+                "runtimeVersion": self.runtime_version, "slideNumberShowing": self.slide_number_showing,
+            }
         if ".hide()" in expression: self.visible = False; return None
         if ".show()" in expression: self.visible = True; return None
         return self.visible
@@ -1622,6 +1636,396 @@ def test_codecs_recorded_in_session_log(tmp_path, monkeypatch):
     assets = {entry["asset"] for entry in codecs_record["report"]}
     assert assets == {"movie.mov", "extra-movie.mov"}
     assert codecs_record["warnings"] == ["extra-movie.mov (hvc1) may not play in this output"]
+
+
+# --- go-to auto-play repair -------------------------------------------------------------------
+
+
+def read_log(output):
+    output.stop()
+    return [json.loads(line) for line in output._log_path.read_text().splitlines()]
+
+
+def last_execute_record(records, operation="goTo"):
+    return next(record for record in reversed(records) if record["kind"] == "execute" and record["operation"] == operation)
+
+
+def test_goto_semantics_armed_by_default(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.start()
+    assert output.capabilities()["goTo"]["semantics"] == "restart-at-initial-state+autoplay"
+
+
+def test_goto_fires_zero_advance_when_run_length_is_zero(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 0, []
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]
+    assert observed.auto_play_deferred is None
+    record = last_execute_record(read_log(output))
+    assert (record["autoPlayRunLength"], record["autoPlayRunKinds"], record["autoPlayFired"], record["autoPlayDeferredReason"]) == (0, [], False, None)
+
+
+def test_goto_fires_one_advance_via_key_when_run_length_positive(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter", " "]
+    assert observed.auto_play_deferred is None
+    record = last_execute_record(read_log(output))
+    assert (record["autoPlayRunLength"], record["autoPlayRunKinds"], record["autoPlayFired"], record["autoPlayDeferredReason"]) == (1, ["apple:movie-start"], True, None)
+
+
+def test_goto_fires_one_advance_via_click_in_click_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.ADVANCE_ENV, "click")
+    output = host(tmp_path, monkeypatch)
+    output.start()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 2, ["apple:movie-start", "apple:movie-start"]
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]
+    assert fake.clicks == 1
+    assert observed.auto_play_deferred is None
+
+
+def test_goto_fails_closed_when_run_length_is_null(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length = None
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]
+    assert observed.auto_play_deferred == "Movies idle until next advance"
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"] == "runLength null"
+    assert record["autoPlayFired"] is False
+
+
+def test_goto_fails_closed_when_can_advance_is_false(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    fake.can_advance = False
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]
+    assert observed.auto_play_deferred == "Movies idle until next advance"
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"] == "busy"
+    assert record["autoPlayFired"] is False
+
+
+def test_goto_fails_closed_on_settle_timeout(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length = 1
+    fake.busy_on_enter = True  # never settles after the jump
+    output.timeout_s = .05
+    observed = output.execute("goTo", 2)
+    assert observed.auto_play_deferred == "Movies idle until next advance"
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"] == "settle timeout"
+    assert record["autoPlayFired"] is False
+
+
+def test_goto_fails_closed_when_state_changes_before_fire(tmp_path, monkeypatch):
+    # R1: the run length is read at settle and fired a moment later; re-read the
+    # snapshot immediately before firing and abort if anything moved underneath us.
+    output = host(tmp_path, monkeypatch)
+    output.observe()  # lazily starts the transport (one _wait_settled call, in start())
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    real_wait_settled = live_host.LiveOutputHost._wait_settled
+    calls = {"n": 0}
+
+    def wait_settled(self, *args, **kwargs):
+        result = real_wait_settled(self, *args, **kwargs)
+        calls["n"] += 1
+        if calls["n"] == 1:  # the goTo's own settle (installed after setup's start()), right before the R1 re-read
+            fake.revision += 1
+        return result
+
+    monkeypatch.setattr(live_host.LiveOutputHost, "_wait_settled", wait_settled)
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]
+    assert observed.auto_play_deferred == "Movies idle until next advance"
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"] == "changed before fire"
+    assert record["autoPlayFired"] is False
+
+
+def test_goto_reports_delivery_unknown_when_input_dispatch_is_rejected(tmp_path, monkeypatch):
+    # Once key/click delivery is attempted, its outcome may be unknown -- it must
+    # never be reported as safely idle (that could invite a second, consuming press).
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    fake.space_rejects = True
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]  # the rejected space is never recorded
+    assert observed.auto_play_deferred is None
+    assert observed.go_to_target_reached is True  # the jump itself already settled
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"].startswith("delivery unknown:")
+    assert record["autoPlayFired"] is None
+
+
+def test_goto_reports_delivery_unknown_when_ack_times_out_after_dispatch(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    real_key = fake.key
+
+    def key(key_value, code, vk):
+        if key_value == " ":
+            return  # dispatched, but the player never acknowledges it
+        real_key(key_value, code, vk)
+
+    fake.key = key
+    output.timeout_s = .05
+    observed = output.execute("goTo", 2)
+    assert observed.auto_play_deferred is None
+    assert observed.go_to_target_reached is True
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"].startswith("delivery unknown:")
+    assert record["autoPlayFired"] is None
+
+
+def test_goto_reports_fired_when_settle_times_out_after_ack(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    real_key = fake.key
+
+    def key(key_value, code, vk):
+        real_key(key_value, code, vk)
+        if key_value == " ":
+            fake.busy = True  # acked, but the fired advance never settles
+
+    fake.key = key
+    output.timeout_s = .05
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter", " "]
+    assert observed.auto_play_deferred is None
+    assert observed.go_to_target_reached is True
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayFired"] is True
+    assert record["autoPlayDeferredReason"].startswith("settle unconfirmed:")
+
+
+def _raise_on_nth_obedlive_read(monkeypatch, n, exc):
+    real_evaluate = FakeCdp.evaluate
+    calls = {"n": 0}
+
+    def evaluate(self, expression):
+        if "__obedLive" in expression:
+            calls["n"] += 1
+            if calls["n"] == n:
+                raise exc
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+
+
+def test_goto_fails_closed_on_non_timeout_error_at_initial_settle(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    _raise_on_nth_obedlive_read(monkeypatch, 3, live_host.LiveHostError("Program browser CDP connection failed."))
+    observed = output.execute("goTo", 2)
+    assert observed.auto_play_deferred == "Movies idle until next advance"
+    assert observed.go_to_target_reached is False  # the initial settle itself never succeeded
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"].startswith("pre-dispatch error:")
+    assert record["autoPlayFired"] is False
+
+
+def test_goto_fails_closed_on_non_timeout_error_at_r1_reread(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    _raise_on_nth_obedlive_read(monkeypatch, 4, live_host.LiveHostError("Program browser CDP connection failed."))
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]  # never fired: the failure precedes dispatch
+    assert observed.auto_play_deferred == "Movies idle until next advance"
+    assert observed.go_to_target_reached is True  # the jump itself already settled
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"].startswith("pre-dispatch error:")
+    assert record["autoPlayFired"] is False
+
+
+def test_goto_reports_delivery_unknown_on_error_at_input_delivery(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    real_evaluate = FakeCdp.evaluate
+    focus_calls = {"n": 0}
+
+    def evaluate(self, expression):
+        if "window.focus()" in expression:
+            focus_calls["n"] += 1
+            if focus_calls["n"] == 2:  # the repair's own focus call, not goTo's
+                raise live_host.LiveHostError("Program browser CDP connection failed.")
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]  # the space was never reached
+    assert observed.auto_play_deferred is None
+    assert observed.go_to_target_reached is True
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"].startswith("delivery unknown:")
+    assert record["autoPlayFired"] is None
+
+
+def test_goto_reports_fired_on_non_timeout_error_at_post_fire_observation(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    _raise_on_nth_obedlive_read(monkeypatch, 6, live_host.LiveHostError("Program browser CDP connection failed."))
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter", " "]
+    assert observed.auto_play_deferred is None
+    assert observed.go_to_target_reached is True
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayFired"] is True
+    assert record["autoPlayDeferredReason"].startswith("settle unconfirmed:")
+
+
+# --- slide-number overlay swallows a click (attach/click mode) -------------------------------
+
+
+def test_goto_repair_waits_for_slide_number_overlay_before_clicking(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.ADVANCE_ENV, "click")
+    output = host(tmp_path, monkeypatch)
+    output.start()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    fake.slide_number_showing = True
+    output.timeout_s = 1.0
+    real_evaluate = FakeCdp.evaluate
+    calls = {"n": 0}
+
+    def evaluate(self, expression):
+        if "__obedLive" in expression:
+            calls["n"] += 1
+            if calls["n"] < 6:
+                assert self.clicks == 0  # never clicks while the overlay is up
+            if calls["n"] == 6:
+                self.slide_number_showing = False
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    observed = output.execute("goTo", 2)
+    assert fake.clicks == 1
+    assert fake.keys == ["2", "Enter"]  # no space key in click mode
+    assert observed.auto_play_deferred is None
+    assert calls["n"] >= 6
+
+
+def test_goto_repair_fails_closed_when_overlay_never_hides(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.ADVANCE_ENV, "click")
+    output = host(tmp_path, monkeypatch)
+    output.start()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    fake.slide_number_showing = True
+    output.timeout_s = .1
+    observed = output.execute("goTo", 2)
+    assert fake.clicks == 0
+    assert fake.keys == ["2", "Enter"]
+    assert observed.auto_play_deferred == "Movies idle until next advance"
+    assert observed.go_to_target_reached is True  # the jump itself already settled
+    record = last_execute_record(read_log(output))
+    assert record["autoPlayDeferredReason"].startswith("pre-dispatch error:")
+    assert record["autoPlayFired"] is False
+
+
+def test_advance_click_mode_waits_for_overlay_then_clicks(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.ADVANCE_ENV, "click")
+    output = host(tmp_path, monkeypatch)
+    output.start()
+    fake = FakeCdp.instances[0]
+    fake.slide_number_showing = True
+    output.timeout_s = 1.0
+    real_evaluate = FakeCdp.evaluate
+    calls = {"n": 0}
+
+    def evaluate(self, expression):
+        if "__obedLive" in expression:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                assert self.clicks == 0
+            if calls["n"] == 3:
+                self.slide_number_showing = False
+        return real_evaluate(self, expression)
+
+    monkeypatch.setattr(FakeCdp, "evaluate", evaluate)
+    output.execute("advance")
+    assert fake.clicks == 1
+    assert calls["n"] >= 3
+
+
+def test_advance_click_mode_rejected_when_overlay_never_hides(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.ADVANCE_ENV, "click")
+    output = host(tmp_path, monkeypatch)
+    output.start()
+    fake = FakeCdp.instances[0]
+    fake.slide_number_showing = True
+    output.timeout_s = .1
+    with pytest.raises(live_host.PlayerCommandRejected, match="slide-number overlay"):
+        output.execute("advance")
+    assert fake.clicks == 0
+
+
+def test_advance_key_mode_ignores_the_slide_number_overlay(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.slide_number_showing = True
+    output.execute("advance")
+    assert fake.keys == [" "]
+    assert fake.clicks == 0
+
+
+def test_goto_repair_key_mode_ignores_the_slide_number_overlay(tmp_path, monkeypatch):
+    output = host(tmp_path, monkeypatch)
+    output.observe()
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    fake.slide_number_showing = True
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter", " "]
+    assert observed.auto_play_deferred is None
+
+
+def test_goto_env_off_disables_the_repair_entirely(tmp_path, monkeypatch):
+    monkeypatch.setenv(live_host.GOTO_AUTOPLAY_ENV, "off")
+    output = host(tmp_path, monkeypatch)
+    output.start()
+    assert output.capabilities()["goTo"]["semantics"] == "restart-at-initial-state"
+    fake = FakeCdp.instances[0]
+    fake.auto_play_run_length, fake.auto_play_run_kinds = 1, ["apple:movie-start"]
+    observed = output.execute("goTo", 2)
+    assert fake.keys == ["2", "Enter"]
+    assert observed.auto_play_deferred is None
+    records = read_log(output)
+    record = last_execute_record(records)
+    assert "autoPlayFired" not in record
+    started = next(r for r in records if r["kind"] == "start")
+    assert started["goToAutoplayMode"] == "off"
 
 
 def test_cdp_sockets_accept_messages_larger_than_the_websockets_default():

@@ -67,18 +67,24 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from obed_edom import live_host as live_host_module  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
-from obed_edom.html_preview import cache_dir  # noqa: E402
+from obed_edom.html_preview import cache_dir, safe_export_file  # noqa: E402
 from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     INPAGE_BAND_COUNT,
     INPAGE_MIN_SAMPLES,
     combine_oracle_verdicts,
     inpage_mask_is_usable,
+    is_character_effect,
     occluder_mask_from_markers,
     score_inpage_liveness,
 )
-from obed_edom.live_host import ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
+from obed_edom.live_host import ADVANCE_ENV, ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
 from obed_edom.p2_verdict import BURST_OFFSETS_MS, CONTROL_INSET_PX, CONTROL_PATCH_PX  # noqa: E402
+
+try:
+    from obed_edom.live_host import GOTO_AUTOPLAY_ENV  # noqa: E402
+except ImportError:  # pragma: no cover - stream B is landing this constant concurrently
+    GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
 
@@ -133,6 +139,20 @@ REFUSAL_VERDICT_KEY = {
 # A painting `<video>` overlaps a retired movie's rect when it does so by more
 # than this in authored px -- edge-touching and AA seams are not an overlap.
 REFUSAL_OVERLAP_MIN_PX = 1.0
+
+# Pass G (goTo autoplay repair): (fromOriginalOrdinal, toOriginalOrdinal) pairs.
+GOTO_MATRIX: tuple[tuple[int, int], ...] = ((1, 2), (1, 3), (1, 4), (3, 1), (4, 3))
+# 8 shots with a nominal margin over the >=360ms floor `spacing_ok` checks on the measured timestamps.
+G_BURST_OFFSETS_MS: tuple[int, ...] = (0, 450, 910, 1360, 1820, 2270, 2730, 3180)
+# The one destination the plan requires no-consumption evidence for.
+GOTO_CONSUMPTION_CHECK_TO = 2
+CHARACTERS_ASSET_KEY = "__characters__"
+# A completed dissolve build is static, so "did it fire" is judged by pixel content change, never motion.
+CHARACTER_REGION_MAE_MIN = 8.0
+# The area outside every expected movie rect must show a pixel this bright somewhere (never a flat
+# black overlay) and change by no more than this between two captures (stable, no stray motion).
+STATIC_CONTROL_MIN_BRIGHT = 12.0
+STATIC_CONTROL_MAX_MAE = 6.0
 
 # In headless Chrome, --window-size=W,H yields innerHeight H-32 (chrome window
 # chrome persists even headless) -- reuse live_host_probe's measured compensation
@@ -412,6 +432,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--burst-poke", action="store_true", default=False,
         help="1-px DOM style poke before each burst shot (mutates the deck under test; off by default)",
+    )
+    parser.add_argument(
+        "--pass", dest="only_pass", choices=["G"], default=None,
+        help="Run only this pass instead of the full A/B/C + V/Voff + attach run (currently only "
+        "'G', the goTo autoplay-repair gate). Omit for the unchanged default full run.",
+    )
+    parser.add_argument(
+        "--attach", action="store_true", default=False,
+        help="Pass G only: run the attach-mode arm (click-advance path, forced to 1920x1080) "
+        "instead of a launch-mode arm at --viewport.",
     )
     return parser.parse_args(argv)
 
@@ -1954,6 +1984,543 @@ def run_visible_pass(
     return result
 
 
+def goto_rect_expectations(v_expectations: dict[int, dict[str, str]], *, armed: bool) -> dict[int, dict[str, str]]:
+    """Pure: armed reuses the plan's own `V` expectations; disarmed marks every asset dead (plan §2)."""
+    if armed:
+        return v_expectations
+    return {index: {asset: DEAD for asset in per} for index, per in v_expectations.items()}
+
+
+def spacing_ok(
+    offsets_ms: Sequence[float], *, min_gap_ms: float = 360.0, expected_count: int = len(G_BURST_OFFSETS_MS)
+) -> bool | None:
+    """Fail-closed on the REALIZED timestamps: exactly `expected_count` finite values, each
+    consecutive gap >= `min_gap_ms`; a wrong count or a non-finite value is inconclusive, not a pass."""
+    values = list(offsets_ms) if isinstance(offsets_ms, Sequence) else []
+    if len(values) != expected_count or not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in values
+    ):
+        return None
+    return all(b - a >= min_gap_ms for a, b in zip(values, values[1:]))
+
+
+def capture_is_fresh(live_expected: bool, unique_shas: Any, *, min_unique: int = 2) -> bool | None:
+    """Fail-closed sanity control: a live-expected destination's burst frames must show at least
+    `min_unique` distinct images (`burstProfile.uniqueShas`); an unreadable count is inconclusive,
+    not a pass -- a stale/frozen capture must never silently read as a genuinely dead rect."""
+    if not live_expected:
+        return True
+    if not isinstance(unique_shas, int) or isinstance(unique_shas, bool):
+        return None
+    return unique_shas >= min_unique
+
+
+def combine_verdicts(*values: bool | None) -> bool | None:
+    """Tri-state AND: any unknown makes the whole thing unknown, never a
+    silent pass or fail."""
+    if any(value is None for value in values):
+        return None
+    return all(values)
+
+
+def read_execute_log(log_path: str | Path | None) -> list[dict[str, Any]]:
+    """The host's own JSONL execute log (`player.output["logPath"]`), read
+    defensively: a missing file, an unreadable line, or a non-object record is
+    skipped, never raised."""
+    if not log_path:
+        return []
+    try:
+        lines = Path(log_path).read_text().splitlines()
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def find_execute_record(records: list[dict[str, Any]], *, operation: str, slide: int) -> dict[str, Any] | None:
+    for record in reversed(records):
+        if record.get("kind") == "execute" and record.get("operation") == operation and record.get("slide") == slide:
+            return record
+    return None
+
+
+def wait_for_execute_record(
+    log_path: str | Path | None, *, operation: str, slide: int, timeout_s: float = 2.0,
+    now: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any] | None:
+    """The host's execute log is drained by a background writer thread, so a
+    record can lag its call by a few ms -- poll briefly rather than assume it
+    is already flushed. Bounded: a record that never lands is `None`, never a
+    hang."""
+    deadline = now() + timeout_s
+    record = None
+    while now() < deadline:
+        record = find_execute_record(read_execute_log(log_path), operation=operation, slide=slide)
+        if record is not None:
+            return record
+        sleep(0.05)
+    return record
+
+
+def score_no_consumption(
+    observed_scene_id: str | None, expected_scene_id: str | None, execute_record: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Pure: the settled scene plus the host's own execute-log evidence in, a
+    verdict out. `autoPlayRunLength`/`autoPlayRunKinds`/`autoPlayFired` are
+    read defensively -- another stream is landing them on `live_host.py`
+    concurrently -- so a record that predates them is INCONCLUSIVE, never a
+    false pass."""
+    scene_ok = observed_scene_id is not None and observed_scene_id == expected_scene_id
+    if not isinstance(execute_record, dict):
+        return {"verdict": None, "sceneOk": scene_ok, "reason": "no execute-log record for this goTo"}
+    run_length, fired = execute_record.get("autoPlayRunLength"), execute_record.get("autoPlayFired")
+    if run_length is None or fired is None:
+        return {
+            "verdict": None, "sceneOk": scene_ok, "autoPlayRunLength": run_length, "autoPlayFired": fired,
+            "reason": "execute log has no autoPlayRunLength/autoPlayFired yet",
+        }
+    log_ok = run_length == 0 and fired is False
+    ok = scene_ok and log_ok
+    return {
+        "verdict": bool(ok), "sceneOk": scene_ok, "logOk": log_ok, "autoPlayRunLength": run_length,
+        "autoPlayRunKinds": execute_record.get("autoPlayRunKinds"), "autoPlayFired": fired,
+        "reason": None if ok else "scene or execute-log evidence contradicts no-consumption",
+    }
+
+
+GOTO_TELEMETRY_FIELDS = ("autoPlayRunLength", "autoPlayRunKinds", "autoPlayFired", "autoPlayDeferredReason")
+
+
+def goto_telemetry(execute_record: dict[str, Any] | None) -> dict[str, Any]:
+    """The four autoplay-repair fields off one goTo's execute-log record, for attaching to a
+    destination artifact regardless of arm; absent fields read `None`, never raise."""
+    return {field: (execute_record or {}).get(field) for field in GOTO_TELEMETRY_FIELDS}
+
+
+def telemetry_present(execute_record: dict[str, Any] | None) -> bool | None:
+    """`True` only when the execute-log record carries all four autoplay-repair fields (even if a
+    field's own value is legitimately `null`); otherwise inconclusive, never a silent pass."""
+    if isinstance(execute_record, dict) and all(field in execute_record for field in GOTO_TELEMETRY_FIELDS):
+        return True
+    return None
+
+
+def _crop_screen_rect(frame: np.ndarray, rect: dict[str, float]) -> np.ndarray:
+    height, width = frame.shape[:2]
+    x0, y0 = max(0, int(round(rect["x"]))), max(0, int(round(rect["y"])))
+    x1, y1 = min(width, int(round(rect["x"] + rect["w"]))), min(height, int(round(rect["y"] + rect["h"])))
+    if x1 <= x0 or y1 <= y0:
+        return np.zeros((0, 0, 3), dtype=frame.dtype)
+    return frame[y0:y1, x0:x1]
+
+
+def score_region_changed(
+    before: np.ndarray, after: np.ndarray, rect: dict[str, float], *, min_mae: float = CHARACTER_REGION_MAE_MIN,
+) -> dict[str, Any]:
+    """Pure: two full-frame screenshots plus a screen-space rect in, a verdict
+    out. Proves a click-driven build actually fired by comparing pixel
+    content (not motion) before/after one `advance` -- a completed dissolve is
+    static, so `liveness_mask` alone cannot see it."""
+    crop_before, crop_after = _crop_screen_rect(before, rect), _crop_screen_rect(after, rect)
+    if crop_before.size == 0 or crop_after.size == 0:
+        return {"verdict": False, "mae": None, "reason": "characters region crop is empty"}
+    if crop_before.shape != crop_after.shape:
+        return {"verdict": False, "mae": None, "reason": "characters region crop shape mismatch"}
+    mae = float(np.mean(np.abs(crop_before[:, :, :3].astype(np.float64) - crop_after[:, :, :3].astype(np.float64))))
+    ok = mae >= min_mae
+    return {"verdict": ok, "mae": mae, "minMae": min_mae, "reason": None if ok else "characters region did not change after the advance"}
+
+
+def _exclusion_mask(shape: tuple[int, int], exclude_rects: Sequence[dict[str, float]]) -> np.ndarray:
+    mask = np.ones(shape, dtype=bool)
+    height, width = shape
+    for rect in exclude_rects:
+        x0, y0 = max(0, int(rect.get("x", 0))), max(0, int(rect.get("y", 0)))
+        x1 = min(width, int(rect.get("x", 0) + rect.get("w", 0)))
+        y1 = min(height, int(rect.get("y", 0) + rect.get("h", 0)))
+        if x1 > x0 and y1 > y0:
+            mask[y0:y1, x0:x1] = False
+    return mask
+
+
+def score_static_control(
+    transport: Any, exclude_rects: Sequence[dict[str, float]], *,
+    min_bright: float = STATIC_CONTROL_MIN_BRIGHT, max_mae: float = STATIC_CONTROL_MAX_MAE, gap_s: float = 0.4,
+) -> dict[str, Any]:
+    """The area outside every expected movie rect must show genuinely rendered content (never a
+    uniform black overlay) and stay stable, so a wrong-slide or still-black capture cannot pass."""
+    first = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
+    time.sleep(gap_s)
+    second = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
+    if first.size == 0 or first.shape != second.shape:
+        return {"verdict": False, "max": None, "mae": None, "reason": "static control capture is empty or mismatched"}
+    mask = _exclusion_mask(first.shape[:2], exclude_rects)
+    if not mask.any():
+        return {"verdict": None, "max": None, "mae": None, "reason": "no area outside the expected movie rects to measure"}
+    region_a, region_b = first[mask][:, :3], second[mask][:, :3]
+    max_value = float(max(region_a.max(), region_b.max()))
+    mae = float(np.mean(np.abs(region_a.astype(np.float64) - region_b.astype(np.float64))))
+    non_black, stable = max_value >= min_bright, mae <= max_mae
+    reason = None
+    if not non_black:
+        reason = f"no rendered content outside the movie rects (brightest pixel {max_value:.1f} < {min_bright})"
+    elif not stable:
+        reason = f"content outside the movie rects changed unexpectedly (mae={mae:.1f}, max {max_mae})"
+    return {"verdict": non_black and stable, "max": max_value, "mae": mae, "reason": reason}
+
+
+def _rect_from_layer_state(state: dict[str, Any]) -> dict[str, float] | None:
+    position = state.get("position") or {}
+    anchor = state.get("anchorPoint") or {}
+    width, height = state.get("width"), state.get("height")
+    px, py = position.get("pointX"), position.get("pointY")
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (width, height, px, py)):
+        return None
+    ax = anchor.get("pointX") if isinstance(anchor.get("pointX"), (int, float)) else 0.5
+    ay = anchor.get("pointY") if isinstance(anchor.get("pointY"), (int, float)) else 0.5
+    return {"x": float(px - ax * width), "y": float(py - ay * height), "w": float(width), "h": float(height)}
+
+
+def _walk_character_rects(node: Any) -> list[dict[str, float]]:
+    """Every authored rect of an `apple:*character*` buildIn effect (Keynote's
+    dissolve-character build), walked the way `flatten_effect_names` walks
+    `effects`, but keeping the geometry that function drops."""
+    found: list[dict[str, float]] = []
+    if isinstance(node, dict):
+        base_layer = node.get("baseLayer")
+        if is_character_effect(node.get("name")) and isinstance(base_layer, dict):
+            rect = _rect_from_layer_state(base_layer.get("initialState") or {})
+            if rect is not None:
+                found.append(rect)
+        for child in node.get("effects") or []:
+            found.extend(_walk_character_rects(child))
+    elif isinstance(node, list):
+        for child in node:
+            found.extend(_walk_character_rects(child))
+    return found
+
+
+def _union_rect(rects: Sequence[dict[str, float]]) -> dict[str, float] | None:
+    if not rects:
+        return None
+    x0, y0 = min(r["x"] for r in rects), min(r["y"] for r in rects)
+    x1, y1 = max(r["x"] + r["w"] for r in rects), max(r["y"] + r["h"] for r in rects)
+    return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+
+
+def character_region_rect(export_root: Path, slide: dict[str, Any]) -> dict[str, float] | None:
+    """The authored bounding box of this slide's own `apple:*character*` builds
+    (ground truth read straight from the export's per-slide JSON, the way
+    `derive_plan` reads it), or `None` if the slide has none. Pass G's own
+    no-consumption evidence: unrelated to any tracked movie asset, so it
+    cannot be derived from `plan.slide_instances`."""
+    uuid = slide.get("exportedUuid")
+    if not isinstance(uuid, str) or not uuid:
+        return None
+    try:
+        data = json.loads(safe_export_file(export_root, f"assets/{uuid}/{uuid}.json").read_text())
+        events = data["events"]
+    except Exception:  # noqa: BLE001 - no character region is a valid, checkable answer
+        return None
+    rects: list[dict[str, float]] = [
+        rect
+        for event in (events if isinstance(events, list) else [])
+        if isinstance(event, dict)
+        for rect in _walk_character_rects(event.get("effects"))
+    ]
+    return _union_rect(rects)
+
+
+def score_no_build_consumed(
+    player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float],
+    stage_map: dict[str, Any], *, execute_record: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Scene + execute-log evidence the click-driven builds are still pending, plus pixel evidence
+    the characters' region only changes after one more `advance` -- proving it really was pending."""
+    observed = player.observe()
+    consumption = score_no_consumption(observed.scene_id, expected_scene_id, execute_record)
+    transport = player._require_transport()
+    screen_rect = to_screen_rect(character_rect, stage_map)
+    before = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
+    player.execute("advance")
+    wait_until_settled(player)
+    # A click-driven build's own animation is invisible to `busy`; give it the same settle margin
+    # every advance-driven arrival gets elsewhere in this file.
+    time.sleep(POST_ADVANCE_SETTLE_S)
+    after = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
+    changed = score_region_changed(before, after, screen_rect)
+    return {
+        "consumption": consumption, "regionChanged": changed,
+        "verdict": combine_verdicts(consumption.get("verdict"), changed.get("verdict")),
+    }
+
+
+def resolve_no_consumption(
+    player: LiveOutputHost, expected_scene_id: str | None, character_rect: dict[str, float] | None,
+    stage_map: dict[str, Any] | None, *, execute_record: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Fail-closed: missing/unreadable characters geometry or an invalid stage map is inconclusive
+    (never silently `True`) and never touches `player`; only then is the real evidence scored."""
+    if character_rect is None:
+        return {"verdict": None, "reason": "characters region rect is unavailable (missing/unreadable slide geometry)"}
+    if not stage_map_valid(stage_map):
+        return {"verdict": None, "reason": "stage map invalid at the no-consumption sample"}
+    return score_no_build_consumed(player, expected_scene_id, character_rect, stage_map, execute_record=execute_record)
+
+
+def run_goto_destination(
+    player: LiveOutputHost, from_ordinal: int, to_ordinal: int, slides: list[dict[str, Any]],
+    instances: dict[int, dict[str, list[Any]]], viewport: tuple[int, int], *,
+    expectations: dict[int, dict[str, str]], evidence: Callable[..., dict[str, str]] | None,
+    expected_scene_id: str | None, character_rect: dict[str, float] | None,
+    armed: bool, require_no_consumption: bool,
+) -> dict[str, Any]:
+    """One goTo, driven for real through `LiveOutputHost.execute`, scored with the same
+    `visible_slide_record` the V/Voff passes use -- never a re-derived scorer."""
+    reasons: list[str] = []
+    player.execute("goTo", from_ordinal)
+    # `execute("goTo")`'s own returned observation is not settled when the autoplay repair is
+    # disarmed (it is the bare digit/Enter ack); check the requested slide only AFTER settling.
+    wait_until_settled(player)
+    from_observed = player.observe()
+    source_reached = from_observed.original_slide == from_ordinal
+    if not source_reached:
+        reasons.append(f"source goTo did not reach slide {from_ordinal} (landed on {from_observed.original_slide!r})")
+    slide = next(s for s in slides if s["originalOrdinal"] == to_ordinal)
+    player.execute("goTo", to_ordinal)
+    wait_until_settled(player)
+    to_observed = player.observe()
+    destination_reached = to_observed.original_slide == to_ordinal
+    if not destination_reached:
+        reasons.append(f"destination goTo did not reach slide {to_ordinal} (landed on {to_observed.original_slide!r})")
+    # `execute("goTo")` settling is a DOM/runtime fact, not a compositor one; give it the same
+    # margin `advance_until_original_slide` gives every advance-driven arrival before a burst.
+    time.sleep(POST_ADVANCE_SETTLE_S)
+    record = visible_slide_record(
+        player, slide, instances, viewport, scorer=_scorers()[1], evidence=evidence,
+        expectations=expectations, offsets_ms=G_BURST_OFFSETS_MS,
+    )
+    transport = player._require_transport()
+    video_count = transport.evaluate("document.querySelectorAll('video').length")
+    live_expected = any(item.get("expect") == LIVE for item in record.get("expectedRects") or [])
+    video_ok = (not live_expected) or (isinstance(video_count, int) and not isinstance(video_count, bool) and video_count > 0)
+    spaced = spacing_ok(record.get("shotOffsetsMs") or [])
+    unique_shas = (record.get("burstProfile") or {}).get("uniqueShas")
+    capture_fresh = capture_is_fresh(live_expected, unique_shas)
+    if record.get("verdict") is not True:
+        reasons.append(f"destination {to_ordinal} rects do not meet expectations (status={record.get('status')!r})")
+    if not video_ok:
+        reasons.append(f"destination {to_ordinal} has a live-expected movie but no <video> element")
+    if spaced is not True:
+        reasons.append(f"destination {to_ordinal} burst spacing is unproven or too fast: {record.get('shotOffsetsMs')}")
+    if capture_fresh is not True:
+        reasons.append(f"destination {to_ordinal} burst captured {unique_shas} distinct frame(s) (live-expected: {live_expected})")
+
+    stage_map = record.get("stageMap")
+    exclude_rects = [item["screen"] for item in record.get("expectedRects") or [] if isinstance(item.get("screen"), dict)]
+    static_control = score_static_control(transport, exclude_rects)
+    if static_control.get("verdict") is not True:
+        reasons.append(f"destination {to_ordinal} static content control: {static_control}")
+
+    execute_record = wait_for_execute_record(player.output.get("logPath"), operation="goTo", slide=to_ordinal)
+    telemetry = goto_telemetry(execute_record)
+    telemetry_ok = telemetry_present(execute_record) if armed else True
+    if telemetry_ok is not True:
+        reasons.append(f"destination {to_ordinal} armed execute-log telemetry is missing: {telemetry}")
+
+    no_consumption = None
+    if require_no_consumption:
+        no_consumption = resolve_no_consumption(
+            player, expected_scene_id, character_rect, stage_map, execute_record=execute_record,
+        )
+        if no_consumption.get("verdict") is not True:
+            reasons.append(f"no-consumption check for destination {to_ordinal}: {no_consumption}")
+
+    verdict = combine_verdicts(
+        record.get("verdict"), video_ok, spaced, capture_fresh, source_reached, destination_reached,
+        static_control.get("verdict"), telemetry_ok,
+        no_consumption.get("verdict") if require_no_consumption else True,
+    )
+    return {
+        "fromOrdinal": from_ordinal, "toOrdinal": to_ordinal, "record": record, "videoElementCount": video_count,
+        "sourceReached": source_reached, "destinationReached": destination_reached,
+        "staticControl": static_control, "autoPlay": telemetry, "noConsumption": no_consumption,
+        "verdict": verdict, "reasons": reasons,
+    }
+
+
+def destinations_of(entry: Any) -> list[dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return []
+    destinations = entry.get("destinations")
+    return [d for d in destinations if isinstance(d, dict)] if isinstance(destinations, list) else []
+
+
+def overall_status_g(result: dict[str, Any]) -> tuple[str, list[str]]:
+    """Pure: both arms need EVERY destination verdict True (for the null control that means the
+    DEAD expectation was genuinely met -- a LIVE reading there is the "green null control" the
+    plan requires to fail this pass) and a visible output; else fail, or inconclusive on any None."""
+    armed_entry, off_entry = result.get("armed") or {}, result.get("nullControl") or {}
+    armed, off = destinations_of(armed_entry), destinations_of(off_entry)
+    if len(armed) != len(GOTO_MATRIX) or len(off) != len(GOTO_MATRIX):
+        return "error", ["pass G did not score every goTo destination in both arms"]
+    reasons: list[str] = []
+    for label, entry, group in (("armed", armed_entry, armed), ("null control", off_entry, off)):
+        if entry.get("outputVisible") is not True:
+            reasons.append(f"{label} output was not visible after show() (outputVisible={entry.get('outputVisible')!r})")
+        if entry.get("stopError"):
+            reasons.append(f"{label} player.stop() failed: {entry.get('stopError')}")
+        for dest in group:
+            if dest.get("verdict") is not True:
+                detail = "; ".join(dest.get("reasons") or []) or f"verdict={dest.get('verdict')!r}"
+                reasons.append(f"{label} goTo {dest.get('fromOrdinal')}->{dest.get('toOrdinal')}: {detail}")
+    if any(dest.get("verdict") is None for dest in armed + off):
+        return "inconclusive", reasons
+    return ("pass" if not reasons else "fail"), reasons
+
+
+def warm_up_for_screenshots(player: LiveOutputHost) -> Any:
+    """Every screenshot-scoring pass must call this before its first burst: a fresh session starts
+    hidden behind the output-black overlay until `execute("show")` runs (mirrors `run_visible_pass`'s
+    own warm-up). Returns the `show()` observation so a caller can verify `output_visible`."""
+    shown = player.execute("show")
+    transport = player._require_transport()
+    transport.evaluate(ENSURE_PLAYING_JS)
+    wait_for_decode(player)
+    time.sleep(CLICK_DELAY_S)
+    return shown
+
+
+def _run_goto_arm(
+    export_root: Path, slides: list[dict[str, Any]], *, env: dict[str, str | None], tag: str, armed: bool,
+    instances: dict[int, dict[str, list[Any]]], expectations: dict[int, dict[str, str]], viewport: tuple[int, int],
+    evidence_dir: Path, character_rect: dict[str, float] | None, onset_scene_id: str,
+) -> dict[str, Any]:
+    """One armed or null-control goTo session: start, warm up, drive the whole `GOTO_MATRIX`, stop."""
+    result: dict[str, Any] = {}
+    evidence = visible_evidence_writer(evidence_dir, tag)
+    with env_override(env):
+        player = LiveOutputHost(export_root, slides, headless=True)
+        try:
+            player.start()
+            shown = warm_up_for_screenshots(player)
+            result["continuity"] = player.output["continuity"]
+            result["outputVisible"] = shown.output_visible
+            result["destinations"] = [
+                run_goto_destination(
+                    player, from_ordinal, to_ordinal, slides, instances, viewport,
+                    expectations=expectations, evidence=evidence,
+                    expected_scene_id=onset_scene_id if to_ordinal == GOTO_CONSUMPTION_CHECK_TO else None,
+                    character_rect=character_rect, armed=armed,
+                    require_no_consumption=armed and to_ordinal == GOTO_CONSUMPTION_CHECK_TO,
+                )
+                for from_ordinal, to_ordinal in GOTO_MATRIX
+            ]
+        finally:
+            try:
+                player.stop()
+            except Exception as exc:  # noqa: BLE001 - record, never mask an earlier failure
+                result["stopError"] = str(exc)
+    return result
+
+
+def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
+    """Drive every `GOTO_MATRIX` entry through the real goTo, once armed and once with
+    `GOTO_AUTOPLAY_ENV=off` (the null control), via `_run_goto_arm`."""
+    plan_export = prepare_export(args.fixture, args.original_index, "pass-g-plan")
+    plan_slides = load_slides(plan_export)
+    plan = ground_truth_plan(plan_export, plan_slides)
+    facts = ground_truth_facts(plan)
+    instances = slide_instances_of(plan)
+    v_expectations = facts["rectExpectations"]["V"]
+
+    consumption_slide = next(s for s in plan_slides if s["originalOrdinal"] == GOTO_CONSUMPTION_CHECK_TO)
+    character_rect = character_region_rect(plan_export, consumption_slide)
+    consumption_index = int(consumption_slide["playerIndex"])
+
+    instances_g = {index: dict(assets) for index, assets in instances.items()}
+    expectations_g = {index: dict(assets) for index, assets in v_expectations.items()}
+    if character_rect is not None:
+        instances_g.setdefault(consumption_index, {})[CHARACTERS_ASSET_KEY] = [character_rect]
+        expectations_g.setdefault(consumption_index, {})[CHARACTERS_ASSET_KEY] = DEAD
+
+    viewport = (VIEWPORT_WIDTH, VIEWPORT_HEIGHT) if args.attach else args.viewport
+    evidence_dir = args.artifact.parent / "visible"
+    onset_scene_id = str(facts["onset1to2"])
+
+    result: dict[str, Any] = {"pass": "G", "attach": bool(args.attach), "viewport": {"width": viewport[0], "height": viewport[1]}}
+    chrome_proc: subprocess.Popen | None = None
+    try:
+        env: dict[str, str | None] = {}
+        if args.attach:
+            port = free_port()
+            profile = args.artifact.parent / "attach-chrome-profile-g"
+            if profile.exists():
+                shutil.rmtree(profile)
+            chrome_proc = launch_attach_chrome(port, profile)
+            wait_for_cdp(port)
+            force_exact_viewport(port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+            env = {ATTACH_ENV: f"http://127.0.0.1:{port}", ADVANCE_ENV: "click"}
+        else:
+            force_viewport(*viewport)
+
+        export_armed = prepare_export(args.fixture, args.original_index, "pass-g-armed")
+        result["armed"] = _run_goto_arm(
+            export_armed, load_slides(export_armed), env=env, tag="G", armed=True,
+            instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=True),
+            viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
+        )
+
+        export_off = prepare_export(args.fixture, args.original_index, "pass-g-off")
+        result["nullControl"] = _run_goto_arm(
+            export_off, load_slides(export_off), env={**env, GOTO_AUTOPLAY_ENV: "off"}, tag="Goff", armed=False,
+            instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
+            viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
+        )
+    finally:
+        if chrome_proc is not None:
+            chrome_proc.terminate()
+            try:
+                chrome_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                chrome_proc.kill()
+                chrome_proc.wait(timeout=5)
+            result["chromePid"] = chrome_proc.pid
+            result["chromeExitCode"] = chrome_proc.poll()
+
+    result["status"], result["reasons"] = overall_status_g(result)
+    return result
+
+
+def run_pass_g_cli(args: argparse.Namespace) -> None:
+    artifact = args.artifact
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Any] = {"kind": "live-continuity-probe-pass-g", "status": "running"}
+
+    def save() -> None:
+        artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
+
+    save()
+    try:
+        result.update(run_pass_g(args))
+    except Exception as exc:  # noqa: BLE001 - always leave a readable artifact behind
+        result["status"] = "error"
+        result["error"] = str(exc)
+    finally:
+        save()
+    print(json.dumps({"status": result.get("status"), "reasons": result.get("reasons")}, indent=2))
+
+
 def check_no_leftover_chrome() -> str:
     try:
         completed = subprocess.run(["pgrep", "-fl", "obed-live-chrome"], capture_output=True, text=True)
@@ -2271,6 +2838,9 @@ def main() -> None:
         raise SystemExit(f"fixture is unavailable: {args.fixture}")
     if not args.original_index.is_file():
         raise SystemExit(f"original index is unavailable: {args.original_index}")
+    if args.only_pass == "G":
+        run_pass_g_cli(args)
+        return
     artifact = args.artifact
     artifact.parent.mkdir(parents=True, exist_ok=True)
     viewport = args.viewport

@@ -217,6 +217,21 @@ describe("LivePresenter", () => {
     }
   });
 
+  it("shows the auto-play-deferred note near the slide line", async () => {
+    const api = client({ state: vi.fn(async () => state({ autoPlayDeferred: "Movies idle until next advance" })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    const note = await screen.findByText("Movies idle until next advance");
+    const slideLine = screen.getByText(/Slide 1 · Build/);
+    expect(slideLine.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("says nothing when auto-play was not deferred", async () => {
+    const api = client({ state: vi.fn(async () => state({ autoPlayDeferred: null })) });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+    await screen.findByText(/Slide 1 · Build/);
+    expect(screen.queryByText("Movies idle until next advance")).not.toBeInTheDocument();
+  });
+
   it("keeps the observed slide when go-to is rejected", async () => {
     const api = client({
       state: vi.fn(async () => state()),

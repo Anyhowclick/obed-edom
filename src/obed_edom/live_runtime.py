@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-RUNTIME_VERSION = 1
+RUNTIME_VERSION = 2
 PLAYER_SHA256 = "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354"
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
 
@@ -26,7 +26,8 @@ _INSTALL = r"""
       const initial = state === 'IdleAtInitialState';
       const final = state === 'IdleAtFinalState';
       const manual = !!script && script.showMode === 0;
-      const next = script && script.events[controller.nextSceneIndex];
+      const events = script && Array.isArray(script.events) ? script.events : null;
+      const next = events && events[controller.nextSceneIndex];
       const automaticPending = final && !!next && !!next.automaticPlay;
       const ready = manual && (initial || final) && !automaticPending &&
         !controller.queuedUserAction;
@@ -34,8 +35,32 @@ _INSTALL = r"""
       if (script && (!Number.isInteger(slide) || slide < 0)) {
         slide = script.slideIndexFromSceneIndexLookup[controller.currentSceneIndex];
       }
+      // Mirror the player's next-event index without truncating automatic runs at slide boundaries.
+      let autoPlayRunLength = null, autoPlayRunKinds = null;
+      if (events) {
+        let start = -1;
+        if (initial) start = controller.currentSceneIndex;
+        else if (final) start = controller.nextSceneIndex;
+        if (start === -1 && !final) {
+          autoPlayRunLength = null;
+        } else if (!Number.isInteger(start) || start < 0 || start >= events.length) {
+          autoPlayRunLength = 0;
+          autoPlayRunKinds = [];
+        } else {
+          autoPlayRunLength = 0;
+          autoPlayRunKinds = [];
+          for (let i = start; i < events.length; i++) {
+            const event = events[i];
+            if (!event || !event.automaticPlay) break;
+            autoPlayRunLength += 1;
+            const effects = Array.isArray(event.effects) ? event.effects : null;
+            const first = effects && effects[0];
+            autoPlayRunKinds.push(first && typeof first.name === 'string' ? first.name : null);
+          }
+        }
+      }
       return {
-        runtimeVersion: 1,
+        runtimeVersion: 2,
         ready,
         busy: !ready,
         playerState: state,
@@ -50,6 +75,9 @@ _INSTALL = r"""
         canGoTo: ready,
         automaticPending,
         queuedAction: !!controller.queuedUserAction,
+        slideNumberShowing: !!(controller.slideNumberController && controller.slideNumberController.isShowing),
+        autoPlayRunLength,
+        autoPlayRunKinds,
         goToSemantics: 'restart-at-initial-state',
         refusalReason: script && !manual ? 'Only manual presentation mode is supported.' : null
       };

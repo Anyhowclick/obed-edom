@@ -263,3 +263,26 @@ def test_live_start_rejects_unknown_continuity_mode(tmp_path, monkeypatch):
     response = client.post('/api/live', json={'previewJobId': 'prepared', 'continuity': 'force'})
     assert response.status_code == 422
     assert not adapters
+
+
+def test_live_api_snapshot_surfaces_auto_play_deferred_and_advance_clears_it(tmp_path, monkeypatch):
+    client, _, _, _, adapters, _service = client_for(tmp_path, monkeypatch)
+    state = client.post('/api/live', json={'previewJobId': 'prepared'}).json()
+    assert state['autoPlayDeferred'] is None
+    session = state['sessionId']
+    adapter = adapters[-1]
+
+    def goto_with_deferral(operation, slide=None):
+        observed = Adapter.observe(adapter)
+        return PlayerObservation(
+            original_slide=observed.original_slide, scene_id=observed.scene_id,
+            output_visible=observed.output_visible, auto_play_deferred='Movies idle until next advance',
+        )
+
+    adapter.execute = goto_with_deferral
+    result = client.post(f'/api/live/{session}/commands', json={'requestId': 'g', 'operation': 'goTo', 'slide': 1}).json()
+    assert result['state']['autoPlayDeferred'] == 'Movies idle until next advance'
+    assert client.get('/api/live').json()['autoPlayDeferred'] == 'Movies idle until next advance'
+
+    advanced = client.post(f'/api/live/{session}/commands', json={'requestId': 'a', 'operation': 'advance'}).json()
+    assert advanced['state']['autoPlayDeferred'] is None
