@@ -33,6 +33,7 @@ GL_REPLAY_JS = r"""
   var BAND_COLS = 16;
   var BAND_ROWS = 8;
   var GREEN_INSET_PX = 8;
+  var SEAM_VERSION = 1;
   var SEGMENT_CALL_CAP = 512;
   var SETTLE_QUIET_TICKS = 3;
   var OCCLUSION_MAX_FRACTION = 0.5;
@@ -942,6 +943,7 @@ GL_REPLAY_JS = r"""
   // stand-down until the armed context exists (plan §2.2).
   function preflight(){
     var seam = window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.glReplay;
+    if (seam && seam.version !== SEAM_VERSION) seam = null;
     if (seam) state.seam = seam;
     state.arming = true;
     var ok = assertOr('runtimeSeamAbsent', !!seam, null) &&
