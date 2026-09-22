@@ -612,7 +612,7 @@ overlapping edits to those boundary files without coordination.
    the hand-built + `..._with mistakes` decks; JobName rename on both sub-tabs; `content_only=True`
    refuses the text-only kwargs (`text_fit`, `min_text_pt`, `allow_split`, `split_overrides`); and
    the two-batch + pure-per-movie Generator→Exporter chains on `DSK_Gen_Export_Input.key` 11–13 (PRs
-   #135/#138/#140/#143/#148). Evidence `~/Desktop/dsk-d4-work/evidence-r1[456]/`. Durable Keynote
+   #135/#138/#140/#143/#148). Evidence was `~/Desktop/dsk-d4-work/evidence-r1[456]/` (trashed 2026-09-22). Durable Keynote
    quirk found here: this build raises -1728 on `locked of group N` though the group deletes fine
    (tolerated, #148).
 
@@ -697,7 +697,7 @@ overlapping edits to those boundary files without coordination.
     movie-start pos 0; movie 1 dissolve In pos 1, automatic True / referent False / delay 8.0);
     Keynote opens the patched deck, the Exporter renders A → cross-dissolve at ~8.25 s → B
     playing; an open + nudge + SAVE in Keynote leaves the builds IDENTICAL. Evidence
-    `~/Desktop/dsk-d5-work/evidence-r18/` (`final50_strip.png`), outputs `…/r18-output/`.
+    `~/Desktop/dsk-d5-work/evidence-r18/` (`final50_strip.png`), outputs `…/r18-output/` (trashed 2026-09-22).
 29. **Stacked-clip intermediates exported BARE — DONE, LIVE-VERIFIED r18.** The upper stacked clip's
     scratch copy has its source build-in flipped to `apple:movie-start` / After Transition / delay 0
     (`iwa_movies.bare_source_build_ins`, scratch only, `_SlideJob.bare`). Live: movie 1's
@@ -724,7 +724,7 @@ overlapping edits to those boundary files without coordination.
     edge 1877 (upper clip w 1403 → 1876, the source's own 5 px); y 670 h 395 unchanged. The same run
     re-proved the 0.9 rule + item 30(d) live: slide 50 still `stackedMovies`, 1 build-in bared,
     upper clip dissolve With Previous delay 8.0; Exporter frames A@3 s / B@12 s. Peak RSS 3.07 GB.
-    Source sha unchanged. Evidence `~/Desktop/dsk-d5-work/evidence-r19/` (`lr-strip.png`).
+    Source sha unchanged. Evidence `~/Desktop/dsk-d5-work/evidence-r19/` (`lr-strip.png`, trashed 2026-09-22).
     Stack threshold SETTLED (owner, 2026-09-20): raised 0.5 → 0.9 — FRC 50's visible rects overlap
     100% of the smaller (movie 1 is 5 px narrower inside movie 0), so nothing real needed the
     loose bound and a row that merely clips can no longer be read as a stack.
@@ -783,7 +783,7 @@ overlapping edits to those boundary files without coordination.
     `apple:movie-start` per clip, leftmost After Transition at `buildChunks[0]` (automatic True,
     referent True, delay 0), others With Build 1 (True, False, 0), `playsAcrossSlides` False. Live
     r17 (2026-09-17, PR #151) PASSED on `DSK_Gen_Export_Input.key` 11–13; evidence
-    `~/Desktop/dsk-d4-work/evidence-r17/`.
+    `~/Desktop/dsk-d4-work/evidence-r17/` (trashed 2026-09-22).
 
 ## 6. Test gates
 
@@ -800,6 +800,5 @@ overlapping edits to those boundary files without coordination.
   (`dashboard/tests/*.test.cjs`, `npm run test:maps`); there is NO Vitest and no `tests-ui/` in
   this worktree. `cd dashboard && npm install && npm run build` (includes `tsc --noEmit`) after
   any `dashboard/src/**` change.
-- Acceptance scripts live OUTSIDE the repo under `~/Desktop/dsk-d4-work/`: `accept9.py`,
-  `accept11b.py`, `accept11p.py`, `accept12.py`, `accept13.py` (current; CSV
-  `check,expected,actual,result`).
+- Acceptance scripts live OUTSIDE the repo under `~/Desktop/dsk-d4-work/`: `accept13.py` (CSV
+  `check,expected,actual,result`) and `inspect_chunks.py` (offline build-chunk dumper); older `accept*.py` are gone.
