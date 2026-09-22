@@ -1774,23 +1774,33 @@ def test_an_unmeasured_animation_property_is_refused():
 # --- finding 2: fade/hidden scan every flattened animation, exact inequality, any fill mode --
 
 
+def _opacity_group(from_value: float, to_value: float, fill_mode: str = "both") -> dict:
+    return {
+        "additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
+        "fillMode": fill_mode, "duration": 0.1, "autoreverses": False,
+        "animations": [
+            {"repeatCount": 0, "removedOnCompletion": True, "from": {"scalar": from_value},
+             "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
+             "autoreverses": False, "property": "opacity", "fillMode": fill_mode,
+             "duration": 0.1, "beginTime": 0, "to": {"scalar": to_value}}
+        ], "removedOnCompletion": False,
+    }
+
+
 def test_fade_is_detected_even_when_not_the_settled_animation():
-    """Slot 0 (background) has product == sto == 1 and no fade on its own settled animation;
-    adding an EARLIER, non-`both`/`forwards` opacity animation with `from != to` must still
-    exclude it -- the exclusion scan is not limited to the settled (last both/forwards) one."""
+    """Slot 0 (background) has product == sto == 1 and no `opacity` animation of its own (its
+    only group is `zPosition`). Prepending an EARLIER opacity fade, followed by a LATER opacity
+    group that settles back to 1->1 (so it -- not the fade -- is the one `settled[property]`
+    keeps, per last-both/forwards-wins), must still exclude the slot: the exclusion scan is not
+    limited to whichever animation ends up chosen as settled."""
 
     def add_earlier_fade(effect):
         wrapper = effect["baseLayer"]["layers"][0]
-        wrapper.setdefault("animations", []).append(
-            {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
-             "fillMode": "backwards", "duration": 0.1, "autoreverses": False,
-             "animations": [
-                 {"repeatCount": 0, "removedOnCompletion": True, "from": {"scalar": 1},
-                  "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
-                  "autoreverses": False, "property": "opacity", "fillMode": "backwards",
-                  "duration": 0.1, "beginTime": 0, "to": {"scalar": 0.5}}
-             ], "removedOnCompletion": False}
-        )
+        wrapper["animations"] = [
+            _opacity_group(1, 0.5),
+            _opacity_group(1, 1),
+            *(wrapper.get("animations") or []),
+        ]
 
     result = effect_opacity_overrides(_mutate_sanitized_effect(add_earlier_fade))
     assert isinstance(result, dict)
@@ -1818,24 +1828,27 @@ def test_fade_uses_exact_inequality_not_a_tolerance():
     assert {"slot": 0, "reason": "fade"} in result["excluded"]
 
 
-def test_hidden_presence_excludes_regardless_of_fill_mode():
-    """Slot 3 has no `hidden` animation at all; a transient one with a fill mode that never
-    settles must still exclude it -- 'a hidden animation is present', full stop."""
+def test_hidden_presence_excludes_regardless_of_settlement():
+    """Slot 3 has no `hidden` animation at all; adding one (with a measured-valid `fillMode`, so
+    the animation itself is not what excludes it) must still exclude the slot -- `hidden`
+    exclusion is presence-based, not conditioned on the animation being the settled one for
+    anything."""
 
-    def add_transient_hidden(effect):
+    def add_hidden(effect):
         leaf = _leaf_of(effect["baseLayer"]["layers"][3])
-        leaf.setdefault("animations", []).append(
+        leaf["animations"] = [
+            *(leaf.get("animations") or []),
             {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
-             "fillMode": "removed", "duration": 0.1, "autoreverses": False,
+             "fillMode": "both", "duration": 0.1, "autoreverses": False,
              "animations": [
                  {"repeatCount": 0, "removedOnCompletion": True, "from": {"scalar": False},
                   "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
-                  "autoreverses": False, "property": "hidden", "fillMode": "removed",
+                  "autoreverses": False, "property": "hidden", "fillMode": "both",
                   "duration": 0.1, "beginTime": 0, "to": {"scalar": False}}
-             ], "removedOnCompletion": False}
-        )
+             ], "removedOnCompletion": False},
+        ]
 
-    result = effect_opacity_overrides(_mutate_sanitized_effect(add_transient_hidden))
+    result = effect_opacity_overrides(_mutate_sanitized_effect(add_hidden))
     assert isinstance(result, dict)
     assert {"slot": 3, "reason": "hidden"} in result["excluded"]
 
@@ -1925,6 +1938,253 @@ def test_non_identity_sublayer_transform_refuses():
     assert "sublayerTransform" in result.reason
 
 
+# --- Codex round 2 finding 2 (residual): root geometry, child-centering, non-leaf animations ---
+
+
+def test_a_rotated_effect_root_refuses():
+    def rotate_root(effect):
+        effect["baseLayer"]["initialState"]["rotation"] = 90
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(rotate_root))
+    assert isinstance(result, Unsupported)
+    assert "effect baseLayer" in result.reason
+    assert "rotated" in result.reason
+
+
+def test_a_root_with_animations_refuses():
+    def animate_root(effect):
+        effect["baseLayer"]["animations"] = [_opacity_group(1, 1)]
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(animate_root))
+    assert isinstance(result, Unsupported)
+    assert "effect baseLayer carries animations" in result.reason
+
+
+def test_leaf_position_moved_100px_refuses():
+    """The formula never reads a leaf's `position` (it derives the leaf centre from the wrapper's
+    position plus the leaf's own translation animation), so moving it must be caught by the
+    centred-in-parent invariant, not silently ignored."""
+
+    def move_leaf(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        leaf["initialState"]["position"]["pointX"] += 100
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(move_leaf))
+    assert isinstance(result, Unsupported)
+    assert "not centred in its parent" in result.reason
+
+
+def test_wrapper_translation_animation_refuses():
+    """`transform.translation`/`transform.scale.*` are only ever measured on a chain's leaf; one
+    on the wrapper must refuse rather than being silently accepted and ignored."""
+
+    def add_wrapper_translation(effect):
+        wrapper = effect["baseLayer"]["layers"][4]
+        wrapper["animations"] = [
+            {"additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
+             "fillMode": "both", "duration": 0.1, "autoreverses": False,
+             "animations": [
+                 {"repeatCount": 0, "removedOnCompletion": True, "from": {"pointX": 0, "pointY": 0},
+                  "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
+                  "autoreverses": False, "property": "transform.translation", "fillMode": "both",
+                  "duration": 0.1, "beginTime": 0, "to": {"pointX": 100, "pointY": 0}}
+             ], "removedOnCompletion": False},
+            *(wrapper.get("animations") or []),
+        ]
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(add_wrapper_translation))
+    assert isinstance(result, Unsupported)
+    assert "on a non-leaf node" in result.reason
+
+
+# --- Codex round 2 finding 1 (residual): value/control shapes, not just key names --------------
+
+
+def test_effects_must_be_the_empty_list():
+    def replace_effects(effect):
+        effect["effects"] = [1]
+
+    with pytest.raises(_Refuse, match="always empty"):
+        _check_effect_encoding(_mutate_sanitized_effect(replace_effects))
+
+
+@pytest.mark.parametrize("bad_texture", [None, 42, [], [False]])
+def test_texture_must_be_a_non_empty_string(bad_texture):
+    def replace_texture(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][0])
+        leaf["texture"] = bad_texture
+
+    with pytest.raises(_Refuse, match="unmeasured value or shape"):
+        _check_effect_encoding(_mutate_sanitized_effect(replace_texture))
+
+
+@pytest.mark.parametrize("bad_layers", ["not a list", [False], [{"initialState": {}}, "x"]])
+def test_layers_must_be_a_list_of_readable_layer_objects(bad_layers):
+    def replace_layers(effect):
+        effect["baseLayer"]["layers"][4]["layers"] = bad_layers
+
+    with pytest.raises(_Refuse, match="not a readable list of layer objects"):
+        _check_effect_encoding(_mutate_sanitized_effect(replace_layers))
+
+
+def test_a_transform_with_the_wrong_length_refuses():
+    def short_affine(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        leaf["initialState"]["affineTransform"] = [1, 0, 0, 1]
+
+    with pytest.raises(_Refuse, match="unmeasured value or shape"):
+        _check_effect_encoding(_mutate_sanitized_effect(short_affine))
+
+
+def test_a_missing_animation_endpoint_refuses_not_a_keyerror():
+    """Codex round 2 reproduced a raw `KeyError` from a missing `to`; it must now be a `_Refuse`
+    at the vocabulary stage, and `effect_opacity_overrides` must return `Unsupported`, never
+    raise."""
+
+    def drop_to(effect):
+        a = _opacity_anim_of(effect, 4)
+        del a["to"]
+
+    mutated = _mutate_sanitized_effect(drop_to)
+    with pytest.raises(_Refuse, match="missing measured animation keys"):
+        _check_effect_encoding(mutated)
+    result = effect_opacity_overrides(mutated)
+    assert isinstance(result, Unsupported)
+
+
+def test_a_missing_animation_from_refuses_not_a_keyerror():
+    def drop_from(effect):
+        a = _opacity_anim_of(effect, 4)
+        del a["from"]
+
+    mutated = _mutate_sanitized_effect(drop_from)
+    with pytest.raises(_Refuse, match="missing measured animation keys"):
+        _check_effect_encoding(mutated)
+    result = effect_opacity_overrides(mutated)
+    assert isinstance(result, Unsupported)
+
+
+def test_an_invalid_fill_mode_refuses():
+    def bad_fill_mode(effect):
+        _opacity_anim_of(effect, 4)["fillMode"] = "bogus"
+
+    with pytest.raises(_Refuse, match="not a measured fill mode"):
+        _check_effect_encoding(_mutate_sanitized_effect(bad_fill_mode))
+
+
+@pytest.mark.parametrize("control,value", [("additive", True), ("autoreverses", True), ("repeatCount", 3)])
+def test_a_non_neutral_animation_control_refuses(control, value):
+    def tamper(effect):
+        _opacity_anim_of(effect, 4)[control] = value
+
+    with pytest.raises(_Refuse, match="not the measured neutral value"):
+        _check_effect_encoding(_mutate_sanitized_effect(tamper))
+
+
+def test_removed_on_completion_true_and_false_are_both_accepted():
+    """Unlike `additive`/`autoreverses`/`repeatCount`, `removedOnCompletion` legitimately varies
+    (measured both `True` and `False`); it must be type-checked, not pinned to one value."""
+
+    def flip(effect):
+        _opacity_anim_of(effect, 4)["removedOnCompletion"] = False
+
+    _check_effect_encoding(_mutate_sanitized_effect(flip))
+
+
+def test_removed_on_completion_non_boolean_refuses():
+    def tamper(effect):
+        _opacity_anim_of(effect, 4)["removedOnCompletion"] = 1
+
+    with pytest.raises(_Refuse, match="removedOnCompletion is not a readable boolean"):
+        _check_effect_encoding(_mutate_sanitized_effect(tamper))
+
+
+# --- Codex round 2 finding 3: non-finite derived arithmetic must not bypass mismatch/Unsupported
+
+
+def test_an_overflowed_opacity_product_is_excluded_not_overridden():
+    """`1e308 * 1e308` overflows to `inf`; the old `abs(inf - sto) > 1e-6` comparison is fine, but
+    `abs(nan - sto) > 1e-6` is FALSE for any `nan` (nan comparisons are always false), which used
+    to let a NaN product sail through as a false match. `math.isclose` correctly returns `False`
+    for both, so overflow/NaN products are excluded as `product-mismatch`, never overridden."""
+
+    def overflow_wrapper_and_leaf_opacity(effect):
+        overflow_group = {
+            "additive": False, "timeOffset": 0, "beginTime": 0, "repeatCount": 0,
+            "fillMode": "both", "duration": 0.1, "autoreverses": False,
+            "animations": [
+                {"repeatCount": 0, "removedOnCompletion": True, "from": {"scalar": 1e308},
+                 "timingFunction": "EaseInEaseOut", "additive": False, "timeOffset": 0,
+                 "autoreverses": False, "property": "opacity", "fillMode": "both",
+                 "duration": 0.1, "beginTime": 0, "to": {"scalar": 1e308}}
+            ], "removedOnCompletion": False,
+        }
+        effect["baseLayer"]["layers"][0]["animations"] = [overflow_group]
+        leaf = _leaf_of(effect["baseLayer"]["layers"][0])
+        leaf["animations"] = [overflow_group]
+        leaf["texturedRectangle"]["singleTextureOpacity"] = 0
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(overflow_wrapper_and_leaf_opacity))
+    assert isinstance(result, dict)
+    assert {"slot": 0, "reason": "product-mismatch"} in result["excluded"]
+    assert all(o["slot"] != 0 for o in result["opacityOverrides"])
+
+
+def test_an_overflowed_rect_component_refuses():
+    def overflow_scale(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        group = leaf["animations"][0]
+        for anim in group["animations"]:
+            if anim.get("property") in ("transform.scale.x", "transform.scale.y"):
+                anim["to"] = {"scalar": 1e308}
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(overflow_scale))
+    assert isinstance(result, Unsupported)
+    assert "non-finite emitted rect" in result.reason
+
+
+# --- Codex round 2 finding 4 (SHOULD-FIX): settlement branches ---------------------------------
+
+
+def test_last_both_or_forwards_opacity_wins_over_earlier_and_intervening_animations():
+    """Three opacity animations on one node: an earlier eligible one (`both`, 1->0.6), an
+    intervening eligible one (`forwards`, 1->0.3), and the last eligible one (`both`, 1->1) that
+    must be the one governing the product -- while the earlier two still count for fade
+    detection (both have `from != to`, so the slot excludes regardless of which value 'wins')."""
+
+    def three_opacity_groups(effect):
+        wrapper = effect["baseLayer"]["layers"][0]
+        wrapper["animations"] = [
+            _opacity_group(1, 0.6, fill_mode="both"),
+            _opacity_group(1, 0.3, fill_mode="forwards"),
+            _opacity_group(1, 1, fill_mode="both"),
+        ]
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(three_opacity_groups))
+    assert isinstance(result, dict)
+    assert {"slot": 0, "reason": "fade"} in result["excluded"]
+
+
+def test_multi_node_product_uses_a_non_one_initial_state_opacity_fallback():
+    """Neither the wrapper nor the leaf of slot 3 has an opacity animation; give both a non-1,
+    non-default `initialState.opacity` whose product still equals the (mutated)
+    `singleTextureOpacity`, isolating the multi-node initialState-fallback path (as opposed to
+    the settled-animation path every other test exercises)."""
+
+    def non_one_initial_opacities(effect):
+        wrapper_state = effect["baseLayer"]["layers"][3]["initialState"]
+        leaf = _leaf_of(effect["baseLayer"]["layers"][3])
+        wrapper_state["opacity"] = 0.5
+        leaf["initialState"]["opacity"] = 0.6
+        leaf["texturedRectangle"]["singleTextureOpacity"] = 0.3
+
+    result = effect_opacity_overrides(_mutate_sanitized_effect(non_one_initial_opacities))
+    assert isinstance(result, dict)
+    assert not any(e["slot"] == 3 for e in result["excluded"])
+    override = next(o for o in result["opacityOverrides"] if o["slot"] == 3)
+    assert override["opacity"] == pytest.approx(0.3, abs=1e-9)
+
+
 # --- O1's own exclusion/candidate rules, unconditional -----------------------------------------
 
 
@@ -1945,6 +2205,7 @@ def test_duplicate_size_only_blocks_patched_slots():
         target = _leaf_of(effect["baseLayer"]["layers"][2])
         target["initialState"]["width"] = source["initialState"]["width"]
         target["initialState"]["height"] = source["initialState"]["height"]
+        target["initialState"]["anchorPoint"] = {"pointX": 0.5, "pointY": 0.5}
 
     harmless = effect_opacity_overrides(_mutate_sanitized_effect(duplicate_among_full_opacity_slots))
     assert isinstance(harmless, dict)
@@ -1979,7 +2240,7 @@ def _real_export_effects(root: Path = REAL_PLAYER_ROOT) -> list[tuple[str, int, 
 
 
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
-def test_real_export_matches_the_sanitized_fixture_and_every_other_effect_refuses():
+def test_real_export_matches_fixture_and_classifies_other_effects_by_shape():
     slide_list = json.loads((REAL_PLAYER_ROOT / "assets" / "header.json").read_text())["slideList"]
     data = json.loads(
         (REAL_PLAYER_ROOT / "assets" / slide_list[0] / f"{slide_list[0]}.json").read_text()
@@ -1990,20 +2251,21 @@ def test_real_export_matches_the_sanitized_fixture_and_every_other_effect_refuse
     _assert_is_the_qualified_1_to_2_result(real_result)
     assert real_result == effect_opacity_overrides(_sanitized_effect())
 
-    # Classify every OTHER effect in the export explicitly rather than asserting a blanket
-    # refusal: `apple:movie-start` build-ins animate `isPlaying` (never measured for the 1->2
-    # boundary) and any effect nesting a non-empty sub-`effects` list refuses (this vocabulary,
-    # like the movie one, treats `effects` as always empty) -- but the export also carries
-    # OTHER dissolve/magic-move transitions and empty-`effects` dissolve build-ins that are
-    # structurally identical to the qualified boundary's vocabulary and correctly pass; a test
-    # that demanded every non-qualified effect refuse would be asserting something the fixture
-    # measurably contradicts (five such effects pass; only four `isPlaying` build-ins and one
-    # nested-`effects` build-in refuse).
+    # Other effects are classified by their measured shape, not asserted to uniformly refuse:
+    # `apple:movie-start` build-ins refuse (for `isPlaying`, or -- now that fillMode/control
+    # values are validated too -- for one of their OTHER unmeasured-for-this-boundary control
+    # values, whichever the walker reaches first) and any effect nesting a non-empty sub-`effects`
+    # list refuses (this vocabulary, like the movie one, treats `effects` as always empty) -- but
+    # the export also carries OTHER dissolve/magic-move transitions and empty-`effects` dissolve
+    # build-ins that are structurally identical to the qualified boundary's vocabulary and
+    # correctly pass; a test that demanded every non-qualified effect refuse would be asserting
+    # something the fixture measurably contradicts (five such effects pass; only four
+    # `apple:movie-start` build-ins and one nested-`effects` build-in refuse).
     for uuid, event_index, effect_index, other in _real_export_effects():
         if (uuid, event_index, effect_index) == (slide_list[0], 1, 0):
             continue
         if other.get("type") == "buildIn" and other.get("name") == "apple:movie-start":
-            with pytest.raises(_Refuse, match="isPlaying"):
+            with pytest.raises(_Refuse, match=r"isPlaying|fillMode|removedOnCompletion|neutral value"):
                 _check_effect_encoding(other)
         elif other.get("effects"):
             with pytest.raises(_Refuse, match="effects"):
