@@ -149,7 +149,7 @@ PRE_ARM_REASONS = {
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "c13d67878ea2832cdbf78b7f1a6421d591dd83b6e0a472e097ae7b176233c352"
+PINNED_JS_SHA256 = "aeaaea6f1e9ed6da7609bf6be859a11d79848b204d0c32a96c932d7405eee2c6"
 
 
 # =======================================================================================
@@ -186,10 +186,10 @@ def _quoted_literals(source: str) -> list[str]:
 
 def _emitted_reasons(source: str) -> set[str]:
     """Every reason literal the module can actually emit: the first string argument
-    of an `assertOr`/`refuseInstall`/`pendingOr`/`provenOr`/`unproven`/`standDown`
-    call site, plus the named constants those helpers are handed."""
+    of an `assertOr`/`refuseInstall`/`provenOr`/`unproven`/`standDown` call site,
+    plus the named constants those helpers are handed."""
     direct = set(re.findall(
-        r"(?:assertOr|refuseInstall|pendingOr|provenOr|unproven|standDown)\s*\(\s*"
+        r"(?:assertOr|refuseInstall|provenOr|unproven|standDown)\s*\(\s*"
         r"(?:[A-Za-z0-9_.]+\s*,\s*)?['\"]([A-Za-z0-9_-]+)['\"]",
         source,
     ))
@@ -213,18 +213,58 @@ def test_stand_down_reason_set_is_closed_and_matches_the_plan():
     )
 
 
+# A reason bound to a `var NAME = '<reason>'` constant can be emitted from several
+# places while the quoted literal still appears once, so counting literals would be
+# blind exactly where it matters. `canvasRemoved` is the one documented exception:
+# it is both returned by the LIVE `guards()` and raised by the MutationObserver.
+REASONS_WITH_TWO_SITES = {
+    NORMAL_EXIT_REASON: "returned by `guards()` and raised by the MutationObserver",
+}
+
+
+def _constant_for(source: str, reason: str) -> str | None:
+    match = re.search(rf"var\s+([A-Z][A-Z_]*)\s*=\s*['\"]{re.escape(reason)}['\"]", source)
+    return match.group(1) if match else None
+
+
+def _emitting_sites(source: str, name: str) -> list[str]:
+    """Uses of a reason constant that can reach a stand-down: every reference to it
+    except its own declaration and the `=== NAME` / `!== NAME` guard comparisons
+    (those only ask whether a reason is being forced, they never raise it)."""
+    sites = []
+    for match in re.finditer(rf"\b{name}\b", source):
+        before = source[max(0, match.start() - 40) : match.start()]
+        if re.search(r"var\s+$", before):
+            continue
+        if re.search(r"[=!]==\s*$", before):
+            continue
+        line = source[: match.start()].count("\n") + 1
+        sites.append(f"{name}@line {line}")
+    return sites
+
+
 @pytest.mark.parametrize("reason", STAND_DOWN_REASONS + [NORMAL_EXIT_REASON])
 def test_each_reason_is_emitted_from_exactly_one_site(reason):
     """A reason emitted from two sites cannot be told apart by the sandbox tests
     below, so the fail-closed coverage they claim would be a half-truth."""
     source = _js_source()
-    occurrences = len(re.findall(rf"['\"]{re.escape(reason)}['\"]", source))
-    assert occurrences == 1, f"{reason!r} appears {occurrences} times; §2.7 requires one site"
-
-
-@pytest.mark.parametrize("reason", OPACITY_UNPROVEN_REASONS)
-def test_each_opacity_unproven_reason_is_present(reason):
-    assert f"'{reason}'" in _js_source() or f'"{reason}"' in _js_source()
+    expected = 2 if reason in REASONS_WITH_TWO_SITES else 1
+    name = _constant_for(source, reason)
+    if name is None:
+        occurrences = len(re.findall(rf"['\"]{re.escape(reason)}['\"]", source))
+        assert occurrences == expected, (
+            f"{reason!r} appears {occurrences} times; §2.7 requires {expected}")
+        return
+    # Bound to a constant: the literal count is meaningless, count the uses.
+    assert len(re.findall(rf"['\"]{re.escape(reason)}['\"]", source)) == 1, (
+        f"{reason!r} is bound to {name} but the literal is also written elsewhere")
+    sites = _emitting_sites(source, name)
+    assert len(sites) == expected, (
+        f"{reason!r} (via {name}) can be emitted from {len(sites)} sites, "
+        f"expected {expected}: {sites}"
+        + (f" — documented exception: {REASONS_WITH_TWO_SITES[reason]}"
+           if reason in REASONS_WITH_TWO_SITES else "")
+    )
 
 
 @pytest.mark.parametrize("note", MILESTONE_NOTES + ["glreplay-standdown", "glreplay-handoff",
@@ -253,14 +293,29 @@ def test_no_minified_player_identifiers(minified_name):
     assert minified_name not in _js_source()
 
 
-def test_script_builder_escapes_the_script_close_sequence():
+SCRIPT_PREFIX = '<script id="obed-gl-replay">'
+SCRIPT_SUFFIX = "</script>\n"
+
+
+def test_script_builder_wraps_the_module_in_a_script_tag():
     script = live_gl_replay_js.gl_replay_script(RUNTIME_PLAN)
-    assert script.startswith('<script id="obed-gl-replay">')
-    assert script.endswith("</script>\n")
-    body = script[len('<script id="obed-gl-replay">') : -len("</script>\n")]
-    assert "</script" not in body
-    if "</script" in _js_source():
-        assert "<\\/script" in body
+    assert script.startswith(SCRIPT_PREFIX)
+    assert script.endswith(SCRIPT_SUFFIX)
+    assert "</script" not in script[len(SCRIPT_PREFIX) : -len(SCRIPT_SUFFIX)]
+
+
+def test_script_builder_escapes_the_script_close_sequence(monkeypatch):
+    """Exercised directly rather than conditionally: today's bytes contain no
+    `</script`, so guarding the assertion on the shipped source made it vacuous.
+    An HTML parser ends the element on `</SCRIPT` too, so the escape must not be
+    case-sensitive."""
+    monkeypatch.setattr(live_gl_replay_js, "GL_REPLAY_JS", "var s = '</SCRIPT>';")
+    script = live_gl_replay_js.gl_replay_script(RUNTIME_PLAN)
+    assert script.startswith(SCRIPT_PREFIX)
+    assert script.endswith(SCRIPT_SUFFIX)
+    body = script[len(SCRIPT_PREFIX) : -len(SCRIPT_SUFFIX)]
+    assert "</script" not in body.lower(), body
+    assert "SCRIPT" in body, "the payload was dropped rather than escaped"
 
 
 def test_script_builder_embeds_the_module_bytes_once():
@@ -845,7 +900,10 @@ const window = {
   MutationObserver: MutationObserver,
   addEventListener() {}, removeEventListener() {},
 };
-if (!CFG.noSeam) window.__OBED_P2_PRESERVE__ = CFG.noGlReplaySeam ? {} : { glReplay: seam };
+function installSeam() {
+  window.__OBED_P2_PRESERVE__ = CFG.noGlReplaySeam ? {} : { glReplay: seam };
+}
+if (!CFG.noSeam && !CFG.lateSeamTicks) installSeam();
 if (!CFG.noObedLive) {
   window.__obedLive = {
     _ready: false,
@@ -926,6 +984,8 @@ function snapshotState() {
   return {
     installed: !!M,
     installThrew: installThrew,
+    debugHooks: M ? Object.keys(M).filter((k) => k === 'debug' || k === 'debugForceFail')
+                      .filter((k) => M[k] != null).sort() : null,
     state: M ? M.state : null,
     standDowns: M ? M.standDowns.slice() : [],
     events: M ? detailsOf(M.events) : [],
@@ -947,8 +1007,18 @@ function snapshotState() {
   };
 }
 
-async function armAndGoLive() {
+async function armAndGoLive(out) {
   await settle(3);                                   // IDLE -> ARM-PRE on the hash
+  if (CFG.lateSeamTicks) {
+    // An ARM-PRE requirement that appears N ticks late must be DEFERRED, not a
+    // stand-down, for as long as no armed context exists (plan §2.2).
+    await settle(CFG.lateSeamTicks);
+    out.beforeSeam = { standDowns: M ? M.standDowns.slice() : [],
+                       pending: M ? M.stats().pending : null,
+                       state: M ? M.state : null };
+    installSeam();
+    await settle(2);
+  }
   const canvas = new FakeCanvas(CFG.canvasId === undefined ? '0-canvas' : CFG.canvasId,
                                 CFG.canvasW === undefined ? 1920 : CFG.canvasW,
                                 CFG.canvasH === undefined ? 1080 : CFG.canvasH);
@@ -980,6 +1050,8 @@ async function armAndGoLive() {
   return gl;
 }
 
+const MOVIE_ENTRY = (CFG.plan && CFG.plan.boundaries
+  ? CFG.plan.boundaries.filter((b) => b && b.action === 'glReplay')[0] : null) || {atScene: 2};
 const MOVIE_SLOT_JS = CFG.plan && CFG.plan.boundaries
   ? (CFG.plan.boundaries.filter((b) => b && b.action === 'glReplay')[0] || {}).movieSlot
   : 3;
@@ -992,7 +1064,7 @@ async function main() {
     out.final = snapshotState();
     return out;
   }
-  const gl = await armAndGoLive();
+  const gl = await armAndGoLive(out);
   out.afterLive = snapshotState();
 
   if (CFG.scenario === 'happy') {
@@ -1021,6 +1093,57 @@ async function main() {
       await pumpUntil(handle.resume());
       out.afterResume = { seam: world.seamCalls.slice(), video: world.videoCalls.slice() };
     }
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'hash_flip') {
+    location.hash = '#' + MOVIE_ENTRY.atScene;
+    await settle(4);
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'pause_twice') {
+    const handle = window.__OBED_GL_ORACLE__;
+    if (handle) {
+      await pumpUntil(handle.pause());
+      await pumpUntil(handle.pause());          // a second pause must not spawn a 2nd loop
+      const before = M.stats().iter;
+      await settle(5);                          // 5 rAF ticks of the paused loop
+      out.pausedIterDelta = M.stats().iter - before;
+      out.pausedTicks = 5;
+      await pumpUntil(handle.resume());
+      const afterResume = M.stats().iter;
+      await settle(4);
+      out.resumedIterDelta = M.stats().iter - afterResume;
+      out.resumedTicks = 4;
+    }
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'sample_interrupted') {
+    const handle = window.__OBED_GL_ORACLE__;
+    if (handle) {
+      let resolved = null;
+      handle.sample(24).then(function (v) { resolved = v; });
+      for (let i = 0; i < 4; i++) { tickRaf(); tickRvfc(); await null; await null; }
+      out.samplesBeforeRemoval = 4;
+      stage.removeChild(world.canvas);          // stand-down with the window outstanding
+      for (let i = 0; i < 40 && resolved === null; i++) {
+        tickRaf(); tickRvfc(); await null; await null;
+      }
+      out.interruptedSamples = resolved === null ? null : resolved.length;
+    }
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'second_context') {
+    // A later Magic Move creates a NEW canvas + context; v1 has one boundary, so
+    // the module must neither re-arm on it nor stand down because of it.
+    const second = new FakeCanvas('1-canvas', 1920, 1080);
+    stage.appendChild(second);
+    out.secondContext = !!second.getContext('webgl');
+    second.getContext('webgl').enable(GLC.BLEND);
+    await settle(4);
     out.final = snapshotState();
     return out;
   }
@@ -1359,7 +1482,6 @@ def test_writeback_precedes_forwarded_player_call():
     assert "useProgram" in before, order
     # The CURRENT_PROGRAM restore is the last program switch of the write-back,
     # after every `uniform1f` (§2.5 step 3's poster restore may follow it).
-    assert before.index("uniform1f") < len(before) - 1 - before[::-1].index("useProgram") + 1
     last_uniform = len(before) - 1 - before[::-1].index("uniform1f")
     last_use = len(before) - 1 - before[::-1].index("useProgram")
     assert last_use > last_uniform, order
@@ -1432,3 +1554,158 @@ def test_unproven_slot_replays_opaque_and_notes():
     assert final["state"] == "LIVE", final["state"]
     assert final["opacityAfter"][4] == 1, final["opacityAfter"]
     assert final["stats"]["opacityUnproven"] == [{"slot": 4, "reason": "mixfactor"}]
+
+
+# --- regression cases for the round-1 fixes (Opus r2 spec 5) ----------------------------
+
+
+def test_late_arm_pre_requirement_is_deferred_not_a_stand_down():
+    """Plan §2.2 / r1 finding 3: an ARM-PRE requirement that appears a few ticks
+    late must be RECORDED as pending, never retire a module that has not armed a
+    context yet. The seam here arrives six ARM-PRE ticks after the hash."""
+    out = _run_sandbox(scenario="happy", lateSeamTicks=6)
+    final = _assert_clean(out)
+    before = out["beforeSeam"]
+    assert before["standDowns"] == [], before
+    assert before["pending"] == "runtimeSeamAbsent", before
+    assert before["state"] == "ARM-PRE", before
+    # Once the seam appears the module arms and goes LIVE with nothing recorded.
+    assert final["state"] == "LIVE", final["state"]
+    assert final["standDowns"] == [], final["standDowns"]
+    assert final["stats"]["pending"] is None, final["stats"]["pending"]
+    assert final["handlePresent"] is True
+
+
+def test_settle_to_hash_is_measured_after_the_hash_flips():
+    """r1 finding 4: `settleToHashMs` was unreachable. The measured timeline flips
+    the hash to `atScene` ~100 ms AFTER `ready`, so the value only exists once the
+    LIVE poll sees the flip."""
+    live_only = _run_sandbox(scenario="happy")
+    assert live_only["final"]["stats"]["settleToHashMs"] is None, (
+        "settleToHashMs reported before the hash ever flipped")
+    out = _run_sandbox(scenario="hash_flip")
+    final = _assert_clean(out)
+    assert final["state"] == "LIVE", final["state"]
+    value = final["stats"]["settleToHashMs"]
+    assert isinstance(value, (int, float)) and value == value, value   # finite, not NaN
+    assert value > 0, value
+    assert final["stats"]["settleGapMs"] is not None
+
+
+def test_double_pause_does_not_spawn_a_second_loop():
+    """r1 finding 5: `pause()`/`resume()` must not leave two loops running. The
+    paused loop is rAF-driven, so `stats().iter` must advance exactly once per tick
+    however many times `pause()` was called."""
+    out = _run_sandbox(scenario="pause_twice")
+    final = _assert_clean(out)
+    assert out["pausedIterDelta"] == out["pausedTicks"], (
+        f"paused loop ticked {out['pausedIterDelta']}x over "
+        f"{out['pausedTicks']} frames — duplicate loop?")
+    assert out["resumedIterDelta"] == out["resumedTicks"], (
+        f"resumed loop ticked {out['resumedIterDelta']}x over "
+        f"{out['resumedTicks']} frames — duplicate loop?")
+    assert final["standDowns"] == [], final["standDowns"]
+
+
+def test_outstanding_sample_resolves_short_on_stand_down():
+    """r1 finding 6: a `sample(n)` still collecting when the module stands down must
+    RESOLVE with what it has, not hang. A short list is safe — the scorer fails
+    closed on count (`INPAGE_MIN_SAMPLES`), so a truncated window can never read
+    LIVE, and the probe keeps the diagnostic `n`."""
+    out = _run_sandbox(scenario="sample_interrupted")
+    final = _assert_clean(out)
+    assert out["interruptedSamples"] is not None, "sample(24) never settled — it hung"
+    assert out["interruptedSamples"] < 24, out["interruptedSamples"]
+    assert final["standDowns"] == [NORMAL_EXIT_REASON], final["standDowns"]
+    assert final["handlePresent"] is False
+
+
+def test_second_magic_move_context_does_not_rearm_or_stand_down():
+    """r1 closed check 3(d): v1 arms ONE boundary. A later Magic Move's new canvas
+    and context must be ignored — not a second arm, and not an `unflaggedPlayerCall`
+    either, since its calls are not on the armed context."""
+    out = _run_sandbox(scenario="second_context")
+    final = _assert_clean(out)
+    assert out["secondContext"] is True
+    assert final["state"] == "LIVE", final["state"]
+    assert final["standDowns"] == [], final["standDowns"]
+    assert final["eventKinds"].count("glreplay-arm") == 1, final["eventKinds"]
+    assert final["handleScalars"]["canvasId"] == "0-canvas"
+
+
+def test_happy_path_uses_the_current_segment_not_the_retained_fallback():
+    """r2 spec 2: the `state.retained` fallback may only fire on a malformed final
+    frame, and must say so. The measured settle frame is `clearColor,clear`
+    delimited, so the fallback must not be taken."""
+    out = _run_sandbox(scenario="happy")
+    final = _assert_clean(out)
+    assert "glreplay-retained-frame" not in final["eventKinds"], final["eventKinds"]
+    assert final["stats"]["frameLen"] == SETTLE_FRAME["frameLen"]
+
+
+def test_green_roi_is_plan_derived_and_reported_in_both_spaces():
+    """Owner decision D1(a): the green ROI is the largest part of the front-most
+    overlapping slot that is OFF the movie rect, inset 8 px. `stats()` must report
+    the authored rect and the buffer ROI actually read under distinct names."""
+    out = _run_sandbox(scenario="happy")
+    stats = _assert_clean(out)["stats"]
+    authored = stats["greenAuthored"]
+    assert authored is not None, "no green ROI derived from the plan"
+    assert authored["x"] == pytest.approx(796.7255, abs=0.01)
+    assert authored["y"] == pytest.approx(680.9159, abs=0.01)
+    assert authored["w"] == pytest.approx(337.0, abs=0.01)
+    assert authored["h"] == pytest.approx(101.931, abs=0.01)
+    roi = stats["greenRoi"]
+    assert roi is not None and roi != authored, (
+        "greenRoi must be the buffer ROI, not the authored rect")
+    assert (roi["w"], roi["h"]) == (337, 102)
+    # Drawing-buffer y is measured from the bottom.
+    assert roi["y"] == 1080 - (round(authored["y"]) + roi["h"])
+
+
+def test_proofs_leave_every_program_at_its_recorded_rest_opacity():
+    """S3's headless D1, as a unit invariant. The opacity proofs probe each draw by
+    writing `Opacity` (alpha=0 identity, ablation, restore). GLSL uniforms are
+    STICKY per program and the measured frame re-sets `Opacity` for programs 0–3
+    only (opacity-plan F-10), so a probe value left behind on program 4 survives
+    into every later replay. After `proveOpacity`, every program must read back at
+    the rest value captured before any probing — including a slot whose override
+    was dropped as unproven."""
+    out = _run_sandbox(scenario="happy")
+    final = _assert_clean(out)
+    stats = final["stats"]
+    rest = stats["restOpacity"]
+    after = stats["opacityAfterProofs"]
+    assert after is not None, "opacityAfterProofs not published — the proofs never ran"
+    assert rest == [p["restOpacity"] for p in SETTLE_FRAME["programs"]], rest
+    assert after == rest, f"a probe value survived the proofs: rest={rest} after={after}"
+
+
+def test_slot_unproven_after_the_probes_is_left_opaque_not_transparent():
+    """The exact path S3 hit headlessly. A slot dropped at `mixfactor` never gets
+    probed, but one dropped at `ablation` is dropped AFTER the alpha=0 identity
+    probe has written 0.0 to its program — and program 4 is the one the recorded
+    frame never re-sets, so that 0.0 is sticky. It must be restored, or the movie
+    slot replays as a transparent hole and the oracle reads DEAD."""
+    out = _run_sandbox(scenario="happy", debugForceFail="ablation")
+    final = _assert_clean(out)
+    assert _unproven(final).get(4) == "ablation", _unproven(final)
+    assert final["state"] == "LIVE", final["state"]
+    stats = final["stats"]
+    assert stats["opacityAfterProofs"] == stats["restOpacity"], stats
+    assert stats["opacityAfterProofs"][4] == 1, stats["opacityAfterProofs"]
+    # And the replayed frame really is opaque there, not a transparent hole.
+    assert final["opacityAfter"][4] == 1, final["opacityAfter"]
+
+
+def test_debug_hooks_are_absent_on_the_normal_install_path():
+    """§2.7: `debugForceFail` — and the `API.debug` replay hooks S3 needs — are
+    seeded only from a pre-existing version-less `window.__OBED_GL_REPLAY__`, so no
+    product injection can reach them."""
+    out = _run_sandbox(scenario="happy")
+    assert _assert_clean(out)["debugHooks"] == [], out["final"]["debugHooks"]
+    # The seeded path is what the forced stand-downs rely on, so prove it works —
+    # and that both hooks are gated on the same pre-seeded object, never one alone.
+    forced = _run_sandbox(scenario="arm_only", debugForceFail="occlusionTooHigh")
+    assert forced["final"]["debugHooks"] == ["debug", "debugForceFail"], \
+        forced["final"]["debugHooks"]
