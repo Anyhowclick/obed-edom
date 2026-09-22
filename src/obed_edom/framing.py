@@ -496,7 +496,7 @@ def propose_framings(
             candidate["rects"] = rects_of(slide, shown)
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
         auto_slide = row.get("templateSlide")
-        auto_recipe = plan.recipes[number]
+        auto_recipe = plan.framing_recipes[number]
         pages.append(
             {
                 "slide": number,

@@ -3699,7 +3699,7 @@ class Plan:
     badge_raises: list[dict[str, Any]]
     card_grid: list[dict[str, Any]]
     roster: dict[str, set[int]]
-    recipes: dict[int, dict[str, Any]] = field(default_factory=dict)
+    framing_recipes: dict[int, dict[str, Any]] = field(default_factory=dict)
     framing_context: dict[int, FramingContext] = field(default_factory=dict)
 
 
@@ -3855,7 +3855,7 @@ def plan_payload(
     card_grid_report: list[dict[str, Any]] = []
     roster_report: dict[str, set[int]] = {}
     prev = FramingContext()
-    recipes: dict[int, dict[str, Any]] = {}
+    framing_recipes: dict[int, dict[str, Any]] = {}
     framing_context: dict[int, FramingContext] = {}
     roster_keep, roster_drop = roster_slides(payload.get("slides") or [])
     roster_report["keep"] = roster_keep
@@ -3881,7 +3881,7 @@ def plan_payload(
             framing_report.append(row)
             if row["fitted"]:
                 fitted_slides.append(number)
-        recipes[number] = slide_recipe
+        framing_recipes[number] = slide_recipe
         preview = (previews or {}).get(number)
         analysis = (
             analyse_free_text(
@@ -3936,7 +3936,7 @@ def plan_payload(
         badge_raises=badge_raise_report,
         card_grid=card_grid_report,
         roster=roster_report,
-        recipes=recipes,
+        framing_recipes=framing_recipes,
         framing_context=framing_context,
     )
 

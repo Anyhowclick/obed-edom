@@ -507,7 +507,7 @@ def test_proposal_uses_full_wall_context_for_digests_navigator_and_thumbnails(tm
         numbers = [slide["number"] for slide in payload["slides"]]
         return _plan(
             framing=[{"slide": n, "templateSlide": 1, "fitted": False} for n in numbers],
-            recipes={n: {"destWidth": 1920, "destHeight": 1080} for n in numbers},
+            framing_recipes={n: {"destWidth": 1920, "destHeight": 1080} for n in numbers},
             framing_context={n: FramingContext() for n in numbers},
         )
 
@@ -587,7 +587,7 @@ def test_fallback_candidate_carries_text_and_card_context_onto_the_fit_recipe(tm
     def fake_plan(payload, _recipe, **kwargs):
         return _plan(
             framing=[{"slide": 1, "templateSlide": 1, "fitted": True}],
-            recipes={1: {"destWidth": 1920, "destHeight": 1080}},
+            framing_recipes={1: {"destWidth": 1920, "destHeight": 1080}},
             framing_context={1: FramingContext()},
         )
 
