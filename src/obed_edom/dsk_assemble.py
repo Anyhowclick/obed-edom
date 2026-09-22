@@ -6331,11 +6331,12 @@ def assemble_dsk_deck(
             check_layout_import_preconditions(
                 fw_deck, layout_template=layout_template, layout_names=import_layout_names
             )
-        elif dsk_live.owned_alpha_safe_layout(fw_deck, import_layout_names) is None:
-            raise AssemblyRefusal(
-                f"no layout template given and {fw_deck.name} owns no alpha-safe layout "
-                f"among {list(import_layout_names)!r}"
-            )
+        else:
+            for name in import_layout_names:
+                if dsk_live.owned_alpha_safe_layout(fw_deck, (name,)) is None:
+                    raise AssemblyRefusal(
+                        f"no layout template given and {fw_deck.name} owns no alpha-safe layout named {name!r}"
+                    )
 
     if reference_deck is not None:
         resolved_band = read_band(reference_deck)

@@ -204,8 +204,10 @@ async function migrateLegacyTemplates(stored: StoredTemplates): Promise<StoredTe
   return written;
 }
 
+const NO_TEMPLATES: StoredTemplates = { lwTemplate: "", dskTemplate: "" };
 let templatesRequest: Promise<StoredTemplates> | null = null;
 let templatesCache: StoredTemplates | null = null;
+let templateWrites = 0;
 const templateListeners = new Set<() => void>();
 
 /** Invalidates the shared templates fetch so every mounted `useStoredTemplate` refetches. */
@@ -217,13 +219,17 @@ export function refreshStoredTemplates(): void {
 
 function templatesReady(): Promise<StoredTemplates> {
   if (!templatesRequest) {
+    const writesBefore = templateWrites;
     templatesRequest = getSettings()
-      .then((settings) => migrateLegacyTemplates(pickTemplates(settings)))
-      .catch(() => ({ lwTemplate: "", dskTemplate: "" }))
+      .then((settings) => {
+        const stored = pickTemplates(settings);
+        return migrateLegacyTemplates(stored).catch(() => stored);
+      })
+      .catch(() => NO_TEMPLATES)
       .then((stored) => {
-        templatesCache = stored;
+        if (templateWrites === writesBefore) templatesCache = stored;
         templateListeners.forEach((listener) => listener());
-        return stored;
+        return templatesCache || stored;
       });
   }
   return templatesRequest;
@@ -238,10 +244,12 @@ export function useStoredTemplate(field: TemplateField): [StoredFile | null, (fi
   const [value, setValue] = useState<StoredFile | null>(() => toStoredFile(templatesCache?.[field] || ""));
 
   useEffect(() => {
-    const sync = () => setValue(toStoredFile(templatesCache?.[field] || ""));
+    const sync = () => {
+      setValue(toStoredFile(templatesCache?.[field] || ""));
+      if (!templatesRequest) void templatesReady();
+    };
     templateListeners.add(sync);
     sync();
-    void templatesReady();
     return () => {
       templateListeners.delete(sync);
     };
@@ -250,8 +258,9 @@ export function useStoredTemplate(field: TemplateField): [StoredFile | null, (fi
   const update = useCallback(
     async (file: StoredFile | null) => {
       const path = file?.path || "";
-      const previous = templatesCache;
-      templatesCache = { ...(templatesCache || { lwTemplate: "", dskTemplate: "" }), [field]: path };
+      const previous = templatesCache || NO_TEMPLATES;
+      templateWrites += 1;
+      templatesCache = { ...previous, [field]: path };
       templateListeners.forEach((listener) => listener());
       try {
         templatesCache = pickTemplates(await putSettings({ [field]: path }));

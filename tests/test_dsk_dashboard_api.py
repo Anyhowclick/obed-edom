@@ -2559,6 +2559,28 @@ def test_dsk_propose_falls_back_to_template_when_reference_cannot_donate(tmp_pat
     assert job["result"]["dskTemplate"] == str(template.resolve())
 
 
+def test_dsk_apply_honours_an_explicit_template_override_even_when_no_donor_is_needed(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("template")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+    monkeypatch.setattr(app_mod, "owned_alpha_safe_layout", lambda _deck, names: names[0])
+    seen = {}
+    monkeypatch.setattr(app_mod, "_run_dsk_apply", lambda _job, proposal: seen.update(proposal) or {})
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template="").json()["id"]
+    assert _wait(client, job_id)["result"]["dskTemplate"] == ""
+    res = client.post(f"/api/dsk/{job_id}/apply", json={"decisions": [], "dskTemplate": str(template)})
+    assert res.status_code == 200, res.text
+    _wait(client, job_id)
+    assert seen["dskTemplate"] == str(template.resolve())
+
+
 def test_dsk_propose_full_text_path_always_requires_template(tmp_path, monkeypatch):
     import obed_edom.web.app as app_mod
 

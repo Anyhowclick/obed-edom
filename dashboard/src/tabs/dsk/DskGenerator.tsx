@@ -313,7 +313,7 @@ export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void }
             <button className="btn" type="button" disabled={!!busy} onClick={run}>
               Run
             </button>
-              </div>
+          </div>
         </>
       )}
       <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />

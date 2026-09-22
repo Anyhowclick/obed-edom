@@ -27,8 +27,8 @@ function Consumer({ label }: { label: string }) {
   return (
     <div>
       <span data-testid={`${label}-value`}>{file?.name || "none"}</span>
-      <button onClick={() => void setFile({ path: "/tmp/a.key", name: "a.key" })}>{`${label}-choose`}</button>
-      <button onClick={() => void setFile(null)}>{`${label}-clear`}</button>
+      <button onClick={() => setFile({ path: "/tmp/a.key", name: "a.key" }).catch(() => undefined)}>{`${label}-choose`}</button>
+      <button onClick={() => setFile(null).catch(() => undefined)}>{`${label}-clear`}</button>
     </div>
   );
 }
@@ -79,5 +79,49 @@ describe("useStoredTemplate", () => {
     });
     expect(screen.getByTestId("a-value")).toHaveTextContent("remembered.key");
     expect(screen.getByTestId("b-value")).toHaveTextContent("remembered.key");
+  });
+
+  it("keeps a template chosen while the first fetch is still in flight", async () => {
+    let resolve!: (value: typeof emptySettings) => void;
+    vi.mocked(getSettings).mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    render(<Consumer label="a" />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("a-choose"));
+    });
+    expect(screen.getByTestId("a-value")).toHaveTextContent("a.key");
+
+    await act(async () => {
+      resolve({ ...emptySettings, dskTemplate: "" });
+    });
+    expect(screen.getByTestId("a-value")).toHaveTextContent("a.key");
+  });
+
+  it("keeps the fetched templates when the one-time legacy migration write fails", async () => {
+    localStorage.setItem("obed-edom.generate.lwTemplate", JSON.stringify({ path: "/tmp/legacy-lw.key", name: "legacy-lw.key" }));
+    vi.mocked(getSettings).mockResolvedValue({ ...emptySettings, dskTemplate: "/tmp/kept.key" });
+    vi.mocked(putSettings).mockRejectedValueOnce(new Error("read-only"));
+    render(<Consumer label="a" />);
+    await act(async () => {});
+
+    expect(screen.getByTestId("a-value")).toHaveTextContent("kept.key");
+    expect(localStorage.getItem("obed-edom.generate.lwTemplate")).not.toBeNull();
+  });
+
+  it("rolls a failed save back to the previous value without blanking the other template", async () => {
+    vi.mocked(getSettings).mockResolvedValue({ ...emptySettings, lwTemplate: "/tmp/lw.key", dskTemplate: "/tmp/old.key" });
+    vi.mocked(putSettings).mockRejectedValueOnce(new Error("read-only"));
+    function Lw() {
+      const [file] = useStoredTemplate("lwTemplate");
+      return <span data-testid="lw">{file?.name || "none"}</span>;
+    }
+    render(<><Consumer label="a" /><Lw /></>);
+    await act(async () => {});
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("a-choose"));
+    });
+    expect(screen.getByTestId("a-value")).toHaveTextContent("old.key");
+    expect(screen.getByTestId("lw")).toHaveTextContent("lw.key");
   });
 });

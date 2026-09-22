@@ -2205,7 +2205,7 @@ def _resolve_dsk_layout_donor(
         try:
             check_layout_import_preconditions(fw_deck, layout_template=reference, layout_names=names)
             return reference.resolve()
-        except AssemblyRefusal:
+        except Exception:  # noqa: BLE001 -- an unreadable or unsuitable reference falls through to the template
             pass
     reason = (
         f"Choose the DSK template (.key): {fw_deck.name} has no transparent "
@@ -2217,6 +2217,7 @@ def _resolve_dsk_layout_donor(
 def _resolve_apply_dsk_template(
     job_id: str, result: dict[str, Any], override: str | None
 ) -> tuple[dict[str, Any], Path | None]:
+    """An explicit apply-time template is honoured as the donor; otherwise the proposal's."""
     raw_override = (override or "").strip()
     if not raw_override:
         if "dskTemplate" not in result:
@@ -2226,13 +2227,9 @@ def _resolve_apply_dsk_template(
             return result, None
         return result, _require_dsk_template_field(stored)
     fw_deck = Path(str(result.get("path") or "")).expanduser()
-    reference_raw = result.get("referenceDeck")
-    reference = Path(str(reference_raw)).expanduser() if reference_raw else None
-    template_path = _resolve_dsk_layout_donor(
-        raw_override, fw_deck, reference, content_only=bool(result.get("contentOnly"))
-    )
+    template_path = _validate_dsk_template(raw_override, fw_deck, content_only=bool(result.get("contentOnly")))
     result = dict(result)
-    result["dskTemplate"] = str(template_path) if template_path else ""
+    result["dskTemplate"] = str(template_path)
     seeded = RUNNER.update_result(job_id, result)
     if seeded:
         result = dict(seeded.result or result)
