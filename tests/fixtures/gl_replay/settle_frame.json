@@ -1,0 +1,1398 @@
+{
+ "_provenance": {
+  "measured": "m2-s3/result.json (analyze, remeasure.perUnit, segment) + keynote_live_gl_replay_opacity.plan.md section 0",
+  "synthesised": "the 88-call argument list (call methods/args), the vertex setup padding, and the solid source colours of slots 1/2/3 - no archive records them",
+  "frameLenHistogram": {
+   "88": 60,
+   "89": 29,
+   "93": 1,
+   "125": 1
+  }
+ },
+ "frameLen": 88,
+ "drawIndices": [
+  17,
+  33,
+  50,
+  66,
+  83
+ ],
+ "glEnums": {
+  "TEXTURE_2D": 3553,
+  "TEXTURE0": 33984,
+  "TEXTURE1": 33985,
+  "ARRAY_BUFFER": 34962,
+  "ELEMENT_ARRAY_BUFFER": 34963,
+  "COLOR_BUFFER_BIT": 16384,
+  "DEPTH_BUFFER_BIT": 256,
+  "BLEND": 3042,
+  "SRC_ALPHA": 770,
+  "ONE_MINUS_SRC_ALPHA": 771,
+  "UNSIGNED_SHORT": 5123,
+  "FLOAT": 5126,
+  "TRIANGLE_STRIP": 5
+ },
+ "slotSizes": [
+  [
+   1920,
+   1080
+  ],
+  [
+   671,
+   195
+  ],
+  [
+   266,
+   236
+  ],
+  [
+   960,
+   276
+  ],
+  [
+   178,
+   157
+  ]
+ ],
+ "slotRects": [
+  [
+   0.0,
+   0.0,
+   1920.0,
+   1080.0
+  ],
+  [
+   1071.6833801269531,
+   871.9523239135742,
+   671.0,
+   195.0
+  ],
+  [
+   541.858301475681,
+   721.0772309801108,
+   181.0,
+   161.0
+  ],
+  [
+   105.1231918334961,
+   790.846923828125,
+   960.0,
+   276.0
+  ],
+  [
+   788.725538103768,
+   672.9158876261134,
+   353.0,
+   313.0
+  ]
+ ],
+ "background": [
+  65,
+  62,
+  62,
+  255
+ ],
+ "programs": [
+  {
+   "prog": 0,
+   "uniforms": [
+    {
+     "name": "MVPMatrix",
+     "type": 35676,
+     "value": [
+      0.0010416667209938169,
+      0,
+      0,
+      0,
+      0,
+      0.0018518518190830946,
+      0,
+      0,
+      0,
+      0,
+      -1,
+      0,
+      -1,
+      -1,
+      0,
+      1
+     ]
+    },
+    {
+     "name": "mixFactor",
+     "type": 5126,
+     "value": 1
+    },
+    {
+     "name": "Opacity",
+     "type": 5126,
+     "value": 1
+    },
+    {
+     "name": "Texture",
+     "type": 35678,
+     "value": 1
+    },
+    {
+     "name": "Texture2",
+     "type": 35678,
+     "value": 0
+    }
+   ],
+   "setsOpacityInFrame": true,
+   "restOpacity": 1
+  },
+  {
+   "prog": 1,
+   "uniforms": [
+    {
+     "name": "MVPMatrix",
+     "type": 35676,
+     "value": [
+      0.0010416667209938169,
+      0,
+      0,
+      0,
+      0,
+      0.0018518518190830946,
+      0,
+      0,
+      0,
+      0,
+      -1,
+      0,
+      0.11666673421859741,
+      -0.9759259223937988,
+      0,
+      1
+     ]
+    },
+    {
+     "name": "mixFactor",
+     "type": 5126,
+     "value": 0
+    },
+    {
+     "name": "Opacity",
+     "type": 5126,
+     "value": 0
+    },
+    {
+     "name": "Texture",
+     "type": 35678,
+     "value": 1
+    },
+    {
+     "name": "Texture2",
+     "type": 35678,
+     "value": 0
+    }
+   ],
+   "setsOpacityInFrame": true,
+   "restOpacity": 0
+  },
+  {
+   "prog": 2,
+   "uniforms": [
+    {
+     "name": "MVPMatrix",
+     "type": 35676,
+     "value": [
+      0.0007088033016771078,
+      0,
+      0,
+      0,
+      0,
+      0.0012633396545425057,
+      0,
+      0,
+      0,
+      0,
+      -1,
+      0,
+      -0.43541666865348816,
+      -0.6333332657814026,
+      0,
+      1
+     ]
+    },
+    {
+     "name": "mixFactor",
+     "type": 5126,
+     "value": 0
+    },
+    {
+     "name": "Opacity",
+     "type": 5126,
+     "value": 1
+    },
+    {
+     "name": "Texture",
+     "type": 35678,
+     "value": 1
+    },
+    {
+     "name": "Texture2",
+     "type": 35678,
+     "value": 0
+    }
+   ],
+   "setsOpacityInFrame": true,
+   "restOpacity": 1
+  },
+  {
+   "prog": 3,
+   "uniforms": [
+    {
+     "name": "MVPMatrix",
+     "type": 35676,
+     "value": [
+      0.0010416667209938169,
+      0,
+      0,
+      0,
+      0,
+      0.0018518518190830946,
+      0,
+      0,
+      0,
+      0,
+      -1,
+      0,
+      -0.890625,
+      -0.9759259223937988,
+      0,
+      1
+     ]
+    },
+    {
+     "name": "mixFactor",
+     "type": 5126,
+     "value": 0
+    },
+    {
+     "name": "Opacity",
+     "type": 5126,
+     "value": 1
+    },
+    {
+     "name": "Texture",
+     "type": 35678,
+     "value": 1
+    },
+    {
+     "name": "Texture2",
+     "type": 35678,
+     "value": 0
+    }
+   ],
+   "setsOpacityInFrame": true,
+   "restOpacity": 1
+  },
+  {
+   "prog": 4,
+   "uniforms": [
+    {
+     "name": "MVPMatrix",
+     "type": 35676,
+     "value": [
+      0.002065777312964201,
+      0,
+      0,
+      0,
+      0,
+      0.0036919082049280405,
+      0,
+      0,
+      0,
+      0,
+      -1,
+      0,
+      -0.17812499403953552,
+      -0.8259259462356567,
+      0,
+      1
+     ]
+    },
+    {
+     "name": "mixFactor",
+     "type": 5126,
+     "value": 0
+    },
+    {
+     "name": "Opacity",
+     "type": 5126,
+     "value": 1
+    },
+    {
+     "name": "Texture",
+     "type": 35678,
+     "value": 1
+    },
+    {
+     "name": "Texture2",
+     "type": 35678,
+     "value": 0
+    }
+   ],
+   "setsOpacityInFrame": false,
+   "restOpacity": 1
+  }
+ ],
+ "draws": [
+  {
+   "slot": 0,
+   "index": 17,
+   "method": "drawElements",
+   "count": 4,
+   "prog": 0,
+   "unitsBound": {
+    "0": 1,
+    "1": 2
+   },
+   "samplers": {
+    "Texture": 1,
+    "Texture2": 0
+   },
+   "mixFactor": 1,
+   "sourceColour": [
+    65,
+    62,
+    62,
+    255
+   ],
+   "ablationFootprint": null
+  },
+  {
+   "slot": 1,
+   "index": 33,
+   "method": "drawElements",
+   "count": 4,
+   "prog": 1,
+   "unitsBound": {
+    "0": 3,
+    "1": 2
+   },
+   "samplers": {
+    "Texture": 1,
+    "Texture2": 0
+   },
+   "mixFactor": 0,
+   "sourceColour": [
+    11,
+    22,
+    33,
+    255
+   ],
+   "ablationFootprint": null
+  },
+  {
+   "slot": 2,
+   "index": 50,
+   "method": "drawElements",
+   "count": 4,
+   "prog": 2,
+   "unitsBound": {
+    "0": 4,
+    "1": 2
+   },
+   "samplers": {
+    "Texture": 1,
+    "Texture2": 0
+   },
+   "mixFactor": 0,
+   "sourceColour": [
+    200,
+    40,
+    120,
+    255
+   ],
+   "ablationFootprint": [
+    544,
+    720,
+    180,
+    72
+   ]
+  },
+  {
+   "slot": 3,
+   "index": 66,
+   "method": "drawElements",
+   "count": 4,
+   "prog": 3,
+   "unitsBound": {
+    "0": 5,
+    "1": 2
+   },
+   "samplers": {
+    "Texture": 1,
+    "Texture2": 0
+   },
+   "mixFactor": 0,
+   "sourceColour": [
+    17,
+    17,
+    17,
+    255
+   ],
+   "ablationFootprint": [
+    108,
+    792,
+    956,
+    272
+   ]
+  },
+  {
+   "slot": 4,
+   "index": 83,
+   "method": "drawElements",
+   "count": 4,
+   "prog": 4,
+   "unitsBound": {
+    "0": 6,
+    "1": 2
+   },
+   "samplers": {
+    "Texture": 1,
+    "Texture2": 0
+   },
+   "mixFactor": 0,
+   "sourceColour": [
+    29,
+    177,
+    0,
+    255
+   ],
+   "ablationFootprint": [
+    792,
+    672,
+    352,
+    312
+   ]
+  }
+ ],
+ "textureUploads": [
+  {
+   "tex": 1,
+   "width": 1920,
+   "height": 1080,
+   "srcType": "canvas",
+   "format": "RGBA",
+   "type": "UNSIGNED_BYTE",
+   "flipY": true,
+   "premultiplyAlpha": true
+  },
+  {
+   "tex": 3,
+   "width": 671,
+   "height": 195,
+   "srcType": "canvas",
+   "format": "RGBA",
+   "type": "UNSIGNED_BYTE",
+   "flipY": true,
+   "premultiplyAlpha": true
+  },
+  {
+   "tex": 4,
+   "width": 266,
+   "height": 236,
+   "srcType": "canvas",
+   "format": "RGBA",
+   "type": "UNSIGNED_BYTE",
+   "flipY": true,
+   "premultiplyAlpha": true
+  },
+  {
+   "tex": 5,
+   "width": 960,
+   "height": 276,
+   "srcType": "canvas",
+   "format": "RGBA",
+   "type": "UNSIGNED_BYTE",
+   "flipY": true,
+   "premultiplyAlpha": true
+  },
+  {
+   "tex": 6,
+   "width": 178,
+   "height": 157,
+   "srcType": "canvas",
+   "format": "RGBA",
+   "type": "UNSIGNED_BYTE",
+   "flipY": true,
+   "premultiplyAlpha": true
+  }
+ ],
+ "sharedTexture": 2,
+ "sentinelAfterFrame": [
+  1,
+  0,
+  1,
+  1,
+  0.5
+ ],
+ "measuredPatch": {
+  "slot": 4,
+  "alpha": 0.29468628764152527,
+  "clean": [
+   29,
+   177,
+   0,
+   255
+  ],
+  "ablated": [
+   65,
+   62,
+   62,
+   255
+  ],
+  "patched": [
+   54,
+   96,
+   44,
+   255
+  ],
+  "restored": [
+   29,
+   177,
+   0,
+   255
+  ],
+  "alpha0EqualsAblation": true
+ },
+ "calls": [
+  {
+   "m": "clearColor",
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "m": "clear",
+   "a": [
+    16640
+   ]
+  },
+  {
+   "m": "enable",
+   "a": [
+    3042
+   ]
+  },
+  {
+   "m": "blendFunc",
+   "a": [
+    770,
+    771
+   ]
+  },
+  {
+   "m": "useProgram",
+   "a": [
+    0
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33985
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    2
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33984
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    1
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 0,
+     "name": "Texture"
+    },
+    1
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 0,
+     "name": "Texture2"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 0,
+     "name": "mixFactor"
+    },
+    1
+   ]
+  },
+  {
+   "m": "uniformMatrix4fv",
+   "a": [
+    {
+     "prog": 0,
+     "name": "MVPMatrix"
+    },
+    false,
+    [
+     0.0010416667209938169,
+     0,
+     0,
+     0,
+     0,
+     0.0018518518190830946,
+     0,
+     0,
+     0,
+     0,
+     -1,
+     0,
+     -1,
+     -1,
+     0,
+     1
+    ]
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 0,
+     "name": "Opacity"
+    },
+    1
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34962,
+    100
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34963,
+    200
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    0,
+    2,
+    5126,
+    false,
+    16,
+    0
+   ]
+  },
+  {
+   "m": "drawElements",
+   "a": [
+    5,
+    4,
+    5123,
+    0
+   ]
+  },
+  {
+   "m": "useProgram",
+   "a": [
+    1
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33985
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    2
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33984
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    3
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 1,
+     "name": "Texture"
+    },
+    1
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 1,
+     "name": "Texture2"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 1,
+     "name": "mixFactor"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniformMatrix4fv",
+   "a": [
+    {
+     "prog": 1,
+     "name": "MVPMatrix"
+    },
+    false,
+    [
+     0.0010416667209938169,
+     0,
+     0,
+     0,
+     0,
+     0.0018518518190830946,
+     0,
+     0,
+     0,
+     0,
+     -1,
+     0,
+     0.11666673421859741,
+     -0.9759259223937988,
+     0,
+     1
+    ]
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 1,
+     "name": "Opacity"
+    },
+    0
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34962,
+    101
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34963,
+    201
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    0,
+    2,
+    5126,
+    false,
+    16,
+    0
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    1,
+    2,
+    5126,
+    false,
+    16,
+    8
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    2,
+    2,
+    5126,
+    false,
+    16,
+    16
+   ]
+  },
+  {
+   "m": "drawElements",
+   "a": [
+    5,
+    4,
+    5123,
+    0
+   ]
+  },
+  {
+   "m": "useProgram",
+   "a": [
+    2
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33985
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    2
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33984
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    4
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 2,
+     "name": "Texture"
+    },
+    1
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 2,
+     "name": "Texture2"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 2,
+     "name": "mixFactor"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniformMatrix4fv",
+   "a": [
+    {
+     "prog": 2,
+     "name": "MVPMatrix"
+    },
+    false,
+    [
+     0.0007088033016771078,
+     0,
+     0,
+     0,
+     0,
+     0.0012633396545425057,
+     0,
+     0,
+     0,
+     0,
+     -1,
+     0,
+     -0.43541666865348816,
+     -0.6333332657814026,
+     0,
+     1
+    ]
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 2,
+     "name": "Opacity"
+    },
+    1
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34962,
+    102
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34963,
+    202
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    0,
+    2,
+    5126,
+    false,
+    16,
+    0
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    1,
+    2,
+    5126,
+    false,
+    16,
+    8
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    2,
+    2,
+    5126,
+    false,
+    16,
+    16
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    3,
+    2,
+    5126,
+    false,
+    16,
+    24
+   ]
+  },
+  {
+   "m": "drawElements",
+   "a": [
+    5,
+    4,
+    5123,
+    0
+   ]
+  },
+  {
+   "m": "useProgram",
+   "a": [
+    3
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33985
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    2
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33984
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    5
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 3,
+     "name": "Texture"
+    },
+    1
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 3,
+     "name": "Texture2"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 3,
+     "name": "mixFactor"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniformMatrix4fv",
+   "a": [
+    {
+     "prog": 3,
+     "name": "MVPMatrix"
+    },
+    false,
+    [
+     0.0010416667209938169,
+     0,
+     0,
+     0,
+     0,
+     0.0018518518190830946,
+     0,
+     0,
+     0,
+     0,
+     -1,
+     0,
+     -0.890625,
+     -0.9759259223937988,
+     0,
+     1
+    ]
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 3,
+     "name": "Opacity"
+    },
+    1
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34962,
+    103
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34963,
+    203
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    0,
+    2,
+    5126,
+    false,
+    16,
+    0
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    1,
+    2,
+    5126,
+    false,
+    16,
+    8
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    2,
+    2,
+    5126,
+    false,
+    16,
+    16
+   ]
+  },
+  {
+   "m": "drawElements",
+   "a": [
+    5,
+    4,
+    5123,
+    0
+   ]
+  },
+  {
+   "m": "useProgram",
+   "a": [
+    4
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33985
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    2
+   ]
+  },
+  {
+   "m": "activeTexture",
+   "a": [
+    33984
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    6
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 4,
+     "name": "Texture"
+    },
+    1
+   ]
+  },
+  {
+   "m": "uniform1i",
+   "a": [
+    {
+     "prog": 4,
+     "name": "Texture2"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniform1f",
+   "a": [
+    {
+     "prog": 4,
+     "name": "mixFactor"
+    },
+    0
+   ]
+  },
+  {
+   "m": "uniformMatrix4fv",
+   "a": [
+    {
+     "prog": 4,
+     "name": "MVPMatrix"
+    },
+    false,
+    [
+     0.002065777312964201,
+     0,
+     0,
+     0,
+     0,
+     0.0036919082049280405,
+     0,
+     0,
+     0,
+     0,
+     -1,
+     0,
+     -0.17812499403953552,
+     -0.8259259462356567,
+     0,
+     1
+    ]
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34962,
+    104
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34963,
+    204
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    0,
+    2,
+    5126,
+    false,
+    16,
+    0
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    1,
+    2,
+    5126,
+    false,
+    16,
+    8
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    2,
+    2,
+    5126,
+    false,
+    16,
+    16
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    3,
+    2,
+    5126,
+    false,
+    16,
+    24
+   ]
+  },
+  {
+   "m": "vertexAttribPointer",
+   "a": [
+    4,
+    2,
+    5126,
+    false,
+    16,
+    32
+   ]
+  },
+  {
+   "m": "drawElements",
+   "a": [
+    5,
+    4,
+    5123,
+    0
+   ]
+  },
+  {
+   "m": "bindTexture",
+   "a": [
+    3553,
+    null
+   ]
+  },
+  {
+   "m": "useProgram",
+   "a": [
+    null
+   ]
+  },
+  {
+   "m": "bindBuffer",
+   "a": [
+    34962,
+    null
+   ]
+  },
+  {
+   "m": "flush",
+   "a": []
+  }
+ ]
+}

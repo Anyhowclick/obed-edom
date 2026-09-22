@@ -1,0 +1,1411 @@
+"""Load-bearing tests for `src/obed_edom/live_gl_replay_js.py` (GL-replay G2, stream S2).
+
+Two layers, both of which must be able to FAIL:
+
+1. **Unconditional Python-level contract** — the version/hash pinning, the closed
+   reason set of the plan's §2.7 (each reason emitted from exactly one site in the
+   JS), the seam-access restriction of §2.6, the geometry constants shared with
+   `p2_verdict`/`html_alpha_probe`, and `validate_gl_replay_entry`/`gl_replay_script`
+   refusing every malformed shape of §2.0/§2.8.
+
+2. **A Node sandbox** (skipped without `node`, exactly as
+   `tests/test_live_continuity_js.py` does) that runs `GL_REPLAY_JS` against a
+   *scripted* fake WebGL implementation: programs carrying real uniform tables,
+   textures carrying last-upload metadata, and a `readPixels` computed from the
+   draws executed since the last `clear` plus their uniform values, as solid
+   colours with exact alpha arithmetic. There is no rasteriser: a draw covers the
+   rectangle its `MVPMatrix` decodes to and nothing else.
+
+   **What the sandbox proves:** dispatch, state ordering, the write-back/forward
+   ordering, fail-closed coverage of every §2.7 reason, and the shape of the
+   published handle. **What it cannot prove:** pixel fidelity, real timing, or the
+   real settle frame — those belong to the S3 headless harness.
+
+The settle frame replayed through the sandbox lives in
+`tests/fixtures/gl_replay/settle_frame.json`. Its *measured* content (88 calls,
+five draws at indices 17/33/50/66/83, one distinct program each, the five
+`MVPMatrix` values, the `Texture→unit 1`/`Texture2→unit 0` sampler bindings,
+`mixFactor` 1 on draw 17 and 0 elsewhere, rest `Opacity` 1/0/1/1/1, and the fact
+that the frame re-sets `Opacity` for programs 0–3 but not for program 4) comes
+from the archived `m2-s3/result.json` (`analyze`, `remeasure.perUnit`,
+`remeasure.sentinelAfterFrame`, `segment`) and §0 of
+`.agents/plans/keynote_live_gl_replay_opacity.plan.md`. The *argument list* of the
+88 calls is not recorded anywhere and is synthesised to that measured shape, as
+are the solid source colours of slots 1/2/3; see the fixture's `_provenance`.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from obed_edom import html_alpha_probe, live_gl_replay_js, p2_verdict
+
+FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "gl_replay" / "settle_frame.json"
+SETTLE_FRAME = json.loads(FIXTURE_PATH.read_text())
+
+# --- the plan literal under test -------------------------------------------------------
+#
+# Shaped exactly like `EXPECTED_GL_REPLAY_RUNTIME_PLAN` in `tests/test_live_continuity.py`
+# (the flag-on derivation of the `html-adversarial` fixture), plus the three G1b fields
+# of plan §2.0 that stream S0 adds: `instanceId`, `instanceRect`, `movieSlot`.
+
+SLOT4_OPACITY = 0.29468628764152527
+
+GL_REPLAY_ENTRY: dict = {
+    "atScene": 2,
+    "action": "glReplay",
+    "movieKey": "movie1",
+    "fallback": "retire",
+    "slotSizes": [[1920, 1080], [671, 195], [266, 236], [960, 276], [178, 157]],
+    "slotRects": [
+        [0.0, 0.0, 1920.0, 1080.0],
+        [1071.6833801269531, 871.9523239135742, 671.0, 195.0],
+        [541.858301475681, 721.0772309801108, 181.0, 161.0],
+        [105.1231918334961, 790.846923828125, 960.0, 276.0],
+        [788.725538103768, 672.9158876261134, 353.0, 313.0],
+    ],
+    "opacityOverrides": [{"slot": 4, "opacity": SLOT4_OPACITY, "texW": 178, "texH": 157}],
+    "instanceId": "untitled.mov#1",
+    "instanceRect": {"x": 109.35, "y": 795.04, "w": 951.54, "h": 267.62},
+    "movieSlot": 3,
+}
+
+RUNTIME_PLAN: dict = {
+    "movies": {
+        "movie1": {
+            "assetKeys": ["untitled.mov"],
+            "footprint": {"x": 109, "y": 795, "w": 952, "h": 268},
+        }
+    },
+    "boundaries": [
+        copy.deepcopy(GL_REPLAY_ENTRY),
+        {"atScene": 6, "action": "restart"},
+    ],
+}
+
+MOVIE_SLOT = GL_REPLAY_ENTRY["movieSlot"]
+DESTINATION_RECT = {
+    "x": GL_REPLAY_ENTRY["slotRects"][MOVIE_SLOT][0],
+    "y": GL_REPLAY_ENTRY["slotRects"][MOVIE_SLOT][1],
+    "w": GL_REPLAY_ENTRY["slotRects"][MOVIE_SLOT][2],
+    "h": GL_REPLAY_ENTRY["slotRects"][MOVIE_SLOT][3],
+}
+
+# --- plan §2.7, verbatim ---------------------------------------------------------------
+
+STAND_DOWN_REASONS = [
+    "planUnreadable",
+    "runtimeSeamAbsent",
+    "glReplayUnavailable",
+    "settleSignalAbsent",
+    "sceneMismatch",
+    "observerNotArmed",
+    "canvasShape",
+    "posterAmbiguous",
+    "posterUnreadable",
+    "frameNotDelimited",
+    "contextLost",
+    "rvfcUnavailable",
+    "videoNotReady",
+    "assetUnbound",
+    "occlusionTooHigh",
+    "unflaggedPlayerCall",
+    "frameLengthChanged",
+    "glError",
+    "writebackFailed",
+]
+NORMAL_EXIT_REASON = "canvasRemoved"
+MILESTONE_NOTES = ["glreplay-arm", "glreplay-live"]
+OPACITY_UNPROVEN_REASONS = [
+    "count",
+    "uniforms",
+    "mixfactor",
+    "size",
+    "mvp",
+    "rest-opacity",
+    "ablation",
+    "identity",
+]
+
+# Reasons that can only be reached before the seam/poster/handle exist, so no
+# `release()` and no handle teardown is owed for them.
+PRE_ARM_REASONS = {
+    "planUnreadable",
+    "runtimeSeamAbsent",
+    "glReplayUnavailable",
+    "settleSignalAbsent",
+    "rvfcUnavailable",
+    "observerNotArmed",
+    "canvasShape",
+}
+
+# `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
+# JS changes on purpose; a surprise here means the bytes moved without a decision.
+PINNED_JS_SHA256 = ""
+
+
+# =======================================================================================
+# 1. Unconditional Python-level contract
+# =======================================================================================
+
+
+def test_gl_replay_version_is_pinned_int():
+    assert live_gl_replay_js.GL_REPLAY_VERSION == 1
+    assert isinstance(live_gl_replay_js.GL_REPLAY_VERSION, int)
+
+
+def test_js_sha256_matches_the_shipped_bytes():
+    expected = hashlib.sha256(live_gl_replay_js.GL_REPLAY_JS.encode()).hexdigest()
+    assert live_gl_replay_js.js_sha256() == expected
+    assert live_gl_replay_js.js_sha256() == live_gl_replay_js.js_sha256()
+
+
+@pytest.mark.xfail(
+    not PINNED_JS_SHA256,
+    reason="S1 in flight: the literal is pinned once `live_gl_replay_js.GL_REPLAY_JS` is stable",
+    strict=False,
+)
+def test_js_sha256_matches_the_pinned_literal():
+    assert live_gl_replay_js.js_sha256() == PINNED_JS_SHA256
+
+
+def _js_source() -> str:
+    return live_gl_replay_js.GL_REPLAY_JS
+
+
+def _quoted_literals(source: str) -> list[str]:
+    """Every single- or double-quoted string literal in the JS source."""
+    return [
+        m.group(1) or m.group(2)
+        for m in re.finditer(r"'((?:[^'\\\n]|\\.)*)'|\"((?:[^\"\\\n]|\\.)*)\"", source)
+    ]
+
+
+def _emitted_reasons(source: str) -> set[str]:
+    """Every reason literal the module can actually emit: the first string argument
+    of an `assertOr`/`refuseInstall`/`provenOr`/`unproven`/`standDown` call site, plus
+    the named constants those helpers are handed (`CANVAS_REMOVED` and friends)."""
+    direct = set(re.findall(
+        r"(?:assertOr|refuseInstall|provenOr|unproven|standDown)\s*\(\s*"
+        r"(?:[A-Za-z0-9_.]+\s*,\s*)?['\"]([A-Za-z0-9_-]+)['\"]",
+        source,
+    ))
+    named = set(re.findall(r"var\s+[A-Z][A-Z_]*\s*=\s*['\"]([A-Za-z0-9_-]+)['\"]", source))
+    return direct | named
+
+
+def test_stand_down_reason_set_is_closed_and_matches_the_plan():
+    """Every §2.7 reason appears, and nothing outside §2.7 can be emitted as one."""
+    source = _js_source()
+    literals = set(_quoted_literals(source))
+    for reason in STAND_DOWN_REASONS + [NORMAL_EXIT_REASON]:
+        assert reason in literals, f"§2.7 reason {reason!r} is never mentioned in the JS"
+
+    emitted = _emitted_reasons(source)
+    assert emitted, "no reason-emitting call sites found — this grep would be vacuous"
+    expected = set(STAND_DOWN_REASONS) | {NORMAL_EXIT_REASON} | set(OPACITY_UNPROVEN_REASONS)
+    assert emitted == expected, (
+        f"missing: {sorted(expected - emitted)}; outside the closed set: "
+        f"{sorted(emitted - expected)}"
+    )
+
+
+@pytest.mark.parametrize("reason", STAND_DOWN_REASONS + [NORMAL_EXIT_REASON])
+def test_each_reason_is_emitted_from_exactly_one_site(reason):
+    """A reason emitted from two sites cannot be told apart by the sandbox tests
+    below, so the fail-closed coverage they claim would be a half-truth."""
+    source = _js_source()
+    occurrences = len(re.findall(rf"['\"]{re.escape(reason)}['\"]", source))
+    assert occurrences == 1, f"{reason!r} appears {occurrences} times; §2.7 requires one site"
+
+
+@pytest.mark.parametrize("reason", OPACITY_UNPROVEN_REASONS)
+def test_each_opacity_unproven_reason_is_present(reason):
+    assert f"'{reason}'" in _js_source() or f'"{reason}"' in _js_source()
+
+
+@pytest.mark.parametrize("note", MILESTONE_NOTES + ["glreplay-standdown", "glreplay-handoff",
+                                                    "glreplay-opacity-unproven"])
+def test_milestone_and_note_kinds_are_present(note):
+    assert f"'{note}'" in _js_source() or f'"{note}"' in _js_source()
+
+
+def test_module_touches_only_the_gl_replay_seam():
+    """Plan §2.6: G2 reads NOTHING else off `__OBED_P2_PRESERVE__`."""
+    source = _js_source()
+    accesses = re.findall(r"__OBED_P2_PRESERVE__\s*\.\s*(\w+)", source)
+    assert accesses, "the module never reaches for the seam at all"
+    assert set(accesses) == {"glReplay"}, f"non-seam core access: {sorted(set(accesses))}"
+    # Bracket access would sidestep the grep above.
+    assert not re.search(r"__OBED_P2_PRESERVE__\s*\[", source)
+
+
+@pytest.mark.parametrize(
+    "minified_name",
+    ["renderFrameWithContext", "textureInfoFromEffect", "_renderFrame", "kTextureInfo"],
+)
+def test_no_minified_player_identifiers(minified_name):
+    """The mapping must be structural (GLSL uniform names read back with
+    `getActiveUniform`), never a `main.js` identifier that a re-export renames."""
+    assert minified_name not in _js_source()
+
+
+def test_script_builder_escapes_the_script_close_sequence():
+    script = live_gl_replay_js.gl_replay_script(RUNTIME_PLAN)
+    assert script.startswith('<script id="obed-gl-replay">')
+    assert script.endswith("</script>\n")
+    body = script[len('<script id="obed-gl-replay">') : -len("</script>\n")]
+    assert "</script" not in body
+    if "</script" in _js_source():
+        assert "<\\/script" in body
+
+
+def test_script_builder_embeds_the_module_bytes_once():
+    script = live_gl_replay_js.gl_replay_script(RUNTIME_PLAN)
+    assert script.count('<script id="obed-gl-replay">') == 1
+
+
+@pytest.mark.parametrize(
+    "name,constant,py_value",
+    [
+        ("CONTROL_PATCH_PX", "CONTROL_PATCH_PX", p2_verdict.CONTROL_PATCH_PX),
+        ("CONTROL_INSET_PX", "CONTROL_INSET_PX", p2_verdict.CONTROL_INSET_PX),
+        ("BAND_COLS", "BAND_COLS", html_alpha_probe.LIVE_BAND_COLS),
+        ("BAND_ROWS", "BAND_ROWS", html_alpha_probe.LIVE_BAND_ROWS),
+    ],
+)
+def test_geometry_constants_match_the_python_scorer(name, constant, py_value):
+    match = re.search(rf"\b{constant}\s*=\s*(\d+)", _js_source())
+    assert match, f"{constant} is not a JS literal in the module"
+    assert int(match.group(1)) == py_value
+
+
+def test_control_and_band_constants_have_the_expected_python_values():
+    """Guards the parity test above against both sides drifting together."""
+    assert (p2_verdict.CONTROL_PATCH_PX, p2_verdict.CONTROL_INSET_PX) == (40, 4)
+    assert (html_alpha_probe.LIVE_BAND_COLS, html_alpha_probe.LIVE_BAND_ROWS) == (16, 8)
+    assert html_alpha_probe.INPAGE_BAND_COUNT == 128
+
+
+# --- validate_gl_replay_entry / gl_replay_script refusals -------------------------------
+
+
+def _plan_with(entry: dict | None, *, extra_entry: dict | None = None) -> dict:
+    plan = copy.deepcopy(RUNTIME_PLAN)
+    boundaries = [b for b in plan["boundaries"] if b.get("action") != "glReplay"]
+    if entry is not None:
+        boundaries.insert(0, entry)
+    if extra_entry is not None:
+        boundaries.insert(1, extra_entry)
+    plan["boundaries"] = boundaries
+    return plan
+
+
+def _mutated(**changes) -> dict:
+    entry = copy.deepcopy(GL_REPLAY_ENTRY)
+    entry.update(changes)
+    return entry
+
+
+def _override(**changes) -> dict:
+    override = copy.deepcopy(GL_REPLAY_ENTRY["opacityOverrides"][0])
+    override.update(changes)
+    return _mutated(opacityOverrides=[override])
+
+
+MALFORMED_PLANS: list[tuple[str, dict]] = [
+    ("no_glreplay_entry", _plan_with(None)),
+    ("two_glreplay_entries", _plan_with(copy.deepcopy(GL_REPLAY_ENTRY),
+                                        extra_entry=_mutated(atScene=4))),
+    ("fallback_not_retire", _plan_with(_mutated(fallback="restart"))),
+    ("fallback_missing", _plan_with({k: v for k, v in GL_REPLAY_ENTRY.items()
+                                     if k != "fallback"})),
+    ("at_scene_not_int", _plan_with(_mutated(atScene="2"))),
+    ("at_scene_bool", _plan_with(_mutated(atScene=True))),
+    ("movie_key_not_in_movies", _plan_with(_mutated(movieKey="movie9"))),
+    ("slot_sizes_not_pairs", _plan_with(_mutated(
+        slotSizes=[[1920, 1080], [671], [266, 236], [960, 276], [178, 157]]))),
+    ("slot_sizes_non_int", _plan_with(_mutated(
+        slotSizes=[[1920.5, 1080], [671, 195], [266, 236], [960, 276], [178, 157]]))),
+    ("slot_rects_length_mismatch", _plan_with(_mutated(
+        slotRects=GL_REPLAY_ENTRY["slotRects"][:4]))),
+    ("slot_rect_not_four_floats", _plan_with(_mutated(
+        slotRects=[[0.0, 0.0, 1920.0]] + GL_REPLAY_ENTRY["slotRects"][1:]))),
+    ("slot_rect_non_finite", _plan_with(_mutated(
+        slotRects=[[0.0, 0.0, float("inf"), 1080.0]] + GL_REPLAY_ENTRY["slotRects"][1:]))),
+    ("override_slot_out_of_range", _plan_with(_override(slot=5))),
+    ("override_slot_negative", _plan_with(_override(slot=-1))),
+    ("override_opacity_zero", _plan_with(_override(opacity=0.0))),
+    ("override_opacity_one", _plan_with(_override(opacity=1.0))),
+    ("override_opacity_above_one", _plan_with(_override(opacity=1.5))),
+    ("override_texw_mismatch", _plan_with(_override(texW=179))),
+    ("override_texh_mismatch", _plan_with(_override(texH=158))),
+    ("movie_slot_out_of_range", _plan_with(_mutated(movieSlot=5))),
+    ("movie_slot_negative", _plan_with(_mutated(movieSlot=-1))),
+    ("movie_slot_not_int", _plan_with(_mutated(movieSlot="3"))),
+    ("instance_rect_missing_key", _plan_with(_mutated(
+        instanceRect={"x": 1.0, "y": 2.0, "w": 3.0}))),
+    ("instance_rect_non_finite", _plan_with(_mutated(
+        instanceRect={"x": float("nan"), "y": 795.04, "w": 951.54, "h": 267.62}))),
+    ("instance_rect_not_a_dict", _plan_with(_mutated(instanceRect=[109.35, 795.04, 951.54, 267.62]))),
+    ("instance_id_not_str", _plan_with(_mutated(instanceId=1))),
+    ("instance_id_missing", _plan_with({k: v for k, v in GL_REPLAY_ENTRY.items()
+                                        if k != "instanceId"})),
+]
+
+
+def test_valid_plan_validates_and_builds():
+    """The positive control for every refusal below — without it they are vacuous."""
+    entry = live_gl_replay_js.validate_gl_replay_entry(RUNTIME_PLAN)
+    assert entry is not None
+    assert entry["movieKey"] == "movie1"
+    assert entry["movieSlot"] == MOVIE_SLOT
+    assert entry["instanceId"] == "untitled.mov#1"
+    assert live_gl_replay_js.gl_replay_script(RUNTIME_PLAN) != ""
+
+
+@pytest.mark.parametrize("label,plan", MALFORMED_PLANS, ids=[p[0] for p in MALFORMED_PLANS])
+def test_validate_refuses_every_malformed_shape(label, plan):
+    assert live_gl_replay_js.validate_gl_replay_entry(plan) is None, label
+
+
+@pytest.mark.parametrize("label,plan", MALFORMED_PLANS, ids=[p[0] for p in MALFORMED_PLANS])
+def test_builder_returns_empty_for_every_malformed_shape(label, plan):
+    assert live_gl_replay_js.gl_replay_script(plan) == "", label
+
+
+@pytest.mark.parametrize("junk", [None, {}, {"boundaries": None}, {"movies": {}},
+                                  {"boundaries": [], "movies": {}}, "not a plan", []])
+def test_validate_refuses_junk_plans(junk):
+    assert live_gl_replay_js.validate_gl_replay_entry(junk) is None
+    assert live_gl_replay_js.gl_replay_script(junk) == ""
+
+
+# --- the fixture itself -----------------------------------------------------------------
+
+
+def test_settle_frame_fixture_matches_the_measured_shape():
+    """The fixture is the sandbox's only source of frame truth; if it drifts from
+    the measured facts of opacity-plan §0 every sandbox assertion below is hollow."""
+    assert SETTLE_FRAME["frameLen"] == 88
+    assert len(SETTLE_FRAME["calls"]) == 88
+    assert SETTLE_FRAME["drawIndices"] == [17, 33, 50, 66, 83]
+    assert [d["index"] for d in SETTLE_FRAME["draws"]] == [17, 33, 50, 66, 83]
+    for draw in SETTLE_FRAME["draws"]:
+        assert SETTLE_FRAME["calls"][draw["index"]]["m"] == draw["method"]
+    assert SETTLE_FRAME["calls"][0]["m"] == "clearColor"
+    assert SETTLE_FRAME["calls"][1]["m"] == "clear"
+    progs = [d["prog"] for d in SETTLE_FRAME["draws"]]
+    assert len(set(progs)) == 5
+    assert [p["restOpacity"] for p in SETTLE_FRAME["programs"]] == [1, 0, 1, 1, 1]
+    assert [p["setsOpacityInFrame"] for p in SETTLE_FRAME["programs"]] == [
+        True, True, True, True, False]
+    assert [d["mixFactor"] for d in SETTLE_FRAME["draws"]] == [1, 0, 0, 0, 0]
+    for draw in SETTLE_FRAME["draws"]:
+        assert draw["samplers"] == {"Texture": 1, "Texture2": 0}
+        assert draw["unitsBound"]["1"] == SETTLE_FRAME["sharedTexture"]
+    assert SETTLE_FRAME["slotSizes"] == GL_REPLAY_ENTRY["slotSizes"]
+    assert SETTLE_FRAME["slotRects"] == GL_REPLAY_ENTRY["slotRects"]
+    assert SETTLE_FRAME["background"] == [65, 62, 62, 255]
+    for program in SETTLE_FRAME["programs"]:
+        assert [u["name"] for u in program["uniforms"]] == [
+            "MVPMatrix", "mixFactor", "Opacity", "Texture", "Texture2"]
+
+
+def test_settle_frame_mvp_matrices_decode_to_the_slot_rects():
+    """Opacity-plan §0's zero-replay geometry check, recomputed here so that the
+    sandbox's coverage model and the module's `mvp` proof agree on the decode."""
+    for draw in SETTLE_FRAME["draws"]:
+        program = SETTLE_FRAME["programs"][draw["prog"]]
+        mvp = next(u["value"] for u in program["uniforms"] if u["name"] == "MVPMatrix")
+        tex_w, tex_h = SETTLE_FRAME["slotSizes"][draw["slot"]]
+        x0 = (mvp[12] + 1) / 2 * 1920
+        x1 = (mvp[0] * tex_w + mvp[12] + 1) / 2 * 1920
+        y0 = (mvp[13] + 1) / 2 * 1080
+        y1 = (mvp[5] * tex_h + mvp[13] + 1) / 2 * 1080
+        rect = SETTLE_FRAME["slotRects"][draw["slot"]]
+        assert x0 == pytest.approx(rect[0], abs=1.0)
+        assert (x1 - x0) == pytest.approx(rect[2], abs=1.0)
+        assert (1080 - y1) == pytest.approx(rect[1], abs=1.0)
+        assert (y1 - y0) == pytest.approx(rect[3], abs=1.0)
+
+
+def test_settle_frame_measured_patch_is_exact_alpha_arithmetic():
+    """`patched == α·clean + (1−α)·ablated` to the byte — the arithmetic the
+    sandbox's `readPixels` reproduces."""
+    patch = SETTLE_FRAME["measuredPatch"]
+    alpha = patch["alpha"]
+    for i in range(3):
+        blended = round(alpha * patch["clean"][i] + (1 - alpha) * patch["ablated"][i])
+        assert blended == patch["patched"][i]
+    assert patch["restored"][:3] == patch["clean"][:3]
+    assert patch["alpha0EqualsAblation"] is True
+
+
+# =======================================================================================
+# 2. Node sandbox
+# =======================================================================================
+
+# =======================================================================================
+# 2. Node sandbox
+# =======================================================================================
+#
+# The fake platform below is a state machine, not an emulator. Its GL:
+#   * holds the five player programs of the fixture with real uniform tables, so
+#     `getActiveUniform`/`getUniformLocation`/`getUniform` answer truthfully;
+#   * refuses a uniform write aimed at a program that is not CURRENT (it raises
+#     INVALID_OPERATION and drops the write) — this is what makes the override
+#     ordering and the write-back ordering testable rather than assumed;
+#   * records each texture's last upload (source kind, size, format, flipY, premul);
+#   * on a draw, records {slot, Opacity, decoded rect, source colour}, and clears
+#     that list on `clear`;
+#   * computes `readPixels` by filling each recorded draw's rect, in order, with
+#     `round(a*src + (1-a)*dst)` — exact alpha arithmetic over solid colours.
+
+_SANDBOX_JS = r"""
+'use strict';
+const FIXTURE = __FIXTURE__;
+const CFG = __CFG__;
+
+// ------------------------------------------------------------------ clock / scheduling
+const clock = { t: 0 };
+const performance = { now() { return clock.t; } };
+let rafQueue = [], rvfcQueue = [];
+function requestAnimationFrame(cb) { rafQueue.push(cb); return rafQueue.length; }
+function cancelAnimationFrame() {}
+function setTimeout(cb) { rafQueue.push(cb); return 0; }
+function clearTimeout() {}
+function setInterval() { return 0; }
+function clearInterval() {}
+function tickRaf(dtMs) {
+  clock.t += (dtMs === undefined ? 16.7 : dtMs);
+  const due = rafQueue; rafQueue = [];
+  for (const cb of due) { try { cb(clock.t); } catch (e) { world.harnessErrors.push('raf:' + e); } }
+}
+function tickRvfc() {
+  const due = rvfcQueue; rvfcQueue = [];
+  for (const cb of due) {
+    try { cb(clock.t, { mediaTime: world.video.currentTime, presentedFrames: ++world.presented }); }
+    catch (e) { world.harnessErrors.push('rvfc:' + e); }
+  }
+}
+
+// ------------------------------------------------------------------ GL enums
+const E = FIXTURE.glEnums;
+const GLC = {
+  TEXTURE_2D: E.TEXTURE_2D, TEXTURE0: E.TEXTURE0, TEXTURE1: E.TEXTURE1,
+  RGBA: 6408, UNSIGNED_BYTE: 5121, FLOAT: E.FLOAT,
+  COLOR_BUFFER_BIT: E.COLOR_BUFFER_BIT, DEPTH_BUFFER_BIT: E.DEPTH_BUFFER_BIT,
+  CURRENT_PROGRAM: 35725, ACTIVE_UNIFORMS: 35718,
+  FRAMEBUFFER: 36160, FRAMEBUFFER_BINDING: 36006, COLOR_ATTACHMENT0: 36064,
+  FRAMEBUFFER_COMPLETE: 36053, FRAMEBUFFER_INCOMPLETE_ATTACHMENT: 36054,
+  UNPACK_FLIP_Y_WEBGL: 37440, UNPACK_PREMULTIPLY_ALPHA_WEBGL: 37441,
+  NO_ERROR: 0, INVALID_OPERATION: 1282,
+  TEXTURE_BINDING_2D: 32873, ACTIVE_TEXTURE: 34016,
+  ARRAY_BUFFER: E.ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER: E.ELEMENT_ARRAY_BUFFER,
+  BLEND: E.BLEND, SRC_ALPHA: E.SRC_ALPHA, ONE_MINUS_SRC_ALPHA: E.ONE_MINUS_SRC_ALPHA,
+  TRIANGLE_STRIP: E.TRIANGLE_STRIP, UNSIGNED_SHORT: E.UNSIGNED_SHORT,
+};
+
+function decodeRect(mvp, w, h, bw, bh) {
+  // y-up drawing-buffer coordinates, the frame readPixels reads in.
+  const x0 = (mvp[12] + 1) / 2 * bw;
+  const x1 = (mvp[0] * w + mvp[12] + 1) / 2 * bw;
+  const y0 = (mvp[13] + 1) / 2 * bh;
+  const y1 = (mvp[5] * h + mvp[13] + 1) / 2 * bh;
+  return { x: Math.round(Math.min(x0, x1)), y: Math.round(Math.min(y0, y1)),
+           w: Math.round(Math.abs(x1 - x0)), h: Math.round(Math.abs(y1 - y0)) };
+}
+
+// ------------------------------------------------------------------ the scripted fake GL
+function FakeGL(canvas) {
+  const gl = this;
+  this.canvas = canvas;
+  this._programs = new Map();
+  this._textures = new Map();
+  this._nextTex = 100;
+  this._units = {};
+  this._activeUnit = 0;
+  this._current = null;
+  this._error = GLC.NO_ERROR;
+  this._lost = false;
+  this._flipY = false; this._premul = false;
+  this._drawn = [];
+  this._clearColour = [0, 0, 0, 0];
+  this._pendingClearColour = [0, 0, 0, 0];
+  this._fboStatus = CFG.fboStatus === undefined ? GLC.FRAMEBUFFER_COMPLETE : CFG.fboStatus;
+  this._uniform1fThrows = false;
+  this.callLog = [];
+
+  // Internals live on the INSTANCE: anything on the prototype would be wrapped by
+  // the module's `wrapContexts` loop and logged as a player call.
+  this._rec = function (name) { gl.callLog.push({ m: name }); };
+  this._tex = function (id) {
+    if (!gl._textures.has(id)) gl._textures.set(id, { id: id, upload: null, colour: null });
+    return gl._textures.get(id);
+  };
+  this._write = function (loc, value) {
+    if (gl._uniform1fThrows) throw new Error('uniform write refused');
+    if (!loc || !loc.__loc) { gl._error = GLC.INVALID_OPERATION; return; }
+    if (loc.prog !== gl._current) { gl._error = GLC.INVALID_OPERATION; return; }
+    loc.prog.uniforms.get(loc.name).value = value;
+  };
+  this._draw = function () {
+    gl._rec('draw');
+    const prog = gl._current;
+    if (!prog) { gl._error = GLC.INVALID_OPERATION; return; }
+    const opacity = prog.uniforms.has('Opacity') ? prog.uniforms.get('Opacity').value : 1;
+    const mvp = prog.uniforms.get('MVPMatrix').value;
+    const mix = prog.uniforms.get('mixFactor').value;
+    // The sampler-visible unit, per opacity-plan §0: mixFactor 1 selects
+    // `Texture` (unit 1), 0 selects `Texture2` (unit 0).
+    const unit = mix === 1 ? prog.uniforms.get('Texture').value
+                           : prog.uniforms.get('Texture2').value;
+    const tex = gl._units[unit];
+    const slot = prog.slot;
+    const size = FIXTURE.slotSizes[slot];
+    const rect = decodeRect(mvp, size[0], size[1], gl.canvas.width, gl.canvas.height);
+    const colour = (tex && tex.colour) ? tex.colour : FIXTURE.draws[slot].sourceColour;
+    gl._drawn.push({ slot: slot, opacity: opacity, rect: rect, colour: colour });
+  };
+
+  for (const p of FIXTURE.programs) {
+    const prog = { slot: p.prog, uniforms: new Map(), locs: new Map() };
+    for (const u of p.uniforms) {
+      prog.uniforms.set(u.name, { name: u.name, type: u.type,
+                                  value: Array.isArray(u.value) ? u.value.slice() : u.value });
+      prog.locs.set(u.name, { __loc: true, prog: prog, name: u.name });
+    }
+    this._programs.set(p.prog, prog);
+  }
+}
+Object.assign(FakeGL.prototype, GLC);
+FakeGL.prototype.isContextLost = function () { return this._lost; };
+FakeGL.prototype.getError = function () { const e = this._error; this._error = GLC.NO_ERROR; return e; };
+FakeGL.prototype.getExtension = function (name) {
+  const gl = this;
+  if (name === 'WEBGL_lose_context') return { loseContext() { gl._lost = true; } };
+  return null;
+};
+FakeGL.prototype.getParameter = function (p) {
+  if (p === GLC.CURRENT_PROGRAM) return this._current;
+  if (p === GLC.ACTIVE_TEXTURE) return GLC.TEXTURE0 + this._activeUnit;
+  if (p === GLC.TEXTURE_BINDING_2D) return this._units[this._activeUnit] || null;
+  if (p === GLC.FRAMEBUFFER_BINDING) return this._fbo || null;
+  if (p === GLC.UNPACK_FLIP_Y_WEBGL) return this._flipY;
+  if (p === GLC.UNPACK_PREMULTIPLY_ALPHA_WEBGL) return this._premul;
+  return 0;
+};
+FakeGL.prototype.useProgram = function (p) { this._rec('useProgram'); this._current = p; };
+FakeGL.prototype.getProgramParameter = function (p, what) {
+  if (what === GLC.ACTIVE_UNIFORMS) return p ? p.uniforms.size : 0;
+  return 0;
+};
+FakeGL.prototype.getActiveUniform = function (p, i) {
+  const names = Array.from(p.uniforms.keys());
+  if (i >= names.length) return null;
+  const u = p.uniforms.get(names[i]);
+  return { name: u.name, size: 1, type: u.type };
+};
+FakeGL.prototype.getUniformLocation = function (p, name) { return (p && p.locs.get(name)) || null; };
+FakeGL.prototype.getUniform = function (p, loc) {
+  if (!loc || !loc.__loc) return null;
+  const u = loc.prog.uniforms.get(loc.name);
+  return u ? u.value : null;
+};
+FakeGL.prototype.uniform1f = function (loc, v) { this._rec('uniform1f'); this._write(loc, v); };
+FakeGL.prototype.uniform1i = function (loc, v) { this._rec('uniform1i'); this._write(loc, v); };
+FakeGL.prototype.uniformMatrix4fv = function (loc, transpose, v) {
+  this._rec('uniformMatrix4fv'); this._write(loc, Array.prototype.slice.call(v));
+};
+FakeGL.prototype.activeTexture = function (unit) {
+  this._rec('activeTexture'); this._activeUnit = unit - GLC.TEXTURE0;
+};
+FakeGL.prototype.createTexture = function () { return this._tex(this._nextTex++); };
+FakeGL.prototype.deleteTexture = function () {};
+FakeGL.prototype.bindTexture = function (target, tex) {
+  this._rec('bindTexture'); this._units[this._activeUnit] = tex || null;
+};
+FakeGL.prototype.pixelStorei = function (pname, v) {
+  this._rec('pixelStorei');
+  if (pname === GLC.UNPACK_FLIP_Y_WEBGL) this._flipY = !!v;
+  if (pname === GLC.UNPACK_PREMULTIPLY_ALPHA_WEBGL) this._premul = !!v;
+};
+FakeGL.prototype.texImage2D = function () {
+  this._rec('texImage2D');
+  const a = arguments, tex = this._units[this._activeUnit];
+  if (!tex) { this._error = GLC.INVALID_OPERATION; return; }
+  let upload;
+  if (a.length >= 9) {                       // target, level, ifmt, w, h, border, fmt, type, px
+    upload = { srcType: 'pixels', w: a[3], h: a[4], format: a[6], type: a[7] };
+    const px = a[8];
+    if (px && px.length >= 4) tex.colour = [px[0], px[1], px[2], px[3]];
+  } else {                                   // target, level, ifmt, fmt, type, source
+    const src = a[5] || {};
+    const kind = src.tagName === 'CANVAS' ? 'canvas' : (src.tagName === 'VIDEO' ? 'video' : 'other');
+    upload = { srcType: kind, w: kind === 'video' ? src.videoWidth : src.width,
+               h: kind === 'video' ? src.videoHeight : src.height, format: a[3], type: a[4] };
+    tex.colour = src.__colour ? src.__colour.slice() : null;
+  }
+  upload.flipY = this._flipY; upload.premultiplyAlpha = this._premul;
+  tex.upload = upload;
+  world.uploads.push({ tex: tex.id, upload: upload });
+};
+FakeGL.prototype.texSubImage2D = function () { return FakeGL.prototype.texImage2D.apply(this, arguments); };
+FakeGL.prototype.texParameteri = function () {};
+FakeGL.prototype.clearColor = function (r, g, b, a) {
+  this._rec('clearColor');
+  this._pendingClearColour = [Math.round(r * 255), Math.round(g * 255),
+                              Math.round(b * 255), Math.round(a * 255)];
+};
+FakeGL.prototype.clear = function () {
+  this._rec('clear');
+  this._drawn = [];
+  this._clearColour = this._pendingClearColour.slice();
+  world.clears.push(clock.t);
+};
+FakeGL.prototype.drawElements = function () { this._draw(); };
+FakeGL.prototype.drawArrays = function () { this._draw(); };
+FakeGL.prototype.bindBuffer = function () {};
+FakeGL.prototype.vertexAttribPointer = function () {};
+FakeGL.prototype.enableVertexAttribArray = function () {};
+FakeGL.prototype.enable = function () { this._rec('enable'); };
+FakeGL.prototype.blendFunc = function () {};
+FakeGL.prototype.flush = function () {};
+FakeGL.prototype.finish = function () {};
+FakeGL.prototype.viewport = function () {};
+FakeGL.prototype.createFramebuffer = function () { return { id: 'fbo' }; };
+FakeGL.prototype.deleteFramebuffer = function () {};
+FakeGL.prototype.bindFramebuffer = function (t, f) { this._fbo = f; };
+FakeGL.prototype.framebufferTexture2D = function (t, a, tt, tex) { this._fboTex = tex; };
+FakeGL.prototype.checkFramebufferStatus = function () { return this._fboStatus; };
+FakeGL.prototype.readPixels = function (x, y, w, h, fmt, type, out) {
+  if (this._fbo) {                            // poster readback off the attached texture
+    const col = (this._fboTex && this._fboTex.colour) || [0, 0, 0, 255];
+    for (let i = 0; i < w * h; i++) {
+      out[i * 4] = col[0]; out[i * 4 + 1] = col[1]; out[i * 4 + 2] = col[2];
+      out[i * 4 + 3] = col[3] === undefined ? 255 : col[3];
+    }
+    return;
+  }
+  for (let i = 0; i < w * h; i++) {
+    out[i * 4] = this._clearColour[0]; out[i * 4 + 1] = this._clearColour[1];
+    out[i * 4 + 2] = this._clearColour[2]; out[i * 4 + 3] = this._clearColour[3];
+  }
+  const fill = (rx, ry, rw, rh, colour, alpha) => {
+    if (alpha === 0) return;
+    const x0 = Math.max(x, rx), x1 = Math.min(x + w, rx + rw);
+    const y0 = Math.max(y, ry), y1 = Math.min(y + h, ry + rh);
+    const ca = colour[3] === undefined ? 255 : colour[3];
+    for (let yy = y0; yy < y1; yy++) {
+      const row = (yy - y) * w;
+      for (let xx = x0; xx < x1; xx++) {
+        const px = (row + (xx - x)) * 4;
+        out[px] = Math.round(alpha * colour[0] + (1 - alpha) * out[px]);
+        out[px + 1] = Math.round(alpha * colour[1] + (1 - alpha) * out[px + 1]);
+        out[px + 2] = Math.round(alpha * colour[2] + (1 - alpha) * out[px + 2]);
+        out[px + 3] = Math.round(alpha * ca + (1 - alpha) * out[px + 3]);
+      }
+    }
+  };
+  for (const d of this._drawn) fill(d.rect.x, d.rect.y, d.rect.w, d.rect.h, d.colour, d.opacity);
+};
+
+// ------------------------------------------------------------------ fake DOM
+function FakeElement(id, tag) {
+  this.id = id || ''; this.tagName = (tag || 'div').toUpperCase(); this.nodeType = 1;
+  this.children = []; this.parentNode = null; this.isConnected = false;
+  this.style = { setProperty() {} }; this.dataset = {};
+}
+FakeElement.prototype.appendChild = function (child) {
+  child.parentNode = this; this.children.push(child);
+  const connect = (n) => { n.isConnected = this.isConnected; n.children.forEach(connect); };
+  connect(child);
+  world.fireMutation([{ type: 'childList', target: this, addedNodes: [child], removedNodes: [] }]);
+  return child;
+};
+FakeElement.prototype.removeChild = function (child) {
+  const i = this.children.indexOf(child);
+  if (i >= 0) this.children.splice(i, 1);
+  child.parentNode = null;
+  const disconnect = (n) => { n.isConnected = false; n.children.forEach(disconnect); };
+  disconnect(child);
+  world.fireMutation([{ type: 'childList', target: this, addedNodes: [], removedNodes: [child] }]);
+  return child;
+};
+FakeElement.prototype.contains = function (n) {
+  if (n === this) return true;
+  return this.children.some((c) => c.contains(n));
+};
+FakeElement.prototype.querySelector = function () { return null; };
+FakeElement.prototype.querySelectorAll = function () { return []; };
+FakeElement.prototype.addEventListener = function () {};
+FakeElement.prototype.removeEventListener = function () {};
+FakeElement.prototype.checkVisibility = function () { return true; };
+
+function FakeCanvas(id, w, h) {
+  FakeElement.call(this, id, 'canvas');
+  this.width = w; this.height = h;
+  this.__colour = [17, 17, 17, 255];
+  this._ctx = null;
+}
+FakeCanvas.prototype = Object.create(FakeElement.prototype);
+FakeCanvas.prototype.constructor = FakeCanvas;
+FakeCanvas.prototype.getContext = function (kind) {
+  if (kind !== 'webgl' && kind !== 'experimental-webgl' && kind !== 'webgl2') return null;
+  if (!this._ctx) { this._ctx = new FakeGL(this); world.contexts.push(this._ctx); }
+  return this._ctx;
+};
+
+function FakeVideo(src) {
+  FakeElement.call(this, '', 'video');
+  this.currentSrc = src; this.src = src;
+  this.readyState = 4; this.paused = false; this.currentTime = 0.5;
+  this.videoWidth = 1920; this.videoHeight = 540;
+  this.__colour = [80, 90, 100, 255];
+}
+FakeVideo.prototype = Object.create(FakeElement.prototype);
+FakeVideo.prototype.constructor = FakeVideo;
+FakeVideo.prototype.play = function () {
+  this.paused = false; world.videoCalls.push('play'); return Promise.resolve();
+};
+FakeVideo.prototype.pause = function () { this.paused = true; world.videoCalls.push('pause'); };
+FakeVideo.prototype.requestVideoFrameCallback = function (cb) { rvfcQueue.push(cb); return 1; };
+
+// ------------------------------------------------------------------ the world
+const world = {
+  uploads: [], clears: [], contexts: [], videoCalls: [], seamCalls: [],
+  mutationCallbacks: [], harnessErrors: [], presented: 0,
+  observerThrows: !!CFG.observerThrows,
+  fireMutation(records) {
+    for (const cb of this.mutationCallbacks) {
+      try { cb(records, { disconnect() {} }); } catch (e) { this.harnessErrors.push('mo:' + e); }
+    }
+  },
+};
+
+function MutationObserver(cb) {
+  this.observe = function () {
+    if (world.observerThrows) throw new Error('observe refused');
+    world.mutationCallbacks.push(cb);
+  };
+  this.disconnect = function () {};
+  this.takeRecords = function () { return []; };
+}
+
+const documentElement = new FakeElement('', 'html');
+documentElement.isConnected = true;
+const body = new FakeElement('body', 'body');
+documentElement.appendChild(body);
+const stage = new FakeElement('stage', 'div');
+const document = {
+  documentElement: documentElement, body: body, readyState: 'complete',
+  getElementById(id) { return id === 'stage' ? stage : null; },
+  querySelector(sel) { return sel === '#stage' ? stage : null; },
+  querySelectorAll() { return []; },
+  addEventListener() {}, removeEventListener() {},
+  createElement(tag) {
+    return tag === 'canvas' ? new FakeCanvas('', 1, 1) : new FakeElement('', tag);
+  },
+};
+
+const location = { hash: CFG.initialHash === undefined ? '#1' : CFG.initialHash };
+world.video = new FakeVideo('file:///assets/untitled.mov');
+
+const seam = {
+  version: 1,
+  carried(movieKey) {
+    world.seamCalls.push({ fn: 'carried', movieKey: movieKey });
+    if (CFG.carriedNull) return { video: null, reason: 'ambiguous' };
+    return { video: world.video, reason: null };
+  },
+  movieKeyOf(v) {
+    world.seamCalls.push({ fn: 'movieKeyOf' });
+    return v === world.video ? 'movie1' : null;
+  },
+  setKeepWarm(v, on) { world.seamCalls.push({ fn: 'setKeepWarm', on: !!on }); },
+  release(movieKey, opts) {
+    world.seamCalls.push({ fn: 'release', movieKey: movieKey,
+                           rect: (opts && opts.rect) || null });
+    return { ok: true, reason: null };
+  },
+  note(kind, detail) { world.seamCalls.push({ fn: 'note', kind: kind }); },
+};
+
+const window = {
+  __OBED_CONTINUITY__: CFG.plan,
+  __OBED_CONTINUITY_INFO__: { authoredWidth: 1920, authoredHeight: 1080 },
+  location: location, performance: performance, document: document,
+  requestAnimationFrame: requestAnimationFrame, cancelAnimationFrame: cancelAnimationFrame,
+  setTimeout: setTimeout, clearTimeout: clearTimeout,
+  setInterval: setInterval, clearInterval: clearInterval,
+  MutationObserver: MutationObserver,
+  addEventListener() {}, removeEventListener() {},
+};
+if (!CFG.noSeam) window.__OBED_P2_PRESERVE__ = CFG.noGlReplaySeam ? {} : { glReplay: seam };
+if (!CFG.noObedLive) {
+  window.__obedLive = {
+    _ready: false,
+    _sceneId: CFG.sceneId === undefined ? 1 : CFG.sceneId,
+    snapshot() { return { state: this._ready ? 'IdleAtFinalState' : 'Playing',
+                          ready: this._ready, sceneId: this._sceneId }; },
+  };
+}
+const HTMLCanvasElement = FakeCanvas;
+const HTMLVideoElement = FakeVideo;
+const WebGLRenderingContext = FakeGL;
+if (!CFG.noWebGL) window.WebGLRenderingContext = FakeGL;
+if (CFG.noRvfc) delete FakeVideo.prototype.requestVideoFrameCallback;
+// The module reads `debugForceFail` off a pre-seeded (version-less) API object.
+if (CFG.debugForceFail) window.__OBED_GL_REPLAY__ = { debugForceFail: CFG.debugForceFail };
+
+// ------------------------------------------------------------------ install the module
+let installThrew = null;
+try {
+__MODULE__
+} catch (e) { installThrew = String((e && e.stack) || e); }
+const M = window.__OBED_GL_REPLAY__ && window.__OBED_GL_REPLAY__.version
+  ? window.__OBED_GL_REPLAY__ : null;
+
+// ------------------------------------------------------------------ the "player"
+function playerFrame(gl, len) {
+  const calls = FIXTURE.calls.slice(0, len === undefined ? FIXTURE.calls.length : len);
+  for (const call of calls) {
+    const args = call.a.map((a) => {
+      if (a && typeof a === 'object' && a.prog !== undefined && a.name !== undefined) {
+        return gl.getUniformLocation(gl._programs.get(a.prog), a.name);
+      }
+      return a;
+    });
+    if (call.m === 'useProgram') gl.useProgram(args[0] === null ? null : gl._programs.get(args[0]));
+    else if (call.m === 'bindTexture') gl.bindTexture(args[0], args[1] === null ? null : gl._tex(args[1]));
+    else gl[call.m].apply(gl, args);
+  }
+}
+
+function playerUpload(gl, texId, w, h, colour) {
+  const src = new FakeCanvas('', w, h);
+  if (colour) src.__colour = colour;
+  gl.activeTexture(GLC.TEXTURE0);
+  gl.bindTexture(GLC.TEXTURE_2D, gl._tex(texId));
+  gl.pixelStorei(GLC.UNPACK_FLIP_Y_WEBGL, true);
+  gl.pixelStorei(GLC.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  gl.texImage2D(GLC.TEXTURE_2D, 0, GLC.RGBA, GLC.RGBA, GLC.UNSIGNED_BYTE, src);
+}
+
+// ------------------------------------------------------------------ the timeline
+async function settle(ticks) {
+  for (let i = 0; i < (ticks || 8); i++) { tickRaf(); tickRvfc(); await null; await null; }
+}
+
+async function pumpUntil(promise, budget) {
+  let done = false, value = null, err = null;
+  promise.then((v) => { done = true; value = v; }, (e) => { done = true; err = e; });
+  for (let i = 0; i < (budget || 400) && !done; i++) {
+    tickRaf(); tickRvfc(); await null; await null;
+  }
+  if (err) throw err;
+  return { done: done, value: value };
+}
+
+function detailsOf(list) {
+  return (list || []).map((r) => (typeof r === 'string' ? { kind: r, detail: {} }
+                                                        : { kind: r.kind, detail: r.detail || {} }));
+}
+
+function snapshotState() {
+  const handle = window.__OBED_GL_ORACLE__;
+  const gl = world.contexts.length ? world.contexts[0] : null;
+  let stats = null;
+  if (M && typeof M.stats === 'function') {
+    try { stats = M.stats(); } catch (e) { stats = { statsThrew: String(e) }; }
+  }
+  return {
+    installed: !!M,
+    installThrew: installThrew,
+    state: M ? M.state : null,
+    standDowns: M ? M.standDowns.slice() : [],
+    events: M ? detailsOf(M.events) : [],
+    notes: M ? detailsOf(M.notes) : [],
+    eventKinds: M ? M.events.map((e) => e.kind) : [],
+    seamCalls: world.seamCalls,
+    videoCalls: world.videoCalls,
+    handlePresent: !!handle,
+    handleFields: handle ? Object.keys(handle).sort() : null,
+    handleScalars: handle ? {
+      sceneId: handle.sceneId, instanceId: handle.instanceId, rect: handle.rect,
+      canvasId: handle.canvasId, epoch: handle.epoch,
+    } : null,
+    uploads: world.uploads.length,
+    harnessErrors: world.harnessErrors,
+    opacityAfter: gl ? FIXTURE.programs.map(
+      (p) => gl._programs.get(p.prog).uniforms.get('Opacity').value) : null,
+    stats: stats,
+  };
+}
+
+async function armAndGoLive() {
+  await settle(3);                                   // IDLE -> ARM-PRE on the hash
+  const canvas = new FakeCanvas(CFG.canvasId === undefined ? '0-canvas' : CFG.canvasId,
+                                CFG.canvasW === undefined ? 1920 : CFG.canvasW,
+                                CFG.canvasH === undefined ? 1080 : CFG.canvasH);
+  stage.isConnected = true;
+  body.appendChild(stage);
+  world.canvas = canvas;
+  stage.appendChild(canvas);
+  const gl = canvas.getContext('webgl');
+  world.gl = gl;
+  if (CFG.videoNotReady) world.video.readyState = 1;
+  // The player's per-slot texture uploads. Slot `movieSlot`'s is the poster: the
+  // measured signature is a canvas source at slotSizes[movieSlot], RGBA /
+  // UNSIGNED_BYTE, flipY + premultiplied.
+  FIXTURE.textureUploads.forEach(function (up, slot) {
+    playerUpload(gl, up.tex, up.width, up.height, FIXTURE.draws[slot].sourceColour);
+  });
+  // Draw 17 samples the SHARED texture (mixFactor 1 -> unit 1), so it carries slot 0's colour.
+  playerUpload(gl, FIXTURE.sharedTexture, 1920, 1080, FIXTURE.draws[0].sourceColour);
+  if (CFG.secondPosterTexture) {
+    const poster = FIXTURE.slotSizes[MOVIE_SLOT_JS];
+    playerUpload(gl, 900, poster[0], poster[1]);
+  }
+  for (let f = 0; f < 3; f++) { playerFrame(gl, CFG.frameLen); await settle(2); }
+  if (CFG.floodWithoutClear) {
+    for (let i = 0; i < 600; i++) gl.enable(GLC.BLEND);
+  }
+  if (window.__obedLive) window.__obedLive._ready = true;
+  await settle(CFG.settleTicks === undefined ? 14 : CFG.settleTicks);
+  return gl;
+}
+
+const MOVIE_SLOT_JS = CFG.plan && CFG.plan.boundaries
+  ? (CFG.plan.boundaries.filter((b) => b && b.action === 'glReplay')[0] || {}).movieSlot
+  : 3;
+
+async function main() {
+  const out = { scenario: CFG.scenario };
+  if (CFG.scenario === 'install_only') {
+    out.afterInstall = snapshotState();
+    await settle(6);
+    out.final = snapshotState();
+    return out;
+  }
+  const gl = await armAndGoLive();
+  out.afterLive = snapshotState();
+
+  if (CFG.scenario === 'happy') {
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'sample') {
+    const handle = window.__OBED_GL_ORACLE__;
+    if (handle) out.samples = (await pumpUntil(handle.sample(24))).value;
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'pause_resume') {
+    const handle = window.__OBED_GL_ORACLE__;
+    if (handle) {
+      world.seamCalls.length = 0; world.videoCalls.length = 0;
+      await pumpUntil(handle.pause());
+      out.afterPause = { seam: world.seamCalls.slice(), video: world.videoCalls.slice() };
+      world.seamCalls.length = 0; world.videoCalls.length = 0;
+      await pumpUntil(handle.resume());
+      out.afterResume = { seam: world.seamCalls.slice(), video: world.videoCalls.slice() };
+    }
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'canvas_removed') {
+    stage.removeChild(world.canvas);
+    await settle(4);
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'unflagged_player_call') {
+    // The player wakes up and issues ONE call the module never issues itself.
+    gl.callLog.length = 0;
+    gl.enable(GLC.BLEND);
+    out.callOrder = gl.callLog.slice();
+    await settle(3);
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'context_lost') {
+    gl.getExtension('WEBGL_lose_context').loseContext();
+    gl.callLog.length = 0;
+    await settle(4);
+    out.callOrder = gl.callLog.slice();
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'gl_error') {
+    gl._error = GLC.INVALID_OPERATION;
+    await settle(4);
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'writeback_fails') {
+    gl._uniform1fThrows = true;
+    stage.removeChild(world.canvas);
+    await settle(4);
+    out.final = snapshotState();
+    return out;
+  }
+  await settle(6);
+  out.final = snapshotState();
+  return out;
+}
+
+main().then((out) => {
+  console.log('__RESULT__' + JSON.stringify(out));
+}, (e) => {
+  console.log('__RESULT__' + JSON.stringify({ harnessThrew: String((e && e.stack) || e) }));
+});
+"""
+
+
+def _node() -> str:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to exercise the GL-replay JS")
+    return node
+
+
+_DEFAULT_PLAN = object()
+
+
+def _run_sandbox(*, scenario: str = "happy", plan: object = _DEFAULT_PLAN,
+                 frame: dict | None = None, **cfg) -> dict:
+    node = _node()
+    config = {"scenario": scenario,
+              "plan": RUNTIME_PLAN if plan is _DEFAULT_PLAN else plan}
+    config.update(cfg)
+    harness = (
+        _SANDBOX_JS.replace("__FIXTURE__", json.dumps(SETTLE_FRAME if frame is None else frame))
+        .replace("__CFG__", json.dumps(config))
+        .replace("__MODULE__", live_gl_replay_js.GL_REPLAY_JS)
+    )
+    result = subprocess.run([node, "-e", harness], text=True, capture_output=True)
+    for line in result.stdout.splitlines():
+        if line.startswith("__RESULT__"):
+            return json.loads(line[len("__RESULT__") :])
+    raise AssertionError(
+        f"sandbox produced no result\nexit={result.returncode}\n"
+        f"stdout={result.stdout[-4000:]}\nstderr={result.stderr[-4000:]}"
+    )
+
+
+def _assert_clean(out: dict) -> dict:
+    assert "harnessThrew" not in out, out.get("harnessThrew")
+    final = out["final"]
+    assert final["installThrew"] is None, final["installThrew"]
+    assert final["harnessErrors"] == [], final["harnessErrors"]
+    return final
+
+
+def _unproven(final: dict) -> dict[int, str]:
+    """Slot -> reason, from the `glreplay-opacity-unproven` notes."""
+    out: dict[int, str] = {}
+    for note in final["notes"]:
+        if note["kind"] != "glreplay-opacity-unproven":
+            continue
+        out[note["detail"]["slot"]] = note["detail"]["reason"]
+    return out
+
+
+def _mutate_frame(**kw) -> dict:
+    """A copy of the settle frame with program 4's uniform `name` changed to
+    `value`, in both the program table and the call that sets it."""
+    name, value = kw["name"], kw["value"]
+    frame = copy.deepcopy(SETTLE_FRAME)
+    for program in frame["programs"]:
+        if program["prog"] != 4:
+            continue
+        for uniform in program["uniforms"]:
+            if uniform["name"] == name:
+                uniform["value"] = value
+        if name == "Opacity":
+            program["restOpacity"] = value
+    for draw in frame["draws"]:
+        if draw["slot"] == 4 and name == "mixFactor":
+            draw["mixFactor"] = value
+    for call in frame["calls"]:
+        target = call["a"][0] if call["a"] else None
+        if not isinstance(target, dict) or target != {"prog": 4, "name": name}:
+            continue
+        call["a"][-1] = value
+    return frame
+
+
+# --- install / arming -------------------------------------------------------------------
+
+
+def test_install_is_a_no_op_without_a_plan():
+    out = _run_sandbox(scenario="install_only", plan=None)
+    assert "harnessThrew" not in out, out.get("harnessThrew")
+    assert out["afterInstall"]["installed"] is False
+    assert out["afterInstall"]["installThrew"] is None
+    assert out["final"]["handlePresent"] is False
+
+
+def test_install_is_a_no_op_for_a_plan_without_a_gl_replay_boundary():
+    out = _run_sandbox(scenario="install_only", plan=_plan_with(None))
+    assert out["afterInstall"]["installed"] is False
+    assert out["final"]["handlePresent"] is False
+
+
+def test_malformed_plan_stands_down_plan_unreadable_and_installs_nothing():
+    out = _run_sandbox(scenario="install_only", plan=_plan_with(_override(opacity=5.0)))
+    final = out["final"]
+    assert final["installed"] is True, "the API object must exist to carry the reason"
+    assert final["standDowns"] == ["planUnreadable"], final["standDowns"]
+    assert final["state"] == "RETIRED"
+    assert final["handlePresent"] is False
+
+
+def test_install_stands_down_without_the_seam_at_arm_pre():
+    """Plan §2.2: the seam is an ARM-PRE requirement, never a silent carry."""
+    out = _run_sandbox(scenario="arm_only", noSeam=True)
+    final = _assert_clean(out)
+    assert final["handlePresent"] is False
+    assert final["standDowns"] == ["runtimeSeamAbsent"]
+
+
+def test_full_happy_path_reaches_live_with_the_milestone_notes():
+    out = _run_sandbox(scenario="happy")
+    live = out["afterLive"]
+    assert live["installThrew"] is None, live["installThrew"]
+    assert live["standDowns"] == [], live["standDowns"]
+    assert live["state"] == "LIVE", live["state"]
+    for milestone in MILESTONE_NOTES:
+        assert milestone in live["eventKinds"], live["eventKinds"]
+    assert live["handlePresent"] is True
+    # `glreplay-arm`/`glreplay-live` also reach the core through the seam.
+    seam_notes = [c["kind"] for c in live["seamCalls"] if c["fn"] == "note"]
+    for milestone in MILESTONE_NOTES:
+        assert milestone in seam_notes, seam_notes
+
+
+def test_published_handle_carries_exactly_the_plan_fields():
+    out = _run_sandbox(scenario="happy")
+    live = out["afterLive"]
+    assert live["handlePresent"] is True
+    assert live["handleFields"] == sorted([
+        "gl", "canvas", "video", "epoch", "sceneId", "instanceId", "rect", "canvasId",
+        "sample", "markerBands", "pause", "resume",
+    ])
+    scalars = live["handleScalars"]
+    assert scalars["sceneId"] == GL_REPLAY_ENTRY["atScene"] - 1
+    assert scalars["instanceId"] == GL_REPLAY_ENTRY["instanceId"]
+    assert scalars["rect"] == GL_REPLAY_ENTRY["instanceRect"]
+    assert scalars["canvasId"] == "0-canvas"
+    assert isinstance(scalars["epoch"], int) and scalars["epoch"] >= 1
+
+
+def test_sample_returns_monotonic_ticks_with_128_bands():
+    out = _run_sandbox(scenario="sample")
+    samples = out.get("samples")
+    assert samples, "sample(24) never resolved"
+    assert len(samples) == 24
+    times = [s["t"] for s in samples]
+    assert all(b > a for a, b in zip(times, times[1:])), times
+    for s in samples:
+        assert len(s["bands"]) == html_alpha_probe.INPAGE_BAND_COUNT
+        assert s["glErr"] == 0
+        assert len(s["greenRGB"]) == 3
+
+
+def test_pause_suspends_keep_warm_before_pausing_and_resume_reverses():
+    """Plan §2.4 / rev-2 A4: without the keep-warm suspension the core's 200 ms
+    sweep un-pauses the probe's control decoder mid-window."""
+    out = _run_sandbox(scenario="pause_resume")
+    pause = out["afterPause"]
+    keep_warm_off = [c for c in pause["seam"] if c["fn"] == "setKeepWarm" and c["on"] is False]
+    assert keep_warm_off, f"pause() never suspended the keep-warm sweep: {pause}"
+    assert pause["video"] == ["pause"], pause["video"]
+    resume = out["afterResume"]
+    keep_warm_on = [c for c in resume["seam"] if c["fn"] == "setKeepWarm" and c["on"] is True]
+    assert keep_warm_on, f"resume() never restored the keep-warm sweep: {resume}"
+    assert resume["video"] == ["play"], resume["video"]
+
+
+# --- stand-down coverage ----------------------------------------------------------------
+
+# Every §2.7 reason, driven through the sandbox's natural path where one exists and
+# through `debugForceFail` where it does not. The middle column records which.
+STAND_DOWN_CASES: list[tuple[str, str, dict]] = [
+    ("planUnreadable", "natural", {"scenario": "install_only",
+                                   "plan": _plan_with(_override(opacity=5.0))}),
+    ("runtimeSeamAbsent", "natural", {"scenario": "arm_only", "noSeam": True}),
+    ("glReplayUnavailable", "natural", {"scenario": "install_only", "noWebGL": True}),
+    ("settleSignalAbsent", "natural", {"scenario": "arm_only", "noObedLive": True}),
+    ("rvfcUnavailable", "natural", {"scenario": "arm_only", "noRvfc": True}),
+    ("observerNotArmed", "natural", {"scenario": "install_only", "observerThrows": True}),
+    ("canvasShape", "natural", {"scenario": "arm_only", "canvasW": 1280, "canvasH": 720}),
+    ("assetUnbound", "natural", {"scenario": "arm_only", "carriedNull": True}),
+    ("videoNotReady", "natural", {"scenario": "arm_only", "videoNotReady": True}),
+    ("posterAmbiguous", "natural", {"scenario": "arm_only", "secondPosterTexture": True}),
+    ("posterUnreadable", "natural", {"scenario": "arm_only", "fboStatus": 36054}),
+    ("sceneMismatch", "natural", {"scenario": "arm_only", "sceneId": 7}),
+    ("frameNotDelimited", "natural", {"scenario": "arm_only", "floodWithoutClear": True}),
+    ("occlusionTooHigh", "forced", {"scenario": "arm_only",
+                                    "debugForceFail": "occlusionTooHigh"}),
+    ("contextLost", "natural", {"scenario": "context_lost"}),
+    ("glError", "natural", {"scenario": "gl_error"}),
+    ("unflaggedPlayerCall", "natural", {"scenario": "unflagged_player_call"}),
+    ("frameLengthChanged", "forced", {"scenario": "arm_only",
+                                      "debugForceFail": "frameLengthChanged"}),
+]
+
+# Reasons reached before the carried decoder is bound: no `release()` is owed.
+NO_RELEASE_REASONS = PRE_ARM_REASONS | {"assetUnbound"}
+
+
+def test_stand_down_cases_cover_the_closed_reason_set():
+    """The parametrisation below must exercise every §2.7 reason — `writebackFailed`
+    has its own test because it is recorded *in addition* to a trigger."""
+    covered = {case[0] for case in STAND_DOWN_CASES} | {"writebackFailed"}
+    assert covered == set(STAND_DOWN_REASONS)
+    assert len(STAND_DOWN_CASES) == len({c[0] for c in STAND_DOWN_CASES})
+
+
+@pytest.mark.parametrize("reason,how,cfg", STAND_DOWN_CASES,
+                         ids=[f"{c[0]}-{c[1]}" for c in STAND_DOWN_CASES])
+def test_each_reason_stands_down_exactly_once(reason, how, cfg):
+    out = _run_sandbox(**cfg)
+    final = _assert_clean(out)
+    assert final["standDowns"] == [reason], final["standDowns"]
+    assert final["handlePresent"] is False, "the handle survived the stand-down"
+    assert final["state"] == "RETIRED", final["state"]
+    standdowns = [e for e in final["events"] if e["kind"] == "glreplay-standdown"]
+    assert len(standdowns) == 1, final["events"]
+    assert standdowns[0]["detail"]["reason"] == reason
+    releases = [c for c in final["seamCalls"] if c["fn"] == "release"]
+    if reason in NO_RELEASE_REASONS:
+        assert releases == [], f"{reason} released a decoder it never bound"
+    else:
+        assert len(releases) == 1, f"release called {len(releases)} times"
+        assert releases[0]["movieKey"] == GL_REPLAY_ENTRY["movieKey"]
+        assert releases[0]["rect"] == DESTINATION_RECT
+
+
+def test_canvas_removal_is_the_normal_exit_and_hands_off():
+    out = _run_sandbox(scenario="canvas_removed")
+    final = _assert_clean(out)
+    assert final["standDowns"] == [NORMAL_EXIT_REASON], final["standDowns"]
+    assert final["handlePresent"] is False
+    handoffs = [e for e in final["events"] if e["kind"] == "glreplay-handoff"]
+    assert len(handoffs) == 1, final["events"]
+    assert not [e for e in final["events"] if e["kind"] == "glreplay-standdown"]
+    releases = [c for c in final["seamCalls"] if c["fn"] == "release"]
+    assert len(releases) == 1
+    assert releases[0]["rect"] == DESTINATION_RECT
+    assert handoffs[0]["detail"]["released"] == {"ok": True, "reason": None}
+
+
+def test_writeback_failure_is_recorded_alongside_its_trigger():
+    out = _run_sandbox(scenario="writeback_fails")
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["writebackFailed", NORMAL_EXIT_REASON], final["standDowns"]
+    assert final["handlePresent"] is False
+
+
+# --- write-back ordering and the opacity proofs -----------------------------------------
+
+
+def test_writeback_precedes_forwarded_player_call():
+    """§2.5 step 2: when the trigger is an unflagged player call, the write-back and
+    the `CURRENT_PROGRAM` restore run inside the wrapper BEFORE `orig.apply`."""
+    out = _run_sandbox(scenario="unflagged_player_call")
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["unflaggedPlayerCall"]
+    order = [c["m"] for c in out["callOrder"]]
+    assert order.count("enable") == 1, order
+    forwarded = order.index("enable")
+    assert forwarded == len(order) - 1, ("the forwarded player call was not last", order)
+    before = order[:forwarded]
+    assert "uniform1f" in before, order
+    assert "useProgram" in before, order
+    # The CURRENT_PROGRAM restore is the last program switch of the write-back,
+    # after every `uniform1f` (§2.5 step 3's poster restore may follow it).
+    assert before.index("uniform1f") < len(before) - 1 - before[::-1].index("useProgram") + 1
+    last_uniform = len(before) - 1 - before[::-1].index("uniform1f")
+    last_use = len(before) - 1 - before[::-1].index("useProgram")
+    assert last_use > last_uniform, order
+    # Every program is back at its recorded rest Opacity.
+    assert final["opacityAfter"] == [p["restOpacity"] for p in SETTLE_FRAME["programs"]]
+
+
+def test_context_lost_exempts_writeback():
+    """§2.5: the write-back is skipped only when `isContextLost()` is true, and the
+    stand-down still completes with the hand-off."""
+    out = _run_sandbox(scenario="context_lost")
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["contextLost"], final["standDowns"]
+    assert final["handlePresent"] is False
+    assert [c["m"] for c in out["callOrder"]] == [], out["callOrder"]
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_override_applied_before_mapped_draw():
+    """The override must be written while its program is CURRENT and before that
+    program's draw. The fake drops a uniform write aimed at a non-current program,
+    so a mis-ordered module leaves slot 4 at 1.0 instead of the override."""
+    out = _run_sandbox(scenario="happy")
+    final = _assert_clean(out)
+    assert final["state"] == "LIVE"
+    assert final["stats"]["opacityUnproven"] == [], final["stats"]["opacityUnproven"]
+    assert final["opacityAfter"][4] == pytest.approx(SLOT4_OPACITY, abs=1e-12)
+    # The slots with no override are left exactly as the frame set them.
+    assert final["opacityAfter"][:4] == [p["restOpacity"] for p in SETTLE_FRAME["programs"][:4]]
+
+
+def test_rest_opacity_not_one_is_unproven():
+    """Opacity-plan §2: an override slot whose recorded rest `Opacity` is not 1.0
+    cannot be patched multiplicatively; the slot is dropped with `rest-opacity`."""
+    out = _run_sandbox(scenario="happy", frame=_mutate_frame(name="Opacity", value=0.5))
+    final = _assert_clean(out)
+    assert _unproven(final).get(4) == "rest-opacity", _unproven(final)
+
+
+def test_mixfactor_between_zero_and_one_is_unproven():
+    """Opacity-plan §1.2 (F-9): a `mixFactor` strictly between 0 and 1 leaves the
+    sampler-visible texture undetermined, so that slot is unproven."""
+    out = _run_sandbox(scenario="happy", frame=_mutate_frame(name="mixFactor", value=0.5))
+    final = _assert_clean(out)
+    assert _unproven(final).get(4) == "mixfactor", _unproven(final)
+
+
+def test_mvp_decode_must_match_settled_rect():
+    """The zero-replay geometry check: a draw whose `MVPMatrix` decodes somewhere
+    other than its `slotRects` entry is unproven with `mvp`."""
+    shifted = None
+    for program in SETTLE_FRAME["programs"]:
+        if program["prog"] == 4:
+            shifted = list(next(u["value"] for u in program["uniforms"]
+                                if u["name"] == "MVPMatrix"))
+    shifted[12] += 0.25                        # ≈ 240 px to the right
+    out = _run_sandbox(scenario="happy", frame=_mutate_frame(name="MVPMatrix", value=shifted))
+    final = _assert_clean(out)
+    assert _unproven(final).get(4) == "mvp", _unproven(final)
+
+
+def test_unproven_slot_replays_opaque_and_notes():
+    """A dropped override must not silently become a patch: the slot keeps its
+    recorded rest Opacity and a `glreplay-opacity-unproven` note names it."""
+    out = _run_sandbox(scenario="happy", frame=_mutate_frame(name="mixFactor", value=0.5))
+    final = _assert_clean(out)
+    notes = [n for n in final["notes"] if n["kind"] == "glreplay-opacity-unproven"]
+    assert notes, final["notes"]
+    assert [n["detail"]["slot"] for n in notes] == [4], notes
+    assert final["state"] == "LIVE", final["state"]
+    assert final["opacityAfter"][4] == 1, final["opacityAfter"]
+    assert final["stats"]["opacityUnproven"] == [{"slot": 4, "reason": "mixfactor"}]
