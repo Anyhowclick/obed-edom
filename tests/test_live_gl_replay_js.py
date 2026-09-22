@@ -149,7 +149,7 @@ PRE_ARM_REASONS = {
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "aeaaea6f1e9ed6da7609bf6be859a11d79848b204d0c32a96c932d7405eee2c6"
+PINNED_JS_SHA256 = "eb7ef90cc080a6aaa61efca0943832cc8d470ab6815d4465ed748dadbd4c9c73"
 
 
 # =======================================================================================
@@ -608,7 +608,7 @@ function FakeGL(canvas) {
     if (loc.prog !== gl._current) { gl._error = GLC.INVALID_OPERATION; return; }
     loc.prog.uniforms.get(loc.name).value = value;
   };
-  this._draw = function () {
+  this._draw = function (slotFromOffset) {
     gl._rec('draw');
     const prog = gl._current;
     if (!prog) { gl._error = GLC.INVALID_OPERATION; return; }
@@ -620,7 +620,9 @@ function FakeGL(canvas) {
     const unit = mix === 1 ? prog.uniforms.get('Texture').value
                            : prog.uniforms.get('Texture2').value;
     const tex = gl._units[unit];
-    const slot = prog.slot;
+    // The slot comes from the draw's own index-buffer offset, NOT from the program:
+    // two draws may legitimately share one program with different uniforms.
+    const slot = slotFromOffset;
     const size = FIXTURE.slotSizes[slot];
     const rect = decodeRect(mvp, size[0], size[1], gl.canvas.width, gl.canvas.height);
     const colour = (tex && tex.colour) ? tex.colour : FIXTURE.draws[slot].sourceColour;
@@ -722,8 +724,12 @@ FakeGL.prototype.clear = function () {
   this._clearColour = this._pendingClearColour.slice();
   world.clears.push(clock.t);
 };
-FakeGL.prototype.drawElements = function () { this._draw(); };
-FakeGL.prototype.drawArrays = function () { this._draw(); };
+FakeGL.prototype.drawElements = function (mode, count, type, offset) {
+  this._draw(offset / FIXTURE.drawSlotStride);
+};
+FakeGL.prototype.drawArrays = function (mode, first) {
+  this._draw(first / FIXTURE.drawSlotStride);
+};
 FakeGL.prototype.bindBuffer = function () {};
 FakeGL.prototype.vertexAttribPointer = function () {};
 FakeGL.prototype.enableVertexAttribArray = function () {};
@@ -1005,6 +1011,8 @@ function snapshotState() {
       sceneId: handle.sceneId, instanceId: handle.instanceId, rect: handle.rect,
       canvasId: handle.canvasId, epoch: handle.epoch,
     } : null,
+    drawnOpacities: gl ? gl._drawn.map((d) => d.opacity) : null,
+    drawnSlots: gl ? gl._drawn.map((d) => d.slot) : null,
     uploads: world.uploads.length,
     harnessErrors: world.harnessErrors,
     opacityAfter: gl ? FIXTURE.programs.map(
@@ -1056,6 +1064,7 @@ async function armAndGoLive(out) {
   return gl;
 }
 
+const DEBUG_ONLY_SLOT = CFG.debugOnlySlot === undefined ? 4 : CFG.debugOnlySlot;
 const MOVIE_ENTRY = (CFG.plan && CFG.plan.boundaries
   ? CFG.plan.boundaries.filter((b) => b && b.action === 'glReplay')[0] : null) || {atScene: 2};
 const MOVIE_SLOT_JS = CFG.plan && CFG.plan.boundaries
@@ -1099,6 +1108,30 @@ async function main() {
       await pumpUntil(handle.resume());
       out.afterResume = { seam: world.seamCalls.slice(), video: world.videoCalls.slice() };
     }
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'debug_replay_only') {
+    // `API.debug.replay({only: n})` with no `value` must leave EVERY program at its
+    // rest opacity — the same shape as D1, in the hook S3 drives gate 3 with.
+    const dirty = [];
+    for (const p of FIXTURE.programs) {
+      const prog = gl._programs.get(p.prog);
+      const loc = gl.getUniformLocation(prog, 'Opacity');
+      const prev = gl._current;
+      RAW.useProgram.call(gl, prog);
+      RAW.uniform1f.call(gl, loc, 0.5);
+      RAW.useProgram.call(gl, prev);
+      dirty.push(prog.uniforms.get('Opacity').value);
+    }
+    out.dirtiedBefore = dirty;
+    // Slot 4 is the ONLY meaningful target: the recorded frame re-sets `Opacity`
+    // for programs 0-3 itself, so a replay that writes nothing for them still
+    // leaves them at rest and the assertion would pass on the broken shape.
+    M.debug.replay({only: DEBUG_ONLY_SLOT});
+    out.afterDebugReplay = FIXTURE.programs.map(
+      (p) => gl._programs.get(p.prog).uniforms.get('Opacity').value);
+    out.debugPrograms = M.debug.programs().length;
     out.final = snapshotState();
     return out;
   }
@@ -1703,6 +1736,10 @@ def test_proofs_leave_every_program_at_its_recorded_rest_opacity():
     assert after is not None, "opacityAfterProofs not published — the proofs never ran"
     assert rest == [p["restOpacity"] for p in SETTLE_FRAME["programs"]], rest
     assert after == rest, f"a probe value survived the proofs: rest={rest} after={after}"
+    # This per-SLOT invariant is only sound while every draw has its own program;
+    # with a shared program slots i and j report one value and it stays green while
+    # the composite is wrong (Opus r3 spec 3). The shared case has its own test.
+    assert stats.get("programsDistinct") is True, stats.get("programsDistinct")
 
 
 def test_slot_unproven_after_the_probes_is_left_opaque_not_transparent():
@@ -1752,3 +1789,98 @@ def test_live_replay_writes_opacity_for_every_draw_not_just_overrides():
         f"the LIVE replay left program 4 at {out['afterLiveTick']} — a non-override "
         "slot got no Opacity write, so the composite depends on the last writer")
     assert final["state"] == "LIVE", final["state"]
+
+
+# --- shared-program frames (Opus r3 spec 1) ---------------------------------------------
+
+SHARED_PROGRAM_SLOTS = (2, 3)
+SHARED_PROGRAM_OPACITIES = (1.0, 0.6)
+
+
+def _shared_program_frame() -> dict:
+    """The settle frame with draws 2 and 3 bound to ONE program, carrying different
+    in-frame `Opacity` values (1.0 then 0.6).
+
+    The measured deck gives every draw its own program, so the fixture as recorded
+    cannot express this — but Keynote reuses shaders, and a capture taken once per
+    *slot* after a whole frame replays both draws at whichever value the frame set
+    last. This variant is the only way S2 can see that.
+    """
+    frame = copy.deepcopy(SETTLE_FRAME)
+    keep, share = SHARED_PROGRAM_SLOTS          # draw `share` moves onto `keep`'s program
+    first, second = SHARED_PROGRAM_OPACITIES
+    start = frame["drawIndices"][keep]          # exclusive: the kept slot's own draw
+    end = frame["drawIndices"][share]           # inclusive: the moved slot's draw
+
+    def retarget(call, value=None):
+        for i, arg in enumerate(call["a"]):
+            if isinstance(arg, dict) and arg.get("prog") == share:
+                call["a"][i] = {"prog": keep, "name": arg["name"]}
+        if call["m"] == "useProgram" and call["a"][0] == share:
+            call["a"][0] = keep
+
+    for call in frame["calls"][start + 1 : end + 1]:
+        retarget(call)
+    # Each draw keeps its OWN in-frame Opacity on the now-shared program.
+    for index, (slot, opacity) in enumerate(zip(SHARED_PROGRAM_SLOTS, SHARED_PROGRAM_OPACITIES)):
+        lo = 0 if slot == keep else start + 1
+        hi = frame["drawIndices"][slot] + 1
+        for call in frame["calls"][lo:hi]:
+            if call["m"] == "uniform1f" and isinstance(call["a"][0], dict) \
+                    and call["a"][0] == {"prog": keep, "name": "Opacity"}:
+                call["a"][1] = opacity
+    frame["draws"][share]["prog"] = keep
+    return frame
+
+
+EXPECTED_SHARED_DRAW_OPACITIES = {2: 1.0, 3: 0.6}
+
+
+def test_shared_program_draws_replay_at_their_own_in_frame_opacity():
+    """Opus r3 spec 1. Two draws on one program with different in-frame `Opacity`
+    must each replay at the value the frame set for THAT draw. A rest capture taken
+    once per slot at end of frame collapses both onto the last value, and the LIVE
+    composite then differs from the player everywhere the first draw shows."""
+    out = _run_sandbox(scenario="happy", frame=_shared_program_frame())
+    final = _assert_clean(out)
+    assert final["state"] == "LIVE", final["state"]
+    assert final["drawnSlots"] == [0, 1, 2, 3, 4], final["drawnSlots"]
+    executed = final["drawnOpacities"]
+    for slot, expected in EXPECTED_SHARED_DRAW_OPACITIES.items():
+        assert executed[slot] == pytest.approx(expected, abs=1e-9), (
+            f"draw {slot} replayed at {executed[slot]}, not its own in-frame "
+            f"{expected}: {executed}")
+    # The capture that feeds the replay and the write-back must be per DRAW too.
+    rest = final["stats"]["restOpacity"]
+    assert len(rest) == len(SETTLE_FRAME["draws"])
+    for slot, expected in EXPECTED_SHARED_DRAW_OPACITIES.items():
+        assert rest[slot] == pytest.approx(expected, abs=1e-9), rest
+    assert final["stats"].get("programsDistinct") is False, final["stats"].get("programsDistinct")
+
+
+def test_programs_are_distinct_on_the_measured_frame():
+    """The control for the case above: the recorded deck gives every draw its own
+    program, so `programsDistinct` is true and the per-slot `opacityAfterProofs`
+    invariant is sound here — it is NOT sound when this flag is false."""
+    out = _run_sandbox(scenario="happy")
+    final = _assert_clean(out)
+    assert final["stats"].get("programsDistinct") is True, final["stats"].get("programsDistinct")
+    assert final["drawnSlots"] == [0, 1, 2, 3, 4]
+    assert final["drawnOpacities"][4] == pytest.approx(SLOT4_OPACITY, abs=1e-12)
+
+
+def test_debug_replay_without_a_value_leaves_every_program_at_rest():
+    """Opus r3 spec 2: `API.debug.replay({only: n})` with no `value` must not
+    reproduce D1's shape through the very hook S3 drives the gate-3 readback with.
+
+    Targets slot 4 deliberately. The recorded frame re-sets `Opacity` for programs
+    0-3 on its own, so aiming at any of those would pass even on the broken shape;
+    program 4 is the one where writing nothing is visible."""
+    out = _run_sandbox(scenario="debug_replay_only", seedDebug=True)
+    final = _assert_clean(out)
+    assert out["debugPrograms"] == len(SETTLE_FRAME["draws"])
+    # Every program is dirtied first, so "left at rest" cannot be satisfied by
+    # writing nothing at all — which is exactly the shape being guarded against.
+    assert out["dirtiedBefore"] == [0.5] * len(SETTLE_FRAME["programs"]), out["dirtiedBefore"]
+    assert out["afterDebugReplay"] == final["stats"]["restOpacity"], out["afterDebugReplay"]
+    assert out["afterDebugReplay"] == [p["restOpacity"] for p in SETTLE_FRAME["programs"]]
