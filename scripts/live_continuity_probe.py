@@ -69,12 +69,10 @@ from obed_edom import live_host as live_host_module  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import ContinuityPlan, Unsupported, derive_plan  # noqa: E402
+from obed_edom.html_alpha_probe import INPAGE_MIN_SAMPLES  # noqa: E402
 from obed_edom.live_host import ATTACH_ENV, CONTINUITY_ENV, LiveOutputHost, OutputDisplay, PlayerCommandRejected  # noqa: E402
-# Visible-content pass (see the module docstring). Deliberately unequal gaps
-# (130/160/210/270 ms) so a periodic two-state animation cannot alias into
-# "static" the way an evenly spaced burst can. Shared with
-# `scripts/p2_recovery_html_adversarial.py`'s own visible-content pass, so both
-# live here rather than as a re-tuned local copy.
+# Visible-content pass (see the module docstring); cadence rationale lives
+# beside BURST_OFFSETS_MS in p2_verdict.py, shared with the P2 script.
 from obed_edom.p2_verdict import BURST_OFFSETS_MS, CONTROL_INSET_PX, CONTROL_PATCH_PX  # noqa: E402
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
@@ -107,13 +105,14 @@ MAX_ADVANCE_STEPS = 40
 # window is exactly the failure mode this instrument exists to catch.
 WINDOW_PAD_S = 2.0
 
-# A 1-px DOM style poke before each shot, off by default (`--burst-poke`):
-# forces a compositor commit but mutates the deck under test, so it is the
-# documented escape hatch, never the default.
+# E0-qualified 1x1 painted-element poke (research harness
+# `output/research-harnesses/live-visible-content/alt-oracle/oracle.py` POKE_JS).
 BURST_POKE_JS = (
-    "(function(){var s=document.documentElement.style;"
-    "var v=s.getPropertyValue('--obed-burst-poke');"
-    "s.setProperty('--obed-burst-poke', v === '0' ? '1' : '0');return true;})()"
+    "(function(){var d=document.getElementById('__orpoke');"
+    "if(!d){d=document.createElement('div');d.id='__orpoke';"
+    "d.style.cssText='position:fixed;left:0;top:0;width:1px;height:1px;z-index:0;';"
+    "document.body.appendChild(d);}"
+    "d.style.background='rgb('+(Math.floor(Math.random()*255))+',0,0)';return 1;})()"
 )
 VISIBLE_SETTLE_TIMEOUT_S = 10.0
 # A painting `<video>` claims an expected instance rect at the same IoU the
@@ -291,19 +290,15 @@ ENSURE_PLAYING_JS = (
     "try{v.muted=true;var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}});true"
 )
 
-# Inert-but-contracted in-page GL liveness oracle (plan SS4.2, SS13 D-b): keyed
-# off a runtime-published handle so applicability never calls `getContext`
-# speculatively. Applicable only for a WebGL-settled canvas that is connected,
-# a descendant of #stage, covers `window.__obedInpageRect` (set by the caller
-# before this evaluates), and is fully opaque and visible -- a DOM slide, an
-# occluded canvas, or a slide the arming PR has not reached yet all answer
-# {applicable:false}, never a sample window a Python caller could mistake for
-# live. Ports the research harness's sample shape (`alt-oracle/js.py`).
-INPAGE_LIVENESS_JS = r"""
-(function(){
+# Use only the runtime-published handle; never acquire a context here.
+_INPAGE_LIVENESS_JS_TEMPLATE = r"""
+(async function(){
   function notApplicable(reason){ return {applicable: false, status: "n/a", reason: reason}; }
+  function inconclusive(reason){ return {applicable: true, status: "inconclusive", reason: reason}; }
   var handle = window.__OBED_GL_ORACLE__;
-  if (!handle || !handle.gl || !handle.canvas || typeof handle.sample !== 'function') {
+  if (!handle || !handle.gl || !handle.canvas || !handle.video ||
+      typeof handle.sample !== 'function' || typeof handle.markerBands !== 'function' ||
+      typeof handle.pause !== 'function' || typeof handle.resume !== 'function') {
     return notApplicable('no __OBED_GL_ORACLE__ handle published');
   }
   var canvas = handle.canvas, gl = handle.gl;
@@ -314,11 +309,13 @@ INPAGE_LIVENESS_JS = r"""
   if (!stage || !stage.contains(canvas)) {
     return notApplicable('canvas is not a descendant of #stage');
   }
-  var rect = window.__obedInpageRect;
-  var box = canvas.getBoundingClientRect();
-  if (!rect || box.left > rect.x + 1 || box.top > rect.y + 1 ||
-      box.right < rect.x + rect.w - 1 || box.bottom < rect.y + rect.h - 1) {
-    return notApplicable('canvas does not cover the movie rect');
+  if (handle.sceneId !== window.__obedInpageSceneId) {
+    return inconclusive('handle scene does not match the scene being scored');
+  }
+  var rect = window.__obedInpageRect, hr = handle.rect;
+  if (!rect || !hr || hr.x > rect.x || hr.y > rect.y ||
+      hr.x + hr.w < rect.x + rect.w || hr.y + hr.h < rect.y + rect.h) {
+    return inconclusive('handle rect does not contain the movie rect being scored');
   }
   if (typeof canvas.checkVisibility !== 'function' ||
       !canvas.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) {
@@ -332,24 +329,31 @@ INPAGE_LIVENESS_JS = r"""
   if (opacity !== 1) {
     return notApplicable('canvas or an ancestor is not fully opaque');
   }
-  var markers = (typeof handle.markerBands === 'function') ? handle.markerBands() : null;
-  var pausedSamples = [];
-  var video = document.querySelector('video');
-  if (video) {
-    var wasPaused = video.paused;
-    video.pause();
-    for (var i = 0; i < 8; i++) { pausedSamples.push(handle.sample()); }
-    if (!wasPaused) { video.play().catch(function(){}); }
+  var epoch = handle.epoch;
+  var markers = await handle.markerBands();
+  if (!markers || markers.epoch !== epoch) {
+    epoch = handle.epoch;
+    markers = await handle.markerBands();
+    if (!markers || markers.epoch !== handle.epoch) {
+      return inconclusive('marker epoch does not match the sample epoch');
+    }
+    epoch = handle.epoch;
   }
-  var samples = [];
-  for (var j = 0; j < 30; j++) { samples.push(handle.sample()); }
+  await handle.pause();
+  var pausedDecoderSamples = await handle.sample(__N__);
+  await handle.resume();
+  var samples = await handle.sample(__N__);
+  if (handle.epoch !== epoch) {
+    return inconclusive('handle re-recorded during the sample window');
+  }
   return {
-    applicable: true, status: "ok",
-    samples: samples, pausedDecoderSamples: pausedSamples,
-    markerDark: markers ? markers.dark : null, markerLight: markers ? markers.light : null,
+    applicable: true, status: "ok", canvasId: handle.canvasId, epoch: epoch,
+    samples: samples, pausedDecoderSamples: pausedDecoderSamples,
+    markerDark: markers.dark, markerLight: markers.light, markerEpoch: markers.epoch,
   };
 })()
 """
+INPAGE_LIVENESS_JS = _INPAGE_LIVENESS_JS_TEMPLATE.replace("__N__", str(INPAGE_MIN_SAMPLES))
 
 
 def parse_viewport_arg(value: str) -> tuple[int, int]:
@@ -1383,40 +1387,63 @@ def _oracle_helpers() -> tuple[Callable[..., Any], Callable[..., Any], Callable[
     return occluder_mask_from_markers, inpage_mask_is_usable, score_inpage_liveness, combine_oracle_verdicts
 
 
+def evaluate_async(transport: Any, expression: str) -> Any:
+    """`Runtime.evaluate` with `awaitPromise=True`, for a handle whose
+    `sample()`/`markerBands()`/`pause()`/`resume()` return Promises -- the
+    probe's own `evaluate` always awaits `False`."""
+    result = transport.call("Runtime.evaluate", expression=expression, returnByValue=True, awaitPromise=True)
+    if result.get("exceptionDetails"):
+        raise VisiblePassError("in-page oracle evaluation failed")
+    return (result.get("result") or {}).get("value")
+
+
 def inpage_applicability_reason(raw: Any) -> str | None:
-    """`None` when `INPAGE_LIVENESS_JS`'s result is applicable; else why not."""
-    if not isinstance(raw, dict):
-        return "in-page oracle probe returned an unusable result"
-    if raw.get("applicable") is not True:
+    """`None` only for a well-formed, explicit `{applicable:false,status:'n/a'}`
+    result (Codex r1 Spec 8) -- anything malformed is not evidence of
+    inapplicability and must not disappear as n/a."""
+    if isinstance(raw, dict) and raw.get("applicable") is False and raw.get("status") == "n/a":
         return raw.get("reason") or "in-page oracle not applicable"
     return None
 
 
 def inpage_oracle_result(raw: Any) -> dict[str, Any] | None:
     """`INPAGE_LIVENESS_JS`'s result, scored into the in-page verdict. `None`
-    when the probe declined applicability -- a DOM-painted slide, no runtime
-    handle, an occluded/disconnected/invisible canvas -- so it contributes
-    nothing to `combine_oracle_verdicts` (plan SS4.2's applicability gate).
-    The measured occluder mask and the paused-decoder control are both
-    required: an unusable mask or a control that does not read DEAD make the
-    read INCONCLUSIVE, never LIVE.
+    only for a well-formed not-applicable result -- a DOM-painted slide, no
+    runtime handle, an occluded/disconnected/invisible canvas -- so it
+    contributes nothing to `combine_oracle_verdicts` (plan SS4.2's
+    applicability gate). Anything malformed, a scene/rect mismatch, an epoch
+    mismatch, an unusable occluder mask, or a paused-decoder control that does
+    not read DEAD is an APPLICABLE INCONCLUSIVE result, never n/a and never
+    LIVE (Codex r1 Specs 2-6, 8-9).
     """
-    occluder_mask_from_markers, inpage_mask_is_usable, score_inpage_liveness, _ = _oracle_helpers()
     if inpage_applicability_reason(raw) is not None:
         return None
+    if not isinstance(raw, dict) or raw.get("applicable") is not True:
+        return {"verdict": None, "status": "inconclusive", "reason": "in-page oracle probe returned an unusable result", "n": 0}
+    if raw.get("status") != "ok":
+        return {"verdict": None, "status": "inconclusive", "reason": raw.get("reason") or "in-page oracle inconclusive", "n": 0}
+
+    occluder_mask_from_markers, inpage_mask_is_usable, score_inpage_liveness, _ = _oracle_helpers()
     samples = raw.get("samples") or []
+    paused_samples = raw.get("pausedDecoderSamples") or []
+    sample_epoch, marker_epoch = raw.get("epoch"), raw.get("markerEpoch")
+    if sample_epoch is None or marker_epoch is None or sample_epoch != marker_epoch:
+        return {"verdict": None, "status": "inconclusive", "reason": "marker epoch does not match the sample epoch", "n": len(samples)}
+
     mask = occluder_mask_from_markers(raw.get("markerDark") or [], raw.get("markerLight") or [])
     if not inpage_mask_is_usable(mask):
         return {"verdict": None, "status": "inconclusive", "reason": "occluder mask unusable", "n": len(samples)}
+
     scored = score_inpage_liveness(samples, occluder_mask=mask["mask"])
-    # The paused-decoder control is a deliberately SHORT window (plan SS6): its
-    # own sample count, never INPAGE_MIN_SAMPLES, gates "too few samples" --
-    # otherwise a short control could never qualify at all.
-    paused_samples = raw.get("pausedDecoderSamples") or []
-    paused = score_inpage_liveness(
-        paused_samples, occluder_mask=mask["mask"], min_samples=len(paused_samples) or 1
-    )
-    result = {**scored, "controls": {"pausedDecoder": paused}}
+    paused = score_inpage_liveness(paused_samples, occluder_mask=mask["mask"])
+    result = {
+        **scored,
+        "controls": {"pausedDecoder": paused},
+        "rawSamples": samples,
+        "rawPausedSamples": paused_samples,
+        "markerDark": raw.get("markerDark"),
+        "markerLight": raw.get("markerLight"),
+    }
     if paused.get("verdict") is not False:
         result["verdict"] = None
         result["status"] = "inconclusive"
@@ -1424,19 +1451,47 @@ def inpage_oracle_result(raw: Any) -> dict[str, Any] | None:
     return result
 
 
-def read_inpage_oracle(transport: Any, rect_screen: dict[str, float]) -> dict[str, Any] | None:
-    """One rect's in-page GL read, taken in the same armed state the screenshot
-    burst just captured. `None` when the oracle is not applicable to this rect."""
-    transport.evaluate(f"window.__obedInpageRect = {json.dumps(rect_screen)}; true")
-    return inpage_oracle_result(transport.evaluate(INPAGE_LIVENESS_JS))
+def measure_inpage_oracle_with_paused_control(
+    transport: Any, rect_authored: dict[str, float], scene_id: Any
+) -> dict[str, Any] | None:
+    """One rect's in-page GL read, bound to the scene and authored rect being
+    scored and taken in the same armed state the screenshot burst just
+    captured. `None` when the oracle is not applicable to this rect."""
+    transport.evaluate(
+        f"window.__obedInpageRect = {json.dumps(rect_authored)};"
+        f"window.__obedInpageSceneId = {json.dumps(scene_id)}; true"
+    )
+    return inpage_oracle_result(evaluate_async(transport, INPAGE_LIVENESS_JS))
 
 
-def _screenshot_oracle_dict(entry: dict[str, Any]) -> dict[str, Any]:
-    """A screenshot `perRect` entry, reshaped to `combine_oracle_verdicts`'s
-    `{verdict, status, reason}` screenshot-oracle contract."""
-    verdict = entry.get("verdict")
-    status = "pass" if verdict is True else ("fail" if verdict is False else "inconclusive")
-    return {"verdict": verdict, "status": status, "reason": entry.get("reason")}
+def combine_rect_oracles(entry: dict[str, Any], inpage: dict[str, Any] | None) -> dict[str, Any]:
+    """Pure: fold one screenshot `perRect` entry -- whose `verdict` means
+    "expectation met", opposite polarity for a dead-expected rect -- with its
+    in-page physical-liveness read (Codex r1 Spec 2). Converts the screenshot
+    verdict to physical LIVE/DEAD via `expect`, combines physical liveness,
+    then translates the combined physical verdict back to expectation-met
+    before the caller folds it into the slide verdict."""
+    _, _, _, combine_oracle_verdicts = _oracle_helpers()
+    expect = entry.get("expect", LIVE)
+    met = entry.get("verdict")
+    physical = None if met is None else (met if expect != DEAD else not met)
+    physical_status = "live" if physical is True else ("dead" if physical is False else "inconclusive")
+    screenshot_physical = {"verdict": physical, "status": physical_status, "reason": entry.get("reason")}
+    combined = combine_oracle_verdicts(screenshot_physical, inpage)
+    combined_physical = combined["verdict"]
+    if combined_physical is None:
+        final_verdict = None
+    else:
+        final_verdict = combined_physical if expect != DEAD else not combined_physical
+    return {
+        **entry,
+        "verdict": final_verdict,
+        "reason": combined.get("reason"),
+        "oracles": {
+            "screenshot": {"verdict": met, "status": entry.get("status", physical_status), "liveFrac": entry.get("liveFrac")},
+            "inpage": inpage,
+        },
+    }
 
 
 def frame_shas(frames: Sequence[np.ndarray]) -> list[str]:
@@ -1661,31 +1716,27 @@ def visible_evidence_writer(directory: Path, pass_name: str) -> Callable[[dict[s
     return write
 
 
-def combine_slide_verdict(
-    per_rect: list[dict[str, Any]], transport: Any, screenshot_verdict: dict[str, Any],
+def measure_and_combine_slide_oracles(
+    expected: list[dict[str, Any]], per_rect: list[dict[str, Any]], transport: Any, scene_id: Any,
+    screenshot_verdict: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], bool | None, str]:
-    """Recompute each rect's verdict from both oracles (plan SS4.4). A rect
-    disagreement or an in-page-inconclusive-over-live rect turns the slide
-    `None`/"inconclusive"; otherwise the combined per-rect verdicts equal the
-    screenshot-only ones exactly, so the slide verdict falls back to the
-    screenshot scorer's own (already stray-AND-ed) `verdict`/`status`. With
-    the in-page oracle inert (n/a everywhere) this reproduces today's verdict
-    bit-for-bit; only the additive `oracles` key changes."""
-    _, _, _, combine_oracle_verdicts = _oracle_helpers()
-    combined_per_rect: list[dict[str, Any]] = []
-    for entry in per_rect:
-        screenshot = _screenshot_oracle_dict(entry)
-        inpage = read_inpage_oracle(transport, entry["rect"]) if entry.get("rect") else None
-        combined = combine_oracle_verdicts(screenshot, inpage)
-        combined_per_rect.append({
-            **entry,
-            "verdict": combined["verdict"],
-            "reason": combined["reason"],
-            "oracles": {
-                "screenshot": {"verdict": screenshot["verdict"], "status": screenshot["status"], "liveFrac": entry.get("liveFrac")},
-                "inpage": inpage,
-            },
-        })
+    """Measure each rect's in-page oracle (bound to `scene_id` and its authored
+    rect) and fold it with the screenshot verdict via the pure
+    `combine_rect_oracles` (plan SS4.4). A rect disagreement or an
+    in-page-inconclusive-over-live rect turns the slide `None`/"inconclusive";
+    otherwise the combined per-rect verdicts equal the screenshot-only ones
+    exactly, so the slide verdict falls back to the screenshot scorer's own
+    (already stray-AND-ed) `verdict`/`status`. With the in-page oracle inert
+    (n/a everywhere) this reproduces today's verdict bit-for-bit; only the
+    additive `oracles` key changes."""
+    combined_per_rect = [
+        combine_rect_oracles(
+            entry,
+            measure_inpage_oracle_with_paused_control(transport, item["authored"], scene_id)
+            if entry.get("rect") else None,
+        )
+        for item, entry in zip(expected, per_rect)
+    ]
     if any(entry["verdict"] is None for entry in combined_per_rect):
         return combined_per_rect, None, "inconclusive"
     return combined_per_rect, screenshot_verdict.get("verdict"), screenshot_verdict.get("status")
@@ -1769,7 +1820,9 @@ def visible_slide_record(
     )
     per_rect = scored.get("perRect") or []
     if per_rect:
-        per_rect, verdict, status = combine_slide_verdict(per_rect, transport, scored)
+        per_rect, verdict, status = measure_and_combine_slide_oracles(
+            expected, per_rect, transport, record["sceneId"], scored
+        )
     else:
         verdict, status = scored.get("verdict"), scored.get("status")
     record.update(

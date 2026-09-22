@@ -3639,6 +3639,17 @@ def test_footprint_frame_sha_list_must_match_the_burst_length():
     assert p2._footprint_fully_live_ok(_b_with_evidence(frameSha256=None)) is False
 
 
+def test_footprint_evidence_must_be_bound_to_the_capture_cadence():
+    """Codex r1 Spec 10: retained evidence must also match BURST_OFFSETS_MS, not
+    only the frame count -- a raster captured under an earlier burst cadence
+    must refuse to re-score under today's (different) capture contract."""
+    assert p2._footprint_fully_live_ok(_b_with_evidence(burstOffsetsMs=[0] * p2.FOOTPRINT_BURST_FRAMES)) is False
+    assert p2._footprint_fully_live_ok(_b_with_evidence(burstOffsetsMs=None)) is False
+    assert p2._footprint_fully_live_ok(
+        _b_with_evidence(burstOffsetsMs=list(p2.BURST_OFFSETS_MS)[:-1] + [999999])
+    ) is False
+
+
 def test_footprint_padded_raster_is_inconclusive():
     """Probe 3: the raster padded and re-encoded at 1921x1081. It decodes, and it
     is self-consistent, but it is not the capture viewport."""
