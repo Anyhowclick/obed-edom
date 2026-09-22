@@ -45,6 +45,7 @@ GL_REPLAY_JS = r"""
   var SEAM_VERSION = 1;
   var SEGMENT_CALL_CAP = 512;
   var SETTLE_QUIET_TICKS = 3;
+  var LOOP_WATCHDOG_TICKS = 2;
   var OCCLUSION_MAX_FRACTION = 0.5;
   var MARKER_BAND_EPSILON = 0.5;
   var MARKER_PATCH_PX = 8;
@@ -145,6 +146,7 @@ GL_REPLAY_JS = r"""
     lastClearAt: null, readyAt: null, settleGapMs: null, settleToHashMs: null,
     mutationScanMs: null, occluded: null, mask: null,
     paused: false, pausedByUs: false, geometry: null, buffers: null,
+    loopMode: null, videoEnded: false, armVfc: null, contextLostListener: null,
     collectors: [], observer: null
   };
 
@@ -199,6 +201,7 @@ GL_REPLAY_JS = r"""
       frameLen: state.frameLen, uploads: state.uploads, glErrors: state.glErrors,
       settleGapMs: state.settleGapMs, settleToHashMs: state.settleToHashMs,
       mutationScanMs: state.mutationScanMs,
+      loopMode: state.loopMode, videoEnded: state.videoEnded,
       pending: state.pending, occludedBands: state.occluded, occluderMask: state.mask,
       bandCount: BAND_COLS * BAND_ROWS,
       opacityUnproven: state.unproven.slice(),
@@ -817,6 +820,14 @@ GL_REPLAY_JS = r"""
       state.replaying--;
     }
     if (!lost) restorePoster();
+    // One clean replay so the stand-down does not leave the PATCHED frame on
+    // screen. Skipped when the canvas is gone, the context is lost, or the player
+    // is mid-call and about to render the frame itself.
+    if (!lost && reason !== CANVAS_REMOVED && reason !== CONTEXT_LOST &&
+        reason !== UNFLAGGED_PLAYER_CALL &&
+        state.frame && state.canvas && state.canvas.isConnected){
+      replayFrame({rest: true});
+    }
     if (failed || API.debugForceFail === WRITEBACK_FAILED) API.standDowns.push(WRITEBACK_FAILED);
     API.standDowns.push(reason);
     if (state.pausedByUs && state.video){
@@ -838,6 +849,10 @@ GL_REPLAY_JS = r"""
     payload.reason = reason;
     event(reason === CANVAS_REMOVED ? 'glreplay-handoff' : 'glreplay-standdown', payload);
     if (state.observer){ try { state.observer.disconnect(); } catch (e) {} }
+    if (state.contextLostListener && state.canvas){
+      try { state.canvas.removeEventListener('webglcontextlost', state.contextLostListener, false); } catch (e) {}
+      state.contextLostListener = null;
+    }
     state.phase = 'RETIRED';
     API.state = 'RETIRED';
   }
@@ -863,7 +878,6 @@ GL_REPLAY_JS = r"""
         state.paused = true;
         state.pausedByUs = true;
         try { state.video.pause(); } catch (e) {}
-        startPausedLoop();
         return Promise.resolve(true);
       },
       resume: function(){
@@ -872,7 +886,7 @@ GL_REPLAY_JS = r"""
         try { if (state.seam) state.seam.setKeepWarm(state.video, true); } catch (e) {}
         state.paused = false;
         state.pausedByUs = false;
-        var done = function(){ startLiveLoop(); return true; };
+        var done = function(){ if (state.armVfc) state.armVfc(); return true; };
         return (p && p.then) ? p.then(done, done) : Promise.resolve(done());
       }
     };
@@ -896,20 +910,31 @@ GL_REPLAY_JS = r"""
     state.collectors = keep;
   }
 
+  // Both the `webglcontextlost` listener and the per-tick guard come through here.
+  function contextLostNow(fromEvent){
+    var g = state.gl;
+    var lost = fromEvent === true || API.debugForceFail === CONTEXT_LOST ||
+      (!!g && typeof g.isContextLost === 'function' && g.isContextLost());
+    if (lost) standDown(CONTEXT_LOST, {fromEvent: fromEvent === true});
+    return lost;
+  }
+
   function guards(){
-    var c = state.canvas, g = state.gl;
+    var c = state.canvas;
     var stage = document.getElementById('stage');
     if (API.debugForceFail === CANVAS_REMOVED || !c || !c.isConnected || !stage || !stage.contains(c)) return CANVAS_REMOVED;
-    if (API.debugForceFail === CONTEXT_LOST || (typeof g.isContextLost === 'function' && g.isContextLost())) return CONTEXT_LOST;
     if (API.debugForceFail === FRAME_LENGTH_CHANGED || state.frame.length !== state.frameLen) return FRAME_LENGTH_CHANGED;
     return null;
   }
 
-  function tickOnce(meta){
+  function tickOnce(meta, fresh){
     if (state.down) return false;
     var why = guards();
+    if (why === CANVAS_REMOVED){ standDown(why, null); return false; }
+    if (contextLostNow(false)) return false;
     if (why){ standDown(why, null); return false; }
-    if (!state.paused) perLiveUpload();
+    if (state.video) state.videoEnded = !!state.video.ended;
+    if (fresh && !state.paused) perLiveUpload();
     replayFrame();
     var sample = sampleOnce(meta);
     state.iter++;
@@ -924,28 +949,48 @@ GL_REPLAY_JS = r"""
     state.uploads++;
   }
 
-  function startLiveLoop(){
-    if (state.down || state.paused) return;
+  // LIVE never depends on rVFC alone: end-of-media, a paused decoder or a
+  // browser that stops delivering video frames must not freeze the loop, so a
+  // rAF driver ticks whenever no rVFC tick arrived since the last frame. Only a
+  // rVFC tick carries a new video frame, so only it uploads.
+  function startLoop(){
+    if (state.down) return;
     var gen = ++state.loopGen;
-    var request = function(step){
-      try { state.video.requestVideoFrameCallback(step); return true; } catch (e) { return false; }
-    };
-    var step = function(t, meta){
-      if (state.down || state.paused || gen !== state.loopGen) return;
-      if (!tickOnce(meta)) return;
-      requireVideoFrameCallback(request(step));
-    };
-    requireVideoFrameCallback(request(step));
-  }
+    var sawVfc = false, quiet = 0, armed = false;
 
-  function startPausedLoop(){
-    var gen = ++state.loopGen;
-    var step = function(){
-      if (state.down || !state.paused || gen !== state.loopGen) return;
-      if (!tickOnce(null)) return;
-      requestAnimationFrame(step);
+    var vfcStep = function(t, meta){
+      armed = false;
+      if (state.down || gen !== state.loopGen) return;
+      sawVfc = true;
+      state.loopMode = 'rvfc';
+      if (!tickOnce(meta, true)) return;
+      armVfc();
     };
-    requestAnimationFrame(step);
+
+    var armVfc = function(){
+      if (armed || state.down || state.paused || gen !== state.loopGen) return;
+      var v = state.video;
+      if (!v || typeof v.requestVideoFrameCallback !== 'function') return;
+      try { v.requestVideoFrameCallback(vfcStep); armed = true; } catch (e) { armed = false; }
+    };
+
+    var rafStep = function(){
+      if (state.down || gen !== state.loopGen) return;
+      var idle = state.paused || state.videoEnded;
+      if (sawVfc){
+        sawVfc = false;
+        quiet = 0;
+      } else if (idle || ++quiet >= LOOP_WATCHDOG_TICKS){
+        state.loopMode = 'raf';
+        if (!tickOnce(null, false)) return;
+      }
+      armVfc();
+      requestAnimationFrame(rafStep);
+    };
+
+    state.armVfc = armVfc;
+    armVfc();
+    requestAnimationFrame(rafStep);
   }
 
   // ---------------------------------------------------------------- ARM-POST
@@ -983,9 +1028,9 @@ GL_REPLAY_JS = r"""
     state.phase = 'LIVE';
     API.state = 'LIVE';
     state.hot = true;
-    if (!tickOnce(null)) return;
+    if (!tickOnce(null, true)) return;
     publishHandle();
-    startLiveLoop();
+    startLoop();
   }
 
   // ----------------------------------------------------------------- ARM-PRE
@@ -1038,6 +1083,8 @@ GL_REPLAY_JS = r"""
         {id: canvas.id, w: canvas.width, h: canvas.height})) return;
     state.gl = gl;
     state.canvas = canvas;
+    state.contextLostListener = function(){ contextLostNow(true); };
+    try { canvas.addEventListener('webglcontextlost', state.contextLostListener, false); } catch (e) {}
     if (!preflight()) return;
     state.recording = true;
     state.hot = true;
