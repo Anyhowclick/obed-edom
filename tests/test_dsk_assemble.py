@@ -1312,6 +1312,9 @@ def test_group_caption_below_35pt_bumped_and_anchored_at_clipped_pill():
     assert pill["h"] == pytest.approx(clipped_h * k, abs=0.05)
     assert text["x"] == pytest.approx(clipped_x + (1956.1 - clipped_x) * k, abs=0.05)
     assert text["y"] == pytest.approx(clipped_y + (10.8 - clipped_y) * k, abs=0.05)
+    # Live r1: the writer sets the autosize text width before its size, so an unscaled
+    # width (natural 335.6 at 50pt) wraps the 35pt caption onto three lines.
+    assert text["w"] == pytest.approx(335.6 * k, abs=0.05)
 
 
 def test_group_caption_nested_name_tag_gets_the_same_pill_anchor():

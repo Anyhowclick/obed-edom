@@ -3309,6 +3309,7 @@ def _apply_caption_pill_anchor(
     new_text = dict(text_child)
     new_text["x"] = clipped.x + (text_child["x"] - clipped.x) * k
     new_text["y"] = clipped.y + (text_child["y"] - clipped.y) * k
+    new_text["w"], new_text["h"] = text_child["w"] * k, text_child["h"] * k
     return [new_pill if c is pill else new_text if c is text_child else c for c in children]
 
 
