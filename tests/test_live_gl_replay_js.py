@@ -149,7 +149,7 @@ PRE_ARM_REASONS = {
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "eb7ef90cc080a6aaa61efca0943832cc8d470ab6815d4465ed748dadbd4c9c73"
+PINNED_JS_SHA256 = "9c5e63798c0e71b1520c045a171efb4a7176f10390e25ac2ddb0b993e959558e"
 
 
 # =======================================================================================
@@ -803,8 +803,19 @@ FakeElement.prototype.contains = function (n) {
 };
 FakeElement.prototype.querySelector = function () { return null; };
 FakeElement.prototype.querySelectorAll = function () { return []; };
-FakeElement.prototype.addEventListener = function () {};
-FakeElement.prototype.removeEventListener = function () {};
+FakeElement.prototype.addEventListener = function (type, fn) {
+  (this._listeners || (this._listeners = {}))[type] =
+    ((this._listeners[type]) || []).concat([fn]);
+};
+FakeElement.prototype.removeEventListener = function (type, fn) {
+  if (!this._listeners || !this._listeners[type]) return;
+  this._listeners[type] = this._listeners[type].filter((f) => f !== fn);
+};
+FakeElement.prototype.dispatchEvent = function (event) {
+  const fns = (this._listeners && this._listeners[event.type]) || [];
+  for (const fn of fns) fn.call(this, event);
+  return true;
+};
 FakeElement.prototype.checkVisibility = function () { return true; };
 
 function FakeCanvas(id, w, h) {
@@ -824,7 +835,7 @@ FakeCanvas.prototype.getContext = function (kind) {
 function FakeVideo(src) {
   FakeElement.call(this, '', 'video');
   this.currentSrc = src; this.src = src;
-  this.readyState = 4; this.paused = false; this.currentTime = 0.5;
+  this.readyState = 4; this.paused = false; this.ended = false; this.currentTime = 0.5;
   this.videoWidth = 1920; this.videoHeight = 540;
   this.__colour = [80, 90, 100, 255];
 }
@@ -834,7 +845,12 @@ FakeVideo.prototype.play = function () {
   this.paused = false; world.videoCalls.push('play'); return Promise.resolve();
 };
 FakeVideo.prototype.pause = function () { this.paused = true; world.videoCalls.push('pause'); };
-FakeVideo.prototype.requestVideoFrameCallback = function (cb) { rvfcQueue.push(cb); return 1; };
+FakeVideo.prototype.requestVideoFrameCallback = function (cb) {
+  // At end of media the browser stops delivering these; the registration is
+  // accepted and then simply never fires. That is N1's whole shape.
+  if (world.rvfcDead) return 1;
+  rvfcQueue.push(cb); return 1;
+};
 
 // ------------------------------------------------------------------ the world
 const world = {
@@ -1111,6 +1127,46 @@ async function main() {
     out.final = snapshotState();
     return out;
   }
+  if (CFG.scenario === 'video_ended') {
+    const handle = window.__OBED_GL_ORACLE__;
+    let resolved = null;
+    handle.sample(24).then(function (v) { resolved = v; });
+    const iterBefore = M.stats().iter;
+    const uploadsBefore = M.stats().uploads;
+    world.video.ended = true;
+    world.video.paused = true;
+    world.rvfcDead = true;                       // no more rVFC callbacks, ever
+    for (let i = 0; i < 200 && resolved === null; i++) { tickRaf(); await null; await null; }
+    out.endedSamples = resolved === null ? null : resolved.length;
+    out.iterDelta = M.stats().iter - iterBefore;
+    out.uploadsDelta = M.stats().uploads - uploadsBefore;
+    out.loopMode = M.stats().loopMode;
+    out.videoEnded = M.stats().videoEnded;
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'context_lost_no_ticks') {
+    // The loop is dead: NOTHING is delivered after this point, so a stand-down can
+    // only come from the `webglcontextlost` event itself.
+    world.rvfcDead = true;
+    rafQueue = [];
+    gl.callLog.length = 0;
+    gl._lost = true;
+    world.canvas.dispatchEvent({ type: 'webglcontextlost', preventDefault() {} });
+    await null; await null;                      // microtasks only — no rAF, no rVFC
+    out.callOrder = gl.callLog.slice();
+    out.ticksDelivered = 0;
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'gl_error_replay') {
+    gl.callLog.length = 0;
+    gl._error = GLC.INVALID_OPERATION;
+    await settle(4);
+    out.callOrder = gl.callLog.slice();
+    out.final = snapshotState();
+    return out;
+  }
   if (CFG.scenario === 'debug_replay_only') {
     // `API.debug.replay({only: n})` with no `value` must leave EVERY program at its
     // rest opacity — the same shape as D1, in the hook S3 drives gate 3 with.
@@ -1205,8 +1261,10 @@ async function main() {
     return out;
   }
   if (CFG.scenario === 'canvas_removed') {
+    gl.callLog.length = 0;
     stage.removeChild(world.canvas);
     await settle(4);
+    out.callOrder = gl.callLog.slice();
     out.final = snapshotState();
     return out;
   }
@@ -1884,3 +1942,107 @@ def test_debug_replay_without_a_value_leaves_every_program_at_rest():
     assert out["dirtiedBefore"] == [0.5] * len(SETTLE_FRAME["programs"]), out["dirtiedBefore"]
     assert out["afterDebugReplay"] == final["stats"]["restOpacity"], out["afterDebugReplay"]
     assert out["afterDebugReplay"] == [p["restOpacity"] for p in SETTLE_FRAME["programs"]]
+
+
+# --- S3 Q3 soak findings (s3-gates-r2.md N1–N3) -----------------------------------------
+
+
+def _frames_replayed(call_order: list[dict]) -> int:
+    """How many whole frames were replayed in this window. Every replay of the
+    recorded frame begins with its `clearColor,clear` delimiter, so counting
+    `clear` counts frames.
+
+    Anchoring on the last `uniform1f` instead would be structurally broken: r3
+    spec 1 requires every replay to write `Opacity` immediately BEFORE each draw,
+    so the last uniform write always precedes the last draw and any such count is
+    1 for every module that satisfies both D1 and r3 spec 1.
+    """
+    return [c["m"] for c in call_order].count("clear")
+
+
+def _draws_in_final_frame(call_order: list[dict]) -> int:
+    methods = [c["m"] for c in call_order]
+    if "clear" not in methods:
+        return 0
+    last_clear = len(methods) - 1 - methods[::-1].index("clear")
+    return methods[last_clear:].count("draw")
+
+
+def test_live_loop_survives_end_of_media_and_keeps_sampling():
+    """S3 N1 (high). The LIVE loop is rVFC-driven, and at end of media the browser
+    stops delivering rVFC callbacks entirely — S3's soak froze `iter` at 1281 with
+    the state still LIVE, the handle still published and `sample(n)` unable to ever
+    resolve. The loop must fall back to rAF and keep replaying the last frame; the
+    movie is over, so there is nothing new to upload."""
+    out = _run_sandbox(scenario="video_ended")
+    final = _assert_clean(out)
+    assert out["endedSamples"] == 24, (
+        f"sample(24) resolved with {out['endedSamples']} after end of media "
+        "— the probe would hang or read short")
+    assert out["iterDelta"] > 0, "the loop stopped ticking when rVFC went quiet"
+    assert out["loopMode"] == "raf", out["loopMode"]
+    assert out["videoEnded"] is True, out["videoEnded"]
+    assert out["uploadsDelta"] == 0, (
+        f"{out['uploadsDelta']} uploads after end of media — there is no new frame")
+    assert final["standDowns"] == [], final["standDowns"]
+    assert final["state"] == "LIVE", final["state"]
+    assert final["handlePresent"] is True
+
+
+def test_context_loss_stands_down_without_a_single_tick():
+    """S3 N2 (high). The only `contextLost` check lived in the tick guards, so with
+    the loop dead `loseContext()` produced no stand-down for seven minutes. The
+    `webglcontextlost` event must retire the module on its own, with no rAF and no
+    rVFC delivered at all after it fires."""
+    out = _run_sandbox(scenario="context_lost_no_ticks")
+    final = _assert_clean(out)
+    assert out["ticksDelivered"] == 0
+    assert final["standDowns"] == ["contextLost"], final["standDowns"]
+    assert final["handlePresent"] is False, "the handle outlived the lost context"
+    # A lost context exempts the write-back (§2.5) — nothing may be issued on it.
+    assert [c["m"] for c in out["callOrder"]] == [], out["callOrder"]
+    releases = [c for c in final["seamCalls"] if c["fn"] == "release"]
+    assert len(releases) == 1, releases
+    assert releases[0]["rect"] == DESTINATION_RECT
+
+
+def test_context_lost_still_has_exactly_one_emitting_site():
+    """N2's fix adds an event listener; it must route through the existing site
+    rather than become a second one, or the coverage above stops being specific."""
+    source = _js_source()
+    name = _constant_for(source, "contextLost")
+    assert name is not None, "contextLost is no longer bound to a constant"
+    sites = _emitting_sites(source, name)
+    assert len(sites) == 1, sites
+
+
+def test_stand_down_on_a_live_context_leaves_the_clean_frame_composited():
+    """S3 N3 (low). The stand-down restored the uniforms and the poster but never
+    redrew, so the last thing on screen stayed the PATCHED frame — S3 measured
+    (9,52,0) where the clean deck is (29,177,0). One rest replay after the
+    write-back closes it."""
+    out = _run_sandbox(scenario="gl_error_replay")
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["glError"], final["standDowns"]
+    assert final["drawnSlots"] == [0, 1, 2, 3, 4], final["drawnSlots"]
+    rest = final["stats"]["restOpacity"]
+    assert final["drawnOpacities"] == rest, (
+        f"the composited frame is still patched: {final['drawnOpacities']} vs rest {rest}")
+    # The window opens just before the erroring tick, so it holds that tick's own
+    # replay plus exactly one more — the stand-down's rest replay — and that last
+    # frame is complete.
+    assert _frames_replayed(out["callOrder"]) == 2, (
+        f"expected one LIVE tick plus exactly one rest replay, saw "
+        f"{_frames_replayed(out['callOrder'])} frames")
+    assert _draws_in_final_frame(out["callOrder"]) == len(SETTLE_FRAME["draws"])
+
+
+def test_canvas_removal_does_not_replay_onto_a_detached_canvas():
+    """The other half of N3: the rest replay is for a stand-down on a LIVE context.
+    When the canvas has already been removed there is nothing to redraw onto, and
+    issuing a frame at it would be pointless work on the hand-off path."""
+    out = _run_sandbox(scenario="canvas_removed")
+    final = _assert_clean(out)
+    assert final["standDowns"] == [NORMAL_EXIT_REASON], final["standDowns"]
+    assert _frames_replayed(out["callOrder"]) == 0, (
+        "a frame was replayed onto a canvas that is no longer in the document")
