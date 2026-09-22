@@ -271,19 +271,6 @@ def test_gate_fails_on_malformed_live_planner_env(monkeypatch: pytest.MonkeyPatc
         _gate(deck_name, monkeypatch, tmp_path)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="framing.propose_framings models two of the planner's four framing arms -- the "
-    "template trial and the fit-to-frame fallback -- and hand-inlines a copy of "
-    "_framing_unusable. It does not model sibling-affine reuse (_recipe_reusing_affine) "
-    "for an unusable pin, nor the unpinned photo-only backdrop carry. On a slide the "
-    "planner frames by reusing a sibling's affine the operator's autoRects therefore show "
-    "a layout the run will not produce (Full slides 58 and 93). Pre-existing and "
-    "long hidden: this test was skipping on golden-fixture digest drift until the "
-    "2026-09-21 re-baseline. Fix is its own change -- expose the planner's per-slide "
-    "framing decision so both callers share it -- because the SET of framing arms must "
-    "not move during a refactor. strict: remove this marker when that lands.",
-)
 def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPatch) -> None:
     deck_name = "Full_Report_Card_Wall.key"
     golden = _skip_ladder(deck_name)
@@ -330,6 +317,130 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
                 detail.append(f"slide {slide_no}: apply={apply_rows} propose={propose_rows}")
 
     assert differing == [], "\n".join([f"{len(differing)} slide(s) differ", *detail])
+
+
+@pytest.mark.parametrize(
+    ("slide_no", "pinned_to", "arm"),
+    [
+        # Gold 13 pinned to template 5 pairs to a sliver on its own; slide 12 (auto) lands on
+        # template 5, so the planner re-anchors 13 on 12's affine: the pinned sibling-reuse arm.
+        (13, 5, "reusedSibling"),
+        # Gold 14 pinned to 5 alone: slide 13 (auto) is not on template 5, so there is no
+        # sibling to reuse and the planner overrides the pin with 14's own auto framing.
+        (14, 5, "pinOverridden"),
+    ],
+)
+def test_propose_pinned_candidate_matches_a_pinned_apply(
+    monkeypatch: pytest.MonkeyPatch, slide_no: int, pinned_to: int, arm: str
+) -> None:
+    """A candidate is what the run does when the operator pins only that page to it."""
+    from obed_edom.map_remap import learn_recipe, plan_payload
+
+    deck_name = "Gold_Wall_Input.key"
+    _skip_ladder(deck_name)
+    deck = DECKS / deck_name
+
+    def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
+        return {}
+
+    monkeypatch.setattr(framing, "build_preview_thumbs", _no_thumbs)
+    proposal = framing.propose_framings(
+        deck,
+        TEMPLATE,
+        wall_payload=offline_wall_payload(deck),
+        template_payload=offline_wall_payload(TEMPLATE),
+        log=lambda _m: None,
+    )
+    page = next(p for p in proposal["pages"] if p["slide"] == slide_no)
+    candidate = next(c for c in page["candidates"] if c["templateSlide"] == pinned_to)
+
+    wall = offline_wall_payload(deck)
+    template = offline_wall_payload(TEMPLATE)
+    card_stroke = remap_keynote.prepare_wall_payload(deck, wall, TEMPLATE, template, lambda _m: None)
+    plan = plan_payload(
+        wall,
+        learn_recipe(wall, template),
+        template=template,
+        card_stroke=card_stroke,
+        framing_overrides={slide_no: pinned_to},
+    )
+    row = next(r for r in plan.framing if r["slide"] == slide_no)
+    assert row[arm] is True, f"slide {slide_no} no longer exercises the {arm} arm: {row}"
+    assert candidate["pinOverridden"] is row["pinOverridden"]
+    assert candidate["wouldFallBack"] is row["fitted"]
+
+    apply_rows = [
+        (t.role, t.kind, round(t.x), round(t.y), round(t.w), round(t.h))
+        for t in plan.transforms
+        if t.slide_number == slide_no and t.role in ROLE_SET
+    ]
+    candidate_rows = [
+        (r["role"], r["kind"], r["x"], r["y"], r.get("w", 0), r.get("h", 0))
+        for r in candidate["rects"]
+        if r["role"] in ROLE_SET
+    ]
+    assert apply_rows, f"slide {slide_no} planned no framed items"
+    assert candidate_rows == apply_rows
+
+
+def test_pinning_the_previous_page_changes_how_the_next_pinned_page_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidates model 'pin only this page'. Pinning Gold 13 AND 14 to template 5 together
+    lets 14 reuse 13's affine, so the pin the lone-14 candidate flags as overridden IS used
+    when 13 is pinned too -- the reason the review says previews assume the other pages stay
+    automatic."""
+    from obed_edom.map_remap import learn_recipe, plan_payload
+
+    deck_name = "Gold_Wall_Input.key"
+    _skip_ladder(deck_name)
+    deck = DECKS / deck_name
+
+    def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
+        return {}
+
+    monkeypatch.setattr(framing, "build_preview_thumbs", _no_thumbs)
+    proposal = framing.propose_framings(
+        deck,
+        TEMPLATE,
+        wall_payload=offline_wall_payload(deck),
+        template_payload=offline_wall_payload(TEMPLATE),
+        log=lambda _m: None,
+    )
+    page_14 = next(p for p in proposal["pages"] if p["slide"] == 14)
+    lone_candidate = next(c for c in page_14["candidates"] if c["templateSlide"] == 5)
+    assert lone_candidate["pinOverridden"] is True
+
+    wall = offline_wall_payload(deck)
+    template = offline_wall_payload(TEMPLATE)
+    card_stroke = remap_keynote.prepare_wall_payload(deck, wall, TEMPLATE, template, lambda _m: None)
+    joint = plan_payload(
+        wall,
+        learn_recipe(wall, template),
+        template=template,
+        card_stroke=card_stroke,
+        framing_overrides={13: 5, 14: 5},
+    )
+    rows = {r["slide"]: r for r in joint.framing}
+    for slide_no in (13, 14):
+        row = rows[slide_no]
+        assert row["templateSlide"] == 5, row
+        assert row["source"] == "sibling-affine", row
+        assert row["reusedSibling"] is True, row
+        assert row["pinOverridden"] is False, row
+        assert row["fitted"] is False, row
+
+    joint_14 = [
+        (t.role, t.kind, round(t.x), round(t.y), round(t.w), round(t.h))
+        for t in joint.transforms
+        if t.slide_number == 14 and t.role in ROLE_SET
+    ]
+    lone_14 = [
+        (r["role"], r["kind"], r["x"], r["y"], r.get("w", 0), r.get("h", 0))
+        for r in lone_candidate["rects"]
+        if r["role"] in ROLE_SET
+    ]
+    assert joint_14 and joint_14 != lone_14
 
 
 _FULL_WALL_BANK_SKIP = (

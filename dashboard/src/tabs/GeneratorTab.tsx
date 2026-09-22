@@ -4,13 +4,13 @@ import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
-import { DSK_TEMPLATE_KEY, LW_TEMPLATE_KEY, loadStoredFile, saveStoredFile } from "../prefs";
+import { DSK_TEMPLATE_KEY, LW_TEMPLATE_KEY, useStoredFile } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 export function GeneratorTab() {
   const { job, upsert, rename, error: openError } = useCurrentJob("generate");
-  const [lwTemplate, setLwTemplate] = useState<ChosenFile | null>(() => loadStoredFile(LW_TEMPLATE_KEY));
-  const [dskTemplate, setDskTemplate] = useState<ChosenFile | null>(() => loadStoredFile(DSK_TEMPLATE_KEY));
+  const [lwTemplate, setLwTemplate] = useStoredFile(LW_TEMPLATE_KEY);
+  const [dskTemplate, setDskTemplate] = useStoredFile(DSK_TEMPLATE_KEY);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [open, setOpen] = useState<string | null>(null);
@@ -18,12 +18,10 @@ export function GeneratorTab() {
 
   function rememberLw(file: ChosenFile) {
     setLwTemplate(file);
-    saveStoredFile(LW_TEMPLATE_KEY, file);
   }
 
   function rememberDsk(file: ChosenFile) {
     setDskTemplate(file);
-    saveStoredFile(DSK_TEMPLATE_KEY, file);
   }
 
   async function pickTemplate(which: "lw" | "dsk") {
@@ -95,10 +93,7 @@ export function GeneratorTab() {
           file={lwTemplate}
           onChoose={() => pickTemplate("lw")}
           onPath={(path) => rememberLw({ path, name: path.split("/").pop() || path })}
-          onClear={() => {
-            setLwTemplate(null);
-            saveStoredFile(LW_TEMPLATE_KEY, null);
-          }}
+          onClear={() => setLwTemplate(null)}
           onError={setError}
         />
         <FileWell
@@ -108,10 +103,7 @@ export function GeneratorTab() {
           file={dskTemplate}
           onChoose={() => pickTemplate("dsk")}
           onPath={(path) => rememberDsk({ path, name: path.split("/").pop() || path })}
-          onClear={() => {
-            setDskTemplate(null);
-            saveStoredFile(DSK_TEMPLATE_KEY, null);
-          }}
+          onClear={() => setDskTemplate(null)}
           onError={setError}
         />
       </div>

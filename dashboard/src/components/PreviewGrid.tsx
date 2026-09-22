@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 export function isPreviewVideo(nameOrUrl: string): boolean {
   return /\.mov(?:$|[?#])/i.test(nameOrUrl);
 }
@@ -10,23 +12,53 @@ export type OverlayProgress = {
   note?: string;
 };
 
+function formatElapsed(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function useElapsed(startedAt?: number): string | null {
+  const [now, setNow] = useState(() => Date.now() / 1000);
+
+  useEffect(() => {
+    if (startedAt == null) return;
+    setNow(Date.now() / 1000);
+    const id = window.setInterval(() => setNow(Date.now() / 1000), 1000);
+    return () => window.clearInterval(id);
+  }, [startedAt]);
+
+  return startedAt == null ? null : formatElapsed(now - startedAt);
+}
+
 export function LoadingOverlay({
   title,
   logs,
   onCancel,
   progress,
+  details,
+  startedAt,
 }: {
   title: string;
   logs: string[];
   onCancel?: () => void;
   progress?: OverlayProgress | null;
+  details?: string[];
+  startedAt?: number;
 }) {
   const pct = progress ? Math.min(100, Math.max(0, (progress.value / Math.max(1, progress.max)) * 100)) : 0;
+  const elapsed = useElapsed(startedAt);
   return (
     <div className="overlay">
       <div className="overlay-card">
         <div className="spinner" />
         <h2>{title}</h2>
+        {elapsed ? (
+          <div className="elapsed" aria-live="off">
+            Elapsed {elapsed}
+          </div>
+        ) : null}
         {progress ? (
           <div className="progress">
             <div className="progress-head">
@@ -41,6 +73,12 @@ export function LoadingOverlay({
           </div>
         ) : null}
         <div className="log">{logs.join("\n") || "Working…"}</div>
+        {details && details.length > 0 ? (
+          <details className="overlay-details">
+            <summary>Technical details</summary>
+            <div className="log">{details.join("\n")}</div>
+          </details>
+        ) : null}
         {onCancel ? (
           <button className="btn secondary" type="button" onClick={onCancel}>
             Cancel

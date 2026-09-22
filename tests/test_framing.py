@@ -28,7 +28,7 @@ from obed_edom.framing import (
     save_framings,
     template_framing_digests,
 )
-from obed_edom.map_remap import ItemTransform, Plan, Rect, frame_affine
+from obed_edom.map_remap import FramingContext, ItemTransform, Plan, Rect, frame_affine
 
 WALL = "/tmp/Wall.key"
 TEMPLATE = "/tmp/Base_CG_Assets.key"
@@ -504,11 +504,11 @@ def test_proposal_uses_full_wall_context_for_digests_navigator_and_thumbnails(tm
     seen = {}
 
     def fake_plan(payload, _recipe, **kwargs):
+        numbers = [slide["number"] for slide in payload["slides"]]
         return _plan(
-            framing=[
-                {"slide": slide["number"], "templateSlide": 1, "fitted": False}
-                for slide in payload["slides"]
-            ]
+            framing=[{"slide": n, "templateSlide": 1, "fitted": False} for n in numbers],
+            framing_recipes={n: {"destWidth": 1920, "destHeight": 1080} for n in numbers},
+            framing_context={n: FramingContext() for n in numbers},
         )
 
     def fake_thumbs(deck, payload, **_kwargs):
@@ -554,7 +554,13 @@ def test_proposal_uses_full_wall_context_for_digests_navigator_and_thumbnails(tm
             "needsAttention": False,
             "noUsableFraming": False,
             "candidates": [
-                {"templateSlide": 1, "wouldFallBack": False, "transform": None, "rects": []}
+                {
+                    "templateSlide": 1,
+                    "wouldFallBack": False,
+                    "pinOverridden": False,
+                    "transform": None,
+                    "rects": [],
+                }
             ],
         }
     ]
@@ -576,13 +582,17 @@ def test_fallback_candidate_carries_text_and_card_context_onto_the_fit_recipe(tm
         "destWidth": 1920, "destHeight": 1080,
         "listFontSize": 42, "cardSamples": [{"w": 1}],
     }
-    captured: dict = {}
+    captured: list[dict] = []
 
     def fake_plan(payload, _recipe, **kwargs):
-        return _plan(framing=[{"slide": 1, "templateSlide": 1, "fitted": True}])
+        return _plan(
+            framing=[{"slide": 1, "templateSlide": 1, "fitted": True}],
+            framing_recipes={1: {"destWidth": 1920, "destHeight": 1080}},
+            framing_context={1: FramingContext()},
+        )
 
     def fake_planned_rects(_slide, recipe, **_kwargs):
-        captured["recipe"] = recipe
+        captured.append(recipe)
         return []
 
     monkeypatch.setattr(baseline_mod, "deck_digest", lambda _path: "deck")
@@ -612,8 +622,10 @@ def test_fallback_candidate_carries_text_and_card_context_onto_the_fit_recipe(tm
         template_payload={"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1}]},
     )
 
-    assert captured["recipe"].get("listFontSize") == 42
-    assert captured["recipe"].get("cardSamples") == [{"w": 1}]
+    # Rects are drawn for the one candidate first, then for the planner's own auto recipe.
+    candidate_recipe = captured[0]
+    assert candidate_recipe.get("listFontSize") == 42
+    assert candidate_recipe.get("cardSamples") == [{"w": 1}]
 
 
 def test_transform_of_uses_the_planner_frame_affine():

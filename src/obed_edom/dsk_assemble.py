@@ -1633,6 +1633,11 @@ def apply_compiled_compositions(
             compiled_occurrences[key] = occurrence_id
             if build_in is not None:
                 compiled_build_ins[key] = build_in
+        composition_ids[layout_slide] = comp_id
+        if not compiled_clips:
+            for per_slide in (clips, clip_rects, timing, timing_delay, sources, occurrences, build_ins):
+                per_slide.pop(layout_slide, None)
+            continue
         clips[layout_slide] = compiled_clips
         clip_rects[layout_slide] = compiled_rects
         timing[layout_slide] = tuple(compiled_timing)
@@ -1643,7 +1648,6 @@ def apply_compiled_compositions(
             build_ins[layout_slide] = compiled_build_ins
         else:
             build_ins.pop(layout_slide, None)
-        composition_ids[layout_slide] = comp_id
 
     return _dc_replace(
         plan, clips=clips, clip_rects=clip_rects, clip_timing=timing,

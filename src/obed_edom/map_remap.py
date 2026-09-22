@@ -13,7 +13,7 @@ import math
 import re
 import warnings
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
@@ -3699,6 +3699,133 @@ class Plan:
     badge_raises: list[dict[str, Any]]
     card_grid: list[dict[str, Any]]
     roster: dict[str, set[int]]
+    framing_recipes: dict[int, dict[str, Any]] = field(default_factory=dict)
+    framing_context: dict[int, FramingContext] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FramingContext:
+    """What the previous planned slide leaves for this one's sibling-affine reuse."""
+
+    number: int | None = None
+    template: int | None = None
+    affine: Affine | None = None
+    source: str | None = None
+
+
+def _next_framing_context(
+    number: int,
+    slide: dict,
+    recipe: dict[str, Any],
+    wall_w: float,
+    wall_h: float,
+    min_on_canvas: float,
+) -> FramingContext:
+    used_affine = frame_affine(recipe)
+    still_usable = used_affine is not None and not _framing_unusable(
+        slide, recipe, wall_w, wall_h, min_on_canvas
+    )
+    return FramingContext(
+        number=number,
+        template=(
+            recipe.get("templateSlide")
+            if recipe.get("source") in _TEMPLATE_FRAMED_SOURCES
+            else None
+        ),
+        affine=used_affine if still_usable else None,
+        source=recipe.get("source") if still_usable else None,
+    )
+
+
+def frame_slide(
+    slide: dict,
+    payload: dict[str, Any],
+    template: dict[str, Any],
+    *,
+    wanted: int | None,
+    prev: FramingContext,
+    min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One slide's framing decision as the planner makes it: (recipe, framing row)."""
+    wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
+    wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
+    number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+    single = {
+        "slideWidth": payload.get("slideWidth"),
+        "slideHeight": payload.get("slideHeight"),
+        "slides": [slide],
+    }
+    slide_recipe = learn_recipe(single, template, template_slide=wanted)
+    pin_overridden = False
+    reused_sibling = False
+    uncovered_top: float | None = None
+    if wanted is not None and _framing_unusable(
+        slide, slide_recipe, wall_w, wall_h, min_on_canvas
+    ):
+        # Pinned magic-move: if this page's art pairs to a sliver, reuse the adjacent previous slide's affine when it landed on the same template — by pin or by pairing.
+        if (
+            prev.number == number - 1
+            and prev.template == wanted
+            and prev.affine is not None
+        ):
+            reused = _recipe_reusing_affine(
+                slide, slide_recipe, prev.affine, wall_w, wall_h
+            )
+            if reused is not None and not _framing_unusable(
+                slide, reused, wall_w, wall_h, min_on_canvas
+            ):
+                slide_recipe = reused
+                reused_sibling = True
+        if not reused_sibling:
+            auto_recipe = learn_recipe(single, template, template_slide=None)
+            if not _framing_unusable(slide, auto_recipe, wall_w, wall_h, min_on_canvas):
+                slide_recipe = auto_recipe
+                pin_overridden = True
+    elif (
+        wanted is None
+        and prev.number == number - 1
+        and prev.source == "template-layout"
+        and prev.affine is not None
+        and _is_unpinned_photo_only_backdrop(slide, slide_recipe, wall_w, wall_h)
+    ):
+        # clamp=False keeps the reused affine source-faithful, band and all.
+        reused = _recipe_reusing_affine(
+            slide, slide_recipe, prev.affine, wall_w, wall_h, clamp=False
+        )
+        if reused is not None and not _framing_unusable(
+            slide, reused, wall_w, wall_h, min_on_canvas
+        ):
+            slide_recipe = reused
+            reused_sibling = True
+            uncovered_top = max(0.0, _f((reused.get("mapDst") or {}).get("y")))
+    row: dict[str, Any] = {
+        "slide": number,
+        "templateSlide": slide_recipe.get("templateSlide"),
+        "requested": wanted,
+        "confirmed": bool(slide_recipe.get("framingPinned")),
+        "source": slide_recipe.get("source"),
+        "pairQuality": slide_recipe.get("pairQuality"),
+        "fitted": False,
+        "pinOverridden": pin_overridden,
+        "reusedSibling": reused_sibling,
+    }
+    if uncovered_top is not None:
+        row["uncoveredTopPx"] = round(uncovered_top, 1)
+    if _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas):
+        fitted = fit_to_frame_recipe(
+            slide,
+            wall_w,
+            wall_h,
+            _f(slide_recipe.get("destWidth"), CG_WIDTH),
+            _f(slide_recipe.get("destHeight"), CG_HEIGHT),
+        )
+        if fitted:
+            slide_recipe = carry_fit_context(fitted, slide_recipe)
+            row["fitted"] = True
+    counts: dict[str, int] = {}
+    row["onCanvas"] = round(on_canvas_fraction(slide, slide_recipe, wall_w, wall_h, counts), 3)
+    row.update(counts)
+    return slide_recipe, row
 
 
 def plan_payload(
@@ -3727,10 +3854,9 @@ def plan_payload(
     badge_raise_report: list[dict[str, Any]] = []
     card_grid_report: list[dict[str, Any]] = []
     roster_report: dict[str, set[int]] = {}
-    prev_number: int | None = None
-    prev_template: int | None = None
-    prev_affine: Affine | None = None
-    prev_source: str | None = None
+    prev = FramingContext()
+    framing_recipes: dict[int, dict[str, Any]] = {}
+    framing_context: dict[int, FramingContext] = {}
     roster_keep, roster_drop = roster_slides(payload.get("slides") or [])
     roster_report["keep"] = roster_keep
     roster_report["drop"] = roster_drop
@@ -3742,92 +3868,20 @@ def plan_payload(
             skipped_slides.append(number)
             continue
         slide_recipe = recipe
-        wanted = None
         if template and (template.get("slides") or []):
-            single = {
-                "slideWidth": payload.get("slideWidth"),
-                "slideHeight": payload.get("slideHeight"),
-                "slides": [slide],
-            }
-            wanted = (framing_overrides or {}).get(number)
-            slide_recipe = learn_recipe(single, template, template_slide=wanted)
-            pin_overridden = False
-            reused_sibling = False
-            uncovered_top: float | None = None
-            if wanted is not None and _framing_unusable(
-                slide, slide_recipe, wall_w, wall_h, min_on_canvas
-            ):
-                # Pinned magic-move: if this page's art pairs to a sliver, reuse the adjacent previous slide's affine when it landed on the same template — by pin or by pairing.
-                if (
-                    prev_number == number - 1
-                    and prev_template == wanted
-                    and prev_affine is not None
-                ):
-                    reused = _recipe_reusing_affine(
-                        slide, slide_recipe, prev_affine, wall_w, wall_h
-                    )
-                    if reused is not None and not _framing_unusable(
-                        slide, reused, wall_w, wall_h, min_on_canvas
-                    ):
-                        slide_recipe = reused
-                        reused_sibling = True
-                if not reused_sibling:
-                    auto_recipe = learn_recipe(single, template, template_slide=None)
-                    if not _framing_unusable(slide, auto_recipe, wall_w, wall_h, min_on_canvas):
-                        slide_recipe = auto_recipe
-                        pin_overridden = True
-            elif (
-                wanted is None
-                and prev_number == number - 1
-                and prev_source == "template-layout"
-                and prev_affine is not None
-                and _is_unpinned_photo_only_backdrop(slide, slide_recipe, wall_w, wall_h)
-            ):
-                # clamp=False keeps the reused affine source-faithful, band and all.
-                reused = _recipe_reusing_affine(
-                    slide, slide_recipe, prev_affine, wall_w, wall_h, clamp=False
-                )
-                if reused is not None and not _framing_unusable(
-                    slide, reused, wall_w, wall_h, min_on_canvas
-                ):
-                    slide_recipe = reused
-                    reused_sibling = True
-                    uncovered_top = max(0.0, _f((reused.get("mapDst") or {}).get("y")))
-            row = {
-                "slide": number,
-                "templateSlide": slide_recipe.get("templateSlide"),
-                "requested": wanted,
-                "confirmed": bool(slide_recipe.get("framingPinned")),
-                "source": slide_recipe.get("source"),
-                "pairQuality": slide_recipe.get("pairQuality"),
-                "fitted": False,
-                "pinOverridden": pin_overridden,
-                "reusedSibling": reused_sibling,
-            }
-            if uncovered_top is not None:
-                row["uncoveredTopPx"] = round(uncovered_top, 1)
+            framing_context[number] = prev
+            slide_recipe, row = frame_slide(
+                slide,
+                payload,
+                template,
+                wanted=(framing_overrides or {}).get(number),
+                prev=prev,
+                min_on_canvas=min_on_canvas,
+            )
             framing_report.append(row)
-        if template and (template.get("slides") or []):
-            unusable = _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas)
-            if unusable:
-                fitted = fit_to_frame_recipe(
-                    slide,
-                    wall_w,
-                    wall_h,
-                    _f(slide_recipe.get("destWidth"), CG_WIDTH),
-                    _f(slide_recipe.get("destHeight"), CG_HEIGHT),
-                )
-                if fitted:
-                    slide_recipe = carry_fit_context(fitted, slide_recipe)
-                    fitted_slides.append(number)
-                    if framing_report:
-                        framing_report[-1]["fitted"] = True
-            if framing_report:
-                counts: dict[str, int] = {}
-                framing_report[-1]["onCanvas"] = round(
-                    on_canvas_fraction(slide, slide_recipe, wall_w, wall_h, counts), 3
-                )
-                framing_report[-1].update(counts)
+            if row["fitted"]:
+                fitted_slides.append(number)
+        framing_recipes[number] = slide_recipe
         preview = (previews or {}).get(number)
         analysis = (
             analyse_free_text(
@@ -3870,18 +3924,7 @@ def plan_payload(
             offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)
         )
         transforms.extend(planned)
-        used_affine = frame_affine(slide_recipe)
-        slide_still_usable = used_affine is not None and not _framing_unusable(
-            slide, slide_recipe, wall_w, wall_h, min_on_canvas
-        )
-        prev_affine = used_affine if slide_still_usable else None
-        prev_source = slide_recipe.get("source") if slide_still_usable else None
-        prev_number = number
-        prev_template = (
-            slide_recipe.get("templateSlide")
-            if slide_recipe.get("source") in _TEMPLATE_FRAMED_SOURCES
-            else None
-        )
+        prev = _next_framing_context(number, slide, slide_recipe, wall_w, wall_h, min_on_canvas)
     return Plan(
         transforms=transforms,
         placements=placement_report,
@@ -3893,6 +3936,8 @@ def plan_payload(
         badge_raises=badge_raise_report,
         card_grid=card_grid_report,
         roster=roster_report,
+        framing_recipes=framing_recipes,
+        framing_context=framing_context,
     )
 
 

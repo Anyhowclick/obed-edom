@@ -29,10 +29,13 @@ class Job:
     name: str = ""
     status: str = "queued"
     logs: list[str] = field(default_factory=list)
+    details: list[str] = field(default_factory=list)
     error: str | None = None
     result: dict[str, Any] | None = None
+    progress: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    started_at: float | None = None
     _cancelled: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -41,6 +44,20 @@ class Job:
 
     def log(self, message: str) -> None:
         self.logs.append(message)
+        self.updated_at = time.time()
+
+    def detail(self, message: str) -> None:
+        self.details.append(message)
+        self.updated_at = time.time()
+
+    def set_progress(self, step: int, steps: int, label: str, detail: str | None = None) -> None:
+        self.progress = {
+            "step": int(step),
+            "steps": int(steps),
+            "label": str(label),
+            "detail": detail,
+            "stepStartedAt": time.time(),
+        }
         self.updated_at = time.time()
 
     def cancelled(self) -> bool:
@@ -54,10 +71,13 @@ class Job:
             "name": self.name,
             "status": self.status,
             "logs": self.logs[-80:],
+            "details": self.details[-200:],
             "error": self.error,
             "result": self.result,
+            "progress": self.progress,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
+            "startedAt": self.started_at,
         }
 
     @classmethod
@@ -69,10 +89,13 @@ class Job:
             name=str(data.get("name") or data["id"]),
             status=str(data.get("status") or "done"),
             logs=list(data.get("logs") or []),
+            details=list(data.get("details") or []),
             error=data.get("error"),
             result=data.get("result"),
+            progress=data.get("progress"),
             created_at=float(data.get("createdAt") or time.time()),
             updated_at=float(data.get("updatedAt") or time.time()),
+            started_at=(float(data["startedAt"]) if data.get("startedAt") is not None else None),
         )
 
 
@@ -150,6 +173,7 @@ class JobRunner:
                     raise RuntimeError("Job is already running")
                 job.status = "queued"
                 job.error = None
+                job.started_at = None
                 job._cancelled.clear()
                 job.updated_at = time.time()
                 self._fns[job.id] = fn
@@ -489,6 +513,7 @@ class JobRunner:
                 if job and fn and not job.cancelled():
                     self._running.add(job_id)
                     job.status = "running"
+                    job.started_at = time.time()
                     job.log("Started.")
                 else:
                     job = None
@@ -516,6 +541,7 @@ class JobRunner:
                             job.result = result
                             job.status = "done"
                             job.log("Finished.")
+                        job.progress = None
                         self._running.discard(job_id)
                         job.updated_at = time.time()
                     try:

@@ -418,15 +418,9 @@ def propose_framings(
     from obed_edom.baseline import deck_digest, deck_slide_digests  # noqa: PLC0415
     from obed_edom.inspect import inspect_keynote  # noqa: PLC0415
     from obed_edom.map_remap import (  # noqa: PLC0415
-        CG_HEIGHT,
-        CG_WIDTH,
-        MIN_ON_CANVAS_FRACTION,
-        carry_fit_context,
-        fit_to_frame_recipe,
-        is_degenerate_scale,
+        frame_slide,
         learn_recipe,
         navigator_numbering,
-        on_canvas_fraction,
         plan_payload,
         rank_framing_candidates,
         skipped_positions,
@@ -456,13 +450,13 @@ def propose_framings(
     template_slides = template_data.get("slides") or []
 
     recipe = learn_recipe(wall_data, template_data)
-    report = plan_payload(
+    plan = plan_payload(
         wall_data,
         recipe,
         slide_range=slide_range,
         template=template_data,
         card_stroke=card_stroke,
-    ).framing
+    )
     thumbs = build_preview_thumbs(wall_path, full_wall_data, log=log)
     template_thumbs = build_preview_thumbs(template_path, template_data, log=log)
 
@@ -470,60 +464,46 @@ def propose_framings(
         int(s.get("number") or (int(s.get("index") or 0) + 1)): s
         for s in wall_data.get("slides") or []
     }
+
+    def rects_of(slide: dict[str, Any], shown: dict[str, Any]) -> list[dict[str, Any]]:
+        return planned_rects(
+            slide,
+            shown,
+            wall_size=(wall_w, wall_h),
+            keep_side_panels=keep_side_panels,
+            side_content_slides=side_content_slides,
+            card_stroke=card_stroke,
+        )
+
     pages: list[dict[str, Any]] = []
-    for row in report:
+    for row in plan.framing:
         number = int(row["slide"])
         slide = by_number.get(number)
         if slide is None:
             continue
         auto_fell_back = bool(row.get("fitted"))
+        prev = plan.framing_context[number]
         candidates = rank_framing_candidates(
             slide, template_slides, wall_size=(wall_w, wall_h), dest_size=dest
         )
         for candidate in candidates:
-            trial = learn_recipe(
-                {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]},
-                template_data,
-                template_slide=candidate["templateSlide"],
+            shown, pinned_row = frame_slide(
+                slide, wall_data, template_data, wanted=candidate["templateSlide"], prev=prev
             )
-            falls_back = (
-                on_canvas_fraction(slide, trial, wall_w, wall_h) < MIN_ON_CANVAS_FRACTION
-                or is_degenerate_scale(trial, wall_w, wall_h)
-            )
-            candidate["wouldFallBack"] = falls_back
-            # Fallback is planned as fit-to-frame; showing the template crop would lie.
-            shown = trial
-            if falls_back:
-                fitted = fit_to_frame_recipe(
-                    slide,
-                    wall_w,
-                    wall_h,
-                    float(trial.get("destWidth") or CG_WIDTH),
-                    float(trial.get("destHeight") or CG_HEIGHT),
-                )
-                if fitted:
-                    shown = carry_fit_context(fitted, trial)
+            candidate["wouldFallBack"] = bool(pinned_row["fitted"])
+            candidate["pinOverridden"] = bool(pinned_row["pinOverridden"])
             candidate["transform"] = _transform_of(shown)
-            candidate["rects"] = planned_rects(
-                slide,
-                shown,
-                wall_size=(wall_w, wall_h),
-                keep_side_panels=keep_side_panels,
-                side_content_slides=side_content_slides,
-                card_stroke=card_stroke,
-            )
+            candidate["rects"] = rects_of(slide, shown)
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
         auto_slide = row.get("templateSlide")
-        auto_candidate = next(
-            (c for c in candidates if c["templateSlide"] == auto_slide), None
-        )
+        auto_recipe = plan.framing_recipes[number]
         pages.append(
             {
                 "slide": number,
                 "index": number - 1,
                 "thumb": thumbs.get(number),
-                "autoTransform": (auto_candidate or {}).get("transform"),
-                "autoRects": (auto_candidate or {}).get("rects") or [],
+                "autoTransform": _transform_of(auto_recipe),
+                "autoRects": rects_of(slide, auto_recipe),
                 "autoTemplateSlide": auto_slide,
                 "autoFellBack": auto_fell_back,
                 "needsAttention": auto_fell_back,

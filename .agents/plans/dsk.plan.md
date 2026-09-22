@@ -720,6 +720,23 @@ overlapping edits to those boundary files without coordination.
     Stack threshold SETTLED (owner, 2026-09-20): raised 0.5 → 0.9 — FRC 50's visible rects overlap
     100% of the smaller (movie 1 is 5 px narrower inside movie 0), so nothing real needed the
     loose bound and a row that merely clips can no longer be read as a stack.
+31. **`wrapped_height` ignores paragraph styles — PLANNED (owner-banked 2026-09-22, option C).**
+    Golden slide 33 (`test_wrapped_height_golden_slide_33_argentcf_bold`, xfail) is not a wrap
+    error: nothing wraps; the text is five hard lines. The predictor prices every line at the
+    item's 65 pt × 1.157 + 21 = 397.0 pt, but the autosize box's saved `naturalSize` is 229.8 pt
+    (2.78 lines; +2.22 over). IWA: paragraphs 1–2 are ArgentCF-Bold 65 pt `lineSpacing` 0.7, the
+    blank paragraph 10 pt (Caption parent), the citation 40 pt `lineSpacing` 0.7 under a Cyan Bold
+    AzoSans char style (`Free Form` default: 45 pt, 0.8); `storage_runs` reports `size: None` for
+    them because the size lives on the paragraph style. Faithful model: per-paragraph size from
+    `tableParaStyle` (`iwa_runs.resolve_para_style`), paragraph `lineSpacing`, and the face's real
+    ascent+descent (PIL: ArgentCF 1.215×, AzoSans 1.222×) instead of the fixed 1.157 — rough
+    estimate ≈ 212 pt + inset vs 229.8 — calibrated against a Keynote measurement before it
+    replaces anything. Paths: `dsk_plan.wrapped_height`/`wrapped_height_runs`/`line_count`/
+    `wrap_line_spans`/`fit_heading_pt`, `iwa_runs.storage_runs`, the `dsk_assemble` slot/split
+    fits (`~:816`, `~:2250`), and `iwa_text_shape.HEIGHT_MODEL` (its ArgentCF slope is
+    single-line-only). Moves the DSK golden fits; never rewrites verse text to force reflow.
+    Option B alone (per-paragraph size, no line spacing: 304.5 pt, +0.99 lines) was rejected: it
+    clears the 1.0-line gate by 0.01 while still mis-modelling the line height.
 
 ## 5. Live-run recipe
 

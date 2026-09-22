@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -25,7 +27,17 @@ def no_keynote(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _forbidden)
     monkeypatch.setattr(subprocess, "Popen", _forbidden)
+    import obed_edom.web.app as app_mod
+
+    # The offline layout-import precondition (contract A) actually parses the
+    # template/FW `.key` IWA archives; the fixture decks here are plain text
+    # stand-ins, so it is a no-op by default. Tests exercising the precondition
+    # itself re-patch this to something that raises.
+    monkeypatch.setattr(app_mod, "check_layout_import_preconditions", lambda *_a, **_k: None)
     yield
+
+
+_DSK_TEMPLATE_FIXTURE_NAME = "_dsk_template_fixture.key"
 
 
 def _wait(client, job_id, tries=120):
@@ -37,6 +49,18 @@ def _wait(client, job_id, tries=120):
             return job
         time.sleep(0.05)
     raise AssertionError("job never finished")
+
+
+def _wait_for_progress_step(client, job_id, step, tries=200):
+    for _ in range(tries):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        progress = job.get("progress")
+        if progress and progress.get("step") == step:
+            return progress
+        if job["status"] in {"done", "error"}:
+            raise AssertionError(f"job finished before reaching progress step {step}: {job}")
+        time.sleep(0.01)
+    raise AssertionError(f"job never reached progress step {step}")
 
 
 def _cls(number, category, *, is_text=False, build_count=0, movie_count=0):
@@ -80,6 +104,11 @@ def _patch_common(monkeypatch, app_mod, *, classes, thumbs=None):
 
 def _propose_dsk(client, deck, **extra):
     data = {"path": str(deck), **extra}
+    if "dsk_template" not in data:
+        template = deck.parent / _DSK_TEMPLATE_FIXTURE_NAME
+        if not template.exists():
+            template.write_text("template fixture")
+        data["dsk_template"] = str(template)
     return client.post("/api/dsk", data=data)
 
 
@@ -2436,3 +2465,641 @@ def test_dsk_export_propose_pages_default_videos_only_false(tmp_path, monkeypatc
     }
     app_mod._apply_dsk_decisions(result, [{"slide": 1, "videosOnly": True}])
     assert result["pages"][0]["decision"]["videosOnly"] is False
+
+
+# --- DSK template (contract A) -------------------------------------------------
+
+
+def test_dsk_propose_refuses_blank_template(tmp_path):
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+
+    client = TestClient(app)
+    res = client.post("/api/dsk", data={"path": str(deck), "dsk_template": ""})
+    assert res.status_code == 400
+    assert res.json()["detail"] == {
+        "field": "dskTemplate",
+        "message": "Choose the DSK template (.key) — the lower-thirds deck that supplies the DSK layouts.",
+    }
+
+
+def test_dsk_propose_refuses_missing_template_field(tmp_path):
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+
+    client = TestClient(app)
+    res = client.post("/api/dsk", data={"path": str(deck)})
+    assert res.status_code == 400
+    assert res.json()["detail"]["field"] == "dskTemplate"
+
+
+def test_dsk_propose_refuses_template_not_found(tmp_path):
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    missing = tmp_path / "nope.key"
+
+    client = TestClient(app)
+    res = client.post("/api/dsk", data={"path": str(deck), "dsk_template": str(missing)})
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert detail["field"] == "dskTemplate"
+    assert str(missing) in detail["message"]
+    assert "Choose on this Mac" in detail["message"]
+
+
+def test_dsk_propose_stores_dsk_template_in_result(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("template")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template=str(template)).json()["id"]
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["dskTemplate"] == str(template)
+
+
+def test_dsk_propose_runs_offline_layout_precondition(tmp_path, monkeypatch):
+    """The offline `check_layout_import_preconditions` refusal (contract A) surfaces
+    as the same structured 400 as a missing/blank template."""
+    import obed_edom.web.app as app_mod
+    from obed_edom.dsk_assemble import AssemblyRefusal
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("template")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+
+    seen = {}
+
+    def fake_check(fw_deck, *, layout_template, layout_names):
+        seen["fw_deck"] = fw_deck
+        seen["layout_template"] = layout_template
+        seen["layout_names"] = layout_names
+        raise AssemblyRefusal("no layout named 'Blank Black' found in layout template")
+
+    monkeypatch.setattr(app_mod, "check_layout_import_preconditions", fake_check)
+
+    client = TestClient(app)
+    res = client.post("/api/dsk", data={"path": str(deck), "dsk_template": str(template)})
+    assert res.status_code == 400
+    assert res.json()["detail"] == {
+        "field": "dskTemplate",
+        "message": "no layout named 'Blank Black' found in layout template",
+    }
+    assert seen["fw_deck"] == deck
+    assert seen["layout_template"] == template
+    assert tuple(seen["layout_names"]) == ("Blank Black",)
+
+
+def test_dsk_apply_refuses_when_proposal_has_no_dsk_template(tmp_path, monkeypatch):
+    """A proposal saved before this feature shipped has no `dskTemplate`; apply must
+    refuse with the same structured 400, telling the operator to re-propose."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("template")
+
+    def fake_propose(_job, path, _reference_deck, _dsk_template, _slide_range, content_only, _words):
+        return {
+            "phase": "review",
+            "path": str(path),
+            "pages": [],
+            "skipped": [],
+            "contentOnly": content_only,
+        }
+
+    monkeypatch.setattr(app_mod, "_run_dsk_propose", fake_propose)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template=str(template)).json()["id"]
+    proposed = _wait(client, job_id)
+    assert proposed["status"] == "done", proposed.get("error")
+    assert "dskTemplate" not in proposed["result"]
+
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 400
+    assert applied.json()["detail"] == {
+        "field": "dskTemplate",
+        "message": "Choose the DSK template (.key) — the lower-thirds deck that supplies the DSK layouts.",
+    }
+
+
+def test_dsk_apply_refuses_when_stored_template_no_longer_exists(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("template")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template=str(template)).json()["id"]
+    _wait(client, job_id)
+    template.unlink()
+
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 400
+    detail = applied.json()["detail"]
+    assert detail["field"] == "dskTemplate"
+    assert str(template) in detail["message"]
+
+
+def test_dsk_apply_passes_layout_template_to_export_and_assemble(tmp_path, monkeypatch):
+    """The legacy (non-review) apply path's `export_slide_clips` and
+    `assemble_dsk_deck` calls both receive the stored `dskTemplate` as
+    `layout_template` (contract A)."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("template")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    seen = {}
+
+    def fake_export_clips(fw, slides, out_dir, **kwargs):
+        seen["export_layout_template"] = kwargs.get("layout_template")
+        from obed_edom.dsk_movie_export import ClipResult
+        from obed_edom.map_remap import Rect
+
+        dest = Path(out_dir) / "clip.001.mov"
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        dest.write_text("movie")
+        return [
+            ClipResult(
+                slide=2, movie_id=("movie", 0), path=dest, crop_rect=Rect(0, 0, 100, 100),
+                width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+            )
+        ]
+
+    def fake_assemble(fw, out_path, *, clips, **kwargs):
+        seen["assemble_layout_template"] = kwargs.get("layout_template")
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
+            clips_inserted={2: dict(clips[2])}, stroke={}, zorder={}, builds={},
+            size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(), movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template=str(template)).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert seen["export_layout_template"] == template
+    assert seen["assemble_layout_template"] == template
+
+
+def test_dsk_v2_apply_passes_layout_template_to_compiled_clip_export(tmp_path, monkeypatch):
+    """The v2/review apply path's compiled-composition `export_slide_clips` call
+    (a different call site than the legacy path's) also receives `layout_template`."""
+    import obed_edom.web.app as app_mod
+    from obed_edom.dsk_assemble import AssembleResult
+    from obed_edom.dsk_movie_export import ClipResult
+    from obed_edom.map_remap import Rect
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    template = tmp_path / "Lower-Thirds.key"
+    template.write_text("template")
+    payload = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slideCount": 1,
+        "slides": [{"number": 1, "index": 0, "items": [{
+            "kind": "movie", "kindIndex": 0, "index": 0, "fileName": "clip.mov",
+            "x": 1920, "y": 0, "w": 3840, "h": 1080,
+        }]}],
+    }
+    cls = SlideClass(1, "movie", 0, 1, (("movie", 0),), (), (), None, False)
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _path: payload)
+    monkeypatch.setattr(app_mod, "classify_deck", lambda *_a, **_k: [cls])
+    monkeypatch.setattr(app_mod, "build_preview_thumbs", lambda *_a, **_k: {1: "slide-1.png"})
+    monkeypatch.setattr(app_mod, "deck_digest", lambda _path: "bound")
+    monkeypatch.setattr(app_mod, "wall_thumb_dir", lambda _digest: tmp_path)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+    monkeypatch.setattr(app_mod, "_dsk_archive_ids", lambda _path: {(1, "movie", 0): "movie-1"})
+    monkeypatch.setattr(app_mod, "_dsk_build_records", lambda _path: {})
+    seen = {}
+
+    def fake_export(_deck, slides, out_dir, *, movie_plans, **kwargs):
+        seen["layout_template"] = kwargs.get("layout_template")
+        target = Path(out_dir) / "compiled.mov"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("clip")
+        plan = movie_plans[0]
+        return [ClipResult(
+            slide=plan.source_slide, movie_id=plan.source_item, path=target,
+            width=935, height=263, duration_s=1, wall_s=1, crop_width=935,
+            crop_rect=Rect(1920, 0, 3840, 1080), occurrence_id=plan.occurrence_id,
+        )]
+
+    def fake_assemble(_deck, out_path, *, compiled_compositions, compiled_clips, **_kwargs):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("deck")
+        synthetic = ("movie", 1_000_000)
+        occurrence = compiled_compositions[0].media[0].occurrence_id
+        return AssembleResult(
+            path=Path(out_path), slides_kept=(1,), ordinals={1: 1}, fits={},
+            clips_inserted={1: {synthetic: compiled_clips[occurrence]}}, stroke={}, zorder={},
+            builds={}, size_bytes=4, source_size_bytes=7, wall_s=1, warnings=(), movie_props={},
+            clip_rects={1: {synthetic: Rect(43, 802, 935, 263)}},
+            clip_occurrences={1: {synthetic: occurrence}},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template=str(template)).json()["id"]
+    proposed = _wait(client, job_id)
+    review = proposed["result"]["review"]
+    envelope = {
+        "schemaVersion": 2,
+        "sourceFingerprint": review["source"]["fingerprint"],
+        "defaults": review["defaults"],
+        "decisions": [{"id": comp["id"], **comp["decision"]} for comp in review["compositions"]],
+    }
+    response = client.post(
+        f"/api/dsk/{job_id}/apply",
+        json={"review": envelope, "baseRevision": 0, "exportDir": str(tmp_path / "workspace")},
+    )
+    assert response.status_code == 200
+    done = _wait(client, job_id)
+    assert done["status"] == "done", done.get("error")
+    assert seen["layout_template"] == template
+
+
+# --- Stage progress + plain log (contract B) -----------------------------------
+
+
+def test_dsk_propose_routes_library_callback_to_details_and_narration_to_logs(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "FW.key"
+    deck.write_text("fixture")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    monkeypatch.setattr(app_mod, "classify_deck", lambda *_a, **_k: [_cls(1, "static")])
+    monkeypatch.setattr(app_mod, "deck_digest", lambda _p: "digest")
+    monkeypatch.setattr(app_mod, "wall_thumb_dir", lambda _d: tmp_path)
+
+    def fake_thumbs(_path, _payload, *, log):
+        log("IWA export: wrote 0001.jpg via ordinal 1")
+        return {1: "0001.jpg"}
+
+    monkeypatch.setattr(app_mod, "build_preview_thumbs", fake_thumbs)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert "IWA export: wrote 0001.jpg via ordinal 1" in job["details"]
+    assert not any("IWA export" in line for line in job["logs"])
+    assert any(line.startswith("Reading") for line in job["logs"])
+    assert any("Made 1 slide preview" in line for line in job["logs"])
+    assert job["progress"] is None
+
+
+def test_dsk_apply_sets_progress_and_routes_assembler_log_to_details(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    def fake_export_clips(fw, slides, out_dir, **kwargs):
+        kwargs["log"]("technical: exported via ffmpeg pass 1")
+        from obed_edom.dsk_movie_export import ClipResult
+        from obed_edom.map_remap import Rect
+
+        dest = Path(out_dir) / "clip.001.mov"
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        dest.write_text("movie")
+        return [
+            ClipResult(
+                slide=2, movie_id=("movie", 0), path=dest, crop_rect=Rect(0, 0, 100, 100),
+                width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+            )
+        ]
+
+    def fake_assemble(fw, out_path, *, clips, **kwargs):
+        kwargs["log"]("technical: wrote staging deck")
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
+            clips_inserted={2: dict(clips[2])}, stroke={}, zorder={}, builds={},
+            size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(), movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert "technical: exported via ffmpeg pass 1" in job["details"]
+    assert "technical: wrote staging deck" in job["details"]
+    assert not any("technical:" in line for line in job["logs"])
+    assert any("Exporting 1 video clip" in line for line in job["logs"])
+    assert any(line.startswith("Assembling") for line in job["logs"])
+    assert any(line.startswith("Wrote") for line in job["logs"])
+    # progress is cleared once the job finishes (Job B: "cleared on finish")
+    assert job["progress"] is None
+
+
+def test_dsk_apply_progress_stages_with_clip_export(tmp_path, monkeypatch):
+    """3 stages when a clip export is needed: exporting clips, assembling, finishing
+    outputs. Each fake blocks on an event so the test can observe the *live* progress
+    the API reports mid-run, not just the finished job."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    export_entered = threading.Event()
+    release_export = threading.Event()
+    assemble_entered = threading.Event()
+    release_assemble = threading.Event()
+    finishing_entered = threading.Event()
+    release_finishing = threading.Event()
+
+    def fake_export_clips(fw, slides, out_dir, **kwargs):
+        export_entered.set()
+        assert release_export.wait(2)
+        from obed_edom.dsk_movie_export import ClipResult
+        from obed_edom.map_remap import Rect
+
+        dest = Path(out_dir) / "clip.001.mov"
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        dest.write_text("movie")
+        return [
+            ClipResult(
+                slide=2, movie_id=("movie", 0), path=dest, crop_rect=Rect(0, 0, 100, 100),
+                width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+            )
+        ]
+
+    def fake_assemble(fw, out_path, *, clips, **kwargs):
+        assemble_entered.set()
+        assert release_assemble.wait(2)
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
+            clips_inserted={2: dict(clips[2])}, stroke={}, zorder={}, builds={},
+            size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(), movie_props={},
+        )
+
+    real_write_manifest = app_mod.write_manifest
+
+    def fake_write_manifest(*args, **kwargs):
+        finishing_entered.set()
+        assert release_finishing.wait(2)
+        return real_write_manifest(*args, **kwargs)
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+    monkeypatch.setattr(app_mod, "write_manifest", fake_write_manifest)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+
+    assert export_entered.wait(2)
+    progress = _wait_for_progress_step(client, job_id, 1)
+    assert progress["steps"] == 3
+    assert progress["label"] == "Exporting video clips"
+    release_export.set()
+
+    assert assemble_entered.wait(2)
+    progress = _wait_for_progress_step(client, job_id, 2)
+    assert progress["steps"] == 3
+    assert progress["label"] == "Assembling the DSK deck"
+    release_assemble.set()
+
+    assert finishing_entered.wait(2)
+    progress = _wait_for_progress_step(client, job_id, 3)
+    assert progress["steps"] == 3
+    assert progress["label"] == "Finishing outputs"
+    release_finishing.set()
+
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert job["progress"] is None
+
+
+def test_dsk_apply_progress_stages_without_clip_export(tmp_path, monkeypatch):
+    """2 stages when no clip export is needed: assembling, finishing outputs."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    assemble_entered = threading.Event()
+    release_assemble = threading.Event()
+    finishing_entered = threading.Event()
+    release_finishing = threading.Event()
+
+    def fake_assemble(fw, out_path, *, clips, **kwargs):
+        assemble_entered.set()
+        assert release_assemble.wait(2)
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path, slides_kept=(1,), ordinals={1: 1}, fits={},
+            clips_inserted={}, stroke={}, zorder={}, builds={},
+            size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(), movie_props={},
+        )
+
+    real_write_manifest = app_mod.write_manifest
+
+    def fake_write_manifest(*args, **kwargs):
+        finishing_entered.set()
+        assert release_finishing.wait(2)
+        return real_write_manifest(*args, **kwargs)
+
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+    monkeypatch.setattr(app_mod, "write_manifest", fake_write_manifest)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck).json()["id"]
+    _wait(client, job_id)
+    applied = client.post(f"/api/dsk/{job_id}/apply")
+    assert applied.status_code == 200
+
+    assert assemble_entered.wait(2)
+    progress = _wait_for_progress_step(client, job_id, 1)
+    assert progress["steps"] == 2
+    assert progress["label"] == "Assembling the DSK deck"
+    release_assemble.set()
+
+    assert finishing_entered.wait(2)
+    progress = _wait_for_progress_step(client, job_id, 2)
+    assert progress["steps"] == 2
+    assert progress["label"] == "Finishing outputs"
+    release_finishing.set()
+
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert job["progress"] is None
+
+
+# --- DSK template override at apply time (Codex r1 finding 1) -----------------
+
+
+def test_dsk_apply_with_new_template_overrides_stored_one(tmp_path, monkeypatch):
+    """A `dskTemplate` given to apply overrides the stored proposal value -- even
+    when the stored one no longer exists -- validates and persists it, and reaches
+    export/assemble with the new path."""
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    old_template = tmp_path / "old.key"
+    old_template.write_text("old template")
+    new_template = tmp_path / "new.key"
+    new_template.write_text("new template")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(2))
+    classes = {1: _cls(1, "static"), 2: _cls(2, "movie", movie_count=1)}
+    _patch_common(monkeypatch, app_mod, classes=classes)
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+    monkeypatch.setattr(app_mod, "default_output_root", lambda: tmp_path / "output")
+
+    seen = {}
+
+    def fake_export_clips(fw, slides, out_dir, **kwargs):
+        seen["export_layout_template"] = kwargs.get("layout_template")
+        from obed_edom.dsk_movie_export import ClipResult
+        from obed_edom.map_remap import Rect
+
+        dest = Path(out_dir) / "clip.001.mov"
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        dest.write_text("movie")
+        return [
+            ClipResult(
+                slide=2, movie_id=("movie", 0), path=dest, crop_rect=Rect(0, 0, 100, 100),
+                width=1920, height=1080, duration_s=1.0, wall_s=1.0, crop_width=1920,
+            )
+        ]
+
+    def fake_assemble(fw, out_path, *, clips, **kwargs):
+        seen["assemble_layout_template"] = kwargs.get("layout_template")
+        from obed_edom.dsk_assemble import AssembleResult
+
+        return AssembleResult(
+            path=out_path, slides_kept=(1, 2), ordinals={1: 1, 2: 2}, fits={},
+            clips_inserted={2: dict(clips[2])}, stroke={}, zorder={}, builds={},
+            size_bytes=10, source_size_bytes=20, wall_s=1.0, warnings=(), movie_props={},
+        )
+
+    monkeypatch.setattr(app_mod, "export_slide_clips", fake_export_clips)
+    monkeypatch.setattr(app_mod, "assemble_dsk_deck", fake_assemble)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template=str(old_template)).json()["id"]
+    _wait(client, job_id)
+    old_template.unlink()
+
+    applied = client.post(f"/api/dsk/{job_id}/apply", json={"dskTemplate": str(new_template)})
+    assert applied.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert seen["export_layout_template"] == new_template.resolve()
+    assert seen["assemble_layout_template"] == new_template.resolve()
+
+    # The stored proposal now carries the new template.
+    refetched = client.get(f"/api/jobs/{job_id}").json()
+    assert refetched["result"].get("dskTemplate") == str(new_template.resolve())
+
+
+def test_dsk_apply_with_bad_new_template_refuses_and_keeps_stored_value(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    deck = tmp_path / "GW.key"
+    deck.write_text("placeholder")
+    old_template = tmp_path / "old.key"
+    old_template.write_text("old template")
+    bad_template = tmp_path / "does-not-exist.key"
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+    monkeypatch.setattr(app_mod, "keynote_running", lambda: False)
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template=str(old_template)).json()["id"]
+    _wait(client, job_id)
+
+    applied = client.post(f"/api/dsk/{job_id}/apply", json={"dskTemplate": str(bad_template)})
+    assert applied.status_code == 400
+    detail = applied.json()["detail"]
+    assert detail["field"] == "dskTemplate"
+    assert str(bad_template) in detail["message"]
+
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["result"]["dskTemplate"] == str(old_template)
+    assert job["status"] == "done"
+
+
+# --- Relative DSK template resolved to an absolute path (Codex r1 finding 5) ---
+
+
+def test_dsk_propose_resolves_relative_template_to_absolute(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    monkeypatch.chdir(tmp_path)
+    deck = Path("FW.key")
+    deck.write_text("fixture")
+    template = Path("Lower-Thirds.key")
+    template.write_text("template")
+    monkeypatch.setattr(app_mod, "offline_wall_payload", lambda _p: _fw_payload(1))
+    _patch_common(monkeypatch, app_mod, classes={1: _cls(1, "static")})
+
+    client = TestClient(app)
+    job_id = _propose_dsk(client, deck, dsk_template=str(template)).json()["id"]
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    stored = job["result"]["dskTemplate"]
+    assert Path(stored).is_absolute()
+    assert Path(stored) == (tmp_path / "Lower-Thirds.key").resolve()
