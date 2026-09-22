@@ -67,6 +67,557 @@ unmeasured object may be the mask this module cannot map."""
 _MASKING_NAME_FRAGMENTS = ("mask", "clip", "shapepath")
 _BENIGN_MASK_KEYS = frozenset({"masksToBounds", "edgeAntialiasingMask"})
 
+_EFFECT_FILL_MODES: frozenset[str] = frozenset({"both", "forwards"})
+_EFFECT_TIMING_FUNCTIONS: frozenset[str] = frozenset({"EaseInEaseOut"})
+_EFFECT_TYPES: frozenset[str] = frozenset({"transition", "buildIn"})
+_EFFECT_PROPERTIES: frozenset[str] = frozenset(
+    {"contents", "hidden", "opacity", "transform.scale.x", "transform.scale.y",
+     "transform.translation", "zPosition"}
+)
+_EFFECT_LEAF_ONLY_PROPERTIES: frozenset[str] = frozenset(
+    {"transform.scale.x", "transform.scale.y", "transform.translation"}
+)
+
+
+def _math_isfinite(value: Any) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _v_finite_number(value: Any, path: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not _math_isfinite(value):
+        raise _Refuse(f"{path} is not a readable finite number")
+
+
+def _v_finite_int(value: Any, path: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not _math_isfinite(value):
+        raise _Refuse(f"{path} is not a readable integer")
+
+
+def _v_bool(value: Any, path: str) -> None:
+    if not isinstance(value, bool):
+        raise _Refuse(f"{path} is not a readable boolean")
+
+
+def _v_bool_equals(expected: bool) -> Callable[[Any, str], None]:
+    def validator(value: Any, path: str) -> None:
+        if not isinstance(value, bool) or value is not expected:
+            raise _Refuse(f"{path} is not the measured neutral value {expected!r}")
+
+    return validator
+
+
+def _v_number_equals(expected: float) -> Callable[[Any, str], None]:
+    def validator(value: Any, path: str) -> None:
+        _v_finite_number(value, path)
+        if value != expected:
+            raise _Refuse(f"{path} is not the measured neutral value {expected!r}")
+
+    return validator
+
+
+def _v_number_range(low: float, high: float) -> Callable[[Any, str], None]:
+    def validator(value: Any, path: str) -> None:
+        _v_finite_number(value, path)
+        if not low <= value <= high:
+            raise _Refuse(f"{path} is outside the measured range [{low}, {high}]")
+
+    return validator
+
+
+def _v_nonneg_number(value: Any, path: str) -> None:
+    _v_finite_number(value, path)
+    if value < 0:
+        raise _Refuse(f"{path} is negative")
+
+
+def _v_nonempty_str(value: Any, path: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise _Refuse(f"{path} is not a readable non-empty string")
+
+
+def _v_one_of(values: frozenset[str]) -> Callable[[Any, str], None]:
+    def validator(value: Any, path: str) -> None:
+        if not isinstance(value, str) or value not in values:
+            raise _Refuse(f"{path} is not one of the measured values {sorted(values)}")
+
+    return validator
+
+
+def _v_list_of(
+    item_validator: Callable[[Any, str], None], length: int | None = None, min_length: int | None = None
+) -> Callable[[Any, str], None]:
+    def validator(value: Any, path: str) -> None:
+        if not isinstance(value, list):
+            raise _Refuse(f"{path} is not a readable list")
+        if length is not None and len(value) != length:
+            raise _Refuse(f"{path} is not a readable list of length {length}")
+        if min_length is not None and len(value) < min_length:
+            raise _Refuse(f"{path} is not a readable list of at least {min_length} items")
+        for index, item in enumerate(value):
+            item_validator(item, f"{path}[{index}]")
+
+    return validator
+
+
+def _v_empty_list(value: Any, path: str) -> None:
+    if not isinstance(value, list) or value:
+        raise _Refuse(f"{path} must be measured as always empty")
+
+
+def _v_dict_exact(
+    required: dict[str, Callable[[Any, str], None]], optional: dict[str, Callable[[Any, str], None]] | None = None
+) -> Callable[[Any, str], None]:
+    allowed = {**required, **(optional or {})}
+
+    def validator(value: Any, path: str) -> None:
+        if not isinstance(value, dict):
+            raise _Refuse(f"{path} is not a readable object")
+        extra = set(value) - set(allowed)
+        if extra:
+            raise _Refuse(f"{path} carries unmeasured keys {sorted(extra)}")
+        missing = set(required) - set(value)
+        if missing:
+            raise _Refuse(f"{path} is missing measured keys {sorted(missing)}")
+        for key, sub_validator in allowed.items():
+            if key in value:
+                sub_validator(value[key], f"{path}.{key}")
+
+    return validator
+
+
+_v_point = _v_dict_exact({"pointX": _v_finite_number, "pointY": _v_finite_number})
+_v_pinned_unit_rect = _v_dict_exact(
+    {"x": _v_number_equals(0), "y": _v_number_equals(0), "width": _v_number_equals(1), "height": _v_number_equals(1)}
+)
+_v_value_scalar_number = _v_dict_exact({"scalar": _v_finite_number})
+_v_value_scalar_bool = _v_dict_exact({"scalar": _v_bool})
+_v_value_scalar_zposition = _v_dict_exact({"scalar": _v_number_range(-1.0, 1.0)})
+_v_value_texture = _v_dict_exact({"texture": _v_nonempty_str})
+
+_EFFECT_PROPERTY_ENDPOINT_SCHEMAS: dict[str, Callable[[Any, str], None]] = {
+    "contents": _v_value_texture,
+    "hidden": _v_value_scalar_bool,
+    "opacity": _v_value_scalar_number,
+    "transform.scale.x": _v_value_scalar_number,
+    "transform.scale.y": _v_value_scalar_number,
+    "transform.translation": _v_point,
+    "zPosition": _v_value_scalar_zposition,
+}
+"""Every measured animation `property`'s exact endpoint schema, keyed by the property
+(`m3b_anim.log`). `zPosition` is additionally bounded to `|scalar| <= 1.0` (measured <= 0.004):
+combined with `sublayerTransform[11]`'s measured range, the worst-case perspective factor stays
+within the plan's 1px rect contract on a 1920px layer."""
+
+
+def _v_animation_leaf(value: Any, path: str) -> None:
+    if not isinstance(value, dict):
+        raise _Refuse(f"{path} is not a readable animation")
+    property_ = value.get("property")
+    if not isinstance(property_, str) or property_ not in _EFFECT_PROPERTY_ENDPOINT_SCHEMAS:
+        raise _Refuse(f"{path}.property is not a measured property")
+    endpoint = _EFFECT_PROPERTY_ENDPOINT_SCHEMAS[property_]
+    required = {
+        "additive": _v_bool_equals(False),
+        "autoreverses": _v_bool_equals(False),
+        "beginTime": _v_nonneg_number,
+        "duration": _v_nonneg_number,
+        "fillMode": _v_one_of(_EFFECT_FILL_MODES),
+        "from": endpoint,
+        "property": _v_one_of(_EFFECT_PROPERTIES),
+        "removedOnCompletion": _v_bool_equals(True),
+        "repeatCount": _v_number_equals(0),
+        "timeOffset": _v_number_equals(0),
+        "to": endpoint,
+    }
+    optional = {"timingFunction": _v_one_of(_EFFECT_TIMING_FUNCTIONS)}
+    _v_dict_exact(required, optional)(value, path)
+
+
+def _v_animation_group(value: Any, path: str) -> None:
+    required = {
+        "additive": _v_bool_equals(False),
+        "animations": _v_list_of(_v_animation_leaf),
+        "autoreverses": _v_bool_equals(False),
+        "beginTime": _v_nonneg_number,
+        "duration": _v_nonneg_number,
+        "fillMode": _v_one_of(_EFFECT_FILL_MODES),
+        "removedOnCompletion": _v_bool_equals(False),
+        "repeatCount": _v_number_equals(0),
+        "timeOffset": _v_number_equals(0),
+    }
+    _v_dict_exact(required)(value, path)
+
+
+_v_point_pair = _v_list_of(_v_finite_number, length=2)
+_EFFECT_SHAPE_ELEMENT_SCHEMAS: dict[str, Callable[[Any, str], None]] = {
+    "MoveToPoint": _v_dict_exact({"type": _v_one_of(frozenset({"MoveToPoint"})), "points": _v_list_of(_v_point_pair, length=1)}),
+    "AddLine": _v_dict_exact({"type": _v_one_of(frozenset({"AddLine"})), "points": _v_list_of(_v_point_pair, length=1)}),
+    "CloseSubpath": _v_dict_exact({"type": _v_one_of(frozenset({"CloseSubpath"}))}),
+}
+
+
+def _v_shape_element(value: Any, path: str) -> None:
+    if not isinstance(value, dict):
+        raise _Refuse(f"{path} is not a readable shape-path element")
+    kind = value.get("type")
+    if not isinstance(kind, str) or kind not in _EFFECT_SHAPE_ELEMENT_SCHEMAS:
+        raise _Refuse(f"{path}.type is not a measured shape-path element type")
+    _EFFECT_SHAPE_ELEMENT_SCHEMAS[kind](value, path)
+
+
+_v_shape_path = _v_dict_exact(
+    {
+        "elements": _v_list_of(_v_shape_element),
+        "flatness": _v_finite_number,
+        "lineCapStyle": _v_finite_int,
+        "lineJoinStyle": _v_finite_int,
+        "lineWidth": _v_finite_number,
+        "miterLimit": _v_finite_number,
+        "windingRule": _v_finite_int,
+    }
+)
+
+_v_textured_rectangle = _v_dict_exact(
+    {
+        "isBackgroundTexture": _v_bool,
+        "isVerticalText": _v_bool,
+        "singleTextureOpacity": _v_finite_number,
+        "textBaseline": _v_finite_int,
+        "textXHeight": _v_finite_int,
+        "textureType": _v_finite_int,
+    },
+    {"shapePath": _v_shape_path},
+)
+
+_v_initial_state = _v_dict_exact(
+    {
+        "affineTransform": _v_list_of(_v_finite_number, length=6),
+        "anchorPoint": _v_point,
+        "contentsRect": _v_pinned_unit_rect,
+        "edgeAntialiasingMask": _v_finite_int,
+        "height": _v_finite_number,
+        "hidden": _v_bool_equals(False),
+        "masksToBounds": _v_bool_equals(False),
+        "opacity": _v_finite_number,
+        "position": _v_point,
+        "rotation": _v_finite_number,
+        "scale": _v_finite_number,
+        "sublayerTransform": _v_list_of(_v_finite_number, length=16),
+        "width": _v_finite_number,
+    }
+)
+
+
+def _v_layer_node(value: Any, path: str) -> None:
+    if not isinstance(value, dict):
+        raise _Refuse(f"{path} is not a readable object")
+    if value.get("layers") == []:
+        _v_leaf_node(value, path)
+    else:
+        _v_wrapper_node(value, path)
+
+
+_v_leaf_node = _v_dict_exact(
+    {
+        "animations": _v_list_of(_v_animation_group),
+        "initialState": _v_initial_state,
+        "layers": _v_empty_list,
+        "texture": _v_nonempty_str,
+        "texturedRectangle": _v_textured_rectangle,
+    }
+)
+_v_wrapper_node = _v_dict_exact(
+    {
+        "animations": _v_list_of(_v_animation_group),
+        "initialState": _v_initial_state,
+        "layers": _v_list_of(_v_layer_node, min_length=1),
+    }
+)
+"""A layer node is discriminated by its own `layers`: an empty list is a terminal, textured leaf
+(`texture` + `texturedRectangle` mandatory, neither ever present on a wrapper); anything else is
+a non-textured wrapper with at least one child. Top-level slots (`_v_base_layer` below) are
+wrappers specifically, never a bare leaf -- every measured slot is a multi-node chain."""
+
+_v_base_layer = _v_dict_exact(
+    {
+        "animations": _v_empty_list,
+        "initialState": _v_initial_state,
+        "layers": _v_list_of(_v_wrapper_node),
+        "objectID": _v_nonempty_str,
+    }
+)
+
+_v_transition_effect = _v_dict_exact(
+    {
+        "attributes": _v_dict_exact({"direction": _v_finite_int}),
+        "baseLayer": _v_base_layer,
+        "beginTime": _v_nonneg_number,
+        "duration": _v_nonneg_number,
+        "effects": _v_empty_list,
+        "name": _v_nonempty_str,
+        "objectID": _v_nonempty_str,
+        "type": _v_one_of(_EFFECT_TYPES),
+    }
+)
+"""The recursive schema for a `glReplay` boundary's transition-effect tree (plan section 0,
+F-8): every container and primitive reachable from here has an explicit `_v_*` validator, so no
+value reaches the arithmetic below unvalidated."""
+
+
+def _check_effect_encoding(effect: dict[str, Any]) -> None:
+    _v_transition_effect(effect, "<transition effect>")
+
+
+def _effect_leaves(node: dict[str, Any]) -> list[dict[str, Any]]:
+    return [leaf for group in node.get("animations") or [] for leaf in group.get("animations") or []]
+
+
+def _effect_chain(slot: Any, index: int) -> list[dict[str, Any]]:
+    """The single-child descent from a top-level slot wrapper to its textured leaf (plan section
+    0, `m4_settled.py`): every measured slot is exactly one chain, never a branch."""
+    if not isinstance(slot, dict):
+        raise _Refuse(f"slot {index} is not a readable object")
+    chain = [slot]
+    node = slot
+    while True:
+        kids = node.get("layers")
+        if not kids:
+            break
+        if not isinstance(kids, list) or len(kids) != 1 or not isinstance(kids[0], dict):
+            raise _Refuse(f"slot {index} has a branching or unreadable layer chain")
+        node = kids[0]
+        chain.append(node)
+    return chain
+
+
+_IDENTITY_SUBLAYER_TRANSFORM = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+_EFFECT_SUBLAYER_PERSPECTIVE_INDEX = 11
+_EFFECT_SUBLAYER_PERSPECTIVE_RANGE = (-5e-4, 0.0)
+_EFFECT_RECT_PIXEL_TOLERANCE = 1.0
+
+
+def _check_effect_node_geometry(state: dict[str, Any], where: str) -> None:
+    """The invariants the settled-leaf-rect formula relies on: no rotation, a unit
+    `initialState.scale`, an identity `affineTransform`, positive `width`/`height`, and an
+    identity `sublayerTransform` except index 11 (the measured perspective term), bounded to
+    `[-5e-4, 0]`. Pixel-error accumulation across the chain is checked separately."""
+    rotation = _number(state, "rotation", where=where, slide_name="<effect>")
+    if rotation != 0.0:
+        raise _Refuse(f"{where} is rotated ({rotation}), outside the measured geometry")
+    scale = _number(state, "scale", where=where, slide_name="<effect>")
+    if scale != 1.0:
+        raise _Refuse(f"{where} has a non-unit initialState.scale ({scale})")
+    affine = state["affineTransform"]
+    if [float(v) for v in affine] != _IDENTITY_AFFINE:
+        raise _Refuse(f"{where} has a non-identity affineTransform")
+    if state["width"] <= 0 or state["height"] <= 0:
+        raise _Refuse(f"{where} has a non-positive width or height")
+    sublayer = state["sublayerTransform"]
+    for i, (value, identity) in enumerate(zip(sublayer, _IDENTITY_SUBLAYER_TRANSFORM)):
+        v = float(value)
+        if i == _EFFECT_SUBLAYER_PERSPECTIVE_INDEX:
+            low, high = _EFFECT_SUBLAYER_PERSPECTIVE_RANGE
+            if not low <= v <= high:
+                raise _Refuse(f"{where} has sublayerTransform[11] outside the measured range")
+        elif v != identity:
+            raise _Refuse(f"{where} has a non-identity sublayerTransform")
+
+
+def _root_position_residual_px(root_state: dict[str, Any]) -> tuple[float, float]:
+    where = "effect baseLayer"
+    position_x = _number(root_state, "position", "pointX", where=where, slide_name="<effect>")
+    position_y = _number(root_state, "position", "pointY", where=where, slide_name="<effect>")
+    anchor_x = _number(root_state, "anchorPoint", "pointX", where=where, slide_name="<effect>")
+    anchor_y = _number(root_state, "anchorPoint", "pointY", where=where, slide_name="<effect>")
+    width = _number(root_state, "width", where=where, slide_name="<effect>")
+    height = _number(root_state, "height", where=where, slide_name="<effect>")
+    return abs(position_x - anchor_x * width), abs(position_y - anchor_y * height)
+
+
+def _effect_anchor_error_px(state: dict[str, Any], where: str) -> tuple[float, float]:
+    anchor_x = _number(state, "anchorPoint", "pointX", where=where, slide_name="<effect>")
+    anchor_y = _number(state, "anchorPoint", "pointY", where=where, slide_name="<effect>")
+    width = _number(state, "width", where=where, slide_name="<effect>")
+    height = _number(state, "height", where=where, slide_name="<effect>")
+    return abs(anchor_x - 0.5) * width, abs(anchor_y - 0.5) * height
+
+
+def _child_center_residual_px(child_state: dict[str, Any], parent_state: dict[str, Any], where: str) -> tuple[float, float]:
+    parent_width = _number(parent_state, "width", where=where, slide_name="<effect>")
+    parent_height = _number(parent_state, "height", where=where, slide_name="<effect>")
+    child_x = _number(child_state, "position", "pointX", where=where, slide_name="<effect>")
+    child_y = _number(child_state, "position", "pointY", where=where, slide_name="<effect>")
+    return abs(child_x - parent_width / 2), abs(child_y - parent_height / 2)
+
+
+def effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any] | Unsupported:
+    """Settled per-slot opacity overrides for a `glReplay` boundary's transition effect (plan
+    section 2): `_check_effect_encoding` closes the vocabulary; geometry, opacity-settlement, and
+    exclusion rules are applied per slot in `_effect_opacity_overrides`. Any exception this
+    module's own validators did not anticipate is converted to `Unsupported` here, as a
+    fail-closed net behind them."""
+    try:
+        return _effect_opacity_overrides(effect)
+    except _Refuse as exc:
+        return Unsupported(str(exc))
+    except Exception as exc:
+        return Unsupported(f"unexpected malformed input: {exc!r}")
+
+
+def _effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(effect, dict):
+        raise _Refuse("effect is not a readable object")
+    _check_effect_encoding(effect)
+    base_layer = effect["baseLayer"]
+    root_state = base_layer["initialState"]
+    _check_effect_node_geometry(root_state, "effect baseLayer")
+    root_residual_x, root_residual_y = _root_position_residual_px(root_state)
+    slots = base_layer["layers"]
+    if not slots:
+        raise _Refuse("effect declares no readable top-level slots")
+
+    computed: list[dict[str, Any]] = []
+    for index, slot in enumerate(slots):
+        chain = _effect_chain(slot, index)
+        product = 1.0
+        fade = False
+        hidden = False
+        node_settled: list[dict[str, dict[str, Any]]] = []
+        anchor_errors: list[tuple[float, float]] = []
+        pixel_error_x = root_residual_x
+        pixel_error_y = root_residual_y
+        for depth, node in enumerate(chain):
+            state = node["initialState"]
+            where = f"slot {index}"
+            _check_effect_node_geometry(state, where)
+            anchor_errors.append(_effect_anchor_error_px(state, where))
+            if depth > 0:
+                child_error_x, child_error_y = _child_center_residual_px(
+                    state, chain[depth - 1]["initialState"], where
+                )
+                pixel_error_x += child_error_x
+                pixel_error_y += child_error_y
+
+            is_leaf = depth == len(chain) - 1
+            settled: dict[str, dict[str, Any]] = {}
+            for anim in _effect_leaves(node):
+                property_ = anim["property"]
+                if not is_leaf and property_ in _EFFECT_LEAF_ONLY_PROPERTIES:
+                    raise _Refuse(f"{where} has a {property_!r} animation on a non-leaf node")
+                if property_ == "opacity":
+                    to_value = anim["to"]["scalar"]
+                    from_value = anim["from"]["scalar"]
+                    if from_value != to_value:
+                        fade = True
+                    if "opacity" in settled:
+                        raise _Refuse(f"{where} has more than one settled opacity animation")
+                elif property_ == "hidden":
+                    hidden = True
+                settled[property_] = anim
+            node_settled.append(settled)
+
+            if "opacity" in settled:
+                product *= settled["opacity"]["to"]["scalar"]
+            elif "opacity" in state:
+                product *= state["opacity"]
+            else:
+                raise _Refuse(
+                    f"{where} has no settled opacity animation and no readable initialState.opacity"
+                )
+
+        wrapper_state = chain[0]["initialState"]
+        leaf_state = chain[-1]["initialState"]
+        leaf_settled = node_settled[-1]
+        leaf = chain[-1]
+
+        width = leaf_state["width"]
+        height = leaf_state["height"]
+        scale_x = (
+            leaf_settled["transform.scale.x"]["to"]["scalar"] if "transform.scale.x" in leaf_settled else 1.0
+        )
+        scale_y = (
+            leaf_settled["transform.scale.y"]["to"]["scalar"] if "transform.scale.y" in leaf_settled else 1.0
+        )
+        if scale_x <= 0 or scale_y <= 0:
+            raise _Refuse(f"slot {index} has a non-positive settled leaf scale")
+        if "transform.translation" in leaf_settled:
+            translation = leaf_settled["transform.translation"]["to"]
+            tx, ty = translation["pointX"], translation["pointY"]
+        else:
+            tx, ty = 0.0, 0.0
+        wrapper_x = wrapper_state["position"]["pointX"]
+        wrapper_y = wrapper_state["position"]["pointY"]
+
+        leaf_tr = leaf.get("texturedRectangle")
+        if not isinstance(leaf_tr, dict):
+            raise _Refuse(f"slot {index} leaf has no readable texturedRectangle")
+        sto = leaf_tr["singleTextureOpacity"]
+
+        non_leaf_error_x = sum(err[0] for err in anchor_errors[:-1])
+        non_leaf_error_y = sum(err[1] for err in anchor_errors[:-1])
+        leaf_error_x, leaf_error_y = anchor_errors[-1]
+        pixel_error_x += non_leaf_error_x + leaf_error_x * scale_x
+        pixel_error_y += non_leaf_error_y + leaf_error_y * scale_y
+        if pixel_error_x > _EFFECT_RECT_PIXEL_TOLERANCE or pixel_error_y > _EFFECT_RECT_PIXEL_TOLERANCE:
+            raise _Refuse(
+                f"slot {index} accumulated geometry error exceeds the 1px rect contract"
+            )
+
+        rect_w = width * scale_x
+        rect_h = height * scale_y
+        if rect_w <= 0 or rect_h <= 0:
+            raise _Refuse(f"slot {index} has a non-positive emitted rect dimension")
+        center_x = wrapper_x + tx
+        center_y = wrapper_y + ty
+        rect = [center_x - rect_w / 2, center_y - rect_h / 2, rect_w, rect_h]
+        if not all(math.isfinite(v) for v in rect):
+            raise _Refuse(f"slot {index} has a non-finite emitted rect {rect}")
+
+        computed.append(
+            {
+                "index": index, "width": width, "height": height, "rect": rect,
+                "product": product, "sto": sto, "fade": fade, "hidden": hidden,
+            }
+        )
+
+    excluded: list[dict[str, Any]] = []
+    candidates: dict[int, dict[str, Any]] = {}
+    for c in computed:
+        index = c["index"]
+        if c["fade"]:
+            excluded.append({"slot": index, "reason": "fade"})
+            continue
+        if c["hidden"]:
+            excluded.append({"slot": index, "reason": "hidden"})
+            continue
+        if not math.isclose(c["product"], c["sto"], rel_tol=0, abs_tol=1e-6):
+            excluded.append({"slot": index, "reason": "product-mismatch"})
+            continue
+        if c["sto"] < 1 - 1e-6:
+            candidates[index] = c
+
+    overrides: list[dict[str, Any]] = []
+    for index, c in candidates.items():
+        size = (c["width"], c["height"])
+        if any((o["width"], o["height"]) == size for o in computed if o["index"] != index):
+            excluded.append({"slot": index, "reason": "duplicate-size"})
+            continue
+        overrides.append({"slot": index, "opacity": c["sto"], "texW": c["width"], "texH": c["height"]})
+
+    excluded.sort(key=lambda e: e["slot"])
+    overrides.sort(key=lambda o: o["slot"])
+    return {
+        "slotSizes": [[c["width"], c["height"]] for c in computed],
+        "slotRects": [c["rect"] for c in computed],
+        "opacityOverrides": overrides,
+        "excluded": excluded,
+    }
+
+
+
 
 class _Refuse(Exception):
     """Internal control-flow only: carries the reason for an `Unsupported` result."""

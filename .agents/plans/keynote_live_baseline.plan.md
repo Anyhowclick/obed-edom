@@ -244,7 +244,7 @@ moving + scaling** (move and enlarge the movie; nothing above it on S3). S3→S4
 present on S4 — the deliberate restart. Every destination slide must have *nothing* in a higher draw slot
 overlapping the movie rect. This deck alone qualifies S5b.
 
-**(ii) Masked movie — 2 slides.** S1: one movie with a **shape mask / crop** applied in Keynote (an ellipse or a
+**(ii) Masked movie — MOOT (2026-09-22): Keynote cannot mask a movie, and a DSK-generator crop is a pre-cropped file with a plain rect; nothing to author. Kept for the record.** S1: one movie with a **shape mask / crop** applied in Keynote (an ellipse or a
 rectangle smaller than the movie). S1→S2 Magic Move, same rect. Purpose is the *encoding measurement*, not a
 green run: the expected outcome is `Unsupported: possible mask`.
 
