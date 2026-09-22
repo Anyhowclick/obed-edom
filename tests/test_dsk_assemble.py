@@ -125,6 +125,22 @@ def test_compiled_composition_script_reads_earlier_slide_playback_before_termina
     assert script.index("repetition method of movie 1 of slide 108") < script.index("repeat with i from slideCount")
 
 
+def test_compiled_composition_with_only_stills_leaves_the_layout_slide_clipless(tmp_path):
+    """Alpha_Wall slide 1 (one still, outgoing Magic Move): a still-only composition inserts
+    no clip, so it must not register as a clip slide -- otherwise the script skips the
+    dissolve (no clip) while builds verify still demands one and refuses the deck."""
+    composition = dsa.CompiledComposition(
+        id="slide:110", source_slides=(110,), layout_slide=110, overlay_slide=110,
+        output_frame=Rect(43, 802, 935, 263), source_mode="fw", content_mode="full",
+        media=(dsa.CompiledMedia("110:still", 110, ("image", 0), "s", "Building.png", Rect(43, 802, 935, 263)),),
+    )
+    plan = dsa.apply_compiled_compositions(_compiled_terminal_plan(), (composition,), {})
+    assert 110 not in plan.clips
+    assert 110 not in plan.clip_timing
+    script = build_assembly_script(plan, scratch_path=tmp_path / "wall.key", staging_path=tmp_path / "out.key")
+    assert "transition effect:dissolve" not in script
+
+
 def test_compiled_composition_refuses_a_target_outside_the_frozen_safe_area():
     composition = dsa.CompiledComposition(
         id="slide:110", source_slides=(110,), layout_slide=110, overlay_slide=110,
