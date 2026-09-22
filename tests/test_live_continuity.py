@@ -2607,7 +2607,7 @@ def test_real_export_matches_fixture_and_classifies_other_effects_by_shape():
 
 # --- G1: glReplay derivation (arming plan section 11) ---------------------------------------
 
-GL_REPLAY_RUNTIME_PLAN_SHA256 = "2ac48f1178bc271b679b58f7e58b46d1b0b383026cd3a82ffeb9aefcb98386f8"
+GL_REPLAY_RUNTIME_PLAN_SHA256 = "6a0596da54532493aee74d22fe91b7cbf3628795aca586dd3cf7dc61a37cc635"
 
 # `derive_plan(..., gl_replay=True)` on the fixture must produce exactly this runtime plan.
 EXPECTED_GL_REPLAY_RUNTIME_PLAN = {
@@ -2624,6 +2624,12 @@ EXPECTED_GL_REPLAY_RUNTIME_PLAN = {
                 [788.725538103768, 672.9158876261134, 353.0, 313.0],
             ],
             "opacityOverrides": [{"slot": 4, "opacity": REAL_SLOT4_OPACITY, "texW": 178, "texH": 157}],
+            "instanceId": "untitled.mov#1",
+            "instanceRect": {
+                "x": 109.3517074584961, "y": 795.0361938476562,
+                "w": 951.54296875, "h": 267.6214599609375,
+            },
+            "movieSlot": 3,
         },
         {"atScene": 6, "action": "restart"},
         {
@@ -2861,6 +2867,77 @@ def test_to_runtime_refuses_gl_replay_mismatched_slot_lists():
     result = replace(plan, boundaries=(bad_boundary, *plan.boundaries[1:])).to_runtime()
     assert isinstance(result, Unsupported)
     assert "unreadable override table" in result.reason
+
+
+# --- G1b: instanceId / instanceRect / movieSlot (G2 plan section 2.0) -----------------------
+
+
+def _gl_replay_plan_with(**movie_fields) -> ContinuityPlan:
+    """The flag-on fixture plan with the carried movie's G1b inputs overridden."""
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    boundary = plan.boundaries[0]
+    movie = boundary.movies[0]
+    assert movie.gl_replay is not None
+    bad_boundary = replace(boundary, movies=(replace(movie, **movie_fields),))
+    return replace(plan, boundaries=(bad_boundary, *plan.boundaries[1:]))
+
+
+def test_gl_replay_entry_binds_the_probe_instance_label_rect_and_slot():
+    """The three G1b fields must be exactly what the probe binds: `asset#index` over the
+    DOM-ordered `slide_instances` list, that list's stored floats verbatim, and the movie's
+    index in `slotSizes`/`slotRects`."""
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    entry = runtime["boundaries"][0]
+
+    asset = runtime["movies"][entry["movieKey"]]["assetKeys"][0]
+    destination = plan.slide_instances[1][asset]
+    assert entry["instanceId"] == f"{asset}#1"
+    assert entry["instanceRect"] == destination[0]
+    assert entry["instanceRect"] is not destination[0]
+    assert entry["movieSlot"] == 3
+    assert entry["slotSizes"][entry["movieSlot"]] == [960, 276]
+    assert list(entry)[-3:] == ["instanceId", "instanceRect", "movieSlot"]
+
+
+@pytest.mark.parametrize("slot", [None, 5, -1, True, 3.0])
+def test_to_runtime_refuses_an_out_of_range_or_unreadable_movie_slot(slot):
+    result = _gl_replay_plan_with(gl_replay_slot=slot).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "no readable movie slot index" in result.reason
+
+
+def test_to_runtime_refuses_a_non_finite_instance_rect():
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    boundary = plan.boundaries[0]
+    movie = boundary.movies[0]
+    assert movie.dst_rect is not None
+    infinite = Rect(movie.dst_rect.x, movie.dst_rect.y, movie.dst_rect.w, float("inf"))
+    bad_boundary = replace(boundary, movies=(replace(movie, dst_rect=infinite),))
+    instances = {
+        player: {asset: [dict(r) for r in rects] for asset, rects in by_asset.items()}
+        for player, by_asset in plan.slide_instances.items()
+    }
+    instances[1]["untitled.mov"][0]["h"] = float("inf")
+    result = replace(
+        plan, boundaries=(bad_boundary, *plan.boundaries[1:]), slide_instances=instances
+    ).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "not in slide_instances" in result.reason
+
+
+def test_to_runtime_refuses_when_the_destination_instance_is_not_in_slide_instances():
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    instances = {player: dict(by_asset) for player, by_asset in plan.slide_instances.items()}
+    instances[1] = {}
+    result = replace(plan, slide_instances=instances).to_runtime()
+    assert isinstance(result, Unsupported)
+    assert "not in slide_instances" in result.reason
 
 
 @pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")

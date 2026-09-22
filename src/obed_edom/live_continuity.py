@@ -627,7 +627,7 @@ class _Refuse(Exception):
 QUALIFIED_PLAN_SHA256: frozenset[str] = frozenset(
     {
         "bafe26cad55cf3a390154bce2c0fdcc771b9b1821293b6aec76119d25180e81e",
-        "2ac48f1178bc271b679b58f7e58b46d1b0b383026cd3a82ffeb9aefcb98386f8",
+        "6a0596da54532493aee74d22fe91b7cbf3628795aca586dd3cf7dc61a37cc635",
     }
 )
 
@@ -672,6 +672,9 @@ class MovieContinuity:
     derivation (arming plan section 11), else `None`."""
     gl_replay_reason: str | None = None
     """Why `gl_replay` derivation was not attempted or did not qualify, else `None`."""
+    gl_replay_slot: int | None = None
+    """The carried instance's index in the source slide's draw order, captured while that
+    slide's events are in hand; the runtime entry's `movieSlot`. Flag-on only."""
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -793,10 +796,26 @@ class ContinuityPlan:
                         or len(slot_sizes) != len(slot_rects)
                     ):
                         return Unsupported("glReplay boundary carries an unreadable override table")
+                    slot = movie.gl_replay_slot
+                    if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot < len(slot_sizes):
+                        return Unsupported("glReplay boundary has no readable movie slot index")
+                    asset = movies[key]["assetKeys"][0]
+                    bound = _destination_instance(
+                        self.slide_instances.get(boundary.to_player_index, {}).get(asset),
+                        movie.dst_rect,
+                    )
+                    if bound is None:
+                        return Unsupported(
+                            f"glReplay boundary's destination instance of '{asset}' is not in slide_instances"
+                        )
+                    instance_index, instance_rect = bound
                     runtime_boundaries.append(
                         {
                             "atScene": scene, "action": "glReplay", "movieKey": key, "fallback": "retire",
                             "slotSizes": slot_sizes, "slotRects": slot_rects, "opacityOverrides": overrides,
+                            "instanceId": f"{asset}#{instance_index}",
+                            "instanceRect": instance_rect,
+                            "movieSlot": slot,
                         }
                     )
                 else:
@@ -860,6 +879,26 @@ class ContinuityPlan:
 @dataclass(frozen=True)
 class Unsupported:
     reason: str
+
+
+def _destination_instance(
+    instances: list[dict[str, float]] | None, dst_rect: "Rect | None"
+) -> tuple[int, dict[str, float]] | None:
+    """The 1-based position of `dst_rect` in the asset's `slide_instances` list -- the same
+    DOM-ordered list, and the same floats, the probe binds `asset#index` and its rect to -- plus
+    that stored rect verbatim. `None` when the rect is absent, unmatched, or not four finite
+    floats."""
+    if not instances or dst_rect is None:
+        return None
+    wanted = dst_rect.as_dict()
+    for index, rect in enumerate(instances, start=1):
+        if not isinstance(rect, dict) or rect != wanted:
+            continue
+        values = [rect.get(k) for k in ("x", "y", "w", "h")]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
+            return None
+        return index, {k: rect[k] for k in ("x", "y", "w", "h")}
+    return None
 
 
 def _rect_ints(rect: dict[str, float]) -> dict[str, int]:
@@ -1215,15 +1254,15 @@ def _boundary_transition(events: list[Any], slide_name: str) -> dict[str, Any] |
 
 def _resolve_continuation(
     asset: str, outgoing: list[_MovieInstance], incoming: list[_MovieInstance], boundary_desc: str
-) -> tuple[MovieContinuity, _MovieInstance]:
+) -> tuple[MovieContinuity, _MovieInstance, _MovieInstance]:
     if len(outgoing) == 1 and len(incoming) == 1:
         src, dst = outgoing[0], incoming[0]
         action = "pin" if src.rect.close_to(dst.rect) else "bridge"
-        return MovieContinuity(asset, action, src.rect, dst.rect), dst
+        return MovieContinuity(asset, action, src.rect, dst.rect), src, dst
     pin_pairs = [(o, i) for o in outgoing for i in incoming if o.rect.close_to(i.rect)]
     if len(pin_pairs) == 1:
         src, dst = pin_pairs[0]
-        return MovieContinuity(asset, "pin", src.rect, dst.rect), dst
+        return MovieContinuity(asset, "pin", src.rect, dst.rect), src, dst
     raise _Refuse(
         f"ambiguous '{asset}' ownership at {boundary_desc}: "
         f"{len(outgoing)} instance(s) before, {len(incoming)} after, "
@@ -1236,6 +1275,9 @@ def _gl_replay_attempt(
     transition: dict[str, Any] | None,
     transition_name: str | None,
     continuing_count: int,
+    src_events: list[Any],
+    src_instance: "_MovieInstance",
+    src_slide_name: str,
     dst_events: list[Any],
 ) -> MovieContinuity:
     """Rules 1-5 of arming plan section 11, applied to a `pin` that received an overlap refusal.
@@ -1259,7 +1301,28 @@ def _gl_replay_attempt(
     if isinstance(result, Unsupported):
         reason = f"transition effect: {result.reason}"
         return replace(movie, gl_replay=None, gl_replay_reason=reason)
-    return replace(movie, gl_replay=result, gl_replay_reason=None)
+    try:
+        slot = _drawn_slot_index(src_events, src_instance, src_slide_name)
+    except _Refuse as exc:
+        return replace(movie, gl_replay=None, gl_replay_reason=str(exc))
+    if slot is None:
+        reason = "carried movie has no draw slot on the source slide"
+        return replace(movie, gl_replay=None, gl_replay_reason=reason)
+    return replace(movie, gl_replay=result, gl_replay_reason=None, gl_replay_slot=slot)
+
+
+def _drawn_slot_index(
+    events: list[Any], instance: "_MovieInstance", slide_name: str
+) -> int | None:
+    """The slot index of an instance in its slide's draw order -- for the source slide of a
+    `glReplay` boundary, the same index the transition effect's `slotSizes`/`slotRects` use."""
+    if instance.object_id is None:
+        return None
+    for event in events:
+        found = _movie_slot_index(_draw_slots(event, slide_name), instance.object_id, slide_name)
+        if found is not None:
+            return found
+    return None
 
 
 def _refusal_record(
@@ -1394,7 +1457,7 @@ def derive_plan(
                 movies.append(MovieContinuity(asset, "restart", src, dst))
                 continue
             try:
-                continuity, dst_instance = _resolve_continuation(
+                continuity, src_instance, dst_instance = _resolve_continuation(
                     asset, out_found, in_found, boundary_desc
                 )
                 refusal = _overlap_refusal(
@@ -1410,7 +1473,9 @@ def derive_plan(
                 continuity = replace(continuity, refusal=refusal)
                 if gl_replay:
                     continuity = _gl_replay_attempt(
-                        continuity, transition, transition_name, len(continuing), events_by_player[to_player_index]
+                        continuity, transition, transition_name, len(continuing),
+                        events_by_player[player_index], src_instance, uuid,
+                        events_by_player[to_player_index],
                     )
             movies.append(continuity)
             if continuity.action == "bridge":
