@@ -352,6 +352,18 @@ def layout_alpha_safe(slide_archive: dict, objects: dict[str, dict], canvas: tup
     return True
 
 
+def owned_alpha_safe_layout(deck: Path, candidates: Sequence[str]) -> str | None:
+    """The first of `candidates` (alternative aliases, any one acceptable) that `deck`
+    already owns alpha-safely -- no donor import needed -- or `None`."""
+    objects, _f, _fi = _load_deck(deck)
+    canvas = _canvas_size(objects)
+    for name in candidates:
+        owned = _find_layout_by_name(objects, name)
+        if owned is not None and layout_alpha_safe(owned, objects, canvas):
+            return name
+    return None
+
+
 def check_layout_import_preconditions(
     fw_deck: Path,
     *,

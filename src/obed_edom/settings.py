@@ -14,6 +14,8 @@ DEFAULTS = {
     "reusePreviews": True,
     "defaultExportDir": "",
     "highlightColour": "#e8772a",
+    "lwTemplate": "",
+    "dskTemplate": "",
 }
 
 _HEX_COLOUR_RE = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
@@ -47,6 +49,9 @@ def _clamp(data: dict) -> dict:
             out["highlightColour"] = f"#{hex_digits}"
         else:
             out["highlightColour"] = DEFAULTS["highlightColour"]
+    for key in ("lwTemplate", "dskTemplate"):
+        if key in data:
+            out[key] = str(data[key] or "").strip()
     return out
 
 

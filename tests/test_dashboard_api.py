@@ -461,6 +461,25 @@ def test_settings_roundtrip(tmp_path, monkeypatch):
     assert client.get("/api/settings").json()["reuseThreshold"] == 0.8
 
 
+def test_settings_remember_templates_without_touching_other_fields(tmp_path, monkeypatch):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "settings_path", lambda root=None: tmp_path / "settings.json")
+    client = TestClient(app)
+    put = client.put("/api/settings", json={"dskTemplate": "/Users/x/DSK.key"})
+    assert put.status_code == 200
+    assert put.json()["dskTemplate"] == "/Users/x/DSK.key"
+    assert put.json()["lwTemplate"] == ""
+
+    put = client.put("/api/settings", json={"lwTemplate": "/Users/x/LW.key"})
+    assert put.json()["dskTemplate"] == "/Users/x/DSK.key"
+    assert put.json()["lwTemplate"] == "/Users/x/LW.key"
+
+    got = client.get("/api/settings").json()
+    assert got["dskTemplate"] == "/Users/x/DSK.key"
+    assert client.put("/api/settings", json={"dskTemplate": ""}).json()["dskTemplate"] == ""
+
+
 def test_settings_unrelated_change_does_not_revalidate_export_dir(monkeypatch, tmp_path):
     from obed_edom import settings as settings_mod
 

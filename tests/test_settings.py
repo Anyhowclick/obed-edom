@@ -84,3 +84,18 @@ def test_load_settings_succeeds_with_stored_path_now_a_file(tmp_path: Path):
     export_dir.write_text("now a file")
     again = load_settings(tmp_path)
     assert again["defaultExportDir"] == str(export_dir.resolve())
+
+
+def test_templates_round_trip(tmp_path: Path):
+    assert load_settings(tmp_path)["dskTemplate"] == ""
+    assert load_settings(tmp_path)["lwTemplate"] == ""
+    save_settings({"dskTemplate": " /Users/x/DSK.key \n", "lwTemplate": "/Users/x/LW.key"}, tmp_path)
+    again = load_settings(tmp_path)
+    assert again["dskTemplate"] == "/Users/x/DSK.key"
+    assert again["lwTemplate"] == "/Users/x/LW.key"
+
+
+def test_templates_clear_with_empty_string(tmp_path: Path):
+    save_settings({"dskTemplate": "/Users/x/DSK.key"}, tmp_path)
+    save_settings({**load_settings(tmp_path), "dskTemplate": ""}, tmp_path)
+    assert load_settings(tmp_path)["dskTemplate"] == ""

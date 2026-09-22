@@ -35,10 +35,8 @@ export function DskDecksCard({
 }: Props) {
   const [templateOver, setTemplateOver] = useState(false);
   const [referenceOver, setReferenceOver] = useState(false);
-  const requiredId = "dsk-template-required";
   const errorId = "dsk-template-error";
-  const describedBy =
-    [!dskTemplate ? requiredId : null, templateError ? errorId : null].filter(Boolean).join(" ") || undefined;
+  const describedBy = templateError ? errorId : undefined;
 
   async function handleDrop(e: DragEvent, onPath: (path: string) => void, setOver: (v: boolean) => void) {
     e.preventDefault();
@@ -65,19 +63,7 @@ export function DskDecksCard({
           onDragLeave={() => setTemplateOver(false)}
           onDrop={(e) => void handleDrop(e, onTemplatePath, setTemplateOver)}
         >
-          <div className="dsk-deck-row-label">
-            DSK template
-            {!dskTemplate ? (
-              <>
-                <span className="err" aria-hidden="true">
-                  {" "}*
-                </span>
-                <span id={requiredId} className="visually-hidden">
-                  Required
-                </span>
-              </>
-            ) : null}
-          </div>
+          <div className="dsk-deck-row-label">DSK template</div>
           {dskTemplate ? (
             <>
               <p className="dsk-deck-row-name">
@@ -103,8 +89,9 @@ export function DskDecksCard({
           ) : (
             <>
               <p className="note">
-                The lower-thirds .key that supplies the DSK layouts. Remembered on this Mac, shared with
-                Sermon Base Generator.
+                Optional. Used only when neither the wall deck nor the reference deck has a transparent
+                Blank Black layout, or when text verses are reformatted. Remembered on this Mac, shared
+                with Sermon Base Generator.
               </p>
               <div className="actions">
                 <button

@@ -149,6 +149,20 @@ def test_compiled_composition_with_only_stills_leaves_the_layout_slide_clipless(
     assert "transition effect:dissolve" not in script
 
 
+def test_assembly_script_without_a_layout_template_skips_the_import_and_still_assigns_the_owned_layout(tmp_path):
+    """Donor hierarchy tier 1: the FW deck owns an alpha-safe `Blank Black`, so no template is
+    given (`layout_template=None`). The script must not open any template document, but it
+    must still resolve the deck's own black layout and set it as every kept slide's base."""
+    plan = _compiled_terminal_plan()
+    script = build_assembly_script(
+        plan, scratch_path=tmp_path / "wall.key", staging_path=tmp_path / "out.key", layout_template=None,
+        black_layout_names=("Blank Black",), import_layout_names=("Blank Black",),
+    )
+    assert "set tmplDoc to open POSIX file" not in script
+    assert 'set blackNames to {"Blank Black"}' in script
+    assert "set base layout of slide" in script
+
+
 def test_compiled_composition_refuses_a_target_outside_the_frozen_safe_area():
     composition = dsa.CompiledComposition(
         id="slide:110", source_slides=(110,), layout_slide=110, overlay_slide=110,
