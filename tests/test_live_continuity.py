@@ -8,7 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from obed_edom.live_continuity import ContinuityPlan, MovieContinuity, Rect, Unsupported, codec_report, derive_plan
+from obed_edom.live_continuity import (
+    ContinuityPlan,
+    MovieContinuity,
+    Rect,
+    Unsupported,
+    _check_effect_encoding,
+    _Refuse,
+    codec_report,
+    derive_plan,
+    effect_opacity_overrides,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 REAL_EXPORT_ROOT = Path(
@@ -1604,3 +1614,140 @@ def test_real_export_yields_the_same_runtime_plan_and_refusal():
     fixture = _plan()
     assert isinstance(fixture, ContinuityPlan)
     assert real.refusals == fixture.refusals
+
+
+# --- O0/O1: the glReplay transition-effect vocabulary and settled-opacity overrides --------
+#
+# `_check_effect_encoding`/`effect_opacity_overrides` are pure, importable functions the G1
+# arming work will call once `derive_plan` emits a `glReplay` boundary (not built yet -- see
+# the plan's O0/O1 rows). They are tested here directly against the real fixture export's
+# baseLayer.layers[1].effects[0] transition (the 1->2 magic move), the same export the other
+# `REAL_PLAYER_ROOT`-gated tests in this module use, and are skipped where that export is not
+# checked out (it is `output/**`, gitignored).
+
+# m4_settled.py's settled-leaf-rect arithmetic, measured on the qualified export.
+REAL_SLOT_SIZES = [[1920, 1080], [671, 195], [266, 236], [960, 276], [178, 157]]
+REAL_SLOT_RECTS = [
+    [0.0, 0.0, 1920, 1080],
+    [1071.68, 871.95, 671, 195],
+    [541.86, 721.08, 181.0, 161.0],
+    [105.12, 790.85, 960, 276],
+    [788.73, 672.92, 353.0, 313.0],
+]
+REAL_SLOT4_OPACITY = 0.29468628764152527
+
+
+def _real_effect(root: Path = REAL_PLAYER_ROOT) -> dict:
+    slide_list = json.loads((root / "assets" / "header.json").read_text())["slideList"]
+    data = json.loads((root / "assets" / slide_list[0] / f"{slide_list[0]}.json").read_text())
+    return data["events"][1]["effects"][0]
+
+
+def _real_export_effects(root: Path = REAL_PLAYER_ROOT) -> list[tuple[str, int, dict]]:
+    slide_list = json.loads((root / "assets" / "header.json").read_text())["slideList"]
+    found = []
+    for uuid in slide_list:
+        data = json.loads((root / "assets" / uuid / f"{uuid}.json").read_text())
+        for event_index, event in enumerate(data["events"]):
+            for effect in event.get("effects", []):
+                found.append((uuid, event_index, effect))
+    return found
+
+
+def _leaf_of(node: dict) -> dict:
+    while node.get("layers"):
+        node = node["layers"][0]
+    return node
+
+
+def _mutate_effect(transform) -> dict:
+    effect = copy.deepcopy(_real_effect())
+    transform(effect)
+    return effect
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_effect_tree_vocabulary_is_closed():
+    effect = _real_effect()
+    _check_effect_encoding(effect)  # must not raise: the 1->2 boundary is the qualified vocabulary
+
+    # Every OTHER effect in the export is reported, not silently widened into the vocabulary:
+    # `apple:movie-start` build-ins animate `isPlaying` (never measured for the 1->2 boundary)
+    # and the dissolve build-ins nest a sub-effect under `effects`, which this vocabulary --
+    # like the movie one -- treats as always empty.
+    for uuid, event_index, other in _real_export_effects():
+        try:
+            _check_effect_encoding(other)
+        except _Refuse as exc:
+            assert "isPlaying" in str(exc) or "effects" in str(exc), (uuid, event_index, other.get("name"), exc)
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_gl_replay_opacity_overrides_from_export():
+    result = effect_opacity_overrides(_real_effect())
+    assert isinstance(result, dict)
+    assert result["slotSizes"] == REAL_SLOT_SIZES
+    for got, want in zip(result["slotRects"], REAL_SLOT_RECTS):
+        assert got == pytest.approx(want, abs=1e-6)
+    assert len(result["opacityOverrides"]) == 1
+    override = result["opacityOverrides"][0]
+    assert override["slot"] == 4
+    assert override["opacity"] == pytest.approx(REAL_SLOT4_OPACITY, abs=1e-9)
+    assert override["texW"] == 178
+    assert override["texH"] == 157
+    assert result["excluded"] == [{"slot": 1, "reason": "fade"}]
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_faded_slot_is_excluded_not_refused():
+    """Slot 1 on the real fixture carries both a fade and a `hidden` animation; isolate the fade
+    alone (drop the `hidden` animation) to prove the fade path itself excludes rather than
+    refuses, independent of the `hidden` rule."""
+
+    def drop_hidden(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][1])
+        group = leaf["animations"][0]
+        group["animations"] = [a for a in group["animations"] if a.get("property") != "hidden"]
+
+    result = effect_opacity_overrides(_mutate_effect(drop_hidden))
+    assert isinstance(result, dict)
+    assert {"slot": 1, "reason": "fade"} in result["excluded"]
+    assert all(o["slot"] != 1 for o in result["opacityOverrides"])
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_settled_product_must_equal_single_texture_opacity():
+    def break_sto(effect):
+        leaf = _leaf_of(effect["baseLayer"]["layers"][4])
+        leaf["texturedRectangle"]["singleTextureOpacity"] = 0.5
+
+    result = effect_opacity_overrides(_mutate_effect(break_sto))
+    assert isinstance(result, dict)
+    assert {"slot": 4, "reason": "product-mismatch"} in result["excluded"]
+    assert all(o["slot"] != 4 for o in result["opacityOverrides"])
+
+
+@pytest.mark.skipif(not REAL_PLAYER_ROOT.is_dir(), reason="real player export not available")
+def test_duplicate_size_only_blocks_patched_slots():
+    def duplicate_among_full_opacity_slots(effect):
+        source = _leaf_of(effect["baseLayer"]["layers"][0])
+        target = _leaf_of(effect["baseLayer"]["layers"][2])
+        target["initialState"]["width"] = source["initialState"]["width"]
+        target["initialState"]["height"] = source["initialState"]["height"]
+
+    harmless = effect_opacity_overrides(_mutate_effect(duplicate_among_full_opacity_slots))
+    assert isinstance(harmless, dict)
+    assert harmless["opacityOverrides"] == [
+        {"slot": 4, "opacity": REAL_SLOT4_OPACITY, "texW": 178, "texH": 157}
+    ]
+    assert not any(e["reason"] == "duplicate-size" for e in harmless["excluded"])
+
+    def duplicate_onto_the_patched_slot(effect):
+        target = _leaf_of(effect["baseLayer"]["layers"][1])
+        target["initialState"]["width"] = 178
+        target["initialState"]["height"] = 157
+
+    blocked = effect_opacity_overrides(_mutate_effect(duplicate_onto_the_patched_slot))
+    assert isinstance(blocked, dict)
+    assert blocked["opacityOverrides"] == []
+    assert {"slot": 4, "reason": "duplicate-size"} in blocked["excluded"]

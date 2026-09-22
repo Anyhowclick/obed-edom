@@ -67,6 +67,285 @@ unmeasured object may be the mask this module cannot map."""
 _MASKING_NAME_FRAGMENTS = ("mask", "clip", "shapepath")
 _BENIGN_MASK_KEYS = frozenset({"masksToBounds", "edgeAntialiasingMask"})
 
+_EFFECT_TEXTURED_RECTANGLE_KEYS = _MOVIE_SUBTREE_KEYS["texturedRectangle"] | frozenset({"shapePath"})
+
+_EFFECT_SUBTREE_KEYS: dict[str, frozenset[str]] = {
+    "<transition effect>": _MOVIE_SUBTREE_KEYS["<movie node>"],
+    "attributes": _MOVIE_SUBTREE_KEYS["attributes"],
+    "baseLayer": _MOVIE_SUBTREE_KEYS["baseLayer"],
+    "layers": _MOVIE_SUBTREE_KEYS["layers"],
+    "initialState": _MOVIE_SUBTREE_KEYS["initialState"],
+    "position": _MOVIE_SUBTREE_KEYS["position"],
+    "anchorPoint": _MOVIE_SUBTREE_KEYS["anchorPoint"],
+    "contentsRect": _MOVIE_SUBTREE_KEYS["contentsRect"],
+    "texturedRectangle": _EFFECT_TEXTURED_RECTANGLE_KEYS,
+    "shapePath": frozenset(
+        {"elements", "flatness", "lineCapStyle", "lineJoinStyle", "lineWidth", "miterLimit", "windingRule"}
+    ),
+    "elements": frozenset({"points", "type"}),
+}
+"""Every object under the transition effect tree of the qualified 1->2 boundary (plan section 0,
+F-8), keyed like `_MOVIE_SUBTREE_KEYS` and sharing its frozensets wherever the measured keys are
+identical. `texturedRectangle` additionally measures `shapePath` here -- the shape-path inset
+noted in plan section 0, not a mask; movie nodes never carry it. `animations` groups and leaf
+animations are closed-set-checked separately (`_EFFECT_ANIMATION_GROUP_KEYS` /
+`_EFFECT_ANIMATION_LEAF_KEYS`), since which shape applies depends on whether a nested
+`animations` key is present, not on the key that holds the object."""
+
+_EFFECT_ANIMATION_GROUP_KEYS: frozenset[str] = frozenset(
+    {"additive", "animations", "autoreverses", "beginTime", "duration", "fillMode",
+     "removedOnCompletion", "repeatCount", "timeOffset"}
+)
+_EFFECT_ANIMATION_LEAF_KEYS: frozenset[str] = frozenset(
+    {"additive", "autoreverses", "beginTime", "duration", "fillMode", "from", "property",
+     "removedOnCompletion", "repeatCount", "timeOffset", "timingFunction", "to"}
+)
+_EFFECT_ANIMATION_PROPERTIES: frozenset[str] = frozenset(
+    {"contents", "hidden", "opacity", "transform.scale.x", "transform.scale.y",
+     "transform.translation", "zPosition"}
+)
+_EFFECT_FROM_TO_KEY_SETS: frozenset[frozenset[str]] = frozenset(
+    {frozenset({"scalar"}), frozenset({"pointX", "pointY"}), frozenset({"texture"})}
+)
+
+
+def _walk_effect_subtree(value: Any, kind: str, path: str) -> None:
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _walk_effect_subtree(item, kind, f"{path}[{index}]")
+        return
+    if not isinstance(value, dict):
+        return
+    allowed = _EFFECT_SUBTREE_KEYS.get(kind)
+    if allowed is None:
+        raise _Refuse(f"effect tree object at {path} has no measured vocabulary for '{kind}'")
+    for key, child in value.items():
+        if key not in allowed:
+            raise _Refuse(f"effect tree at {path}.{key} is outside the measured vocabulary")
+        if key == "animations":
+            _walk_effect_animations(child, f"{path}.animations")
+        else:
+            _walk_effect_subtree(child, key, f"{path}.{key}")
+
+
+def _walk_effect_animations(items: Any, path: str) -> None:
+    if not isinstance(items, list):
+        raise _Refuse(f"{path} is not a readable animation list")
+    for index, item in enumerate(items):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict):
+            raise _Refuse(f"{item_path} is not a readable animation")
+        if "animations" in item:
+            extra = set(item) - _EFFECT_ANIMATION_GROUP_KEYS
+            if extra:
+                raise _Refuse(f"{item_path} carries unmeasured animation-group keys {sorted(extra)}")
+            _walk_effect_animations(item["animations"], f"{item_path}.animations")
+            continue
+        extra = set(item) - _EFFECT_ANIMATION_LEAF_KEYS
+        if extra:
+            raise _Refuse(f"{item_path} carries unmeasured animation keys {sorted(extra)}")
+        if item.get("property") not in _EFFECT_ANIMATION_PROPERTIES:
+            raise _Refuse(f"{item_path} has an unmeasured animation property {item.get('property')!r}")
+        for side in ("from", "to"):
+            if side not in item:
+                continue
+            value = item[side]
+            if not isinstance(value, dict) or frozenset(value) not in _EFFECT_FROM_TO_KEY_SETS:
+                raise _Refuse(f"{item_path}.{side} has an unmeasured value shape")
+
+
+def _check_effect_encoding(effect: dict[str, Any]) -> None:
+    _walk_effect_subtree(effect, "<transition effect>", "<transition effect>")
+
+
+def _flatten_effect_animations(items: Any) -> list[dict[str, Any]]:
+    flat: list[dict[str, Any]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            raise _Refuse("effect animation entry is not a readable object")
+        if "animations" in item:
+            flat.extend(_flatten_effect_animations(item["animations"]))
+        else:
+            flat.append(item)
+    return flat
+
+
+def _settled_animations(node: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Property -> its last animation whose `fillMode` is `both` or `forwards` (plan section 0's
+    settled-opacity rule generalised to every animated property this module reads)."""
+    settled: dict[str, dict[str, Any]] = {}
+    for leaf in _flatten_effect_animations(node.get("animations")):
+        if leaf.get("fillMode") in ("both", "forwards"):
+            settled[leaf.get("property")] = leaf
+    return settled
+
+
+def _effect_scalar(value: Any, where: str) -> float:
+    if not isinstance(value, dict) or set(value) != {"scalar"}:
+        raise _Refuse(f"{where} is not a readable scalar value")
+    return _finite(value["scalar"], "scalar", where, "<effect>")
+
+
+def _effect_point(value: Any, where: str) -> tuple[float, float]:
+    if not isinstance(value, dict) or set(value) != {"pointX", "pointY"}:
+        raise _Refuse(f"{where} is not a readable point value")
+    return (
+        _finite(value["pointX"], "pointX", where, "<effect>"),
+        _finite(value["pointY"], "pointY", where, "<effect>"),
+    )
+
+
+def _effect_number_default(state: dict[str, Any], key: str, default: float, index: int) -> float:
+    if key not in state:
+        return default
+    return _finite(state[key], key, f"slot {index}", "<effect>")
+
+
+def _effect_chain(slot: Any, index: int) -> list[dict[str, Any]]:
+    """The single-child descent from a top-level slot wrapper to its textured leaf (plan section
+    0, `m4_settled.py`): every measured slot is exactly one chain, never a branch."""
+    if not isinstance(slot, dict):
+        raise _Refuse(f"slot {index} is not a readable object")
+    chain = [slot]
+    node = slot
+    while True:
+        kids = node.get("layers")
+        if not kids:
+            break
+        if not isinstance(kids, list) or len(kids) != 1 or not isinstance(kids[0], dict):
+            raise _Refuse(f"slot {index} has a branching or unreadable layer chain")
+        node = kids[0]
+        chain.append(node)
+    return chain
+
+
+def effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any] | Unsupported:
+    """Settled per-slot opacity overrides for a `glReplay` boundary's transition effect (plan
+    section 2). Any object outside `_EFFECT_SUBTREE_KEYS`, or an animation shape this module has
+    never measured, refuses the whole computation. A real fade (`from != to` on the settled
+    opacity animation) or a `hidden` animation on a slot's path, a settled product that disagrees
+    with the leaf's `singleTextureOpacity`, or an overridden slot's texture size duplicating
+    another slot's, excludes only that slot -- never a refusal."""
+    try:
+        return _effect_opacity_overrides(effect)
+    except _Refuse as exc:
+        return Unsupported(str(exc))
+
+
+def _effect_opacity_overrides(effect: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(effect, dict):
+        raise _Refuse("effect is not a readable object")
+    _check_effect_encoding(effect)
+    base_layer = effect.get("baseLayer")
+    if not isinstance(base_layer, dict):
+        raise _Refuse("effect has no readable baseLayer")
+    slots = base_layer.get("layers")
+    if not isinstance(slots, list) or not slots:
+        raise _Refuse("effect declares no readable top-level slots")
+
+    computed: list[dict[str, Any]] = []
+    for index, slot in enumerate(slots):
+        chain = _effect_chain(slot, index)
+        product = 1.0
+        fade = False
+        hidden = False
+        for node in chain:
+            state = node.get("initialState")
+            state = state if isinstance(state, dict) else {}
+            settled = _settled_animations(node)
+            if "hidden" in settled:
+                hidden = True
+            if "opacity" in settled:
+                anim = settled["opacity"]
+                to_value = _effect_scalar(anim.get("to"), f"slot {index} opacity.to")
+                from_value = _effect_scalar(anim.get("from"), f"slot {index} opacity.from")
+                if abs(from_value - to_value) > 1e-9:
+                    fade = True
+                product *= to_value
+            else:
+                product *= _effect_number_default(state, "opacity", 1.0, index)
+
+        wrapper, leaf = chain[0], chain[-1]
+        wrapper_state = wrapper.get("initialState")
+        wrapper_state = wrapper_state if isinstance(wrapper_state, dict) else {}
+        leaf_state = leaf.get("initialState")
+        leaf_state = leaf_state if isinstance(leaf_state, dict) else {}
+        leaf_settled = _settled_animations(leaf)
+
+        width = _number(leaf_state, "width", where=f"slot {index} leaf", slide_name="<effect>")
+        height = _number(leaf_state, "height", where=f"slot {index} leaf", slide_name="<effect>")
+        scale_x = (
+            _effect_scalar(leaf_settled["transform.scale.x"]["to"], f"slot {index} scale.x")
+            if "transform.scale.x" in leaf_settled
+            else _effect_number_default(leaf_state, "scale", 1.0, index)
+        )
+        scale_y = (
+            _effect_scalar(leaf_settled["transform.scale.y"]["to"], f"slot {index} scale.y")
+            if "transform.scale.y" in leaf_settled
+            else _effect_number_default(leaf_state, "scale", 1.0, index)
+        )
+        if "transform.translation" in leaf_settled:
+            tx, ty = _effect_point(leaf_settled["transform.translation"]["to"], f"slot {index} translation")
+        else:
+            tx, ty = 0.0, 0.0
+        wrapper_x = _number(
+            wrapper_state, "position", "pointX", where=f"slot {index} wrapper", slide_name="<effect>"
+        )
+        wrapper_y = _number(
+            wrapper_state, "position", "pointY", where=f"slot {index} wrapper", slide_name="<effect>"
+        )
+
+        leaf_tr = leaf.get("texturedRectangle")
+        if not isinstance(leaf_tr, dict) or "singleTextureOpacity" not in leaf_tr:
+            raise _Refuse(f"slot {index} leaf has no readable texturedRectangle.singleTextureOpacity")
+        sto = _finite(leaf_tr["singleTextureOpacity"], "singleTextureOpacity", f"slot {index}", "<effect>")
+
+        rect_w = width * scale_x
+        rect_h = height * scale_y
+        center_x = wrapper_x + tx
+        center_y = wrapper_y + ty
+        rect = [center_x - rect_w / 2, center_y - rect_h / 2, rect_w, rect_h]
+
+        computed.append(
+            {
+                "index": index, "width": width, "height": height, "rect": rect,
+                "product": product, "sto": sto, "fade": fade, "hidden": hidden,
+            }
+        )
+
+    excluded: list[dict[str, Any]] = []
+    candidates: dict[int, dict[str, Any]] = {}
+    for c in computed:
+        index = c["index"]
+        if c["fade"]:
+            excluded.append({"slot": index, "reason": "fade"})
+            continue
+        if c["hidden"]:
+            excluded.append({"slot": index, "reason": "hidden"})
+            continue
+        if abs(c["product"] - c["sto"]) > 1e-6:
+            excluded.append({"slot": index, "reason": "product-mismatch"})
+            continue
+        if c["sto"] < 1 - 1e-6:
+            candidates[index] = c
+
+    overrides: list[dict[str, Any]] = []
+    for index, c in candidates.items():
+        size = (c["width"], c["height"])
+        if any((o["width"], o["height"]) == size for o in computed if o["index"] != index):
+            excluded.append({"slot": index, "reason": "duplicate-size"})
+            continue
+        overrides.append({"slot": index, "opacity": c["sto"], "texW": c["width"], "texH": c["height"]})
+
+    excluded.sort(key=lambda e: e["slot"])
+    overrides.sort(key=lambda o: o["slot"])
+    return {
+        "slotSizes": [[c["width"], c["height"]] for c in computed],
+        "slotRects": [c["rect"] for c in computed],
+        "opacityOverrides": overrides,
+        "excluded": excluded,
+    }
+
 
 class _Refuse(Exception):
     """Internal control-flow only: carries the reason for an `Unsupported` result."""
