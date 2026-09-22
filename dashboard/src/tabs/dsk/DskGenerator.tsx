@@ -63,7 +63,7 @@ type DskResult = {
   compositions?: unknown[];
 };
 
-export function DskGenerator() {
+export function DskGenerator({ onOpenExporter }: { onOpenExporter?: () => void } = {}) {
   const { job, upsert, rename, error: openError } = useCurrentJob("dsk");
   const [keynote, setKeynote] = useState<ChosenFile | null>(null);
   const [dskTemplate, setDskTemplate] = useStoredTemplate("dskTemplate");
@@ -344,13 +344,18 @@ export function DskGenerator() {
               </p>
             </div>
           </div>
-          <p className="path-note dsk-result-path">{result.deckPath}</p>
-          <div className="actions">
+          <p className="dsk-result-path" title={result.deckPath}>{result.deckPath}</p>
+          <div className="actions dsk-result-actions">
+            {onOpenExporter && (
+              <button className="btn" type="button" onClick={onOpenExporter}>
+                Continue in Exporter
+              </button>
+            )}
             <button className="btn secondary" type="button" onClick={() => reveal(result.deckPath!)}>
               Show in Finder
             </button>
+            <span className="note">Next, the Exporter bakes the live overlays into the final .mov(s).</span>
           </div>
-          <p className="note">Next: open the Exporter tab to bake the live overlays into the final .mov(s).</p>
           {(skipped.length > 0 || (result.warnings || []).length > 0 || (result.overflows || []).length > 0) && (
             <div className="dsk-result-notes">
               <p className="dsk-result-notes-title">Notes</p>

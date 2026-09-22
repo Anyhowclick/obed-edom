@@ -720,13 +720,31 @@ h3 {
   background: #ff6b6b;
 }
 .path-note { overflow-wrap: anywhere; }
-.dsk-result { margin: 16px 0; }
+.dsk-result {
+  margin: 16px 0;
+  padding: 18px 20px;
+  border: 1px solid var(--aud-dsk-line);
+  border-radius: var(--radius-md);
+  background: var(--aud-dsk-tint);
+}
+.dsk-result .btn.secondary { border-color: var(--aud-dsk-line); color: var(--aud-dsk); }
+.dsk-result .btn.secondary:hover:not(:disabled) { border-color: var(--aud-dsk); background: rgba(255, 123, 172, 0.12); }
 .dsk-result-header { display: flex; align-items: flex-start; gap: 10px; }
 .dsk-result-icon { --icon-size: 22px; color: var(--ok); flex: none; margin-top: 2px; }
 .dsk-result-heading { min-width: 0; }
 .dsk-result-name { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 600; color: var(--ink-primary); }
-.dsk-result-path { margin-top: 4px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-tertiary); }
-.dsk-result-notes { margin-top: 16px; }
+.dsk-result-path {
+  margin: 6px 0 0 32px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dsk-result-actions { margin: 14px 0 0 32px; align-items: center; }
+.dsk-result-actions .note { flex-basis: 100%; }
+.dsk-result-notes { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--aud-dsk-line); }
 .dsk-result-notes-title { margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; color: var(--ink-secondary); }
 .dsk-result-notes .flag { display: flex; align-items: flex-start; gap: 8px; }
 .dsk-result-notes .flag .status-icon { margin-top: 2px; flex: none; }

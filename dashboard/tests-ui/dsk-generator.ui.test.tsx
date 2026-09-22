@@ -477,8 +477,20 @@ describe("DskGenerator result card", () => {
     expect(screen.getByText("fw_DSK.key · 1 slides")).toBeInTheDocument();
     expect(screen.getByText("/tmp/workspace/fw_DSK.key")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show in Finder" })).toBeInTheDocument();
-    expect(screen.getByText(/Next: open the Exporter tab/)).toBeInTheDocument();
+    expect(screen.getByText(/the Exporter bakes the live overlays/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue in Exporter" })).toBeNull();
     expect(screen.queryByText("Notes")).toBeNull();
+  });
+
+  it("offers Continue in Exporter when the DSK tab can switch sub-tabs, and does not show Preview builds", async () => {
+    mockSession(doneJob);
+    const onOpenExporter = vi.fn();
+    render(<DskGenerator onOpenExporter={onOpenExporter} />);
+    await act(async () => {});
+
+    expect(screen.queryByRole("button", { name: "Preview builds" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Continue in Exporter" }));
+    expect(onOpenExporter).toHaveBeenCalledTimes(1);
   });
 
   it("lists skipped slides, warnings, and overflows as Notes when present", async () => {
