@@ -383,6 +383,66 @@ def test_propose_pinned_candidate_matches_a_pinned_apply(
     assert candidate_rows == apply_rows
 
 
+def test_pinning_the_previous_page_changes_how_the_next_pinned_page_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidates model 'pin only this page'. Pinning Gold 13 AND 14 to template 5 together
+    lets 14 reuse 13's affine, so the pin the lone-14 candidate flags as overridden IS used
+    when 13 is pinned too -- the reason the review says previews assume the other pages stay
+    automatic."""
+    from obed_edom.map_remap import learn_recipe, plan_payload
+
+    deck_name = "Gold_Wall_Input.key"
+    _skip_ladder(deck_name)
+    deck = DECKS / deck_name
+
+    def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
+        return {}
+
+    monkeypatch.setattr(framing, "build_preview_thumbs", _no_thumbs)
+    proposal = framing.propose_framings(
+        deck,
+        TEMPLATE,
+        wall_payload=offline_wall_payload(deck),
+        template_payload=offline_wall_payload(TEMPLATE),
+        log=lambda _m: None,
+    )
+    page_14 = next(p for p in proposal["pages"] if p["slide"] == 14)
+    lone_candidate = next(c for c in page_14["candidates"] if c["templateSlide"] == 5)
+    assert lone_candidate["pinOverridden"] is True
+
+    wall = offline_wall_payload(deck)
+    template = offline_wall_payload(TEMPLATE)
+    card_stroke = remap_keynote.prepare_wall_payload(deck, wall, TEMPLATE, template, lambda _m: None)
+    joint = plan_payload(
+        wall,
+        learn_recipe(wall, template),
+        template=template,
+        card_stroke=card_stroke,
+        framing_overrides={13: 5, 14: 5},
+    )
+    rows = {r["slide"]: r for r in joint.framing}
+    for slide_no in (13, 14):
+        row = rows[slide_no]
+        assert row["templateSlide"] == 5, row
+        assert row["source"] == "sibling-affine", row
+        assert row["reusedSibling"] is True, row
+        assert row["pinOverridden"] is False, row
+        assert row["fitted"] is False, row
+
+    joint_14 = [
+        (t.role, t.kind, round(t.x), round(t.y), round(t.w), round(t.h))
+        for t in joint.transforms
+        if t.slide_number == 14 and t.role in ROLE_SET
+    ]
+    lone_14 = [
+        (r["role"], r["kind"], r["x"], r["y"], r.get("w", 0), r.get("h", 0))
+        for r in lone_candidate["rects"]
+        if r["role"] in ROLE_SET
+    ]
+    assert joint_14 and joint_14 != lone_14
+
+
 _FULL_WALL_BANK_SKIP = (
     "no JXA slide-digest bank for Full_Report_Card_Wall.key: a legacy Keynote read of a "
     "155-slide, 6.7 GB deck is deliberately not run on this machine (Gold, at 19 slides, "
