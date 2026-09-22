@@ -907,7 +907,7 @@ _MISSING = object()
 # The real A1/B/A2 bracket committed under `tests/fixtures/p2_freeze_3to4/`
 # (fixture commit 3b31048a) was captured before `burstOffsetsMs` existed in
 # `footprintFullyLive.evidence` at all, under the burst cadence THEN in force
-# -- the unspaced 5-shot-derived 12-shot profile this tuple names. It is
+# -- the earlier, tighter 5-shot-derived 12-shot profile this tuple names. It is
 # scored under its OWN profile, named explicitly here; this tuple lives only
 # in tests; production code never references it.
 LEGACY_BURST_OFFSETS_MS = (0, 130, 290, 500, 770, 1000, 1190, 1430, 1650, 1910, 2110, 2360)

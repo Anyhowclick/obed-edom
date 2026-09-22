@@ -2481,6 +2481,45 @@ class TestBurstProfileArtifact:
         assert record["verdict"] is True
 
 
+def _base_shaped_record(
+    host: "FakeHost", slide: dict[str, Any], instances: dict[int, dict[str, list[Any]]],
+    viewport: tuple[int, int], scorer: Any, clock: "FakeClock",
+) -> dict[str, Any]:
+    """Regenerates `tests/fixtures/live_continuity_probe/base_shaped_record.json`
+    (Codex r3 Spec 5): the origin/main record shape, built by driving the SAME
+    pre-existing primitives `visible_slide_record` itself calls (settle wait,
+    scene, stage map, burst capture, expected rects, instance check, control,
+    scorer) -- literally the pre-oracle record path. NOT called by any test;
+    kept only so the golden fixture can be regenerated deliberately (never
+    silently) when one of those primitives intentionally changes shape. See
+    that JSON's own `_provenance` field for the exact call this reproduces."""
+    transport = host._require_transport()
+    assert probe.wait_until_settled(host, now=clock.now, sleep=clock.sleep)
+    scene_id = transport.evaluate(probe.SCENE_ID_JS)
+    stage_map = transport.evaluate(probe.STAGE_MAP_JS)
+    painting_raw = transport.evaluate(probe.PAINTING_VIDEOS_JS)
+    frames, offsets = probe.capture_burst(transport, now=clock.now, sleep=clock.sleep)
+    expected = probe.expected_screen_rects(instances, slide["playerIndex"], stage_map, None)
+    painting = probe.painting_videos(painting_raw, stage_map)
+    instance_check = probe.match_painting_videos(painting, expected)
+    control = probe.control_region(probe.stage_screen_rect(stage_map), viewport)
+    scored = scorer(
+        frames,
+        [{**item["screen"], "label": item["label"], "expect": item["expect"]} for item in expected],
+        control,
+    )
+    verdict, status = scored.get("verdict"), scored.get("status")
+    if verdict is True and not instance_check["verdict"]:
+        verdict, status = False, "fail"
+    return {
+        "playerIndex": int(slide["playerIndex"]), "originalOrdinal": slide.get("originalOrdinal"),
+        "sceneId": scene_id, "expectedRects": expected, "perRect": scored.get("perRect") or [],
+        "stray": scored.get("stray"), "noiseFloor": scored.get("noiseFloor"), "shotOffsetsMs": offsets,
+        "stageMap": stage_map, "instanceCheck": instance_check, "status": status, "verdict": verdict,
+        "attempts": 1, "control": control,
+    }
+
+
 class TestInPageOracleApplicability:
     """The JS predicate cannot run in pytest, so these test the Python
     handling of each `reason` the JS could return, plus the JS source's own
@@ -2500,68 +2539,43 @@ class TestInPageOracleApplicability:
         raw = {"applicable": False, "status": "n/a", "reason": reason}
         assert probe.inpage_oracle_result(raw) is None
 
-    def _base_shaped_record(
-        self, host: "FakeHost", slide: dict[str, Any], instances: dict[int, dict[str, list[Any]]],
-        viewport: tuple[int, int], scorer: Any, clock: "FakeClock",
-    ) -> dict[str, Any]:
-        """The origin/main record shape, built by driving the SAME pre-existing
-        primitives `visible_slide_record` itself calls (settle wait, scene,
-        stage map, burst capture, expected rects, instance check, control,
-        scorer) -- literally the pre-oracle record path, so the comparison
-        below is against a real base-shaped record, not a re-derivation of
-        the branch's own combined output (Codex r2 Spec 7)."""
-        transport = host._require_transport()
-        assert probe.wait_until_settled(host, now=clock.now, sleep=clock.sleep)
-        scene_id = transport.evaluate(probe.SCENE_ID_JS)
-        stage_map = transport.evaluate(probe.STAGE_MAP_JS)
-        painting_raw = transport.evaluate(probe.PAINTING_VIDEOS_JS)
-        frames, offsets = probe.capture_burst(transport, now=clock.now, sleep=clock.sleep)
-        expected = probe.expected_screen_rects(instances, slide["playerIndex"], stage_map, None)
-        painting = probe.painting_videos(painting_raw, stage_map)
-        instance_check = probe.match_painting_videos(painting, expected)
-        control = probe.control_region(probe.stage_screen_rect(stage_map), viewport)
-        scored = scorer(
-            frames,
-            [{**item["screen"], "label": item["label"], "expect": item["expect"]} for item in expected],
-            control,
-        )
-        verdict, status = scored.get("verdict"), scored.get("status")
-        if verdict is True and not instance_check["verdict"]:
-            verdict, status = False, "fail"
-        return {
-            "playerIndex": int(slide["playerIndex"]), "originalOrdinal": slide.get("originalOrdinal"),
-            "sceneId": scene_id, "expectedRects": expected, "perRect": scored.get("perRect") or [],
-            "stray": scored.get("stray"), "noiseFloor": scored.get("noiseFloor"), "shotOffsetsMs": offsets,
-            "stageMap": stage_map, "instanceCheck": instance_check, "status": status, "verdict": verdict,
-            "attempts": 1, "control": control,
-        }
+    # Codex r3 Spec 5: compare against a FIXED literal/checked-in golden, not a
+    # dynamically re-derived one -- the primitives below could otherwise drift
+    # in lockstep with the branch and never show a real difference. The golden
+    # was generated ONCE by driving the pre-existing (pre-oracle) primitives
+    # `visible_slide_record` itself calls (`wait_until_settled`,
+    # `capture_burst`, `expected_screen_rects`, `painting_videos`,
+    # `match_painting_videos`, `control_region`, `stage_screen_rect`,
+    # `score_visible_slide`) over the same `FakeHost`/`instances` fixture this
+    # test builds; see the JSON file's own `_provenance` field for the exact
+    # recipe to regenerate it if one of those primitives intentionally changes
+    # shape.
+    GOLDEN_BASE_RECORD_PATH = (
+        Path(__file__).parent / "fixtures" / "live_continuity_probe" / "base_shaped_record.json"
+    )
 
     def test_no_gl_handle_records_not_applicable_and_changes_nothing(self) -> None:
-        """Full base-shaped golden compare (Codex r2 Spec 7): the branch's
-        record and an independently-driven base record (built from the SAME
-        pre-existing primitives, see `_base_shaped_record`) must be IDENTICAL
-        field for field -- scene, expected rects, stage map, instance check,
-        attempts, and control included, not only the scorer's own verdict --
-        exempting only `shotOffsetsMs`, and permitting only the documented
-        additive `burstProfile` and per-rect `oracles` keys."""
+        """Full base-shaped golden compare (Codex r2 Spec 7; Codex r3 Spec 5
+        fixes the golden to a checked-in literal): the branch's record must be
+        IDENTICAL, field for field, to the FIXED golden -- scene, expected
+        rects, stage map, instance check, attempts, and control included, not
+        only the scorer's own verdict -- exempting only `shotOffsetsMs`, and
+        permitting only the documented additive `burstProfile` and per-rect
+        `oracles` keys."""
         from obed_edom.html_alpha_probe import score_visible_slide
 
         stage_map = PAINT_STAGE_MAPS["full-bleed"]
         shot = png_b64(*PAINT_VIEWPORT)
         instances = {0: {"Untitled.mov": [probe.to_authored_rect(EXPECTED_SCREEN_RECT, stage_map)]}}
 
-        clock_a = FakeClock()
-        host_a = FakeHost(scene_ids=["s"] * 8, stage_map=dict(stage_map), shot=shot)
+        clock = FakeClock()
+        host = FakeHost(scene_ids=["s"] * 8, stage_map=dict(stage_map), shot=shot)
         record = probe.visible_slide_record(
-            host_a, VISIBLE_SLIDE, instances, PAINT_VIEWPORT, scorer=score_visible_slide,
-            now=clock_a.now, sleep=clock_a.sleep,
+            host, VISIBLE_SLIDE, instances, PAINT_VIEWPORT, scorer=score_visible_slide,
+            now=clock.now, sleep=clock.sleep,
         )
 
-        clock_b = FakeClock()
-        host_b = FakeHost(scene_ids=["s"] * 8, stage_map=dict(stage_map), shot=shot)
-        base = self._base_shaped_record(
-            host_b, VISIBLE_SLIDE, instances, PAINT_VIEWPORT, score_visible_slide, clock_b,
-        )
+        base = json.loads(self.GOLDEN_BASE_RECORD_PATH.read_text())["record"]
 
         assert record["perRect"], "the fixture must exercise at least one rect"
         stripped_record = dict(record)
@@ -2723,12 +2737,15 @@ class TestHandleIdentityBinding:
     IDENTITY_MISMATCH_REASONS = [
         "the runtime handle was replaced",
         "handle re-recorded during the sample window",
-        "handle scene no longer matches the live player scene",
+        "handle scene does not match the scene being scored",
+        "handle canvas, gl, or video identity changed",
+        "canvas is not a descendant of #stage",
         "canvas disconnected",
         "context lost",
         "canvas is not visible",
         "handle rect does not exactly match the scored instance rect",
         "handle instance does not match the scored instance",
+        "handle is present but malformed",
     ]
 
     @pytest.mark.parametrize("reason", IDENTITY_MISMATCH_REASONS)
@@ -2739,6 +2756,35 @@ class TestHandleIdentityBinding:
         assert result["verdict"] is None
         assert result["status"] == "inconclusive"
         assert result["reason"] == reason
+
+    def test_a_new_scene_with_the_same_rect_is_an_applicable_inconclusive(self) -> None:
+        """Codex r3 Spec 1: a self-consistent handle re-published for a NEW
+        scene, whose rect happens to coincide with the previous scene's, must
+        not corroborate the previous scene's screenshots -- the JS's own
+        `recheck()` binds `handle.sceneId === expectedScene === liveSceneId()`,
+        not merely "the current live scene equals whatever the handle claims"."""
+        raw = {"applicable": True, "status": "inconclusive", "reason": "handle scene does not match the scene being scored"}
+        result = probe.inpage_oracle_result(raw)
+        assert result["verdict"] is None
+        assert result["status"] == "inconclusive"
+
+    def test_a_swapped_canvas_object_is_an_applicable_inconclusive(self) -> None:
+        """A handle whose `canvas`/`gl`/`video` object identity changed after
+        entry (e.g. the runtime re-created the canvas mid-read) must not be
+        trusted just because `handle.rect`/`sceneId` still read the same."""
+        raw = {"applicable": True, "status": "inconclusive", "reason": "handle canvas, gl, or video identity changed"}
+        result = probe.inpage_oracle_result(raw)
+        assert result["verdict"] is None
+        assert result["status"] == "inconclusive"
+
+    def test_present_but_malformed_handle_is_inconclusive_not_n_a(self) -> None:
+        """Codex r3 Spec 1: only an ABSENT global handle may answer n/a; a
+        PRESENT but malformed one (missing a required member) must be an
+        applicable INCONCLUSIVE, never silently n/a."""
+        raw = {"applicable": True, "status": "inconclusive", "reason": "handle is present but malformed"}
+        result = probe.inpage_oracle_result(raw)
+        assert result is not None
+        assert result["status"] == "inconclusive"
 
     def test_measurement_binds_the_scene_rect_and_instance_before_reading(self) -> None:
         host = FakeHost(scene_ids=["scene-7", "scene-7"], inpage=[{"applicable": False, "status": "n/a", "reason": "no handle"}])
@@ -2755,6 +2801,20 @@ class TestHandleIdentityBinding:
         assert "recheck" in js
         assert js.count("recheck()") >= 4
         assert "__OBED_GL_ORACLE__ !== handle" in js
+
+    def test_js_source_snapshots_scene_and_object_identities_at_entry(self) -> None:
+        js = probe.INPAGE_LIVENESS_JS
+        assert "var expectedScene = window.__obedInpageSceneId" in js
+        assert "var canvas0 = handle.canvas, gl0 = handle.gl, video0 = handle.video" in js
+        assert "handle.canvas !== canvas0 || handle.gl !== gl0 || handle.video !== video0" in js
+        assert "handle.sceneId !== expectedScene || liveSceneId() !== expectedScene" in js
+
+    def test_js_source_only_an_absent_handle_returns_n_a(self) -> None:
+        js = probe.INPAGE_LIVENESS_JS
+        absent_check = js.index("if (!handle) { return notApplicable(")
+        malformed_check = js.index("return inconclusive('handle is present but malformed')")
+        assert absent_check < malformed_check
+        assert js.count("notApplicable(") == 2  # the definition plus its one call site
 
 
 class TestAsyncOracleFailureHandling:
@@ -2791,12 +2851,82 @@ class TestAsyncOracleFailureHandling:
         assert record["perRect"][0]["oracles"]["inpage"]["status"] == "inconclusive"
 
     def test_js_source_wraps_paused_sampling_in_try_finally_with_resume(self) -> None:
+        """Codex r3 Spec 3: `pause()` itself moved INSIDE the `try` (a promise
+        that pauses and then rejects must still hit `finally`)."""
         js = probe.INPAGE_LIVENESS_JS
-        pause_index = js.index("handle.pause()")
-        try_index = js.index("try", pause_index)
-        finally_index = js.index("finally", try_index)
+        try_index = js.index("try {")
+        pause_index = js.index("handle.pause()", try_index)
+        finally_index = js.index("finally", pause_index)
         resume_index = js.index("handle.resume()", finally_index)
-        assert pause_index < try_index < finally_index < resume_index
+        assert try_index < pause_index < finally_index < resume_index
+        # A recheck immediately follows the paused sample, still inside the try.
+        paused_sample_index = js.index("handle.sample(", pause_index)
+        recheck_after_paused = js.index("recheck()", paused_sample_index)
+        assert paused_sample_index < recheck_after_paused < finally_index
+
+    def _run_inpage_js_against_stub(self, *, pause_rejects: bool, sample_rejects: bool) -> dict[str, Any]:
+        """Executes the actual `INPAGE_LIVENESS_JS` source under Node (no
+        browser) against a stub handle whose `pause()` or paused `sample()`
+        rejects, and reports how many times `resume()` was called -- proving
+        the `finally` actually runs on a rejection from EITHER phase."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not available")
+        pause_body = "return Promise.reject(new Error('pause rejected'));" if pause_rejects else "return Promise.resolve();"
+        sample_body = (
+            "if (sampleCalls === 1 && " + ("true" if sample_rejects else "false") + ") "
+            "{ return Promise.reject(new Error('sample rejected')); } "
+            "return Promise.resolve([]);"
+        )
+        script = f"""
+        global.window = global;
+        var resumeCalls = 0, sampleCalls = 0;
+        var handle = {{
+          gl: {{ isContextLost: function(){{ return false; }} }},
+          canvas: {{ isConnected: true, nodeType: 1, parentElement: null, checkVisibility: function(){{ return true; }} }},
+          video: {{}},
+          sceneId: 'scene-1', rect: {{x: 0, y: 0, w: 1, h: 1}}, instanceId: 'inst-1',
+          canvasId: 'canvas-1', epoch: 1,
+          markerBands: function(){{ return Promise.resolve({{dark: [0], light: [1], epoch: 1}}); }},
+          pause: function(){{ {pause_body} }},
+          resume: function(){{ resumeCalls++; return Promise.resolve(); }},
+          sample: function(n){{ sampleCalls++; {sample_body} }},
+        }};
+        window.__OBED_GL_ORACLE__ = handle;
+        window.__obedInpageSceneId = 'scene-1';
+        window.__obedInpageRect = handle.rect;
+        window.__obedInpageInstanceId = 'inst-1';
+        window.__obedLive = {{ snapshot: function(){{ return {{sceneId: 'scene-1'}}; }} }};
+        window.getComputedStyle = function(){{ return {{opacity: '1'}}; }};
+        global.document = {{
+          getElementById: function(id){{
+            return id === 'stage' ? {{ contains: function(c){{ return c === handle.canvas; }} }} : null;
+          }},
+        }};
+        (async function(){{
+          try {{
+            var result = await ({probe.INPAGE_LIVENESS_JS});
+            console.log(JSON.stringify({{ok: true, result: result, resumeCalls: resumeCalls}}));
+          }} catch (e) {{
+            console.log(JSON.stringify({{ok: false, error: String(e), resumeCalls: resumeCalls}}));
+          }}
+        }})();
+        """
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout.strip())
+
+    def test_resume_is_awaited_even_when_pause_rejects(self) -> None:
+        outcome = self._run_inpage_js_against_stub(pause_rejects=True, sample_rejects=False)
+        assert outcome["resumeCalls"] == 1
+        assert outcome["ok"] is False
+        assert "pause rejected" in outcome["error"]
+
+    def test_resume_is_awaited_even_when_the_paused_sample_rejects(self) -> None:
+        outcome = self._run_inpage_js_against_stub(pause_rejects=False, sample_rejects=True)
+        assert outcome["resumeCalls"] == 1
+        assert outcome["ok"] is False
+        assert "sample rejected" in outcome["error"]
 
 
 class TestPokeIsProbabilistic:

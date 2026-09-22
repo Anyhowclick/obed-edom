@@ -2394,10 +2394,13 @@ def _inpage_samples(
     green_amp=0.0,
     green_rgb=(10.0, 200.0, 10.0),
     gl_err=0,
+    ms=4.0,
 ):
     """Synthetic in-page samples: every non-static band ramps 100..127 across the
     window (range 27, well past the 1.0 threshold); ``static_bands`` (or
-    ``all_static``) hold a band constant to model an occluder or a dead read."""
+    ``all_static``) hold a band constant to model an occluder or a dead read.
+    ``ms`` (sampling cost, not a callback clock -- distinctness is on ``t``
+    only) is a constant or a ``callable(t) -> float``; realistically constant."""
     samples = []
     for t in range(n):
         if all_static:
@@ -2412,7 +2415,7 @@ def _inpage_samples(
         samples.append(
             {
                 "t": t,
-                "ms": 4.0 + t * 0.01,
+                "ms": ms(t) if callable(ms) else ms,
                 "vt": t * 0.033,
                 "mediaTime": t * 0.033,
                 "bands": bands,
@@ -2620,6 +2623,24 @@ class TestInPageLivenessScorer:
         assert scored["status"] == "inconclusive"
         assert scored["reason"] == "duplicate or non-monotonic sample callbacks"
 
+    def test_constant_sampling_cost_still_reads_live(self):
+        """Codex r3 Spec 2: `ms` is sampling COST, not a callback clock -- a
+        realistic constant `ms=4.0` across every sample must not be treated
+        as non-distinct. Only `t` (the callback identity) needs distinctness."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(ms=4.0), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is True
+        assert scored["sampleMsP50"] == 4.0
+
+    def test_fluctuating_sampling_cost_still_reads_live(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(
+            _inpage_samples(ms=lambda t: 3.0 + (t % 3)), occluder_mask=NO_OCCLUSION_128
+        )
+        assert scored["verdict"] is True
+
     def test_a_regressing_timestamp_is_inconclusive(self):
         from obed_edom.html_alpha_probe import score_inpage_liveness
 
@@ -2666,6 +2687,19 @@ class TestInPageLivenessScorer:
         assert scored["verdict"] is False
         assert scored["reason"] == "gl error"
         assert scored["glErrAny"] == 0.5
+
+    def test_a_numeric_string_ms_never_raises_at_the_percentile_step(self):
+        """Codex r3 Standards 1 / Spec 4: `"4.0"` passes `_finite_float` (it
+        converts), but the raw string used to reach `np.percentile()`
+        unconverted and raised `TypeError`. `sample_ms` must be normalized to
+        floats before the percentile call."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[0]["ms"] = "4.0"
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is True
+        assert scored["sampleMsP50"] == pytest.approx(4.0)
 
 
 class TestOracleCombiner:

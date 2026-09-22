@@ -298,12 +298,15 @@ _INPAGE_LIVENESS_JS_TEMPLATE = r"""
   function notApplicable(reason){ return {applicable: false, status: "n/a", reason: reason}; }
   function inconclusive(reason){ return {applicable: true, status: "inconclusive", reason: reason}; }
   var handle = window.__OBED_GL_ORACLE__;
-  if (!handle || !handle.gl || !handle.canvas || !handle.video ||
+  if (!handle) { return notApplicable('no __OBED_GL_ORACLE__ handle published'); }
+  if (!handle.gl || !handle.canvas || !handle.video ||
       typeof handle.sample !== 'function' || typeof handle.markerBands !== 'function' ||
       typeof handle.pause !== 'function' || typeof handle.resume !== 'function') {
-    return notApplicable('no __OBED_GL_ORACLE__ handle published');
+    return inconclusive('handle is present but malformed');
   }
+  var expectedScene = window.__obedInpageSceneId;
   var rect = window.__obedInpageRect, instanceId = window.__obedInpageInstanceId;
+  var canvas0 = handle.canvas, gl0 = handle.gl, video0 = handle.video;
   var epoch = handle.epoch;
   function liveSceneId(){
     try { return window.__obedLive ? window.__obedLive.snapshot().sceneId : null; } catch (e) { return null; }
@@ -314,11 +317,18 @@ _INPAGE_LIVENESS_JS_TEMPLATE = r"""
   function recheck(){
     if (window.__OBED_GL_ORACLE__ !== handle) return 'the runtime handle was replaced';
     if (handle.epoch !== epoch) return 'handle re-recorded during the sample window';
-    if (liveSceneId() !== handle.sceneId) return 'handle scene no longer matches the live player scene';
-    if (!handle.canvas.isConnected) return 'canvas disconnected';
-    if (typeof handle.gl.isContextLost === 'function' && handle.gl.isContextLost()) return 'context lost';
-    if (typeof handle.canvas.checkVisibility !== 'function' ||
-        !handle.canvas.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) {
+    if (handle.sceneId !== expectedScene || liveSceneId() !== expectedScene) {
+      return 'handle scene does not match the scene being scored';
+    }
+    if (handle.canvas !== canvas0 || handle.gl !== gl0 || handle.video !== video0) {
+      return 'handle canvas, gl, or video identity changed';
+    }
+    var stage = document.getElementById('stage');
+    if (!stage || !stage.contains(canvas0)) return 'canvas is not a descendant of #stage';
+    if (!canvas0.isConnected) return 'canvas disconnected';
+    if (typeof gl0.isContextLost === 'function' && gl0.isContextLost()) return 'context lost';
+    if (typeof canvas0.checkVisibility !== 'function' ||
+        !canvas0.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) {
       return 'canvas is not visible';
     }
     if (!rectsEqual(handle.rect, rect)) return 'handle rect does not exactly match the scored instance rect';
@@ -328,7 +338,7 @@ _INPAGE_LIVENESS_JS_TEMPLATE = r"""
   var problem = recheck();
   if (problem) { return inconclusive(problem); }
   var opacity = 1;
-  for (var node = handle.canvas; node && node.nodeType === 1; node = node.parentElement) {
+  for (var node = canvas0; node && node.nodeType === 1; node = node.parentElement) {
     var value = parseFloat(window.getComputedStyle(node).opacity);
     opacity *= (isFinite(value) ? value : 1);
   }
@@ -347,11 +357,13 @@ _INPAGE_LIVENESS_JS_TEMPLATE = r"""
   }
 
   var pausedDecoderSamples, samples;
-  await handle.pause();
   try {
+    await handle.pause();
     problem = recheck();
     if (problem) { return inconclusive(problem); }
     pausedDecoderSamples = await handle.sample(__N__);
+    problem = recheck();
+    if (problem) { return inconclusive(problem); }
   } finally {
     await handle.resume();
   }
@@ -1469,9 +1481,9 @@ def measure_inpage_oracle_with_paused_control(
             f"window.__obedInpageInstanceId = {json.dumps(instance_id)}; true"
         )
         raw = evaluate_async(transport, INPAGE_LIVENESS_JS)
+        return inpage_oracle_result(raw)
     except Exception as exc:  # noqa: BLE001 - an oracle failure degrades this rect, it never crashes the pass
         return {"verdict": None, "status": "inconclusive", "reason": f"in-page oracle evaluation failed: {exc}", "n": 0}
-    return inpage_oracle_result(raw)
 
 
 def combine_rect_oracles(entry: dict[str, Any], inpage: dict[str, Any] | None) -> dict[str, Any]:
