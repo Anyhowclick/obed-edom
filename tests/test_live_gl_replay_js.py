@@ -919,6 +919,12 @@ if (!CFG.noWebGL) window.WebGLRenderingContext = FakeGL;
 if (CFG.noRvfc) delete FakeVideo.prototype.requestVideoFrameCallback;
 // The module reads `debugForceFail` off a pre-seeded (version-less) API object.
 if (CFG.debugForceFail) window.__OBED_GL_REPLAY__ = { debugForceFail: CFG.debugForceFail };
+if (CFG.seedDebug && !CFG.debugForceFail) window.__OBED_GL_REPLAY__ = {};
+
+// The pre-wrap prototype methods. Calling through these simulates a writer that
+// is not the player and not us (a future probe, a re-record), which is the only
+// honest way to dirty a sticky uniform without tripping the LIVE wrapper guard.
+const RAW = { useProgram: FakeGL.prototype.useProgram, uniform1f: FakeGL.prototype.uniform1f };
 
 // ------------------------------------------------------------------ install the module
 let installThrew = null;
@@ -1093,6 +1099,24 @@ async function main() {
       await pumpUntil(handle.resume());
       out.afterResume = { seam: world.seamCalls.slice(), video: world.videoCalls.slice() };
     }
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'dirty_unset_program') {
+    // Program 4 is the one the recorded frame never re-sets (opacity plan F-10),
+    // and with its override dropped nothing else writes it either. Dirty it from
+    // outside, then let ONE LIVE tick run: the replay must write its rest value.
+    const prog = gl._programs.get(4);
+    const loc = gl.getUniformLocation(prog, 'Opacity');
+    const prev = gl._current;
+    RAW.useProgram.call(gl, prog);
+    RAW.uniform1f.call(gl, loc, 0);
+    RAW.useProgram.call(gl, prev);
+    out.dirtied = prog.uniforms.get('Opacity').value;
+    const iterBefore = M.stats().iter;
+    await settle(3);
+    out.liveTicked = M.stats().iter > iterBefore;
+    out.afterLiveTick = prog.uniforms.get('Opacity').value;
     out.final = snapshotState();
     return out;
   }
@@ -1709,3 +1733,22 @@ def test_debug_hooks_are_absent_on_the_normal_install_path():
     forced = _run_sandbox(scenario="arm_only", debugForceFail="occlusionTooHigh")
     assert forced["final"]["debugHooks"] == ["debug", "debugForceFail"], \
         forced["final"]["debugHooks"]
+
+
+def test_live_replay_writes_opacity_for_every_draw_not_just_overrides():
+    """The LIVE-path half of the D1 fix, which the proofs' `finally` cannot reach.
+    `replayFrame()` with no options must write an explicit `Opacity` for EVERY
+    draw, not only for slots carrying an override. Program 4 is the one the
+    recorded frame never re-sets, and with its override dropped as unproven
+    nothing else writes it either — so if the replay skips it, the LIVE composite
+    silently inherits whatever wrote last. Here an outside writer leaves 0 on it
+    and one LIVE tick must restore the rest value."""
+    out = _run_sandbox(scenario="dirty_unset_program", debugForceFail="ablation")
+    final = _assert_clean(out)
+    assert _unproven(final).get(4) == "ablation", _unproven(final)
+    assert out["dirtied"] == 0, "the harness failed to dirty the uniform"
+    assert out["liveTicked"] is True, "no LIVE tick ran, so the assertion below is vacuous"
+    assert out["afterLiveTick"] == 1, (
+        f"the LIVE replay left program 4 at {out['afterLiveTick']} — a non-override "
+        "slot got no Opacity write, so the composite depends on the last writer")
+    assert final["state"] == "LIVE", final["state"]
