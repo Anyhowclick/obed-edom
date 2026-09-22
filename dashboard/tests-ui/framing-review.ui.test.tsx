@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { FramingDecision } from "../src/api";
 import { FramingReview, type FramingPage, type PlannedRect } from "../src/components/FramingReview";
 
@@ -35,17 +35,50 @@ function page(overrides: Partial<FramingPage> = {}): FramingPage {
   };
 }
 
-function renderReview(p: FramingPage) {
+function renderReview(p: FramingPage | FramingPage[], onSave: (d: FramingDecision[]) => void = () => {}) {
   return render(
     <FramingReview
-      proposal={{ pages: [p], destWidth: 1920, destHeight: 1080, wallWidth: 7680, wallHeight: 1080 }}
+      proposal={{
+        pages: Array.isArray(p) ? p : [p],
+        destWidth: 1920,
+        destHeight: 1080,
+        wallWidth: 7680,
+        wallHeight: 1080,
+      }}
       jobId="job"
       busy={false}
-      onSave={() => {}}
+      onSave={onSave}
       onApply={() => {}}
     />
   );
 }
+
+function pinWarning(slide = 58): HTMLElement {
+  const el = document.getElementById(`framing-pin-warning-${slide}`)!;
+  expect(el).toHaveAttribute("role", "status");
+  return el;
+}
+
+// A page whose planner-auto framing is exactly what pinning its auto template slide produces.
+function matchingPage(slide: number): FramingPage {
+  return page({
+    slide,
+    index: slide - 1,
+    candidates: [
+      {
+        templateSlide: 1,
+        agreement: 1,
+        fit: 0.9,
+        wouldFallBack: false,
+        pinOverridden: false,
+        transform: { s: 0.5, tx: -100.2, ty: 0.3 },
+        rects: [{ ...AUTO_RECT, x: AUTO_RECT.x + 0.4 }],
+      },
+    ],
+  });
+}
+
+const CONFIRM_NOTE = "Confirming would change this page's framing — pick a template to pin it.";
 
 function rectLefts(container: HTMLElement, width: number): number[] {
   const k = width / 1920;
@@ -98,7 +131,7 @@ describe("framing review overridden pin", () => {
       screen.getByRole("button", { name: "Slide 58 — the run won't use this pin" })
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
-    const status = screen.getByRole("status");
+    const status = pinWarning();
     expect(status).toHaveTextContent(
       "The run won't use this pin: its framing would push the page off the frame or shrink it " +
         "to a sliver. The run will frame this slide automatically instead."
@@ -130,7 +163,7 @@ describe("framing review overridden pin", () => {
     });
     renderReview(p);
     fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
-    const status = screen.getByRole("status");
+    const status = pinWarning();
     expect(status).toHaveAttribute("aria-live", "polite");
     expect(status).toBeEmptyDOMElement();
     const overridden = screen.getByRole("button", {
@@ -138,7 +171,7 @@ describe("framing review overridden pin", () => {
     });
     expect(overridden).not.toHaveAccessibleDescription(/its framing would push the page/);
     fireEvent.click(overridden);
-    expect(screen.getByRole("status")).toBe(status);
+    expect(pinWarning()).toBe(status);
     expect(status).toHaveTextContent(/^The run won't use this pin/);
     expect(overridden).toHaveAccessibleDescription(status.textContent!);
     expect(screen.getByRole("button", { name: /^Template slide 1 —/ })).not.toHaveAccessibleDescription(/its framing would push the page/);
@@ -151,8 +184,62 @@ describe("framing review overridden pin", () => {
     expect(screen.getByRole("button", { name: "Slide 58" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
     expect(screen.getByText(/This framing applies cleanly/)).toBeInTheDocument();
-    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(pinWarning()).toBeEmptyDOMElement();
     expect(screen.queryByText(/won't use this pin/)).toBeNull();
+  });
+});
+
+describe("framing review confirm never silently changes the shown framing", () => {
+  it("disables Confirm on a Full-58-shaped page and says why, linked to the button", () => {
+    const onSave = vi.fn();
+    renderReview(page(), onSave);
+    fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
+    const confirm = screen.getByRole("button", { name: "Confirm this framing" });
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText(CONFIRM_NOTE)).toBeVisible();
+    expect(confirm).toHaveAccessibleDescription(CONFIRM_NOTE);
+    fireEvent.click(confirm);
+    fireEvent.click(screen.getByRole("button", { name: /^Save/ }));
+    expect(onSave).toHaveBeenLastCalledWith([]);
+  });
+
+  it("lets the operator pin once they pick the template explicitly", () => {
+    const onSave = vi.fn();
+    renderReview(page(), onSave);
+    fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Template slide 1 —/ }));
+    const confirm = screen.getByRole("button", { name: "Confirm this framing" });
+    expect(confirm).toBeEnabled();
+    expect(screen.queryByText(CONFIRM_NOTE)).toBeNull();
+    fireEvent.click(confirm);
+    fireEvent.click(screen.getByRole("button", { name: /^Save/ }));
+    expect(onSave).toHaveBeenLastCalledWith([{ wallIndex: 57, state: "pinned", templateSlide: 1 }]);
+  });
+
+  it("still pins a matching page on Confirm, as before", () => {
+    const onSave = vi.fn();
+    renderReview(matchingPage(60), onSave);
+    fireEvent.click(screen.getByRole("button", { name: /Open pages/ }));
+    const confirm = screen.getByRole("button", { name: "Confirm this framing" });
+    expect(confirm).toBeEnabled();
+    expect(screen.queryByText(CONFIRM_NOTE)).toBeNull();
+    fireEvent.click(confirm);
+    expect(screen.getByRole("button", { name: /^Reviewed \(1\)/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Save/ }));
+    expect(onSave).toHaveBeenLastCalledWith([{ wallIndex: 59, state: "pinned", templateSlide: 1 }]);
+  });
+
+  it("bulk confirm pins the matching pages and names the ones it skipped", () => {
+    const onSave = vi.fn();
+    renderReview([page(), matchingPage(60), page({ slide: 93, index: 92 })], onSave);
+    fireEvent.click(screen.getByRole("button", { name: /^Select all 3/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm selected" }));
+    expect(screen.getByRole("button", { name: /^Reviewed \(1\)/ })).toBeInTheDocument();
+    expect(document.getElementById("framing-bulk-note")).toHaveTextContent(
+      "Skipped 2 pages whose framing would change if confirmed: 58, 93. Pick a template to pin them."
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Save/ }));
+    expect(onSave).toHaveBeenLastCalledWith([{ wallIndex: 59, state: "pinned", templateSlide: 1 }]);
   });
 });
 

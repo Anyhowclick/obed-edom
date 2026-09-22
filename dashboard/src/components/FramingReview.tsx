@@ -140,6 +140,53 @@ function chipLabel(page: FramingPage, slide: number | null, keepsSide: boolean):
   );
 }
 
+const RECT_TOLERANCE_PX = 0.5;
+const SCALE_TOLERANCE = 1e-6;
+
+const CONFIRM_CHANGES_NOTE = "Confirming would change this page's framing — pick a template to pin it.";
+
+function near(a: number, b: number, tolerance: number): boolean {
+  return Math.abs(a - b) <= tolerance;
+}
+
+function sameRects(a: PlannedRect[], b: PlannedRect[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((r, i) => {
+      const o = b[i];
+      return (
+        r.role === o.role &&
+        r.kind === o.kind &&
+        (r.willBeInOutput ?? true) === (o.willBeInOutput ?? true) &&
+        near(r.x, o.x, RECT_TOLERANCE_PX) &&
+        near(r.y, o.y, RECT_TOLERANCE_PX) &&
+        near(r.w, o.w, RECT_TOLERANCE_PX) &&
+        near(r.h, o.h, RECT_TOLERANCE_PX)
+      );
+    })
+  );
+}
+
+function sameTransform(a: FramingTransform | null | undefined, b: FramingTransform | null | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return (
+    near(a.s, b.s, SCALE_TOLERANCE) &&
+    near(a.tx, b.tx, RECT_TOLERANCE_PX) &&
+    near(a.ty, b.ty, RECT_TOLERANCE_PX)
+  );
+}
+
+/** Pinning autoTemplateSlide would not reproduce the planner's own framing shown for this page. */
+function confirmChangesFraming(page: FramingPage): boolean {
+  const candidate = candidateFor(page, page.autoTemplateSlide);
+  if (!candidate) return page.autoTemplateSlide != null;
+  return (
+    !sameRects(candidate.rects ?? [], page.autoRects ?? []) ||
+    !sameTransform(candidate.transform, page.autoTransform) ||
+    !!candidate.wouldFallBack !== page.autoFellBack
+  );
+}
+
 function categoryOf(page: FramingPage, decisions: Record<number, FramingDecision>): Category {
   const state = stateOf(page, decisions);
   if (state === "pinned") return "reviewed";
@@ -352,6 +399,7 @@ export function FramingReview({
   const [marquee, setMarquee] = useState<Marquee | null>(null);
   const [keptOnly, setKeptOnly] = useState(false);
   const [templateFilter, setTemplateFilter] = useState<string>("all");
+  const [bulkNote, setBulkNote] = useState("");
 
   const byCategory = useMemo(() => {
     const out: Record<Category, FramingPage[]> = {
@@ -463,7 +511,28 @@ export function FramingReview({
     if (!indexes.length) return;
     if (action === "defer") decide(indexes, "deferred", () => null);
     else if (action === "unconfirm") decide(indexes, "auto", () => null);
-    else decide(indexes, "pinned", (p) => chosenSlide(p, decisions) ?? p.autoTemplateSlide);
+    else {
+      const skippedPages = pages.filter(
+        (p) => indexes.includes(p.index) && pinnedSlide(p, decisions) == null && confirmChangesFraming(p)
+      );
+      const skippedIndexes = new Set(skippedPages.map((p) => p.index));
+      const skipped = skippedPages.map((p) => p.slide).sort((a, b) => a - b);
+      decide(
+        indexes.filter((i) => !skippedIndexes.has(i)),
+        "pinned",
+        (p) => chosenSlide(p, decisions) ?? p.autoTemplateSlide
+      );
+      setBulkNote(
+        skipped.length === 0
+          ? ""
+          : `Skipped ${skipped.length} page${skipped.length === 1 ? "" : "s"} whose framing would ` +
+              `change if confirmed: ${skipped.join(", ")}. Pick a template to pin ` +
+              `${skipped.length === 1 ? "it" : "them"}.`
+      );
+      setSelected(new Set());
+      return;
+    }
+    setBulkNote("");
     setSelected(new Set());
   }
 
@@ -577,6 +646,9 @@ export function FramingReview({
               ))}
             </select>
           </label>
+          <p id="framing-bulk-note" className="note" role="status" aria-live="polite">
+            {bulkNote}
+          </p>
           <button className="btn tone-save" type="button" disabled={busy} onClick={() => onSave(collect())}>
             Save decisions
           </button>
@@ -837,6 +909,11 @@ export function FramingReview({
                   const previewOverridden = pinOverriddenWith(page, shown);
                   const warningId = `framing-pin-warning-${page.slide}`;
                   const contextId = `framing-candidate-context-${page.slide}`;
+                  const confirmNoteId = `framing-confirm-note-${page.slide}`;
+                  const confirmBlocked =
+                    previewing[page.index] == null &&
+                    pinnedSlide(page, decisions) == null &&
+                    confirmChangesFraming(page);
                   return (
                     <div key={page.slide} className="framing-row">
                       <span className="outline-num framing-row-num">{page.slide}</span>
@@ -977,8 +1054,14 @@ export function FramingReview({
                           <button
                             className="btn secondary tone-alt"
                             type="button"
-                            disabled={busy || (preview ?? page.autoTemplateSlide) == null}
-                            aria-describedby={previewOverridden ? warningId : undefined}
+                            disabled={
+                              busy || confirmBlocked || (preview ?? page.autoTemplateSlide) == null
+                            }
+                            aria-describedby={
+                              [previewOverridden && warningId, confirmBlocked && confirmNoteId]
+                                .filter(Boolean)
+                                .join(" ") || undefined
+                            }
                             onClick={() =>
                               decide(
                                 [page.index],
@@ -989,6 +1072,11 @@ export function FramingReview({
                           >
                             {differs ? "Use this framing" : "Confirm this framing"}
                           </button>
+                          {confirmBlocked && (
+                            <span id={confirmNoteId} className="note">
+                              {CONFIRM_CHANGES_NOTE}
+                            </span>
+                          )}
                           <button
                             className="btn secondary tone-template"
                             type="button"

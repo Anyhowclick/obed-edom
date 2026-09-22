@@ -289,6 +289,16 @@ that yearly content churn justifies this automation before building it.
 ## Product backlog
 
 - Propose pins flag: expose pin-role uncertainty during framing rather than burying it in logs.
+- Reviewed-auto framing decision (owner-banked 2026-09-22, option B; A shipped). Confirm in the
+  framing review pins `autoTemplateSlide`, which does not reproduce the planner's own framing where
+  it carried a sibling affine or fell back to fit-to-frame (Gold 13; Full 23, 32, 58, 75, 93 at
+  2026-09-22 deck bytes). Option A disables Confirm and bulk-skips those pages. B adds a saved
+  "reviewed, still automatic" decision that emits no override: a new state or `reviewed` flag in
+  `framing.STATES`/`Decision`, `normalize_decision`, `save_framings` (today drops `auto` rows),
+  `reuse_framings`, `FramingReuse.overrides` and the app's `_overrides_from_result` (must stay
+  pin-only), and the review's Reviewed category. Caveat: an older build silently drops the new
+  state on load (`normalize_decision` refuses unknown states), so the page falls back to
+  unreviewed-auto there. Saved pins keep meaning "pin".
 - Portable recipes: store role-specific affines in small tracked JSON, resolving each role on the
   current slide and fitting only orphaned roles.
 - Stat drift: compare adjacent slides after removing digits and warn when a number disagrees with
