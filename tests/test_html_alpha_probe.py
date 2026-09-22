@@ -2382,3 +2382,443 @@ def test_visible_slide_scores_live_and_dead_rects_side_by_side():
     assert scored["perRect"][0]["verdict"] is True
     assert scored["perRect"][1]["verdict"] is False
     assert scored["stray"]["verdict"] is True
+
+
+def _inpage_samples(
+    n=30,
+    *,
+    n_bands=128,
+    static_bands=(),
+    all_static=False,
+    control_amp=0.0,
+    green_amp=0.0,
+    green_rgb=(10.0, 200.0, 10.0),
+    gl_err=0,
+    ms=4.0,
+):
+    """Synthetic in-page samples: every non-static band ramps 100..127 across the
+    window (range 27, well past the 1.0 threshold); ``static_bands`` (or
+    ``all_static``) hold a band constant to model an occluder or a dead read.
+    ``ms`` (sampling cost, not a callback clock -- distinctness is on ``t``
+    only) is a constant or a ``callable(t) -> float``; realistically constant."""
+    samples = []
+    for t in range(n):
+        if all_static:
+            bands = [100.0] * n_bands
+        else:
+            bands = [
+                100.0 if b in static_bands else 100.0 + (t % 10) * 3.0
+                for b in range(n_bands)
+            ]
+        control = 50.0 + control_amp * (t % 2)
+        green = 80.0 + green_amp * (t % 2)
+        samples.append(
+            {
+                "t": t,
+                "ms": ms(t) if callable(ms) else ms,
+                "vt": t * 0.033,
+                "mediaTime": t * 0.033,
+                "bands": bands,
+                "control": control,
+                "green": green,
+                "greenRGB": list(green_rgb),
+                "glErr": gl_err,
+            }
+        )
+    return samples
+
+
+NO_OCCLUSION_128 = [0] * 128
+
+
+class TestInPageLivenessScorer:
+    def test_all_bands_moving_reads_live(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is True
+        assert scored["status"] == "live"
+        assert scored["occludedBands"] == 0
+        assert scored["judgedBands"] == 128
+
+    def test_one_non_occluded_static_band_reads_dead(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(static_bands=(5,)), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is False
+        assert scored["status"] == "dead"
+        assert scored["reason"] == "a judged band did not move"
+
+    def test_that_same_band_marked_occluded_reads_live(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples(static_bands=(5,))
+        mask = [1 if i == 5 else 0 for i in range(128)]
+        scored = score_inpage_liveness(samples, occluder_mask=mask)
+        assert scored["verdict"] is True
+        assert scored["occludedBands"] == 1
+        assert scored["judgedBands"] == 127
+
+    def test_a_moving_control_patch_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(control_amp=5.0), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "control patch moved"
+
+    def test_a_moving_green_patch_reads_dead(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(green_amp=5.0), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is False
+        assert scored["reason"] == "green patch moved"
+
+    def test_a_green_patch_that_is_not_green_reads_dead(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(
+            _inpage_samples(green_rgb=(100.0, 100.0, 100.0)), occluder_mask=NO_OCCLUSION_128
+        )
+        assert scored["verdict"] is False
+        assert scored["reason"] == "green patch is not green"
+
+    def test_twenty_three_samples_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(n=23), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "too few samples"
+
+    def test_a_non_zero_gl_error_reads_dead(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(gl_err=1), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is False
+        assert scored["reason"] == "gl error"
+
+    def test_a_missing_gl_error_field_is_inconclusive(self):
+        """Codex r5: `glErr` is part of the contract; a sample without it (or with
+        None) is malformed, never silently "no error" -- a missing field could
+        otherwise hide a GL error and let the window read LIVE."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        for missing in ({"glErr": None}, "drop"):
+            samples = _inpage_samples(24)
+            for sample in samples:
+                if missing == "drop":
+                    sample.pop("glErr")
+                else:
+                    sample.update(missing)
+            result = score_inpage_liveness(samples, occluder_mask=[0] * len(samples[0]["bands"]))
+            assert result["verdict"] is None
+            assert result["reason"] == "malformed samples"
+
+    def test_band_count_other_than_the_fixed_grid_is_inconclusive(self):
+        """Codex r5: the contract is 16x8 = 128 band means; 1, 127 or 129 bands
+        (with a matching mask) must be refused rather than scored as a smaller
+        grid that could be trivially all-moving."""
+        from obed_edom.html_alpha_probe import INPAGE_BAND_COUNT, score_inpage_liveness
+
+        for n in (1, INPAGE_BAND_COUNT - 1, INPAGE_BAND_COUNT + 1):
+            samples = _inpage_samples(24)
+            for k, sample in enumerate(samples):
+                sample["bands"] = [100.0 + (k % 10) * 3.0] * n
+            result = score_inpage_liveness(samples, occluder_mask=[0] * n)
+            assert result["verdict"] is None, n
+            assert result["reason"] == "malformed samples"
+
+    def test_more_than_half_the_bands_occluded_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        mask = [1] * 65 + [0] * 63
+        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=mask)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "more than half the bands are occluded"
+
+    def test_empty_samples_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness([], occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "no samples"
+        assert scored["n"] == 0
+
+    def test_media_time_alone_never_implies_live(self):
+        """Advancing mediaTime/vt over static bands must not read live."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(all_static=True), occluder_mask=NO_OCCLUSION_128)
+        assert scored["vtSpan"] > 0
+        assert scored["mediaTimeSpan"] > 0
+        assert scored["verdict"] is False
+
+    def test_missing_occluder_mask_is_inconclusive(self):
+        """`occluder_mask` is required (Codex r1 Spec 4): a caller with no measured
+        mask must say so, never fall back to "nothing is occluded"."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=None)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "missing or malformed occluder mask"
+
+    def test_a_mask_of_the_wrong_length_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=[0] * 4)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "missing or malformed occluder mask"
+
+    def test_a_mask_with_a_non_zero_one_value_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        mask = [0] * 127 + [2]
+        scored = score_inpage_liveness(_inpage_samples(), occluder_mask=mask)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "missing or malformed occluder mask"
+
+    def test_a_non_finite_band_value_is_inconclusive_not_a_raise(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[0]["bands"][0] = float("nan")
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "malformed samples"
+
+    def test_a_non_numeric_control_value_is_inconclusive_not_a_raise(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[3]["control"] = "not-a-number"
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "malformed samples"
+
+    def test_a_two_element_green_rgb_is_inconclusive_not_a_raise(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[0]["greenRGB"] = [10.0, 200.0]
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "malformed samples"
+
+    def test_occluder_mask_from_markers_flags_bands_that_do_not_move(self):
+        from obed_edom.html_alpha_probe import occluder_mask_from_markers
+
+        from obed_edom.html_alpha_probe import INPAGE_BAND_COUNT
+
+        # The contract is the fixed 16x8 grid (Codex r5): a marker array of any
+        # other length is refused, so the boundary is probed on full-size arrays.
+        n = INPAGE_BAND_COUNT
+        at_bound = occluder_mask_from_markers([100.0] * n, [100.5] * n)
+        assert at_bound["verdict"] is True
+        assert at_bound["mask"] == [1] * n
+        assert at_bound["occluded"] == n
+
+        past_bound = occluder_mask_from_markers([100.0] * n, [100.51] * n)
+        assert past_bound["mask"] == [0] * n
+        assert past_bound["occluded"] == 0
+
+        for bad in (1, n - 1, n + 1):
+            short = occluder_mask_from_markers([100.0] * bad, [100.5] * bad)
+            assert short["verdict"] is False and short["mask"] is None, bad
+
+    def test_occluder_mask_fails_closed_on_mismatched_marker_lengths(self):
+        from obed_edom.html_alpha_probe import occluder_mask_from_markers
+
+        result = occluder_mask_from_markers([100.0, 100.0], [100.0])
+        assert result["verdict"] is False
+        assert result["mask"] is None
+        assert result["reason"] == "mismatched marker lengths"
+
+    def test_occluder_mask_fails_closed_on_non_numeric_marker_values(self):
+        from obed_edom.html_alpha_probe import occluder_mask_from_markers
+
+        from obed_edom.html_alpha_probe import INPAGE_BAND_COUNT
+
+        dark = [100.0] * INPAGE_BAND_COUNT
+        dark[1] = "oops"
+        result = occluder_mask_from_markers(dark, [100.0] * INPAGE_BAND_COUNT)
+        assert result["verdict"] is False
+        assert result["mask"] is None
+        assert result["reason"] == "non-finite marker delta"
+
+    def test_a_frozen_sample_repeated_twenty_four_times_is_inconclusive(self):
+        """Codex r2 Spec 5: the scorer requires 24 array entries, not 24
+        DISTINCT callbacks -- repeating one frozen sample must not "prove" a
+        window by inflating its length."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        frozen = _inpage_samples(n=1)[0]
+        samples = [dict(frozen) for _ in range(24)]
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "duplicate or non-monotonic sample callbacks"
+
+    def test_constant_sampling_cost_still_reads_live(self):
+        """Codex r3 Spec 2: `ms` is sampling COST, not a callback clock -- a
+        realistic constant `ms=4.0` across every sample must not be treated
+        as non-distinct. Only `t` (the callback identity) needs distinctness."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(ms=4.0), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is True
+        assert scored["sampleMsP50"] == 4.0
+
+    def test_fluctuating_sampling_cost_still_reads_live(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(
+            _inpage_samples(ms=lambda t: 3.0 + (t % 3)), occluder_mask=NO_OCCLUSION_128
+        )
+        assert scored["verdict"] is True
+
+    def test_a_regressing_timestamp_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[-1]["t"] = samples[0]["t"]
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["reason"] == "duplicate or non-monotonic sample callbacks"
+
+    def test_a_non_sequence_samples_argument_is_inconclusive_not_a_raise(self):
+        """Codex r2 Standards 1: a truthy non-sequence `samples` (a dict here)
+        must not raise when indexed."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness({"not": "a list"}, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+
+    def test_an_overflowing_numeric_value_is_inconclusive_not_a_raise(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[0]["control"] = "1" + "0" * 400  # int() succeeds; float() overflows
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is None
+        assert scored["status"] == "inconclusive"
+        assert scored["reason"] == "malformed samples"
+
+    def test_non_numeric_vt_does_not_raise_and_is_excluded_from_the_span(self):
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[0]["vt"] = "not-a-number"
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is True
+        assert scored["vtSpan"] is None
+
+    def test_a_fractional_gl_error_is_not_truncated_to_zero(self):
+        """Codex r2 Standards 1: `int(max(...))` used to truncate 0.5 to 0 and
+        return LIVE; every numeric `glErr != 0` must count as an error."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        scored = score_inpage_liveness(_inpage_samples(gl_err=0.5), occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is False
+        assert scored["reason"] == "gl error"
+        assert scored["glErrAny"] == 0.5
+
+    def test_a_numeric_string_ms_never_raises_at_the_percentile_step(self):
+        """Codex r3 Standards 1 / Spec 4: `"4.0"` passes `_finite_float` (it
+        converts), but the raw string used to reach `np.percentile()`
+        unconverted and raised `TypeError`. `sample_ms` must be normalized to
+        floats before the percentile call."""
+        from obed_edom.html_alpha_probe import score_inpage_liveness
+
+        samples = _inpage_samples()
+        samples[0]["ms"] = "4.0"
+        scored = score_inpage_liveness(samples, occluder_mask=NO_OCCLUSION_128)
+        assert scored["verdict"] is True
+        assert scored["sampleMsP50"] == pytest.approx(4.0)
+
+
+class TestOracleCombiner:
+    def _screenshot(self, verdict, reason=None):
+        return {"verdict": verdict, "status": "pass" if verdict else ("fail" if verdict is False else "inconclusive"), "reason": reason}
+
+    def _inpage(self, verdict, reason=None):
+        return {"verdict": verdict, "status": "live" if verdict else ("dead" if verdict is False else "inconclusive"), "reason": reason}
+
+    def test_agree_live_is_live(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        combined = combine_oracle_verdicts(self._screenshot(True), self._inpage(True))
+        assert combined["verdict"] is True
+        assert combined["status"] == "pass"
+
+    def test_agree_dead_is_dead(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        combined = combine_oracle_verdicts(self._screenshot(False, "live fraction below threshold"), self._inpage(False))
+        assert combined["verdict"] is False
+        assert combined["status"] == "fail"
+        assert combined["reason"] == "live fraction below threshold"
+
+    def test_screenshot_only_is_passthrough(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        screenshot = self._screenshot(True)
+        assert combine_oracle_verdicts(screenshot, None) == {
+            "verdict": True,
+            "status": "pass",
+            "reason": None,
+            "oracles": {"screenshot": screenshot, "inpage": None},
+        }
+        na = {"verdict": None, "status": "n/a", "reason": "no webgl canvas"}
+        combined = combine_oracle_verdicts(screenshot, na)
+        assert combined["verdict"] is True
+        assert combined["status"] == "pass"
+        assert combined["oracles"]["inpage"] is na
+
+    def test_disagreement_either_way_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        live_vs_dead = combine_oracle_verdicts(self._screenshot(True), self._inpage(False))
+        assert live_vs_dead["verdict"] is None
+        assert live_vs_dead["status"] == "inconclusive"
+        assert live_vs_dead["reason"] == "oracle disagreement"
+
+        dead_vs_live = combine_oracle_verdicts(self._screenshot(False), self._inpage(True))
+        assert dead_vs_live["verdict"] is None
+        assert dead_vs_live["status"] == "inconclusive"
+        assert dead_vs_live["reason"] == "oracle disagreement"
+
+    def test_inpage_inconclusive_over_a_live_screenshot_is_inconclusive(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        combined = combine_oracle_verdicts(self._screenshot(True), self._inpage(None, "control patch moved"))
+        assert combined["verdict"] is None
+        assert combined["status"] == "inconclusive"
+        assert combined["reason"] == "in-page oracle inconclusive: control patch moved"
+
+    def test_inpage_inconclusive_over_a_red_screenshot_stays_red(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        screenshot = self._screenshot(False, "dead bands")
+        combined = combine_oracle_verdicts(screenshot, self._inpage(None, "control patch moved"))
+        assert combined["verdict"] is False
+        assert combined["status"] == "fail"
+        assert combined["reason"] == "dead bands"
+
+    def test_an_inconclusive_screenshot_is_never_upgraded(self):
+        from obed_edom.html_alpha_probe import combine_oracle_verdicts
+
+        screenshot = {"verdict": None, "status": "inconclusive", "reason": "noise floor above threshold"}
+        combined = combine_oracle_verdicts(screenshot, self._inpage(True))
+        assert combined["verdict"] is None
+        assert combined["status"] == "inconclusive"
+        assert combined["reason"] == "noise floor above threshold"

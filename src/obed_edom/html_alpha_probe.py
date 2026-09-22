@@ -77,6 +77,15 @@ DEAD_RECT_MAX_LIVE_FRAC = 0.05
 STRAY_DILATE_PX = 6
 STRAY_MIN_AREA_PX = 2000
 NOISE_FLOOR_P99_MAX = 6
+# In-page GL liveness oracle: thresholds frozen from the research harness (plan §4.2).
+INPAGE_BAND_MARGIN = 1.0
+INPAGE_CONTROL_RANGE_MAX = 1.0
+INPAGE_GREEN_STATIC_MAX = 1.0
+INPAGE_GREEN_CHANNEL_MARGIN = 30
+INPAGE_MIN_SAMPLES = 24
+INPAGE_BAND_COUNT = LIVE_BAND_COLS * LIVE_BAND_ROWS
+INPAGE_OCCLUDED_BANDS_MAX_FRAC = 0.5
+INPAGE_MARKER_DELTA_MAX = 0.5
 PLAYER_RAF_ASSIGN = "window.requestAnimFrame=window.requestAnimationFrame"
 LINEDRAW = "com.apple.iWork.Keynote.LineDraw"
 LINEDRAW_FOR_LINE = "com.apple.iWork.Keynote.LineDrawForLine"
@@ -1925,6 +1934,287 @@ def score_visible_slide_from_delta(
         "stray": stray,
         "noiseFloor": noise,
         "reason": None,
+    }
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if np.isfinite(result) else None
+
+
+def _valid_inpage_sample(sample: Any, n_bands: int) -> bool:
+    """Every field `score_inpage_liveness` reads or converts, checked up front so a
+    malformed sample fails closed to INCONCLUSIVE instead of raising."""
+    if not isinstance(sample, dict):
+        return False
+    bands = sample.get("bands")
+    if not isinstance(bands, (list, tuple)) or len(bands) != n_bands:
+        return False
+    if any(_finite_float(v) is None for v in bands):
+        return False
+    if _finite_float(sample.get("control")) is None or _finite_float(sample.get("green")) is None:
+        return False
+    rgb = sample.get("greenRGB")
+    if not isinstance(rgb, (list, tuple)) or len(rgb) != 3 or any(_finite_float(v) is None for v in rgb):
+        return False
+    if _finite_float(sample.get("ms")) is None or _finite_float(sample.get("t")) is None:
+        return False
+    return _finite_float(sample.get("glErr")) is not None
+
+
+def _distinct_monotonic(values: Sequence[float]) -> bool:
+    """Strictly increasing, no repeats: a duplicated or replayed callback cannot
+    "prove" a window by repeating one frozen sample."""
+    return all(a < b for a, b in zip(values, values[1:]))
+
+
+def _valid_occluder_mask(mask: Any, n_bands: int) -> bool:
+    return (
+        isinstance(mask, (list, tuple))
+        and len(mask) == n_bands
+        and all(v in (0, 1) for v in mask)
+    )
+
+
+def score_inpage_liveness(
+    samples: Sequence[dict[str, Any]],
+    *,
+    occluder_mask: Sequence[int],
+    min_samples: int = INPAGE_MIN_SAMPLES,
+) -> dict[str, Any]:
+    """WebGL-settled-slide oracle: LIVE iff every non-occluded band moves more than
+    the static control patch, the green patch stays green and static, and there is
+    no GL error. Fails closed to INCONCLUSIVE on anything that makes the read itself
+    untrustworthy (too few/malformed samples, an unmeasured or malformed occluder
+    mask, a moving control, mostly-occluded bands) rather than ever manufacturing a
+    pass. ``mediaTime``/``vt`` are recorded only and never influence the verdict.
+    """
+    if not isinstance(samples, (list, tuple)):
+        return {"verdict": None, "status": "inconclusive", "reason": "malformed samples", "n": 0}
+    if not samples:
+        return {"verdict": None, "status": "inconclusive", "reason": "no samples", "n": 0}
+
+    n_bands = INPAGE_BAND_COUNT
+    if not all(_valid_inpage_sample(s, n_bands) for s in samples):
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "reason": "malformed samples",
+            "n": len(samples),
+        }
+    t_values = [float(s["t"]) for s in samples]
+    if not _distinct_monotonic(t_values):
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "reason": "duplicate or non-monotonic sample callbacks",
+            "n": len(samples),
+        }
+    if not _valid_occluder_mask(occluder_mask, n_bands):
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "reason": "missing or malformed occluder mask",
+            "n": len(samples),
+            "nBands": n_bands,
+        }
+
+    bands = np.array([s["bands"] for s in samples], dtype=float)
+    control = np.array([s["control"] for s in samples], dtype=float)
+    green = np.array([s["green"] for s in samples], dtype=float)
+    rgb = np.array([s["greenRGB"] for s in samples], dtype=float)
+    vt_values = [_finite_float(s.get("vt")) for s in samples]
+    media_time_values = [_finite_float(s.get("mediaTime")) for s in samples]
+
+    occ = np.asarray(occluder_mask, dtype=bool)
+    n_occluded = int(occ.sum())
+    if n_bands == 0 or (n_occluded / n_bands) > INPAGE_OCCLUDED_BANDS_MAX_FRAC:
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "reason": "more than half the bands are occluded",
+            "n": len(samples),
+            "nBands": n_bands,
+            "occludedBands": n_occluded,
+        }
+
+    judged = ~occ
+    n_judged = int(judged.sum())
+    if n_judged == 0:
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "reason": "no judged bands",
+            "n": len(samples),
+            "nBands": n_bands,
+            "occludedBands": n_occluded,
+            "judgedBands": n_judged,
+        }
+
+    band_range = bands.max(axis=0) - bands.min(axis=0)
+    control_range = float(control.max() - control.min())
+    green_range = float(green.max() - green.min())
+    threshold = control_range + INPAGE_BAND_MARGIN
+    live_bands = int((band_range > threshold).sum())
+    mean_rgb = rgb.mean(axis=0)
+    green_is_green = bool(
+        mean_rgb[1] > mean_rgb[0] + INPAGE_GREEN_CHANNEL_MARGIN
+        and mean_rgb[1] > mean_rgb[2] + INPAGE_GREEN_CHANNEL_MARGIN
+    )
+    gl_err_values = [float(s["glErr"]) for s in samples]
+    gl_err_any = max((abs(v) for v in gl_err_values), default=0.0)
+    sample_ms = [float(s["ms"]) for s in samples]
+
+    common = {
+        "n": len(samples),
+        "enoughSamples": len(samples) >= min_samples,
+        "nBands": n_bands,
+        "liveBands": live_bands,
+        "occludedBands": n_occluded,
+        "judgedBands": n_judged,
+        "judgedBandRangeMin": float(band_range[judged].min()) if judged.any() else None,
+        "bandRangeMin": float(band_range.min()),
+        "bandRangeMed": float(np.median(band_range)),
+        "bandRangeMax": float(band_range.max()),
+        "threshold": float(threshold),
+        "controlRange": control_range,
+        "greenRange": green_range,
+        "greenMeanRGB": [float(v) for v in mean_rgb],
+        "greenIsGreen": green_is_green,
+        "vtSpan": (max(vt_values) - min(vt_values)) if all(v is not None for v in vt_values) else None,
+        "mediaTimeSpan": (
+            (max(media_time_values) - min(media_time_values))
+            if all(v is not None for v in media_time_values)
+            else None
+        ),
+        "sampleMsP50": float(np.percentile(sample_ms, 50)),
+        "sampleMsP95": float(np.percentile(sample_ms, 95)),
+        "glErrAny": gl_err_any,
+    }
+
+    if control_range > INPAGE_CONTROL_RANGE_MAX:
+        return {"verdict": None, "status": "inconclusive", "reason": "control patch moved", **common}
+    if len(samples) < min_samples:
+        return {"verdict": None, "status": "inconclusive", "reason": "too few samples", **common}
+
+    all_judged_live = bool((band_range[judged] > threshold).all())
+    reasons = []
+    if not all_judged_live:
+        reasons.append("a judged band did not move")
+    if green_range > INPAGE_GREEN_STATIC_MAX:
+        reasons.append("green patch moved")
+    if not green_is_green:
+        reasons.append("green patch is not green")
+    if gl_err_any != 0:
+        reasons.append("gl error")
+
+    verdict = not reasons
+    return {
+        "verdict": verdict,
+        "status": "live" if verdict else "dead",
+        "reason": None if verdict else reasons[0],
+        **common,
+    }
+
+
+def occluder_mask_from_markers(
+    dark_bands: Sequence[float],
+    light_bands: Sequence[float],
+    *,
+    max_delta: float = INPAGE_MARKER_DELTA_MAX,
+) -> dict[str, Any]:
+    """Marker-swap occluder mask: a band whose mean does not move between a black and
+    a white marker frame is covered by later-authored artwork. Markers must differ in
+    RGB sum (black vs white) because the band metric is the RGB mean."""
+    if not isinstance(dark_bands, (list, tuple)) or not isinstance(light_bands, (list, tuple)):
+        return {"verdict": False, "mask": None, "reason": "mismatched marker lengths"}
+    n = len(dark_bands)
+    if n != INPAGE_BAND_COUNT or len(light_bands) != n:
+        return {"verdict": False, "mask": None, "reason": "mismatched marker lengths"}
+    dark = [_finite_float(v) for v in dark_bands]
+    light = [_finite_float(v) for v in light_bands]
+    if any(v is None for v in dark) or any(v is None for v in light):
+        return {"verdict": False, "mask": None, "reason": "non-finite marker delta"}
+    delta = [light[i] - dark[i] for i in range(n)]
+    mask = [1 if abs(d) <= max_delta else 0 for d in delta]
+    return {
+        "verdict": True,
+        "mask": mask,
+        "occluded": int(sum(mask)),
+        "nBands": n,
+        "markerDelta": delta,
+        "reason": None,
+    }
+
+
+def inpage_mask_is_usable(mask_result: dict[str, Any]) -> bool:
+    """A measured occluder mask is usable when it exists and covers no more than
+    half the bands (plan §4.3)."""
+    if not mask_result.get("verdict") or not mask_result.get("mask"):
+        return False
+    n_bands = mask_result["nBands"]
+    if n_bands == 0:
+        return False
+    return (mask_result["occluded"] / n_bands) <= INPAGE_OCCLUDED_BANDS_MAX_FRAC
+
+
+def combine_oracle_verdicts(
+    screenshot: dict[str, Any], inpage: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Two-oracle verdict: agreement wins, disagreement is always inconclusive, and
+    an inconclusive or absent in-page read never upgrades a screenshot verdict of
+    False or None (plan §4.4). A screenshot verdict of None is never overridden."""
+    oracles = {"screenshot": screenshot, "inpage": inpage}
+    if inpage is None or inpage.get("status") == "n/a":
+        return {
+            "verdict": screenshot["verdict"],
+            "status": screenshot["status"],
+            "reason": screenshot.get("reason"),
+            "oracles": oracles,
+        }
+
+    screenshot_verdict = screenshot["verdict"]
+    inpage_verdict = inpage["verdict"]
+
+    if screenshot_verdict is None:
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "reason": screenshot.get("reason"),
+            "oracles": oracles,
+        }
+
+    if inpage_verdict is None:
+        if screenshot_verdict is True:
+            return {
+                "verdict": None,
+                "status": "inconclusive",
+                "reason": f"in-page oracle inconclusive: {inpage.get('reason')}",
+                "oracles": oracles,
+            }
+        return {
+            "verdict": False,
+            "status": "fail",
+            "reason": screenshot.get("reason"),
+            "oracles": oracles,
+        }
+
+    if screenshot_verdict != inpage_verdict:
+        return {
+            "verdict": None,
+            "status": "inconclusive",
+            "reason": "oracle disagreement",
+            "oracles": oracles,
+        }
+
+    return {
+        "verdict": screenshot_verdict,
+        "status": "pass" if screenshot_verdict else "fail",
+        "reason": screenshot.get("reason"),
+        "oracles": oracles,
     }
 
 

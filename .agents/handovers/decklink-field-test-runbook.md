@@ -20,8 +20,8 @@ day** — on 2026-09-20 `pr158-handover-findings-4366b9` was found re-used for a
 build; `decklink-field-test-2ad808` has this branch checked out instead · `PY=/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python`
 (always with `PYTHONPATH=$W/src`; the venv is an editable install of the MAIN checkout) ·
 `FX=<worktree>/output/p2-recovery/html-adversarial` (the H.264 fixture export; git-ignored, so it exists only where
-it was copied: `pr158-handover-findings-4366b9`, `friendly-sammet-32dab4`, `gate-runner` as of 2026-09-20 — never
-remove those worktrees without saving it. The §2 command uses `$FX`, which need not be under `$W`.
+it was copied. As of 2026-09-22 the durable copy is the MAIN checkout's `output/p2-recovery/html-adversarial`
+(those three worktrees are gone; `html-unmodified` there was verified byte-identical before removal). The §2 command uses `$FX`, which need not be under `$W`.
 **Do not run the P2 gate or any other headless Chrome during the test**: the gate rewrites `html-player`, and a
 concurrent browser broke an arm's stage fit on 2026-09-19).
 

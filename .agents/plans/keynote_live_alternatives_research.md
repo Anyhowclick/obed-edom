@@ -335,3 +335,18 @@ host output `fill-key`, alpha true, transparent background. Page returned to `ab
   frame Δ 0 vs control after build 1.
 - **C5 go-to freeze CONFIRMED in the real output path:** goTo 3 and goTo 1-back ⇒ 0 `<video>`, liveFrac 0.000 at +1 s and
   +6 s, 1/8 unique shas (a fully static frame); one advance ⇒ 0.991 live.
+
+## Paint-oracle A12 re-measurement + re-qualification (2026-09-22, Fable; evidence, after the gate-runner prune, in the main checkout's `output/gate-runner-archive/research-harnesses/live-visible-content/{alt-oracle/a12-*,alt-cef/c1a12-*}` and `output/gate-runner-archive/requal-paint-oracle/`)
+The owner chose 12 shots at ≥360 ms (`(0,360,730,1090,1460,1820,2190,2550,2920,3280,3650,4010)`, plan §14) over E0's
+8-shot A. A12 measured with gate12 and A alongside as controls (all matched their E0 numbers):
+- Headless S-GL, 3 viewports × 3 sessions: positive LIVE 9/9 (liveFrac 0.805–0.806; in-page readPixels LIVE 9/9),
+  paused-video DEAD 9/9, null DEAD 9/9. Headless S-DOM: positive LIVE 9/9, null DEAD 9/9. Burst wall ≈4.05 s.
+- OBS 32 CEF attach, 1920×1080, S-DOM, 4 sessions: positive LIVE 4/4 (0.9913), paused null DEAD 4/4. Wall ≈4.2 s.
+- Full re-qualification on `feat/paint-oracle` 4256de38: host pass ×3 viewports (V/Voff all met; refused 1→2), P2 fast
+  14/14, bridge-off 13/14 (only `continueThroughMovingMagicMove3to4` red), slow 14/14. Invariance vs a `main` (76daff4a)
+  before-artifact: every pre-existing verdict/expect/label/rect/stray/status/refused field identical at all three
+  viewports; in-page oracle n/a on every rect; only additive `burstProfile` + per-rect `oracles`.
+- Residual (pre-existing, run-to-run): `instanceCheck.painting` on slide 3 lists 1 or 2 painting videos depending on the
+  run — seen on `main` alone (3 runs at 1920×1080: 2/1, 2/2, 2/2 for V/Voff); `instanceCheck.verdict` True throughout.
+- Harness note: `alt-oracle/common.py` FIXTURE repointed from the removed `friendly-sammet` worktree to the durable
+  `output/p2-recovery/` copy; A12 harness variants are new files (`oracle_a12.py`, `c1_a12.py`).

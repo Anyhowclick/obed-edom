@@ -202,3 +202,23 @@ Full numbers: "Paint-oracle E0" in [`keynote_live_alternatives_research.md`](key
 - D-c: oracle disagreement ⇒ inconclusive-and-fail.
 - D-d: the DOM stimulus in OBS attach mode must be measured before any offset change lands.
 - D-e: FULL re-qualification suite in the same PR.
+
+## 14. Owner decisions — ANSWERED 2026-09-21 (implementation brief questions)
+- Burst = **12 shots at ≥360 ms**: the E0-qualified 8 offsets extended on the same alternating 360/370 cadence,
+  `(0, 360, 730, 1090, 1460, 1820, 2190, 2550, 2920, 3280, 3650, 4010)`. Keeps the 12-shot aliasing bound (2·0.5¹² ≈ 0.05 %)
+  AND the spacing fix; ≈+1.7 s/slide. The anti-aliasing tests restate the property as measured: min gap ≥ 350 ms and ≥ 2
+  distinct gap values (gaps need not all be unique). The 12-shot spaced burst itself is NOT yet measured ⇒ a short
+  headless + OBS-attach re-measurement is owed before merge (D-d), on the owner's go.
+- In-page oracle applicability keys off a runtime-published handle `window.__OBED_GL_ORACLE__`
+  (`{gl, canvas, sample(), markerBands()}`); never a speculative `getContext`. The GL-replay arming PR publishes it.
+- Accepted documented residuals: attach mode measured at 1920×1080 only; a WebGL-only stimulus scored by screenshots in
+  CEF is unmeasured (cannot be produced there at 166 ms/shot).
+- W4 = no touch: P2 imports `BURST_OFFSETS_MS`; `FOOTPRINT_BURST_FRAMES` stays 12.
+  Retained evidence carries `burstOffsetsMs` and IS bound to it (owner decision, Codex r2 Spec 2 -- reversing the
+  r1-follow-up "unbound" call after Codex r2 demonstrated a cadence-specific false-PASS path): `_footprint_evidence_bound`
+  takes a keyword-only `evidence_cadence` (default `BURST_OFFSETS_MS`, the live path) and `legacy_unrecorded_cadence`
+  (default `None`), threaded through `_footprint_fully_live_ok`/`_isolation_view`/`_score_freeze_control`. The real
+  freeze-control fixture stays at its legacy cadence and is scored ONLY via the test-side `_score_34`, which names that
+  legacy profile explicitly on both parameters; a fixture refresh under the current cadence is a freeze-control decision
+  on the owner's go, not a paint-oracle deliverable. For that refresh: the new 12 `burstOffsetsMs[i]` leaves per arm
+  will surface in the absence sweep as ungated and belong in `_SWEEP_ALLOW`/`_MAIN_SWEEP_ALLOW` as report-only provenance.
