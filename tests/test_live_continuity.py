@@ -701,9 +701,6 @@ def test_fixture_refuses_only_the_1_to_2_boundary_and_names_the_green_squares_sl
                 "later-authored artwork overlaps the carried 'untitled.mov' on the destination "
                 f"slide (player index 1, draw slot {SLIDE2_GREEN_SLOT})"
             ),
-            "glReplay": False,
-            "glReplayReason": None,
-            "opacityExcluded": [],
         },
     )
     # the refusal lives on the boundary's own MovieContinuity too, and `action` still says pin.
@@ -2878,3 +2875,58 @@ def test_real_export_gl_replay_parity_both_flag_states():
         assert isinstance(fixture, ContinuityPlan)
         assert real.to_runtime() == fixture.to_runtime()
         assert real.refusals == fixture.refusals
+
+
+# --- Codex round 1 findings ------------------------------------------------------------------
+
+
+def test_flag_off_as_dict_and_json_have_no_gl_replay_keys():
+    """Finding 1 (High): flag-off serialization must be byte-identical to pre-G1 -- no
+    `glReplay`/`glReplayReason`/`opacityExcluded` key anywhere in `as_dict()` or `to_json()`,
+    including on the refusal record and every `MovieContinuity.as_dict()`."""
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=False)
+    assert isinstance(plan, ContinuityPlan)
+    assert plan.refusals  # the boundary still refuses; only the new keys must be absent
+    as_dict = plan.as_dict()
+    dumped = json.dumps(as_dict)
+    assert "glReplay" not in dumped
+    assert "glReplayReason" not in dumped
+    assert "opacityExcluded" not in dumped
+    assert plan.to_json() == json.dumps(as_dict)
+    for boundary in as_dict["boundaries"]:
+        for movie in boundary["movies"]:
+            assert set(movie) == {"asset", "action", "srcRect", "dstRect"}
+    for refusal in as_dict["refusals"]:
+        assert set(refusal) == {"fromPlayer", "toPlayer", "atScene", "asset", "movieKey", "reason"}
+
+
+def _set_transition_name(data, value):
+    events = copy.deepcopy(data["events"])
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if obj.get("type") == "transition" and "name" in obj:
+                obj["name"] = value
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(events)
+    return {**data, "events": events}
+
+
+@pytest.mark.parametrize("bad_name", [42, [1, 2], {"nested": "object"}])
+def test_gl_replay_rejects_unreadable_transition_name_instead_of_raising(bad_name):
+    """Finding 2 (Medium): a JSON-valid non-string transition `name` must not raise at
+    `.startswith()` or at the `_GL_REPLAY_TRANSITIONS` membership test (an unhashable `list`/
+    `dict` raises `TypeError` there) -- it must fail closed to `Unsupported`."""
+    tmp = _mutate_slide(SLIDE1, lambda data: _set_transition_name(data, bad_name))
+    plan = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, Unsupported)
+    assert "unreadable transition name" in plan.reason
+
+    plan_off = derive_plan(tmp, SLIDES, resolver=_resolver, gl_replay=False)
+    assert isinstance(plan_off, Unsupported)
+    assert "unreadable transition name" in plan_off.reason

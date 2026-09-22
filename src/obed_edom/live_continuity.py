@@ -674,14 +674,16 @@ class MovieContinuity:
     """Why `gl_replay` derivation was not attempted or did not qualify, else `None`."""
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "asset": self.asset,
             "action": self.action,
             "srcRect": self.src_rect.as_dict() if self.src_rect else None,
             "dstRect": self.dst_rect.as_dict() if self.dst_rect else None,
-            "glReplay": self.gl_replay is not None,
-            "glReplayReason": self.gl_replay_reason,
         }
+        if self.gl_replay is not None or self.gl_replay_reason is not None:
+            result["glReplay"] = self.gl_replay is not None
+            result["glReplayReason"] = self.gl_replay_reason
+        return result
 
 
 @dataclass(frozen=True)
@@ -1260,6 +1262,27 @@ def _gl_replay_attempt(
     return replace(movie, gl_replay=result, gl_replay_reason=None)
 
 
+def _refusal_record(
+    boundary: SlideBoundary,
+    movie: MovieContinuity,
+    scene_index_by_player: dict[int, int],
+    movie_keys: dict[str, str],
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "fromPlayer": boundary.from_player_index,
+        "toPlayer": boundary.to_player_index,
+        "atScene": scene_index_by_player.get(boundary.to_player_index),
+        "asset": movie.asset,
+        "movieKey": movie_keys.get(movie.asset),
+        "reason": movie.refusal,
+    }
+    if movie.gl_replay is not None or movie.gl_replay_reason is not None:
+        record["glReplay"] = movie.gl_replay is not None
+        record["glReplayReason"] = movie.gl_replay_reason
+        record["opacityExcluded"] = movie.gl_replay.get("excluded", []) if movie.gl_replay else []
+    return record
+
+
 def derive_plan(
     export_root: Path,
     slides: list[dict[str, Any]],
@@ -1340,6 +1363,9 @@ def derive_plan(
         incoming = instances_by_player.get(to_player_index, {}) if to_player_index is not None else {}
         boundary_desc = f"player index {player_index} -> {to_player_index}"
 
+        if transition_name is not None and not isinstance(transition_name, str):
+            return Unsupported(f"unreadable transition name at {boundary_desc}")
+
         if to_player_index is None:
             movies = tuple(
                 MovieContinuity(
@@ -1405,17 +1431,7 @@ def derive_plan(
     return replace(
         plan,
         refusals=tuple(
-            {
-                "fromPlayer": boundary.from_player_index,
-                "toPlayer": boundary.to_player_index,
-                "atScene": scene_index_by_player.get(boundary.to_player_index),
-                "asset": movie.asset,
-                "movieKey": movie_keys.get(movie.asset),
-                "reason": movie.refusal,
-                "glReplay": movie.gl_replay is not None,
-                "glReplayReason": movie.gl_replay_reason,
-                "opacityExcluded": movie.gl_replay.get("excluded", []) if movie.gl_replay else [],
-            }
+            _refusal_record(boundary, movie, scene_index_by_player, movie_keys)
             for boundary in plan.boundaries
             for movie in boundary.movies
             if movie.refusal is not None
