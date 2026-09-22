@@ -1307,7 +1307,7 @@ def _gl_replay_attempt(
         reason = f"transition effect: {result.reason}"
         return replace(movie, gl_replay=None, gl_replay_reason=reason)
     try:
-        slot = _drawn_slot_index(src_events, src_instance, src_slide_name)
+        slot = _drawn_slot_index(src_events, src_instance, src_slide_name, len(result["slotSizes"]))
     except _Refuse as exc:
         return replace(movie, gl_replay=None, gl_replay_reason=str(exc))
     if slot is None:
@@ -1317,17 +1317,32 @@ def _gl_replay_attempt(
 
 
 def _drawn_slot_index(
-    events: list[Any], instance: "_MovieInstance", slide_name: str
+    events: list[Any], instance: "_MovieInstance", slide_name: str, slot_count: int
 ) -> int | None:
-    """The slot index of an instance in its slide's draw order -- for the source slide of a
-    `glReplay` boundary, the same index the transition effect's `slotSizes`/`slotRects` use."""
+    """The instance's slot in the source slide's draw order, which `slotSizes`/`slotRects` index
+    positionally. The transition effect's own layers carry no `objectID`, so the index cannot be
+    read from there; instead every source event that draws the movie must agree on it, and its
+    draw order must be as long as the transition's, otherwise the index would address a different
+    array and the boundary is refused."""
     if instance.object_id is None:
         return None
+    found: int | None = None
     for event in events:
-        found = _movie_slot_index(_draw_slots(event, slide_name), instance.object_id, slide_name)
-        if found is not None:
-            return found
-    return None
+        slots = _draw_slots(event, slide_name)
+        index = _movie_slot_index(slots, instance.object_id, slide_name)
+        if index is None:
+            continue
+        if len(slots) != slot_count:
+            raise _Refuse(
+                f"slide {slide_name} draws {len(slots)} slots where the boundary transition has "
+                f"{slot_count}"
+            )
+        if found is not None and found != index:
+            raise _Refuse(
+                f"slide {slide_name} draws object {instance.object_id} in slot {found} and slot {index}"
+            )
+        found = index
+    return found
 
 
 def _refusal_record(

@@ -2903,6 +2903,46 @@ def test_gl_replay_entry_binds_the_probe_instance_label_rect_and_slot():
     assert list(entry)[-3:] == ["instanceId", "instanceRect", "movieSlot"]
 
 
+def test_movie_slot_agrees_across_every_source_event_that_draws_the_movie():
+    """Codex r1 spec 3. `slotSizes`/`slotRects` come from the qualifying transition effect and
+    `movieSlot` indexes them positionally, so a source event whose draw order puts the movie
+    somewhere else would make the index address the wrong slot. The transition's own layers carry
+    no `objectID` (every slot's child has `objectID is None` on the fixture), so the index cannot
+    be read from the transition directly; instead every source event that draws the movie must
+    agree, and a disagreement refuses the boundary rather than picking the first match."""
+    from obed_edom.live_continuity import _draw_slots, _drawn_slot_index, _Refuse
+
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    movie = plan.boundaries[0].movies[0]
+    assert movie.gl_replay_slot == 3
+    slot_count = len(movie.gl_replay["slotSizes"])
+
+    instance = _MovieInstanceStub(object_id="movie-object")
+    def event(order):
+        return {"baseLayer": {"layers": [{"layers": [{"objectID": name}]} for name in order]}}
+
+    names = [f"other{i}" for i in range(slot_count)]
+    agreeing = list(names)
+    agreeing[3] = "movie-object"
+    assert _drawn_slot_index([event(agreeing), event(agreeing)], instance, "s1", slot_count) == 3
+
+    reordered = list(names)
+    reordered[1] = "movie-object"
+    with pytest.raises(_Refuse, match="slot 3 and slot 1"):
+        _drawn_slot_index([event(agreeing), event(reordered)], instance, "s1", slot_count)
+
+    short = ["movie-object", *names[:2]]
+    with pytest.raises(_Refuse, match="draws 3 slots where the boundary transition has 5"):
+        _drawn_slot_index([event(short)], instance, "s1", slot_count)
+
+
+
+class _MovieInstanceStub:
+    def __init__(self, object_id):
+        self.object_id = object_id
+
+
 @pytest.mark.parametrize("slot", [None, 5, -1, True, 3.0])
 def test_to_runtime_refuses_an_out_of_range_or_unreadable_movie_slot(slot):
     result = _gl_replay_plan_with(gl_replay_slot=slot).to_runtime()

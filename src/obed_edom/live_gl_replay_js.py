@@ -176,6 +176,12 @@ GL_REPLAY_JS = r"""
   var WRITEBACK_FAILED = 'writebackFailed';
 
   function requireDelimitedFrame(ok, detail){ return assertOr('frameNotDelimited', ok, detail); }
+  // The sole `glError` emission: a caught exception from one of our own GL calls
+  // is a failure even when `getError()` stayed clean.
+  function requireGlClean(ok, detail){ return assertOr('glError', ok, detail); }
+  // WebGL absent, or a prototype method we could not replace: either way we
+  // cannot see the player's frame, so nothing installs.
+  function requireWrappers(ok){ return refuseInstall('glReplayUnavailable', ok); }
   function requireVideoFrameCallback(ok){ return assertOr('rvfcUnavailable', ok, null); }
 
   function event(kind, detail){
@@ -262,6 +268,7 @@ GL_REPLAY_JS = r"""
   }
 
   function wrapContexts(){
+    var installed = true;
     var protos = [];
     if (window.WebGLRenderingContext) protos.push(WebGLRenderingContext.prototype);
     if (window.WebGL2RenderingContext) protos.push(WebGL2RenderingContext.prototype);
@@ -292,9 +299,11 @@ GL_REPLAY_JS = r"""
           return rv;
         };
         wrapper.__obedGlReplay = 1;
-        P[name] = wrapper;
+        try { P[name] = wrapper; } catch (e) {}
+        if (P[name] !== wrapper) installed = false;
       });
     });
+    return installed;
   }
 
   function record(g, name, args){
@@ -429,30 +438,36 @@ GL_REPLAY_JS = r"""
     if (!F) return 0;
     var g = state.gl;
     state.replaying++;
-    var errs = 0, drawSeen = 0;
-    for (var i = 0; i < F.length; i++){
-      var e = F[i];
-      var isDraw = e.m === 'drawArrays' || e.m === 'drawElements';
-      if (isDraw){
-        var slot = drawSeen++;
-        var loc = state.locations[slot];
-        if (opts.capture){
-          state.restOpacity[slot] = null;
-          if (loc && loc.Opacity && state.programs[slot]){
-            try { state.restOpacity[slot] = g.getUniform(state.programs[slot], loc.Opacity); }
-            catch (x) { state.restOpacity[slot] = null; }
+    var errs = 0, drawSeen = 0, failure = null;
+    try {
+      for (var i = 0; i < F.length; i++){
+        var e = F[i];
+        var isDraw = e.m === 'drawArrays' || e.m === 'drawElements';
+        if (isDraw){
+          var slot = drawSeen++;
+          var loc = state.locations[slot];
+          if (opts.capture){
+            state.restOpacity[slot] = null;
+            if (loc && loc.Opacity && state.programs[slot]){
+              try { state.restOpacity[slot] = g.getUniform(state.programs[slot], loc.Opacity); }
+              catch (x) { state.restOpacity[slot] = null; }
+            }
+          } else {
+            var value = opacityFor(slot, opts);
+            if (value != null && loc && loc.Opacity){
+              try { g.uniform1f(loc.Opacity, value); }
+              catch (x) { errs++; if (!failure) failure = {call: 'uniform1f', slot: slot, error: String(x)}; }
+            }
           }
-        } else {
-          var value = opacityFor(slot, opts);
-          if (value != null && loc && loc.Opacity){
-            try { g.uniform1f(loc.Opacity, value); } catch (x) { errs++; }
-          }
+          if (opts.skip === slot) continue;
         }
-        if (opts.skip === slot) continue;
+        try { e.g[e.m].apply(e.g, e.a); }
+        catch (x) { errs++; if (!failure) failure = {call: e.m, index: i, error: String(x)}; }
       }
-      try { e.g[e.m].apply(e.g, e.a); } catch (x) { errs++; }
+    } finally {
+      state.replaying--;
     }
-    state.replaying--;
+    if (failure) requireGlClean(false, failure);
     return errs;
   }
 
@@ -505,7 +520,7 @@ GL_REPLAY_JS = r"""
     var g = state.gl, G = state.geometry, B = state.buffers;
     var t0 = now();
     state.replaying++;
-    var bands = null, control = 0, green = NaN, greenRGB = [NaN, NaN, NaN], err = 0;
+    var bands = null, control = 0, green = NaN, greenRGB = [NaN, NaN, NaN], err = 0, thrown = null;
     try {
       readInto(G.band, B.band);
       readInto(G.control, B.control);
@@ -517,9 +532,10 @@ GL_REPLAY_JS = r"""
         greenRGB = rgbOf(B.green);
       }
       err = g.getError();
-    } catch (e) { err = -1; }
+    } catch (e) { err = -1; thrown = String(e); }
     state.replaying--;
     if (err) state.glErrors++;
+    if (err) requireGlClean(false, {call: 'readPixels', glErr: err, error: thrown});
     var v = state.video;
     return {
       t: now(), ms: now() - t0,
@@ -692,6 +708,7 @@ GL_REPLAY_JS = r"""
       complete[j] = !!program && UNIFORM_NAMES.every(function(n){ return names[n] && locations[n]; });
     }
     replayFrame({capture: true});
+    if (state.down) return;
 
     for (var i = 0; i < draws.length; i++){
       var prog = state.programs[i], loc = state.locations[i];
@@ -749,6 +766,7 @@ GL_REPLAY_JS = r"""
 
       state.overrides[i] = wanted[i];
     }
+    if (state.down) return;
     replayFrame({rest: true});
     state.opacityAfterProofs = state.programs.map(function(prog, slot){
       var loc = state.locations[slot];
@@ -760,14 +778,18 @@ GL_REPLAY_JS = r"""
   // ------------------------------------------------------------- marker swap
   function markerSwap(){
     var bandsFor = function(r, g2, b){
+      if (state.down) return null;
       paintTexture(state.posterTex, state.posterUpload, r, g2, b);
       replayFrame();
+      if (state.down) return null;
       return sampleOnce(null).bands;
     };
     var dark = bandsFor(0, 0, 0);
     var light = bandsFor(255, 255, 255);
+    if (state.down || !dark || !light) return null;
     restorePoster();
     replayFrame();
+    if (state.down) return null;
     var mask = [], occ = 0;
     for (var i = 0; i < dark.length; i++){
       var o = Math.abs(dark[i] - light[i]) <= MARKER_BAND_EPSILON;
@@ -791,8 +813,9 @@ GL_REPLAY_JS = r"""
     state.collectors.forEach(function(c){ c.resolve(c.out); });
     state.collectors = [];
     var g = state.gl;
-    var lost = false;
-    try { lost = !g || (typeof g.isContextLost === 'function' && g.isContextLost()); } catch (e) { lost = true; }
+    var lost = reason === CONTEXT_LOST;
+    try { lost = lost || !g || (typeof g.isContextLost === 'function' && g.isContextLost()); }
+    catch (e) { lost = true; }
     var written = [], writtenPrograms = [];
     for (var i = 0; i < state.programs.length; i++){
       if (state.overrides[i] == null || !state.programs[i]) continue;
@@ -807,17 +830,21 @@ GL_REPLAY_JS = r"""
     var failed = false;
     if (!lost && written.length){
       state.replaying++;
+      var prev = null;
+      try { prev = g.getParameter(g.CURRENT_PROGRAM); } catch (e) { failed = true; }
       try {
-        var prev = g.getParameter(g.CURRENT_PROGRAM);
         for (var k = 0; k < written.length; k++){
           var slot = written[k];
-          g.useProgram(state.programs[slot]);
-          g.uniform1f(state.locations[slot].Opacity, state.restOpacity[slot]);
+          try {
+            g.useProgram(state.programs[slot]);
+            g.uniform1f(state.locations[slot].Opacity, state.restOpacity[slot]);
+          } catch (e) { failed = true; }
         }
-        g.useProgram(prev);
-        if (g.getError() !== 0) failed = true;
-      } catch (e) { failed = true; }
-      state.replaying--;
+        try { if (g.getError() !== 0) failed = true; } catch (e) { failed = true; }
+      } finally {
+        try { g.useProgram(prev); } catch (e) { failed = true; }
+        state.replaying--;
+      }
     }
     if (!lost) restorePoster();
     // One clean replay so the stand-down does not leave the PATCHED frame on
@@ -871,7 +898,7 @@ GL_REPLAY_JS = r"""
       sample: function(n){ return collect(n); },
       markerBands: function(){
         var m = markerSwap();
-        return Promise.resolve({dark: m.dark, light: m.light, epoch: state.epoch});
+        return Promise.resolve(m ? {dark: m.dark, light: m.light, epoch: state.epoch} : null);
       },
       pause: function(){
         try { if (state.seam) state.seam.setKeepWarm(state.video, false); } catch (e) {}
@@ -936,9 +963,10 @@ GL_REPLAY_JS = r"""
     if (state.video) state.videoEnded = !!state.video.ended;
     if (fresh && !state.paused) perLiveUpload();
     replayFrame();
+    if (state.down) return false;
     var sample = sampleOnce(meta);
     state.iter++;
-    if (!assertOr('glError', !sample.glErr, {glErr: sample.glErr})) return false;
+    if (state.down) return false;
     feedCollectors(sample);
     return true;
   }
@@ -1016,8 +1044,7 @@ GL_REPLAY_JS = r"""
     if (!assertOr('posterUnreadable', state.poster.complete, null)) return;
 
     buildGeometry();
-    markerSwap();
-    if (state.down) return;
+    if (!markerSwap() || state.down) return;
     var bandCount = BAND_COLS * BAND_ROWS;
     if (!assertOr('occlusionTooHigh', state.occluded <= OCCLUSION_MAX_FRACTION * bandCount,
         {occluded: state.occluded, bands: bandCount})) return;
@@ -1077,10 +1104,12 @@ GL_REPLAY_JS = r"""
 
   function onContextCreated(gl, canvas){
     if (state.gl || state.phase !== 'ARM-PRE' || state.down) return;
-    if (!CANVAS_ID_RE.test(String(canvas.id || ''))) return;
-    if (!assertOr('canvasShape', canvas.isConnected &&
-        canvas.width === INFO.authoredWidth && canvas.height === INFO.authoredHeight,
-        {id: canvas.id, w: canvas.width, h: canvas.height})) return;
+    var stage = document.getElementById('stage');
+    var shaped = CANVAS_ID_RE.test(String(canvas.id || '')) && !!canvas.isConnected &&
+      !!stage && stage.contains(canvas) &&
+      canvas.width === INFO.authoredWidth && canvas.height === INFO.authoredHeight;
+    if (!assertOr('canvasShape', shaped, {id: canvas.id || null, w: canvas.width, h: canvas.height,
+        connected: !!canvas.isConnected, inStage: !!stage && stage.contains(canvas)})) return;
     state.gl = gl;
     state.canvas = canvas;
     state.contextLostListener = function(){ contextLostNow(true); };
@@ -1124,7 +1153,7 @@ GL_REPLAY_JS = r"""
 
   // -------------------------------------------------------------- install
   if (!refuseInstall('planUnreadable', !!ENTRY)) return;
-  if (!refuseInstall('glReplayUnavailable', !!window.WebGLRenderingContext)) return;
+  if (!requireWrappers(!!window.WebGLRenderingContext)) return;
 
   var origGetContext = HTMLCanvasElement.prototype.getContext;
   if (!origGetContext.__obedGlReplay){
@@ -1136,9 +1165,10 @@ GL_REPLAY_JS = r"""
       return ctx;
     };
     wrappedGetContext.__obedGlReplay = 1;
-    HTMLCanvasElement.prototype.getContext = wrappedGetContext;
+    try { HTMLCanvasElement.prototype.getContext = wrappedGetContext; } catch (e) {}
+    if (!requireWrappers(HTMLCanvasElement.prototype.getContext === wrappedGetContext)) return;
   }
-  wrapContexts();
+  if (!requireWrappers(wrapContexts())) return;
 
   armObserver();
   requestAnimationFrame(poll);
