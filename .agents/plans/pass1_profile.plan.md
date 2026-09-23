@@ -76,7 +76,11 @@ todos:
       the IWA writer (remove from drawablesZOrder/ownedDrawables + the object; a NEW surgical write with its
       own live gate because `expected_base_counts` = source − hides addresses later stages). Ceiling ≈ 200 s
       of 780. Order: (i)+(ii) first (behaviour-preserving, node-stub testable), then decide (iii).
-    status: pending
+      DONE (i)+(ii) 2026-09-23 as "per-slide cached lookup + skip applyGeom" — NOT "skip getItem": the lookup is
+      the only attrs-mode miss source, so skipping it would turn misses into applied. Live A/B (runs 5–8,
+      review README): attrs ≈ 97–107 s → ≈ 19 s, null control identical, pass-1 slides equal modulo IDs.
+      Deferred: one doc.slides() per slide (≈ 2–5 s, below gate). (iii) hides (≈ 100 s) stays a separate decision.
+    status: completed
   - id: h-copy-clone
     content: >-
       GATE: deck copy ≥ 60 s AND same APFS volume. Lever: `cp -c` (clonefile) inside
@@ -134,6 +138,17 @@ todos:
       per slide versus what the writer consumes (`_OFFLINE_SOFT_SEED_KINDS` = text only; group rows
       unused since the groups branch stopped) and whether the read can be narrowed to the kinds and
       slides that need a seed. Gate: projected saving ≥ 60 s; needs one owner-gated live run.
+    status: pending
+  - id: h-hides-offline
+    content: >-
+      NEXT (owner 2026-09-23, own session; handover `.agents/handovers/pass1-hides-offline-2026-09-23.md`).
+      Hides ≈ 82–118 s for 947 deletes, almost all of it the per-object `Keynote.delete` AppleEvent.
+      Keynote-side batching DROPPED (owner): a one-event bulk delete needs a contiguous index range or a
+      `whose` clause, and Keynote items expose no stable marker to filter on — revisit only if Apple's
+      scripting dictionary improves. Lever: delete hide targets offline in the IWA writer after the pass-1
+      save (remove from drawablesZOrder/ownedDrawables + the object), keeping the "source − hides" index
+      model every later stage assumes (`iwa_write.expected_base_counts`). New surgical write ⇒ own plan,
+      own live gate, ID-insensitive slide diff vs the Keynote-deleted deck.
     status: pending
   - id: design-offline-attrs
     content: >-

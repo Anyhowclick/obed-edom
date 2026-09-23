@@ -56,7 +56,8 @@ function fixture() {
     },
   };
   const transforms = [
-    { slide: 1, kind: "shape", kindIndex: 0, role: "text" },
+    // font makes the attrs pass reach applyGeom since no-attr specs are skipped; it throws harmlessly on the bare stub.
+    { slide: 1, kind: "shape", kindIndex: 0, role: "text", font: "Helvetica" },
     { slide: 1, kind: "shape", kindIndex: 1, role: "hide" },
   ];
   return { doc: doc, Keynote: Keynote, transforms: transforms, shapes: shapes };
