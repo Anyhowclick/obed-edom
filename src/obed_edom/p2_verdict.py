@@ -1751,16 +1751,7 @@ def _iou(a: object, b: object) -> float | None:
 
 
 def _derived_paint(entry: dict) -> tuple[bool, str | None] | None:
-    """`(visible, hiddenBy)` RECOMPUTED from the raw readings, or `None` when the
-    entry does not carry them.
-
-    The page's own `visible` is a derived Boolean like any other, and a stale one
-    reading `false` over an attached, opaque, on-screen element would be SKIPPED
-    by the attestation. The rules are the page's, restated on the
-    retained `inDocument` / `documentHidden` / `display` / `visibility` / ancestor-opacity product /
-    `checkVisibility` / client rect / viewport, in the same order, so the two
-    must agree exactly. `documentHidden` is absent only from records that predate
-    it (captured under screenshot-driven hidden-page scheduling)."""
+    """Re-derive paint from raw fields; legacy records default documentHidden to false."""
     attached = entry.get("inDocument")
     page_hidden = entry.get("documentHidden", False)
     display, visibility = entry.get("display"), entry.get("visibility")
@@ -1845,6 +1836,7 @@ def _visible_competitors(
     hits: list[dict] = []
     classified: dict[str, int] = {}
     ok = True
+    page_hidden = 0
     bound = str(bound_decoder)
     for i in positions:
         if not (0 <= i < len(media) and 0 <= i < len(owner)):
@@ -1859,6 +1851,9 @@ def _visible_competitors(
             str(e.get("decoderId")) for e in videos
             if isinstance(e, dict) and not e.get("fromPreservePool")
         }
+        if any(isinstance(e, dict) and e.get("documentHidden") is True for e in videos):
+            ok = False
+            page_hidden += 1
         for v in videos:
             if not isinstance(v, dict) or "visible" not in v or not _paint_agrees(v, dom_ids):
                 ok = False
@@ -1879,7 +1874,12 @@ def _visible_competitors(
                              "iou": round(iou, 4), "rect": v.get("rect")})
     return {
         "ok": ok,
-        "reason": None if ok else "a visible competing decoder overlapped the footprint",
+        "reason": (
+            None if ok
+            else "the page was hidden in a scored sample" if page_hidden
+            else "a visible competing decoder overlapped the footprint"
+        ),
+        "pageHidden": page_hidden,
         "hits": hits[:8],
         "n": len(positions),
         "hiddenBy": classified,

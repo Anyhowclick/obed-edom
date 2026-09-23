@@ -223,9 +223,9 @@ OQ-11 note: `patch_player` is sha-pinned (`live_runtime.py:94-99`), the same gat
 
 ## P2 harness fix (2026-09-23, folded into this PR)
 - **Key input:** `p2_alpha_spike.ChromeCdp.key` no longer sends `nativeVirtualKeyCode` (as `live_host`). A/B on this fixture, one run per arm: native + focus emulation hung at #4 (CDP timeout); safe keys stayed `visible` with rAF running, drained 24/24 keys, with and without focus emulation.
-- **3→4 owner query:** the capture collector starts its modelled R3→R4 move at the carried decoder's `__obedMotion.started` (fallback: hash ≥ 8; `collector.flipVia` reports which). GPU-on/replay-off, 4 captures: motion started ~1.7 s before #8, all ~126 modelled-null rows were owned at the measured rect, and the motion-started model vs measured rect had IoU ≥ 0.973 throughout.
+- **3→4 owner query:** the capture collector starts its modelled R3→R4 move at the bound decoder's `__obedMotion.started`, accepted only for boundary `atScene` 8, the decoder's current generation, a finite stamp at or after the trusted advance keydown and not in the future (fallback: hash ≥ 8; `collector.flipVia` reports which). Measured: the stamp lands ~103 ms after the keydown in every arm, on the carried decoder only. GPU-on/replay-off, 4 captures: motion started ~1.7 s before #8, all ~126 modelled-null rows were owned at the measured rect, and the motion-started model vs measured rect had IoU ≥ 0.973 throughout.
 - **Collector tail:** two frames (1 s timeout) before the dump, so the last capture is bracketed (B-arm sample 101).
-- **Paint:** a video on a `document.hidden` page classifies `page-hidden` (records predating the field still re-derive).
+- **Paint:** a video on a `document.hidden` page classifies `page-hidden` (records predating the field default it to false). A hidden page in a scored competitor sample is inadmissible: `visibleCompetitors` fails (`pageHidden` counts the samples).
 - **Stop-gap reverted:** `owner_coverage_report_only` removed; `stableSlide4Owner` coverage gates in auto again.
 - **Re-qualification** (fast profile, one Chrome, machine quiet; 3× flag-off, 3× `--gl-replay auto`): 6/6 `success`, freeze control `pass` 6/6, thresholds unchanged. Measured vs limit: max rAF gap 33.4–33.9 ms (≤ 100); trigger 7 rAFs (≤ 9) / 128.7–139.5 ms (≤ 190); frozen run 21–26 (≥ 6); rVFC advance ≥ 4.97 s (≥ 0.5); after-window null-owner run 0 in every arm (was 26–28); unbracketed 0; `flipVia` = motion in every arm.
 
@@ -234,3 +234,4 @@ OQ-11 note: `patch_player` is sha-pinned (`live_runtime.py:94-99`), the same gat
 - Astra M investigation (3→4 GPU-on): P2 owner query lags the product's motion start (#7 vs #8) ⇒ owner-coverage stop-gap; G2 already RETIRED.
 - Astra H investigation (visible-page hang): P2 sends Windows key codes as macOS `nativeVirtualKeyCode` ⇒ hidden page / hang; host unaffected ⇒ P2 timing verdicts are screenshot-driven. Fixed by the harness-fix branch folded into this PR.
 - Astra H r2 (d43de548): 0 BLOCKER, 1 MAJOR (forced-ok on invalid V reference), 5 MINOR — fixed in the following commit.
+- Astra H r3 (fc5e79b0, harness fix): 0 BLOCKER, 1 MAJOR (hidden page skipped competitors, RED→GREEN), 3 MINOR (motion stamp not bound to the carried decoder; collector-tail timeout and driver ordering untested; `_derived_paint` docstring) — fixed in the following commit.

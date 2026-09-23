@@ -2169,7 +2169,8 @@ CAPTURE_COLLECTOR_JS = r"""
   if (window.__OBED_CAP_COLLECT__) return;
   var MIN4 = %(minHash)d, TRANS_MS = %(transMs)f, KEY = %(key)s;
   var R3 = %(r3)s, R4 = %(r4)s, RING = %(ring)d;
-  var st = {rows: [], running: false, n: 0, flipT: null, flipVia: null, dropped: 0, errors: 0, started: null};
+  var st = {rows: [], running: false, n: 0, flipT: null, flipVia: null, dropped: 0, errors: 0, started: null,
+            bound: null, advanceAt: null};
 
   function hashNow() {
     return String(window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash);
@@ -2194,11 +2195,19 @@ CAPTURE_COLLECTOR_JS = r"""
     var P = window.__OBED_P2_PRESERVE__;
     try { return (P && P.snapshot) ? P.snapshot() : []; } catch (e) { st.errors++; return []; }
   }
-  function motionStart() {
+  function onAdvanceKey(e) {
+    if (st.advanceAt === null && e.key === 'ArrowRight' && e.isTrusted === true && e.repeat !== true)
+      st.advanceAt = e.timeStamp;
+  }
+  function motionStart(now) {
+    if (st.bound === null || st.advanceAt === null) return null;
     var vids = document.querySelectorAll('video');
     for (var i = 0; i < vids.length; i++) {
-      var m = vids[i].__obedMotion;
-      if (m && m.boundary && m.boundary.movieKey === KEY && m.started >= st.started) return m.started;
+      var v = vids[i], m = v.__obedMotion;
+      if (String(v.__obedElId) !== String(st.bound) || !m || !m.boundary) continue;
+      var gen = v.__obedGen == null ? 0 : v.__obedGen;
+      if (m.boundary.movieKey === KEY && m.boundary.atScene === MIN4 && m.generation === gen
+          && Number.isFinite(m.started) && m.started >= st.advanceAt && m.started <= now) return m.started;
     }
     return null;
   }
@@ -2207,7 +2216,7 @@ CAPTURE_COLLECTOR_JS = r"""
     var t = performance.now();
     var h = hashNow(), hn = hashNum(h);
     if (st.flipT === null) {
-      var ms = motionStart();
+      var ms = motionStart(t);
       if (ms !== null) { st.flipT = ms; st.flipVia = 'motion'; }
       else if (hn !== null && hn >= MIN4) { st.flipT = t; st.flipVia = 'hash'; }
     }
@@ -2221,15 +2230,22 @@ CAPTURE_COLLECTOR_JS = r"""
     requestAnimationFrame(frame);
   }
   window.__OBED_CAP_COLLECT__ = {
-    start: function () {
-      if (!st.running) { st.running = true; st.started = performance.now(); requestAnimationFrame(frame); }
+    start: function (bound) {
+      if (!st.running) {
+        st.running = true; st.started = performance.now(); st.bound = bound == null ? null : bound;
+        window.addEventListener('keydown', onAdvanceKey, true);
+        requestAnimationFrame(frame);
+      }
       return {ok: true};
     },
     dump: function () {
       return {rows: st.rows, dropped: st.dropped, errors: st.errors,
               started: st.started, running: st.running, flipT: st.flipT, flipVia: st.flipVia};
     },
-    stop: function () { st.running = false; return {rows: st.rows.length}; }
+    stop: function () {
+      st.running = false; window.removeEventListener('keydown', onAdvanceKey, true);
+      return {rows: st.rows.length};
+    }
   };
 })()
 """ % {
@@ -2469,7 +2485,7 @@ async def _advance_to_slide4_capture(
         inner_w = float(badge_install.get("innerWidth") or 0) or float(probe.shape[1])
         badge_scale = float(probe.shape[1]) / inner_w
     await chrome.evaluate(CAPTURE_COLLECTOR_JS)
-    await chrome.evaluate("window.__OBED_CAP_COLLECT__.start()")
+    await chrome.evaluate(f"window.__OBED_CAP_COLLECT__.start({json.dumps(bound_owner_id)})")
     badge_decoded = 0
     badge_missing = 0
     badge_unlogged = 0

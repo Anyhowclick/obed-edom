@@ -4147,6 +4147,51 @@ def test_visible_competitor_on_the_footprint_during_the_gap_is_inconclusive():
     assert verdict["verdict"] == "inconclusive"
 
 
+def _hide_page(snap: dict, positions) -> dict:
+    """Every `videos` entry at the given sample positions re-read on a hidden page:
+    raw readings and derived flags agree (`page-hidden`), ownership and clocks as
+    they were."""
+    media = [copy.deepcopy(m) for m in snap["mediaSamples"]]
+    for i in positions:
+        for v in media[i]["videos"]:
+            if not v.get("fromPreservePool"):
+                v.update(documentHidden=True, visible=False, hiddenBy="page-hidden")
+    snap["mediaSamples"] = media
+    return snap
+
+
+def test_hiding_the_page_cannot_turn_a_competitor_red_into_green():
+    """Astra H r3 MAJOR: a hidden page classified every video `page-hidden`, so the
+    overlapping competitor was skipped and the RED verdict went GREEN. A hidden
+    page in a scored sample is inadmissible evidence."""
+    b = _freeze_b_snap_34()
+    gap = p2._moving_continuity_derived(b)["stableSlide4Owner"]["nullGaps"]["gaps"][0]
+    fp = b["ownerSamples"][_after_positions(b)[gap["from"]]]["footprint"]
+    span = range(gap["from"], gap["to"] + 1)
+    red = _b_with_competitor(span, dict(zip(("x", "y", "w", "h"), fp)))
+    assert "stableSlide4Owner" in p2._moving_continuity_derived(red)["failed"]
+    hidden = _hide_page(red, [_after_positions(red)[k] for k in span])
+    assert all(p2._paint_agrees(v, set()) or v.get("fromPreservePool")
+               for i in (_after_positions(hidden)[k] for k in span)
+               for v in hidden["mediaSamples"][i]["videos"]
+               if v.get("decoderId") == 9999)
+    mc = p2._moving_continuity_derived(hidden)
+    comp = mc["stableSlide4Owner"]["visibleCompetitors"]
+    assert mc["ok"] is False and "stableSlide4Owner" in mc["failed"]
+    assert comp["ok"] is False
+    assert comp["pageHidden"] == len(span)
+    assert comp["reason"] == "the page was hidden in a scored sample"
+    assert _score_34(_positive_snap_34(), hidden, _a2_snap_34())["verdict"] != "pass"
+
+
+def test_a_hidden_page_in_one_scored_sample_fails_without_any_competitor():
+    b = _freeze_b_snap_34()
+    assert p2._moving_continuity_derived(b)["failed"] == []
+    b = _hide_page(b, [_after_positions(b)[-1]])
+    comp = p2._moving_continuity_derived(b)["stableSlide4Owner"]["visibleCompetitors"]
+    assert comp["ok"] is False and comp["pageHidden"] == 1
+
+
 def test_a_competitor_that_does_not_paint_is_not_a_competitor():
     """The same overlapping box, not painting: a decoder that does not composite
     cannot own the footprint however well its rect fits."""
