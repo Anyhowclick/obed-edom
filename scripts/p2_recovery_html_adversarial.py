@@ -352,9 +352,7 @@ GL_SERVED_ORDER = ["plan", "core", "info", "gl", "main"]
 GL_POOL_READS_N = 4
 GL_POOL_READ_GAP_S = 0.35
 
-# The carry census split at the hand-off: the first `glreplay-zone` to `released`
-# note's page clock. Same movie1 attribution and retire-zone window as
-# CARRY_CENSUS_JS; facade stubs of the carried decoder are attributed by the DOM.
+# Clause (c) census (plan §4.2 c), split at the `glreplay-zone -> released` note.
 GL_CARRY_CENSUS_JS = r"""(() => {
   const p = window.__OBED_P2_PRESERVE__;
   if (!p || !p.events) return null;
@@ -390,15 +388,17 @@ GL_CARRY_CENSUS_JS = r"""(() => {
   const released = p.events.find((e) => e.kind === ZONE && e.detail && e.detail.to === 'released');
   const handoffT = released ? released.t : null;
   function sceneNum(e) {
-    const m = /^#(\d+)/.exec(String((e.detail || {}).sceneHash || ''));
+    const m = /^#(\d+)(\?.*)?$/.exec(String((e.detail || {}).sceneHash || ''));
     return m ? parseInt(m[1], 10) : -1;
   }
+  const malformed = [];
   const hits = p.events.filter((e) => {
     if (KINDS.indexOf(e.kind) < 0) return false;
     const d = e.detail || {};
     const mine = mineByKey(e) || ids[String(d.elId)] === 1 || ids[String(d.newElId)] === 1;
     if (!mine) return false;
     const n = sceneNum(e);
+    if (n < 0) malformed.push(e);
     return n >= LO && n < HI;
   });
   const before = hits.filter((e) => handoffT === null || e.t < handoffT);
@@ -413,6 +413,8 @@ GL_CARRY_CENSUS_JS = r"""(() => {
     key: KEY,
     handoffT: handoffT,
     handoffScene: handoffScene,
+    malformedTotal: malformed.length,
+    malformedSample: malformed.slice(0, 10),
     carriedElId: carried,
     facadeElIds: facades,
     before: {total: before.length, sample: before.slice(0, 20)},
@@ -434,8 +436,7 @@ GL_CARRY_CENSUS_JS = r"""(() => {
     "__ZONE_HI__", str(SLIDE3_MIN_HASH)
 )
 
-# One settled-slide-2 read: the pool, the carried decoder's own frame and the
-# page clock, taken in one evaluate so they share a time.
+# One slide-2 read (plan §4.1): pool, carried `sampleFrame` and page clock together.
 GL_SLIDE2_READ_JS = r"""(() => {
   const p = window.__OBED_P2_PRESERVE__;
   if (!p || !p.snapshot) return null;
@@ -500,9 +501,7 @@ def _out_root(gl_auto: bool) -> Path:
 
 
 def _unmodified_export(root: Path, *, reuse: bool, gl_auto: bool) -> Path:
-    """The export every strip/patch step runs on. Auto with `--reuse-export` works on
-    a private copy under `root`: the strip rewrites in place, and the shared
-    `OUT/html-unmodified` is the next flag-off run's input."""
+    """The export the strip/patch steps run on; auto + reuse uses a private copy (plan §4.1)."""
     if not (reuse and gl_auto):
         return root / "html-unmodified"
     copy = root / "html-unmodified"
@@ -541,9 +540,7 @@ def _served_script_order(html: str) -> list[str]:
 
 
 def _inject_player(player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict) -> tuple[dict, dict, dict | None]:
-    """Inject the P2 scripts. Each call lands immediately after the probe marker,
-    so the later call is served first: auto calls GL, INFO, preserve, plan and
-    serves plan < core < INFO < GL < main.js. Off is today's two calls."""
+    """Inject the P2 scripts; auto adds GL then INFO so the served order is plan < core < INFO < GL < main.js (plan §4.1)."""
     gl_record = None
     if gl_auto:
         gl = _inject_script(
@@ -584,8 +581,7 @@ def _patched_main_js(player_dir: Path) -> tuple[bytes, dict]:
 
 
 def _player_handler(player_dir: Path, main_js: bytes | None = None) -> type:
-    """Static handler over `player_dir`; with `main_js` the player script is served
-    from memory (the auto-only `patch_player` bytes), the file on disk untouched."""
+    """Static handler over `player_dir`, serving `main_js` from memory when given (plan §4.1)."""
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -608,16 +604,7 @@ def _player_handler(player_dir: Path, main_js: bytes | None = None) -> type:
 
 
 class GlReplayChromeCdp(ChromeCdp):
-    """`ChromeCdp` without `--disable-gpu`, for `--gl-replay auto` only. Under that
-    flag headless Chrome has no WebGL, so the player renders its non-WebGL
-    fallback and the GL module never sees a context to arm on (G6-P2 r1). The
-    host's headless launch passes no such flag.
-
-    The page lifecycle is left as the flag-off harness has it: after the first CDP
-    key event the page reads `hidden` and frames (rAF, rVFC, the replay loop) are
-    produced only by screenshots. Keeping it visible with focus emulation hung the
-    slide-2 drain at #4-#5 (CDP unresponsive > 30 s), with or without the GPU,
-    the GL module or the continuity core."""
+    """`ChromeCdp` without `--disable-gpu` (WebGL for the GL module), `--gl-replay auto` only (plan §4.1)."""
 
     def _spawn(self) -> None:
         port = _free_port()
@@ -648,8 +635,7 @@ def _chrome(profile: Path, *, gl_auto: bool) -> ChromeCdp:
     return (GlReplayChromeCdp if gl_auto else ChromeCdp)(CHROME, profile)
 
 
-# Read on about:blank BEFORE the player loads: a context made on the player page
-# while the module is in ARM-PRE would be taken for the player's and stand it down.
+# Read on about:blank only: a context made in the player page would arm G2 on it.
 WEBGL_AVAILABLE_JS = "(() => { try { return !!document.createElement('canvas').getContext('webgl'); } catch (e) { return false; } })()"
 
 
@@ -669,9 +655,7 @@ def _gl_boot_ok(check: object) -> bool:
 
 
 def _sample_frame_index_roi(width: int, height: int) -> tuple[int, int, int, int]:
-    """INDEX_PATCH_ROI's insets, as fractions of the on-screen counter patch it sits
-    in (the top-left 120x48 of the 1920x540 source), applied to a `sampleFrame`
-    image. Live calibration is G6-0 (A7)."""
+    """INDEX_PATCH_ROI's insets scaled to a `sampleFrame` image (plan §4.2 f)."""
     screen_w, screen_h = MOVIE_ROI[2] * 120 / 1920, MOVIE_ROI[3] * 48 / 540
     patch_w, patch_h = width * 120 / 1920, height * 48 / 540
     return (
@@ -693,9 +677,7 @@ def _sample_frame_index(frame: object, save_to: Path | None = None) -> int | Non
 
 
 async def _gl_slide2_reads(chrome: ChromeCdp, run_dir: Path) -> list[dict]:
-    """Settled-slide-2 reads, each followed by a screenshot: on the harness's hidden
-    page the screenshot is what produces frames between reads, and it pairs with
-    that read's `sampleFrame` for the A7 counter calibration."""
+    """Settled-slide-2 pool + `sampleFrame` reads, each paired with a screenshot (plan §4.1)."""
     reads = []
     for i in range(GL_POOL_READS_N):
         if i:

@@ -1028,11 +1028,7 @@ def progressingIndexAfterFlip(
     min_after: int = GL_INDEX_MIN_AFTER_FLIP,
     min_sample_frames: int = GL_SAMPLE_FRAME_MIN_READS,
 ) -> dict:
-    """Clause (f): the composited counter (screenshots) keeps advancing after the
-    1->2 flip, and the carried decoder's own `sampleFrame` counter advances the
-    same way. Nulls are skipped, never bridged into a delta of their own; every
-    step between decoded reads must be in `[0, GL_INDEX_MAX_STEP)` mod 256 with a
-    positive sum. Agreement between the two series is report-only."""
+    """Clause (f) (plan §4.2 f): composite and `sampleFrame` counters advance after the flip."""
     if not isinstance(flip_index, int) or not isinstance(index_samples, list) or not 0 <= flip_index <= len(index_samples):
         composite = {"ok": False, "reason": "no scene-hash flip observed", "nDecoded": 0}
     else:
@@ -1062,11 +1058,7 @@ def glPoolReadsVerdict(
     min_reads: int = GL_POOL_MIN_READS,
     min_gap_ms: float = GL_POOL_MIN_GAP_MS,
 ) -> dict:
-    """Clause (d): every pool read on settled slide 2 holds movie1 as {carried} ∪
-    siblings, all detached (`inDocument` false, no `fromDom`), the carried decoder
-    unpaused with `readyState >= 2`. At least `min_reads` reads inside
-    `[lo_scene, hi_scene)`, at least `min_gap_ms` apart by the page clock. An
-    unattributable entry invalidates the read."""
+    """Clause (d) (plan §4.2 d): every slide-2 pool read holds movie1 as {carried} ∪ detached siblings."""
     reads = pool_reads if isinstance(pool_reads, list) else []
     problems: list[str] = []
     pooled: set[str] = set()
@@ -1132,10 +1124,7 @@ def carriedClock1to2(
     rate_max: float = GL_CLOCK_RATE_MAX,
     min_reads: int = GL_POOL_MIN_READS,
 ) -> dict:
-    """Clause (g): the decoder that owned the footprint before the flip IS the
-    carried one, and the carried decoder's OWN clock (matched by elId, never a
-    sibling's or a max across the key) rises strictly across the slide-2 pool
-    reads at wall rate: Δct/Δwall ∈ [rate_min, rate_max] first to last."""
+    """Clause (g) (plan §4.2 g): the pre-flip owner is the carried decoder and its own clock runs at wall rate."""
     owners = [o for o in (pre_flip_owner_ids or []) if o is not None]
     owner_ok = bool(owners) and all(_same_id(o, carried_el_id) for o in owners)
     samples = []
@@ -1185,14 +1174,7 @@ def carriedClock1to2(
 
 
 def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
-    """Clause (c) from the in-page census split at the hand-off (`glreplay-zone`
-    to `released`): zero carry notes for movie1 before it; exactly one
-    `remount-into-authored-layer` for the carried decoder AT the hand-off scene;
-    zero `remount-done` / `remount-footprint-rect` for it or its facade anywhere
-    after it. Later builds legitimately re-place the pinned decoder in its
-    authored layer (`released` is pin; G6-P2 r1 measured 18 more at #3-#5), so
-    those are report-only. A census that is missing, malformed, truncated or has
-    no hand-off fails closed."""
+    """Clause (c) (plan §4.2 c): the in-page carry census split at the hand-off."""
     if not isinstance(census, dict):
         return {"ok": False, "reason": "gl carry census missing", "census": census}
     before = census.get("before") if isinstance(census.get("before"), dict) else {}
@@ -1208,6 +1190,8 @@ def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
         or not all(isinstance(e, dict) for e in gated)
     ):
         return {"ok": False, "reason": "gl carry census malformed", "census": census}
+    if census.get("malformedTotal") != 0:
+        return {"ok": False, "reason": "movie1 carry notes with an unparseable scene hash", "census": census}
     if _finite(census.get("handoffT")) is None or not isinstance(handoff_scene, int) or handoff_scene < 0:
         return {"ok": False, "reason": "no hand-off in the census", "census": census}
     if gated_total != len(gated):
@@ -1215,7 +1199,7 @@ def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
     into = [
         e for e in gated
         if e.get("kind") == "remount-into-authored-layer"
-        and _hash_num(e.get("sceneHash")) == handoff_scene
+        and _strict_hash_num(e.get("sceneHash")) == handoff_scene
         and _same_id(e.get("elId"), carried_el_id)
     ]
     owned = facades | ({str(carried_el_id)} if carried_el_id is not None else set())
@@ -1247,17 +1231,14 @@ def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
     }
 
 
-def glLiveOnSlide2(states: object, *, min_reads: int = 2) -> dict:
-    """The module is LIVE at settled slide 2 itself, not merely once: at least
-    `min_reads` state reads, each `LIVE` with no stand-downs and zero GL errors,
-    one epoch, and `iter`/`uploads` strictly increasing. `loopMode` is not read:
-    G2's watchdog flips it to `raf` whenever two rAF ticks pass without a video
-    frame, so one snapshot of it is a coin toss (owner decision 2026-09-23)."""
+def glLiveOnSlide2(states: object, at_scene: int, *, min_reads: int = 2) -> dict:
+    """Clause (b)'s live half (plan §4.2 b): the module LIVE and advancing across the slide-2 state reads."""
     reads = states if isinstance(states, list) else []
     problems = []
     if len(reads) < min_reads:
         problems.append(f"{len(reads)} slide-2 state reads, need {min_reads}")
     stats = []
+    times: list[float | None] = []
     for i, r in enumerate(reads):
         st = r.get("stats") if isinstance(r, dict) and isinstance(r.get("stats"), dict) else None
         if st is None:
@@ -1269,10 +1250,18 @@ def glLiveOnSlide2(states: object, *, min_reads: int = 2) -> dict:
             problems.append(f"state read {i} stand-downs {r.get('standDowns')!r}")
         if st.get("glErrors") != 0:
             problems.append(f"state read {i} glErrors {st.get('glErrors')!r}")
+        if _strict_hash_num(r.get("sceneHash")) != at_scene:
+            problems.append(f"state read {i} at {r.get('sceneHash')!r}, expected #{at_scene}")
+        epoch = st.get("epoch")
+        if not isinstance(epoch, int) or isinstance(epoch, bool):
+            problems.append(f"state read {i} epoch {epoch!r}")
         stats.append(st)
+        times.append(_finite(r.get("t")))
     if len(stats) == len(reads) and len(stats) >= 2:
         if len({s.get("epoch") for s in stats}) != 1:
             problems.append("epoch changed across slide-2 reads")
+        if any(x is None for x in times) or not all(b > a for a, b in zip(times, times[1:])):
+            problems.append(f"state read clocks not strictly increasing: {times!r}")
         for field in ("iter", "uploads"):
             vals = [_finite(s.get(field)) for s in stats]
             if any(x is None for x in vals) or not all(b > a for a, b in zip(vals, vals[1:])):
@@ -1358,17 +1347,7 @@ def glReplayCarry1to2(
     at_scene: int = SLIDE2_MIN_HASH,
     max_delta: float = GL_CARRIED_MAX_DELTA,
 ) -> dict:
-    """Fail-CLOSED verdict that the 1->2 carry went through GL replay and was
-    handed back to the authored layer (plan §4.2). All of:
-    (a) the plan's `glReplay` entry for `target_key` at `at_scene` with
-    `fallback == "retire"`; (b) zone exactly `pending->armed moduleReady,
-    armed->released handoff`, one arm at `#at_scene-1`, one live, one carried
-    (delta <= `max_delta`), one `handoff` release that retired exactly the pooled
-    siblings, no refusal note for the key at `#at_scene`, and `glLiveOnSlide2`; (c) the split carry
-    census; (d) every slide-2 pool read; (e) nothing painting over the slide-1/2
-    footprints on settled slide 2; (f) `progressingIndexAfterFlip`; (g)
-    `carriedClock1to2`; (h) after build 1 the module RETIRED on `canvasRemoved`
-    alone, the hash exactly `#at_scene-1 -> #at_scene` and no player build error."""
+    """Fail-closed 1->2 GL-replay carry verdict, clauses (a)-(h) of plan §4.2."""
     boundaries = (injected_plan or {}).get("boundaries") or []
     entry = next(
         (
@@ -1397,7 +1376,7 @@ def glReplayCarry1to2(
     from_n = _strict_hash_num(hash1)
     to_n = _strict_hash_num(hash2)
     hash_ok = from_n == at_scene - 1 and to_n == at_scene
-    live = glLiveOnSlide2(gl_states_s2)
+    live = glLiveOnSlide2(gl_states_s2, at_scene)
     retired_ok = state.get("standDowns") == [GL_HANDOFF_STAND_DOWN] and state.get("state") == "RETIRED"
     clauses = {
         "a": entry is not None,

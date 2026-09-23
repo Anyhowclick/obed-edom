@@ -145,7 +145,6 @@ REFUSAL_VERDICT_KEY = {
 # than this in authored px -- edge-touching and AA seams are not an overlap.
 REFUSAL_OVERLAP_MIN_PX = 1.0
 
-# GL replay (plan g5g6 §3): the armed 1->2 verdict, its reads, and the hand-back capture.
 ARMED_VERDICT_KEY = {"continue1to2": "armed1to2"}
 ARMED_READ_GAP_S = 0.5
 ARMED_CARRY_DELTA_MAX = 0.02
@@ -203,8 +202,7 @@ STAGE_MAP_JS = "(function(){" + STAGE_MAP_FN_JS + "return stageMapOf();})()"
 SCENE_ID_JS = "window.__obedLive ? window.__obedLive.snapshot().sceneId : null"
 HASH_JS = "String(location.hash || '')"
 
-# Module state, runtime notes and the pool census in one read. Never the oracle
-# handle, its context, `markerBands` or `pause`: those belong to the Vgl pass alone.
+# Never the oracle handle, its context, `markerBands` or `pause` (Vgl pass only).
 GL_REPLAY_READ_JS = r"""
 (function(){
   function plain(x){ try { return JSON.parse(JSON.stringify(x)); } catch (e) { return {error: String(e)}; } }
@@ -619,9 +617,7 @@ def retire_fact(
 def armed_fact(
     plan: ContinuityPlan, runtime: dict[str, Any], boundary_keys: dict[int, str]
 ) -> dict[str, Any]:
-    """The one `glReplay` boundary a flag-on runtime plan carries, resolved like
-    `retire_fact` plus the geometry the armed and hand-back checks need. Anything
-    but exactly one scorable entry is outside the contract."""
+    """The flag-on plan's single `glReplay` boundary and its geometry (plan g5g6 §3.2); fails closed."""
     entries = [
         boundary for boundary in runtime.get("boundaries") or []
         if isinstance(boundary, dict) and boundary.get("action") == "glReplay"
@@ -738,8 +734,7 @@ def ground_truth_facts(plan: ContinuityPlan, *, armed: bool = False) -> dict[str
     bridging asset, the scene onset of each of the three boundaries under test, and
     the authored rects the tracked decoder must be on-screen at either side of each
     boundary (reviewer finding #1: "same id existed sometime before/after" is not
-    enough -- it must be at the RIGHT rect, not merely present somewhere). `armed`
-    adds the flag-on plan's `armed`/`armedBoundaries`; the off key set is unchanged."""
+    enough -- it must be at the RIGHT rect, not merely present somewhere)."""
     bridge = None
     pin = None
     for boundary in plan.boundaries:
@@ -797,8 +792,7 @@ def gl_replay_mode(entry: Any) -> str | None:
 def facts_for(
     continuity: Any, facts_off: dict[str, Any], facts_on: dict[str, Any] | None
 ) -> dict[str, Any]:
-    """The fact set an arm or pass is scored by: the flag-on set only when the host
-    REPORTS the module injected (plan D2), else today's."""
+    """The flag-on facts only when the host reports the module injected (plan g5g6 D2)."""
     if facts_on is not None and gl_replay_mode({"continuity": continuity}) == "injected":
         return facts_on
     return facts_off
@@ -807,8 +801,7 @@ def facts_for(
 def check_vgl_expectations(
     v: dict[int, dict[str, str]], vgl: dict[int, dict[str, str]], armed: dict[str, Any]
 ) -> None:
-    """Vgl's expectations may differ from V's only at the armed movie on its
-    destination slide, where V says dead and Vgl live."""
+    """Vgl may differ from V only at the armed movie, dead in V and live in Vgl."""
     diffs = {
         (index, asset)
         for index in set(v) | set(vgl)
@@ -1460,8 +1453,7 @@ def _finite_number(value: Any) -> float | None:
 def armed_evidence(
     transport: Any, *, gap_s: float = ARMED_READ_GAP_S, sleep: Callable[[float], None] = time.sleep
 ) -> list[dict[str, Any]]:
-    """Two reads of the settled armed slide, `gap_s` apart: the refusal triple plus
-    `GL_REPLAY_READ_JS`. No in-page oracle, no marker swap, no pause."""
+    """Two reads of the settled armed slide, `gap_s` apart; never the oracle handle."""
     reads: list[dict[str, Any]] = []
     for index in range(2):
         if index:
@@ -1476,8 +1468,7 @@ def boundary_observer(
     player: Any, facts: dict[str, Any], out: dict[str, Any], *, sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
 ) -> Callable[[int], None] | None:
-    """`refusal_observer` unless the fact set arms a boundary, in which case its
-    destination slide is read by `armed_evidence` instead."""
+    """`refusal_observer`, or two armed reads once the destination hash settles."""
     armed = facts.get("armed")
     if not armed:
         return refusal_observer(player, facts, out)
@@ -1619,9 +1610,7 @@ def _armed_pool(states: list[dict[str, Any]], armed: dict[str, Any], carried: An
 
 
 def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> list[Any]:
-    """Every footprint owner the runtime resolved for the movie at its instance rect
-    before the flip (authored samples with `scene < atScene`); an unresolved owner is
-    recorded as None."""
+    """Footprint owners resolved at the armed instance rect before the flip (None if unresolved)."""
     owners: list[Any] = []
     for sample in samples or []:
         scene = sample.get("scene")
@@ -1637,13 +1626,7 @@ def pre_flip_owner_ids(samples: list[dict[str, Any]], armed: dict[str, Any]) -> 
 def score_armed(
     reads: Any, armed: dict[str, Any], continuity: Any, *, owner_ids: Any = None
 ) -> dict[str, Any]:
-    """The armed 1->2 verdict (plan g5g6 §3.3), True iff all five clauses hold on
-    two settled reads: the pinned module injected; LIVE on both reads with the loop
-    progressing in one epoch; exactly the arm/live/zone/carried notes of a clean arm;
-    no painting `<video>` over the movie; and the pool is {carried} plus siblings,
-    out of the document, the carried clock running in real time. At least one pre-flip
-    footprint owner resolved, and every resolved one is that single carried decoder
-    (unresolved reads are dropped, as P2's `carriedClock1to2`). Missing is False."""
+    """`armed1to2` (plan g5g6 §3.3): every clause holds; missing is False, never None."""
     checks = {"mode": False, "live": False, "events": False, "noPainting": False, "pool": False, "owner": False}
     detail: dict[str, Any] = {}
     gl = continuity.get("glReplay") if isinstance(continuity, dict) else None
@@ -2422,8 +2405,7 @@ def run_visible_pass(
 def occluded_screen_cells(
     gl_mask: Any, *, cols: int = LIVE_BAND_COLS, rows: int = LIVE_BAND_ROWS
 ) -> list[tuple[int, int]]:
-    """The module's occluder mask (cell `k = gl_row * cols + col`, GL row 0 = the
-    BOTTOM of the instance rect) as screen `(row, col)` cells, row 0 = top."""
+    """The module's occluder mask (GL row 0 = bottom) as screen `(row, col)` cells."""
     if not isinstance(gl_mask, (list, tuple)) or len(gl_mask) != cols * rows or any(v not in (0, 1) for v in gl_mask):
         raise ValueError(f"occluder mask is not {cols * rows} cells of 0/1")
     return sorted((rows - 1 - k // cols, k % cols) for k, v in enumerate(gl_mask) if v == 1)
@@ -2439,10 +2421,7 @@ def _recompute_slide_verdict(record: dict[str, Any]) -> None:
 
 
 def apply_occlusion_rescore(record: dict[str, Any], frames: list[np.ndarray], label: str) -> None:
-    """Re-score one rect's screenshot half over the cells its same-epoch in-page
-    marker mask leaves visible (plan g5g6 §3.5, gating), keep the unmasked score
-    as report-only, and re-fold it with the in-page read. No usable mask leaves
-    the rect inconclusive."""
+    """Gate one rect's screenshot half on its same-epoch occluder mask (plan g5g6 §3.5)."""
     expected = record.get("expectedRects") or []
     per_rect = record.get("perRect") or []
     index = next((i for i, item in enumerate(expected) if item.get("label") == label), None)
@@ -2487,9 +2466,7 @@ def occlusion_rescorer(armed: dict[str, Any]) -> Callable[[dict[str, Any], list[
 
 
 def score_vgl_armed_slide(entry: Any, armed: dict[str, Any]) -> dict[str, Any]:
-    """Vgl's armed destination (plan g5g6 §3.4): the slide meets its expectations,
-    the armed rect reads LIVE in both oracles (the screenshot one masked), the
-    in-page paused control reads DEAD, and no `<video>` paints over the movie."""
+    """Vgl's armed slide (plan g5g6 §3.4): LIVE in both oracles, paused DEAD, no painting video."""
     checks = {key: False for key in ("slide", "inpageLive", "pausedDead", "screenshotLive", "masked", "noPainting")}
     slide = next((s for s in visible_slides_of(entry) if s.get("playerIndex") == armed["playerIndex"]), None)
     rect = next(
@@ -2541,10 +2518,7 @@ def capture_handback(
     host: Any, armed: dict[str, Any], *, expect_handoff: bool, timeout_s: float = HANDBACK_TIMEOUT_S,
     now: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[dict[str, Any], np.ndarray | None]:
-    """ONE post-build-1 capture (plan g5g6 §3.6): read the settled armed slide, one
-    `advance`, wait for the build's hash, a ready player, no busy and (Vgl) the
-    module's hand-off and its release, then 2 rAF and capture. Early or past-hash
-    is inconclusive, never a capture."""
+    """One post-build-1 capture (plan g5g6 §3.6); early or past-hash is inconclusive."""
     transport = host._require_transport()
     target = armed["atScene"] + 1
     record: dict[str, Any] = {"status": "inconclusive", "reason": None, "targetHash": target, "expectHandoff": expect_handoff}
@@ -2588,8 +2562,7 @@ def capture_handback(
 def handback_hook(
     armed: dict[str, Any], sink: dict[str, Any], *, expect_handoff: bool, refusal: bool = False,
 ) -> Callable[[Any, dict[str, Any], dict[str, Any]], None]:
-    """A visible pass's `after_slide`: on the armed slide, optionally the refusal
-    triple, then the hand-back capture into `sink`."""
+    """`after_slide` that captures the hand-back on the armed slide into `sink`."""
     def after_slide(host: Any, slide: dict[str, Any], record: dict[str, Any]) -> None:
         if slide.get("originalOrdinal") != armed["originalOrdinal"]:
             return
@@ -2614,8 +2587,7 @@ def green_slot(slot_rects: list[dict[str, float]], movie_slot: int) -> int | Non
 def handback_mask_rects(
     armed: dict[str, Any], stage_map: dict[str, Any], *, dilate_px: float = HANDBACK_DILATE_PX, poke: bool = False,
 ) -> list[dict[str, float]]:
-    """`toScreen(instanceRect U movie slot U override slots U green slot)`, dilated,
-    plus the poke pixel when the burst poked."""
+    """Dilated screen rects of the instance, movie, override and green slots, plus the poke pixel."""
     slots = armed["slotRects"]
     indices = {armed["movieSlot"], *armed["overrideSlots"]}
     green = green_slot(slots, armed["movieSlot"])
@@ -2666,9 +2638,7 @@ def handback_parity(
 
 
 def score_handback_carry(record: Any, armed: dict[str, Any]) -> dict[str, Any]:
-    """Vgl after build 1: the carried decoder alone paints movie1 at its authored
-    rect, the release was a hand-off retiring exactly the siblings, and neither it
-    nor its facade was ever remounted to the stage or footprint."""
+    """Vgl after build 1: carried paints alone, released by hand-off, never remounted."""
     checks = {"painting": False, "release": False, "noRemount": False, "handoff": False}
     detail: dict[str, Any] = {}
     record = record if isinstance(record, dict) else {}
@@ -2741,8 +2711,7 @@ def handback_latency(record: Any) -> dict[str, Any]:
 
 @contextmanager
 def forced_fail_seed(reason: str) -> Iterator[dict[str, Any]]:
-    """Prepend a `debugForceFail` seed to the host's GL-replay tag, probe-side only;
-    each splice must yield exactly one seed ahead of exactly one module tag."""
+    """Splice a `debugForceFail` seed ahead of the host's GL-replay tag (plan g5g6 §3.8)."""
     original = live_host_module.gl_replay_script
     payload = json.dumps({"debugForceFail": reason}).replace("</", "<\\/")
     seed = f'<script id="{FORCE_FAIL_SEED_ID}">window.__OBED_GL_REPLAY__={payload};</script>\n'
@@ -2765,9 +2734,7 @@ def forced_fail_seed(reason: str) -> Iterator[dict[str, Any]]:
 def score_forced(
     *, v_pass: Any, g_pass: Any, refusal: Any, g_handback: Any, parity: Any, reason: str, splice: Any,
 ) -> dict[str, Any]:
-    """A forced stand-down must leave the page the flag-off twin (plan g5g6 §3.8):
-    V's verdicts slide for slide, `refused1to2`, the zone retired for that reason,
-    no `glreplay-live`, hand-back parity 0. `forced-ok` or `forced-fail`, never `pass`."""
+    """`forced-ok` iff the forced page is V's flag-off twin (plan g5g6 §3.8); never `pass`."""
     after = g_handback.get("after") if isinstance(g_handback, dict) and isinstance(g_handback.get("after"), dict) else None
     zones = _notes(after, "glreplay-zone") if after else []
     last = zones[-1] if zones else {}
@@ -2780,6 +2747,7 @@ def score_forced(
         "mode": gl_replay_mode(g_pass) == "injected",
         "slides": bool(g_verdicts) and all(v is True for v in g_verdicts)
         and not visible_pass_reasons(g_pass, "VglForced", "qualified"),
+        "reference": gl_replay_mode(v_pass) == "off" and not visible_pass_reasons(v_pass, "V", "qualified"),
         "matchesV": v_verdicts == g_verdicts,
         "refused": isinstance(refusal, dict) and refusal.get("verdict") is True,
         "zone": last.get("to") == "retired" and reason in stand_downs and (
@@ -3590,9 +3558,7 @@ def gl_mode_reasons(result: dict[str, Any]) -> list[str]:
 
 
 def gl_replay_reasons(result: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """`--gl-replay auto` only: every arm/pass reports its expected mode, Vgl meets
-    its expectations with its armed slide LIVE in both oracles, and the hand-back
-    holds. Returns (failures, inconclusive)."""
+    """`--gl-replay auto` failures and inconclusives (modes, Vgl, hand-back)."""
     fails = gl_mode_reasons(result)
     armed = (result.get("groundTruthGl") or {}).get("armed")
     if not isinstance(armed, dict):
@@ -3719,8 +3685,7 @@ def write_handback_shot(evidence_dir: Path, name: str, sink: dict[str, Any]) -> 
 def gl_ground_truth(export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any]) -> tuple[
     ContinuityPlan, dict[str, Any], dict[int, dict[str, str]]
 ]:
-    """The flag-on plan, its fact set, and Vgl's expectations -- which may differ
-    from V's only at the armed movie."""
+    """The flag-on plan, its facts, and Vgl's expectations."""
     plan_on = ground_truth_plan(export_root, slides, gl_replay=True)
     facts_on = ground_truth_facts(plan_on, armed=True)
     vgl = rect_expectations(plan_on, runtime_of(plan_on), continuity_on=True)
@@ -3729,8 +3694,7 @@ def gl_ground_truth(export_root: Path, slides: list[dict[str, Any]], facts: dict
 
 
 def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
-    """`--gl-force-fail R`: V and a forced Vgl only, both scored with the flag-off
-    facts; the forced page must be V's twin."""
+    """`--gl-force-fail`: V and a forced Vgl, scored with the flag-off facts."""
     reason = args.gl_force_fail
     viewport = args.viewport
     evidence_dir = args.artifact.parent / "visible"
@@ -3780,6 +3744,13 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def check_fixture(args: argparse.Namespace) -> None:
+    if not args.fixture.is_dir():
+        raise SystemExit(f"fixture is unavailable: {args.fixture}")
+    if not args.original_index.is_file():
+        raise SystemExit(f"original index is unavailable: {args.original_index}")
+
+
 def run_forced_fail_cli(args: argparse.Namespace) -> None:
     artifact = args.artifact
     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -3794,6 +3765,7 @@ def run_forced_fail_cli(args: argparse.Namespace) -> None:
 
     save()
     try:
+        check_fixture(args)
         result.update(run_forced_fail(args))
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - always leave a readable artifact behind
         result["status"] = "forced-fail"
@@ -3805,15 +3777,12 @@ def run_forced_fail_cli(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if not args.fixture.is_dir():
-        raise SystemExit(f"fixture is unavailable: {args.fixture}")
-    if not args.original_index.is_file():
-        raise SystemExit(f"original index is unavailable: {args.original_index}")
-    if args.only_pass == "G":
-        run_pass_g_cli(args)
-        return
     if args.gl_force_fail is not None:
         run_forced_fail_cli(args)
+        return
+    check_fixture(args)
+    if args.only_pass == "G":
+        run_pass_g_cli(args)
         return
     auto = args.gl_replay == "auto"
     artifact = args.artifact

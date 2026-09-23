@@ -4370,10 +4370,14 @@ def _forced_pass(verdicts: list[Any]) -> dict[str, Any]:
     }
 
 
+def _v_reference() -> dict[str, Any]:
+    return dict(_forced_pass([True] * 4), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})
+
+
 class TestForcedFailScoring:
     def _score(self, **overrides: Any) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
-            "v_pass": _forced_pass([True] * 4), "g_pass": _forced_pass([True] * 4),
+            "v_pass": _v_reference(), "g_pass": _forced_pass([True] * 4),
             "refusal": {"verdict": True}, "g_handback": _forced_after("posterAmbiguous"),
             "parity": {"verdict": True}, "reason": "posterAmbiguous", "splice": {"splices": 1},
         }
@@ -4398,6 +4402,11 @@ class TestForcedFailScoring:
         {"g_pass": _forced_pass([True, False, True, True])},
         {"g_pass": dict(_forced_pass([True] * 4), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})},
         {"splice": {"splices": 0}},
+        {"v_pass": dict(_v_reference(), stageFit={"verdict": False})},
+        {"v_pass": dict(_v_reference(), stopError="websocket closed")},
+        {"v_pass": dict(_v_reference(), status="error", error="boom")},
+        {"v_pass": _forced_pass([True] * 4)},
+        {"v_pass": dict(_v_reference(), slides=[])},
     ])
     def test_every_deviation_is_forced_fail(self, override: dict[str, Any]) -> None:
         assert self._score(**override)["status"] == "forced-fail"
@@ -4494,7 +4503,7 @@ class TestCodexR1ProbeFixes:
 
     def test_an_unknown_reason_is_forced_fail_even_when_otherwise_green(self) -> None:
         scored = probe.score_forced(
-            v_pass=_forced_pass([True] * 4), g_pass=_forced_pass([True] * 4), refusal={"verdict": True},
+            v_pass=_v_reference(), g_pass=_forced_pass([True] * 4), refusal={"verdict": True},
             g_handback=_forced_after("bogusReason"), parity={"verdict": True}, reason="bogusReason",
             splice={"splices": 1},
         )
@@ -4564,3 +4573,25 @@ class TestVglScreenshotLiveIsPhysical:
         entry = _vgl_pass()
         mutate(entry["slides"][1]["perRect"][0])
         assert probe.score_vgl_armed_slide(entry, ARMED)["checks"]["screenshotLive"] is False
+
+
+class TestForcedFixtureValidationIsCaught:
+    """Astra H r2: a missing fixture in forced mode must still overwrite the
+    artifact with forced-fail, never leave a previous one untouched."""
+
+    @pytest.mark.parametrize("missing", ["fixture", "index"])
+    def test_a_missing_fixture_stamps_forced_fail(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
+        artifact = tmp_path / "forced.json"
+        artifact.write_text(json.dumps({"status": "forced-ok", "stale": True}))
+        index = tmp_path / "index.html"
+        index.write_text("x")
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        argv = ["x", "--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous", "--artifact", str(artifact),
+                "--fixture", str(tmp_path / "nope" if missing == "fixture" else fixture),
+                "--original-index", str(tmp_path / "nope.html" if missing == "index" else index)]
+        monkeypatch.setattr(sys, "argv", argv)
+        probe.main()
+        saved = json.loads(artifact.read_text())
+        assert saved["status"] == "forced-fail" and "stale" not in saved
+        assert "unavailable" in saved["error"]

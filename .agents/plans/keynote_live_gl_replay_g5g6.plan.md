@@ -216,3 +216,13 @@ OQ-11 note: `patch_player` is sha-pinned (`live_runtime.py:94-99`), the same gat
 - **3→4 owner coverage report-only in P2 auto only** (`owner_coverage_report_only`): P2's owner query lags the product's motion start (Codex Astra M). Identity, competitors, ambiguity, crossing identity and rVFC clock still gate. Stop-gap; reverted by the P2 harness-fix work.
 - **One PR:** G5+G6 ships together with the P2 harness-fix work (key-code input, 3→4 query geometry, B-arm tail race, timing re-qualification) from the session "Fix P2 harness input and 3→4 query timing", which builds on this branch and reverts the stop-gap.
 - Known limit: P2's page goes hidden after the first CDP key event, so P2 GL liveness is screenshot-driven; autonomous liveness is evidenced by the probe's Vgl pass on the visible host.
+- **Clause (c) as measured:** after the hand-off the zone is `released` (pin) and builds #3–#5 re-place the carried decoder in its authored layer again. Gated: exactly one carried-decoder `remount-into-authored-layer` at the hand-off scene, and zero `remount-done`/`remount-footprint-rect` for the carried decoder or its facade anywhere after. Later authored-layer placements are report-only.
+- **Probe `owner` clause:** unresolved (`None`) pre-flip owner reads are ignored; ≥1 resolved owner is required and every resolved owner must equal the carried id (mirrors P2 `carriedClock1to2`).
+- **P2 auto facts:** the WebGL availability probe runs on about:blank (a context made in the player page during ARM-PRE would be taken as the player's and stand G2 down); auto works on a private copy of the reused export; forcing the page visible via focus emulation was rejected (drain hangs at #4–#5, see review log).
+- **Reviewer for this session:** Codex GPT-6 Astra, high effort (owner, 2026-09-23).
+
+## Review log (raw reviewer output not kept; conclusions only)
+- Codex GPT-5.6 Sol r1 (70f22cf1): 2 BLOCKER (armed1to2 wrong sibling; P2 slide-2 LIVE ungated), 5 MAJOR, 3 MINOR — all fixed in bfaeffae.
+- Astra M investigation (3→4 GPU-on): P2 owner query lags the product's motion start (#7 vs #8) ⇒ owner-coverage stop-gap; G2 already RETIRED.
+- Astra H investigation (visible-page hang): P2 sends Windows key codes as macOS `nativeVirtualKeyCode` ⇒ hidden page / hang; host unaffected ⇒ P2 timing verdicts are screenshot-driven. Fixed by the harness-fix branch folded into this PR.
+- Astra H r2 (d43de548): 0 BLOCKER, 1 MAJOR (forced-ok on invalid V reference), 5 MINOR — fixed in the following commit.

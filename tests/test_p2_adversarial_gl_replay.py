@@ -118,6 +118,7 @@ def _gl_census(**over) -> dict:
         "facadeElIds": [7],
         "before": {"total": 0, "sample": []},
         "handoffScene": 2,
+        "malformedTotal": 0,
         "gatedTotal": 1,
         "gated": [{"kind": "remount-into-authored-layer", "elId": CARRIED, "sceneHash": "#2", "t": 20_000.4}],
         "afterTotal": 19,
@@ -138,7 +139,7 @@ def _index_samples() -> list[dict]:
 def _live_state(it=100, up=90, **over):
     stats = {"epoch": 1, "iter": it, "uploads": up, "glErrors": 0, "loopMode": "rvfc"}
     stats.update(over.pop("stats", {}))
-    state = {"state": "LIVE", "standDowns": [], "stats": stats, "sceneHash": "#2"}
+    state = {"state": "LIVE", "standDowns": [], "stats": stats, "sceneHash": "#2?currentSlide=1", "t": 8000.0 + it}
     state.update(over)
     return state
 
@@ -267,6 +268,18 @@ def test_gl_carry_b_each_zone_or_seam_defect_is_red_alone(mutate):
         pytest.param([_live_state(), _live_state(it=100, up=150)], id="iter-stalled"),
         pytest.param([_live_state(), _live_state(it=160, up=90)], id="uploads-stalled"),
         pytest.param([_live_state(), {"state": "LIVE", "standDowns": []}], id="stats-missing"),
+        pytest.param([_live_state(), _live_state(it=160, up=150, sceneHash="#3")], id="read-on-wrong-scene"),
+        pytest.param([_live_state(), _live_state(it=160, up=150, sceneHash="#2junk")], id="read-hash-malformed"),
+        pytest.param([_live_state(), _live_state(it=160, up=150, t=None)], id="read-clock-missing"),
+        pytest.param([_live_state(), _live_state(it=160, up=150, t=8000.0)], id="read-clock-not-increasing"),
+        pytest.param(
+            [_live_state(stats={"epoch": None}), _live_state(it=160, up=150, stats={"epoch": None})],
+            id="epoch-missing-in-both",
+        ),
+        pytest.param(
+            [_live_state(stats={"epoch": True}), _live_state(it=160, up=150, stats={"epoch": True})],
+            id="epoch-not-an-int",
+        ),
     ],
 )
 def test_gl_carry_b_needs_the_module_live_at_settled_slide_2(states):
@@ -322,6 +335,10 @@ def test_gl_carry_c_later_build_re_placements_are_report_only():
         ),
         pytest.param({"gatedTotal": 41}, id="truncated"),
         pytest.param({"handoffScene": None}, id="no-handoff-scene"),
+        pytest.param({"handoffScene": -1}, id="handoff-hash-malformed"),
+        pytest.param({"malformedTotal": 1}, id="malformed-event-hash"),
+        pytest.param({"malformedTotal": None}, id="malformed-count-missing"),
+        pytest.param({"gated": [_into(scene="#2junk")], "gatedTotal": 1}, id="remount-hash-malformed"),
         pytest.param({"handoffT": None}, id="no-handoff"),
         pytest.param({"carriedElId": SIBLING}, id="census-other-carried"),
         pytest.param({"facadeElIds": None}, id="facades-malformed"),
@@ -1099,3 +1116,22 @@ def test_the_script_threads_owner_coverage_only_through_auto():
     assert bracket.count("owner_coverage_report_only=main_js is not None") == 2
     assert "owner_coverage_report_only=owner_coverage_report_only" in inspect.getsource(drv._capture_3to4_snapshot)
     assert 'success = all(f["pass"] for f in findings) and not restart_inconclusive' in run_src
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_gl_carry_census_counts_malformed_movie1_hashes_instead_of_dropping_them():
+    events = [
+        _ev("glreplay-carried", 10, elId=1, delta=0.0, sceneHash="#1?currentSlide=1"),
+        _ev("glreplay-zone", 50, key="movie1", to="released", sceneHash="#2?currentSlide=1"),
+        _ev("remount-into-authored-layer", 51, elId=1, key="untitled.mov", sceneHash="#2?currentSlide=1"),
+        _ev("remount-done", 60, elId=1, sceneHash="#3junk"),
+        _ev("remount-done", 61, elId=9, key="wa0125.mov", sceneHash="bogus"),
+    ]
+    census = _run_census(events)
+    assert census["handoffScene"] == 2
+    assert census["malformedTotal"] == 1
+    verdict = v.glCarryCensusVerdict(census, 1)
+    assert verdict["ok"] is False
+    assert verdict["reason"] == "movie1 carry notes with an unparseable scene hash"
+    clean = _run_census(events[:3])
+    assert clean["malformedTotal"] == 0 and v.glCarryCensusVerdict(clean, 1)["ok"] is True
