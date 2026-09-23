@@ -13,7 +13,7 @@ Supersedes `keynote-live-continuity-2026-09-21.md` (its facts hold; worktree tab
 
 ## Paint oracle — SHIPPED (#196)
 12-shot spaced burst as the single `BURST_OFFSETS_MS` in `p2_verdict.py`; `--burst-poke` off by default; `burstProfile`
-artifact; inert in-page GL oracle. Five Codex rounds (`.agents/reviews/paint-oracle/r1–r5.md`) + a Fable peer opinion
+artifact; inert in-page GL oracle. Five Codex rounds (raw rounds pruned after merge; in git history) + a Fable peer opinion
 on the cadence bind (decision recorded in the plan §14). Re-measured (A12 headless 18/18 + OBS attach 4/4, controls all
 DEAD) and re-qualified (host ×3, P2 fast 14/14 / bridge-off 13/14 / slow 14/14, invariance identical at 3 viewports).
 **Contract the GL-replay arming PR must publish:** `window.__OBED_GL_ORACLE__ = {gl, canvas, video, epoch, sceneId,

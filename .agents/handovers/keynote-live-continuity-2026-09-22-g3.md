@@ -47,8 +47,8 @@ Then G5 (probe `armed1to2` flip) and G6 (P2 `glReplayCarry1to2`) per the arming 
 ## Pruned this round (PR: docs/handover-2026-09-22-g3)
 Removed from the tree (all in git history): reviews for merged work no open plan cites (`dsk-clip-timing`, `dsk-template-optional`,
 `gl-replay-g1`, `gl-replay-g2` except `s3-gates-r5.md`, `live-continuity-followups`, `live-continuity-i3`, `test-speed`), the uncited
-brief, and two doubly-superseded handovers (09-20-night, 09-21). Kept because live docs cite them: `freeze-3to4`, `dsk-split-cap`,
-`groups-census-2026-09-19`, `live-baseline`, `paint-oracle` reviews; the 09-19/09-20 handovers (DeckLink runbook cites them); the
+brief, and two doubly-superseded handovers (09-20-night, 09-21). Kept because live docs cite them: `dsk-split-cap` (open item) and
+`groups-census-2026-09-19` reviews (raw rounds of merged items pruned 2026-09-23); the 09-19/09-20 handovers (DeckLink runbook cites them); the
 completed `cg_resizer`, `gate_verdict_seam`, `offline_text_middle_anchor` plans (checker/offline_groups/architecture-seams cite them).
 **Candidates for the owner to confirm** (no status line, may be closed): `keynote_live_continuity.plan.md`, `keynote_live_visible_content.plan.md`,
 `keynote_live_baseline.plan.md`, `keynote_live_continuity_generalisation.md`, `keynote-alpha.md`, `dsk.plan.md`; `status: pending` plans

@@ -1,8 +1,8 @@
 # Plan — re-bracket the P2 freeze negative control at the 3→4 boundary
 
 Status: IMPLEMENTED and under review — the freeze negative control is re-bracketed on the MOVING 3→4 Magic Move
-and runs in both the A-B-A scratch bracket and the e2e. Codex review rounds 1–12 (r1–r9 recorded under
-`.agents/reviews/freeze-3to4/`); round 12 closes r9's four majors (MAIN's cut boundary, the pre-trigger poll
+and runs in both the A-B-A scratch bracket and the e2e. Codex review rounds 1–12 (raw rounds pruned after merge; in git
+history); round 12 closes r9's four majors (MAIN's cut boundary, the pre-trigger poll
 gap, the release split + first settled instant, the null controller's keydown filter) and replaces the
 hand-picked absence sweep with an EXHAUSTIVE leaf walk (§10.14), which found two further ungated
 cached-verdict reads and a Chrome orphan path. NOT merged; no CI, so the

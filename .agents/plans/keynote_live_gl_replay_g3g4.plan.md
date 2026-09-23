@@ -308,7 +308,7 @@ It is installed on `window.__OBED_P2_PRESERVE__.glReplay` **only when the plan h
 
 ## 8. Rev 3 amendments (round 1: gates r1, Opus R-A/R-B, A2 advisor, owner decisions)
 
-Evidence: `.agents/reviews/gl-replay-g3/{gates-r1,opus-r1-a,opus-r1-b,a2-advice}.md`. Owner decisions 2026-09-23: A2 = (a) + guard G +
+Evidence: `.agents/reviews/gl-replay-g3/gates-r1.md` (raw Opus/advisor rounds pruned after merge; git history). Owner decisions 2026-09-23: A2 = (a) + guard G +
 stash rule; gate-6 frozen frame fixed in G2 in this PR; no further Opus review rounds, straight to Codex.
 
 **§1 zone (R-A A1, A3, A9, A13).**
@@ -350,7 +350,7 @@ the crop). The snapshot moves before the first upload, and a settle-time stand-d
 R3: the footprint fallback no longer fires for the carried decoder; `keepAtFootprint` still holds its origin, now the instance.
 New R9: the 2→3 transition window, covered by guard G. F9's ≈4 px pop was held by the stale pin loop (advisor).
 
-**Codex rounds 1–2 (`.agents/reviews/gl-replay-g3/codex-r{1,2}.md`, all applied).**
+**Codex rounds 1–2 (all applied; raw rounds pruned after merge, git history).**
 - §1 released: a facade bound to the carried decoder swaps it in only inside the authored poster layer; anywhere else the stub is
   dropped with `glreplay-hold {via:'stage'}`. A facade inherits the carried decoder's rect before the footprint check (G34-01; R9
   now covers the facade observer too).

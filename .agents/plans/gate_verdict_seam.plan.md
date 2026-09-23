@@ -212,8 +212,8 @@ proves the counter would have advanced were it not covered.
   **Superseded — owned elsewhere, do not duplicate.** The moving 3->4 case IS scoped and
   implemented on branch `feat/p2-freeze-control-3to4`, plan
   `.agents/plans/p2_freeze_control_3to4.plan.md` (SS2 hold/trigger/geometry, SS4 tiers, SS9
-  correction, SS10 measurements rounds 4-7), Codex reviews r1-r5 in
-  `.agents/reviews/freeze-3to4/`. There the freeze control is re-bracketed at 3->4 with
+  correction, SS10 measurements rounds 4-7), Codex reviews r1-r5 (raw rounds pruned
+  after merge; in git history). There the freeze control is re-bracketed at 3->4 with
   per-screenshot attestation: the cover is re-painted and tracked per rAF against the bound
   owner (`coverTracksFootprint`), each screenshot carries an in-page badge encoding the rect
   that produced it (CRC-8 + monotonic seq, `_fill_badge_coupling`), and in the 3->4 scorer

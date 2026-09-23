@@ -70,7 +70,7 @@ Voff green on every slide (slide 2 "dead, as expected"; slides 1/3/4 live). P2 f
 not-True is the parked `freezeControlCaughtByCounter` (inconclusive ⇒ `success` False); `--disable-bridge34` additionally
 reds ONLY `continueThroughMovingMagicMove3to4`. 914 unit tests. Codex baseline r1 FAIL (1 blocker, 3 majors) → fixed →
 r2 FAIL (3 narrower majors: stale movie identity on asset re-assignment, frozen-composite content validity, census
-attribution) → fixed → **r3 PASS** (`.agents/reviews/live-baseline/`). Evidence (ignored): `output/live-baseline/`.
+attribution) → fixed → **r3 PASS** (raw rounds pruned after merge; in git history). Evidence (ignored): `output/live-baseline/`.
 
 ## What the owner needs to do / decide
 1. Review `.agents/plans/keynote_live_baseline.plan.md` and the baseline branch; say whether to fold it into PR #175.
