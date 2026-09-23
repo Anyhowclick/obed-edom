@@ -24,11 +24,17 @@ from test_remap_keynote import _touch_paths
 
 
 class _SlideHides:
-    def __init__(self, deleted=0, refused=False, reason=None, removed_ids=()):
+    def __init__(self, deleted=0, refused=False, reason=None, removed_ids=(), order_proven=False):
         self.deleted = deleted
         self.refused = refused
         self.reason = reason
         self.removed_ids = list(removed_ids)
+        self.order_proven = order_proven
+
+
+def _proven_refusal(reason="component externalReferences names 9"):
+    """A refusal raised after the writer proved saved order == source order (R1-R4 passed)."""
+    return _SlideHides(0, True, reason, order_proven=True)
 
 
 class _HidesResult:
@@ -229,7 +235,7 @@ def test_run_offline_hides_all_deleted_offline(monkeypatch, deck):
     info = offline_write.run_offline_hides(deck, "verify", {1, 3}, TRANSFORMS, WALL, said.append)
 
     assert fb == []
-    assert info["deleted"] == 4 and info["missed"] == 0 and info["refused"] == []
+    assert info["deleted"] == 4 and info["refused"] == []
     assert info["droppedData"] == 1
     assert sorted(seen["hides"]) == [1, 3]
     assert all(s["role"] == "hide" for v in seen["hides"].values() for s in v)
@@ -241,10 +247,10 @@ def test_run_offline_hides_all_deleted_offline(monkeypatch, deck):
     assert any(m.startswith("Offline hides (verify): 2 slide(s), 4 deleted, 0 refused") for m in said)
 
 
-def test_run_offline_hides_refused_slide_goes_to_applescript_delete(monkeypatch, deck):
+def test_run_offline_hides_order_proven_refusal_goes_to_applescript_delete(monkeypatch, deck):
     _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult(
-        {1: _SlideHides(2), 3: _SlideHides(0, True, "R5 build ref")}))
-    fb = _record_fallback(monkeypatch, missed_lines=["OBED_HIDE_MISSED slide=3 kind=text kindIndex=0"])
+        {1: _SlideHides(2), 3: _proven_refusal("R5 build ref")}))
+    fb = _record_fallback(monkeypatch)
     said = []
     info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, said.append)
 
@@ -254,14 +260,43 @@ def test_run_offline_hides_refused_slide_goes_to_applescript_delete(monkeypatch,
     script = fb[0]["scripts"][0]
     assert "tell slide 3" in script and "tell slide 1" not in script
     assert script.index("delete group 1") < script.index("delete text item 1")
-    assert info["offlineDeleted"] == 2 and info["fallbackDeleted"] == 1
-    assert info["deleted"] == 3 and info["missed"] == 1
+    assert info["offlineDeleted"] == 2 and info["fallbackDeleted"] == 2
+    assert info["deleted"] == 4
+    assert "missed" not in info
     assert info["refused"] == [{"slide": 3, "reason": "R5 build ref"}]
     assert any("slide 3 R5 build ref" in m for m in said)
 
 
+@pytest.mark.parametrize("reason", [
+    "group 0 child-text signature differs from the payload",
+    "reconcile mismatch on kinds ['image']",
+    "hide image 1 does not resolve",
+    "planning failed: KeyError('x')",
+])
+def test_identity_or_address_refusal_aborts_before_any_keynote_reopen(monkeypatch, deck, reason):
+    """Codex r1 #1: the saved order may differ from the source (e.g. two groups swapped
+    during the pass-1 save), so an AppleScript delete by source kindIndex could remove the
+    wrong object. No fallback session may open."""
+    _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult(
+        {1: _proven_refusal(), 3: _SlideHides(0, True, reason, order_proven=False)}))
+    fb = _record_fallback(monkeypatch)
+    with pytest.raises(RuntimeError, match=r"refused slide\(s\) \[3\] before proving the saved order"):
+        offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    assert fb == []
+
+
+def test_any_hide_missed_marker_is_fatal(monkeypatch, deck):
+    """Codex r1 #3: a failed delete (opacity 0 at best) leaves the drawable in its kind
+    collection, so `source - hides` no longer holds; the stage must abort, not count a miss."""
+    _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult(
+        {1: _SlideHides(2), 3: _proven_refusal()}))
+    _record_fallback(monkeypatch, missed_lines=["OBED_HIDE_MISSED slide=3 kind=text kindIndex=0"])
+    with pytest.raises(RuntimeError, match="could not delete 1 hide"):
+        offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+
+
 def test_run_offline_hides_fallback_failure_raises(monkeypatch, deck):
-    _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult({1: _SlideHides(0, True, "x"),
+    _install_writer(monkeypatch, lambda d, h, **kw: _HidesResult({1: _proven_refusal("x"),
                                                                   3: _SlideHides(2)}))
     _record_fallback(monkeypatch, ok=False)
     with pytest.raises(RuntimeError, match="offline hides fallback failed"):
@@ -291,18 +326,6 @@ def _assert_all_to_fallback(fb, info):
     assert [r["slide"] for r in info["refused"]] == [1, 3]
 
 
-def test_pre_write_exception_routes_every_eligible_slide_to_fallback(monkeypatch, deck):
-    def writer(d, h, **kw):
-        raise KeyError("bug before writing")
-
-    _install_writer(monkeypatch, writer)
-    fb = _record_fallback(monkeypatch)
-    said = []
-    info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, said.append)
-    _assert_all_to_fallback(fb, info)
-    assert any(m.startswith("WARNING offline hides failed before writing (KeyError") for m in said)
-
-
 def test_disk_guard_refusal_routes_every_eligible_slide_to_fallback(monkeypatch, deck):
     iwa_write = pytest.importorskip("obed_edom.iwa_write")
 
@@ -311,37 +334,51 @@ def test_disk_guard_refusal_routes_every_eligible_slide_to_fallback(monkeypatch,
 
     _install_writer(monkeypatch, writer)
     fb = _record_fallback(monkeypatch)
-    info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    said = []
+    info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, said.append)
     _assert_all_to_fallback(fb, info)
+    assert any(m.startswith("WARNING offline hides refused before writing") for m in said)
 
 
-def test_writer_import_failure_routes_every_eligible_slide_to_fallback(monkeypatch, deck):
-    monkeypatch.setitem(sys.modules, "obed_edom.iwa_hides", None)
-    fb = _record_fallback(monkeypatch)
-    info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
-    _assert_all_to_fallback(fb, info)
+def test_refused_with_changed_deck_stamp_still_falls_back(monkeypatch, deck):
+    """Codex r1 #7 control: the typed `OfflineWriteRefused` signal decides, not the file's
+    stat (a pre-write touch of the deck must not flip it to an abort)."""
+    iwa_write = pytest.importorskip("obed_edom.iwa_write")
 
-
-def test_readback_mismatch_after_write_raises_without_fallback(monkeypatch, deck):
     def writer(d, h, **kw):
-        Path(d).write_bytes(b"rewritten-deck-bytes")
-        raise RuntimeError("read-back mismatch on slide 1")
+        Path(d).write_bytes(b"different-size-and-mtime")
+        raise iwa_write.OfflineWriteRefused("undecodable member")
 
     _install_writer(monkeypatch, writer)
     fb = _record_fallback(monkeypatch)
-    with pytest.raises(RuntimeError, match="failed after writing"):
+    info = offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
+    _assert_all_to_fallback(fb, info)
+
+
+@pytest.mark.parametrize("exc", [
+    RuntimeError("hides read-back slide 1: lists != expected"),
+    KeyError("bug before writing"),
+    ValueError("slide numbers are 1-based"),
+])
+def test_any_other_writer_exception_aborts_without_fallback(monkeypatch, deck, exc):
+    """Codex r1 #7 control: the deck is untouched here (same stamp), yet only
+    `OfflineWriteRefused` proves nothing was written, so everything else aborts."""
+    def writer(d, h, **kw):
+        raise exc
+
+    _install_writer(monkeypatch, writer)
+    fb = _record_fallback(monkeypatch)
+    before = deck.read_bytes()
+    with pytest.raises(RuntimeError, match="state of .* is unknown"):
         offline_write.run_offline_hides(deck, "verify", {1, 3}, TRANSFORMS, WALL, lambda m: None)
     assert fb == []
+    assert deck.read_bytes() == before
 
 
-def test_non_runtime_error_after_write_also_raises_without_fallback(monkeypatch, deck):
-    def writer(d, h, **kw):
-        Path(d).write_bytes(b"rewritten-deck-bytes")
-        raise KeyError("bug in read-back")
-
-    _install_writer(monkeypatch, writer)
+def test_writer_import_failure_aborts_without_fallback(monkeypatch, deck):
+    monkeypatch.setitem(sys.modules, "obed_edom.iwa_hides", None)
     fb = _record_fallback(monkeypatch)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ImportError):
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
     assert fb == []
 
@@ -505,7 +542,7 @@ def test_plan_field_absent_when_off(monkeypatch, tmp_path):
 
 def test_plan_field_present_when_on(monkeypatch, tmp_path):
     plan, hides_calls = _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "hidesDeferred": 2},
-                              hides_info={"deleted": 2, "missed": 0})
+                              hides_info={"deleted": 2})
     _run(tmp_path)
     assert plan["offlineHideSlides"] == [1]
     assert all(isinstance(n, int) for n in plan["offlineHideSlides"])
@@ -523,7 +560,7 @@ def test_plan_field_absent_when_offline_write_off(monkeypatch, tmp_path):
 def test_call_order_offline_hides_between_saved_closed_and_every_later_stage(monkeypatch, tmp_path):
     events = []
     _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "hidesDeferred": 2}, events=events,
-          hides_info={"deleted": 2, "missed": 0})
+          hides_info={"deleted": 2})
     _run(tmp_path)
     i = events.index("runOfflineHides")
     assert events[i - 1] == "requireSavedClosed"
@@ -538,18 +575,18 @@ def test_call_order_offline_hides_between_saved_closed_and_every_later_stage(mon
 
 def test_applied_accounting_adds_offline_and_fallback_deletes(monkeypatch, tmp_path):
     _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "applied": 7, "missed": 1, "hidesDeferred": 2},
-          hides_info={"deleted": 1, "missed": 1})
+          hides_info={"deleted": 2})
     said = []
     info = _run(tmp_path, said)
-    assert "Applied 8, missed 2." in said
-    assert info["applied"] == 8 and info["missed"] == 2
-    assert info["offlineHides"] == {"deleted": 1, "missed": 1}
+    assert "Applied 9, missed 1." in said
+    assert info["applied"] == 9 and info["missed"] == 1
+    assert info["offlineHides"] == {"deleted": 2}
 
 
 def test_applied_line_prints_after_the_hides_stage(monkeypatch, tmp_path):
     events = []
     _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "hidesDeferred": 2}, events=events,
-          hides_info={"deleted": 2, "missed": 0})
+          hides_info={"deleted": 2})
     said = []
     source, template, dest = _touch_paths(tmp_path)
 
@@ -577,7 +614,7 @@ def test_off_mode_applied_line_unchanged(monkeypatch, tmp_path):
 
 def test_zero_applied_with_deferred_hides_does_not_abort(monkeypatch, tmp_path):
     _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "applied": 0, "hidesDeferred": 2},
-          hides_info={"deleted": 2, "missed": 0})
+          hides_info={"deleted": 2})
     said = []
     info = _run(tmp_path, said)
     assert info["applied"] == 2

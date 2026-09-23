@@ -159,11 +159,6 @@ def _hide_delete_body(specs: list[dict[str, Any]], slide_no: int) -> str:
     return "\n".join(body + ["end tell", "end timeout"])
 
 
-def _deck_stamp(dest: Path) -> tuple[int, int, int]:
-    st = Path(dest).stat()
-    return st.st_size, st.st_mtime_ns, st.st_ctime_ns
-
-
 def _debug_force_refuse() -> frozenset[int]:
     import os  # noqa: PLC0415
 
@@ -179,17 +174,13 @@ def _patch_hides(
     verify: bool,
     say: Callable[[str], None],
 ) -> Any:
-    """`patch_deck_hides`' result, or None when it failed before writing (deck untouched).
+    """`patch_deck_hides`' result, or None on `OfflineWriteRefused` (nothing written).
 
-    `OfflineWriteCorrupted` propagates; any failure after the deck changed raises
-    `RuntimeError` (its state is unknown, so no fallback)."""
-    stamp = _deck_stamp(dest)
-    try:
-        from obed_edom.iwa_hides import patch_deck_hides  # noqa: PLC0415 (optional iwa extra)
-        from obed_edom.iwa_write import OfflineWriteCorrupted  # noqa: PLC0415 (optional iwa extra)
-    except Exception as exc:  # noqa: BLE001 — deck untouched; the AppleScript delete covers it
-        say(f"WARNING offline hides unavailable ({type(exc).__name__}: {exc}); deck untouched.")
-        return None
+    `OfflineWriteCorrupted` propagates; any other failure raises `RuntimeError`, since the
+    deck's state is then unknown."""
+    from obed_edom.iwa_hides import patch_deck_hides  # noqa: PLC0415 (optional iwa extra)
+    from obed_edom.iwa_write import OfflineWriteCorrupted, OfflineWriteRefused  # noqa: PLC0415
+
     slides = _wall_slides_by_number(wall)
     counts = counts_from_payload(wall)
     try:
@@ -205,6 +196,9 @@ def _patch_hides(
             verify=verify,
             force_refuse=_debug_force_refuse(),
         )
+    except OfflineWriteRefused as exc:
+        say(f"WARNING offline hides refused before writing ({exc}); deck untouched.")
+        return None
     except OfflineWriteCorrupted as exc:
         tmp_path = Path(dest).parent / f".{Path(dest).name}.obedwrite.tmp"
         say(
@@ -213,15 +207,11 @@ def _patch_hides(
             "NOT falling back to AppleScript — the deck cannot be safely opened like this."
         )
         raise
-    except Exception as exc:  # noqa: BLE001 — classified by whether the deck changed
-        if _deck_stamp(dest) != stamp:
-            raise RuntimeError(
-                f"offline hides failed after writing {dest} ({type(exc).__name__}: {exc}); "
-                "the deck state is unknown — not falling back to AppleScript. Re-run."
-            ) from exc
-        say(f"WARNING offline hides failed before writing ({type(exc).__name__}: {exc}); "
-            "deck untouched.")
-        return None
+    except Exception as exc:
+        raise RuntimeError(
+            f"offline hides failed ({type(exc).__name__}: {exc}); the state of {dest} is "
+            "unknown — not falling back to AppleScript. Re-run."
+        ) from exc
 
 
 def run_offline_hides(
@@ -233,11 +223,13 @@ def run_offline_hides(
     say: Callable[[str], None],
 ) -> dict[str, Any] | None:
     """Delete the hides pass 1 deferred on `hide_slides`: one surgical IWA rewrite, then one
-    AppleScript delete session for every refused slide (every slide when the writer failed
+    AppleScript delete session for every refused slide (every slide when the writer refused
     before writing). `None` (no decode) when off or nothing is eligible.
 
-    Raises `RuntimeError` when the fallback session fails or the writer fails after writing:
-    a hide left in place makes every later positional stage address the wrong object."""
+    The fallback addresses by source kindIndex, so a slide refused before the writer proved
+    its saved order equals the source order (`order_proven`) raises instead. Also raises
+    `RuntimeError` when the fallback session fails or any hide delete misses: a hide left in
+    place makes every later positional stage address the wrong object."""
     if mode == "off" or not hide_slides:
         return None
     import time  # noqa: PLC0415
@@ -251,10 +243,10 @@ def run_offline_hides(
     t0 = time.monotonic()
     result = _patch_hides(dest, hides_by_slide, wall, verify=(mode == "verify"), say=say)
     if result is None:
-        refused = {n: "writer failed before writing" for n in hides_by_slide}
+        refused = {n: "writer refused before writing" for n in hides_by_slide}
         offline_deleted = 0
         dropped = 0
-        reasons = "writer failed before writing"
+        reasons = "writer refused before writing"
     else:
         refused = {n: str(r.reason) for n, r in result.slides.items() if r.refused}
         offline_deleted = sum(r.deleted for r in result.slides.values() if not r.refused)
@@ -265,8 +257,16 @@ def run_offline_hides(
         f"{len(refused)} refused{' (' + reasons + ')' if reasons else ''}, "
         f"{dropped} orphan data dropped, {time.monotonic() - t0:.1f}s."
     )
+    if result is not None:
+        unproven = sorted(n for n, r in result.slides.items() if r.refused and not r.order_proven)
+        if unproven:
+            raise RuntimeError(
+                f"offline hides refused slide(s) {unproven} before proving the saved order "
+                f"matches the source ({'; '.join(f'slide {n} {refused[n]}' for n in unproven)}); "
+                "an AppleScript delete by source kindIndex could remove the wrong object. "
+                "Re-run with OBED_OFFLINE_HIDES=off."
+            )
     fallback_deleted = 0
-    missed_lines: list[str] = []
     if refused:
         fallback_n = sum(len(hides_by_slide[n]) for n in refused)
         say(f"Offline hides fallback: {len(refused)} slide(s) ({fallback_n} hide(s)) via AppleScript delete.")
@@ -281,10 +281,13 @@ def run_offline_hides(
                 f"{[str(p) for p in failed_dumps]} — those slide(s) may still carry their "
                 "hides, which every later positional stage would mis-address."
             )
-        fallback_deleted = fallback_n - len(missed_lines)
         if missed_lines:
-            say(f"WARNING remap: {len(missed_lines)} hide delete(s) failed (opacity 0 instead): "
-                f"{missed_lines[:8]}")
+            raise RuntimeError(
+                f"offline hides fallback could not delete {len(missed_lines)} hide(s) "
+                f"(left at opacity 0 where possible): {missed_lines[:8]} — every later "
+                "positional stage would mis-address those slides."
+            )
+        fallback_deleted = fallback_n
     return {
         "mode": mode,
         "slides": sorted(hides_by_slide),
@@ -292,7 +295,6 @@ def run_offline_hides(
         "offlineDeleted": offline_deleted,
         "fallbackDeleted": fallback_deleted,
         "deleted": offline_deleted + fallback_deleted,
-        "missed": len(missed_lines),
         "droppedData": dropped,
     }
 

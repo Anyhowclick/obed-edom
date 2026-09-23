@@ -40,7 +40,8 @@ pytest.importorskip("keynote_parser")
 from keynote_parser.codec import IWAFile  # noqa: E402
 
 from obed_edom import iwa_hides, iwa_write  # noqa: E402
-from obed_edom.iwa_hides import HidesResult, patch_deck_hides  # noqa: E402
+from obed_edom.iwa_hides import HidesResult, HidesWriteFailed, patch_deck_hides  # noqa: E402
+from obed_edom.iwa_geometry import compose_geometry  # noqa: E402
 from obed_edom.iwa_kindindex import deck_kind_counts, derive_kind_index  # noqa: E402
 from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
 from obed_edom.iwa_write import (  # noqa: E402
@@ -51,7 +52,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     patch_deck_geometry,
 )
 from obed_edom.offline_inspect import _build_data_index, _data_identifier  # noqa: E402
-from test_iwa_write import _arch, _geom, _member, _shape_super  # noqa: E402
+from test_iwa_write import _arch, _geom, _member, _shape_super, _transition_dict  # noqa: E402
 
 SHEET = "Index/DocumentStylesheet.iwa"
 DOC = "Index/Document.iwa"
@@ -100,17 +101,19 @@ def _a(ident, pbtype, obj, refs=(), data=()):
     return arch
 
 
-def _text(ident, storage, text, *, textbox=True, style=901, extra_refs=(), **extra):
+def _text(ident, storage, text, *, textbox=True, style=901, extra_refs=(), at=None, **extra):
+    x, y = at if at is not None else ((ident % 100) * 10, 10)
     obj = {"isTextBox": textbox, "ownedStorage": {"identifier": storage},
-           "super": {"style": {"identifier": style}, **_geom(10, 10, 100, 40)}, **extra}
+           "super": {"style": {"identifier": style}, **_shape_super(x, y, 100, 40)}, **extra}
     return [
         _a(ident, "TSWP.ShapeInfoArchive", obj, refs=[storage, style, *extra_refs]),
         _a(storage, "TSWP.StorageArchive", {"text": [text]}),
     ]
 
 
-def _image(ident, data, *, mask=None, style=900):
-    obj = {"data": {"identifier": data}, "style": {"identifier": style}, "super": _geom(0, 0, 50, 50)}
+def _image(ident, data, *, mask=None, style=900, at=None):
+    x, y = at if at is not None else ((ident % 100) * 10, 0)
+    obj = {"data": {"identifier": data}, "style": {"identifier": style}, "super": _geom(x, y, 50, 50)}
     refs = [style]
     if mask is not None:
         obj["mask"] = {"identifier": mask}
@@ -264,8 +267,11 @@ def _payload(path: Path) -> dict[int, list[dict]]:
     out: dict[int, list[dict]] = {}
     for n, (sid, _skipped) in enumerate(slide_order(objects), 1):
         items = []
+        geom = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(objects[sid], objects)}
         for rec in derive_kind_index(objects[sid], objects):
-            item = {"kind": rec["kind"], "kindIndex": rec["kindIndex"], "text": rec["text"], "fileName": ""}
+            g = geom.get((rec["kind"], rec["kindIndex"])) or {}
+            item = {"kind": rec["kind"], "kindIndex": rec["kindIndex"], "text": rec["text"], "fileName": "",
+                    **{k: g.get(k) for k in ("x", "y", "w", "h")}}
             if rec["kind"] in ("image", "movie"):
                 item["fileName"] = data_index.get(_data_identifier(objects[rec["id"]]) or "", "")
             if rec.get("duplicateOf"):
@@ -538,8 +544,14 @@ def _i4_violation(comp):
     comp["externalReferences"] = [e for e in comp["externalReferences"] if e.get("objectIdentifier") != "901"]
 
 
+def _group_header_omits_child(members):
+    members[S1] = [a if str(a["header"]["identifier"]) != "306"
+                   else _a(306, "TSD.GroupArchive", a["objects"][0], refs=[]) for a in members[S1]]
+
+
 def _foreign_ext_ref(comp):
-    comp.setdefault("externalReferences", []).append({"componentIdentifier": "101", "objectIdentifier": "301"})
+    comp.setdefault("externalReferences", []).append(
+        {"componentIdentifier": "101", "objectIdentifier": "301", "isWeak": True})
 
 
 REFUSALS = {
@@ -550,8 +562,9 @@ REFUSALS = {
     "non-list-slide-field": (1, dict(mutate=_non_list_slide_field), "titlePlaceholder"),
     "i1": (1, dict(mutate=_i1_violation), "I1"),
     "i2": (1, dict(mutate=_i2_violation), "I2"),
-    "i3": (1, dict(meta_mutate=_mutate_comp("101", _i3_violation)), "I3"),
-    "i4": (1, dict(meta_mutate=_mutate_comp("101", _i4_violation)), "I4"),
+    "same-component-ambiguous-id": (
+        1, dict(meta_mutate=_mutate_comp("101", lambda c: c.update(ambiguousObjectIdentifiers=["301"]))), "ambiguous"),
+    "body-ref-missing-from-header": (1, dict(mutate=_group_header_omits_child), "without a header reference"),
     "shared-member": (1, dict(mutate=_second_slide_in_member), "slide archives"),
     "cross-member-subtree": (1, dict(mutate=_cross_member_subtree), "700"),
     "uuid-ref": (1, dict(mutate=_uuid_ref), "uuid"),
@@ -690,8 +703,8 @@ def test_every_slide_refused_writes_nothing(deck):
     assert _raw_members(deck) == before
 
 
-def test_slide_zero_raises(deck):
-    with pytest.raises(ValueError):
+def test_slide_zero_refuses_before_write(deck):
+    with pytest.raises(OfflineWriteRefused):
         patch_deck_hides(deck, {0: HIDES[1]}, source_counts_by_slide={}, items_by_slide={})
 
 
@@ -706,7 +719,7 @@ def test_b6_post_write_corruption_raises_on_read_back(deck, monkeypatch):
         real(path, {**edits, S1: original}, drop=drop)
 
     monkeypatch.setattr(iwa_hides, "_rewrite_members", corrupting)
-    with pytest.raises(RuntimeError, match="read-back"):
+    with pytest.raises(HidesWriteFailed, match="read-back"):
         _run(deck)
 
 
@@ -790,3 +803,238 @@ def test_b10_geometry_patch_after_hides_does_not_refuse(deck):
     assert not results[1].refused, results[1].reason
     assert not results[3].refused, results[3].reason
     assert results[1].applied >= 1
+
+
+# ---------------------------------------------------------------- #4: global component tables
+
+
+@pytest.mark.parametrize("comp_id, fn, needle", [
+    ("101", _i3_violation, "I3"),
+    ("101", _i4_violation, "I4"),
+    ("600", lambda c: c.pop("dataReferences"), "I3"),
+])
+def test_any_component_table_mismatch_refuses_the_stage_before_write(tmp_path, comp_id, fn, needle):
+    """The untouched template's stale dataReferences (third case) would otherwise let its
+    shared data 53 look orphaned once slide 2's image 402 is deleted."""
+    path = _build(tmp_path / "stale.key", meta_mutate=_mutate_comp(comp_id, fn))
+    before = _raw_members(path)
+    with pytest.raises(OfflineWriteRefused, match=needle):
+        _run(path)
+    assert _raw_members(path) == before
+
+
+def test_data_liveness_comes_from_headers_not_metadata(tmp_path):
+    """Data 54 is also used by an image in a member Metadata has no component for. Header
+    liveness keeps it (no orphan drop); Metadata alone would then leave it unreferenced
+    (I6), so the stage refuses before writing instead of failing the read-back."""
+    def extra(members):
+        members["Index/Extra-800.iwa"] = [_image(800, 54)]
+
+    def drop_extra(pm):
+        pm["components"] = [c for c in pm["components"] if c["identifier"] != "800"]
+
+    path = _build(tmp_path / "extra.key", mutate=extra, meta_mutate=drop_extra)
+    before = _raw_members(path)
+    with pytest.raises(OfflineWriteRefused, match="I6"):
+        _run(path)
+    assert _raw_members(path) == before
+
+
+# ---------------------------------------------------------------- #8: exact slide archive, Magic Move
+
+
+def _with_magic_move(members):
+    obj = copy.deepcopy(members[S1][0]["objects"][0])
+    obj["transition"] = _transition_dict("apple:magic-move", 1.25)
+    members[S1][0] = _a(101, "KN.SlideArchive", obj, refs=[902, 300, 301, 302, 303, 304, 305, 306])
+
+
+def test_b8_magic_move_transition_and_every_other_slide_field_preserved(tmp_path):
+    path = _build(tmp_path / "mm.key", mutate=_with_magic_move)
+    before = _decoded(path, S1)["101"]
+    res = _run(path)
+    assert not res.slides[1].refused, res.slides[1].reason
+    after = _decoded(path, S1)["101"]
+    assert after["objects"][0]["transition"] == before["objects"][0]["transition"]
+    assert after["objects"][0]["transition"]["attributes"]["animationAttributes"]["effect"] == "apple:magic-move"
+    want = copy.deepcopy(before)
+    want["objects"][0]["drawablesZOrder"] = [{"identifier": "300"}, {"identifier": "303"}]
+    want["objects"][0]["ownedDrawables"] = [{"identifier": "300"}, {"identifier": "303"}]
+    want["header"]["messageInfos"][0]["objectReferences"] = ["902", "300", "303"]
+    assert iwa_write._archives_equal(after, want)
+
+
+def test_b8_re_encode_that_alters_the_transition_refuses_the_slide(tmp_path, monkeypatch):
+    path = _build(tmp_path / "mm.key", mutate=_with_magic_move)
+    real = iwa_hides._slide_apply_fn
+
+    def tampering(plan):
+        inner = real(plan)
+
+        def apply_fn(patched):
+            n = inner(patched)
+            for ch in patched["chunks"]:
+                for arch in ch["archives"]:
+                    if str(arch["header"]["identifier"]) == "101":
+                        arch["objects"][0]["transition"]["attributes"]["animationAttributes"]["duration"] = 9.0
+            return n
+        return apply_fn
+
+    monkeypatch.setattr(iwa_hides, "_slide_apply_fn", tampering)
+    before = _raw_members(path)
+    res = _run(path)
+    assert res.slides[1].refused and "re-encoded slide archive" in res.slides[1].reason
+    assert res.slides[1].order_proven
+    assert _raw_members(path)[S1] == before[S1]
+
+
+# ---------------------------------------------------------------- #2: survivor twins
+
+
+def _twin_archs(kind, hide_at, surv_at):
+    """(archives, hide id, survivor id) for two same-content drawables of ``kind``."""
+    if kind == "text":
+        return [*_text(503, 513, "Twin", at=hide_at), *_text(504, 514, "Twin", at=surv_at)], 503, 504
+    if kind == "image":
+        return [_image(505, 51, at=hide_at), _image(506, 51, at=surv_at)], 505, 506
+    if kind == "group":
+        out = []
+        for gid, at in ((520, hide_at), (523, surv_at)):
+            out.append(_a(gid, "TSD.GroupArchive", {"children": [{"identifier": gid + 1}], "super": _geom(*at, 100, 40)},
+                          refs=[gid + 1]))
+            out.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), extra_refs=[gid]))
+        return out, 520, 523
+    line = {"isTextBox": False}
+    return [
+        _a(530, "TSWP.ShapeInfoArchive", {**line, "super": _shape_super(*hide_at, 140, 0, nw=140, nh=0, line=True)}),
+        _a(531, "TSWP.ShapeInfoArchive", {**line, "super": _shape_super(*surv_at, 140, 0, nw=140, nh=0, line=True)}),
+    ], 530, 531
+
+
+_TWIN_HIDE = {"text": 1, "image": 1, "group": 0, "line": 0}
+
+
+def _twin_deck(path, kind, *, surv_at, swap=False):
+    archs, hide, surv = _twin_archs(kind, (40, 400), surv_at)
+    z = [500, 501, surv, hide] if swap else [500, 501, hide, surv]
+
+    def mutate(members):
+        members[S3] = [_slide(103, z), *_text(500, 510, "Stay"), _image(501, 54), *archs]
+    return _build(path, mutate=mutate), str(hide), str(surv)
+
+
+def _twin_hides(kind):
+    return {**HIDES, 3: [HIDES[3][0], {"role": "hide", "kind": kind, "kindIndex": _TWIN_HIDE[kind]}]}
+
+
+@pytest.mark.parametrize("kind", ["text", "image", "group", "line"])
+def test_twin_with_moved_survivor_deletes_the_hide(tmp_path, kind):
+    path, hide, surv = _twin_deck(tmp_path / "t.key", kind, surv_at=(600, 700))
+    res = _run(path, _twin_hides(kind))
+    assert not res.slides[3].refused, res.slides[3].reason
+    assert hide in res.slides[3].removed_ids and surv not in res.slides[3].removed_ids
+
+
+@pytest.mark.parametrize("kind", ["text", "image", "group", "line"])
+def test_twin_reordered_by_the_save_refuses(tmp_path, kind):
+    """Payload from the source order; the saved deck holds the survivor at the hide's index."""
+    source, _h, _s = _twin_deck(tmp_path / "src.key", kind, surv_at=(600, 700))
+    saved, _h, _s = _twin_deck(tmp_path / "saved.key", kind, surv_at=(600, 700), swap=True)
+    before = _raw_members(saved)
+    res = _run(saved, _twin_hides(kind), items=_payload(source), counts=deck_kind_counts(source))
+    assert res.slides[3].refused and "survivor twin" in res.slides[3].reason
+    assert not res.slides[3].order_proven
+    assert _raw_members(saved)[S3] == before[S3]
+
+
+@pytest.mark.parametrize("kind", ["text", "image", "line"])
+def test_twin_at_the_same_geometry_refuses(tmp_path, kind):
+    path, _h, _s = _twin_deck(tmp_path / "t.key", kind, surv_at=(40, 400))
+    res = _run(path, _twin_hides(kind))
+    assert res.slides[3].refused and "survivor twin" in res.slides[3].reason
+
+
+def test_twins_that_are_both_hidden_do_not_refuse(tmp_path):
+    path, hide, surv = _twin_deck(tmp_path / "t.key", "text", surv_at=(40, 400))
+    hides = {**HIDES, 3: [*HIDES[3], {"role": "hide", "kind": "text", "kindIndex": 1},
+                          {"role": "hide", "kind": "text", "kindIndex": 2}]}
+    res = _run(path, hides)
+    assert not res.slides[3].refused, res.slides[3].reason
+    assert {hide, surv} <= set(res.slides[3].removed_ids)
+
+
+# ---------------------------------------------------------------- #7: typed failure phases, order_proven
+
+
+def test_temp_phase_failure_is_refused_and_deck_untouched(deck, monkeypatch):
+    before = _raw_members(deck)
+
+    def boom(self, *a, **k):
+        raise OSError("disk full mid zip build")
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", boom)
+    with pytest.raises(OfflineWriteRefused, match="temp rewrite failed"):
+        _run(deck)
+    monkeypatch.undo()
+    assert _raw_members(deck) == before
+
+
+def test_failure_after_copy_back_is_hides_write_failed(deck, monkeypatch):
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **k):
+        if self.name.endswith(".obedwrite.tmp") and not k.get("missing_ok"):
+            raise PermissionError("tmp locked")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(HidesWriteFailed, match="after its copy-back"):
+        _run(deck)
+
+
+def test_planning_bug_is_refused_before_write(deck, monkeypatch):
+    before = _raw_members(deck)
+    monkeypatch.setattr(iwa_hides, "_orphans", lambda *_a: 1 / 0)
+    with pytest.raises(OfflineWriteRefused, match="ZeroDivisionError"):
+        _run(deck)
+    assert _raw_members(deck) == before
+
+
+def test_order_proven_values(tmp_path):
+    items_path = _build(tmp_path / "a.key", mutate=_build_ref)
+    items = _payload(items_path)
+    items[2] = [dict(it, fileName="wrong.png") if it["kind"] == "image" else it for it in items[2]]
+    res = _run(items_path, items=items, force_refuse=frozenset({3}))
+    assert res.slides[1].refused and "330" in res.slides[1].reason and res.slides[1].order_proven
+    assert res.slides[2].refused and "file" in res.slides[2].reason and not res.slides[2].order_proven
+    assert res.slides[3].refused and res.slides[3].reason == "forced refusal" and res.slides[3].order_proven
+
+
+def test_forced_refusal_of_an_unplannable_slide_keeps_order_unproven(deck):
+    counts = deck_kind_counts(deck)
+    counts[3] = {**counts[3], "image": 5}
+    res = _run(deck, counts=counts, force_refuse=frozenset({3}))
+    assert res.slides[3].refused and "reconcile" in res.slides[3].reason
+    assert not res.slides[3].order_proven
+
+
+def test_patched_slides_report_order_proven(deck):
+    res = _run(deck)
+    assert all(s.order_proven and not s.refused for s in res.slides.values())
+
+
+def test_twin_hide_not_at_its_payload_geometry_refuses(tmp_path):
+    path, _h, _s = _twin_deck(tmp_path / "t.key", "text", surv_at=(600, 700))
+    items = _payload(path)
+    items[3] = [dict(it, x=it["x"] + 50) if (it["kind"], it["kindIndex"]) == ("text", 1) else it for it in items[3]]
+    res = _run(path, _twin_hides("text"), items=items)
+    assert res.slides[3].refused and "survivor twin" in res.slides[3].reason
+
+
+def test_hiding_every_drawable_on_a_slide(deck):
+    hides = {**HIDES, 2: [*HIDES[2], {"role": "hide", "kind": "image", "kindIndex": 0}]}
+    res = _run(deck, hides)
+    assert not res.slides[2].refused, res.slides[2].reason
+    z, owned, header = _z(deck, S2, "102")
+    assert z == [] and owned == [] and header == ["902"]
+    assert set(_decoded(deck, S2)) == {"102"}

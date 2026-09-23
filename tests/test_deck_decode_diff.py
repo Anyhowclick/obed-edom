@@ -49,12 +49,19 @@ def _build(effect, drawable):
     }), [drawable])
 
 
+def _shape(ident, slide, x, y, w, h):
+    shape_super = _shape_super(x, y, w, h)
+    shape_super["super"]["parent"] = {"identifier": slide}
+    return _with_refs(_arch(ident, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": shape_super}), [slide])
+
+
 def _base_spec():
-    shape300 = _arch(300, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(10, 20, 100, 50)})
+    shape300 = _shape(300, 101, 10, 20, 100, 50)
     image301 = _with_data_refs(_with_refs(_arch(301, "TSD.ImageArchive", {
-        "data": {"identifier": 7001}, "style": {"identifier": 900}, "super": _geom(300, 100, 120, 60),
+        "data": {"identifier": 7001}, "style": {"identifier": 900},
+        "super": {**_geom(300, 100, 120, 60), "parent": {"identifier": 101}},
         "originalSize": {"width": 120.0, "height": 60.0},
-    }), [900]), [7001])
+    }), [900, 101]), [7001])
     build500 = _build("apple:dissolve", 300)
     build501 = _build("apple:wipe-iris", 301)
     slide101 = _with_refs(_arch(101, "KN.SlideArchive", {
@@ -62,8 +69,8 @@ def _base_spec():
         "ownedDrawables": [{"identifier": 300}, {"identifier": 301}],
         "builds": [{"identifier": 500}, {"identifier": 501}],
     }), [300, 301, 500, 501])
-    shape400 = _arch(400, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(30, 40, 80, 60)})
-    shape401 = _arch(401, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(50, 60, 20, 20)})
+    shape400 = _shape(400, 102, 30, 40, 80, 60)
+    shape401 = _shape(401, 102, 50, 60, 20, 20)
     slide102 = _with_refs(_arch(102, "KN.SlideArchive", {
         "drawablesZOrder": [{"identifier": 400}, {"identifier": 401}],
         "ownedDrawables": [{"identifier": 400}, {"identifier": 401}],
@@ -253,11 +260,12 @@ def test_null_uuid_values_ignored(base, tmp_path):
 # --------------------------------------------------------------------------
 def test_field_change_on_slide_2_reports_exactly_slide_2(base, tmp_path):
     def edit(spec):
-        _obj(spec, "Index/Slide-102.iwa", 400)["super"] = _shape_super(31, 40, 80, 60)
+        _obj(spec, "Index/Slide-102.iwa", 400)["super"]["super"]["geometry"]["position"]["x"] = 31
 
     report = ddd.run(base, _variant(tmp_path, "moved", edit))
     assert report["differing_slides"] == [2]
     assert _keys(report) == [
+        "metadata:Slide-102:objectUuidMapEntries",
         "slide:2:KN.SlideArchive.@objectReferences",
         "slide:2:KN.SlideArchive.drawablesZOrder",
         "slide:2:KN.SlideArchive.ownedDrawables",
@@ -330,12 +338,101 @@ def test_stale_header_ref_reported(tmp_path):
     assert ddd.run(good, stale, refs=False)["diffs"] == []
 
 
-def test_undeleted_vs_deleted_reports_only_that_slide_and_its_metadata(base, tmp_path):
+def test_removed_drawable_reports_only_its_slide_lists_header_and_archive(base, tmp_path):
     report = ddd.run(base, _variant(tmp_path, "deleted", _correctly_deleted_401))
     assert report["differing_slides"] == [2]
-    assert {k.split(":")[0] for k in _keys(report)} == {"slide", "member", "metadata"}
-    assert "metadata:Slide-102:objectUuidMapEntries" in _keys(report)
-    assert "slide:2:TSWP.ShapeInfoArchive" in _keys(report)
+    assert _keys(report) == [
+        "metadata:Slide-102:objectUuidMapEntries",
+        "slide:2:KN.SlideArchive.@objectReferences",
+        "slide:2:KN.SlideArchive.drawablesZOrder",
+        "slide:2:KN.SlideArchive.ownedDrawables",
+        "slide:2:TSWP.ShapeInfoArchive",
+    ]
+    [removed] = [d for d in report["diffs"] if d["key"] == "slide:2:TSWP.ShapeInfoArchive"]
+    assert len(removed["a"]) == 1 and removed["b"] == []
+
+
+def test_slide_archive_change_does_not_cascade_to_parent_refs(base, tmp_path):
+    def edit(spec):
+        _obj(spec, "Index/Slide-102.iwa", 102)["name"] = "renamed"
+
+    report = ddd.run(base, _variant(tmp_path, "renamed", edit))
+    assert _keys(report) == ["slide:2:KN.SlideArchive.name"]
+
+
+def test_parent_ref_to_another_slide_reported(base, tmp_path):
+    def edit(spec):
+        _obj(spec, "Index/Slide-102.iwa", 400)["super"]["super"]["parent"] = {"identifier": 101}
+        _set_header_refs(spec, "Index/Slide-102.iwa", 400, [101])
+
+    report = ddd.run(base, _variant(tmp_path, "reparented", edit))
+    assert "slide:2:TSWP.ShapeInfoArchive.super" in _keys(report)
+    assert "slide:2:TSWP.ShapeInfoArchive.@objectReferences" in _keys(report)
+
+
+def _with_field_info(spec, member, ident, *, refs=(), data=()):
+    info = {"path": {"path": [1]}, "type": "REFERENCE"}
+    if refs:
+        info["objectReferences"] = [str(r) for r in refs]
+    if data:
+        info["dataReferences"] = [str(r) for r in data]
+    _archive(spec, member, ident)["header"]["messageInfos"][0]["fieldInfos"] = [info]
+
+
+def test_null_identical_field_infos(base, tmp_path):
+    def edit(spec):
+        _with_field_info(spec, "Index/Slide-102.iwa", 400, refs=[102])
+
+    one = _variant(tmp_path, "fi1", edit)
+    two = _variant(tmp_path, "fi2", edit)
+    assert ddd.run(one, two)["diffs"] == []
+
+
+def test_dangling_field_info_object_ref_reported(tmp_path):
+    def good(spec):
+        _correctly_deleted_401(spec)
+        _with_field_info(spec, "Index/Slide-102.iwa", 400, refs=[102])
+
+    def dangling(spec):
+        _correctly_deleted_401(spec)
+        _with_field_info(spec, "Index/Slide-102.iwa", 400, refs=[102, 401])
+
+    report = ddd.run(_variant(tmp_path, "good", good), _variant(tmp_path, "dangling", dangling))
+    [entry] = report["diffs"]
+    assert entry["key"] == "slide:2:TSWP.ShapeInfoArchive.@fieldInfos"
+    assert ddd.DANGLING in entry["b"][0]["objectReferences"]
+
+
+def test_changed_field_info_data_ref_reported(base, tmp_path):
+    def photo(spec):
+        _with_field_info(spec, "Index/Slide-101.iwa", 301, data=[7001])
+
+    def orphan(spec):
+        _with_field_info(spec, "Index/Slide-101.iwa", 301, data=[7002])
+
+    report = ddd.run(_variant(tmp_path, "photo", photo), _variant(tmp_path, "orphan", orphan))
+    [entry] = report["diffs"]
+    assert entry["key"] == "slide:1:TSD.ImageArchive.@fieldInfos"
+    assert entry["a"][0]["dataReferences"] == [f"data:{_DIGEST_PHOTO}"]
+    assert entry["b"][0]["dataReferences"] == [f"data:{_DIGEST_ORPHAN}"]
+
+
+def test_same_count_wrong_uuid_entry_reported(tmp_path):
+    def good(spec):
+        _correctly_deleted_401(spec)
+
+    def wrong(spec):
+        _correctly_deleted_401(spec)
+        comp = _component(spec, "Slide-102")
+        comp["objectUuidMapEntries"] = [
+            e for e in comp["objectUuidMapEntries"] if e["identifier"] != 400
+        ] + [{"identifier": 401, "uuid": {"lower": "401", "upper": "7"}}]
+
+    report = ddd.run(_variant(tmp_path, "good", good), _variant(tmp_path, "wrong", wrong))
+    [entry] = report["diffs"]
+    assert entry["key"] == "metadata:Slide-102:objectUuidMapEntries"
+    assert entry["a"][0].startswith("TSWP.ShapeInfoArchive#")
+    assert entry["b"] == [ddd.DANGLING]
 
 
 def test_metadata_data_reference_removal_reported(base, tmp_path):

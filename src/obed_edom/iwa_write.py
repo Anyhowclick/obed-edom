@@ -915,10 +915,32 @@ def _rewrite_members(deck: Path, edits: dict[str, bytes], *, drop: Iterable[str]
 
     ``drop`` names raw ``namelist()`` members to omit from the rewrite; a name that is
     missing or also in ``edits`` refuses before any write.
+
+    Phase is typed: every failure before the copy-back opens the deck raises
+    ``OfflineWriteRefused`` (deck untouched), a failed copy-back raises
+    ``OfflineWriteCorrupted``, and anything else was raised after the deck was written.
     """
     deck = Path(deck)
     drop = set(drop)
     tmp_path = recovery_tmp_path(deck)
+    try:
+        _write_temp_zip(deck, tmp_path, edits, drop)
+    except OfflineWriteRefused:
+        raise
+    except Exception as exc:
+        raise OfflineWriteRefused(f"temp rewrite failed, {deck.name} untouched: {exc!r}") from exc
+
+    try:
+        with open(str(deck), "wb") as out_fp, open(tmp_path, "rb") as tmp_fp:
+            shutil.copyfileobj(tmp_fp, out_fp, 8 << 20)
+            out_fp.flush()
+            os.fsync(out_fp.fileno())
+    except Exception as exc:
+        raise OfflineWriteCorrupted(f"{deck} truncated; recover from {tmp_path}") from exc
+    tmp_path.unlink()
+
+
+def _write_temp_zip(deck: Path, tmp_path: Path, edits: dict[str, bytes], drop: set[str]) -> None:
     # temp zip + full copy-back reallocation (worst case: deck is an APFS clone source).
     required = deck.stat().st_size * 2.1
     if shutil.disk_usage(deck.parent).free < required:
@@ -949,15 +971,6 @@ def _rewrite_members(deck: Path, edits: dict[str, bytes], *, drop: Iterable[str]
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise  # nothing useful in the temp; deck untouched
-
-    try:
-        with open(str(deck), "wb") as out_fp, open(tmp_path, "rb") as tmp_fp:
-            shutil.copyfileobj(tmp_fp, out_fp, 8 << 20)
-            out_fp.flush()
-            os.fsync(out_fp.fileno())
-    except Exception as exc:
-        raise OfflineWriteCorrupted(f"{deck} truncated; recover from {tmp_path}") from exc
-    tmp_path.unlink()
 
 
 def patch_deck_geometry(

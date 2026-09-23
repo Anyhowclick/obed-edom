@@ -1685,7 +1685,6 @@ def remap_keynote(
     )
     if hides_info is not None:
         applied += hides_info["deleted"]
-        missed += hides_info["missed"]
     say(f"Applied {applied}, missed {missed}.")
     _debug_snapshot_pass1(dest, say)
     text_reposition = offline_text_reposition_enabled(offline_mode=offline_mode, say=say)

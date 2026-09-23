@@ -3,9 +3,11 @@
 
 Each deck is decoded once. Archives are canonicalised with ``identifier``,
 ``randomNumberSeed``, ``saveToken`` and UUIDs dropped. A body reference and each header
-``objectReferences`` entry becomes the target's content label (pbtype + ref-free body
-hash, ``<dangling>`` when the target is missing); a data reference becomes the data's
-digest. Slides (by ``slide_order``) and the other ``.iwa`` members compare as multisets of
+``objectReferences`` entry (direct or in ``fieldInfos``) becomes the target's content label
+(pbtype + ref-free body hash, ``<dangling>`` when the target is missing); a data reference
+becomes the data's digest. A slide archive is labelled by position instead (slide_order, or
+its member for a template slide), so a slide edit does not cascade into every reference to
+the slide; the slide's own content is still compared in its slide scope. Slides (by ``slide_order``) and the other ``.iwa`` members compare as multisets of
 archives. ``Index/Metadata.iwa`` compares per component (by locator) in label space, plus
 the ``datas`` table and the non-IWA ZIP members.
 
@@ -40,6 +42,7 @@ PACKAGE_METADATA = "TSP.PackageMetadata"
 DANGLING = "<dangling>"
 DANGLING_DATA = "<dangling-data>"
 REF = "<ref>"
+SLIDE = "KN.SlideArchive"
 
 _DROP_KEYS = frozenset({"identifier", "randomNumberSeed", "saveToken"})
 _REF_KEYS = frozenset({"identifier", "deprecatedType", "deprecatedIsExternal"})
@@ -63,6 +66,7 @@ class Deck:
     metadata: dict = field(default_factory=dict)
     data_labels: dict[str, str] = field(default_factory=dict)
     zip_entries: list[tuple[str, int, int]] = field(default_factory=list)
+    content_labels: dict[str, str] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
 
 
@@ -121,11 +125,25 @@ def load_deck(path: str | Path) -> Deck:
     for entry in deck.metadata.get("datas") or []:
         label = entry.get("digest") or entry.get("preferredFileName") or entry.get("fileName") or ""
         deck.data_labels[str(entry.get("identifier"))] = f"data:{label}"
-    deck.labels = {
+    deck.content_labels = {
         ident: f"{arch.pbtype}#{_hash(_canon_archive(deck, arch, labels=None, header=False))}"
         for ident, arch in deck.archives.items()
     }
+    deck.labels = {**deck.content_labels, **_slide_labels(deck)}
     return deck
+
+
+def _slide_labels(deck: Deck) -> dict[str, str]:
+    objects = {i: arch.objects[0] for i, arch in deck.archives.items() if arch.objects}
+    out = {
+        ident: f"{arch.pbtype}@{arch.member}"
+        for ident, arch in deck.archives.items()
+        if arch.pbtype == SLIDE
+    }
+    for n, (sid, _skipped) in enumerate(slide_order(objects), start=1):
+        if sid in out:
+            out[sid] = f"{SLIDE}@slide:{n}"
+    return out
 
 
 def _ref_label(ident: Any, labels: dict[str, str] | None) -> str:
@@ -208,6 +226,17 @@ def _canon_archive(
         out["@dataReferences"] = sorted(
             _data_label(deck, r) for mi in infos for r in mi.get("dataReferences") or []
         )
+        out["@fieldInfos"] = sorted(
+            (_canon_field_info(deck, fi, labels) for mi in infos for fi in mi.get("fieldInfos") or []),
+            key=_hash,
+        )
+    return out
+
+
+def _canon_field_info(deck: Deck, info: dict, labels: dict[str, str]) -> dict[str, Any]:
+    out = {k: v for k, v in info.items() if k not in ("objectReferences", "dataReferences")}
+    out["objectReferences"] = sorted(_ref_label(r, labels) for r in info.get("objectReferences") or [])
+    out["dataReferences"] = sorted(_data_label(deck, r) for r in info.get("dataReferences") or [])
     return out
 
 
@@ -239,7 +268,7 @@ def _diff_archives(
     for ident in only_a:
         pbtype = a.archives[ident].pbtype
         if left_b.pop((ident, pbtype), None) is None:
-            unpaired.setdefault(pbtype, {"a": [], "b": []})["a"].append(a.labels[ident])
+            unpaired.setdefault(pbtype, {"a": [], "b": []})["a"].append(a.content_labels[ident])
             continue
         ca, cb = _full(a, ident, refs), _full(b, ident, refs)
         for key in sorted(set(ca) | set(cb)):
@@ -248,7 +277,7 @@ def _diff_archives(
                     "key": f"{scope}:{pbtype}.{key}", "id": ident, "a": ca.get(key), "b": cb.get(key),
                 })
     for ident, pbtype in left_b:
-        unpaired.setdefault(pbtype, {"a": [], "b": []})["b"].append(b.labels[ident])
+        unpaired.setdefault(pbtype, {"a": [], "b": []})["b"].append(b.content_labels[ident])
     for pbtype, sides in sorted(unpaired.items()):
         diffs.append({"key": f"{scope}:{pbtype}", "a": sorted(sides["a"]), "b": sorted(sides["b"])})
     return diffs
@@ -261,7 +290,7 @@ def _multiset_diff(key: str, a: list, b: list) -> list[dict]:
     return [{"key": key, "a": sorted((ca - cb).elements(), key=repr), "b": sorted((cb - ca).elements(), key=repr)}]
 
 
-def _slides(deck: Deck) -> list[str | None]:
+def _slide_members(deck: Deck) -> list[str | None]:
     objects = {i: arch.objects[0] for i, arch in deck.archives.items() if arch.objects}
     return [
         deck.archives[sid].member if sid in deck.archives else None
@@ -295,7 +324,9 @@ def _component_tables(deck: Deck, comp: dict) -> dict[str, list]:
         target = ref.get("objectIdentifier", ref.get("componentIdentifier"))
         ext_refs.append((locator, deck.labels.get(str(target), DANGLING), bool(ref.get("isWeak"))))
     return {
-        "objectUuidMapEntries": [len(comp.get("objectUuidMapEntries") or [])],
+        "objectUuidMapEntries": [
+            deck.labels.get(str(e.get("identifier")), DANGLING) for e in comp.get("objectUuidMapEntries") or []
+        ],
         "featureInfos": [_hash(f) for f in comp.get("featureInfos") or []],
         "dataReferences": data_refs,
         "externalReferences": ext_refs,
@@ -304,7 +335,7 @@ def _component_tables(deck: Deck, comp: dict) -> dict[str, list]:
 
 def compare(a: Deck, b: Deck, *, refs: bool = True) -> list[dict]:
     diffs: list[dict] = []
-    slides_a, slides_b = _slides(a), _slides(b)
+    slides_a, slides_b = _slide_members(a), _slide_members(b)
     for n in range(1, max(len(slides_a), len(slides_b)) + 1):
         ma = slides_a[n - 1] if n <= len(slides_a) else None
         mb = slides_b[n - 1] if n <= len(slides_b) else None

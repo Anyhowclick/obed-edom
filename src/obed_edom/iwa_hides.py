@@ -23,15 +23,23 @@ from obed_edom.iwa_kindindex import (
     derived_kind_counts,
     reconcile_counts,
 )
-from obed_edom.iwa_runs import _group_child_signature, _normalize_text, slide_order
+from obed_edom.iwa_geometry import compose_geometry
+from obed_edom.iwa_runs import (
+    _group_child_signature,
+    _group_content_signature,
+    _normalize_text,
+    slide_order,
+)
 from obed_edom.iwa_write import (
     _METADATA_MEMBER,
     _PACKAGE_METADATA_PBTYPE,
     _archive_diff,
     _archives_by_id,
+    _archives_equal,
     _decode_apply_reencode_diff,
     _member_locator,
     _rewrite_members,
+    OfflineWriteCorrupted,
     OfflineWriteRefused,
     expected_base_counts,
 )
@@ -51,6 +59,7 @@ class SlideHides:
     refused: bool = False
     reason: str | None = None
     removed_ids: list[str] = field(default_factory=list)
+    order_proven: bool = False
 
 
 @dataclass
@@ -58,6 +67,11 @@ class HidesResult:
     slides: dict[int, SlideHides] = field(default_factory=dict)
     dropped_data: list[str] = field(default_factory=list)
     members: list[str] = field(default_factory=list)
+
+
+class HidesWriteFailed(Exception):
+    """Raised once the deck has been (or may have been) written and a later step failed
+    (read-back, ``verify``, or the rewrite after its copy-back): the deck's state is unknown."""
 
 
 class _Refuse(Exception):
@@ -297,6 +311,54 @@ def _identity_check(
                     raise _Refuse(f"group {ki} child-text signature differs from the payload")
 
 
+_GEOM_TOL = 1.0
+
+
+def _content_signature(rec: dict, objects: dict[str, dict], data_index: dict[str, str], cache: dict) -> str | None:
+    kind = rec["kind"]
+    if kind in ("text", "shape"):
+        return _normalize_text(rec.get("text"))
+    if kind in ("image", "movie"):
+        did = _data_identifier(objects.get(rec["id"]) or {})
+        return data_index.get(did) if did is not None else None
+    if kind == "group":
+        return _group_content_signature(rec["id"], objects, cache, data_index)
+    return None
+
+
+def _rect(d: dict | None) -> tuple[float, ...] | None:
+    try:
+        return tuple(float(d[k]) for k in ("x", "y", "w", "h"))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _near(a: tuple[float, ...] | None, b: tuple[float, ...] | None) -> bool:
+    return a is not None and b is not None and all(abs(p - q) <= _GEOM_TOL for p, q in zip(a, b))
+
+
+def _check_unambiguous(
+    records: list[dict], hides: list[dict], items: list[dict], slide: dict,
+    objects: dict[str, dict], data_index: dict[str, str], cache: dict,
+) -> None:
+    """A hide whose content class (same kind and signature; lines and unresolved content
+    match everything of their kind) holds a survivor must be the only class member whose
+    saved geometry matches the hide's payload geometry; otherwise a twin swap is invisible."""
+    hide_keys = {(str(h.get("kind")), int(h.get("kindIndex", -1))) for h in hides}
+    sigs = {(r["kind"], r["kindIndex"]): _content_signature(r, objects, data_index, cache) for r in records}
+    geom = {(r["kind"], r["kindIndex"]): _rect(r) for r in compose_geometry(slide, objects)}
+    payload = {(str(it.get("kind")), int(it.get("kindIndex", -1))): it for it in items}
+    for key in sorted(hide_keys):
+        sig = sigs[key]
+        survivors = [k for k in sigs if k[0] == key[0] and k not in hide_keys
+                     and (sig is None or sigs[k] is None or sigs[k] == sig)]
+        if not survivors:
+            continue
+        want = _rect(payload.get(key))
+        if not _near(geom.get(key), want) or any(_near(geom.get(k), want) for k in survivors):
+            raise _Refuse(f"{key[0]} {key[1]} has a survivor twin that geometry cannot tell apart")
+
+
 def _plan_slide(
     n: int, hides: list[dict], model: _Model, order: list[tuple[str, bool]],
     slide_count_by_member: Counter, *, source_counts: dict[str, int] | None,
@@ -330,9 +392,6 @@ def _plan_slide(
     comp = comp_of_member.get(member)
     if comp is None:
         raise _Refuse(f"no unique component for {member}")
-    headers = {aid: model.archives[aid]["header"] for aid in model.member_ids[member]}
-    i3, i4 = _recompute_tables(headers, member, model.member_of, comp_of_member)
-    _check_tables(comp, i3, i4, "pre-edit")
     member_ids = set(model.member_ids[member])
     if any(str(e.get("identifier")) not in member_ids for e in comp.get("objectUuidMapEntries") or []):
         raise _Refuse("uuid entry names an archive outside the member (I5)")
@@ -366,6 +425,7 @@ def _plan_slide(
     if items is None:
         raise _Refuse("payload items missing")
     _identity_check(records, items, model.objects, data_index, group_text, cache)
+    _check_unambiguous(records, hides, items, slide, model.objects, data_index, cache)
 
     subtree: set[str] = set()
     boundary: set[str] = set()
@@ -382,6 +442,12 @@ def _plan_slide(
     dup = subtree & model.duplicates
     if dup:
         raise _Refuse(f"subtree ids duplicated in the deck: {sorted(dup)[:5]}")
+    for x in subtree:
+        header = set(_header_refs(model.archives[x]["header"]))
+        for _w, t in _body_refs(model.archives[x]):
+            if (t not in header and t not in subtree and t != slide_id
+                    and model.member_of.get(t) == member):
+                raise _Refuse(f"{x} body references {t} in {member} without a header reference")
     return slide_id, member, hide_ids, subtree, boundary
 
 
@@ -417,6 +483,8 @@ def _prove_references(
         for e in other.get("externalReferences") or []:
             if str(e.get("objectIdentifier")) in subtree:
                 raise _Refuse(f"component {other.get('identifier')} externalReferences names {e.get('objectIdentifier')}")
+        if any(str(i) in subtree for i in other.get("ambiguousObjectIdentifiers") or []):
+            raise _Refuse(f"component {other.get('identifier')} lists a subtree id as ambiguous")
         if other is comp:
             continue
         for e in other.get("objectUuidMapEntries") or []:
@@ -426,8 +494,6 @@ def _prove_references(
             for o in e.get("objectReferenceList") or []:
                 if str(o.get("objectIdentifier")) in subtree:
                     raise _Refuse(f"component {other.get('identifier')} dataReferences names {o.get('objectIdentifier')}")
-        if any(str(i) in subtree for i in other.get("ambiguousObjectIdentifiers") or []):
-            raise _Refuse(f"component {other.get('identifier')} lists a subtree id as ambiguous")
     for e in comp.get("objectUuidMapEntries") or []:
         if str(e.get("identifier")) not in subtree:
             continue
@@ -503,14 +569,18 @@ def _edit_slide_member(zf: zipfile.ZipFile, plan: _Plan) -> bytes:
         raise _Refuse(
             f"re-encode gate: removed {len(gone)}/{len(plan.subtree)}, added {sorted(added)}, "
             f"changed {sorted(changed)}")
-    slide = _archives_by_id(reparsed)[plan.slide_id]["objects"][0]
+    hides = set(plan.hide_ids)
+    expected = copy.deepcopy(_archives_by_id(decoded)[plan.slide_id])
+    obj = expected["objects"][0]
     for key in _SLIDE_LIST_FIELDS:
-        if [str(r.get("identifier")) for r in slide.get(key) or []] != plan.expected_order:
-            raise _Refuse(f"re-encoded {key} != expected")
-    before = Counter(_header_refs(_archives_by_id(decoded)[plan.slide_id]["header"]))
-    after = Counter(_header_refs(_archives_by_id(reparsed)[plan.slide_id]["header"]))
-    if before - after != Counter(plan.hide_ids) or after - before:
-        raise _Refuse("re-encoded slide header refs != original minus hides")
+        obj[key] = [r for r in obj.get(key) or [] if str(r.get("identifier")) not in hides]
+        if [str(r.get("identifier")) for r in obj[key]] != plan.expected_order:
+            raise _Refuse(f"{key} minus hides != expected order")
+        if not obj[key]:
+            del obj[key]
+    _strip_header_refs(expected["header"], hides)
+    if not _archives_equal(_archives_by_id(reparsed)[plan.slide_id], expected):
+        raise _Refuse("re-encoded slide archive != original minus the hide references")
     return new_bytes
 
 
@@ -573,16 +643,35 @@ def _data_metadata_ids(model: _Model, pm: dict) -> set[str]:
     return {str(e.get("dataIdentifier")) for e in obj.get("dataMetadataEntries") or []}
 
 
-def _orphans(plans: dict[int, _Plan], pm: dict) -> set[str]:
+def _validate_all_components(model: _Model, pm: dict, comp_of_member: dict[str, dict]) -> set[str]:
+    """I3/I4 on every component against its decoded headers; refuses the whole stage on any
+    mismatch. Returns the data ids named by components with no decoded member (kept live)."""
+    unresolved_live: set[str] = set()
+    by_id = {id(c) for c in comp_of_member.values()}
+    for comp in pm.get("components") or []:
+        if id(comp) not in by_id:
+            unresolved_live |= {str(e.get("dataIdentifier")) for e in comp.get("dataReferences") or []}
+    for comp in pm.get("versionedComponents") or []:
+        unresolved_live |= {str(e.get("dataIdentifier")) for e in comp.get("dataReferences") or []}
+    for member, comp in comp_of_member.items():
+        headers = {aid: model.archives[aid]["header"] for aid in model.member_ids[member]
+                   if model.member_of.get(aid) == member}
+        try:
+            i3, i4 = _recompute_tables(headers, member, model.member_of, comp_of_member)
+            _check_tables(comp, i3, i4, member)
+        except _Refuse as exc:
+            raise OfflineWriteRefused(f"component tables do not match the headers: {exc}") from exc
+    return unresolved_live
+
+
+def _orphans(plans: dict[int, _Plan], data_by_archive: dict[str, set[str]], unresolved_live: set[str]) -> set[str]:
     removed = set().union(*(p.subtree for p in plans.values())) if plans else set()
-    still: set[str] = set()
-    for comps in (pm.get("components") or [], pm.get("versionedComponents") or []):
-        for comp in comps:
-            for e in comp.get("dataReferences") or []:
-                if any(str(o.get("objectIdentifier")) not in removed for o in e.get("objectReferenceList") or []):
-                    still.add(str(e.get("dataIdentifier")))
+    live = set(unresolved_live)
+    for aid, datas in data_by_archive.items():
+        if aid not in removed:
+            live |= datas
     candidates = set().union(*(p.data_ids for p in plans.values())) if plans else set()
-    return candidates - still
+    return candidates - live
 
 
 def _data_member_names(namelist: list[str]) -> dict[str, list[str]]:
@@ -616,10 +705,10 @@ def _readback(
         decoded = {m: IWAFile.from_buffer(zf.read(m), m).to_dict() for m in members}
     gone = [m for m in dropped if m in names]
     if gone:
-        raise RuntimeError(f"hides read-back: dropped members still present: {gone}")
+        raise HidesWriteFailed(f"hides read-back: dropped members still present: {gone}")
     _pid, pm = _package_metadata(decoded[_METADATA_MEMBER])
     if pm is None:
-        raise RuntimeError("hides read-back: no PackageMetadata")
+        raise HidesWriteFailed("hides read-back: no PackageMetadata")
     member_of = dict(model.member_of)
     for aid in removed:
         member_of.pop(aid, None)
@@ -630,50 +719,52 @@ def _readback(
         objects = {aid: a["objects"][0] for aid, a in archs.items() if a.get("objects")}
         present = removed & set(archs)
         if present:
-            raise RuntimeError(f"hides read-back slide {n}: removed archives present {sorted(present)[:5]}")
+            raise HidesWriteFailed(f"hides read-back slide {n}: removed archives present {sorted(present)[:5]}")
         for aid, arch in archs.items():
             refs = set(_header_refs(arch["header"])) | {t for _w, t in _body_refs(arch)}
             if refs & removed:
-                raise RuntimeError(f"hides read-back slide {n}: {aid} references removed {sorted(refs & removed)[:5]}")
+                raise HidesWriteFailed(f"hides read-back slide {n}: {aid} references removed {sorted(refs & removed)[:5]}")
         slide = objects[plan.slide_id]
         z = [str(r.get("identifier")) for r in slide.get("drawablesZOrder") or []]
         owned = [str(r.get("identifier")) for r in slide.get("ownedDrawables") or []]
         if z != plan.expected_order or owned != z:
-            raise RuntimeError(f"hides read-back slide {n}: lists != expected")
+            raise HidesWriteFailed(f"hides read-back slide {n}: lists != expected")
         if set(_header_refs(archs[plan.slide_id]["header"])) != {t for _w, t in _body_refs(archs[plan.slide_id])}:
-            raise RuntimeError(f"hides read-back slide {n}: I1")
+            raise HidesWriteFailed(f"hides read-back slide {n}: I1")
         comp = comp_of_member.get(plan.member)
         if comp is None:
-            raise RuntimeError(f"hides read-back slide {n}: component lost")
+            raise HidesWriteFailed(f"hides read-back slide {n}: component lost")
         try:
             i3, i4 = _recompute_tables(
                 {aid: a["header"] for aid, a in archs.items()}, plan.member, member_of, comp_of_member)
             _check_tables(comp, i3, i4, f"slide {n}")
         except _Refuse as exc:
-            raise RuntimeError(f"hides read-back: {exc}") from exc
+            raise HidesWriteFailed(f"hides read-back: {exc}") from exc
         if any(str(e.get("identifier")) not in archs for e in comp.get("objectUuidMapEntries") or []):
-            raise RuntimeError(f"hides read-back slide {n}: I5")
+            raise HidesWriteFailed(f"hides read-back slide {n}: I5")
         base = expected_base_counts(source_counts_by_slide[n], hides_by_slide[n])
         mismatched = reconcile_counts(derived_kind_counts(derive_kind_index(slide, objects)), base)
         if mismatched:
-            raise RuntimeError(f"hides read-back slide {n}: reconcile mismatch on {mismatched}")
+            raise HidesWriteFailed(f"hides read-back slide {n}: reconcile mismatch on {mismatched}")
 
 
 def _check_metadata_invariants(pm: dict, removed: set[str], orphans: set[str], where: str) -> None:
     datas = {str(d.get("identifier")) for d in pm.get("datas") or []}
     if datas & orphans:
-        raise RuntimeError(f"{where}: orphan datas entries remain {sorted(datas & orphans)}")
+        raise HidesWriteFailed(f"{where}: orphan datas entries remain {sorted(datas & orphans)}")
     unreferenced = datas - _referenced_data(pm)
     if unreferenced:
-        raise RuntimeError(f"{where}: unreferenced datas (I6) {sorted(unreferenced)[:5]}")
+        raise HidesWriteFailed(f"{where}: unreferenced datas (I6) {sorted(unreferenced)[:5]}")
     for comp in pm.get("components") or []:
+        if any(str(i) in removed for i in comp.get("ambiguousObjectIdentifiers") or []):
+            raise HidesWriteFailed(f"{where}: ambiguousObjectIdentifiers names a removed id")
         for e in comp.get("objectUuidMapEntries") or []:
             if str(e.get("identifier")) in removed:
-                raise RuntimeError(f"{where}: uuid entry for removed {e.get('identifier')}")
+                raise HidesWriteFailed(f"{where}: uuid entry for removed {e.get('identifier')}")
         for e in comp.get("dataReferences") or []:
             for o in e.get("objectReferenceList") or []:
                 if str(o.get("objectIdentifier")) in removed:
-                    raise RuntimeError(f"{where}: dataReferences names removed {o.get('objectIdentifier')}")
+                    raise HidesWriteFailed(f"{where}: dataReferences names removed {o.get('objectIdentifier')}")
 
 
 def _verify_deck(deck: Path, removed: set[str], orphans: set[str]) -> None:
@@ -681,11 +772,11 @@ def _verify_deck(deck: Path, removed: set[str], orphans: set[str]) -> None:
         model = _load_model(zf)
     pm_id, pm = _package_metadata(model)
     if pm is None:
-        raise RuntimeError("hides verify: no PackageMetadata")
+        raise HidesWriteFailed("hides verify: no PackageMetadata")
     referrers, _uuids = _scan(model, removed, pm_id)
     if referrers:
         t, refs = next(iter(referrers.items()))
-        raise RuntimeError(f"hides verify: removed {t} still referenced by {refs[:3]}")
+        raise HidesWriteFailed(f"hides verify: removed {t} still referenced by {refs[:3]}")
     _check_metadata_invariants(pm, removed, orphans, "hides verify")
     comp_of_member = _components_by_member(pm, list(model.member_ids))
     for member, comp in comp_of_member.items():
@@ -695,10 +786,10 @@ def _verify_deck(deck: Path, removed: set[str], orphans: set[str]) -> None:
             i3, i4 = _recompute_tables(headers, member, model.member_of, comp_of_member)
             _check_tables(comp, i3, i4, member)
         except _Refuse as exc:
-            raise RuntimeError(f"hides verify: {exc}") from exc
+            raise HidesWriteFailed(f"hides verify: {exc}") from exc
         ids = set(model.member_ids[member])
         if any(str(e.get("identifier")) not in ids for e in comp.get("objectUuidMapEntries") or []):
-            raise RuntimeError(f"hides verify: {member}: I5")
+            raise HidesWriteFailed(f"hides verify: {member}: I5")
 
 
 def patch_deck_hides(
@@ -713,21 +804,63 @@ def patch_deck_hides(
 ) -> HidesResult:
     """Delete each slide's role=hide targets (WALL kindIndex; the deck still holds them).
 
-    Per-slide refusal leaves that slide's member byte-identical. Raises
-    ``OfflineWriteRefused`` before any write (undecodable member, missing Metadata, disk
-    guard, Metadata self-check), lets ``OfflineWriteCorrupted`` propagate, and raises
-    ``RuntimeError`` on a read-back or ``verify`` mismatch after the write.
+    Per-slide refusal leaves that slide's member byte-identical; ``order_proven`` marks a
+    refused slide whose saved kind order was proven to match the payload. Every failure
+    before the first byte is written raises ``OfflineWriteRefused`` (deck untouched);
+    ``OfflineWriteCorrupted`` propagates; any failure after that raises ``HidesWriteFailed``.
     """
-    if 0 in hides_by_slide:
-        raise ValueError("slide numbers are 1-based")
     deck = Path(deck)
-    group_text_by_slide = group_text_by_slide or {}
+    try:
+        result, plans, edits, dropped, model, removed, orphans = _prepare(
+            deck, hides_by_slide, source_counts_by_slide, items_by_slide,
+            force_refuse, group_text_by_slide or {})
+    except OfflineWriteRefused:
+        raise
+    except Exception as exc:
+        raise OfflineWriteRefused(f"hides planning failed: {exc!r}") from exc
+    if not plans:
+        return result
+
+    try:
+        _rewrite_members(deck, edits, drop=dropped)
+    except (OfflineWriteRefused, OfflineWriteCorrupted):
+        raise
+    except Exception as exc:
+        raise HidesWriteFailed(f"rewrite failed after its copy-back: {exc!r}") from exc
+
+    for n, p in plans.items():
+        result.slides[n] = SlideHides(deleted=len(p.hide_ids), removed_ids=sorted(p.subtree), order_proven=True)
+    result.dropped_data = dropped
+    result.members = sorted(edits)
+
+    wanted = {n: list(h) for n, h in hides_by_slide.items() if h}
+    try:
+        _readback(deck, plans, wanted, source_counts_by_slide, model, removed, orphans, dropped)
+        if verify:
+            _verify_deck(deck, removed, orphans)
+    except HidesWriteFailed:
+        raise
+    except Exception as exc:
+        raise HidesWriteFailed(f"hides read-back failed: {exc!r}") from exc
+    return result
+
+
+def _prepare(
+    deck: Path, hides_by_slide: dict[int, list[dict]], source_counts_by_slide: dict[int, dict[str, int]],
+    items_by_slide: dict[int, list[dict]], force_refuse: frozenset[int] | set[int],
+    group_text_by_slide: dict[int, dict[int, str]],
+) -> tuple:
+    if 0 in hides_by_slide:
+        raise OfflineWriteRefused("slide numbers are 1-based")
     result = HidesResult()
     wanted = {n: list(h) for n, h in hides_by_slide.items() if h}
     for n in hides_by_slide:
         result.slides[n] = SlideHides()
     if not wanted:
-        return result
+        return result, {}, {}, [], None, set(), set()
+
+    def refuse(n: int, reason: str, proven: bool) -> None:
+        result.slides[n] = SlideHides(refused=True, reason=reason, order_proven=proven)
 
     with zipfile.ZipFile(deck) as zf:
         model = _load_model(zf)
@@ -737,30 +870,38 @@ def patch_deck_hides(
         order = slide_order(model.objects)
         data_index = _build_data_index(model.namelist)
         comp_of_member = _components_by_member(pm, list(model.member_ids))
+        unresolved_live = _validate_all_components(model, pm, comp_of_member)
+        datas_ids = {str(d.get("identifier")) for d in pm.get("datas") or []}
+        unreferenced = datas_ids - _referenced_data(pm)
+        if unreferenced:
+            raise OfflineWriteRefused(f"datas unreferenced before the edit (I6): {sorted(unreferenced)[:5]}")
         slide_count_by_member = Counter(
             model.member_of[aid] for aid, obj in model.objects.items() if obj.get("_pbtype") == "KN.SlideArchive")
         cache: dict = {}
 
         planned: dict[int, tuple] = {}
         for n in sorted(wanted):
-            if n in force_refuse:
-                result.slides[n] = SlideHides(refused=True, reason="forced refusal")
-                continue
             try:
-                planned[n] = _plan_slide(
+                plan = _plan_slide(
                     n, wanted[n], model, order, slide_count_by_member,
                     source_counts=source_counts_by_slide.get(n), items=items_by_slide.get(n),
                     group_text=group_text_by_slide.get(n), data_index=data_index,
                     comp_of_member=comp_of_member, cache=cache)
             except _Refuse as exc:
-                result.slides[n] = SlideHides(refused=True, reason=str(exc))
+                refuse(n, str(exc), False)
+                continue
             except Exception as exc:
-                result.slides[n] = SlideHides(refused=True, reason=f"planning failed: {exc!r}")
+                refuse(n, f"planning failed: {exc!r}", False)
+                continue
+            if n in force_refuse:
+                refuse(n, "forced refusal", True)
+                continue
+            planned[n] = plan
 
         slide_ids = Counter(p[0] for p in planned.values())
         for n in list(planned):
             if slide_ids[planned[n][0]] > 1:
-                result.slides[n] = SlideHides(refused=True, reason="slide archive shared with another slide number")
+                refuse(n, "slide archive shared with another slide number", True)
                 del planned[n]
 
         targets = set().union(*(p[3] | p[4] for p in planned.values())) if planned else set()
@@ -779,29 +920,27 @@ def patch_deck_hides(
                 plan.new_bytes = _edit_slide_member(zf, plan)
                 plans[n] = plan
             except _Refuse as exc:
-                result.slides[n] = SlideHides(refused=True, reason=str(exc))
+                refuse(n, str(exc), True)
             except Exception as exc:
-                result.slides[n] = SlideHides(refused=True, reason=f"planning failed: {exc!r}")
+                refuse(n, f"planning failed: {exc!r}", True)
 
-        datas_ids = {str(d.get("identifier")) for d in pm.get("datas") or []}
-        unreferenced = datas_ids - _referenced_data(pm)
-        if unreferenced:
-            raise OfflineWriteRefused(f"datas unreferenced before the edit (I6): {sorted(unreferenced)[:5]}")
+        data_by_archive = {aid: set(_header_data_refs(arch["header"])) for aid, arch in model.archives.items()}
+        data_by_archive = {aid: d for aid, d in data_by_archive.items() if d}
         dmm_ids = _data_metadata_ids(model, pm)
         member_names = _data_member_names(model.namelist)
         while True:
-            orphans = _orphans(plans, pm)
+            orphans = _orphans(plans, data_by_archive, unresolved_live)
             bad = {did: why for did in orphans
                    if (why := _orphan_violation(did, datas_ids, dmm_ids, member_names))}
             if not bad:
                 break
             for n in [n for n, p in plans.items() if p.data_ids & set(bad)]:
                 did = sorted(plans[n].data_ids & set(bad))[0]
-                result.slides[n] = SlideHides(refused=True, reason=bad[did])
+                refuse(n, bad[did], True)
                 del plans[n]
 
         if not plans:
-            return result
+            return result, {}, {}, [], model, set(), set()
 
         removed = set().union(*(p.subtree for p in plans.values()))
         drop_ext: dict[str, set] = {}
@@ -824,18 +963,11 @@ def patch_deck_hides(
         rdatas = {str(d.get("identifier")) for d in rpm.get("datas") or []}
         if rdatas != datas_ids - orphans:
             raise OfflineWriteRefused("datas after edit != datas minus orphans")
+        unreferenced = rdatas - _referenced_data(rpm)
+        if unreferenced:
+            raise OfflineWriteRefused(f"datas live only outside Metadata after the edit (I6): {sorted(unreferenced)[:5]}")
 
     dropped = sorted(member_names[did][0] for did in orphans)
     edits = {p.member: p.new_bytes for p in plans.values()}
     edits[_METADATA_MEMBER] = new_meta
-    _rewrite_members(deck, edits, drop=dropped)
-
-    for n, p in plans.items():
-        result.slides[n] = SlideHides(deleted=len(p.hide_ids), removed_ids=sorted(p.subtree))
-    result.dropped_data = dropped
-    result.members = sorted(edits)
-
-    _readback(deck, plans, wanted, source_counts_by_slide, model, removed, orphans, dropped)
-    if verify:
-        _verify_deck(deck, removed, orphans)
-    return result
+    return result, plans, edits, dropped, model, removed, orphans
