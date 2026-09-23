@@ -443,6 +443,10 @@ PRESERVE_CORE_JS = r"""
     const prev = v.__obedAssetKey != null ? v.__obedAssetKey : assetKey(v.currentSrc || v.src || '');
     v.__obedAssetKey = next;
     if (prev === next) return;
+    v.__obedGlPooled = false;
+    const gi = glPooled.indexOf(v);
+    if (gi >= 0) glPooled.splice(gi, 1);
+    if (carriedMemo === v) carriedMemo = null;
     if (prev) {
       const empties = [];
       pool.forEach(function(q, key) {
@@ -511,6 +515,10 @@ PRESERVE_CORE_JS = r"""
    */
   function zoneState(inRelease) {
     if (!GL) return null;
+    if (disabled && zone !== 'retired') {
+      retireZone('disabled');
+      return zone;
+    }
     if (zone === 'pending') {
       if (document.readyState === 'loading') return zone;
       const m = window.__OBED_GL_REPLAY__;
@@ -529,6 +537,7 @@ PRESERVE_CORE_JS = r"""
       const m = window.__OBED_GL_REPLAY__;
       if (!inRelease && m && m.state === 'RETIRED') retireZone('moduleRetired');
       else if (hn != null && hn >= GL.atScene && !armSeen) retireZone('unengaged');
+      else if (hn != null && hn >= retireZoneEnd(GL)) retireZone('leftDestination');
     } else if (zone === 'released' && hn != null && hn < GL.atScene) {
       retireZone('leftDestination');
     }
@@ -543,7 +552,8 @@ PRESERVE_CORE_JS = r"""
     setZone('retired', reason, extra);
     const victims = [];
     [carriedMemo].concat(glPooled).forEach(function(v) {
-      if (v && v.__obedGen !== -1 && victims.indexOf(v) < 0) victims.push(v);
+      if (v && v.__obedGen !== -1 && victims.indexOf(v) < 0
+          && movieKeyFor(v, v.currentSrc || v.src || '') === GL.movieKey) victims.push(v);
     });
     if (inRetireZone(GL)) zoneVictims(GL, victims);
     return retireVictims(GL, victims, true);
@@ -570,7 +580,7 @@ PRESERVE_CORE_JS = r"""
       (q || []).forEach(function(v) {
         if (cands.indexOf(v) >= 0 || document.contains(v)) return;
         if (movieKeyFor(v, v.currentSrc || v.src || '') !== movieKey) return;
-        if (!isLive(v) || v.ended || v.dataset.obedRemounted === '1') return;
+        if (!isLive(v) || v.ended || v.dataset.obedRemounted === '1' || !v.__obedGlPooled || v.__obedFacadeFor) return;
         cands.push(v);
       });
     });
@@ -638,6 +648,7 @@ PRESERVE_CORE_JS = r"""
       if (zone === 'armed' || zone === 'released') {
         retire('releaseError', {message: message});
       } else if (decided) {
+        retireVictims(GL, [carriedMemo].concat(glPooled).filter(function(v) { return v && v.__obedGen !== -1; }), true);
         out.ok = true;
         out.mode = 'retire';
         out.reason = 'releaseError';
@@ -655,7 +666,7 @@ PRESERVE_CORE_JS = r"""
     const hn = currentHashNum();
     if (!(hn != null && hn >= GL.atScene && hn < retireZoneEnd(GL))) return retire('notOnDestination');
     const v = carriedMemo;
-    if (!v || !isLive(v)) return retire('noCarried');
+    if (!v || !isLive(v) || movieKeyFor(v, v.currentSrc || v.src || '') !== GL.movieKey) return retire('noCarried');
     if (v.ended) return retire('ended');
     if (!(v.readyState >= 2) || !(v.currentSrc || v.src)) return retire('noCarried');
     const rect = opts && opts.rect;
@@ -665,9 +676,9 @@ PRESERVE_CORE_JS = r"""
     const screen = toScreen(rect, map);
     const canvas = findMovieCanvas(screen, v);
     if (!canvas || !canvas.parentNode) return retire('noAuthoredLayer');
-    const siblings = glPooled.filter(function(x) {
-      return x !== v && x.__obedGen !== -1 && movieKeyFor(x, x.currentSrc || x.src || '') === GL.movieKey;
-    });
+    const siblings = zoneVictims(GL, glPooled.filter(function(x) {
+      return x.__obedGen !== -1 && movieKeyFor(x, x.currentSrc || x.src || '') === GL.movieKey;
+    })).filter(function(x) { return x !== v; });
     out.retired = retireVictims(GL, siblings, false);
     v.__obedRect = screen;
     v.__obedParent = null;
@@ -1256,7 +1267,11 @@ PRESERVE_CORE_JS = r"""
     zoneState(false);
     const b = retireBoundary();
     if (!b || !inRetireZone(b)) return;
-    if (b === GL && (zone === 'armed' || zone === 'released')) return;
+    if (b === GL && zone === 'released') return;
+    if (b === GL && zone === 'armed') {
+      retireVictims(b, zoneVictims(b, []).filter(function(v) { return !v.__obedGlPooled; }), true);
+      return;
+    }
     retireVictims(b, zoneVictims(b, []), true);
   }
   function zoneVictims(b, victims) {
@@ -1509,7 +1524,7 @@ PRESERVE_CORE_JS = r"""
       note('facade-error', String(e && e.message || e));
     }
     const mo = new MutationObserver(function(){
-      if (stub.parentNode && real !== stub) {
+      if (stub.parentNode && real !== stub && real.__obedGen === preserveGeneration && real.__obedRemountEpoch !== -1) {
         try {
           const parent = stub.parentNode;
           const next = stub.nextSibling;
@@ -1619,20 +1634,20 @@ PRESERVE_CORE_JS = r"""
 
   /**
    * A src clear/removal: swallow it (true) so the decoder keeps its resource, or
-   * let the real clear run (false). Armed: an already-armed-pooled decoder is
-   * held; a detached one on the move scene is stashed; an attached one really
-   * clears, so it never keeps painting.
+   * let the real clear run (false). Armed: a detached armed-pooled decoder is
+   * held; a detached one on the move scene is swallowed only if `stash` pooled
+   * it; anything else really clears, so it never keeps painting.
    */
   function swallowClear(v, cur, why, via) {
     const mode = zoneMode(v, cur);
     if (mode === 'armed') {
-      if (v.__obedGlPooled) {
+      if (v.__obedGlPooled && !document.contains(v)) {
         noteHold(v, cur, via);
         return true;
       }
       if (currentHashNum() === GL.atScene - 1 && !document.contains(v)) {
         stash(v, why);
-        return true;
+        if (v.__obedGlPooled) return true;
       }
     } else if (mode !== 'refuse') {
       stash(v, why);

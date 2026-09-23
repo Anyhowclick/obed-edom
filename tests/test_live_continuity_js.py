@@ -35,7 +35,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "914464e4ccd0f8b77d4ef5e0a7aa270fce6636abf6ff09c3172f395e8b6d8d8a"
+PINNED_CORE_SHA256 = "02d7e76ca67e376ed055ffad02fa518da0c33b5de740011933f41548d4ca79f6"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -730,7 +730,9 @@ const document = {
   },
   querySelectorAll(sel) {
     if (sel === 'video') return videos.slice();
-    if (sel === 'video[data-obed-preserved="1"]') return videos.filter((v) => v.dataset.obedPreserved === '1');
+    if (sel === 'video[data-obed-preserved="1"]') {
+      return videos.filter((v) => v.dataset.obedPreserved === '1' && document.contains(v));
+    }
     if (sel === 'canvas') return canvases.slice();
     return [];
   },
@@ -1774,15 +1776,33 @@ function playerDetach(v) {
   v._rect = {left: 0, top: 0, width: 0, height: 0};
   detach(v);
 }
+/**
+ * The fixture's teardown (r1 `preserve-on-detach-subtree`): the movie's LAYER is
+ * removed, so the node keeps its (now detached, zero-box) parent — the K6 case.
+ */
+function playerDetachSubtree(v) {
+  const layer = {
+    id: 'layer-' + v.__obedElId, parentNode: bodyEl, parentElement: null,
+    getBoundingClientRect: () => ({left: 0, top: 0, width: 0, height: 0}),
+    querySelectorAll: (sel) => (sel === 'video' && v.parentNode === layer ? [v] : []),
+    removeChild(node) { node.parentNode = null; node.parentElement = null; },
+  };
+  v.parentNode = layer;
+  v.parentElement = layer;
+  v._rect = {left: 0, top: 0, width: 0, height: 0};
+  layer.parentNode = null;
+  moCallbacks.slice().forEach((cb) => cb([{removedNodes: [layer]}]));
+  return layer;
+}
 /** The measured 1->2 flow up to G2 arming: rest capture on #1, detach, `glreplay-arm`. */
 function arm() {
   location.hash = '#1';
   const big = makeMovie(MEASURED), sib = makeMovie(SIBLING);
   tick();
-  playerDetach(big);
-  playerDetach(sib);
+  const bigLayer = playerDetachSubtree(big);
+  playerDetachSubtree(sib);
   S.note('glreplay-arm', {canvasId: '0-canvas', atScene: 2});
-  return {big: big, sib: sib};
+  return {big: big, sib: sib, bigLayer: bigLayer};
 }
 function goLive() {
   const carried = S.carried('movie1');
@@ -2193,7 +2213,7 @@ const second = S.carried('movie1');
 console.log(JSON.stringify({
   bigRect: ctx.big.__obedRect,
   isBig: first.video === ctx.big, reason: first.reason, memo: second.video === ctx.big,
-  stamped: !!ctx.big.__obedGlCarried,
+  stamped: !!ctx.big.__obedGlCarried, memoArmedPooled: ctx.big.__obedGlPooled === true,
   carriedNotes: notesOf('glreplay-carried'),
   bigId: ctx.big.__obedElId, sibId: ctx.sib.__obedElId,
 }));
@@ -2203,6 +2223,7 @@ console.log(JSON.stringify({
     assert result["reason"] is None
     assert result["memo"] is True
     assert result["stamped"] is True
+    assert result["memoArmedPooled"] is True
     [note] = result["carriedNotes"]
     assert note["elId"] == result["bigId"]
     assert note["delta"] == pytest.approx(0.0121, abs=1e-6)
@@ -2211,6 +2232,25 @@ console.log(JSON.stringify({
     assert set(cands) == {result["bigId"], result["sibId"]}
     assert cands[result["bigId"]] == pytest.approx(_GL_MEASURED)
     assert cands[result["sibId"]] == pytest.approx(_GL_SIBLING)
+
+
+#: The only rect-matching decoder, pooled armed, then made ineligible (review A7).
+_ONLY_MATCH = r"""
+location.hash = '#1';
+const v = makeMovie(MEASURED);
+tick();
+playerDetach(v);
+if (!v.__obedGlPooled) throw new Error('not pooled armed');
+__MUTATE__
+const r = S.carried('movie1');"""
+_ONLY_MATCH_MUTATIONS = {
+    "attached": "v.parentNode = bodyEl;",
+    "ended": "v.ended = true;",
+    "stale-generation": "v.__obedGen = -2;",
+    "remounted": "v.dataset.obedRemounted = '1';",
+    "not-armed-pooled": "v.__obedGlPooled = false;",
+    "is-a-facade": "v.__obedFacadeFor = makeMovie(SIBLING);",
+}
 
 
 @pytest.mark.parametrize(
@@ -2224,6 +2264,12 @@ console.log(JSON.stringify({
         ("unmeasured-does-not-block", None),
         ("wrong-movie", "notArmed"),
         ("disabled", "disabled"),
+        ("only-match-attached", "notPooled"),
+        ("only-match-ended", "notPooled"),
+        ("only-match-stale-generation", "notPooled"),
+        ("only-match-remounted", "notPooled"),
+        ("only-match-not-armed-pooled", "notPooled"),
+        ("only-match-is-a-facade", "notPooled"),
     ],
 )
 def test_carried_fails_closed_and_never_binds_the_only_video(case, reason):
@@ -2265,6 +2311,7 @@ playerDetach(a); playerDetach(late);
 const r = S.carried('movie1');
 if (r.video !== a) throw new Error('bound the wrong decoder');""",
         "wrong-movie": "const ctx = arm(); const r = S.carried('movie2');",
+        **{f"only-match-{k}": _ONLY_MATCH.replace("__MUTATE__", m) for k, m in _ONLY_MATCH_MUTATIONS.items()},
         "disabled": "P.disable(); const r = S.carried('movie1');",
     }[case] + "\nconsole.log(JSON.stringify({reason: r.reason, bound: !!r.video}));\n"
     result = _run_gl(script)
@@ -2284,9 +2331,11 @@ const ctx = arm();
 goLive();
 const canvas = posterLayer(SLOT);
 standDown(['canvasRemoved']);
+const parentBefore = ctx.big.__obedParent === ctx.bigLayer;
 const out = S.release('movie1', {rect: SLOT});
 console.log(JSON.stringify({
-  out, zones: zones(), big: census(ctx.big), sib: census(ctx.sib),
+  out, zones: zones(), big: census(ctx.big), sib: census(ctx.sib), parentBefore,
+  parentAfterIsNull: ctx.big.__obedParent === null,
   bigId: ctx.big.__obedElId, sibId: ctx.sib.__obedElId,
   landed: ctx.big.parentNode === canvas.parentNode && ctx.big.previousSibling === canvas,
   rect: ctx.big.__obedRect, parentGuard: ctx.big.__obedParent,
@@ -2304,6 +2353,8 @@ console.log(JSON.stringify({
     assert result["landed"] is True
     assert result["rect"] == pytest.approx(screen)
     assert result["parentGuard"] is None
+    assert result["parentBefore"] is True
+    assert result["parentAfterIsNull"] is True
     assert result["rendered"] == pytest.approx(
         {"left": screen["x"], "top": screen["y"], "width": screen["w"], "height": screen["h"]}
     )
@@ -2424,19 +2475,39 @@ const out = S.release('movie1', {rect: SLOT});
     _assert_retired_like_today(result, "notLive")
 
 
-@pytest.mark.parametrize("scene", [1, 6])
-def test_release_off_the_destination_retires(scene):
-    """Row 5: a go-to off the destination during LIVE. At #6 (past the zone)
-    the transition retires only the armed-pooled decoders and the memo."""
+def test_release_off_the_destination_retires():
+    """Row 5: a go-to back off the destination during LIVE (`hn < atScene`)."""
     result = _run_gl(r"""
 const ctx = arm();
 goLive();
-location.hash = '#__SCENE__';
+location.hash = '#1';
 posterLayer(SLOT);
 standDown(['canvasRemoved']);
 const out = S.release('movie1', {rect: SLOT});
-""".replace("__SCENE__", str(scene)) + _RELEASE_REPORT)
+""" + _RELEASE_REPORT)
     _assert_retired_like_today(result, "notOnDestination")
+
+
+def test_release_past_the_zone_end_finds_the_zone_already_retired():
+    """A3: at `hn >= retireZoneEnd` the armed watchdog retires the zone
+    (`leftDestination`) before `release` reads its rows, so row 5's upper
+    bound is reached through the watchdog and `release` answers `notArmed`.
+    Out of the zone only the armed-pooled decoders and the memo are retired."""
+    result = _run_gl(r"""
+const ctx = arm();
+goLive();
+location.hash = '#6';
+posterLayer(SLOT);
+standDown(['canvasRemoved']);
+const out = S.release('movie1', {rect: SLOT});
+console.log(JSON.stringify({out, zone: zones().slice(-1)[0], big: census(ctx.big), sib: census(ctx.sib),
+  retired: notesOf('retire-boundary').map(x => x.elIds)}));
+""")
+    assert result["out"] == {"ok": False, "reason": "notArmed", "mode": None, "elId": None, "retired": []}
+    assert result["zone"] == ["armed", "retired", "leftDestination", "#6"]
+    assert result["retired"] == [[result["big"]["elId"], result["sib"]["elId"]]]
+    for who in ("big", "sib"):
+        assert (result[who]["paused"], result[who]["gen"], result[who]["pooled"]) == (True, -1, False)
 
 
 @pytest.mark.parametrize(
@@ -2496,7 +2567,10 @@ const out = S.release('movie1', {rect: __RECT__});
 @pytest.mark.parametrize("stage", [_IDENTITY_STAGE, _LETTERBOXED_STAGE], ids=["near-zero", "near-stage-origin"])
 def test_release_rect_that_would_take_the_footprint_fallback_retires(stage):
     """Row 7 near-origin guard: a hand-off rect `tryRemount` would read as
-    unpositioned (:1098-1099) is refused before the fallback can engage."""
+    unpositioned is refused before the fallback can engage. Both cases trip
+    `nearStageOrigin`: the `nearZero` leg mirrors `tryRemount`'s own test and is
+    implied by it at identity, and unreachable letterboxed while the rect must
+    contain `instanceRect` (review A10) — kept, not separately testable."""
     at_origin = {"x": 1, "y": 1, "w": 100, "h": 50}
     result = _run_gl(r"""
 const ctx = arm();
@@ -2714,12 +2788,15 @@ console.log(JSON.stringify({
 
 def test_out_of_zone_retire_touches_only_armed_pooled_decoders_and_the_memo():
     """K1: a transition outside `[atScene-1, retireZoneEnd)` never runs today's
-    key-wide sweep, so a decoder pooled there under pin/bridge survives."""
+    key-wide sweep, so a decoder pooled there under pin survives. Driven by a
+    go-to back to #0 while armed (A3 retires an armed zone at #7 on the first
+    consult, so #0 is where an out-of-zone armed state can still hold a pin
+    decoder when the watchdog fires)."""
     result = _run_gl(r"""
 const ctx = arm();
 S.carried('movie1');
-goToScene(7);
-const d = makeMovie(MEASURED);
+goToScene(0);
+const d = makeMovie(SIBLING);
 playerDetach(d);
 G2.state = 'RETIRED';
 tick();
@@ -2728,12 +2805,13 @@ console.log(JSON.stringify({
   retired: notesOf('retire-boundary').map(x => x.elIds),
 }));
 """)
-    assert result["zone"] == ["armed", "retired", "moduleRetired", "#7"]
+    assert result["zone"] == ["armed", "retired", "moduleRetired", "#0"]
     assert result["retired"] == [[result["big"]["elId"], result["sib"]["elId"]]]
     for who in ("big", "sib"):
         assert (result[who]["paused"], result[who]["gen"]) == (True, -1)
     d = result["d"]
     assert (d["pooled"], d["preserved"], d["paused"], d["gen"]) == (True, "1", False, 0)
+    assert d["inDocument"] is True
 
 
 _HANDOFF = r"""
@@ -2913,3 +2991,275 @@ console.log(JSON.stringify(P.events.filter(e => e.kind === 'glreplay-zone').map(
         assert [(n["from"], n["to"], n["reason"], n["key"]) for n in notes] == [
             ("pending", "retired", reason, "movie1")
         ]
+
+
+
+# --- review r1 (`.agents/reviews/gl-replay-g3/opus-r1-a.md`) ------------------
+
+
+def test_armed_retires_a_decoder_pooled_before_the_zone_and_hands_off_only_the_carried_one():
+    """A1: a decoder pooled and remounted under pin on the scene before the
+    move (a source-slide build) must be retired by the first in-zone tick,
+    exactly as the literal retire does, and must never be the decoder a later
+    `reuse-decoder` facades onto after the hand-off."""
+    result = _run_gl(r"""
+location.hash = '#0';
+tick();
+const early = makeMovie(SIBLING);
+playerDetach(early);
+const earlyAtZero = census(early);
+const ctx = arm();
+const earlyArmed = census(early);
+const retiredAtOne = notesOf('retire-boundary').map(x => [x.elIds, x.sceneHash]);
+S.carried('movie1');
+S.note('glreplay-live', {});
+location.hash = '#2';
+posterLayer(SLOT);
+standDown(['canvasRemoved']);
+const out = S.release('movie1', {rect: SLOT});
+const fresh = document.createElement('video');
+fresh.setAttribute('src', 'https://host/untitled.mov');
+console.log(JSON.stringify({earlyAtZero, earlyArmed, retiredAtOne, out, earlyId: early.__obedElId,
+  bigId: ctx.big.__obedElId, sibId: ctx.sib.__obedElId,
+  reuse: notesOf('reuse-decoder').map(x => x.oldElId)}));
+""")
+    assert result["earlyAtZero"]["inDocument"] is True
+    assert result["earlyAtZero"]["remounted"] == "1"
+    e = result["earlyArmed"]
+    assert (e["paused"], e["inDocument"], e["gen"], e["pooled"]) == (True, False, -1, False)
+    assert result["retiredAtOne"] == [[[result["earlyId"]], "#1"]]
+    assert result["out"]["mode"] == "handoff"
+    assert result["out"]["retired"] == [result["sibId"]]
+    assert result["reuse"] == [result["bigId"]]
+
+
+def test_release_retires_every_in_zone_same_asset_decoder_except_the_carried_one():
+    """A1(2): the sibling set is every pooled or DOM-preserved decoder of the
+    key except the memo, not only the armed-pooled ones — forced here by a
+    same-asset decoder pooled under pin that the armed sweep has not reached."""
+    result = _run_gl(r"""
+const ctx = arm();
+S.carried('movie1');
+S.note('glreplay-live', {});
+location.hash = '#2';
+const other = makeMovie(SIBLING);
+other.dataset.obedPreserved = '1';
+posterLayer(SLOT);
+standDown(['canvasRemoved']);
+const out = S.release('movie1', {rect: SLOT});
+console.log(JSON.stringify({out, other: census(other), otherId: other.__obedElId, sibId: ctx.sib.__obedElId}));
+""")
+    assert result["out"]["mode"] == "handoff"
+    assert sorted(result["out"]["retired"]) == sorted([result["sibId"], result["otherId"]])
+    o = result["other"]
+    assert (o["paused"], o["inDocument"], o["gen"]) == (True, False, -1)
+
+
+def test_a_natural_facade_stub_is_never_bound():
+    """A1(3): a stub `bindFacade` proxies onto a pooled decoder answers the
+    candidate checks through the real decoder; it must never be carried."""
+    result = _run_gl(r"""
+location.hash = '#0';
+tick();
+const real = makeMovie(SIBLING);
+playerDetach(real);
+const stub = document.createElement('video');
+stub.setAttribute('src', 'https://host/untitled.mov');
+if (stub.__obedFacadeFor !== real) throw new Error('no facade');
+stub.parentNode = bodyEl;
+stub._rect = screenOf(MEASURED);
+location.hash = '#1';
+tick();
+playerDetach(stub);
+const r = S.carried('movie1');
+console.log(JSON.stringify({reason: r.reason, bound: !!r.video, stubArmedPooled: !!stub.__obedGlPooled}));
+""")
+    assert result == {"reason": "notPooled", "bound": False, "stubArmedPooled": True}
+
+
+def test_armed_zone_retires_when_the_hash_reaches_the_next_flow():
+    """A3: with `armSeen`, an armed zone at `hn >= retireZoneEnd` used to stay
+    armed and let the next flow bridge the carried decoder while armed."""
+    plan = {**_GL_PLAN, "boundaries": [b for b in _GL_PLAN["boundaries"] if b["action"] != "restart"]}
+    result = _run_gl(r"""
+const ctx = arm();
+goLive();
+goToScene(8);
+tick();
+const fresh = document.createElement('video');
+fresh.setAttribute('src', 'https://host/untitled.mov');
+console.log(JSON.stringify({zone: zones().slice(-1)[0], big: census(ctx.big),
+  bridged: notesOf('bridge-3to4').map(x => x.oldElId), bigId: ctx.big.__obedElId}));
+""", plan=plan)
+    assert result["zone"] == ["armed", "retired", "leftDestination", "#8"]
+    assert result["bigId"] not in result["bridged"]
+    assert (result["big"]["paused"], result["big"]["gen"]) == (True, -1)
+
+
+@pytest.mark.parametrize("via", ["src-clear", "removeAttribute"])
+def test_armed_clear_on_a_reattached_armed_pooled_decoder_really_clears(via):
+    """A4: an attached element is never kept painting, even one pooled armed."""
+    clear = "ctx.big.src = '';" if via == "src-clear" else "ctx.big.removeAttribute('src');"
+    result = _run_gl(r"""
+const ctx = arm();
+location.hash = '#2';
+ctx.big.parentNode = bodyEl;
+__CLEAR__
+console.log(JSON.stringify({src: ctx.big.src || '', refusals: notesOf('preserve-refused').map(d => d.via),
+  holds: notesOf('glreplay-hold').map(d => d.via)}));
+""".replace("__CLEAR__", clear))
+    assert result["src"] == ""
+    assert result["refusals"] == [via]
+    assert result["holds"] == ["remount"]
+
+
+@pytest.mark.parametrize("via", ["src-clear", "removeAttribute"])
+def test_armed_clear_is_real_when_stash_declines_the_detached_decoder(via):
+    """A5: a detached move-scene clear is swallowed only when `stash` pooled
+    the decoder; otherwise nothing would ever retire the kept src."""
+    clear = "v.src = '';" if via == "src-clear" else "v.removeAttribute('src');"
+    result = _run_gl(r"""
+location.hash = '#1';
+tick();
+const v = makeMovie(MEASURED);
+v.readyState = 1; v.currentTime = 0;
+v.parentNode = null;
+__CLEAR__
+console.log(JSON.stringify({src: v.src || '', pooled: census(v).pooled,
+  refusals: notesOf('preserve-refused').map(d => d.via)}));
+""".replace("__CLEAR__", clear))
+    assert result == {"src": "", "pooled": False, "refusals": [via]}
+
+
+def test_a_repurposed_armed_pooled_decoder_is_neither_a_victim_nor_carried():
+    """A6: `reidentify` drops the armed stamp, and `retireZone` checks the key."""
+    result = _run_gl(r"""
+const ctx = arm();
+ctx.sib.src = 'https://host/WA0125.mov';
+ctx.sib.parentNode = bodyEl;
+G2.state = 'RETIRED';
+tick();
+console.log(JSON.stringify({sib: census(ctx.sib), zone: zones().slice(-1)[0].slice(0, 3)}));
+""")
+    assert result["zone"] == ["armed", "retired", "moduleRetired"]
+    s = result["sib"]
+    assert (s["paused"], s["inDocument"], s["gen"], s["glPooled"]) == (False, True, 0, False)
+
+
+def test_a_repurposed_memo_is_not_handed_off():
+    """A6 row 6: the memo's source moved to another asset without the hooks
+    seeing it (a raw attribute write) — release must not hand it off."""
+    result = _run_gl(r"""
+const ctx = arm();
+S.carried('movie1');
+S.note('glreplay-live', {});
+location.hash = '#2';
+srcStore.set(ctx.big, 'https://host/WA0125.mov');
+posterLayer(SLOT);
+standDown(['canvasRemoved']);
+const out = S.release('movie1', {rect: SLOT});
+console.log(JSON.stringify({out}));
+""")
+    assert result["out"]["mode"] == "retire"
+    assert result["out"]["reason"] == "noCarried"
+
+
+def test_a_reassigned_memo_is_forgotten():
+    """A6 `reidentify`: a hooked re-assignment clears the memo and the stamp."""
+    result = _run_gl(r"""
+const ctx = arm();
+S.carried('movie1');
+ctx.big.src = 'https://host/WA0125.mov';
+S.note('glreplay-live', {});
+location.hash = '#2';
+posterLayer(SLOT);
+standDown(['canvasRemoved']);
+const out = S.release('movie1', {rect: SLOT});
+console.log(JSON.stringify({out, glPooled: !!ctx.big.__obedGlPooled}));
+""")
+    assert result["out"]["reason"] == "noCarried"
+    assert result["out"]["elId"] is None
+    assert result["glPooled"] is False
+
+
+def test_stash_attached_branch_writes_the_authored_rect():
+    """A7: `stash`'s own attached-box capture (a pin src clear on #0, no
+    interval tick) is a second, independent writer of `__obedAuthoredRect`."""
+    result = _run_gl(r"""
+location.hash = '#0';
+const v = makeMovie(MEASURED);
+v.src = '';
+console.log(JSON.stringify({pooled: census(v).pooled, rect: v.__obedAuthoredRect || null}));
+""", stage=_LETTERBOXED_STAGE)
+    assert result["pooled"] is True
+    assert result["rect"] == pytest.approx(_GL_MEASURED)
+
+
+def test_disable_retires_a_zone_it_would_otherwise_leave_armed():
+    """A9: with the interval stopped, no watchdog could ever end the zone."""
+    result = _run_gl(r"""
+P.disable();
+const r = S.carried('movie1');
+console.log(JSON.stringify({reason: r.reason, zones: zones().map(z => z.slice(0, 3))}));
+""")
+    assert result == {"reason": "disabled", "zones": [["pending", "retired", "disabled"]]}
+
+
+def test_a_retire_that_throws_midway_still_retires_every_armed_decoder():
+    """A11: `retireDecoder` throws once (its `dataset` write) after the zone
+    already reads `retired`; the catch must finish retiring the armed pool."""
+    result = _run_gl(r"""
+const ctx = arm();
+goLive();
+posterLayer(SLOT);
+let throws = 1;
+const ds = ctx.big.dataset;
+ctx.big.dataset = new Proxy(ds, {deleteProperty(t, k) {
+  if (throws > 0) { throws -= 1; throw new Error('dataset gone'); }
+  delete t[k]; return true;
+}});
+standDown(['glError']);
+let threw = null, out = null;
+try { out = S.release('movie1', {rect: SLOT}); } catch (e) { threw = String(e); }
+console.log(JSON.stringify({threw, out, big: census(ctx.big), sib: census(ctx.sib), throwsLeft: throws}));
+""")
+    assert result["threw"] is None
+    assert result["throwsLeft"] == 0
+    assert (result["out"]["ok"], result["out"]["mode"], result["out"]["reason"]) == (True, "retire", "releaseError")
+    for who in ("big", "sib"):
+        c = result[who]
+        assert (c["paused"], c["inDocument"], c["gen"]) == (True, False, -1), (who, c)
+
+
+def test_facade_swap_never_resurrects_a_retired_decoder():
+    """A13 / K20: a facade bound in `released` whose stub is inserted after the
+    zone retired must not re-insert and play the retired decoder."""
+    result = _run_gl(_HANDOFF + r"""
+const fresh = document.createElement('video');
+fresh.setAttribute('src', 'https://host/untitled.mov');
+if (fresh.__obedFacadeFor !== ctx.big) throw new Error('no facade onto the memo');
+goToScene(1);
+tick();
+fresh.parentNode = bodyEl;
+moCallbacks.slice().forEach((cb) => cb([{removedNodes: []}]));
+console.log(JSON.stringify({big: census(ctx.big), swaps: notesOf('dom-swap').length}));
+""")
+    assert result["swaps"] == 0
+    b = result["big"]
+    assert (b["paused"], b["inDocument"], b["gen"]) == (True, False, -1)
+
+
+def test_facade_swap_still_happens_for_a_live_decoder():
+    """Control for A13: the liveness gate keeps pin's ordinary facade swap."""
+    result = _run_gl(r"""
+location.hash = '#0';
+tick();
+const real = makeMovie(SIBLING);
+playerDetach(real);
+const fresh = document.createElement('video');
+fresh.setAttribute('src', 'https://host/untitled.mov');
+fresh.parentNode = bodyEl;
+moCallbacks.slice().forEach((cb) => cb([{removedNodes: []}]));
+console.log(JSON.stringify({swaps: notesOf('dom-swap').length}));
+""")
+    assert result == {"swaps": 1}
