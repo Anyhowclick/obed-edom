@@ -3238,7 +3238,8 @@ async def _run(player: Path) -> dict:
                 // non-engagement so the gate fails for a named reason, not silently.
                 'texture-feed-draw', 'texture-feed-skip', 'texture-feed-skip-canvas',
                 'mo-prepaint-skip',
-                'player-build-error', 'mo-prepaint-draw', 'mo-no-stage'
+                'player-build-error', 'mo-prepaint-draw', 'mo-no-stage',
+                'glreplay-zone', 'glreplay-live'
               ];
               const important = p.events.filter((e) => keep.indexOf(e.kind) >= 0);
               // Keep the EARLIEST remounts as well: a carry inside the retire

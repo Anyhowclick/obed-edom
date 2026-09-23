@@ -17,6 +17,7 @@ import base64
 import concurrent.futures
 import contextlib
 import copy
+import importlib.util
 import io
 import json
 import os
@@ -2885,13 +2886,21 @@ def test_freeze_blocks_success_inconclusive_and_fail_always_block():
 # --------------------------------------------------------------------------- #
 # I4 — the 1->2 carry is REFUSED: gates under the baseline plan.
 # --------------------------------------------------------------------------- #
+def _zone_note(to: str = "retired", reason: str = "moduleAbsent", frm: str = "pending") -> dict:
+    """One v5 `glreplay-zone` transition note."""
+    return {"kind": "glreplay-zone", "detail": {"from": frm, "to": to, "reason": reason, "sceneHash": "#1"}}
+
+
 def _refusal_events() -> list[dict]:
-    """The two positive notes the retire zone may emit for movie1.
+    """The notes the retire zone emits for movie1 under the injected glReplay plan.
 
     The player holds `#1` for the WHOLE 1->2 Magic Move, so the declining hooks
-    fire at scene 1; the swept `retire-boundary` still names `atScene` 2.
+    fire at scene 1; the swept `retire-boundary` still names `atScene` 2. With no
+    GL module in P2 the v5 core resolves the glReplay zone pending -> retired
+    `moduleAbsent` at its first post-load evaluation, before either.
     """
     return [
+        _zone_note(),
         {
             "kind": "retire-boundary",
             "detail": {"key": "movie1", "elIds": [1], "atScene": 2, "sceneHash": "#1"},
@@ -2993,6 +3002,8 @@ def test_refused_carry_passes_when_every_clause_holds():
     assert verdict["ok"] is True
     assert verdict["reasons"] == []
     assert verdict["planRetire"]["atScene"] == p2.SLIDE2_MIN_HASH
+    assert verdict["planRetire"]["action"] == "glReplay"
+    assert verdict["glReplayFallback"] == "moduleAbsent"
     assert verdict["frozenComposite"]["frozen"] is True
 
 
@@ -3000,10 +3011,90 @@ def test_refused_carry_fails_without_plan_retire_boundary():
     """(a) The plan must actually retire the key — an un-retired plan cannot be
     'honoured' by silence."""
     plan = p2.build_continuity_plan(True)
-    plan["boundaries"] = [b for b in plan["boundaries"] if b.get("action") != "retire"]
+    plan["boundaries"] = [b for b in plan["boundaries"] if b.get("action") not in ("retire", "glReplay")]
     verdict = _refused(injected_plan=plan)
     assert verdict["ok"] is False
     assert "injected plan has no retire boundary for the target key" in verdict["reasons"]
+
+
+@pytest.mark.parametrize("fallback", [None, "pin", "", "RETIRE"])
+def test_refused_carry_rejects_a_gl_replay_boundary_without_a_retire_fallback(fallback):
+    """(a) A glReplay boundary counts as a retire ONLY through its literal
+    `fallback == "retire"`: any other fallback is not a refusal."""
+    plan = p2.build_continuity_plan(True)
+    entry = plan["boundaries"][0]
+    assert entry["action"] == "glReplay"
+    if fallback is None:
+        del entry["fallback"]
+    else:
+        entry["fallback"] = fallback
+    verdict = _refused(injected_plan=plan)
+    assert verdict["ok"] is False
+    assert verdict["planRetire"] is None
+    assert "injected plan has no retire boundary for the target key" in verdict["reasons"]
+
+
+@pytest.mark.parametrize("field,value", [("atScene", p2.SLIDE2_MIN_HASH + 1), ("movieKey", "movie2")])
+def test_refused_carry_rejects_a_gl_replay_boundary_at_the_wrong_scene_or_key(field, value):
+    plan = p2.build_continuity_plan(True)
+    plan["boundaries"][0][field] = value
+    verdict = _refused(injected_plan=plan)
+    assert verdict["ok"] is False
+    assert verdict["planRetire"] is None
+
+
+def test_refused_carry_still_accepts_a_literal_retire_plan_without_zone_notes():
+    """A literal `retire` boundary is today's contract: no glReplay zone exists,
+    so no `glreplay-zone` note is required and the fallback reads None."""
+    plan = p2.build_continuity_plan(True)
+    plan["boundaries"][0] = {"atScene": p2.SLIDE2_MIN_HASH, "action": "retire", "movieKey": p2.MOVIE1_KEY}
+    events = [e for e in _refusal_events() if e["kind"] != "glreplay-zone"]
+    verdict = _refused(injected_plan=plan, preserve_events=events)
+    assert verdict["ok"] is True
+    assert verdict["reasons"] == []
+    assert verdict["planRetire"]["action"] == "retire"
+    assert verdict["glReplayFallback"] is None
+
+
+def test_refused_carry_fails_when_the_gl_replay_zone_never_fell_back_to_retire():
+    """A glReplay plan must PROVE its fallback: silence (no zone note) is not a retire."""
+    events = [e for e in _refusal_events() if e["kind"] != "glreplay-zone"]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is False
+    assert verdict["glReplayFallback"] is None
+    assert "glReplay zone never fell back to retire" in verdict["reasons"]
+
+
+@pytest.mark.parametrize("to", ["armed", "released"])
+def test_refused_carry_fails_when_the_gl_replay_zone_ever_armed_or_released(to):
+    """Arming pools the carried decoder; a later retire does not make the zone a
+    plain refusal, so any armed/released transition fails the clause."""
+    events = [_zone_note(to=to, reason="moduleReady" if to == "armed" else "handoff")] + _refusal_events()
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is False
+    assert "glReplay zone never fell back to retire" in verdict["reasons"]
+
+
+def test_refused_carry_fails_when_only_a_non_retired_zone_note_exists():
+    events = [e for e in _refusal_events() if e["kind"] != "glreplay-zone"]
+    events.append(_zone_note(to="armed", reason="moduleReady"))
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is False
+    assert "glReplay zone never fell back to retire" in verdict["reasons"]
+
+
+def test_refused_carry_fails_when_gl_replay_went_live():
+    events = _refusal_events() + [{"kind": "glreplay-live", "detail": {"sceneHash": "#2"}}]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is False
+    assert "glReplay went live inside the refused zone" in verdict["reasons"]
+
+
+def test_refused_carry_reports_the_first_retired_zone_reason_as_the_fallback():
+    events = _refusal_events() + [_zone_note(reason="entryInvalid")]
+    verdict = _refused(preserve_events=events)
+    assert verdict["ok"] is True
+    assert verdict["glReplayFallback"] == "moduleAbsent"
 
 
 def test_refused_carry_fails_without_a_positive_refusal_event():
@@ -3017,6 +3108,7 @@ def test_refused_carry_accepts_a_refusal_on_the_transition_scene_alone():
     """The transition scene (RETIRE_ZONE_MIN_HASH) is inside the zone: a
     `preserve-refused` there satisfies (b) with no `retire-boundary` at all."""
     only_transition = [
+        _zone_note(),
         {"kind": "preserve-refused",
          "detail": {"key": "movie1", "scene": 1, "via": "src-clear", "sceneHash": "#1"}},
     ]
@@ -3240,13 +3332,26 @@ def test_footprint_fully_live_fails_closed_on_a_truncated_burst():
 # --------------------------------------------------------------------------- #
 # Injected plan shape + the findings inventory.
 # --------------------------------------------------------------------------- #
-def test_injected_plan_retires_movie1_before_the_restart_and_bridges_3to4():
+def _expected_gl_replay_runtime_plan() -> dict:
+    """`EXPECTED_GL_REPLAY_RUNTIME_PLAN` from tests/test_live_continuity.py. Loaded as a
+    module, not `eval`ed: the literal names `REAL_SLOT4_OPACITY`."""
+    spec = importlib.util.spec_from_file_location(
+        "test_live_continuity_for_p2", REPO / "tests" / "test_live_continuity.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return copy.deepcopy(module.EXPECTED_GL_REPLAY_RUNTIME_PLAN)
+
+
+def test_injected_plan_gl_replays_movie1_before_the_restart_and_bridges_3to4():
     plan = p2.build_continuity_plan(True)
     boundaries = plan["boundaries"]
-    assert [b["action"] for b in boundaries] == ["retire", "restart", "bridge"]
-    assert boundaries[0] == {
-        "atScene": p2.SLIDE2_MIN_HASH, "action": "retire", "movieKey": p2.MOVIE1_KEY,
-    }
+    assert [b["action"] for b in boundaries] == ["glReplay", "restart", "bridge"]
+    assert boundaries[0] == _expected_gl_replay_runtime_plan()["boundaries"][0]
+    assert boundaries[0]["atScene"] == p2.SLIDE2_MIN_HASH
+    assert boundaries[0]["movieKey"] == p2.MOVIE1_KEY
+    assert boundaries[0]["fallback"] == "retire"
     assert boundaries[1]["atScene"] == p2.SLIDE3_MIN_HASH
     assert boundaries[2]["atScene"] == p2.SLIDE4_MIN_HASH
     assert boundaries[0]["atScene"] < boundaries[1]["atScene"] < boundaries[2]["atScene"]
@@ -3262,27 +3367,27 @@ def test_injected_plan_names_movie1_only():
 
 def test_disable_bridge34_removes_only_the_bridge():
     plan = p2.build_continuity_plan(False)
-    assert [b["action"] for b in plan["boundaries"]] == ["retire", "restart"]
+    assert [b["action"] for b in plan["boundaries"]] == ["glReplay", "restart"]
+    assert plan["boundaries"] == p2.build_continuity_plan(True)["boundaries"][:2]
     assert plan["movies"] == p2.build_continuity_plan(True)["movies"]
     assert plan["transparentBackground"] is True
 
 
-def test_injected_plan_matches_the_derived_runtime_plan_boundaries():
-    """The P2 injection must stay equal to `derive_plan(...).to_runtime()` for the
-    fixture (tests/test_live_continuity.py pins the other direction)."""
-    import re
+def test_injected_plan_matches_the_derived_flag_on_runtime_plan():
+    """The P2 injection must stay equal to `derive_plan(..., gl_replay=True).to_runtime()`
+    for the fixture (tests/test_live_continuity.py pins the other direction), and so
+    carry a qualified plan signature."""
+    from obed_edom import live_continuity
 
-    expected = re.search(
-        r"EXPECTED_RUNTIME_PLAN = (\{.*?\n\})",
-        (REPO / "tests" / "test_live_continuity.py").read_text(encoding="utf-8"),
-        re.S,
-    )
-    assert expected, "EXPECTED_RUNTIME_PLAN literal not found"
-    derived = eval(expected.group(1))  # noqa: S307 - repo-local literal
+    derived = _expected_gl_replay_runtime_plan()
     injected = p2.build_continuity_plan(True)
-    assert injected["boundaries"] == derived["boundaries"]
-    assert injected["movies"] == derived["movies"]
-    assert {k: v for k, v in injected.items() if k != "transparentBackground"} == derived
+    assert injected["transparentBackground"] is True
+    runtime = {k: v for k, v in injected.items() if k != "transparentBackground"}
+    assert runtime["boundaries"] == derived["boundaries"]
+    assert runtime["movies"] == derived["movies"]
+    assert runtime == derived
+    assert json.dumps(runtime) == json.dumps(derived)
+    assert live_continuity.plan_signature(runtime) in live_continuity.QUALIFIED_PLAN_SHA256
 
 
 def test_refused_carry_ignores_a_suppressed_or_errored_remount():
