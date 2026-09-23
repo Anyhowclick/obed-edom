@@ -22,10 +22,7 @@ from obed_edom.live_continuity import (
 )
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
-REAL_EXPORT_ROOT = Path(
-    "/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/"
-    "keynote-parser-module-error-46801c/output/p2-recovery/html-adversarial/html-unmodified"
-)
+REAL_EXPORT_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-unmodified"
 
 REAL_PLAYER_ROOT = Path(__file__).resolve().parents[1] / "output" / "p2-recovery" / "html-adversarial" / "html-player"
 
