@@ -16,6 +16,8 @@ overview: >-
   `children` (per-child autosize) spec slice, which `iwa_write._slide_edits` does not read at
   all and which needs Keynote's live relayout — its size is the ONE number the census could not
   measure offline, so todo 1 measures it before any code is written.
+  MEASURED 2026-09-23: bucket (a) = 0 of 83 (27 scaled, 56 `children`) -> the groups branch is
+  STOPPED as live-bound; only the masked-media increments (2, 3) remain open.
 todos:
   - id: measure-spec-shape
     content: >-
@@ -33,7 +35,11 @@ todos:
       increment buys nothing and the wall-time lever is unreachable without an offline autosize
       text layout engine, which is out of scope; say so and close the family as live-bound.
       Cheap: one run, no new refusal logic, the dump is throwaway and never merged.
-    status: pending
+      DONE 2026-09-23 (record: `.agents/reviews/offline-fallback-2026-09-23/README.md`):
+      one full-deck run, fallback line identical to baseline (group-residual 83). Buckets: (a) 0,
+      (b) scaled 27, (c) `children` 56. Bar failed -> STOP: the groups family is live-bound.
+      Hook reverted, never committed.
+    status: completed
   - id: seeded-group-translate
     content: >-
       INCREMENT 1 (the main one), opt-in `OBED_OFFLINE_GROUP_SEED`, default OFF, mirroring
@@ -57,7 +63,8 @@ todos:
       (iv) a scaled spec mis-classified as translate-only by the 0.5px test — tighten to exact
       `is None` if the live run shows any drift. Tests: seed present/absent, `children` refused,
       scaled refused, delta arithmetic, flag helper, end-to-end convert-under-flag.
-    status: pending
+      CLOSED 2026-09-23: todo 1 measured bucket (a) = 0; nothing for this increment to write.
+    status: closed-not-pursued
   - id: seeded-group-live-gate
     content: >-
       LIVE VALIDATION GATE for increment 1. Subset slides 11,17,26,36,110,124 (covers the
@@ -76,7 +83,8 @@ todos:
       benchmark. Expected reduction: bucket (a) from todo 1 (unknown until measured; the
       optimistic ceiling is 83 -> 0, the pessimistic floor is 83 -> 83 if everything is a
       `children` spec).
-    status: pending
+      CLOSED 2026-09-23 with the increment above.
+    status: closed-not-pursued
   - id: masked-residue-epsilon-and-snap90
     content: >-
       INCREMENT 2, independent of groups and much cheaper than it looks — the census says the
@@ -125,6 +133,9 @@ todos:
       is large AND increments 2+3 pass; otherwise take the partial win (fewer fallback slides =
       a shorter pass, still ~15 min but less Keynote round-tripping) and leave the pass in
       place. Do not promote any flag to default without its own live gate.
+      UPDATE 2026-09-23: todo 1 STOPPED the groups branch, so the fallback pass survives
+      regardless of increments 2+3; only the partial win remains. Largest family is now
+      `text-grow-height-width` 88 (`OBED_OFFLINE_TEXT_REGROW`, cg_resizer.plan).
     status: pending
 ---
 
