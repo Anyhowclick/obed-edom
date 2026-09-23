@@ -179,7 +179,7 @@ any code. That is todo 1 of the plan.
 ## 5. Masked-media: the 57 are NOT what the brief assumed
 
 Same gates as shipped today (`_is_identity_mask` OR `_is_axis_aligned_crop`, offset crops now
-folded into the default per `offline_maskcrop_offset.plan.md`). In-range slides only.
+folded into the default per the offset-crop plan of PR #166, promoted in #167). In-range slides only.
 
 | deck | convertible | rotated | overhang | cross-member | total refused |
 |---|---:|---:|---:|---:|---:|
