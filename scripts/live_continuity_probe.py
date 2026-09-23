@@ -2559,8 +2559,22 @@ def capture_handback(
     return record, frame
 
 
+def capture_live_frame(transport: Any, armed: dict[str, Any]) -> dict[str, Any]:
+    """One settled screenshot of the armed scene before build 1 (plan (c) N3); a moved hash is inconclusive."""
+    try:
+        before = transport.evaluate(HASH_JS)
+        evaluate_async(transport, TWO_RAF_JS)
+        frame = decode_png(transport.call("Page.captureScreenshot", format="png")["data"])
+        stage_map, after = transport.evaluate(STAGE_MAP_JS), transport.evaluate(HASH_JS)
+    except Exception as exc:  # noqa: BLE001 - a live capture that fails proves nothing
+        return {"stageMap": None, "frame": None, "reason": f"live capture failed: {exc}"}
+    if hash_number(before) != armed["atScene"] or hash_number(after) != armed["atScene"]:
+        return {"stageMap": None, "frame": None, "reason": f"live capture off #{armed['atScene']}: {before!r} -> {after!r}"}
+    return {"stageMap": stage_map, "frame": frame, "reason": None}
+
+
 def handback_hook(
-    armed: dict[str, Any], sink: dict[str, Any], *, expect_handoff: bool, refusal: bool = False,
+    armed: dict[str, Any], sink: dict[str, Any], *, expect_handoff: bool, refusal: bool = False, capture_live: bool = False,
 ) -> Callable[[Any, dict[str, Any], dict[str, Any]], None]:
     """`after_slide` that captures the hand-back on the armed slide into `sink`."""
     def after_slide(host: Any, slide: dict[str, Any], record: dict[str, Any]) -> None:
@@ -2568,6 +2582,8 @@ def handback_hook(
             return
         if refusal:
             sink["refusal"] = refusal_evidence(host._require_transport())
+        if capture_live:
+            sink["live"] = capture_live_frame(host._require_transport(), armed)
         sink["record"], sink["frame"] = capture_handback(host, armed, expect_handoff=expect_handoff)
 
     return after_slide
@@ -2584,22 +2600,39 @@ def green_slot(slot_rects: list[dict[str, float]], movie_slot: int) -> int | Non
     return None
 
 
+def _override_and_green_slots(armed: dict[str, Any]) -> set[int]:
+    indices = set(armed["overrideSlots"])
+    green = green_slot(armed["slotRects"], armed["movieSlot"])
+    if green is not None:
+        indices.add(green)
+    return indices
+
+
+def _dilated_screen_rect(rect: dict[str, float], stage_map: dict[str, Any], dilate_px: float) -> dict[str, float]:
+    screen = to_screen_rect(rect, stage_map)
+    return {
+        "x": screen["x"] - dilate_px, "y": screen["y"] - dilate_px,
+        "w": screen["w"] + 2 * dilate_px, "h": screen["h"] + 2 * dilate_px,
+    }
+
+
+def _raster_box(rect: dict[str, float], width: int, height: int) -> tuple[slice, slice] | None:
+    """Every pixel the rect touches (floor/ceil), clipped to the frame; None when empty."""
+    x0, y0 = max(0, math.floor(rect["x"])), max(0, math.floor(rect["y"]))
+    x1, y1 = min(width, math.ceil(rect["x"] + rect["w"])), min(height, math.ceil(rect["y"] + rect["h"]))
+    return (slice(y0, y1), slice(x0, x1)) if x1 > x0 and y1 > y0 else None
+
+
 def handback_mask_rects(
     armed: dict[str, Any], stage_map: dict[str, Any], *, dilate_px: float = HANDBACK_DILATE_PX, poke: bool = False,
 ) -> list[dict[str, float]]:
     """Dilated screen rects of the instance, movie, override and green slots, plus the poke pixel."""
     slots = armed["slotRects"]
-    indices = {armed["movieSlot"], *armed["overrideSlots"]}
-    green = green_slot(slots, armed["movieSlot"])
-    if green is not None:
-        indices.add(green)
-    rects = []
-    for rect in [armed["instanceRect"], *(slots[i] for i in sorted(indices))]:
-        screen = to_screen_rect(rect, stage_map)
-        rects.append({
-            "x": screen["x"] - dilate_px, "y": screen["y"] - dilate_px,
-            "w": screen["w"] + 2 * dilate_px, "h": screen["h"] + 2 * dilate_px,
-        })
+    indices = {armed["movieSlot"], *_override_and_green_slots(armed)}
+    rects = [
+        _dilated_screen_rect(rect, stage_map, dilate_px)
+        for rect in [armed["instanceRect"], *(slots[i] for i in sorted(indices))]
+    ]
     if poke:
         rects.append({"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0})
     return rects
@@ -2621,10 +2654,9 @@ def handback_parity(
     outside = np.ones((height, width), dtype=bool)
     rects = [rect for r in records for rect in handback_mask_rects(armed, r["stageMap"], dilate_px=dilate_px, poke=poke)]
     for rect in rects:
-        x0, y0 = max(0, math.floor(rect["x"])), max(0, math.floor(rect["y"]))
-        x1, y1 = min(width, math.ceil(rect["x"] + rect["w"])), min(height, math.ceil(rect["y"] + rect["h"]))
-        if x1 > x0 and y1 > y0:
-            outside[y0:y1, x0:x1] = False
+        box = _raster_box(rect, width, height)
+        if box is not None:
+            outside[box] = False
     delta = np.abs(v_frame[:, :, :3].astype(np.int16) - g_frame[:, :, :3].astype(np.int16)).max(axis=2)
     if not outside.any():
         return {"verdict": None, "reason": "the mask covers the whole capture"}
@@ -2634,6 +2666,51 @@ def handback_parity(
         "verdict": max_outside == 0, "maxOutside": max_outside, "nChangedOutside": int((out > 0).sum()),
         "maxInside": int(inside.max()) if inside.size else 0, "maskRects": rects,
         "reason": None if max_outside == 0 else f"{int((out > 0).sum())} px differ outside the mask",
+    }
+
+
+def live_ring_mask(
+    armed: dict[str, Any], stage_maps: list[dict[str, Any]], shape: tuple[int, int], *,
+    dilate_px: float = HANDBACK_DILATE_PX,
+) -> np.ndarray:
+    """toScreen(S) - dilate(toScreen(I)) - dilate(override and green slots), under every stage map."""
+    height, width = shape
+    ring = np.ones((height, width), dtype=bool)
+    slots = armed["slotRects"]
+    for stage_map in stage_maps:
+        inside = np.zeros((height, width), dtype=bool)
+        box = _raster_box(to_screen_rect(slots[armed["movieSlot"]], stage_map), width, height)
+        if box is not None:
+            inside[box] = True
+        ring &= inside
+        for rect in [armed["instanceRect"], *(slots[i] for i in sorted(_override_and_green_slots(armed)))]:
+            box = _raster_box(_dilated_screen_rect(rect, stage_map, dilate_px), width, height)
+            if box is not None:
+                ring[box] = False
+    return ring
+
+
+def score_live_ring(
+    v_sink: Any, g_sink: Any, armed: dict[str, Any], *, dilate_px: float = HANDBACK_DILATE_PX,
+) -> dict[str, Any]:
+    """N3: max|V - Vgl| over the movie slot's ring while LIVE must be 0."""
+    lives = [sink.get("live") if isinstance(sink, dict) else None for sink in (v_sink, g_sink)]
+    if any(not isinstance(live, dict) or live.get("frame") is None for live in lives):
+        reasons = [live.get("reason") for live in lives if isinstance(live, dict) and live.get("reason")]
+        return {"verdict": None, "reason": "; ".join(reasons) or "a live capture is missing"}
+    if any(not stage_map_valid(live.get("stageMap")) for live in lives):
+        return {"verdict": None, "reason": "a live stage map is missing or untrustworthy"}
+    v_frame, g_frame = lives[0]["frame"], lives[1]["frame"]
+    if v_frame.shape != g_frame.shape:
+        return {"verdict": None, "reason": f"live captures differ in shape: {v_frame.shape} vs {g_frame.shape}"}
+    ring = live_ring_mask(armed, [live["stageMap"] for live in lives], v_frame.shape[:2], dilate_px=dilate_px)
+    if not ring.any():
+        return {"verdict": None, "reason": "the live ring is empty"}
+    delta = np.abs(v_frame[:, :, :3].astype(np.int16) - g_frame[:, :, :3].astype(np.int16)).max(axis=2)[ring]
+    max_ring, n_changed = int(delta.max()), int((delta > 0).sum())
+    return {
+        "verdict": max_ring == 0, "maxRing": max_ring, "nChangedRing": n_changed, "nRing": int(ring.sum()),
+        "dilatePx": dilate_px, "reason": None if max_ring == 0 else f"{n_changed} px differ in the live ring",
     }
 
 
@@ -3574,9 +3651,17 @@ def gl_replay_reasons(result: dict[str, Any]) -> tuple[list[str], list[str]]:
     handback = result.get("handback")
     verdict = handback.get("verdict") if isinstance(handback, dict) else None
     reason = handback.get("reason") if isinstance(handback, dict) else "not captured"
+    unknown = [f"hand-back inconclusive: {reason}"] if verdict is None else []
     if verdict is False:
         fails.append(f"hand-back failed: {reason}")
-    return fails, ([f"hand-back inconclusive: {reason}"] if verdict is None else [])
+    ring = result.get("liveRing")
+    ring_verdict = ring.get("verdict") if isinstance(ring, dict) else None
+    ring_reason = ring.get("reason") if isinstance(ring, dict) else "not captured"
+    if ring_verdict is False:
+        fails.append(f"live ring failed: {ring_reason}")
+    elif ring_verdict is not True:
+        unknown.append(f"live ring inconclusive: {ring_reason}")
+    return fails, unknown
 
 
 def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
@@ -3673,13 +3758,24 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
 
 
 def write_handback_shot(evidence_dir: Path, name: str, sink: dict[str, Any]) -> None:
-    frame, record = sink.get("frame"), sink.get("record")
+    live, record = sink.get("live"), sink.get("record")
+    if isinstance(live, dict) and live.get("frame") is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        path = evidence_dir / f"{name}-live.png"
+        cv2.imwrite(str(path), cv2.cvtColor(live["frame"], cv2.COLOR_RGB2BGR))
+        live["shot"] = str(path)
+    frame = sink.get("frame")
     if frame is None or not isinstance(record, dict):
         return
     evidence_dir.mkdir(parents=True, exist_ok=True)
     path = evidence_dir / f"{name}-handback.png"
     cv2.imwrite(str(path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     record["shot"] = str(path)
+
+
+def _live_summary(sink: dict[str, Any]) -> Any:
+    live = sink.get("live")
+    return {k: v for k, v in live.items() if k != "frame"} if isinstance(live, dict) else None
 
 
 def gl_ground_truth(export_root: Path, slides: list[dict[str, Any]], facts: dict[str, Any]) -> tuple[
@@ -3860,11 +3956,12 @@ def main() -> None:
         result["visible"]["V"] = run_visible_pass(
             "V", export_v, load_slides(export_v), plan, viewport, expected_stage, evidence_dir,
             facts["rectExpectations"]["V"], burst_poke=args.burst_poke, gl_replay="off",
-            after_slide=handback_hook(facts_on["armed"], v_sink, expect_handoff=False) if facts_on else None,
+            after_slide=handback_hook(facts_on["armed"], v_sink, expect_handoff=False, capture_live=True) if facts_on else None,
         )
         if auto:
             write_handback_shot(evidence_dir, "V", v_sink)
             result["visible"]["V"]["handback"] = v_sink.get("record")
+            result["visible"]["V"]["live"] = _live_summary(v_sink)
         result["leftoverChromeAfterVisibleV"] = check_no_leftover_chrome()
         save()
 
@@ -3884,16 +3981,19 @@ def main() -> None:
             vgl = run_visible_pass(
                 "Vgl", export_vgl, load_slides(export_vgl), plan_on, viewport, expected_stage, evidence_dir,
                 vgl_expectations, burst_poke=args.burst_poke, gl_replay="auto",
-                rescore=occlusion_rescorer(armed), after_slide=handback_hook(armed, g_sink, expect_handoff=True),
+                rescore=occlusion_rescorer(armed),
+                after_slide=handback_hook(armed, g_sink, expect_handoff=True, capture_live=True),
             )
             write_handback_shot(evidence_dir, "Vgl", g_sink)
             vgl["handback"] = g_sink.get("record")
+            vgl["live"] = _live_summary(g_sink)
             vgl["armedSlide"] = score_vgl_armed_slide(vgl, armed)
             result["visible"]["Vgl"] = vgl
             result["handback"] = score_handback(
                 v_sink.get("record"), v_sink.get("frame"), g_sink.get("record"), g_sink.get("frame"), armed,
                 poke=args.burst_poke,
             )
+            result["liveRing"] = score_live_ring(v_sink, g_sink, armed)
             result["latency"] = handback_latency(g_sink.get("record"))
             result["leftoverChromeAfterVisibleGl"] = check_no_leftover_chrome()
             save()
@@ -3934,6 +4034,7 @@ def main() -> None:
     }
     if auto:
         summary["handback"] = (result.get("handback") or {}).get("verdict")
+        summary["liveRing"] = (result.get("liveRing") or {}).get("verdict")
     print(json.dumps(summary, indent=2))
 
 
