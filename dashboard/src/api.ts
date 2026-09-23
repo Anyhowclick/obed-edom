@@ -503,12 +503,18 @@ export async function applyResize(
   jobId: string,
   decisions?: FramingDecision[],
   exportDir?: string,
-  offlineHides?: "off"
+  opts: { offlineHides?: "off"; outputClosed?: boolean } = {}
 ): Promise<Job> {
-  const body: { decisions?: FramingDecision[]; exportDir?: string; offlineHides?: "off" } = {};
+  const body: {
+    decisions?: FramingDecision[];
+    exportDir?: string;
+    offlineHides?: "off";
+    outputClosed?: boolean;
+  } = {};
   if (decisions) body.decisions = decisions;
   if (exportDir !== undefined) body.exportDir = exportDir;
-  if (offlineHides) body.offlineHides = offlineHides;
+  if (opts.offlineHides) body.offlineHides = opts.offlineHides;
+  if (opts.outputClosed) body.outputClosed = true;
   const res = await fetch(`/api/resize/${jobId}/apply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

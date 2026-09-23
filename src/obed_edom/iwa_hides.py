@@ -26,7 +26,6 @@ from obed_edom.iwa_kindindex import (
 from obed_edom.iwa_geometry import compose_geometry
 from obed_edom.iwa_runs import (
     _group_child_signature,
-    _group_content_signature,
     _normalize_text,
     slide_order,
 )
@@ -314,15 +313,18 @@ def _identity_check(
 _GEOM_TOL = 1.0
 
 
-def _content_signature(rec: dict, objects: dict[str, dict], data_index: dict[str, str], cache: dict) -> str | None:
+def _content_signature(
+    rec: dict, objects: dict[str, dict], data_index: dict[str, str], group_text: dict[int, str] | None, cache: dict,
+) -> str | None:
+    """The identity ``_identity_check`` verified against the source; ``None`` = unverified."""
     kind = rec["kind"]
     if kind in ("text", "shape"):
         return _normalize_text(rec.get("text"))
     if kind in ("image", "movie"):
         did = _data_identifier(objects.get(rec["id"]) or {})
         return data_index.get(did) if did is not None else None
-    if kind == "group":
-        return _group_content_signature(rec["id"], objects, cache, data_index)
+    if kind == "group" and group_text is not None:
+        return _group_child_signature(rec["id"], objects, cache)
     return None
 
 
@@ -339,13 +341,14 @@ def _near(a: tuple[float, ...] | None, b: tuple[float, ...] | None) -> bool:
 
 def _check_unambiguous(
     records: list[dict], hides: list[dict], items: list[dict], slide: dict,
-    objects: dict[str, dict], data_index: dict[str, str], cache: dict,
+    objects: dict[str, dict], data_index: dict[str, str], group_text: dict[int, str] | None, cache: dict,
 ) -> None:
     """A hide whose content class (same kind and signature; lines and unresolved content
     match everything of their kind) holds a survivor must be the only class member whose
     saved geometry matches the hide's payload geometry; otherwise a twin swap is invisible."""
     hide_keys = {(str(h.get("kind")), int(h.get("kindIndex", -1))) for h in hides}
-    sigs = {(r["kind"], r["kindIndex"]): _content_signature(r, objects, data_index, cache) for r in records}
+    sigs = {(r["kind"], r["kindIndex"]): _content_signature(r, objects, data_index, group_text, cache)
+            for r in records}
     geom = {(r["kind"], r["kindIndex"]): _rect(r) for r in compose_geometry(slide, objects)}
     payload = {(str(it.get("kind")), int(it.get("kindIndex", -1))): it for it in items}
     for key in sorted(hide_keys):
@@ -357,6 +360,32 @@ def _check_unambiguous(
         want = _rect(payload.get(key))
         if not _near(geom.get(key), want) or any(_near(geom.get(k), want) for k in survivors):
             raise _Refuse(f"{key[0]} {key[1]} has a survivor twin that geometry cannot tell apart")
+
+
+def _owned_refs(obj: dict) -> list[str]:
+    """Strong ownership refs: group children, owned storage, media mask. Weak parent and
+    shared style refs are deliberately not ownership."""
+    refs = [c.get("identifier") for c in obj.get("children") or []] if obj.get("_pbtype") == "TSD.GroupArchive" else []
+    refs += [(obj.get(k) or {}).get("identifier") for k in ("ownedStorage", "mask")]
+    return [str(r) for r in refs if r is not None]
+
+
+def _metadata_refs(comp: dict) -> list[tuple[str, str]]:
+    """(field, id) for every object reference a Metadata component carries."""
+    out: list[tuple[str, str]] = []
+    for f in ("externalReferences", "versionedExternalReferences"):
+        for e in comp.get(f) or []:
+            for k in ("objectIdentifier", "componentIdentifier"):
+                if e.get(k) is not None:
+                    out.append((f"{f}.{k}", str(e[k])))
+    for e in comp.get("dataReferences") or []:
+        out.extend(("dataReferences", str(o.get("objectIdentifier"))) for o in e.get("objectReferenceList") or [])
+    out.extend(("objectUuidMapEntries", str(e.get("identifier"))) for e in comp.get("objectUuidMapEntries") or [])
+    out.extend(("ambiguousObjectIdentifiers", str(i)) for i in comp.get("ambiguousObjectIdentifiers") or [])
+    return out
+
+
+_EDITED_METADATA_FIELDS = frozenset({"objectUuidMapEntries", "dataReferences"})
 
 
 def _plan_slide(
@@ -425,7 +454,7 @@ def _plan_slide(
     if items is None:
         raise _Refuse("payload items missing")
     _identity_check(records, items, model.objects, data_index, group_text, cache)
-    _check_unambiguous(records, hides, items, slide, model.objects, data_index, cache)
+    _check_unambiguous(records, hides, items, slide, model.objects, data_index, group_text, cache)
 
     subtree: set[str] = set()
     boundary: set[str] = set()
@@ -444,6 +473,9 @@ def _plan_slide(
         raise _Refuse(f"subtree ids duplicated in the deck: {sorted(dup)[:5]}")
     for x in subtree:
         header = set(_header_refs(model.archives[x]["header"]))
+        for t in _owned_refs(model.objects.get(x) or {}):
+            if t not in header or model.member_of.get(t) != member:
+                raise _Refuse(f"{x} owns {t} ({model.member_of.get(t)}) without a same-member header reference")
         for _w, t in _body_refs(model.archives[x]):
             if (t not in header and t not in subtree and t != slide_id
                     and model.member_of.get(t) == member):
@@ -479,21 +511,11 @@ def _prove_references(
         refs = referrers.get(b, [])
         if refs and all(ref in subtree for ref, _w in refs):
             raise _Refuse(f"{b} in {model.member_of[b]} is referenced only from the hide subtree")
-    for other in pm.get("components") or []:
-        for e in other.get("externalReferences") or []:
-            if str(e.get("objectIdentifier")) in subtree:
-                raise _Refuse(f"component {other.get('identifier')} externalReferences names {e.get('objectIdentifier')}")
-        if any(str(i) in subtree for i in other.get("ambiguousObjectIdentifiers") or []):
-            raise _Refuse(f"component {other.get('identifier')} lists a subtree id as ambiguous")
-        if other is comp:
-            continue
-        for e in other.get("objectUuidMapEntries") or []:
-            if str(e.get("identifier")) in subtree:
-                raise _Refuse(f"component {other.get('identifier')} maps a uuid for {e.get('identifier')}")
-        for e in other.get("dataReferences") or []:
-            for o in e.get("objectReferenceList") or []:
-                if str(o.get("objectIdentifier")) in subtree:
-                    raise _Refuse(f"component {other.get('identifier')} dataReferences names {o.get('objectIdentifier')}")
+    for table in ("components", "versionedComponents"):
+        for other in pm.get(table) or []:
+            for f, t in _metadata_refs(other):
+                if t in subtree and not (table == "components" and other is comp and f in _EDITED_METADATA_FIELDS):
+                    raise _Refuse(f"{table} {other.get('identifier')} {f} names subtree id {t}")
     for e in comp.get("objectUuidMapEntries") or []:
         if str(e.get("identifier")) not in subtree:
             continue
@@ -501,11 +523,6 @@ def _prove_references(
         key = (str(u.get("lower")), str(u.get("upper")))
         if key in uuid_refs:
             raise _Refuse(f"uuid of {e.get('identifier')} is referenced by {uuid_refs[key][0]}")
-    if pm.get("versionedComponents"):
-        ids: list[str] = []
-        _walk_refs(pm["versionedComponents"], ids, None)
-        if subtree & set(ids):
-            raise _Refuse("versionedComponents names a subtree id")
     if (comp.get("featureInfos") and any(
             (model.objects.get(h) or {}).get("_pbtype") == "TSD.MovieArchive" for h in hide_ids)):
         raise _Refuse("movie hide on a component with featureInfos")
@@ -755,16 +772,11 @@ def _check_metadata_invariants(pm: dict, removed: set[str], orphans: set[str], w
     unreferenced = datas - _referenced_data(pm)
     if unreferenced:
         raise HidesWriteFailed(f"{where}: unreferenced datas (I6) {sorted(unreferenced)[:5]}")
-    for comp in pm.get("components") or []:
-        if any(str(i) in removed for i in comp.get("ambiguousObjectIdentifiers") or []):
-            raise HidesWriteFailed(f"{where}: ambiguousObjectIdentifiers names a removed id")
-        for e in comp.get("objectUuidMapEntries") or []:
-            if str(e.get("identifier")) in removed:
-                raise HidesWriteFailed(f"{where}: uuid entry for removed {e.get('identifier')}")
-        for e in comp.get("dataReferences") or []:
-            for o in e.get("objectReferenceList") or []:
-                if str(o.get("objectIdentifier")) in removed:
-                    raise HidesWriteFailed(f"{where}: dataReferences names removed {o.get('objectIdentifier')}")
+    for table in ("components", "versionedComponents"):
+        for comp in pm.get(table) or []:
+            for f, t in _metadata_refs(comp):
+                if t in removed:
+                    raise HidesWriteFailed(f"{where}: {table} {comp.get('identifier')} {f} names removed {t}")
 
 
 def _verify_deck(deck: Path, removed: set[str], orphans: set[str]) -> None:

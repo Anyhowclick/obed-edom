@@ -190,6 +190,7 @@ class FramingsBody(BaseModel):
     decisions: list[dict[str, Any]] | None = None
     exportDir: str | None = None
     offlineHides: str | None = None
+    outputClosed: bool = False
 
 
 class DskDecisionsBody(BaseModel):
@@ -1114,7 +1115,15 @@ def create_app() -> FastAPI:
         template = Path(str(result.get("templatePath") or "")).expanduser()
         if not key.exists() or not template.exists():
             raise HTTPException(400, "The wall deck or template has moved since proposing.")
-        hides = _offline_hides_field(payload.offlineHides if payload else None)
+        hides = _offline_hides_field(payload.offlineHides) or result.get("offlineHides")
+        aborted = result.get("offlineHidesAborted") or {}
+        if aborted.get("needsFreshOutput") and not payload.outputClosed:
+            name = Path(str(aborted.get("outputPath") or "")).name or "the output deck"
+            raise HTTPException(
+                409,
+                f"Close {name} in Keynote and confirm it is closed before re-applying; "
+                "the last run may have left it open or partly edited.",
+            )
         export_dir: str | None = None
         resolved_export_dir: str | None = None
         if payload and payload.exportDir is not None:
@@ -3169,7 +3178,16 @@ def _run_resize(
             log=job.log,
         )
     except OfflineHidesAborted as exc:
-        job.result = {**(job.result or {}), "offlineHidesAborted": exc.reason}
+        job.result = {
+            **(job.result or {}),
+            "offlineHides": "off",
+            "offlineHidesAborted": {
+                "reason": exc.reason,
+                "detail": getattr(exc, "detail", ""),
+                "needsFreshOutput": bool(getattr(exc, "needs_fresh_output", False)),
+                "outputPath": str(dest),
+            },
+        }
         raise
     inspect = info.get("inspect") or {}
     names = list(info.get("previewFiles") or [])

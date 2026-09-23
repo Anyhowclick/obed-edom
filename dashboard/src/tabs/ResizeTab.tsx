@@ -50,7 +50,8 @@ type ResizeResult = FramingProposal & {
   exportDir?: string;
   resolvedExportDir?: string;
   proposalExportDir?: string;
-  offlineHidesAborted?: string;
+  offlineHides?: string;
+  offlineHidesAborted?: { reason: string; detail?: string; needsFreshOutput?: boolean; outputPath?: string };
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -76,13 +77,22 @@ export function ResizeTab() {
   const [exportDir, setExportDir] = useSessionPath("obed-edom.resize.exportDir");
   const defaultExportDir = useDefaultExportDir();
   const result = (job?.result || undefined) as ResizeResult | undefined;
-  const [hidesOff, setHidesOff] = useState<{ jobId: string; reason: string } | null>(null);
+  const [closedFor, setClosedFor] = useState<string | null>(null);
   const hidesAborted = result?.offlineHidesAborted;
-  const offlineHides = hidesOff && hidesOff.jobId === job?.id ? ("off" as const) : undefined;
-
-  useEffect(() => {
-    if (job && hidesAborted) setHidesOff({ jobId: job.id, reason: hidesAborted });
-  }, [job?.id, hidesAborted]);
+  const offlineHides = result?.offlineHides === "off" ? ("off" as const) : undefined;
+  const outputName = hidesAborted?.outputPath?.split("/").pop() || "the output deck";
+  const needsClose = Boolean(hidesAborted?.needsFreshOutput);
+  const outputClosed = Boolean(job) && closedFor === job?.id;
+  const hidesNotice =
+    hidesAborted &&
+    [
+      `Offline hides aborted: ${hidesAborted.reason}.`,
+      hidesAborted.detail,
+      "Offline hides are switched off for the next run.",
+      needsClose ? `Close ${outputName} in Keynote before re-applying.` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
 
   useEffect(() => {
     const path = result?.path;
@@ -118,7 +128,6 @@ export function ResizeTab() {
         validate,
         offlineHides,
       });
-      if (offlineHides && hidesOff) setHidesOff({ ...hidesOff, jobId: created.id });
       upsert(created);
       await track(created);
     } catch (err) {
@@ -153,10 +162,14 @@ export function ResizeTab() {
 
   async function applyFramings(decisions: FramingDecision[]) {
     if (!job) return;
+    if (needsClose && !outputClosed) {
+      setError(`Close ${outputName} in Keynote and tick “I’ve closed ${outputName} in Keynote” before re-applying.`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await track(await applyResize(job.id, decisions, exportDir, offlineHides));
+      await track(await applyResize(job.id, decisions, exportDir, { offlineHides, outputClosed }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -281,6 +294,19 @@ export function ResizeTab() {
               onError={setError}
             />
           </div>
+          {offlineHides && !hidesAborted && (
+            <p className="note">Offline hides are switched off for this run after the last abort.</p>
+          )}
+          {needsClose && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={outputClosed}
+                onChange={(e) => setClosedFor(e.target.checked ? job.id : null)}
+              />
+              <span>I’ve closed {outputName} in Keynote</span>
+            </label>
+          )}
           <FramingReview
             proposal={result}
             jobId={job.id}
@@ -323,13 +349,7 @@ export function ResizeTab() {
           <ArtifactActions artifacts={[{ label: "CG.key", path: result.destPath }]} onError={setError} />
         </>
       )}
-      <ErrorNotice
-        message={
-          offlineHides &&
-          `Offline hides aborted: ${hidesOff?.reason}. Offline hides are switched off for the next run.`
-        }
-        onDismiss={() => setHidesOff(null)}
-      />
+      <ErrorNotice message={hidesNotice} />
       <ErrorNotice message={error || openError || rangeError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Remapping map and pins…" logs={logs} />}
       {job && !(job.status === "error" && hidesAborted) && (

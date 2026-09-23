@@ -7,9 +7,10 @@ Each deck is decoded once. Archives are canonicalised with ``identifier``,
 (pbtype + ref-free body hash, ``<dangling>`` when the target is missing); a data reference
 becomes the data's digest. A slide archive is labelled by position instead (slide_order, or
 its member for a template slide), so a slide edit does not cascade into every reference to
-the slide; the slide's own content is still compared in its slide scope. Slides (by ``slide_order``) and the other ``.iwa`` members compare as multisets of
-archives. ``Index/Metadata.iwa`` compares per component (by locator) in label space, plus
-the ``datas`` table and the non-IWA ZIP members.
+the slide; the slide's own content is still compared in its slide scope. Slides (by
+``slide_order``) and the other ``.iwa`` members compare as multisets of archives.
+``Index/Metadata.iwa`` compares per component of ``components`` and ``versionedComponents``
+(by locator) in label space, plus the ``datas`` table and the non-IWA ZIP members.
 
 Leftover archives that share an identifier and pbtype on both sides are explained per
 field, so every difference has a key such as ``slide:12:KN.SlideArchive.drawablesZOrder``,
@@ -298,9 +299,9 @@ def _slide_members(deck: Deck) -> list[str | None]:
     ]
 
 
-def _components(deck: Deck) -> dict[str, dict]:
+def _components(deck: Deck, table: str = "components") -> dict[str, dict]:
     out: dict[str, dict] = {}
-    for comp in deck.metadata.get("components") or []:
+    for comp in deck.metadata.get(table) or []:
         locator = str(comp.get("locator") or comp.get("preferredLocator") or comp.get("identifier"))
         if locator in out:
             raise ValueError(f"{deck.path}: two Metadata components share locator {locator!r}")
@@ -309,27 +310,39 @@ def _components(deck: Deck) -> dict[str, dict]:
 
 
 def _component_tables(deck: Deck, comp: dict) -> dict[str, list]:
-    by_id = {str(c.get("identifier")): c for c in deck.metadata.get("components") or []}
+    by_id = {
+        str(c.get("identifier")): c
+        for table in ("versionedComponents", "components")
+        for c in deck.metadata.get(table) or []
+    }
     data_refs = [
         (_data_label(deck, d.get("dataIdentifier")), deck.labels.get(str(o.get("objectIdentifier")), DANGLING),
          o.get("count"))
         for d in comp.get("dataReferences") or []
         for o in d.get("objectReferenceList") or []
     ]
-    ext_refs = []
-    for ref in comp.get("externalReferences") or []:
-        target_comp = by_id.get(str(ref.get("componentIdentifier")))
-        target_locator = (target_comp or {}).get("locator") or (target_comp or {}).get("preferredLocator")
-        locator = _LOCATOR_SUFFIX.sub("", str(target_locator or DANGLING))
-        target = ref.get("objectIdentifier", ref.get("componentIdentifier"))
-        ext_refs.append((locator, deck.labels.get(str(target), DANGLING), bool(ref.get("isWeak"))))
+
+    def ext_refs(key: str) -> list[tuple]:
+        out = []
+        for ref in comp.get(key) or []:
+            target_comp = by_id.get(str(ref.get("componentIdentifier"))) or {}
+            target_locator = target_comp.get("locator") or target_comp.get("preferredLocator") or DANGLING
+            locator = _LOCATOR_SUFFIX.sub("", str(target_locator))
+            target = ref.get("objectIdentifier", ref.get("componentIdentifier"))
+            out.append((locator, deck.labels.get(str(target), DANGLING), bool(ref.get("isWeak"))))
+        return out
+
     return {
         "objectUuidMapEntries": [
             deck.labels.get(str(e.get("identifier")), DANGLING) for e in comp.get("objectUuidMapEntries") or []
         ],
         "featureInfos": [_hash(f) for f in comp.get("featureInfos") or []],
         "dataReferences": data_refs,
-        "externalReferences": ext_refs,
+        "externalReferences": ext_refs("externalReferences"),
+        "versionedExternalReferences": ext_refs("versionedExternalReferences"),
+        "ambiguousObjectIdentifiers": [
+            deck.labels.get(str(i), DANGLING) for i in comp.get("ambiguousObjectIdentifiers") or []
+        ],
     }
 
 
@@ -350,14 +363,15 @@ def compare(a: Deck, b: Deck, *, refs: bool = True) -> list[dict]:
             diffs.append({"key": f"member:{member}", "a": member in rest_a, "b": member in rest_b})
             continue
         diffs += _diff_archives(f"member:{member}", a, a.members[member], b, b.members[member], refs)
-    comps_a, comps_b = _components(a), _components(b)
-    for locator in sorted(set(comps_a) | set(comps_b)):
-        if locator not in comps_a or locator not in comps_b:
-            diffs.append({"key": f"metadata:{locator}", "a": locator in comps_a, "b": locator in comps_b})
-            continue
-        ta, tb = _component_tables(a, comps_a[locator]), _component_tables(b, comps_b[locator])
-        for table in ta:
-            diffs += _multiset_diff(f"metadata:{locator}:{table}", ta[table], tb[table])
+    for table, prefix in (("components", "metadata:"), ("versionedComponents", "metadata:versioned:")):
+        comps_a, comps_b = _components(a, table), _components(b, table)
+        for locator in sorted(set(comps_a) | set(comps_b)):
+            if locator not in comps_a or locator not in comps_b:
+                diffs.append({"key": f"{prefix}{locator}", "a": locator in comps_a, "b": locator in comps_b})
+                continue
+            ta, tb = _component_tables(a, comps_a[locator]), _component_tables(b, comps_b[locator])
+            for name in ta:
+                diffs += _multiset_diff(f"{prefix}{locator}:{name}", ta[name], tb[name])
     datas_a = [(d.get("preferredFileName"), d.get("digest")) for d in a.metadata.get("datas") or []]
     datas_b = [(d.get("preferredFileName"), d.get("digest")) for d in b.metadata.get("datas") or []]
     for entry in _multiset_diff("datas", datas_a, datas_b):

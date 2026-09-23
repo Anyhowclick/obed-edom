@@ -94,14 +94,21 @@ HIDE_FALLBACK_OK = "OBED_HIDES_FALLBACK_OK"
 
 class OfflineHidesAborted(RuntimeError):
     """Offline hides stopped the run before any later deck stage; a rerun with
-    `OBED_OFFLINE_HIDES=off` avoids it. `reason` is short and operator-readable."""
+    `OBED_OFFLINE_HIDES=off` avoids it. `reason` is short and operator-readable, `detail`
+    is the full operator message with the recovery steps. `needs_fresh_output` is True when
+    the fallback session may have left the destination open in Keynote or partly edited."""
 
-    def __init__(self, reason: str, detail: str = "") -> None:
+    def __init__(self, reason: str, context: str = "", *, needs_fresh_output: bool = False) -> None:
         self.reason = reason
-        super().__init__(
-            f"Offline hides aborted: {reason}{f' ({detail})' if detail else ''}. "
-            "Rerun with OBED_OFFLINE_HIDES=off."
+        self.needs_fresh_output = needs_fresh_output
+        recovery = (
+            "Close the destination deck in Keynote WITHOUT saving if it is still open, then "
+            "rerun from the original source into a fresh --out with OBED_OFFLINE_HIDES=off; "
+            "never replay the delete script."
+            if needs_fresh_output else "Rerun with OBED_OFFLINE_HIDES=off."
         )
+        self.detail = f"Offline hides aborted: {reason}{f' ({context})' if context else ''}. {recovery}"
+        super().__init__(self.detail)
 
 
 def _hide_specs_by_slide(transform_dicts: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
@@ -185,22 +192,62 @@ def _hide_delete_body(specs: list[dict[str, Any]], slide_no: int) -> str:
     return "\n".join(body + ["      end tell"])
 
 
+_CANON_SH = (
+    'p="${p%/}"; d=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || exit 1; '
+    'printf \'%s/%s\' "$d" "$(basename "$p")"'
+)
+
+
 def _hide_fallback_script(dest: Path, bodies_by_slide: dict[int, str]) -> str:
-    """One session: open `dest`, verify the bound document by its exact resolved path before
-    any mutation, delete, save, close, and confirm no document at that path stays open.
-    A delete error closes without saving; only a full success returns `HIDE_FALLBACK_OK`."""
-    path = _as_escape(str(Path(dest).resolve()))
+    """One session: open `dest`, bind the unique open document whose `file … as alias` path
+    canonicalises (symlinks, /tmp vs /private/tmp) to `os.path.realpath(dest)`, delete, save,
+    close, and confirm by the same identity that no such document stays open. Any failure
+    after binding closes it without saving; only a full success returns `HIDE_FALLBACK_OK`."""
+    import os  # noqa: PLC0415
+
+    target = _as_escape(os.path.realpath(dest))
+    canon_sh = _as_escape(_CANON_SH)
     return "\n".join([
+        "on obedCanon(p)",
+        '  if p is "" then return ""',
+        "  try",
+        f'    return do shell script "p=" & quoted form of p & "; " & "{canon_sh}"',
+        "  on error",
+        '    return ""',
+        "  end try",
+        "end obedCanon",
+        "",
+        "on obedMatches(target)",
+        "  set found to {}",
+        f"  {_keynote_terms()}",
+        f"  {_keynote_tell()}",
+        "    repeat with d in documents",
+        '      set p to ""',
+        "      try",
+        "        set p to POSIX path of ((file of d) as alias)",
+        "      end try",
+        "      if (my obedCanon(p)) is target then set end of found to (contents of d)",
+        "    end repeat",
+        "  end tell",
+        "  end using terms from",
+        "  return found",
+        "end obedMatches",
+        "",
         _keynote_terms(),
         _keynote_tell(),
         "  activate",
         "  with timeout of 3600 seconds",
-        f'    set theDoc to open (POSIX file "{path}")',
-        '    set docPath to ""',
-        "    try",
-        "      set docPath to POSIX path of (file of theDoc)",
-        "    end try",
-        f'    if docPath is not "{path}" then error "hides fallback bound the wrong document: " & docPath',
+        f'    open (POSIX file "{target}")',
+        f'    set matches to my obedMatches("{target}")',
+        "    if (count of matches) is not 1 then",
+        "      repeat with m in matches",
+        "        try",
+        "          close (contents of m) saving no",
+        "        end try",
+        "      end repeat",
+        f'      error "hides fallback bound " & (count of matches) & " document(s) at {target}"',
+        "    end if",
+        "    set theDoc to item 1 of matches",
         "    try",
         "      tell theDoc",
         *(bodies_by_slide[n] for n in sorted(bodies_by_slide)),
@@ -213,13 +260,7 @@ def _hide_fallback_script(dest: Path, bodies_by_slide: dict[int, str]) -> str:
         "      error errMsg",
         "    end try",
         "    close theDoc saving yes",
-        "    repeat with d in documents",
-        '      set openPath to ""',
-        "      try",
-        "        set openPath to POSIX path of (file of d)",
-        "      end try",
-        f'      if openPath is "{path}" then error "hides fallback: document still open after close"',
-        "    end repeat",
+        f'    if (count of (my obedMatches("{target}"))) is not 0 then error "hides fallback: document still open after close"',
         f'    return "{HIDE_FALLBACK_OK}"',
         "  end timeout",
         "end tell",
@@ -230,18 +271,16 @@ def _hide_fallback_script(dest: Path, bodies_by_slide: dict[int, str]) -> str:
 def _run_hide_fallback(
     dest: Path, hides_by_slide: dict[int, list[dict[str, Any]]], say: Callable[[str], None],
 ) -> None:
-    """Run the hide-delete session; raise `OfflineHidesAborted` unless it deleted every hide,
-    saved, and confirmed the close."""
+    """Run the hide-delete session; raise `OfflineHidesAborted` (fresh output needed) unless
+    it deleted every hide, saved, and confirmed the close."""
     script = _hide_fallback_script(
         dest, {n: _hide_delete_body(specs, n) for n, specs in hides_by_slide.items()})
-    recovery = ("the output is incomplete: close it in Keynote if it is open and rerun from "
-                "the original source into a fresh --out; never replay the delete script")
     try:
         proc = run_applescript(
             script, launch=True, dump_on_failure=dest.with_suffix(".hides-fallback.applescript"))
     except Exception as exc:  # noqa: BLE001 — a timeout or runner failure leaves the deck unknown
         raise OfflineHidesAborted("hide fallback session did not finish",
-                                  f"{type(exc).__name__}: {exc}; {recovery}") from exc
+                                  f"{type(exc).__name__}: {exc}", needs_fresh_output=True) from exc
     out = (proc.stdout or "").strip()
     if proc.returncode == 0 and out.endswith(HIDE_FALLBACK_OK):
         return
@@ -249,7 +288,8 @@ def _run_hide_fallback(
     say(f"Offline hides fallback session failed (script kept: {proc.dump}): "
         f"{proc.stderr or proc.stdout}")
     reason = "a hide delete failed" if missed else "hide fallback session failed"
-    raise OfflineHidesAborted(reason, f"{missed[0] if missed else (proc.stderr or out)[:200]}; {recovery}")
+    raise OfflineHidesAborted(reason, missed[0] if missed else (proc.stderr or out)[:200],
+                              needs_fresh_output=True)
 
 
 def _debug_force_refuse() -> frozenset[int]:

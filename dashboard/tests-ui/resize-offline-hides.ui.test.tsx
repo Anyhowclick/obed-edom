@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunNavContext } from "../src/nav";
 import { ResizeTab } from "../src/tabs/ResizeTab";
@@ -7,6 +7,10 @@ import type { Job } from "../src/api";
 
 const REASON = "the IWA writer refused the deck before writing";
 const NOTICE = `Offline hides aborted: ${REASON}. Offline hides are switched off for the next run.`;
+const TIMEOUT_DETAIL = "Keynote did not finish; close wall_CG.key without saving, then re-apply into fresh output.";
+const TIMEOUT_NOTICE =
+  `Offline hides aborted: hide fallback session did not finish. ${TIMEOUT_DETAIL} ` +
+  "Offline hides are switched off for the next run. Close wall_CG.key in Keynote before re-applying.";
 
 const proposal = {
   phase: "framing",
@@ -25,8 +29,8 @@ const proposal = {
   ],
 };
 
-// The backend keeps the framing proposal on the errored job and adds the structured
-// `offlineHidesAborted` field; the UI keys on that field, never on the error text.
+// The backend keeps the framing proposal on the errored job, persists `offlineHides: "off"`
+// and adds the structured `offlineHidesAborted`; the UI keys on those, never on the error text.
 const aborted: Job = {
   id: "job-1",
   kind: "resize",
@@ -34,9 +38,29 @@ const aborted: Job = {
   status: "error",
   error: `Offline hides aborted: ${REASON}. Rerun with OBED_OFFLINE_HIDES=off.`,
   logs: [],
-  result: { ...proposal, offlineHidesAborted: REASON },
+  result: {
+    ...proposal,
+    offlineHides: "off",
+    offlineHidesAborted: { reason: REASON, detail: "", needsFreshOutput: false, outputPath: "/tmp/out/wall_CG.key" },
+  },
   createdAt: 0,
   updatedAt: 0,
+};
+
+// A fallback-session timeout: Keynote may still hold a partly edited output deck.
+const timedOut: Job = {
+  ...aborted,
+  error: `Offline hides aborted: hide fallback session did not finish (${TIMEOUT_DETAIL}). Rerun with OBED_OFFLINE_HIDES=off.`,
+  result: {
+    ...proposal,
+    offlineHides: "off",
+    offlineHidesAborted: {
+      reason: "hide fallback session did not finish",
+      detail: TIMEOUT_DETAIL,
+      needsFreshOutput: true,
+      outputPath: "/tmp/out/wall_CG.key",
+    },
+  },
 };
 
 const plainError: Job = {
@@ -88,8 +112,8 @@ async function clickApply() {
   });
 }
 
-function applyBody(fetchSpy: ReturnType<typeof spyFetch>) {
-  const call = fetchSpy.mock.calls.find(([url]) => url === "/api/resize/job-1/apply");
+function applyBody(fetchSpy: ReturnType<typeof spyFetch>, jobId = "job-1") {
+  const call = fetchSpy.mock.calls.find(([url]) => url === `/api/resize/${jobId}/apply`);
   expect(call).toBeDefined();
   return JSON.parse(String((call![1] as RequestInit).body));
 }
@@ -119,8 +143,16 @@ describe("Resize tab after an offline-hides abort", () => {
     expect(applyBody(fetchSpy).offlineHides).toBe("off");
   });
 
-  it("a fresh Propose carries offline hides off, and so does that new job's Apply", async () => {
-    const next: Job = { ...aborted, id: "job-2", status: "done", error: null, result: { ...proposal } };
+  it("a fresh Propose carries offline hides off, and so does the reopened proposal's Apply", async () => {
+    // The new proposal stores `offlineHides: "off"` server-side, so a refresh or reopen
+    // (which rebuilds the tab from the job alone) still sends it on Apply.
+    const next: Job = {
+      ...aborted,
+      id: "job-2",
+      status: "done",
+      error: null,
+      result: { ...proposal, offlineHides: "off" },
+    };
     const fetchSpy = spyFetch(next);
     vi.mocked(pollJob).mockImplementation(async () => next);
     renderOpenRun();
@@ -133,14 +165,22 @@ describe("Resize tab after an offline-hides abort", () => {
     expect(vi.mocked(startResize).mock.lastCall?.[1]).toMatchObject({ offlineHides: "off" });
     const form = fetchSpy.mock.calls.find(([url]) => url === "/api/resize")![1]!.body as FormData;
     expect(form.get("offline_hides")).toBe("off");
-    expect(await screen.findByText(NOTICE)).toBeInTheDocument();
+    expect(
+      await screen.findByText("Offline hides are switched off for this run after the last abort.")
+    ).toBeInTheDocument();
 
     await clickApply();
-    const call = fetchSpy.mock.calls.find(([url]) => url === "/api/resize/job-2/apply");
-    expect(JSON.parse(String((call![1] as RequestInit).body)).offlineHides).toBe("off");
+    expect(applyBody(fetchSpy, "job-2").offlineHides).toBe("off");
+
+    cleanup();
+    vi.mocked(getJob).mockImplementation(async () => next);
+    fetchSpy.mockClear();
+    renderOpenRun("job-2");
+    await clickApply();
+    expect(applyBody(fetchSpy, "job-2").offlineHides).toBe("off");
   });
 
-  it("dismissing the notice stops sending offlineHides", async () => {
+  it("dismissing the notice hides it but keeps offline hides off for the re-apply", async () => {
     const fetchSpy = spyFetch(aborted);
     renderOpenRun();
     await screen.findByText(NOTICE);
@@ -153,7 +193,30 @@ describe("Resize tab after an offline-hides abort", () => {
 
     await clickApply();
 
-    expect(applyBody(fetchSpy)).not.toHaveProperty("offlineHides");
+    expect(applyBody(fetchSpy).offlineHides).toBe("off");
+  });
+
+  it("a timeout abort shows the recovery detail and blocks re-Apply until the output is confirmed closed", async () => {
+    vi.mocked(getJob).mockImplementation(async () => timedOut);
+    vi.mocked(pollJob).mockImplementation(async () => timedOut);
+    const fetchSpy = spyFetch(timedOut);
+    renderOpenRun();
+    expect(await screen.findByText(TIMEOUT_NOTICE)).toBeInTheDocument();
+
+    await clickApply();
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/apply"))).toBe(false);
+    expect(
+      screen.getByText(
+        "Close wall_CG.key in Keynote and tick “I’ve closed wall_CG.key in Keynote” before re-applying."
+      )
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" }));
+    });
+    await clickApply();
+
+    expect(applyBody(fetchSpy)).toMatchObject({ offlineHides: "off", outputClosed: true });
   });
 
   it("an ordinary error shows its message and leaves offline hides alone", async () => {
@@ -163,10 +226,12 @@ describe("Resize tab after an offline-hides abort", () => {
     renderOpenRun();
     await screen.findByRole("button", { name: "Resize with these framings" });
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /closed/ })).not.toBeInTheDocument();
 
     await clickApply();
 
     expect(applyBody(fetchSpy)).not.toHaveProperty("offlineHides");
+    expect(applyBody(fetchSpy)).not.toHaveProperty("outputClosed");
     expect((await screen.findAllByText("Keynote went away")).length).toBeGreaterThan(0);
   });
 });

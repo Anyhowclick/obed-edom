@@ -549,6 +549,21 @@ def _group_header_omits_child(members):
                    else _a(306, "TSD.GroupArchive", a["objects"][0], refs=[]) for a in members[S1]]
 
 
+def _move_to_sheet(*ids):
+    """Move archives from the slide-1 member into the stylesheet member (cross-member ownership)."""
+    def mutate(members):
+        moved = [a for a in members[S1] if str(a["header"]["identifier"]) in ids]
+        members[S1] = [a for a in members[S1] if str(a["header"]["identifier"]) not in ids]
+        members[SHEET].extend(moved)
+    return mutate
+
+
+def _versioned(fields):
+    def meta_mutate(pm):
+        pm["versionedComponents"] = [{"identifier": "990", "preferredLocator": "Versioned", **fields}]
+    return meta_mutate
+
+
 def _foreign_ext_ref(comp):
     comp.setdefault("externalReferences", []).append(
         {"componentIdentifier": "101", "objectIdentifier": "301", "isWeak": True})
@@ -564,7 +579,23 @@ REFUSALS = {
     "i2": (1, dict(mutate=_i2_violation), "I2"),
     "same-component-ambiguous-id": (
         1, dict(meta_mutate=_mutate_comp("101", lambda c: c.update(ambiguousObjectIdentifiers=["301"]))), "ambiguous"),
-    "body-ref-missing-from-header": (1, dict(mutate=_group_header_omits_child), "without a header reference"),
+    "body-ref-missing-from-header": (1, dict(mutate=_group_header_omits_child), "without a same-member header"),
+    "owned-child-cross-member-missing-header": (
+        1, dict(mutate=_chain(_group_header_omits_child, _move_to_sheet("320", "321"))), "owns 320"),
+    "owned-storage-cross-member": (1, dict(mutate=_move_to_sheet("311")), "owns 311"),
+    "mask-cross-member": (1, dict(mutate=_move_to_sheet("312")), "owns 312"),
+    "versioned-external-ref": (1, dict(meta_mutate=_mutate_comp("2", lambda c: c.update(
+        versionedExternalReferences=[{"componentIdentifier": "101", "objectIdentifier": "301"}]))),
+        "versionedExternalReferences"),
+    "versioned-component-uuid": (1, dict(meta_mutate=_versioned({"objectUuidMapEntries": [
+        {"identifier": "301", "uuid": {"lower": "1", "upper": "2"}}]})), "versionedComponents"),
+    "versioned-component-data-ref": (1, dict(meta_mutate=_versioned({"dataReferences": [
+        {"dataIdentifier": "50", "objectReferenceList": [{"objectIdentifier": "302", "count": 1}]}]})),
+        "versionedComponents"),
+    "versioned-component-ambiguous": (1, dict(meta_mutate=_versioned({"ambiguousObjectIdentifiers": ["304"]})),
+                                      "versionedComponents"),
+    "versioned-component-external-ref": (1, dict(meta_mutate=_versioned({"externalReferences": [
+        {"componentIdentifier": "101", "objectIdentifier": "305"}]})), "versionedComponents"),
     "shared-member": (1, dict(mutate=_second_slide_in_member), "slide archives"),
     "cross-member-subtree": (1, dict(mutate=_cross_member_subtree), "700"),
     "uuid-ref": (1, dict(mutate=_uuid_ref), "uuid"),
@@ -1038,3 +1069,56 @@ def test_hiding_every_drawable_on_a_slide(deck):
     z, owned, header = _z(deck, S2, "102")
     assert z == [] and owned == [] and header == ["902"]
     assert set(_decoded(deck, S2)) == {"102"}
+
+
+# ---------------------------------------------------------------- Astra r2 #1: group twins, #3: read-back
+
+
+def _media_group_twins(swap):
+    """Groups 520 ("GT" + image of data 51) and 540 ("GT" + image of data 52): same child
+    text (the signature checked against the source), different media."""
+    archs = []
+    for gid, data, at in ((520, 51, (40, 400)), (540, 52, (600, 700))):
+        archs.append(_a(gid, "TSD.GroupArchive",
+                        {"children": [{"identifier": gid + 1}, {"identifier": gid + 3}], "super": _geom(*at, 100, 40)},
+                        refs=[gid + 1, gid + 3]))
+        archs.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), extra_refs=[gid]))
+        archs.append(_image(gid + 3, data, at=(0, 0)))
+    z = [500, 501, 540, 520] if swap else [500, 501, 520, 540]
+
+    def mutate(members):
+        members[S3] = [_slide(103, z), *_text(500, 510, "Stay"), _image(501, 54), *archs]
+    return mutate
+
+
+_GROUP_HIDES = {**HIDES, 3: [HIDES[3][0], {"role": "hide", "kind": "group", "kindIndex": 0}]}
+_GROUP_TEXT = {3: {0: "GT", 1: "GT"}}
+
+
+def test_same_text_different_media_group_swap_refuses(tmp_path):
+    source = _build(tmp_path / "src.key", mutate=_media_group_twins(False))
+    saved = _build(tmp_path / "saved.key", mutate=_media_group_twins(True))
+    before = _raw_members(saved)
+    res = _run(saved, _GROUP_HIDES, items=_payload(source), counts=deck_kind_counts(source),
+               group_text_by_slide=_GROUP_TEXT)
+    assert res.slides[3].refused and "survivor twin" in res.slides[3].reason
+    assert _raw_members(saved)[S3] == before[S3]
+
+
+def test_same_text_different_media_group_in_source_order_deletes_the_hide(tmp_path):
+    path = _build(tmp_path / "g.key", mutate=_media_group_twins(False))
+    res = _run(path, _GROUP_HIDES, group_text_by_slide=_GROUP_TEXT)
+    assert not res.slides[3].refused, res.slides[3].reason
+    assert "520" in res.slides[3].removed_ids and "540" not in res.slides[3].removed_ids
+
+
+def test_read_back_catches_metadata_naming_a_removed_id(deck, monkeypatch):
+    original_meta = _raw_members(deck)[META]
+    real = iwa_write._rewrite_members
+
+    def stale_metadata(path, edits, *, drop=()):
+        real(path, {**edits, META: original_meta}, drop=drop)
+
+    monkeypatch.setattr(iwa_hides, "_rewrite_members", stale_metadata)
+    with pytest.raises(HidesWriteFailed, match="names removed 401|names removed 411"):
+        _run(deck, {2: [HIDES[2][0]]})

@@ -1636,22 +1636,32 @@ def _propose(client, tmp_path, **extra):
     )
 
 
-def test_resize_offline_hides_abort_is_structured_and_the_rerun_can_switch_them_off(
+def _hides_abort(reason, detail="", needs_fresh_output=False):
+    """`OfflineHidesAborted` carrying D's structured fields whether or not its constructor
+    takes them yet (the web layer reads them with `getattr` defaults)."""
+    from obed_edom.offline_write import OfflineHidesAborted
+
+    exc = OfflineHidesAborted(reason)
+    exc.detail = detail
+    exc.needs_fresh_output = needs_fresh_output
+    return exc
+
+
+def test_resize_offline_hides_abort_is_structured_and_the_rerun_keeps_them_off(
     tmp_path, monkeypatch
 ):
     """Owner decision 4: a whole-deck refusal aborts the remap with `OfflineHidesAborted`.
     The job ends in error, keeps its framing proposal so Apply stays available, and
-    carries `offlineHidesAborted: <reason>` for the Resize tab to key on (no message
-    parsing). The operator's re-apply sends `offlineHides: "off"`, which reaches the
-    remap as `offline_hides="off"`, and a fresh apply clears the stale abort field."""
-    from obed_edom.offline_write import OfflineHidesAborted
-
+    carries a structured `offlineHidesAborted` for the Resize tab to key on (no message
+    parsing). It also persists `offlineHides: "off"`, so a plain re-Apply (for example
+    after a refresh, sending no override) still reaches the remap with hides off, and a
+    fresh apply clears the stale abort."""
     calls = []
 
     def fake_remap(path, dest, **kwargs):
         calls.append(kwargs.get("offline_hides"))
         if len(calls) == 1:
-            raise OfflineHidesAborted("slide 19 group order changed across the save")
+            raise _hides_abort("the IWA writer refused the deck before writing", "slide 19 group order changed")
         return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
 
     _stub_resize_propose(monkeypatch, fake_remap)
@@ -1662,28 +1672,76 @@ def test_resize_offline_hides_abort_is_structured_and_the_rerun_can_switch_them_
     assert client.post(f"/api/resize/{job_id}/apply", json={}).status_code == 200
     aborted = _wait(client, job_id)
     assert aborted["status"] == "error"
-    assert "slide 19 group order changed" in aborted["error"]
-    assert aborted["result"]["offlineHidesAborted"] == "slide 19 group order changed across the save"
+    assert "refused the deck" in aborted["error"]
+    abort = aborted["result"]["offlineHidesAborted"]
+    assert abort["reason"] == "the IWA writer refused the deck before writing"
+    assert abort["detail"] == "slide 19 group order changed"
+    assert abort["needsFreshOutput"] is False
+    assert abort["outputPath"].endswith("Wall_CG.key")
+    assert aborted["result"]["offlineHides"] == "off"
     assert aborted["result"]["phase"] == "framing"
     assert calls == [None]
 
-    assert client.post(f"/api/resize/{job_id}/apply", json={"offlineHides": "off"}).status_code == 200
+    assert client.post(f"/api/resize/{job_id}/apply", json={}).status_code == 200
     rerun = _wait(client, job_id)
     assert rerun["status"] == "done", rerun.get("error")
     assert calls == [None, "off"]
     assert "offlineHidesAborted" not in rerun["result"]
+    assert "offlineHides" not in rerun["result"]
     assert any("Offline hides switched off" in line for line in rerun["logs"])
 
 
-def test_resize_rerun_failing_otherwise_does_not_keep_a_stale_hides_abort(tmp_path, monkeypatch):
-    from obed_edom.offline_write import OfflineHidesAborted
-
+def test_resize_fallback_timeout_needs_a_closed_output_before_re_apply(tmp_path, monkeypatch):
+    """Astra r2 #5: a fallback-session timeout may leave the destination open or partly
+    edited in Keynote, and re-Apply replaces that same destination. The abort publishes the
+    recovery detail and `needsFreshOutput`; Apply is refused (nothing saved, nothing run)
+    until the request confirms the operator closed the output deck."""
+    detail = "Keynote did not finish; close Wall_CG.key without saving, then re-apply into fresh output."
     calls = []
 
     def fake_remap(path, dest, **kwargs):
         calls.append(kwargs.get("offline_hides"))
         if len(calls) == 1:
-            raise OfflineHidesAborted("identity unproven")
+            raise _hides_abort("hide fallback session did not finish", detail, needs_fresh_output=True)
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    _stub_resize_propose(monkeypatch, fake_remap)
+    client = TestClient(app)
+    job_id = _propose(client, tmp_path).json()["id"]
+    _wait(client, job_id)
+    client.post(f"/api/resize/{job_id}/apply", json={})
+    abort = _wait(client, job_id)["result"]["offlineHidesAborted"]
+    assert abort == {
+        "reason": "hide fallback session did not finish",
+        "detail": detail,
+        "needsFreshOutput": True,
+        "outputPath": abort["outputPath"],
+    }
+
+    blocked = client.post(
+        f"/api/resize/{job_id}/apply",
+        json={"decisions": [{"wallIndex": 0, "state": "pinned", "templateSlide": 5}]},
+    )
+    assert blocked.status_code == 409
+    assert "Close Wall_CG.key in Keynote" in blocked.json()["detail"]
+    after_block = client.get(f"/api/jobs/{job_id}").json()
+    assert after_block["status"] == "error"
+    assert after_block["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
+    assert after_block["result"]["pages"][0]["decision"]["state"] != "pinned"
+    assert calls == [None]
+
+    assert client.post(f"/api/resize/{job_id}/apply", json={"outputClosed": True}).status_code == 200
+    assert _wait(client, job_id)["status"] == "done"
+    assert calls == [None, "off"]
+
+
+def test_resize_rerun_failing_otherwise_does_not_keep_a_stale_hides_abort(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_remap(path, dest, **kwargs):
+        calls.append(kwargs.get("offline_hides"))
+        if len(calls) == 1:
+            raise _hides_abort("identity unproven")
         raise RuntimeError("Keynote went away")
 
     _stub_resize_propose(monkeypatch, fake_remap)
@@ -1691,16 +1749,20 @@ def test_resize_rerun_failing_otherwise_does_not_keep_a_stale_hides_abort(tmp_pa
     job_id = _propose(client, tmp_path).json()["id"]
     _wait(client, job_id)
     client.post(f"/api/resize/{job_id}/apply", json={})
-    assert _wait(client, job_id)["result"]["offlineHidesAborted"] == "identity unproven"
+    assert _wait(client, job_id)["result"]["offlineHidesAborted"]["reason"] == "identity unproven"
 
-    client.post(f"/api/resize/{job_id}/apply", json={"offlineHides": "off"})
+    client.post(f"/api/resize/{job_id}/apply", json={})
     failed = _wait(client, job_id)
     assert failed["status"] == "error"
     assert failed["error"] == "Keynote went away"
     assert "offlineHidesAborted" not in failed["result"]
+    assert failed["result"]["offlineHides"] == "off"
+    assert calls == [None, "off"]
 
 
-def test_resize_start_records_offline_hides_off_and_apply_default_passes_none(tmp_path, monkeypatch):
+def test_resize_proposal_saved_offline_hides_off_survives_to_a_plain_apply(tmp_path, monkeypatch):
+    """Abort → fresh Propose with hides off → refresh/reopen → Apply sends no override:
+    the proposal's saved `offlineHides="off"` still reaches the remap."""
     seen = []
 
     def fake_remap(path, dest, **kwargs):
@@ -1714,10 +1776,13 @@ def test_resize_start_records_offline_hides_off_and_apply_default_passes_none(tm
 
     client.post(f"/api/resize/{job_id}/apply", json={})
     assert _wait(client, job_id)["status"] == "done"
-    assert seen == [None]
+    assert seen == ["off"]
 
     plain_id = _propose(client, tmp_path).json()["id"]
     assert "offlineHides" not in _wait(client, plain_id)["result"]
+    client.post(f"/api/resize/{plain_id}/apply", json={})
+    _wait(client, plain_id)
+    assert seen == ["off", None]
 
 
 @pytest.mark.parametrize("value", ["on", "verify", "bogus"])

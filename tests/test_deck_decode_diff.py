@@ -582,3 +582,97 @@ def test_cli_undecodable_member_exits_2(base, tmp_path, capsys):
         zf.writestr("Index/Bogus.iwa", b"not a valid iwa chunk")
     assert ddd.main([str(base), str(bad)]) == 2
     assert "Index/Bogus.iwa" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Versioned Metadata tables: components[].versionedExternalReferences,
+# components[].ambiguousObjectIdentifiers, and every table of versionedComponents.
+# --------------------------------------------------------------------------
+def _versioned_component(target):
+    return {
+        "identifier": 8000, "locator": "Slide-102-v1", "preferredLocator": "Slide",
+        "externalReferences": [{"componentIdentifier": 900, "objectIdentifier": 900}],
+        "dataReferences": [{"dataIdentifier": 7001,
+                            "objectReferenceList": [{"objectIdentifier": target, "count": 1}]}],
+        "objectUuidMapEntries": [{"identifier": target, "uuid": {"lower": "1", "upper": "8"}}],
+        "versionedExternalReferences": [{"componentIdentifier": 102, "objectIdentifier": target}],
+        "ambiguousObjectIdentifiers": [target],
+    }
+
+
+def _versioned_spec(spec, target=401):
+    comp = _component(spec, "Slide-101")
+    comp["versionedExternalReferences"] = [{"componentIdentifier": 102, "objectIdentifier": target}]
+    comp["ambiguousObjectIdentifiers"] = [target]
+    _metadata(spec)["versionedComponents"] = [_versioned_component(target)]
+
+
+def _set_component_versioned_ext(spec, ident):
+    _component(spec, "Slide-101")["versionedExternalReferences"][0]["objectIdentifier"] = ident
+
+
+def _set_component_ambiguous(spec, ident):
+    _component(spec, "Slide-101")["ambiguousObjectIdentifiers"] = [ident]
+
+
+def _versioned(spec):
+    return _metadata(spec)["versionedComponents"][0]
+
+
+def _set_versioned_ext(spec, ident):
+    _versioned(spec)["externalReferences"][0]["objectIdentifier"] = ident
+
+
+def _set_versioned_data(spec, ident):
+    _versioned(spec)["dataReferences"][0]["objectReferenceList"][0]["objectIdentifier"] = ident
+
+
+def _set_versioned_uuid(spec, ident):
+    _versioned(spec)["objectUuidMapEntries"][0]["identifier"] = ident
+
+
+def _set_versioned_versioned_ext(spec, ident):
+    _versioned(spec)["versionedExternalReferences"][0]["objectIdentifier"] = ident
+
+
+def _set_versioned_ambiguous(spec, ident):
+    _versioned(spec)["ambiguousObjectIdentifiers"] = [ident]
+
+
+def test_null_versioned_tables(tmp_path):
+    one = _variant(tmp_path, "v1", _versioned_spec)
+    two = _variant(tmp_path, "v2", _versioned_spec)
+    assert ddd.run(one, two)["diffs"] == []
+    deck = ddd.load_deck(one)
+    tables = ddd._component_tables(deck, ddd._components(deck, "versionedComponents")["Slide-102-v1"])
+    assert all(ddd.DANGLING not in repr(rows) for rows in tables.values())
+    assert tables["dataReferences"][0][1].startswith("TSWP.ShapeInfoArchive#")
+
+
+@pytest.mark.parametrize(("setter", "key"), [
+    (_set_component_versioned_ext, "metadata:Slide-101:versionedExternalReferences"),
+    (_set_component_ambiguous, "metadata:Slide-101:ambiguousObjectIdentifiers"),
+    (_set_versioned_ext, "metadata:versioned:Slide-102-v1:externalReferences"),
+    (_set_versioned_data, "metadata:versioned:Slide-102-v1:dataReferences"),
+    (_set_versioned_uuid, "metadata:versioned:Slide-102-v1:objectUuidMapEntries"),
+    (_set_versioned_versioned_ext, "metadata:versioned:Slide-102-v1:versionedExternalReferences"),
+    (_set_versioned_ambiguous, "metadata:versioned:Slide-102-v1:ambiguousObjectIdentifiers"),
+])
+def test_dangling_versioned_ref_reported(tmp_path, setter, key):
+    good = _variant(tmp_path, "good", _versioned_spec)
+
+    def dangling(spec):
+        _versioned_spec(spec)
+        setter(spec, 999)
+
+    report = ddd.run(good, _variant(tmp_path, "dangling", dangling))
+    [entry] = report["diffs"]
+    assert entry["key"] == key
+    assert ddd.DANGLING in repr(entry["b"])
+    assert ddd.DANGLING not in repr(entry["a"])
+
+
+def test_versioned_component_presence_reported(base, tmp_path):
+    report = ddd.run(base, _variant(tmp_path, "v", lambda spec: _metadata(spec).update(
+        versionedComponents=[_versioned_component(401)])))
+    assert _keys(report) == ["metadata:versioned:Slide-102-v1"]

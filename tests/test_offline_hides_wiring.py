@@ -217,35 +217,81 @@ def test_hide_delete_body_stops_at_first_error_without_opacity():
     assert body.index("delete image 8") < body.index("kindIndex=7") < body.index("delete image 3")
 
 
-def test_fallback_script_binds_by_exact_resolved_path_before_any_delete(tmp_path):
-    """Astra H #6: verify `file of theDoc` against the exact resolved path before mutating;
-    no name-prefix match, no closing of other same-name documents."""
-    dest = tmp_path / "sub" / ".." / "out.key"
+def test_fallback_script_binds_unique_canonical_path_match_before_any_delete(tmp_path):
+    """Astra H #6 / r2 #4: bind the UNIQUE open document whose `file ... as alias` path
+    canonicalises to realpath(dest), before any mutation; no name-prefix match, no
+    `document 1`, no closing of unrelated same-name documents."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    dest = tmp_path / "link" / "sub" / ".." / "out.key"
     script = offline_write._hide_fallback_script(dest, {3: "      tell slide 3\n      end tell"})
-    resolved = str(dest.resolve())
-    assert f'set theDoc to open (POSIX file "{resolved}")' in script
-    assert f'if docPath is not "{resolved}" then error' in script
-    assert script.index(f'if docPath is not "{resolved}"') < script.index("tell slide 3")
+    target = str((real / "out.key").resolve())
+    assert "/link/" not in script
+    assert f'open (POSIX file "{target}")' in script
+    assert "POSIX path of ((file of d) as alias)" in script
+    assert "if (my obedCanon(p)) is target then" in script
+    bind = script.index(f'set matches to my obedMatches("{target}")')
+    assert bind < script.index("if (count of matches) is not 1 then") < script.index("tell slide 3")
     assert "starts with" not in script and "start with" not in script
-    assert "every document whose name" not in script
+    assert "whose name" not in script
     assert "document 1" not in script
 
 
-def test_fallback_script_saves_and_confirms_close(tmp_path):
-    """Astra H #4: the save and the close are not swallowed; after closing, no document at
-    the exact path may remain open; the success token is returned only at the end.
-    A delete error closes WITHOUT saving and re-raises."""
+def test_fallback_script_closes_only_verified_matches_on_binding_failure(tmp_path):
+    script = offline_write._hide_fallback_script(tmp_path / "out.key", {3: "      tell slide 3\n      end tell"})
+    lines = [ln.strip() for ln in script.splitlines()]
+    check = lines.index("if (count of matches) is not 1 then")
+    assert lines[check + 1] == "repeat with m in matches"
+    assert lines[check + 3] == "close (contents of m) saving no"
+    assert lines[check + 6].startswith('error "hides fallback bound " & (count of matches)')
+
+
+def test_fallback_script_saves_and_confirms_close_by_the_same_identity(tmp_path):
+    """Astra H #4 / r2 #4: the save and the close are not swallowed; after closing, the same
+    canonical-path scan must find no open document; the success token comes last. A delete
+    error closes WITHOUT saving and re-raises."""
     dest = tmp_path / "out.key"
     script = offline_write._hide_fallback_script(dest, {3: "      tell slide 3\n      end tell"})
+    target = str(dest.resolve())
     lines = [ln.strip() for ln in script.splitlines()]
     save = lines.index("save theDoc")
     close = lines.index("close theDoc saving yes")
     assert lines[close - 1] == "end try"
-    assert lines[close + 1] != "end try"
+    assert lines[close + 1] == (
+        f'if (count of (my obedMatches("{target}"))) is not 0 then '
+        'error "hides fallback: document still open after close"'
+    )
     assert save < close
     assert lines.index("close theDoc saving no") > save
-    assert "document still open after close" in script
     assert lines.index(f'return "{offline_write.HIDE_FALLBACK_OK}"') > close
+
+
+def _canon(p):
+    import subprocess
+
+    return subprocess.run(["sh", "-c", f"p='{p}'; " + offline_write._CANON_SH],
+                          capture_output=True, text=True).stdout
+
+
+def test_canon_shell_matches_python_realpath_for_symlink_and_alias_spellings(tmp_path):
+    """The AppleScript side canonicalises the alias path with this shell snippet; it must
+    agree with `os.path.realpath` for symlinked directories, `/tmp` vs `/private/tmp`, and a
+    package's trailing slash."""
+    import os
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    (real / "out.key").write_bytes(b"x")
+    (real / "pkg.key").mkdir()
+    want = os.path.realpath(real / "out.key")
+    assert _canon(str(tmp_path / "link" / "out.key")) == want
+    assert _canon(str(real / "out.key")) == want
+    assert _canon(str(tmp_path / "link" / "pkg.key") + "/") == os.path.realpath(real / "pkg.key")
+    if os.path.realpath("/tmp") == "/private/tmp":
+        assert _canon("/tmp/obed-hides-canon.key") == "/private/tmp/obed-hides-canon.key"
+    assert _canon(str(tmp_path / "missing-dir" / "out.key")) == ""
 
 
 # --- run_offline_hides --------------------------------------------------------------------
@@ -327,6 +373,8 @@ def test_identity_or_address_refusal_aborts_before_any_keynote_reopen(monkeypatc
     assert fb == []
     assert err.value.reason == "slide(s) [3] refused before the saved order was proven"
     assert "Rerun with OBED_OFFLINE_HIDES=off" in str(err.value)
+    assert err.value.needs_fresh_output is False
+    assert err.value.detail == str(err.value)
 
 
 def test_hide_missed_marker_is_fatal(monkeypatch, deck):
@@ -339,7 +387,9 @@ def test_hide_missed_marker_is_fatal(monkeypatch, deck):
     with pytest.raises(offline_write.OfflineHidesAborted) as err:
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
     assert err.value.reason == "a hide delete failed"
-    assert "fresh --out" in str(err.value) and "never replay" in str(err.value)
+    assert err.value.needs_fresh_output is True
+    assert "fresh --out" in err.value.detail and "never replay" in err.value.detail
+    assert "OBED_HIDE_MISSED slide=3" in err.value.detail
 
 
 @pytest.mark.parametrize("returncode,stdout,stderr", [
@@ -358,6 +408,8 @@ def test_fallback_session_without_confirmed_success_aborts(monkeypatch, deck, re
     with pytest.raises(offline_write.OfflineHidesAborted) as err:
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
     assert err.value.reason == "hide fallback session failed"
+    assert err.value.needs_fresh_output is True
+    assert "WITHOUT saving" in err.value.detail
 
 
 def test_fallback_timeout_aborts(monkeypatch, deck):
@@ -368,6 +420,8 @@ def test_fallback_timeout_aborts(monkeypatch, deck):
     with pytest.raises(offline_write.OfflineHidesAborted) as err:
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
     assert err.value.reason == "hide fallback session did not finish"
+    assert err.value.needs_fresh_output is True
+    assert "osascript timed out" in err.value.detail and "fresh --out" in err.value.detail
     assert len(fb) == 1
 
 
@@ -410,7 +464,8 @@ def test_whole_deck_refusal_aborts_without_fallback(monkeypatch, deck):
         offline_write.run_offline_hides(deck, "on", {1, 3}, TRANSFORMS, WALL, lambda m: None)
     assert fb == []
     assert err.value.reason == "the IWA writer refused the deck before writing"
-    assert "free space" in str(err.value)
+    assert err.value.needs_fresh_output is False
+    assert "free space" in err.value.detail
     assert "Rerun with OBED_OFFLINE_HIDES=off" in str(err.value)
 
 
@@ -724,6 +779,7 @@ def test_deferred_count_mismatch_refuses_before_any_deck_stage(monkeypatch, tmp_
     with pytest.raises(offline_write.OfflineHidesAborted, match="deferred 0, expected 2") as err:
         _run(tmp_path)
     assert err.value.reason == "pass 1 deferred a different number of hides than planned"
+    assert err.value.needs_fresh_output is False
     assert "runOfflineHides" not in events and "runOfflineWrite" not in events
 
 
