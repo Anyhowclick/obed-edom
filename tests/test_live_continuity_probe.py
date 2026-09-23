@@ -3474,3 +3474,1124 @@ class TestOverallStatusG:
         status, reasons = probe.overall_status_g(result)
         assert status == "fail"
         assert any("armed player.stop() failed: boom" in reason for reason in reasons)
+
+
+# --------------------------------------------------------------------------
+# GL replay G5 (`.agents/plans/keynote_live_gl_replay_g5g6.plan.md` §3): the
+# probe's `--gl-replay auto` arms, the armed 1->2 verdict, the Vgl pass, the
+# hand-back capture, occluded cells and the forced-fail splice. Flag off must
+# change nothing: every test below that touches an off path asserts it.
+# --------------------------------------------------------------------------
+
+GL_SLOT_RECTS = [[0.0, 0.0, 1920.0, 1080.0], [105.0, 790.0, 960.0, 276.0], [788.0, 672.0, 353.0, 313.0]]
+GL_BOUNDARY = {
+    "atScene": 2, "action": "glReplay", "movieKey": "movie1", "fallback": "retire",
+    "slotSizes": [[1920, 1080], [960, 276], [178, 157]], "slotRects": GL_SLOT_RECTS,
+    "opacityOverrides": [{"slot": 2, "opacity": 0.3, "texW": 178, "texH": 157}],
+    "instanceId": f"{BIG_ASSET}#1", "instanceRect": dict(BIG_INSTANCE), "movieSlot": 1,
+}
+GL_RUNTIME = {"movies": RUNTIME_MOVIES, "boundaries": [GL_BOUNDARY, RESTART_BOUNDARY, BRIDGE_BOUNDARY]}
+GL_REPLAY_VERSION = probe.GL_REPLAY_VERSION
+GL_CONTINUITY = {"mode": "qualified", "glReplay": {"mode": "injected", "version": GL_REPLAY_VERSION, "sha256": probe.gl_replay_js_sha256()}}
+ARMED = probe.armed_fact(synthetic_plan(), GL_RUNTIME, BOUNDARY_KEYS)
+GL_STAGE = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+
+
+def _ev(kind: str, **detail: Any) -> dict[str, Any]:
+    return {"kind": kind, "detail": detail, "t": 1.0}
+
+
+def _pool_entry(el_id: int, current_time: float, **extra: Any) -> dict[str, Any]:
+    return {
+        "key": "untitled.mov", "movieKey": "movie1", "elId": el_id, "currentTime": current_time,
+        "paused": False, "readyState": 4, "inDocument": False, **extra,
+    }
+
+
+def _armed_read(t: float, iteration: int, carried_time: float) -> dict[str, Any]:
+    """One settled-slide-2 read in the r3 GREEN shape: 2 pooled (1 carried, 2
+    sibling), none in the document, LIVE, rVFC loop, no stand-down."""
+    return {
+        "stageMap": dict(GL_STAGE), "painting": [], "poolSnapshot": [],
+        "glReplay": {
+            "t": t, "hash": "#2", "ready": True,
+            "api": {
+                "version": 1, "state": "LIVE", "standDowns": [], "events": [],
+                "stats": {"epoch": 1, "iter": iteration, "uploads": iteration, "glErrors": 0, "loopMode": "rvfc"},
+            },
+            "coreEvents": [
+                _ev("glreplay-zone", key="movie1", **{"from": "pending"}, to="armed", reason="moduleReady", sceneHash=""),
+                _ev("glreplay-arm", canvasId="1-canvas", atScene=2, sceneHash="#1"),
+                _ev("glreplay-carried", elId=1, delta=0.012, candidates=[{"elId": 1}, {"elId": 2}], sceneHash="#1"),
+                _ev("glreplay-live", canvasId="1-canvas", epoch=1, frameLen=88, sceneHash="#1"),
+            ],
+            "pool": [_pool_entry(1, carried_time), _pool_entry(2, 3.0)],
+            "facades": [],
+        },
+    }
+
+
+def _armed_reads() -> list[dict[str, Any]]:
+    return [_armed_read(1000.0, 10, 5.0), _armed_read(1600.0, 46, 5.6)]
+
+
+def _gl(read: dict[str, Any]) -> dict[str, Any]:
+    return read["glReplay"]
+
+
+def _events_without(read: dict[str, Any], kind: str) -> None:
+    _gl(read)["coreEvents"] = [e for e in _gl(read)["coreEvents"] if e["kind"] != kind]
+
+
+def _set_detail(read: dict[str, Any], kind: str, **detail: Any) -> None:
+    for event in _gl(read)["coreEvents"]:
+        if event["kind"] == kind:
+            event["detail"].update(detail)
+
+
+ARMED_CLAUSE_MUTATIONS = {
+    # clause 1 -- mode/version/sha
+    "mode not injected": ("mode", lambda reads, c: c["glReplay"].update(mode="notApplicable")),
+    "version drift": ("mode", lambda reads, c: c["glReplay"].update(version=GL_REPLAY_VERSION + 1)),
+    "sha drift": ("mode", lambda reads, c: c["glReplay"].update(sha256="0" * 64)),
+    # clause 2 -- both reads LIVE, same epoch, strictly progressing
+    "first read not LIVE": ("live", lambda reads, c: _gl(reads[0])["api"].update(state="ARM-POST")),
+    "a stand-down": ("live", lambda reads, c: _gl(reads[1])["api"].update(standDowns=["glError"])),
+    "gl error": ("live", lambda reads, c: _gl(reads[0])["api"]["stats"].update(glErrors=1)),
+    "epoch changed": ("live", lambda reads, c: _gl(reads[1])["api"]["stats"].update(epoch=2)),
+    "iter stalled": ("live", lambda reads, c: _gl(reads[1])["api"]["stats"].update(iter=10)),
+    "uploads stalled": ("live", lambda reads, c: _gl(reads[1])["api"]["stats"].update(uploads=10)),
+    "reads too close": ("live", lambda reads, c: (_gl(reads[1]).update(t=1400.0), _set_pool_time(reads[1], 5.4))),
+    "hash before destination": ("live", lambda reads, c: _gl(reads[0]).update(hash="#1")),
+    # clause 3 -- one arm, one live, zone, one carried
+    "two arms": ("events", lambda reads, c: _gl(reads[1])["coreEvents"].append(_ev("glreplay-arm", sceneHash="#1"))),
+    "arm at the wrong scene": ("events", lambda reads, c: _set_detail(reads[1], "glreplay-arm", sceneHash="#2")),
+    "no live": ("events", lambda reads, c: _events_without(reads[1], "glreplay-live")),
+    "live before the transition": ("events", lambda reads, c: _set_detail(reads[1], "glreplay-live", sceneHash="#0")),
+    "a stand-down event": ("events", lambda reads, c: _gl(reads[1])["coreEvents"].append(_ev("glreplay-standdown", reason="glError"))),
+    "an early hand-off": ("events", lambda reads, c: _gl(reads[1])["coreEvents"].append(_ev("glreplay-handoff", reason="canvasRemoved"))),
+    "zone retired": ("events", lambda reads, c: _gl(reads[1])["coreEvents"].append(
+        _ev("glreplay-zone", **{"from": "armed"}, to="retired", reason="moduleRetired"))),
+    "zone reason drift": ("events", lambda reads, c: _set_detail(reads[1], "glreplay-zone", reason="entryInvalid")),
+    "carry delta too large": ("events", lambda reads, c: _set_detail(reads[1], "glreplay-carried", delta=0.05)),
+    # clause 4 -- no painting <video> over the armed rect
+    "painting over the rect": ("noPainting", lambda reads, c: reads[0].update(painting=[painting_video(BIG_INSTANCE, el_id=1)])),
+    "unreadable painting": ("noPainting", lambda reads, c: reads[1].update(painting={"error": "no checkVisibility"})),
+    "bad stage map": ("noPainting", lambda reads, c: reads[1].update(stageMap=None)),
+    # clause 5 -- pool = {carried} U siblings, out of the document, carried decoding in real time
+    "carried not pooled": ("pool", lambda reads, c: _gl(reads[1]).update(pool=[_pool_entry(2, 3.0)])),
+    "sibling in the document": ("pool", lambda reads, c: _gl(reads[0])["pool"][1].update(inDocument=True)),
+    "a preserved DOM copy": ("pool", lambda reads, c: _gl(reads[1])["pool"].append(_pool_entry(5, 1.0, fromDom=True))),
+    "carried paused": ("pool", lambda reads, c: _gl(reads[1])["pool"][0].update(paused=True)),
+    "carried not decoding": ("pool", lambda reads, c: _gl(reads[0])["pool"][0].update(readyState=1)),
+    "carried clock frozen": ("pool", lambda reads, c: _set_pool_time(reads[1], 5.0)),
+    "carried clock double speed": ("pool", lambda reads, c: _set_pool_time(reads[1], 6.2)),
+    "carried clock half speed": ("pool", lambda reads, c: _set_pool_time(reads[1], 5.3)),
+    "unreadable pool": ("pool", lambda reads, c: _gl(reads[0]).update(pool={"error": "boom"})),
+}
+
+
+def _set_pool_time(read: dict[str, Any], value: float) -> None:
+    _gl(read)["pool"][0]["currentTime"] = value
+
+
+class TestArmedFact:
+    def test_the_glreplay_boundary_resolves_to_armed1to2_with_its_geometry(self) -> None:
+        armed = probe.armed_fact(synthetic_plan(), GL_RUNTIME, BOUNDARY_KEYS)
+        assert armed["verdictKey"] == "armed1to2" == probe.ARMED_VERDICT_KEY["continue1to2"]
+        assert armed["boundaryKey"] == "continue1to2"
+        assert armed["movieKey"] == "movie1" and armed["atScene"] == 2
+        assert armed["playerIndex"] == 1 and armed["originalOrdinal"] == 2
+        assert armed["assetKeys"] == ["untitled.mov"] and armed["rects"] == [BIG_INSTANCE]
+        assert armed["instanceId"] == f"{BIG_ASSET}#1" and armed["instanceRect"] == BIG_INSTANCE
+        assert armed["movieSlot"] == 1 and armed["overrideSlots"] == [2]
+        assert armed["slotRects"][1] == {"x": 105.0, "y": 790.0, "w": 960.0, "h": 276.0}
+
+    @pytest.mark.parametrize("boundaries", [
+        [RESTART_BOUNDARY, BRIDGE_BOUNDARY],
+        [GL_BOUNDARY, dict(GL_BOUNDARY, atScene=6), BRIDGE_BOUNDARY],
+    ])
+    def test_anything_but_exactly_one_glreplay_boundary_fails_closed(self, boundaries: list[Any]) -> None:
+        with pytest.raises(SystemExit):
+            probe.armed_fact(synthetic_plan(), {"movies": RUNTIME_MOVIES, "boundaries": boundaries}, BOUNDARY_KEYS)
+
+    @pytest.mark.parametrize("change", [
+        {"atScene": 4}, {"atScene": 6}, {"movieKey": "movie9"}, {"instanceId": f"{BIG_ASSET}#2"},
+        {"instanceRect": dict(BIG_INSTANCE, x=110.0)}, {"movieSlot": 3}, {"slotRects": None},
+        {"opacityOverrides": [{"slot": 7}]},
+    ])
+    def test_an_unscorable_entry_fails_closed(self, change: dict[str, Any]) -> None:
+        runtime = {"movies": RUNTIME_MOVIES, "boundaries": [dict(GL_BOUNDARY, **change)]}
+        with pytest.raises(SystemExit):
+            probe.armed_fact(synthetic_plan(), runtime, BOUNDARY_KEYS)
+
+
+def _gl_plan() -> Any:
+    rect = probe.live_continuity_module.Rect
+    movie = probe.live_continuity_module.MovieContinuity
+    boundary = probe.live_continuity_module.SlideBoundary
+    pin = movie(BIG_ASSET, "pin", rect(**BIG_INSTANCE), rect(**BIG_INSTANCE))
+    bridge = movie(BIG_ASSET, "bridge", rect(198, 797, 952, 268), rect(327, 709, 1266, 356))
+    return probe.ContinuityPlan(
+        canvas={"width": 1920, "height": 1080}, scene_index_by_player=dict(SCENE_INDEX_BY_PLAYER),
+        slide_rects={}, boundaries=(boundary(0, 1, (pin,)), boundary(2, 3, (bridge,))),
+        slide_instances=dict(SLIDE_INSTANCES),
+    )
+
+
+class TestFactsPerArm:
+    def test_the_off_fact_set_has_no_armed_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "runtime_of", lambda plan: RETIRED_RUNTIME)
+        facts = probe.ground_truth_facts(_gl_plan())
+        assert "armed" not in facts and "armedBoundaries" not in facts
+        assert facts["retire"]["verdictKey"] == "refused1to2"
+
+    def test_the_on_fact_set_adds_armed_and_no_retire(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "runtime_of", lambda plan: GL_RUNTIME)
+        facts = probe.ground_truth_facts(_gl_plan(), armed=True)
+        assert facts["armed"] == probe.armed_fact(_gl_plan(), GL_RUNTIME, BOUNDARY_KEYS)
+        assert facts["armedBoundaries"] == ["continue1to2"]
+        assert facts["retire"] is None and facts["refusedBoundaries"] == []
+
+    def test_asking_for_armed_facts_from_an_off_plan_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(probe, "runtime_of", lambda plan: RETIRED_RUNTIME)
+        with pytest.raises(SystemExit):
+            probe.ground_truth_facts(_gl_plan(), armed=True)
+
+    @pytest.mark.parametrize("continuity,expected", [
+        ({"mode": "qualified", "glReplay": {"mode": "injected"}}, "on"),
+        ({"mode": "qualified", "glReplay": {"mode": "off"}}, "off"),
+        ({"mode": "qualified", "glReplay": {"mode": "unavailable"}}, "off"),
+        ({"mode": "qualified", "glReplay": {"mode": "notApplicable"}}, "off"),
+        ({"mode": "qualified"}, "off"),
+        (None, "off"),
+    ])
+    def test_the_reported_mode_selects_the_fact_set(self, continuity: Any, expected: str) -> None:
+        on, off = {"set": "on"}, {"set": "off"}
+        assert probe.facts_for(continuity, off, on)["set"] == expected
+
+    def test_without_an_on_set_injected_still_scores_off(self) -> None:
+        off = {"set": "off"}
+        assert probe.facts_for({"glReplay": {"mode": "injected"}}, off, None) is off
+
+    def test_the_off_observer_is_todays_refusal_observer(self) -> None:
+        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        out: dict[str, Any] = {}
+        host = ArmedHost([])
+        probe.boundary_observer(host, {"retire": retire}, out)(2)
+        assert list(out) == ["refused1to2"]
+        assert probe.GL_REPLAY_READ_JS not in host.transport.evaluations
+        assert probe.boundary_observer(host, {"retire": None}, out) is None
+
+    def test_the_armed_observer_reads_twice_on_the_armed_slide_only(self) -> None:
+        clock = FakeClock()
+        host = ArmedHost([_gl(r) for r in _armed_reads()])
+        out: dict[str, Any] = {}
+        observe = probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)
+        observe(1)
+        assert out == {}
+        observe(2)
+        assert len(out["armed1to2"]) == 2
+        assert clock.sleeps[-1] == probe.ARMED_READ_GAP_S
+        joined = "\n".join(host.transport.evaluations)
+        assert probe.INPAGE_LIVENESS_JS not in host.transport.evaluations
+        assert "markerBands" not in joined and "__OBED_GL_ORACLE__" not in joined
+
+    def test_the_gl_read_never_touches_the_oracle_handle_or_its_context(self) -> None:
+        import re
+
+        js = probe.GL_REPLAY_READ_JS
+        assert "__OBED_GL_ORACLE__" not in js
+        assert "markerBands" not in js and "pause" not in js and "sample(" not in js
+        assert not re.search(r"\.gl\b", js)
+
+
+class ArmedTransport:
+    def __init__(self, host: "ArmedHost") -> None:
+        self.host = host
+        self.evaluations: list[str] = []
+        self.captures = 0
+
+    def evaluate(self, js: str) -> Any:
+        self.evaluations.append(js)
+        if js == probe.HASH_JS:
+            hashes = self.host.hashes
+            return hashes.pop(0) if len(hashes) > 1 else (hashes[0] if hashes else "#2")
+        if js == probe.GL_REPLAY_READ_JS:
+            reads = self.host.reads
+            return reads.pop(0) if len(reads) > 1 else (reads[0] if reads else None)
+        if js == probe.STAGE_MAP_JS:
+            return self.host.stage_map
+        if js == probe.PAINTING_VIDEOS_JS:
+            return self.host.painting
+        if js == probe.PRESERVE_SNAPSHOT_JS:
+            return []
+        return True
+
+    def call(self, method: str, **params: Any) -> dict[str, Any]:
+        if method == "Runtime.evaluate":
+            self.evaluations.append(params.get("expression", ""))
+            return {"result": {"value": True}}
+        assert method == "Page.captureScreenshot"
+        self.captures += 1
+        return {"data": png_b64(64, 32)}
+
+
+class ArmedHost:
+    def __init__(self, reads: list[Any], *, advance_error: BaseException | None = None) -> None:
+        self.reads = list(reads)
+        self.hashes: list[Any] = []
+        self.stage_map = dict(GL_STAGE)
+        self.painting: Any = []
+        self.transport = ArmedTransport(self)
+        self.executed: list[str] = []
+        self.advance_error = advance_error
+
+    def observe(self) -> FakeObservation:
+        return FakeObservation(False)
+
+    def execute(self, operation: str, *args: Any) -> None:
+        self.executed.append(operation)
+        if self.advance_error is not None:
+            raise self.advance_error
+
+    def _require_transport(self) -> ArmedTransport:
+        return self.transport
+
+
+class TestArmedScoring:
+    """Plan §3.3: `armed1to2` is True iff all five clauses hold; every way of not
+    knowing is False, never None."""
+
+    def test_the_r3_two_pooled_shape_is_green(self) -> None:
+        scored = probe.score_armed(_armed_reads(), ARMED, json.loads(json.dumps(GL_CONTINUITY)), owner_ids=[1, 1])
+        assert scored["verdict"] is True, scored
+        assert all(scored["checks"].values())
+
+    @pytest.mark.parametrize("name", sorted(ARMED_CLAUSE_MUTATIONS))
+    def test_each_clause_is_red_alone(self, name: str) -> None:
+        clause, mutate = ARMED_CLAUSE_MUTATIONS[name]
+        reads, continuity = _armed_reads(), json.loads(json.dumps(GL_CONTINUITY))
+        mutate(reads, continuity)
+        scored = probe.score_armed(reads, ARMED, continuity, owner_ids=[1, 1])
+        assert scored["verdict"] is False
+        assert {key for key, ok in scored["checks"].items() if not ok} == {clause}
+
+    @pytest.mark.parametrize("modes", [("raf", "raf"), ("rvfc", "raf"), (None, "rvfc")])
+    def test_the_loop_driver_is_not_scored(self, modes: tuple[Any, Any]) -> None:
+        """Owner 2026-09-23: `loopMode` is whichever driver ticked last and flips
+        many times a second in a healthy LIVE loop, so it is never a clause."""
+        reads = _armed_reads()
+        for read, mode in zip(reads, modes):
+            _gl(read)["api"]["stats"]["loopMode"] = mode
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is True
+
+    def test_no_carried_note_fails_the_events_and_cannot_vouch_for_the_pool(self) -> None:
+        reads = _armed_reads()
+        for read in reads:
+            _events_without(read, "glreplay-carried")
+        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
+        assert scored["verdict"] is False
+        assert not scored["checks"]["events"] and not scored["checks"]["pool"]
+
+    @pytest.mark.parametrize("reads", [None, [], "x", [_armed_read(1000.0, 10, 5.0)], [{"glReplay": None}, {"glReplay": None}]])
+    def test_missing_reads_are_false_never_none(self, reads: Any) -> None:
+        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
+        assert scored["verdict"] is False
+
+    def test_the_r3_forced_shape_is_red(self) -> None:
+        reads = _armed_reads()
+        for read in reads:
+            _gl(read)["api"].update(state="RETIRED", standDowns=["posterAmbiguous"])
+            _events_without(read, "glreplay-live")
+            _gl(read)["coreEvents"].append(_ev("glreplay-zone", **{"from": "armed"}, to="retired", reason="moduleRetired"))
+        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
+        assert scored["verdict"] is False
+        assert not scored["checks"]["live"] and not scored["checks"]["events"]
+
+    def test_positive_halves_score_the_armed_boundary_for_an_armed_set(self) -> None:
+        scored = probe.score_positive_halves({"armed1to2": _armed_reads()}, {"retire": None, "armed": ARMED}, True, GL_CONTINUITY)
+        assert list(scored) == ["armed1to2"] and scored["armed1to2"]["checks"]["owner"] is False
+        samples = [{"scene": 1, "videos": [
+            {"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}},
+            {"src": "untitled.mov", "rect": dict(SMALL_INSTANCE), "footprintOwner": {"elId": 2}},
+        ]}, {"scene": 2, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 2}}]}]
+        scored = probe.score_positive_halves(
+            {"armed1to2": _armed_reads()}, {"retire": None, "armed": ARMED}, True, GL_CONTINUITY, samples,
+        )
+        assert scored["armed1to2"]["verdict"] is True, scored
+
+    def test_positive_halves_are_todays_refusals_for_the_off_set(self) -> None:
+        retire = probe.retire_fact(synthetic_plan(), RETIRED_RUNTIME, BOUNDARY_KEYS)
+        evidence = {"refused1to2": {"stageMap": dict(GL_STAGE), "painting": [], "poolSnapshot": []}}
+        facts = {"retire": retire}
+        assert probe.score_positive_halves(evidence, facts, True, {"mode": "qualified"}) == probe.score_refusals(evidence, facts, True)
+
+
+class TestRectExpectationModelGl:
+    def test_a_glreplay_boundary_is_live_on_and_dead_off_like_a_carried_pin(self) -> None:
+        plan = synthetic_plan()
+        on = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=True)
+        off = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=False)
+        assert on[1] == {BIG_ASSET: "live"} and off[1] == {BIG_ASSET: "dead"}
+        assert on == probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=True)
+        assert off == probe.rect_expectations(plan, CARRIED_RUNTIME, continuity_on=False)
+
+    def test_vgl_may_differ_from_v_only_at_the_armed_movie(self) -> None:
+        plan = synthetic_plan()
+        v = probe.rect_expectations(plan, RETIRED_RUNTIME, continuity_on=True)
+        vgl = probe.rect_expectations(plan, GL_RUNTIME, continuity_on=True)
+        probe.check_vgl_expectations(v, vgl, ARMED)
+        with pytest.raises(SystemExit):
+            probe.check_vgl_expectations(v, v, ARMED)
+        extra = json.loads(json.dumps(vgl), object_hook=lambda d: {int(k) if k.isdigit() else k: val for k, val in d.items()})
+        extra[2][BIG_ASSET] = "dead"
+        with pytest.raises(SystemExit):
+            probe.check_vgl_expectations(v, extra, ARMED)
+
+
+# Hand-back geometry: a 0.1 stage scale keeps the frames small.
+HB_STAGE = {"s": 0.1, "sy": 0.1, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920.0, "offsetHeight": 1080.0}
+HB_SHAPE = (108, 192, 3)
+
+
+def _hb_frames() -> tuple[np.ndarray, np.ndarray]:
+    """V and Vgl captures identical outside the movie, different inside it."""
+    v = np.full(HB_SHAPE, 50, dtype=np.uint8)
+    g = v.copy()
+    g[80:106, 11:106] = 200
+    return v, g
+
+
+def _hb_v_record() -> dict[str, Any]:
+    return {
+        "status": "ok", "stageMap": dict(HB_STAGE), "painting": [],
+        "before": {"pool": [], "facades": [], "coreEvents": []},
+        "after": {"hash": "#3", "coreEvents": [], "api": None, "facades": []},
+    }
+
+
+def _hb_vgl_record() -> dict[str, Any]:
+    screen = probe.to_screen_rect(BIG_INSTANCE, HB_STAGE)
+    return {
+        "status": "ok", "stageMap": dict(HB_STAGE),
+        "painting": [{"src": "untitled.mov", "elId": 1, "rect": dict(screen)}],
+        "before": {"pool": [_pool_entry(1, 5.0), _pool_entry(2, 3.0)], "facades": [], "coreEvents": []},
+        "after": {
+            "hash": "#3",
+            "coreEvents": [
+                _ev("glreplay-carried", elId=1, delta=0.01),
+                _ev("glreplay-release", ok=True, mode="handoff", reason=None, elId=1, retired=[2]),
+                _ev("remount-into-authored-layer", elId=1),
+            ],
+            "api": {
+                "version": 1, "state": "RETIRED", "standDowns": ["canvasRemoved"],
+                "events": [_ev("glreplay-handoff", reason="canvasRemoved", completedMs=1.8)],
+                "stats": {"mutationScanMs": 0.3},
+            },
+            "facades": [{"elId": 3, "forElId": 1}],
+        },
+    }
+
+
+class TestHandbackScoring:
+    def _score(self, v_rec=None, v_frame=None, g_rec=None, g_frame=None, **kwargs: Any) -> dict[str, Any]:
+        v, g = _hb_frames()
+        return probe.score_handback(
+            v_rec or _hb_v_record(), v if v_frame is None else v_frame,
+            g_rec or _hb_vgl_record(), g if g_frame is None else g_frame, ARMED, **kwargs,
+        )
+
+    def test_the_green_hand_back_passes(self) -> None:
+        scored = self._score()
+        assert scored["verdict"] is True, scored
+        assert scored["parity"]["maxOutside"] == 0 and scored["parity"]["maxInside"] > 0
+
+    def test_v_versus_v_parity_is_zero(self) -> None:
+        v, _ = _hb_frames()
+        parity = probe.handback_parity(_hb_v_record(), v, _hb_v_record(), v.copy(), ARMED)
+        assert parity["verdict"] is True and parity["maxOutside"] == 0 and parity["maxInside"] == 0
+
+    def test_v_scored_as_vgl_is_red(self) -> None:
+        v, _ = _hb_frames()
+        scored = self._score(g_rec=_hb_v_record(), g_frame=v.copy())
+        assert scored["verdict"] is False
+        assert not scored["carry"]["checks"]["painting"] and not scored["carry"]["checks"]["release"]
+
+    def test_one_pixel_outside_the_mask_is_red(self) -> None:
+        _, g = _hb_frames()
+        g[5, 150] = 51
+        scored = self._score(g_frame=g)
+        assert scored["verdict"] is False and scored["parity"]["nChangedOutside"] == 1
+
+    def test_the_poke_pixel_is_red_unless_the_poke_is_masked(self) -> None:
+        _, g = _hb_frames()
+        g[0, 0] = 99
+        assert self._score(g_frame=g)["verdict"] is False
+        assert self._score(g_frame=g, poke=True)["verdict"] is True
+
+    def test_an_undilated_mask_is_red_on_the_antialiased_edge(self) -> None:
+        _, g = _hb_frames()
+        g[90, 9] = 60
+        assert self._score(g_frame=g)["verdict"] is True
+        assert self._score(g_frame=g, dilate_px=0)["verdict"] is False
+
+    def test_the_override_and_green_slot_are_masked(self) -> None:
+        _, g = _hb_frames()
+        g[70, 100] = 90
+        assert self._score(g_frame=g)["verdict"] is True
+
+    @pytest.mark.parametrize("mutate,check", [
+        (lambda r: r["painting"][0].update(elId=7), "painting"),
+        (lambda r: r["painting"][0]["rect"].update(x=r["painting"][0]["rect"]["x"] + 1.0), "painting"),
+        (lambda r: r["painting"].append(dict(r["painting"][0])), "painting"),
+        (lambda r: r.update(painting={"error": "x"}), "painting"),
+        (lambda r: r["after"]["coreEvents"][1]["detail"].update(mode="retire"), "release+handoff"),
+        (lambda r: r["after"]["coreEvents"][1]["detail"].update(retired=[]), "release"),
+        (lambda r: r["before"].update(pool={"error": "x"}), "release"),
+        (lambda r: r["after"]["coreEvents"].append(_ev("remount-done", elId=1)), "noRemount"),
+        (lambda r: r["after"]["coreEvents"].append(_ev("remount-footprint-rect", elId=3)), "noRemount"),
+    ])
+    def test_each_vgl_carry_check_is_red_alone(self, mutate: Any, check: str) -> None:
+        record = _hb_vgl_record()
+        mutate(record)
+        scored = self._score(g_rec=record)
+        assert scored["verdict"] is False
+        assert {key for key, ok in scored["carry"]["checks"].items() if not ok} == set(check.split("+"))
+
+    def test_a_remount_of_an_unrelated_decoder_is_irrelevant(self) -> None:
+        record = _hb_vgl_record()
+        record["after"]["coreEvents"].append(_ev("remount-done", elId=9))
+        assert self._score(g_rec=record)["verdict"] is True
+
+    @pytest.mark.parametrize("which", ["v", "g"])
+    def test_an_inconclusive_capture_is_inconclusive(self, which: str) -> None:
+        record = _hb_v_record() if which == "v" else _hb_vgl_record()
+        record["status"] = "inconclusive"
+        scored = self._score(**({"v_rec": record} if which == "v" else {"g_rec": record}))
+        assert scored["verdict"] is None
+
+    def test_mismatched_frames_are_inconclusive(self) -> None:
+        assert self._score(g_frame=np.zeros((10, 10, 3), dtype=np.uint8))["verdict"] is None
+
+    def test_latency_is_report_only(self) -> None:
+        assert probe.handback_latency(_hb_vgl_record()) == {"mutationScanMs": 0.3, "completedMs": 1.8}
+        assert probe.handback_latency(None) == {"mutationScanMs": None, "completedMs": None}
+
+
+def _hb_read(hash_: str, *, handoff: bool = False) -> dict[str, Any]:
+    read: dict[str, Any] = {"t": 1.0, "hash": hash_, "ready": True, "api": {"events": []}, "coreEvents": [], "pool": [], "facades": []}
+    if handoff:
+        read["api"]["events"].append(_ev("glreplay-handoff", completedMs=1.0))
+        read["coreEvents"].append(_ev("glreplay-release", mode="handoff"))
+    return read
+
+
+class TestHandbackCapture:
+    def _capture(self, reads: list[Any], *, expect_handoff: bool = False, **host_kwargs: Any) -> tuple[Any, Any, ArmedHost]:
+        clock = FakeClock()
+        host = ArmedHost(reads, **host_kwargs)
+        record, frame = probe.capture_handback(host, ARMED, expect_handoff=expect_handoff, now=clock.now, sleep=clock.sleep)
+        return record, frame, host
+
+    def test_one_advance_then_a_capture_at_the_build(self) -> None:
+        record, frame, host = self._capture([_hb_read("#2"), _hb_read("#3"), _hb_read("#3")])
+        assert record["status"] == "ok" and frame is not None
+        assert host.executed == ["advance"]
+        assert probe.TWO_RAF_JS in host.transport.evaluations
+
+    def test_an_early_capture_is_inconclusive(self) -> None:
+        record, frame, host = self._capture([_hb_read("#2"), _hb_read("#2")])
+        assert record["status"] == "inconclusive" and frame is None
+        assert host.transport.captures == 0
+
+    def test_a_past_hash_poll_is_inconclusive(self) -> None:
+        record, frame, _ = self._capture([_hb_read("#2"), _hb_read("#4")])
+        assert record["status"] == "inconclusive" and frame is None
+
+    def test_a_hash_that_moves_during_the_capture_is_inconclusive(self) -> None:
+        record, frame, _ = self._capture([_hb_read("#2"), _hb_read("#3"), _hb_read("#4")])
+        assert record["status"] == "inconclusive" and frame is None
+
+    def test_an_unready_player_is_not_captured(self) -> None:
+        unready = dict(_hb_read("#3"), ready=False)
+        record, _, _ = self._capture([_hb_read("#2"), unready])
+        assert record["status"] == "inconclusive"
+
+    def test_vgl_waits_for_the_hand_off_and_its_release(self) -> None:
+        record, _, _ = self._capture([_hb_read("#2"), _hb_read("#3")], expect_handoff=True)
+        assert record["status"] == "inconclusive"
+        record, _, _ = self._capture([_hb_read("#2"), _hb_read("#3", handoff=True), _hb_read("#3", handoff=True)], expect_handoff=True)
+        assert record["status"] == "ok"
+
+    def test_a_rejected_advance_is_inconclusive(self) -> None:
+        record, frame, _ = self._capture([_hb_read("#2")], advance_error=probe.PlayerCommandRejected("busy"))
+        assert record["status"] == "inconclusive" and frame is None
+
+
+class TestOccludedScreenCells:
+    def test_gl_row_zero_is_the_bottom_screen_row(self) -> None:
+        mask = [0] * 128
+        mask[0] = 1
+        mask[127] = 1
+        assert probe.occluded_screen_cells(mask) == [(0, 15), (7, 0)]
+
+    @pytest.mark.parametrize("mask", [None, [0] * 127, [2] + [0] * 127])
+    def test_an_unusable_mask_fails_loudly(self, mask: Any) -> None:
+        with pytest.raises(ValueError):
+            probe.occluded_screen_cells(mask)
+
+
+def _rescore_fixture(static_screen_row: int) -> tuple[dict[str, Any], list[np.ndarray]]:
+    """A Vgl slide-2 record whose armed rect is live except one screen row band,
+    with markers that occlude GL row 0 (the BOTTOM row)."""
+    screen = {"x": 0.0, "y": 0.0, "w": 320.0, "h": 160.0}
+    frames = [np.full((160, 320, 3), 10 + 40 * i, dtype=np.uint8) for i in range(4)]
+    y0 = static_screen_row * 20
+    for frame in frames:
+        frame[max(0, y0 - 5): y0 + 25, :, :] = 200
+    dark = [0.0] * 128
+    light = [255.0] * 128
+    for col in range(16):
+        light[col] = 0.0
+    inpage = {"verdict": True, "status": "live", "reason": None, "markerDark": dark, "markerLight": light,
+              "controls": {"pausedDecoder": {"verdict": False}}}
+    live = probe.liveness_mask(frames)
+    unmasked = probe.score_live_coverage(live, screen)
+    entry = {**unmasked, "expect": "live", "label": f"{BIG_ASSET}#1"}
+    combined = probe.combine_rect_oracles(entry, inpage)
+    record = {
+        "playerIndex": 1, "expectedRects": [{"label": f"{BIG_ASSET}#1", "screen": screen, "expect": "live"}],
+        "perRect": [combined], "stray": {"verdict": True}, "instanceCheck": {"verdict": True, "painting": []},
+        "verdict": combined["verdict"], "status": "fail",
+    }
+    return record, frames
+
+
+class TestOcclusionRescore:
+    def test_the_bottom_gl_row_masks_the_bottom_screen_row(self) -> None:
+        record, frames = _rescore_fixture(7)
+        assert record["verdict"] is None, "unmasked, the static band disagrees with the in-page LIVE read"
+        probe.occlusion_rescorer(ARMED)(record, frames)
+        entry = record["perRect"][0]
+        assert entry["occlusion"]["status"] == "ok" and entry["occlusion"]["cells"] == 16
+        assert entry["occlusion"]["unmasked"]["verdict"] is False
+        assert entry["verdict"] is True and record["verdict"] is True and record["status"] == "pass"
+
+    def test_an_unflipped_mask_would_miss_it(self) -> None:
+        """Known-bad: the static band at the TOP is not what GL row 0 occludes, so
+        the masked screenshot still reads it dead against the in-page LIVE."""
+        record, frames = _rescore_fixture(0)
+        probe.occlusion_rescorer(ARMED)(record, frames)
+        entry = record["perRect"][0]
+        assert entry["oracles"]["screenshot"]["verdict"] is False and entry["occlusion"]["masked"]["deadRowBands"] == [0]
+        assert entry["verdict"] is None and record["verdict"] is None
+
+    def test_no_markers_is_inconclusive_not_a_pass(self) -> None:
+        record, frames = _rescore_fixture(7)
+        record["perRect"][0]["oracles"]["inpage"] = None
+        probe.occlusion_rescorer(ARMED)(record, frames)
+        assert record["perRect"][0]["verdict"] is None and record["verdict"] is None
+
+    def test_another_slide_is_untouched(self) -> None:
+        record, frames = _rescore_fixture(7)
+        record["playerIndex"] = 0
+        before = json.loads(json.dumps(record))
+        probe.occlusion_rescorer(ARMED)(record, frames)
+        assert json.loads(json.dumps(record)) == before
+
+
+def _vgl_slide(ordinal: int, *, armed: bool = False) -> dict[str, Any]:
+    rect: dict[str, Any] = {"expect": "live", "verdict": True}
+    if armed:
+        rect.update(
+            label=f"{BIG_ASSET}#1",
+            oracles={
+                "screenshot": {"verdict": True, "status": "live"},
+                "inpage": {"verdict": True, "status": "live", "controls": {"pausedDecoder": {"verdict": False}}},
+            },
+            occlusion={"status": "ok", "cells": 20},
+        )
+    return {
+        "playerIndex": ordinal - 1, "originalOrdinal": ordinal, "verdict": True, "status": "pass",
+        "perRect": [rect], "instanceCheck": {"verdict": True, "painting": []},
+    }
+
+
+def _vgl_pass() -> dict[str, Any]:
+    return {
+        "pass": "Vgl", "status": "ok", "continuity": {"mode": "qualified", "glReplay": {"mode": "injected"}},
+        "stageFit": {"verdict": True}, "slides": [_vgl_slide(n, armed=(n == 2)) for n in (1, 2, 3, 4)], "verdict": True,
+    }
+
+
+def _auto_result() -> dict[str, Any]:
+    result = TestOverallStatusTruthTable()._base_result()
+    result["glReplay"] = {"requested": "auto"}
+    result["groundTruth"]["refusedBoundaries"] = ["continue1to2"]
+    result["groundTruthGl"] = {"armed": ARMED, "armedBoundaries": ["continue1to2"]}
+    for name, mode in (("A", "injected"), ("B", "off"), ("C", "injected")):
+        result["arms"][name]["continuity"]["glReplay"] = {"mode": mode}
+    for name in ("A", "C"):
+        result["arms"][name]["continue1to2"] = {"verdict": False}
+        result["arms"][name]["armed1to2"] = {"verdict": True, "reason": None}
+    result["attach"]["continuity"]["glReplay"] = {"mode": "unavailable"}
+    result["attach"]["continue1to2"] = {"verdict": False}
+    result["attach"]["refused1to2"] = {"verdict": True, "reason": None}
+    for name in ("V", "Voff"):
+        result["visible"][name]["continuity"]["glReplay"] = {"mode": "off"}
+    result["visible"]["Vgl"] = _vgl_pass()
+    result["handback"] = {"verdict": True, "reason": None}
+    return result
+
+
+class TestAutoOverallStatus:
+    def test_the_auto_green_passes(self) -> None:
+        assert probe.overall_status(_auto_result()) == ("pass", [])
+
+    @pytest.mark.parametrize("arm", ["A", "C"])
+    def test_an_armed_arm_needs_armed1to2(self, arm: str) -> None:
+        result = _auto_result()
+        result["arms"][arm]["armed1to2"] = {"verdict": False, "reason": "armed checks failed: ['pool']"}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and any(f"arm {arm} armed1to2=False" in r for r in reasons)
+
+    @pytest.mark.parametrize("arm", ["A", "C"])
+    def test_a_missing_armed1to2_fails(self, arm: str) -> None:
+        result = _auto_result()
+        del result["arms"][arm]["armed1to2"]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and any(f"arm {arm} has no armed1to2 verdict" in r for r in reasons)
+
+    @pytest.mark.parametrize("value", [None, True, False])
+    def test_continue1to2_is_report_only_in_an_armed_arm(self, value: Any) -> None:
+        result = _auto_result()
+        result["arms"]["A"]["continue1to2"] = {"verdict": value}
+        result["arms"]["C"]["continue1to2"] = {"verdict": value}
+        assert probe.overall_status(result)[0] == "pass"
+
+    @pytest.mark.parametrize("where,mode", [
+        (("arms", "A"), "notApplicable"), (("arms", "B"), "injected"), (("arms", "C"), "unavailable"),
+        (("visible", "V"), "injected"), (("visible", "Voff"), "injected"), (("visible", "Vgl"), "off"),
+        (("attach",), "injected"),
+    ])
+    def test_every_arm_and_pass_must_report_its_expected_mode(self, where: tuple[str, ...], mode: str) -> None:
+        result = _auto_result()
+        entry = result
+        for key in where:
+            entry = entry[key]
+        entry["continuity"]["glReplay"] = {"mode": mode}
+        status, reasons = probe.overall_status(result)
+        assert status == "fail"
+        assert any(f"{where[-1]} glReplay.mode={mode!r}" in r for r in reasons)
+
+    def test_a_missing_vgl_pass_fails(self) -> None:
+        result = _auto_result()
+        del result["visible"]["Vgl"]
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and any("visible pass Vgl missing" in r for r in reasons)
+
+    @pytest.mark.parametrize("mutate", [
+        lambda s: s["perRect"][0]["oracles"]["inpage"].update(verdict=None),
+        lambda s: s["perRect"][0]["oracles"]["inpage"]["controls"]["pausedDecoder"].update(verdict=True),
+        lambda s: s["perRect"][0]["oracles"].update(inpage=None),
+        lambda s: s["perRect"][0]["oracles"]["screenshot"].update(verdict=False),
+        lambda s: s["perRect"][0].update(occlusion={"status": "unavailable"}),
+        lambda s: s["instanceCheck"].update(painting=[{"authored": dict(BIG_INSTANCE)}]),
+        lambda s: s["perRect"][0].update(label="other#1"),
+    ])
+    def test_the_vgl_armed_slide_must_be_live_in_both_oracles_with_no_video(self, mutate: Any) -> None:
+        result = _auto_result()
+        mutate(result["visible"]["Vgl"]["slides"][1])
+        status, reasons = probe.overall_status(result)
+        assert status == "fail" and any("Vgl armed slide" in r for r in reasons)
+
+    def test_a_red_hand_back_fails_and_an_unknown_one_is_inconclusive(self) -> None:
+        result = _auto_result()
+        result["handback"] = {"verdict": False, "reason": "parity"}
+        assert probe.overall_status(result)[0] == "fail"
+        result["handback"] = {"verdict": None, "reason": "early capture"}
+        assert probe.overall_status(result)[0] == "inconclusive"
+        del result["handback"]
+        assert probe.overall_status(result)[0] == "inconclusive"
+
+    def test_an_off_result_never_consults_gl_modes(self) -> None:
+        result = TestOverallStatusTruthTable()._base_result()
+        result["arms"]["B"]["continuity"]["glReplay"] = {"mode": "whatever"}
+        assert probe.overall_status(result) == ("pass", [])
+
+
+class RecordingHost:
+    """A `LiveOutputHost` stand-in that records its constructor kwargs and stops
+    the run at `start()`."""
+
+    made: list[dict[str, Any]] = []
+
+    def __init__(self, export_root: Any, slides: Any, **kwargs: Any) -> None:
+        RecordingHost.made.append(kwargs)
+
+    def start(self) -> None:
+        raise RuntimeError("recording host stops here")
+
+    def stop(self) -> None:
+        pass
+
+
+class TestGlReplayCli:
+    def test_defaults_are_off_with_no_forced_fail(self) -> None:
+        args = probe.parse_args([])
+        assert args.gl_replay == "off" and args.gl_force_fail is None
+
+    def test_auto_is_selectable(self) -> None:
+        assert probe.parse_args(["--gl-replay", "auto"]).gl_replay == "auto"
+
+    def test_other_values_are_rejected(self) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--gl-replay", "on"])
+
+    def test_forced_fail_requires_auto(self) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--gl-force-fail", "posterAmbiguous"])
+        args = probe.parse_args(["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"])
+        assert args.gl_force_fail == "posterAmbiguous"
+
+    def test_forced_fail_is_not_a_pass_g_option(self) -> None:
+        with pytest.raises(SystemExit):
+            probe.parse_args(["--pass", "G", "--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous"])
+
+    @pytest.fixture
+    def recording(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        RecordingHost.made = []
+        monkeypatch.setattr(probe, "LiveOutputHost", RecordingHost)
+        monkeypatch.setattr(probe, "force_viewport", lambda *a: None)
+        monkeypatch.setenv("OBED_LIVE_GL_REPLAY", "auto")
+        return RecordingHost.made
+
+    @pytest.mark.parametrize("gl", [None, "off", "auto"])
+    def test_run_arm_passes_gl_replay_explicitly(self, recording: list[dict[str, Any]], gl: Any) -> None:
+        kwargs = {} if gl is None else {"gl_replay": gl}
+        with pytest.raises(RuntimeError):
+            probe.run_arm("A", Path("x"), [], {}, (64, 32), {}, **kwargs)
+        assert recording[-1]["gl_replay"] == (gl or "off")
+
+    @pytest.mark.parametrize("gl", [None, "off", "auto"])
+    def test_run_visible_pass_passes_gl_replay_explicitly(self, recording: list[dict[str, Any]], tmp_path: Path, gl: Any) -> None:
+        kwargs = {} if gl is None else {"gl_replay": gl}
+        result = probe.run_visible_pass("V", Path("x"), [], synthetic_plan(), (64, 32), {}, tmp_path, **kwargs)
+        assert result["status"] == "error"
+        assert recording[-1]["gl_replay"] == (gl or "off")
+
+    @pytest.mark.parametrize("gl", [None, "off", "auto"])
+    def test_goto_arm_passes_gl_replay_explicitly(self, recording: list[dict[str, Any]], tmp_path: Path, gl: Any) -> None:
+        kwargs = {} if gl is None else {"gl_replay": gl}
+        with pytest.raises(RuntimeError):
+            probe._run_goto_arm(
+                Path("x"), [], env={}, tag="G", armed=True, instances={}, expectations={}, viewport=(64, 32),
+                evidence_dir=tmp_path, character_rect=None, onset_scene_id="2", **kwargs,
+            )
+        assert recording[-1]["gl_replay"] == (gl or "off")
+
+    @pytest.mark.parametrize("gl", [None, "off", "auto"])
+    def test_attach_arm_passes_gl_replay_explicitly(
+        self, recording: list[dict[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gl: Any,
+    ) -> None:
+        class Proc:
+            pid = 1
+
+            def terminate(self) -> None:
+                pass
+
+            def wait(self, timeout: float) -> int:
+                return 0
+
+            def poll(self) -> int:
+                return 0
+
+        monkeypatch.setattr(probe, "free_port", lambda: 1)
+        monkeypatch.setattr(probe, "launch_attach_chrome", lambda port, profile: Proc())
+        monkeypatch.setattr(probe, "wait_for_cdp", lambda port: None)
+        monkeypatch.setattr(probe, "force_exact_viewport", lambda *a: None)
+        kwargs = {} if gl is None else {"gl_replay": gl}
+        with pytest.raises(RuntimeError):
+            probe.run_attach_arm(Path("x"), [], {}, tmp_path, {}, **kwargs)
+        assert recording[-1]["gl_replay"] == (gl or "off")
+
+
+class TestForcedFailSplice:
+    def test_the_seed_lands_once_ahead_of_exactly_one_module_and_is_restored(self) -> None:
+        original = probe.live_host_module.gl_replay_script
+        with probe.forced_fail_seed("posterAmbiguous") as splice:
+            script = probe.live_host_module.gl_replay_script(GL_RUNTIME)
+        assert probe.live_host_module.gl_replay_script is original
+        assert splice == {"reason": "posterAmbiguous", "splices": 1}
+        assert script.startswith('<script id="probe-force-fail">window.__OBED_GL_REPLAY__={"debugForceFail": "posterAmbiguous"};</script>')
+        assert script.count('id="probe-force-fail"') == 1 and script.count('id="obed-gl-replay"') == 1
+        assert script.endswith(original(GL_RUNTIME))
+
+    def test_a_script_breaking_reason_is_escaped(self) -> None:
+        with probe.forced_fail_seed("</script><b>") as _:
+            script = probe.live_host_module.gl_replay_script(GL_RUNTIME)
+        assert script.count("</script>") == 2
+
+    def test_no_module_means_no_splice(self) -> None:
+        with probe.forced_fail_seed("posterAmbiguous") as splice:
+            with pytest.raises(RuntimeError):
+                probe.live_host_module.gl_replay_script(CARRIED_RUNTIME)
+        assert splice["splices"] == 0
+
+    def test_restored_even_when_the_run_raises(self) -> None:
+        original = probe.live_host_module.gl_replay_script
+        with pytest.raises(ValueError):
+            with probe.forced_fail_seed("posterAmbiguous"):
+                raise ValueError("boom")
+        assert probe.live_host_module.gl_replay_script is original
+
+
+def _forced_after(reason: str, *, zone_reason: str = "failure", live: bool = False) -> dict[str, Any]:
+    zone = _ev("glreplay-zone", **{"from": "armed"}, to="retired", reason=zone_reason)
+    if zone_reason == "failure":
+        zone["detail"]["standDown"] = reason
+    record = {
+        "status": "ok",
+        "after": {
+            "hash": "#3", "api": {"version": 1, "state": "RETIRED", "standDowns": [reason], "events": []},
+            "coreEvents": [_ev("glreplay-zone", **{"from": "pending"}, to="armed", reason="moduleReady"), zone],
+        },
+    }
+    if live:
+        record["after"]["coreEvents"].append(_ev("glreplay-live"))
+    return record
+
+
+def _forced_pass(verdicts: list[Any]) -> dict[str, Any]:
+    return {
+        "status": "ok", "continuity": {"mode": "qualified", "glReplay": {"mode": "injected"}}, "stageFit": {"verdict": True},
+        "slides": [{"originalOrdinal": i + 1, "playerIndex": i, "verdict": v, "status": "pass" if v else "fail"} for i, v in enumerate(verdicts)],
+    }
+
+
+def _v_reference() -> dict[str, Any]:
+    return dict(_forced_pass([True] * 4), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})
+
+
+class TestForcedFailScoring:
+    def _score(self, **overrides: Any) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "v_pass": _v_reference(), "g_pass": _forced_pass([True] * 4),
+            "refusal": {"verdict": True}, "g_handback": _forced_after("posterAmbiguous"),
+            "parity": {"verdict": True}, "reason": "posterAmbiguous", "splice": {"splices": 1},
+        }
+        kwargs.update(overrides)
+        return probe.score_forced(**kwargs)
+
+    def test_a_clean_fallback_is_forced_ok_never_pass(self) -> None:
+        scored = self._score()
+        assert scored["status"] == "forced-ok", scored
+
+    def test_module_retired_is_an_accepted_zone_reason(self) -> None:
+        assert self._score(g_handback=_forced_after("planUnreadable", zone_reason="moduleRetired"), reason="planUnreadable")["status"] == "forced-ok"
+
+    @pytest.mark.parametrize("override", [
+        {"g_handback": _forced_after("posterAmbiguous", live=True)},
+        {"g_handback": _forced_after("posterAmbiguous", zone_reason="leftDestination")},
+        {"g_handback": _forced_after("glError")},
+        {"g_handback": {"status": "inconclusive"}},
+        {"refusal": {"verdict": False}},
+        {"parity": {"verdict": None}},
+        {"parity": {"verdict": False}},
+        {"g_pass": _forced_pass([True, False, True, True])},
+        {"g_pass": dict(_forced_pass([True] * 4), continuity={"mode": "qualified", "glReplay": {"mode": "off"}})},
+        {"splice": {"splices": 0}},
+        {"v_pass": dict(_v_reference(), stageFit={"verdict": False})},
+        {"v_pass": dict(_v_reference(), stopError="websocket closed")},
+        {"v_pass": dict(_v_reference(), status="error", error="boom")},
+        {"v_pass": _forced_pass([True] * 4)},
+        {"v_pass": dict(_v_reference(), slides=[])},
+    ])
+    def test_every_deviation_is_forced_fail(self, override: dict[str, Any]) -> None:
+        assert self._score(**override)["status"] == "forced-fail"
+
+
+class TestCodexR1ProbeFixes:
+    """Codex r1 (stream P): each finding's known-bad, forced."""
+
+    def test_a_substituted_sibling_is_red_on_the_owner_clause_alone(self) -> None:
+        """The note names the sibling (2) and the sibling's clock runs plausibly,
+        but the decoder that owned the footprint before the flip was 1."""
+        reads = _armed_reads()
+        for read in reads:
+            _set_detail(read, "glreplay-carried", elId=2)
+        _gl(reads[0])["pool"][1]["currentTime"] = 3.0
+        _gl(reads[1])["pool"][1]["currentTime"] = 3.6
+        scored = probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])
+        assert scored["verdict"] is False
+        assert {k for k, ok in scored["checks"].items() if not ok} == {"owner"}
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[2, 2])["verdict"] is True
+
+    @pytest.mark.parametrize("owners", [None, [], [None], [None, None], [1, 2], [2, None]])
+    def test_no_resolved_owner_or_a_sibling_owner_is_red(self, owners: Any) -> None:
+        scored = probe.score_armed(_armed_reads(), ARMED, GL_CONTINUITY, owner_ids=owners)
+        assert {k for k, ok in scored["checks"].items() if not ok} == {"owner"}
+
+    @pytest.mark.parametrize("owners", [[1, None], [None, 1, 1]])
+    def test_an_unresolved_owner_read_is_dropped(self, owners: Any) -> None:
+        """Owner 2026-09-23, mirroring P2's carriedClock1to2: gates r2 saw ['1', None]."""
+        assert probe.score_armed(_armed_reads(), ARMED, GL_CONTINUITY, owner_ids=owners)["verdict"] is True
+
+    def test_pre_flip_owners_read_only_the_instance_rect_before_the_flip(self) -> None:
+        samples = [
+            {"scene": 0, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 1}}]},
+            {"scene": 1, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": None}]},
+            {"scene": 1, "videos": [{"src": "other.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 9}}]},
+            {"scene": 2, "videos": [{"src": "untitled.mov", "rect": dict(BIG_INSTANCE), "footprintOwner": {"elId": 7}}]},
+        ]
+        assert probe.pre_flip_owner_ids(samples, ARMED) == [1, None]
+
+    def test_a_setup_time_system_exit_stamps_forced_fail(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        def boom(*a: Any, **k: Any) -> Any:
+            raise SystemExit("fixture does not derive a continuity plan")
+
+        monkeypatch.setattr(probe, "prepare_export", boom)
+        artifact = tmp_path / "forced.json"
+        args = probe.parse_args(["--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous", "--artifact", str(artifact)])
+        probe.run_forced_fail_cli(args)
+        saved = json.loads(artifact.read_text())
+        assert saved["status"] == "forced-fail"
+        assert "does not derive" in saved["error"]
+
+    def test_readiness_never_accepts_a_stand_down_for_the_hand_off(self) -> None:
+        read = _hb_read("#3")
+        read["api"]["events"].append(_ev("glreplay-standdown", reason="glError"))
+        read["coreEvents"].append(_ev("glreplay-release", mode="retire"))
+        assert probe._handback_ready(read, 3, True) is False
+        assert probe._handback_ready(_hb_read("#3", handoff=True), 3, True) is True
+        twice = _hb_read("#3", handoff=True)
+        twice["api"]["events"].append(_ev("glreplay-handoff"))
+        assert probe._handback_ready(twice, 3, True) is False
+        retire = _hb_read("#3", handoff=True)
+        retire["coreEvents"][0]["detail"]["mode"] = "retire"
+        assert probe._handback_ready(retire, 3, True) is False
+
+    def test_final_scoring_requires_the_module_hand_off(self) -> None:
+        record = _hb_vgl_record()
+        record["after"]["api"]["events"] = [_ev("glreplay-standdown", reason="glError")]
+        v, g = _hb_frames()
+        scored = probe.score_handback(_hb_v_record(), v, record, g, ARMED)
+        assert scored["verdict"] is False
+        assert {k for k, ok in scored["carry"]["checks"].items() if not ok} == {"handoff"}
+
+    @pytest.mark.parametrize("value", ["#3junk", "#3-1", " #3", "#", "3.0", None])
+    def test_hash_numbers_full_match(self, value: Any) -> None:
+        assert probe.hash_number(value) is None
+
+    def test_a_malformed_hash_is_red_in_armed_scoring(self) -> None:
+        reads = _armed_reads()
+        _gl(reads[1]).update(hash="#2junk")
+        failing = {k for k, ok in probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])["checks"].items() if not ok}
+        assert failing == {"live"}
+        reads = _armed_reads()
+        for read in reads:
+            _set_detail(read, "glreplay-arm", sceneHash="#1junk")
+        failing = {k for k, ok in probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])["checks"].items() if not ok}
+        assert failing == {"events"}
+
+    def test_a_malformed_hash_never_captures_a_hand_back(self) -> None:
+        clock = FakeClock()
+        host = ArmedHost([_hb_read("#2"), _hb_read("#3junk")])
+        record, frame = probe.capture_handback(host, ARMED, expect_handoff=False, now=clock.now, sleep=clock.sleep)
+        assert record["status"] == "inconclusive" and frame is None and host.transport.captures == 0
+
+    def test_an_unknown_reason_is_forced_fail_even_when_otherwise_green(self) -> None:
+        scored = probe.score_forced(
+            v_pass=_v_reference(), g_pass=_forced_pass([True] * 4), refusal={"verdict": True},
+            g_handback=_forced_after("bogusReason"), parity={"verdict": True}, reason="bogusReason",
+            splice={"splices": 1},
+        )
+        assert scored["status"] == "forced-fail"
+        assert {k for k, ok in scored["checks"].items() if not ok} == {"knownReason"}
+
+
+class TestArmedReadWaitsForDestination:
+    """P5-A r1: read 1 was taken at #1 (LIVE precedes #2 by ~98 ms)."""
+
+    def test_the_first_read_waits_for_the_destination_hash(self) -> None:
+        clock = FakeClock()
+        host = ArmedHost([_gl(r) for r in _armed_reads()])
+        host.hashes = ["#1", "#1", "#2"]
+        out: dict[str, Any] = {}
+        probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)(2)
+        evaluations = host.transport.evaluations
+        assert evaluations.count(probe.HASH_JS) == 3
+        assert evaluations.index(probe.GL_REPLAY_READ_JS) > max(i for i, js in enumerate(evaluations) if js == probe.HASH_JS)
+        assert len(out["armed1to2"]) == 2
+
+    @pytest.mark.parametrize("stuck", ["#1", "#2junk", "#3", None])
+    def test_a_hash_that_never_settles_is_red_not_read(self, stuck: Any) -> None:
+        clock = FakeClock()
+        host = ArmedHost([_gl(r) for r in _armed_reads()])
+        host.hashes = [stuck]
+        out: dict[str, Any] = {}
+        probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)(2)
+        assert probe.GL_REPLAY_READ_JS not in host.transport.evaluations
+        assert probe.score_armed(out["armed1to2"], ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is False
+
+
+class TestVglScreenshotLiveIsPhysical:
+    """Gate runner r2: `oracles.screenshot.verdict` means "met expectation", so a
+    DEAD-expected rect that read dead must not count as a LIVE screenshot."""
+
+    def _slide(self, record: dict[str, Any]) -> dict[str, Any]:
+        entry = _vgl_pass()
+        entry["slides"][1]["perRect"] = [record]
+        return entry
+
+    def test_a_dead_expected_rect_that_read_dead_is_red(self) -> None:
+        met_dead = probe.combine_rect_oracles(
+            {"expect": probe.DEAD, "verdict": True, "label": f"{BIG_ASSET}#1", "liveFrac": 0.0},
+            {"verdict": False, "status": "dead", "reason": None, "controls": {"pausedDecoder": {"verdict": False}}},
+        )
+        met_dead["occlusion"] = {"status": "ok"}
+        assert met_dead["oracles"]["screenshot"] == {"verdict": True, "status": "dead", "liveFrac": 0.0}
+        scored = probe.score_vgl_armed_slide(self._slide(met_dead), ARMED)
+        assert scored["checks"]["screenshotLive"] is False and scored["verdict"] is False
+
+    def test_a_live_expected_rect_that_read_live_is_green(self) -> None:
+        met_live = probe.combine_rect_oracles(
+            {"expect": probe.LIVE, "verdict": True, "label": f"{BIG_ASSET}#1", "liveFrac": 0.9},
+            {"verdict": True, "status": "live", "reason": None, "controls": {"pausedDecoder": {"verdict": False}}},
+        )
+        met_live["occlusion"] = {"status": "ok"}
+        scored = probe.score_vgl_armed_slide(self._slide(met_live), ARMED)
+        assert scored["verdict"] is True, scored
+
+    @pytest.mark.parametrize("mutate", [
+        lambda r: r["oracles"]["screenshot"].update(status="pass"),
+        lambda r: r["oracles"]["screenshot"].pop("status"),
+        lambda r: r.update(expect=probe.DEAD),
+    ])
+    def test_status_or_expectation_other_than_live_is_red(self, mutate: Any) -> None:
+        entry = _vgl_pass()
+        mutate(entry["slides"][1]["perRect"][0])
+        assert probe.score_vgl_armed_slide(entry, ARMED)["checks"]["screenshotLive"] is False
+
+
+class TestForcedFixtureValidationIsCaught:
+    """Astra H r2: a missing fixture in forced mode must still overwrite the
+    artifact with forced-fail, never leave a previous one untouched."""
+
+    @pytest.mark.parametrize("missing", ["fixture", "index"])
+    def test_a_missing_fixture_stamps_forced_fail(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
+        artifact = tmp_path / "forced.json"
+        artifact.write_text(json.dumps({"status": "forced-ok", "stale": True}))
+        index = tmp_path / "index.html"
+        index.write_text("x")
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        argv = ["x", "--gl-replay", "auto", "--gl-force-fail", "posterAmbiguous", "--artifact", str(artifact),
+                "--fixture", str(tmp_path / "nope" if missing == "fixture" else fixture),
+                "--original-index", str(tmp_path / "nope.html" if missing == "index" else index)]
+        monkeypatch.setattr(sys, "argv", argv)
+        probe.main()
+        saved = json.loads(artifact.read_text())
+        assert saved["status"] == "forced-fail" and "stale" not in saved
+        assert "unavailable" in saved["error"]

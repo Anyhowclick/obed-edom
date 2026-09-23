@@ -1,7 +1,7 @@
 # G3+G4 headless gates — round 2 (2026-09-23, branch `ce21e359`, core v5 sha 359c589a…, G2 module 3f089a1a…, product flag `gl_replay="auto"`)
 
 Results: `output/live-visible-content/g3/r2/<arm>/result.json`, `r2/gates.json`, and `r2/r2-instrument-validation.json`. The analyser is
-`g3/analyse_g3.py`: plan rev 2 §6, the coordinator rulings, and the A2/G2-fix checks from `a2-advice.md`. G-P2 is in
+`g3/analyse_g3.py`: plan rev 2 §6, the coordinator rulings, and the A2/G2-fix checks from `a2-advice.md` (pruned; `git show a56474f3:.agents/reviews/gl-replay-g3/a2-advice.md`). G-P2 is in
 `output/gates-g3/gp2-ce21e359/`. Pinned detached worktree: `gates-g3-ce21e359` (clean); `gates-g3-2884e116` has been removed.
 Every armed arm asserts `inject == product`. Lanes: at most 3 Chromes; `run_gates`, the go-to arms and Q3 each ran alone (Q3 as one 1227 s
 call). Load was 11–28, except during the fail-arm batch (up to 93 at its end, from a concurrent `pytest -n auto`) and the go-to batch (≈50).

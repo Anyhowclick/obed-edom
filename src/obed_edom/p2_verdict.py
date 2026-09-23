@@ -151,6 +151,21 @@ PRESERVE_EVENT_KEEP_KINDS = (
     "texture-feed-stop",
 )
 
+# Added to the fetch filter under `--gl-replay auto` only: the zone, seam and module
+# notes `glReplayCarry1to2` reads.
+GL_REPLAY_KEEP_KINDS = (
+    "glreplay-arm",
+    "glreplay-carried",
+    "glreplay-handoff",
+    "glreplay-hold",
+    "glreplay-live",
+    "glreplay-opacity-unproven",
+    "glreplay-release",
+    "glreplay-retained-frame",
+    "glreplay-standdown",
+    "glreplay-zone",
+)
+
 CARRY_EVENT_KINDS = frozenset({
     "remount-scheduled",
     "remount-done",
@@ -955,6 +970,467 @@ def neverPooledEvidence(
     }
 
 
+GL_CARRIED_MAX_DELTA = 0.02
+GL_POOL_MIN_READS = 3
+GL_POOL_MIN_GAP_MS = 300.0
+GL_CLOCK_RATE_MIN = 0.75
+GL_CLOCK_RATE_MAX = 1.25
+GL_INDEX_MAX_STEP = 64
+GL_INDEX_MIN_AFTER_FLIP = 4
+GL_SAMPLE_FRAME_MIN_READS = 3
+GL_HANDOFF_STAND_DOWN = "canvasRemoved"
+
+
+def _same_id(a: object, b: object) -> bool:
+    return a is not None and b is not None and str(a) == str(b)
+
+
+def _id_set(values: object) -> set[str] | None:
+    if not isinstance(values, list) or any(v is None for v in values):
+        return None
+    return {str(v) for v in values}
+
+
+def _kind_details(preserve_events: list[dict], kind: str) -> list[dict]:
+    return [
+        e["detail"]
+        for e in preserve_events
+        if e.get("kind") == kind and isinstance(e.get("detail"), dict)
+    ]
+
+
+def _entry_movie_key(entry: dict) -> str | None:
+    stamped = entry.get("movieKey")
+    if isinstance(stamped, str) and stamped:
+        return _movie_key(stamped)
+    raw = str(entry.get("key") or "")
+    return _movie_key(raw) if raw else None
+
+
+def _index_series_progress(values: list, *, min_decoded: int, max_step: int = GL_INDEX_MAX_STEP) -> dict:
+    decoded = [int(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    deltas = [(b - a) % INDEX_PATCH_MODULO for a, b in zip(decoded, decoded[1:])]
+    base = {"nDecoded": len(decoded), "nNull": len(values) - len(decoded), "indices": decoded, "deltas": deltas}
+    if len(decoded) < min_decoded:
+        return {"ok": False, "reason": "insufficient decoded reads", **base}
+    if any(d >= max_step for d in deltas):
+        return {"ok": False, "reason": "implausible counter step", **base}
+    if sum(deltas) <= 0:
+        return {"ok": False, "reason": "counter never advanced", **base}
+    return {"ok": True, "reason": None, **base}
+
+
+def progressingIndexAfterFlip(
+    index_samples: list[dict],
+    flip_index: int | None,
+    sample_frame_indices: list,
+    *,
+    min_after: int = GL_INDEX_MIN_AFTER_FLIP,
+    min_sample_frames: int = GL_SAMPLE_FRAME_MIN_READS,
+) -> dict:
+    """Clause (f) (plan §4.2 f): composite and `sampleFrame` counters advance after the flip."""
+    if not isinstance(flip_index, int) or not isinstance(index_samples, list) or not 0 <= flip_index <= len(index_samples):
+        composite = {"ok": False, "reason": "no scene-hash flip observed", "nDecoded": 0}
+    else:
+        composite = _index_series_progress(
+            [s.get("index") if isinstance(s, dict) else None for s in index_samples[flip_index:]],
+            min_decoded=min_after,
+        )
+    source = _index_series_progress(list(sample_frame_indices or []), min_decoded=min_sample_frames)
+    return {
+        "ok": bool(composite["ok"] and source["ok"]),
+        "composite": composite,
+        "sourceSampleFrame": source,
+        "agreementNonGating": {
+            "compositeForward": sum(composite.get("deltas") or []),
+            "sourceForward": sum(source.get("deltas") or []),
+        },
+    }
+
+
+def glPoolReadsVerdict(
+    pool_reads: object,
+    carried_el_id: object,
+    *,
+    target_key: str = MOVIE1_KEY,
+    lo_scene: int = SLIDE2_MIN_HASH,
+    hi_scene: int = SLIDE2_MIN_HASH + 1,
+    min_reads: int = GL_POOL_MIN_READS,
+    min_gap_ms: float = GL_POOL_MIN_GAP_MS,
+) -> dict:
+    """Clause (d) (plan §4.2 d): every slide-2 pool read holds movie1 as {carried} ∪ detached siblings."""
+    reads = pool_reads if isinstance(pool_reads, list) else []
+    problems: list[str] = []
+    pooled: set[str] = set()
+    per_read = []
+    if carried_el_id is None:
+        problems.append("no carried decoder")
+    if len(reads) < min_reads:
+        problems.append(f"{len(reads)} pool reads, need {min_reads}")
+    last_t = None
+    for i, r in enumerate(reads):
+        if not isinstance(r, dict) or not isinstance(r.get("pool"), list):
+            problems.append(f"read {i} malformed")
+            continue
+        scene = _strict_hash_num(r.get("sceneHash"))
+        if scene is None or not lo_scene <= scene < hi_scene:
+            problems.append(f"read {i} outside [{lo_scene},{hi_scene})")
+        t = _finite(r.get("t"))
+        if t is None:
+            problems.append(f"read {i} has no page clock")
+        elif last_t is not None and t - last_t < min_gap_ms:
+            problems.append(f"read {i} only {t - last_t:.0f} ms after the previous")
+        last_t = t if t is not None else last_t
+        mine = []
+        for e in r["pool"]:
+            if not isinstance(e, dict) or _entry_movie_key(e) is None:
+                problems.append(f"read {i} holds an unattributable entry")
+                continue
+            if _entry_movie_key(e) == target_key:
+                mine.append(e)
+        ids = [e.get("elId") for e in mine]
+        pooled |= {str(x) for x in ids if x is not None}
+        carried = [e for e in mine if _same_id(e.get("elId"), carried_el_id)]
+        if len(carried) != 1:
+            problems.append(f"read {i} holds {len(carried)} carried entries")
+        if any(e.get("elId") is None for e in mine):
+            problems.append(f"read {i} holds a movie1 entry without an elId")
+        if any(e.get("inDocument") is not False for e in mine):
+            problems.append(f"read {i} holds a movie1 entry in the document")
+        if any(e.get("fromDom") for e in mine):
+            problems.append(f"read {i} holds a fromDom movie1 entry")
+        for e in carried:
+            if e.get("paused") is not False:
+                problems.append(f"read {i} carried decoder paused")
+            ready = e.get("readyState")
+            if not isinstance(ready, (int, float)) or ready < 2:
+                problems.append(f"read {i} carried decoder readyState {ready!r}")
+        per_read.append({"t": t, "sceneHash": r.get("sceneHash"), "movie1ElIds": ids})
+    return {
+        "ok": not problems,
+        "problems": problems[:12],
+        "readsN": len(reads),
+        "pooledElIds": sorted(pooled),
+        "reads": per_read,
+    }
+
+
+def carriedClock1to2(
+    pre_flip_owner_ids: list,
+    pool_reads: object,
+    carried_el_id: object,
+    *,
+    rate_min: float = GL_CLOCK_RATE_MIN,
+    rate_max: float = GL_CLOCK_RATE_MAX,
+    min_reads: int = GL_POOL_MIN_READS,
+) -> dict:
+    """Clause (g) (plan §4.2 g): the pre-flip owner is the carried decoder and its own clock runs at wall rate."""
+    owners = [o for o in (pre_flip_owner_ids or []) if o is not None]
+    owner_ok = bool(owners) and all(_same_id(o, carried_el_id) for o in owners)
+    samples = []
+    for r in pool_reads if isinstance(pool_reads, list) else []:
+        if not isinstance(r, dict):
+            continue
+        entry = next(
+            (e for e in r.get("pool") or [] if isinstance(e, dict) and _same_id(e.get("elId"), carried_el_id)),
+            None,
+        )
+        t = _finite(r.get("t"))
+        ct = _finite(entry.get("currentTime")) if entry else None
+        samples.append({"t": t, "currentTime": ct})
+    clean = [s for s in samples if s["t"] is not None and s["currentTime"] is not None]
+    rising = len(clean) == len(samples) and all(
+        b["currentTime"] > a["currentTime"] and b["t"] > a["t"] for a, b in zip(clean, clean[1:])
+    )
+    rate = None
+    if len(clean) >= 2 and clean[-1]["t"] > clean[0]["t"]:
+        rate = (clean[-1]["currentTime"] - clean[0]["currentTime"]) / ((clean[-1]["t"] - clean[0]["t"]) / 1000.0)
+    ok = bool(
+        carried_el_id is not None
+        and owner_ok
+        and len(clean) >= min_reads
+        and rising
+        and rate is not None
+        and rate_min <= rate <= rate_max
+    )
+    reason = None
+    if carried_el_id is None:
+        reason = "no carried decoder"
+    elif not owner_ok:
+        reason = "pre-flip footprint owner is not the carried decoder"
+    elif len(clean) < min_reads or len(clean) != len(samples):
+        reason = "carried clock missing from a pool read"
+    elif not rising:
+        reason = "carried clock not strictly increasing"
+    elif rate is None or not rate_min <= rate <= rate_max:
+        reason = "carried clock off wall rate"
+    return {
+        "ok": ok,
+        "reason": reason,
+        "preFlipOwnerIds": owners[:12],
+        "samples": samples,
+        "rate": rate,
+    }
+
+
+def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
+    """Clause (c) (plan §4.2 c): the in-page carry census split at the hand-off."""
+    if not isinstance(census, dict):
+        return {"ok": False, "reason": "gl carry census missing", "census": census}
+    before = census.get("before") if isinstance(census.get("before"), dict) else {}
+    gated = census.get("gated")
+    gated_total = census.get("gatedTotal")
+    facades = _id_set(census.get("facadeElIds"))
+    handoff_scene = census.get("handoffScene")
+    if (
+        not isinstance(before.get("total"), int)
+        or not isinstance(gated, list)
+        or not isinstance(gated_total, int)
+        or facades is None
+        or not all(isinstance(e, dict) for e in gated)
+    ):
+        return {"ok": False, "reason": "gl carry census malformed", "census": census}
+    if census.get("malformedTotal") != 0:
+        return {"ok": False, "reason": "movie1 carry notes with an unparseable scene hash", "census": census}
+    if _finite(census.get("handoffT")) is None or not isinstance(handoff_scene, int) or handoff_scene < 0:
+        return {"ok": False, "reason": "no hand-off in the census", "census": census}
+    if gated_total != len(gated):
+        return {"ok": False, "reason": "gl carry census truncated after the hand-off", "census": census}
+    into = [
+        e for e in gated
+        if e.get("kind") == "remount-into-authored-layer"
+        and _strict_hash_num(e.get("sceneHash")) == handoff_scene
+        and _same_id(e.get("elId"), carried_el_id)
+    ]
+    owned = facades | ({str(carried_el_id)} if carried_el_id is not None else set())
+    forbidden = [
+        e for e in gated
+        if e.get("kind") in ("remount-done", "remount-footprint-rect") and str(e.get("elId")) in owned
+    ]
+    problems = []
+    if carried_el_id is None:
+        problems.append("no carried decoder")
+    if not _same_id(census.get("carriedElId"), carried_el_id):
+        problems.append("census carried decoder differs from the carried note")
+    if before["total"] != 0:
+        problems.append(f"{before['total']} carry notes before the hand-off")
+    if len(into) != 1:
+        problems.append(f"{len(into)} remount-into-authored-layer for the carried decoder at the hand-off scene")
+    if forbidden:
+        problems.append(f"{len(forbidden)} remount-done/-footprint-rect for the carried decoder or its facade")
+    return {
+        "ok": not problems,
+        "reason": problems[0] if problems else None,
+        "problems": problems,
+        "beforeTotal": before["total"],
+        "beforeSample": (before.get("sample") or [])[:6],
+        "gated": gated[:12],
+        "handoffT": census.get("handoffT"),
+        "handoffScene": handoff_scene,
+        "afterTotalNonGating": census.get("afterTotal"),
+    }
+
+
+def glLiveOnSlide2(states: object, at_scene: int, *, min_reads: int = 2) -> dict:
+    """Clause (b)'s live half (plan §4.2 b): the module LIVE and advancing across the slide-2 state reads."""
+    reads = states if isinstance(states, list) else []
+    problems = []
+    if len(reads) < min_reads:
+        problems.append(f"{len(reads)} slide-2 state reads, need {min_reads}")
+    stats = []
+    times: list[float | None] = []
+    for i, r in enumerate(reads):
+        st = r.get("stats") if isinstance(r, dict) and isinstance(r.get("stats"), dict) else None
+        if st is None:
+            problems.append(f"state read {i} missing")
+            continue
+        if r.get("state") != "LIVE":
+            problems.append(f"state read {i} is {r.get('state')!r}")
+        if r.get("standDowns") != []:
+            problems.append(f"state read {i} stand-downs {r.get('standDowns')!r}")
+        if st.get("glErrors") != 0:
+            problems.append(f"state read {i} glErrors {st.get('glErrors')!r}")
+        if _strict_hash_num(r.get("sceneHash")) != at_scene:
+            problems.append(f"state read {i} at {r.get('sceneHash')!r}, expected #{at_scene}")
+        epoch = st.get("epoch")
+        if not isinstance(epoch, int) or isinstance(epoch, bool):
+            problems.append(f"state read {i} epoch {epoch!r}")
+        stats.append(st)
+        times.append(_finite(r.get("t")))
+    if len(stats) == len(reads) and len(stats) >= 2:
+        if len({s.get("epoch") for s in stats}) != 1:
+            problems.append("epoch changed across slide-2 reads")
+        if any(x is None for x in times) or not all(b > a for a, b in zip(times, times[1:])):
+            problems.append(f"state read clocks not strictly increasing: {times!r}")
+        for field in ("iter", "uploads"):
+            vals = [_finite(s.get(field)) for s in stats]
+            if any(x is None for x in vals) or not all(b > a for a, b in zip(vals, vals[1:])):
+                problems.append(f"{field} not strictly increasing: {vals!r}")
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "reads": [
+            {k: s.get(k) for k in ("epoch", "iter", "uploads", "glErrors", "loopMode")} for s in stats
+        ],
+    }
+
+
+def _gl_zone_handoff_verdict(
+    preserve_events: list[dict],
+    carried_el_id: object,
+    pooled_el_ids: list[str],
+    *,
+    target_key: str,
+    at_scene: int,
+    max_delta: float,
+) -> dict:
+    zone = [(d.get("from"), d.get("to"), d.get("reason")) for d in _gl_zone_notes(preserve_events)]
+    arms = _kind_details(preserve_events, "glreplay-arm")
+    lives = _kind_details(preserve_events, "glreplay-live")
+    carried = _kind_details(preserve_events, "glreplay-carried")
+    releases = _kind_details(preserve_events, "glreplay-release")
+    refusals = [
+        e for e in refusalEvents(preserve_events, target_key, at_scene)
+        if (_event_scene(e) or 0) < at_scene + 1
+    ]
+    expected_retired = sorted(set(pooled_el_ids) - {str(carried_el_id)})
+    release = releases[0] if len(releases) == 1 else {}
+    retired = _id_set(release.get("retired"))
+    delta = _finite(carried[0].get("delta")) if len(carried) == 1 else None
+    problems = []
+    if zone != [("pending", "armed", "moduleReady"), ("armed", "released", "handoff")]:
+        problems.append(f"zone {zone!r}")
+    if len(arms) != 1 or _strict_hash_num(arms[0].get("sceneHash")) != at_scene - 1:
+        problems.append(f"{len(arms)} glreplay-arm, expected one at #{at_scene - 1}")
+    if len(lives) != 1:
+        problems.append(f"{len(lives)} glreplay-live")
+    if len(carried) != 1 or delta is None or delta > max_delta:
+        problems.append(f"{len(carried)} glreplay-carried, delta {delta!r}")
+    if len(releases) != 1:
+        problems.append(f"{len(releases)} glreplay-release")
+    elif release.get("mode") != "handoff" or release.get("ok") is not True:
+        problems.append(f"release mode {release.get('mode')!r}")
+    elif not _same_id(release.get("elId"), carried_el_id):
+        problems.append("release handed off another decoder")
+    elif retired is None or sorted(retired) != expected_retired or len(release["retired"]) != len(retired):
+        problems.append(f"release retired {release.get('retired')!r}, expected {expected_retired!r}")
+    if refusals:
+        problems.append(f"{len(refusals)} refusal notes for {target_key} at #{at_scene}")
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "zone": zone,
+        "carriedDelta": delta,
+        "release": release or None,
+        "expectedRetired": expected_retired,
+        "refusals": refusals[:6],
+    }
+
+
+def glReplayCarry1to2(
+    injected_plan: dict,
+    preserve_events: list[dict],
+    gl_carry_census: object,
+    pool_reads: object,
+    lingering: object,
+    index_samples: list[dict],
+    flip_index: int | None,
+    sample_frame_indices: list,
+    pre_flip_owner_ids: list,
+    gl_states_s2: object,
+    gl_state_after: object,
+    hash1: object,
+    hash2: object,
+    player_build_errors: list,
+    *,
+    target_key: str = MOVIE1_KEY,
+    at_scene: int = SLIDE2_MIN_HASH,
+    max_delta: float = GL_CARRIED_MAX_DELTA,
+) -> dict:
+    """Fail-closed 1->2 GL-replay carry verdict, clauses (a)-(h) of plan §4.2."""
+    boundaries = (injected_plan or {}).get("boundaries") or []
+    entry = next(
+        (
+            b for b in boundaries
+            if isinstance(b, dict)
+            and b.get("action") == "glReplay"
+            and b.get("atScene") == at_scene
+            and b.get("movieKey") == target_key
+            and b.get("fallback") == "retire"
+        ),
+        None,
+    )
+    carried_notes = _kind_details(preserve_events, "glreplay-carried")
+    carried_el_id = carried_notes[0].get("elId") if len(carried_notes) == 1 else None
+    pool = glPoolReadsVerdict(pool_reads, carried_el_id, target_key=target_key, lo_scene=at_scene, hi_scene=at_scene + 1)
+    zone = _gl_zone_handoff_verdict(
+        preserve_events, carried_el_id, pool["pooledElIds"],
+        target_key=target_key, at_scene=at_scene, max_delta=max_delta,
+    )
+    census = glCarryCensusVerdict(gl_carry_census, carried_el_id)
+    painting = lingering.get("paintingCount") if isinstance(lingering, dict) else None
+    no_painting = isinstance(painting, int) and not isinstance(painting, bool) and painting == 0
+    progress = progressingIndexAfterFlip(index_samples, flip_index, sample_frame_indices)
+    clock = carriedClock1to2(pre_flip_owner_ids, pool_reads, carried_el_id)
+    state = gl_state_after if isinstance(gl_state_after, dict) else {}
+    from_n = _strict_hash_num(hash1)
+    to_n = _strict_hash_num(hash2)
+    hash_ok = from_n == at_scene - 1 and to_n == at_scene
+    live = glLiveOnSlide2(gl_states_s2, at_scene)
+    retired_ok = state.get("standDowns") == [GL_HANDOFF_STAND_DOWN] and state.get("state") == "RETIRED"
+    clauses = {
+        "a": entry is not None,
+        "b": bool(zone["ok"] and live["ok"]),
+        "c": census["ok"],
+        "d": pool["ok"],
+        "e": no_painting,
+        "f": progress["ok"],
+        "g": clock["ok"],
+        "h": bool(retired_ok and hash_ok and not player_build_errors),
+    }
+    reasons = []
+    if not clauses["a"]:
+        reasons.append("(a) no glReplay retire-fallback entry for the target key")
+    if not clauses["b"]:
+        reasons.append("(b) " + "; ".join(zone["problems"] + live["problems"]))
+    if not clauses["c"]:
+        reasons.append("(c) " + str(census.get("reason")))
+    if not clauses["d"]:
+        reasons.append("(d) " + "; ".join(pool["problems"]))
+    if not clauses["e"]:
+        reasons.append(f"(e) paintingCount {painting!r} on settled slide 2")
+    if not clauses["f"]:
+        reasons.append(
+            f"(f) composite {progress['composite'].get('reason')!r}, "
+            f"sampleFrame {progress['sourceSampleFrame'].get('reason')!r}"
+        )
+    if not clauses["g"]:
+        reasons.append("(g) " + str(clock["reason"]))
+    if not retired_ok:
+        reasons.append(f"(h) module {state.get('state')!r} with standDowns {state.get('standDowns')!r}")
+    if not hash_ok:
+        reasons.append("(h) no valid forward 1->2 boundary")
+    if player_build_errors:
+        reasons.append("(h) player build error")
+    return {
+        "ok": all(clauses.values()),
+        "clauses": clauses,
+        "reasons": reasons,
+        "planEntry": entry,
+        "carriedElId": carried_el_id,
+        "zone": zone,
+        "liveOnSlide2": live,
+        "carryCensus": census,
+        "poolReads": pool,
+        "paintingCount": painting,
+        "progressingIndexAfterFlip": progress,
+        "carriedClock1to2": clock,
+        "glStateAfterBuild1": {k: state.get(k) for k in ("state", "standDowns")},
+        "hash": f"{hash1}->{hash2}",
+        "playerBuildErrors": player_build_errors,
+    }
+
+
 # The CAPTURE CONTRACT for the settled-slide-4 visible-content burst: the shape,
 # frame count, rects and thresholds the re-score uses, taken from HERE and never
 # from the retained blob (plan §10.17).
@@ -1275,16 +1751,9 @@ def _iou(a: object, b: object) -> float | None:
 
 
 def _derived_paint(entry: dict) -> tuple[bool, str | None] | None:
-    """`(visible, hiddenBy)` RECOMPUTED from the raw readings, or `None` when the
-    entry does not carry them.
-
-    The page's own `visible` is a derived Boolean like any other, and a stale one
-    reading `false` over an attached, opaque, on-screen element would be SKIPPED
-    by the attestation. The rules are the page's, restated on the
-    retained `inDocument` / `display` / `visibility` / ancestor-opacity product /
-    `checkVisibility` / client rect / viewport, in the same order, so the two
-    must agree exactly."""
+    """Re-derive paint from raw fields; legacy records default documentHidden to false."""
     attached = entry.get("inDocument")
+    page_hidden = entry.get("documentHidden", False)
     display, visibility = entry.get("display"), entry.get("visibility")
     op = _finite(entry.get("opacityProduct"))
     engine = entry.get("checkVisibility")
@@ -1293,6 +1762,7 @@ def _derived_paint(entry: dict) -> tuple[bool, str | None] | None:
     vw, vh = _finite(view.get("w")), _finite(view.get("h"))
     if not (
         isinstance(attached, bool)
+        and isinstance(page_hidden, bool)
         and (engine is None or isinstance(engine, bool))
         and rect is not None
         and vw is not None and vh is not None
@@ -1300,6 +1770,8 @@ def _derived_paint(entry: dict) -> tuple[bool, str | None] | None:
         return None
     if not attached:
         return False, "detached"
+    if page_hidden:
+        return False, "page-hidden"
     if not (isinstance(display, str) and isinstance(visibility, str) and op is not None):
         return None
     if display == "none":
@@ -1357,13 +1829,14 @@ def _visible_competitors(
     geometry cannot be stated in authored px -- no stage map, a malformed rect,
     a missing `visible` flag -- is not an attestation and fails closed. The
     export's own suppressed restart element paints nothing and so does not
-    compete; `hiddenBy` records which of detached / display-none / zero-size /
-    hidden / engine-hidden / offscreen it was, and `suppressed34` records that
+    compete; `hiddenBy` records which of detached / page-hidden / display-none /
+    zero-size / hidden / engine-hidden / offscreen it was, and `suppressed34` records that
     PRESERVE is what is holding it that way.
     """
     hits: list[dict] = []
     classified: dict[str, int] = {}
     ok = True
+    page_hidden = 0
     bound = str(bound_decoder)
     for i in positions:
         if not (0 <= i < len(media) and 0 <= i < len(owner)):
@@ -1378,6 +1851,9 @@ def _visible_competitors(
             str(e.get("decoderId")) for e in videos
             if isinstance(e, dict) and not e.get("fromPreservePool")
         }
+        if any(isinstance(e, dict) and e.get("documentHidden") is True for e in videos):
+            ok = False
+            page_hidden += 1
         for v in videos:
             if not isinstance(v, dict) or "visible" not in v or not _paint_agrees(v, dom_ids):
                 ok = False
@@ -1398,7 +1874,12 @@ def _visible_competitors(
                              "iou": round(iou, 4), "rect": v.get("rect")})
     return {
         "ok": ok,
-        "reason": None if ok else "a visible competing decoder overlapped the footprint",
+        "reason": (
+            None if ok
+            else "the page was hidden in a scored sample" if page_hidden
+            else "a visible competing decoder overlapped the footprint"
+        ),
+        "pageHidden": page_hidden,
         "hits": hits[:8],
         "n": len(positions),
         "hiddenBy": classified,
@@ -1808,6 +2289,7 @@ def _collector_series_meta(dump: object) -> dict:
         "errors": int(d.get("errors") or 0),
         "schemaOk": schema_ok,
         "monotonicOk": monotonic_ok,
+        "flipVia": d.get("flipVia"),
     }
 
 
