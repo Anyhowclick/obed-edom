@@ -137,7 +137,7 @@ OPACITY_UNPROVEN_REASONS = [
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "84cf7830d8bfd33954fd594e4fdd9574f1125b6d68b6c4d9bcfc596179bab8a9"
+PINNED_JS_SHA256 = "4f8850e05177d12051eadd37f84e091938b46e8fd0e2b7ecf03e7637bed6351e"
 
 
 # =======================================================================================
@@ -724,6 +724,13 @@ FakeGL.prototype.texImage2D = function () {
       a[4] === FIXTURE.slotSizes[MOVIE_SLOT_JS][1]) {
     throw new Error('poster restore upload refused');
   }
+  // A restore upload that returns normally but fails: the GL error is the only evidence
+  // and the texture keeps what it held (the video).
+  if (a.length >= 9 && this._restoreSilentError && a[3] === FIXTURE.slotSizes[MOVIE_SLOT_JS][0] &&
+      a[4] === FIXTURE.slotSizes[MOVIE_SLOT_JS][1]) {
+    this._error = GLC.INVALID_OPERATION;
+    return;
+  }
   if (a.length >= 9) {                       // target, level, ifmt, w, h, border, fmt, type, px
     upload = { srcType: 'pixels', w: a[3], h: a[4], format: a[6], type: a[7] };
     const px = a[8];
@@ -1258,6 +1265,7 @@ async function main() {
       gl._flipY = true; gl._premul = true;
       gl._units[gl._activeUnit] = gl._tex(777);
     }
+    if (CFG.restoreSilentError) gl._restoreSilentError = true;
     M.debugForceFail = CFG.lateForce;
     await settle(4);
     out.final = snapshotState();
@@ -2686,3 +2694,26 @@ def test_clear_without_clear_color_stands_down_before_uploading(frame):
     assert final["posterTexture"] == final["originalPoster"], final["posterTexture"]
     assert final["moduleClears"] == 0, final["moduleClears"]
     assert final["drawnColours"][MOVIE_SLOT] == POSTER_COLOUR, final["drawnColours"]
+
+
+# --- codex r2: a restore that returns normally but raises a GL error --------------------
+
+
+@pytest.mark.parametrize("late_force", ["canvasRemoved", "glError"])
+def test_restore_with_a_silent_gl_error_is_not_reported_restored(late_force):
+    """Success needs a live context and a clean `getError()` after the upload. On a
+    failed restore the rest replay still runs, and the texture still holds the
+    video. That replay does not put the movie on screen: the canvas already shows
+    the last LIVE frame, drawn from the same texture. What the replay changes is
+    the opacity patch, which it removes, so the composite ends at rest opacities."""
+    out = _run_sandbox(scenario="force_late", lateForce=late_force, restoreSilentError=True,
+                       trackPoster=True)
+    final = _assert_clean(out)
+    assert out["atForce"]["state"] == "LIVE", out["atForce"]
+    assert final["standDowns"] == [late_force], final["standDowns"]
+    assert _standdown_detail(final).get("posterRestored") is False, _standdown_detail(final)
+    assert final["posterTexture"] != final["originalPoster"], "the fake restored it anyway"
+    assert _size(final["posterTexture"]) == VIDEO_SIZE, final["posterTexture"]
+    if late_force == "glError":
+        assert final["drawnColours"][MOVIE_SLOT] == VIDEO_COLOUR, final["drawnColours"]
+        assert final["drawnOpacities"] == REST_OPACITIES, final["drawnOpacities"]

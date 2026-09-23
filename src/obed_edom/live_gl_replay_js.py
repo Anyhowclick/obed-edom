@@ -410,7 +410,7 @@ GL_REPLAY_JS = r"""
       g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, false);
       g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       g.texImage2D(g.TEXTURE_2D, 0, P.intFmt, P.w, P.h, 0, P.extFmt, P.type, P.px);
-      ok = true;
+      ok = !g.isContextLost() && g.getError() === g.NO_ERROR;
     } catch (e) {
     } finally {
       if (saved){
