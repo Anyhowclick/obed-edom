@@ -376,10 +376,11 @@ def pre_deferral_twin_risk(
 ) -> set[tuple[str, int]]:
     """Hide keys ``_check_unambiguous`` could refuse after the save for approximate geometry.
 
-    Payload items carry no ``needs_keynote`` flag, so this is a proxy: every kind the
-    composer can flag (text autosize, masked image/movie, group) counts as approximate.
-    A hide is at risk when its twin class (the writer's signature, from the payload)
-    holds a survivor of such a kind. Superset of the writer's approximate-geometry refusal.
+    A hide is at risk when its twin class (the writer's signature, from the payload) holds
+    a survivor and a member whose geometry may be approximate. Offline-read items carry the
+    reader's ``needsKeynote`` on every item (``None`` when exact), which decides it; other
+    payloads carry no flag, so every kind the composer can flag (text, image, movie,
+    group) counts as approximate. A hide missing from the payload is always at risk.
     """
     def sig(item: dict) -> str | None:
         kind = str(item.get("kind") or "")
@@ -391,17 +392,21 @@ def pre_deferral_twin_risk(
             return group_text.get(int(item.get("kindIndex", -1)))
         return None
 
-    sigs = {(str(it.get("kind") or ""), int(it.get("kindIndex", -1))): sig(it) for it in items}
+    flagged = bool(items) and all("needsKeynote" in it for it in items)
+    by_key = {(str(it.get("kind") or ""), int(it.get("kindIndex", -1))): it for it in items}
+    sigs = {k: sig(it) for k, it in by_key.items()}
+
+    def approximate(key: tuple[str, int]) -> bool:
+        return bool(by_key[key].get("needsKeynote")) if flagged else key[0] in _APPROXIMABLE_KINDS
+
     risky: set[tuple[str, int]] = set()
     for key in hide_keys:
         if key not in sigs:
             risky.add(key)
             continue
-        if key[0] not in _APPROXIMABLE_KINDS:
-            continue
         s = sigs[key]
-        if any(k[0] == key[0] and k not in hide_keys and (s is None or v is None or v == s)
-               for k, v in sigs.items()):
+        twins = [k for k, v in sigs.items() if k[0] == key[0] and (s is None or v is None or v == s)]
+        if any(k not in hide_keys for k in twins) and any(approximate(k) for k in twins):
             risky.add(key)
     return risky
 

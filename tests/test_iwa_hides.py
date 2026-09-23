@@ -51,7 +51,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     _rewrite_members,
     patch_deck_geometry,
 )
-from obed_edom.offline_inspect import _build_data_index, _data_identifier  # noqa: E402
+from obed_edom.offline_inspect import _build_data_index, _data_identifier, offline_wall_payload  # noqa: E402
 from test_iwa_write import _arch, _geom, _member, _shape_super, _transition_dict  # noqa: E402
 
 SHEET = "Index/DocumentStylesheet.iwa"
@@ -1222,3 +1222,35 @@ def test_twin_risk_is_a_superset_of_the_writer_refusal_on_the_rotated_group(tmp_
     assert ("group", 0) in pre_deferral_twin_risk(items, hide_keys, _GROUP_TEXT[3])
     res = _run(source, _GROUP_HIDES, group_text_by_slide=_GROUP_TEXT)
     assert res.slides[3].refused and "approximate" in res.slides[3].reason
+
+
+def test_twin_risk_uses_the_reader_flag_on_offline_items():
+    def off(kind, ki, needs=None, **kw):
+        return {**_item(kind, ki, **kw), "needsKeynote": needs}
+
+    slide20 = [off("group", 0, "group-residual"), off("group", 1, "group-residual")]
+    assert pre_deferral_twin_risk(slide20, {("group", 0)}, {0: "", 1: ""}) == {("group", 0)}
+    clean = [off("image", 0, fileName="a.png"), off("image", 1, fileName="a.png"),
+             off("text", 0, text="T"), off("text", 1, text="T"), off("group", 0), off("group", 1)]
+    assert pre_deferral_twin_risk(clean, {("image", 0), ("text", 0), ("group", 0)}, {0: "G", 1: "G"}) == set()
+    masked = [off("image", 0, fileName="a.png"), off("image", 1, "masked-unresolved", fileName="a.png")]
+    assert pre_deferral_twin_risk(masked, {("image", 0)}, None) == {("image", 0)}
+    no_survivor = [off("image", 0, "rotated-masked", fileName="a.png"), off("image", 1, fileName="b.png")]
+    assert pre_deferral_twin_risk(no_survivor, {("image", 0)}, None) == set()
+    partial = [off("image", 0, fileName="a.png"), _item("image", 1, fileName="a.png")]
+    assert pre_deferral_twin_risk(partial, {("image", 0)}, None) == {("image", 0)}
+
+
+def test_offline_reader_flag_matches_the_writer_on_real_payloads(tmp_path):
+    """Offline-read payload items carry ``needsKeynote``; the predicate flags the rotated
+    group twin (which the writer refuses) and clears the clean image twin (which it accepts)."""
+    rotated = _build(tmp_path / "rot.key", mutate=_rotated_group_twins(False))
+    items = offline_wall_payload(rotated)["slides"][2]["items"]
+    assert all("needsKeynote" in it for it in items)
+    assert ("group", 0) in pre_deferral_twin_risk(items, {("image", 0), ("group", 0)}, _GROUP_TEXT[3])
+
+    clean, _h, _s = _twin_deck(tmp_path / "img.key", "image", surv_at=(600, 700))
+    payload = {s["number"]: s["items"] for s in offline_wall_payload(clean)["slides"]}
+    assert pre_deferral_twin_risk(payload[3], {("image", 0), ("image", 1)}, None) == set()
+    res = _run(clean, _twin_hides("image"), items=payload)
+    assert not res.slides[3].refused, res.slides[3].reason

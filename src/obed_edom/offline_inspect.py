@@ -240,6 +240,7 @@ def _item_from_record(
 
     reason: str | None = None
     needs = rec.get("needs_keynote")
+    item["needsKeynote"] = needs
     if needs is not None and needs not in VOUCHED_NEEDS_KEYNOTE:
         reason = needs
 
