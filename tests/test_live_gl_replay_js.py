@@ -137,7 +137,7 @@ OPACITY_UNPROVEN_REASONS = [
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "e3ae63f4d802cc940ca3d4a4cee7942216ef29d66fd0d844353fe7bc3dd28637"
+PINNED_JS_SHA256 = "10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288"
 
 
 # =======================================================================================
@@ -146,7 +146,7 @@ PINNED_JS_SHA256 = "e3ae63f4d802cc940ca3d4a4cee7942216ef29d66fd0d844353fe7bc3dd2
 
 
 def test_gl_replay_version_is_pinned_int():
-    assert live_gl_replay_js.GL_REPLAY_VERSION == 2
+    assert live_gl_replay_js.GL_REPLAY_VERSION == 1
     assert isinstance(live_gl_replay_js.GL_REPLAY_VERSION, int)
 
 
@@ -3216,3 +3216,45 @@ def test_pending_probe_resolves_stand_down_and_a_stale_handle_answers_the_same()
     final = out["final"]
     assert final["standDowns"] == [NORMAL_EXIT_REASON], final["standDowns"]
     assert final["handlePresent"] is False
+
+
+# --- the real core against the real module ----------------------------------------------
+#
+# The core's G3 tests fake this module as the plain object it publishes. This one runs
+# the real `PRESERVE_CORE_JS` and the real `GL_REPLAY_JS` in one page, in page order
+# (plan < core < module, then load), so a module the core would refuse -- a version the
+# core's `m.version !== 1` gate does not accept -- fails here and not first on a gate.
+
+_REAL_MODULE_AFTER_CORE = r"""
+function CanvasElement() {}
+CanvasElement.prototype.getContext = function () { return null; };
+function GLContext() {}
+GLContext.prototype.clear = function () {};
+GLContext.prototype.drawElements = function () {};
+window.WebGLRenderingContext = GLContext;
+window.__OBED_CONTINUITY_INFO__ = {authoredWidth: 1920, authoredHeight: 1080};
+new Function('HTMLCanvasElement', 'WebGLRenderingContext', __MODULE_SOURCE__)(CanvasElement, GLContext);
+""" + "document.readyState = 'complete';\n"
+
+
+def test_the_real_core_arms_the_zone_for_the_real_module():
+    from test_live_continuity_js import _IDENTITY_STAGE, _run_full_core_in_node
+
+    result = _run_full_core_in_node(
+        plan=RUNTIME_PLAN, stage=_IDENTITY_STAGE,
+        after_core=_REAL_MODULE_AFTER_CORE.replace(
+            "__MODULE_SOURCE__", json.dumps(live_gl_replay_js.GL_REPLAY_JS)),
+        script=r"""
+const m = window.__OBED_GL_REPLAY__;
+const module = m ? {version: m.version, state: m.state, standDowns: m.standDowns.slice()} : null;
+P.glReplay.carried('movie1');
+console.log(JSON.stringify({
+  module: module,
+  zones: P.events.filter((e) => e.kind === 'glreplay-zone')
+    .map((e) => [e.detail.from, e.detail.to, e.detail.reason]),
+}));
+""")
+    assert result["zones"] == [["pending", "armed", "moduleReady"]], result["zones"]
+    assert result["module"] == {
+        "version": live_gl_replay_js.GL_REPLAY_VERSION, "state": "IDLE", "standDowns": [],
+    }, result["module"]

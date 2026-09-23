@@ -750,7 +750,7 @@ def _boot_check(**over):
         "webgl": True,
         "obedLive": True,
         "runtimeVersion": 2,
-        "glVersion": 2,
+        "glVersion": 1,
         "glState": "IDLE",
         "info": {"authoredWidth": 1920, "authoredHeight": 1080, "installed": True},
     }
@@ -770,7 +770,7 @@ def test_boot_check_green():
         {"obedLive": False},
         {"runtimeVersion": None},
         {"glVersion": None},
-        {"glVersion": 1},
+        {"glVersion": 2},
         {"glState": "RETIRED"},
         {"info": None},
     ],

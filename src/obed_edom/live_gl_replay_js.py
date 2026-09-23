@@ -29,7 +29,7 @@ import math
 import re
 from typing import Any
 
-GL_REPLAY_VERSION = 2
+GL_REPLAY_VERSION = 1
 
 GL_REPLAY_JS = r"""
 (function(){
@@ -57,7 +57,7 @@ GL_REPLAY_JS = r"""
   var CANVAS_ID_RE = /^\d+-canvas$/;
 
   var API = {
-    version: 2,
+    version: 1,
     state: 'IDLE',
     events: [],
     notes: [],

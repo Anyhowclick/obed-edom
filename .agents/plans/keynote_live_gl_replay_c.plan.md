@@ -10,7 +10,7 @@ g3h = main-checkout `output/gl-replay-g3-harness/g3/` (git-ignored), r3 = `g3h/r
 
 ## 0. Closed owner decisions this plan carries
 
-- **§11 answered** (owner, 2026-09-23): OQ-1 2D canvas + `texSubImage2D` (own FBO draw rejected: "a lot of work for marginal benefit"; it stays the fallback only if the uploads/s rule trips); OQ-2 bump to 2; OQ-3 compute in page (0.16 px is not visible); OQ-4 P2 only; OQ-5 gate if CvC passes, else report-only; OQ-6 harness-side splices.
+- **§11 answered** (owner, 2026-09-23): OQ-1 2D canvas + `texSubImage2D` (own FBO draw rejected: "a lot of work for marginal benefit"; it stays the fallback only if the uploads/s rule trips); OQ-2 bump to 2 — **REVERSED same day: stays 1** (gates r1 stopped at gate 2: core `live_continuity_js.py:531` refuses any module version ≠ 1 with `moduleVersion`, so v2 never armed; changing the core would break the byte-identical off path; the G2 sha pin identifies the bytes); OQ-3 compute in page (0.16 px is not visible); OQ-4 P2 only; OQ-5 gate if CvC passes, else report-only; OQ-6 harness-side splices.
 
 - **Readback probe is IN scope** (owner, 2026-09-23): G2 gains `probe(rect)` (deferred from g5g6 C8/D4/owner decision 4). §4 designs it; §8 lists its consumers and their known-bads.
 - OD-2 stands: attach stays not injected (host :866-867). The OBS/CEF upload-rate gap (≈14/s in OBS vs ≈30/s headless, measured 2026-09-23) is out of scope. It belongs to the attach qualification that follows (c).
