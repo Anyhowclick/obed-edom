@@ -25,12 +25,12 @@ evidence stays in the main checkout's git-ignored `output/gates-g5g6/{g0,r1,r2}/
 |---|---|---|
 | G-OFF host ×3 (blocking) | PASS | Verdict summary byte-identical to G-0′; key sets equal at 2560×1440, 1600×1000, 1920×1080 |
 | G-OFF P2 off (blocking; the harness fix changes the off path on purpose) | PASS | Fast and slow: success, 14 True. `--disable-bridge34`: False only on `continueThroughMovingMagicMove3to4` (== G-0′). Finding ids/verdicts and key sets == G-0′. Freeze control pass (fast, slow). `collector.flipVia` = `motion` (fast, slow), `hash` (no-bridge) |
-| G6-0 A6 | PASS | Served `main.js` == `PLAYER_SHA256`; `patch_player` one anchor |
+| G6-0 A6 | PASS | Unpatched fixture `main.js` == `PLAYER_SHA256`; `patch_player` verifies one anchor; auto serves the recorded patched digest |
 | G6-0 A7 | PASS | 16/16 `sampleFrame`/screenshot counter pairs \|Δ\| ≤ 2 (typically −1). Known-bad: pairing with the previous read gives \|Δ\| = 14 (12/12). ROI margin +4 px x / +3 px y still decodes; beyond that None, never a wrong index |
 | P5-0 | Poke off | Unpoked Vgl screenshot oracle reads slide 2 LIVE (n=2; poked identical) |
 | P5-A, 3 viewports + 2 reps at 2560×1440 | PASS | 5/5 pass. `armed1to2` True in A and C 10/10. Attach `unavailable` + `refused1to2`; B `refused1to2`; V/Voff all slides; Vgl armed slide 6/6 checks, mask 20/128 |
 | P5-A known-bads / controls | RED / 0 | Vgl vs `facts_off` RED 5/5; V as armed slide RED 5/5; r3 forced shape RED; Vgl vs own facts 0 reasons; two Vgl runs identical |
-| P5-H (2560 ×3) | PASS | Parity maxOutside 0; carry 4/4. V as Vgl RED (carry 0/4); 1-px poke outside mask RED; undilated mask not RED on the real pair (no edge difference) — synthetic ring pixel RED undilated / GREEN dilated; V vs V and Vgl vs Vgl 0 px |
+| P5-H (3 viewports) | PASS | Parity maxOutside 0; carry 4/4. V as Vgl RED (carry 0/4); 1-px poke outside mask RED; undilated mask not RED on the real pair (no edge difference) — synthetic ring pixel RED undilated / GREEN dilated; V vs V and Vgl vs Vgl 0 px |
 | P5-F (2560) | PASS | `planUnreadable`, `rvfcUnavailable`, `posterAmbiguous`, `occlusionTooHigh` `forced-ok`; unknown reason ⇒ `forced-fail` |
 | P5-7 (r1, `bfaeffae`) | PASS | goTo 3 → goTo 1 → advance 2: no `glreplay-live`, zone `armed→retired cleared`, slide-2 shot == flag-off twin |
 | P5-L | Recorded | `mutationScanMs` 0; hand-off `completedMs` 2.8–3.6 ms |

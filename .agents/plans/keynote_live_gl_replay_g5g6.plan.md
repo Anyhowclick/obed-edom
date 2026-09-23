@@ -235,3 +235,4 @@ OQ-11 note: `patch_player` is sha-pinned (`live_runtime.py:94-99`), the same gat
 - Astra H investigation (visible-page hang): P2 sends Windows key codes as macOS `nativeVirtualKeyCode` ⇒ hidden page / hang; host unaffected ⇒ P2 timing verdicts are screenshot-driven. Fixed by the harness-fix branch folded into this PR.
 - Astra H r2 (d43de548): 0 BLOCKER, 1 MAJOR (forced-ok on invalid V reference), 5 MINOR — fixed in the following commit.
 - Astra H r3 (fc5e79b0, harness fix): 0 BLOCKER, 1 MAJOR (hidden page skipped competitors, RED→GREEN), 3 MINOR (motion stamp not bound to the carried decoder; collector-tail timeout and driver ordering untested; `_derived_paint` docstring) — fixed in the following commit.
+- Astra H r4 (04106ec9): all r3 findings closed; 2 MINOR doc wording fixes (README attach mode, gate-record player sha) applied.

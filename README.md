@@ -120,10 +120,10 @@ scores decoder identity + playback-clock continuity at each cut.
 live across a click-driven Magic Move whose destination draws artwork above it,
 by replaying the player's own WebGL frame with the live movie as the texture.
 `output.continuity.glReplay.mode` reports `off`, `injected`, `notApplicable` or
-`unavailable`; the OBS attach output always reports `unavailable`, and
-`notCarried` still lists that boundary while GL replay is injected. Qualify it
-with `scripts/live_continuity_probe.py --gl-replay auto` and
-`scripts/p2_recovery_html_adversarial.py --gl-replay auto`.
+`unavailable`; with GL replay `auto` and continuity on, the OBS attach output
+reports `unavailable` (otherwise `off`), and `notCarried` still lists that
+boundary while GL replay is injected. Qualify it with
+`scripts/live_continuity_probe.py --gl-replay auto` and `scripts/p2_recovery_html_adversarial.py --gl-replay auto`.
 
 ### Codec report
 
