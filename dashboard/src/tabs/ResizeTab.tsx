@@ -51,6 +51,7 @@ type ResizeResult = FramingProposal & {
   resolvedExportDir?: string;
   proposalExportDir?: string;
   offlineHides?: string;
+  outputCloseRequired?: string;
   offlineHidesAborted?: { reason: string; detail?: string; needsFreshOutput?: boolean; outputPath?: string };
   applied?: number;
   missed?: number;
@@ -80,8 +81,9 @@ export function ResizeTab() {
   const [closedFor, setClosedFor] = useState<string | null>(null);
   const hidesAborted = result?.offlineHidesAborted;
   const offlineHides = result?.offlineHides === "off" ? ("off" as const) : undefined;
-  const outputName = hidesAborted?.outputPath?.split("/").pop() || "the output deck";
-  const needsClose = Boolean(hidesAborted?.needsFreshOutput);
+  const closePath = hidesAborted?.needsFreshOutput ? hidesAborted.outputPath : result?.outputCloseRequired;
+  const outputName = closePath?.split("/").pop() || "the output deck";
+  const needsClose = Boolean(hidesAborted?.needsFreshOutput || result?.outputCloseRequired);
   const outputClosed = Boolean(job) && closedFor === job?.id;
   const hidesNotice =
     hidesAborted &&

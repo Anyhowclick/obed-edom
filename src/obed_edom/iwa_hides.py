@@ -349,7 +349,8 @@ def _check_unambiguous(
     hide_keys = {(str(h.get("kind")), int(h.get("kindIndex", -1))) for h in hides}
     sigs = {(r["kind"], r["kindIndex"]): _content_signature(r, objects, data_index, group_text, cache)
             for r in records}
-    geom = {(r["kind"], r["kindIndex"]): _rect(r) for r in compose_geometry(slide, objects)}
+    composed = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(slide, objects)}
+    geom = {k: _rect(r) for k, r in composed.items()}
     payload = {(str(it.get("kind")), int(it.get("kindIndex", -1))): it for it in items}
     for key in sorted(hide_keys):
         sig = sigs[key]
@@ -357,15 +358,58 @@ def _check_unambiguous(
                      and (sig is None or sigs[k] is None or sigs[k] == sig)]
         if not survivors:
             continue
+        competing = [k for k in sigs if k[0] == key[0] and (sig is None or sigs[k] is None or sigs[k] == sig)]
+        approximate = {f"{k[0]} {k[1]}": composed[k]["needs_keynote"]
+                       for k in competing if (composed.get(k) or {}).get("needs_keynote")}
+        if approximate:
+            raise _Refuse(f"{key[0]} {key[1]} has a survivor twin and approximate saved geometry {approximate}")
         want = _rect(payload.get(key))
         if not _near(geom.get(key), want) or any(_near(geom.get(k), want) for k in survivors):
             raise _Refuse(f"{key[0]} {key[1]} has a survivor twin that geometry cannot tell apart")
 
 
+_APPROXIMABLE_KINDS = frozenset({"text", "image", "movie", "group"})
+
+
+def pre_deferral_twin_risk(
+    items: list[dict], hide_keys: set[tuple[str, int]], group_text: dict | None,
+) -> set[tuple[str, int]]:
+    """Hide keys ``_check_unambiguous`` could refuse after the save for approximate geometry.
+
+    Payload items carry no ``needs_keynote`` flag, so this is a proxy: every kind the
+    composer can flag (text autosize, masked image/movie, group) counts as approximate.
+    A hide is at risk when its twin class (the writer's signature, from the payload)
+    holds a survivor of such a kind. Superset of the writer's approximate-geometry refusal.
+    """
+    def sig(item: dict) -> str | None:
+        kind = str(item.get("kind") or "")
+        if kind in ("text", "shape"):
+            return _normalize_text(item.get("text"))
+        if kind in ("image", "movie"):
+            return item.get("fileName") or None
+        if kind == "group" and group_text is not None:
+            return group_text.get(int(item.get("kindIndex", -1)))
+        return None
+
+    sigs = {(str(it.get("kind") or ""), int(it.get("kindIndex", -1))): sig(it) for it in items}
+    risky: set[tuple[str, int]] = set()
+    for key in hide_keys:
+        if key not in sigs:
+            risky.add(key)
+            continue
+        if key[0] not in _APPROXIMABLE_KINDS:
+            continue
+        s = sigs[key]
+        if any(k[0] == key[0] and k not in hide_keys and (s is None or v is None or v == s)
+               for k, v in sigs.items()):
+            risky.add(key)
+    return risky
+
+
 def _owned_refs(obj: dict) -> list[str]:
     """Strong ownership refs: group children, owned storage, media mask. Weak parent and
     shared style refs are deliberately not ownership."""
-    refs = [c.get("identifier") for c in obj.get("children") or []] if obj.get("_pbtype") == "TSD.GroupArchive" else []
+    refs = [c.get("identifier") for c in obj.get("children") or [] if isinstance(c, dict)]
     refs += [(obj.get(k) or {}).get("identifier") for k in ("ownedStorage", "mask")]
     return [str(r) for r in refs if r is not None]
 
@@ -473,7 +517,7 @@ def _plan_slide(
         raise _Refuse(f"subtree ids duplicated in the deck: {sorted(dup)[:5]}")
     for x in subtree:
         header = set(_header_refs(model.archives[x]["header"]))
-        for t in _owned_refs(model.objects.get(x) or {}):
+        for t in (t for obj in model.archives[x].get("objects") or [] for t in _owned_refs(obj)):
             if t not in header or model.member_of.get(t) != member:
                 raise _Refuse(f"{x} owns {t} ({model.member_of.get(t)}) without a same-member header reference")
         for _w, t in _body_refs(model.archives[x]):

@@ -145,6 +145,54 @@ def test_offline_hides_mode_forced_off_when_iwa_extra_missing(monkeypatch):
 # --- eligibility ------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_twin_risk(monkeypatch):
+    """Stand in for Stream B's `pre_deferral_twin_risk` (clean by default) so eligibility
+    tests do not depend on B's module; tests that need a flag override `twin_risk`."""
+    import importlib
+
+    try:
+        mod = importlib.import_module("obed_edom.iwa_hides")
+    except Exception:  # noqa: BLE001
+        mod = types.ModuleType("obed_edom.iwa_hides")
+        monkeypatch.setitem(sys.modules, "obed_edom.iwa_hides", mod)
+    calls = []
+
+    def fake(items, hide_keys, group_text):
+        calls.append({"items": items, "hide_keys": set(hide_keys), "group_text": group_text})
+        return set()
+
+    monkeypatch.setattr(mod, "pre_deferral_twin_risk", fake, raising=False)
+    return calls
+
+
+def test_eligibility_excludes_slide_flagged_by_twin_risk(monkeypatch, _no_twin_risk):
+    """FRC slide 20: two text-less groups with approximate geometry cannot be told apart
+    after the save, so the slide stays on the Keynote delete instead of aborting later."""
+    import obed_edom.iwa_hides as mod
+
+    seen = []
+
+    def flag(items, hide_keys, group_text):
+        seen.append((items, set(hide_keys), group_text))
+        return {("group", 0)} if ("group", 0) in hide_keys else set()
+
+    monkeypatch.setattr(mod, "pre_deferral_twin_risk", flag, raising=False)
+    t = [_hide(1, "image", 0), _hide(3, "group", 0)]
+    assert offline_write.offline_hide_slides(t, WALL, None) == {1}
+    by_keys = {frozenset(k): (items, gt) for items, k, gt in seen}
+    items3, gt3 = by_keys[frozenset({("group", 0)})]
+    assert items3 == WALL["slides"][2]["items"]
+    assert gt3 == {1: "sig"}
+
+
+def test_eligibility_clean_twin_risk_keeps_slide(_no_twin_risk):
+    t = [_hide(1, "image", 0), _hide(3, "group", 0)]
+    assert offline_write.offline_hide_slides(t, WALL, None) == {1, 3}
+    assert {frozenset(c["hide_keys"]) for c in _no_twin_risk} == {
+        frozenset({("image", 0)}), frozenset({("group", 0)})}
+
+
 def test_eligibility_slides_with_hides_only():
     t = [_hide(1, "image", 0), _move(1, "text", 0), _move(3, "text", 0)]
     assert offline_write.offline_hide_slides(t, WALL, None) == {1}
@@ -230,7 +278,7 @@ def test_fallback_script_binds_unique_canonical_path_match_before_any_delete(tmp
     assert "/link/" not in script
     assert f'open (POSIX file "{target}")' in script
     assert "POSIX path of ((file of d) as alias)" in script
-    assert "if (my obedCanon(p)) is target then" in script
+    assert "if my obedIsTarget(p, target) then" in script
     bind = script.index(f'set matches to my obedMatches("{target}")')
     assert bind < script.index("if (count of matches) is not 1 then") < script.index("tell slide 3")
     assert "starts with" not in script and "start with" not in script
@@ -238,13 +286,18 @@ def test_fallback_script_binds_unique_canonical_path_match_before_any_delete(tmp
     assert "document 1" not in script
 
 
-def test_fallback_script_closes_only_verified_matches_on_binding_failure(tmp_path):
+def test_fallback_script_closes_nothing_on_binding_failure(tmp_path):
+    """Astra r3 #3: zero or several matches abort without closing anything; only the
+    document bound exactly is ever closed."""
     script = offline_write._hide_fallback_script(tmp_path / "out.key", {3: "      tell slide 3\n      end tell"})
     lines = [ln.strip() for ln in script.splitlines()]
     check = lines.index("if (count of matches) is not 1 then")
-    assert lines[check + 1] == "repeat with m in matches"
-    assert lines[check + 3] == "close (contents of m) saving no"
-    assert lines[check + 6].startswith('error "hides fallback bound " & (count of matches)')
+    assert lines[check + 1].startswith('error "hides fallback bound " & (count of matches)')
+    assert lines[check + 2] == "end if"
+    assert "contents of m" not in script
+    closes = [ln for ln in lines if ln.startswith("close ")]
+    assert closes == ["close theDoc saving no", "close theDoc saving yes"]
+    assert script.index("set theDoc to item 1 of matches") < script.index("close theDoc saving no")
 
 
 def test_fallback_script_saves_and_confirms_close_by_the_same_identity(tmp_path):
@@ -267,17 +320,17 @@ def test_fallback_script_saves_and_confirms_close_by_the_same_identity(tmp_path)
     assert lines.index(f'return "{offline_write.HIDE_FALLBACK_OK}"') > close
 
 
-def _canon(p):
+def _same(p, t):
+    """Run the shell step exactly as `obedIsTarget` does; True iff it would bind."""
     import subprocess
 
-    return subprocess.run(["sh", "-c", f"p='{p}'; " + offline_write._CANON_SH],
-                          capture_output=True, text=True).stdout
+    return subprocess.run(["sh", "-c", f"p='{p}'; t='{t}'; " + offline_write._SAME_PATH_SH],
+                          capture_output=True, text=True).returncode == 0
 
 
-def test_canon_shell_matches_python_realpath_for_symlink_and_alias_spellings(tmp_path):
-    """The AppleScript side canonicalises the alias path with this shell snippet; it must
-    agree with `os.path.realpath` for symlinked directories, `/tmp` vs `/private/tmp`, and a
-    package's trailing slash."""
+def test_same_path_accepts_symlink_and_alias_spellings(tmp_path):
+    """The alias path Keynote reports must match `os.path.realpath(dest)` through symlinked
+    directories, `/tmp` vs `/private/tmp`, and a package's trailing slash."""
     import os
 
     real = tmp_path / "real"
@@ -286,12 +339,55 @@ def test_canon_shell_matches_python_realpath_for_symlink_and_alias_spellings(tmp
     (real / "out.key").write_bytes(b"x")
     (real / "pkg.key").mkdir()
     want = os.path.realpath(real / "out.key")
-    assert _canon(str(tmp_path / "link" / "out.key")) == want
-    assert _canon(str(real / "out.key")) == want
-    assert _canon(str(tmp_path / "link" / "pkg.key") + "/") == os.path.realpath(real / "pkg.key")
+    assert _same(str(tmp_path / "link" / "out.key"), want)
+    assert _same(str(real / "out.key"), want)
+    assert _same(str(tmp_path / "link" / "pkg.key") + "/", os.path.realpath(real / "pkg.key"))
     if os.path.realpath("/tmp") == "/private/tmp":
-        assert _canon("/tmp/obed-hides-canon.key") == "/private/tmp/obed-hides-canon.key"
-    assert _canon(str(tmp_path / "missing-dir" / "out.key")) == ""
+        assert _same("/tmp/obed-hides-canon.key", "/private/tmp/obed-hides-canon.key")
+
+
+def test_same_path_is_byte_exact(tmp_path):
+    """Astra r3 #3: a differently cased path (same file on a case-insensitive volume, or an
+    unrelated document) never matches; neither does a missing directory or a sibling."""
+    import os
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "out.key").write_bytes(b"x")
+    want = os.path.realpath(real / "out.key")
+    assert not _same(str(real / "OUT.key"), want)
+    assert not _same(str(real / "Out.key"), want)
+    assert not _same(str(real / "out.key.bak"), want)
+    assert not _same(str(tmp_path / "missing-dir" / "out.key"), want)
+    assert not _same("", want)
+
+
+def test_obed_is_target_handler_semantics_under_osascript(tmp_path):
+    """Run the real `obedIsTarget` handler through osascript with NO `tell application`
+    (pure string/shell work): exact match binds; a case variant does not."""
+    import os
+    import shutil
+    import subprocess
+
+    if shutil.which("osascript") is None:
+        pytest.skip("osascript unavailable")
+    handler = offline_write._same_path_handler()
+    assert "tell application" not in handler
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "out.key").write_bytes(b"x")
+    want = os.path.realpath(real / "out.key")
+
+    def run(p):
+        esc = offline_write._as_escape
+        script = handler + f'\nreturn my obedIsTarget("{esc(p)}", "{esc(want)}")'
+        out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+        assert out.returncode == 0, out.stderr
+        return out.stdout.strip()
+
+    assert run(str(real / "out.key")) == "true"
+    assert run(str(real / "OUT.key")) == "false"
+    assert run("") == "false"
 
 
 # --- run_offline_hides --------------------------------------------------------------------

@@ -219,6 +219,32 @@ describe("Resize tab after an offline-hides abort", () => {
     expect(applyBody(fetchSpy)).toMatchObject({ offlineHides: "off", outputClosed: true });
   });
 
+  it("a fresh proposal after a timeout still requires confirming the shared output is closed", async () => {
+    // The backend keys the unresolved closure by output path, so the new proposal job
+    // carries `outputCloseRequired` even though it has no abort of its own.
+    const fresh: Job = {
+      ...aborted,
+      id: "job-2",
+      status: "done",
+      error: null,
+      result: { ...proposal, offlineHides: "off", outputCloseRequired: "/tmp/out/wall_CG.key" },
+    };
+    vi.mocked(getJob).mockImplementation(async () => fresh);
+    vi.mocked(pollJob).mockImplementation(async () => fresh);
+    const fetchSpy = spyFetch(fresh);
+    renderOpenRun("job-2");
+
+    await clickApply();
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/apply"))).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" }));
+    });
+    await clickApply();
+
+    expect(applyBody(fetchSpy, "job-2")).toMatchObject({ offlineHides: "off", outputClosed: true });
+  });
+
   it("an ordinary error shows its message and leaves offline hides alone", async () => {
     vi.mocked(getJob).mockImplementation(async () => plainError);
     vi.mocked(pollJob).mockImplementation(async () => plainError);

@@ -40,7 +40,7 @@ pytest.importorskip("keynote_parser")
 from keynote_parser.codec import IWAFile  # noqa: E402
 
 from obed_edom import iwa_hides, iwa_write  # noqa: E402
-from obed_edom.iwa_hides import HidesResult, HidesWriteFailed, patch_deck_hides  # noqa: E402
+from obed_edom.iwa_hides import HidesResult, HidesWriteFailed, patch_deck_hides, pre_deferral_twin_risk  # noqa: E402
 from obed_edom.iwa_geometry import compose_geometry  # noqa: E402
 from obed_edom.iwa_kindindex import deck_kind_counts, derive_kind_index  # noqa: E402
 from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
@@ -480,7 +480,7 @@ def _build_ref(members):
 
 def _shared_mask(members):
     members[S1][0] = _slide(101, [300, 301, 302, 303, 304, 305, 306, 307])
-    members[S1].append(_image(307, 51, mask=312))
+    members[S1].append(_image(307, 53, mask=312))
 
 
 def _connection_line(members):
@@ -1122,3 +1122,103 @@ def test_read_back_catches_metadata_naming_a_removed_id(deck, monkeypatch):
     monkeypatch.setattr(iwa_hides, "_rewrite_members", stale_metadata)
     with pytest.raises(HidesWriteFailed, match="names removed 401|names removed 411"):
         _run(deck, {2: [HIDES[2][0]]})
+
+
+# ---------------------------------------------------------------- Astra r3 #1: approximate geometry, #2: later objects
+
+
+def _rotated_group_twins(swap):
+    """Hide group 520 is rotated 30 degrees: its composed (translation-only) rect is
+    approximate (``needs_keynote="rotated-group"``). Survivor group 540, same child text,
+    sits exactly on the rect the source reported for the rotated hide."""
+    archs = []
+    for gid, at, angle in ((520, (40, 400), 30.0), (540, (130, 70), 0.0)):
+        archs.append(_a(gid, "TSD.GroupArchive", {"children": [{"identifier": gid + 1}],
+                                                  "super": _geom(*at, 100, 40, angle)}, refs=[gid + 1]))
+        archs.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), extra_refs=[gid]))
+    z = [500, 501, 540, 520] if swap else [500, 501, 520, 540]
+
+    def mutate(members):
+        members[S3] = [_slide(103, z), *_text(500, 510, "Stay"), _image(501, 54), *archs]
+    return mutate
+
+
+def test_rotated_group_swap_refuses_unproven(tmp_path):
+    source = _build(tmp_path / "src.key", mutate=_rotated_group_twins(False))
+    saved = _build(tmp_path / "saved.key", mutate=_rotated_group_twins(True))
+    items = _payload(source)
+    survivor_rect = next(it for it in items[3] if (it["kind"], it["kindIndex"]) == ("group", 1))
+    items[3] = [dict(it, **{k: survivor_rect[k] for k in "xywh"})
+                if (it["kind"], it["kindIndex"]) == ("group", 0) else it for it in items[3]]
+    before = _raw_members(saved)
+    res = _run(saved, _GROUP_HIDES, items=items, counts=deck_kind_counts(source), group_text_by_slide=_GROUP_TEXT)
+    assert res.slides[3].refused and "rotated-group" in res.slides[3].reason, res.slides[3].reason
+    assert not res.slides[3].order_proven
+    assert _raw_members(saved)[S3] == before[S3]
+
+
+def test_second_object_ownership_cross_member_without_header_refuses(tmp_path):
+    """Archive 306 carries a second object owning child 320, which lives in another member
+    and is absent from 306's header: removing 306 alone would orphan 320/321."""
+    def mutate(members):
+        members[S1] = [a for a in members[S1] if str(a["header"]["identifier"]) not in {"306", "320", "321"}]
+        members[SHEET].extend(_text(320, 321, "G child"))
+        group = _a(306, "TSD.GroupArchive", {"children": [], "super": {}}, refs=[])
+        second = copy.deepcopy(group["objects"][0])
+        second["children"] = [{"identifier": 320}]
+        group["objects"].append(second)
+        group["header"]["messageInfos"].append(copy.deepcopy(group["header"]["messageInfos"][0]))
+        members[S1].append(group)
+
+    path = _build(tmp_path / "second.key", mutate=mutate)
+    before = _raw_members(path)
+    res = _run(path)
+    _assert_refused_only(path, before, res, 1, "owns 320")
+
+
+# ---------------------------------------------------------------- pre-deferral twin risk (payload-only)
+
+
+def _item(kind, ki, **kw):
+    return {"kind": kind, "kindIndex": ki, "text": "", "fileName": "", **kw}
+
+
+def test_twin_risk_flags_slide_20_shape():
+    """FRC slide 20: two text-less groups (both group-residual in the writer), group 0 hidden."""
+    items = [_item("group", 0, x=5773, y=0, w=1920, h=1080), _item("group", 1, x=3840, y=0, w=1920, h=1080)]
+    assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}) == {("group", 0)}
+    assert pre_deferral_twin_risk(items, {("group", 0)}, {}) == {("group", 0)}
+    assert pre_deferral_twin_risk(items, {("group", 0)}, None) == {("group", 0)}
+
+
+def test_twin_risk_ignores_clean_twins():
+    items = [
+        _item("shape", 0, text="Same"), _item("shape", 1, text="Same"),
+        _item("image", 0, fileName="a.png"), _item("image", 1, fileName="b.png"),
+        _item("text", 0, text="Twin"), _item("text", 1, text="Twin"),
+        _item("line", 0), _item("line", 1),
+        _item("group", 0), _item("group", 1),
+    ]
+    hides = {("shape", 0), ("image", 0), ("text", 0), ("text", 1), ("line", 0), ("group", 0)}
+    assert pre_deferral_twin_risk(items, hides, {0: "A", 1: "B"}) == set()
+
+
+def test_twin_risk_flags_approximable_kinds_with_a_survivor_twin():
+    items = [_item("image", 0, fileName="a.png"), _item("image", 1, fileName="a.png"),
+             _item("text", 0, text="T"), _item("text", 1, text=" T "),
+             _item("group", 0), _item("group", 1)]
+    hides = {("image", 0), ("text", 1), ("group", 1)}
+    assert pre_deferral_twin_risk(items, hides, {0: "G", 1: "G"}) == hides
+
+
+def test_twin_risk_flags_a_hide_missing_from_the_payload():
+    assert pre_deferral_twin_risk([_item("image", 0)], {("image", 3)}, None) == {("image", 3)}
+
+
+def test_twin_risk_is_a_superset_of_the_writer_refusal_on_the_rotated_group(tmp_path):
+    source = _build(tmp_path / "src.key", mutate=_rotated_group_twins(False))
+    items = _payload(source)[3]
+    hide_keys = {("image", 0), ("group", 0)}
+    assert ("group", 0) in pre_deferral_twin_risk(items, hide_keys, _GROUP_TEXT[3])
+    res = _run(source, _GROUP_HIDES, group_text_by_slide=_GROUP_TEXT)
+    assert res.slides[3].refused and "approximate" in res.slides[3].reason

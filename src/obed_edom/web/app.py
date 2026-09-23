@@ -1116,14 +1116,6 @@ def create_app() -> FastAPI:
         if not key.exists() or not template.exists():
             raise HTTPException(400, "The wall deck or template has moved since proposing.")
         hides = _offline_hides_field(payload.offlineHides) or result.get("offlineHides")
-        aborted = result.get("offlineHidesAborted") or {}
-        if aborted.get("needsFreshOutput") and not payload.outputClosed:
-            name = Path(str(aborted.get("outputPath") or "")).name or "the output deck"
-            raise HTTPException(
-                409,
-                f"Close {name} in Keynote and confirm it is closed before re-applying; "
-                "the last run may have left it open or partly edited.",
-            )
         export_dir: str | None = None
         resolved_export_dir: str | None = None
         if payload and payload.exportDir is not None:
@@ -1142,6 +1134,22 @@ def create_app() -> FastAPI:
                         resolved_export_dir = str(resolve_export_destination(None))
                     except ValueError as exc:
                         raise HTTPException(400, str(exc)) from exc
+        target_root = resolved_export_dir if payload.exportDir is not None else result.get("resolvedExportDir")
+        dest = _resize_dest(key, Path(target_root) if target_root else export_destination(job))
+        unclosed = _unclosed_outputs(dest)
+        if unclosed and not payload.outputClosed:
+            raise HTTPException(
+                409,
+                f"Close {dest.name} in Keynote and confirm it is closed before re-applying; "
+                "an earlier run may have left it open or partly edited.",
+            )
+        for other in unclosed:
+            other_result = dict(other.result or {})
+            other_result["offlineHidesAborted"] = {
+                **other_result["offlineHidesAborted"],
+                "needsFreshOutput": False,
+            }
+            RUNNER.update_result(other.id, other_result)
         if payload and payload.decisions is not None:
             save_resize_framings(job_id, payload)
         if payload and payload.exportDir is not None:
@@ -3003,6 +3011,22 @@ def _run_dsk_export_apply(job: Job, proposal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resize_dest(source: Path, export_root: Path) -> Path:
+    return export_root / f"{source.stem}_CG.key"
+
+
+def _unclosed_outputs(dest: Path) -> list[Job]:
+    """Resize jobs whose offline-hides abort may have left `dest` open in Keynote."""
+    target = dest.expanduser().resolve()
+    unclosed = []
+    for job in RUNNER.list(feature="resize"):
+        abort = (job.result or {}).get("offlineHidesAborted") or {}
+        output = str(abort.get("outputPath") or "")
+        if abort.get("needsFreshOutput") and output and Path(output).expanduser().resolve() == target:
+            unclosed.append(job)
+    return unclosed
+
+
 def _offline_hides_field(raw: str | None) -> str | None:
     """The dashboard may only switch offline hides off; blank keeps the env default."""
     value = (raw or "").strip().lower()
@@ -3117,6 +3141,7 @@ def _run_resize_propose(
         }
         page["resurfaced"] = page["index"] in set(reuse.resurfaced)
     resolved_export_dir = str(resolve_export_destination(export_dir or None))
+    dest = _resize_dest(path, Path(resolved_export_dir))
     return {
         "phase": "framing",
         "path": str(path),
@@ -3126,6 +3151,7 @@ def _run_resize_propose(
         "export": export,
         **({"exportDir": export_dir} if export_dir else {}),
         **({"offlineHides": offline_hides} if offline_hides else {}),
+        **({"outputCloseRequired": str(dest)} if _unclosed_outputs(dest) else {}),
         "resolvedExportDir": resolved_export_dir,
         "proposalExportDir": resolved_export_dir,
         **proposal,
@@ -3152,7 +3178,7 @@ def _run_resize(
     dest_dir = default_output_root() / ".resize" / job.name
     resolved_export_dir = (job.result or {}).get("resolvedExportDir")
     export_root = Path(resolved_export_dir) if resolved_export_dir else export_destination(job)
-    dest = export_root / f"{path.stem}_CG.key"
+    dest = _resize_dest(path, export_root)
     export_dir = dest_dir / "previews" if export else None
     label = format_slide_range(slide_range)
     scope = f"slide {label}" if label else "every slide"

@@ -146,8 +146,10 @@ def offline_hide_slides(
     wanted: list[int] | None,
 ) -> set[int]:
     """Slides whose hides the IWA writer deletes after the pass-1 save: slides with a
-    hide, within `wanted`, minus slides where a hide is a source build target, a dual, or
-    has no AppleScript address (those stay on the Keynote delete)."""
+    hide, within `wanted`, minus slides where a hide is a source build target, a dual, has
+    no AppleScript address, or is a group twin the writer could not disambiguate after the
+    save (`pre_deferral_twin_risk`); those stay on the Keynote delete."""
+    from obed_edom.iwa_hides import pre_deferral_twin_risk  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.remap_keynote import _AS_KIND_NAMES  # noqa: PLC0415 (avoid a module cycle)
 
     hides = _hide_specs_by_slide(transform_dicts)
@@ -164,7 +166,11 @@ def offline_hide_slides(
             (str(b.get("kind") or ""), int(b.get("kindIndex") or 0))
             for b in slide.get("builds") or []
         }
-        if any((str(s.get("kind")), int(s["kindIndex"])) in excluded for s in specs):
+        hide_keys = {(str(s.get("kind")), int(s["kindIndex"])) for s in specs}
+        if hide_keys & excluded:
+            continue
+        group_text = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
+        if pre_deferral_twin_risk(slide.get("items") or [], hide_keys, group_text):
             continue
         out.add(n)
     return out
@@ -192,30 +198,41 @@ def _hide_delete_body(specs: list[dict[str, Any]], slide_no: int) -> str:
     return "\n".join(body + ["      end tell"])
 
 
-_CANON_SH = (
+_SAME_PATH_SH = (
     'p="${p%/}"; d=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || exit 1; '
-    'printf \'%s/%s\' "$d" "$(basename "$p")"'
+    '[ "$d/$(basename "$p")" = "$t" ] && printf 1'
 )
+
+
+def _same_path_handler() -> str:
+    """`obedIsTarget(p, t)`: true iff `p`, canonicalised (symlinks, /tmp vs /private/tmp, a
+    package's trailing slash), equals `t` byte for byte. The comparison runs in the shell,
+    so AppleScript's case-insensitive `is` never decides identity."""
+    same_sh = _as_escape(_SAME_PATH_SH)
+    return "\n".join([
+        "on obedIsTarget(p, t)",
+        '  if p is "" then return false',
+        "  try",
+        f'    do shell script "p=" & quoted form of p & "; t=" & quoted form of t & "; " & "{same_sh}"',
+        "    return true",
+        "  on error",
+        "    return false",
+        "  end try",
+        "end obedIsTarget",
+    ])
 
 
 def _hide_fallback_script(dest: Path, bodies_by_slide: dict[int, str]) -> str:
     """One session: open `dest`, bind the unique open document whose `file … as alias` path
-    canonicalises (symlinks, /tmp vs /private/tmp) to `os.path.realpath(dest)`, delete, save,
-    close, and confirm by the same identity that no such document stays open. Any failure
-    after binding closes it without saving; only a full success returns `HIDE_FALLBACK_OK`."""
+    is byte-identical to `os.path.realpath(dest)` after canonicalisation, delete, save,
+    close, and confirm by the same identity that no such document stays open. A binding
+    failure closes nothing; any failure after binding closes the bound document without
+    saving; only a full success returns `HIDE_FALLBACK_OK`."""
     import os  # noqa: PLC0415
 
     target = _as_escape(os.path.realpath(dest))
-    canon_sh = _as_escape(_CANON_SH)
     return "\n".join([
-        "on obedCanon(p)",
-        '  if p is "" then return ""',
-        "  try",
-        f'    return do shell script "p=" & quoted form of p & "; " & "{canon_sh}"',
-        "  on error",
-        '    return ""',
-        "  end try",
-        "end obedCanon",
+        _same_path_handler(),
         "",
         "on obedMatches(target)",
         "  set found to {}",
@@ -226,7 +243,7 @@ def _hide_fallback_script(dest: Path, bodies_by_slide: dict[int, str]) -> str:
         "      try",
         "        set p to POSIX path of ((file of d) as alias)",
         "      end try",
-        "      if (my obedCanon(p)) is target then set end of found to (contents of d)",
+        "      if my obedIsTarget(p, target) then set end of found to (contents of d)",
         "    end repeat",
         "  end tell",
         "  end using terms from",
@@ -240,11 +257,6 @@ def _hide_fallback_script(dest: Path, bodies_by_slide: dict[int, str]) -> str:
         f'    open (POSIX file "{target}")',
         f'    set matches to my obedMatches("{target}")',
         "    if (count of matches) is not 1 then",
-        "      repeat with m in matches",
-        "        try",
-        "          close (contents of m) saving no",
-        "        end try",
-        "      end repeat",
         f'      error "hides fallback bound " & (count of matches) & " document(s) at {target}"',
         "    end if",
         "    set theDoc to item 1 of matches",

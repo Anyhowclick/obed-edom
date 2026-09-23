@@ -1735,6 +1735,46 @@ def test_resize_fallback_timeout_needs_a_closed_output_before_re_apply(tmp_path,
     assert calls == [None, "off"]
 
 
+def test_resize_fallback_timeout_closure_carries_into_a_fresh_proposal(tmp_path, monkeypatch):
+    """Astra r3 #4: timeout → Propose framings → Apply. The fresh proposal is a new job that
+    writes the same `<export dir>/<source>_CG.key` (which `copy_keynote` unlinks first), so the
+    unresolved closure requirement is keyed by that canonical output path, not by job: the new
+    proposal flags it, its Apply is refused until closure is confirmed, and the confirmation
+    resolves it on the aborted job too."""
+    calls = []
+
+    def fake_remap(path, dest, **kwargs):
+        calls.append(kwargs.get("offline_hides"))
+        if len(calls) == 1:
+            raise _hides_abort("hide fallback session did not finish", "close it", needs_fresh_output=True)
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    _stub_resize_propose(monkeypatch, fake_remap)
+    client = TestClient(app)
+    first = _propose(client, tmp_path).json()["id"]
+    _wait(client, first)
+    client.post(f"/api/resize/{first}/apply", json={})
+    output = _wait(client, first)["result"]["offlineHidesAborted"]["outputPath"]
+
+    second = _propose(client, tmp_path, offline_hides="off").json()["id"]
+    proposal = _wait(client, second)["result"]
+    assert proposal["offlineHides"] == "off"
+    assert proposal["outputCloseRequired"] == output
+
+    blocked = client.post(f"/api/resize/{second}/apply", json={})
+    assert blocked.status_code == 409
+    assert f"Close {Path(output).name} in Keynote" in blocked.json()["detail"]
+    assert calls == [None]
+
+    assert client.post(f"/api/resize/{second}/apply", json={"outputClosed": True}).status_code == 200
+    assert _wait(client, second)["status"] == "done"
+    assert calls == [None, "off"]
+    assert client.get(f"/api/jobs/{first}").json()["result"]["offlineHidesAborted"]["needsFreshOutput"] is False
+
+    third = _propose(client, tmp_path).json()["id"]
+    assert "outputCloseRequired" not in _wait(client, third)["result"]
+
+
 def test_resize_rerun_failing_otherwise_does_not_keep_a_stale_hides_abort(tmp_path, monkeypatch):
     calls = []
 
