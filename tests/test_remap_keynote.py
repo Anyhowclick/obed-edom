@@ -137,8 +137,9 @@ def test_pass1_census_no_attr_matches_apply_geom_truthiness():
         {"slide": 1, "color": [1, 0, 0]},
         {"slide": 1, "locked": True},
         {"slide": 1, "locked": False},
+        {"slide": 2, "color": [1, 2]},
     ]
-    census = _pass1_census(transforms, suppressed=set(), as_geom_slides=set())
+    census = _pass1_census(transforms, suppressed={1}, as_geom_slides=set())
     assert census["noAttr"] == 4
 
 

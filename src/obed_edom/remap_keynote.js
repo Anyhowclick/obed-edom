@@ -83,8 +83,10 @@ function collectionNamed(slide, name) {
 
 function collectionOf(slide, name, cache) {
   if (!cache) return collectionNamed(slide, name);
-  if (!Object.prototype.hasOwnProperty.call(cache, name)) cache[name] = collectionNamed(slide, name);
-  return cache[name];
+  if (Object.prototype.hasOwnProperty.call(cache, name)) return cache[name];
+  const col = collectionNamed(slide, name);
+  if (col != null) cache[name] = col;
+  return col;
 }
 
 function itemAt(col, index) {

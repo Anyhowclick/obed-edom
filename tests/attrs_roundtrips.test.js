@@ -202,6 +202,97 @@ test("locked: a font spec on a locked item unlocks, writes, relocks", function (
   assert.deepStrictEqual(c.writes, ["x.locked=false", "x.font=F", "x.locked=true"]);
 });
 
+test("attrs cache does not poison itself with a failed lookup: it retries, then caches the retry", function () {
+  const c = newCounters();
+  const item0 = makeItem("x0", c);
+  let accesses = 0;
+  const slide = {};
+  Object.defineProperty(slide, "shapes", {
+    get: function () {
+      accesses += 1;
+      c.fetch.shapes = accesses;
+      if (accesses <= 2) throw new Error("boom");
+      return [item0];
+    },
+  });
+  const missReasons = [];
+  const r = m.applyTransforms(
+    [slide],
+    [
+      { slide: 1, kind: "shape", kindIndex: 0 },
+      { slide: 1, kind: "shape", kindIndex: 0 },
+      { slide: 1, kind: "shape", kindIndex: 0 },
+    ],
+    null,
+    missReasons,
+    "attrs"
+  );
+  // First spec's lookup both attempts throw (accesses 1-2) and is not cached, so it misses.
+  // Second spec retries (accesses 3-4), succeeds, and caches the collection.
+  // Third spec is a cache hit: no further getter accesses.
+  assert.deepStrictEqual(r, { applied: 2, missed: 1 });
+  assert.strictEqual(accesses, 4);
+  assert.ok(/missing/.test(missReasons[0]), missReasons[0]);
+});
+
+test("two slides fetch their own collections independently, once each", function () {
+  const c = newCounters();
+  const slide1 = makeSlide({ shapes: [makeItem("a0", c), makeItem("a1", c)] }, c);
+  const slide2 = makeSlide({ shapes: [makeItem("b0", c), makeItem("b1", c)] }, c);
+  const r = m.applyTransforms(
+    [slide1, slide2],
+    [
+      { slide: 1, kind: "shape", kindIndex: 0 },
+      { slide: 1, kind: "shape", kindIndex: 1 },
+      { slide: 2, kind: "shape", kindIndex: 0 },
+      { slide: 2, kind: "shape", kindIndex: 1 },
+    ],
+    null,
+    [],
+    "attrs"
+  );
+  assert.deepStrictEqual(r, { applied: 4, missed: 0 });
+  assert.deepStrictEqual(c.fetch, { shapes: 2 });
+});
+
+test("a missing or zero slide number defaults to 1 and shares slide 1's cache", function () {
+  const c = newCounters();
+  const shapes = [makeItem("s0", c), makeItem("s1", c), makeItem("s2", c)];
+  const slide = makeSlide({ shapes: shapes }, c);
+  const r = m.applyTransforms(
+    [slide],
+    [
+      { kind: "shape", kindIndex: 0 },
+      { slide: 0, kind: "shape", kindIndex: 1 },
+      { slide: 1, kind: "shape", kindIndex: 2 },
+    ],
+    null,
+    [],
+    "attrs"
+  );
+  assert.deepStrictEqual(r, { applied: 3, missed: 0 });
+  assert.deepStrictEqual(c.fetch, { shapes: 1 });
+});
+
+test("a typed miss falls through to itemIndex and resolves through an already-cached iWorkItems", function () {
+  const c = newCounters();
+  const a = makeItem("a", c);
+  const b = makeItem("b", c);
+  const slide = makeSlide({ iWorkItems: [a, b] }, c);
+  const r = m.applyTransforms(
+    [slide],
+    [
+      { slide: 1, kind: "table", itemIndex: 0 },
+      { slide: 1, kind: "shape", kindIndex: 5, itemIndex: 1 },
+    ],
+    null,
+    [],
+    "attrs"
+  );
+  assert.deepStrictEqual(r, { applied: 2, missed: 0 });
+  assert.deepStrictEqual(c.fetch, { iWorkItems: 1 });
+});
+
 function groupOf(shapes, textItems, c) {
   const g = makeItem("g", c);
   g.shapes = function () {

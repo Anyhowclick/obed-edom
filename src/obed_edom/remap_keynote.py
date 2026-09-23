@@ -523,9 +523,17 @@ def _pass1_census(
     as_geom_slides: set[int] | frozenset[int],
 ) -> dict[str, int]:
     """Mirror of js `geometryPathForSlide` over `slidesInPlan`, plus per-spec cost classes."""
+    def spec_slide(t: dict[str, Any]) -> int:
+        try:
+            n = int(t.get("slide"))
+        except (TypeError, ValueError):
+            n = 0
+        return n or 1
+
     slides = {int(t["slide"]) for t in transform_dicts if t.get("slide") is not None}
     attrs = {n for n in slides if n in suppressed}
     as_path = {n for n in slides - attrs if n in as_geom_slides}
+    attrs_or_as = attrs | as_path
     specs = [t for t in transform_dicts if t.get("role") != "hide"]
     return {
         "attrs": len(attrs),
@@ -535,7 +543,8 @@ def _pass1_census(
         "hides": len(transform_dicts) - len(specs),
         "noAttr": sum(
             1 for t in specs
-            if not t.get("font")
+            if spec_slide(t) in attrs_or_as
+            and not t.get("font")
             and not t.get("fontSize")
             and len(t.get("color") or ()) < 3
             and t.get("opacity") is None
