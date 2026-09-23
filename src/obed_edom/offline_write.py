@@ -385,7 +385,9 @@ def _patch_offline_slides(
         try:
             from obed_edom import inspect as _inspect  # noqa: PLC0415
 
+            say(f"Offline-write: bulk live seed read of {len(soft_slides)} slide(s)…")
             bulk = _inspect.bulk_geometry(dest, slides=sorted(soft_slides), log=say)
+            say("Offline-write: bulk seed read done; patching members.")
             reported_by_slide = _reported_from_bulk_rows(bulk)
             reported_by_slide = _drop_unreadable_seed_rows(
                 reported_by_slide, _inspect.LAST_BULK_ERRORS, say=say)

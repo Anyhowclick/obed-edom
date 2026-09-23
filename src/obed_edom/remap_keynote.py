@@ -1790,7 +1790,9 @@ def remap_keynote(
             "OBED_ZORDER_WRITE=off knowingly skips every z-order raise."
         )
     _require_pass1_saved_closed(jxa)
+    say("Z-order patch…")
     zorder_write_info = offline_write.run_offline_zorder(dest, zorder_mode, zorder_targets, say)
+    say("Builds/transitions: reading source and output decks…")
     # Builds/transitions follow the source. Unconditional and runs last — verify-all,
     # patch-none when the slide set is empty; must keep running LAST, after the z-order write.
     build_result = restore_source_builds(dest, source, set(), say)
