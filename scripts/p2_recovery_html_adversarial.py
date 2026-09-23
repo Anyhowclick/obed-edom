@@ -99,6 +99,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     MOVIE2_TOKEN,
     MOVIE_ROI,
     OWNER_SETTLE_READINGS,
+    PRESERVE_EVENT_KEEP_KINDS,
     RETIRE_ZONE_MIN_HASH,
     RVFC_MIN_ADVANCE_S,
     SLIDE2_MIN_HASH,
@@ -3224,22 +3225,7 @@ async def _run(player: Path) -> dict:
             r"""(() => {
               const p = window.__OBED_P2_PRESERVE__;
               if (!p) return [];
-              const keep = [
-                'reuse-skip-boundary', 'retire-on-start-movie', 'pool-cleared',
-                'reuse-decoder', 'createElement-video',
-                // The retire zone asserts refusal by a POSITIVE event, and its
-                // absence-of-carry clause needs the pool-consuming notes too.
-                'preserve-refused', 'retire-boundary', 'dom-swap',
-                'remount-error', 'facade-block-clear',
-                'texture-feed-start', 'texture-feed-stop',
-                // F1a: engagement events the fail-closed 1->2 gate keys off — a
-                // texture-feed-draw / mo-prepaint-draw into an incoming canvas is
-                // the ONLY positive proof the feed drew; the skip notes explain a
-                // non-engagement so the gate fails for a named reason, not silently.
-                'texture-feed-draw', 'texture-feed-skip', 'texture-feed-skip-canvas',
-                'mo-prepaint-skip',
-                'player-build-error', 'mo-prepaint-draw', 'mo-no-stage'
-              ];
+              const keep = __KEEP_KINDS__;
               const important = p.events.filter((e) => keep.indexOf(e.kind) >= 0);
               // Keep the EARLIEST remounts as well: a carry inside the retire
               // zone happens long before the last-20 window.
@@ -3247,7 +3233,7 @@ async def _run(player: Path) -> dict:
               const remounts = remountAll.slice(0, 12).concat(remountAll.slice(12).slice(-20));
               const moNoTexids = p.events.filter((e) => e.kind === 'mo-no-texids').slice(-5);
               return important.concat(remounts).concat(moNoTexids);
-            })()"""
+            })()""".replace("__KEEP_KINDS__", json.dumps(sorted(PRESERVE_EVENT_KEEP_KINDS)))
         ) or []
         # Carry census: counted IN THE PAGE over the full event log and filtered
         # to movie1 BEFORE any slicing, so a bounded sample can never hide an

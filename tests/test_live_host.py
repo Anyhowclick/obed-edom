@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -10,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from obed_edom import html_preview, live_host, live_runtime
+from obed_edom import html_preview, live_gl_replay_js, live_host, live_runtime
 
 
 class FakeCdp:
@@ -934,7 +935,7 @@ def host_with_continuity(
     tmp_path, monkeypatch, *, attach: bool = False, continuity: str = "auto", headless: bool = True,
     movie_bytes: bytes | None = None, extra_movie_bytes: bytes | None = None,
     movie_bytes_by_slide: dict[str, bytes] | None = None,
-    artwork_above_on_s2: bool = False, masked: bool = False,
+    artwork_above_on_s2: bool = False, masked: bool = False, gl_replay: str | None = None,
 ) -> live_host.LiveOutputHost:
     export_root = tmp_path / "export"
     write_one_movie_export(
@@ -954,8 +955,11 @@ def host_with_continuity(
     # covered in tests/test_live_continuity.py, so treat this plan as measured here.
     from obed_edom import live_continuity
     monkeypatch.setattr(live_continuity, "plan_signature", lambda _runtime: next(iter(live_continuity.QUALIFIED_PLAN_SHA256)))
+    monkeypatch.delenv("OBED_LIVE_GL_REPLAY", raising=False)
     FakeCdp.instances.clear()
-    kwargs = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
+    kwargs: dict[str, Any] = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
+    if gl_replay is not None:
+        kwargs["gl_replay"] = gl_replay
     return live_host.LiveOutputHost(
         export_root, slides_with_uuid(), headless=headless, transport_factory=FakeCdp,
         server_factory=FakeServer, resolver=continuity_resolver(export_root), continuity=continuity, **kwargs,
@@ -1322,7 +1326,7 @@ def test_continuity_output_shape(tmp_path, monkeypatch):
     output = host_with_continuity(tmp_path, monkeypatch)
     output.observe()
     continuity = output.output["continuity"]
-    assert set(continuity) <= {"mode", "reason", "version", "sha256", "scale"}
+    assert set(continuity) <= {"mode", "reason", "version", "sha256", "scale", "glReplay"}
     assert continuity["mode"] == "unsupported"
     assert continuity["version"] == live_host.CONTINUITY_VERSION
     assert isinstance(continuity["sha256"], str) and len(continuity["sha256"]) == 64
@@ -2050,3 +2054,411 @@ def test_cdp_sockets_accept_messages_larger_than_the_websockets_default():
     source = inspect.getsource(live_host.ChromeCdp)
     assert live_host._CDP_MAX_MESSAGE_BYTES >= 32 * 1024 * 1024
     assert source.count("max_size=_CDP_MAX_MESSAGE_BYTES") == 2
+
+
+# --- G4: the GL-replay host flag (plan keynote_live_gl_replay_g3g4 section 4) --------------
+# Every test below pins `live_host.CONTINUITY_VERSION` (4 or 5) so it never depends on the
+# core's own version bump landing first.
+
+
+def _gl_entry() -> dict[str, Any]:
+    """A `glReplay` boundary that passes `validate_gl_replay_entry`, sized to the one-movie export."""
+    return {
+        "atScene": 2, "action": "glReplay", "movieKey": "movie1", "fallback": "retire",
+        "slotSizes": [[1920, 1080], [100, 100]],
+        "slotRects": [[0.0, 0.0, 1920.0, 1080.0], [150.0, 150.0, 100.0, 100.0]],
+        "opacityOverrides": [],
+        "instanceId": "movie.mov#0",
+        "instanceRect": {"x": 150.0, "y": 150.0, "w": 100.0, "h": 100.0},
+        "movieSlot": 1,
+    }
+
+
+def _fake_runtime(*, gl: bool) -> dict[str, Any]:
+    first = _gl_entry() if gl else {"atScene": 2, "action": "retire", "movieKey": "movie1"}
+    return {
+        "movies": {"movie1": {"assetKeys": ["movie.mov"], "footprint": {"x": 150, "y": 150, "w": 100, "h": 100}}},
+        "boundaries": [first],
+    }
+
+
+class _FakePlan:
+    refusals: list[dict[str, Any]] = []
+
+    def __init__(self, runtime):
+        self._runtime = runtime
+
+    def to_runtime(self):
+        return copy.deepcopy(self._runtime)
+
+
+def fake_plan_pair(monkeypatch, *, on: Any = None, off: Any = None) -> list[dict[str, Any]]:
+    """Replace `derive_plan` with a spy answering the flag-on runtime `on` only when called with
+    `gl_replay=True`, and the flag-off runtime `off` otherwise. An `Unsupported` answer is
+    returned as the plan itself. Returns the recorded keyword arguments of every call."""
+    on = _fake_runtime(gl=True) if on is None else on
+    off = _fake_runtime(gl=False) if off is None else off
+    calls: list[dict[str, Any]] = []
+
+    def derive(_root, _slides, **kwargs):
+        calls.append(dict(kwargs))
+        answer = on if kwargs.get("gl_replay") else off
+        return answer if isinstance(answer, live_host.Unsupported) else _FakePlan(answer)
+
+    monkeypatch.setattr(live_host, "derive_plan", derive)
+    return calls
+
+
+def spy_real_derive_plan(monkeypatch) -> list[dict[str, Any]]:
+    real = live_host.derive_plan
+    calls: list[dict[str, Any]] = []
+
+    def derive(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(live_host, "derive_plan", derive)
+    return calls
+
+
+def forbid_gl_module(monkeypatch) -> None:
+    """Force the off path: off never builds, validates or injects the GL module; only its
+    version and sha are reported. Any call into the builder or its validator is a failure."""
+    def boom(*_a, **_k):
+        raise AssertionError("the GL-replay module must not be touched on the off path")
+
+    monkeypatch.setattr(live_host, "gl_replay_script", boom)
+    monkeypatch.setattr(live_gl_replay_js, "gl_replay_script", boom)
+    monkeypatch.setattr(live_gl_replay_js, "validate_gl_replay_entry", boom)
+
+
+def served_html(output: live_host.LiveOutputHost, tmp_path: Path) -> str:
+    page = tmp_path / "served"
+    page.mkdir(exist_ok=True)
+    (page / "index.html").write_text(
+        '<html><head></head><body><div id="stage"></div><script src="assets/player/main.js"></script></body></html>'
+    )
+    server = live_host._AssetServer(page, b"", resolver=resolver_for(page), continuity_script=output._server.continuity_script)
+    return server._program_html().decode()
+
+
+def ready(monkeypatch) -> None:
+    monkeypatch.setattr(FakeCdp, "evaluate", continuity_ready_evaluate(FakeCdp.evaluate, [stage_geometry(1920, 1080, 0, 0, 1920, 1080)]))
+
+
+@pytest.mark.parametrize("version", [4, 5])
+@pytest.mark.parametrize("how", ["unset", "ctor-off", "env-off", "env-blank", "env-off-padded", "continuity-off"])
+def test_gl_replay_off_never_touches_the_module_and_serves_todays_recipe(tmp_path, monkeypatch, how, version):
+    """Off is the default. It must derive exactly as today (no `gl_replay` kwarg) and inject exactly
+    `_continuity_scripts(plan, canvas)`. Off never builds, validates or injects the GL module; only
+    its version and sha are reported -- forced by making the builder and its validator raise.
+    Continuity off turns GL off even when asked."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", version)
+    gl_replay = {"ctor-off": "off", "continuity-off": "auto"}.get(how)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay=gl_replay)
+    if how.startswith("env-"):
+        monkeypatch.setenv("OBED_LIVE_GL_REPLAY", {"env-off": "off", "env-blank": "", "env-off-padded": "  OFF "}[how])
+    if how == "continuity-off":
+        monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    forbid_gl_module(monkeypatch)
+    calls = spy_real_derive_plan(monkeypatch)
+    ready(monkeypatch)
+    output.observe()
+
+    assert all("gl_replay" not in kwargs for kwargs in calls)
+    info = output.output["continuity"]["glReplay"]
+    assert info["mode"] == "off"
+    assert "reason" not in info
+    if how == "continuity-off":
+        assert calls == []
+        assert output._server.continuity_script == ""
+    else:
+        assert len(calls) == 1
+        assert output._continuity_mode == "qualified"
+        assert output._server.continuity_script == live_host._continuity_scripts(output._continuity_runtime_plan, output._canvas)
+        assert all(b["action"] != "glReplay" for b in output._continuity_runtime_plan["boundaries"])
+    assert 'id="obed-gl-replay"' not in served_html(output, tmp_path)
+
+
+def test_gl_replay_auto_injects_the_flag_on_plan_and_the_module_after_the_core(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    calls = fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.observe()
+
+    assert calls == [{"resolver": output.resolver, "gl_replay": True}]
+    runtime = output._continuity_runtime_plan
+    assert runtime == _fake_runtime(gl=True)
+    tag = live_gl_replay_js.gl_replay_script(runtime)
+    assert tag.startswith('<script id="obed-gl-replay">')
+    assert output._server.continuity_script == live_host._continuity_scripts(runtime, output._canvas) + tag
+    assert output._continuity_mode == "qualified"
+    assert output.output["continuity"]["glReplay"] == {
+        "mode": "injected",
+        "version": live_gl_replay_js.GL_REPLAY_VERSION,
+        "sha256": live_gl_replay_js.js_sha256(),
+    }
+
+    document = served_html(output, tmp_path)
+    body = document[document.index("<body"):]
+    assert (
+        body.index('id="obed-output-black"')
+        < body.index('id="obed-continuity-plan"')
+        < body.index('id="obed-continuity-core"')
+        < body.index('id="obed-gl-replay"')
+        < body.index('id="obed-output-fit"')
+        < body.index('id="stage"')
+        < body.index("assets/player/main.js")
+    )
+    assert document.count('id="obed-gl-replay"') == 1
+
+
+def test_gl_replay_auto_with_a_v4_core_serves_the_off_plan(tmp_path, monkeypatch):
+    """A core older than v5 has no G3 zone: a glReplay plan must never reach it (G1 decision B)."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 4)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    calls = fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.observe()
+
+    assert all("gl_replay" not in kwargs for kwargs in calls)
+    assert output._continuity_runtime_plan == _fake_runtime(gl=False)
+    assert output._server.continuity_script == live_host._continuity_scripts(_fake_runtime(gl=False), output._canvas)
+    assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    info = output.output["continuity"]["glReplay"]
+    assert info["mode"] == "unavailable"
+    assert info["reason"]
+
+
+def test_gl_replay_auto_without_an_entry_is_not_applicable_and_byte_identical_to_off(tmp_path, monkeypatch):
+    """The real derivation of the one-movie export has no glReplay boundary."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    off = host_with_continuity(tmp_path / "off", monkeypatch, gl_replay="off")
+    ready(monkeypatch)
+    off.observe()
+
+    auto = host_with_continuity(tmp_path / "auto", monkeypatch, gl_replay="auto")
+    calls = spy_real_derive_plan(monkeypatch)
+    auto.observe()
+
+    assert calls[0].get("gl_replay") is True
+    assert "gl_replay" not in calls[-1]
+    assert auto._continuity_runtime_plan == off._continuity_runtime_plan
+    assert auto._server.continuity_script == off._server.continuity_script
+    assert served_html(auto, tmp_path / "auto") == served_html(off, tmp_path / "off")
+    info = auto.output["continuity"]["glReplay"]
+    assert info["mode"] == "notApplicable"
+    assert "reason" not in info
+
+
+def test_gl_replay_auto_with_an_empty_module_script_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    calls = fake_plan_pair(monkeypatch)
+    monkeypatch.setattr(live_host, "gl_replay_script", lambda _runtime: "")
+    ready(monkeypatch)
+    output.observe()
+
+    assert calls[0].get("gl_replay") is True
+    assert "gl_replay" not in calls[-1]
+    assert output._continuity_runtime_plan == _fake_runtime(gl=False)
+    assert output._server.continuity_script == live_host._continuity_scripts(_fake_runtime(gl=False), output._canvas)
+    info = output.output["continuity"]["glReplay"]
+    assert info["mode"] == "unavailable"
+    assert info["reason"]
+
+
+def test_gl_replay_auto_with_a_real_invalid_entry_is_unavailable(tmp_path, monkeypatch):
+    """The real builder refuses an entry its validator rejects; the host falls back to off."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    bad = _fake_runtime(gl=True)
+    bad["boundaries"][0]["fallback"] = "pin"
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    fake_plan_pair(monkeypatch, on=bad)
+    ready(monkeypatch)
+    output.observe()
+
+    assert output._continuity_runtime_plan == _fake_runtime(gl=False)
+    assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    assert output.output["continuity"]["glReplay"]["mode"] == "unavailable"
+
+
+@pytest.mark.parametrize("how", ["derive", "to_runtime"])
+def test_gl_replay_auto_with_an_unsupported_flag_on_plan_falls_back_to_off(tmp_path, monkeypatch, how):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    if how == "derive":
+        calls = fake_plan_pair(monkeypatch, on=live_host.Unsupported("unreadable override table"))
+    else:
+        calls = fake_plan_pair(monkeypatch)
+        real_to_runtime = _FakePlan.to_runtime
+
+        def to_runtime(self):
+            runtime = real_to_runtime(self)
+            if runtime["boundaries"][0]["action"] == "glReplay":
+                return live_host.Unsupported("unreadable override table")
+            return runtime
+
+        monkeypatch.setattr(_FakePlan, "to_runtime", to_runtime)
+    ready(monkeypatch)
+    output.observe()
+
+    assert [kwargs.get("gl_replay") for kwargs in calls] == [True, None]
+    assert output._continuity_mode == "qualified"
+    assert output._continuity_runtime_plan == _fake_runtime(gl=False)
+    assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    info = output.output["continuity"]["glReplay"]
+    assert info == {
+        "mode": "unavailable", "reason": "unreadable override table",
+        "version": live_gl_replay_js.GL_REPLAY_VERSION, "sha256": live_gl_replay_js.js_sha256(),
+    }
+
+
+def test_gl_replay_auto_in_attach_mode_is_not_injected(tmp_path, monkeypatch):
+    """OD-2: the pool keep-warm and stash order are unmeasured inside OBS CEF."""
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = host_with_continuity(tmp_path, monkeypatch, attach=True, gl_replay="auto")
+    calls = fake_plan_pair(monkeypatch)
+    forbid_gl_module(monkeypatch)
+    ready(monkeypatch)
+    output.observe()
+
+    assert calls and all("gl_replay" not in kwargs for kwargs in calls)
+    assert output._continuity_runtime_plan == {**_fake_runtime(gl=False), "transparentBackground": True}
+    assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    info = output.output["continuity"]["glReplay"]
+    assert info["mode"] == "unavailable"
+    assert info["reason"] == "attach output not qualified"
+
+
+def test_gl_replay_auto_is_not_reported_injected_when_the_codec_refuses_continuity(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto", movie_bytes=_movie_bytes(b"apcn"))
+    fake_plan_pair(monkeypatch)
+    output.observe()
+
+    assert output._continuity_mode == "unsupported"
+    assert output._server.continuity_script == ""
+    assert output.output["continuity"]["glReplay"] == {
+        "mode": "unavailable", "reason": "continuity unsupported",
+        "version": live_gl_replay_js.GL_REPLAY_VERSION, "sha256": live_gl_replay_js.js_sha256(),
+    }
+
+
+def test_gl_replay_auto_falls_back_to_off_when_the_flag_on_to_runtime_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    calls = fake_plan_pair(monkeypatch)
+    real_to_runtime = _FakePlan.to_runtime
+
+    def to_runtime(self):
+        runtime = real_to_runtime(self)
+        if runtime["boundaries"][0]["action"] == "glReplay":
+            raise ValueError("glReplay translation blew up")
+        return runtime
+
+    monkeypatch.setattr(_FakePlan, "to_runtime", to_runtime)
+    ready(monkeypatch)
+    output.observe()
+
+    assert [kwargs.get("gl_replay") for kwargs in calls] == [True, None]
+    assert output._continuity_mode == "qualified"
+    assert output._continuity_runtime_plan == _fake_runtime(gl=False)
+    assert 'id="obed-gl-replay"' not in output._server.continuity_script
+    assert output.output["continuity"]["glReplay"]["mode"] == "unavailable"
+    assert output.output["continuity"]["glReplay"]["reason"] == "glReplay translation blew up"
+
+
+def test_continuity_is_unsupported_not_a_crash_when_to_runtime_raises(tmp_path, monkeypatch):
+    output = host_with_continuity(tmp_path, monkeypatch)
+
+    class RaisingPlan:
+        def to_runtime(self):
+            raise ValueError("cannot translate")
+
+    monkeypatch.setattr(live_host, "derive_plan", lambda *a, **k: RaisingPlan())
+    output.observe()
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == "cannot translate"
+    assert output._server.continuity_script == ""
+
+
+@pytest.mark.parametrize("ctor,env,expected", [
+    (None, None, "off"),
+    (None, " Auto ", "auto"),
+    ("auto", None, "auto"),
+    ("off", "auto", "off"),
+])
+def test_start_log_records_the_requested_gl_replay_preference(tmp_path, monkeypatch, ctor, env, expected):
+    """Under continuity off or attach the continuity record cannot show that `auto` was asked for."""
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    monkeypatch.setenv(live_host.CONTINUITY_ENV, "off")
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay=ctor)
+    if env is not None:
+        monkeypatch.setenv(live_host.GL_REPLAY_ENV, env)
+    output.start()
+    records = read_log(output)
+    assert next(r for r in records if r["kind"] == "start")["glReplayPreference"] == expected
+    assert next(r for r in records if r["kind"] == "continuity")["glReplay"]["mode"] == "off"
+
+
+@pytest.mark.parametrize("ctor,env,expected", [
+    (None, "auto", "injected"),
+    (None, " AUTO ", "injected"),
+    (None, "off", "off"),
+    ("off", "auto", "off"),
+    ("auto", "off", "injected"),
+    ("auto", "bogus", "injected"),
+])
+def test_gl_replay_constructor_wins_over_the_env(tmp_path, monkeypatch, ctor, env, expected):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay=ctor)
+    monkeypatch.setenv(live_host.GL_REPLAY_ENV, env)
+    fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.observe()
+    assert output.output["continuity"]["glReplay"]["mode"] == expected
+
+
+@pytest.mark.parametrize("value", ["on", "Auto", "", None, True])
+def test_gl_replay_constructor_rejects_anything_but_auto_or_off(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    (tmp_path / "main.js").write_bytes(player_bytes())
+    (tmp_path / "header.json").write_text('{"slideWidth":1920,"slideHeight":1080,"showMode":0}')
+    monkeypatch.setattr(live_host, "choose_display", lambda *_a, **_k: live_host.OutputDisplay(9, 10, 20, 2560, 1440))
+    with pytest.raises(live_host.LiveHostError, match="GL replay must be auto or off."):
+        live_host.LiveOutputHost(tmp_path, [], headless=True, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, gl_replay=value)
+
+
+@pytest.mark.parametrize("value", ["on", "1", "true", "auto-ish"])
+def test_invalid_gl_replay_env_refuses_before_starting_resources(tmp_path, monkeypatch, value):
+    output = host_with_continuity(tmp_path, monkeypatch)
+    monkeypatch.setenv(live_host.GL_REPLAY_ENV, value)
+    with pytest.raises(live_host.LiveHostError, match="OBED_LIVE_GL_REPLAY must be off or auto."):
+        output.start()
+    assert not FakeCdp.instances
+    assert output._server is None
+
+
+def test_gl_replay_env_name_is_the_documented_one():
+    assert live_host.GL_REPLAY_ENV == "OBED_LIVE_GL_REPLAY"
+
+
+def test_gl_replay_output_shape_before_and_after_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "preview"))
+    output = host_with_continuity(tmp_path, monkeypatch, gl_replay="auto")
+    before = output.output["continuity"]["glReplay"]
+    assert before == {"mode": "off", "version": live_gl_replay_js.GL_REPLAY_VERSION, "sha256": live_gl_replay_js.js_sha256()}
+    fake_plan_pair(monkeypatch)
+    ready(monkeypatch)
+    output.start()
+    info = output.output["continuity"]["glReplay"]
+    assert set(info) <= {"mode", "reason", "version", "sha256"}
+    assert info["mode"] == "injected"
+    assert isinstance(info["sha256"], str) and len(info["sha256"]) == 64
+    records = read_log(output)
+    record = next(r for r in records if r["kind"] == "continuity")
+    assert record["glReplay"] == info

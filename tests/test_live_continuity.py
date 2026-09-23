@@ -2940,6 +2940,33 @@ class _MovieInstanceStub:
         self.object_id = object_id
 
 
+def test_gl_replay_instance_rect_selects_exactly_one_source_slide_instance():
+    """G3 plan section 2, the offline half of instance selection. The core binds the carried
+    decoder by matching each pooled source decoder's authored rect against `instanceRect` within
+    1.0 px per edge, with no size-only or only-candidate fallback. On the flag-on fixture exactly
+    one slide-1 instance of the carried asset may match: the big instance (equal to the
+    destination rect, since the pin pair is byte-exact), never the 966 px-away sibling."""
+    plan = derive_plan(FIXTURE_ROOT, SLIDES, resolver=_resolver, gl_replay=True)
+    assert isinstance(plan, ContinuityPlan)
+    runtime = plan.to_runtime()
+    assert isinstance(runtime, dict)
+    entry = next(b for b in runtime["boundaries"] if b["action"] == "glReplay")
+    asset = runtime["movies"][entry["movieKey"]]["assetKeys"][0]
+    target = entry["instanceRect"]
+    source_player = next(b.from_player_index for b in plan.boundaries if b.movies and b.movies[0].gl_replay)
+    source = plan.slide_instances[source_player][asset]
+
+    def within(rect, target_rect, tolerance=1.0):
+        return all(abs(rect[edge] - target_rect[edge]) <= tolerance for edge in ("x", "y", "w", "h"))
+
+    assert len(source) == 2
+    matches = [rect for rect in source if within(rect, target)]
+    assert len(matches) == 1
+    assert matches[0] == target
+    sibling = next(rect for rect in source if rect is not matches[0])
+    assert abs(sibling["x"] - target["x"]) > 900
+
+
 @pytest.mark.parametrize("slot", [None, 5, -1, True, 3.0])
 def test_to_runtime_refuses_an_out_of_range_or_unreadable_movie_slot(slot):
     result = _gl_replay_plan_with(gl_replay_slot=slot).to_runtime()
