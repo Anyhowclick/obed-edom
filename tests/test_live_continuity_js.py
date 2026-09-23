@@ -3001,7 +3001,7 @@ console.log(JSON.stringify(P.events.filter(e => e.kind === 'glreplay-zone').map(
 
 
 
-# --- review r1 (`.agents/reviews/gl-replay-g3/opus-r1-a.md`) ------------------
+# --- review r1 (`git show a56474f3:.agents/reviews/gl-replay-g3/opus-r1-a.md`) ------------------
 
 
 def test_armed_retires_a_decoder_pooled_before_the_zone_and_hands_off_only_the_carried_one():
@@ -3275,7 +3275,7 @@ console.log(JSON.stringify({swaps: notesOf('dom-swap').length}));
 
 # --- A2 (owner: option (a) + guard G + the stash rule) -------------------
 #
-# `.agents/reviews/gl-replay-g3/a2-advice.md`: after the hand-off the carried
+# `git show a56474f3:.agents/reviews/gl-replay-g3/a2-advice.md`: after the hand-off the carried
 # decoder (and a facade bound to it) must never take the top-z stage append,
 # and a detach must not overwrite its last attached rect.
 
@@ -3345,7 +3345,7 @@ console.log(JSON.stringify({before, after: ctx.big.__obedRect,
     assert result["landed"][1] == pytest.approx(screen)
 
 
-# --- Codex r1 (`.agents/reviews/gl-replay-g3/codex-r1.md`) --------------
+# --- Codex r1 (`git show a56474f3:.agents/reviews/gl-replay-g3/codex-r1.md`) --------------
 
 
 def _insert(node: str, parent: str) -> str:
