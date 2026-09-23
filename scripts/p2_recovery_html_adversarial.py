@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import shutil
@@ -39,6 +40,7 @@ from p2_alpha_spike import CHROME, ChromeCdp, _wait_ready  # noqa: E402
 from p2_recovery_html_dissolve_live import (  # noqa: E402
     MEDIA_PROBE_JS,
     _ensure_videos_playing,
+    _inject_script,
     _media_snapshot,
     _replace_hevc_movies,
     _wait_hash_clean,
@@ -77,6 +79,14 @@ from obed_edom.html_alpha_probe import (  # noqa: E402
     write_patched_export,
 )
 from obed_edom.html_preview import export_html  # noqa: E402
+from obed_edom.live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script  # noqa: E402
+from obed_edom.live_gl_replay_js import js_sha256 as gl_replay_js_sha256  # noqa: E402
+from obed_edom.live_runtime import (  # noqa: E402
+    PLAYER_SHA256,
+    RUNTIME_VERSION,
+    LiveRuntimeUnsupported,
+    patch_player,
+)
 from obed_edom.p2_verdict import (  # noqa: E402
     ADVANCE_PRESS_HASH,
     BLACK_RGB_MEAN_MAX,
@@ -91,6 +101,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     FOOTPRINT_BADGE_CELL_PX,
     FOOTPRINT_BADGE_MAGIC,
     FOOTPRINT_BADGE_Q,
+    GL_REPLAY_KEEP_KINDS,
     FREEZE_MIN_AFTER,
     FREEZE_MIN_RUN,
     MAX_RAF_GAP_MS,
@@ -110,6 +121,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     TRANS_S,
     build_continuity_plan,
     footprintFullyLive,
+    glReplayCarry1to2,
     liveContinuity1to2,
     movingContinuity3to4,
     neverPooledEvidence,
@@ -309,6 +321,313 @@ LINGERING_MOVIE_OVERLAYS_JS = """(() => {
     paintingElIds: painting.map((v) => v.__obedElId || null)
   };
 })()"""
+
+# Fetch by kind server-side — a flat last-120 slice lets ~100+ routine
+# remount-done events crowd out the few guard/retire/clear events that
+# findings actually depend on.
+PRESERVE_EVENTS_FETCH_JS = r"""(() => {
+              const p = window.__OBED_P2_PRESERVE__;
+              if (!p) return [];
+              const keep = __KEEP_KINDS__;
+              const important = p.events.filter((e) => keep.indexOf(e.kind) >= 0);
+              // Keep the EARLIEST remounts as well: a carry inside the retire
+              // zone happens long before the last-20 window.
+              const remountAll = p.events.filter((e) => e.kind === 'remount-done');
+              const remounts = remountAll.slice(0, 12).concat(remountAll.slice(12).slice(-20));
+              const moNoTexids = p.events.filter((e) => e.kind === 'mo-no-texids').slice(-5);
+              return important.concat(remounts).concat(moNoTexids);
+            })()"""
+
+
+def _preserve_events_js(gl_auto: bool) -> str:
+    kinds = set(PRESERVE_EVENT_KEEP_KINDS) | set(GL_REPLAY_KEEP_KINDS) if gl_auto else PRESERVE_EVENT_KEEP_KINDS
+    return PRESERVE_EVENTS_FETCH_JS.replace("__KEEP_KINDS__", json.dumps(sorted(kinds)))
+
+
+GL_REPLAY_MODES = ("off", "auto")
+GL_REPLAY_DIR = "gl-replay"
+PLAYER_MAIN_JS = "assets/player/main.js"
+GL_SERVED_ORDER = ["plan", "core", "info", "gl", "main"]
+GL_POOL_READS_N = 4
+GL_POOL_READ_GAP_S = 0.35
+
+# The carry census split at the hand-off: the first `glreplay-zone` to `released`
+# note's page clock. Same movie1 attribution and retire-zone window as
+# CARRY_CENSUS_JS; facade stubs of the carried decoder are attributed by the DOM.
+GL_CARRY_CENSUS_JS = r"""(() => {
+  const p = window.__OBED_P2_PRESERVE__;
+  if (!p || !p.events) return null;
+  const KEY = '__KEY__';
+  const TOKEN = '__TOKEN__';
+  const KINDS = __CARRY_KINDS__;
+  const ZONE = __ZONE_KIND__;
+  const CARRIED = __CARRIED_KIND__;
+  const LO = __ZONE_LO__;
+  const HI = __ZONE_HI__;
+  function mineByKey(e) {
+    const k = String((e.detail && e.detail.key) || '').toLowerCase();
+    return k === KEY || (!!k && k.indexOf(TOKEN) >= 0);
+  }
+  const ids = {};
+  p.events.forEach((e) => {
+    if (!mineByKey(e)) return;
+    const d = e.detail || {};
+    [d.elId, d.newElId].forEach((i) => { if (i !== undefined && i !== null) ids[String(i)] = 1; });
+    (d.elIds || []).forEach((i) => { ids[String(i)] = 1; });
+  });
+  const carriedNotes = p.events.filter((e) => e.kind === CARRIED);
+  const carried = carriedNotes.length === 1 ? carriedNotes[0].detail.elId : null;
+  const facades = [];
+  document.querySelectorAll('video').forEach((v) => {
+    const real = v.__obedFacadeFor;
+    if (real && carried !== null && String(real.__obedElId) === String(carried)) {
+      facades.push(v.__obedElId === undefined ? null : v.__obedElId);
+    }
+  });
+  facades.forEach((i) => { if (i !== null) ids[String(i)] = 1; });
+  if (carried !== null) ids[String(carried)] = 1;
+  const released = p.events.find((e) => e.kind === ZONE && e.detail && e.detail.to === 'released');
+  const handoffT = released ? released.t : null;
+  const hits = p.events.filter((e) => {
+    if (KINDS.indexOf(e.kind) < 0) return false;
+    const d = e.detail || {};
+    const mine = mineByKey(e) || ids[String(d.elId)] === 1 || ids[String(d.newElId)] === 1;
+    if (!mine) return false;
+    const m = /^#(\d+)/.exec(String(d.sceneHash || ''));
+    const n = m ? parseInt(m[1], 10) : -1;
+    return n >= LO && n < HI;
+  });
+  const before = hits.filter((e) => handoffT === null || e.t < handoffT);
+  const after = hits.filter((e) => handoffT !== null && e.t >= handoffT);
+  return {
+    key: KEY,
+    handoffT: handoffT,
+    carriedElId: carried,
+    facadeElIds: facades,
+    before: {total: before.length, sample: before.slice(0, 20)},
+    afterTotal: after.length,
+    after: after.slice(0, 40).map((e) => ({
+      kind: e.kind, elId: (e.detail || {}).elId, sceneHash: (e.detail || {}).sceneHash, t: e.t
+    })),
+    loScene: LO,
+    hiScene: HI,
+    eventsSeen: p.events.length
+  };
+})()""".replace(
+    "__CARRY_KINDS__", json.dumps(sorted(CARRY_EVENT_KINDS))
+).replace("__KEY__", MOVIE1_KEY).replace(
+    "__TOKEN__", MOVIE1_TOKEN.lower()
+).replace("__ZONE_KIND__", json.dumps("glreplay-zone")).replace(
+    "__CARRIED_KIND__", json.dumps("glreplay-carried")
+).replace("__ZONE_LO__", str(RETIRE_ZONE_MIN_HASH)).replace(
+    "__ZONE_HI__", str(SLIDE3_MIN_HASH)
+)
+
+# One settled-slide-2 read: the pool, the carried decoder's own frame and the
+# page clock, taken in one evaluate so they share a time.
+GL_SLIDE2_READ_JS = r"""(() => {
+  const p = window.__OBED_P2_PRESERVE__;
+  if (!p || !p.snapshot) return null;
+  const notes = p.events.filter((e) => e.kind === __CARRIED_KIND__);
+  const carried = notes.length === 1 ? notes[0].detail.elId : null;
+  return {
+    t: performance.now(),
+    sceneHash: String(location.hash || ''),
+    carried: carried,
+    pool: p.snapshot(),
+    frame: carried !== null && p.sampleFrame ? p.sampleFrame(carried) : null
+  };
+})()""".replace("__CARRIED_KIND__", json.dumps("glreplay-carried"))
+
+# Module state only: never the oracle handle, never `handle.gl`.
+GL_STATE_JS = r"""(() => {
+  const m = window.__OBED_GL_REPLAY__;
+  if (!m) return null;
+  return {
+    t: performance.now(),
+    sceneHash: String(location.hash || ''),
+    version: m.version,
+    state: m.state,
+    standDowns: (m.standDowns || []).slice(),
+    events: (m.events || []).map((e) => ({kind: e.kind, t: e.t, detail: e.detail})),
+    stats: m.stats ? m.stats() : null
+  };
+})()"""
+
+GL_BOOT_CHECK_JS = r"""(() => {
+  const order = [];
+  document.querySelectorAll('script').forEach((s) => {
+    if (s.hasAttribute('data-obed-p2-continuity-plan')) order.push('plan');
+    else if (s.hasAttribute('data-obed-p2-preserve')) order.push('core');
+    else if (s.hasAttribute('data-obed-p2-gl-info')) order.push('info');
+    else if (s.hasAttribute('data-obed-p2-gl-replay')) order.push('gl');
+    else if (/(^|\/)assets\/player\/main\.js$/.test(s.getAttribute('src') || '')) order.push('main');
+  });
+  let snap = null;
+  try { snap = window.__obedLive ? window.__obedLive.snapshot() : null; } catch (e) { snap = null; }
+  const m = window.__OBED_GL_REPLAY__;
+  return {
+    order: order,
+    obedLive: !!window.__obedLive,
+    runtimeVersion: snap ? snap.runtimeVersion : null,
+    glVersion: m ? m.version : null,
+    glState: m ? m.state : null,
+    info: window.__OBED_CONTINUITY_INFO__ || null
+  };
+})()"""
+
+
+def _gl_replay_mode() -> str:
+    mode = _arg_value("--gl-replay", "off")
+    if mode not in GL_REPLAY_MODES:
+        raise SystemExit(f"--gl-replay must be one of {GL_REPLAY_MODES}, got {mode!r}")
+    return mode
+
+
+def _out_root(gl_auto: bool) -> Path:
+    return OUT / GL_REPLAY_DIR if gl_auto else OUT
+
+
+def _gl_info_js(canvas: dict) -> str:
+    width, height = int(canvas["width"]), int(canvas["height"])
+    return (
+        f"window.__OBED_CONTINUITY_INFO__={{authoredWidth:{width},authoredHeight:{height},"
+        "viewportWidth:window.innerWidth,viewportHeight:window.innerHeight,installed:true};"
+    )
+
+
+def _gl_replay_body(plan: dict) -> str:
+    tag = gl_replay_script(plan)
+    head, tail = '<script id="obed-gl-replay">', "</script>\n"
+    if not (tag.startswith(head) and tag.endswith(tail)):
+        raise SystemExit("the continuity plan carries no usable glReplay entry; refuse --gl-replay auto")
+    return tag[len(head):-len(tail)]
+
+
+def _served_script_order(html: str) -> list[str]:
+    markers = (
+        ("plan", "data-obed-p2-continuity-plan="),
+        ("core", "data-obed-p2-preserve="),
+        ("info", "data-obed-p2-gl-info="),
+        ("gl", "data-obed-p2-gl-replay="),
+        ("main", f'src="{PLAYER_MAIN_JS}"'),
+    )
+    found = [(html.find(m), name) for name, m in markers if m in html]
+    return [name for _, name in sorted(found)]
+
+
+def _inject_player(player_dir: Path, plan: dict, *, gl_auto: bool, canvas: dict) -> tuple[dict, dict, dict | None]:
+    """Inject the P2 scripts. Each call lands immediately after the probe marker,
+    so the later call is served first: auto calls GL, INFO, preserve, plan and
+    serves plan < core < INFO < GL < main.js. Off is today's two calls."""
+    gl_record = None
+    if gl_auto:
+        gl = _inject_script(
+            player_dir,
+            marker_attr='data-obed-p2-gl-replay="1"',
+            script=_gl_replay_body(plan),
+            already="data-obed-p2-gl-replay=",
+        )
+        info = _inject_script(
+            player_dir,
+            marker_attr='data-obed-p2-gl-info="1"',
+            script=_gl_info_js(canvas),
+            already="data-obed-p2-gl-info=",
+        )
+        gl_record = {"gl": gl, "info": info}
+    preserve = inject_preserve(player_dir)
+    plan_inject = inject_continuity_plan(player_dir, plan)
+    if gl_record is not None:
+        html = (player_dir / "index.html").read_text(encoding="utf-8")
+        order = _served_script_order(html)
+        if order != GL_SERVED_ORDER:
+            raise SystemExit(f"served script order {order}, expected {GL_SERVED_ORDER}")
+        gl_record["servedOrder"] = order
+    return preserve, plan_inject, gl_record
+
+
+def _patched_main_js(player_dir: Path) -> tuple[bytes, dict]:
+    raw = (player_dir / PLAYER_MAIN_JS).read_bytes()
+    try:
+        patched = patch_player(raw)
+    except LiveRuntimeUnsupported as exc:
+        raise SystemExit(f"--gl-replay auto: {exc} (main.js sha {hashlib.sha256(raw).hexdigest()})") from exc
+    return patched, {
+        "mainJsSha256": hashlib.sha256(raw).hexdigest(),
+        "playerSha256": PLAYER_SHA256,
+        "patchedMainJsSha256": hashlib.sha256(patched).hexdigest(),
+    }
+
+
+def _player_handler(player_dir: Path, main_js: bytes | None = None) -> type:
+    """Static handler over `player_dir`; with `main_js` the player script is served
+    from memory (the auto-only `patch_player` bytes), the file on disk untouched."""
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(player_dir), **k)
+
+        def do_GET(self):
+            if main_js is not None and self.path.split("?", 1)[0] == "/" + PLAYER_MAIN_JS:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript")
+                self.send_header("Content-Length", str(len(main_js)))
+                self.end_headers()
+                self.wfile.write(main_js)
+                return
+            super().do_GET()
+
+        def log_message(self, fmt, *args):  # noqa: A003
+            return
+
+    return Handler
+
+
+def _gl_boot_ok(check: object) -> bool:
+    if not isinstance(check, dict):
+        return False
+    info = check.get("info") if isinstance(check.get("info"), dict) else {}
+    return bool(
+        check.get("order") == GL_SERVED_ORDER
+        and check.get("obedLive") is True
+        and check.get("runtimeVersion") == RUNTIME_VERSION
+        and check.get("glVersion") == GL_REPLAY_VERSION
+        and check.get("glState") not in (None, "RETIRED")
+        and info.get("installed") is True
+    )
+
+
+def _sample_frame_index_roi(width: int, height: int) -> tuple[int, int, int, int]:
+    """The counter patch inside a `sampleFrame` JPEG: the top-left 120x48 of the
+    1920x540 source, inset off the grating edge and the JPEG block it rings into."""
+    return (2, 1, max(1, round(width * 120 / 1920) - 6), max(1, round(height * 48 / 540) - 3))
+
+
+def _sample_frame_index(frame: object, save_to: Path | None = None) -> int | None:
+    if not isinstance(frame, dict) or not frame.get("ok") or not frame.get("dataURL"):
+        return None
+    raw = str(frame["dataURL"]).split(",", 1)[-1]
+    arr = np.array(Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGB"))
+    if save_to is not None:
+        Image.fromarray(arr).save(save_to)
+    return _decode_index_patch(arr, _sample_frame_index_roi(arr.shape[1], arr.shape[0]))
+
+
+async def _gl_slide2_reads(chrome: ChromeCdp, run_dir: Path) -> list[dict]:
+    reads = []
+    for i in range(GL_POOL_READS_N):
+        if i:
+            await asyncio.sleep(GL_POOL_READ_GAP_S)
+        r = await chrome.evaluate(GL_SLIDE2_READ_JS)
+        if not isinstance(r, dict):
+            reads.append({"error": "slide-2 read unavailable"})
+            continue
+        frame = r.pop("frame", None)
+        r["frameIndex"] = _sample_frame_index(frame, run_dir / f"gl-sample-frame-{i}.jpg")
+        r["frameMeta"] = {k: v for k, v in (frame or {}).items() if k != "dataURL" and k != "snap"}
+        reads.append(r)
+    return reads
+
 
 HOLD_HASHCHANGE_TOL_MS = 50.0  # holdStartedAt must be within this of the hashchange event (1->2, retired)
 PRE_KEY_PATCH_INSET_PX = 2  # extra inset for the PRE-MOVE counter patch: on the smaller
@@ -2660,7 +2979,8 @@ async def _capture_3to4_snapshot(
 
 
 async def _run_freeze_bracket(
-    player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str
+    player_dir: Path, runs_dir: Path, wait_profile: dict, wait_profile_name: str,
+    *, main_js: bytes | None = None,
 ) -> dict:
     """A-B-A composited-freeze bracket on the 3->4 moving Magic Move boundary:
     positive -> freeze-control -> positive, one re-navigated Chrome (same
@@ -2684,13 +3004,7 @@ async def _run_freeze_bracket(
             "waitProfile": wait_profile_name,
         }
 
-    class Handler(SimpleHTTPRequestHandler):
-        def __init__(self, *a, **k):
-            super().__init__(*a, directory=str(player_dir), **k)
-
-        def log_message(self, fmt, *args):  # noqa: A003
-            return
-
+    Handler = _player_handler(player_dir, main_js)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -2789,6 +3103,8 @@ async def _run(player: Path) -> dict:
     reuse = "--reuse-export" in sys.argv
     if reuse and not (OUT / "html-unmodified" / "index.html").is_file():
         raise SystemExit(f"missing reusable export at {OUT / 'html-unmodified' / 'index.html'}")
+    gl_auto = _gl_replay_mode() == "auto"
+    root = _out_root(gl_auto)
     disposable_mode = "--disposable" in sys.argv
     # The 3->4 magic-move bridge is ON by default (the repair). --disable-bridge34
     # skips injecting the bridge config so the raw export restarts movie1 at slide
@@ -2797,19 +3113,19 @@ async def _run(player: Path) -> dict:
     bridge34 = "--disable-bridge34" not in sys.argv
     wait_profile_name = _arg_value("--wait-profile", "fast")
     wait_profile = WAIT_PROFILES[wait_profile_name]
-    if OUT.exists() and not reuse:
-        shutil.rmtree(OUT)
-    OUT.mkdir(parents=True, exist_ok=True)
-    runs = OUT / "runs"
+    if root.exists() and not reuse:
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+    runs = root / "runs"
     if runs.exists():
         shutil.rmtree(runs)
     runs.mkdir()
 
     before = file_identity(SOURCE)
-    write_json(OUT / "fingerprints-before.json", before.as_dict())
+    write_json(root / "fingerprints-before.json", before.as_dict())
     inv = inventory_deck(SOURCE)
     write_json(
-        OUT / "inventory.json",
+        root / "inventory.json",
         {
             "source": before.as_dict(),
             "canvas": inv["canvas"],
@@ -2827,9 +3143,9 @@ async def _run(player: Path) -> dict:
         },
     )
 
-    unmodified = OUT / "html-unmodified"
-    disposable_dir = OUT / "html-disposable"
-    player_dir = OUT / "html-player"
+    unmodified = (OUT if reuse else root) / "html-unmodified"
+    disposable_dir = root / "html-disposable"
+    player_dir = root / "html-player"
     if reuse:
         print("reusing HTML export at", unmodified)
     else:
@@ -2845,33 +3161,38 @@ async def _run(player: Path) -> dict:
             shutil.rmtree(disposable_dir)
         shutil.copytree(unmodified, disposable_dir)
         asset_replace_info = _replace_hevc_movies(disposable_dir)
-        write_json(OUT / "asset-replace.json", asset_replace_info)
+        write_json(root / "asset-replace.json", asset_replace_info)
         source_dir = disposable_dir
     else:
         source_dir = unmodified
 
     strip_info = strip_export_pdf_bg_fills(source_dir)
-    write_json(OUT / "pdf-strip.json", strip_info)
+    write_json(root / "pdf-strip.json", strip_info)
     print("stripped", [r["pdf"] for r in (strip_info.get("rewritten") or [])])
     if player_dir.exists():
         shutil.rmtree(player_dir)
     write_patched_export(source_dir, player_dir)
-    preserve = inject_preserve(player_dir)
-    write_json(OUT / "preserve-inject.json", preserve)
     # The 1->2 retire hands movie1 back to the player at slide 2 (refused carry);
     # the 3->4 bridge keeps the movie1 decoder playing across the moving cut.
     continuity_plan = build_continuity_plan(bridge34)
-    plan_inject = inject_continuity_plan(player_dir, continuity_plan)
-    write_json(OUT / "continuity-plan-inject.json", {**plan_inject, "plan": continuity_plan})
+    preserve, plan_inject, gl_inject = _inject_player(
+        player_dir, continuity_plan, gl_auto=gl_auto, canvas=inv["canvas"]
+    )
+    write_json(root / "preserve-inject.json", preserve)
+    write_json(root / "continuity-plan-inject.json", {**plan_inject, "plan": continuity_plan})
+    main_js = None
+    if gl_auto:
+        main_js, main_meta = _patched_main_js(player_dir)
+        gl_inject = {
+            **gl_inject,
+            **main_meta,
+            "glReplayJsSha256": gl_replay_js_sha256(),
+            "glReplayVersion": GL_REPLAY_VERSION,
+            "indexSha256": hashlib.sha256((player_dir / "index.html").read_bytes()).hexdigest(),
+        }
+        write_json(root / "gl-replay-inject.json", gl_inject)
 
-    # HTTP serve
-    class Handler(SimpleHTTPRequestHandler):
-        def __init__(self, *a, **k):
-            super().__init__(*a, directory=str(player_dir), **k)
-
-        def log_message(self, fmt, *args):  # noqa: A003
-            return
-
+    Handler = _player_handler(player_dir, main_js)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -2886,6 +3207,10 @@ async def _run(player: Path) -> dict:
     await chrome.start()
     try:
         boot = await _boot(chrome, base)
+        if gl_auto:
+            boot["glReplayCheck"] = await chrome.evaluate(GL_BOOT_CHECK_JS)
+            if not _gl_boot_ok(boot["glReplayCheck"]):
+                raise SystemExit(f"--gl-replay auto boot check failed: {boot['glReplayCheck']!r}")
         # The continuity plan (restart boundary, and the 3->4 bridge boundary iff
         # bridge34) is already baked into index.html by inject_continuity_plan
         # above, present before the core script ran at page load.
@@ -2896,7 +3221,7 @@ async def _run(player: Path) -> dict:
         # only and NO LONGER injected as `window.__OBED_MOVIE_TEXIDS__`: the 1->2
         # movie is a live `<video>`, not a fed 2D canvas, so the canvas-feed is gone.
         texids_info = _derive_movie_texids(player_dir)
-        write_json(OUT / "movie-texids.json", texids_info)
+        write_json(root / "movie-texids.json", texids_info)
         await asyncio.sleep(wait_profile["clickDelayS"])
         media_pre = await _media_snapshot_with_pool(chrome)
         pre = await chrome.screenshot()
@@ -3094,6 +3419,8 @@ async def _run(player: Path) -> dict:
         pool_census_s2 = await chrome.evaluate(POOL_CENSUS_JS) or {
             "error": "pool census unavailable"
         }
+        gl_state_s2 = await chrome.evaluate(GL_STATE_JS) if gl_auto else None
+        gl_slide2_reads = await _gl_slide2_reads(chrome, run_dir) if gl_auto else None
         await _ensure_videos_playing(chrome)
         media_mid = await _media_snapshot_with_pool(chrome)
         h_mid = _norm_hash(
@@ -3218,29 +3545,15 @@ async def _run(player: Path) -> dict:
                 "slide3ObsN": len(slide3_obs),
             }
 
-        # Fetch by kind server-side — a flat last-120 slice lets ~100+ routine
-        # remount-done events crowd out the few guard/retire/clear events that
-        # findings actually depend on.
-        preserve_events = await chrome.evaluate(
-            r"""(() => {
-              const p = window.__OBED_P2_PRESERVE__;
-              if (!p) return [];
-              const keep = __KEEP_KINDS__;
-              const important = p.events.filter((e) => keep.indexOf(e.kind) >= 0);
-              // Keep the EARLIEST remounts as well: a carry inside the retire
-              // zone happens long before the last-20 window.
-              const remountAll = p.events.filter((e) => e.kind === 'remount-done');
-              const remounts = remountAll.slice(0, 12).concat(remountAll.slice(12).slice(-20));
-              const moNoTexids = p.events.filter((e) => e.kind === 'mo-no-texids').slice(-5);
-              return important.concat(remounts).concat(moNoTexids);
-            })()""".replace("__KEEP_KINDS__", json.dumps(sorted(PRESERVE_EVENT_KEEP_KINDS)))
-        ) or []
+        preserve_events = await chrome.evaluate(_preserve_events_js(gl_auto)) or []
         # Carry census: counted IN THE PAGE over the full event log and filtered
         # to movie1 BEFORE any slicing, so a bounded sample can never hide an
         # offending note behind another movie's routine ones.
         carry_census = await chrome.evaluate(CARRY_CENSUS_JS) or {
             "error": "carry census unavailable"
         }
+        gl_carry_census = await chrome.evaluate(GL_CARRY_CENSUS_JS) if gl_auto else None
+        gl_state_after = await chrome.evaluate(GL_STATE_JS) if gl_auto else None
         clear_i = next(
             (i for i, e in enumerate(preserve_events) if e.get("kind") == "pool-cleared"),
             None,
@@ -3441,7 +3754,7 @@ async def _run(player: Path) -> dict:
         httpd.shutdown()
 
     after = file_identity(SOURCE)
-    write_json(OUT / "fingerprints-after.json", after.as_dict())
+    write_json(root / "fingerprints-after.json", after.as_dict())
 
     player_build_errors = [e for e in preserve_events if e.get("kind") == "player-build-error"]
 
@@ -3803,6 +4116,53 @@ async def _run(player: Path) -> dict:
         },
     ]
 
+    gl_carry = None
+    if gl_auto:
+        dense_frames_a = [*pre_frames_a, *frames_a]
+        gl_carry = glReplayCarry1to2(
+            continuity_plan,
+            preserve_events,
+            gl_carry_census,
+            gl_slide2_reads,
+            lingering_on_slide2,
+            index_samples,
+            flip_index,
+            [r.get("frameIndex") for r in gl_slide2_reads],
+            [f.get("decoderId") for f in dense_frames_a[:flip_index]] if flip_index is not None else [],
+            gl_state_after,
+            hash1,
+            hash2,
+            player_build_errors,
+        )
+        findings[[f["id"] for f in findings].index("refusedCarry1to2")] = {
+            "id": "glReplayCarry1to2",
+            "pass": gl_carry["ok"],
+            "status": "failed-by-player" if player_build_errors else None,
+            "detail": {
+                "glReplayCarry1to2": gl_carry,
+                "glStateOnSlide2": gl_state_s2,
+                "glStateAfterDrain": gl_state_after,
+                "glCarryCensus": gl_carry_census,
+                "glSlide2Reads": gl_slide2_reads,
+                "lingeringOnSlide2": lingering_on_slide2,
+                "injectedBoundaries": continuity_plan["boundaries"],
+                "diagnosticsNonGating": ["refusedCarry1to2", "liveContinuity1to2", "motionAcrossFlip"],
+                "refusedCarry1to2": refused_carry,
+                "liveContinuity1to2": live_continuity,
+                "motionAcrossFlip": motion_across_flip,
+                "indexSequence": [s.get("index") for s in index_samples],
+                "flipIndex": flip_index,
+                "hash": f"{hash1}->{hash2}",
+                "note": (
+                    "--gl-replay auto: the 1->2 carry runs through the GL-replay module and "
+                    "is handed back to the authored layer at build 1. Pass requires ALL of "
+                    "(a)-(h) of plan §4.2; `reasons` names each failing clause. The module "
+                    "state 'after build 1' is read after the slide-2 drain: RETIRED is "
+                    "terminal, so a later read can only add stand-downs."
+                ),
+            },
+        }
+
     # Phase 2 — composited-freeze negative control (Arm A), A-B-A bracket on the
     # 3->4 moving Magic Move boundary (the 1->2 carry is refused, so there is no
     # carried movie to freeze there — see the plan). Proves the COUNTER gate
@@ -3813,7 +4173,9 @@ async def _run(player: Path) -> dict:
     # Runs on fresh boots (its own server + re-navigated Chrome per arm), so it
     # never perturbs the main pass above. SKIPPED under --disable-bridge34 (no
     # carry to freeze in that arm).
-    freeze_control = await _run_freeze_bracket(player_dir, runs, wait_profile, wait_profile_name)
+    freeze_control = await _run_freeze_bracket(
+        player_dir, runs, wait_profile, wait_profile_name, main_js=main_js
+    )
     freeze_blocks_success = _freeze_control_blocks_success(freeze_control.get("verdict"), not bridge34)
     findings.append(
         {
@@ -3913,7 +4275,17 @@ async def _run(player: Path) -> dict:
             )
         ),
     }
-    write_json(OUT / "report.json", report)
+    if gl_auto:
+        report["glReplay"] = {
+            "mode": "auto",
+            "inject": gl_inject,
+            "glReplayCarry1to2": gl_carry,
+            "stateOnSlide2": gl_state_s2,
+            "stateAfterDrain": gl_state_after,
+            "carryCensus": gl_carry_census,
+            "slide2Reads": gl_slide2_reads,
+        }
+    write_json(root / "report.json", report)
 
     lines = [
         "# HTML adversarial gate — Minimal Alpha_DSK",
@@ -3929,8 +4301,8 @@ async def _run(player: Path) -> dict:
         extra = f" — {f['note']}" if f.get("note") else ""
         verdict = f" ({f['verdict']})" if f.get("verdict") and f["verdict"] != ("pass" if f["pass"] else "fail") else ""
         lines.append(f"- {f['id']}: **{f['pass']}**{verdict}{extra}")
-    lines += ["", f"Samples: `{OUT}`", "", "P3 still unwired."]
-    (OUT / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    lines += ["", f"Samples: `{root}`", "", "P3 still unwired."]
+    (root / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     return report
 

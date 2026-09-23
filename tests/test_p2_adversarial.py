@@ -3381,7 +3381,7 @@ def test_preserve_event_keep_kinds_hold_every_kind_the_verdicts_read():
 def test_the_p2_fetch_filter_substitutes_the_keep_kinds_instead_of_a_literal_list():
     source = (REPO / "scripts" / "p2_recovery_html_adversarial.py").read_text(encoding="utf-8")
     assert source.count("const keep = __KEEP_KINDS__;") == 1
-    assert source.count('.replace("__KEEP_KINDS__", json.dumps(sorted(PRESERVE_EVENT_KEEP_KINDS)))') == 1
+    assert source.count('.replace("__KEEP_KINDS__", json.dumps(sorted(kinds)))') == 1
     assert "const keep = [" not in source
     assert "'glreplay-zone'" not in source
 
