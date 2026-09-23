@@ -360,44 +360,67 @@ GL_REPLAY_JS = r"""
     state.replaying--;
   }
 
+  // WebGL2 keeps separate read and draw framebuffer bindings; binding
+  // `FRAMEBUFFER` sets both, so each is saved and restored on its own.
   function posterOf(tex, up){
     var g = state.gl;
-    state.replaying++;
     var out = {complete: false};
+    var gl2 = typeof g.READ_FRAMEBUFFER_BINDING === 'number';
+    var readFb = null, drawFb = null, saved = false, fb = null;
+    state.replaying++;
     try {
-      var sfb = g.getParameter(g.FRAMEBUFFER_BINDING);
-      var fb = g.createFramebuffer();
+      drawFb = g.getParameter(g.FRAMEBUFFER_BINDING);
+      if (gl2) readFb = g.getParameter(g.READ_FRAMEBUFFER_BINDING);
+      saved = true;
+      fb = g.createFramebuffer();
       g.bindFramebuffer(g.FRAMEBUFFER, fb);
       g.framebufferTexture2D(g.FRAMEBUFFER, g.COLOR_ATTACHMENT0, g.TEXTURE_2D, tex, 0);
-      var st = g.checkFramebufferStatus(g.FRAMEBUFFER);
-      var px = new Uint8Array(up.w * up.h * 4);
-      if (st === g.FRAMEBUFFER_COMPLETE) g.readPixels(0, 0, up.w, up.h, g.RGBA, g.UNSIGNED_BYTE, px);
-      g.bindFramebuffer(g.FRAMEBUFFER, sfb);
-      g.deleteFramebuffer(fb);
-      out = {complete: st === g.FRAMEBUFFER_COMPLETE, px: px, w: up.w, h: up.h,
-             intFmt: up.intFmt, extFmt: up.extFmt, type: up.type};
-    } catch (e) {}
-    state.replaying--;
+      if (g.checkFramebufferStatus(g.FRAMEBUFFER) === g.FRAMEBUFFER_COMPLETE){
+        var px = new Uint8Array(up.w * up.h * 4);
+        g.readPixels(0, 0, up.w, up.h, g.RGBA, g.UNSIGNED_BYTE, px);
+        if (!g.isContextLost() && g.getError() === g.NO_ERROR){
+          out = {complete: true, px: px, w: up.w, h: up.h, intFmt: up.intFmt, extFmt: up.extFmt, type: up.type};
+        }
+      }
+    } catch (e) {
+    } finally {
+      if (saved && gl2){
+        try { g.bindFramebuffer(g.READ_FRAMEBUFFER, readFb); } catch (e) {}
+        try { g.bindFramebuffer(g.DRAW_FRAMEBUFFER, drawFb); } catch (e) {}
+      } else if (saved){
+        try { g.bindFramebuffer(g.FRAMEBUFFER, drawFb); } catch (e) {}
+      }
+      if (fb){ try { g.deleteFramebuffer(fb); } catch (e) {} }
+      state.replaying--;
+    }
     return out;
   }
 
   function restorePoster(){
     var g = state.gl, P = state.poster;
-    if (!g || !P || !P.complete || !state.posterTex) return;
+    if (!g || !P || !P.complete || !state.posterTex) return null;
+    var ok = false, saved = false, sb = null, fy = false, pm = false;
     state.replaying++;
     try {
-      var sb = g.getParameter(g.TEXTURE_BINDING_2D);
-      var fy = g.getParameter(g.UNPACK_FLIP_Y_WEBGL);
-      var pm = g.getParameter(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL);
+      sb = g.getParameter(g.TEXTURE_BINDING_2D);
+      fy = g.getParameter(g.UNPACK_FLIP_Y_WEBGL);
+      pm = g.getParameter(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL);
+      saved = true;
       g.bindTexture(g.TEXTURE_2D, state.posterTex);
       g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, false);
       g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       g.texImage2D(g.TEXTURE_2D, 0, P.intFmt, P.w, P.h, 0, P.extFmt, P.type, P.px);
-      g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, fy);
-      g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, pm);
-      g.bindTexture(g.TEXTURE_2D, sb);
-    } catch (e) {}
-    state.replaying--;
+      ok = true;
+    } catch (e) {
+    } finally {
+      if (saved){
+        try { g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, fy); } catch (e) { ok = false; }
+        try { g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, pm); } catch (e) { ok = false; }
+        try { g.bindTexture(g.TEXTURE_2D, sb); } catch (e) { ok = false; }
+      }
+      state.replaying--;
+    }
+    return ok;
   }
 
   // Taken before the first video upload redefines the poster texture; after it the
@@ -412,6 +435,9 @@ GL_REPLAY_JS = r"""
   }
 
   function perClearUpload(){
+    var seg = state.segment;
+    if (!requireDelimitedFrame(seg.length === 2 && seg[0].m === 'clearColor' && seg[1].m === 'clear',
+        {len: seg.length, prefix: seg.slice(0, 2).map(function(c){ return c.m; })})) return;
     if (!state.posterTex || !state.posterUpload) return;
     if (!resolveVideo()) return;
     var v = state.video;
@@ -858,7 +884,7 @@ GL_REPLAY_JS = r"""
         state.replaying--;
       }
     }
-    if (!lost) restorePoster();
+    var posterRestored = lost ? null : restorePoster();
     // One clean replay so the stand-down does not leave the PATCHED frame, or a
     // settled frame drawn from the video, on screen. Skipped mid-move (the player
     // is still drawing), when the canvas is gone, the context is lost, or the player
@@ -885,7 +911,7 @@ GL_REPLAY_JS = r"""
       try { released = state.seam.release(ENTRY.movieKey, {rect: rectOf(ENTRY.slotRects[MOVIE_SLOT])}); }
       catch (e) { released = {ok: false, reason: String(e)}; }
     }
-    var payload = Object.assign({released: released, writebackFailed: failed,
+    var payload = Object.assign({released: released, writebackFailed: failed, posterRestored: posterRestored,
       completedMs: now() - started}, detail || {});
     payload.reason = reason;
     event(reason === CANVAS_REMOVED ? 'glreplay-handoff' : 'glreplay-standdown', payload);

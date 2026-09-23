@@ -137,7 +137,7 @@ OPACITY_UNPROVEN_REASONS = [
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "3f089a1a6a79578767f83c6330890547cbb931c756052e0f97ea127ef6558ca1"
+PINNED_JS_SHA256 = "84cf7830d8bfd33954fd594e4fdd9574f1125b6d68b6c4d9bcfc596179bab8a9"
 
 
 # =======================================================================================
@@ -659,6 +659,10 @@ function FakeGL(canvas) {
   }
 }
 Object.assign(FakeGL.prototype, GLC);
+// WebGL2's separate read/draw framebuffer targets (DRAW_FRAMEBUFFER_BINDING is
+// FRAMEBUFFER_BINDING). A WebGL1 context has none of these constants.
+const GL2 = { READ_FRAMEBUFFER: 36008, DRAW_FRAMEBUFFER: 36009, READ_FRAMEBUFFER_BINDING: 36010 };
+if (CFG.webgl2) Object.assign(FakeGL.prototype, GL2);
 FakeGL.prototype.isContextLost = function () { return this._lost; };
 FakeGL.prototype.getError = function () { const e = this._error; this._error = GLC.NO_ERROR; return e; };
 FakeGL.prototype.getExtension = function (name) {
@@ -670,7 +674,8 @@ FakeGL.prototype.getParameter = function (p) {
   if (p === GLC.CURRENT_PROGRAM) return this._current;
   if (p === GLC.ACTIVE_TEXTURE) return GLC.TEXTURE0 + this._activeUnit;
   if (p === GLC.TEXTURE_BINDING_2D) return this._units[this._activeUnit] || null;
-  if (p === GLC.FRAMEBUFFER_BINDING) return this._fbo || null;
+  if (p === GLC.FRAMEBUFFER_BINDING) return this._drawFbo || null;
+  if (p === GL2.READ_FRAMEBUFFER_BINDING && CFG.webgl2) return this._readFbo || null;
   if (p === GLC.UNPACK_FLIP_Y_WEBGL) return this._flipY;
   if (p === GLC.UNPACK_PREMULTIPLY_ALPHA_WEBGL) return this._premul;
   return 0;
@@ -715,6 +720,10 @@ FakeGL.prototype.texImage2D = function () {
   const a = arguments, tex = this._units[this._activeUnit];
   if (!tex) { this._error = GLC.INVALID_OPERATION; return; }
   let upload;
+  if (a.length >= 9 && this._restoreThrows && a[3] === FIXTURE.slotSizes[MOVIE_SLOT_JS][0] &&
+      a[4] === FIXTURE.slotSizes[MOVIE_SLOT_JS][1]) {
+    throw new Error('poster restore upload refused');
+  }
   if (a.length >= 9) {                       // target, level, ifmt, w, h, border, fmt, type, px
     upload = { srcType: 'pixels', w: a[3], h: a[4], format: a[6], type: a[7] };
     const px = a[8];
@@ -760,15 +769,29 @@ FakeGL.prototype.blendFunc = function () {};
 FakeGL.prototype.flush = function () {};
 FakeGL.prototype.finish = function () {};
 FakeGL.prototype.viewport = function () {};
-FakeGL.prototype.createFramebuffer = function () { return { id: 'fbo' }; };
-FakeGL.prototype.deleteFramebuffer = function () {};
-FakeGL.prototype.bindFramebuffer = function (t, f) { this._fbo = f; };
-FakeGL.prototype.framebufferTexture2D = function (t, a, tt, tex) { this._fboTex = tex; };
+// Read and draw framebuffer bindings are tracked separately, as in WebGL2;
+// `FRAMEBUFFER` sets both. An attachment belongs to the framebuffer object.
+FakeGL.prototype.createFramebuffer = function () {
+  world.fbosCreated++; return { id: 'fbo' + world.fbosCreated, tex: null };
+};
+FakeGL.prototype.deleteFramebuffer = function (f) { if (f) world.fbosDeleted++; };
+FakeGL.prototype.bindFramebuffer = function (t, f) {
+  if (t === GLC.FRAMEBUFFER || t === GL2.DRAW_FRAMEBUFFER) this._drawFbo = f || null;
+  if (t === GLC.FRAMEBUFFER || t === GL2.READ_FRAMEBUFFER) this._readFbo = f || null;
+};
+FakeGL.prototype.framebufferTexture2D = function (t, a, tt, tex) {
+  const f = t === GL2.READ_FRAMEBUFFER ? this._readFbo : this._drawFbo;
+  if (f) f.tex = tex;
+};
 FakeGL.prototype.checkFramebufferStatus = function () { return this._fboStatus; };
 FakeGL.prototype.readPixels = function (x, y, w, h, fmt, type, out) {
-  if (this._readPixelsThrows && !this._fbo) throw new Error('readPixels refused');
-  if (this._fbo) {                            // readback off the attached texture's texels
-    const tex = this._fboTex;
+  if (this._readPixelsThrows && !this._readFbo) throw new Error('readPixels refused');
+  if (this._readFbo) {                        // readback off the attached texture's texels
+    if (CFG.fboReadThrows) throw new Error('framebuffer readPixels refused');
+    // A failed read that throws nothing: the GL error is the only evidence, and
+    // the caller's array is left as it was (zero-initialised).
+    if (CFG.fboReadSilentError) { this._error = GLC.INVALID_OPERATION; return; }
+    const tex = this._readFbo.tex;
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < w; i++) {
         const tx = x + i, ty = y + j, o = (j * w + i) * 4;
@@ -883,6 +906,7 @@ FakeVideo.prototype.requestVideoFrameCallback = function (cb) {
 const world = {
   uploads: [], clears: [], contexts: [], videoCalls: [], seamCalls: [],
   mutationCallbacks: [], harnessErrors: [], presented: 0, playerClears: 0, originalPoster: null,
+  fbosCreated: 0, fbosDeleted: 0,
   observerThrows: !!CFG.observerThrows,
   fireMutation(records) {
     for (const cb of this.mutationCallbacks) {
@@ -1009,8 +1033,10 @@ const M = window.__OBED_GL_REPLAY__ && window.__OBED_GL_REPLAY__.version
   ? window.__OBED_GL_REPLAY__ : null;
 
 // ------------------------------------------------------------------ the "player"
-function playerFrame(gl, len) {
-  const calls = FIXTURE.calls.slice(0, len === undefined ? FIXTURE.calls.length : len);
+function playerFrame(gl, len, bareClear) {
+  let calls = FIXTURE.calls.slice(0, len === undefined ? FIXTURE.calls.length : len);
+  // A frame whose `clear` is not immediately preceded by `clearColor`.
+  if (bareClear) calls = calls.filter((c, i) => !(i === 0 && c.m === 'clearColor'));
   for (const call of calls) {
     if (call.m === 'clear') world.playerClears++;
     const args = call.a.map((a) => {
@@ -1085,6 +1111,11 @@ function snapshotState() {
     currentProgramSlot: gl && gl._current ? gl._current.slot : null,
     uploads: world.uploads.length,
     moduleClears: world.clears.length - world.playerClears,
+    fbos: { created: world.fbosCreated, deleted: world.fbosDeleted,
+            read: gl && gl._readFbo ? gl._readFbo.id : null,
+            draw: gl && gl._drawFbo ? gl._drawFbo.id : null },
+    unpack: gl ? { flipY: gl._flipY, premul: gl._premul, activeUnit: gl._activeUnit,
+                   bound: gl._units[gl._activeUnit] ? gl._units[gl._activeUnit].id : null } : null,
     drawnColours: gl ? gl._drawn.map((d) => d.colour) : null,
     // Digesting a 1920x540 texture costs real time, so only the tests that read it ask.
     originalPoster: CFG.trackPoster ? world.originalPoster : null,
@@ -1142,7 +1173,16 @@ async function armAndGoLive(out) {
       out.atForce = { uploads: M.stats().uploads, state: M.state };
       M.debugForceFail = CFG.forceMidMove;
     }
-    playerFrame(gl, CFG.frameLen); await settle(2);
+    if (CFG.distinctPlayerFbos && f === 0) {
+      gl._readFbo = { id: 'player-read', tex: null };
+      gl._drawFbo = { id: 'player-draw', tex: null };
+    }
+    playerFrame(gl, CFG.frameLen, CFG.bareClearAtFrame === f);
+    if (CFG.distinctPlayerFbos && f === 0) {
+      out.fbosAfterSnapshot = { read: gl._readFbo && gl._readFbo.id, draw: gl._drawFbo && gl._drawFbo.id };
+      gl._readFbo = null; gl._drawFbo = null;
+    }
+    await settle(2);
   }
   if (CFG.floodWithoutClear) {
     for (let i = 0; i < 600; i++) gl.enable(GLC.BLEND);
@@ -1212,6 +1252,12 @@ async function main() {
   }
   if (CFG.scenario === 'force_late') {
     out.atForce = { uploads: M.stats().uploads, state: M.state };
+    if (CFG.restoreUploadThrows) {
+      // The player's own texture and unpack state, which the failed restore must hand back.
+      gl._restoreThrows = true;
+      gl._flipY = true; gl._premul = true;
+      gl._units[gl._activeUnit] = gl._tex(777);
+    }
     M.debugForceFail = CFG.lateForce;
     await settle(4);
     out.final = snapshotState();
@@ -2558,3 +2604,85 @@ def test_poster_snapshot_time_is_reported():
     out = _run_sandbox(scenario="happy")
     stats = _assert_clean(out)["stats"]
     assert isinstance(stats.get("posterSnapshotMs"), (int, float)), stats.get("posterSnapshotMs")
+
+
+# --- codex r1 G34-04: the poster snapshot/restore under GL failure ------------------------
+
+
+def _standdown_detail(final: dict) -> dict:
+    [event] = [e for e in final["events"]
+               if e["kind"] in ("glreplay-standdown", "glreplay-handoff")]
+    return event["detail"]
+
+
+@pytest.mark.parametrize("label,cfg", [
+    ("bound-fbo-read-throws", {"fboReadThrows": True}),
+    ("bound-fbo-read-silent-gl-error", {"fboReadSilentError": True}),
+])
+def test_failed_poster_read_is_unreadable_and_leaves_no_trace(label, cfg):
+    """A snapshot is complete only when `readPixels` returned, the context is live
+    and `getError()` is clean. A silent failure leaves the zero-initialised array
+    untouched, so accepting it would later write zeros over the poster. A throw
+    must still unbind and delete the temporary framebuffer."""
+    out = _run_sandbox(scenario="arm_only", trackPoster=True, **cfg)
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["posterUnreadable"], final["standDowns"]
+    assert final["stats"]["uploads"] == 0, final["stats"]["uploads"]
+    assert final["posterTexture"] == final["originalPoster"], "the poster was overwritten"
+    fbos = final["fbos"]
+    assert fbos["created"] == 1, fbos
+    assert fbos["deleted"] == fbos["created"], f"temporary framebuffer leaked: {fbos}"
+    assert (fbos["read"], fbos["draw"]) == (None, None), f"framebuffer left bound: {fbos}"
+
+
+def test_snapshot_restores_distinct_webgl2_read_and_draw_bindings():
+    """WebGL2 binds READ and DRAW framebuffers separately; saving `FRAMEBUFFER_BINDING`
+    (the draw binding) and rebinding `FRAMEBUFFER` collapses the player's read
+    binding onto its draw binding."""
+    out = _run_sandbox(scenario="happy", webgl2=True, distinctPlayerFbos=True)
+    final = _assert_clean(out)
+    assert out["fbosAfterSnapshot"] == {"read": "player-read", "draw": "player-draw"}, (
+        out["fbosAfterSnapshot"])
+    assert final["stats"]["uploads"] > 0, "the snapshot never ran; vacuous"
+    assert final["standDowns"] == [], final["standDowns"]
+
+
+def test_throwing_poster_restore_hands_back_texture_binding_and_unpack_flags():
+    """A restore upload that throws must still rebind the player's texture and put
+    both unpack flags back, and the stand-down must say the poster was not restored."""
+    out = _run_sandbox(scenario="force_late", lateForce="canvasRemoved", restoreUploadThrows=True)
+    final = _assert_clean(out)
+    assert out["atForce"]["state"] == "LIVE", out["atForce"]
+    assert final["standDowns"] == [NORMAL_EXIT_REASON], final["standDowns"]
+    assert final["unpack"] == {"flipY": True, "premul": True, "activeUnit": 0, "bound": 777}, (
+        final["unpack"])
+    assert _standdown_detail(final).get("posterRestored") is False, _standdown_detail(final)
+
+
+def test_successful_poster_restore_is_reported():
+    out = _run_sandbox(scenario="force_late", lateForce="canvasRemoved")
+    final = _assert_clean(out)
+    assert _standdown_detail(final).get("posterRestored") is True, _standdown_detail(final)
+    # Nothing to restore: a stand-down before the snapshot, and a lost context.
+    for cfg in ({"scenario": "arm_only", "noSeam": True}, {"scenario": "context_lost"}):
+        detail = _standdown_detail(_assert_clean(_run_sandbox(**cfg)))
+        assert "posterRestored" in detail and detail["posterRestored"] is None, (cfg, detail)
+
+
+# --- codex r1 G34-05: every per-clear upload needs the `clearColor, clear` prefix ---------
+
+
+@pytest.mark.parametrize("frame", [0, 1], ids=["first-clear", "later-clear"])
+def test_clear_without_clear_color_stands_down_before_uploading(frame):
+    """The settled frame must be `clearColor, clear`-delimited to be replayed, so a
+    clear without that prefix can never lead to a repaint. Standing down before
+    that clear's upload leaves the poster (or the player's own frame, drawn from the
+    restored poster) on screen."""
+    out = _run_sandbox(scenario="arm_only", trackPoster=True, bareClearAtFrame=frame)
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["frameNotDelimited"], final["standDowns"]
+    assert final["stats"]["uploads"] == frame, (
+        f"{final['stats']['uploads']} video uploads; expected only the {frame} delimited frame(s)")
+    assert final["posterTexture"] == final["originalPoster"], final["posterTexture"]
+    assert final["moduleClears"] == 0, final["moduleClears"]
+    assert final["drawnColours"][MOVIE_SLOT] == POSTER_COLOUR, final["drawnColours"]
