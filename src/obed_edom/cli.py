@@ -696,8 +696,10 @@ def _run_remap(args: argparse.Namespace) -> int:
         print(str(err), file=sys.stderr)
         return 1
 
+    t_start = time.monotonic()
+
     def log(message: str) -> None:
-        print(message)
+        print(f"[+{time.monotonic() - t_start:7.1f}s] {message}")
 
     source_previews = Path(args.source_previews).expanduser() if args.source_previews else None
     if source_previews and not source_previews.is_dir():
