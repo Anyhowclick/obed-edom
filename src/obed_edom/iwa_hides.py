@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from keynote_parser.codec import IWAFile
+from keynote_parser.codec import IWAFile, import_version
 
 from obed_edom.iwa_kindindex import (
     KIND_ORDER,
@@ -444,18 +444,47 @@ _FORBIDDEN_TABLES = frozenset({
 _STORAGE_TABLE_REF = re.compile(r"(?:^|\.)(table\w+)\.entries\.(?:object|field)$")
 
 
-def _typed_refs(value: Any, path: str, out: list[tuple[str, str]]) -> None:
-    """(dotted field path without list indices, referenced id) for every identifier ref."""
-    if isinstance(value, dict):
-        ident = value.get("identifier")
-        if ident is not None and not isinstance(ident, (dict, list)):
-            out.append((path, str(ident)))
-        for key, v in value.items():
-            if isinstance(v, (dict, list)):
-                _typed_refs(v, f"{path}.{key}" if path else key, out)
-    elif isinstance(value, list):
-        for v in value:
-            _typed_refs(v, path, out)
+_REFERENCE_TYPE = "TSP.Reference"
+_FORBIDDEN_ARCHIVE_TYPE = re.compile(r"Comment|Highlight|PencilAnnotation|Change")
+
+
+def _descriptor_refs(obj: dict, descriptor: Any, path: str, out: list[tuple[str, str]], unknown: list[str]) -> None:
+    """(dotted field path, id) for every field the schema types as ``TSP.Reference``;
+    ``unknown`` collects paths the schema cannot type that still carry an identifier."""
+    for key, value in obj.items():
+        if key == "_pbtype":
+            continue
+        p = f"{path}.{key}" if path else key
+        fd = descriptor.fields_by_camelcase_name.get(key)
+        if fd is None or fd.message_type is None:
+            ids: list[str] = []
+            _walk_refs(value, ids, None)
+            if fd is None and ids:
+                unknown.append(p)
+            continue
+        values = value if isinstance(value, list) else [value]
+        if fd.message_type.full_name == _REFERENCE_TYPE:
+            out.extend((p, str(v["identifier"])) for v in values
+                       if isinstance(v, dict) and v.get("identifier") is not None)
+            continue
+        for v in values:
+            if isinstance(v, dict):
+                _descriptor_refs(v, fd.message_type, p, out, unknown)
+
+
+def _archive_refs(arch: dict) -> list[tuple[str, str]]:
+    """Descriptor-confirmed body refs of every object; refuses an untypeable object or field."""
+    out: list[tuple[str, str]] = []
+    for obj in arch.get("objects") or []:
+        pbtype = obj.get("_pbtype")
+        cls = import_version()[1].get(pbtype) if pbtype else None
+        if cls is None:
+            raise _Refuse(f"{arch['header']['identifier']} has an untyped object {pbtype!r}")
+        unknown: list[str] = []
+        _descriptor_refs(obj, cls.DESCRIPTOR, "", out, unknown)
+        if unknown:
+            raise _Refuse(f"{arch['header']['identifier']} unclassified {unknown[0]} carries a reference")
+    return out
 
 
 def _ref_class(path: str) -> str:
@@ -479,26 +508,45 @@ def _ref_class(path: str) -> str:
     return "unclassified"
 
 
-def _check_subtree_refs(x: str, subtree: set[str], slide_id: str, member: str, model: _Model) -> None:
-    """Every ref of every object is classified: strong ownership must be header-listed and
-    same-member; weak parent/style refs may point anywhere (a same-member header-less one
-    only at the subtree or the slide); forbidden and unclassified refs refuse."""
-    header = set(_header_refs(model.archives[x]["header"]))
-    for obj in model.archives[x].get("objects") or []:
-        refs: list[tuple[str, str]] = []
-        _typed_refs({k: v for k, v in obj.items() if k != "_pbtype"}, "", refs)
+def _close_subtree(hide_ids: list[str], slide_id: str, member: str, model: _Model) -> tuple[set[str], set[str]]:
+    """(subtree, weak boundary). Closure follows only strong, header-listed, same-member
+    body refs; weak targets stay outside; forbidden/unclassified refs and header refs no
+    decoded body ref accounts for refuse; comment/highlight/pencil/change archives refuse."""
+    subtree: set[str] = set()
+    weak: set[str] = set()
+    queue = list(hide_ids)
+    while queue:
+        x = queue.pop()
+        if x in subtree:
+            continue
+        subtree.add(x)
+        arch = model.archives[x]
+        for obj in arch.get("objects") or []:
+            if _FORBIDDEN_ARCHIVE_TYPE.search(str(obj.get("_pbtype") or "")):
+                raise _Refuse(f"{x} is a {obj.get('_pbtype')}")
+        refs = _archive_refs(arch)
+        header = set(_header_refs(arch["header"]))
         for path, t in refs:
-            if t not in model.archives:
-                continue
             cls = _ref_class(path)
-            tm = model.member_of.get(t)
             if cls in ("forbidden", "unclassified"):
                 raise _Refuse(f"{x} {cls} {path} references {t}")
-            if cls == "strong":
-                if t not in header or tm != member:
+        unattributed = header - {t for _p, t in refs}
+        if unattributed:
+            raise _Refuse(f"{x} header references {sorted(unattributed)[:3]} with no decoded body reference")
+        for path, t in refs:
+            tm = model.member_of.get(t)
+            if _ref_class(path) == "strong":
+                if t not in header or tm != member or t == slide_id:
                     raise _Refuse(f"{x} {path} owns {t} ({tm}) without a same-member header reference")
-            elif tm == member and t not in header and t not in subtree and t != slide_id:
-                raise _Refuse(f"{x} {path} references {t} in {member} without a header reference")
+                queue.append(t)
+                continue
+            if t not in model.archives:
+                continue
+            if tm == member and t not in header and t != slide_id and t not in hide_ids:
+                if t not in subtree and (model.objects.get(t) or {}).get("_pbtype") != "TSD.GroupArchive":
+                    raise _Refuse(f"{x} {path} references {t} in {member} without a header reference")
+            weak.add(t)
+    return subtree, weak - subtree - {slide_id}
 
 
 def _metadata_refs(comp: dict) -> list[tuple[str, str]]:
@@ -587,23 +635,10 @@ def _plan_slide(
     _identity_check(records, items, model.objects, data_index, group_text, cache)
     _check_unambiguous(records, hides, items, slide, model.objects, data_index, group_text, cache)
 
-    subtree: set[str] = set()
-    boundary: set[str] = set()
-    queue = list(hide_ids)
-    while queue:
-        x = queue.pop()
-        if x == slide_id or x in subtree or x in boundary or x not in model.archives:
-            continue
-        if model.member_of[x] != member:
-            boundary.add(x)
-            continue
-        subtree.add(x)
-        queue.extend(_header_refs(model.archives[x]["header"]))
+    subtree, boundary = _close_subtree(hide_ids, slide_id, member, model)
     dup = subtree & model.duplicates
     if dup:
         raise _Refuse(f"subtree ids duplicated in the deck: {sorted(dup)[:5]}")
-    for x in subtree:
-        _check_subtree_refs(x, subtree, slide_id, member, model)
     return slide_id, member, hide_ids, subtree, boundary
 
 

@@ -101,12 +101,17 @@ def _a(ident, pbtype, obj, refs=(), data=()):
     return arch
 
 
-def _text(ident, storage, text, *, textbox=True, style=901, extra_refs=(), at=None, **extra):
+def _text(ident, storage, text, *, textbox=True, style=901, parent=None, at=None, **extra):
+    """A text/shape box with owned storage. ``parent`` is a body-only weak ref (Keynote
+    never header-lists a drawable's parent)."""
     x, y = at if at is not None else ((ident % 100) * 10, 10)
+    shape = _shape_super(x, y, 100, 40)
+    if parent is not None:
+        shape["super"]["parent"] = {"identifier": parent}
     obj = {"isTextBox": textbox, "ownedStorage": {"identifier": storage},
-           "super": {"style": {"identifier": style}, **_shape_super(x, y, 100, 40)}, **extra}
+           "super": {"style": {"identifier": style}, **shape}, **extra}
     return [
-        _a(ident, "TSWP.ShapeInfoArchive", obj, refs=[storage, style, *extra_refs]),
+        _a(ident, "TSWP.ShapeInfoArchive", obj, refs=[storage, style]),
         _a(storage, "TSWP.StorageArchive", {"text": [text]}),
     ]
 
@@ -156,7 +161,7 @@ def _members() -> dict[str, list[dict]]:
             _image(304, 51),
             _image(305, 52),
             _a(306, "TSD.GroupArchive", {"children": [{"identifier": 320}], "super": {}}, refs=[320]),
-            *_text(320, 321, "G child", extra_refs=[306]),
+            *_text(320, 321, "G child", parent=306),
         ],
         S2: [
             _slide(102, [400, 401, 402]),
@@ -933,7 +938,7 @@ def _twin_archs(kind, hide_at, surv_at):
         for gid, at in ((520, hide_at), (523, surv_at)):
             out.append(_a(gid, "TSD.GroupArchive", {"children": [{"identifier": gid + 1}], "super": _geom(*at, 100, 40)},
                           refs=[gid + 1]))
-            out.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), extra_refs=[gid]))
+            out.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), parent=gid))
         return out, 520, 523
     line = {"isTextBox": False}
     return [
@@ -1082,7 +1087,7 @@ def _media_group_twins(swap):
         archs.append(_a(gid, "TSD.GroupArchive",
                         {"children": [{"identifier": gid + 1}, {"identifier": gid + 3}], "super": _geom(*at, 100, 40)},
                         refs=[gid + 1, gid + 3]))
-        archs.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), extra_refs=[gid]))
+        archs.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), parent=gid))
         archs.append(_image(gid + 3, data, at=(0, 0)))
     z = [500, 501, 540, 520] if swap else [500, 501, 520, 540]
 
@@ -1135,7 +1140,7 @@ def _rotated_group_twins(swap):
     for gid, at, angle in ((520, (40, 400), 30.0), (540, (130, 70), 0.0)):
         archs.append(_a(gid, "TSD.GroupArchive", {"children": [{"identifier": gid + 1}],
                                                   "super": _geom(*at, 100, 40, angle)}, refs=[gid + 1]))
-        archs.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), extra_refs=[gid]))
+        archs.extend(_text(gid + 1, gid + 2, "GT", at=(0, 0), parent=gid))
     z = [500, 501, 540, 520] if swap else [500, 501, 520, 540]
 
     def mutate(members):
@@ -1364,9 +1369,9 @@ def _masked_twins(mw=180.0, mh=80.0, angle=0.5, survivor_w=None):
                             {"data": {"identifier": 51}, "mask": {"identifier": ident + 10},
                              "style": {"identifier": 900}, "super": _geom(x, 400, w, mh)},
                             refs=[ident + 10, 900], data=[51]))
-            archs.append(_a(ident + 10, "TSD.MaskArchive",
-                            {"super": {"parent": {"identifier": ident}}, **_mask_super(0, 0, w, mh, angle=angle)},
-                            refs=[ident]))
+            mask = _mask_super(0, 0, w, mh, angle=angle)
+            mask["super"]["parent"] = {"identifier": ident}
+            archs.append(_a(ident + 10, "TSD.MaskArchive", mask, refs=[ident]))
         members[S3] = [_slide(103, [500, 501, 505, 506]), *_text(500, 510, "Stay"), _image(501, 54), *archs]
     return mutate
 
@@ -1477,14 +1482,14 @@ NESTED_REFUSALS = {
         _storage_with("tableAttachment", 724,
                       extra_archs=[_a(724, "TSWP.HighlightArchive", {"commentStorage": {"identifier": 725}}, refs=[725]),
                                    _a(725, "TSD.CommentStorageArchive", {})]),
-        "forbidden commentStorage"),
+        "is a TSWP.HighlightArchive"),
     "pencil-annotation-storage": (
         _storage_with("tableAttachment", 726,
                       extra_archs=[_a(726, "TSWP.PencilAnnotationArchive",
                                       {"pencilAnnotationStorage": {"identifier": 727}}, refs=[727]),
                                    _a(727, "TSD.PencilAnnotationStorageArchive", {})]),
-        "forbidden pencilAnnotationStorage"),
-    "pencil-sub-storages-cross-member": (_pencil_substorage, "subStorages owns 731"),
+        "is a TSWP.PencilAnnotationArchive"),
+    "pencil-storage-header-only": (_pencil_substorage, "header references ['730']"),
     "unclassified-header-listed": (
         _storage_with("tableSmartfield", 728, extra_archs=[_a(728, "TSWP.StorageArchive", {})]),
         "unclassified tableSmartfield"),
@@ -1509,3 +1514,70 @@ def test_owned_footnote_and_inline_drawable_in_member_are_deleted_with_the_hide(
     res = _run(path, verify=True)
     assert not res.slides[1].refused, res.slides[1].reason
     assert {"720", "721"} <= set(res.slides[1].removed_ids)
+
+
+@pytest.mark.parametrize("path, cls", [
+    ("super.super.title", "strong"), ("super.caption", "strong"), ("children", "strong"), ("mask", "strong"),
+    ("ownedStorage", "strong"), ("fakeShapeForEmptyGroup", "strong"), ("drawable", "strong"),
+    ("containedStorage", "strong"), ("subStorages", "strong"), ("calloutSubStorages", "strong"),
+    ("tableAttachment.entries.object", "strong"), ("tableFootnote.entries.object", "strong"),
+    ("super.parent", "weak"), ("super.style", "weak"), ("styleSheet", "weak"),
+    ("tableParaStyle.entries.object", "weak"), ("tableDropCapStyle.entries.object", "weak"),
+    ("super.comment", "forbidden"), ("commentStorage", "forbidden"), ("pencilAnnotationStorage", "forbidden"),
+    ("tableHighlight.entries.object", "forbidden"), ("tablePencilAnnotation.entries.field", "forbidden"),
+    ("tableInsertion.entries.object", "forbidden"), ("textFlow", "forbidden"),
+    ("tableSmartfield.entries.object", "unclassified"), ("databaseData", "unclassified"),
+])
+def test_reference_path_classes(path, cls):
+    assert iwa_hides._ref_class(path) == cls
+
+
+# ---------------------------------------------------------------- Sol r6 #1: classification drives closure
+
+
+def test_same_member_weak_style_stays_outside_the_subtree(tmp_path):
+    """A slide-member style used by hidden image 305 and surviving image 303: the weak,
+    header-listed ref must not pull the style into deletion."""
+    local_style = _a(740, "TSD.MediaStyleArchive", {})
+
+    def mutate(members):
+        members[S1] = [_image(int(a["header"]["identifier"]), 51 if a["header"]["identifier"] in (303, "303") else 52,
+                              style=740)
+                       if str(a["header"]["identifier"]) in ("303", "305") else a for a in members[S1]]
+        members[S1].append(local_style)
+
+    path = _build(tmp_path / "style.key", mutate=mutate)
+    res = _run(path, verify=True)
+    assert not res.slides[1].refused, res.slides[1].reason
+    assert "740" not in res.slides[1].removed_ids
+    assert "740" in _decoded(path, S1)
+
+
+@pytest.mark.parametrize("where", ["messageInfos", "fieldInfos"])
+def test_header_only_reference_refuses(tmp_path, where):
+    extra = _a(741, "TSWP.StorageArchive", {"text": ["orphan?"]})
+
+    def mutate(members):
+        out = []
+        for a in members[S1]:
+            if str(a["header"]["identifier"]) == "305":
+                a = copy.deepcopy(a)
+                mi = a["header"]["messageInfos"][0]
+                if where == "messageInfos":
+                    mi["objectReferences"] = [*mi.get("objectReferences", []), "741"]
+                else:
+                    mi["fieldInfos"] = [{"path": {"path": [1]}, "objectReferences": ["741"]}]
+            out.append(a)
+        members[S1] = out + [extra]
+
+    path = _build(tmp_path / f"{where}.key", mutate=mutate)
+    before = _raw_members(path)
+    res = _run(path)
+    _assert_refused_only(path, before, res, 1, "header references ['741'] with no decoded body reference")
+
+
+def test_unresolved_forbidden_reference_refuses(tmp_path):
+    path = _build(tmp_path / "c.key", mutate=_patch_s1(305, super_extra={"comment": {"identifier": 99999}}))
+    before = _raw_members(path)
+    res = _run(path)
+    _assert_refused_only(path, before, res, 1, "forbidden super.comment references 99999")

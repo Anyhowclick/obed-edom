@@ -390,7 +390,7 @@ def create_app() -> FastAPI:
     @app.delete("/api/jobs")
     def delete_all_jobs() -> dict:
         _refuse_deleting_unclosed_outputs(RUNNER.list())
-        return {"ok": True, "deleted": RUNNER.delete_all(purge=True)}
+        return {"ok": True, "deleted": RUNNER.delete_all(purge=True, guard=_deletable)}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict:
@@ -459,10 +459,7 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str) -> dict:
-        job = RUNNER.get(job_id)
-        if job:
-            _refuse_deleting_unclosed_outputs([job])
-        if not RUNNER.delete(job_id, purge=True):
+        if not RUNNER.delete(job_id, purge=True, guard=_deletable):
             raise HTTPException(404, "Unknown job")
         return {"ok": True}
 
@@ -3029,6 +3026,17 @@ def _unclosed_outputs(dest: Path) -> list[Job]:
         if abort.get("needsFreshOutput") and output and Path(output).expanduser().resolve() == target:
             unclosed.append(job)
     return unclosed
+
+
+def _deletable(job: Job) -> bool:
+    """Refuses an in-flight resize (it may still record an unclosed output) or one whose
+    output may still be open in Keynote."""
+    if job.feature == "resize" and job.status in {"queued", "running"}:
+        raise HTTPException(
+            409, f"Run {job.name or job.id} is still running; wait for it to finish before deleting it."
+        )
+    _refuse_deleting_unclosed_outputs([job])
+    return True
 
 
 def _refuse_deleting_unclosed_outputs(jobs: list[Job]) -> None:

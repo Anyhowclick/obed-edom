@@ -1840,6 +1840,67 @@ def test_resize_timeout_blocks_delete_all_so_a_fresh_proposal_still_needs_closur
     assert client.get(f"/api/jobs/{job_id}").json()["result"]["offlineHidesAborted"]["needsFreshOutput"] is False
 
 
+def test_resize_in_flight_fallback_cannot_be_deleted_before_it_records_the_timeout(
+    tmp_path, monkeypatch
+):
+    """Sol r6 #2: in-flight fallback → delete → timeout → fresh proposal. Deleting the running
+    job (singly or via Delete All) would detach it, so its later `needsFreshOutput` abort
+    would never persist and a fresh proposal could replace the deck still open in Keynote."""
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake_remap(path, dest, **kwargs):
+        calls.append(kwargs.get("offline_hides"))
+        if len(calls) == 1:
+            started.set()
+            assert release.wait(10)
+            raise _hides_abort("hide fallback session did not finish", "close it", needs_fresh_output=True)
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    _stub_resize_propose(monkeypatch, fake_remap)
+    client = TestClient(app)
+    job_id = _propose(client, tmp_path).json()["id"]
+    _wait(client, job_id)
+    client.post(f"/api/resize/{job_id}/apply", json={})
+    assert started.wait(10)
+
+    refused = client.delete(f"/api/jobs/{job_id}")
+    assert refused.status_code == 409
+    assert "still running" in refused.json()["detail"]
+    client.delete("/api/jobs")
+    assert client.get(f"/api/jobs/{job_id}").status_code == 200
+
+    release.set()
+    assert _wait(client, job_id)["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
+    fresh = _propose(client, tmp_path, offline_hides="off").json()["id"]
+    assert _wait(client, fresh)["result"]["outputCloseRequired"].endswith("Wall_CG.key")
+    assert client.post(f"/api/resize/{fresh}/apply", json={}).status_code == 409
+
+    assert client.post(f"/api/resize/{fresh}/apply", json={"outputClosed": True}).status_code == 200
+    assert _wait(client, fresh)["status"] == "done"
+    assert client.delete(f"/api/jobs/{job_id}").status_code == 200
+
+
+def test_delete_all_rechecks_status_under_the_job_lock(tmp_path):
+    from obed_edom.web.jobs import Job, JobRunner
+
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path)
+    for job_id, status in [("a", "done"), ("b", "running"), ("c", "queued"), ("d", "error")]:
+        runner._jobs[job_id] = Job(id=job_id, kind="resize", name=job_id, status=status)
+    seen = []
+
+    def guard(job):
+        seen.append(job.id)
+        return job.id != "d"
+
+    assert runner.delete_all(purge=False, guard=guard) == 1
+    assert sorted(seen) == ["a", "d"]
+    assert sorted(runner._jobs) == ["b", "c", "d"]
+
+
 def test_resize_rerun_failing_otherwise_does_not_keep_a_stale_hides_abort(tmp_path, monkeypatch):
     calls = []
 

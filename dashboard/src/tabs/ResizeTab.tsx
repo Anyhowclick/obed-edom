@@ -84,7 +84,8 @@ export function ResizeTab() {
   const closePath = hidesAborted?.needsFreshOutput ? hidesAborted.outputPath : result?.outputCloseRequired;
   const outputName = closePath?.split("/").pop() || "the output deck";
   const needsClose = Boolean(hidesAborted?.needsFreshOutput || result?.outputCloseRequired);
-  const outputClosed = Boolean(job) && closedFor === job?.id;
+  const closeKey = needsClose && job ? `${job.id}|${job.startedAt ?? ""}|${closePath ?? ""}` : null;
+  const outputClosed = closeKey != null && closedFor === closeKey;
   const hidesNotice =
     hidesAborted &&
     [
@@ -95,6 +96,10 @@ export function ResizeTab() {
     ]
       .filter(Boolean)
       .join(" ");
+
+  useEffect(() => {
+    setClosedFor(null);
+  }, [closeKey]);
 
   useEffect(() => {
     const path = result?.path;
@@ -168,6 +173,7 @@ export function ResizeTab() {
       setError(`Close ${outputName} in Keynote and tick “I’ve closed ${outputName} in Keynote” before re-applying.`);
       return;
     }
+    setClosedFor(null);
     setBusy(true);
     setError(null);
     try {
@@ -304,7 +310,7 @@ export function ResizeTab() {
               <input
                 type="checkbox"
                 checked={outputClosed}
-                onChange={(e) => setClosedFor(e.target.checked ? job.id : null)}
+                onChange={(e) => setClosedFor(e.target.checked ? closeKey : null)}
               />
               <span>I’ve closed {outputName} in Keynote</span>
             </label>

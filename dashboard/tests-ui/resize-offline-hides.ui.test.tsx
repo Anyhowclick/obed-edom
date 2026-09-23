@@ -219,6 +219,34 @@ describe("Resize tab after an offline-hides abort", () => {
     expect(applyBody(fetchSpy)).toMatchObject({ offlineHides: "off", outputClosed: true });
   });
 
+  it("a confirmed retry that times out again needs a fresh confirmation", async () => {
+    // Sol r6 #3: the second abort keeps the job ID; only its new run generation differs.
+    const first: Job = { ...timedOut, startedAt: 100 };
+    const second: Job = { ...timedOut, startedAt: 200 };
+    vi.mocked(getJob).mockImplementation(async () => first);
+    vi.mocked(pollJob).mockImplementation(async () => second);
+    const fetchSpy = spyFetch(second);
+    renderOpenRun();
+    await screen.findByText(TIMEOUT_NOTICE);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" }));
+    });
+    await clickApply();
+    expect(applyBody(fetchSpy)).toMatchObject({ outputClosed: true });
+
+    const checkbox = await screen.findByRole("checkbox", { name: "I’ve closed wall_CG.key in Keynote" });
+    expect(checkbox).not.toBeChecked();
+    fetchSpy.mockClear();
+    await clickApply();
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/apply"))).toBe(false);
+    expect(
+      screen.getByText(
+        "Close wall_CG.key in Keynote and tick “I’ve closed wall_CG.key in Keynote” before re-applying."
+      )
+    ).toBeInTheDocument();
+  });
+
   it("a fresh proposal after a timeout still requires confirming the shared output is closed", async () => {
     // The backend keys the unresolved closure by output path, so the new proposal job
     // carries `outputCloseRequired` even though it has no abort of its own.

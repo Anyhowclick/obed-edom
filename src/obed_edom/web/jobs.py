@@ -402,9 +402,15 @@ class JobRunner:
                 return candidate
         return None
 
-    def delete(self, job_id: str, *, purge: bool = True) -> bool:
+    def delete(
+        self, job_id: str, *, purge: bool = True, guard: Callable[[Job], bool] | None = None
+    ) -> bool:
+        """`guard` runs under the job lock; False skips the job and raising refuses."""
         with self._job_lock(job_id):
             with self._lock:
+                current = self._jobs.get(job_id)
+                if current is not None and guard is not None and not guard(current):
+                    return False
                 job = self._jobs.pop(job_id, None)
                 if job is not None:
                     self._deleted_ids.add(job_id)
@@ -421,11 +427,15 @@ class JobRunner:
             self._purge_artifacts(job)
         return True
 
-    def delete_all(self, *, purge: bool = True) -> int:
-        ids = [job.id for job in self.list() if job.status in {"done", "error"}]
+    def delete_all(self, *, purge: bool = True, guard: Callable[[Job], bool] | None = None) -> int:
+        def settled(job: Job) -> bool:
+            if job.status not in {"done", "error"} or job.id in self._running:
+                return False
+            return guard is None or guard(job)
+
         deleted = 0
-        for job_id in ids:
-            if self.delete(job_id, purge=purge):
+        for job in self.list():
+            if self.delete(job.id, purge=purge, guard=settled):
                 deleted += 1
         return deleted
 
