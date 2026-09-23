@@ -144,7 +144,7 @@ GL_REPLAY_JS = r"""
     epoch: 0, frozenSceneId: null, loopGen: 0, arming: false, pending: null, retainedTick: -1,
     iter: 0, uploads: 0, glErrors: 0, tick: 0, lastPlayerTick: -1,
     lastClearAt: null, readyAt: null, settleGapMs: null, settleToHashMs: null,
-    mutationScanMs: null, occluded: null, mask: null,
+    mutationScanMs: null, posterSnapshotMs: null, occluded: null, mask: null,
     paused: false, pausedByUs: false, geometry: null, buffers: null,
     loopMode: null, videoEnded: false, armVfc: null, contextLostListener: null,
     collectors: [], observer: null
@@ -206,7 +206,7 @@ GL_REPLAY_JS = r"""
       version: API.version, state: API.state, epoch: state.epoch, iter: state.iter,
       frameLen: state.frameLen, uploads: state.uploads, glErrors: state.glErrors,
       settleGapMs: state.settleGapMs, settleToHashMs: state.settleToHashMs,
-      mutationScanMs: state.mutationScanMs,
+      mutationScanMs: state.mutationScanMs, posterSnapshotMs: state.posterSnapshotMs,
       loopMode: state.loopMode, videoEnded: state.videoEnded,
       pending: state.pending, occludedBands: state.occluded, occluderMask: state.mask,
       bandCount: BAND_COLS * BAND_ROWS,
@@ -383,7 +383,7 @@ GL_REPLAY_JS = r"""
 
   function restorePoster(){
     var g = state.gl, P = state.poster;
-    if (!g || !P || !P.px || !state.posterTex) return;
+    if (!g || !P || !P.complete || !state.posterTex) return;
     state.replaying++;
     try {
       var sb = g.getParameter(g.TEXTURE_BINDING_2D);
@@ -400,11 +400,23 @@ GL_REPLAY_JS = r"""
     state.replaying--;
   }
 
+  // Taken before the first video upload redefines the poster texture; after it the
+  // texture holds the video and a readback is a crop of the last video frame.
+  function snapshotPoster(){
+    if (state.poster) return true;
+    var t0 = now();
+    state.poster = posterOf(state.posterTex, {w: ENTRY.slotSizes[MOVIE_SLOT][0], h: ENTRY.slotSizes[MOVIE_SLOT][1],
+      intFmt: state.posterUpload.intFmt, extFmt: state.posterUpload.extFmt, type: state.posterUpload.type});
+    state.posterSnapshotMs = now() - t0;
+    return assertOr('posterUnreadable', state.poster.complete, null);
+  }
+
   function perClearUpload(){
     if (!state.posterTex || !state.posterUpload) return;
     if (!resolveVideo()) return;
     var v = state.video;
     if (!assertOr('videoNotReady', v.readyState >= 2, {readyState: v.readyState})) return;
+    if (!snapshotPoster()) return;
     uploadInto(state.posterTex, state.posterUpload, v);
     state.uploads++;
   }
@@ -847,9 +859,11 @@ GL_REPLAY_JS = r"""
       }
     }
     if (!lost) restorePoster();
-    // One clean replay so the stand-down does not leave the PATCHED frame on
-    // screen. Skipped when the canvas is gone, the context is lost, or the player
+    // One clean replay so the stand-down does not leave the PATCHED frame, or a
+    // settled frame drawn from the video, on screen. Skipped mid-move (the player
+    // is still drawing), when the canvas is gone, the context is lost, or the player
     // is mid-call and about to render the frame itself.
+    if (!state.frame && state.readyAt != null) state.frame = settledSegment();
     if (!lost && reason !== CANVAS_REMOVED && reason !== CONTEXT_LOST &&
         reason !== UNFLAGGED_PLAYER_CALL &&
         state.frame && state.canvas && state.canvas.isConnected){
@@ -1029,22 +1043,23 @@ GL_REPLAY_JS = r"""
     return !!seg && seg.length > 2 && seg[0].m === 'clearColor' && seg[1].m === 'clear';
   }
 
-  function armPost(){
-    state.recording = false;
+  function settledSegment(){
     var seg = state.segment;
     if (!isDelimited(seg) && isDelimited(state.retained) &&
-        state.tick - state.retainedTick <= SETTLE_QUIET_TICKS){
-      seg = state.retained;
-      event('glreplay-retained-frame', {tick: state.retainedTick, len: seg.length});
-    }
-    if (!requireDelimitedFrame(isDelimited(seg), {len: seg.length})) return;
+        state.tick - state.retainedTick <= SETTLE_QUIET_TICKS) seg = state.retained;
+    return isDelimited(seg) ? seg : null;
+  }
+
+  function armPost(){
+    state.recording = false;
+    var seg = settledSegment();
+    if (seg && seg !== state.segment) event('glreplay-retained-frame', {tick: state.retainedTick, len: seg.length});
+    if (!requireDelimitedFrame(!!seg, {len: state.segment.length})) return;
     state.frame = seg;
     state.frameLen = seg.length;
 
     if (!assertOr('posterAmbiguous', !state.posterAmbiguous && !!state.posterTex, null)) return;
-    state.poster = posterOf(state.posterTex, {w: ENTRY.slotSizes[MOVIE_SLOT][0], h: ENTRY.slotSizes[MOVIE_SLOT][1],
-      intFmt: state.posterUpload.intFmt, extFmt: state.posterUpload.extFmt, type: state.posterUpload.type});
-    if (!assertOr('posterUnreadable', state.poster.complete, null)) return;
+    if (!snapshotPoster()) return;
 
     buildGeometry();
     if (!markerSwap() || state.down) return;

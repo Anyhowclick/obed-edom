@@ -137,7 +137,7 @@ OPACITY_UNPROVEN_REASONS = [
 
 # `js_sha256()` of the shipped bytes. Recompute and re-pin whenever the module's
 # JS changes on purpose; a surprise here means the bytes moved without a decision.
-PINNED_JS_SHA256 = "985afeb1cc5722d77ff180e9318c7262b2e622ae5c4a023e16f3dcc6641f6569"
+PINNED_JS_SHA256 = "3f089a1a6a79578767f83c6330890547cbb931c756052e0f97ea127ef6558ca1"
 
 
 # =======================================================================================
@@ -498,7 +498,9 @@ def test_settle_frame_measured_patch_is_exact_alpha_arithmetic():
 #   * refuses a uniform write aimed at a program that is not CURRENT (it raises
 #     INVALID_OPERATION and drops the write) — this is what makes the override
 #     ordering and the write-back ordering testable rather than assumed;
-#   * records each texture's last upload (source kind, size, format, flipY, premul);
+#   * records each texture's last upload (source kind, size, format, flipY, premul),
+#     and REDEFINES its level 0 on every `texImage2D`: size and texels follow the
+#     source, so a framebuffer readback of it returns what was last uploaded;
 #   * on a draw, records {slot, Opacity, decoded rect, source colour}, and clears
 #     that list on `clear`;
 #   * computes `readPixels` by filling each recorded draw's rect, in order, with
@@ -559,6 +561,30 @@ function decodeRect(mvp, w, h, bw, bh) {
            w: Math.round(Math.abs(x1 - x0)), h: Math.round(Math.abs(y1 - y0)) };
 }
 
+// ------------------------------------------------------------------ texture contents
+// A texture's level 0 is REDEFINED by every `texImage2D`: its size and texels follow
+// the uploaded source, exactly as in WebGL. Source texels vary with position and
+// texel (0,0) is the source's base colour, so a crop of the 1920x540 video read back
+// at the poster's 960x276 is distinguishable from the poster itself (a2-advice E12).
+function sourceTexel(c) {
+  const a = c[3] === undefined ? 255 : c[3];
+  return (x, y) => [(c[0] + x) & 255, (c[1] + y) & 255, (c[2] + (x >> 8) + 8 * (y >> 8)) & 255, a];
+}
+function pixelsTexel(data, w) {
+  return (x, y) => { const i = (y * w + x) * 4; return [data[i], data[i + 1], data[i + 2], data[i + 3]]; };
+}
+function textureDigest(tex) {
+  if (!tex || !tex.texel) return null;
+  let h = 2166136261;
+  for (let y = 0; y < tex.h; y++) {
+    for (let x = 0; x < tex.w; x++) {
+      const t = tex.texel(x, y);
+      for (let k = 0; k < 4; k++) { h ^= t[k]; h = Math.imul(h, 16777619) >>> 0; }
+    }
+  }
+  return { w: tex.w, h: tex.h, digest: h };
+}
+
 // ------------------------------------------------------------------ the scripted fake GL
 function FakeGL(canvas) {
   const gl = this;
@@ -583,7 +609,9 @@ function FakeGL(canvas) {
   // the module's `wrapContexts` loop and logged as a player call.
   this._rec = function (name) { gl.callLog.push({ m: name }); };
   this._tex = function (id) {
-    if (!gl._textures.has(id)) gl._textures.set(id, { id: id, upload: null, colour: null });
+    if (!gl._textures.has(id)) {
+      gl._textures.set(id, { id: id, upload: null, colour: null, w: 0, h: 0, texel: null });
+    }
     return gl._textures.get(id);
   };
   this._write = function (loc, value) {
@@ -691,13 +719,16 @@ FakeGL.prototype.texImage2D = function () {
     upload = { srcType: 'pixels', w: a[3], h: a[4], format: a[6], type: a[7] };
     const px = a[8];
     if (px && px.length >= 4) tex.colour = [px[0], px[1], px[2], px[3]];
+    tex.texel = px ? pixelsTexel(Uint8Array.from(px), a[3]) : null;
   } else {                                   // target, level, ifmt, fmt, type, source
     const src = a[5] || {};
     const kind = src.tagName === 'CANVAS' ? 'canvas' : (src.tagName === 'VIDEO' ? 'video' : 'other');
     upload = { srcType: kind, w: kind === 'video' ? src.videoWidth : src.width,
                h: kind === 'video' ? src.videoHeight : src.height, format: a[3], type: a[4] };
     tex.colour = src.__colour ? src.__colour.slice() : null;
+    tex.texel = sourceTexel(src.__colour || [0, 0, 0, 255]);
   }
+  tex.w = upload.w; tex.h = upload.h;
   upload.flipY = this._flipY; upload.premultiplyAlpha = this._premul;
   tex.upload = upload;
   world.uploads.push({ tex: tex.id, upload: upload });
@@ -736,11 +767,15 @@ FakeGL.prototype.framebufferTexture2D = function (t, a, tt, tex) { this._fboTex 
 FakeGL.prototype.checkFramebufferStatus = function () { return this._fboStatus; };
 FakeGL.prototype.readPixels = function (x, y, w, h, fmt, type, out) {
   if (this._readPixelsThrows && !this._fbo) throw new Error('readPixels refused');
-  if (this._fbo) {                            // poster readback off the attached texture
-    const col = (this._fboTex && this._fboTex.colour) || [0, 0, 0, 255];
-    for (let i = 0; i < w * h; i++) {
-      out[i * 4] = col[0]; out[i * 4 + 1] = col[1]; out[i * 4 + 2] = col[2];
-      out[i * 4 + 3] = col[3] === undefined ? 255 : col[3];
+  if (this._fbo) {                            // readback off the attached texture's texels
+    const tex = this._fboTex;
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        const tx = x + i, ty = y + j, o = (j * w + i) * 4;
+        let t = [0, 0, 0, 255];
+        if (tex && tex.texel) t = (tx < tex.w && ty < tex.h) ? tex.texel(tx, ty) : [0, 0, 0, 0];
+        out[o] = t[0]; out[o + 1] = t[1]; out[o + 2] = t[2]; out[o + 3] = t[3];
+      }
     }
     return;
   }
@@ -847,7 +882,7 @@ FakeVideo.prototype.requestVideoFrameCallback = function (cb) {
 // ------------------------------------------------------------------ the world
 const world = {
   uploads: [], clears: [], contexts: [], videoCalls: [], seamCalls: [],
-  mutationCallbacks: [], harnessErrors: [], presented: 0,
+  mutationCallbacks: [], harnessErrors: [], presented: 0, playerClears: 0, originalPoster: null,
   observerThrows: !!CFG.observerThrows,
   fireMutation(records) {
     for (const cb of this.mutationCallbacks) {
@@ -977,6 +1012,7 @@ const M = window.__OBED_GL_REPLAY__ && window.__OBED_GL_REPLAY__.version
 function playerFrame(gl, len) {
   const calls = FIXTURE.calls.slice(0, len === undefined ? FIXTURE.calls.length : len);
   for (const call of calls) {
+    if (call.m === 'clear') world.playerClears++;
     const args = call.a.map((a) => {
       if (a && typeof a === 'object' && a.prog !== undefined && a.name !== undefined) {
         return gl.getUniformLocation(gl._programs.get(a.prog), a.name);
@@ -1048,6 +1084,12 @@ function snapshotState() {
     drawnSlots: gl ? gl._drawn.map((d) => d.slot) : null,
     currentProgramSlot: gl && gl._current ? gl._current.slot : null,
     uploads: world.uploads.length,
+    moduleClears: world.clears.length - world.playerClears,
+    drawnColours: gl ? gl._drawn.map((d) => d.colour) : null,
+    // Digesting a 1920x540 texture costs real time, so only the tests that read it ask.
+    originalPoster: CFG.trackPoster ? world.originalPoster : null,
+    posterTexture: CFG.trackPoster && gl
+      ? textureDigest(gl._tex(FIXTURE.textureUploads[MOVIE_SLOT_JS].tex)) : null,
     harnessErrors: world.harnessErrors,
     opacityAfter: gl ? FIXTURE.programs.map(
       (p) => gl._programs.get(p.prog).uniforms.get('Opacity').value) : null,
@@ -1086,11 +1128,22 @@ async function armAndGoLive(out) {
   });
   // Draw 17 samples the SHARED texture (mixFactor 1 -> unit 1), so it carries slot 0's colour.
   playerUpload(gl, FIXTURE.sharedTexture, 1920, 1080, FIXTURE.draws[0].sourceColour);
+  if (CFG.trackPoster) {
+    world.originalPoster = textureDigest(gl._tex(FIXTURE.textureUploads[MOVIE_SLOT_JS].tex));
+  }
   if (CFG.secondPosterTexture) {
     const poster = FIXTURE.slotSizes[MOVIE_SLOT_JS];
     playerUpload(gl, 900, poster[0], poster[1]);
   }
-  for (let f = 0; f < 3; f++) { playerFrame(gl, CFG.frameLen); await settle(2); }
+  for (let f = 0; f < 3; f++) {
+    // Mid-move: the first frame's clear has already replaced the poster texture
+    // with the video, and the player keeps drawing after the stand-down.
+    if (CFG.forceMidMove && f === 1) {
+      out.atForce = { uploads: M.stats().uploads, state: M.state };
+      M.debugForceFail = CFG.forceMidMove;
+    }
+    playerFrame(gl, CFG.frameLen); await settle(2);
+  }
   if (CFG.floodWithoutClear) {
     for (let i = 0; i < 600; i++) gl.enable(GLC.BLEND);
   }
@@ -1154,6 +1207,13 @@ async function main() {
     const iterBefore = M.stats().iter;
     await settle(4);
     out.iterDelta = M.stats().iter - iterBefore;
+    out.final = snapshotState();
+    return out;
+  }
+  if (CFG.scenario === 'force_late') {
+    out.atForce = { uploads: M.stats().uploads, state: M.state };
+    M.debugForceFail = CFG.lateForce;
+    await settle(4);
     out.final = snapshotState();
     return out;
   }
@@ -2334,3 +2394,167 @@ def test_milestones_reach_the_seam_note_on_the_move_scene_then_live():
     assert [c["hash"] for c in arms] == [f"#{GL_REPLAY_ENTRY['atScene'] - 1}"], notes
     assert [c["kind"] for c in notes].count("glreplay-live") == 1, notes
     assert [c["kind"] for c in notes].index("glreplay-arm") < [c["kind"] for c in notes].index("glreplay-live")
+
+
+# --- gate 6: the poster snapshot and the settle-time repaint (a2-advice "Gate 6", F1/F2) --
+#
+# The per-clear upload REDEFINES the poster texture as the 1920x540 video. A snapshot
+# taken after the first such upload is a 960x276 crop of the last video frame, and the
+# stand-down then "restores" that crop — ten gate-6 arms showed it, zoomed, where the
+# control shows the player's poster. These tests read the poster texture's texels
+# after the stand-down and compare them, byte for byte, with the texels the player
+# itself uploaded. They need the fake's texture redefinition, proved by the first test.
+
+POSTER_COLOUR = SETTLE_FRAME["draws"][MOVIE_SLOT]["sourceColour"]
+POSTER_SIZE = (SETTLE_FRAME["textureUploads"][MOVIE_SLOT]["width"],
+               SETTLE_FRAME["textureUploads"][MOVIE_SLOT]["height"])
+VIDEO_SIZE = (1920, 540)
+VIDEO_COLOUR = [80, 90, 100, 255]
+REST_OPACITIES = [p["restOpacity"] for p in SETTLE_FRAME["programs"]]
+
+
+def _size(digest: dict) -> tuple[int, int]:
+    return digest["w"], digest["h"]
+
+
+def test_fake_gl_redefines_the_poster_texture_on_the_video_upload():
+    """The instrument's positive control. While LIVE the poster texture must hold the
+    VIDEO — its size and texels — or every restore assertion below passes for free."""
+    out = _run_sandbox(scenario="happy", trackPoster=True)
+    final = _assert_clean(out)
+    assert final["state"] == "LIVE", final["state"]
+    assert _size(final["originalPoster"]) == POSTER_SIZE, final["originalPoster"]
+    assert _size(final["posterTexture"]) == VIDEO_SIZE, final["posterTexture"]
+    assert final["posterTexture"]["digest"] != final["originalPoster"]["digest"]
+    assert final["drawnColours"][MOVIE_SLOT] == VIDEO_COLOUR, final["drawnColours"]
+    assert POSTER_COLOUR != VIDEO_COLOUR
+
+
+# Every stand-down reachable AFTER the first per-clear upload, each driven through its
+# own path. `contextLost` is excluded: the stand-down issues no GL call on a lost
+# context (§2.5) and the texture is gone with it. `planUnreadable`,
+# `glReplayUnavailable`, `canvasShape` and `assetUnbound` can only fire before any
+# upload; `posterUnreadable` now fires at the snapshot itself, before the first
+# upload, and has its own test below.
+POSTER_RESTORE_CASES: list[tuple[str, str, dict]] = [
+    ("posterAmbiguous", "natural", {"scenario": "arm_only", "secondPosterTexture": True}),
+    ("sceneMismatch", "natural", {"scenario": "arm_only", "sceneId": 7}),
+    ("frameNotDelimited", "natural", {"scenario": "arm_only", "floodWithoutClear": True}),
+    ("occlusionTooHigh", "forced", {"scenario": "arm_only", "debugForceFail": "occlusionTooHigh"}),
+    ("frameLengthChanged", "forced", {"scenario": "arm_only",
+                                      "debugForceFail": "frameLengthChanged"}),
+    ("glError", "forced", {"scenario": "arm_only", "debugForceFail": "glError"}),
+    ("glError", "live", {"scenario": "gl_error"}),
+    ("glError", "live-replay", {"scenario": "gl_error_replay", "errorDuringReplay": True}),
+    ("glError", "live-draw-throws", {"scenario": "draw_throws"}),
+    ("glError", "late-forced", {"scenario": "force_late", "lateForce": "glError"}),
+    ("frameLengthChanged", "late-forced", {"scenario": "force_late",
+                                           "lateForce": "frameLengthChanged"}),
+    ("canvasRemoved", "late-forced", {"scenario": "force_late", "lateForce": "canvasRemoved"}),
+    ("unflaggedPlayerCall", "live", {"scenario": "unflagged_player_call"}),
+    ("canvasRemoved", "live", {"scenario": "canvas_removed"}),
+    ("canvasRemoved", "live-writeback-fails", {"scenario": "writeback_fails"}),
+    ("unflaggedPlayerCall", "live-writeback-fails", {"scenario": "writeback_fails_unflagged"}),
+] + [
+    (reason, "mid-move", {"scenario": "arm_only", "forceMidMove": reason})
+    for reason in ["runtimeSeamAbsent", "observerNotArmed", "settleSignalAbsent",
+                   "rvfcUnavailable", "videoNotReady", "frameNotDelimited",
+                   "unflaggedPlayerCall"]
+]
+POSTER_RESTORE_EXCLUDED = {"contextLost", "planUnreadable", "glReplayUnavailable",
+                           "canvasShape", "assetUnbound", "posterUnreadable"}
+
+
+def test_poster_restore_cases_cover_every_reason_reachable_after_uploads():
+    covered = {case[0] for case in POSTER_RESTORE_CASES} | {"writebackFailed"}
+    expected = (set(STAND_DOWN_REASONS) | {NORMAL_EXIT_REASON}) - POSTER_RESTORE_EXCLUDED
+    assert covered == expected, (sorted(expected - covered), sorted(covered - expected))
+    assert len(REPLAYING_CASES) == len(_REPLAYING), "a replaying case names no POSTER_RESTORE case"
+
+
+@pytest.mark.parametrize("reason,how,cfg", POSTER_RESTORE_CASES,
+                         ids=[f"{c[0]}-{c[1]}" for c in POSTER_RESTORE_CASES])
+def test_stand_down_after_uploads_restores_the_players_poster(reason, how, cfg):
+    out = _run_sandbox(trackPoster=True, **cfg)
+    final = _assert_clean(out)
+    assert final["standDowns"][-1] == reason, final["standDowns"]
+    assert final["state"] == "RETIRED", final["state"]
+    assert final["stats"]["uploads"] > 0, "no upload ever replaced the poster; vacuous"
+    assert _size(final["originalPoster"]) == POSTER_SIZE, final["originalPoster"]
+    assert final["posterTexture"] == final["originalPoster"], (
+        f"after {reason} the poster texture holds {final['posterTexture']}, "
+        f"not the player's poster {final['originalPoster']}")
+
+
+# Stand-downs whose final composite is the module's own rest replay: it must draw the
+# movie slot from the RESTORED poster, not from a crop of the last video frame.
+_REPLAYING = {
+    ("posterAmbiguous", "natural"), ("sceneMismatch", "natural"),
+    ("occlusionTooHigh", "forced"), ("frameLengthChanged", "forced"), ("glError", "forced"),
+    ("glError", "live"), ("glError", "live-replay"),
+    ("glError", "late-forced"), ("frameLengthChanged", "late-forced"),
+}
+REPLAYING_CASES = [c for c in POSTER_RESTORE_CASES if (c[0], c[1]) in _REPLAYING]
+
+
+@pytest.mark.parametrize("reason,how,cfg", REPLAYING_CASES,
+                         ids=[f"{c[0]}-{c[1]}" for c in REPLAYING_CASES])
+def test_stand_down_replay_composites_the_restored_poster(reason, how, cfg):
+    out = _run_sandbox(trackPoster=True, **cfg)
+    final = _assert_clean(out)
+    assert final["standDowns"][-1] == reason, final["standDowns"]
+    assert final["moduleClears"] > 0, "the module never replayed; the colour below is the player's"
+    assert final["drawnSlots"] == [0, 1, 2, 3, 4], final["drawnSlots"]
+    assert final["drawnColours"][MOVIE_SLOT] == POSTER_COLOUR, final["drawnColours"]
+    assert final["drawnOpacities"] == REST_OPACITIES, final["drawnOpacities"]
+
+
+def test_scene_mismatch_at_settle_replays_the_settled_frame_once():
+    """F2. `sceneMismatch` fires at settle, before ARM-POST has chosen a frame, and
+    the idle player never draws again: without a replay the canvas keeps the last
+    move frame, drawn from the video, for the whole pre-build dwell."""
+    out = _run_sandbox(scenario="arm_only", sceneId=7, trackPoster=True)
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["sceneMismatch"], final["standDowns"]
+    assert final["moduleClears"] == 1, final["moduleClears"]
+    assert final["drawnSlots"] == [0, 1, 2, 3, 4], final["drawnSlots"]
+    assert final["drawnColours"][MOVIE_SLOT] == POSTER_COLOUR, final["drawnColours"]
+    assert final["drawnOpacities"] == REST_OPACITIES, final["drawnOpacities"]
+    assert "glreplay-retained-frame" not in final["eventKinds"], final["eventKinds"]
+
+
+MID_MOVE_CASES = [c for c in POSTER_RESTORE_CASES if c[1] == "mid-move"]
+
+
+@pytest.mark.parametrize("reason,how,cfg", MID_MOVE_CASES, ids=[c[0] for c in MID_MOVE_CASES])
+def test_mid_move_stand_down_restores_without_a_replay(reason, how, cfg):
+    """A stand-down during the move replays nothing: the player is still drawing, and
+    its next frame must sample the restored poster rather than the video."""
+    out = _run_sandbox(trackPoster=True, **cfg)
+    final = _assert_clean(out)
+    assert out["atForce"]["state"] == "ARM-PRE", out["atForce"]
+    assert out["atForce"]["uploads"] > 0, out["atForce"]
+    assert final["standDowns"] == [reason], final["standDowns"]
+    assert final["posterTexture"] == final["originalPoster"]
+    assert final["moduleClears"] == 0, final["moduleClears"]
+    assert final["drawnColours"][MOVIE_SLOT] == POSTER_COLOUR, final["drawnColours"]
+
+
+@pytest.mark.parametrize("label,cfg", [("natural", {"fboStatus": 36054}),
+                                       ("forced", {"debugForceFail": "posterUnreadable"})])
+def test_unreadable_poster_stands_down_before_the_first_upload(label, cfg):
+    """F1 moves the snapshot to the first per-clear upload, so an unreadable poster
+    stands down before the video ever touches the texture. An incomplete snapshot
+    must never be written back: that would replace the poster with zeros."""
+    out = _run_sandbox(scenario="arm_only", trackPoster=True, **cfg)
+    final = _assert_clean(out)
+    assert final["standDowns"] == ["posterUnreadable"], final["standDowns"]
+    assert final["stats"]["uploads"] == 0, final["stats"]["uploads"]
+    assert final["posterTexture"] == final["originalPoster"], final["posterTexture"]
+    assert len([c for c in final["seamCalls"] if c["fn"] == "release"]) == 1
+
+
+def test_poster_snapshot_time_is_reported():
+    out = _run_sandbox(scenario="happy")
+    stats = _assert_clean(out)["stats"]
+    assert isinstance(stats.get("posterSnapshotMs"), (int, float)), stats.get("posterSnapshotMs")
