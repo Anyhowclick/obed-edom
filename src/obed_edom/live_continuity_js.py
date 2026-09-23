@@ -606,7 +606,7 @@ PRESERVE_CORE_JS = r"""
     const right = (r.x + r.w) - (ir.x + ir.w), bottom = (r.y + r.h) - (ir.y + ir.h);
     if (![left, top, right, bottom].every(function(m) { return m >= -0.5 && m <= 8; })) return false;
     if (!map) return true;
-    const s = toScreen(r, map);
+    const s = toScreen(GL.instanceRect, map);
     const nearZero = Math.abs(s.x) < 2 && Math.abs(s.y) < 2;
     const nearStageOrigin = Math.abs(s.x - map.ox) < 2 && Math.abs(s.y - map.oy) < 2;
     return !nearZero && !nearStageOrigin;
@@ -673,7 +673,7 @@ PRESERVE_CORE_JS = r"""
     const map = stageMap();
     if (!handbackRectOk(rect, map)) return retire('badRect');
     if (!map) return retire('noStageMap');
-    const screen = toScreen(rect, map);
+    const screen = toScreen(GL.instanceRect, map);
     const canvas = findMovieCanvas(screen, v);
     if (!canvas || !canvas.parentNode) return retire('noAuthoredLayer');
     const siblings = zoneVictims(GL, glPooled.filter(function(x) {
@@ -762,7 +762,7 @@ PRESERVE_CORE_JS = r"""
         v.__obedRect = {x: r.left, y: r.top, w: r.width, h: r.height};
         const authored = authoredRectOf(r);
         if (authored) v.__obedAuthoredRect = authored;
-      } else {
+      } else if (!(GL && zone === 'released' && v === carriedMemo)) {
         captureLayout(v);
       }
       v.__obedStyle = v.getAttribute('style') || '';
@@ -1446,6 +1446,10 @@ PRESERVE_CORE_JS = r"""
       } catch (e) {
         note('remount-into-authored-layer-error', {elId: v.__obedElId, message: String(e && e.message || e)});
       }
+    }
+    if (GL && zone === 'released' && carriedMemo && (v === carriedMemo || v.__obedFacadeFor === carriedMemo)) {
+      noteHold(v, remountSrc, 'stage');
+      return;
     }
     const stage = document.getElementById('body') || document.querySelector('[class*="stage"]') || document.body;
     if (!stage) {

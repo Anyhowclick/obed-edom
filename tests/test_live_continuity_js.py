@@ -35,7 +35,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "02d7e76ca67e376ed055ffad02fa518da0c33b5de740011933f41548d4ca79f6"
+PINNED_CORE_SHA256 = "359c589aa3921e17464ddebde5f9f652b9efc5dbc54e8dabf75ba969a250eb6b"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -1789,6 +1789,7 @@ function playerDetachSubtree(v) {
   };
   v.parentNode = layer;
   v.parentElement = layer;
+  v.__inStage = false;
   v._rect = {left: 0, top: 0, width: 0, height: 0};
   layer.parentNode = null;
   moCallbacks.slice().forEach((cb) => cb([{removedNodes: [layer]}]));
@@ -1839,6 +1840,8 @@ function posterLayer(rect, opts) {
   canvases.push(canvas);
   return canvas;
 }
+/** `beginMove`'s flag is cleared on the next macrotask; the harness never runs timers. */
+function settleMoves() { videos.forEach((v) => { v.__obedRemounting = false; }); }
 function census(v) {
   return {
     elId: v.__obedElId, paused: v.paused, inDocument: document.contains(v), gen: v.__obedGen,
@@ -2322,9 +2325,11 @@ if (r.video !== a) throw new Error('bound the wrong decoder');""",
 
 
 @pytest.mark.parametrize("stage", [_IDENTITY_STAGE, _LETTERBOXED_STAGE], ids=["identity", "letterboxed"])
-def test_release_hands_off_into_the_authored_layer_at_the_mapped_slot_rect(stage):
-    """Row 10: siblings retired, `__obedRect = toScreen(rect)` (G2 passes
-    AUTHORED px — the stub's raw stamp was right only at s = 1), no footprint
+def test_release_hands_off_into_the_authored_layer_at_the_mapped_instance_rect(stage):
+    """Row 10 (A2 option (a)): siblings retired, `__obedRect =
+    toScreen(instanceRect)` — G2's slot rect is validated (row 7), never used
+    for placement — so the DOM movie sits in its authored frame from build 1,
+    where the hand-off `keepAtFootprint` loop then holds it. No footprint
     fallback, remounted next to the pre-checked canvas, zone `released`."""
     result = _run_gl(r"""
 const ctx = arm();
@@ -2340,12 +2345,14 @@ console.log(JSON.stringify({
   landed: ctx.big.parentNode === canvas.parentNode && ctx.big.previousSibling === canvas,
   rect: ctx.big.__obedRect, parentGuard: ctx.big.__obedParent,
   rendered: ctx.big.getBoundingClientRect(),
+  styleSize: [parseFloat(ctx.big.style.width), parseFloat(ctx.big.style.height)],
   remounts: P.events.filter(e => e.kind.indexOf('remount-') === 0).map(e => [e.kind, e.detail.rect || null]),
   releaseNotes: notesOf('glreplay-release'),
   retire: notesOf('retire-boundary').length,
 }));
 """, stage=stage)
-    screen = _screen(_GL_SLOT, stage)
+    screen = _screen(_GL_INSTANCE, stage)
+    assert result["styleSize"] == pytest.approx([_GL_INSTANCE["w"], _GL_INSTANCE["h"]])
     assert result["out"] == {
         "ok": True, "reason": None, "mode": "handoff", "elId": result["bigId"], "retired": [result["sibId"]],
     }
@@ -3263,3 +3270,76 @@ moCallbacks.slice().forEach((cb) => cb([{removedNodes: []}]));
 console.log(JSON.stringify({swaps: notesOf('dom-swap').length}));
 """)
     assert result == {"swaps": 1}
+
+
+
+# --- A2 (owner: option (a) + guard G + the stash rule) -------------------
+#
+# `.agents/reviews/gl-replay-g3/a2-advice.md`: after the hand-off the carried
+# decoder (and a facade bound to it) must never take the top-z stage append,
+# and a detach must not overwrite its last attached rect.
+
+
+def test_released_memo_and_its_facade_never_take_the_stage_append():
+    """Guard G: the 2->3 transition window (hash still #5) has no matching
+    poster canvas; the memo and its facade are held (`glreplay-hold` via
+    `stage`), never appended over the transition."""
+    result = _run_gl(_HANDOFF + r"""
+const stub = document.createElement('video');
+stub.setAttribute('src', 'https://host/untitled.mov');
+if (stub.__obedFacadeFor !== ctx.big) throw new Error('no facade onto the memo');
+canvases.length = 0;
+location.hash = '#5';
+settleMoves();
+playerDetachSubtree(ctx.big);
+stub.parentNode = bodyEl;
+playerDetach(stub);
+console.log(JSON.stringify({
+  memoInBody: ctx.big.parentNode === bodyEl, stubInBody: stub.parentNode === bodyEl,
+  memoInDocument: document.contains(ctx.big), stubInDocument: document.contains(stub),
+  stubPooled: census(stub).pooled,
+  done: notesOf('remount-done').map(d => d.elId),
+  holds: notesOf('glreplay-hold').map(d => d.via),
+}));
+""")
+    assert result["stubPooled"] is True
+    assert result["memoInBody"] is False and result["stubInBody"] is False
+    assert result["memoInDocument"] is False and result["stubInDocument"] is False
+    assert result["done"] == []
+    assert "stage" in result["holds"]
+
+
+def test_released_pin_still_appends_a_decoder_that_is_not_the_carried_one():
+    """Control for guard G: ordinary pin on any other decoder is unchanged."""
+    result = _run_gl(_HANDOFF + r"""
+canvases.length = 0;
+const other = makeMovie(SIBLING);
+tick();
+playerDetach(other);
+console.log(JSON.stringify({done: notesOf('remount-done').map(d => d.elId), otherId: other.__obedElId,
+  inBody: other.parentNode === bodyEl}));
+""")
+    assert result["done"] == [result["otherId"]]
+    assert result["inBody"] is True
+
+
+@pytest.mark.parametrize("stage", [_IDENTITY_STAGE, _LETTERBOXED_STAGE], ids=["identity", "letterboxed"])
+def test_released_memo_keeps_its_rect_across_a_subtree_detach(stage):
+    """The stash rule: a detach in `released` does not let `captureLayout`'s
+    zero-origin style fallback overwrite the memo's rect, so `tryRemount`
+    never reaches the elId-parity footprint fallback for it."""
+    result = _run_gl(_HANDOFF + r"""
+const before = Object.assign({}, ctx.big.__obedRect);
+location.hash = '#3';
+settleMoves();
+playerDetachSubtree(ctx.big);
+console.log(JSON.stringify({before, after: ctx.big.__obedRect,
+  footprint: notesOf('remount-footprint-rect').map(d => d.elId),
+  landed: notesOf('remount-into-authored-layer').map(d => d.rect)}));
+""", stage=stage)
+    screen = _screen(_GL_INSTANCE, stage)
+    assert result["before"] == pytest.approx(screen)
+    assert result["after"] == pytest.approx(screen)
+    assert result["footprint"] == []
+    assert len(result["landed"]) == 2
+    assert result["landed"][1] == pytest.approx(screen)
