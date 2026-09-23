@@ -443,10 +443,14 @@ PRESERVE_CORE_JS = r"""
     const prev = v.__obedAssetKey != null ? v.__obedAssetKey : assetKey(v.currentSrc || v.src || '');
     v.__obedAssetKey = next;
     if (prev === next) return;
-    v.__obedGlPooled = false;
-    const gi = glPooled.indexOf(v);
-    if (gi >= 0) glPooled.splice(gi, 1);
-    if (carriedMemo === v) carriedMemo = null;
+    if (GL) {
+      v.__obedGlPooled = false;
+      const gi = glPooled.indexOf(v);
+      if (gi >= 0) glPooled.splice(gi, 1);
+      if (carriedMemo === v) carriedMemo = null;
+      delete v.__obedAuthoredRect;
+      delete v.__obedAuthoredRectScene;
+    }
     if (prev) {
       const empties = [];
       pool.forEach(function(q, key) {
@@ -585,7 +589,9 @@ PRESERVE_CORE_JS = r"""
       });
     });
     if (!cands.length) return {video: null, reason: 'notPooled'};
-    const measured = cands.filter(function(v) { return finiteRect(v.__obedAuthoredRect, 0); });
+    const measured = cands.filter(function(v) {
+      return finiteRect(v.__obedAuthoredRect, 0) && v.__obedAuthoredRectScene === GL.atScene - 1;
+    });
     if (!measured.length) return {video: null, reason: 'unmeasured'};
     const matches = measured.filter(function(v) { return rectDelta(v.__obedAuthoredRect, GL.instanceRect) <= 1.0; });
     if (matches.length !== 1) return {video: null, reason: 'ambiguous'};
@@ -761,7 +767,10 @@ PRESERVE_CORE_JS = r"""
       if (r.width > 1 && r.height > 1) {
         v.__obedRect = {x: r.left, y: r.top, w: r.width, h: r.height};
         const authored = authoredRectOf(r);
-        if (authored) v.__obedAuthoredRect = authored;
+        if (authored) {
+          v.__obedAuthoredRect = authored;
+          v.__obedAuthoredRectScene = currentHashNum();
+        }
       } else if (!(GL && zone === 'released' && v === carriedMemo)) {
         captureLayout(v);
       }
@@ -1360,6 +1369,9 @@ PRESERVE_CORE_JS = r"""
         note('remount-authored-parent-error', {elId: v.__obedElId, message: String(e && e.message || e)});
       }
     }
+    if (GL && zone === 'released' && carriedMemo && v.__obedFacadeFor === carriedMemo && carriedMemo.__obedRect) {
+      v.__obedRect = Object.assign({}, carriedMemo.__obedRect);
+    }
     if (!(v.__obedRect && v.__obedRect.w > 1)) captureLayout(v);
     let box = v.__obedRect || {};
     const boxMap = stageMap();
@@ -1529,6 +1541,17 @@ PRESERVE_CORE_JS = r"""
     }
     const mo = new MutationObserver(function(){
       if (stub.parentNode && real !== stub && real.__obedGen === preserveGeneration && real.__obedRemountEpoch !== -1) {
+        if (GL && zone === 'released' && real === carriedMemo) {
+          const layerCanvas = findMovieCanvas(real.__obedRect, real);
+          if (!layerCanvas || stub.parentNode !== layerCanvas.parentNode) {
+            try {
+              beginMove(stub);
+              stub.parentNode.removeChild(stub);
+            } catch (e) {}
+            noteHold(real, real.currentSrc || real.src || '', 'stage');
+            return;
+          }
+        }
         try {
           const parent = stub.parentNode;
           const next = stub.nextSibling;
@@ -1586,7 +1609,10 @@ PRESERVE_CORE_JS = r"""
           v.__obedRect = {x: r.left, y: r.top, w: r.width, h: r.height};
           if (i === 0) {
             const authored = authoredRectOf(r);
-            if (authored) v.__obedAuthoredRect = authored;
+            if (authored) {
+              v.__obedAuthoredRect = authored;
+              v.__obedAuthoredRectScene = currentHashNum();
+            }
           }
           v.__obedStyle = v.getAttribute('style') || v.__obedStyle || '';
           v.__obedId = v.id || v.__obedId || '';

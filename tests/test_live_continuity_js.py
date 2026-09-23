@@ -35,7 +35,7 @@ def test_js_sha256_matches_pinned_bytes():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "359c589aa3921e17464ddebde5f9f652b9efc5dbc54e8dabf75ba969a250eb6b"
+PINNED_CORE_SHA256 = "e9338aff1cbe0aee74e8e1ac94412a0ffb19f787962961d9ff8ed550ebd01fa4"
 
 
 def test_js_sha256_matches_the_pinned_literal():
@@ -3343,3 +3343,135 @@ console.log(JSON.stringify({before, after: ctx.big.__obedRect,
     assert result["footprint"] == []
     assert len(result["landed"]) == 2
     assert result["landed"][1] == pytest.approx(screen)
+
+
+# --- Codex r1 (`.agents/reviews/gl-replay-g3/codex-r1.md`) --------------
+
+
+def _insert(node: str, parent: str) -> str:
+    """The player inserts `node` under `parent`; the observers see an insertion record."""
+    return (
+        f"{node}.parentNode = {parent};\n"
+        f"moCallbacks.slice().forEach((cb) => cb([{{addedNodes: [{node}], removedNodes: []}}]));\n"
+    )
+
+
+def test_released_facade_inserted_top_z_never_swaps_the_carried_decoder_in():
+    """G34-01: the 2->3 transition window (#5, no matching poster canvas). The
+    player inserts the fresh stub bound to the carried decoder under `#body`;
+    the facade observer fires while the stub is STILL attached. The swap would
+    move the carried decoder top-z and play it, bypassing guard G."""
+    result = _run_gl(_HANDOFF + r"""
+canvases.length = 0;
+location.hash = '#5';
+settleMoves();
+playerDetachSubtree(ctx.big);
+const stub = document.createElement('video');
+stub.setAttribute('src', 'https://host/untitled.mov');
+if (stub.__obedFacadeFor !== ctx.big) throw new Error('no facade onto the memo');
+""" + _insert("stub", "bodyEl") + r"""
+const ids = [ctx.big.__obedElId, stub.__obedElId];
+const forIds = (kind) => notesOf(kind).filter(d => ids.indexOf(d.elId) >= 0).length;
+console.log(JSON.stringify({
+  swaps: notesOf('dom-swap').length, done: forIds('remount-done'), footprint: forIds('remount-footprint-rect'),
+  memoInBody: ctx.big.parentNode === bodyEl, memoInDocument: document.contains(ctx.big),
+  stubInBody: stub.parentNode === bodyEl,
+  holds: notesOf('glreplay-hold').map(d => d.via),
+}));
+""")
+    assert result["swaps"] == 0
+    assert result["done"] == 0
+    assert result["footprint"] == 0
+    assert result["memoInBody"] is False and result["memoInDocument"] is False
+    assert result["stubInBody"] is False
+    assert "stage" in result["holds"]
+
+
+def test_released_facade_inserted_in_the_poster_layer_still_swaps():
+    """Control for G34-01: a stub the player inserts into the carried decoder's
+    own authored poster layer is swapped exactly as pin does."""
+    result = _run_gl(_HANDOFF + r"""
+const stub = document.createElement('video');
+stub.setAttribute('src', 'https://host/untitled.mov');
+""" + _insert("stub", "canvas.parentNode") + r"""
+console.log(JSON.stringify({swaps: notesOf('dom-swap').map(d => d.elId), bigId: ctx.big.__obedElId,
+  memoInLayer: ctx.big.parentNode === canvas.parentNode}))
+""")
+    assert result["swaps"] == [result["bigId"]]
+    assert result["memoInLayer"] is True
+
+
+def test_released_facade_detached_without_a_rect_uses_the_carried_rect():
+    """G34-01 (copy): a detached, media-less facade has no rect of its own; it
+    must not reach the elId-parity footprint fallback before guard G."""
+    result = _run_gl(_HANDOFF + r"""
+const stub = document.createElement('video');
+stub.setAttribute('src', 'https://host/untitled.mov');
+canvases.length = 0;
+location.hash = '#5';
+stub.parentNode = bodyEl;
+playerDetach(stub);
+console.log(JSON.stringify({
+  footprint: notesOf('remount-footprint-rect').map(d => d.elId),
+  done: notesOf('remount-done').map(d => d.elId),
+  stubRect: stub.__obedRect || null, memoRect: ctx.big.__obedRect,
+  stubInDocument: document.contains(stub), stubPooled: census(stub).pooled,
+}));
+""")
+    assert result["stubPooled"] is True
+    assert result["footprint"] == []
+    assert result["done"] == []
+    assert result["stubRect"] == pytest.approx(result["memoRect"])
+    assert result["stubInDocument"] is False
+
+
+@pytest.mark.parametrize("plan", [_RETIRE_PLAN, _NO_RETIRE_PLAN], ids=["retire", "no-retire"])
+@pytest.mark.parametrize("via", ["setter", "setAttribute"])
+def test_flag_off_source_reassignment_adds_no_gl_expando(plan, via):
+    """G34-02: without a `glReplay` entry the default path must not grow a new
+    own property on the player's videos."""
+    assign = (lambda url: f"v.src = '{url}';") if via == "setter" else (lambda url: f"v.setAttribute('src', '{url}');")
+    script = (
+        "const v = document.createElement('video');\nv.readyState = 4; v.currentTime = 1; v.parentNode = bodyEl;\n"
+        + assign("https://host/untitled.mov") + "\n" + assign("https://host/WA0125.mov") + "\n"
+        + assign("https://host/untitled.mov") + "\n"
+        + r"""console.log(JSON.stringify({
+  own: ['__obedGlPooled', '__obedAuthoredRect', '__obedAuthoredRectScene', '__obedGlNoWarm', '__obedGlCarried']
+    .filter(k => Object.prototype.hasOwnProperty.call(v, k)),
+}));
+"""
+    )
+    result = _run_full_core_in_node(plan=plan, stage=_IDENTITY_STAGE, script=script)
+    assert result == {"own": []}
+
+
+def test_a_capture_from_an_earlier_scene_never_measures_the_move():
+    """G34-03: a decoder measured at the target geometry on an earlier scene,
+    moved to the sibling geometry, and detached on the move scene before any
+    capture there, must answer `unmeasured` — not bind on the stale rect."""
+    result = _run_gl(r"""
+location.hash = '#0';
+const v = makeMovie(MEASURED);
+tick();
+const staleScene = v.__obedAuthoredRectScene;
+location.hash = '#1';
+v._rect = screenOf(SIBLING);
+playerDetach(v);
+const r = S.carried('movie1');
+console.log(JSON.stringify({staleScene, pooled: census(v).glPooled, reason: r.reason, bound: !!r.video}));
+""")
+    assert result == {"staleScene": 0, "pooled": True, "reason": "unmeasured", "bound": False}
+
+
+def test_changing_assets_clears_the_authored_capture():
+    """G34-03: `reidentify` drops both the rect and its scene on an asset change."""
+    result = _run_gl(r"""
+location.hash = '#1';
+const v = makeMovie(MEASURED);
+tick();
+const before = [!!v.__obedAuthoredRect, v.__obedAuthoredRectScene];
+v.src = 'https://host/WA0125.mov';
+console.log(JSON.stringify({before, after: [Object.prototype.hasOwnProperty.call(v, '__obedAuthoredRect'),
+  Object.prototype.hasOwnProperty.call(v, '__obedAuthoredRectScene')]}));
+""")
+    assert result == {"before": [True, 1], "after": [False, False]}
