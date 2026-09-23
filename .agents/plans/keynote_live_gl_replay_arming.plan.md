@@ -231,9 +231,9 @@ ships. D4: accepted. D5: arming stays `off` by default until a second deck is qu
   written. Fallback if it cannot: `retireDecoder` at stand-down = a visible restart at the first build — an owner call.
 - §5 "stand-down latency ≤ 50 ms" is not traceable to a measurement (measured 1.7–1.8 ms). Set the bound from the
   qualification run with a stated margin, or make it report-only in v1.
-- The freeze-control re-bracket (`p2_freeze_control_3to4.plan.md`) and this plan both edit
+- The freeze-control re-bracket (PR #187, merged) and this plan both edit
   `scripts/p2_recovery_html_adversarial.py`; G6 starts only after that PR has merged.
-- The go-to repair (`keynote_live_goto_autoplay.plan.md`) changes what follows a go-to; §3's "after a go-to + advance
+- The go-to repair (PR #203, merged) changes what follows a go-to; §3's "after a go-to + advance
   the move does not go through WebGL" must be re-measured once that lands.
 
 

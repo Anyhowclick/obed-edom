@@ -1,7 +1,7 @@
 """GL-replay runtime (stage G2): the in-page module that replays the settled
 Magic-Move frame with the carried decoder's live texture.
 
-Plan: `.agents/plans/keynote_live_gl_replay_g2.plan.md` rev 2 §2. The module is a
+Plan: the G2 runtime plan rev 2 §2 (PR #208). The module is a
 sibling of `live_continuity_js.py` -- its own version and sha, so a change here
 never rides on the continuity sha -- and is injected by the host (G4) only when
 `derive_plan` emitted a `glReplay` boundary. Off means the builder returns `""`

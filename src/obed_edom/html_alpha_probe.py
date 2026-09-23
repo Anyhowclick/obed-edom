@@ -1386,7 +1386,7 @@ def footprint_at(
 # Top-edge guard (screen px) for a MEASURED footprint's index-patch ROI: the y
 # mapping carries no inset, so a fractional rect can put the ROI's first row on
 # the movie's antialiased top edge and the patch decodes None. Calibration in
-# `.agents/plans/p2_freeze_control_3to4.plan.md` §10.
+# the freeze-control 3->4 plan §10 (PR #187).
 INDEX_PATCH_TOP_GUARD_PX = 2
 
 

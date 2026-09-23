@@ -29,7 +29,7 @@ five draws at indices 17/33/50/66/83, one distinct program each, the five
 that the frame re-sets `Opacity` for programs 0–3 but not for program 4) comes
 from the archived `m2-s3/result.json` (`analyze`, `remeasure.perUnit`,
 `remeasure.sentinelAfterFrame`, `segment`) and §0 of
-`.agents/plans/keynote_live_gl_replay_opacity.plan.md`. The *argument list* of the
+the GL-replay opacity plan (PR #200). The *argument list* of the
 88 calls is not recorded anywhere and is synthesised to that measured shape, as
 are the solid source colours of slots 1/2/3; see the fixture's `_provenance`.
 """

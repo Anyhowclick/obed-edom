@@ -6,7 +6,7 @@ Keynote unless the owner says it is free.
 ## Where things are (verified on `origin/main` `de8cc24c`)
 | Item | State |
 |---|---|
-| #203 go-to auto-play | MERGED (`2286a7c8`). Plan + implementation record: `.agents/plans/keynote_live_goto_autoplay.plan.md` §8. |
+| #203 go-to auto-play | MERGED (`2286a7c8`). Plan + implementation record: the go-to plan §8, merged with PR #203 (removed from the tree 2026-09-23). |
 | #205 digit box on air | MERGED (`de8cc24c`). `#slideNumberControl` hidden in both output CSS variants. |
 | Worktrees / branches | `go-to-autoplay-fix-719a2e` trashed + pruned; both feature branches deleted locally and on origin. |
 | Full suites on the #205 tree | pytest 5556 passed / 94 skipped / 1 xfailed (`uv run --all-extras pytest tests/ -n auto --dist loadfile`, ~105–140 s); `test:ui` 222; `test:maps` 542 + perf 2. |
