@@ -2169,7 +2169,7 @@ CAPTURE_COLLECTOR_JS = r"""
   if (window.__OBED_CAP_COLLECT__) return;
   var MIN4 = %(minHash)d, TRANS_MS = %(transMs)f, KEY = %(key)s;
   var R3 = %(r3)s, R4 = %(r4)s, RING = %(ring)d;
-  var st = {rows: [], running: false, n: 0, flipT: null, dropped: 0, errors: 0, started: null};
+  var st = {rows: [], running: false, n: 0, flipT: null, flipVia: null, dropped: 0, errors: 0, started: null};
 
   function hashNow() {
     return String(window.__OBED_P2_PROBE__ ? window.__OBED_P2_PROBE__.hash() : location.hash);
@@ -2194,15 +2194,24 @@ CAPTURE_COLLECTOR_JS = r"""
     var P = window.__OBED_P2_PRESERVE__;
     try { return (P && P.snapshot) ? P.snapshot() : []; } catch (e) { st.errors++; return []; }
   }
+  function motionStart() {
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      var m = vids[i].__obedMotion;
+      if (m && m.boundary && m.boundary.movieKey === KEY && m.started >= st.started) return m.started;
+    }
+    return null;
+  }
   function frame() {
     if (!st.running) return;
     var t = performance.now();
     var h = hashNow(), hn = hashNum(h);
-    var reached4 = (hn !== null && hn >= MIN4);
-    if (reached4 && st.flipT === null) st.flipT = t;
-    var progress = reached4
-      ? Math.max(0, Math.min(1, (t - st.flipT) / TRANS_MS))
-      : 0.0;
+    if (st.flipT === null) {
+      var ms = motionStart();
+      if (ms !== null) { st.flipT = ms; st.flipVia = 'motion'; }
+      else if (hn !== null && hn >= MIN4) { st.flipT = t; st.flipVia = 'hash'; }
+    }
+    var progress = st.flipT === null ? 0.0 : Math.max(0, Math.min(1, (t - st.flipT) / TRANS_MS));
     var fp = [R3[0] + (R4[0] - R3[0]) * progress, R3[1] + (R4[1] - R3[1]) * progress,
               R3[2] + (R4[2] - R3[2]) * progress, R3[3] + (R4[3] - R3[3]) * progress];
     st.rows.push({t: t, hash: h, progress: progress, fp: fp,
@@ -2218,7 +2227,7 @@ CAPTURE_COLLECTOR_JS = r"""
     },
     dump: function () {
       return {rows: st.rows, dropped: st.dropped, errors: st.errors,
-              started: st.started, running: st.running};
+              started: st.started, running: st.running, flipT: st.flipT, flipVia: st.flipVia};
     },
     stop: function () { st.running = false; return {rows: st.rows.length}; }
   };
@@ -2366,6 +2375,12 @@ ADVANCE_KEY_READ_JS = r"""(function () {
 })()
 """
 
+
+# Two more frames so the last capture has a collector row after it to bracket it.
+COLLECTOR_TRAILING_ROW_JS = (
+    "new Promise(function (done) { setTimeout(done, 1000); "
+    "requestAnimationFrame(function () { requestAnimationFrame(done); }); })"
+)
 
 SPLIT_EVAL_JS = """(function () {
   var R = %(release)s;
@@ -2654,6 +2669,7 @@ async def _advance_to_slide4_capture(
     # ONE dump of the page-side per-rAF series, then each capture sample takes the
     # rows BRACKETING its own badge frame -- the same before/after pair the five
     # deleted per-sample round trips used to fetch (review r5 MAJOR 4).
+    await chrome.evaluate(COLLECTOR_TRAILING_ROW_JS, await_promise=True)
     collector_dump = await chrome.evaluate("window.__OBED_CAP_COLLECT__.dump()") or {}
     collector_rows = (
         collector_dump.get("rows") if isinstance(collector_dump, dict) else None
@@ -2757,7 +2773,6 @@ async def _capture_3to4_snapshot(
     *,
     inject_null: bool,
     capture_id: str,
-    owner_coverage_report_only: bool = False,
 ) -> dict:
     """Capture + score ONE 3->4 moving Magic Move boundary and return a comparable
     findings snapshot for the A-B-A freeze bracket. Replaces `_capture_1to2_snapshot`
@@ -2977,7 +2992,6 @@ async def _capture_3to4_snapshot(
         )
     moving_continuity = movingContinuity3to4(
         owner_samples, media_samples, slide3_movie_decoder, hash3, hash4, SLIDE4_MIN_HASH,
-        owner_coverage_report_only=owner_coverage_report_only,
     )
     player_build_errors = await chrome.evaluate(
         "(window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"
@@ -3114,16 +3128,13 @@ async def _run_freeze_bracket(
                 snaps[label] = await _capture_3to4_snapshot(
                     chrome, rd, "mm34", wait_profile, inject_null=inject,
                     capture_id=manifest["arms"][label],
-                    owner_coverage_report_only=main_js is not None,
                 )
             finally:
                 await chrome.close()
     finally:
         httpd.shutdown()
 
-    verdict = _score_freeze_control(
-        snaps["a1"], snaps["b"], snaps["a2"], manifest, owner_coverage_report_only=main_js is not None
-    )
+    verdict = _score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"], manifest)
     verdict["manifest"] = manifest
     verdict["waitProfile"] = wait_profile_name
     verdict["snapshots"] = snaps
@@ -3853,7 +3864,6 @@ async def _run(player: Path) -> dict:
     moving_continuity = movingContinuity3to4(
         owner_samples_c, media_samples_c, slide3_movie_decoder,
         hash3, hash4, SLIDE4_MIN_HASH,
-        owner_coverage_report_only=gl_auto,
     )
 
     # The 1->2 carry is refused by the derived plan: assert the refusal was

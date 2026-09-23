@@ -782,7 +782,7 @@ def _video_entry_34(decoder_id, t, **over):
     entry = {
         "decoderId": decoder_id, "presentedMediaTime": t, "visible": True,
         "hiddenBy": None, "suppressed34": False, "rect": dict(box),
-        "inDocument": True, "display": "block", "visibility": "visible",
+        "inDocument": True, "documentHidden": False, "display": "block", "visibility": "visible",
         "opacityProduct": 1.0, "checkVisibility": True,
         "clientRect": dict(box), "viewport": {"w": 1920.0, "h": 1080.0},
     }
@@ -4110,7 +4110,7 @@ def _competitor_entry(rect, visible, decoder) -> dict:
         "hiddenBy": None if visible else "hidden",
         "suppressed34": False,
         "rect": dict(rect), "clientRect": dict(rect),
-        "inDocument": True, "display": "block",
+        "inDocument": True, "documentHidden": False, "display": "block",
         "visibility": "visible" if visible else "hidden",
         "opacityProduct": 1.0, "checkVisibility": True,
         "viewport": {"w": 1920.0, "h": 1080.0},
@@ -4310,7 +4310,7 @@ def test_the_real_bracket_matches_its_own_manifest():
 def _raw_visible(**over) -> dict:
     """The raw readings of an attached, opaque, on-screen entry."""
     entry = {
-        "decoderId": 4242, "inDocument": True, "display": "block",
+        "decoderId": 4242, "inDocument": True, "documentHidden": False, "display": "block",
         "visibility": "visible", "opacityProduct": 1.0, "checkVisibility": True,
         "clientRect": {"x": 327.0, "y": 709.0, "w": 1266.0, "h": 356.0},
         "viewport": {"w": 1920.0, "h": 1080.0},
@@ -4343,6 +4343,8 @@ def test_a_stale_not_visible_flag_over_a_painting_entry_is_inconclusive():
 @pytest.mark.parametrize("over,expected", [
     ({}, (True, None)),
     ({"inDocument": False}, (False, "detached")),
+    ({"documentHidden": True}, (False, "page-hidden")),
+    ({"documentHidden": True, "display": "none"}, (False, "page-hidden")),
     ({"display": "none"}, (False, "display-none")),
     ({"clientRect": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}}, (False, "zero-size")),
     ({"visibility": "hidden"}, (False, "hidden")),
@@ -4354,6 +4356,17 @@ def test_a_stale_not_visible_flag_over_a_painting_entry_is_inconclusive():
 def test_paint_is_rederived_from_the_raw_readings(over, expected):
     """The page's rules, restated on the retained readings, in the same order."""
     assert p2._derived_paint(_raw_visible(**over)) == expected
+
+
+def test_paint_rederives_a_record_that_predates_document_hidden():
+    entry = _raw_visible()
+    del entry["documentHidden"]
+    assert p2._derived_paint(entry) == (True, None)
+
+
+@pytest.mark.parametrize("value", [None, "false", 0])
+def test_paint_cannot_be_rederived_from_a_malformed_document_hidden(value):
+    assert p2._derived_paint(_raw_visible(documentHidden=value)) is None
 
 
 @pytest.mark.parametrize(

@@ -611,3 +611,125 @@ def test_chrome_start_kills_its_process_when_the_attach_fails(tmp_path, monkeypa
     assert c.proc is not None
     assert c.proc.poll() is not None, "Chrome survived a failed start()"
     assert isinstance(c.proc, subprocess.Popen)
+
+
+# --- P2 input / lifecycle (2026-09-23) -------------------------------------- #
+def test_key_events_omit_native_key_code(tmp_path):
+    """A Windows VK sent as `nativeVirtualKeyCode` makes macOS Chrome route the
+    key through AppKit key equivalents: the page goes `hidden` on the first key
+    (rAF runs only when a screenshot forces a frame) and, with the page kept
+    visible, the slide-2 drain hangs at #4 with CDP unresponsive. Omitting it
+    (as the product host does) kept the page visible and drained 24/24 keys."""
+    if str(REPO / "scripts") not in sys.path:
+        sys.path.insert(0, str(REPO / "scripts"))
+    import p2_alpha_spike as spike
+
+    c = spike.ChromeCdp(Path("chrome"), tmp_path / "profile")
+    calls: list[tuple[str, dict]] = []
+
+    async def call(method, **params):
+        calls.append((method, params))
+        return {}
+
+    c.call = call
+    asyncio.run(c.key("ArrowRight", "ArrowRight", 39))
+    assert [p["type"] for _, p in calls] == ["keyDown", "keyUp"]
+    for method, params in calls:
+        assert method == "Input.dispatchKeyEvent"
+        assert "nativeVirtualKeyCode" not in params
+        assert params["windowsVirtualKeyCode"] == 39
+
+
+_COLLECTOR_HARNESS = r"""
+var rafQ = [], now = 0, videos = [], hash = '#7';
+global.performance = {now: function () { return now; }};
+global.location = {hash: hash};
+global.requestAnimationFrame = function (f) { rafQ.push(f); };
+global.document = {querySelectorAll: function () { return videos; }};
+global.window = {
+  __OBED_P2_PROBE__: {hash: function () { return hash; }},
+  __OBED_P2_PRESERVE__: {
+    footprintOwnerDecoderId: function (r) { return {elId: 4, key: 'movie1', via: 'stub'}; },
+    snapshot: function () { return []; }
+  }
+};
+eval(%(src)s);
+var C = window.__OBED_CAP_COLLECT__;
+now = 1000; C.start();
+function tick(t, h) { now = t; hash = h; var q = rafQ; rafQ = []; q.forEach(function (f) { f(); }); }
+var plan = %(plan)s;
+plan.forEach(function (step) {
+  if (step.motion !== undefined) {
+    videos = [{__obedMotion: {started: step.motion, boundary: {movieKey: step.key || 'movie1'}},
+               play: function () {}}];
+  }
+  tick(step.t, step.hash);
+});
+var d = C.dump();
+console.log(JSON.stringify({flipT: d.flipT, flipVia: d.flipVia,
+                            progress: d.rows.map(function (r) { return r.progress; })}));
+"""
+
+
+def _run_collector(plan: list[dict]) -> dict:
+    src = p2.CAPTURE_COLLECTOR_JS.replace(p2.MEDIA_PROBE_JS.strip(), "null")
+    harness = _COLLECTOR_HARNESS % {"src": json.dumps(src), "plan": json.dumps(plan)}
+    out = subprocess.run(["node", "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_collector_starts_the_modelled_move_at_the_products_motion_stamp():
+    """The product starts moving the carried video during #7 (`__obedMotion`);
+    starting the modelled query at #8 left it ~1.7 s behind the video, and the
+    owner resolver (IoU >= 0.75) returned none for the whole lag."""
+    got = _run_collector([
+        {"t": 1100, "hash": "#7"},
+        {"t": 1200, "hash": "#7", "motion": 1150},
+        {"t": 1900, "hash": "#7"},
+        {"t": 2900, "hash": "#8"},
+    ])
+    assert got["flipVia"] == "motion"
+    assert got["flipT"] == 1150
+    assert got["progress"][0] == 0
+    assert got["progress"][2] == pytest.approx(750 / (p2.TRANS_S * 1000))
+    assert got["progress"][3] == 1
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize("stamp", [
+    pytest.param({"motion": 500}, id="stamp-before-collector-start"),
+    pytest.param({"motion": 1150, "key": "movie2"}, id="stamp-on-another-movie"),
+    pytest.param({}, id="no-stamp"),
+])
+def test_collector_falls_back_to_the_slide4_hash_without_a_usable_stamp(stamp):
+    got = _run_collector([
+        {"t": 1200, "hash": "#7", **stamp},
+        {"t": 1900, "hash": "#8"},
+        {"t": 2650, "hash": "#8"},
+    ])
+    assert got["flipVia"] == "hash"
+    assert got["flipT"] == 1900
+    assert got["progress"] == [0, 0, pytest.approx(750 / (p2.TRANS_S * 1000))]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_collector_trailing_row_js_settles_after_two_frames_or_a_timeout():
+    """The last capture needs a collector row AFTER its frame to be bracketed; the
+    dump waits two frames, and never hangs a page that produces none."""
+    harness = r"""
+      var rafQ = [], timers = [], done = [];
+      global.requestAnimationFrame = function (f) { rafQ.push(f); };
+      global.setTimeout = function (f, ms) { timers.push([f, ms]); };
+      function flush() { var q = rafQ; rafQ = []; q.forEach(function (f) { f(); }); }
+      eval(%s).then(function () { done.push('frames'); });
+      flush(); var afterOne = rafQ.length; flush();
+      setImmediate(function () {
+        console.log(JSON.stringify({afterOne: afterOne, done: done, timeoutMs: timers[0][1]}));
+      });
+    """ % json.dumps(p2.COLLECTOR_TRAILING_ROW_JS)
+    out = subprocess.run(["node", "-e", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    assert got == {"afterOne": 1, "done": ["frames"], "timeoutMs": 1000}
