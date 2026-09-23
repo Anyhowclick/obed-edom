@@ -143,7 +143,8 @@ def _dual_keys(items: list[dict[str, Any]]) -> set[tuple[str, int]]:
 def _planned_sizes_by_slide(
     transform_dicts: list[dict[str, Any]],
 ) -> dict[int, dict[tuple[str, int], dict[str, float]]]:
-    """`{slide: {(kind, kindIndex): {"w", "h"}}}` from each non-hide transform that plans a size."""
+    """`{slide: {(kind, kindIndex): {"w", "h"}}}` from each non-hide transform that plans a
+    size; pass 1 writes these before deleting hides unless the slide's geometry is suppressed."""
     out: dict[int, dict[tuple[str, int], dict[str, float]]] = {}
     for t in transform_dicts:
         if t.get("role") == "hide" or t.get("kindIndex") is None:
@@ -160,11 +161,15 @@ def offline_hide_slides(
     transform_dicts: list[dict[str, Any]],
     wall: dict[str, Any],
     wanted: list[int] | None,
+    *,
+    suppressed: set[int] | frozenset[int] = frozenset(),
 ) -> set[int]:
     """Slides whose hides the IWA writer deletes after the pass-1 save: slides with a
     hide, within `wanted`, minus slides where a hide is a source build target, a dual, has
     no AppleScript address, or is a group twin the writer could not disambiguate after the
-    save (`pre_deferral_twin_risk`); those stay on the Keynote delete."""
+    save (`pre_deferral_twin_risk`); those stay on the Keynote delete. `suppressed` is the
+    plan's `suppressGeometry` set: those slides write no size before the hides, so the
+    twin check sees no planned sizes for them."""
     from obed_edom.iwa_hides import pre_deferral_twin_risk  # noqa: PLC0415 (optional iwa extra)
     from obed_edom.remap_keynote import _AS_KIND_NAMES  # noqa: PLC0415 (avoid a module cycle)
 
@@ -188,7 +193,7 @@ def offline_hide_slides(
             continue
         group_text = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
         if pre_deferral_twin_risk(slide.get("items") or [], hide_keys, group_text,
-                                  planned=planned.get(n, {})):
+                                  planned={} if n in suppressed else planned.get(n, {})):
             continue
         out.add(n)
     return out

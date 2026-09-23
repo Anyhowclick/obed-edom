@@ -212,6 +212,29 @@ def test_eligibility_passes_planned_sizes_to_twin_risk(monkeypatch):
     assert seen[frozenset({("image", 0)})] == {("image", 1): {"w": 9.0, "h": 9.0}}
 
 
+def test_eligibility_suppressed_slide_gets_no_planned_sizes(monkeypatch):
+    """Round 6: pass 1 writes no geometry on a suppressed slide (offline-write or
+    env-suppressed) before the hides go, so its planned sizes must not feed the twin check."""
+    import obed_edom.iwa_hides as mod
+
+    seen = {}
+
+    def spy(items, hide_keys, group_text, *, planned=None):
+        seen[frozenset(hide_keys)] = planned
+        return set()
+
+    monkeypatch.setattr(mod, "pre_deferral_twin_risk", spy, raising=False)
+    t = [
+        _hide(3, "group", 0),
+        {"slide": 3, "kind": "group", "kindIndex": 1, "role": "map", "w": 40, "h": 30},
+        _hide(1, "image", 0),
+        {"slide": 1, "kind": "image", "kindIndex": 1, "role": "map", "w": 9, "h": 9},
+    ]
+    assert offline_write.offline_hide_slides(t, WALL, None, suppressed={3}) == {1, 3}
+    assert seen[frozenset({("group", 0)})] == {}
+    assert seen[frozenset({("image", 0)})] == {("image", 1): {"w": 9.0, "h": 9.0}}
+
+
 def test_eligibility_clean_twin_risk_keeps_slide(_no_twin_risk):
     t = [_hide(1, "image", 0), _hide(3, "group", 0)]
     assert offline_write.offline_hide_slides(t, WALL, None) == {1, 3}
@@ -926,3 +949,22 @@ def test_remap_and_inspect_threads_offline_hides(monkeypatch, tmp_path):
     source, template, dest = _touch_paths(tmp_path)
     rk.remap_and_inspect(source, dest, template=template, validate=False, offline_hides="on")
     assert seen["offline_hides"] == "on"
+
+
+def test_eligibility_uses_the_suppression_set_sent_to_jxa(monkeypatch, tmp_path):
+    """The twin check's suppression set is the very set pass 1 receives as
+    `plan["suppressGeometry"]` (offline-write slides plus `OBED_SUPPRESS_GEOMETRY`)."""
+    plan, _ = _wire(monkeypatch, hides_env="on", jxa={**JXA_OK, "hidesDeferred": 2},
+                    hides_info={"deleted": 2})
+    monkeypatch.setenv("OBED_SUPPRESS_GEOMETRY", "7")
+    seen = {}
+    real = rk.offline_write.offline_hide_slides
+
+    def spy(transform_dicts, wall, wanted, *, suppressed=frozenset()):
+        seen["suppressed"] = set(suppressed)
+        return real(transform_dicts, wall, wanted, suppressed=suppressed)
+
+    monkeypatch.setattr(rk.offline_write, "offline_hide_slides", spy)
+    _run(tmp_path)
+    assert seen["suppressed"] == {1, 7}
+    assert sorted(seen["suppressed"]) == plan["suppressGeometry"]

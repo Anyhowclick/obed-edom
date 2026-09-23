@@ -1576,7 +1576,9 @@ def remap_keynote(
         hides_mode = offline_hides_mode(offline_hides, offline_mode=offline_mode, say=say)
         hide_slides: set[int] = set()
         if hides_mode != "off":
-            hide_slides = offline_write.offline_hide_slides(transform_dicts, wall, wanted)
+            hide_slides = offline_write.offline_hide_slides(
+                transform_dicts, wall, wanted, suppressed=suppressed,
+            )
             say(
                 f"OBED_OFFLINE_HIDES={hides_mode}: {len(hide_slides)} slide(s) defer their "
                 "hides to the offline delete after the pass-1 save."

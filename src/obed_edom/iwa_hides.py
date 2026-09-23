@@ -24,7 +24,7 @@ from obed_edom.iwa_kindindex import (
     derived_kind_counts,
     reconcile_counts,
 )
-from obed_edom.iwa_geometry import _masked_rect, compose_geometry
+from obed_edom.iwa_geometry import compose_geometry
 from obed_edom.iwa_runs import (
     _group_child_signature,
     _normalize_text,
@@ -372,30 +372,6 @@ def _check_unambiguous(
 _APPROXIMABLE_KINDS = frozenset({"text", "image", "movie", "group"})
 
 
-def _planned_scale(item: dict, plan: dict | None) -> tuple[float, float] | None:
-    """(sx, sy) of the planned size over the payload size; ``None`` when not computable."""
-    if not plan:
-        return (1.0, 1.0)
-    out = []
-    for k in ("w", "h"):
-        target, source = plan.get(k), item.get(k)
-        if target is None:
-            out.append(1.0)
-            continue
-        try:
-            out.append(float(target) / float(source))
-        except (TypeError, ValueError, ZeroDivisionError):
-            return None
-    return (out[0], out[1])
-
-
-def _scaled_mask_off_axis(mask_geom: list[float], sx: float, sy: float) -> bool:
-    fx, fy, fw, fh, fa, mx, my, mw, mh, ma = (float(v) for v in mask_geom)
-    frame = {"position": {"x": fx * sx, "y": fy * sy}, "size": {"width": fw * sx, "height": fh * sy}, "angle": fa}
-    mask = {"position": {"x": mx * sx, "y": my * sy}, "size": {"width": mw * sx, "height": mh * sy}, "angle": ma}
-    return _masked_rect(frame, mask)[1]
-
-
 def pre_deferral_twin_risk(
     items: list[dict], hide_keys: set[tuple[str, int]], group_text: dict | None,
     *, planned: dict[tuple[str, int], dict] | None = None,
@@ -404,11 +380,12 @@ def pre_deferral_twin_risk(
 
     A hide is at risk when its twin class (the writer's signature, from the payload) holds
     a survivor and a member whose saved geometry may be approximate. Offline-read items
-    carry the reader's ``needsKeynote`` (``None`` when exact); with ``planned``
-    (``{(kind, kindIndex): {"w", "h"}}`` target sizes) a member also counts when pass 1's
-    scaling can raise a size-dependent flag: a masked image whose snap residual crosses
-    ``_MASK_TRUST_PX`` at the planned scale (rotated-masked), or a scaled group with a
-    masked descendant (group-residual). Payloads without these fields fall back to
+    carry the reader's ``needsKeynote`` (``None`` when exact). ``planned`` holds only the
+    size writes pass 1 makes BEFORE the hide stage (``{(kind, kindIndex): {"w", "h"}}``;
+    empty for slides whose pass-1 geometry is suppressed). Until Keynote's sequential
+    width/height mask scaling is live-proven, any such write on a masked image, or on a
+    group with a masked descendant, counts as approximate (rotated-masked / group-residual
+    are the only size-dependent flags). Payloads without these fields fall back to
     counting every kind the composer can flag (text, image, movie, group).
     """
     def sig(item: dict) -> str | None:
@@ -435,14 +412,9 @@ def pre_deferral_twin_risk(
             return key[0] in _APPROXIMABLE_KINDS
         if item.get("needsKeynote"):
             return True
-        if planned is None:
+        if planned is None or key not in planned:
             return False
-        scale = _planned_scale(item, planned.get(key))
-        if scale is None:
-            return key[0] in _APPROXIMABLE_KINDS
-        if item.get("maskGeom"):
-            return _scaled_mask_off_axis(item["maskGeom"], *scale)
-        return key[0] == "group" and bool(item.get("maskedDescendant")) and scale != (1.0, 1.0)
+        return bool(item.get("maskGeom")) or (key[0] == "group" and bool(item.get("maskedDescendant")))
 
     risky: set[tuple[str, int]] = set()
     for key in hide_keys:
@@ -458,11 +430,18 @@ def pre_deferral_twin_risk(
 
 _STRONG_REF_FIELDS = frozenset({
     "children", "ownedStorage", "deprecatedStorage", "mask", "fakeShapeForEmptyGroup",
-    "title", "caption", "textFlow",
+    "title", "caption", "drawable", "containedStorage", "calloutSubStorages", "subStorages",
 })
 _WEAK_REF_FIELDS = frozenset({"parent", "style", "styleSheet", "stylesheet"})
-_FORBIDDEN_REF_FIELDS = frozenset({"comment", "pencilAnnotations"})
-_STYLE_TABLE_REF = re.compile(r"(^|\.)table\w*Style\.entries\.object$")
+_FORBIDDEN_REF_FIELDS = frozenset({
+    "comment", "pencilAnnotations", "commentStorage", "pencilAnnotationStorage", "author", "replies",
+    "textFlow",
+})
+_STRONG_TABLES = frozenset({"tableAttachment", "tableFootnote"})
+_FORBIDDEN_TABLES = frozenset({
+    "tableHighlight", "tableOverlappingHighlight", "tablePencilAnnotation", "tableInsertion", "tableDeletion",
+})
+_STORAGE_TABLE_REF = re.compile(r"(?:^|\.)(table\w+)\.entries\.(?:object|field)$")
 
 
 def _typed_refs(value: Any, path: str, out: list[tuple[str, str]]) -> None:
@@ -480,20 +459,30 @@ def _typed_refs(value: Any, path: str, out: list[tuple[str, str]]) -> None:
 
 
 def _ref_class(path: str) -> str:
+    """strong (owned: header-listed, same member), weak (shared: anywhere), forbidden
+    (comments, pencil, highlights, tracked changes, linked text flow) or unclassified."""
+    table = _STORAGE_TABLE_REF.search(path)
+    if table:
+        name = table.group(1)
+        if name in _STRONG_TABLES:
+            return "strong"
+        if name in _FORBIDDEN_TABLES:
+            return "forbidden"
+        return "weak" if name.endswith("Style") else "unclassified"
     field = path.rsplit(".", 1)[-1]
     if field in _FORBIDDEN_REF_FIELDS:
         return "forbidden"
     if field in _STRONG_REF_FIELDS:
         return "strong"
-    if field in _WEAK_REF_FIELDS or _STYLE_TABLE_REF.search(path):
+    if field in _WEAK_REF_FIELDS:
         return "weak"
     return "unclassified"
 
 
 def _check_subtree_refs(x: str, subtree: set[str], slide_id: str, member: str, model: _Model) -> None:
-    """Strong ownership must be header-listed and same-member; weak parent/style refs may
-    point anywhere; an unclassified header-less ref may not leave the member, nor land on a
-    same-member archive outside the subtree."""
+    """Every ref of every object is classified: strong ownership must be header-listed and
+    same-member; weak parent/style refs may point anywhere (a same-member header-less one
+    only at the subtree or the slide); forbidden and unclassified refs refuse."""
     header = set(_header_refs(model.archives[x]["header"]))
     for obj in model.archives[x].get("objects") or []:
         refs: list[tuple[str, str]] = []
@@ -503,17 +492,12 @@ def _check_subtree_refs(x: str, subtree: set[str], slide_id: str, member: str, m
                 continue
             cls = _ref_class(path)
             tm = model.member_of.get(t)
-            if cls == "forbidden":
-                raise _Refuse(f"{x} {path} references {t}")
+            if cls in ("forbidden", "unclassified"):
+                raise _Refuse(f"{x} {cls} {path} references {t}")
             if cls == "strong":
                 if t not in header or tm != member:
                     raise _Refuse(f"{x} {path} owns {t} ({tm}) without a same-member header reference")
-                continue
-            if cls == "weak" or t in header:
-                continue
-            if tm != member:
-                raise _Refuse(f"{x} unclassified {path} references {t} in {tm} without a header reference")
-            if t not in subtree and t != slide_id:
+            elif tm == member and t not in header and t not in subtree and t != slide_id:
                 raise _Refuse(f"{x} {path} references {t} in {member} without a header reference")
 
 

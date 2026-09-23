@@ -1352,58 +1352,79 @@ def test_metadata_re_encode_that_alters_data_metadata_map_refuses(deck, monkeypa
 # ---------------------------------------------------------------- planned transform (Sol r4 Part 1, option i)
 
 
-def _masked_twin_slide(members):
-    """Slide 3 gains masked image twins 505 (hide) and 506 (survivor), same file, each with
-    a 0.5 degree mask: clean at source size (snap residual under 1.5 px), off-axis at 2x."""
-    archs = []
-    for ident, x in ((505, 40), (506, 600)):
-        archs.append(_a(ident, "TSD.ImageArchive",
-                        {"data": {"identifier": 51}, "mask": {"identifier": ident + 10},
-                         "style": {"identifier": 900}, "super": _geom(x, 400, 200, 100)},
-                        refs=[ident + 10, 900], data=[51]))
-        archs.append(_a(ident + 10, "TSD.MaskArchive",
-                        {"super": {"parent": {"identifier": ident}}, **_mask_super(10, 10, 180, 80, angle=0.5)},
-                        refs=[ident]))
-    members[S3] = [_slide(103, [500, 501, 505, 506]), *_text(500, 510, "Stay"), _image(501, 54), *archs]
+def _masked_twins(mw=180.0, mh=80.0, angle=0.5, survivor_w=None):
+    """Slide 3 gains masked image twins 505 (hide) and 506 (survivor), same file, each
+    with a frame-sized mask at ``angle`` degrees. ``survivor_w`` resizes the survivor's
+    frame and mask width, as pass 1's width write would on a full-JXA slide."""
+    def mutate(members):
+        archs = []
+        for ident, x in ((505, 40), (506, 600)):
+            w = survivor_w if (ident == 506 and survivor_w) else mw
+            archs.append(_a(ident, "TSD.ImageArchive",
+                            {"data": {"identifier": 51}, "mask": {"identifier": ident + 10},
+                             "style": {"identifier": 900}, "super": _geom(x, 400, w, mh)},
+                            refs=[ident + 10, 900], data=[51]))
+            archs.append(_a(ident + 10, "TSD.MaskArchive",
+                            {"super": {"parent": {"identifier": ident}}, **_mask_super(0, 0, w, mh, angle=angle)},
+                            refs=[ident]))
+        members[S3] = [_slide(103, [500, 501, 505, 506]), *_text(500, 510, "Stay"), _image(501, 54), *archs]
+    return mutate
 
 
 def _slide3_offline_items(path):
     return {s["number"]: s["items"] for s in offline_wall_payload(path)["slides"]}[3]
 
 
-def test_planned_upscale_of_a_clean_masked_twin_is_pre_excluded(tmp_path):
-    path = _build(tmp_path / "m.key", mutate=_masked_twin_slide)
-    items = _slide3_offline_items(path)
-    survivor = next(it for it in items if (it["kind"], it["kindIndex"]) == ("image", 2))
-    assert survivor["needsKeynote"] is None and survivor["maskGeom"] is not None
-    hides = {("image", 0), ("image", 1)}
-    doubled = {("image", 2): {"w": survivor["w"] * 2, "h": survivor["h"] * 2}}
-    assert pre_deferral_twin_risk(items, hides, None, planned=doubled) == {("image", 1)}
+_MASKED_HIDES = {**HIDES, 3: [{"role": "hide", "kind": "image", "kindIndex": k} for k in (0, 1)]}
 
 
-def test_masked_twin_clean_at_its_planned_scale_stays_eligible(tmp_path):
-    path = _build(tmp_path / "m.key", mutate=_masked_twin_slide)
+def test_pre_hide_masked_size_write_excludes_the_twin_class_at_the_99_51_threshold(tmp_path):
+    """Raw 99.51 x 50 mask at 0.865 degrees: clean at source (residual ~0.748 px). The payload
+    width rounds to 100, so 200/100 = 2x predicts 1.497 px (still clean), but the real
+    200/99.51 scale crosses 1.5 px. On a full-JXA slide pass 1 writes that width before the
+    hide stage, so the class is pre-excluded without trusting any scaling model."""
+    path = _build(tmp_path / "m.key", mutate=_masked_twins(99.51, 50.0, 0.865))
     items = _slide3_offline_items(path)
     survivor = next(it for it in items if (it["kind"], it["kindIndex"]) == ("image", 2))
+    assert survivor["needsKeynote"] is None and survivor["w"] == 100
     hides = {("image", 0), ("image", 1)}
-    same = {("image", 2): {"w": survivor["w"], "h": survivor["h"]}, ("text", 0): {"w": 10, "h": 10}}
-    assert pre_deferral_twin_risk(items, hides, None, planned=same) == set()
+    full_jxa = {("image", 2): {"w": 200.0, "h": 50.0}}
+    assert pre_deferral_twin_risk(items, hides, None, planned=full_jxa) == {("image", 1)}
+
+
+def test_the_99_51_threshold_write_would_have_aborted_after_the_save(tmp_path):
+    """Backstop control: the saved deck with the survivor at width 200 flags rotated-masked,
+    so the writer refuses the slide unproven (a whole-run abort) -- why it is pre-excluded."""
+    source = _build(tmp_path / "src.key", mutate=_masked_twins(99.51, 50.0, 0.865))
+    saved = _build(tmp_path / "saved.key", mutate=_masked_twins(99.51, 50.0, 0.865, survivor_w=200.0))
+    res = _run(saved, _MASKED_HIDES, items={**_payload(source), 3: _slide3_offline_items(source)},
+               counts=deck_kind_counts(source))
+    assert res.slides[3].refused and "rotated-masked" in res.slides[3].reason
+    assert not res.slides[3].order_proven
+
+
+def test_masked_twin_without_a_pre_hide_write_stays_eligible(tmp_path):
+    """Offline slides suppress pass-1 geometry: no pre-hide write, so the source flags hold."""
+    path = _build(tmp_path / "m.key", mutate=_masked_twins())
+    items = _slide3_offline_items(path)
+    hides = {("image", 0), ("image", 1)}
+    assert pre_deferral_twin_risk(items, hides, None, planned={}) == set()
+    assert pre_deferral_twin_risk(items, hides, None, planned={("text", 0): {"w": 10, "h": 10}}) == set()
     assert pre_deferral_twin_risk(items, hides, None) == set()
-    res = _run(path, {**HIDES, 3: [{"role": "hide", "kind": "image", "kindIndex": k} for k in (0, 1)]},
-               items={**_payload(path), 3: items})
+    res = _run(path, _MASKED_HIDES, items={**_payload(path), 3: items})
     assert not res.slides[3].refused, res.slides[3].reason
 
 
-def test_planned_scale_of_a_group_with_a_masked_descendant_counts_as_approximate():
+def test_pre_hide_write_on_a_group_with_a_masked_descendant_counts_as_approximate():
     def group(ki, masked):
         return {**_item("group", ki, w=100, h=40), "needsKeynote": None, "maskedDescendant": masked}
 
     items = [group(0, True), group(1, True)]
-    scaled = {("group", 1): {"w": 150, "h": 60}}
-    assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}, planned=scaled) == {("group", 0)}
+    written = {("group", 1): {"w": 100, "h": 40}}
+    assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}, planned=written) == {("group", 0)}
     assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}, planned={}) == set()
     plain = [group(0, False), group(1, False)]
-    assert pre_deferral_twin_risk(plain, {("group", 0)}, {0: "", 1: ""}, planned=scaled) == set()
+    assert pre_deferral_twin_risk(plain, {("group", 0)}, {0: "", 1: ""}, planned=written) == set()
 
 
 def test_planned_without_size_fields_stays_conservative():
@@ -1411,3 +1432,80 @@ def test_planned_without_size_fields_stays_conservative():
              {**_item("image", 1, fileName="a.png", w=10, h=10), "needsKeynote": None}]
     assert pre_deferral_twin_risk(stale, {("image", 0)}, None) == set()
     assert pre_deferral_twin_risk(stale, {("image", 0)}, None, planned={}) == {("image", 0)}
+
+
+# ---------------------------------------------------------------- Sol r5 #2: nested attachment / comment / pencil refs
+
+
+def _storage_with(table, entry_obj_id, extra_archs=(), sheet_archs=(), storage_refs=()):
+    """Hide 301's storage 311 gains a ``table`` entry pointing at ``entry_obj_id``."""
+    def mutate(members):
+        out = []
+        for a in members[S1]:
+            if str(a["header"]["identifier"]) == "311":
+                obj = {"text": ["Hide me"], table: {"entries": [{"characterIndex": 0, "object": {"identifier": entry_obj_id}}]}}
+                a = _a(311, "TSWP.StorageArchive", obj, refs=[entry_obj_id, *storage_refs])
+            out.append(a)
+        members[S1] = out + list(extra_archs)
+        members[SHEET].extend(sheet_archs)
+    return mutate
+
+
+def _pencil_substorage(members):
+    members[S1] = [a if str(a["header"]["identifier"]) != "301"
+                   else _a(301, "TSWP.ShapeInfoArchive", a["objects"][0], refs=[311, 901, 730]) for a in members[S1]]
+    members[S1].append(_a(730, "TSD.PencilAnnotationStorageArchive", {"subStorages": [{"identifier": 731}]}, refs=[731]))
+    members[SHEET].append(_a(731, "TSD.PencilAnnotationStorageArchive", {}))
+
+
+NESTED_REFUSALS = {
+    "attachment-drawable-cross-member": (
+        _storage_with("tableAttachment", 720,
+                      extra_archs=[_a(720, "TSWP.DrawableAttachmentArchive", {"drawable": {"identifier": 721}}, refs=[721])],
+                      sheet_archs=[_image(721, 51)]),
+        "drawable owns 721"),
+    "footnote-contained-storage-cross-member": (
+        _storage_with("tableFootnote", 722,
+                      extra_archs=[_a(722, "TSWP.FootnoteReferenceAttachmentArchive",
+                                      {"containedStorage": {"identifier": 723}}, refs=[723])],
+                      sheet_archs=[_a(723, "TSWP.StorageArchive", {"text": ["note"]})]),
+        "containedStorage owns 723"),
+    "highlight-table": (
+        _storage_with("tableHighlight", 724, extra_archs=[_a(724, "TSWP.HighlightArchive", {})]),
+        "forbidden tableHighlight"),
+    "highlight-archive-comment-storage-field": (
+        _storage_with("tableAttachment", 724,
+                      extra_archs=[_a(724, "TSWP.HighlightArchive", {"commentStorage": {"identifier": 725}}, refs=[725]),
+                                   _a(725, "TSD.CommentStorageArchive", {})]),
+        "forbidden commentStorage"),
+    "pencil-annotation-storage": (
+        _storage_with("tableAttachment", 726,
+                      extra_archs=[_a(726, "TSWP.PencilAnnotationArchive",
+                                      {"pencilAnnotationStorage": {"identifier": 727}}, refs=[727]),
+                                   _a(727, "TSD.PencilAnnotationStorageArchive", {})]),
+        "forbidden pencilAnnotationStorage"),
+    "pencil-sub-storages-cross-member": (_pencil_substorage, "subStorages owns 731"),
+    "unclassified-header-listed": (
+        _storage_with("tableSmartfield", 728, extra_archs=[_a(728, "TSWP.StorageArchive", {})]),
+        "unclassified tableSmartfield"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(NESTED_REFUSALS))
+def test_nested_reference_classification_refusals(tmp_path, case):
+    mutate, needle = NESTED_REFUSALS[case]
+    path = _build(tmp_path / f"{case}.key", mutate=mutate)
+    before = _raw_members(path)
+    res = _run(path)
+    _assert_refused_only(path, before, res, 1, needle)
+
+
+def test_owned_footnote_and_inline_drawable_in_member_are_deleted_with_the_hide(tmp_path):
+    def mutate(members):
+        _storage_with("tableAttachment", 720, extra_archs=[
+            _a(720, "TSWP.DrawableAttachmentArchive", {"drawable": {"identifier": 721}}, refs=[721]),
+            _image(721, 51)])(members)
+    path = _build(tmp_path / "inline.key", mutate=mutate)
+    res = _run(path, verify=True)
+    assert not res.slides[1].refused, res.slides[1].reason
+    assert {"720", "721"} <= set(res.slides[1].removed_ids)
