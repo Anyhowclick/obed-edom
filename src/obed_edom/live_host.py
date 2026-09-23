@@ -32,6 +32,8 @@ from websockets.sync.client import connect
 from .html_preview import preview_root, safe_export_file
 from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_plan
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
+from .live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script
+from .live_gl_replay_js import js_sha256 as gl_replay_js_sha256
 from .live_runtime import RUNTIME_VERSION, LiveRuntimeUnsupported, patch_player
 from .live_session import PlayerCommandRejected, PlayerObservation
 
@@ -39,6 +41,7 @@ ATTACH_ENV = "OBED_LIVE_ATTACH"
 ATTACH_MATCH_ENV = "OBED_LIVE_ATTACH_MATCH"
 ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
+GL_REPLAY_ENV = "OBED_LIVE_GL_REPLAY"
 GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 GOTO_AUTOPLAY_DEFERRED_NOTE = "Movies idle until next advance"
 _UNSET = object()
@@ -742,10 +745,14 @@ class _GoToAutoplayResult:
 
 
 class LiveOutputHost:
-    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto") -> None:
+    def __init__(self, export_root: Path, slides: list[dict[str, Any]], *, display_id: int | None = None, chrome_path: Path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), headless: bool = False, transport_factory: Callable[..., ChromeCdp] = ChromeCdp, server_factory: Callable[..., _AssetServer] = _AssetServer, resolver: Callable[[Path, str], Path] = safe_export_file, timeout_s: float = 12.0, attach_endpoint: str | None = _UNSET, attach_match: str | None = None, continuity: str = "auto", gl_replay: str = _UNSET) -> None:
         if continuity not in ("auto", "off"):
             raise LiveHostError("Continuity must be auto or off.")
+        if gl_replay is not _UNSET and gl_replay not in ("auto", "off"):
+            raise LiveHostError("GL replay must be auto or off.")
         self._continuity_preference = continuity
+        self._gl_replay_request = gl_replay
+        self._gl_replay_preference = "off"
         self.export_root, self.slides = export_root, slides
         if attach_endpoint is _UNSET:
             attach_endpoint = os.environ.get(ATTACH_ENV) or None
@@ -789,6 +796,9 @@ class LiveOutputHost:
         self._continuity_runtime_plan: dict[str, Any] | None = None
         self._continuity_scale: float | None = None
         self._continuity_not_carried: list[dict[str, Any]] = []
+        self._gl_replay_mode = "off"
+        self._gl_replay_reason: str | None = None
+        self._gl_replay_script = ""
         self._codec_report: list[dict[str, Any]] = []
         self._codec_warnings: list[str] = []
 
@@ -815,15 +825,14 @@ class LiveOutputHost:
         laid the stage out)."""
         if self._continuity_preference == "off" or os.environ.get(CONTINUITY_ENV) == "off":
             return "off", None, None
-        try:
-            plan = derive_plan(self.export_root, self.slides, resolver=self.resolver)
-        except Exception as exc:  # noqa: BLE001 - fail closed, never let derivation crash the host
-            return "unsupported", str(exc), None
-        if isinstance(plan, Unsupported):
-            return "unsupported", plan.reason, None
-        runtime = plan.to_runtime()
-        if isinstance(runtime, Unsupported):
-            return "unsupported", runtime.reason, None
+        derived = None
+        if self._gl_replay_preference == "auto":
+            self._gl_replay_mode, self._gl_replay_reason, derived, self._gl_replay_script = self._resolve_gl_replay()
+        if derived is None:
+            derived = self._derive_runtime()
+        if isinstance(derived, Unsupported):
+            return "unsupported", derived.reason, None
+        plan, runtime = derived
         codec_by_asset = {entry["asset"]: entry for entry in self._codec_report}
         attach = self._attach_endpoint is not None
         for movie in runtime["movies"].values():
@@ -832,11 +841,42 @@ class LiveOutputHost:
             family = entry["family"] if entry is not None else "other"
             if not _codec_supported(family, attach=attach, headless=self.headless):
                 display = _codec_display(entry)
+                if self._gl_replay_mode == "injected":
+                    self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
                 return "unsupported", f"movie codec is not playable in this output: {asset} ({display})", None
         self._continuity_not_carried = self._not_carried(plan)
         if self._attach_endpoint:
             runtime = {**runtime, "transparentBackground": True}
         return "pending", None, runtime
+
+    def _derive_runtime(self, **kwargs: Any) -> tuple[ContinuityPlan, dict[str, Any]] | Unsupported:
+        try:
+            plan = derive_plan(self.export_root, self.slides, resolver=self.resolver, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - fail closed, never let derivation crash the host
+            return Unsupported(str(exc))
+        if isinstance(plan, Unsupported):
+            return plan
+        runtime = plan.to_runtime()
+        if isinstance(runtime, Unsupported):
+            return runtime
+        return plan, runtime
+
+    def _resolve_gl_replay(self) -> tuple[str, str | None, tuple[ContinuityPlan, dict[str, Any]] | None, str]:
+        """GL replay `(mode, reason, flag-on derivation, script)` for `auto`. The derivation
+        is None unless the module is injected; the caller then derives exactly as the off path."""
+        if self._attach_endpoint:
+            return "unavailable", "attach output not qualified", None, ""
+        if CONTINUITY_VERSION < 5:
+            return "unavailable", "continuity core predates GL replay", None, ""
+        derived = self._derive_runtime(gl_replay=True)
+        if isinstance(derived, Unsupported):
+            return "unavailable", derived.reason, None, ""
+        if not any(b.get("action") == "glReplay" for b in derived[1]["boundaries"]):
+            return "notApplicable", None, None, ""
+        script = gl_replay_script(derived[1])
+        if not script:
+            return "unavailable", "GL replay entry is not usable", None, ""
+        return "injected", None, derived, script
 
     def _not_carried(self, plan: ContinuityPlan) -> list[dict[str, Any]]:
         """Boundaries continuity declines to carry, in operator terms: original slide
@@ -918,6 +958,15 @@ class LiveOutputHost:
             info["scale"] = round(self._continuity_scale, 4)
         if self._continuity_not_carried:
             info["notCarried"] = [dict(entry) for entry in self._continuity_not_carried]
+        info["glReplay"] = self._gl_replay_info()
+        return info
+
+    def _gl_replay_info(self) -> dict[str, Any]:
+        info: dict[str, Any] = {"mode": self._gl_replay_mode}
+        if self._gl_replay_reason is not None:
+            info["reason"] = self._gl_replay_reason
+        info["version"] = GL_REPLAY_VERSION
+        info["sha256"] = gl_replay_js_sha256()
         return info
 
     @property
@@ -952,6 +1001,13 @@ class LiveOutputHost:
         self._advance_mode = os.environ.get(ADVANCE_ENV, "key").strip().lower()
         if self._advance_mode not in ("key", "click"):
             raise LiveHostError("OBED_LIVE_ADVANCE must be key or click.")
+        if self._gl_replay_request is not _UNSET:
+            self._gl_replay_preference = self._gl_replay_request
+        else:
+            env_gl_replay = os.environ.get(GL_REPLAY_ENV, "").strip().lower()
+            if env_gl_replay not in ("", "off", "auto"):
+                raise LiveHostError("OBED_LIVE_GL_REPLAY must be off or auto.")
+            self._gl_replay_preference = env_gl_replay or "off"
         self._goto_autoplay_mode = "off" if os.environ.get(GOTO_AUTOPLAY_ENV, "").strip().lower() == "off" else "on"
         self._log_path = _new_log_path()
         self._logger = _SessionLogger(self._log_path)
@@ -974,7 +1030,7 @@ class LiveOutputHost:
             except LiveRuntimeUnsupported as exc: raise LiveHostError(str(exc)) from exc
             self._profile = Path(tempfile.mkdtemp(prefix="obed-live-chrome-"))
             continuity_script = (
-                _continuity_scripts(self._continuity_runtime_plan, self._canvas)
+                _continuity_scripts(self._continuity_runtime_plan, self._canvas) + self._gl_replay_script
                 if self._continuity_runtime_plan is not None
                 else ""
             )
@@ -1001,7 +1057,7 @@ class LiveOutputHost:
             self._logger.log(
                 "continuity", mode=self._continuity_mode, reason=self._continuity_reason,
                 runtimePlan=self._continuity_runtime_plan, stage=stage_geometry, scale=self._continuity_scale,
-                notCarried=self._continuity_not_carried,
+                notCarried=self._continuity_not_carried, glReplay=self._gl_replay_info(),
             )
             observed = self._wait_settled()
             try: dpr = self._transport.evaluate("window.devicePixelRatio")
