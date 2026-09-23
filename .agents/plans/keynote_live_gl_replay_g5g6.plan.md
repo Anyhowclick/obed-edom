@@ -213,13 +213,21 @@ OQ-11 note: `patch_player` is sha-pinned (`live_runtime.py:94-99`), the same gat
 ## Rev 2 amendments (owner decisions during implementation, 2026-09-23)
 - **loopMode clause dropped** (probe `armed1to2` and P2 `glLiveOnSlide2`): G2's rAF watchdog flips `loopMode` to `'raf'` whenever 2 rAF ticks pass without a video frame (G2 ~:1027-1066), measured 11–21/150 `'raf'` reads while uploads ran at 30/s. Kept: LIVE, empty stand-downs, zero GL errors, same epoch, `iter`/`uploads` strictly increasing.
 - **P2 auto Chrome keeps WebGL** (root cause of gates r1 G6 failure: `--disable-gpu` ⇒ no WebGL ⇒ player's non-GL path ⇒ G2 never arms).
-- **3→4 owner coverage report-only in P2 auto only** (`owner_coverage_report_only`): P2's owner query lags the product's motion start (Codex Astra M). Identity, competitors, ambiguity, crossing identity and rVFC clock still gate. Stop-gap; reverted by the P2 harness-fix work.
+- **3→4 owner coverage report-only in P2 auto only** (`owner_coverage_report_only`): P2's owner query lags the product's motion start (Codex Astra M). Identity, competitors, ambiguity, crossing identity and rVFC clock still gate. Stop-gap; **reverted** by the P2 harness fix (below).
 - **One PR:** G5+G6 ships together with the P2 harness-fix work (key-code input, 3→4 query geometry, B-arm tail race, timing re-qualification) from the session "Fix P2 harness input and 3→4 query timing", which builds on this branch and reverts the stop-gap.
-- Known limit: P2's page goes hidden after the first CDP key event, so P2 GL liveness is screenshot-driven; autonomous liveness is evidenced by the probe's Vgl pass on the visible host.
+- ~~Known limit: P2's page goes hidden after the first CDP key event.~~ Resolved by the P2 harness fix (below).
 - **Clause (c) as measured:** after the hand-off the zone is `released` (pin) and builds #3–#5 re-place the carried decoder in its authored layer again. Gated: exactly one carried-decoder `remount-into-authored-layer` at the hand-off scene, and zero `remount-done`/`remount-footprint-rect` for the carried decoder or its facade anywhere after. Later authored-layer placements are report-only.
 - **Probe `owner` clause:** unresolved (`None`) pre-flip owner reads are ignored; ≥1 resolved owner is required and every resolved owner must equal the carried id (mirrors P2 `carriedClock1to2`).
-- **P2 auto facts:** the WebGL availability probe runs on about:blank (a context made in the player page during ARM-PRE would be taken as the player's and stand G2 down); auto works on a private copy of the reused export; forcing the page visible via focus emulation was rejected (drain hangs at #4–#5, see review log).
+- **P2 auto facts:** the WebGL availability probe runs on about:blank (a context made in the player page during ARM-PRE would be taken as the player's and stand G2 down); auto works on a private copy of the reused export; focus emulation is not used (it only masked the key-code defect; see P2 harness fix).
 - **Reviewer for this session:** Codex GPT-6 Astra, high effort (owner, 2026-09-23).
+
+## P2 harness fix (2026-09-23, folded into this PR)
+- **Key input:** `p2_alpha_spike.ChromeCdp.key` no longer sends `nativeVirtualKeyCode` (as `live_host`). A/B on this fixture, one run per arm: native + focus emulation hung at #4 (CDP timeout); safe keys stayed `visible` with rAF running, drained 24/24 keys, with and without focus emulation.
+- **3→4 owner query:** the capture collector starts its modelled R3→R4 move at the carried decoder's `__obedMotion.started` (fallback: hash ≥ 8; `collector.flipVia` reports which). GPU-on/replay-off, 4 captures: motion started ~1.7 s before #8, all ~126 modelled-null rows were owned at the measured rect, and the motion-started model vs measured rect had IoU ≥ 0.973 throughout.
+- **Collector tail:** two frames (1 s timeout) before the dump, so the last capture is bracketed (B-arm sample 101).
+- **Paint:** a video on a `document.hidden` page classifies `page-hidden` (records predating the field still re-derive).
+- **Stop-gap reverted:** `owner_coverage_report_only` removed; `stableSlide4Owner` coverage gates in auto again.
+- **Re-qualification** (fast profile, one Chrome, machine quiet; 3× flag-off, 3× `--gl-replay auto`): 6/6 `success`, freeze control `pass` 6/6, thresholds unchanged. Measured vs limit: max rAF gap 33.4–33.9 ms (≤ 100); trigger 7 rAFs (≤ 9) / 128.7–139.5 ms (≤ 190); frozen run 21–26 (≥ 6); rVFC advance ≥ 4.97 s (≥ 0.5); after-window null-owner run 0 in every arm (was 26–28); unbracketed 0; `flipVia` = motion in every arm.
 
 ## Review log (raw reviewer output not kept; conclusions only)
 - Codex GPT-5.6 Sol r1 (70f22cf1): 2 BLOCKER (armed1to2 wrong sibling; P2 slide-2 LIVE ungated), 5 MAJOR, 3 MINOR — all fixed in bfaeffae.
