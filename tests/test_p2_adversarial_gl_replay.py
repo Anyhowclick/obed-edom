@@ -929,3 +929,36 @@ def test_slide2_reads_pair_every_sample_frame_with_a_screenshot(tmp_path, monkey
     for i in range(drv.GL_POOL_READS_N):
         assert (tmp_path / f"gl-slide2-{i}.png").is_file()
         assert (tmp_path / f"gl-sample-frame-{i}.jpg").is_file()
+
+
+def _findings(**passes):
+    ids = ["sourceUnchanged", "glReplayCarry1to2", "deliberateRestart2to3",
+           "continueThroughMovingMagicMove3to4", "freezeControlCaughtByCounter"]
+    return [{"id": i, "pass": passes.get(i, True)} for i in ids]
+
+
+RED_34 = {"continueThroughMovingMagicMove3to4": False, "freezeControlCaughtByCounter": False}
+
+
+def test_off_still_gates_the_3to4_findings():
+    findings = _findings(**RED_34)
+    assert drv._run_success(findings, False, gl_auto=False) is False
+    assert not any("reportOnlyInAuto" in f for f in findings)
+    assert drv._run_success(_findings(), False, gl_auto=False) is True
+
+
+def test_auto_makes_only_the_3to4_findings_report_only():
+    findings = _findings(**RED_34)
+    assert drv._run_success(findings, False, gl_auto=True) is True
+    stamped = [f["id"] for f in findings if f.get("reportOnlyInAuto")]
+    assert stamped == list(drv.GL_REPORT_ONLY_FINDINGS)
+    assert all(f["pass"] is False for f in findings if f["id"] in stamped)
+
+
+@pytest.mark.parametrize("red", ["glReplayCarry1to2", "deliberateRestart2to3", "sourceUnchanged"])
+def test_auto_still_fails_on_any_other_red_finding(red):
+    assert drv._run_success(_findings(**RED_34, **{red: False}), False, gl_auto=True) is False
+
+
+def test_auto_still_fails_on_an_inconclusive_restart():
+    assert drv._run_success(_findings(), True, gl_auto=True) is False

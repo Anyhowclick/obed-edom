@@ -495,6 +495,25 @@ def _gl_replay_mode() -> str:
     return mode
 
 
+GL_REPORT_ONLY_FINDINGS = ("continueThroughMovingMagicMove3to4", "freezeControlCaughtByCounter")
+GL_REPORT_ONLY_REASON = (
+    "owner decision 2026-09-23: with --gl-replay auto the WebGL-enabled Chrome renders "
+    "the 3->4 moving Magic Move through WebGL, which the flag-off thresholds were never "
+    "qualified on; recorded in full, not counted toward success"
+)
+
+
+def _run_success(findings: list[dict], restart_inconclusive: bool, *, gl_auto: bool) -> bool:
+    """Off: every finding gates. Auto: the 3->4 findings are stamped
+    `reportOnlyInAuto` and left out of `success`; every other finding gates."""
+    if gl_auto:
+        for f in findings:
+            if f["id"] in GL_REPORT_ONLY_FINDINGS:
+                f["reportOnlyInAuto"] = GL_REPORT_ONLY_REASON
+    gating = [f for f in findings if "reportOnlyInAuto" not in f]
+    return all(f["pass"] for f in gating) and not restart_inconclusive
+
+
 def _out_root(gl_auto: bool) -> Path:
     return OUT / GL_REPLAY_DIR if gl_auto else OUT
 
@@ -4305,7 +4324,7 @@ async def _run(player: Path) -> dict:
     # own pass/block rule lives in `_freeze_control_blocks_success` (owner decision
     # 8b): "inconclusive"/"fail" always block; "skipped" blocks unless the 3->4
     # bridge itself was disabled for this run (nothing to freeze there either).
-    success = all(f["pass"] for f in findings) and not restart_inconclusive
+    success = _run_success(findings, restart_inconclusive, gl_auto=gl_auto)
     report = {
         "probe": "p2_recovery_html_adversarial",
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
