@@ -514,10 +514,12 @@ earlier fixes closed. Each round adds one line to §Review log. At merge the raw
    survivor or template slide is kept (B2/B11).
 2. After a GREEN gate, `OBED_OFFLINE_HIDES` defaults to ON (`g-flip-docs`), with explicit off kept as the kill switch.
 3. Implementers: Opus, Effort MEDIUM. The live gate waits on Keynote use by the other sessions.
-4. Whole-deck pre-write refusal (`OfflineWriteRefused`: disk guard, undecodable member): every eligible slide falls
-   back to the AppleScript delete by kindIndex (owner, after C1). This is only absence of proof, and the later stages
-   already address the saved deck by kindIndex. A per-slide refusal falls back only when `order_proven`, and aborts
-   otherwise (C1 #1).
+4. Whole-deck pre-write refusal (`OfflineWriteRefused`) ABORTS the run (owner, after the Astra H advisory, reversing an
+   earlier lean towards the fallback). A save can reorder same-kind groups (`iwa_zorder.py:84`, Gold slide 19), so
+   deleting by kindIndex without identity proof can remove a survivor. The abort raises `OfflineHidesAborted(reason)`.
+   The CLI prints the reason and says to rerun with `OBED_OFFLINE_HIDES=off`. On the dashboard, the Resize tab shows the
+   reason and switches offline hides off for the operator's next run. A per-slide refusal still falls back only when
+   `order_proven`.
 
 ## Owner questions (resolved above)
 
@@ -592,3 +594,5 @@ disjoint.
 - P2 (2026-09-23, Opus xhigh critic): 1 BLOCKER (failure semantics), 4 MAJOR (Data/ mojibake names, reference-scan holes, R4 false refusals, oracle blind to writer edits), all folded in (§Critique (pass 2)).
 - E (2026-09-23, offline dry run on FRC copy): PASS. 941 hides on 130 slides, 0 refusals (slide 122 excluded), 46 `Data/` (49.8 MB) dropped, 27.0 s at load ~7, differing slides = eligible set. Checker quirk: survivors' parent refs (`.super`, `SlideNodeArchive.slide`) show as diffs when their slide changes.
 - C1 (2026-09-23, Codex GPT-5.6 Sol): BLOCK. 3 BLOCKER (fallback on an identity-refused slide uses source kindIndex; swapped equal-signature twins; opacity-0 fallback continues), 7 MAJOR (untouched-component data liveness, same-component ambiguous ids, header-less child refs, stat-based failure phase, slide re-encode not checked exactly/MM transition, checker blind to nested fieldInfos refs and to same-count uuid swaps). One is a new class (#8), the rest are edge cases of known ones.
+- C1 fix round (2026-09-23): all 10 C1 findings fixed, none refuted (#2 by saved-geometry twin disambiguation, 0/130 FRC slides refused; #6 adapted: weak parent/stylesheet refs are never in headers). FRC dry run re-passed (941/130, 26 s). Suites green: 6334 passed.
+- A1 (2026-09-23, Codex GPT-6 Astra H, advisory on decision 4): abort instead. 2 BLOCKER (save reorders groups; a global refusal discards per-slide unproven results), 4 MAJOR on the fallback session (dual-membership targets, unconfirmed close, not stopping at the first failure, document bound by name prefix), 1 MINOR (`mapReadback` is diagnostic only). The owner switched decision 4 to abort.
