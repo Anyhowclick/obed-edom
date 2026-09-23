@@ -897,11 +897,16 @@ const seam = {
   },
   setKeepWarm(v, on) { world.seamCalls.push({ fn: 'setKeepWarm', on: !!on }); },
   release(movieKey, opts) {
+    // What the core's `release` reads at call time (G3 plan §2 row 4, §1).
+    const api = window.__OBED_GL_REPLAY__;
     world.seamCalls.push({ fn: 'release', movieKey: movieKey,
-                           rect: (opts && opts.rect) || null });
+                           rect: (opts && opts.rect) || null,
+                           standDownsAtRelease: api && Array.isArray(api.standDowns)
+                             ? api.standDowns.slice() : null,
+                           stateAtRelease: api ? api.state : null });
     return { ok: true, reason: null };
   },
-  note(kind, detail) { world.seamCalls.push({ fn: 'note', kind: kind }); },
+  note(kind, detail) { world.seamCalls.push({ fn: 'note', kind: kind, hash: location.hash }); },
 };
 
 const window = {
@@ -2287,3 +2292,45 @@ def test_gl_error_still_has_exactly_one_emitting_site():
     helpers = re.findall(
         r"function\s+(\w+)\s*\([^)]*\)\s*\{\s*return\s+assertOr\(\s*'glError'", source)
     assert helpers == ["requireGlClean"], helpers
+
+
+# --- the G3 seam contract (G3 plan §1-§2, R1) --------------------------------------------
+#
+# The core decides `release` from `__OBED_GL_REPLAY__.standDowns` (the LAST element is the
+# primary, because `writebackFailed` is pushed first), skips its `moduleRetired` watchdog
+# because this module is still `STANDDOWN` while it calls `release`, and takes
+# `armSeen`/`liveSeen` from `glreplay-arm`/`glreplay-live` passed through `seam.note`.
+# These pin that reverse coupling: a reorder here turns them red.
+
+_RELEASE_CASES = [c for c in STAND_DOWN_CASES if c[0] not in NO_RELEASE_REASONS]
+
+
+@pytest.mark.parametrize("reason,how,cfg", _RELEASE_CASES, ids=[f"{c[0]}-{c[1]}" for c in _RELEASE_CASES])
+def test_release_sees_its_reason_last_and_the_module_in_standdown(reason, how, cfg):
+    final = _assert_clean(_run_sandbox(**cfg))
+    [release] = [c for c in final["seamCalls"] if c["fn"] == "release"]
+    assert release["standDownsAtRelease"] == [reason], release
+    assert release["stateAtRelease"] == "STANDDOWN", release
+    assert final["state"] == "RETIRED"
+
+
+@pytest.mark.parametrize(
+    "scenario,expected",
+    [("canvas_removed", [NORMAL_EXIT_REASON]), ("writeback_fails", ["writebackFailed", NORMAL_EXIT_REASON])],
+)
+def test_release_sees_canvas_removed_as_the_primary_even_after_a_writeback_failure(scenario, expected):
+    final = _assert_clean(_run_sandbox(scenario=scenario))
+    [release] = [c for c in final["seamCalls"] if c["fn"] == "release"]
+    assert release["standDownsAtRelease"] == expected, release
+    assert release["standDownsAtRelease"][-1] == NORMAL_EXIT_REASON
+    assert release["stateAtRelease"] == "STANDDOWN", release
+
+
+def test_milestones_reach_the_seam_note_on_the_move_scene_then_live():
+    """`armSeen` counts a `glreplay-arm` only while `hn === atScene - 1`."""
+    live = _run_sandbox(scenario="happy")["afterLive"]
+    notes = [c for c in live["seamCalls"] if c["fn"] == "note"]
+    arms = [c for c in notes if c["kind"] == "glreplay-arm"]
+    assert [c["hash"] for c in arms] == [f"#{GL_REPLAY_ENTRY['atScene'] - 1}"], notes
+    assert [c["kind"] for c in notes].count("glreplay-live") == 1, notes
+    assert [c["kind"] for c in notes].index("glreplay-arm") < [c["kind"] for c in notes].index("glreplay-live")
