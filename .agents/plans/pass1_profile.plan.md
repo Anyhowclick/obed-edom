@@ -69,6 +69,13 @@ todos:
       pass-1 deck slide members byte-equal before/after (unzip -l + CRC diff).
       GATE MET (2026-09-23): attrs + hides ≈ 212 s. Census: 2443 no-attr specs, 947 hides at 122 ms, 1 slide on
       the full jxa path (identify it first). Next lever to build, after the two NEW todos are profiled offline.
+      SIZED 2026-09-23 (owner asked): (i) skip getItem + locked read for the 2443 no-attr specs in attrs
+      mode (still count applied) — most of the ~97 s attrs stage; (ii) skip applyGroupChildren's child
+      resolution in attrs mode (56 groups); (iii) hides 947 × 122 ms = ~114 s: either batch the per-slide
+      deletes into one AppleScript body (cuts JXA overhead, still one event per object) or delete offline in
+      the IWA writer (remove from drawablesZOrder/ownedDrawables + the object; a NEW surgical write with its
+      own live gate because `expected_base_counts` = source − hides addresses later stages). Ceiling ≈ 200 s
+      of 780. Order: (i)+(ii) first (behaviour-preserving, node-stub testable), then decide (iii).
     status: pending
   - id: h-copy-clone
     content: >-
