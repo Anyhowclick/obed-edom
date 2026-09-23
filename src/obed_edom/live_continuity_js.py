@@ -53,7 +53,7 @@ retired`, `released -> retired`, each transition noted `glreplay-zone
 `armed` pools the detached carried movie but never mounts or paints it;
 `released` is pin. The module talks to it only through
 `window.__OBED_P2_PRESERVE__.glReplay` (installed only for such a plan).
-Plan: `.agents/plans/keynote_live_gl_replay_g3g4.plan.md` §1–§2.
+Plan: the G3+G4 plan §1–§2 (PR #214).
 
 The bridge moves during the preceding transition scene using linear interpolation
 over the exported duration. This is a fallback for WebGL movie geometry with no

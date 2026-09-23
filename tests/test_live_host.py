@@ -2056,7 +2056,7 @@ def test_cdp_sockets_accept_messages_larger_than_the_websockets_default():
     assert source.count("max_size=_CDP_MAX_MESSAGE_BYTES") == 2
 
 
-# --- G4: the GL-replay host flag (plan keynote_live_gl_replay_g3g4 section 4) --------------
+# --- G4: the GL-replay host flag (G3+G4 plan section 4, PR #214) ---------------------------
 # Every test below pins `live_host.CONTINUITY_VERSION` (4 or 5) so it never depends on the
 # core's own version bump landing first.
 
