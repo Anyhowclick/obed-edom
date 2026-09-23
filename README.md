@@ -116,6 +116,15 @@ boundaries, in three arms — continuity on, `OBED_LIVE_CONTINUITY=off`, and
 continuity on with the bridging boundary disabled — plus one attach-mode run, and
 scores decoder identity + playback-clock continuity at each cut.
 
+**GL replay (opt-in)**: `OBED_LIVE_GL_REPLAY=auto` (default `off`) keeps a movie
+live across a click-driven Magic Move whose destination draws artwork above it,
+by replaying the player's own WebGL frame with the live movie as the texture.
+`output.continuity.glReplay.mode` reports `off`, `injected`, `notApplicable` or
+`unavailable`; the OBS attach output always reports `unavailable`, and
+`notCarried` still lists that boundary while GL replay is injected. Qualify it
+with `scripts/live_continuity_probe.py --gl-replay auto` and
+`scripts/p2_recovery_html_adversarial.py --gl-replay auto`.
+
 ### Codec report
 
 Every session probes each movie the export references (reading its box tree
