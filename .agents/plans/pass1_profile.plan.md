@@ -123,7 +123,10 @@ todos:
       deck (or a copy of the pass-1 snapshot + the same zorder targets from the run record) and name
       the hot path (per-slide full-deck decode? re-encode per member? verify decode?). Gate: a
       projected saving ≥ 60 s. Owner-gated live run only for the null control after a change.
-    status: pending
+      DONE 2026-09-23 (d9cf7f2b, Codex reviewed): read-back loaded the deck once per slide; now once.
+      Offline 170.3 → 14.5 s; live null-control run 4: z-order block 183 → 20 s, whole run 785 → 584 s,
+      Applied/fallback/zorder-detail lines identical.
+    status: completed
   - id: h-bulk-seed-read
     content: >-
       NEW from the profile (2026-09-23): the bulk live seed read (`inspect.bulk_geometry`,

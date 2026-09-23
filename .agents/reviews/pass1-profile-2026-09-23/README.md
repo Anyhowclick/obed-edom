@@ -97,3 +97,23 @@ Keynote-bound ≈ 555 s (71%); Python ≈ 220 s (28%), of which the z-order patc
 | fallback session | 81 s; shrinks only with the parked regrow write (≈20–30 s) — unchanged |
 
 Evidence: `output/pass1-profile{,-r2,-r3}/run.log` + `facts.txt` in the measuring worktree (git-ignored).
+
+## Run 4 (14:34:10 → 14:43:54, 584 s) — null control for the z-order read-back fix (d9cf7f2b)
+
+`patch_deck_zorder` re-read every patched slide through `read_slide_zorder`, each a full `_load_deck`
+(1.7 s measured × 83). `read_deck_zorders` loads once. Offline A/B on the run-3 deck: 170.3 s → 14.5 s.
+
+| block | run 3 | run 4 |
+|---|---:|---:|
+| pass 1 (JXA) | 280 | 239 |
+| bulk seed read + IWA patch | 165 | 162 |
+| fallback session | 81 | 81 |
+| stat-finalize live | 44 | 44 |
+| **offline z-order patch** | **183** | **20** |
+| builds patch + tail | 5 | 5 |
+| **total** | **785** | **584** |
+
+Null control PASSED: `Applied 3822 objects … missed 0`, identical fallback line, identical
+`Stat zorder detail` (zorderSlides=83, statRaised=173, badgeRaised=325, noop=20, refused=0). The
+pass-1 delta (280 → 239) is machine noise (the runs differ in load), not a change.
+Remaining ranking: pass 1 attrs+hides ≈ 210 s → bulk seed read ≈ 150 s → fallback 81 s.
