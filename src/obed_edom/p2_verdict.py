@@ -1972,6 +1972,15 @@ def _owner_null_gaps(all_owner: list[dict], after: list[dict]) -> dict:
     }
 
 
+OWNER_COVERAGE_REPORT_ONLY_REASON = (
+    "owner decision 2026-09-23: under --gl-replay auto the P2 owner query holds the "
+    "source rect until hash >= 8 while the product already moves at #7, so null "
+    "owner reads at the start of the move are the instrument lagging, not a handoff; "
+    "a single non-null owner, no visible competitor, no ambiguous frame, crossing "
+    "identity and the rVFC clock still gate"
+)
+
+
 def movingContinuity3to4(
     owner_samples: list[dict],
     presented_samples: list[dict],
@@ -1979,6 +1988,8 @@ def movingContinuity3to4(
     hash3: object,
     hash4: object,
     slide4_min_hash: int,
+    *,
+    owner_coverage_report_only: bool = False,
 ) -> dict:
     """Fail-CLOSED sub-verdict for playback continuity through the 3->4 moving
     Magic Move (positive control). The owner authored "Play movie across slides"
@@ -2038,14 +2049,15 @@ def movingContinuity3to4(
     else:
         competitors = {"ok": False, "reason": "owner and media series do not align",
                        "hits": [], "n": 0, "hiddenBy": {}}
-    stable = (
+    identity_stable = (
         bool(after)
         and len(distinct_non_null) == 1
-        and non_null_frac >= 0.7
-        and gaps["ok"]
         and competitors["ok"]
         and not has_ambiguous
     )
+    coverage_ok = non_null_frac >= 0.7 and gaps["ok"]
+    strict_stable = identity_stable and coverage_ok
+    stable = identity_stable if owner_coverage_report_only else strict_stable
     slide4_owner = non_null_ids[0] if stable else None
 
     crossing_identity = bool(
@@ -2070,7 +2082,7 @@ def movingContinuity3to4(
         "rvfcMonotonic": rvfc_ok,
     }
     failed = [name for name, ok in checks.items() if not ok]
-    return {
+    out = {
         "ok": not failed,
         "failed": failed,
         "slide4Owner": slide4_owner,
@@ -2087,6 +2099,14 @@ def movingContinuity3to4(
         "crossingIdentity": {"ok": crossing_identity},
         "rvfcMonotonic": rvfc,
     }
+    if owner_coverage_report_only:
+        out["reportOnlyInAuto"] = {
+            "check": "stableSlide4Owner coverage (nonNullFrac >= 0.7, null-owner gaps)",
+            "ok": bool(coverage_ok),
+            "strictStableSlide4Owner": bool(strict_stable),
+            "reason": OWNER_COVERAGE_REPORT_ONLY_REASON,
+        }
+    return out
 
 
 def _times(
@@ -2727,14 +2747,16 @@ def _isolation_view(
     snap: dict, *,
     evidence_cadence: tuple[int, ...] = BURST_OFFSETS_MS,
     legacy_unrecorded_cadence: tuple[int, ...] | None = None,
+    owner_coverage_report_only: bool = False,
 ) -> dict:
     """The invariant booleans extracted from a 3->4 snapshot for A1==B==A2 checks.
     Every one is RE-DERIVED from the arm's raw evidence -- samples, bridge events,
     and the retained burst raster -- and held to the cached values."""
-    mc = _moving_continuity_derived(snap) or {}
+    rel = {"owner_coverage_report_only": owner_coverage_report_only}
+    mc = _moving_continuity_derived(snap, **rel) or {}
     cached_mc = snap.get("movingContinuity3to4") or {}
     return {
-        "movingContinuityOk": _moving_continuity_ok(snap),
+        "movingContinuityOk": _moving_continuity_ok(snap, **rel),
         "movingContinuityFailedEmpty": (
             mc.get("failed") == [] and cached_mc.get("failed") == []
         ),
@@ -3094,7 +3116,7 @@ def _advance_settle_exact(settle: object) -> bool:
     )
 
 
-def _moving_continuity_derived(snap: dict) -> dict | None:
+def _moving_continuity_derived(snap: dict, *, owner_coverage_report_only: bool = False) -> dict | None:
     """`movingContinuity3to4` RE-RUN from the retained owner and media samples, or
     `None` when either series is absent. Without the media samples a stale green
     continuity field hides a handoff or an rVFC rewind."""
@@ -3104,11 +3126,12 @@ def _moving_continuity_derived(snap: dict) -> dict | None:
     return movingContinuity3to4(
         owner, media, snap.get("ownerDecoderId"),
         snap.get("hash3"), snap.get("hash4"), SLIDE4_MIN_HASH,
+        owner_coverage_report_only=owner_coverage_report_only,
     )
 
 
-def _moving_continuity_ok(snap: dict) -> bool:
-    derived = _moving_continuity_derived(snap)
+def _moving_continuity_ok(snap: dict, *, owner_coverage_report_only: bool = False) -> bool:
+    derived = _moving_continuity_derived(snap, owner_coverage_report_only=owner_coverage_report_only)
     cached = snap.get("movingContinuity3to4") or {}
     return bool(
         derived is not None and derived.get("ok")
@@ -3334,6 +3357,7 @@ def _score_freeze_control(
     a1: dict, b: dict, a2: dict, manifest: object = None, *,
     evidence_cadence: tuple[int, ...] = BURST_OFFSETS_MS,
     legacy_unrecorded_cadence: tuple[int, ...] | None = None,
+    owner_coverage_report_only: bool = False,
 ) -> dict:
     """Pure A-B-A verdict for `freezeControlCaughtByCounter`, re-bracketed at the
     3->4 moving Magic Move (plan p2_freeze_control_3to4.plan.md §4; the 1->2 carry
@@ -3507,7 +3531,7 @@ def _score_freeze_control(
     n_total = idx.get("n")
     n_after = (n_total - flip_index) if (flip_index_present and isinstance(n_total, int)) else 0
 
-    mc = _moving_continuity_derived(b) or {}
+    mc = _moving_continuity_derived(b, owner_coverage_report_only=owner_coverage_report_only) or {}
     stage_at_arm = nc.get("stageRectAtArm")
     stage_at_trigger = nc.get("stageRectAtTrigger")
     stage_geometry_stable = bool(
@@ -3584,7 +3608,7 @@ def _score_freeze_control(
     checks["enoughAfterFlip"] = n_after >= FREEZE_MIN_AFTER
 
     # --- The decoder stayed LIVE through the freeze (RED isolated to counter) ----
-    checks["movingContinuityOk"] = _moving_continuity_ok(b)
+    checks["movingContinuityOk"] = _moving_continuity_ok(b, owner_coverage_report_only=owner_coverage_report_only)
     checks["boundDecoderIsSlide3Decoder"] = (
         nc.get("boundDecoderId") is not None
         and nc.get("boundDecoderId") == b.get("ownerDecoderId")
@@ -3757,7 +3781,11 @@ def _score_freeze_control(
 
     # --- Isolation: every invariant sub-verdict GREEN and equal across A1/B/A2 --
     # (review MAJOR 4: equality alone let all-False-but-equal pass.)
-    isolation_kwargs = {"evidence_cadence": evidence_cadence, "legacy_unrecorded_cadence": legacy_unrecorded_cadence}
+    isolation_kwargs = {
+        "evidence_cadence": evidence_cadence,
+        "legacy_unrecorded_cadence": legacy_unrecorded_cadence,
+        "owner_coverage_report_only": owner_coverage_report_only,
+    }
     iv_a1, iv_b, iv_a2 = (
         _isolation_view(a1, **isolation_kwargs),
         _isolation_view(b, **isolation_kwargs),

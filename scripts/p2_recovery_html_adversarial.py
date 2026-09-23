@@ -495,25 +495,6 @@ def _gl_replay_mode() -> str:
     return mode
 
 
-GL_REPORT_ONLY_FINDINGS = ("continueThroughMovingMagicMove3to4", "freezeControlCaughtByCounter")
-GL_REPORT_ONLY_REASON = (
-    "owner decision 2026-09-23: with --gl-replay auto the WebGL-enabled Chrome renders "
-    "the 3->4 moving Magic Move through WebGL, which the flag-off thresholds were never "
-    "qualified on; recorded in full, not counted toward success"
-)
-
-
-def _run_success(findings: list[dict], restart_inconclusive: bool, *, gl_auto: bool) -> bool:
-    """Off: every finding gates. Auto: the 3->4 findings are stamped
-    `reportOnlyInAuto` and left out of `success`; every other finding gates."""
-    if gl_auto:
-        for f in findings:
-            if f["id"] in GL_REPORT_ONLY_FINDINGS:
-                f["reportOnlyInAuto"] = GL_REPORT_ONLY_REASON
-    gating = [f for f in findings if "reportOnlyInAuto" not in f]
-    return all(f["pass"] for f in gating) and not restart_inconclusive
-
-
 def _out_root(gl_auto: bool) -> Path:
     return OUT / GL_REPLAY_DIR if gl_auto else OUT
 
@@ -2794,6 +2775,7 @@ async def _capture_3to4_snapshot(
     *,
     inject_null: bool,
     capture_id: str,
+    owner_coverage_report_only: bool = False,
 ) -> dict:
     """Capture + score ONE 3->4 moving Magic Move boundary and return a comparable
     findings snapshot for the A-B-A freeze bracket. Replaces `_capture_1to2_snapshot`
@@ -3013,6 +2995,7 @@ async def _capture_3to4_snapshot(
         )
     moving_continuity = movingContinuity3to4(
         owner_samples, media_samples, slide3_movie_decoder, hash3, hash4, SLIDE4_MIN_HASH,
+        owner_coverage_report_only=owner_coverage_report_only,
     )
     player_build_errors = await chrome.evaluate(
         "(window.__OBED_P2_PRESERVE__ ? window.__OBED_P2_PRESERVE__.events"
@@ -3149,13 +3132,16 @@ async def _run_freeze_bracket(
                 snaps[label] = await _capture_3to4_snapshot(
                     chrome, rd, "mm34", wait_profile, inject_null=inject,
                     capture_id=manifest["arms"][label],
+                    owner_coverage_report_only=main_js is not None,
                 )
             finally:
                 await chrome.close()
     finally:
         httpd.shutdown()
 
-    verdict = _score_freeze_control(snaps["a1"], snaps["b"], snaps["a2"], manifest)
+    verdict = _score_freeze_control(
+        snaps["a1"], snaps["b"], snaps["a2"], manifest, owner_coverage_report_only=main_js is not None
+    )
     verdict["manifest"] = manifest
     verdict["waitProfile"] = wait_profile_name
     verdict["snapshots"] = snaps
@@ -3885,6 +3871,7 @@ async def _run(player: Path) -> dict:
     moving_continuity = movingContinuity3to4(
         owner_samples_c, media_samples_c, slide3_movie_decoder,
         hash3, hash4, SLIDE4_MIN_HASH,
+        owner_coverage_report_only=gl_auto,
     )
 
     # The 1->2 carry is refused by the derived plan: assert the refusal was
@@ -4324,7 +4311,7 @@ async def _run(player: Path) -> dict:
     # own pass/block rule lives in `_freeze_control_blocks_success` (owner decision
     # 8b): "inconclusive"/"fail" always block; "skipped" blocks unless the 3->4
     # bridge itself was disabled for this run (nothing to freeze there either).
-    success = _run_success(findings, restart_inconclusive, gl_auto=gl_auto)
+    success = all(f["pass"] for f in findings) and not restart_inconclusive
     report = {
         "probe": "p2_recovery_html_adversarial",
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
