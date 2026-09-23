@@ -51,7 +51,13 @@ todos:
       Decide offline whether h_new is predictable for the 91 single-line middle labels (candidate:
       spec.h when the recipe is the wrap-preserving affine, since font and width scale together).
       KILL: if h_new is not predictable for ≥ ~60 of the 88, stop and record.
-    status: pending
+      DONE 2026-09-23 (`.agents/reviews/regrow-2026-09-23/m1.md`). Effective anchor == style on all 88;
+      b_h ≈ 0 for every alignment (stored x is the left edge, no anchor term in pos_x); stored.w == rep.w;
+      fallback writes w == spec.w and stored centre == spec.y + nh/2. h_new via spec.h is within 1.5 px for
+      73 of 77 middle boxes (role other); refuse title/list (multi-line slot rects). Predictable: 84/88 —
+      bar PASSED. BUT the fallback session is 78.7 s of a ~22-min run (pass 1 dominates); the whole family
+      buys ≈20–30 s. OWNER DECISION PENDING: build for fallback-surface reduction, or stop here.
+    status: completed
   - id: impl-writer
     content: >-
       STREAM A (`src/obed_edom/iwa_write.py`, `src/obed_edom/iwa_geometry.py` docstring only,

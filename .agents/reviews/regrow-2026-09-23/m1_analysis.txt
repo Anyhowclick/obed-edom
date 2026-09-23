@@ -1,0 +1,117 @@
+autosize text specs dumped: 427; grow-height misses: 88
+missed by valign x halign: Counter({('kFrameAlignMiddle', 'TATvalue2'): 77, ('kFrameAlignTop', 'TATvalue1'): 5, ('kFrameAlignTop', 'TATvalue0'): 4, ('kFrameAlignTop', 'TATvalue2'): 2})
+missed by role: Counter({'other': 82, 'title': 5, 'list': 1})
+
+(1) effective vertical anchor (stored.y - rep.y) by style valign:
+   ('kFrameAlignMiddle', 'middle') 77
+   ('kFrameAlignTop', 'top') 11
+
+(2) b_h = (stored.x - rep.x)/rep.w by halign:
+   TATvalue0: n=4 min=-0.000 max=0.003
+   TATvalue2: n=79 min=-0.010 max=0.011
+   TATvalue1: n=5 min=0.001 max=0.002
+
+(3) stored.w - rep.w: [(-0.3, 14), (-0.2, 13), (0.0, 10), (0.4, 9), (-0.4, 9)]
+    spec.w / rep.w: [(3.98, 16), (1.69, 8), (4.0, 7), (1.67, 6), (4.02, 4), (3.96, 4)]
+
+(4) grow-height slides: 54; slides whose ONLY misses are grow-height: 28 -> [4, 5, 21, 22, 25, 30, 31, 57, 73, 76, 79, 97, 103, 105, 106, 107, 111, 114, 115, 116, 119, 120, 129, 136, 137, 138, 139, 140]
+    specs on those slides: 49
+
+(5) M1-TIMING fallback sessions=1 seconds=78.7
+    Offline-write fallback reasons: text-grow-height-width 88, group-needs-keynote:group-residual 83, masked-media 57, group-child-scale 6.
+
+(6) h_new predictability: spec.h vs post-fallback nh (actual laid-out height), by role/halign
+slide ki role halign valign spec.h nh_actual dh spec.w w_actual spec.y y_actual wall_nh font text
+   4 1 other TATvalue0 kFrameAlignTop 675.0 337.0 338.0 1140.0 1140.0 119.0 119.0 270.6 46.67 46 Then Moses said t
+   5 1 other TATvalue0 kFrameAlignTop 675.0 328.2 346.8 1140.0 1140.0 119.0 119.0 270.6 46.67 47 So Aaron did as M
+   9 0 other TATvalue2 kFrameAlignMiddle 32.5 31.0 1.5 146.9 147.0 525.1 540.5 52.0 25.0 CHC Kuching
+   15 0 other TATvalue2 kFrameAlignMiddle 26.9 26.2 0.7 139.9 140.0 53.4 66.1 64.0 21.0 Poor Students 
+   16 0 other TATvalue2 kFrameAlignMiddle 32.5 31.0 1.5 146.9 147.0 342.9 358.5 52.0 25.0 CHC Kuching
+   17 0 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 190.0 190.0 587.0 611.5 52.0 40.0 CHC Klang
+   18 0 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 190.0 190.0 587.0 611.5 52.0 40.0 CHC Klang
+   21 0 title TATvalue2 kFrameAlignMiddle 46.0 85.0 -39.0 192.0 192.0 537.0 579.5 64.0 35.0 Main Sanctuary 
+   22 0 title TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 192.0 192.0 537.0 558.5 64.0 35.0 Café Area 
+   23 1 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 74.3 74.0 53.4 66.0 64.0 21.0 Lounge
+   25 0 other TATvalue2 kFrameAlignMiddle 64.0 61.0 3.0 557.0 557.0 11.0 41.5 64.0 50.0 House of Love Orphan
+   26 4 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 163.0 163.0 132.0 156.5 52.0 40.0 CHC Prai
+   30 0 other TATvalue2 kFrameAlignMiddle 64.0 61.0 3.0 651.0 651.0 11.0 41.5 64.0 50.0 Early Morning Prayer
+   31 0 title TATvalue2 kFrameAlignMiddle 46.0 169.0 -123.0 192.0 192.0 537.0 621.5 64.0 35.0 Early Morning Prayer
+   37 4 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 243.0 243.0 338.0 362.5 52.0 40.0 CHC Sitiawan
+   38 4 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 243.0 243.0 338.0 362.5 52.0 40.0 CHC Sitiawan
+   40 4 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 243.0 243.0 338.0 362.5 52.0 40.0 CHC Sitiawan
+   41 4 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 243.0 243.0 338.0 362.5 52.0 40.0 CHC Sitiawan
+   42 0 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 243.0 243.0 338.0 362.5 52.0 40.0 CHC Sitiawan
+   43 4 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 163.0 163.0 256.0 280.5 52.0 40.0 CHC Ipoh
+   57 4 other TATvalue2 kFrameAlignMiddle 34.0 31.0 3.0 174.0 174.0 675.0 690.5 34.0 25.0 CHC Zwechipen
+   57 24 list TATvalue0 kFrameAlignTop 169.3 169.0 0.3 159.7 160.0 16.0 16.0 515.0 20.0   Pakistan
+  Iran
+ A
+   64 4 other TATvalue1 kFrameAlignTop 72.3 68.0 4.3 627.7 628.0 252.0 252.0 62.0 46.67 Burmese • 0.35% Chri
+   70 7 other TATvalue2 kFrameAlignMiddle 36.7 31.0 5.7 175.0 175.0 607.0 622.5 22.0 25.0 CHC Zwechipen
+   73 4 other TATvalue2 kFrameAlignTop 62.5 61.0 1.5 180.0 180.0 133.9 134.0 100.0 50.0 Christians
+   75 3 other TATvalue2 kFrameAlignMiddle 45.5 43.0 2.5 266.0 266.0 90.8 112.5 52.0 35.0 CHC Chiang Mai
+   76 3 other TATvalue2 kFrameAlignMiddle 45.5 43.0 2.5 266.0 266.0 90.8 112.5 52.0 35.0 CHC Chiang Mai
+   79 0 other TATvalue2 kFrameAlignMiddle 64.0 61.0 3.0 346.0 346.0 11.0 41.5 64.0 50.0 Sunday School
+   80 0 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 145.3 145.0 56.3 69.0 64.0 21.0 English Lessons
+   96 3 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 207.0 207.0 806.0 827.5 46.0 35.0 CHC Bian Lan
+   96 4 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 226.0 226.0 665.0 686.5 46.0 35.0 CHC Xian Chou
+   96 5 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 176.0 176.0 660.0 681.5 46.0 35.0 CHC Pu You
+   96 6 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 198.0 198.0 573.0 594.5 46.0 35.0 CHC Nu Zhou
+   96 7 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 162.0 162.0 787.0 808.5 46.0 35.0 CHC Zui Si
+   96 8 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 183.0 183.0 567.0 588.5 46.0 35.0 CHC Rao Bo
+   96 9 other TATvalue1 kFrameAlignTop 72.3 68.0 4.3 627.7 628.0 138.0 138.0 62.0 46.67 Not Actual Names
+   97 0 other TATvalue2 kFrameAlignMiddle 64.0 61.0 3.0 411.0 411.0 11.0 41.5 64.0 50.0 Discipleship Centre
+   101 3 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 158.0 158.0 511.0 532.5 46.0 35.0 CHC Di He
+   101 4 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 229.0 229.0 673.0 694.5 46.0 35.0 CHC Kuan Ping
+   101 5 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 211.0 211.0 765.0 786.5 46.0 35.0 CHC Feng Yun
+   101 6 other TATvalue1 kFrameAlignTop 72.3 68.0 4.3 413.0 413.0 138.0 138.0 62.0 46.67 Not Actual Names
+   102 3 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 198.0 198.0 682.0 703.5 46.0 35.0 CHC Chun Gu
+   102 4 other TATvalue1 kFrameAlignTop 72.3 68.0 4.3 413.0 413.0 138.0 138.0 62.0 46.67 Not Actual Names
+   103 3 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 207.0 207.0 802.0 823.5 46.0 35.0 CHC Bian Lan
+   103 4 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 155.0 155.0 946.0 967.5 46.0 35.0 CHC Zui Si
+   103 5 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 207.0 207.0 644.0 665.5 46.0 35.0 CHC Chun Gu
+   103 6 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 231.0 231.0 665.0 686.5 46.0 35.0 CHC Kuan Ping
+   103 7 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 155.0 155.0 570.0 591.5 46.0 35.0 CHC Di He
+   103 8 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 226.0 226.0 750.0 771.5 46.0 35.0 CHC Xian Chou
+   103 9 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 212.0 212.0 733.0 754.5 46.0 35.0 CHC Feng Yun
+   103 10 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 192.0 192.0 537.0 558.5 46.0 35.0 CHC Qiu Cha
+   103 11 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 180.0 180.0 603.0 624.5 46.0 35.0 CHC Rao Bo
+   103 12 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 163.0 163.0 479.0 500.5 46.0 35.0 CHC Da Mi
+   103 13 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 217.0 217.0 273.0 294.5 46.0 35.0 CHC Fu Chang
+   103 14 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 212.0 212.0 430.0 451.5 46.0 35.0 CHC Jiang Yin
+   103 15 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 180.0 180.0 365.0 386.5 46.0 35.0 CHC Pu You
+   103 16 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 198.0 198.0 443.0 464.5 46.0 35.0 CHC Nu Zhou
+   103 17 other TATvalue1 kFrameAlignTop 72.3 68.0 4.3 413.0 413.0 138.0 138.0 62.0 46.67 Not Actual Names
+   103 18 other TATvalue2 kFrameAlignMiddle 46.0 43.0 3.0 238.0 238.0 347.0 368.5 46.0 35.0 CHC Jiang Shou
+   105 1 other TATvalue2 kFrameAlignTop 62.5 61.0 1.5 180.0 180.0 99.4 99.0 100.0 50.0 Christians
+   106 3 other TATvalue2 kFrameAlignMiddle 45.5 43.0 2.5 181.1 181.0 573.7 595.5 52.0 35.0 CHC Kikuyo 
+   107 3 other TATvalue2 kFrameAlignMiddle 45.5 43.0 2.5 181.1 181.0 573.7 595.5 52.0 35.0 CHC Kikuyo 
+   111 0 other TATvalue2 kFrameAlignMiddle 64.0 61.0 3.0 253.0 253.0 11.0 41.5 64.0 50.0 Fellowship
+   114 0 other TATvalue2 kFrameAlignMiddle 64.0 61.0 3.0 432.0 432.0 11.0 41.5 64.0 50.0 Outreach to Elderly
+   115 0 title TATvalue2 kFrameAlignMiddle 46.0 127.0 -81.0 192.0 192.0 537.0 600.5 64.0 35.0 Outreach to Low-Inco
+   116 0 other TATvalue2 kFrameAlignMiddle 64.0 61.0 3.0 378.0 378.0 11.0 41.5 64.0 50.0 “Latchkey Kids”
+   117 3 other TATvalue2 kFrameAlignMiddle 52.0 49.0 3.0 207.0 207.0 577.0 601.5 52.0 40.0 CHC Kikuyo 
+   118 3 other TATvalue2 kFrameAlignMiddle 45.5 43.0 2.5 224.9 225.0 604.0 625.5 52.0 35.0 CHC Tai Chung 
+   119 0 other TATvalue2 kFrameAlignMiddle 64.0 61.0 3.0 321.0 321.0 11.0 41.5 64.0 50.0 Church Camp
+   120 0 title TATvalue2 kFrameAlignMiddle 46.0 127.0 -81.0 192.0 192.0 537.0 600.5 64.0 35.0 Outreach to Low-Inco
+   121 3 other TATvalue2 kFrameAlignMiddle 45.5 43.0 2.5 224.9 225.0 303.8 325.5 52.0 35.0 CHC Tai Chung 
+   129 1 other TATvalue0 kFrameAlignTop 675.0 337.0 338.0 1140.0 1140.0 119.0 119.0 270.6 46.67 20 It has always bee
+   136 0 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 128.9 129.0 47.0 60.0 64.0 21.0 CHC Bukit Doa
+   136 2 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 60.9 61.0 47.0 60.0 64.0 21.0 JAMs
+   137 1 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 121.4 121.0 47.0 60.0 64.0 21.0 CHC Kuching
+   137 2 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 126.8 127.0 47.0 60.0 64.0 21.0 Youth Tuition
+   138 0 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 137.3 137.0 47.0 60.0 64.0 21.0 Emerge Camp
+   138 2 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 153.7 154.0 47.0 60.0 64.0 21.0 CHC Coimbatore
+   139 1 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 70.6 71.0 47.0 60.0 64.0 21.0 CHCSA
+   139 2 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 117.2 117.0 47.0 60.0 64.0 21.0 CHC Central
+   140 0 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 134.8 135.0 47.0 60.0 64.0 21.0 CHC Gorontalo
+   140 2 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 134.8 135.0 47.0 60.0 64.0 21.0 CHC Mettukal
+   141 0 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 112.1 112.0 47.0 60.0 64.0 21.0 Lauje Tribe
+   141 2 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 142.8 143.0 47.0 60.0 64.0 21.0 Palawano Tribe
+   142 0 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 112.1 112.0 47.0 60.0 64.0 21.0 CHC Klang
+   142 2 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 142.8 143.0 47.0 60.0 64.0 21.0 CHC Jalandhar
+   143 0 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 86.5 87.0 47.0 60.0 64.0 21.0 CHC Prai
+   143 2 other TATvalue2 kFrameAlignMiddle 26.9 26.0 0.9 206.6 207.0 47.0 60.0 64.0 21.0 CHC Thirumullaivoyal
+
+|spec.h - nh_actual| <= 1px: 20 of 88
+dh distribution: [(3.0, 45), (0.9, 18), (2.5, 6), (4.3, 5), (1.5, 4), (338.0, 2), (-81.0, 2), (346.8, 1)]
