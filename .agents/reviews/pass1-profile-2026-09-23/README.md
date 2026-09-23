@@ -25,7 +25,7 @@ the two earlier runs. Closure PASSED: R1 (JS unattributed) 0.1 s, R2 (osascript/
 | layoutApply | 29.9 | 147 slides ⇒ 203 ms/slide (the O(slides × layouts) scan) |
 | trailingDelete | 1.0 | |
 | templateClose | 0.1 | |
-| **attrs** | **96.8** | 1928 non-hide specs ⇒ 50 ms/spec; 2443 of them carry NO attribute |
+| **attrs** | **96.8** | 2875 non-hide specs ⇒ 34 ms/spec; 2443 of them carry NO attribute |
 | **hides** | **115.5** | 947 hides ⇒ 122 ms/hide |
 | finish | 1.6 | |
 | save | 0.9 | retried: no — h-save is DEAD |
@@ -87,7 +87,7 @@ Keynote-bound ≈ 555 s (71%); Python ≈ 220 s (28%), of which the z-order patc
 
 | todo | verdict |
 |---|---|
-| h-attrs-roundtrips | **LIVE**: attrs + hides ≈ 212 s; 2443 of 1928+947 specs carry no attribute yet cost getItem + locked read each; 947 hides at 122 ms each |
+| h-attrs-roundtrips | **LIVE**: attrs + hides ≈ 212 s; 2443 of 2875 non-hide specs carry no attribute yet cost getItem + locked read each; 947 hides at 122 ms each |
 | h-copy-clone | DEAD: copy 5 s (same-volume APFS ditto is already fast) |
 | h-save | DEAD: save 0.9 s, never retried |
 | h-layouts | BELOW GATE: 39 s total (layoutApply 30 s = 203 ms/slide) — record only |
@@ -117,3 +117,32 @@ Null control PASSED: `Applied 3822 objects … missed 0`, identical fallback lin
 `Stat zorder detail` (zorderSlides=83, statRaised=173, badgeRaised=325, noop=20, refused=0). The
 pass-1 delta (280 → 239) is machine noise (the runs differ in load), not a change.
 Remaining ranking: pass 1 attrs+hides ≈ 210 s → bulk seed read ≈ 150 s → fallback 81 s.
+
+## Runs 5–8 (2026-09-23) — h-attrs-roundtrips levers (i)+(ii), two interleaved A/B pairs
+
+Change: in pass-1 attrs mode each kind collection is fetched once per slide (cached per `applyTransforms`
+call; unresolved lookups retried) and specs with nothing to write skip `applyGeom`; `applyGroupChildren`
+returns at once in attrs mode. Baseline = `origin/main` 5a7cbbb9 in a detached worktree sharing the same
+`.cache`; branch = 403cf3b4. Same command as runs 1–4 plus `OBED_DEBUG_PASS1_SNAPSHOT`.
+
+| run | order | load at start | attrs s | hides s | runJxa s | whole run s |
+|---|---|---:|---:|---:|---:|---:|
+| 5 main | pair 1, 1st (Keynote cold) | 14.7 | 504.3 | 413.5 | 982.8 | 1348 |
+| 6 branch | pair 1, 2nd | 7.0 | **19.4** | 97.5 | 175.4 | 542 |
+| 7 branch | pair 2, 1st | 25.2 | **18.9** | 117.7 | 194.0 | 560 |
+| 8 main | pair 2, 2nd | 7.3 | 106.9 | 82.2 | 247.0 | 607 |
+
+Run 5 is an outlier (cold Keynote under load); judge on runs 1–4 + 8: attrs ≈ 97–107 s → ≈ 19 s, a saving of
+≈ 80–88 s (≈ 30 ms per skipped no-attr spec, i.e. the collection fetch + locked read). Hides are
+noise-bound (82–118 s) and untouched. Whole run ≈ 584–607 s → ≈ 542–560 s.
+
+Null control PASSED in all four runs: `Applied 3822 … missed 0`, census `no-attr 2443` (the one jxa-path
+slide carries no no-attr spec), identical fallback line and `Stat zorder detail`; R1 ≤ 0.2 s, R2 ≤ 0.8 s;
+source sha unchanged.
+
+Pass-1 slide members: Keynote's save is NOT byte-deterministic — main-vs-main and branch-vs-branch
+match CRC on 1/155 slides. Decoded with object identifiers, object/data references and
+`randomNumberSeed` ignored (multiset of objects per slide), all 155 slides are equal for main-vs-main,
+branch-vs-branch and main-vs-branch in both pairs. Positive control: the same comparator reports 148
+differing slides between a pass-1 snapshot and the final deck (the offline writer's 148 slides).
+Remaining ranking: hides ≈ 100 s → bulk seed read ≈ 150 s → fallback 81 s.

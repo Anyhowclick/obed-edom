@@ -76,7 +76,11 @@ todos:
       the IWA writer (remove from drawablesZOrder/ownedDrawables + the object; a NEW surgical write with its
       own live gate because `expected_base_counts` = source − hides addresses later stages). Ceiling ≈ 200 s
       of 780. Order: (i)+(ii) first (behaviour-preserving, node-stub testable), then decide (iii).
-    status: pending
+      DONE (i)+(ii) 2026-09-23 as "per-slide cached lookup + skip applyGeom" — NOT "skip getItem": the lookup is
+      the only attrs-mode miss source, so skipping it would turn misses into applied. Live A/B (runs 5–8,
+      review README): attrs ≈ 97–107 s → ≈ 19 s, null control identical, pass-1 slides equal modulo IDs.
+      Deferred: one doc.slides() per slide (≈ 2–5 s, below gate). (iii) hides (≈ 100 s) stays a separate decision.
+    status: completed
   - id: h-copy-clone
     content: >-
       GATE: deck copy ≥ 60 s AND same APFS volume. Lever: `cp -c` (clonefile) inside
