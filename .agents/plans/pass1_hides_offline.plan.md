@@ -514,6 +514,10 @@ earlier fixes closed. Each round adds one line to §Review log. At merge the raw
    survivor or template slide is kept (B2/B11).
 2. After a GREEN gate, `OBED_OFFLINE_HIDES` defaults to ON (`g-flip-docs`), with explicit off kept as the kill switch.
 3. Implementers: Opus, Effort MEDIUM. The live gate waits on Keynote use by the other sessions.
+4. Whole-deck pre-write refusal (`OfflineWriteRefused`: disk guard, undecodable member): every eligible slide falls
+   back to the AppleScript delete by kindIndex (owner, after C1). This is only absence of proof, and the later stages
+   already address the saved deck by kindIndex. A per-slide refusal falls back only when `order_proven`, and aborts
+   otherwise (C1 #1).
 
 ## Owner questions (resolved above)
 
