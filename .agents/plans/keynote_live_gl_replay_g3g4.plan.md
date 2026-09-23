@@ -350,3 +350,16 @@ the crop). The snapshot moves before the first upload, and a settle-time stand-d
 R3: the footprint fallback no longer fires for the carried decoder; `keepAtFootprint` still holds its origin, now the instance.
 New R9: the 2→3 transition window, covered by guard G. F9's ≈4 px pop was held by the stale pin loop (advisor).
 
+**Codex rounds 1–2 (`.agents/reviews/gl-replay-g3/codex-r{1,2}.md`, all applied).**
+- §1 released: a facade bound to the carried decoder swaps it in only inside the authored poster layer; anywhere else the stub is
+  dropped with `glreplay-hold {via:'stage'}`. A facade inherits the carried decoder's rect before the footprint check (G34-01; R9
+  now covers the facade observer too).
+- §2 selection: a candidate is measured only if its authored capture is stamped with scene `atScene − 1`; an asset change clears
+  the capture (G34-03).
+- §3 flag-off: `reidentify` adds nothing to videos without a GL boundary (G34-02).
+- G2: poster snapshot and restore are exception-safe, keep WebGL2 read/draw framebuffer bindings apart, and succeed only on a live
+  context with no GL error; the stand-down note carries `posterRestored`. Every per-clear upload requires a `clearColor, clear`
+  segment prefix, else `frameNotDelimited` (the exported player clears once per frame in exactly that order) (G34-04, G34-05).
+  A failed restore keeps the cleanup replay: measured, it ends on the rest opacities instead of leaving slot 4 patched.
+- §6 gate 4 tail: the no-remount check covers the carried decoder AND its facade (r3).
+
