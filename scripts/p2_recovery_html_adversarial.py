@@ -21,6 +21,7 @@ import io
 import json
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -36,7 +37,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
-from p2_alpha_spike import CHROME, ChromeCdp, _wait_ready  # noqa: E402
+from p2_alpha_spike import CHROME, ChromeCdp, _free_port, _wait_ready  # noqa: E402
 from p2_recovery_html_dissolve_live import (  # noqa: E402
     MEDIA_PROBE_JS,
     _ensure_videos_playing,
@@ -388,27 +389,37 @@ GL_CARRY_CENSUS_JS = r"""(() => {
   if (carried !== null) ids[String(carried)] = 1;
   const released = p.events.find((e) => e.kind === ZONE && e.detail && e.detail.to === 'released');
   const handoffT = released ? released.t : null;
+  function sceneNum(e) {
+    const m = /^#(\d+)/.exec(String((e.detail || {}).sceneHash || ''));
+    return m ? parseInt(m[1], 10) : -1;
+  }
   const hits = p.events.filter((e) => {
     if (KINDS.indexOf(e.kind) < 0) return false;
     const d = e.detail || {};
     const mine = mineByKey(e) || ids[String(d.elId)] === 1 || ids[String(d.newElId)] === 1;
     if (!mine) return false;
-    const m = /^#(\d+)/.exec(String(d.sceneHash || ''));
-    const n = m ? parseInt(m[1], 10) : -1;
+    const n = sceneNum(e);
     return n >= LO && n < HI;
   });
   const before = hits.filter((e) => handoffT === null || e.t < handoffT);
   const after = hits.filter((e) => handoffT !== null && e.t >= handoffT);
+  const handoffScene = released ? sceneNum(released) : null;
+  const gated = after.filter((e) => e.kind === 'remount-done' || e.kind === 'remount-footprint-rect'
+    || (e.kind === 'remount-into-authored-layer' && sceneNum(e) === handoffScene));
+  function brief(e) {
+    return {kind: e.kind, elId: (e.detail || {}).elId, sceneHash: (e.detail || {}).sceneHash, t: e.t};
+  }
   return {
     key: KEY,
     handoffT: handoffT,
+    handoffScene: handoffScene,
     carriedElId: carried,
     facadeElIds: facades,
     before: {total: before.length, sample: before.slice(0, 20)},
+    gatedTotal: gated.length,
+    gated: gated.slice(0, 40).map(brief),
     afterTotal: after.length,
-    after: after.slice(0, 40).map((e) => ({
-      kind: e.kind, elId: (e.detail || {}).elId, sceneHash: (e.detail || {}).sceneHash, t: e.t
-    })),
+    afterSample: after.slice(0, 40).map(brief),
     loScene: LO,
     hiScene: HI,
     eventsSeen: p.events.length
@@ -596,12 +607,59 @@ def _player_handler(player_dir: Path, main_js: bytes | None = None) -> type:
     return Handler
 
 
+class GlReplayChromeCdp(ChromeCdp):
+    """`ChromeCdp` without `--disable-gpu`, for `--gl-replay auto` only. Under that
+    flag headless Chrome has no WebGL, so the player renders its non-WebGL
+    fallback and the GL module never sees a context to arm on (G6-P2 r1). The
+    host's headless launch passes no such flag.
+
+    The page lifecycle is left as the flag-off harness has it: after the first CDP
+    key event the page reads `hidden` and frames (rAF, rVFC, the replay loop) are
+    produced only by screenshots. Keeping it visible with focus emulation hung the
+    slide-2 drain at #4-#5 (CDP unresponsive > 30 s), with or without the GPU,
+    the GL module or the continuity core."""
+
+    def _spawn(self) -> None:
+        port = _free_port()
+        self.port = port
+        self.proc = subprocess.Popen(
+            [
+                str(self.chrome),
+                "--headless=new",
+                f"--remote-debugging-port={port}",
+                "--remote-debugging-address=127.0.0.1",
+                f"--user-data-dir={self.profile}",
+                f"--window-size={self.width},{self.height}",
+                "--force-device-scale-factor=1",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
+                "--autoplay-policy=no-user-gesture-required",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+def _chrome(profile: Path, *, gl_auto: bool) -> ChromeCdp:
+    return (GlReplayChromeCdp if gl_auto else ChromeCdp)(CHROME, profile)
+
+
+# Read on about:blank BEFORE the player loads: a context made on the player page
+# while the module is in ARM-PRE would be taken for the player's and stand it down.
+WEBGL_AVAILABLE_JS = "(() => { try { return !!document.createElement('canvas').getContext('webgl'); } catch (e) { return false; } })()"
+
+
 def _gl_boot_ok(check: object) -> bool:
     if not isinstance(check, dict):
         return False
     info = check.get("info") if isinstance(check.get("info"), dict) else {}
     return bool(
         check.get("order") == GL_SERVED_ORDER
+        and check.get("webgl") is True
         and check.get("obedLive") is True
         and check.get("runtimeVersion") == RUNTIME_VERSION
         and check.get("glVersion") == GL_REPLAY_VERSION
@@ -635,16 +693,22 @@ def _sample_frame_index(frame: object, save_to: Path | None = None) -> int | Non
 
 
 async def _gl_slide2_reads(chrome: ChromeCdp, run_dir: Path) -> list[dict]:
+    """Settled-slide-2 reads, each followed by a screenshot: on the harness's hidden
+    page the screenshot is what produces frames between reads, and it pairs with
+    that read's `sampleFrame` for the A7 counter calibration."""
     reads = []
     for i in range(GL_POOL_READS_N):
         if i:
             await asyncio.sleep(GL_POOL_READ_GAP_S)
         r = await chrome.evaluate(GL_SLIDE2_READ_JS)
+        shot = await chrome.screenshot()
+        Image.fromarray(shot).save(run_dir / f"gl-slide2-{i}.png")
         if not isinstance(r, dict):
             reads.append({"error": "slide-2 read unavailable"})
             continue
         frame = r.pop("frame", None)
         r["frameIndex"] = _sample_frame_index(frame, run_dir / f"gl-sample-frame-{i}.jpg")
+        r["screenIndexNonGating"] = _decode_index_patch(np.asarray(shot))
         r["frameMeta"] = {k: v for k, v in (frame or {}).items() if k != "dataURL" and k != "snap"}
         reads.append(r)
     return reads
@@ -3057,7 +3121,7 @@ async def _run_freeze_bracket(
         for label, inject in (("a1", False), ("b", True), ("a2", False)):
             rd = bdir / label
             rd.mkdir()
-            chrome = ChromeCdp(CHROME, bdir / f"chrome-profile-{label}")
+            chrome = _chrome(bdir / f"chrome-profile-{label}", gl_auto=main_js is not None)
             try:
                 await chrome.start()
                 await _boot(chrome, base)
@@ -3224,12 +3288,13 @@ async def _run(player: Path) -> dict:
 
     run_dir = runs / "primary"
     run_dir.mkdir()
-    chrome = ChromeCdp(CHROME, run_dir / "chrome-profile")
+    chrome = _chrome(run_dir / "chrome-profile", gl_auto=gl_auto)
     await chrome.start()
     try:
+        webgl = await chrome.evaluate(WEBGL_AVAILABLE_JS) is True if gl_auto else None
         boot = await _boot(chrome, base)
         if gl_auto:
-            boot["glReplayCheck"] = await chrome.evaluate(GL_BOOT_CHECK_JS)
+            boot["glReplayCheck"] = {**(await chrome.evaluate(GL_BOOT_CHECK_JS) or {}), "webgl": webgl}
             if not _gl_boot_ok(boot["glReplayCheck"]):
                 raise SystemExit(f"--gl-replay auto boot check failed: {boot['glReplayCheck']!r}")
         # The continuity plan (restart boundary, and the 3->4 bridge boundary iff

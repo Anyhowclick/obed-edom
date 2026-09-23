@@ -117,8 +117,10 @@ def _gl_census(**over) -> dict:
         "carriedElId": CARRIED,
         "facadeElIds": [7],
         "before": {"total": 0, "sample": []},
-        "afterTotal": 1,
-        "after": [{"kind": "remount-into-authored-layer", "elId": CARRIED, "sceneHash": "#2", "t": 20_000.4}],
+        "handoffScene": 2,
+        "gatedTotal": 1,
+        "gated": [{"kind": "remount-into-authored-layer", "elId": CARRIED, "sceneHash": "#2", "t": 20_000.4}],
+        "afterTotal": 19,
         "loScene": 1,
         "hiScene": 6,
         "eventsSeen": 300,
@@ -260,7 +262,6 @@ def test_gl_carry_b_each_zone_or_seam_defect_is_red_alone(mutate):
         pytest.param(None, id="no-reads"),
         pytest.param([_live_state(), _live_state(state="RETIRED", it=160, up=150)], id="not-live"),
         pytest.param([_live_state(), _live_state(standDowns=["contextLost"], it=160, up=150)], id="stand-down"),
-        pytest.param([_live_state(), _live_state(it=160, up=150, stats={"loopMode": "raf"})], id="not-rvfc"),
         pytest.param([_live_state(), _live_state(it=160, up=150, stats={"glErrors": 1})], id="gl-error"),
         pytest.param([_live_state(), _live_state(it=160, up=150, stats={"epoch": 2})], id="epoch-changed"),
         pytest.param([_live_state(), _live_state(it=100, up=150)], id="iter-stalled"),
@@ -274,6 +275,11 @@ def test_gl_carry_b_needs_the_module_live_at_settled_slide_2(states):
     _only_red(_gl(gl_states_s2=states), "b")
 
 
+def test_gl_carry_b_accepts_a_raf_loop_mode_snapshot_while_uploads_run():
+    states = [_live_state(stats={"loopMode": "raf"}), _live_state(it=160, up=150, stats={"loopMode": "raf"})]
+    assert _gl(gl_states_s2=states)["ok"] is True
+
+
 def test_gl_carry_b_ignores_refusals_outside_slide_2_and_for_other_movies():
     extra = [
         {"kind": "preserve-refused", "detail": {"key": "movie1", "scene": 6, "via": "stash", "sceneHash": "#6"}},
@@ -283,40 +289,39 @@ def test_gl_carry_b_ignores_refusals_outside_slide_2_and_for_other_movies():
 
 
 # ---- (c) ------------------------------------------------------------------ #
+def _into(el_id=CARRIED, scene="#2"):
+    return {"kind": "remount-into-authored-layer", "elId": el_id, "sceneHash": scene}
+
+
+def test_gl_carry_c_later_build_re_placements_are_report_only():
+    """G6-P2 r1 (live): after the hand-off `released` is pin, and builds #3-#5
+    re-place the carried decoder in its authored layer 18 more times. Only the
+    hand-off scene's remount is gated."""
+    census = _gl_census(afterTotal=35)
+    assert _gl(gl_carry_census=census)["ok"] is True
+
+
 @pytest.mark.parametrize(
     "over",
     [
         pytest.param({"before": {"total": 1, "sample": [{"kind": "remount-done"}]}}, id="carry-before-handoff"),
-        pytest.param({"after": [], "afterTotal": 0}, id="no-remount-into-layer"),
+        pytest.param({"gated": [], "gatedTotal": 0}, id="no-remount-into-layer"),
         pytest.param(
-            {
-                "after": [
-                    {"kind": "remount-into-authored-layer", "elId": CARRIED},
-                    {"kind": "remount-into-authored-layer", "elId": CARRIED},
-                ],
-                "afterTotal": 2,
-            },
-            id="two-remount-into-layer",
+            {"gated": [_into(), _into()], "gatedTotal": 2},
+            id="two-remount-into-layer-at-handoff",
         ),
+        pytest.param({"gated": [_into(SIBLING)], "gatedTotal": 1}, id="remount-into-layer-for-sibling"),
+        pytest.param({"gated": [_into(scene="#3")], "gatedTotal": 1}, id="remount-into-layer-only-later"),
         pytest.param(
-            {"after": [{"kind": "remount-into-authored-layer", "elId": SIBLING}], "afterTotal": 1},
-            id="remount-into-layer-for-sibling",
-        ),
-        pytest.param(
-            {
-                "after": [{"kind": "remount-into-authored-layer", "elId": CARRIED}, {"kind": "remount-done", "elId": CARRIED}],
-                "afterTotal": 2,
-            },
+            {"gated": [_into(), {"kind": "remount-done", "elId": CARRIED, "sceneHash": "#4"}], "gatedTotal": 2},
             id="remount-done-carried",
         ),
         pytest.param(
-            {
-                "after": [{"kind": "remount-into-authored-layer", "elId": CARRIED}, {"kind": "remount-footprint-rect", "elId": 7}],
-                "afterTotal": 2,
-            },
+            {"gated": [_into(), {"kind": "remount-footprint-rect", "elId": 7, "sceneHash": "#3"}], "gatedTotal": 2},
             id="footprint-rect-facade",
         ),
-        pytest.param({"afterTotal": 41}, id="truncated"),
+        pytest.param({"gatedTotal": 41}, id="truncated"),
+        pytest.param({"handoffScene": None}, id="no-handoff-scene"),
         pytest.param({"handoffT": None}, id="no-handoff"),
         pytest.param({"carriedElId": SIBLING}, id="census-other-carried"),
         pytest.param({"facadeElIds": None}, id="facades-malformed"),
@@ -666,6 +671,7 @@ def test_patched_main_js_uses_live_runtime_on_the_pinned_player(tmp_path, monkey
 def _boot_check(**over):
     check = {
         "order": ["plan", "core", "info", "gl", "main"],
+        "webgl": True,
         "obedLive": True,
         "runtimeVersion": 2,
         "glVersion": 1,
@@ -819,6 +825,7 @@ def test_gl_carry_census_splits_at_the_released_zone_note():
         _ev("glreplay-carried", 10, elId=1, delta=0.0, sceneHash="#1"),
         _ev("glreplay-zone", 50, key="movie1", to="released", sceneHash="#2"),
         _ev("remount-into-authored-layer", 51, elId=1, key="untitled.mov", sceneHash="#2"),
+        _ev("remount-into-authored-layer", 70, elId=1, key="untitled.mov", sceneHash="#3"),
         _ev("remount-done", 80, elId=7, sceneHash="#3"),
         _ev("remount-done", 90, elId=1, sceneHash="#6"),
         _ev("remount-done", 5, elId=3, key="wa0125.mov", sceneHash="#1"),
@@ -828,8 +835,9 @@ def test_gl_carry_census_splits_at_the_released_zone_note():
     assert census["carriedElId"] == 1
     assert census["facadeElIds"] == [7]
     assert census["before"]["total"] == 0
-    assert census["afterTotal"] == 2
-    assert [(e["kind"], e["elId"]) for e in census["after"]] == [
+    assert census["handoffScene"] == 2
+    assert census["afterTotal"] == 3
+    assert [(e["kind"], e["elId"]) for e in census["gated"]] == [
         ("remount-into-authored-layer", 1),
         ("remount-done", 7),
     ]
@@ -857,6 +865,67 @@ def test_gl_carry_census_green_shape_passes_the_verdict():
         _ev("glreplay-carried", 10, elId=1, delta=0.0, sceneHash="#1"),
         _ev("glreplay-zone", 50, key="movie1", to="released", sceneHash="#2"),
         _ev("remount-into-authored-layer", 51, elId=1, key="untitled.mov", sceneHash="#2"),
+        _ev("remount-scheduled", 60, elId=1, sceneHash="#3"),
+        _ev("remount-into-authored-layer", 61, elId=1, key="untitled.mov", sceneHash="#3"),
+        _ev("dom-swap", 62, elId=1, sceneHash="#4"),
     ]
     census = _run_census(events)
+    assert census["afterTotal"] == 4 and census["gatedTotal"] == 1
     assert v.glCarryCensusVerdict(census, 1)["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# The auto Chrome (G6-P2 r1 root cause): WebGL present, page kept visible.
+# --------------------------------------------------------------------------- #
+def _spawn_argv(cls, monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **k: seen.append(argv) or object())
+    c = cls(Path("/bin/chrome"), tmp_path / "p")
+    c._spawn()
+    return [a for a in seen[0] if not a.startswith("--remote-debugging-port=")]
+
+
+def test_auto_chrome_argv_is_the_p2_argv_minus_disable_gpu_only(monkeypatch, tmp_path):
+    """Under `--disable-gpu` headless Chrome has no WebGL: the player takes its
+    non-WebGL path and G2 never sees a context (r1: ARM-PRE, canvasId null)."""
+    base = _spawn_argv(drv.ChromeCdp, monkeypatch, tmp_path)
+    auto = _spawn_argv(drv.GlReplayChromeCdp, monkeypatch, tmp_path)
+    assert "--disable-gpu" in base
+    assert auto == [a for a in base if a != "--disable-gpu"]
+
+
+def test_chrome_class_follows_the_mode(tmp_path):
+    assert type(drv._chrome(tmp_path / "a", gl_auto=False)) is drv.ChromeCdp
+    assert type(drv._chrome(tmp_path / "b", gl_auto=True)) is drv.GlReplayChromeCdp
+
+
+def test_boot_check_requires_webgl():
+    assert drv._gl_boot_ok(_boot_check(webgl=False)) is False
+    assert drv._gl_boot_ok(_boot_check(webgl=None)) is False
+
+
+class _ReadChrome:
+    def __init__(self):
+        self.calls = []
+
+    async def evaluate(self, js):
+        self.calls.append("read")
+        return {"t": 1.0, "sceneHash": "#2", "carried": 1, "pool": [], "frame": _sample_frame(120)}
+
+    async def screenshot(self):
+        self.calls.append("shot")
+        return np.zeros((1080, 1920, 4), dtype=np.uint8)
+
+
+def test_slide2_reads_pair_every_sample_frame_with_a_screenshot(tmp_path, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(drv, "GL_POOL_READ_GAP_S", 0.0)
+    chrome = _ReadChrome()
+    reads = asyncio.run(drv._gl_slide2_reads(chrome, tmp_path))
+    assert chrome.calls == ["read", "shot"] * drv.GL_POOL_READS_N
+    assert all(abs(r["frameIndex"] - 120) <= 2 for r in reads)
+    assert all("dataURL" not in r["frameMeta"] for r in reads)
+    for i in range(drv.GL_POOL_READS_N):
+        assert (tmp_path / f"gl-slide2-{i}.png").is_file()
+        assert (tmp_path / f"gl-sample-frame-{i}.jpg").is_file()

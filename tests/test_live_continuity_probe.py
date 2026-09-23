@@ -3557,7 +3557,6 @@ ARMED_CLAUSE_MUTATIONS = {
     # clause 2 -- both reads LIVE, same epoch, strictly progressing
     "first read not LIVE": ("live", lambda reads, c: _gl(reads[0])["api"].update(state="ARM-POST")),
     "a stand-down": ("live", lambda reads, c: _gl(reads[1])["api"].update(standDowns=["glError"])),
-    "raf loop": ("live", lambda reads, c: _gl(reads[1])["api"]["stats"].update(loopMode="raf")),
     "gl error": ("live", lambda reads, c: _gl(reads[0])["api"]["stats"].update(glErrors=1)),
     "epoch changed": ("live", lambda reads, c: _gl(reads[1])["api"]["stats"].update(epoch=2)),
     "iter stalled": ("live", lambda reads, c: _gl(reads[1])["api"]["stats"].update(iter=10)),
@@ -3688,12 +3687,12 @@ class TestFactsPerArm:
         clock = FakeClock()
         host = ArmedHost([_gl(r) for r in _armed_reads()])
         out: dict[str, Any] = {}
-        observe = probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep)
+        observe = probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)
         observe(1)
         assert out == {}
         observe(2)
         assert len(out["armed1to2"]) == 2
-        assert clock.sleeps == [probe.ARMED_READ_GAP_S]
+        assert clock.sleeps[-1] == probe.ARMED_READ_GAP_S
         joined = "\n".join(host.transport.evaluations)
         assert probe.INPAGE_LIVENESS_JS not in host.transport.evaluations
         assert "markerBands" not in joined and "__OBED_GL_ORACLE__" not in joined
@@ -3715,6 +3714,9 @@ class ArmedTransport:
 
     def evaluate(self, js: str) -> Any:
         self.evaluations.append(js)
+        if js == probe.HASH_JS:
+            hashes = self.host.hashes
+            return hashes.pop(0) if len(hashes) > 1 else (hashes[0] if hashes else "#2")
         if js == probe.GL_REPLAY_READ_JS:
             reads = self.host.reads
             return reads.pop(0) if len(reads) > 1 else (reads[0] if reads else None)
@@ -3738,6 +3740,7 @@ class ArmedTransport:
 class ArmedHost:
     def __init__(self, reads: list[Any], *, advance_error: BaseException | None = None) -> None:
         self.reads = list(reads)
+        self.hashes: list[Any] = []
         self.stage_map = dict(GL_STAGE)
         self.painting: Any = []
         self.transport = ArmedTransport(self)
@@ -3773,6 +3776,15 @@ class TestArmedScoring:
         scored = probe.score_armed(reads, ARMED, continuity, owner_ids=[1, 1])
         assert scored["verdict"] is False
         assert {key for key, ok in scored["checks"].items() if not ok} == {clause}
+
+    @pytest.mark.parametrize("modes", [("raf", "raf"), ("rvfc", "raf"), (None, "rvfc")])
+    def test_the_loop_driver_is_not_scored(self, modes: tuple[Any, Any]) -> None:
+        """Owner 2026-09-23: `loopMode` is whichever driver ticked last and flips
+        many times a second in a healthy LIVE loop, so it is never a clause."""
+        reads = _armed_reads()
+        for read, mode in zip(reads, modes):
+            _gl(read)["api"]["stats"]["loopMode"] = mode
+        assert probe.score_armed(reads, ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is True
 
     def test_no_carried_note_fails_the_events_and_cannot_vouch_for_the_pool(self) -> None:
         reads = _armed_reads()
@@ -4483,3 +4495,28 @@ class TestCodexR1ProbeFixes:
         )
         assert scored["status"] == "forced-fail"
         assert {k for k, ok in scored["checks"].items() if not ok} == {"knownReason"}
+
+
+class TestArmedReadWaitsForDestination:
+    """P5-A r1: read 1 was taken at #1 (LIVE precedes #2 by ~98 ms)."""
+
+    def test_the_first_read_waits_for_the_destination_hash(self) -> None:
+        clock = FakeClock()
+        host = ArmedHost([_gl(r) for r in _armed_reads()])
+        host.hashes = ["#1", "#1", "#2"]
+        out: dict[str, Any] = {}
+        probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)(2)
+        evaluations = host.transport.evaluations
+        assert evaluations.count(probe.HASH_JS) == 3
+        assert evaluations.index(probe.GL_REPLAY_READ_JS) > max(i for i, js in enumerate(evaluations) if js == probe.HASH_JS)
+        assert len(out["armed1to2"]) == 2
+
+    @pytest.mark.parametrize("stuck", ["#1", "#2junk", "#3", None])
+    def test_a_hash_that_never_settles_is_red_not_read(self, stuck: Any) -> None:
+        clock = FakeClock()
+        host = ArmedHost([_gl(r) for r in _armed_reads()])
+        host.hashes = [stuck]
+        out: dict[str, Any] = {}
+        probe.boundary_observer(host, {"retire": None, "armed": ARMED}, out, sleep=clock.sleep, now=clock.now)(2)
+        assert probe.GL_REPLAY_READ_JS not in host.transport.evaluations
+        assert probe.score_armed(out["armed1to2"], ARMED, GL_CONTINUITY, owner_ids=[1, 1])["verdict"] is False

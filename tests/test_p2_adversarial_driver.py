@@ -451,7 +451,7 @@ def test_freeze_bracket_starts_chrome_inside_its_try():
     import inspect
 
     src = inspect.getsource(p2._run_freeze_bracket)
-    body = src[src.index("chrome = ChromeCdp("):]
+    body = src[src.index("chrome = _chrome("):]
     body = body[: body.index("finally:")]
     assert body.index("try:") < body.index("await chrome.start()"), (
         "chrome.start() runs outside the try that closes it"

@@ -1186,35 +1186,41 @@ def carriedClock1to2(
 
 def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
     """Clause (c) from the in-page census split at the hand-off (`glreplay-zone`
-    to `released`): zero carry notes for movie1 before it; after it exactly one
-    `remount-into-authored-layer` for the carried decoder and zero
-    `remount-done` / `remount-footprint-rect` for it or its facade. A census that
-    is missing, malformed, truncated or has no hand-off fails closed."""
+    to `released`): zero carry notes for movie1 before it; exactly one
+    `remount-into-authored-layer` for the carried decoder AT the hand-off scene;
+    zero `remount-done` / `remount-footprint-rect` for it or its facade anywhere
+    after it. Later builds legitimately re-place the pinned decoder in its
+    authored layer (`released` is pin; G6-P2 r1 measured 18 more at #3-#5), so
+    those are report-only. A census that is missing, malformed, truncated or has
+    no hand-off fails closed."""
     if not isinstance(census, dict):
         return {"ok": False, "reason": "gl carry census missing", "census": census}
     before = census.get("before") if isinstance(census.get("before"), dict) else {}
-    after = census.get("after")
-    after_total = census.get("afterTotal")
+    gated = census.get("gated")
+    gated_total = census.get("gatedTotal")
     facades = _id_set(census.get("facadeElIds"))
+    handoff_scene = census.get("handoffScene")
     if (
         not isinstance(before.get("total"), int)
-        or not isinstance(after, list)
-        or not isinstance(after_total, int)
+        or not isinstance(gated, list)
+        or not isinstance(gated_total, int)
         or facades is None
-        or not all(isinstance(e, dict) for e in after)
+        or not all(isinstance(e, dict) for e in gated)
     ):
         return {"ok": False, "reason": "gl carry census malformed", "census": census}
-    if _finite(census.get("handoffT")) is None:
+    if _finite(census.get("handoffT")) is None or not isinstance(handoff_scene, int) or handoff_scene < 0:
         return {"ok": False, "reason": "no hand-off in the census", "census": census}
-    if after_total != len(after):
+    if gated_total != len(gated):
         return {"ok": False, "reason": "gl carry census truncated after the hand-off", "census": census}
     into = [
-        e for e in after
-        if e.get("kind") == "remount-into-authored-layer" and _same_id(e.get("elId"), carried_el_id)
+        e for e in gated
+        if e.get("kind") == "remount-into-authored-layer"
+        and _hash_num(e.get("sceneHash")) == handoff_scene
+        and _same_id(e.get("elId"), carried_el_id)
     ]
     owned = facades | ({str(carried_el_id)} if carried_el_id is not None else set())
     forbidden = [
-        e for e in after
+        e for e in gated
         if e.get("kind") in ("remount-done", "remount-footprint-rect") and str(e.get("elId")) in owned
     ]
     problems = []
@@ -1225,7 +1231,7 @@ def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
     if before["total"] != 0:
         problems.append(f"{before['total']} carry notes before the hand-off")
     if len(into) != 1:
-        problems.append(f"{len(into)} remount-into-authored-layer for the carried decoder after the hand-off")
+        problems.append(f"{len(into)} remount-into-authored-layer for the carried decoder at the hand-off scene")
     if forbidden:
         problems.append(f"{len(forbidden)} remount-done/-footprint-rect for the carried decoder or its facade")
     return {
@@ -1234,15 +1240,19 @@ def glCarryCensusVerdict(census: object, carried_el_id: object) -> dict:
         "problems": problems,
         "beforeTotal": before["total"],
         "beforeSample": (before.get("sample") or [])[:6],
-        "after": after[:12],
+        "gated": gated[:12],
         "handoffT": census.get("handoffT"),
+        "handoffScene": handoff_scene,
+        "afterTotalNonGating": census.get("afterTotal"),
     }
 
 
 def glLiveOnSlide2(states: object, *, min_reads: int = 2) -> dict:
     """The module is LIVE at settled slide 2 itself, not merely once: at least
-    `min_reads` state reads, each `LIVE` with no stand-downs, `loopMode == "rvfc"`,
-    zero GL errors, one epoch, and `iter`/`uploads` strictly increasing."""
+    `min_reads` state reads, each `LIVE` with no stand-downs and zero GL errors,
+    one epoch, and `iter`/`uploads` strictly increasing. `loopMode` is not read:
+    G2's watchdog flips it to `raf` whenever two rAF ticks pass without a video
+    frame, so one snapshot of it is a coin toss (owner decision 2026-09-23)."""
     reads = states if isinstance(states, list) else []
     problems = []
     if len(reads) < min_reads:
@@ -1257,8 +1267,6 @@ def glLiveOnSlide2(states: object, *, min_reads: int = 2) -> dict:
             problems.append(f"state read {i} is {r.get('state')!r}")
         if r.get("standDowns") != []:
             problems.append(f"state read {i} stand-downs {r.get('standDowns')!r}")
-        if st.get("loopMode") != "rvfc":
-            problems.append(f"state read {i} loopMode {st.get('loopMode')!r}")
         if st.get("glErrors") != 0:
             problems.append(f"state read {i} glErrors {st.get('glErrors')!r}")
         stats.append(st)

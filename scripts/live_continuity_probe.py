@@ -201,6 +201,7 @@ STAGE_MAP_FN_JS = r"""
 STAGE_MAP_JS = "(function(){" + STAGE_MAP_FN_JS + "return stageMapOf();})()"
 
 SCENE_ID_JS = "window.__obedLive ? window.__obedLive.snapshot().sceneId : null"
+HASH_JS = "String(location.hash || '')"
 
 # Module state, runtime notes and the pool census in one read. Never the oracle
 # handle, its context, `markerBands` or `pause`: those belong to the Vgl pass alone.
@@ -1472,7 +1473,8 @@ def armed_evidence(
 
 
 def boundary_observer(
-    player: Any, facts: dict[str, Any], out: dict[str, Any], *, sleep: Callable[[float], None] = time.sleep
+    player: Any, facts: dict[str, Any], out: dict[str, Any], *, sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
 ) -> Callable[[int], None] | None:
     """`refusal_observer` unless the fact set arms a boundary, in which case its
     destination slide is read by `armed_evidence` instead."""
@@ -1483,10 +1485,27 @@ def boundary_observer(
     def observe(ordinal: int) -> None:
         if ordinal != armed["originalOrdinal"]:
             return
-        wait_until_settled(player)
+        if not wait_for_destination_hash(player, armed["atScene"], sleep=sleep, now=now):
+            out[armed["verdictKey"]] = {"reason": f"hash never settled at #{armed['atScene']} before the first read"}
+            return
         out[armed["verdictKey"]] = armed_evidence(player._require_transport(), sleep=sleep)
 
     return observe
+
+
+def wait_for_destination_hash(
+    player: Any, scene: int, *, timeout_s: float = VISIBLE_SETTLE_TIMEOUT_S,
+    now: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Bounded: the page hash is exactly `#scene` and the player is not busy."""
+    transport = player._require_transport()
+    deadline = now() + timeout_s
+    while True:
+        if hash_number(transport.evaluate(HASH_JS)) == scene and not player.observe().busy:
+            return True
+        if now() >= deadline:
+            return False
+        sleep(0.05)
 
 
 def _notes(state: dict[str, Any], kind: str, source: str = "coreEvents") -> list[dict[str, Any]]:
@@ -1523,7 +1542,7 @@ def _armed_live(states: list[dict[str, Any]], armed: dict[str, Any]) -> tuple[bo
         stat = api.get("stats") if isinstance(api, dict) else None
         if not (
             isinstance(stat, dict) and api.get("state") == "LIVE" and api.get("standDowns") == []
-            and stat.get("loopMode") == "rvfc" and stat.get("glErrors") == 0
+            and stat.get("glErrors") == 0
             and (hash_number(state.get("hash")) or -1) >= armed["atScene"]
         ):
             return False, {"reason": "a read is not LIVE on its destination", "state": api}
