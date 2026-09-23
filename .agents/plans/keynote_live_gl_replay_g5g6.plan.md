@@ -209,3 +209,10 @@ GL counter readback goes there.
 11. Allow P2 auto to serve `patch_player(main.js)` (needed to arm at all).
 
 OQ-11 note: `patch_player` is sha-pinned (`live_runtime.py:94-99`), the same gate the product host uses; a Keynote player change stops G6 at G6-0 exactly as it stops live output. Flag-off P2 is unaffected.
+
+## Rev 2 amendments (owner decisions during implementation, 2026-09-23)
+- **loopMode clause dropped** (probe `armed1to2` and P2 `glLiveOnSlide2`): G2's rAF watchdog flips `loopMode` to `'raf'` whenever 2 rAF ticks pass without a video frame (G2 ~:1027-1066), measured 11–21/150 `'raf'` reads while uploads ran at 30/s. Kept: LIVE, empty stand-downs, zero GL errors, same epoch, `iter`/`uploads` strictly increasing.
+- **P2 auto Chrome keeps WebGL** (root cause of gates r1 G6 failure: `--disable-gpu` ⇒ no WebGL ⇒ player's non-GL path ⇒ G2 never arms).
+- **3→4 owner coverage report-only in P2 auto only** (`owner_coverage_report_only`): P2's owner query lags the product's motion start (Codex Astra M). Identity, competitors, ambiguity, crossing identity and rVFC clock still gate. Stop-gap; reverted by the P2 harness-fix work.
+- **One PR:** G5+G6 ships together with the P2 harness-fix work (key-code input, 3→4 query geometry, B-arm tail race, timing re-qualification) from the session "Fix P2 harness input and 3→4 query timing", which builds on this branch and reverts the stop-gap.
+- Known limit: P2's page goes hidden after the first CDP key event, so P2 GL liveness is screenshot-driven; autonomous liveness is evidenced by the probe's Vgl pass on the visible host.
