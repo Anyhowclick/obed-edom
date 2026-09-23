@@ -16,7 +16,7 @@ Supersedes `pass1-hides-offline-2026-09-23.md` for this work. Plan and single so
   - Dashboard abort UX: `web/app.py`, `ResizeTab.tsx`, `HistoryTab.tsx`, `api.ts`.
   - `needsKeynote`, `maskGeom` and `maskedDescendant` on offline payload items: `offline_inspect.py`.
 - **Flag:** `OBED_OFFLINE_HIDES` defaults to off. It flips to on only after a GREEN live gate (owner decision 2, todo `g-flip-docs`).
-- **Offline evidence at HEAD:**
+- **Offline evidence (round 6, fcefaa68^):**
   - FRC dry run: 129 slides, 929 hides, 0 refused, verify passes, 44 orphan `Data/` dropped.
   - Slides 20 (twin risk) and 122 (builds) are excluded before deferral and stay on the Keynote delete.
   - Stage time: 24.4 s at load average ~5; 37.6 s at load ~35, which is not comparable. Re-time on a quiet machine.
@@ -28,8 +28,8 @@ Supersedes `pass1-hides-offline-2026-09-23.md` for this work. Plan and single so
 
 ## Review state
 
-- **Rounds so far:** C1 (Sol), A1 (Astra H advisory), A2 and A3 (Astra H), S4 and S5 (Sol H).
-  - All findings are closed except those listed under the S6 line of the review log.
+- **Rounds so far:** C1 (Sol), A1 (Astra H advisory), A2 and A3 (Astra H), S4, S5 and S6 (Sol H).
+  - S6's 3 majors are fixed in round 7 (fcefaa68) but not yet re-reviewed. Everything earlier is closed.
   - The owner switched the reviewer back to **GPT-5.6 Sol, high effort**:
     `codex exec -m gpt-5.6-sol -c model_reasoning_effort=high -s read-only -o out.md "$(cat p.md)" < /dev/null`.
 - **Raw rounds:**
