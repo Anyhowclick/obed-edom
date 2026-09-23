@@ -389,6 +389,7 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/jobs")
     def delete_all_jobs() -> dict:
+        _refuse_deleting_unclosed_outputs(RUNNER.list())
         return {"ok": True, "deleted": RUNNER.delete_all(purge=True)}
 
     @app.get("/api/jobs/{job_id}")
@@ -458,6 +459,9 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str) -> dict:
+        job = RUNNER.get(job_id)
+        if job:
+            _refuse_deleting_unclosed_outputs([job])
         if not RUNNER.delete(job_id, purge=True):
             raise HTTPException(404, "Unknown job")
         return {"ok": True}
@@ -3025,6 +3029,20 @@ def _unclosed_outputs(dest: Path) -> list[Job]:
         if abort.get("needsFreshOutput") and output and Path(output).expanduser().resolve() == target:
             unclosed.append(job)
     return unclosed
+
+
+def _refuse_deleting_unclosed_outputs(jobs: list[Job]) -> None:
+    """A job's result is the only record that its output may still be open in Keynote."""
+    for job in jobs:
+        abort = (job.result or {}).get("offlineHidesAborted") or {}
+        if abort.get("needsFreshOutput"):
+            name = Path(str(abort.get("outputPath") or "")).name or "its output deck"
+            label = job.name or job.id
+            raise HTTPException(
+                409,
+                f"Run {label} left {name} possibly open in Keynote. Close it, confirm that in the "
+                "Resize tab and re-apply before deleting this run.",
+            )
 
 
 def _offline_hides_field(raw: str | None) -> str | None:

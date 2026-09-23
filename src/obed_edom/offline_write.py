@@ -140,6 +140,22 @@ def _dual_keys(items: list[dict[str, Any]]) -> set[tuple[str, int]]:
     return out
 
 
+def _planned_sizes_by_slide(
+    transform_dicts: list[dict[str, Any]],
+) -> dict[int, dict[tuple[str, int], dict[str, float]]]:
+    """`{slide: {(kind, kindIndex): {"w", "h"}}}` from each non-hide transform that plans a size."""
+    out: dict[int, dict[tuple[str, int], dict[str, float]]] = {}
+    for t in transform_dicts:
+        if t.get("role") == "hide" or t.get("kindIndex") is None:
+            continue
+        if t.get("w") is None or t.get("h") is None:
+            continue
+        out.setdefault(int(t.get("slide", -1)), {})[(str(t.get("kind") or ""), int(t["kindIndex"]))] = {
+            "w": float(t["w"]), "h": float(t["h"]),
+        }
+    return out
+
+
 def offline_hide_slides(
     transform_dicts: list[dict[str, Any]],
     wall: dict[str, Any],
@@ -154,6 +170,7 @@ def offline_hide_slides(
 
     hides = _hide_specs_by_slide(transform_dicts)
     slides = _wall_slides_by_number(wall)
+    planned = _planned_sizes_by_slide(transform_dicts)
     out: set[int] = set()
     for n, specs in hides.items():
         if wanted and n not in wanted:
@@ -170,7 +187,8 @@ def offline_hide_slides(
         if hide_keys & excluded:
             continue
         group_text = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
-        if pre_deferral_twin_risk(slide.get("items") or [], hide_keys, group_text):
+        if pre_deferral_twin_risk(slide.get("items") or [], hide_keys, group_text,
+                                  planned=planned.get(n, {})):
             continue
         out.add(n)
     return out

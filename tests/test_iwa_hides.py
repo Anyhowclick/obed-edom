@@ -52,7 +52,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     patch_deck_geometry,
 )
 from obed_edom.offline_inspect import _build_data_index, _data_identifier, offline_wall_payload  # noqa: E402
-from test_iwa_write import _arch, _geom, _member, _shape_super, _transition_dict  # noqa: E402
+from test_iwa_write import _arch, _geom, _mask_super, _member, _shape_super, _transition_dict  # noqa: E402
 
 SHEET = "Index/DocumentStylesheet.iwa"
 DOC = "Index/Document.iwa"
@@ -1254,3 +1254,160 @@ def test_offline_reader_flag_matches_the_writer_on_real_payloads(tmp_path):
     assert pre_deferral_twin_risk(payload[3], {("image", 0), ("image", 1)}, None) == set()
     res = _run(clean, _twin_hides("image"), items=payload)
     assert not res.slides[3].refused, res.slides[3].reason
+
+
+# ---------------------------------------------------------------- Sol r4 #2: reference classification, #4: Metadata exactness
+
+
+def _patch_s1(ident, *, extra_obj=None, super_extra=None, refs=None, add=(), add_sheet=()):
+    """Rebuild slide-1 archive ``ident`` with extra fields/header refs, plus extra archives
+    in the slide member (``add``) or the stylesheet member (``add_sheet``)."""
+    def mutate(members):
+        out = []
+        for a in members[S1]:
+            if str(a["header"]["identifier"]) != str(ident):
+                out.append(a)
+                continue
+            obj = copy.deepcopy(a["objects"][0])
+            obj.pop("_pbtype", None)
+            obj.update(extra_obj or {})
+            if super_extra:
+                obj["super"] = {**obj.get("super", {}), **super_extra}
+            hdr = a["header"]["messageInfos"][0].get("objectReferences") or []
+            out.append(_a(ident, a["objects"][0]["_pbtype"], obj, refs=refs if refs is not None else hdr))
+        members[S1] = out + list(add)
+        members[SHEET].extend(add_sheet)
+    return mutate
+
+
+def _standin(ident):
+    return _a(ident, "TSD.StandinCaptionArchive", {})
+
+
+REF_REFUSALS = {
+    "fake-shape-cross-member-no-header": (
+        dict(extra_obj={"fakeShapeForEmptyGroup": {"identifier": 700}},
+             add_sheet=[_a(700, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 1, 1)})]),
+        "fakeShapeForEmptyGroup owns 700"),
+    "title-standin-cross-member": (
+        dict(ident=305, super_extra={"title": {"identifier": 702}}, refs=[900, 702], add_sheet=[_standin(702)]),
+        "title owns 702"),
+    "caption-standin-no-header": (
+        dict(ident=305, super_extra={"caption": {"identifier": 703}}, add=[_standin(703)]),
+        "caption owns 703"),
+    "unclassified-cross-member-no-header": (
+        dict(ident=305, extra_obj={"databaseData": {"identifier": 704}}, add_sheet=[_standin(704)]),
+        "unclassified databaseData"),
+    "comment": (
+        dict(ident=305, super_extra={"comment": {"identifier": 705}}, refs=[900, 705], add=[_standin(705)]),
+        "comment references 705"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REF_REFUSALS))
+def test_reference_classification_refusals(tmp_path, case):
+    kw, needle = REF_REFUSALS[case]
+    kw = dict(kw)
+    ident = kw.pop("ident", 306)
+    path = _build(tmp_path / f"{case}.key", mutate=_patch_s1(ident, **kw))
+    before = _raw_members(path)
+    res = _run(path)
+    _assert_refused_only(path, before, res, 1, needle)
+
+
+def test_owned_fake_shape_and_standins_in_member_are_deleted_with_the_hide(tmp_path):
+    fake = _a(701, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 1, 1)})
+    mutate = _chain(
+        _patch_s1(306, extra_obj={"fakeShapeForEmptyGroup": {"identifier": 701}}, refs=[320, 701], add=[fake]),
+        _patch_s1(305, super_extra={"title": {"identifier": 706}, "caption": {"identifier": 707}},
+                  refs=[900, 706, 707], add=[_standin(706), _standin(707)]),
+    )
+    path = _build(tmp_path / "owned.key", mutate=mutate)
+    res = _run(path, verify=True)
+    assert not res.slides[1].refused, res.slides[1].reason
+    assert {"701", "706", "707"} <= set(res.slides[1].removed_ids)
+
+
+@pytest.mark.parametrize("damage", ["drop", "change"])
+def test_metadata_re_encode_that_alters_data_metadata_map_refuses(deck, monkeypatch, damage):
+    real = iwa_hides._decode_apply_reencode_diff
+
+    def damaging(zf, member, apply_fn, expect=None):
+        out = list(real(zf, member, apply_fn, expect))
+        if member == META:
+            pm = iwa_write._archives_by_id(out[5])[str(PM_ID)]["objects"][0]
+            if damage == "drop":
+                pm.pop("dataMetadataMap")
+            else:
+                pm["dataMetadataMap"] = {"identifier": "9"}
+        return tuple(out)
+
+    monkeypatch.setattr(iwa_hides, "_decode_apply_reencode_diff", damaging)
+    before = _raw_members(deck)
+    with pytest.raises(OfflineWriteRefused, match="PackageMetadata != intended"):
+        _run(deck)
+    assert _raw_members(deck) == before
+
+
+# ---------------------------------------------------------------- planned transform (Sol r4 Part 1, option i)
+
+
+def _masked_twin_slide(members):
+    """Slide 3 gains masked image twins 505 (hide) and 506 (survivor), same file, each with
+    a 0.5 degree mask: clean at source size (snap residual under 1.5 px), off-axis at 2x."""
+    archs = []
+    for ident, x in ((505, 40), (506, 600)):
+        archs.append(_a(ident, "TSD.ImageArchive",
+                        {"data": {"identifier": 51}, "mask": {"identifier": ident + 10},
+                         "style": {"identifier": 900}, "super": _geom(x, 400, 200, 100)},
+                        refs=[ident + 10, 900], data=[51]))
+        archs.append(_a(ident + 10, "TSD.MaskArchive",
+                        {"super": {"parent": {"identifier": ident}}, **_mask_super(10, 10, 180, 80, angle=0.5)},
+                        refs=[ident]))
+    members[S3] = [_slide(103, [500, 501, 505, 506]), *_text(500, 510, "Stay"), _image(501, 54), *archs]
+
+
+def _slide3_offline_items(path):
+    return {s["number"]: s["items"] for s in offline_wall_payload(path)["slides"]}[3]
+
+
+def test_planned_upscale_of_a_clean_masked_twin_is_pre_excluded(tmp_path):
+    path = _build(tmp_path / "m.key", mutate=_masked_twin_slide)
+    items = _slide3_offline_items(path)
+    survivor = next(it for it in items if (it["kind"], it["kindIndex"]) == ("image", 2))
+    assert survivor["needsKeynote"] is None and survivor["maskGeom"] is not None
+    hides = {("image", 0), ("image", 1)}
+    doubled = {("image", 2): {"w": survivor["w"] * 2, "h": survivor["h"] * 2}}
+    assert pre_deferral_twin_risk(items, hides, None, planned=doubled) == {("image", 1)}
+
+
+def test_masked_twin_clean_at_its_planned_scale_stays_eligible(tmp_path):
+    path = _build(tmp_path / "m.key", mutate=_masked_twin_slide)
+    items = _slide3_offline_items(path)
+    survivor = next(it for it in items if (it["kind"], it["kindIndex"]) == ("image", 2))
+    hides = {("image", 0), ("image", 1)}
+    same = {("image", 2): {"w": survivor["w"], "h": survivor["h"]}, ("text", 0): {"w": 10, "h": 10}}
+    assert pre_deferral_twin_risk(items, hides, None, planned=same) == set()
+    assert pre_deferral_twin_risk(items, hides, None) == set()
+    res = _run(path, {**HIDES, 3: [{"role": "hide", "kind": "image", "kindIndex": k} for k in (0, 1)]},
+               items={**_payload(path), 3: items})
+    assert not res.slides[3].refused, res.slides[3].reason
+
+
+def test_planned_scale_of_a_group_with_a_masked_descendant_counts_as_approximate():
+    def group(ki, masked):
+        return {**_item("group", ki, w=100, h=40), "needsKeynote": None, "maskedDescendant": masked}
+
+    items = [group(0, True), group(1, True)]
+    scaled = {("group", 1): {"w": 150, "h": 60}}
+    assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}, planned=scaled) == {("group", 0)}
+    assert pre_deferral_twin_risk(items, {("group", 0)}, {0: "", 1: ""}, planned={}) == set()
+    plain = [group(0, False), group(1, False)]
+    assert pre_deferral_twin_risk(plain, {("group", 0)}, {0: "", 1: ""}, planned=scaled) == set()
+
+
+def test_planned_without_size_fields_stays_conservative():
+    stale = [{**_item("image", 0, fileName="a.png", w=10, h=10), "needsKeynote": None},
+             {**_item("image", 1, fileName="a.png", w=10, h=10), "needsKeynote": None}]
+    assert pre_deferral_twin_risk(stale, {("image", 0)}, None) == set()
+    assert pre_deferral_twin_risk(stale, {("image", 0)}, None, planned={}) == {("image", 0)}

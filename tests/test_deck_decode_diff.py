@@ -100,6 +100,9 @@ def _base_spec():
     metadata = _arch(5, "TSP.PackageMetadata", {
         "lastObjectIdentifier": "1000",
         "saveToken": "1",
+        "revision": {"sequence32": 1, "identifier": "rev-a"},
+        "fileFormatVersion": [14, 4, 1],
+        "dataMetadataMap": {"identifier": 6},
         "components": components,
         "datas": [
             {"identifier": 7001, "digest": _DIGEST_PHOTO, "preferredFileName": "photo.jpg",
@@ -114,7 +117,7 @@ def _base_spec():
             "Index/DocumentStylesheet.iwa": [style900],
             "Index/Slide-101.iwa": [slide101, shape300, image301, build500, build501],
             "Index/Slide-102.iwa": [slide102, shape400, shape401],
-            "Index/Metadata.iwa": [metadata],
+            "Index/Metadata.iwa": [metadata, _arch(6, "TSP.DataMetadataMap", {})],
         },
         "files": {
             "Data/photo-7001.jpg": b"\xff\xd8photo",
@@ -170,7 +173,7 @@ def _renumber(value, mapping):
         return value
     out = {}
     for key, item in value.items():
-        if key in _ID_KEYS and not isinstance(item, (dict, list)) and int(item) in mapping:
+        if key in _ID_KEYS and str(item).isdigit() and int(item) in mapping:
             out[key] = mapping[int(item)]
         elif key == "objectReferences":
             out[key] = [str(mapping.get(int(r), int(r))) for r in item]
@@ -676,3 +679,72 @@ def test_versioned_component_presence_reported(base, tmp_path):
     report = ddd.run(base, _variant(tmp_path, "v", lambda spec: _metadata(spec).update(
         versionedComponents=[_versioned_component(401)])))
     assert _keys(report) == ["metadata:versioned:Slide-102-v1"]
+
+
+# --------------------------------------------------------------------------
+# Non-projected PackageMetadata fields, with METADATA_CHURN removed.
+# --------------------------------------------------------------------------
+def test_metadata_churn_constant():
+    assert ddd.METADATA_CHURN == {"saveToken", "revision", "lastObjectIdentifier"}
+
+
+def test_null_metadata_churn_only(base, tmp_path):
+    def edit(spec):
+        meta = _metadata(spec)
+        meta["saveToken"] = "77"
+        meta["revision"] = {"sequence32": 9, "identifier": "rev-b"}
+        meta["lastObjectIdentifier"] = "5000"
+        for comp in meta["components"]:
+            comp["saveToken"] = "3"
+
+    assert ddd.run(base, _variant(tmp_path, "churn", edit))["diffs"] == []
+
+
+def test_data_metadata_map_retarget_reported(base, tmp_path):
+    def edit(spec):
+        _metadata(spec)["dataMetadataMap"] = {"identifier": 999}
+
+    report = ddd.run(base, _variant(tmp_path, "dmm", edit))
+    [entry] = report["diffs"]
+    assert entry["key"] == "metadata:package.dataMetadataMap"
+    assert entry["a"].startswith("TSP.DataMetadataMap#")
+    assert entry["b"] == ddd.DANGLING
+
+
+def test_data_metadata_map_dropped_reported(base, tmp_path):
+    def edit(spec):
+        del _metadata(spec)["dataMetadataMap"]
+
+    report = ddd.run(base, _variant(tmp_path, "nodmm", edit))
+    assert _keys(report) == ["metadata:package.dataMetadataMap"]
+
+
+def test_package_scalar_field_change_reported(base, tmp_path):
+    def edit(spec):
+        _metadata(spec)["fileFormatVersion"] = [14, 5, 0]
+
+    report = ddd.run(base, _variant(tmp_path, "ffv", edit))
+    assert _keys(report) == ["metadata:package.fileFormatVersion"]
+
+
+def test_component_non_projected_field_change_reported(base, tmp_path):
+    def edit(spec):
+        _component(spec, "Slide-102")["canBeDropped"] = True
+
+    report = ddd.run(base, _variant(tmp_path, "drop", edit))
+    assert _keys(report) == ["metadata:Slide-102:fields"]
+
+
+def test_datas_non_projected_field_change_reported(base, tmp_path):
+    def edit(spec):
+        _metadata(spec)["datas"][1]["canDownload"] = True
+
+    report = ddd.run(base, _variant(tmp_path, "dl", edit))
+    assert _keys(report) == ["datas:orphan.png"]
+
+
+def test_datas_file_name_id_suffix_ignored(base, tmp_path):
+    def edit(spec):
+        _metadata(spec)["datas"][1]["fileName"] = "orphan-8888.png"
+
+    assert ddd.run(base, _variant(tmp_path, "fn", edit))["diffs"] == []

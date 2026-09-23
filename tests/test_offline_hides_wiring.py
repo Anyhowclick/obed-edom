@@ -158,7 +158,7 @@ def _no_twin_risk(monkeypatch):
         monkeypatch.setitem(sys.modules, "obed_edom.iwa_hides", mod)
     calls = []
 
-    def fake(items, hide_keys, group_text):
+    def fake(items, hide_keys, group_text, *, planned=None):
         calls.append({"items": items, "hide_keys": set(hide_keys), "group_text": group_text})
         return set()
 
@@ -173,7 +173,7 @@ def test_eligibility_excludes_slide_flagged_by_twin_risk(monkeypatch, _no_twin_r
 
     seen = []
 
-    def flag(items, hide_keys, group_text):
+    def flag(items, hide_keys, group_text, *, planned=None):
         seen.append((items, set(hide_keys), group_text))
         return {("group", 0)} if ("group", 0) in hide_keys else set()
 
@@ -184,6 +184,32 @@ def test_eligibility_excludes_slide_flagged_by_twin_risk(monkeypatch, _no_twin_r
     items3, gt3 = by_keys[frozenset({("group", 0)})]
     assert items3 == WALL["slides"][2]["items"]
     assert gt3 == {1: "sig"}
+
+
+def test_eligibility_passes_planned_sizes_to_twin_risk(monkeypatch):
+    """Owner decision 5c: the predicate sees each slide's planned target sizes from its
+    non-hide transforms (`w`/`h`); hides and size-less transforms are omitted."""
+    import obed_edom.iwa_hides as mod
+
+    seen = {}
+
+    def spy(items, hide_keys, group_text, *, planned=None):
+        seen[frozenset(hide_keys)] = planned
+        return set()
+
+    monkeypatch.setattr(mod, "pre_deferral_twin_risk", spy, raising=False)
+    t = [
+        _hide(3, "group", 0),
+        {"slide": 3, "kind": "group", "kindIndex": 1, "role": "map", "x": 1, "y": 2, "w": 40, "h": 30.5},
+        {"slide": 3, "kind": "text", "kindIndex": 0, "role": "map", "x": 1, "y": 2},
+        {"slide": 3, "kind": "image", "kindIndex": 0, "role": "map", "x": 1, "y": 2, "w": 10, "h": None},
+        {"slide": 3, "kind": "image", "kindIndex": None, "role": "map", "w": 5, "h": 5},
+        {"slide": 1, "kind": "image", "kindIndex": 1, "role": "map", "w": 9, "h": 9},
+        _hide(1, "image", 0),
+    ]
+    assert offline_write.offline_hide_slides(t, WALL, None) == {1, 3}
+    assert seen[frozenset({("group", 0)})] == {("group", 1): {"w": 40.0, "h": 30.5}}
+    assert seen[frozenset({("image", 0)})] == {("image", 1): {"w": 9.0, "h": 9.0}}
 
 
 def test_eligibility_clean_twin_risk_keeps_slide(_no_twin_risk):

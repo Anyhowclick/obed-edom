@@ -1775,6 +1775,71 @@ def test_resize_fallback_timeout_closure_carries_into_a_fresh_proposal(tmp_path,
     assert "outputCloseRequired" not in _wait(client, third)["result"]
 
 
+def _timed_out_job(client, tmp_path, monkeypatch, calls):
+    def fake_remap(path, dest, **kwargs):
+        calls.append(kwargs.get("offline_hides"))
+        if len(calls) == 1:
+            raise _hides_abort("hide fallback session did not finish", "close it", needs_fresh_output=True)
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    _stub_resize_propose(monkeypatch, fake_remap)
+    job_id = _propose(client, tmp_path).json()["id"]
+    _wait(client, job_id)
+    client.post(f"/api/resize/{job_id}/apply", json={})
+    assert _wait(client, job_id)["result"]["offlineHidesAborted"]["needsFreshOutput"] is True
+    return job_id
+
+
+def test_resize_timeout_job_cannot_be_deleted_until_closure_is_confirmed(tmp_path, monkeypatch):
+    """Sol r4 #3: the aborted job's result is the only record that its output may still be
+    open in Keynote, so deleting it would let a later proposal replace that path unconfirmed.
+    Deletion is refused until the closure is confirmed through an Apply."""
+    calls = []
+    client = TestClient(app)
+    job_id = _timed_out_job(client, tmp_path, monkeypatch, calls)
+
+    refused = client.delete(f"/api/jobs/{job_id}")
+    assert refused.status_code == 409
+    assert "Wall_CG.key" in refused.json()["detail"]
+    assert client.get(f"/api/jobs/{job_id}").status_code == 200
+
+    fresh = _propose(client, tmp_path, offline_hides="off").json()["id"]
+    assert "outputCloseRequired" in _wait(client, fresh)["result"]
+    assert client.post(f"/api/resize/{fresh}/apply", json={}).status_code == 409
+
+    assert client.post(f"/api/resize/{fresh}/apply", json={"outputClosed": True}).status_code == 200
+    _wait(client, fresh)
+    assert client.delete(f"/api/jobs/{job_id}").status_code == 200
+    assert calls == [None, "off"]
+
+
+def test_resize_timeout_blocks_delete_all_so_a_fresh_proposal_still_needs_closure(
+    tmp_path, monkeypatch
+):
+    """timeout → delete all (refused, nothing deleted) → fresh proposal → Apply refused
+    until closure is confirmed."""
+    calls = []
+    client = TestClient(app)
+    job_id = _timed_out_job(client, tmp_path, monkeypatch, calls)
+    before = {job["id"] for job in client.get("/api/jobs").json()["jobs"]}
+
+    refused = client.delete("/api/jobs")
+    assert refused.status_code == 409
+    assert "Wall_CG.key" in refused.json()["detail"]
+    assert {job["id"] for job in client.get("/api/jobs").json()["jobs"]} >= before
+
+    fresh = _propose(client, tmp_path, offline_hides="off").json()["id"]
+    assert _wait(client, fresh)["result"]["outputCloseRequired"].endswith("Wall_CG.key")
+    blocked = client.post(f"/api/resize/{fresh}/apply", json={})
+    assert blocked.status_code == 409
+    assert calls == [None]
+
+    assert client.post(f"/api/resize/{fresh}/apply", json={"outputClosed": True}).status_code == 200
+    assert _wait(client, fresh)["status"] == "done"
+    assert calls == [None, "off"]
+    assert client.get(f"/api/jobs/{job_id}").json()["result"]["offlineHidesAborted"]["needsFreshOutput"] is False
+
+
 def test_resize_rerun_failing_otherwise_does_not_keep_a_stale_hides_abort(tmp_path, monkeypatch):
     calls = []
 

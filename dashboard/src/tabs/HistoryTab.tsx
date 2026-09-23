@@ -44,6 +44,15 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
     }
   }
 
+  async function guarded(action: () => Promise<void>) {
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function useSuggested() {
     if (!active?.artifacts?.suggestedPath) return;
     upsert(await relocateJob(active.id, { folder: active.artifacts.suggestedPath }));
@@ -54,7 +63,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
       <div className="history-head">
         <h1>History</h1>
         {jobs.length > 0 && (
-          <button className="btn delete-all" type="button" onClick={() => void removeAll()}>
+          <button className="btn delete-all" type="button" onClick={() => void guarded(removeAll)}>
             Delete All
           </button>
         )}
@@ -68,7 +77,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         <p className="note">No saved runs yet. Generate, compare, or validate from the other tabs.</p>
       ) : (
         <div className="split library">
-          <SessionList jobs={jobs} activeId={activeId} onSelect={setActiveId} onDelete={remove} onRename={rename} />
+          <SessionList jobs={jobs} activeId={activeId} onSelect={setActiveId} onDelete={(id) => void guarded(() => remove(id))} onRename={rename} />
           <div className="library-detail">
             {active && (
               <>

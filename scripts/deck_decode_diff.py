@@ -10,7 +10,8 @@ its member for a template slide), so a slide edit does not cascade into every re
 the slide; the slide's own content is still compared in its slide scope. Slides (by
 ``slide_order``) and the other ``.iwa`` members compare as multisets of archives.
 ``Index/Metadata.iwa`` compares per component of ``components`` and ``versionedComponents``
-(by locator) in label space, plus the ``datas`` table and the non-IWA ZIP members.
+(by locator) in label space, the other ``TSP.PackageMetadata`` fields except the churn in
+``METADATA_CHURN``, the ``datas`` table, and the non-IWA ZIP members.
 
 Leftover archives that share an identifier and pbtype on both sides are explained per
 field, so every difference has a key such as ``slide:12:KN.SlideArchive.drawablesZOrder``,
@@ -49,6 +50,13 @@ _DROP_KEYS = frozenset({"identifier", "randomNumberSeed", "saveToken"})
 _REF_KEYS = frozenset({"identifier", "deprecatedType", "deprecatedIsExternal"})
 _DATA_MEMBER = re.compile(r"^(?P<base>Data/.+)-\d+(?P<ext>\.[^./]+)$")
 _LOCATOR_SUFFIX = re.compile(r"-\d+$")
+_FILE_NAME_ID = re.compile(r"-\d+(?=\.[^.]+$)")
+METADATA_CHURN = frozenset({"saveToken", "revision", "lastObjectIdentifier"})
+_METADATA_PROJECTED = frozenset({"components", "versionedComponents", "datas"})
+_COMPONENT_PROJECTED = frozenset({
+    "identifier", "saveToken", "objectUuidMapEntries", "featureInfos", "dataReferences",
+    "externalReferences", "versionedExternalReferences", "ambiguousObjectIdentifiers",
+})
 
 
 @dataclass
@@ -343,7 +351,22 @@ def _component_tables(deck: Deck, comp: dict) -> dict[str, list]:
         "ambiguousObjectIdentifiers": [
             deck.labels.get(str(i), DANGLING) for i in comp.get("ambiguousObjectIdentifiers") or []
         ],
+        "fields": [
+            (k, json.dumps(v, sort_keys=True)) for k, v in comp.items() if k not in _COMPONENT_PROJECTED
+        ],
     }
+
+
+def _package_fields(deck: Deck) -> dict[str, Any]:
+    rest = {k: v for k, v in deck.metadata.items() if k not in METADATA_CHURN | _METADATA_PROJECTED}
+    return _canon_object(deck, rest, deck.labels) if rest else {}
+
+
+def _data_entry(entry: dict) -> tuple[Any, Any, str]:
+    rest = {k: v for k, v in entry.items() if k not in ("identifier", "preferredFileName", "digest")}
+    if "fileName" in rest:
+        rest["fileName"] = _FILE_NAME_ID.sub("", str(rest["fileName"]))
+    return entry.get("preferredFileName"), entry.get("digest"), json.dumps(rest, sort_keys=True)
 
 
 def compare(a: Deck, b: Deck, *, refs: bool = True) -> list[dict]:
@@ -372,10 +395,14 @@ def compare(a: Deck, b: Deck, *, refs: bool = True) -> list[dict]:
             ta, tb = _component_tables(a, comps_a[locator]), _component_tables(b, comps_b[locator])
             for name in ta:
                 diffs += _multiset_diff(f"{prefix}{locator}:{name}", ta[name], tb[name])
-    datas_a = [(d.get("preferredFileName"), d.get("digest")) for d in a.metadata.get("datas") or []]
-    datas_b = [(d.get("preferredFileName"), d.get("digest")) for d in b.metadata.get("datas") or []]
+    pa, pb = _package_fields(a), _package_fields(b)
+    for name in sorted(set(pa) | set(pb)):
+        if pa.get(name) != pb.get(name):
+            diffs.append({"key": f"metadata:package.{name}", "a": pa.get(name), "b": pb.get(name)})
+    datas_a = [_data_entry(d) for d in a.metadata.get("datas") or []]
+    datas_b = [_data_entry(d) for d in b.metadata.get("datas") or []]
     for entry in _multiset_diff("datas", datas_a, datas_b):
-        names = {n for n, _d in entry["a"] + entry["b"]}
+        names = {d[0] for d in entry["a"] + entry["b"]}
         for name in sorted(names, key=str):
             diffs.append({
                 "key": f"datas:{name}",
